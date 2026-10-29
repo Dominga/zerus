@@ -2250,6 +2250,7 @@ QWidget *TeamWorkspace::boardColumns(const Team &team, const QList<int> &ids, in
 {
     const Colors c = colorsFor(m_dark);
     const auto problemsByTask = problemTasks(team);
+    const auto live = m_live ? m_live : LiveLookup([](const Member &) { return Live{}; });
     auto *box = new QWidget; box->setObjectName("teamBoardColumns"); box->setProperty("phase", phase);
     auto *h = new QHBoxLayout(box); h->setContentsMargins(0, 0, 0, 0); h->setSpacing(6);
     QList<std::pair<QString, QString>> columns{{"pending", tr("Pending")}, {"active", tr("Active")}, {"problems", tr("Problems")},
@@ -2308,6 +2309,15 @@ QWidget *TeamWorkspace::boardColumns(const Team &team, const QList<int> &ids, in
             const QString role = task->assignee.isEmpty() ? tr("You") : team.roleOf(task->assignee);
             auto *pill = new Pill(role, roleColor(role, m_dark)); pill->setObjectName("teamBoardRole"); r2->addWidget(pill);
             if (const auto *m = team.member(task->assignee)) { auto *i = new QLabel; i->setPixmap(agentLogo(m->agent, c.text3).pixmap(14, 14)); r2->addWidget(i); }
+            // The same small activity label as the graph and the plain board
+            // (a problem text wins).
+            if (!problem) {
+                const auto *member = team.member(task->assignee);
+                const QString activity = activityLabel(*task, member ? live(*member) : Live{});
+                if (!activity.isEmpty()) {
+                    auto *a = label(activity, c.text3, 11); a->setObjectName("teamBoardActivity"); r2->addWidget(a);
+                }
+            }
             r2->addStretch(1);
             if (problem) {
                 auto *why = elided(problemText(team, task->id), toneColor(c, problemsByTask.value(task->id)), 11); why->setObjectName("teamBoardProblem");
@@ -2344,6 +2354,7 @@ QWidget *TeamWorkspace::layerRows(const Team &team, const QList<int> &ids)
 {
     const Colors c = colorsFor(m_dark);
     const auto problemsByTask = problemTasks(team);
+    const auto live = m_live ? m_live : LiveLookup([](const Member &) { return Live{}; });
     const auto layers = phaseLayers(team, ids);
     QList<int> order = ids;
     std::stable_sort(order.begin(), order.end(), [&layers](int a, int b) { return layers.value(a) < layers.value(b); });
@@ -2378,6 +2389,10 @@ QWidget *TeamWorkspace::layerRows(const Team &team, const QList<int> &ids)
         if (!deps.isEmpty()) h->addWidget(label(QStringLiteral("←") + deps.join(QStringLiteral(" ")), c.folder, 11));
         auto *name = elided(task->title, c.text2, 13); name->setObjectName("teamLayerTitle"); h->addWidget(name, 3);
         if (problem) { auto *why = elided(problemText(team, id), toneColor(c, problemsByTask.value(id)), 11); why->setObjectName("teamLayerProblem"); h->addWidget(why, 1); }
+        else if (const QString activity = activityLabel(*task, team.member(task->assignee) ? live(*team.member(task->assignee)) : Live{}); !activity.isEmpty()) {
+            // The same small activity label as the graph and the board.
+            auto *a = label(activity, c.text3, 11); a->setObjectName("teamLayerActivity"); h->addWidget(a);
+        }
         const QString role = task->assignee.isEmpty() ? tr("You") : team.roleOf(task->assignee);
         h->addWidget(new Pill(role, roleColor(role, m_dark)));
         auto *logo = new QLabel; logo->setFixedWidth(16);

@@ -194,6 +194,44 @@ fn parse_member(value: &Value) -> anyhow::Result<Member> {
     Ok(member)
 }
 
+/// F1.2/U49: an added member without a folder of its own takes the agent's
+/// default one, shared when the project forbids worktrees.
+fn fill_folder(team: &Team, member: &mut Member, no_folder_given: bool) {
+    if team.settings.folder_policy == FolderPolicy::Auto && no_folder_given && member.directory.is_empty() {
+        member.folder = if team.settings.worktrees_forbidden {
+            MemberFolder::Shared
+        } else {
+            super::dispatcher::default_folder(&member.agent)
+        };
+    }
+}
+
+/// U49: a role's own words as a member id: "Backend" gives "backend", "QA
+/// lead" gives "qa-lead"; a role without letters or digits keeps "member".
+fn scale_base(role: &str) -> String {
+    let mut base = String::new();
+    for ch in role.chars() {
+        if ch.is_ascii_alphanumeric() {
+            base.push(ch.to_ascii_lowercase());
+        } else if !base.is_empty() && !base.ends_with('-') {
+            base.push('-');
+        }
+    }
+    let base: String = base.trim_matches('-').chars().take(36).collect();
+    let base = base.trim_end_matches('-');
+    if base.is_empty() { "member".into() } else { base.to_owned() }
+}
+
+/// U49: the id scale gives a new member, numbered past the ones the team and
+/// this scale already use ("backend", "backend2", ...).
+fn scale_id(team: &Team, chosen: &[String], role: &str) -> String {
+    let base = scale_base(role);
+    (1..)
+        .map(|n| if n == 1 { base.clone() } else { format!("{base}{n}") })
+        .find(|id| team.members.iter().all(|member| member.id != *id) && !chosen.iter().any(|chosen| chosen == id))
+        .unwrap_or_else(|| format!("{base}{}", chosen.len() + 1))
+}
+
 /// U27: a lane is visual only, bounded in number and label; it never touches
 /// dependencies or hand-out.
 fn clean_lane(lane: &mut super::model::Lane, task: u32) -> anyhow::Result<()> {
@@ -3329,18 +3367,9 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
             ensure!(matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused),
                 "Only a planning, running or paused team takes new members");
             let mut member = parse_member(&input["member"])?;
-            if team.settings.folder_policy == FolderPolicy::Auto
-                && input["member"].get("folder").is_none()
-                && member.directory.is_empty()
-            {
-                // F1.2: the agent's default folder, shared when the project
-                // forbids worktrees.
-                member.folder = if team.settings.worktrees_forbidden {
-                    MemberFolder::Shared
-                } else {
-                    super::dispatcher::default_folder(&member.agent)
-                };
-            }
+            // F1.2: the agent's default folder, shared when the project
+            // forbids worktrees.
+            fill_folder(team, &mut member, input["member"].get("folder").is_none());
             ensure!(team.members.iter().all(|m| m.id != member.id), "Member id {} is used", member.id);
             let active = team.members.iter().filter(|m| m.state != MemberState::Removed).count();
             let id = member.id.clone();
@@ -3401,6 +3430,74 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
             }
             Ok(json!({"status":"added","member":id,"by":by}))
         }
+        "scale" => {
+            // U49: several members of one role at once, as add-member adds one;
+            // all of them or none, within the roster the team already has.
+            ensure!(human_or_lead, "Only the lead or you scale the team");
+            ensure!(
+                matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused),
+                "Only a planning, running or paused team takes new members"
+            );
+            let role = clean(text(input, "role").trim(), 60, "A role")?;
+            ensure!(!role.is_empty(), "scale names the role to add");
+            let agent = clean(text(input, "agent").trim(), 40, "An agent")?;
+            ensure!(!agent.is_empty(), "scale names the agent to add");
+            let count = input["count"].as_u64().context("scale names how many members to add")?;
+            ensure!((1..=32).contains(&count), "scale adds 1 to 32 members");
+            let count = count as usize;
+            let active = team.members.iter().filter(|member| member.state != MemberState::Removed).count();
+            ensure!(
+                active + count <= team.settings.max_members,
+                "The team has {active} of {} members; adding {count} does not fit",
+                team.settings.max_members
+            );
+            let on_word = input["roster_word"].as_bool() == Some(true) && matches!(actor, Actor::Member(lead) if *lead == team.lead);
+            let quote = input["owner_word_checked"]["text"].as_str().unwrap_or_default();
+            let by = if on_word { format!("{} on your word", actor.label(team)) } else { actor.label(team) };
+            let mut ids: Vec<String> = Vec::new();
+            let mut added: Vec<Member> = Vec::new();
+            for _ in 0..count {
+                let id = scale_id(team, &ids, &role);
+                let mut value = json!({"id":id,"role":role,"agent":agent});
+                for field in ["model", "effort", "account"] {
+                    let given = text(input, field).trim();
+                    if !given.is_empty() {
+                        value[field] = json!(given);
+                    }
+                }
+                let mut member = parse_member(&value)?;
+                fill_folder(team, &mut member, true);
+                if on_word {
+                    // U32: the roster says how the member joined.
+                    member.added = Some(json!({"by":"Lead on your word","owner_word":quote,"at":now()}));
+                }
+                ids.push(member.id.clone());
+                added.push(member);
+            }
+            let roles: Vec<String> = added.iter().map(|member| member.role.clone()).collect();
+            for member in added {
+                team.members.push(member);
+            }
+            // N39/F1.3: the folders are checked as a whole; a mismatch refuses
+            // the scale and no member joins.
+            if let Err(error) = check_hierarchy(team) {
+                team.members.retain(|member| !ids.contains(&member.id));
+                return Err(error);
+            }
+            let folder_errors: Vec<plan::Finding> = plan::validate(team, offline)
+                .errors
+                .into_iter()
+                .filter(|finding| finding.kind == "folder" && finding.member.as_deref().is_some_and(|id| ids.iter().any(|new| new == id)))
+                .collect();
+            if !folder_errors.is_empty() {
+                team.members.retain(|member| !ids.contains(&member.id));
+                bail!("Fix {} folder error(s) to scale the team: {}", folder_errors.len(), errors_text(&folder_errors));
+            }
+            for (id, role) in ids.iter().zip(roles) {
+                events.push(Event::new("member_added", json!({"by":by,"member":role,"id":id,"owner_word":quote,"scaled":true})));
+            }
+            Ok(json!({"status":"scaled","members":ids,"by":by,"count":count}))
+        }
         "remove-member" => {
             // U26: the lead removes only on the owner's verified word.
             ensure!(
@@ -3450,10 +3547,48 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
             let role = team.role_of(&id);
             let member = team.members.iter_mut().find(|m| m.id == id).context("Unknown member")?;
             member.state = MemberState::Removed;
+            // U49: a member removed by hand is no longer draining.
+            member.draining = false;
             let by = if input["roster_word"].as_bool() == Some(true) { "Lead on your word" } else { "You" };
             let quote = input["owner_word_checked"]["text"].as_str().unwrap_or_default();
             events.push(Event::new("member_removed", json!({"by":by,"member":role,"owner_word":quote})));
             Ok(json!({"status":"removed","member":id,"by":by}))
+        }
+        "drain" => {
+            // U49: the member finishes its open attempt and stage run, takes
+            // nothing new, then its session is paused and the member removed.
+            ensure!(human_or_lead, "Only the lead or you drain a member");
+            ensure!(
+                matches!(team.status, TeamStatus::Running | TeamStatus::Paused),
+                "Only a running or paused team drains a member"
+            );
+            let id = text(input, "member").to_owned();
+            ensure!(!id.is_empty(), "drain names the member");
+            ensure!(id != team.lead, "The lead cannot be drained");
+            let reports: Vec<String> = team.reports_of(&id).iter().map(|member| member.role.clone()).collect();
+            ensure!(reports.is_empty(), "Move its reports to another lead first: {}", reports.join(", "));
+            // Undo before the drain ends: the same command with `draining: false`.
+            let draining = input["draining"].as_bool().unwrap_or(true);
+            let role = team.role_of(&id);
+            let by = if input["roster_word"].as_bool() == Some(true) && matches!(actor, Actor::Member(lead) if *lead == team.lead) {
+                "Lead on your word"
+            } else {
+                "You"
+            };
+            let member = team
+                .members
+                .iter_mut()
+                .find(|member| member.id == id && member.state != MemberState::Removed)
+                .context("Unknown member")?;
+            if member.draining != draining {
+                member.draining = draining;
+                let quote = input["owner_word_checked"]["text"].as_str().unwrap_or_default();
+                events.push(Event::new(
+                    if draining { "member_draining" } else { "drain_cancelled" },
+                    json!({"by":by,"member":role,"owner_word":quote}),
+                ));
+            }
+            Ok(json!({"status":if draining {"draining"} else {"draining_cancelled"},"member":id,"by":by}))
         }
         _ => bail!("Unknown team operation {op}"),
     }?;
@@ -4941,6 +5076,127 @@ mod tests {
         apply(&mut team, "add-member", &docs, &Actor::Member("lead".into()), &none, &mut events).unwrap();
         assert_eq!(team.member("docs").unwrap().state, MemberState::NotCreated);
         assert!(apply(&mut team, "add-member", &docs, &Actor::Human, &none, &mut events).is_err());
+    }
+
+    #[test]
+    fn scale_adds_a_roles_members_at_once_within_the_roster() {
+        // U49: scale adds count members of one role, numbered, all or none.
+        let mut team = running_team();
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        let scaled = apply(
+            &mut team,
+            "scale",
+            &json!({"role":"Backend","agent":"codex","model":"gpt-5","effort":"high","account":"work","count":2}),
+            &Actor::Human,
+            &none,
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!((scaled["status"].as_str(), scaled["members"].clone()), (Some("scaled"), json!(["backend", "backend2"])));
+        let added = team.member("backend").unwrap();
+        assert_eq!((added.role.as_str(), added.agent.as_str()), ("Backend", "codex"));
+        assert_eq!((added.model.as_str(), added.effort.as_str(), added.account.as_str()), ("gpt-5", "high", "work"));
+        assert_eq!((added.state, added.draining), (MemberState::NotCreated, false));
+        assert_eq!(team.member("backend2").unwrap().role, "Backend");
+        assert_eq!(events.iter().filter(|event| event.kind == "member_added").count(), 2);
+        // The roster's cap counts them: two more do not fit and add nothing.
+        let error = apply(&mut team, "scale", &json!({"role":"Backend","agent":"codex","count":2}), &Actor::Human, &none, &mut events);
+        let error = error.unwrap_err().to_string();
+        assert!(error.contains("of 6 members"), "{error}");
+        assert!(team.member("backend3").is_none(), "a scale that does not fit adds nothing");
+        // A role, an agent and a count are required; only the lead or you scale.
+        for input in [
+            json!({"role":"Backend","agent":"codex","count":0}),
+            json!({"role":"Backend","agent":"codex"}),
+            json!({"agent":"codex","count":1}),
+            json!({"role":"Backend","count":1}),
+        ] {
+            assert!(apply(&mut team, "scale", &input, &Actor::Human, &none, &mut events).is_err(), "{input}");
+        }
+        let one = json!({"role":"Backend","agent":"codex","count":1});
+        assert!(apply(&mut team, "scale", &one, &Actor::Member("dev".into()), &none, &mut events).is_err());
+        // The lead scales on the owner's verified word (its check is in commands).
+        let mut worded = one.clone();
+        worded["roster_word"] = Value::Bool(true);
+        worded["owner_word_checked"] = json!({"text":"Please add one more backend to the roster"});
+        apply(&mut team, "scale", &worded, &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        assert!(team.member("backend3").unwrap().added.is_some(), "the roster says the lead added it on your word");
+    }
+
+    #[test]
+    fn drain_waits_for_the_work_and_can_be_cancelled() {
+        // U49: drain marks a member that then finishes its attempt and leaves;
+        // the dispatcher pauses its session and removes it (its test is there).
+        let mut team = running_team();
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        assert!(apply(&mut team, "drain", &json!({"member":"lead"}), &Actor::Human, &none, &mut events).is_err());
+        assert!(apply(&mut team, "drain", &json!({"member":"nobody"}), &Actor::Human, &none, &mut events).is_err());
+        assert!(apply(&mut team, "drain", &json!({"member":"qa"}), &Actor::Member("dev".into()), &none, &mut events).is_err());
+        // The lead drains on the owner's verified word (its check is in commands).
+        let started = apply(&mut team, "drain", &json!({"member":"qa","roster_word":true}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        assert_eq!((started["status"].as_str(), started["by"].as_str()), (Some("draining"), Some("Lead on your word")));
+        assert!(team.member("qa").unwrap().draining);
+        assert_eq!(events.last().unwrap().kind, "member_draining");
+        assert_eq!(events.last().unwrap().payload["member"], "Tester");
+        // Undo before it ends: the same command with draining false needs no word.
+        let cancelled = apply(&mut team, "drain", &json!({"member":"qa","draining":false}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(cancelled["status"], "draining_cancelled");
+        assert!(!team.member("qa").unwrap().draining);
+        assert_eq!(events.last().unwrap().kind, "drain_cancelled");
+        // A sub-lead with reports moves them first, as a removal does.
+        team.members.iter_mut().find(|member| member.id == "qa").unwrap().sub = true;
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().parent = "qa".into();
+        let error = apply(&mut team, "drain", &json!({"member":"qa"}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
+        assert!(error.contains("reports"), "{error}");
+        // A team that ended drains nobody.
+        team.status = TeamStatus::Done;
+        let error = apply(&mut team, "drain", &json!({"draining":false,"member":"dev"}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
+        assert!(error.contains("running or paused"), "{error}");
+    }
+
+    #[test]
+    fn a_team_without_a_draining_member_keeps_todays_flow() {
+        // U49 opt-in: a team stored before this field loads unchanged, and its
+        // hand-out, report, stage and accept produce the events of today's flow.
+        let mut team = running_team();
+        {
+            let task = team.task_mut(1).unwrap();
+            task.pipeline = "code".into();
+            task.pipeline_run = Some(PipelineRun {
+                id: "code".into(),
+                name: "Code: review, test, lead".into(),
+                stages: vec![
+                    PipelineStage { kind: "review".into(), role: "Reviewer".into(), member: "qa".into() },
+                    PipelineStage { kind: "test".into(), role: "Tester".into(), member: "qa".into() },
+                ],
+                max_rounds: 3,
+                folder: "hold".into(),
+                accept: "lead".into(),
+                round: 1,
+                runs: Vec::new(),
+            });
+        }
+        let stored = serde_json::to_string(&team).unwrap();
+        assert!(!stored.contains("draining"), "{stored}");
+        team = serde_json::from_str(&stored).unwrap();
+        assert!(team.members.iter().all(|member| !member.draining));
+        let mut events = Vec::new();
+        let attempt = hand_out(&mut team, 1);
+        events.clear();
+        report(&mut team, &json!({"task":1,"attempt":attempt,"text":"Done"}), &Actor::Member("dev".into()), &mut events).unwrap();
+        super::super::pipeline::give_stage(&mut team, 1, "qa").unwrap();
+        let stage = team.task(1).unwrap().pipeline_run.as_ref().unwrap().open_run().unwrap().id.clone();
+        report(&mut team, &json!({"task":1,"attempt":stage,"verdict":"pass","text":"Read it"}), &Actor::Member("qa".into()), &mut events).unwrap();
+        super::super::pipeline::give_stage(&mut team, 1, "qa").unwrap();
+        let stage = team.task(1).unwrap().pipeline_run.as_ref().unwrap().open_run().unwrap().id.clone();
+        report(&mut team, &json!({"task":1,"attempt":stage,"verdict":"pass","text":"Green"}), &Actor::Member("qa".into()), &mut events).unwrap();
+        apply(&mut team, "accept", &json!({"task":1}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap();
+        let kinds: Vec<&str> = events.iter().map(|event| event.kind).collect();
+        assert_eq!(kinds, ["reported", "stage_started", "stage_passed", "stage_started", "stage_passed", "stages_passed", "accepted"]);
+        assert_eq!(team.task(1).unwrap().status, TaskStatus::Accepted);
+        assert!(!serde_json::to_string(&team).unwrap().contains("draining"));
     }
 
     #[test]

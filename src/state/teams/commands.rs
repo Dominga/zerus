@@ -10,13 +10,13 @@ use super::store::{self, canonical_uuid, Event, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|add-to-phase|approve-phase|discard-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|run|templates|safe-action|reports-to|sub-lead --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|add-to-phase|approve-phase|discard-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|run|templates|safe-action|reports-to|sub-lead --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
 
 const MUTATIONS: &[&str] = &[
     "plan", "extend", "edit-draft", "move-phase", "add-to-phase", "approve-phase", "discard-phase", "reject-phase", "undo-reject-phase",
     "rework-phase", "reports-to", "sub-lead", "finish", "approve", "commit", "discard", "pause", "resume", "stop",
     "archive", "report", "ask", "reply", "hold", "release", "accept", "reject", "skip-stage", "send-back", "reassign", "take-over", "cancel",
-    "retry", "check", "expect", "swap-member", "use-last-reply", "relaunch", "add-member", "pause-member", "resume-member", "remove-member", "settings", "finding",
+    "retry", "check", "expect", "swap-member", "use-last-reply", "relaunch", "add-member", "scale", "drain", "pause-member", "resume-member", "remove-member", "settings", "finding",
     "draft", "propose",
 ];
 
@@ -200,6 +200,9 @@ fn starts_worker(op: &str) -> bool {
             | "send-back" | "skip-stage"
             // U25: auto-accept may take a draft on enabling or after a rework.
             | "settings" | "rework-phase"
+            // U49: the drain finishes when the member owes nothing; the worker
+            // pauses its session and removes it.
+            | "drain"
             // N6: a created draft team starts its lead and sends it the brief.
             | "draft"
     )
@@ -1006,6 +1009,8 @@ fn added_sessions(team: &Team, op: &str, filled: &Value) -> usize {
         // ready, so it counts now: leaving it out let a 17th session start at
         // 16/16. A member with an adopted session adds that session.
         "add-member" => 1,
+        // U49: scale binds one session per member it adds.
+        "scale" => filled["count"].as_u64().unwrap_or(0) as usize,
         "swap-member" => usize::from(
             filled["session"].is_object() && team.member(text(filled, "member")).is_none_or(|member| member.session.is_none()),
         ),
@@ -2223,6 +2228,25 @@ fn roster_word_rule(team: &Team, op: &str, input: &Value) -> super::owner_word::
                 WordRule { phrases: ROSTER_PHRASES, all: vec!["remove".to_owned(), id.to_owned()], add: false }
             }
         }
+        "scale" => {
+            // U49: the sentence says to add ("add"/"добав") and names the count;
+            // the role it names is checked once the sentence is verified.
+            match input["count"].as_u64() {
+                Some(count) if (1..=32).contains(&count) && !text(input, "role").trim().is_empty() => {
+                    WordRule { phrases: &[], all: vec![count.to_string()], add: true }
+                }
+                _ => WordRule::default(),
+            }
+        }
+        "drain" => {
+            // U49: a drain is a removal; cancelling one changes no roster.
+            let id = text(input, "member");
+            if id.is_empty() || input["draining"].as_bool() == Some(false) {
+                WordRule::default()
+            } else {
+                WordRule { phrases: super::owner_word::DRAIN_PHRASES, all: vec![id.to_owned()], add: false }
+            }
+        }
         "swap-member" => {
             let id = text(input, "member");
             if id.is_empty() {
@@ -2293,6 +2317,25 @@ fn check_roster_word(
         );
         filled["owner_word_count"] = json!(super::owner_word::add_count(&word.text));
         filled["owner_word_change"] = json!(format!("adding {role}"));
+    } else if op == "scale" {
+        // U49: the sentence names the role to add and the count it asks for.
+        let (role, agent, model) =
+            (text(filled, "role").to_owned(), text(filled, "agent").to_owned(), text(filled, "model").to_owned());
+        let described = [role.as_str(), agent.as_str(), model.as_str()]
+            .into_iter()
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>()
+            .join(" / ");
+        ensure!(
+            super::owner_word::names_member(&word.text, &role, &agent, &model),
+            "The owner's sentence does not name the role to add ({described}); quote a sentence naming its role or agent"
+        );
+        let asked = filled["count"].as_u64().unwrap_or(0);
+        let said = super::owner_word::add_count(&word.text) as u64;
+        ensure!(said == asked, "The owner's sentence names {said} members, not {asked}; quote a sentence naming the count");
+        filled["owner_word_change"] = json!(format!("scaling {role} by {asked}"));
+    } else if op == "drain" {
+        filled["owner_word_change"] = json!("draining the member");
     } else {
         filled["owner_word_change"] = json!("the roster change");
     }
@@ -2900,7 +2943,7 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             // Section 9.2: a change that can bind a new session keeps the whole
             // tree within its master's budget (extend binds none, and is
             // checked for a tree already over it).
-            if matches!(op, "plan" | "approve" | "add-member" | "swap-member" | "extend") {
+            if matches!(op, "plan" | "approve" | "add-member" | "scale" | "swap-member" | "extend") {
                 let team = store.load(team_id)?.context("Unknown team")?;
                 // Bounded: ancestors by id and children by id; a flat team
                 // reads nothing beyond the team itself.
@@ -2945,7 +2988,7 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             }
             // U26: a lead changes the roster (or max_members) only on the
             // owner's fresh word, and only for the change that word names.
-            if matches!(op, "add-member" | "swap-member" | "remove-member" | "settings") {
+            if matches!(op, "add-member" | "scale" | "drain" | "swap-member" | "remove-member" | "settings") {
                 let team = store.load(team_id)?.context("Unknown team")?;
                 let caller = actor(&team, op, &filled)?;
                 check_roster_word(&team, op, input, &mut filled, &caller, |team, input, rule, now| {
@@ -4370,6 +4413,112 @@ mod tests {
             assert_eq!(good["roster_word"], true, "{op}");
             assert!(good["owner_word_checked"].is_object(), "{op}");
         }
+    }
+
+    #[test]
+    fn scale_and_drain_need_the_owner_word_naming_them() {
+        // U49: the lead scales on the count the sentence names, and drains on
+        // the word that removes the member.
+        use rusqlite::Connection;
+        let now = crate::state::now();
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE events (seq INTEGER PRIMARY KEY, name TEXT, conversation TEXT, payload TEXT);").unwrap();
+        let say = |text: &str| {
+            db.execute(
+                "INSERT INTO events(name, conversation, payload) VALUES ('claude/x/lead','c1',?1)",
+                rusqlite::params![json!({"type":"UserPromptSubmit","at":now - 60.0,"agent_id":"","detail":text}).to_string()],
+            )
+            .unwrap();
+        };
+        say("Please add two backend members to the roster");
+        say("Please drain frontend2 from the roster");
+        say("Please remove frontend2 from the roster");
+        say("Please add three backend members to the roster");
+        let mut team = Team { id: "t".into(), name: "T".into(), lead: "lead".into(), status: TeamStatus::Running, ..Default::default() };
+        team.members.push(Member {
+            id: "lead".into(),
+            role: "Lead".into(),
+            agent: "claude".into(),
+            session: Some(SessionRef { name: "claude/x/lead".into(), conversation_id: "c1".into(), ..Default::default() }),
+            ..Default::default()
+        });
+        let caller = Actor::Member("lead".into());
+        let verify = |_: &Team, word: &Value, rule: &super::super::owner_word::WordRule, now: f64| {
+            super::super::owner_word::verify_roster_in(&db, "claude/x/lead", "c1", word["text"].as_str().unwrap_or_default(), rule, now)
+        };
+        // scale: the sentence says to add, names the role and the count.
+        let scale = json!({"role":"Backend","agent":"codex","count":2});
+        assert!(super::roster_word_rule(&team, "scale", &scale).needed());
+        let mut without = scale.clone();
+        let error = super::check_roster_word(&team, "scale", &scale, &mut without, &caller, verify).unwrap_err().to_string();
+        assert!(error.contains("your word"), "{error}");
+        let mut worded = scale.clone();
+        worded["owner_word"] = json!({"text":"Please add two backend members to the roster"});
+        let mut filled = worded.clone();
+        super::check_roster_word(&team, "scale", &worded, &mut filled, &caller, verify).unwrap();
+        assert_eq!((filled["roster_word"].clone(), filled["owner_word_change"].as_str()), (json!(true), Some("scaling Backend by 2")));
+        // Another count or another role is not this scale.
+        for text in ["Please add three backend members to the roster", "Please add two frontend members to the roster"] {
+            let mut wrong = json!({"role":"Backend","agent":"codex","count":2,"owner_word":{"text":text}});
+            let input = wrong.clone();
+            let error = super::check_roster_word(&team, "scale", &input, &mut wrong, &caller, verify).unwrap_err().to_string();
+            assert!(error.contains("your word") || error.contains("does not name"), "{text}: {error}");
+        }
+        // drain: the owner's drain or remove sentence names the member.
+        let drain = json!({"member":"frontend2"});
+        assert!(super::roster_word_rule(&team, "drain", &drain).needed());
+        let mut without = drain.clone();
+        let error = super::check_roster_word(&team, "drain", &drain, &mut without, &caller, verify).unwrap_err().to_string();
+        assert!(error.contains("your word"), "{error}");
+        let mut worded = json!({"member":"frontend2","owner_word":{"text":"Please drain frontend2 from the roster"}});
+        let input = worded.clone();
+        super::check_roster_word(&team, "drain", &input, &mut worded, &caller, verify).unwrap();
+        assert_eq!(worded["roster_word"], true);
+        let mut removal = json!({"member":"frontend2","owner_word":{"text":"Please remove frontend2 from the roster"}});
+        let input = removal.clone();
+        super::check_roster_word(&team, "drain", &input, &mut removal, &caller, verify).unwrap();
+        let mut other = json!({"member":"frontend2","owner_word":{"text":"Please drain backend from the roster"}});
+        let input = other.clone();
+        assert!(super::check_roster_word(&team, "drain", &input, &mut other, &caller, verify).is_err());
+        // Cancelling a drain is no roster change.
+        assert!(!super::roster_word_rule(&team, "drain", &json!({"member":"frontend2","draining":false})).needed());
+    }
+
+    /// U49 through `run`: the lead's scale and drain ask for the owner's word
+    /// before anything changes.
+    #[test]
+    fn a_lead_scales_and_drains_only_through_the_word() {
+        let _env = crate::state::ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let _worker = hold_worker_lock();
+            let mut store = Store::open(true).unwrap();
+            let mut team = running_team();
+            {
+                let lead = team.members.iter_mut().find(|member| member.id == "lead").unwrap();
+                lead.agent = "dsh".into();
+                lead.session = Some(SessionRef { name: "dsh/x/lead".into(), run_id: "r1".into(), conversation_id: "conv-lead".into(), ..Default::default() });
+            }
+            let id = team.id.clone();
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+            super::set_test_caller_identities(Some((Some("conv-lead".into()), None, None)));
+            let mut n = 0u8;
+            let mut request = |op: &str, input: Value| {
+                n += 1;
+                let mut input = input;
+                input["team"] = json!(id);
+                input["request_id"] = json!(format!("00000000-0000-4000-8000-0000000006{n:02}"));
+                run(op, &input, false)
+            };
+            let error = request("scale", json!({"role":"Backend","agent":"codex","count":1})).unwrap_err().to_string();
+            assert!(error.contains("your word"), "{error}");
+            let error = request("drain", json!({"member":"dev"})).unwrap_err().to_string();
+            assert!(error.contains("your word"), "{error}");
+            // Cancelling a drain changes no roster: the lead may do it alone.
+            let cancelled = request("drain", json!({"member":"dev","draining":false})).unwrap();
+            assert_eq!(cancelled["status"], "draining_cancelled");
+            super::set_test_caller_identities(None);
+        });
     }
 
     #[test]

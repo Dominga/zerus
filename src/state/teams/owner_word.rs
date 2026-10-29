@@ -24,6 +24,9 @@ pub(crate) const ROSTER_PHRASES: &[&str] = &[
     "roster", "team change", "member", "members", "участник", "состав",
 ];
 
+/// U49: the words that ask a member to drain, English and Russian.
+pub(crate) const DRAIN_PHRASES: &[&str] = &["drain", "remove", "вывед", "убери", "убрать"];
+
 /// U32: what the owner's sentence must contain for one roster change: one of
 /// `phrases` (for an add, the verb "add"/"добав" instead), and every token in
 /// `all` (the operation and the member or cap it names).
@@ -53,7 +56,7 @@ const NUMBER_WORDS: &[(&str, usize)] = &[
 const ROLE_ALIASES: &[(&[&str], &[&str])] = &[
     (&["backend", "бэкенд"], &["backend", "бэкенд", "бэкендер"]),
     (&["frontend", "фронт"], &["frontend", "фронт", "фронтенд"]),
-    (&["qa", "tester", "test", "тестер", "тестировщик"], &["qa", "test", "тест", "тестер"]),
+    (&["qa", "tester", "test", "тестер", "тестировщик"], &["qa", "test", "тест", "тестер", "tester"]),
     (&["reviewer", "review", "ревью"], &["reviewer", "review", "ревью", "ревьюер"]),
     (&["expert", "эксперт"], &["expert", "эксперт"]),
 ];
@@ -134,7 +137,23 @@ fn model_aliases(model: &str) -> &'static [&'static str] {
 /// U32: an English alias is a whole token ("qa" is not in "squad"); a Russian
 /// one is matched inside its inflections ("бэкенд" in "бэкендера").
 fn alias_in(lowered: &str, alias: &str) -> bool {
-    if alias.is_ascii() { has_token(lowered, alias) } else { lowered.contains(alias) }
+    if alias.is_ascii() {
+        // U49: a scale names the role in the plural too ("add two backends").
+        has_token(lowered, alias) || has_token(lowered, &format!("{alias}s"))
+    } else {
+        lowered.contains(alias)
+    }
+}
+
+/// U49: a value the sentence must name; a count may be said as a number word
+/// ("add two backends" names 2, as "add 2 backends" does).
+fn needed_in(lowered: &str, value: &str) -> bool {
+    let value = value.to_lowercase();
+    if has_token(lowered, &value) {
+        return true;
+    }
+    let Ok(number) = value.parse::<usize>() else { return false };
+    NUMBER_WORDS.iter().any(|(word, n)| *n == number && has_token(lowered, word))
 }
 
 /// U26/N10: a whole token, not a substring ("add" does not match "address").
@@ -348,7 +367,7 @@ fn verify_scan(
         if if options.exact { detail.trim() != text.trim() } else { !detail.contains(text) } {
             continue;
         }
-        if !options.needed.iter().all(|value| has_token(&lowered, &value.to_lowercase())) {
+        if !options.needed.iter().all(|value| needed_in(&lowered, value)) {
             continue;
         }
         return Ok(OwnerWord { text: detail.to_owned(), at, event: seq });
@@ -520,5 +539,24 @@ mod tests {
         assert_eq!(add_count("add 3 testers"), 3);
         assert_eq!(add_count("добавь двух бэкендеров"), 2);
         assert_eq!(add_count("добавь 5 тестеров"), 5);
+        // U49: a scale names the role in the plural too.
+        assert!(names_member("add two backends", "Backend", "codex", ""));
+        assert!(names_member("add two testers", "Tester", "claude", ""));
+    }
+
+    #[test]
+    fn a_count_may_be_said_as_a_number_word() {
+        // U49: the word rule asks for the count; "two" names 2 as "2" does.
+        let rule = WordRule { phrases: &[], all: vec!["2".into()], add: true };
+        let db = database();
+        add(&db, "claude/x/lead", "c1", prompt(2000.0, "Please add two backend members to the roster"));
+        verify_roster_in(&db, "claude/x/lead", "c1", "Please add two backend members to the roster", &rule, 2010.0).unwrap();
+        let db = database();
+        add(&db, "claude/x/lead", "c1", prompt(2000.0, "Please add three backend members to the roster"));
+        assert!(verify_roster_in(&db, "claude/x/lead", "c1", "Please add three backend members to the roster", &rule, 2010.0).is_err());
+        // A count written as a word does not authorize another count.
+        let db = database();
+        add(&db, "claude/x/lead", "c1", prompt(2000.0, "Please add 2 backend members to the roster"));
+        verify_roster_in(&db, "claude/x/lead", "c1", "Please add 2 backend members to the roster", &rule, 2010.0).unwrap();
     }
 }

@@ -294,6 +294,8 @@ pub(crate) fn candidates(team: &Team, id: u32) -> Vec<String> {
     team.members
         .iter()
         .filter(|member| member.state != MemberState::Removed && member.state != MemberState::Paused)
+        // U49: a draining member takes nothing new, a stage included.
+        .filter(|member| !member.draining)
         .filter(|member| !implementers.contains(&member.id))
         .filter(|member| if spec.member.is_empty() { member.role.eq_ignore_ascii_case(&spec.role) || role_matches(&member.role, &spec.role) } else { member.id == spec.member })
         .map(|member| member.id.clone())
@@ -576,6 +578,19 @@ mod tests {
         assert_eq!(states, [StageState::Passed, StageState::Passed]);
         run(&mut team, "accept", json!({"task":1}), &member("lead")).unwrap();
         assert_eq!(team.task(1).unwrap().status, TaskStatus::Accepted);
+    }
+
+    #[test]
+    fn a_draining_member_takes_no_stage() {
+        // U49: a member that is draining gets nothing new, a stage included.
+        let mut team = team_with("code", &builtin());
+        let attempt = hand(&mut team);
+        report(&mut team, &attempt);
+        assert_eq!(candidates(&team, 1), vec!["rev", "rev2"]);
+        team.members.iter_mut().find(|member| member.id == "rev").unwrap().draining = true;
+        team.members.iter_mut().find(|member| member.id == "rev2").unwrap().draining = true;
+        assert!(candidates(&team, 1).is_empty());
+        assert!(give_stage(&mut team, 1, "rev").is_err());
     }
 
     #[test]

@@ -211,6 +211,10 @@ pub(crate) enum Step {
     HandOut { task: u32, member: String },
     /// U31: an idle member takes an independent task of the next draft phase.
     WorkAhead { task: u32, member: String },
+    /// U49: a draining member owes nothing: pause its session, then remove it.
+    /// `pause` is false when there is no live session to keep (an agent with no
+    /// separate process, or a session already stopped).
+    Drain { member: String, pause: bool },
     /// The member's first turn after the hand-off began (A1).
     Started { task: u32 },
     /// The hand-out did not start in `start_timeout_seconds` (A1).
@@ -462,6 +466,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         }
         // H6: a swapped member's new session starts even before work is ready.
         if member.launch_after_swap
+            && !member.draining
             && member.session.is_none()
             && member.launch_id.is_empty()
             && member.error.is_empty()
@@ -814,7 +819,8 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         let Some(found) = seen.iter().find(|seen| seen.host == session.host && seen.name == session.name) else { continue };
         let has_work = busy.contains(member.id.as_str())
             || ready_ids.iter().any(|id| team.task(*id).is_some_and(|task| task.assignee == member.id));
-        if !staging_open || owner_wait || has_work || !(found.free && found.live) {
+        // U49: a draining member is idle on purpose; its episode ends quietly.
+        if !staging_open || owner_wait || has_work || member.draining || !(found.free && found.live) {
             if member.starved_since.is_some() {
                 steps.push(Step::StarvedEnded { member: member.id.clone() });
             }
@@ -889,6 +895,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     };
     let available = |member: &Member, busy: &BTreeSet<&str>| {
         !matches!(member.state, MemberState::Removed | MemberState::Paused)
+            && !member.draining
             && !busy.contains(member.id.as_str())
             && member.session.is_some()
             && !member.needs_settings()
@@ -934,7 +941,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                 }
             }
         }
-        if matches!(member.state, MemberState::Removed | MemberState::Paused) || busy.contains(member.id.as_str()) {
+        if matches!(member.state, MemberState::Removed | MemberState::Paused) || member.draining || busy.contains(member.id.as_str()) {
             continue;
         }
         if member.session.is_none() {
@@ -985,7 +992,56 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             }
         }
     }
+    // U49: a draining member finishes its open attempt and stage run, takes
+    // nothing new, then its session is paused and the member leaves the roster.
+    // Its queued work went to a peer above; while it still owes anything the
+    // drain waits.
+    for member in &team.members {
+        if !member.draining || member.id == team.lead || member.state == MemberState::Removed {
+            continue;
+        }
+        if !drained(team, &member.id) {
+            continue;
+        }
+        // A computer that did not answer leaves the drain to the next tick, and
+        // a turn still in flight is its last work: pause only an idle session.
+        if listed.is_some_and(|hosts| member.session.as_ref().is_some_and(|session| !hosts.contains(&session.host))) {
+            continue;
+        }
+        let found = session_of(member, seen);
+        if found.is_some_and(|found| found.live && !found.free) {
+            continue;
+        }
+        // U49: an agent with no separate process to pause (OpenCode) has
+        // nothing to keep; every other live session is paused, never killed.
+        let pause = found.is_some_and(|found| found.live) && member.agent != "opencode";
+        steps.push(Step::Drain { member: member.id.clone(), pause });
+    }
     coalesce_lead(steps)
+}
+
+/// U49: whether a draining member owes nothing any more: no open attempt, no
+/// stage run it still holds, no task it still has to start or work on, and no
+/// report of its own. A task at the lead or in a stage is the lead's now.
+fn drained(team: &Team, member: &str) -> bool {
+    let open_attempt = team
+        .tasks
+        .iter()
+        .any(|task| task.open_attempt().is_some_and(|attempt| attempt.member == member));
+    let open_stage = team.tasks.iter().any(|task| {
+        task.pipeline_run
+            .as_ref()
+            .and_then(PipelineRun::open_run)
+            .is_some_and(|run| run.state == StageState::Delivered && run.member == member)
+    });
+    let work = team.tasks.iter().any(|task| task.assignee == member && task_owes(task));
+    !open_attempt && !open_stage && !work && team.reports_of(member).is_empty()
+}
+
+/// U49: a task still to start or work on, as opposed to one at the lead or in
+/// a stage of its pipeline (which no implementer waits for).
+fn task_owes(task: &Task) -> bool {
+    matches!(task.status, TaskStatus::Draft | TaskStatus::Pending | TaskStatus::Assigned | TaskStatus::InProgress)
 }
 
 /// At most one message reaches the free lead per tick; the others wait for the
@@ -2408,6 +2464,44 @@ fn team_override(session: &SessionRef, on: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// U49: the end of a drain. The session is paused, never killed: its
+/// conversation stays under Saved; a session that is already gone needs no
+/// pause. Then the member leaves the roster, as remove-member takes it out.
+fn drain_member(store: &mut Store, team: &Team, member: &str, pause: bool) -> anyhow::Result<()> {
+    // Read the member fresh: a drain may have been cancelled since the step.
+    let current = store.load(&team.id)?.context("Unknown team")?;
+    let Some(found) = current.member(member) else { return Ok(()) };
+    if !found.draining || found.state == MemberState::Removed {
+        return Ok(());
+    }
+    if pause {
+        if let Some(session) = found.session.clone() {
+            let output = hgs(&session.host, &["pause", &session.name], None, Duration::from_secs(60))?;
+            anyhow::ensure!(
+                output.status.success(),
+                "The session of {} was not paused: {}",
+                current.role_of(member),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+    }
+    change(store, &team.id, |team, events| {
+        let role = team.role_of(member);
+        anyhow::ensure!(
+            team.tasks.iter().all(|task| task.assignee != member || !task_owes(task)),
+            "{} still owes a task",
+            role
+        );
+        anyhow::ensure!(team.reports_of(member).is_empty(), "{} still has reports", role);
+        let found = team.members.iter_mut().find(|found| found.id == member).context("Unknown member")?;
+        anyhow::ensure!(found.draining, "the drain was cancelled");
+        found.draining = false;
+        found.state = MemberState::Removed;
+        events.push(Event::new("member_removed", json!({"by":"Zerus","member":role,"draining":true})));
+        Ok(())
+    })
+}
+
 fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, from: Option<&str>, host: &str) -> anyhow::Result<()> {
     // Record the attempt before sending; a crash leaves it Unconfirmed.
     let attempt_id = uuid::Uuid::new_v4().to_string();
@@ -3644,6 +3738,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
                 Ok(())
             })
         }
+        Step::Drain { member, pause } => drain_member(store, team, member, *pause),
         Step::Rebalance { task, from, to } => hand_out(store, &team.id, *task, to, Some(from), host),
         Step::Rebalanced { tasks } => tell_lead_rebalanced(store, team, tasks),
         Step::TurnEnded { task, at, reply } => change(store, &team.id, |team, _| {
@@ -5323,6 +5418,217 @@ mod tests {
         let saved = store.load(&t.id).unwrap().unwrap();
         assert_eq!(saved.task(1).unwrap().attempts.last().unwrap().state, AttemptState::Delivered);
         assert!(saved.task(1).unwrap().reopen_note.is_empty());
+    }
+
+    #[test]
+    fn a_draining_member_finishes_its_attempt_then_its_session_is_paused_and_it_leaves() {
+        // U49: the member owes its open attempt; then its session is paused
+        // (never killed) and the member leaves the roster.
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+            let mut t = team();
+            // dev owes only task 1.
+            let mut events = Vec::new();
+            ops::apply(&mut t, "cancel", &json!({"task":2}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+            let task = t.task_mut(1).unwrap();
+            task.attempts.push(Attempt {
+                n: 1,
+                id: "A1".into(),
+                member: "dev".into(),
+                state: AttemptState::Delivered,
+                sent_at: 10.0,
+                delivered_at: Some(10.0),
+                ..Default::default()
+            });
+            task.status = TaskStatus::InProgress;
+            t.members.iter_mut().find(|member| member.id == "dev").unwrap().draining = true;
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+            let seen = [session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", true)];
+            assert!(
+                !steps(&t, &seen, 100.0).iter().any(|step| matches!(step, Step::Drain { .. })),
+                "the open attempt is finished first"
+            );
+            // The report ends the attempt; the task waits at the lead, which is
+            // no work of the member any more.
+            store
+                .mutate(None, &t.id, None, |team, events| {
+                    ops::apply(team, "report", &json!({"task":1,"attempt":"A1","text":"Done"}), &Actor::Member("dev".into()), &BTreeSet::new(), events)
+                })
+                .unwrap();
+            let after = store.load(&t.id).unwrap().unwrap();
+            assert!(steps(&after, &seen, 200.0).iter().any(|step| matches!(step, Step::Drain { member, .. } if member == "dev")));
+            // The session is paused, never killed, and the member leaves.
+            let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::<Vec<String>>::new()));
+            let record = calls.clone();
+            set_fake_hgs(Some(Box::new(move |_, args: &[&str], _| {
+                record.borrow_mut().push(args.iter().map(|arg| (*arg).to_owned()).collect());
+                Ok(fake_output(0, "", ""))
+            })));
+            run_step(&mut store, &after, &Step::Drain { member: "dev".into(), pause: true }, "").unwrap();
+            set_fake_hgs(None);
+            assert_eq!(calls.borrow()[0], vec!["pause".to_owned(), "codex/x/dev".to_owned()]);
+            assert_eq!(calls.borrow().len(), 1, "one pause, no kill and no terminate");
+            let saved = store.load(&t.id).unwrap().unwrap();
+            let dev = saved.member("dev").unwrap();
+            assert_eq!((dev.state, dev.draining), (MemberState::Removed, false));
+            let events = store.events(&t.id, None, 100).unwrap();
+            let removed = events["items"].as_array().unwrap().iter().find(|event| event["kind"] == "member_removed").unwrap();
+            assert_eq!((removed["detail"]["by"].clone(), removed["detail"]["member"].clone()), (json!("Zerus"), json!("Backend")));
+        });
+    }
+
+    #[test]
+    fn a_draining_member_finishes_its_stage_run_first() {
+        // U49: an open stage run it holds keeps the drain waiting; a stage never
+        // goes to a draining member.
+        let mut t = team();
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        // qa owes only its stage run.
+        ops::apply(&mut t, "cancel", &json!({"task":3}), &Actor::Human, &none, &mut events).unwrap();
+        {
+            let task = t.task_mut(1).unwrap();
+            task.attempts.push(Attempt { n: 1, id: "A1".into(), member: "dev".into(), state: AttemptState::Reported, ..Default::default() });
+            task.status = TaskStatus::InReview;
+            task.pipeline_run = Some(PipelineRun {
+                id: "code".into(),
+                name: "Code".into(),
+                stages: vec![PipelineStage { kind: "review".into(), role: "Reviewer".into(), member: "qa".into() }],
+                max_rounds: 3,
+                folder: "hold".into(),
+                accept: "lead".into(),
+                round: 1,
+                runs: vec![StageRun {
+                    id: "S1".into(),
+                    stage: 0,
+                    kind: "review".into(),
+                    round: 1,
+                    attempt: 1,
+                    member: "qa".into(),
+                    state: StageState::Delivered,
+                    at: 10.0,
+                    delivered_at: Some(10.0),
+                    ..Default::default()
+                }],
+            });
+        }
+        t.members.iter_mut().find(|member| member.id == "qa").unwrap().draining = true;
+        let seen = [session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", true)];
+        assert!(
+            !steps(&t, &seen, 100.0).iter().any(|step| matches!(step, Step::Drain { .. })),
+            "its stage run is finished first"
+        );
+        assert!(super::super::pipeline::candidates(&t, 1).is_empty(), "a stage never goes to a draining member");
+        // The verdict ends the run and the task waits at the lead.
+        let task = t.task_mut(1).unwrap();
+        task.pipeline_run.as_mut().unwrap().runs[0].state = StageState::Passed;
+        task.status = TaskStatus::Submitted;
+        assert!(steps(&t, &seen, 200.0).iter().any(|step| matches!(step, Step::Drain { member, .. } if member == "qa")));
+    }
+
+    #[test]
+    fn a_drain_with_nothing_to_finish_ends_at_once_and_a_cancelled_one_never_does() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+            let mut t = team();
+            let mut events = Vec::new();
+            let none = BTreeSet::new();
+            for id in [1, 2] {
+                ops::apply(&mut t, "cancel", &json!({"task":id}), &Actor::Human, &none, &mut events).unwrap();
+            }
+            t.members.iter_mut().find(|member| member.id == "dev").unwrap().draining = true;
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+            let seen = [session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", true)];
+            assert!(steps(&t, &seen, 100.0).iter().any(|step| matches!(step, Step::Drain { member, .. } if member == "dev")));
+            // Undo before it ends: nothing is paused and nothing is removed.
+            store
+                .mutate(None, &t.id, None, |team, events| {
+                    ops::apply(team, "drain", &json!({"member":"dev","draining":false}), &Actor::Human, &BTreeSet::new(), events)
+                })
+                .unwrap();
+            let undone = store.load(&t.id).unwrap().unwrap();
+            assert!(!steps(&undone, &seen, 200.0).iter().any(|step| matches!(step, Step::Drain { .. })));
+            let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::<Vec<String>>::new()));
+            let record = calls.clone();
+            set_fake_hgs(Some(Box::new(move |_, args: &[&str], _| {
+                record.borrow_mut().push(args.iter().map(|arg| (*arg).to_owned()).collect());
+                Ok(fake_output(0, "", ""))
+            })));
+            run_step(&mut store, &undone, &Step::Drain { member: "dev".into(), pause: true }, "").unwrap();
+            set_fake_hgs(None);
+            assert!(calls.borrow().is_empty(), "a step decided before the undo does nothing");
+            let saved = store.load(&t.id).unwrap().unwrap();
+            assert_eq!(saved.member("dev").unwrap().state, MemberState::Active);
+        });
+    }
+
+    #[test]
+    fn a_session_with_no_process_to_pause_is_not_paused() {
+        // U49: OpenCode has no separate process to pause; the member still leaves.
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+            let mut t = team();
+            let mut events = Vec::new();
+            for id in [1, 2] {
+                ops::apply(&mut t, "cancel", &json!({"task":id}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+            }
+            {
+                let dev = t.members.iter_mut().find(|member| member.id == "dev").unwrap();
+                dev.agent = "opencode".into();
+                dev.draining = true;
+            }
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+            let seen = [session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", true)];
+            let found = steps(&t, &seen, 100.0);
+            assert!(found.iter().any(|step| matches!(step, Step::Drain { pause: false, .. })), "{found:?}");
+            let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::<Vec<String>>::new()));
+            let record = calls.clone();
+            set_fake_hgs(Some(Box::new(move |_, args: &[&str], _| {
+                record.borrow_mut().push(args.iter().map(|arg| (*arg).to_owned()).collect());
+                Ok(fake_output(0, "", ""))
+            })));
+            run_step(&mut store, &t, &Step::Drain { member: "dev".into(), pause: false }, "").unwrap();
+            set_fake_hgs(None);
+            assert!(calls.borrow().is_empty(), "nothing to pause and nothing to kill");
+            assert_eq!(store.load(&t.id).unwrap().unwrap().member("dev").unwrap().state, MemberState::Removed);
+        });
+    }
+
+    #[test]
+    fn a_draining_member_gets_no_new_task() {
+        // U49: a draining member takes nothing new, and its ready task is a
+        // rebalancing source for a member of the same role.
+        let mut t = team();
+        t.members.iter_mut().find(|member| member.id == "dev").unwrap().draining = true;
+        let seen = [session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", true)];
+        let found = steps(&t, &seen, 100.0);
+        assert!(!found.iter().any(|step| matches!(step, Step::HandOut { member, .. } if member == "dev")), "{found:?}");
+        // It still owes its two ready tasks, so the drain waits while they are
+        // assigned to it and no peer can take them.
+        assert!(!found.iter().any(|step| matches!(step, Step::Drain { .. })), "{found:?}");
+        let mut with_peer = t.clone();
+        with_peer.members.push(Member {
+            id: "dev2".into(),
+            role: "Backend".into(),
+            agent: "codex".into(),
+            state: MemberState::Active,
+            session: Some(SessionRef { name: "codex/x/dev2".into(), run_id: "r2".into(), conversation_id: "c".into(), ..Default::default() }),
+            ..Default::default()
+        });
+        let seen = [
+            session("claude/x/lead", "r0", true),
+            session("codex/x/dev", "r1", true),
+            session("codex/x/dev2", "r2", true),
+        ];
+        let found = steps(&with_peer, &seen, 100.0);
+        assert!(
+            found.iter().any(|step| matches!(step, Step::Rebalance { task: 1, from, to } if from == "dev" && to == "dev2")),
+            "{found:?}"
+        );
+        assert!(!found.iter().any(|step| matches!(step, Step::HandOut { task: 1, member } if member == "dev")), "{found:?}");
     }
 
     /// The sessions the local recovery service is asked to wait for.

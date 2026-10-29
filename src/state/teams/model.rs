@@ -303,6 +303,11 @@ pub(crate) struct Member {
     pub added: Option<Value>,
     #[serde(default)]
     pub state: MemberState,
+    /// U49: the member finishes its open attempt and stage run, takes nothing
+    /// new, then its session is paused and the member leaves the roster. Absent
+    /// on every team stored before this field, which keeps today's behaviour.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub draining: bool,
     /// Recorded before the dispatcher starts the member's session, which
     /// `hgs ls` then shows under the same id.
     #[serde(default)]

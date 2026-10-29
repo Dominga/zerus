@@ -1218,6 +1218,27 @@ sets them in the catalog, the team settings or the plan; members never do.
   name; a failed launch returns to the old account, an unconfirmed one is
   reported uncertain and never retried. Nothing changes until the owner
   chooses; a team member's account changes only through swap-member.
+- **U57. The owner confirms a lead's change in the chat, not by a phrase (owner,
+  2026-10-30).** Today the lead asks the owner to type an exact sentence
+  ("add a member", "план принят") and the change is refused when the words
+  differ. Instead the lead proposes the change and the owner answers a card in
+  the lead's chat, the same way a subagent start is approved:
+  - *What is proposed:* adding members, adding tasks to a running phase,
+    removing (cancelling) tasks, discarding a phase, and the existing roster
+    kinds (remove, swap, next goal). The proposal carries the exact change
+    (members with role/agent/model, task titles and ids, the phase).
+  - *The card:* in the lead's conversation (TeamConversation and the session
+    window), in Activity and in the U50/U55 waiting list: what changes, who
+    asks, Allow and Deny, and for Deny an optional reason that reaches the
+    lead. Allow applies exactly that change, bound to the proposal id and a
+    hash of its content; a changed or stale proposal is refused, never
+    re-applied. The owner word by text stays as a fallback for the CLI.
+  - *A phase with no work done:* a phase whose tasks are all cancelled or
+    never started (none accepted, none with a delivered attempt) may be
+    discarded, by the owner directly or by the lead through this card, even
+    when it is running; its numbering closes up as for a draft.
+  - The lead protocol says to propose and wait for the card, never to ask the
+    owner for a sentence.
 - **U56. A stuck member never blocks its tasks silently (owner, 2026-10-29).**
   From team 6d0aabee (RogueDOD QA bot): member b-body stayed in context
   compaction for over 80 minutes after its report; its pinned tasks #15/#16

@@ -1516,18 +1516,32 @@ void TeamWorkspace::keepGraphEdit(TaskView *view, const QString &team)
     };
 }
 
-// U37: the board's running times tick on the shared minute timer; only their
-// labels change, nothing is rebuilt.
+// U37: the board's and the layers' running times tick on the shared minute
+// timer; only their labels change, nothing is rebuilt.
 static QWidget *tickingBoard(QWidget *board)
 {
     QObject::connect(&workedTicker(), &QTimer::timeout, board, [board] {
         const double now = workedClock()();
-        for (auto *label : board->findChildren<QLabel *>(QStringLiteral("teamBoardWorked"))) {
+        for (auto *label : board->findChildren<QLabel *>()) {
+            if (label->objectName() != QLatin1String("teamBoardWorked") && label->objectName() != QLatin1String("teamLayerWorked")) continue;
             const double since = label->property("runningSince").toDouble();
             if (since > 0) label->setText(workedText(qint64(qMax(0.0, now - since))));
         }
     });
     return board;
+}
+
+// U37: a task's working time right after its activity label, in the same color
+// and size; a running one keeps the room it grows to and ticks with its view.
+static void addWorked(QHBoxLayout *row, const Task &task, double now, const QColor &color, const char *name)
+{
+    const QString worked = workedLabel(task, now);
+    if (worked.isEmpty()) return;
+    auto *w = label(worked, color, 11, false, name);
+    w->setProperty("runningSince", task.timing.runningSince);
+    if (task.timing.runningSince > 0) w->setMinimumWidth(workedRoom(w->fontMetrics(), task.timing.runningSince));
+    w->setToolTip(workedTip(task, now));
+    row->addWidget(w);
 }
 
 QWidget *TeamWorkspace::board(const Team &team)
@@ -2167,8 +2181,8 @@ QWidget *TeamWorkspace::laneSections(const Team &team, const PhaseGroup &group)
 
 QWidget *TeamWorkspace::laneBody(const Team &team, const QList<int> &ids, const PhaseGroup &group)
 {
-    if (m_view == "board") return boardColumns(team, ids, group.n);
-    if (m_view == "layers") return layerRows(team, ids);
+    if (m_view == "board") return tickingBoard(boardColumns(team, ids, group.n));
+    if (m_view == "layers") return tickingBoard(layerRows(team, ids));
     return phaseGraph(team, group, ids);
 }
 
@@ -2397,6 +2411,7 @@ QWidget *TeamWorkspace::boardColumns(const Team &team, const QList<int> &ids, in
                     auto *a = label(activity, c.text3, 11); a->setObjectName("teamBoardActivity"); r2->addWidget(a);
                 }
             }
+            addWorked(r2, *task, workedClock()(), c.text3, "teamBoardWorked");
             r2->addStretch(1);
             if (problem) {
                 auto *why = elided(problemText(team, task->id), toneColor(c, problemsByTask.value(task->id)), 11); why->setObjectName("teamBoardProblem");
@@ -2472,6 +2487,7 @@ QWidget *TeamWorkspace::layerRows(const Team &team, const QList<int> &ids)
             // The same small activity label as the graph and the board.
             auto *a = label(activity, c.text3, 11); a->setObjectName("teamLayerActivity"); h->addWidget(a);
         }
+        addWorked(h, *task, workedClock()(), c.text3, "teamLayerWorked");
         const QString role = team.assigneeRole(*task, tr("You"));
         h->addWidget(new Pill(role, roleColor(role, m_dark)));
         auto *logo = new QLabel; logo->setFixedWidth(16);

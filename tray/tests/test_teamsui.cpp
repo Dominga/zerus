@@ -5267,7 +5267,7 @@ void TestTeamsUi::workingTimeFollowsTheActivityLabel()
     QCOMPARE(TeamUi::workedText(12 * 60 + 59), QStringLiteral("12m"));
     QCOMPARE(TeamUi::workedText(3600 + 5 * 60), QStringLiteral("1h 05m"));
     QCOMPARE(TeamUi::workedText(26 * 3600 + 40 * 60), QStringLiteral("26h 40m"));
-    const auto graph = [&] { return dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph")); };
+    const auto graph = [&] { return dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamPhaseGraph")); };
     QTRY_VERIFY(graph() && graph()->nodeRect(1).width() > 0);
     const auto node = [&](TeamUi::TaskView *view, int id) { for (const auto &n : view->nodes) if (n.id == id) return n; return TeamUi::TaskView::Node{}; };
     // Running: since the current attempt started; done: the sum; never
@@ -5350,15 +5350,22 @@ void TestTeamsUi::workingTimeFollowsTheActivityLabel()
     QCOMPARE(state->geometry().left(), stateLeft);
     now = 9000; tick();
     shoot("ux-u37-board");
-    // The Layers row: the same text after the activity label.
+    // The Layers row: the same text after the activity label (the phase
+    // scroll's rows since the one-phase plan has its scroll too).
     view("layers");
-    TeamUi::TaskView *layers = nullptr;
-    QTRY_VERIFY(([&] { layers = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceLayers")); return layers != nullptr; })());
-    QCOMPARE(node(layers, 2).worked, QStringLiteral("1h 05m"));
-    QCOMPARE(node(layers, 8).worked, QStringLiteral("1h 15m"));
-    QCOMPARE(node(layers, 11).worked, QStringLiteral("1m"));
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceLayers") && !workspace.findChildren<QFrame *>("teamLayerRow").isEmpty());
+    const auto layer = [&](int id) -> QLabel * {
+        for (auto *row : workspace.findChildren<QFrame *>("teamLayerRow"))
+            if (row->property("task").toInt() == id) return row->findChild<QLabel *>("teamLayerWorked");
+        return nullptr;
+    };
+    QTRY_VERIFY(layer(2));
+    QCOMPARE(layer(2)->text(), QStringLiteral("1h 05m"));
+    QCOMPARE(layer(8)->text(), QStringLiteral("1h 15m"));
+    QCOMPARE(layer(11)->text(), QStringLiteral("1m"));
+    QVERIFY(layer(2)->toolTip().contains("Attempt 1 (backend, rejected): worked 25m"));
     now = 12000; tick();
-    QCOMPARE(node(layers, 3).worked, QStringLiteral("1h 02m"));
+    QCOMPARE(layer(3)->text(), QStringLiteral("1h 02m"));
     now = 9000; tick();
     shoot("ux-u37-layers");
     // An older hgs sends no timing: nothing is shown.

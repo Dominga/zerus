@@ -1995,15 +1995,13 @@ fn close_questions(task: &mut Task) {
 /// The task's open attempt must be revoked before another starts. The
 /// dispatcher interrupts the old worker separately.
 fn revoke(task: &mut Task, why: &str) -> Option<u32> {
-    // U46: retry, reassign, take-over and cancel end a preparation that
-    // refused: the next hand-out prepares its member again.
+    // Spec 0 (U45, U46, U48): a retry, a reassignment, a take-over or a
+    // decision ends a wait for Zerus; the next hand-out prepares again.
     task.waits = None;
     // The attempt is over: its questions close with it (N5).
     close_questions(task);
     // U36: so does the stage that was reading its report.
     super::pipeline::revoke_runs(task, why);
-    // Spec 0: a retry, a reassignment or a decision ends a wait for Zerus.
-    task.waits = None;
     let attempt = task.open_attempt_mut()?;
     attempt.state = AttemptState::Revoked;
     attempt.error = why.to_owned();

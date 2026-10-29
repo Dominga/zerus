@@ -70,6 +70,9 @@ pub(crate) struct Answers {
     pub(crate) revision: u64,
     pub(crate) epoch: u64,
     last_retry: f64,
+    /// The listed cards' "Asked" texts by `created_at` (its bits), formatted
+    /// before the hub lock is taken: local time may read the time zone files.
+    asked: Vec<(u64, (String, String))>,
 }
 
 impl Answers {
@@ -123,7 +126,7 @@ pub(crate) fn facts(ctx: &Context) -> AnswerFacts {
 
 /// "Asked 28 Oct 14:03:05" (with the year when it is not this year) and the
 /// full time with its zone (`setQuestion`, 376-379); formatted in Rust, never
-/// in the webview.
+/// in the webview, and never under the hub lock.
 fn asked(created: f64) -> (String, String) {
     use chrono::{Datelike, Local, TimeZone};
     if !(created > 0.0 && created < 253_402_300_800.0) {
@@ -178,7 +181,18 @@ impl Composers {
     }
 
     fn sync_moving(&self, navigation: i32) {
+        let listed = {
+            let hub = self.lock();
+            self.context(&hub).and_then(|ctx| ctx.details)
+        };
+        let asked: Vec<_> = listed
+            .map(|details| rules::pending(&details))
+            .unwrap_or_default()
+            .iter()
+            .map(|q| (q.created_at.to_bits(), asked(q.created_at)))
+            .collect();
         let mut hub = self.lock();
+        hub.answers.asked = asked;
         let Some(ctx) = self.context(&hub) else {
             hub.answers.shown = None;
             return;
@@ -433,7 +447,13 @@ impl Composers {
             queue_index: selection.index,
             queue_count: selection.optional.len(),
         };
-        let (asked, asked_tip) = asked(question.created_at);
+        let (asked, asked_tip) = hub
+            .answers
+            .asked
+            .iter()
+            .find(|(at, _)| *at == question.created_at.to_bits())
+            .map(|(_, texts)| texts.clone())
+            .unwrap_or_default();
         let view = QuestionView {
             card: key,
             revision: hub.answers.revision,

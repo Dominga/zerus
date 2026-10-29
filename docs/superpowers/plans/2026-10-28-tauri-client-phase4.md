@@ -7853,6 +7853,7 @@ They share `composer/mod.rs`, `Composer.tsx` and `SessionDetail.tsx` only additi
   - `question_edit(card, epoch, edit)` applies only an edit of the current epoch. A stale one is dropped and Rust's answers stand. One the card refuses (loading, locked, an unchecked radio, a text over its bound) bumps the epoch and so hands Rust's answers back.
   - `question_page`, `question_navigate` and `question_allow_retry` take no epoch: Qt applies them at once.
   - Tests: `a_rebuild_bumps_the_revision_and_the_epoch`, `a_stale_edit_after_a_draft_load_leaves_rusts_answers`, `a_refused_edit_hands_the_answers_back`.
+- **"Asked"** is formatted before the hub lock is taken (`Answers.asked`, refreshed by `sync_questions`), as Task 4a formats the cache expiry: local time may read the time zone files.
 - **Commands** use `rename_all = "snake_case"` like the composer's and sit in the live handler only (the composer is `live`-only). `question_allow_retry` does nothing once the hub has closed.
 - **Later tasks bind to this:** A2-2's tests take the card and its epoch from `tests::shown(&c)`. A2-3 calls `question_edit` with `{ card, epoch, edit }`, and its `QuestionView` has `epoch: number`.
 

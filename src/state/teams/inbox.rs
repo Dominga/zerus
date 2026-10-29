@@ -17,7 +17,8 @@ const SUMMARY_CHARS: usize = 300;
 /// message never names it twice.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Item {
-    /// `report`, `question`, `permission`, `lead_task`, `stalled` or `budget`.
+    /// `report`, `question`, `permission`, `lead_task`, `stalled`, `budget`
+    /// or `task_waits` (U45).
     pub kind: &'static str,
     pub key: String,
     pub task: Option<u32>,
@@ -146,6 +147,21 @@ fn all_items(team: &Team) -> Vec<Item> {
                 json!({"request_id":PLACEHOLDER,"team":team.id,"member":member.id})
             ),
             detail: member.error.clone(),
+        });
+    }
+    // Spec 0 (U45): a task that waits for a step Zerus could not take.
+    for task in team.tasks.iter().filter(|_| active).filter(|task| task.status == TaskStatus::Pending) {
+        let Some(wait) = &task.waits else { continue };
+        items.push(Item {
+            subagents: Value::Null,
+            kind: "task_waits",
+            key: format!("task_waits:{}:{}", task.id, wait.at),
+            task: Some(task.id),
+            member: if task.assignee.is_empty() { task.role.clone() } else { team.role_of(&task.assignee) },
+            since: wait.at,
+            summary: summary(&format!("#{} {} waits: {}", task.id, task.title, wait.reason)),
+            command: format!("{} | hgs team retry --json", json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id})),
+            detail: wait.reason.clone(),
         });
     }
     // F8: each decided proposal reaches the lead with the decision and the
@@ -488,6 +504,10 @@ pub(crate) fn waits(team: &Team, task: &Task, ready: bool) -> Option<Value> {
     }
     if let Some(hold) = &task.hold {
         return Some(json!({"for":"hold","on":[hold.by],"unblock":format!("release #{}", task.id)}));
+    }
+    // Spec 0: a step before the hand-out was refused or never confirmed.
+    if let Some(wait) = task.waits.as_ref().filter(|_| task.status == TaskStatus::Pending) {
+        return Some(json!({"for":wait.waits_for,"on":wait.on,"reason":wait.reason,"unblock":format!("retry or reassign #{}", task.id)}));
     }
     // U36: a test holds the assignee's folder; its next task waits for it.
     if matches!(task.status, TaskStatus::Pending) {

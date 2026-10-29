@@ -81,6 +81,9 @@ pub(crate) struct Seen {
     pub limited: Option<SeenLimit>,
     /// When its session last reported any event.
     pub last_event_at: Option<f64>,
+    /// U45: the model and effort its session record names now.
+    pub model: String,
+    pub effort: String,
 }
 
 /// The newest Background job of a session (C12).
@@ -196,6 +199,8 @@ pub(crate) fn seen(listing: &Value) -> Vec<Seen> {
                 muted: record["notification_preferences"]["muted"] == true,
                 notify_revision: record["notification_preferences"]["revision"].as_u64(),
                 limited,
+                model: field("model").to_owned(),
+                effort: field("effort").to_owned(),
             });
         }
     }
@@ -209,6 +214,12 @@ pub(crate) enum Step {
     Adopt { member: String, session: SessionRef },
     Launch { member: String },
     HandOut { task: u32, member: String },
+    /// U45: switch the member's model and effort before it gets the task.
+    SwitchModel { task: u32, member: String, from: String, model: String, effort: String },
+    /// U45: the switch was not confirmed in time; the task waits for the lead.
+    ModelUncertain { task: u32 },
+    /// U45: no member can run the task's models; it waits with the reason.
+    TaskWaits { task: u32, reason: String },
     /// U31: an idle member takes an independent task of the next draft phase.
     WorkAhead { task: u32, member: String },
     /// The member's first turn after the hand-off began (A1).
@@ -320,6 +331,16 @@ fn can_take_a_message(found: &Seen) -> bool {
         // A turn (`busy`) or a question/approval (`attention`) is not a turn
         // that ended; an idle session with Background work is (U18).
         && matches!(found.activity.as_str(), "idle" | "background")
+}
+
+/// U45: the hand-out of a task to its assignee, or to another member (a
+/// member of its role, or a peer of the assignee) as a rebalance.
+fn deliver(task: &Task, member: &Member) -> Step {
+    if member.id == task.assignee {
+        Step::HandOut { task: task.id, member: member.id.clone() }
+    } else {
+        Step::Rebalance { task: task.id, from: task.assignee.clone(), to: member.id.clone() }
+    }
 }
 
 fn session_of<'a>(member: &Member, seen: &'a [Seen]) -> Option<&'a Seen> {
@@ -927,6 +948,69 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     let ready = plan::dispatch_order(team, ready_ids);
     for id in ready {
         let Some(task) = team.task(id) else { continue };
+        // Spec 0: a refused or unconfirmed step waits for the lead or you.
+        if task.waits.is_some() {
+            continue;
+        }
+        // U45: a task with models or for a role goes to a member that can run
+        // one of its models, switched first when it must be.
+        if super::models::applies(team, task) {
+            if let Some(pending) = super::models::pending(task) {
+                // The member is busy with this task's switch until it shows.
+                busy.insert(pending.member.as_str());
+                let member = team.member(&pending.member);
+                let found = member.and_then(|member| session_of(member, seen));
+                if let (Some(member), Some(found)) = (member, found.filter(|found| super::models::confirmed(pending, &found.model, &found.effort))) {
+                    if found.free && !refused_recently(member) {
+                        steps.push(deliver(task, member));
+                    }
+                } else if now - pending.at >= super::models::CONFIRM_SECONDS {
+                    steps.push(Step::ModelUncertain { task: id });
+                }
+                continue;
+            }
+            if !super::models::can_run(team, task) {
+                steps.push(Step::TaskWaits { task: id, reason: super::models::no_fit_reason(team, task) });
+                continue;
+            }
+            let failed = |m: &Member| !task.pinned && task.attempts.iter().any(|a| a.member == m.id && matches!(a.state, AttemptState::Rejected | AttemptState::Refused));
+            let candidates = super::models::candidates(team, task);
+            let fits: Vec<(&Member, super::models::Fit)> = candidates
+                .iter()
+                .filter(|m| available(m, &busy) && !failed(m) && super::stages::held(team, &m.id).is_none())
+                .filter_map(|m| {
+                    let found = session_of(m, seen)?;
+                    let current = if found.model.is_empty() { super::models::launch_model(m) } else { (found.model.as_str(), found.effort.as_str()) };
+                    super::models::fit(m, task, current).map(|fit| (*m, fit))
+                })
+                .collect();
+            // A member already on an allowed model goes before one that switches.
+            let chosen = fits.iter().find(|(_, fit)| *fit == super::models::Fit::Ready).or_else(|| fits.first());
+            match chosen {
+                Some((member, super::models::Fit::Ready)) => {
+                    busy.insert(member.id.as_str());
+                    steps.push(deliver(task, member));
+                }
+                Some((member, super::models::Fit::Switch(choice))) => {
+                    busy.insert(member.id.as_str());
+                    let found = session_of(member, seen);
+                    let from = found.filter(|found| !found.model.is_empty()).map(|found| super::models::label(&found.model, &found.effort)).unwrap_or_default();
+                    steps.push(Step::SwitchModel { task: id, member: member.id.clone(), from, model: choice.model.clone(), effort: choice.effort.clone() });
+                }
+                None => {
+                    // Start the first member that could run it once it is up.
+                    if let Some(member) = candidates.iter().find(|m| {
+                        m.session.is_none() && m.state != MemberState::Paused && m.launch_id.is_empty() && m.error.is_empty()
+                            && super::models::fit(m, task, super::models::launch_model(m)).is_some()
+                    }) {
+                        if launching.insert(member.id.clone()) {
+                            steps.push(Step::Launch { member: member.id.clone() });
+                        }
+                    }
+                }
+            }
+            continue;
+        }
         let Some(member) = team.member(&task.assignee) else { continue };
         // C1: the lead's own task is handed out without a message; it goes to
         // the inbox and never waits for the lead to be idle.
@@ -2306,6 +2390,52 @@ fn apply_settings(member: &Member) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// U45: switches a member's model and effort before it gets `task_id`. The
+/// step is recorded before the call, so a crash leaves it pending and then
+/// uncertain, never sent twice; the hand-out waits until the member's session
+/// record shows the new model. A refusal leaves the task waiting with its
+/// reason, as does a call whose outcome is unknown.
+fn switch_model(store: &mut Store, team: &Team, task_id: u32, member_id: &str, from: &str, model: &str, effort: &str) -> anyhow::Result<()> {
+    let session = team.member(member_id).and_then(|member| member.session.clone()).context("no session")?;
+    let to = super::models::label(model, effort);
+    change(store, &team.id, |team, events| {
+        let role = team.role_of(member_id);
+        let task = team.task_mut(task_id).context("unknown task")?;
+        anyhow::ensure!(super::models::pending(task).is_none() && task.waits.is_none(), "already switching");
+        super::models::record(task, Prepare { step: "model".into(), member: member_id.to_owned(), from: from.to_owned(), to: to.clone(), at: now(), result: "pending".into(), reason: String::new() });
+        events.push(Event::new("model_switch", json!({"task":task_id,"member":role,"from":from,"to":to})));
+        Ok(())
+    })?;
+    let mut input = json!({"request_id":uuid::Uuid::new_v4().to_string(),"expected_run_id":session.run_id,
+        "expected_conversation_id":session.conversation_id,"model":model});
+    if !effort.is_empty() {
+        input["effort"] = json!(effort);
+    }
+    let outcome = match hgs(&session.host, &["settings", &session.name, "--json"], Some(&input), Duration::from_secs(120)) {
+        Ok(output) if output.status.success() => return Ok(()),
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let line = stderr.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or("the settings change was refused");
+            ("refused", line.chars().take(300).collect::<String>())
+        }
+        Err(error) => ("uncertain", error.to_string().chars().take(300).collect()),
+    };
+    change(store, &team.id, |team, events| {
+        let role = team.role_of(member_id);
+        let task = team.task_mut(task_id).context("unknown task")?;
+        if let Some(step) = task.prepare.iter_mut().rev().find(|step| step.step == "model" && step.result == "pending" && step.member == member_id) {
+            step.result = outcome.0.into();
+            step.reason = outcome.1.clone();
+        }
+        super::models::wait(task, "model", &format!("{role} could not switch to {to}: {}", outcome.1), now());
+        events.push(Event::new(
+            if outcome.0 == "refused" { "model_switch_refused" } else { "model_switch_uncertain" },
+            json!({"task":task_id,"member":role,"to":to,"reason":outcome.1}),
+        ));
+        Ok(())
+    })
+}
+
 fn launch(team: &Team, member: &Member) -> anyhow::Result<()> {
     let folder = member_folder(team, member)?;
     let args = launch_args(team, member, &folder);
@@ -2415,6 +2545,13 @@ fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, fro
     let mut git_job: Option<(String, f64)> = None;
     change(store, team_id, |team, events| {
         anyhow::ensure!(team.status == TeamStatus::Running && plan::ready(team).contains(&task_id), "no longer ready");
+        // U45: a task for a role becomes its chosen member's before its
+        // pipeline is taken from that member's role.
+        if from == Some("") {
+            if let Some(task) = team.task_mut(task_id).filter(|task| super::models::for_role(task)) {
+                task.assignee = member_id.to_owned();
+            }
+        }
         // U36: the task's pipeline as the catalog has it at its first hand-out.
         super::pipeline::snapshot(team, task_id);
         let session = team.member(member_id).and_then(|m| m.session.clone()).context("no session")?;
@@ -2440,6 +2577,9 @@ fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, fro
             rebalanced_from: rebalanced.clone(),
             ..Default::default()
         });
+        // U45: the steps taken for this hand-out go with its attempt.
+        let prepared = super::models::take_for_attempt(task, member_id);
+        task.attempts.last_mut().unwrap().prepare = prepared;
         if let (false, Some((from_role, to_role))) = (rebalanced.is_empty(), roles) {
             events.push(Event::new("rebalanced", json!({"task":task_id,"from":from_role,"to":to_role,"from_member":rebalanced,"to_member":member_id})));
         }
@@ -3691,6 +3831,28 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
                 Ok(())
             })
         }
+        Step::SwitchModel { task, member, from, model, effort } => switch_model(store, team, *task, member, from, model, effort),
+        Step::ModelUncertain { task } => change(store, &team.id, |team, events| {
+            let task_id = *task;
+            let task = team.task_mut(task_id).context("unknown task")?;
+            let Some(step) = task.prepare.iter_mut().rev().find(|step| step.step == "model" && step.result == "pending") else { return Ok(()) };
+            step.result = "uncertain".into();
+            step.reason = format!("the session did not show {} within {} s", step.to, super::models::CONFIRM_SECONDS as u64);
+            let (member, to, reason) = (step.member.clone(), step.to.clone(), step.reason.clone());
+            super::models::wait(task, "model", &format!("The switch to {to} is unconfirmed: {reason}; retry or reassign"), now());
+            let role = team.role_of(&member);
+            events.push(Event::new("model_switch_uncertain", json!({"task":task_id,"member":role,"to":to,"reason":reason})));
+            Ok(())
+        }),
+        Step::TaskWaits { task, reason } => change(store, &team.id, |team, events| {
+            let task_id = *task;
+            let task = team.task_mut(task_id).context("unknown task")?;
+            if task.waits.is_none() {
+                super::models::wait(task, "model", reason, now());
+                events.push(Event::new("task_waits", json!({"task":task_id,"on":"model","reason":reason})));
+            }
+            Ok(())
+        }),
         Step::Settings { member } => {
             let found = team.member(member).cloned().context("unknown member")?;
             let result = apply_settings(&found);
@@ -4749,6 +4911,10 @@ fn ensure_worker_now() -> anyhow::Result<()> {
     crate::platform::spawn_detached(&mut command)?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "models_tests.rs"]
+mod models_tests;
 
 #[cfg(test)]
 mod tests {

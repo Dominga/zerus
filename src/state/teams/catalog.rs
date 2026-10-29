@@ -81,6 +81,10 @@ pub(crate) struct Role {
     /// docs role uses Docs. Empty falls back to the template's.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub pipeline: String,
+    /// U45: the models a member of this role may switch between before a
+    /// task; copied into the member when it joins. Empty: its launch model.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<super::model::ModelChoice>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -433,6 +437,13 @@ pub(crate) fn snapshot_for(role_name: &str) -> Option<super::model::PromptSnapsh
     })
 }
 
+/// U45: the model list of a catalog role, copied into a member when it joins
+/// so a later catalog edit changes no running team.
+pub(crate) fn models_for(role_name: &str) -> Vec<super::model::ModelChoice> {
+    let catalog = load().unwrap_or_else(|_| builtin());
+    catalog.roles.iter().find(|role| role.id == role_name || role.name == role_name).map(|role| role.models.clone()).unwrap_or_default()
+}
+
 /// Renders the member's snapshot in the role's order.
 pub(crate) fn prompt_order_text_snapshot(snapshot: &super::model::PromptSnapshot, member_prompt: &str, task: Option<&Task>) -> Option<String> {
     let role = Role {
@@ -526,6 +537,7 @@ pub(crate) fn validate(catalog: &Catalog) -> anyhow::Result<()> {
         ensure!(role.about.chars().count() <= 500, "The about of role {} is too long", role.id);
         ensure!(role.skills.len() <= 20, "Role {} has at most 20 skills", role.id);
         ensure!(matches!(role.message.as_str(), "" | "lead" | "some" | "team"), "Role {}: message is lead, some or team", role.id);
+        super::models::check_choices(&role.models).with_context(|| format!("Role {}", role.id))?;
         for key in &role.prompt_off {
             ensure!(role.prompt_order.contains(key) || role.notes.contains_key(key), "Role {} turns off unknown block {key}", role.id);
         }

@@ -187,6 +187,11 @@ fn parse_member(value: &Value) -> anyhow::Result<Member> {
     if member.prompt_snapshot.is_none() {
         member.prompt_snapshot = super::catalog::snapshot_for(&member.role);
     }
+    // U45: the role's model list, copied as the prompt is.
+    if member.models.is_empty() {
+        member.models = super::catalog::models_for(&member.role);
+    }
+    super::models::check_choices(&member.models)?;
     member.state = match member.session {
         Some(_) => MemberState::Active,
         None => MemberState::NotCreated,
@@ -250,6 +255,8 @@ fn parse_task(value: &Value) -> anyhow::Result<Task> {
     // assigned, so a request can never carry its own run.
     task.pipeline_run = None;
     check_pipeline(&task.pipeline)?;
+    // U45: the models allowed for the task and a role instead of an assignee.
+    super::models::check_task(&mut task)?;
     Ok(task)
 }
 
@@ -1521,6 +1528,34 @@ fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<
             }
             task.pipeline = pipeline;
             fields.push("pipeline");
+        }
+        // U45: the models allowed for the task, and a role instead of an
+        // assignee (a role clears the assignee; an assignee clears the role).
+        if value.get("models").is_some() || value.get("role").is_some() {
+            let old = (task.models.join(", "), task.role.clone());
+            if let Some(models) = value.get("models") {
+                task.models = serde_json::from_value(models.clone()).context("models is a list of model ids")?;
+                fields.push("models");
+            }
+            if let Some(role) = value.get("role") {
+                task.role = role.as_str().context("role is a role name or empty")?.to_owned();
+                if !task.role.trim().is_empty() {
+                    task.assignee.clear();
+                    task.pinned = false;
+                }
+                fields.push("role");
+            } else if fields.contains(&"assignee") {
+                task.role.clear();
+            }
+            super::models::check_task(task)?;
+            if old.0 != task.models.join(", ") {
+                changes.push(json!({"kind":"changed","task":id,"title":task.title,"field":"models","from":old.0,"to":task.models.join(", ")}));
+            }
+            if old.1 != task.role {
+                changes.push(json!({"kind":"changed","task":id,"title":task.title,"field":"role","from":old.1,"to":task.role}));
+            }
+        } else if fields.contains(&"assignee") && !task.role.is_empty() {
+            task.role.clear();
         }
         // U27: the lead or the owner moves a task to a lane; null takes it out.
         if let Some(value) = value.get("lane") {
@@ -3126,6 +3161,10 @@ fn reassign(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
     let revoked = revoke(task, "reassigned");
     task.assignee = target.to_owned();
     task.pinned = true;
+    // U45: a task for a role now has its member; a waiting step starts over.
+    task.role.clear();
+    task.waits = None;
+    task.prepare.clear();
     if task.status != TaskStatus::Draft {
         task.status = TaskStatus::Pending;
     }
@@ -3142,6 +3181,9 @@ fn retry(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>)
     ensure!(!task.status.finished() && task.status != TaskStatus::Draft, "Task #{id} cannot be retried now");
     let revoked = revoke(task, "retried");
     task.status = TaskStatus::Pending;
+    // Spec 0: the lead or the owner retries a refused or unconfirmed step.
+    task.waits = None;
+    task.prepare.clear();
     events.push(Event::new("retried", json!({"by":label,"task":id,"revoked_attempt":revoked})));
     Ok(json!({"status":"pending","task":id,"revoked_attempt":revoked}))
 }

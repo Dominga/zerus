@@ -2,8 +2,8 @@ import { batch, createSignal } from "solid-js";
 import { createStore, produce } from "solid-js/store";
 import type { ConflictsPage, DraftSource, SavedDraftDetail, SavedDraftItem, SavedDraftsPage } from "../types";
 import type { Session } from "../ui/sessions/types";
-
-const folderName = (s: Session) => s.cwd.split(/[\\/]/).filter(Boolean).pop() ?? "";
+import { folderOf } from "../ui/sessions/SessionCard";
+import { composer } from "./composer";
 
 // Saved drafts (Qt's MessageComposer::showSavedDrafts, MessageComposer.cpp
 // 1230-1387) over src-tauri's composer/saved.rs. Three sections: this
@@ -130,6 +130,20 @@ export function draftSubagent(item: SavedDraftItem, owner: Session): string | un
   return child;
 }
 
+export async function focusMessageEditor(key: string): Promise<void> {
+  const deadline = performance.now() + 2000;
+  for (;;) {
+    const view = composer.view();
+    if (view?.loaded && view.key === key) {
+      if (view.input_visible !== false) document.querySelector<HTMLTextAreaElement>(".cmp-editor")?.focus();
+      return;
+    }
+    const left = deadline - performance.now();
+    if (left <= 0) return;
+    await new Promise((resolve) => setTimeout(resolve, Math.min(25, left)));
+  }
+}
+
 /** The catalog roles a Saved drafts row takes when its owner is listed. */
 export function draftPresentation(item: SavedDraftItem, owner: Session | undefined) {
   return {
@@ -137,7 +151,7 @@ export function draftPresentation(item: SavedDraftItem, owner: Session | undefin
     machine: owner?.machine ?? item.machine,
     agent: owner?.agent,
     computer: owner?.computer,
-    checkout: owner ? [folderName(owner), owner.branch].filter(Boolean).join(" / ") : item.meta,
+    checkout: owner ? [folderOf(owner), owner.branch].filter(Boolean).join(" / ") : item.meta,
     model: owner && item.kind !== "subagent" ? [owner.model, owner.effort].filter(Boolean).join(" ") : "",
   };
 }

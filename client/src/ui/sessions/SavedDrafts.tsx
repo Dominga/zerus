@@ -1,13 +1,14 @@
 import { For, Show, createEffect, createRoot, createSignal, untrack, type JSX } from "solid-js";
 import * as bridge from "../../bridge";
 import { Icon } from "../lib/icons";
-import { composer } from "../../store/composer";
+import { composer, draftKey } from "../../store/composer";
 import { orderedRows } from "../../store/catalog";
 import { openSession } from "../../store/desk";
 import { setSubagentOpen, toast } from "../../store/ui";
 import { AgentBadge, MachineBadge } from "./SessionCard";
+import { listRows } from "./model";
 import {
-  createSavedDrafts, draftOwnerRow, draftPresentation, draftSubagent, listStep, modifiedText, replaceText, SECTIONS, TEXTS,
+  createSavedDrafts, draftOwnerRow, draftPresentation, draftSubagent, focusMessageEditor, listStep, modifiedText, replaceText, SECTIONS, TEXTS,
   type RestoreTarget, type SavedDrafts,
 } from "../../store/savedDrafts";
 import type { SavedDraftItem } from "../../types";
@@ -172,16 +173,18 @@ export function SavedDraftsDialog() {
     if (!row) return;
     opener = undefined;
     savedDrafts.close();
-    openSession({ computer: row.computer, key: row.catalogKey, preserveFilters: true });
+    openSession(
+      { computer: row.computer, key: row.catalogKey, preserveFilters: true },
+      { keepFiltersIf: (id) => listRows().some((entry) => entry.type === "card" && entry.id === id) },
+    );
     if (item.kind === "subagent") {
       const child = draftSubagent(item, row);
       if (child) setSubagentOpen(child);
       return;
     }
     if (item.kind === "message") {
-      queueMicrotask(() => {
-        if (composer.view()?.input_visible !== false) document.querySelector<HTMLTextAreaElement>(".cmp-editor")?.focus();
-      });
+      const key = draftKey({ computer: row.computer, key: row.catalogKey, name: row.name, archive_id: row.archiveId ?? null });
+      void focusMessageEditor(key);
     }
   };
   const restore = async (confirmed = false) => {
@@ -207,7 +210,9 @@ export function SavedDraftsDialog() {
     <dialog class="dlg saved-drafts" classList={{ "no-drafts": savedDrafts.empty() }} ref={el} aria-labelledby="saved-drafts-title" style={{ width: savedDrafts.empty() ? "480px" : "720px" }}
       onCancel={(e) => { e.preventDefault(); close(); }}
       onClose={() => {
-        if (!el?.open && savedDrafts.open()) savedDrafts.close();
+        // A delayed close from the previous opening must not consume this opener.
+        if (el?.open) return;
+        if (savedDrafts.open()) savedDrafts.close();
         // The focus returns to what opened the dialog.
         const back = opener;
         opener = undefined;

@@ -3,11 +3,9 @@ import * as bridge from "../bridge";
 import * as ui from "./ui";
 import * as organization from "./organization";
 import * as settingsSections from "../ui/screens/settings/sections";
-import { listRows } from "../ui/sessions/model";
-import { startDesk } from "./desk";
+import { openSession, startDesk } from "./desk";
 
 vi.mock("../ui/screens/settings/sections", () => ({ openSettings: vi.fn() }));
-vi.mock("../ui/sessions/model", () => ({ listRows: vi.fn() }));
 vi.mock("../bridge", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../bridge")>()),
   onOpenSession: vi.fn(async () => () => {}),
@@ -29,6 +27,7 @@ vi.mock("./organization", () => ({
 }));
 // store/ui reads the page URL when it loads; the wiring needs only its setters.
 vi.mock("./ui", () => ({
+  search: vi.fn(() => ""),
   setPage: vi.fn(),
   setSelectedKey: vi.fn(),
   setSubagentOpen: vi.fn(),
@@ -57,7 +56,10 @@ async function opener(): Promise<(target: bridge.OpenSession) => void> {
 }
 
 describe("desk wiring", () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(ui.search).mockReturnValue("");
+  });
 
   it("opens the session the menu bar or a notification names", async () => {
     const stop = vi.fn();
@@ -97,20 +99,29 @@ describe("desk wiring", () => {
     expect(shown.setSubagentOpen).toHaveBeenCalledWith(undefined);
   });
 
-  it("preserves filters only while the draft's owner is listed", async () => {
-    const open = await opener();
-    vi.mocked(listRows).mockReturnValue([{ type: "card", id: "mac\nrun:folded" } as never]);
-    open({ computer: "mac", key: "run:folded", preserveFilters: true });
+  it("reveals first and preserves filters only for an empty-search listed owner", () => {
+    const keepFiltersIf = vi.fn((id: string) => {
+      expect(id).toBe("mac\nrun:folded");
+      expect(projects.setProjectCollapsed).toHaveBeenCalledWith("folded-project", false);
+      return true;
+    });
+    openSession({ computer: "mac", key: "run:folded", preserveFilters: true }, { keepFiltersIf });
     expect(shown.setStateFilter).not.toHaveBeenCalled();
     expect(shown.setMachineFilter).not.toHaveBeenCalled();
     expect(shown.setProjectFilter).not.toHaveBeenCalled();
     expect(shown.setSearch).not.toHaveBeenCalled();
     vi.clearAllMocks();
-    vi.mocked(listRows).mockReturnValue([]);
-    open({ computer: "mac", key: "run:folded", preserveFilters: true });
+    openSession({ computer: "mac", key: "run:folded", preserveFilters: true }, { keepFiltersIf: () => false });
     expect(shown.setStateFilter).toHaveBeenCalledWith("all");
     expect(shown.setMachineFilter).toHaveBeenCalledWith([]);
     expect(shown.setProjectFilter).toHaveBeenCalledWith([]);
+    expect(shown.setSearch).toHaveBeenCalledWith("");
+    vi.clearAllMocks();
+    vi.mocked(ui.search).mockReturnValue("draft");
+    const listed = vi.fn(() => true);
+    openSession({ computer: "mac", key: "run:folded", preserveFilters: true }, { keepFiltersIf: listed });
+    expect(listed).not.toHaveBeenCalled();
+    expect(shown.setStateFilter).toHaveBeenCalledWith("all");
     expect(shown.setSearch).toHaveBeenCalledWith("");
   });
 

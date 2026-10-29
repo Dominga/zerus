@@ -1,8 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createRoot } from "solid-js";
 import { createSavedDrafts, draftOwnerRow, draftPresentation, draftSubagent, listStep, modifiedText, PAGE, REASONS, replaceText, TEXTS, type RestoreTarget, type SavedDraftsPort } from "./savedDrafts";
 import type { DraftSource, SavedDraftDetail, SavedDraftItem } from "../types";
 import type { Session } from "../ui/sessions/types";
+
+vi.mock("../ui/sessions/SessionCard", () => ({
+  folderOf: (s: { cwd: string }) => s.cwd.split(/[\\/]/).filter(Boolean).pop() ?? "",
+}));
 
 const item = (key: string, source: DraftSource = "client", extra: Partial<SavedDraftItem> = {}): SavedDraftItem => ({
   key, kind: "message", computer: "", session: key.split("\n")[1] ?? "", title: key.replaceAll("\n", " / "), caption: key, machine: "this computer",

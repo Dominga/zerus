@@ -5,6 +5,7 @@ import { markAllEntry } from "./mark-entries";
 
 export interface BackgroundDeps {
   headers: () => { id: string }[];
+  newSession: () => void;
   newProject: () => void;
   collapse: (project: string, collapsed: boolean) => void;
   expandRows: () => void;
@@ -14,6 +15,7 @@ export interface BackgroundDeps {
 
 const defaults: BackgroundDeps = {
   headers: () => grouping().headers,
+  newSession: () => {},
   newProject: () => {},
   collapse: setProjectCollapsed,
   expandRows: () => Object.keys(compactRows).forEach((key) => setCompactRows(key, false)),
@@ -36,7 +38,7 @@ export function expandAllCollapsedEntry(expandRows: () => void = defaults.expand
 export function backgroundEntries(overrides: Partial<BackgroundDeps> = {}): MenuEntry[] {
   const deps = { ...defaults, ...overrides };
   return [
-    { label: "New session…", icon: "add", disabled: true },
+    { label: "New session…", icon: "add", action: deps.newSession },
     { label: "New project…", icon: "plus", action: deps.newProject },
     { separator: true },
     { label: "Expand all projects", icon: "expand-row", action: () => collapseAllProjects(deps.headers(), false, deps.collapse) },

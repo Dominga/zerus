@@ -12,6 +12,7 @@ function harness() {
   const calls: string[] = [];
   const deps: BackgroundDeps = {
     headers: () => [{ id: "p-one" }, { id: "p-two" }],
+    newSession: () => calls.push("new-session"),
     newProject: () => calls.push("new-project"),
     collapse: (project, collapsed) => calls.push(`${project}:${collapsed}`),
     expandRows: () => calls.push("expand-rows"),
@@ -22,16 +23,18 @@ function harness() {
 }
 
 describe("the Sessions list background menu (SessionsWindow.cpp:340-373)", () => {
-  it("keeps New session for phase 5 and opens New project", () => {
+  it("opens New session and New project", () => {
     const { deps, calls } = harness();
     const entries = backgroundEntries(deps);
     expect(entries.map((entry) => "label" in entry ? entry.label : "separator")).toEqual([
       "New session…", "New project…", "separator", "Expand all projects", "Collapse all projects", "Expand all collapsed", "separator", "Mark all as read", "Clear archive…",
     ]);
-    expect("disabled" in entries[0] && entries[0].disabled).toBe(true);
+    expect("disabled" in entries[0] && entries[0].disabled).toBe(false);
+    expect("action" in entries[0] && entries[0].action).toBeTypeOf("function");
     expect("action" in entries[1] && entries[1].action).toBeTypeOf("function");
+    if ("action" in entries[0]) entries[0].action?.();
     if ("action" in entries[1]) entries[1].action?.();
-    expect(calls).toEqual(["new-project"]);
+    expect(calls).toEqual(["new-session", "new-project"]);
   });
 
   it("expands and collapses every project through the layout API", () => {

@@ -2092,22 +2092,30 @@ fn report(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
         }
         return Ok(json!({"status":"submitted","task":id,"attempt":n}));
     }
-    // A6: while the task is Submitted and its report was captured, the member
-    // may send the real report for that attempt. It replaces the text, keeps
-    // the captured one in `replaced` and is never a stale report.
+    // A6/U42: while the task is undecided the member may send its report again
+    // for the same attempt. A captured reply was always replaceable; U42 also
+    // repairs one that reached the store as a placeholder (a short "poll"
+    // closed #512's attempt and the whole text was refused afterwards). Only
+    // the newest reported attempt: older reports are history.
+    let newest = task
+        .attempts
+        .iter()
+        .rev()
+        .find(|attempt| attempt.state == AttemptState::Reported)
+        .map(|attempt| attempt.id.clone());
     let Some(attempt) = task.attempts.iter_mut().find(|a| a.id == attempt_id) else {
         unreachable!("the attempt was checked above")
     };
     let replaceable = task.status.reported()
         && attempt.state == AttemptState::Reported
-        && (by_member.is_empty() || attempt.member == by_member)
-        && attempt.report.as_ref().is_some_and(|report| report.captured);
+        && newest.as_deref() == Some(attempt.id.as_str())
+        && (by_member.is_empty() || attempt.member == by_member);
     if replaceable {
         let n = attempt.n;
         let member = attempt.member.clone();
-        let report = attempt.report.as_mut().expect("a captured report");
-        let captured = std::mem::take(&mut report.text);
-        report.replaced.push(ReplacedReport { text: captured, at: report.at });
+        let Some(report) = attempt.report.as_mut() else { bail!("This attempt has no report to replace") };
+        let replaced = std::mem::take(&mut report.text);
+        report.replaced.push(ReplacedReport { text: replaced, at: report.at });
         // At most the newest three kept; a longer record would grow without bound.
         if report.replaced.len() > 3 {
             report.replaced.remove(0);
@@ -4577,6 +4585,39 @@ mod tests {
     }
 
     #[test]
+    fn a_member_repairs_a_placeholder_report_before_the_lead_decides() {
+        // U42: a queued report that reached the store before its whole text did
+        // closed #512's attempt with the placeholder "poll". The member replaces
+        // it while the task is undecided; a decision closes that door.
+        let mut team = running_team();
+        let attempt = hand_out(&mut team, 1);
+        let mut events = Vec::new();
+        let first = report(&mut team, &json!({"task":1,"attempt":attempt,"text":"poll"}), &Actor::Member("dev".into()), &mut events).unwrap();
+        assert_eq!((first["status"].as_str(), team.task(1).unwrap().status), (Some("submitted"), TaskStatus::Submitted));
+        let whole = report(
+            &mut team,
+            &json!({"task":1,"attempt":attempt,"text":"The whole report: 512 checks and their totals"}),
+            &Actor::Member("dev".into()),
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(whole["status"], "submitted");
+        let task = team.task(1).unwrap();
+        let stored = task.attempts[0].report.as_ref().unwrap();
+        assert_eq!(stored.text, "The whole report: 512 checks and their totals");
+        assert_eq!(stored.replaced.last().map(|replaced| replaced.text.as_str()), Some("poll"));
+        assert_eq!(task.attempts[0].notice, Notice::Pending);
+        assert_eq!(events.last().unwrap().kind, "report_replaced");
+        // Another member's attempt, and an older report, are not this one's.
+        let stolen = report(&mut team, &json!({"task":1,"attempt":attempt,"text":"mine"}), &Actor::Member("qa".into()), &mut events).unwrap();
+        assert_eq!(stolen["status"], "stale");
+        // The lead's decision ends the replacement window.
+        apply(&mut team, "accept", &json!({"task":1}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap();
+        let late = report(&mut team, &json!({"task":1,"attempt":attempt,"text":"later"}), &Actor::Member("dev".into()), &mut events).unwrap();
+        assert_eq!(late["status"], "stale");
+    }
+
+    #[test]
     fn the_lead_reports_and_accepts_its_own_task_in_one_step() {
         let (mut team, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude","session":{"name":"claude/x/lead"}}})).unwrap();
         let mut events = Vec::new();
@@ -5488,16 +5529,16 @@ mod tests {
         assert_eq!(team.task(1).unwrap().status, TaskStatus::Submitted);
         assert_eq!(events.last().unwrap().kind, "report_replaced");
         assert_eq!(events.last().unwrap().payload["by"], "Backend");
-        // A report that is not captured is never replaced.
-        let late = report(&mut team, &json!({"task":1,"attempt":attempt,"text":"Again"}), &Actor::Member("dev".into()), &mut events).unwrap();
-        assert_eq!(late["status"], "stale");
-        assert_eq!(events.last().unwrap().kind, "stale_report");
-        // Another member's report, and a decided task's, are stale too.
-        team.task_mut(1).unwrap().attempts[0].report.as_mut().unwrap().captured = true;
+        // U42: while the task is undecided the member may replace it again, and
+        // the text it replaces is kept for the lead.
+        let again = report(&mut team, &json!({"task":1,"attempt":attempt,"text":"Again"}), &Actor::Member("dev".into()), &mut events).unwrap();
+        assert_eq!(again["status"], "submitted");
+        assert_eq!(team.task(1).unwrap().attempts[0].report.as_ref().unwrap().text, "Again");
+        assert_eq!(events.last().unwrap().kind, "report_replaced");
+        // Another member's report, and a decided task's, are stale.
         let foreign = report(&mut team, &json!({"task":1,"attempt":attempt,"text":"Mine"}), &Actor::Member("qa".into()), &mut events).unwrap();
         assert_eq!(foreign["status"], "stale");
-        assert_eq!(team.task(1).unwrap().attempts[0].report.as_ref().unwrap().text, "Done: the tests pass.");
-        team.task_mut(1).unwrap().attempts[0].report.as_mut().unwrap().captured = false;
+        assert_eq!(team.task(1).unwrap().attempts[0].report.as_ref().unwrap().text, "Again");
         apply(&mut team, "accept", &json!({"task":1}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
         let decided = report(&mut team, &json!({"task":1,"attempt":attempt,"text":"Late"}), &Actor::Member("dev".into()), &mut events).unwrap();
         assert_eq!(decided["status"], "stale");

@@ -2067,6 +2067,12 @@ fn adopt_members(store: &Store, team: &Team, members: &mut [Value]) -> anyhow::R
     Ok(())
 }
 
+/// U20/U42: the member writes a sandbox may not put in the store, queued in
+/// its own folder: a report, a question, a commit or a budget (`expect`).
+fn queues_instead(op: &str) -> bool {
+    matches!(op, "report" | "ask" | "commit" | "expect")
+}
+
 /// The team's files refuse writes here: SQLite opened them read-only, or the
 /// system denies access (in any language: Windows localizes its message).
 fn read_only(error: &anyhow::Error) -> bool {
@@ -2091,9 +2097,12 @@ fn member_outbox_folder(team: &Team, member: &Member) -> anyhow::Result<std::pat
 }
 
 /// U20: a member in a sandbox may not write the team store, but it writes its
-/// own folder. The report, ask or commit waits there as `<request_id>.json` for
-/// the worker, which applies it with the same identity checks (folder + attempt
-/// id); `--wait` polls for the outcome (up to 30 s).
+/// own folder. The report, ask, commit or budget waits there as
+/// `<request_id>.json` for the worker, which applies it with the same identity
+/// checks (folder + attempt id); `--wait` polls for the outcome (up to 30 s).
+/// U42: one id never replaces a queued request with another: a poll that
+/// carried a placeholder overwrote #512's whole report before the worker read
+/// it. The first whole text stays, or nothing is queued.
 fn queue_write(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
     let store = Store::open(false)?;
     let team = store.load(text(input, "team"))?.context("Unknown team")?;
@@ -2105,10 +2114,31 @@ fn queue_write(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
     let folder = member_outbox_folder(&team, member)?;
     let request = json!({"op":op, "request_id":request_id, "team":team.id, "member":member_id,
         "attempt":text(input, "attempt"), "input":input});
-    let path = super::outbox::push(&folder, &request)?;
+    // U42: a request already applied answers its outcome, and one still queued
+    // answers its state (or waits, with `--wait`); a different request under the
+    // same id is refused, so a placeholder can never replace the whole text that
+    // was queued first.
+    if let Some(result) = super::outbox::result(&folder, &request_id) {
+        return Ok(result);
+    }
+    let existing = super::outbox::request(&folder, &request_id);
+    if let Some(queued) = &existing {
+        ensure!(
+            queued["op"] == request["op"] && queued["input"] == request["input"],
+            "request_id {request_id} already queues another request; use a new request_id for another one"
+        );
+    }
+    let path = match &existing {
+        Some(_) => super::outbox::request_path(&folder, &request_id),
+        None => super::outbox::push(&folder, &request)?,
+    };
     let queued = json!({
         "status":"queued", "request_id":request_id, "path":path.to_string_lossy(),
-        "note":"The sandbox blocks the team store: the request waits in the member's folder and the team worker applies it. Run it again with --wait to read the outcome."
+        "note": if existing.is_some() {
+            "This request is already queued; ask again with the same request_id (or --wait) to read the outcome."
+        } else {
+            "The sandbox blocks the team store: the request waits in the member's folder and the team worker applies it. Run it again with --wait to read the outcome."
+        }
     });
     if !wait {
         return Ok(queued);
@@ -2903,7 +2933,7 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             // refusal can come with the write as well as with the open.
             let mut store = match Store::open(true) {
                 Ok(store) => store,
-                Err(error) if matches!(op, "report" | "ask" | "commit") && read_only(&error) => {
+                Err(error) if queues_instead(op) && read_only(&error) => {
                     return queue_write(op, input, wait)
                 }
                 // U20: a write the sandbox blocked says what to do, not a bare
@@ -3010,7 +3040,7 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                 ops::apply(team, op, &filled, &actor, &BTreeSet::new(), events)
             }) {
                 Ok(receipt) => receipt,
-                Err(error) if matches!(op, "report" | "ask" | "commit") && read_only(&error) => {
+                Err(error) if queues_instead(op) && read_only(&error) => {
                     return queue_write(op, input, wait)
                 }
                 Err(error) => return Err(super::store::write_error(error)),
@@ -5482,6 +5512,86 @@ mod tests {
         }
         assert!(USAGE.contains("current"));
         assert!(!MUTATIONS.contains(&"current"));
+    }
+
+    #[test]
+    fn a_queued_report_keeps_its_whole_text_and_a_budget_queues_too() {
+        // U42 (#512): the queued route stored the placeholder "poll" over the
+        // whole report. One request id keeps the first whole text; a later
+        // request under it is refused, never queued in its place. A budget
+        // from the sandbox queues like a report.
+        let _env = crate::state::ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let _worker = hold_worker_lock();
+            let mut store = Store::open(true).unwrap();
+            let mut team = running_team();
+            let member_folder = dir.path().join("dev");
+            std::fs::create_dir_all(&member_folder).unwrap();
+            {
+                let dev = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
+                dev.agent = "dsh".into();
+                dev.session = Some(SessionRef { name: "dsh/x/dev".into(), run_id: "r1".into(), conversation_id: "conv-dev".into(), ..Default::default() });
+                dev.folder = crate::state::teams::model::MemberFolder::Shared;
+                dev.directory = member_folder.display().to_string();
+            }
+            let id = team.id.clone();
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+            super::set_test_caller_identities(Some((Some("conv-dev".into()), None, None)));
+            let request = "00000000-0000-4000-8000-000000000901";
+            let attempt = "00000000-0000-4000-8000-000000000001";
+            let whole = "The whole report: 512 checks and their totals";
+            let first = super::queue_write(
+                "report",
+                &json!({"request_id":request,"team":id,"attempt":attempt,"task":1,"text":whole}),
+                false,
+            )
+            .unwrap();
+            assert_eq!(first["status"], "queued");
+            // A poll that carries a placeholder neither replaces it nor queues again.
+            let error = super::queue_write(
+                "report",
+                &json!({"request_id":request,"team":id,"attempt":attempt,"task":1,"text":"poll"}),
+                false,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("already queues another request"), "{error}");
+            let queued = crate::state::teams::outbox::pending(&member_folder, 10).unwrap();
+            assert_eq!(queued.len(), 1);
+            assert_eq!(queued[0].1["input"]["text"], whole);
+            // The same request again is a retry: it answers its state, one file.
+            let again = super::queue_write(
+                "report",
+                &json!({"request_id":request,"team":id,"attempt":attempt,"task":1,"text":whole}),
+                false,
+            )
+            .unwrap();
+            assert_eq!(again["status"], "queued");
+            assert_eq!(crate::state::teams::outbox::pending(&member_folder, 10).unwrap().len(), 1);
+            // U42: a budget from the member's sandbox queues in its folder too.
+            let budget = super::queue_write(
+                "expect",
+                &json!({"request_id":"00000000-0000-4000-8000-000000000902","team":id,"label":"the suites","minutes":15}),
+                false,
+            )
+            .unwrap();
+            assert_eq!(budget["status"], "queued");
+            let queued = crate::state::teams::outbox::pending(&member_folder, 10).unwrap();
+            assert_eq!(queued.len(), 2);
+            assert_eq!(
+                (queued[1].1["op"].as_str(), queued[1].1["input"]["minutes"].as_u64()),
+                (Some("expect"), Some(15))
+            );
+            // The gate that sends a write to the queue holds for both kinds.
+            for op in ["report", "ask", "commit", "expect"] {
+                assert!(super::queues_instead(op), "{op}");
+            }
+            for op in ["accept", "cancel", "scale", "drain"] {
+                assert!(!super::queues_instead(op), "{op}");
+            }
+            super::set_test_caller_identities(None);
+        });
     }
 
     /// A running team with an open hand-out to dev.

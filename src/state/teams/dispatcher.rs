@@ -4324,10 +4324,11 @@ fn run_request(store: &mut Store, folder: &Path, request: &Value) {
 
 /// One queued request, applied as the member's own write (U20). The member's
 /// input keys the store receipt, so a request applied twice (a worker that died
-/// before it removed the file) is a replay, not a second report.
+/// before it removed the file) is a replay, not a second report. U42: a budget
+/// (`expect`) has no attempt; the folder itself proves the member.
 fn apply_outbox(store: &mut Store, team: &Team, member: &Member, request: &Value) -> anyhow::Result<Value> {
     let op = request["op"].as_str().unwrap_or_default();
-    anyhow::ensure!(matches!(op, "report" | "ask" | "commit"), "Unknown outbox request {op}");
+    anyhow::ensure!(matches!(op, "report" | "ask" | "commit" | "expect"), "Unknown outbox request {op}");
     anyhow::ensure!(request["team"] == team.id.as_str(), "a request for another team");
     anyhow::ensure!(request["member"] == member.id.as_str(), "the folder belongs to {}", team.role_of(&member.id));
     // The member's own request, unchanged: a replay keys the same store receipt.
@@ -4338,18 +4339,36 @@ fn apply_outbox(store: &mut Store, team: &Team, member: &Member, request: &Value
     if let Some(receipt) = store.receipt(&request_id, &input)? {
         return Ok(receipt);
     }
-    let attempt_id = request["attempt"].as_str().unwrap_or_default();
-    anyhow::ensure!(attempt_id == input["attempt"].as_str().unwrap_or_default(), "the request names another attempt");
-    let task = team
-        .tasks
-        .iter()
-        .find(|task| task.open_attempt().is_some_and(|attempt| attempt.id == attempt_id && attempt.member == member.id))
-        .map(|task| task.id)
-        // U36: a stage member in a sandbox queues its verdict the same way.
-        .or_else(|| super::pipeline::open_run_task(team, attempt_id, &member.id));
-    let Some(task) = task else { anyhow::bail!("attempt {attempt_id} does not run for this member") };
-    if input["task"].as_u64().is_some() {
-        anyhow::ensure!(input["task"] == json!(task), "the request names another task");
+    if op != "expect" {
+        let attempt_id = request["attempt"].as_str().unwrap_or_default();
+        anyhow::ensure!(attempt_id == input["attempt"].as_str().unwrap_or_default(), "the request names another attempt");
+        let task = team
+            .tasks
+            .iter()
+            .find(|task| task.open_attempt().is_some_and(|attempt| attempt.id == attempt_id && attempt.member == member.id))
+            .map(|task| task.id)
+            // U42: a queued report also reaches an attempt whose report already
+            // landed (the placeholder repair), while the task is undecided.
+            .or_else(|| {
+                if op != "report" {
+                    return None;
+                }
+                team.tasks
+                    .iter()
+                    .find(|task| {
+                        task.status.reported()
+                            && task.attempts.iter().any(|attempt| {
+                                attempt.id == attempt_id && attempt.member == member.id && attempt.state == AttemptState::Reported
+                            })
+                    })
+                    .map(|task| task.id)
+            })
+            // U36: a stage member in a sandbox queues its verdict the same way.
+            .or_else(|| super::pipeline::open_run_task(team, attempt_id, &member.id));
+        let Some(task) = task else { anyhow::bail!("attempt {attempt_id} does not run for this member") };
+        if input["task"].as_u64().is_some() {
+            anyhow::ensure!(input["task"] == json!(task), "the request names another task");
+        }
     }
     if op == "commit" {
         return super::commands::commit_in_team(team, &member.id, &input);
@@ -5418,6 +5437,85 @@ mod tests {
         let saved = store.load(&t.id).unwrap().unwrap();
         assert_eq!(saved.task(1).unwrap().attempts.last().unwrap().state, AttemptState::Delivered);
         assert!(saved.task(1).unwrap().reopen_note.is_empty());
+    }
+
+    #[test]
+    fn a_queued_report_repairs_a_placeholder_while_the_task_is_undecided() {
+        // U42 (#512): the QA's whole report reached the worker after the queued
+        // placeholder had closed its attempt. A queued report now reaches that
+        // attempt while the lead has not decided.
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+            let mut t = team();
+            {
+                let task = t.task_mut(1).unwrap();
+                task.attempts.push(Attempt {
+                    n: 1,
+                    id: "A1".into(),
+                    member: "dev".into(),
+                    state: AttemptState::Reported,
+                    ..Default::default()
+                });
+                task.attempts[0].report = Some(Report { text: "poll".into(), at: 1.0, unstructured: true, ..Default::default() });
+                task.status = TaskStatus::Submitted;
+            }
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+            let saved = store.load(&t.id).unwrap().unwrap();
+            let dev = saved.member("dev").unwrap().clone();
+            let request = json!({"op":"report","request_id":"44444444-4444-4444-8444-444444444444","team":t.id,"member":"dev","attempt":"A1",
+                "input":{"request_id":"44444444-4444-4444-8444-444444444444","team":t.id,"task":1,"attempt":"A1",
+                    "text":"The whole report: 512 checks and their totals"}});
+            let outcome = apply_outbox(&mut store, &saved, &dev, &request).unwrap();
+            assert_eq!(outcome["status"], "submitted");
+            let saved = store.load(&t.id).unwrap().unwrap();
+            let report = saved.task(1).unwrap().attempts[0].report.as_ref().unwrap();
+            assert_eq!(report.text, "The whole report: 512 checks and their totals");
+            assert_eq!(report.replaced[0].text, "poll");
+            // Once the lead decides, the queue refuses the attempt again.
+            store
+                .mutate(None, &t.id, None, |team, _| {
+                    team.task_mut(1).unwrap().status = TaskStatus::Accepted;
+                    Ok(Value::Null)
+                })
+                .unwrap();
+            let saved = store.load(&t.id).unwrap().unwrap();
+            let later = json!({"op":"report","request_id":"55555555-5555-4555-8555-555555555555","team":t.id,"member":"dev","attempt":"A1",
+                "input":{"request_id":"55555555-5555-4555-8555-555555555555","team":t.id,"task":1,"attempt":"A1","text":"later"}});
+            let error = apply_outbox(&mut store, &saved, &dev, &later).unwrap_err().to_string();
+            assert!(error.contains("does not run for this member"), "{error}");
+        });
+    }
+
+    #[test]
+    fn a_queued_budget_is_applied_as_the_members_own() {
+        // U42: `hgs team expect` from a sandbox queues like a report. The worker
+        // applies it as the member's own budget, with no attempt to name; the
+        // folder still proves the member.
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+            let t = team();
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+            let saved = store.load(&t.id).unwrap().unwrap();
+            let dev = saved.member("dev").unwrap().clone();
+            let request = json!({"op":"expect","request_id":"33333333-3333-4333-8333-333333333333","team":t.id,"member":"dev","attempt":"",
+                "input":{"request_id":"33333333-3333-4333-8333-333333333333","team":t.id,"label":"the suites","minutes":15}});
+            let outcome = apply_outbox(&mut store, &saved, &dev, &request).unwrap();
+            assert_eq!((outcome["status"].as_str(), outcome["label"].as_str()), (Some("expected"), Some("the suites")));
+            let saved = store.load(&t.id).unwrap().unwrap();
+            let budget = saved.member("dev").unwrap().budget.as_ref().unwrap();
+            assert_eq!((budget.label.as_str(), budget.minutes, budget.red_minutes), ("the suites", 15, 30));
+            let events = store.events(&t.id, None, 20).unwrap();
+            assert!(
+                events["items"].as_array().unwrap().iter().any(|event| event["kind"] == "budget_declared"),
+                "{events}"
+            );
+            // The folder proves the member: another member's request is refused.
+            let qa = saved.member("qa").unwrap().clone();
+            let error = apply_outbox(&mut store, &saved, &qa, &request).unwrap_err().to_string();
+            assert!(error.contains("the folder belongs to"), "{error}");
+        });
     }
 
     #[test]

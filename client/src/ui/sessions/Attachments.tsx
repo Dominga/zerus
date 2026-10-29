@@ -4,6 +4,7 @@ import { Icon } from "../lib/icons";
 import { composer } from "../../store/composer";
 import { inTauri } from "../../bridge";
 import type { AttachmentView } from "../../types";
+import { keptItem } from "./composer-ui";
 
 // The composer's attachments (MessageComposer::rebuildAttachments, 1008-1044;
 // removeAttachment, 1046-1065), after the mockup's AttachmentsChip: the chip
@@ -89,7 +90,7 @@ export function AttachmentsChip(props: { compact?: boolean }) {
           <div class="att-head"><b>Attachments</b><span class="dim">{items().length} of 8, up to 10 MiB each</span></div>
           {/* Rows are keyed by their reference, so a new view (a minute tick) keeps them and their focus. */}
           <For each={references()}>{(reference, i) => {
-            const a = () => items().find((x) => x.reference === reference) ?? items()[i()];
+            const a = keptItem(items, reference);
             return (
               <div class="att-row" tabindex="0" aria-label={a().name}
                 onMouseEnter={() => setPreview(i())} onMouseLeave={() => setPreview(undefined)} onFocus={() => { if (arrowed) setPreview(i()); }}

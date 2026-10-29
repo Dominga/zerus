@@ -433,6 +433,38 @@ describe("composer store", () => {
     });
   });
 
+  // Fix round 2: the call locks are per session (the reviewer's N9).
+  it("a call locks only its own composer, also after going to another one and back", async () => {
+    const f = fakes();
+    const forA = held<SendReply>(), forB = held<SendReply>();
+    const port: ComposerPort = { ...f.port, send: (h, rev, _epoch, text) => { f.calls.push(`send ${h} ${text}`); return h === 1 ? forA.call() : forB.call(); } };
+    const A = view({ handle: 1 }), B = view({ handle: 2, key: "studio\nclaude/sample-project/other" });
+    await createRoot(async () => {
+      const c = createComposer(port, f.timers, undefined, f.notify);
+      c.apply(A);
+      c.input("for A", 5, 5);
+      const sentA = c.send();
+      await tick();
+      expect(c.locked()).toBe(true);
+      c.apply(B);
+      expect(c.locked()).toBe(false);
+      c.input("for B", 5, 5);
+      const sentB = c.send();
+      await tick();
+      expect(c.locked()).toBe(true);
+      // Back on A while both calls run: A's own call still locks it, also once B's ends.
+      c.apply(A);
+      expect(c.locked()).toBe(true);
+      forB.answer({ kind: "busy" });
+      await sentB;
+      expect(c.locked()).toBe(true);
+      forA.answer({ kind: "notice", text: "Wait for the session update to finish.", error: true });
+      await sentA;
+      expect(c.locked()).toBe(false);
+      expect(f.calls.filter((x) => x.startsWith("send"))).toEqual(["send 1 for A", "send 2 for B"]);
+    });
+  });
+
   // M1 (probe P1): a second Enter while the first send flushes sends nothing.
   it("two sends from one Enter: the second finds the editor locked", async () => {
     const f = fakes();

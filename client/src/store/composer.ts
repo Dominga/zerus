@@ -113,20 +113,34 @@ export function statusLine(v: ComposerView | undefined, own: string | undefined,
   return { text, error: text !== "" && text === v.session_status && v.session_status_error };
 }
 
+/**
+ * The composers with a call of one kind under way, as a signal: each call
+ * locks only its own composer, also after the user went to another one and
+ * back while it runs.
+ */
+function handleSet() {
+  const [handles, setHandles] = createSignal<ReadonlySet<number>>(new Set(), { equals: false });
+  return {
+    has: (h: number) => handles().has(h),
+    add: (h: number) => setHandles((all) => new Set(all).add(h)),
+    remove: (h: number) => setHandles((all) => { const next = new Set(all); next.delete(h); return next; }),
+  };
+}
+
 export function createComposer(port: ComposerPort, timers: Timers = realTimers, images: Images = browserImages, notices: Notices = appNotices) {
   const [view, setView] = createSignal<ComposerView | undefined>();
   const [text, setText] = createSignal("");
   /** `start` is the anchor and `end` the cursor position (Qt's anchor and position); start may follow end. */
   const [selection, setSelection] = createSignal({ start: 0, end: 0 });
-  /** The composer whose attach or paste runs. */
-  const [pending, setPending] = createSignal<number | undefined>();
+  /** The composers whose attach or paste runs. */
+  const pending = handleSet();
   /** The composer's own error (a refused paste), Qt's `showError`: it stays until a hand-back, a send or Allow retry. */
   const [error, setError] = createSignal<string | undefined>();
   const [dialog, setDialog] = createSignal<Dialog | undefined>();
   /** The epoch a remove, Undo or refused send waits to see exceeded. */
   const [handBack, setHandBack] = createSignal<number | undefined>();
-  /** The composer whose send or answer call is on its way. */
-  const [calling, setCalling] = createSignal<number | undefined>();
+  /** The composers whose send or answer call is on its way. */
+  const calling = handleSet();
   /** Opens under way: the editor stays read-only, so no key is typed into the composer being left. */
   const [opening, setOpening] = createSignal(0);
   /** A send started: locked until Rust's view shows it (sending, waiting) or hands the text back. */
@@ -158,7 +172,7 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
   const operationLocked = () => {
     const v = view();
     const h = v?.handle;
-    return opening() > 0 || (h !== undefined && (pending() === h || calling() === h)) || handBack() !== undefined || starting() || question()
+    return opening() > 0 || (h !== undefined && (pending.has(h) || calling.has(h))) || handBack() !== undefined || starting() || question()
       || !v?.loaded || v.attaching || v.sending || !!v.waiting;
   };
   const locked = () => operationLocked() || !!view()?.session_blocks_input;
@@ -290,8 +304,8 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
   async function exclusive(work: (h: number) => Promise<void>) {
     const h = handle();
     if (h === undefined || locked()) return;
-    setPending(h);
-    try { await flush(); await work(h); } catch { /* outside the app */ } finally { if (pending() === h) setPending(undefined); }
+    pending.add(h);
+    try { await flush(); await work(h); } catch { /* outside the app */ } finally { pending.remove(h); }
   }
 
   /** Remove and Undo change the text in Rust: locked until it hands the text back. */
@@ -371,7 +385,7 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
       hintTimer?.();
       setHint(undefined);
       // Locked before the flush awaits, so a second Enter meanwhile sends nothing.
-      setCalling(h);
+      calling.add(h);
       let r: SendReply;
       let at = epoch;
       try {
@@ -381,18 +395,18 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
         setError(undefined);
         r = await port.send(h, rev, at, text(), s.end, s.start);
       } catch (e) {
-        if (calling() === h) setCalling(undefined);
+        calling.remove(h);
         notices("error", typeof e === "string" ? e : e instanceof Error ? e.message : String(e), true);
         return;
       }
-      batch(() => { if (calling() === h) setCalling(undefined); reply(r, h, at, true); });
+      batch(() => { calling.remove(h); reply(r, h, at, true); });
     },
     /** Answers the open question with its token. The question kept the epoch: closing it unlocks the editor. */
     async answer(answer: Answer) {
       const d = dialog();
       const h = handle();
       if (!d || d.kind === "clear" || h === undefined) return;
-      batch(() => { setDialog(undefined); setCalling(h); });
+      batch(() => { setDialog(undefined); calling.add(h); });
       let r: SendReply;
       let at = epoch;
       try {
@@ -400,10 +414,10 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
         at = epoch;
         r = await port.answer(d.token, answer);
       } catch {
-        if (calling() === h) setCalling(undefined);
+        calling.remove(h);
         return;
       }
-      batch(() => { if (calling() === h) setCalling(undefined); reply(r, h, at, false); });
+      batch(() => { calling.remove(h); reply(r, h, at, false); });
     },
     /** Cancel or Escape: a question answers Cancel; the Clear dialog just closes. */
     closeDialog: dropDialog,

@@ -376,16 +376,18 @@ const [unseen, setUnseen] = createSignal(0);
 let liveScroller: HTMLDivElement | undefined;
 export { following, unseen };
 
-/** Puts the focus in the transcript (Qt's browser), e.g. before a focused chip there hides. */
-export function focusTranscript() { liveScroller?.focus({ preventScroll: true }); }
-
 /**
- * Scrolls to the newest item and follows it again. `fromFocus`: the jump's
- * own control had the focus, which stays in the transcript (Qt's
- * jumpToLatest, ActivityView.cpp:1611), since the control hides.
+ * Puts the focus in the transcript (Qt's browser), e.g. before a focused chip
+ * hides; false when no transcript is shown to take it.
  */
-export function jumpToLatest(fromFocus = false) {
-  if (fromFocus) focusTranscript();
+export function focusTranscript(): boolean {
+  if (!liveScroller?.isConnected) return false;
+  liveScroller.focus({ preventScroll: true });
+  return true;
+}
+
+/** Scrolls to the newest item and follows it again. */
+export function jumpToLatest() {
   setFollowing(true);
   setUnseen(0);
   liveScroller?.scrollTo({ top: liveScroller.scrollHeight, behavior: "instant" });

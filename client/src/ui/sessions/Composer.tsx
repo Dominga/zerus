@@ -9,6 +9,7 @@ import { actionEntries } from "./ActionDialogs";
 import { snapshotOf } from "./actions-ui";
 import { markReadChip, runMarkRead } from "./mark-entries";
 import { AttachmentsChip } from "./Attachments";
+import { moveFocusOff } from "./composer-ui";
 import { focusTranscript, following, jumpToLatest, unseen } from "./Activity";
 import type { ChipTone } from "../../types";
 
@@ -220,13 +221,13 @@ export function Composer() {
         {/* The voice slot: Task 13. */}
         <Show when={!following()}>
           <button type="button" class="tchip icon" title={jumpCaption()} aria-label={jumpCaption()}
-            onClick={(e) => jumpToLatest(document.activeElement === e.currentTarget)}><Icon name="chevrons-down" size={14} /></button>
+            onClick={(e) => { if (document.activeElement === e.currentTarget) moveFocusOff(focusTranscript, editor); jumpToLatest(); }}><Icon name="chevrons-down" size={14} /></button>
         </Show>
         <Show when={mark().active}>
           <button type="button" class="tchip accent" classList={{ icon: compact() }} title={mark().detail} aria-label="Mark as read"
             onClick={(e) => {
-              // The chip goes once read: its focus moves to the transcript first (SessionsWindow.cpp:1038).
-              if (document.activeElement === e.currentTarget) focusTranscript();
+              // The chip goes once read: its focus moves on first (composer-ui.ts moveFocusOff).
+              if (document.activeElement === e.currentTarget) moveFocusOff(focusTranscript, editor);
               runMarkRead(snapshotOf(s()));
             }}>
             <Icon name="read-all" size={13} /><Show when={!compact()}>Mark as read</Show>

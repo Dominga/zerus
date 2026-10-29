@@ -45,7 +45,7 @@ vi.mock("../../bridge", () => ({
 }));
 
 import * as bridge from "../../bridge";
-import { paneStates, readsOlder, transcriptOf } from "./Activity";
+import { focusTranscript, paneStates, readsOlder, transcriptOf } from "./Activity";
 import { activitySourceFor, detailTabs } from "./SessionDetail";
 import { activity } from "../../store/session";
 import { archiveActivity } from "../../store/archiveActivity";
@@ -198,5 +198,12 @@ describe("the app's archived Activity", () => {
     vi.advanceTimersByTime(3000);
     expect(reads.length).toBe(before + 1);
     expect(reads.at(-1)?.args).toEqual(["", "codex/example/a3", uuid(3), 1]);
+  });
+});
+
+// Task 6 fix round 2: without a mounted transcript, a hiding chip's focus goes to the field (composer-ui.ts moveFocusOff).
+describe("focusTranscript", () => {
+  it("answers false when no transcript is shown to take the focus", () => {
+    expect(focusTranscript()).toBe(false);
   });
 });

@@ -28,6 +28,12 @@ struct SettingsDirectory {
 void moveTemporaryFiles()
 {
     if (qgetenv("ZERUS_TEST_SYSTEM_TEMP") == "1") return;
+    // Only the user's own %TEMP% moves: a TEMP someone chose (a sandbox's, a
+    // script's) stays, since a lower-integrity sandbox cannot write a folder a
+    // normal process created in the build tree.
+    const QString system = QDir::cleanPath(QString::fromLocal8Bit(qgetenv("LOCALAPPDATA")) + QStringLiteral("/Temp"));
+    const QString current = QDir::cleanPath(QString::fromLocal8Bit(qgetenv("TEMP")));
+    if (!current.isEmpty() && current.compare(system, Qt::CaseInsensitive) != 0) return;
     const QString dir = QFileInfo(QStringLiteral(ZERUS_TEST_HELPER)).absolutePath() + QStringLiteral("/tmp");
     if (!QDir().mkpath(dir)) return;
     const QByteArray native = QDir::toNativeSeparators(dir).toLocal8Bit();

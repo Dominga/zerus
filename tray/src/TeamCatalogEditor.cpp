@@ -985,6 +985,57 @@ QWidget *TeamCatalogEditor::roleEditor(int index)
     connect(model, &QComboBox::activated, this, modelChanged);
     connect(effort, &QComboBox::activated, this, set([this, index, effort] { m_catalog.roles[index].effort = effort->currentData().toString(); }));
     add(tr("Default agent"), orig && (r.agent != orig->agent || r.account != orig->account || r.model != orig->model || r.effort != orig->effort), box(agentRow));
+    // U45: the models a member of this role may switch to before a task.
+    auto *modelsBox = new QVBoxLayout; modelsBox->setSpacing(4);
+    auto *choicesBox = new QWidget; auto *choices = new FlowLayout(6); choicesBox->setLayout(choices);
+    for (int i = 0; i < r.models.size(); ++i) {
+        auto *chip = button(r.models[i].text() + QStringLiteral("  ×"), "teamRoleModelChoice"); chip->setProperty("chip", true);
+        chip->setToolTip(tr("Remove %1").arg(r.models[i].text()));
+        connect(chip, &QPushButton::clicked, this, [this, index, i] { m_catalog.roles[index].models.removeAt(i); changed(); rebuildEditor(); });
+        choices->addWidget(chip);
+    }
+    auto *choiceModel = new QComboBox; choiceModel->setObjectName("teamRoleModelsAdd"); choiceModel->setEditable(true); choiceModel->setInsertPolicy(QComboBox::NoInsert);
+    for (int i = 0; i < model->count(); ++i) if (!model->itemText(i).isEmpty()) choiceModel->addItem(model->itemText(i));
+    choiceModel->setCurrentIndex(-1); choiceModel->lineEdit()->setPlaceholderText(tr("+ model")); choiceModel->setMinimumWidth(150);
+    auto *choiceEffort = choice({{"", "—"}, {"low", "low"}, {"medium", "medium"}, {"high", "high"}, {"xhigh", "xhigh"}}, QString(), "teamRoleModelsEffort");
+    auto *addChoice = button(tr("Add"), "teamRoleModelsAddButton"); addChoice->setProperty("ghost", true);
+    const auto addModel = [this, index, choiceModel, choiceEffort] {
+        const Teams::ModelChoice next{choiceModel->currentText().trimmed(), choiceEffort->currentData().toString()};
+        auto &list = m_catalog.roles[index].models;
+        if (next.model.isEmpty() || list.contains(next) || list.size() >= 20) return;
+        list.append(next); changed(); rebuildEditor();
+    };
+    connect(addChoice, &QPushButton::clicked, this, addModel);
+    connect(choiceModel->lineEdit(), &QLineEdit::returnPressed, this, addModel);
+    auto *addRow = row(6); addRow->addWidget(choiceModel); addRow->addWidget(choiceEffort); addRow->addWidget(addChoice); addRow->addStretch();
+    modelsBox->addWidget(choicesBox);
+    modelsBox->addLayout(addRow);
+    auto *modelsHint = hint(r.models.isEmpty() ? tr("Only the default model. A task that names other models goes to a member that allows one")
+                                               : tr("Before a task that names one of these, Zerus switches the member to it and waits for the switch"), c.muted);
+    modelsHint->setObjectName("teamRoleModelsHint");
+    modelsBox->addWidget(modelsHint);
+    choicesBox->setVisible(!r.models.isEmpty());
+    add(tr("Models"), edited(r.models, orig ? orig->models : QList<Teams::ModelChoice>()), box(modelsBox));
+    // U46: what Zerus does to the member's context before each task.
+    auto *contextBox = new QVBoxLayout; contextBox->setSpacing(4);
+    auto *contextRow = row(0);
+    const QString context = r.contextBeforeTask.isEmpty() ? QStringLiteral("none") : r.contextBeforeTask;
+    contextRow->addWidget(segmented({{"none", tr("Keep")}, {"compact", tr("Compact")}, {"clear", tr("Clear")}}, context, "teamRoleContext",
+                                    [this, index](const QString &value) {
+                                        auto &role = m_catalog.roles[index];
+                                        // The default stays unwritten unless the role already had the field.
+                                        const QString next = value == "none" && !role.raw.contains(QLatin1String("context_before_task")) ? QString() : value;
+                                        if (next == role.contextBeforeTask) return;
+                                        role.contextBeforeTask = next; changed(); rebuildEditor();
+                                    }));
+    contextRow->addStretch();
+    contextBox->addLayout(contextRow);
+    auto *contextHint = hint(context == "compact" ? tr("Before each task the conversation is compacted; the task goes once that is confirmed")
+                             : context == "clear" ? tr("Before each task the conversation is cleared; the task text names everything it needs")
+                                                  : tr("Each task continues the member's conversation"), c.muted);
+    contextHint->setObjectName("teamRoleContextHint");
+    contextBox->addWidget(contextHint);
+    add(tr("Context before task"), edited(r.contextBeforeTask, orig ? orig->contextBeforeTask : QString()), box(contextBox));
     // Computer: chips with ×, "Any computer" when none; "+ computer" adds one.
     auto *computerBox = new QVBoxLayout; computerBox->setSpacing(4);
     auto *chips = new QWidget; auto *flow = new FlowLayout(6); chips->setLayout(flow);

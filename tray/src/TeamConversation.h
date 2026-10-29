@@ -114,6 +114,7 @@ private:
     HeldSent m_sentHeld;
     QString m_agentName;
     QPushButton *m_openTerminal = nullptr;
+    QHBoxLayout *m_statusRow = nullptr;   // the status and Open terminal
     QHash<quint64, QString> m_cancels;
     // The answer in flight: its request, card key and question.
     quint64 m_answerRequest = 0;

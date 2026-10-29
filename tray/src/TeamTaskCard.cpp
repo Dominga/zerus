@@ -119,7 +119,7 @@ void TeamTaskCard::rebuild()
     state->setObjectName("teamTaskState");
     meta->addWidget(state);
     if (task->last()) meta->addWidget(label(tr("Attempt %1").arg(task->last()->n), c.muted, 11));
-    const QString role = task->assignee.isEmpty() ? tr("You") : m_team.roleOf(task->assignee);
+    const QString role = m_team.assigneeRole(*task, tr("You"));
     meta->addWidget(new Pill(role, roleColor(role, m_dark)));
     meta->addStretch();
     v->addLayout(meta);

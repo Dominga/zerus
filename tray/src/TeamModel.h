@@ -30,6 +30,17 @@ inline QStringList knownModels(const QString &agent)
     return known.value(agent);
 }
 
+// U45: a model a role's or member's session may switch to before a task, with
+// its effort (empty: the model's own). Written as {model, effort}.
+struct ModelChoice {
+    QString model, effort;
+    bool operator==(const ModelChoice &other) const { return model == other.model && effort == other.effort; }
+    bool operator!=(const ModelChoice &other) const { return !(*this == other); }
+    QString text() const { return effort.isEmpty() ? model : model + QLatin1Char('@') + effort; }
+};
+QList<ModelChoice> parseModelChoices(const QJsonValue &value);
+QJsonArray modelChoicesJson(const QList<ModelChoice> &choices);
+
 // A member's question to the lead (A3), open until the lead answers it. B1/C4:
 // a permission request carries the exact command, its source ("tool_input",
 // "process" or "unknown"), the agent's reason and the question hash hgs team
@@ -102,6 +113,13 @@ struct Member {
     // it is a sub-lead, which hands out, reviews and accepts its reports' tasks.
     QString parent;
     bool sub = false;
+    // U45/U46: the models it may switch between (empty: its launch model) and
+    // what Zerus does to its context before a task ("": its role's, none,
+    // compact or clear); sent back only when set.
+    QList<ModelChoice> models;
+    QString contextBeforeTask;
+    // U49: it finishes its open work, takes nothing new and then leaves.
+    bool draining = false;
     QJsonObject json() const;
 };
 
@@ -217,6 +235,10 @@ struct Task {
     bool pinned = false;       // stays with its assignee
     QString title, description, status, assignee, decidedBy, reason;
     QString kind;              // C5: "check" for a check task
+    // U45: the models allowed for it (`model` or `model@effort`; empty: any of
+    // its member's) and the role it is for when it has no assignee.
+    QStringList models;
+    QString role;
     QStringList criteria;
     QList<Dep> deps;
     QList<Attempt> attempts;   // oldest first
@@ -402,6 +424,10 @@ struct Team {
     QList<int> stuckScope;
     // The settings as stored, so a change sends them back whole.
     QJsonObject settingsJson;
+    // U51: the owner's intake keys for urgent tasks (the key itself is shown
+    // only once, when it is created).
+    struct Intake { QString id, label; double created = 0; };
+    QList<Intake> intakes;
     // F8: the lead's membership proposals, decided by the owner. `member` is
     // the proposed member (add), its id (remove) or the swap fields (swap).
     struct Proposal {
@@ -436,6 +462,9 @@ struct Team {
     const Phase *phase(int n) const;
     const LeftRunning *leftOf(const QString &member) const;
     QString roleOf(const QString &member) const;
+    // Who a task goes to: its assignee's role, "Any free <role>" for a task
+    // for a role (U45), otherwise `none`.
+    QString assigneeRole(const Task &task, const QString &none) const;
     // Only a team with a phase record groups its plan by phase.
     bool phased() const { return !phases.isEmpty(); }
     QString effectivePhaseApproval() const { return phaseApproval.isEmpty() ? approval : phaseApproval; }
@@ -622,6 +651,11 @@ struct Role {
     QStringList machines, messageTo, promptOrder, promptOff;
     QJsonObject danger;
     QMap<QString, QString> notes;
+    // U45/U46: the models a member of this role may switch between, and its
+    // context before a task (none, compact or clear); both copied into a
+    // member when it joins.
+    QList<ModelChoice> models;
+    QString contextBeforeTask;
     QJsonObject raw;
     QJsonObject json() const;
 };

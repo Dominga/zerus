@@ -51,6 +51,19 @@ private:
     std::function<void()> m_send;
 };
 
+// Calls back when the watched widget shows or hides.
+class VisibilityFilter : public QObject {
+public:
+    VisibilityFilter(std::function<void()> changed, QObject *parent) : QObject(parent), m_changed(std::move(changed)) {}
+    bool eventFilter(QObject *watched, QEvent *event) override
+    {
+        if (event->type() == QEvent::Show || event->type() == QEvent::Hide) m_changed();
+        return QObject::eventFilter(watched, event);
+    }
+private:
+    std::function<void()> m_changed;
+};
+
 // Owner, 2026-10-28: a pasted image or file became "[Image #1]" text and the
 // file was lost. As in the session's composer, a pasted or dropped image or
 // local file becomes an attachment; other text pastes as text.
@@ -123,9 +136,9 @@ TeamConversation::TeamConversation(HgsClient *client, QWidget *parent) : QWidget
     // A dialog or draft in the agent's terminal: the owner finishes it there.
     m_openTerminal = button(tr("Open terminal"), "teamConversationOpenTerminal"); m_openTerminal->hide();
     QObject::connect(m_openTerminal, &QPushButton::clicked, this, [this] { if (openTerminal) openTerminal(m_host, m_name); });
-    auto *statusRow = new QHBoxLayout; statusRow->setSpacing(8);
-    statusRow->addWidget(m_status, 1); statusRow->addWidget(m_openTerminal, 0, Qt::AlignTop);
-    bv->addLayout(statusRow);
+    m_statusRow = new QHBoxLayout; m_statusRow->setSpacing(8);
+    m_statusRow->addWidget(m_status, 1); m_statusRow->addWidget(m_openTerminal, 0, Qt::AlignTop);
+    bv->addLayout(m_statusRow);
     // The files to send, and Attach beside Send: every conversation takes
     // files, not only the designer's (owner, 2026-10-28).
     m_filesRow = new QWidget; m_filesRow->setObjectName("teamConversationFiles"); m_filesRow->setLayout(new FlowLayout(6)); m_filesRow->hide();
@@ -179,7 +192,7 @@ TeamConversation::TeamConversation(HgsClient *client, QWidget *parent) : QWidget
         if (!ok) {
             m_held->cancelFinished(receipt.value("request_id").toString());
             m_status->setText(error); m_status->setStyleSheet(QStringLiteral("color:%1;").arg(colorsFor(m_dark).danger.name())); m_status->show();
-            poll(); return;
+            fitDesigner(); poll(); return;
         }
         // The cancelled text comes back to an empty composer.
         if (m_input->toPlainText().trimmed().isEmpty()) m_input->setPlainText(text);
@@ -272,7 +285,14 @@ void TeamConversation::useDesignerLayout(QWidget *intro, QWidget *above)
     m_bottom = new QWidget; m_bottom->setObjectName("teamDesignerComposer");
     auto *bv = new QVBoxLayout(m_bottom); bv->setContentsMargins(16, 6, 16, 4); bv->setSpacing(6);
     bv->addWidget(m_filesRow);
-    bv->addWidget(m_status);
+    // #521: the held messages, a Terminal draft, the status and Open terminal
+    // sit above the card; the column refits as they show or hide.
+    for (QWidget *bar : {static_cast<QWidget *>(m_held), static_cast<QWidget *>(m_terminalDraft)}) {
+        v->removeWidget(bar); bv->addWidget(bar);
+        bar->installEventFilter(new VisibilityFilter([this] { QTimer::singleShot(0, this, [this] { fitDesigner(); }); }, bar));
+    }
+    if (oldBottom) oldBottom->layout()->removeItem(m_statusRow);
+    m_statusRow->setParent(nullptr); bv->addLayout(m_statusRow);
     m_card = new QFrame; m_card->setObjectName("teamDesignerComposerCard");
     auto *ch = new QHBoxLayout(m_card); ch->setContentsMargins(14, 8, 8, 8); ch->setSpacing(8);
     m_input->setParent(m_card); m_send->setParent(m_card);
@@ -706,6 +726,7 @@ void TeamConversation::renderHeld()
     // Messages waiting for an agent that is not working: a Terminal draft may hold them.
     m_terminalDraft->setSession(m_host, m_name, m_details.value("run_id").toString(), m_details.value("conversation_id").toString());
     if (!held.isEmpty() && m_details.value("activity").toString() != QLatin1String("busy")) m_terminalDraft->check(true);
+    fitDesigner();
 }
 
 // A refusal names what holds the message. At a dialog, draft or unknown prompt
@@ -728,4 +749,5 @@ void TeamConversation::showRefusal(const QString &error, bool uncertain)
     m_status->setStyleSheet(QStringLiteral("color:%1;").arg(colorsFor(m_dark).danger.name()));
     m_status->show();
     m_openTerminal->setVisible(terminal && openTerminal);
+    fitDesigner();
 }

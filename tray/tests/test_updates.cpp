@@ -176,6 +176,30 @@ private slots:
         const auto layout=ForkUpdater::layoutFor(root.filePath("app-7/hgs-tray.exe"));
         QVERIFY(!layout.versioned);QVERIFY(layout.superseded);
     }
+    // #511 N10: a local or experimental build has no number (0); any release
+    // used to count as newer and replaced it unasked.
+    void forkFeedIsComparedWithTheRunningCommit(){
+        using Offer=ForkUpdater::Offer;
+        const QString running(40,'a'),other(40,'b');
+        QVERIFY(ForkUpdater::offerFor(0,running,7,running)==Offer::Current);
+        QVERIFY(ForkUpdater::offerFor(0,running,7,other)==Offer::Replacement);
+        QVERIFY(ForkUpdater::offerFor(0,QString(),7,other)==Offer::Replacement);
+        QVERIFY(ForkUpdater::offerFor(5,running,7,running)==Offer::Current);
+        QVERIFY(ForkUpdater::offerFor(5,running,7,other)==Offer::Newer);
+        QVERIFY(ForkUpdater::offerFor(7,running,7,other)==Offer::Current);
+        QVERIFY(ForkUpdater::offerFor(9,running,7,other)==Offer::Current);
+    }
+    void forkRunningCommitComesFromBuildInfo(){
+        QTemporaryDir root;QVERIFY(root.isValid());
+        QCOMPARE(ForkUpdater::sourceCommit(root.path()),QString());
+        const auto write=[&](const QByteArray &text){QFile file(root.filePath("build-info.json"));QVERIFY(file.open(QIODevice::WriteOnly|QIODevice::Truncate));file.write(text);};
+        write(R"({"source_commit":"0123456789abcdef0123456789abcdef01234567"})");
+        QCOMPARE(ForkUpdater::sourceCommit(root.path()),QStringLiteral("0123456789abcdef0123456789abcdef01234567"));
+        write(R"({"source_commit":"0123456"})");
+        QCOMPARE(ForkUpdater::sourceCommit(root.path()),QString());
+        write("not json");
+        QCOMPARE(ForkUpdater::sourceCommit(root.path()),QString());
+    }
     void devVersionSequenceIsVisibleAndMatchesTheFeed(){
         auto value=devRaw();
         auto legacy=parsedFeed(QJsonDocument(value).toJson(),"dev");

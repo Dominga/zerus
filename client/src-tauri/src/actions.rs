@@ -1032,6 +1032,49 @@ impl ArchiveReads {
     }
 }
 
+/// A checked archive row and its Rust-owned organization projection. The
+/// original ViewRow fields stay flat in IPC; the webview receives no catalog.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct ArchiveRow {
+    #[serde(flatten)]
+    pub row: ViewRow,
+    pub group: String,
+    pub rank: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct ArchivePageOut {
+    pub rows: Vec<ArchiveRow>,
+    pub next_cursor: String,
+    pub previous_cursor: Option<String>,
+    pub total: u64,
+    pub position: Option<u64>,
+}
+
+fn grouped_archive_page(
+    pump: &crate::pump::Pump,
+    computer: &ComputerId,
+    mut page: ArchivePage,
+) -> Result<ArchivePageOut, String> {
+    let groups = pump.place_archived(computer, &mut page.rows)?;
+    Ok(ArchivePageOut {
+        rows: page
+            .rows
+            .into_iter()
+            .zip(groups)
+            .map(|(row, place)| ArchiveRow {
+                row,
+                group: place.group,
+                rank: place.rank,
+            })
+            .collect(),
+        next_cursor: page.next_cursor,
+        previous_cursor: page.previous_cursor,
+        total: page.total,
+        position: page.position,
+    })
+}
+
 /// One checked page of the computer's archive (30 s, Qt's validation).
 /// `request` is the archive store's request number. A newer request for the
 /// same computer, or a cancel through this number, ends this one's `hgs` and
@@ -1041,13 +1084,14 @@ impl ArchiveReads {
 #[allow(clippy::too_many_arguments)]
 pub async fn archive_page(
     state: State<'_, ArchiveReads>,
+    app: State<'_, crate::commands::AppState>,
     computer: String,
     from: f64,
     until: f64,
     cursor: String,
     query: String,
     request: u64,
-) -> Result<ArchivePage, String> {
+) -> Result<ArchivePageOut, String> {
     if blocked() {
         return Err(REPLAY_NEEDS_HGS.to_owned());
     }
@@ -1058,8 +1102,16 @@ pub async fn archive_page(
     let hgs = default_hgs();
     let id = ComputerId::from(computer.as_str());
     let job = Arc::clone(&flag);
+    let pump = app.pump();
     let result = tauri::async_runtime::spawn_blocking(move || {
         reads::archive_page_cancellable(&hgs, &id, from, until, &cursor, &query, &job)
+            .map_err(|error| error.to_string())
+            .and_then(|page| {
+                if job.load(Ordering::Relaxed) {
+                    return Err("superseded".into());
+                }
+                grouped_archive_page(&pump, &id, page)
+            })
     })
     .await
     .map_err(|error| error.to_string());
@@ -1068,7 +1120,7 @@ pub async fn archive_page(
     if flag.load(Ordering::Relaxed) {
         return Err("superseded".into());
     }
-    result?.map_err(|error| error.to_string())
+    result?
 }
 
 /// The archived Activity reads in flight, one per computer, name and archive
@@ -1815,6 +1867,128 @@ mod tests {
         assert!(reads.begin("other", 3).load(Ordering::Relaxed));
         reads.finish("studio", 1);
         assert!(!later.load(Ordering::Relaxed));
+    }
+
+    fn archive_fixture() -> ArchivePage {
+        ArchivePage {
+            rows: vec![ViewRow {
+                name: "codex/sample-project/review".into(),
+                state: "archived".into(),
+                archive_id: Some("00000000-0000-4000-8000-000000000001".into()),
+                run_id: Some("run-1".into()),
+                ..ViewRow::default()
+            }],
+            next_cursor: "older".into(),
+            previous_cursor: Some("newer".into()),
+            total: 12,
+            position: Some(3),
+        }
+    }
+
+    #[test]
+    fn archive_page_rows_carry_group_and_rank_with_the_hello_host_without_live_rows() {
+        let pump = crate::pump::Pump::default();
+        let computer = ComputerId::local();
+        let mut catalog = zerus_client_core::CatalogState::new();
+        let hello = include_str!("../../core/tests/fixtures/basic.ndjson")
+            .lines()
+            .next()
+            .unwrap();
+        for change in catalog.apply(&computer, &zerus_watch_protocol::decode(hello).unwrap()) {
+            pump.push(change);
+        }
+        let id = zerus_client_core::swarm::archive_member(
+            "workstation",
+            "00000000-0000-4000-8000-000000000001",
+        );
+        let org = serde_json::json!({"default_project":"ungrouped", "projects":[{"id":"alpha","sessions":[id]},{"id":"ungrouped","sessions":[]}]});
+        pump.present(
+            &org,
+            Arc::new(zerus_client_core::swarm::members(&org)),
+            1,
+            Default::default(),
+        );
+        let page = grouped_archive_page(&pump, &computer, archive_fixture()).unwrap();
+        assert_eq!(page.rows[0].group, "alpha");
+        assert!(page.rows[0].rank > 0);
+        assert_eq!(page.rows[0].row.machine, "workstation");
+        assert!(
+            pump.row_named("", "codex/sample-project/review").is_none(),
+            "no live or archived row cache"
+        );
+        let json = serde_json::to_value(&page).unwrap();
+        assert_eq!(json["rows"][0]["name"], "codex/sample-project/review");
+        assert_eq!(json["rows"][0]["group"], "alpha");
+        assert_eq!(json["rows"][0]["rank"], page.rows[0].rank);
+        assert!(json["rows"][0].get("row").is_none(), "ViewRow remains flat");
+        assert_eq!(
+            (
+                page.total,
+                page.position,
+                page.next_cursor.as_str(),
+                page.previous_cursor.as_deref()
+            ),
+            (12, Some(3), "older", Some("newer"))
+        );
+        assert_eq!(
+            grouped_archive_page(&pump, &computer, archive_fixture()).unwrap(),
+            page
+        );
+    }
+
+    #[test]
+    fn archive_page_rows_use_the_peer_alias_and_refuse_unknown_local_identity() {
+        let pump = crate::pump::Pump::default();
+        assert_eq!(
+            grouped_archive_page(&pump, &ComputerId::local(), archive_fixture()).unwrap_err(),
+            reads::ARCHIVE_IDENTITY_INVALID
+        );
+        let id = zerus_client_core::swarm::archive_member(
+            "studio",
+            "00000000-0000-4000-8000-000000000001",
+        );
+        let org = serde_json::json!({"default_project":"ungrouped", "projects":[{"id":"alpha","sessions":[id]},{"id":"ungrouped","sessions":[]}]});
+        pump.present(
+            &org,
+            Arc::new(zerus_client_core::swarm::members(&org)),
+            1,
+            Default::default(),
+        );
+        pump.push(zerus_client_core::Change::Machine {
+            computer: ComputerId::from("studio"),
+            machine: zerus_client_core::MachineMeta {
+                host: Some("remote-hostname".into()),
+                ..Default::default()
+            },
+        });
+        let page =
+            grouped_archive_page(&pump, &ComputerId::from("studio"), archive_fixture()).unwrap();
+        assert_eq!(page.rows[0].row.machine, "studio");
+        assert_eq!(page.rows[0].group, "alpha");
+    }
+
+    #[test]
+    fn archive_page_projection_refuses_oversized_or_unidentified_rows_and_keeps_empty_pages() {
+        let pump = crate::pump::Pump::default();
+        let computer = ComputerId::from("studio");
+        let mut page = archive_fixture();
+        page.rows[0].archive_id = None;
+        assert_eq!(
+            grouped_archive_page(&pump, &computer, page).unwrap_err(),
+            reads::ARCHIVE_IDENTITY_INVALID
+        );
+        let mut page = archive_fixture();
+        page.rows = vec![page.rows[0].clone(); reads::ARCHIVE_PAGE_ROWS + 1];
+        assert_eq!(
+            grouped_archive_page(&pump, &computer, page).unwrap_err(),
+            reads::ARCHIVE_PAGE_INVALID
+        );
+        let mut page = archive_fixture();
+        page.rows.clear();
+        assert!(grouped_archive_page(&pump, &ComputerId::local(), page)
+            .unwrap()
+            .rows
+            .is_empty());
     }
 
     #[test]

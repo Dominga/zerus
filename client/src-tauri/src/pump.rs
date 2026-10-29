@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 use zerus_client_core::swarm::edit::Intent;
-use zerus_client_core::swarm::grouping::{Grouping, SyncView};
+use zerus_client_core::swarm::grouping::{ArchivedRow, GroupOut, Grouping, SyncView};
 use zerus_client_core::swarm::layout::Layout;
 use zerus_client_core::views::FleetEntry;
 use zerus_client_core::{
@@ -200,6 +200,59 @@ impl Pump {
         let mut inner = self.lock();
         inner.grouping.seed_runs(groups);
         self.wake(inner);
+    }
+
+    /// One checked archive page, resolved against one organization snapshot.
+    /// The local host comes from hello/meta even when its live list is empty;
+    /// a peer always uses its configured alias (as live catalog rows do).
+    pub fn place_archived(
+        &self,
+        computer: &ComputerId,
+        rows: &mut [ViewRow],
+    ) -> Result<Vec<GroupOut>, &'static str> {
+        if rows.len() > zerus_client_core::reads::ARCHIVE_PAGE_ROWS {
+            return Err(zerus_client_core::reads::ARCHIVE_PAGE_INVALID);
+        }
+        let mut inner = self.lock();
+        let machine = computer
+            .alias()
+            .map(str::to_owned)
+            .or_else(|| {
+                inner
+                    .mirror
+                    .computers
+                    .get(&computer.0)?
+                    .machine
+                    .as_ref()?
+                    .host
+                    .clone()
+            })
+            .filter(|machine| !machine.is_empty());
+        if !rows.is_empty() && machine.is_none() {
+            return Err(zerus_client_core::reads::ARCHIVE_IDENTITY_INVALID);
+        }
+        let machine = machine.unwrap_or_default();
+        let identities: Vec<_> = rows
+            .iter_mut()
+            .map(|row| {
+                let id = row
+                    .archive_id
+                    .as_deref()
+                    .filter(|id| !id.is_empty())
+                    .ok_or(zerus_client_core::reads::ARCHIVE_IDENTITY_INVALID)?;
+                row.machine.clone_from(&machine);
+                Ok(ArchivedRow {
+                    computer: computer.clone(),
+                    key: format!("archive:{id}"),
+                    machine: machine.clone(),
+                    archive_id: id.to_owned(),
+                    run_id: row.run_id.clone().unwrap_or_default(),
+                })
+            })
+            .collect::<Result<_, &'static str>>()?;
+        let out = inner.grouping.place_archived(&identities);
+        self.wake(inner);
+        Ok(out)
     }
 
     /// A computer's machine card, once its listing named one.

@@ -240,17 +240,18 @@ impl Organization {
 
     pub fn seed_runs(&self, source: Option<zerus_client_core::settings::QtStore>) {
         if let Some(source) = source {
-            self.seed_runs_with(move || zerus_client_core::swarm::layout::qt_run_groups(&source));
+            let _ = self
+                .seed_runs_with(move || zerus_client_core::swarm::layout::qt_run_groups(&source));
         }
     }
 
     fn seed_runs_with(
         &self,
         read: impl FnOnce() -> Result<serde_json::Map<String, Value>, String> + Send + 'static,
-    ) {
+    ) -> Option<std::thread::JoinHandle<()>> {
         use std::sync::atomic::Ordering::SeqCst;
         if self.0.pump.runs_seeded() || self.0.seed_started.swap(true, SeqCst) {
-            return;
+            return None;
         }
         let shared = Arc::downgrade(&self.0);
         let started = std::thread::Builder::new()
@@ -273,9 +274,13 @@ impl Organization {
                     }
                 }
             });
-        if let Err(error) = started {
-            self.0.seed_started.store(false, SeqCst);
-            eprintln!("zerus-client: the archive project seed worker did not start: {error}");
+        match started {
+            Ok(worker) => Some(worker),
+            Err(error) => {
+                self.0.seed_started.store(false, SeqCst);
+                eprintln!("zerus-client: the archive project seed worker did not start: {error}");
+                None
+            }
         }
     }
 
@@ -1348,19 +1353,21 @@ mod tests {
         );
         let (entered, started) = std::sync::mpsc::channel();
         let (release, held) = std::sync::mpsc::channel();
-        organization.seed_runs_with(move || {
-            entered.send(()).unwrap();
-            held.recv().unwrap();
-            Ok(
-                json!({"workstation\nlive":"alpha", "workstation\nold":"alpha"})
-                    .as_object()
-                    .unwrap()
-                    .clone(),
-            )
-        });
+        let seed = organization
+            .seed_runs_with(move || {
+                entered.send(()).unwrap();
+                held.recv().unwrap();
+                Ok(
+                    json!({"workstation\nlive":"alpha", "workstation\nold":"alpha"})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                )
+            })
+            .unwrap();
         started.recv_timeout(Duration::from_secs(2)).unwrap();
         // A duplicate startup callback neither reads again nor blocks.
-        organization.seed_runs_with(|| panic!("the seed is already being read"));
+        let duplicate = organization.seed_runs_with(|| panic!("the seed is already being read"));
         let changed = pump.clone();
         let (flowed, flow) = std::sync::mpsc::channel();
         let drain = std::thread::spawn(move || {
@@ -1381,6 +1388,8 @@ mod tests {
         let result = flow.recv_timeout(Duration::from_secs(2));
         release.send(()).unwrap();
         drain.join().unwrap();
+        seed.join().unwrap();
+        assert!(duplicate.is_none(), "the second call starts no reader");
         assert!(
             result.is_ok(),
             "the catalog flowed before the Qt read finished"
@@ -1397,7 +1406,9 @@ mod tests {
             "live implicit membership clears the stale seed"
         );
         assert_eq!(saved.run_project("workstation", "old"), Some("alpha"));
-        organization.seed_runs_with(|| panic!("a saved seed never reads Qt again"));
+        assert!(organization
+            .seed_runs_with(|| panic!("a saved seed never reads Qt again"))
+            .is_none());
         fake.finish(organization);
     }
 
@@ -1406,17 +1417,25 @@ mod tests {
         let fake = Fake::landing();
         let pump = Pump::default();
         let organization = fake.organization(&pump, true);
-        organization.seed_runs_with(|| Err("synthetic seed read error".into()));
+        organization
+            .seed_runs_with(|| Err("synthetic seed read error".into()))
+            .unwrap()
+            .join()
+            .unwrap();
         wait_until("the seed read to fail", || {
             !organization.0.seed_started.load(Ordering::SeqCst)
         });
         assert!(!pump.runs_seeded());
-        organization.seed_runs_with(|| {
-            Ok(json!({"workstation\nold":"alpha"})
-                .as_object()
-                .unwrap()
-                .clone())
-        });
+        organization
+            .seed_runs_with(|| {
+                Ok(json!({"workstation\nold":"alpha"})
+                    .as_object()
+                    .unwrap()
+                    .clone())
+            })
+            .unwrap()
+            .join()
+            .unwrap();
         wait_until("the retry to seed", || pump.runs_seeded());
         organization.flush();
         let saved = zerus_client_core::swarm::layout::Layout::from_json(
@@ -1427,6 +1446,25 @@ mod tests {
     }
 
     #[test]
+    fn a_persisted_run_seed_mark_skips_qt_on_the_next_start() {
+        let fake = Fake::landing();
+        let mut layout = zerus_client_core::swarm::layout::Layout::default();
+        layout.seed_runs(&serde_json::Map::new());
+        std::fs::write(fake.layout(), layout.to_json()).unwrap();
+        let pump = Pump::default();
+        let organization = fake.organization(&pump, true);
+        assert!(pump.runs_seeded());
+        assert!(!organization.0.seed_started.load(Ordering::SeqCst));
+        let reader = organization.seed_runs_with(|| panic!("a persisted seed never reads Qt"));
+        let skipped = reader.is_none();
+        if let Some(reader) = reader {
+            let _ = reader.join();
+        }
+        fake.finish(organization);
+        assert!(skipped);
+    }
+
+    #[test]
     fn a_blocked_run_seed_never_keeps_the_organization_alive_during_quit() {
         let fake = Fake::landing();
         let pump = Pump::default();
@@ -1434,11 +1472,13 @@ mod tests {
         let weak = Arc::downgrade(&organization.0);
         let (entered, started) = std::sync::mpsc::channel();
         let (release, held) = std::sync::mpsc::channel();
-        organization.seed_runs_with(move || {
-            entered.send(()).unwrap();
-            held.recv().unwrap();
-            Ok(serde_json::Map::new())
-        });
+        let seed = organization
+            .seed_runs_with(move || {
+                entered.send(()).unwrap();
+                held.recv().unwrap();
+                Ok(serde_json::Map::new())
+            })
+            .unwrap();
         started.recv_timeout(Duration::from_secs(2)).unwrap();
         drop(organization);
         let until = Instant::now() + Duration::from_secs(2);
@@ -1447,6 +1487,7 @@ mod tests {
         }
         let ended = weak.strong_count() == 0;
         release.send(()).unwrap();
+        seed.join().unwrap();
         wait_until("the organization to end", || weak.strong_count() == 0);
         std::fs::remove_dir_all(fake.dir).unwrap();
         assert!(ended, "quit did not wait for the seed read");

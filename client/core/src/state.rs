@@ -173,6 +173,20 @@ impl CatalogState {
             Body::Hello(hello) => {
                 self.hello = Some(hello.clone());
                 self.begin();
+                // Archive pages need the local machine identity even with an
+                // empty catalog, before (or without) catalog.meta. Keep card
+                // facts across reconnects; hello only supplies the host name.
+                if !hello.host.is_empty() {
+                    let mut machine = self.machine.clone().unwrap_or_default();
+                    machine.host = Some(hello.host.clone());
+                    if self.machine.as_ref() != Some(&machine) {
+                        self.machine = Some(machine.clone());
+                        changes.push(Change::Machine {
+                            computer: computer.clone(),
+                            machine,
+                        });
+                    }
+                }
             }
             Body::Snapshot(snapshot) if snapshot.topic == topic::CATALOG => {
                 let machine = self.machine(computer);
@@ -454,7 +468,14 @@ impl CatalogState {
 
     /// Keeps a `catalog.meta` value; a changed machine card is a change.
     fn set_meta(&mut self, computer: &ComputerId, meta: Value) -> Option<Change> {
-        let machine = crate::MachineMeta::project(&meta);
+        let mut machine = crate::MachineMeta::project(&meta);
+        if machine.host.as_deref().is_none_or(str::is_empty) {
+            machine.host = self
+                .hello
+                .as_ref()
+                .map(|hello| hello.host.clone())
+                .filter(|host| !host.is_empty());
+        }
         self.meta = Some(meta);
         (self.machine.as_ref() != Some(&machine)).then(|| {
             self.machine = Some(machine.clone());
@@ -1590,7 +1611,11 @@ mod tests {
         let frames = fixture("basic.ndjson");
         let local = ComputerId::local();
         let mut state = CatalogState::new();
-        assert!(state.apply(&local, &frames[0]).is_empty(), "hello");
+        let hello = state.apply(&local, &frames[0]);
+        assert!(
+            matches!(&hello[..], [Change::Machine { computer, machine }] if computer.is_local() && machine.host.as_deref() == Some("workstation"))
+        );
+        assert!(state.rows().is_empty(), "hello adds no session rows");
         assert!(state.apply(&local, &frames[1]).is_empty(), "page 0");
         assert!(state.apply(&local, &frames[2]).is_empty(), "page 1");
         let changes = state.apply(&local, &frames[3]);
@@ -1822,7 +1847,10 @@ mod tests {
         let peer = ComputerId::from("studio");
         let mut state = CatalogState::new();
         let changes = apply_all(&mut state, &peer, &frames[..4]);
-        let Some(Change::Replace { computer, rows }) = changes.first() else {
+        let Some(Change::Replace { computer, rows }) = changes
+            .iter()
+            .find(|change| matches!(change, Change::Replace { .. }))
+        else {
             panic!("{changes:?}")
         };
         assert_eq!(computer, &peer);
@@ -1982,7 +2010,11 @@ mod tests {
                 .collect()
         };
         let first = machines(apply_all(&mut state, &local, &frames[..5]));
-        assert_eq!(first.len(), 1);
+        assert_eq!(
+            first.len(),
+            2,
+            "hello identity, then the complete machine card"
+        );
         assert_eq!(first[0].host.as_deref(), Some("workstation"));
         // The same meta again, as after a reconnect, sends nothing; a new
         // sample does.
@@ -2001,6 +2033,37 @@ mod tests {
                    "value":{"host":"elsewhere"}}),
         );
         assert!(machines(state.apply(&local, &partial)).is_empty());
+    }
+
+    #[test]
+    fn an_empty_catalog_keeps_its_hello_host_when_meta_omits_it_and_on_reconnect() {
+        let frames = fixture("basic.ndjson");
+        let local = ComputerId::local();
+        let mut state = CatalogState::new();
+        let initial = state.apply(&local, &frames[0]);
+        assert!(
+            matches!(&initial[..], [Change::Machine { machine, .. }] if machine.host.as_deref() == Some("workstation"))
+        );
+        let meta = frame(
+            json!({"v":1,"seq":2,"t":"snapshot","topic":"catalog.meta","page":0,"last":true,"cursor":1,
+            "value":{"local_sessions":false,"platform":"linux"}}),
+        );
+        let changed = state.apply(&local, &meta);
+        assert!(
+            matches!(&changed[..], [Change::Machine { machine, .. }] if machine.host.as_deref() == Some("workstation") && machine.local_sessions == Some(false))
+        );
+        assert!(
+            state.apply(&local, &frames[0]).is_empty(),
+            "hello preserves the card and emits no duplicate"
+        );
+        assert!(state.rows().is_empty());
+        let peer = ComputerId::from("studio");
+        let mut peer_state = CatalogState::new();
+        let changed = peer_state.apply(&peer, &frames[0]);
+        assert!(
+            matches!(&changed[..], [Change::Machine { computer, machine }] if computer == &peer && machine.host.as_deref() == Some("workstation")),
+            "the card still names the peer's real host; row grouping uses its alias"
+        );
     }
 
     #[test]

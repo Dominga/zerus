@@ -363,6 +363,53 @@ pub(crate) fn verify_phase_in(
         })
 }
 
+/// U39/U42: what the owner says to change an accepted phase on the lead's
+/// request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PhaseChange {
+    Discard,
+    ToDraft,
+}
+
+/// The verbs of a discard, English whole and Russian at a word start.
+const DISCARD_VERBS: &[&str] = &["discard", "drop", "remove", "delete", "scrap", "cancel", "отмен", "удали", "убери", "выброс", "выкин"];
+/// The words of a return to a draft.
+const DRAFT_WORDS: &[&str] = &["draft", "drafts", "redraft", "черновик"];
+
+/// The owner's sentence names phase `phase` and the change.
+fn asks_phase_change(lowered: &str, phase: u32, change: PhaseChange) -> bool {
+    let words = match change {
+        PhaseChange::Discard => DISCARD_VERBS,
+        PhaseChange::ToDraft => DRAFT_WORDS,
+    };
+    named_phases(lowered).contains(&phase) && words.iter().any(|word| verb_in(lowered, word))
+}
+
+/// U39/U42: verifies the owner's word for discarding phase `phase`, or for
+/// returning it to a draft: a fresh sentence of the lead's own session that
+/// names the phase and the change.
+pub(crate) fn verify_phase_change(team: &Team, input: &Value, phase: u32, change: PhaseChange, now: f64) -> anyhow::Result<OwnerWord> {
+    let text = input["text"]
+        .as_str()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .context("owner_word.text is required: quote the owner's sentence")?;
+    let lead = team.member(&team.lead).context("The team has no lead")?;
+    let session = lead.session.as_ref().context("The lead has no session to check the owner's word in")?;
+    let db = super::super::journal::event_db().map_err(|error| anyhow::anyhow!("The session events are unavailable: {error}"))?;
+    verify_phase_change_in(&db, &session.name, &session.conversation_id, text, phase, change, now)
+}
+
+/// The fixture-testable phase change check.
+pub(crate) fn verify_phase_change_in(db: &Connection, name: &str, conversation: &str, text: &str, phase: u32, change: PhaseChange, now: f64) -> anyhow::Result<OwnerWord> {
+    let accept = move |lowered: &str| asks_phase_change(lowered, phase, change);
+    verify_scan(db, name, conversation, text, now, ScanOptions { phrases: &[], needed: &[], exact: false, add: false, verbs: &[], names: &[], accept: Some(&accept), after: 0.0 })
+        .with_context(|| match change {
+            PhaseChange::Discard => format!("The owner has not asked to discard phase {phase} (the sentence names the phase and the discard)"),
+            PhaseChange::ToDraft => format!("The owner has not asked to return phase {phase} to a draft (the sentence names the phase and the draft)"),
+        })
+}
+
 struct ScanOptions<'a> {
     phrases: &'a [&'a str],
     needed: &'a [String],

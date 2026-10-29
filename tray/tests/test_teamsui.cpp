@@ -669,6 +669,7 @@ private slots:
     void severalDraftPhasesRenderAndApproveInOrder();
     void phaseBandsStackWithStatusDecisionAndHealth();
     void aQueuedPhaseCanBeDiscarded();
+    void aQueuedPhaseCanReturnToDraft();
     void lanesGroupACollapseInEveryView();
     void draftReorderSendsMovePhase();
     void pinMarkAndFinishedTeamShowWhoFinished();
@@ -6543,6 +6544,85 @@ void TestTeamsUi::aQueuedPhaseCanBeDiscarded()
     more->click();
     QTRY_COMPARE(calls(script(), "discard-phase").size(), 1);
     QCOMPARE(calls(script(), "discard-phase").first()["phase"].toInt(), 4);
+}
+
+// U42 (#587): the same accepted, unstarted phase carries Return to draft… in
+// its menu; it asks first and sends its number.
+void TestTeamsUi::aQueuedPhaseCanReturnToDraft()
+{
+    auto t = phasedTeam();
+    t["status"] = "running";
+    t["pending_phase"] = QJsonValue();
+    t["pending_phases"] = QJsonArray{5};
+    t["phases"] = QJsonArray{
+        QJsonObject{{"n", 2}, {"title", "QA fixes"}, {"barrier", true}, {"state", "approved"}, {"tasks", QJsonArray{3, 4}}},
+        QJsonObject{{"n", 3}, {"title", "Polish"}, {"state", "approved"}, {"tasks", QJsonArray{5}}},
+        QJsonObject{{"n", 4}, {"title", "Review"}, {"barrier", true}, {"state", "approved"}, {"tasks", QJsonArray{6}}},
+        QJsonObject{{"n", 5}, {"title", "Docs"}, {"state", "draft"}, {"tasks", QJsonArray{7}},
+                    {"waiting", QJsonObject{{"text", "Can run alongside phase 4"}, {"phase", 4},
+                                            {"open", QJsonArray{6}}, {"alongside", true}}},
+                    {"changes", QJsonArray{QJsonObject{{"kind", "added"}, {"task", 7}, {"title", "Screenshots"}},
+                                           QJsonObject{{"kind", "changed"}, {"task", 7}, {"title", "Screenshots"}, {"from", "backend"}, {"to", "tester"}}}}}};
+    t["tasks"] = QJsonArray{
+        QJsonObject{{"id", 1}, {"phase", 1}, {"title", "Requirements"}, {"assignee", "lead"}, {"status", "accepted"},
+                    {"attempts", QJsonArray{QJsonObject{{"n", 1}, {"id", "a1"}, {"member", "lead"}, {"state", "reported"}}}}},
+        QJsonObject{{"id", 2}, {"phase", 1}, {"title", "Checkout design"}, {"assignee", "backend"}, {"status", "accepted"}},
+        QJsonObject{{"id", 3}, {"phase", 2}, {"title", "Address form UI"}, {"assignee", "backend"}, {"status", "accepted"},
+                    {"attempts", QJsonArray{QJsonObject{{"n", 1}, {"id", "a3"}, {"member", "backend"}, {"state", "reported"}}}}},
+        QJsonObject{{"id", 4}, {"phase", 2}, {"title", "Unit tests"}, {"assignee", "tester"}, {"status", "accepted"}},
+        QJsonObject{{"id", 5}, {"phase", 3}, {"title", "Code review"}, {"assignee", "backend"}, {"status", "in_progress"},
+                    {"attempts", QJsonArray{QJsonObject{{"n", 1}, {"id", "a5"}, {"member", "backend"}, {"state", "delivered"}}}}},
+        QJsonObject{{"id", 6}, {"phase", 4}, {"title", "Release notes"}, {"assignee", "backend"}, {"status", "assigned"}},
+        QJsonObject{{"id", 7}, {"phase", 5}, {"title", "Screenshots"}, {"assignee", "tester"}, {"status", "draft"}}};
+    t["phase_summary"] = QJsonArray{
+        QJsonObject{{"n", 1}, {"title", QString()}, {"status", "done"}, {"done", 2}, {"total", 2}, {"barrier", false}, {"health_line", "path 2 · par 1.0"}},
+        QJsonObject{{"n", 2}, {"title", "QA fixes"}, {"status", "done"}, {"done", 2}, {"total", 2}, {"barrier", true}, {"health_line", "path 2 · par 1.0 · 1 warning"}},
+        QJsonObject{{"n", 3}, {"title", "Polish"}, {"status", "in_work"}, {"done", 0}, {"total", 1}, {"barrier", false}, {"health_line", "path 1 · par 1.0"}},
+        QJsonObject{{"n", 4}, {"title", "Review"}, {"status", "approved"}, {"done", 0}, {"total", 1}, {"barrier", true}, {"health_line", "path 1 · par 1.0"}},
+        QJsonObject{{"n", 5}, {"title", "Docs"}, {"status", "draft"}, {"done", 0}, {"total", 1}, {"barrier", false}, {"health_line", ""}}};
+    t["phases_health"] = QJsonObject{
+        {"1", QJsonObject{{"tasks", 2}, {"critical_path", 2}, {"parallelism", 1.0}, {"warnings", QJsonArray()}}},
+        {"2", QJsonObject{{"tasks", 2}, {"critical_path", 2}, {"parallelism", 1.0}, {"warnings", QJsonArray{"Backend holds 2 of 2"}}}},
+        {"3", QJsonObject{{"tasks", 1}, {"critical_path", 1}, {"parallelism", 1.0}, {"warnings", QJsonArray()}}},
+        {"4", QJsonObject{{"tasks", 1}, {"critical_path", 1}, {"parallelism", 1.0}, {"warnings", QJsonArray()}}},
+        {"5", QJsonObject{{"tasks", 1}, {"critical_path", 1}, {"parallelism", 1.0}, {"warnings", QJsonArray()}}}};
+    setTeam(t);
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(1300, 1000); workspace.show();
+    controller.refresh();
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    QTRY_COMPARE(workspace.findChildren<QFrame *>("teamPhaseScroll").size(), 5);
+    workspace.render();
+    QTest::qWait(100);
+    // U25: every state reads from phase_summary (an older hgs's G9 status: an
+    // approved phase that has not started waits as queued).
+    const auto state = [&](int n) { auto *f = phaseScrollOf(&workspace, n); return f ? f->property("state").toString() : QString(); };
+    QTRY_COMPARE(state(1), QStringLiteral("done"));
+    QTRY_COMPARE(state(2), QStringLiteral("done"));
+    QTRY_COMPARE(state(3), QStringLiteral("running"));
+    QTRY_COMPARE(state(4), QStringLiteral("queued"));
+    auto *more = phaseScrollOf(&workspace, 4)->findChild<QToolButton *>("teamPhaseMore");
+    QVERIFY(more);
+    // A declined confirmation sends nothing; a confirmed one sends the phase.
+    armConfirm(&panel, true);
+    chooseMenuAction("teamPhaseReturnToDraft");
+    more->click();
+    QTest::qWait(300);
+    QCOMPARE(calls(script(), "return-to-draft").size(), 0);
+    // The workspace may have rebuilt its rows meanwhile: find the button again.
+    more = phaseScrollOf(&workspace, 4)->findChild<QToolButton *>("teamPhaseMore");
+    QVERIFY(more);
+    armConfirm(&panel, false);
+    chooseMenuAction("teamPhaseReturnToDraft");
+    more->click();
+    QTRY_COMPARE(calls(script(), "return-to-draft").size(), 1);
+    QCOMPARE(calls(script(), "return-to-draft").first()["phase"].toInt(), 4);
+    QCOMPARE(calls(script(), "discard-phase").size(), 0);
 }
 
 void TestTeamsUi::phaseBandsStackWithStatusDecisionAndHealth()

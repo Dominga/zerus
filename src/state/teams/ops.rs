@@ -187,6 +187,11 @@ fn parse_member(value: &Value) -> anyhow::Result<Member> {
     if member.prompt_snapshot.is_none() {
         member.prompt_snapshot = super::catalog::snapshot_for(&member.role);
     }
+    // U45: the role's model list, copied as the prompt is.
+    if member.models.is_empty() {
+        member.models = super::catalog::models_for(&member.role);
+    }
+    super::models::check_choices(&member.models)?;
     member.state = match member.session {
         Some(_) => MemberState::Active,
         None => MemberState::NotCreated,
@@ -288,6 +293,8 @@ fn parse_task(value: &Value) -> anyhow::Result<Task> {
     // assigned, so a request can never carry its own run.
     task.pipeline_run = None;
     check_pipeline(&task.pipeline)?;
+    // U45: the models allowed for the task and a role instead of an assignee.
+    super::models::check_task(&mut task)?;
     Ok(task)
 }
 
@@ -458,7 +465,17 @@ fn plan(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) 
             ..Default::default()
         });
     }
-    phases.sort_by_key(|phase| phase.n);
+    // U42 (#587): a phase the plan already had keeps its proposer, its time
+    // and its place in the order (a move stays); a new one goes after them by
+    // number.
+    for phase in &mut phases {
+        if let Some(old) = team.phases.iter().find(|old| old.n == phase.n) {
+            phase.added_by = old.added_by.clone();
+            phase.added_at = old.added_at;
+            phase.order = old.order();
+        }
+    }
+    phases.sort_by_key(|phase| (if phase.order == 0 { u32::MAX } else { phase.order }, phase.n));
     // The plan lists the phases in order; the owner may move a draft later (F10).
     // Phase 1 is the approved plan and has no record, so the orders start at 2.
     for (index, phase) in phases.iter_mut().enumerate() {
@@ -1081,16 +1098,7 @@ fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, of
             "Phase {n} is done; a finished phase stays"
         );
         // Started or decided work stays: cancel it first.
-        let started: Vec<String> = tasks
-            .iter()
-            .filter_map(|id| team.task(*id))
-            .filter(|task| {
-                task.status.finished()
-                    || !matches!(task.status, TaskStatus::Pending | TaskStatus::Draft)
-                    || task.attempts.iter().any(|attempt| !matches!(attempt.state, AttemptState::Revoked | AttemptState::Refused))
-            })
-            .map(|task| format!("#{}", task.id))
-            .collect();
+        let started = started_tasks(team, at);
         ensure!(
             started.is_empty(),
             "Phase {n} has started work ({}): cancel those tasks first, then discard the phase",
@@ -1202,6 +1210,76 @@ fn accept_phase(team: &mut Team, at: usize, label: &str, alongside: bool) -> &'s
     } else {
         "running"
     }
+}
+
+/// U39: the tasks of an accepted phase whose work started or was decided.
+fn started_tasks(team: &Team, at: usize) -> Vec<String> {
+    team.phases[at]
+        .tasks
+        .iter()
+        .filter_map(|id| team.task(*id))
+        .filter(|task| {
+            task.status.finished()
+                || !matches!(task.status, TaskStatus::Pending | TaskStatus::Draft)
+                || task.attempts.iter().any(|attempt| !matches!(attempt.state, AttemptState::Revoked | AttemptState::Refused))
+        })
+        .map(|task| format!("#{}", task.id))
+        .collect()
+}
+
+/// U42 (#587): an approved or queued phase whose work has not started goes
+/// back to a draft that waits for the owner's approval again: you do it, or
+/// the lead on your word naming the phase. Its tasks return to Draft and the
+/// drafts are numbered after the accepted phases again.
+fn return_to_draft(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    let owner_word = verified_word(input)?;
+    ensure!(owner_word.is_none() || actor.is_lead(team), "Only the lead acts on the owner's word");
+    ensure!(
+        matches!(actor, Actor::Human) || parent_approves(team, actor) || owner_word.is_some(),
+        "Only you return a phase to a draft; the lead does it on your word: pass \"owner_word\""
+    );
+    ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
+    let n = phase_number(input)?;
+    let at = team.phases.iter().position(|phase| phase.n == n).with_context(|| format!("Unknown phase {n}"))?;
+    ensure!(team.phases[at].state.is_accepted(), "Phase {n} is not approved or queued; only an accepted phase returns to a draft");
+    ensure!(
+        !team.settings.auto_accept,
+        "Auto-accept is on and would accept the draft again at once: turn it off first"
+    );
+    let tasks = team.phases[at].tasks.clone();
+    ensure!(
+        !tasks.is_empty() && !tasks.iter().all(|id| team.task(*id).is_none_or(|task| task.status.finished())),
+        "Phase {n} is done; a finished phase stays"
+    );
+    let started = started_tasks(team, at);
+    ensure!(
+        started.is_empty(),
+        "Phase {n} has started work ({}): cancel those tasks first, then return the phase to a draft",
+        started.join(", ")
+    );
+    let wanted: BTreeSet<u32> = tasks.iter().copied().collect();
+    for task in &mut team.tasks {
+        if wanted.contains(&task.id) && task.status == TaskStatus::Pending {
+            task.status = TaskStatus::Draft;
+        }
+    }
+    let label = actor.label(team);
+    let record = &mut team.phases[at];
+    let from = record.state;
+    record.state = PhaseState::Draft;
+    record.decided_by.clear();
+    record.decided_at = None;
+    record.owner_word = None;
+    let title = record.title.clone();
+    events.push(Event::new(
+        "phase_returned_to_draft",
+        json!({"by":label,"phase":n,"title":title,"tasks":tasks,"from":from,"owner_word":owner_word}),
+    ));
+    // A draft is numbered after every accepted phase (F285).
+    let renumbering = renumbered(team, &label, events);
+    let now_n = renumbering["phases"].as_array().into_iter().flatten().find(|moved| moved["from"] == n).and_then(|moved| moved["to"].as_u64()).map_or(n, |to| to as u32);
+    let ids = team.phases.iter().find(|phase| phase.n == now_n).map(|phase| phase.tasks.clone()).unwrap_or_default();
+    Ok(json!({"status":"phase_returned_to_draft","phase":now_n,"from_phase":n,"tasks":ids,"renumbered":renumbering}))
 }
 
 /// The phase number of a request.
@@ -1559,6 +1637,34 @@ fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<
             }
             task.pipeline = pipeline;
             fields.push("pipeline");
+        }
+        // U45: the models allowed for the task, and a role instead of an
+        // assignee (a role clears the assignee; an assignee clears the role).
+        if value.get("models").is_some() || value.get("role").is_some() {
+            let old = (task.models.join(", "), task.role.clone());
+            if let Some(models) = value.get("models") {
+                task.models = serde_json::from_value(models.clone()).context("models is a list of model ids")?;
+                fields.push("models");
+            }
+            if let Some(role) = value.get("role") {
+                task.role = role.as_str().context("role is a role name or empty")?.to_owned();
+                if !task.role.trim().is_empty() {
+                    task.assignee.clear();
+                    task.pinned = false;
+                }
+                fields.push("role");
+            } else if fields.contains(&"assignee") {
+                task.role.clear();
+            }
+            super::models::check_task(task)?;
+            if old.0 != task.models.join(", ") {
+                changes.push(json!({"kind":"changed","task":id,"title":task.title,"field":"models","from":old.0,"to":task.models.join(", ")}));
+            }
+            if old.1 != task.role {
+                changes.push(json!({"kind":"changed","task":id,"title":task.title,"field":"role","from":old.1,"to":task.role}));
+            }
+        } else if fields.contains(&"assignee") && !task.role.is_empty() {
+            task.role.clear();
         }
         // U27: the lead or the owner moves a task to a lane; null takes it out.
         if let Some(value) = value.get("lane") {
@@ -1962,6 +2068,13 @@ fn structured_report(team: &Team, id: u32, report: &Value) -> anyhow::Result<Val
                 "A criterion cites evidence {index} that the report does not list"
             );
         }
+    }
+    // U36: the files the attempt changed, which a stage reads in a folder
+    // without Git.
+    let files = report["files"].as_array().cloned().unwrap_or_default();
+    ensure!(report.get("files").is_none_or(Value::is_array) && files.len() <= 500, "A report lists at most 500 changed files");
+    for file in &files {
+        ensure!(file.as_str().is_some_and(|file| !file.trim().is_empty() && file.chars().count() <= 500), "A changed file is a path of at most 500 characters");
     }
     let limits = report["limits"].as_array().cloned().unwrap_or_default();
     ensure!(limits.len() <= 50, "A report lists at most 50 limits");
@@ -3165,6 +3278,10 @@ fn reassign(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
     let revoked = revoke(task, "reassigned");
     task.assignee = target.to_owned();
     task.pinned = true;
+    // U45: a task for a role now has its member; a waiting step starts over.
+    task.role.clear();
+    task.waits = None;
+    task.prepare.clear();
     if task.status != TaskStatus::Draft {
         task.status = TaskStatus::Pending;
     }
@@ -3181,6 +3298,9 @@ fn retry(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>)
     ensure!(!task.status.finished() && task.status != TaskStatus::Draft, "Task #{id} cannot be retried now");
     let revoked = revoke(task, "retried");
     task.status = TaskStatus::Pending;
+    // Spec 0: the lead or the owner retries a refused or unconfirmed step.
+    task.waits = None;
+    task.prepare.clear();
     events.push(Event::new("retried", json!({"by":label,"task":id,"revoked_attempt":revoked})));
     Ok(json!({"status":"pending","task":id,"revoked_attempt":revoked}))
 }
@@ -3282,6 +3402,7 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
         "add-to-phase" => add_to_phase(team, input, actor, offline, events),
         "approve-phase" => decide_phase(team, input, actor, true, offline, events),
         "discard-phase" => decide_phase(team, input, actor, false, offline, events),
+        "return-to-draft" => return_to_draft(team, input, actor, events),
         "reject-phase" | "undo-reject-phase" | "rework-phase" => send_back(team, op, input, actor, events),
         "settings" => settings(team, input, actor, events),
         "finding" => finding(team, input, actor, offline, events),
@@ -3935,6 +4056,85 @@ mod tests {
         team.task_mut(3).unwrap().status = TaskStatus::Accepted;
         let error = apply(&mut team, "discard-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
         assert!(error.contains("is done"), "{error}");
+    }
+
+    /// U42 (#587): an accepted phase with no started work returns to a draft:
+    /// by you, or by the lead on your word; its tasks go back to Draft and it
+    /// waits for approval again, numbered after the accepted phases.
+    #[test]
+    fn an_accepted_phase_returns_to_a_draft_until_its_work_starts() {
+        let mut team = running_team();
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        for id in [3, 4] {
+            extend(&mut team, &json!({"tasks":[{"id":id,"title":"T","assignee":"dev"}]}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        }
+        apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap();
+        apply(&mut team, "approve-phase", &json!({"phase":3}), &Actor::Human, &none, &mut events).unwrap();
+        // Both wait behind phase 1, which still runs.
+        assert_eq!(team.phases.iter().map(|phase| phase.state).collect::<Vec<_>>(), vec![PhaseState::Queued, PhaseState::Queued]);
+        // The lead alone cannot; a draft is not returned again.
+        let error = apply(&mut team, "return-to-draft", &json!({"phase":2}), &Actor::Member("lead".into()), &none, &mut events).unwrap_err().to_string();
+        assert!(error.contains("Only you return a phase to a draft"), "{error}");
+        // Auto-accept would take it again at once: refused while it is on.
+        let mut auto = team.clone();
+        auto.settings.auto_accept = true;
+        let error = apply(&mut auto, "return-to-draft", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
+        assert!(error.contains("Auto-accept is on"), "{error}");
+        // Started work stays.
+        let mut started = team.clone();
+        started.task_mut(3).unwrap().status = TaskStatus::InProgress;
+        let error = apply(&mut started, "return-to-draft", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
+        assert!(error.contains("has started work (#3)"), "{error}");
+        // You return the queued phase 2: it becomes the draft after phase 3,
+        // its task Draft again, with a feed event.
+        events.clear();
+        let returned = apply(&mut team, "return-to-draft", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!((returned["status"].as_str(), returned["from_phase"].as_u64(), returned["phase"].as_u64()), (Some("phase_returned_to_draft"), Some(2), Some(4)));
+        let draft = team.phases.iter().find(|phase| phase.state == PhaseState::Draft).unwrap();
+        assert_eq!((draft.n, draft.decided_at, draft.decided_by.as_str()), (4, None, ""));
+        let ids = draft.tasks.clone();
+        assert!(ids.iter().all(|id| team.task(*id).unwrap().status == TaskStatus::Draft), "{ids:?}");
+        let event = events.iter().find(|event| event.kind == "phase_returned_to_draft").unwrap();
+        assert_eq!((event.payload["by"].as_str(), event.payload["phase"].as_u64(), event.payload["from"].as_str()), (Some("You"), Some(2), Some("queued")));
+        // It waits for your approval again, as any draft.
+        let approved = apply(&mut team, "approve-phase", &json!({"phase":4}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(approved["status"], "phase_approved");
+        // The lead on your word (the CLI's checked sentence) returns a queued one.
+        let word = json!({"phase":4,"owner_word_checked":{"text":"return phase 4 to draft","at":1.0,"event":9},
+            "owner_word_event":9,"owner_word_change":"the return of phase 4 to a draft"});
+        let returned = apply(&mut team, "return-to-draft", &word, &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        assert_eq!(returned["status"], "phase_returned_to_draft");
+        assert_eq!(events.last().map(|event| event.payload["owner_word"]["text"].clone()), Some(json!("return phase 4 to draft")));
+        // A draft does not return again.
+        let n = team.phases.iter().find(|phase| phase.state == PhaseState::Draft).unwrap().n;
+        let error = apply(&mut team, "return-to-draft", &json!({"phase":n}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
+        assert!(error.contains("not approved or queued"), "{error}");
+    }
+
+    /// U42 (#587): a plan edit keeps the phases it already had: their order,
+    /// proposer and time; a new phase goes after them.
+    #[test]
+    fn a_plan_edit_keeps_the_phases_it_already_had() {
+        let (mut team, _) = create("t", &json!({"name":"Checkout","lead":{"id":"lead","agent":"claude"}})).unwrap();
+        let mut events = Vec::new();
+        let input = |phases: Value, tasks: Value| json!({"members":[{"id":"dev","role":"Backend","agent":"codex"}],"phases":phases,"tasks":tasks});
+        let tasks = json!([{"id":1,"title":"A","assignee":"dev"},{"id":2,"title":"B","assignee":"dev","phase":2},{"id":3,"title":"C","assignee":"dev","phase":3}]);
+        plan(&mut team, &input(json!([{"n":2,"title":"Two"},{"n":3,"title":"Three"}]), tasks.clone()), &Actor::Member("lead".into()), &mut events).unwrap();
+        // The owner moved phase 3 before phase 2; both were proposed earlier.
+        for phase in &mut team.phases {
+            phase.added_at = 100.0 + phase.n as f64;
+            phase.order = if phase.n == 3 { 2 } else { 3 };
+        }
+        let mut more = tasks.as_array().unwrap().clone();
+        more.push(json!({"id":4,"title":"D","assignee":"dev","phase":4}));
+        plan(&mut team, &input(json!([{"n":2,"title":"Two again"},{"n":3,"title":"Three"},{"n":4,"title":"Four"}]), json!(more)), &Actor::Human, &mut events).unwrap();
+        let seen: Vec<(u32, u32, &str, f64)> = team.phases.iter().map(|phase| (phase.n, phase.order(), phase.added_by.as_str(), phase.added_at)).collect();
+        assert_eq!(seen[0], (3, 2, "Lead", 103.0));
+        assert_eq!(seen[1], (2, 3, "Lead", 102.0));
+        assert_eq!((seen[2].0, seen[2].1, seen[2].2), (4, 4, "You"));
+        assert!(seen[2].3 > 1000.0);
+        assert_eq!(team.phases[1].title, "Two again");
     }
 
     #[test]

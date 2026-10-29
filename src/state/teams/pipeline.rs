@@ -311,7 +311,6 @@ fn role_matches(name: &str, id: &str) -> bool {
 
 /// Stage delivery gives the open stage to `member` (U36, #532). The task's
 /// implementer never takes its own stage.
-#[cfg_attr(not(test), allow(dead_code))] // the dispatcher's stage delivery (#532) calls it
 pub(crate) fn give_stage(team: &mut Team, id: u32, member: &str) -> anyhow::Result<String> {
     ensure!(candidates(team, id).iter().any(|found| found == member), "{} cannot take this stage of task #{id}", team.role_of(member));
     let task = team.task_mut(id).context("Unknown task")?;

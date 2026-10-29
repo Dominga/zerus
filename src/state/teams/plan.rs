@@ -248,7 +248,8 @@ fn urgent(team: &Team, id: u32) -> bool {
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub(crate) struct Finding {
-    /// `assignee`, `cycle`, `dependency`, `member`, `offline` or `members`.
+    /// `assignee`, `cycle`, `dependency`, `member`, `offline`, `members` or
+    /// `models` (U45).
     pub kind: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task: Option<u32>,
@@ -758,8 +759,18 @@ pub(crate) fn validate(team: &Team, offline: &BTreeSet<String>) -> Validation {
         found.errors.push(finding("member", None, Some(&team.lead), "The team has no lead".into()));
     }
     for task in team.tasks.iter().filter(|task| task.status != TaskStatus::Cancelled) {
-        if task.assignee.is_empty() || !live(&task.assignee) {
+        // U45: a task for a role needs a member of that role; one whose
+        // members allow none of its models waits at run time.
+        if super::models::for_role(task) {
+            if super::models::candidates(team, task).is_empty() {
+                found.errors.push(finding("assignee", Some(task.id), None, format!("#{} {}: no member has the role {}", task.id, task.title, task.role)));
+            } else if !super::models::can_run(team, task) {
+                found.warnings.push(finding("models", Some(task.id), None, format!("#{} {}: {}", task.id, task.title, super::models::no_fit_reason(team, task))));
+            }
+        } else if task.assignee.is_empty() || !live(&task.assignee) {
             found.errors.push(finding("assignee", Some(task.id), None, format!("#{} {}: no assignee", task.id, task.title)));
+        } else if super::models::applies(team, task) && !super::models::can_run(team, task) {
+            found.warnings.push(finding("models", Some(task.id), None, format!("#{} {}: {}", task.id, task.title, super::models::no_fit_reason(team, task))));
         }
         for dep in &task.deps {
             if team.task(dep.task).is_none() {

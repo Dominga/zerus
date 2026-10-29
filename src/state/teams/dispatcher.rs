@@ -81,6 +81,9 @@ pub(crate) struct Seen {
     pub limited: Option<SeenLimit>,
     /// When its session last reported any event.
     pub last_event_at: Option<f64>,
+    /// U45: the model and effort its session record names now.
+    pub model: String,
+    pub effort: String,
 }
 
 /// The newest Background job of a session (C12).
@@ -196,6 +199,8 @@ pub(crate) fn seen(listing: &Value) -> Vec<Seen> {
                 muted: record["notification_preferences"]["muted"] == true,
                 notify_revision: record["notification_preferences"]["revision"].as_u64(),
                 limited,
+                model: field("model").to_owned(),
+                effort: field("effort").to_owned(),
             });
         }
     }
@@ -209,6 +214,12 @@ pub(crate) enum Step {
     Adopt { member: String, session: SessionRef },
     Launch { member: String },
     HandOut { task: u32, member: String },
+    /// U45: switch the member's model and effort before it gets the task.
+    SwitchModel { task: u32, member: String, from: String, model: String, effort: String },
+    /// U45: the switch was not confirmed in time; the task waits for the lead.
+    ModelUncertain { task: u32 },
+    /// U45: no member can run the task's models; it waits with the reason.
+    TaskWaits { task: u32, reason: String },
     /// U31: an idle member takes an independent task of the next draft phase.
     WorkAhead { task: u32, member: String },
     /// U49: a draining member owes nothing: pause its session, then remove it.
@@ -293,6 +304,11 @@ pub(crate) enum Step {
     /// Gives a ready task to a free member with the assignee's role: the
     /// assignee is busy, or failed the task's last attempt.
     Rebalance { task: u32, from: String, to: String },
+    /// U36: gives a task's waiting stage to a free member with its role (or
+    /// its pinned member), in the task's own folder.
+    StageOut { task: u32, member: String },
+    /// U36: an ended stage's detached checkout and temporary folder go.
+    StageCleanup { task: u32, run: String },
     /// Tells the lead, in one message, which open tasks Zerus gave to
     /// another member with the same role.
     Rebalanced { tasks: Vec<u32> },
@@ -319,6 +335,16 @@ fn can_take_a_message(found: &Seen) -> bool {
         // A turn (`busy`) or a question/approval (`attention`) is not a turn
         // that ended; an idle session with Background work is (U18).
         && matches!(found.activity.as_str(), "idle" | "background")
+}
+
+/// U45: the hand-out of a task to its assignee, or to another member (a
+/// member of its role, or a peer of the assignee) as a rebalance.
+fn deliver(task: &Task, member: &Member) -> Step {
+    if member.id == task.assignee {
+        Step::HandOut { task: task.id, member: member.id.clone() }
+    } else {
+        Step::Rebalance { task: task.id, from: task.assignee.clone(), to: member.id.clone() }
+    }
 }
 
 fn session_of<'a>(member: &Member, seen: &'a [Seen]) -> Option<&'a Seen> {
@@ -803,16 +829,18 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             steps.push(Step::Rebalanced { tasks });
         }
     }
-    // Members busy with an open attempt, or handed one in this tick. A7: a
-    // member whose undecided report was captured from its last reply counts as
-    // busy too - no hand-out, rebalance or work ahead, and it has work, so it
-    // does not starve (C7) - until that report is decided or replaced (A6).
+    // Members busy with an open attempt, or handed one in this tick, or with
+    // a stage of another member's task (U36). A7: a member whose undecided
+    // report was captured from its last reply counts as busy too - no
+    // hand-out, rebalance or work ahead, and it has work, so it does not
+    // starve (C7) - until that report is decided or replaced (A6).
     let mut busy: BTreeSet<&str> = team
         .tasks
         .iter()
         .filter_map(|task| task.open_attempt())
         .map(|attempt| attempt.member.as_str())
         .chain(team.members.iter().filter(|member| team.captured_hold(&member.id).is_some()).map(|member| member.id.as_str()))
+        .chain(super::stages::busy(team))
         .collect();
     // C7: a member idle without a ready task while tasks are open starves the
     // plan. The lead hears once after 20 minutes; the episode ends with work.
@@ -912,11 +940,88 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             && !refused_recently(member)
             && session_of(member, seen).is_some_and(|s| s.free && !s.run_id.is_empty())
     };
+    // U36: a waiting stage goes to its first free candidate (the pinned
+    // member, or a member with its role who did not implement the task),
+    // before new tasks: it finishes work already done.
+    if team.status == TeamStatus::Running {
+        for (task, candidates) in super::stages::waiting(team) {
+            if let Some(member) = candidates.iter().filter_map(|id| team.member(id)).find(|member| available(member, &busy)) {
+                busy.insert(member.id.as_str());
+                steps.push(Step::StageOut { task, member: member.id.clone() });
+            }
+        }
+    }
+    for (task, run) in super::stages::to_clean(team) {
+        steps.push(Step::StageCleanup { task, run });
+    }
     // C6: among a member's ready tasks the one with the most transitive
     // dependants goes first, then the lowest number.
     let ready = plan::dispatch_order(team, ready_ids);
     for id in ready {
         let Some(task) = team.task(id) else { continue };
+        // Spec 0: a refused or unconfirmed step waits for the lead or you.
+        if task.waits.is_some() {
+            continue;
+        }
+        // U45: a task with models or for a role goes to a member that can run
+        // one of its models, switched first when it must be.
+        if super::models::applies(team, task) {
+            if let Some(pending) = super::models::pending(task) {
+                // The member is busy with this task's switch until it shows.
+                busy.insert(pending.member.as_str());
+                let member = team.member(&pending.member);
+                let found = member.and_then(|member| session_of(member, seen));
+                if let (Some(member), Some(found)) = (member, found.filter(|found| super::models::confirmed(pending, &found.model, &found.effort))) {
+                    if found.free && !refused_recently(member) {
+                        steps.push(deliver(task, member));
+                    }
+                } else if now - pending.at >= super::models::CONFIRM_SECONDS {
+                    steps.push(Step::ModelUncertain { task: id });
+                }
+                continue;
+            }
+            if !super::models::can_run(team, task) {
+                steps.push(Step::TaskWaits { task: id, reason: super::models::no_fit_reason(team, task) });
+                continue;
+            }
+            let failed = |m: &Member| !task.pinned && task.attempts.iter().any(|a| a.member == m.id && matches!(a.state, AttemptState::Rejected | AttemptState::Refused));
+            let candidates = super::models::candidates(team, task);
+            let fits: Vec<(&Member, super::models::Fit)> = candidates
+                .iter()
+                .filter(|m| available(m, &busy) && !failed(m) && super::stages::held(team, &m.id).is_none())
+                .filter_map(|m| {
+                    let found = session_of(m, seen)?;
+                    let current = if found.model.is_empty() { super::models::launch_model(m) } else { (found.model.as_str(), found.effort.as_str()) };
+                    super::models::fit(m, task, current).map(|fit| (*m, fit))
+                })
+                .collect();
+            // A member already on an allowed model goes before one that switches.
+            let chosen = fits.iter().find(|(_, fit)| *fit == super::models::Fit::Ready).or_else(|| fits.first());
+            match chosen {
+                Some((member, super::models::Fit::Ready)) => {
+                    busy.insert(member.id.as_str());
+                    steps.push(deliver(task, member));
+                }
+                Some((member, super::models::Fit::Switch(choice))) => {
+                    busy.insert(member.id.as_str());
+                    let found = session_of(member, seen);
+                    let from = found.filter(|found| !found.model.is_empty()).map(|found| super::models::label(&found.model, &found.effort)).unwrap_or_default();
+                    steps.push(Step::SwitchModel { task: id, member: member.id.clone(), from, model: choice.model.clone(), effort: choice.effort.clone() });
+                }
+                None => {
+                    // Start the first member that could run it once it is up.
+                    if let Some(member) = candidates.iter().find(|m| {
+                        m.session.is_none() && m.state != MemberState::Paused && m.launch_id.is_empty() && m.error.is_empty()
+                            && super::models::fit(m, task, super::models::launch_model(m)).is_some()
+                    }) {
+                        if launching.insert(member.id.clone()) {
+                            steps.push(Step::Launch { member: member.id.clone() });
+                        }
+                    }
+                }
+            }
+            continue;
+        }
         let Some(member) = team.member(&task.assignee) else { continue };
         // C1: the lead's own task is handed out without a message; it goes to
         // the inbox and never waits for the lead to be idle.
@@ -937,13 +1042,17 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         // Members with one role do the same work: a ready task goes to a free
         // one when its assignee is busy, and a retry to one that did not fail
         // it (a fresh context). The lead's or your choice stays.
+        // U36: a test holding the assignee's folder keeps its next task back;
+        // a free member with the same role may take it.
+        let held = super::stages::held(team, &member.id).is_some();
         if !task.pinned {
             let failed = |m: &Member| task.attempts.iter().any(|a| a.member == m.id && matches!(a.state, AttemptState::Rejected | AttemptState::Refused));
-            let assignee_fits = available(member, &busy) && !failed(member);
+            let assignee_fits = available(member, &busy) && !failed(member) && !held;
             if !assignee_fits {
                 let role = team.role_of(&member.id);
                 if let Some(peer) = team.members.iter().find(|m| {
                     m.id != member.id && m.id != team.lead && team.role_of(&m.id) == role && available(m, &busy) && !failed(m)
+                        && super::stages::held(team, &m.id).is_none()
                 }) {
                     busy.insert(peer.id.as_str());
                     steps.push(Step::Rebalance { task: id, from: member.id.clone(), to: peer.id.clone() });
@@ -951,7 +1060,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                 }
             }
         }
-        if matches!(member.state, MemberState::Removed | MemberState::Paused) || member.draining || busy.contains(member.id.as_str()) {
+        if matches!(member.state, MemberState::Removed | MemberState::Paused) || member.draining || busy.contains(member.id.as_str()) || held {
             continue;
         }
         if member.session.is_none() {
@@ -1996,7 +2105,7 @@ pub(crate) fn member_folder_path(team: &Team, member: &Member) -> anyhow::Result
 /// F1.4/F1.6: one git command in a folder. Tests can set a per-thread ceiling
 /// (a temp dir) so a TEMP inside another repository cannot leak into discovery
 /// without touching the process environment other tests share.
-fn git_command(folder: &str) -> std::process::Command {
+pub(crate) fn git_command(folder: &str) -> std::process::Command {
     let mut command = std::process::Command::new("git");
     // A member's folder may carry its own config: no fsmonitor, hooks or
     // optional locks run for these reads.
@@ -2058,7 +2167,7 @@ pub(crate) fn set_git_ceiling(ceiling: &str) {
     GIT_CEILING.with(|value| *value.borrow_mut() = Some(ceiling.to_owned()));
 }
 
-fn git_at(folder: &str, args: &[&str]) -> Option<String> {
+pub(crate) fn git_at(folder: &str, args: &[&str]) -> Option<String> {
     let output = git_command(folder).args(args).output().ok()?;
     if !output.status.success() {
         return None;
@@ -2428,6 +2537,52 @@ fn apply_settings(member: &Member) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// U45: switches a member's model and effort before it gets `task_id`. The
+/// step is recorded before the call, so a crash leaves it pending and then
+/// uncertain, never sent twice; the hand-out waits until the member's session
+/// record shows the new model. A refusal leaves the task waiting with its
+/// reason, as does a call whose outcome is unknown.
+fn switch_model(store: &mut Store, team: &Team, task_id: u32, member_id: &str, from: &str, model: &str, effort: &str) -> anyhow::Result<()> {
+    let session = team.member(member_id).and_then(|member| member.session.clone()).context("no session")?;
+    let to = super::models::label(model, effort);
+    change(store, &team.id, |team, events| {
+        let role = team.role_of(member_id);
+        let task = team.task_mut(task_id).context("unknown task")?;
+        anyhow::ensure!(super::models::pending(task).is_none() && task.waits.is_none(), "already switching");
+        super::models::record(task, Prepare { step: "model".into(), member: member_id.to_owned(), from: from.to_owned(), to: to.clone(), at: now(), result: "pending".into(), reason: String::new() });
+        events.push(Event::new("model_switch", json!({"task":task_id,"member":role,"from":from,"to":to})));
+        Ok(())
+    })?;
+    let mut input = json!({"request_id":uuid::Uuid::new_v4().to_string(),"expected_run_id":session.run_id,
+        "expected_conversation_id":session.conversation_id,"model":model});
+    if !effort.is_empty() {
+        input["effort"] = json!(effort);
+    }
+    let outcome = match hgs(&session.host, &["settings", &session.name, "--json"], Some(&input), Duration::from_secs(120)) {
+        Ok(output) if output.status.success() => return Ok(()),
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let line = stderr.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or("the settings change was refused");
+            ("refused", line.chars().take(300).collect::<String>())
+        }
+        Err(error) => ("uncertain", error.to_string().chars().take(300).collect()),
+    };
+    change(store, &team.id, |team, events| {
+        let role = team.role_of(member_id);
+        let task = team.task_mut(task_id).context("unknown task")?;
+        if let Some(step) = task.prepare.iter_mut().rev().find(|step| step.step == "model" && step.result == "pending" && step.member == member_id) {
+            step.result = outcome.0.into();
+            step.reason = outcome.1.clone();
+        }
+        super::models::wait(task, "model", &format!("{role} could not switch to {to}: {}", outcome.1), now());
+        events.push(Event::new(
+            if outcome.0 == "refused" { "model_switch_refused" } else { "model_switch_uncertain" },
+            json!({"task":task_id,"member":role,"to":to,"reason":outcome.1}),
+        ));
+        Ok(())
+    })
+}
+
 fn launch(team: &Team, member: &Member) -> anyhow::Result<()> {
     let folder = member_folder(team, member)?;
     let args = launch_args(team, member, &folder);
@@ -2575,6 +2730,13 @@ fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, fro
     let mut git_job: Option<(String, f64)> = None;
     change(store, team_id, |team, events| {
         anyhow::ensure!(team.status == TeamStatus::Running && plan::ready(team).contains(&task_id), "no longer ready");
+        // U45: a task for a role becomes its chosen member's before its
+        // pipeline is taken from that member's role.
+        if from == Some("") {
+            if let Some(task) = team.task_mut(task_id).filter(|task| super::models::for_role(task)) {
+                task.assignee = member_id.to_owned();
+            }
+        }
         // U36: the task's pipeline as the catalog has it at its first hand-out.
         super::pipeline::snapshot(team, task_id);
         let session = team.member(member_id).and_then(|m| m.session.clone()).context("no session")?;
@@ -2600,6 +2762,9 @@ fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, fro
             rebalanced_from: rebalanced.clone(),
             ..Default::default()
         });
+        // U45: the steps taken for this hand-out go with its attempt.
+        let prepared = super::models::take_for_attempt(task, member_id);
+        task.attempts.last_mut().unwrap().prepare = prepared;
         if let (false, Some((from_role, to_role))) = (rebalanced.is_empty(), roles) {
             events.push(Event::new("rebalanced", json!({"task":task_id,"from":from_role,"to":to_role,"from_member":rebalanced,"to_member":member_id})));
         }
@@ -2660,6 +2825,91 @@ fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, fro
                 task.continuation = None;
                 events.push(Event::new("unconfirmed", json!({"task":task_id,"attempt":n,"error":error})));
             }
+        }
+        Ok(())
+    })
+}
+
+/// U36: gives the task's waiting stage to `member` and sends the stage
+/// hand-off. The run is recorded before the send, so a crash leaves it with its
+/// member; a refused send puts it back to wait, and its checkout goes.
+fn stage_hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, host: &str) -> anyhow::Result<()> {
+    let team = store.load(team_id)?.context("unknown team")?;
+    anyhow::ensure!(team.status == TeamStatus::Running, "the team is not running");
+    let session = team.member(member_id).and_then(|m| m.session.clone()).context("no session")?;
+    let member_host = team.member(member_id).map(|m| m.computer.clone()).unwrap_or_default();
+    // The folder, the checkout and the file states, outside the store's lock.
+    let prepared = super::stages::prepare(&team, task_id)?;
+    let mut message = None;
+    let recorded = change(store, team_id, |team, events| {
+        let run_id = super::pipeline::give_stage(team, task_id, member_id)?;
+        super::stages::record(team, task_id, &run_id, &prepared);
+        let task = team.task(task_id).context("unknown task")?;
+        let run = task.pipeline_run.as_ref().and_then(|run| run.open_run()).context("no open stage")?;
+        let report_host = if member_host.is_empty() { String::new() } else { host.to_owned() };
+        message = Some((run_id.clone(), super::stages::hand_off_text(team, task, run, &prepared, &report_host)));
+        events.push(Event::new(
+            "stage_handed_out",
+            json!({"task":task_id,"stage":run.kind,"round":run.round,"to":team.role_of(member_id),"folder":prepared.folder,
+                "checkout":!prepared.checkout.is_empty(),"holds":prepared.holds}),
+        ));
+        Ok(())
+    });
+    if let Err(error) = recorded {
+        let _ = super::stages::clean_up(&StageRun { checkout: prepared.checkout.clone(), checkout_repo: prepared.checkout_repo.clone(), temp: prepared.temp.clone(), ..Default::default() });
+        return Err(error);
+    }
+    let (run_id, text) = message.context("no stage message")?;
+    let outcome = send(&session, &run_id, &text);
+    change(store, team_id, |team, events| {
+        let Some(task) = team.task_mut(task_id) else { return Ok(()) };
+        let pinned = task.pipeline_run.as_ref().and_then(|run| run.open_run()).and_then(|run| task.pipeline_run.as_ref()?.stages.get(run.stage)).map(|stage| stage.member.clone()).unwrap_or_default();
+        let Some(run) = task.pipeline_run.as_mut().and_then(|run| run.open_run_mut()).filter(|run| run.id == run_id) else { return Ok(()) };
+        match &outcome {
+            Sent::Delivered => {
+                run.delivered_at = Some(now());
+                events.push(Event::new("stage_delivered", json!({"task":task_id,"stage":run.kind,"round":run.round})));
+            }
+            Sent::Refused(error) => {
+                // Back to wait for a member; nothing reached this one.
+                let _ = super::stages::clean_up(run);
+                run.state = StageState::Waiting;
+                run.member = if pinned == run.member { pinned } else { String::new() };
+                run.delivered_at = None;
+                run.folder.clear();
+                run.checkout.clear();
+                run.temp.clear();
+                run.holds = false;
+                events.push(Event::new("stage_refused", json!({"task":task_id,"stage":run.kind,"error":error})));
+            }
+            Sent::Uncertain(error) => {
+                events.push(Event::new("stage_unconfirmed", json!({"task":task_id,"stage":run.kind,"error":error})));
+            }
+        }
+        Ok(())
+    })
+}
+
+/// U36: removes an ended stage's checkout and temporary folder, then forgets
+/// them; a failure is kept for the next tick and shown in the feed once.
+fn stage_clean_up(store: &mut Store, team: &Team, task_id: u32, run_id: &str) -> anyhow::Result<()> {
+    let Some(run) = team.task(task_id).and_then(|task| task.pipeline_run.as_ref()).and_then(|run| run.runs.iter().find(|run| run.id == run_id)).cloned() else {
+        return Ok(());
+    };
+    let removed = super::stages::clean_up(&run);
+    change(store, &team.id, |team, events| {
+        let Some(found) = team.task_mut(task_id).and_then(|task| task.pipeline_run.as_mut()).and_then(|run| run.runs.iter_mut().find(|run| run.id == run_id)) else {
+            return Ok(());
+        };
+        match &removed {
+            Ok(()) => {
+                if !found.checkout.is_empty() {
+                    events.push(Event::new("stage_checkout_removed", json!({"task":task_id,"stage":found.kind,"round":found.round})));
+                }
+                found.checkout.clear();
+                found.temp.clear();
+            }
+            Err(error) => anyhow::bail!("{error:#}"),
         }
         Ok(())
     })
@@ -3772,6 +4022,28 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
                 Ok(())
             })
         }
+        Step::SwitchModel { task, member, from, model, effort } => switch_model(store, team, *task, member, from, model, effort),
+        Step::ModelUncertain { task } => change(store, &team.id, |team, events| {
+            let task_id = *task;
+            let task = team.task_mut(task_id).context("unknown task")?;
+            let Some(step) = task.prepare.iter_mut().rev().find(|step| step.step == "model" && step.result == "pending") else { return Ok(()) };
+            step.result = "uncertain".into();
+            step.reason = format!("the session did not show {} within {} s", step.to, super::models::CONFIRM_SECONDS as u64);
+            let (member, to, reason) = (step.member.clone(), step.to.clone(), step.reason.clone());
+            super::models::wait(task, "model", &format!("The switch to {to} is unconfirmed: {reason}; retry or reassign"), now());
+            let role = team.role_of(&member);
+            events.push(Event::new("model_switch_uncertain", json!({"task":task_id,"member":role,"to":to,"reason":reason})));
+            Ok(())
+        }),
+        Step::TaskWaits { task, reason } => change(store, &team.id, |team, events| {
+            let task_id = *task;
+            let task = team.task_mut(task_id).context("unknown task")?;
+            if task.waits.is_none() {
+                super::models::wait(task, "model", reason, now());
+                events.push(Event::new("task_waits", json!({"task":task_id,"on":"model","reason":reason})));
+            }
+            Ok(())
+        }),
         Step::Settings { member } => {
             let found = team.member(member).cloned().context("unknown member")?;
             let result = apply_settings(&found);
@@ -3851,6 +4123,8 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
         }
         Step::Drain { member, pause } => drain_member(store, team, member, *pause),
         Step::Rebalance { task, from, to } => hand_out(store, &team.id, *task, to, Some(from), host),
+        Step::StageOut { task, member } => stage_hand_out(store, &team.id, *task, member, host),
+        Step::StageCleanup { task, run } => stage_clean_up(store, team, *task, run),
         Step::Rebalanced { tasks } => tell_lead_rebalanced(store, team, tasks),
         Step::TurnEnded { task, at, reply } => change(store, &team.id, |team, _| {
             if let Some(attempt) = team.task_mut(*task).and_then(|t| t.attempts.last_mut()) {
@@ -4219,8 +4493,15 @@ fn inside(folder: &str, root: &str) -> bool {
 fn run_outcome(team: &Team, member: &Member, folder: &Path, request: &Value) -> anyhow::Result<super::templates::Outcome> {
     let template = request["template"].as_str().unwrap_or_default();
     let args = request["args"].clone();
-    let plan = super::templates::plan(template, &args, folder)?;
     let timeout = Duration::from_secs(super::templates::timeout_for(template));
+    // U36: a test stage builds in the task's folder (or its checkout), with
+    // its own temporary folder, only while the stage is open.
+    if let Some((stage_folder, temp)) = super::stages::run_folder(team, &member.id, request["attempt"].as_str().unwrap_or_default(), template)? {
+        let plan = super::templates::plan(template, &args, &stage_folder)?;
+        let env: Vec<(&str, String)> = if temp.is_empty() { Vec::new() } else { ["TEMP", "TMP", "TMPDIR"].map(|key| (key, temp.clone())).to_vec() };
+        return Ok(super::templates::execute(&plan, &stage_folder, timeout, &env));
+    }
+    let plan = super::templates::plan(template, &args, folder)?;
     if template == "git-merge-lead" {
         let mine = member_folder_path(team, member)?;
         anyhow::ensure!(
@@ -4263,6 +4544,20 @@ fn record_run(store: &mut Store, team: &Team, member: &Member, request: &Value, 
     let attempt_id = request["attempt"].as_str().unwrap_or_default().to_owned();
     let role = team.role_of(&member.id);
     let recorded = change(store, &team.id, |team, events| {
+        let record = RunRecord { template: template.to_owned(), args: args.clone(), exit: outcome.exit, at: now(), ms: outcome.ms, timed_out: outcome.timed_out };
+        // U36: a stage's run is kept on its stage run.
+        if let Some(task) = team.tasks.iter_mut().find(|task| task.pipeline_run.as_ref().is_some_and(|run| run.runs.iter().any(|run| run.id == attempt_id))) {
+            let task_id = task.id;
+            let run = task.pipeline_run.as_mut().and_then(|run| run.runs.iter_mut().find(|run| run.id == attempt_id)).context("unknown stage")?;
+            run.runs.push(record);
+            let excess = run.runs.len().saturating_sub(20);
+            run.runs.drain(..excess);
+            events.push(Event::new(
+                "ran",
+                json!({"member":role,"task":task_id,"stage":run.kind,"round":run.round,"template":template,"exit":outcome.exit,"timed_out":outcome.timed_out}),
+            ));
+            return Ok(());
+        }
         let task = team
             .tasks
             .iter_mut()
@@ -4340,6 +4635,9 @@ fn start_run(
         return refuse(format!("attempt {attempt} does not run for this member"));
     }
     let template = request["template"].as_str().unwrap_or_default();
+    if let Err(error) = super::stages::run_folder(team, &member.id, attempt, template) {
+        return refuse(format!("{error:#}"));
+    }
     let plan = match super::templates::plan(template, &request["args"], folder) {
         Ok(plan) => plan,
         Err(error) => return refuse(format!("{error:#}")),
@@ -4826,6 +5124,10 @@ fn ensure_worker_now() -> anyhow::Result<()> {
 }
 
 #[cfg(test)]
+#[path = "models_tests.rs"]
+mod models_tests;
+
+#[cfg(test)]
 mod tests {
     use super::super::ops::{self, Actor};
     use super::*;
@@ -4852,6 +5154,120 @@ mod tests {
         ops::apply(&mut team, "approve", &json!({}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
         team
     }
+    /// U36: dev reported #1 under the Code pipeline; rev reviews and qa tests,
+    /// each with a free session; every member works in `folder`.
+    fn staged(folder: &str) -> Team {
+        let mut t = team();
+        t.folder = folder.to_owned();
+        t.members.push(Member { id: "rev".into(), role: "Reviewer".into(), agent: "claude".into(), state: MemberState::Active,
+            session: Some(SessionRef { name: "claude/x/rev".into(), run_id: "r2".into(), ..Default::default() }), ..Default::default() });
+        for member in &mut t.members {
+            member.folder = MemberFolder::Shared;
+            if member.id == "qa" {
+                member.state = MemberState::Active;
+                member.session = Some(SessionRef { name: "kimi/x/qa".into(), run_id: "r3".into(), ..Default::default() });
+            }
+        }
+        t.task_mut(1).unwrap().pipeline = "code".into();
+        super::super::pipeline::snapshot_with(&mut t, 1, &super::super::catalog::builtin());
+        let task = t.task_mut(1).unwrap();
+        task.attempts.push(Attempt { n: 1, id: "a1".into(), member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
+        task.status = TaskStatus::InProgress;
+        let mut events = Vec::new();
+        ops::apply(&mut t, "report", &json!({"task":1,"attempt":"a1","text":"Done"}), &Actor::Member("dev".into()), &BTreeSet::new(), &mut events).unwrap();
+        assert_eq!(t.task(1).unwrap().status, TaskStatus::InReview);
+        t
+    }
+    fn free_sessions() -> Vec<Seen> {
+        vec![session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", true), session("claude/x/rev", "r2", true), session("kimi/x/qa", "r3", true)]
+    }
+
+    #[test]
+    fn a_waiting_stage_goes_to_its_first_free_member_never_the_implementer() {
+        let mut t = staged("C:\\proj");
+        let found = steps(&t, &free_sessions(), 100.0);
+        assert!(found.contains(&Step::StageOut { task: 1, member: "rev".into() }), "{found:?}");
+        assert!(!found.iter().any(|step| matches!(step, Step::StageOut { member, .. } if member == "dev")), "{found:?}");
+        // A busy reviewer gets nothing; a second reviewer takes the stage.
+        let busy = vec![session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", true), session("claude/x/rev", "r2", false), session("kimi/x/qa", "r3", true)];
+        assert!(!steps(&t, &busy, 100.0).iter().any(|step| matches!(step, Step::StageOut { .. })));
+        t.members.push(Member { id: "rev2".into(), role: "Reviewer".into(), agent: "claude".into(), state: MemberState::Active,
+            session: Some(SessionRef { name: "claude/x/rev2".into(), run_id: "r4".into(), ..Default::default() }), ..Default::default() });
+        let mut seen = busy;
+        seen.push(session("claude/x/rev2", "r4", true));
+        assert!(steps(&t, &seen, 100.0).contains(&Step::StageOut { task: 1, member: "rev2".into() }));
+        // Given out, its member is busy with it: no second stage and no task.
+        super::super::pipeline::give_stage(&mut t, 1, "rev").unwrap();
+        let found = steps(&t, &free_sessions(), 100.0);
+        assert!(!found.iter().any(|step| matches!(step, Step::StageOut { .. })), "{found:?}");
+        assert!(!found.iter().any(|step| matches!(step, Step::HandOut { member, .. } if member == "rev")), "{found:?}");
+    }
+
+    #[test]
+    fn a_held_folder_keeps_the_implementers_next_task_back() {
+        let mut t = staged("C:\\proj");
+        // While #1 is in review, dev takes #2 as usual.
+        assert!(steps(&t, &free_sessions(), 100.0).contains(&Step::HandOut { task: 2, member: "dev".into() }));
+        let run = super::super::pipeline::give_stage(&mut t, 1, "rev").unwrap();
+        let mut events = Vec::new();
+        ops::apply(&mut t, "report", &json!({"task":1,"attempt":run,"verdict":"pass"}), &Actor::Member("rev".into()), &BTreeSet::new(), &mut events).unwrap();
+        // The test holds the folder: #2 waits, the test goes to qa.
+        let found = steps(&t, &free_sessions(), 100.0);
+        assert!(found.contains(&Step::StageOut { task: 1, member: "qa".into() }), "{found:?}");
+        assert!(!found.iter().any(|step| matches!(step, Step::HandOut { task: 2, .. } | Step::Rebalance { task: 2, .. })), "{found:?}");
+        // An ended stage with a temporary folder is cleaned up.
+        let run = super::super::pipeline::give_stage(&mut t, 1, "qa").unwrap();
+        t.task_mut(1).unwrap().pipeline_run.as_mut().unwrap().open_run_mut().unwrap().temp = "C:\\gone".into();
+        ops::apply(&mut t, "report", &json!({"task":1,"attempt":run,"verdict":"pass"}), &Actor::Member("qa".into()), &BTreeSet::new(), &mut events).unwrap();
+        let found = steps(&t, &free_sessions(), 100.0);
+        assert!(found.contains(&Step::StageCleanup { task: 1, run: run.clone() }), "{found:?}");
+        assert!(found.contains(&Step::HandOut { task: 2, member: "dev".into() }), "the hold ended: {found:?}");
+    }
+
+    #[test]
+    fn a_stage_hand_out_names_the_folder_and_a_refusal_puts_it_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("proj");
+        std::fs::create_dir_all(&folder).unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let t = staged(&folder.display().to_string());
+        store.create("11111111-1111-4111-8111-111111111532", &json!({}), t.clone(), vec![]).unwrap();
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::<(String, String)>::new()));
+        let record = sent.clone();
+        let refuse = std::rc::Rc::new(std::cell::Cell::new(true));
+        let refusing = refuse.clone();
+        set_fake_hgs(Some(Box::new(move |_, args: &[&str], input: Option<&Value>| {
+            assert_eq!(args.first().copied(), Some("send"));
+            let input = input.cloned().unwrap_or_default();
+            record.borrow_mut().push((args.get(1).copied().unwrap_or_default().to_owned(), input["text"].as_str().unwrap_or_default().to_owned()));
+            Ok(if refusing.get() { fake_output(1, "", "hgs: the session is busy") } else { fake_output(0, r#"{"status":"submitted"}"#, "") })
+        })));
+        let refused = stage_hand_out(&mut store, &t.id, 1, "rev", "");
+        let after_refusal = store.load(&t.id).unwrap().unwrap();
+        refuse.set(false);
+        let delivered = stage_hand_out(&mut store, &t.id, 1, "rev", "");
+        set_fake_hgs(None);
+        refused.unwrap();
+        delivered.unwrap();
+        let run = after_refusal.task(1).unwrap().pipeline_run.as_ref().unwrap().open_run().unwrap().clone();
+        assert_eq!((run.state, run.member.as_str(), run.folder.as_str()), (StageState::Waiting, "", ""), "a refused stage waits again");
+        let saved = store.load(&t.id).unwrap().unwrap();
+        let run = saved.task(1).unwrap().pipeline_run.as_ref().unwrap().open_run().unwrap().clone();
+        assert_eq!((run.state, run.member.as_str()), (StageState::Delivered, "rev"));
+        assert!(run.delivered_at.is_some());
+        assert_eq!(std::path::PathBuf::from(&run.folder), folder);
+        let sent = sent.borrow();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[1].0, "claude/x/rev");
+        assert!(sent[1].1.contains("review stage") && sent[1].1.contains(&format!("Folder: {}", folder.display())), "{}", sent[1].1);
+        assert!(sent[1].1.contains(&format!("\"attempt\":\"{}\"", run.id)), "{}", sent[1].1);
+        // hgs team current names the stage for its member.
+        let current = super::super::commands::current_view(&saved, "rev").unwrap();
+        assert_eq!((current["attempt"].clone(), current["stage"].clone()), (json!(run.id), json!("review")));
+        // The implementer is never given its own stage.
+        assert!(stage_hand_out(&mut store, &t.id, 1, "dev", "").is_err());
+    }
+
     fn session(name: &str, run: &str, free: bool) -> Seen {
         Seen { name: name.into(), run_id: run.into(), conversation_id: "c".into(), free, idle: free, live: true, ..Default::default() }
     }

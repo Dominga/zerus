@@ -10,10 +10,10 @@ use super::store::{self, canonical_uuid, Event, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|add-to-phase|approve-phase|discard-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|run|templates|safe-action|reports-to|sub-lead --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|add-to-phase|approve-phase|discard-phase|return-to-draft|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|run|templates|safe-action|reports-to|sub-lead --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
 
 const MUTATIONS: &[&str] = &[
-    "plan", "extend", "edit-draft", "move-phase", "add-to-phase", "approve-phase", "discard-phase", "reject-phase", "undo-reject-phase",
+    "plan", "extend", "edit-draft", "move-phase", "add-to-phase", "approve-phase", "discard-phase", "return-to-draft", "reject-phase", "undo-reject-phase",
     "rework-phase", "reports-to", "sub-lead", "finish", "approve", "commit", "discard", "pause", "resume", "stop",
     "archive", "report", "ask", "reply", "hold", "release", "accept", "reject", "skip-stage", "send-back", "reassign", "take-over", "cancel",
     "retry", "check", "expect", "swap-member", "use-last-reply", "relaunch", "add-member", "scale", "drain", "pause-member", "resume-member", "remove-member", "settings", "finding",
@@ -194,6 +194,37 @@ fn pending_phase(team: &Team) -> Option<u32> {
 
 /// Operations after which new work may be ready for the dispatcher, or a
 /// question or answer waits to be delivered.
+/// U42 (#587): the lead's owner word for a phase discard or a return to a
+/// draft, verified against its own session and spent on that one change. A
+/// lead without a word passes through: ops refuses what needs one.
+fn check_phase_change_word(
+    team: &Team,
+    op: &str,
+    input: &Value,
+    filled: &mut Value,
+    caller: &Actor,
+    verify: impl Fn(&Team, &Value, u32, super::owner_word::PhaseChange, f64) -> anyhow::Result<super::model::OwnerWord>,
+) -> anyhow::Result<()> {
+    if !matches!(caller, Actor::Member(member) if *member == team.lead) {
+        return Ok(());
+    }
+    let Some(word) = input.get("owner_word").filter(|word| word.is_object()) else { return Ok(()) };
+    let phase = input["phase"].as_u64().and_then(|phase| u32::try_from(phase).ok()).filter(|phase| *phase > 0).context("A phase number is required")?;
+    let (change, what) = if op == "discard-phase" {
+        (super::owner_word::PhaseChange::Discard, format!("the discard of phase {phase}"))
+    } else {
+        (super::owner_word::PhaseChange::ToDraft, format!("the return of phase {phase} to a draft"))
+    };
+    let verified = verify(team, word, phase, change, super::super::now())?;
+    if let Some(used) = team.owner_word_used(verified.event) {
+        bail!("That word was already used for {used}; ask the owner again");
+    }
+    filled["owner_word_checked"] = serde_json::to_value(&verified)?;
+    filled["owner_word_event"] = json!(verified.event);
+    filled["owner_word_change"] = json!(what);
+    Ok(())
+}
+
 fn starts_worker(op: &str) -> bool {
     matches!(
         op,
@@ -586,6 +617,8 @@ fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::
             if let Some(held) = captured_hold(team, &member.id) {
                 value["captured_hold"] = held;
             }
+            // U36: the stage it has, then the waiting stages it may take.
+            value["stage_queue"] = json!(super::stages::queue(team, &member.id));
             // U32: how the member joined on the owner's word, with the quote.
             if let Some(added) = &member.added {
                 value["added"] = added.clone();
@@ -703,6 +736,7 @@ fn summary(team: &Team) -> Value {
         .map(|m| {
             let mut value = json!({"id":m.id,"role":team.role_of(&m.id),"agent":m.agent,"model":m.model,"computer":m.computer,
                 "session":m.session,"state":m.state,"error":m.error,"queue":member_queue(team, &m.id),
+                "stage_queue":super::stages::queue(team, &m.id),
                 "services":m.services,"question":m.permission});
             if let Some(held) = captured_hold(team, &m.id) {
                 value["captured_hold"] = held;
@@ -1724,7 +1758,7 @@ pub(crate) fn commit_in_team(team: &Team, member_id: &str, input: &Value) -> any
 /// What `hgs team current` answers for one member of a team (spec section 5):
 /// the live attempt, its phase, its open questions and the report command.
 /// Read only.
-fn current_view(team: &Team, member: &str) -> anyhow::Result<Value> {
+pub(crate) fn current_view(team: &Team, member: &str) -> anyhow::Result<Value> {
     let Some((task, attempt)) = team
         .tasks
         .iter()
@@ -1733,12 +1767,13 @@ fn current_view(team: &Team, member: &str) -> anyhow::Result<Value> {
         .find(|(_, attempt)| attempt.member == member)
     else {
         // U36: a stage member's current attempt is the open stage run given to
-        // it; its answer is a verdict, not a report.
+        // it; its answer is a verdict, not a report. A waiting stage is not
+        // given out yet.
         if let Some((task, run)) = team.tasks.iter().rev().find_map(|task| {
             task.pipeline_run
                 .as_ref()
                 .and_then(PipelineRun::open_run)
-                .filter(|run| run.member == member)
+                .filter(|run| run.state == StageState::Delivered && run.member == member)
                 .map(|run| (task, run))
         }) {
             return Ok(json!({
@@ -1749,6 +1784,7 @@ fn current_view(team: &Team, member: &str) -> anyhow::Result<Value> {
                 "n": run.attempt,
                 "stage": run.kind,
                 "round": run.round,
+                "folder": run.folder,
                 "phase": if run.kind == "test" { "in_test" } else { "in_review" },
                 "open_questions": [],
                 "report": {
@@ -3056,7 +3092,7 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             }
             // C6: a sub-team's plan and phases are decided by the parent lead,
             // whose session is proven in the parent team, not in this one.
-            let parent_lead = matches!(op, "approve" | "approve-phase" | "discard-phase" | "reject-phase" | "undo-reject-phase") && {
+            let parent_lead = matches!(op, "approve" | "approve-phase" | "discard-phase" | "return-to-draft" | "reject-phase" | "undo-reject-phase") && {
                 let team = store.load(team_id)?.context("Unknown team")?;
                 parent_lead_calls(&store, &team)?
             };
@@ -3080,6 +3116,14 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                     filled["owner_word_event"] = json!(verified.event);
                     filled["owner_word_change"] = json!(if op == "approve" { "the plan approval" } else { "the phase approval" });
                 }
+            }
+            // U42 (#587): the lead discards an accepted phase, or returns one to
+            // a draft, on the owner's word naming the phase and the change; the
+            // CLI checks it here as it does for an approval.
+            if matches!(op, "discard-phase" | "return-to-draft") && !parent_lead {
+                let team = store.load(team_id)?.context("Unknown team")?;
+                let caller = actor(&team, op, &filled)?;
+                check_phase_change_word(&team, op, input, &mut filled, &caller, super::owner_word::verify_phase_change)?;
             }
             // U26: a lead changes the roster (or max_members) only on the
             // owner's fresh word, and only for the change that word names.
@@ -4984,6 +5028,65 @@ mod tests {
             )
             .unwrap();
             assert_eq!((removed["status"].as_str(), removed["member"].as_str()), (Some("removed"), Some("backend4")));
+        });
+    }
+
+    /// U42 (#587): the lead discards an accepted phase, or returns one to a
+    /// draft, on the owner's sentence naming the phase and the change; the CLI
+    /// verifies it as it does for an approval.
+    #[test]
+    fn the_lead_discards_or_redrafts_an_accepted_phase_on_the_owners_word() {
+        use crate::state::teams::model::{Phase, PhaseState, Task, TaskStatus};
+        let dir = tempfile::tempdir().unwrap();
+        let now = crate::state::now();
+        owner_word_events(dir.path(), &[
+            (now - 60.0, "discard phase 3, we do not need it"),
+            (now - 60.0, "верни фазу 2 в черновик"),
+            (now - 60.0, "phase 2 looks fine"),
+        ]);
+        crate::state::with_test_state_root(dir.path(), || {
+            set_test_caller_identities(Some((Some("c1".into()), None, None)));
+            let mut store = Store::open(true).unwrap();
+            let mut team = full_team();
+            team.tasks = vec![
+                Task { id: 1, title: "A".into(), assignee: "m1".into(), status: TaskStatus::InProgress, ..Default::default() },
+                Task { id: 2, phase: 2, title: "B".into(), assignee: "m1".into(), status: TaskStatus::Pending, ..Default::default() },
+                Task { id: 3, phase: 3, title: "C".into(), assignee: "m1".into(), status: TaskStatus::Pending, ..Default::default() },
+            ];
+            team.phases = vec![
+                Phase { n: 2, order: 2, title: "Two".into(), state: PhaseState::Queued, tasks: vec![2], ..Default::default() },
+                Phase { n: 3, order: 3, title: "Three".into(), state: PhaseState::Queued, tasks: vec![3], ..Default::default() },
+            ];
+            let id = team.id.clone();
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+            let call = |op: &str, request: &str, phase: u32, text: Option<&str>| {
+                let mut input = json!({"request_id":request,"team":id,"phase":phase});
+                if let Some(text) = text {
+                    input["owner_word"] = json!({"text":text});
+                }
+                run(op, &input, false)
+            };
+            // Without a word, or on a sentence that does not name the change,
+            // the lead cannot.
+            let error = call("discard-phase", "22222222-2222-4222-8222-222222222222", 3, None).unwrap_err().to_string();
+            assert!(error.contains("Only you discard an accepted phase"), "{error}");
+            let error = call("discard-phase", "33333333-3333-4333-8333-333333333333", 2, Some("phase 2 looks fine")).unwrap_err().to_string();
+            assert!(error.contains("has not asked to discard phase 2"), "{error}");
+            // A discard sentence names its own phase only.
+            let error = call("discard-phase", "44444444-4444-4444-8444-444444444444", 2, Some("discard phase 3")).unwrap_err().to_string();
+            assert!(error.contains("has not asked to discard phase 2"), "{error}");
+            // The owner's discard of phase 3 is the lead's word for it.
+            let discarded = call("discard-phase", "55555555-5555-4555-8555-555555555555", 3, Some("discard phase 3")).unwrap();
+            assert_eq!(discarded["status"], "phase_discarded");
+            // The Russian sentence returns phase 2 to a draft.
+            let returned = call("return-to-draft", "66666666-6666-4666-8666-666666666666", 2, Some("верни фазу 2 в черновик")).unwrap();
+            assert_eq!(returned["status"], "phase_returned_to_draft");
+            let saved = Store::open(false).unwrap().load(&id).unwrap().unwrap();
+            assert_eq!(saved.phases.iter().map(|phase| (phase.n, phase.state)).collect::<Vec<_>>(), vec![(2, PhaseState::Draft)]);
+            assert_eq!(saved.task(2).unwrap().status, TaskStatus::Draft);
+            let events = run("events", &json!({"team":id}), false).unwrap();
+            let item = events["items"].as_array().unwrap().iter().find(|item| item["kind"] == "phase_returned_to_draft").cloned().unwrap();
+            assert_eq!((item["detail"]["by"].as_str(), item["detail"]["owner_word"]["text"].as_str()), (Some("Lead"), Some("верни фазу 2 в черновик")));
         });
     }
 

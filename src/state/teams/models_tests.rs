@@ -1,0 +1,299 @@
+//! U45: the dispatcher's model switch before a hand-out and the tasks for a
+//! role, with the default path unchanged.
+use super::super::ops::{self, Actor};
+use super::*;
+
+/// A running team: a lead, the given members and tasks.
+fn team_with(members: Value, tasks: Value) -> Team {
+    let (mut team, _) = ops::create(
+        "t",
+        &json!({"name":"Models","lead":{"id":"lead","agent":"claude","session":{"name":"claude/x/lead","run_id":"r0"}}}),
+    )
+    .unwrap();
+    let mut events = Vec::new();
+    ops::apply(&mut team, "plan", &json!({"members":members,"tasks":tasks}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+    ops::apply(&mut team, "approve", &json!({}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+    team
+}
+
+fn member(id: &str, role: &str, agent: &str, model: &str, models: Value) -> Value {
+    json!({"id":id,"role":role,"agent":agent,"model":model,"models":models,
+        "session":{"name":format!("{agent}/x/{id}"),"run_id":format!("run-{id}"),"conversation_id":"c"}})
+}
+
+fn on(name: &str, model: &str, effort: &str, free: bool) -> Seen {
+    Seen {
+        name: name.into(),
+        run_id: format!("run-{}", name.rsplit('/').next().unwrap()),
+        conversation_id: "c".into(),
+        free,
+        idle: free,
+        live: true,
+        model: model.into(),
+        effort: effort.into(),
+        ..Default::default()
+    }
+}
+
+fn stored(team: &Team) -> (tempfile::TempDir, Store) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+    store.create("11111111-1111-4111-8111-111111111572", &json!({}), team.clone(), vec![]).unwrap();
+    (dir, store)
+}
+
+/// The team's feed kinds, oldest first.
+fn kinds(store: &Store, team: &str) -> Vec<String> {
+    let page = store.events(team, None, 200).unwrap();
+    let mut out: Vec<String> = page["items"].as_array().unwrap().iter().map(|item| item["kind"].as_str().unwrap().to_owned()).collect();
+    out.reverse();
+    out
+}
+
+/// A fake `hgs` that records each call and answers `settings` with `settings`.
+fn fake(settings: impl Fn() -> anyhow::Result<Output> + 'static) -> std::rc::Rc<std::cell::RefCell<Vec<(String, Value)>>> {
+    let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let record = calls.clone();
+    set_fake_hgs(Some(Box::new(move |_, args: &[&str], input: Option<&Value>| {
+        record.borrow_mut().push((args.join(" "), input.cloned().unwrap_or_default()));
+        match args.first().copied() {
+            Some("settings") => settings(),
+            _ => Ok(fake_output(0, r#"{"status":"submitted"}"#, "")),
+        }
+    })));
+    calls
+}
+
+/// Dev may run gpt-5 at medium or gpt-5.5 at high; task #1 wants the latter,
+/// task #2 names no model.
+fn switching() -> Team {
+    team_with(
+        json!([member("dev", "Backend", "codex", "gpt-5", json!([{"model":"gpt-5","effort":"medium"},{"model":"gpt-5.5","effort":"high"}]))]),
+        json!([{"id":1,"title":"API","assignee":"dev","models":["gpt-5.5@high"]},{"id":2,"title":"Docs","assignee":"dev"}]),
+    )
+}
+
+fn lead_seen() -> Seen {
+    on("claude/x/lead", "", "", true)
+}
+
+#[test]
+fn a_team_without_the_new_fields_hands_out_reports_and_accepts_as_before() {
+    let t = team_with(
+        json!([member("dev", "Backend", "codex", "gpt-5", json!([])), member("qa", "Tester", "kimi", "k2", json!([]))]),
+        json!([{"id":1,"title":"API","assignee":"dev","pipeline":"none"},{"id":2,"title":"Tests","assignee":"qa","deps":[{"task":1}]}]),
+    );
+    // Nothing new is written: an old team's JSON stays as it was.
+    for task in &t.tasks {
+        let value = serde_json::to_value(task).unwrap();
+        for key in ["models", "role", "waits", "prepare"] {
+            assert!(value.get(key).is_none(), "{key} in {value}");
+        }
+    }
+    let dev = serde_json::to_value(t.member("dev").unwrap()).unwrap();
+    assert!(dev.get("models").is_none(), "{dev}");
+    // A session on another model than its launch one changes nothing.
+    let seen = [lead_seen(), on("codex/x/dev", "gpt-9", "low", true), on("kimi/x/qa", "k2", "", true)];
+    let found = steps(&t, &seen, 100.0);
+    assert!(found.contains(&Step::HandOut { task: 1, member: "dev".into() }), "{found:?}");
+    assert!(!found.iter().any(|step| matches!(step, Step::SwitchModel { .. } | Step::ModelUncertain { .. } | Step::TaskWaits { .. })), "{found:?}");
+    let (_dir, mut store) = stored(&t);
+    let calls = fake(|| panic!("no settings change without models"));
+    run_step(&mut store, &t, &Step::HandOut { task: 1, member: "dev".into() }, "").unwrap();
+    set_fake_hgs(None);
+    assert_eq!(calls.borrow().iter().map(|(args, _)| args.as_str()).collect::<Vec<_>>(), vec!["send codex/x/dev --json"]);
+    let attempt_id = store.load(&t.id).unwrap().unwrap().task(1).unwrap().attempts[0].id.clone();
+    store.mutate(None, &t.id, None, |team, events| {
+        ops::apply(team, "report", &json!({"task":1,"attempt":attempt_id,"text":"Done"}), &Actor::Member("dev".into()), &BTreeSet::new(), events)
+    }).unwrap();
+    store.mutate(None, &t.id, None, |team, events| {
+        ops::apply(team, "accept", &json!({"task":1}), &Actor::Member("lead".into()), &BTreeSet::new(), events)
+    }).unwrap();
+    let saved = store.load(&t.id).unwrap().unwrap();
+    assert_eq!(saved.task(1).unwrap().status, TaskStatus::Accepted);
+    assert!(saved.task(1).unwrap().attempts[0].prepare.is_empty());
+    assert_eq!(kinds(&store, &t.id), vec!["handed_out", "delivered", "reported", "accepted"]);
+}
+
+#[test]
+fn a_switch_is_confirmed_by_the_session_before_the_hand_out() {
+    let t = switching();
+    let old = [lead_seen(), on("codex/x/dev", "gpt-5", "medium", true)];
+    let found = steps(&t, &old, 100.0);
+    let switch = Step::SwitchModel { task: 1, member: "dev".into(), from: "gpt-5@medium".into(), model: "gpt-5.5".into(), effort: "high".into() };
+    assert!(found.contains(&switch), "{found:?}");
+    assert!(!found.iter().any(|step| matches!(step, Step::HandOut { .. })), "{found:?}");
+    let (_dir, mut store) = stored(&t);
+    let calls = fake(|| Ok(fake_output(0, r#"{"status":"applied"}"#, "")));
+    run_step(&mut store, &t, &switch, "").unwrap();
+    let (args, input) = calls.borrow()[0].clone();
+    assert_eq!(args, "settings codex/x/dev --json");
+    assert_eq!((input["model"].clone(), input["effort"].clone(), input["expected_run_id"].clone()), (json!("gpt-5.5"), json!("high"), json!("run-dev")));
+    let saved = store.load(&t.id).unwrap().unwrap();
+    let step = saved.task(1).unwrap().prepare[0].clone();
+    assert_eq!((step.step.as_str(), step.from.as_str(), step.to.as_str(), step.result.as_str()), ("model", "gpt-5@medium", "gpt-5.5@high", "pending"));
+    // Until the session shows the model nothing is handed out, and the member
+    // takes no other task meanwhile; no second switch is sent.
+    let waiting = steps(&saved, &old, step.at + 10.0);
+    assert!(waiting.iter().all(|step| !matches!(step, Step::HandOut { .. } | Step::SwitchModel { .. } | Step::ModelUncertain { .. })), "{waiting:?}");
+    let now_on = [lead_seen(), on("codex/x/dev", "gpt-5.5", "high", true)];
+    let found = steps(&saved, &now_on, step.at + 10.0);
+    assert!(found.contains(&Step::HandOut { task: 1, member: "dev".into() }), "{found:?}");
+    run_step(&mut store, &saved, &Step::HandOut { task: 1, member: "dev".into() }, "").unwrap();
+    set_fake_hgs(None);
+    let saved = store.load(&t.id).unwrap().unwrap();
+    let task = saved.task(1).unwrap();
+    assert!(task.prepare.is_empty());
+    assert_eq!(task.attempts[0].prepare[0].result, "done");
+    assert_eq!(kinds(&store, &t.id), vec!["model_switch", "handed_out", "delivered"]);
+    // A member already on an allowed model is handed the task with no switch.
+    let mut ready = switching();
+    ready.task_mut(1).unwrap().models = vec!["gpt-5".into()];
+    let found = steps(&ready, &old, 100.0);
+    assert!(found.contains(&Step::HandOut { task: 1, member: "dev".into() }), "{found:?}");
+}
+
+#[test]
+fn a_refused_switch_leaves_the_task_waiting_with_its_reason() {
+    let t = switching();
+    let (_dir, mut store) = stored(&t);
+    fake(|| Ok(fake_output(1, "", "hgs: unknown model gpt-5.5 for this account\n")));
+    let switch = Step::SwitchModel { task: 1, member: "dev".into(), from: "gpt-5@medium".into(), model: "gpt-5.5".into(), effort: "high".into() };
+    run_step(&mut store, &t, &switch, "").unwrap();
+    set_fake_hgs(None);
+    let saved = store.load(&t.id).unwrap().unwrap();
+    let task = saved.task(1).unwrap();
+    assert_eq!(task.prepare[0].result, "refused");
+    let wait = task.waits.clone().unwrap();
+    assert_eq!((wait.waits_for.as_str(), wait.on.clone()), ("zerus", vec!["model".to_owned()]));
+    assert!(wait.reason.contains("unknown model gpt-5.5"), "{}", wait.reason);
+    assert_eq!(kinds(&store, &t.id), vec!["model_switch", "model_switch_refused"]);
+    // Never on the wrong model, never retried on its own; the lead sees it.
+    let old = [lead_seen(), on("codex/x/dev", "gpt-5", "medium", true)];
+    let found = steps(&saved, &old, 1e12);
+    assert!(!found.iter().any(|step| matches!(step, Step::HandOut { task: 1, .. } | Step::SwitchModel { .. })), "{found:?}");
+    let items = inbox::items(&saved);
+    assert!(items.iter().any(|item| item.kind == "task_waits" && item.task == Some(1) && item.command.contains("hgs team retry")), "{items:?}");
+    assert_eq!(inbox::waits(&saved, task, true).unwrap()["for"], "zerus");
+    // The lead's retry starts over with a new switch.
+    let mut retried = saved.clone();
+    ops::apply(&mut retried, "retry", &json!({"task":1}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut Vec::new()).unwrap();
+    assert!(retried.task(1).unwrap().waits.is_none() && retried.task(1).unwrap().prepare.is_empty());
+    assert!(steps(&retried, &old, 100.0).iter().any(|step| matches!(step, Step::SwitchModel { task: 1, .. })));
+}
+
+#[test]
+fn an_unconfirmed_switch_is_uncertain_and_never_retried() {
+    let t = switching();
+    let (_dir, mut store) = stored(&t);
+    fake(|| Ok(fake_output(0, r#"{"status":"scheduled"}"#, "")));
+    let switch = Step::SwitchModel { task: 1, member: "dev".into(), from: String::new(), model: "gpt-5.5".into(), effort: "high".into() };
+    run_step(&mut store, &t, &switch, "").unwrap();
+    set_fake_hgs(None);
+    let saved = store.load(&t.id).unwrap().unwrap();
+    let at = saved.task(1).unwrap().prepare[0].at;
+    let old = [lead_seen(), on("codex/x/dev", "gpt-5", "medium", true)];
+    assert!(!steps(&saved, &old, at + 59.0).contains(&Step::ModelUncertain { task: 1 }));
+    let found = steps(&saved, &old, at + 60.0);
+    assert!(found.contains(&Step::ModelUncertain { task: 1 }), "{found:?}");
+    run_step(&mut store, &saved, &Step::ModelUncertain { task: 1 }, "").unwrap();
+    let saved = store.load(&t.id).unwrap().unwrap();
+    let task = saved.task(1).unwrap();
+    assert_eq!(task.prepare[0].result, "uncertain");
+    assert!(task.waits.as_ref().unwrap().reason.contains("unconfirmed"), "{:?}", task.waits);
+    // The session shows the model only later: still nothing without the lead.
+    let late = [lead_seen(), on("codex/x/dev", "gpt-5.5", "high", true)];
+    assert!(!steps(&saved, &late, at + 120.0).iter().any(|step| matches!(step, Step::HandOut { task: 1, .. } | Step::SwitchModel { .. })));
+    assert_eq!(kinds(&store, &t.id), vec!["model_switch", "model_switch_uncertain"]);
+    // A call whose outcome is unknown (no answer) is uncertain at once.
+    let (_dir, mut store) = stored(&t);
+    fake(|| anyhow::bail!("timed out after 120 s"));
+    run_step(&mut store, &t, &switch, "").unwrap();
+    set_fake_hgs(None);
+    let saved = store.load(&t.id).unwrap().unwrap();
+    assert_eq!(saved.task(1).unwrap().prepare[0].result, "uncertain");
+    assert!(saved.task(1).unwrap().waits.is_some());
+}
+
+#[test]
+fn a_task_for_a_role_goes_to_a_member_on_an_allowed_model_first() {
+    let t = team_with(
+        json!([
+            member("dev", "Backend", "codex", "gpt-5", json!([{"model":"gpt-5"},{"model":"gpt-5.5"}])),
+            member("dev2", "Backend", "codex", "gpt-5.5", json!([])),
+            member("dev3", "Backend", "kimi", "k2", json!([])),
+        ]),
+        json!([{"id":1,"title":"API","role":"Backend","models":["gpt-5.5"]}]),
+    );
+    assert!(t.task(1).unwrap().assignee.is_empty());
+    let all_free = [lead_seen(), on("codex/x/dev", "gpt-5", "", true), on("codex/x/dev2", "gpt-5.5", "", true), on("kimi/x/dev3", "k2", "", true)];
+    let found = steps(&t, &all_free, 100.0);
+    assert!(found.contains(&Step::Rebalance { task: 1, from: String::new(), to: "dev2".into() }), "{found:?}");
+    // With dev2 busy, dev switches; dev3 (Kimi, no such model) never takes it.
+    let dev2_busy = [lead_seen(), on("codex/x/dev", "gpt-5", "", true), on("codex/x/dev2", "gpt-5.5", "", false), on("kimi/x/dev3", "k2", "", true)];
+    let found = steps(&t, &dev2_busy, 100.0);
+    assert!(found.iter().any(|step| matches!(step, Step::SwitchModel { task: 1, member, .. } if member == "dev")), "{found:?}");
+    assert!(!found.iter().any(|step| matches!(step, Step::Rebalance { to, .. } | Step::HandOut { member: to, .. } if to == "dev3")), "{found:?}");
+    // The hand-out makes the chosen member the assignee, without a rebalance.
+    let (_dir, mut store) = stored(&t);
+    fake(|| panic!("no switch"));
+    run_step(&mut store, &t, &Step::Rebalance { task: 1, from: String::new(), to: "dev2".into() }, "").unwrap();
+    set_fake_hgs(None);
+    let saved = store.load(&t.id).unwrap().unwrap();
+    let task = saved.task(1).unwrap();
+    assert_eq!((task.assignee.as_str(), task.attempts[0].member.as_str(), task.attempts[0].rebalanced_from.as_str()), ("dev2", "dev2", ""));
+    assert_eq!(kinds(&store, &t.id), vec!["handed_out", "delivered"]);
+}
+
+#[test]
+fn rebalancing_never_moves_a_task_to_a_member_without_its_model() {
+    let t = team_with(
+        json!([
+            member("dev", "Backend", "codex", "gpt-5.5", json!([])),
+            member("dev2", "Backend", "kimi", "k2", json!([])),
+        ]),
+        json!([{"id":1,"title":"API","assignee":"dev","models":["gpt-5.5"]}]),
+    );
+    let busy = [lead_seen(), on("codex/x/dev", "gpt-5.5", "", false), on("kimi/x/dev2", "k2", "", true)];
+    let found = steps(&t, &busy, 100.0);
+    assert!(!found.iter().any(|step| matches!(step, Step::Rebalance { .. } | Step::HandOut { .. } | Step::TaskWaits { .. })), "{found:?}");
+    // The same task without models goes to the free peer, as today.
+    let mut plain = t.clone();
+    plain.task_mut(1).unwrap().models.clear();
+    assert!(steps(&plain, &busy, 100.0).contains(&Step::Rebalance { task: 1, from: "dev".into(), to: "dev2".into() }));
+}
+
+#[test]
+fn a_pinned_member_that_cannot_switch_leaves_the_task_waiting() {
+    let t = team_with(
+        json!([member("qa", "Tester", "kimi", "k2", json!([{"model":"k2"},{"model":"k3"}]))]),
+        json!([{"id":1,"title":"Tests","assignee":"qa","pinned":true,"models":["k3"]}]),
+    );
+    let seen = [lead_seen(), on("kimi/x/qa", "k2", "", true)];
+    let found = steps(&t, &seen, 100.0);
+    let reason = "Kimi cannot switch to model k3".to_owned();
+    assert!(found.contains(&Step::TaskWaits { task: 1, reason: reason.clone() }), "{found:?}");
+    let (_dir, mut store) = stored(&t);
+    run_step(&mut store, &t, &Step::TaskWaits { task: 1, reason: reason.clone() }, "").unwrap();
+    let saved = store.load(&t.id).unwrap().unwrap();
+    assert_eq!(saved.task(1).unwrap().waits.as_ref().unwrap().reason, reason);
+    assert!(steps(&saved, &seen, 100.0).iter().all(|step| !matches!(step, Step::TaskWaits { .. } | Step::HandOut { .. })));
+}
+
+#[test]
+fn the_plan_checks_roles_and_models() {
+    let (mut team, _) = ops::create("t", &json!({"name":"Models","lead":{"id":"lead","agent":"claude"}})).unwrap();
+    let members = json!([member("dev", "Backend", "kimi", "k2", json!([]))]);
+    let error = ops::apply(&mut team, "plan", &json!({"members":members,"tasks":[{"id":1,"title":"A","assignee":"dev","role":"Backend"}]}),
+        &Actor::Human, &BTreeSet::new(), &mut Vec::new()).unwrap_err().to_string();
+    assert!(error.contains("an assignee or a role, not both"), "{error}");
+    ops::apply(&mut team, "plan", &json!({"members":members,"tasks":[
+        {"id":1,"title":"A","role":"Designer"},
+        {"id":2,"title":"B","role":"Backend","models":["k3"]},
+        {"id":3,"title":"C","role":"Backend","models":["k2"]}]}), &Actor::Human, &BTreeSet::new(), &mut Vec::new()).unwrap();
+    let found = plan::validate(&team, &BTreeSet::new());
+    assert!(found.errors.iter().any(|f| f.task == Some(1) && f.text.contains("no member has the role Designer")), "{:?}", found.errors);
+    assert!(!found.errors.iter().any(|f| f.task == Some(2) || f.task == Some(3)), "{:?}", found.errors);
+    assert!(found.warnings.iter().any(|f| f.kind == "models" && f.task == Some(2) && f.text.contains("Kimi cannot switch to model k3")), "{:?}", found.warnings);
+    assert!(!found.warnings.iter().any(|f| f.task == Some(3)), "{:?}", found.warnings);
+}

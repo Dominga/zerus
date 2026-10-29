@@ -75,6 +75,9 @@ private:
     // F10 arrows move a draft among the drafts.
     bool approvePhase(const QString &team, int phase);
     bool discardPhase(const QString &team, int phase);
+    // U42: an accepted phase whose work has not started goes back to a draft
+    // that waits for your approval again; asks first.
+    bool returnPhaseToDraft(const QString &team, int phase);
     void movePhase(const Teams::Team &team, int phase, int to, const QString &position);
     QWidget *inboxStrip(const Teams::Team &team, const QList<Teams::InboxItem> &items);
     // F8: the lead's open membership proposals with Accept and Reject; remove

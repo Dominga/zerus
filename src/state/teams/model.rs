@@ -323,6 +323,11 @@ pub(crate) struct Member {
     /// dispatcher does not try again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub settings_applied: bool,
+    /// U45: the models this member may switch between before a task; empty
+    /// means only its launch `model` and `effort`. Copied from the catalog
+    /// role when it joins.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<ModelChoice>,
     /// The member's questions already given to the lead, as question id and
     /// hash; the most recent ones only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -398,6 +403,48 @@ pub(crate) struct Member {
     /// N10: the sub-lead brief has not been sent yet.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub sub_brief: bool,
+}
+
+/// U45: a model a member may run a task on, with its effort (empty: the
+/// model's own).
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct ModelChoice {
+    pub model: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub effort: String,
+}
+
+/// Spec 0: what a ready task waits for that Zerus could not do on its own (a
+/// refused or unconfirmed step before the hand-out); the lead or the owner
+/// retries or reassigns it.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct TaskWait {
+    #[serde(rename = "for")]
+    pub waits_for: String,
+    #[serde(default)]
+    pub on: Vec<String>,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub at: f64,
+}
+
+/// Spec 1: one step Zerus took for a member before a hand-out (model,
+/// context, branch) and its result: `pending` until confirmed, then `done`,
+/// `skipped`, `refused` or `uncertain`.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct Prepare {
+    pub step: String,
+    pub member: String,
+    #[serde(default)]
+    pub from: String,
+    #[serde(default)]
+    pub to: String,
+    #[serde(default)]
+    pub at: f64,
+    pub result: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
 }
 
 /// U21: one built-in command template Zerus ran for this attempt, outside the
@@ -945,6 +992,9 @@ pub(crate) struct Attempt {
     /// last, at most 20.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runs: Vec<RunRecord>,
+    /// Spec 1: the steps Zerus took for the member before this hand-out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prepare: Vec<Prepare>,
 }
 
 impl Attempt {
@@ -1022,6 +1072,21 @@ pub(crate) struct Task {
     /// today's flow (an old team, "none", a check or the lead's own task).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pipeline_run: Option<PipelineRun>,
+    /// U45: the models allowed for this task (`model` or `model@effort`);
+    /// empty: any model of its member.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<String>,
+    /// U45: a task for a role: with an empty assignee it goes to a free
+    /// member of this role whose models allow the task's.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub role: String,
+    /// Spec 0: a step before the hand-out was refused or never confirmed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waits: Option<TaskWait>,
+    /// Spec 1: the steps taken for the next hand-out, newest last, at most 20;
+    /// they move to the attempt that hands it out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prepare: Vec<Prepare>,
 }
 
 /// U36: one stage of a task's pipeline snapshot.
@@ -1092,6 +1157,29 @@ pub(crate) struct StageRun {
     /// Who ended it: the stage's role, Lead, You or Pipeline.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub by: String,
+    /// #532: the folder the stage works in: the task's own folder, or its
+    /// detached checkout.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub folder: String,
+    /// A detached checkout Zerus made for this test, removed after it, and the
+    /// repository it belongs to.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub checkout: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub checkout_repo: String,
+    /// This test holds the task's folder until it ends.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub holds: bool,
+    /// What changed: the attempt's commits, or its reported files with their
+    /// size and hash when the stage began.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed: Vec<serde_json::Value>,
+    /// A test's own temporary folder, removed after the stage.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub temp: String,
+    /// The command templates the stage ran, newest last, at most 20.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<RunRecord>,
 }
 
 /// U36: a task's pipeline snapshot and progress.

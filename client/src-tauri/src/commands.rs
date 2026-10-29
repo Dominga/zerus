@@ -144,14 +144,21 @@ mod live {
                         (Source::Fleet(fleet), "live")
                     }
                 };
-            self.pump.drain_with(changes, move |change| {
-                if let Some(organization) = &organization {
-                    organization.observe(change);
-                }
-                if let Some(creations) = &creations {
-                    creations.observe(change);
-                }
-            });
+            let after = creations.clone();
+            self.pump.drain_with_after(
+                changes,
+                move |change| {
+                    if let Some(organization) = &organization {
+                        organization.observe(change);
+                    }
+                    creations.is_some() && crate::creations::CreationHost::observes(change)
+                },
+                move || {
+                    if let Some(creations) = &after {
+                        creations.catalog_changed();
+                    }
+                },
+            );
             *source = Some(started);
             Ok(mode.into())
         }

@@ -301,10 +301,9 @@ impl CreationHost {
         host
     }
 
-    /// The source drain only sets a coalesced flag and tries a bounded send.
-    /// It never waits for the worker, journal or an organization lock.
-    pub fn observe(&self, change: &Change) {
-        if matches!(
+    /// Cheap filter for the source drain's pre-push callback.
+    pub(crate) fn observes(change: &Change) -> bool {
+        matches!(
             change,
             Change::Upsert { .. }
                 | Change::Replace { .. }
@@ -312,9 +311,21 @@ impl CreationHost {
                 | Change::Computer { .. }
                 | Change::Machine { .. }
                 | Change::Organization { .. }
-        ) && !self.0.catalog.swap(true, Ordering::AcqRel)
-        {
+        )
+    }
+
+    /// Signals only after the source drain applied the change to its mirror.
+    /// It never waits for the worker, journal or an organization lock.
+    pub(crate) fn catalog_changed(&self) {
+        if !self.0.catalog.swap(true, Ordering::AcqRel) {
             let _ = self.0.input.try_send(Input::Catalog);
+        }
+    }
+
+    #[cfg(all(test, unix))]
+    fn observe(&self, change: &Change) {
+        if Self::observes(change) {
+            self.catalog_changed();
         }
     }
 
@@ -1799,7 +1810,9 @@ mod tests {
         let pump = crate::pump::Pump::default();
         let (send, receive) = mpsc::channel();
         let observing = host.clone();
-        pump.drain_with(receive, move |change| observing.observe(change));
+        pump.drain_with_after(receive, CreationHost::observes, move || {
+            observing.catalog_changed();
+        });
         for _ in 0..10_000 {
             send.send(Change::Upsert {
                 computer: ComputerId::local(),

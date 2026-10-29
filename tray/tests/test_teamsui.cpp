@@ -716,6 +716,9 @@ private slots:
     void planTaskTakesModelsAndARole();
     void teamSettingsSendOnlyWhatChanged();
     void memberMenuScalesAndDrains();
+    void catalogPipelinesAreEditedAndSaved();
+    void catalogPipelineProposalsHavePlates();
+    void catalogPipelineTryWalksASampleTask();
     void boardScrollsInsteadOfSqueezingColumns();
     void planningBoardScrollsInsteadOfSqueezingColumns();
     void catalogRoleEditorEditsEveryField();
@@ -6459,6 +6462,304 @@ void TestTeamsUi::memberMenuScalesAndDrains()
         for (auto *action : menu->actions())
             if (action->objectName() == "teamWorkspaceMemberScale") { QVERIFY(!action->isEnabled()); QVERIFY(action->toolTip().contains("2 members")); }
     });
+}
+
+// U36 (#533): a catalog with the server's built-in presets (catalog.rs
+// builtin_pipelines), a template that names Code as its default and a team's
+// own Docs template without one.
+QJsonObject pipelineCatalog()
+{
+    return QJsonDocument::fromJson(R"({"builtin":false,
+ "catalog":{"version":14,
+  "roles":[{"id":"lead","name":"Lead","agent":"claude","prompt":"You lead."},
+           {"id":"frontend","name":"Frontend","agent":"codex","model":"gpt-6.1-sol","prompt":"Build the UI."},
+           {"id":"reviewer","name":"Reviewer","agent":"claude","model":"claude-sonnet-4-6","prompt":"Review it."},
+           {"id":"tester","name":"Tester","agent":"kimi","model":"kimi-k2.5","prompt":"Test it."}],
+  "templates":[{"id":"feature","name":"Feature delivery","roster":[{"role":"frontend","count":1},{"role":"reviewer","count":1},{"role":"tester","count":1}],
+                "tasks":[],"planning":"lead","approval":"review","max_members":6,"pipeline":"code"},
+               {"id":"docs","name":"Documentation","roster":[{"role":"reviewer","count":1}],"tasks":[],"planning":"lead","approval":"review","max_members":3}],
+  "routing":[],
+  "pipelines":[{"id":"code","name":"Code: review, test, lead","stages":[{"kind":"review","role":"reviewer"},{"kind":"test","role":"tester"}],"max_rounds":3,"folder":"hold","accept":"lead"},
+               {"id":"docs","name":"Docs: review, auto","stages":[{"kind":"review","role":"reviewer"}],"max_rounds":2,"folder":"hold","accept":"auto"},
+               {"id":"check","name":"Check: lead","stages":[],"max_rounds":3,"folder":"hold","accept":"lead"}]},
+ "draft":{"base":0,"proposals":[]}})").object();
+}
+
+void writeCatalog(const QString &script, const QJsonObject &value)
+{
+    QVERIFY(FakeCli::replace(script + ".catalog", QJsonDocument(value).toJson(QJsonDocument::Compact)));
+}
+
+bool clickSegment(QWidget *segments, const QString &value)
+{
+    if (!segments) return false;
+    for (auto *b : segments->findChildren<QPushButton *>()) if (b->property("segment") == value) { if (!b->isEnabled()) return false; b->click(); return true; }
+    return false;
+}
+
+void TestTeamsUi::catalogPipelinesAreEditedAndSaved()
+{
+    QSettings().setValue("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([this] { QSettings().remove("workspace/skin"); darkPalette(); writeCatalog(script(), catalog()); });
+    // Opt-in: a catalog without presets saves without them, and its roles and
+    // templates gain no pipeline field.
+    {
+        const auto plain = parseCatalog(catalog()).json();
+        QVERIFY(!plain.contains("pipelines"));
+        for (const auto &key : {"roles", "templates"})
+            for (const auto &item : plain[key].toArray()) QVERIFY(!item.toObject().contains("pipeline"));
+    }
+    writeCatalog(script(), pipelineCatalog());
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamCatalogEditor editor(&controller);
+    editor.confirm = [](const QString &, const QString &, const QString &, const QString &) { return true; };
+    editor.resize(1320, 1180); editor.show();
+    QTRY_COMPARE(editor.findChild<QListWidget *>("teamCatalogRoles")->count(), 4);
+    QVERIFY(clickSegment(editor.findChild<QWidget *>("teamCatalogTabs"), "pipelines"));
+    auto *list = editor.findChild<QListWidget *>("teamCatalogPipelines");
+    QTRY_COMPARE(list->count(), 4);   // three presets, then None
+    QCOMPARE(list->item(3)->data(Qt::UserRole).toString(), QStringLiteral("none"));
+    QVERIFY(list->isVisible());
+    QCOMPARE(editor.findChild<QLabel *>("teamPipelineTitle")->text(), QStringLiteral("Code: review, test, lead"));
+    QVERIFY(editor.findChild<QLabel *>("teamPipelineUsedBy")->text().contains("Feature delivery"));
+    // The flow in the list: Review › Test › Lead; Docs ends in Auto.
+    QStringList flow;
+    for (auto *chip : list->itemWidget(list->item(0))->findChildren<QWidget *>("teamPipelineStageChip")) flow << chip->property("kind").toString();
+    QCOMPARE(flow, (QStringList{"review", "test", "lead"}));
+    // The test stage's details are open: the task's folder holds it.
+    auto *hold = editor.findChild<QRadioButton *>("teamPipelineFolderHold");
+    QVERIFY(hold && hold->isChecked());
+    shot(&editor, "u36-pipelines-dark");
+    editor.setDark(false); lightShot(&editor, "u36-pipelines-light"); darkPalette(); editor.setDark(true);
+    // A detached checkout, Auto, two rounds.
+    editor.findChild<QRadioButton *>("teamPipelineFolderCheckout")->click();
+    QTRY_VERIFY(editor.findChild<QRadioButton *>("teamPipelineFolderCheckout") && editor.findChild<QRadioButton *>("teamPipelineFolderCheckout")->isChecked());
+    QVERIFY(clickSegment(editor.findChild<QWidget *>("teamPipelineAccept"), "auto"));
+    QTRY_VERIFY(editor.findChild<QWidget *>("teamPipelineRounds"));
+    editor.findChild<QWidget *>("teamPipelineRounds")->findChild<QPushButton *>("teamStepperMinus")->click();
+    // The review is pinned to a member.
+    editor.findChildren<QPushButton *>("teamPipelineStageOpen").at(0)->click();
+    QTRY_VERIFY(editor.findChild<QWidget *>("teamPipelineStageWho"));
+    QVERIFY(clickSegment(editor.findChild<QWidget *>("teamPipelineStageWho"), "member"));
+    QTRY_VERIFY(editor.findChild<QLineEdit *>("teamPipelineStageMember"));
+    QVERIFY(editor.findChild<QWidget *>("teamPipelineProblemLine"));   // a pinned stage with no member yet
+    editor.findChild<QLineEdit *>("teamPipelineStageMember")->setText("reviewer2");
+    emit editor.findChild<QLineEdit *>("teamPipelineStageMember")->editingFinished();
+    QTRY_VERIFY(!editor.findChild<QWidget *>("teamPipelineProblemLine"));
+    // U47: a command stage Zerus runs, with its time limit.
+    editor.findChild<QPushButton *>("teamPipelineAddStage")->click();
+    QTRY_COMPARE(editor.findChildren<QWidget *>("teamPipelineStageKind").size(), 3);
+    QVERIFY(clickSegment(editor.findChildren<QWidget *>("teamPipelineStageKind").at(2), "command"));
+    QTRY_VERIFY(editor.findChild<QLineEdit *>("teamPipelineStageCommand"));
+    QVERIFY(editor.findChild<QLabel *>("teamPipelineStageZerus"));
+    QVERIFY(editor.findChild<QWidget *>("teamPipelineProblemLine"));   // no command yet
+    editor.findChild<QLineEdit *>("teamPipelineStageCommand")->setText("ctest --output-on-failure");
+    emit editor.findChild<QLineEdit *>("teamPipelineStageCommand")->editingFinished();
+    QTRY_VERIFY(editor.findChild<QSpinBox *>("teamPipelineStageTimeout"));
+    QCOMPARE(editor.findChild<QSpinBox *>("teamPipelineStageTimeout")->value(), 30);   // the server's default
+    editor.findChild<QSpinBox *>("teamPipelineStageTimeout")->setValue(45);
+    emit editor.findChild<QSpinBox *>("teamPipelineStageTimeout")->editingFinished();
+    // U48: Land only on the last stage, with its exit codes and the owner's rule.
+    editor.findChild<QPushButton *>("teamPipelineAddStage")->click();
+    QTRY_COMPARE(editor.findChildren<QWidget *>("teamPipelineStageKind").size(), 4);
+    QVERIFY(!clickSegment(editor.findChildren<QWidget *>("teamPipelineStageKind").at(2), "land"));
+    QVERIFY(clickSegment(editor.findChildren<QWidget *>("teamPipelineStageKind").at(3), "land"));
+    QTRY_VERIFY(editor.findChild<QWidget *>("teamPipelineLandRuleLine"));
+    QVERIFY(editor.findChild<QLabel *>("teamPipelineLandRule")->text().contains("land_allowed"));
+    editor.findChild<QLineEdit *>("teamPipelineStageCommand")->setText("scripts/land.sh --squash");
+    emit editor.findChild<QLineEdit *>("teamPipelineStageCommand")->editingFinished();
+    QTRY_VERIFY(editor.findChild<QPushButton *>("teamPipelineAddExit"));
+    editor.findChild<QPushButton *>("teamPipelineAddExit")->click();
+    QTRY_COMPARE(editor.findChildren<QComboBox *>("teamPipelineExitOutcome").size(), 1);
+    editor.findChild<QPushButton *>("teamPipelineAddExit")->click();
+    QTRY_COMPARE(editor.findChildren<QComboBox *>("teamPipelineExitOutcome").size(), 2);
+    auto *outcome = editor.findChildren<QComboBox *>("teamPipelineExitOutcome").at(1);
+    outcome->setCurrentIndex(outcome->findData("held")); emit outcome->activated(outcome->currentIndex());
+    shot(&editor, "u36-pipelines-land-dark");
+    editor.setDark(false); lightShot(&editor, "u36-pipelines-land-light"); darkPalette(); editor.setDark(true);
+    // A new stage goes before the land stage, which stays last; then it goes.
+    editor.findChild<QPushButton *>("teamPipelineAddStage")->click();
+    QTRY_COMPARE(editor.findChildren<QWidget *>("teamPipelineStageKind").size(), 5);
+    QVERIFY(!editor.findChildren<QToolButton *>("teamPipelineStageDown").at(3)->isEnabled());
+    editor.findChildren<QToolButton *>("teamPipelineStageDelete").at(3)->click();
+    QTRY_COMPARE(editor.findChildren<QWidget *>("teamPipelineStageKind").size(), 4);
+    // Defaults: Documentation takes Docs; Frontend gets this preset as its own.
+    QComboBox *docs = nullptr;
+    for (auto *box : editor.findChildren<QComboBox *>("teamPipelineTemplateDefault")) if (box->property("template") == "docs") docs = box;
+    QVERIFY(docs);
+    docs->setCurrentIndex(docs->findData("docs")); emit docs->activated(docs->currentIndex());
+    QTRY_VERIFY(editor.findChild<QComboBox *>("teamPipelineAddRole"));
+    auto *addRole = editor.findChild<QComboBox *>("teamPipelineAddRole");
+    addRole->setCurrentIndex(addRole->findData("frontend")); emit addRole->activated(addRole->currentIndex());
+    QTRY_COMPARE(editor.findChildren<QComboBox *>("teamPipelineRoleDefault").size(), 1);
+    // Check is deleted, after the confirmation.
+    list->setCurrentRow(2);
+    QTRY_COMPARE(editor.findChild<QLabel *>("teamPipelineTitle")->text(), QStringLiteral("Check: lead"));
+    editor.findChild<QPushButton *>("teamPipelineDelete")->click();
+    QTRY_COMPARE(list->count(), 3);
+    // Nothing is sent until Save, which writes the next version.
+    QVERIFY(calls(script(), "catalog set").isEmpty());
+    QVERIFY(editor.findChild<QLabel *>("teamCatalogStatus")->text().contains("unsaved"));
+    auto *save = editor.findChild<QPushButton *>("teamCatalogSave"); QVERIFY(save->isEnabled());
+    save->click();
+    QTRY_COMPARE(calls(script(), "catalog set").size(), 1);
+    const auto input = calls(script(), "catalog set").first();
+    QCOMPARE(input["version"].toInt(), 14);
+    const auto sent = input["catalog"].toObject();
+    const auto code = QJsonDocument::fromJson(R"({"id":"code","name":"Code: review, test, lead","stages":[
+        {"kind":"review","member":"reviewer2"},{"kind":"test","role":"tester"},
+        {"kind":"command","command":{"command":"ctest --output-on-failure","expect_exit":0,"timeout_minutes":45}},
+        {"kind":"land","command":{"command":"scripts/land.sh --squash","expect_exit":0,"timeout_minutes":30},"exits":{"0":"accepted","1":"held"}}],
+        "max_rounds":2,"folder":"checkout","accept":"auto"})").object();
+    const auto pipelines = sent["pipelines"].toArray();
+    QCOMPARE(pipelines.size(), 2);
+    QCOMPARE(pipelines[0].toObject(), code);
+    QCOMPARE(pipelines[1].toObject(), pipelineCatalog().value("catalog").toObject().value("pipelines").toArray()[1].toObject());
+    const auto templates = sent["templates"].toArray();
+    QCOMPARE(templates[0].toObject()["pipeline"].toString(), QStringLiteral("code"));
+    QCOMPARE(templates[1].toObject()["pipeline"].toString(), QStringLiteral("docs"));
+    for (const auto &role : sent["roles"].toArray()) {
+        const auto o = role.toObject();
+        if (o["id"] == "frontend") QCOMPARE(o["pipeline"].toString(), QStringLiteral("code"));
+        else QVERIFY2(!o.contains("pipeline"), qPrintable(o["id"].toString()));
+    }
+}
+
+// U36: the designer's pipeline proposals in the draft: the tab's count, the
+// marks in the list, a plate to keep or reject inside the editor and the
+// changed fields old → new; the designer page's Show in catalog opens them.
+void TestTeamsUi::catalogPipelineProposalsHavePlates()
+{
+    QSettings().setValue("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([this] { QSettings().remove("workspace/skin"); darkPalette(); writeCatalog(script(), catalog()); });
+    auto drafted = pipelineCatalog();
+    const auto presets = drafted.value("catalog").toObject().value("pipelines").toArray();
+    auto checkout = presets[0].toObject(); checkout["folder"] = "checkout";
+    auto docs = presets[1].toObject(); docs["id"] = "docs-lite"; docs["name"] = "Docs: review, auto"; docs["max_rounds"] = 1;
+    drafted["draft"] = QJsonObject{{"base", 14}, {"proposals", QJsonArray{
+        QJsonObject{{"id", "pp1"}, {"kind", "pipeline"}, {"action", "change"}, {"target", "code"}, {"title", "Code: the test works on a detached checkout"},
+                    {"reason", "Frontend waited 52 min on average while the test held its folder (7 tasks)."}, {"value", checkout}, {"state", "proposed"}},
+        QJsonObject{{"id", "pp2"}, {"kind", "pipeline"}, {"action", "add"}, {"target", "docs-lite"}, {"title", "Pipeline · Docs: review, auto"},
+                    {"reason", "9 of the last 11 docs tasks were accepted unchanged by the lead."}, {"value", docs}, {"state", "kept"}}}}};
+    writeCatalog(script(), drafted);
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    // The model: a kept pipeline proposal applies, an undecided one only with them.
+    QTRY_VERIFY(([&] { controller.refreshCatalog(); return controller.catalogReady() && controller.catalog().proposals.size() == 2; })());
+    QVERIFY(withProposals(controller.catalog(), false).pipeline("docs-lite"));
+    QCOMPARE(withProposals(controller.catalog(), false).pipeline("code")->folder, QStringLiteral("hold"));
+    QCOMPARE(withProposals(controller.catalog(), true).pipeline("code")->folder, QStringLiteral("checkout"));
+    TeamDesignerPage page(&controller);
+    page.confirm = [](const QString &, const QString &, const QString &, const QString &) { return true; };
+    page.resize(1600, 1000); page.show();
+    QTRY_VERIFY(page.findChildren<QPushButton *>("teamProposalShow").size() == 2);
+    auto *editor = dynamic_cast<TeamCatalogEditor *>(page.findChild<QWidget *>("teamCatalogEditor"));
+    QVERIFY(editor);
+    QTRY_VERIFY(([&] { for (auto *b : editor->findChild<QWidget *>("teamCatalogTabs")->findChildren<QPushButton *>())
+                           if (b->property("segment") == "pipelines") return b->text().contains("2"); return false; })());
+    page.findChildren<QPushButton *>("teamProposalShow").at(0)->click();
+    auto *list = editor->findChild<QListWidget *>("teamCatalogPipelines");
+    QTRY_VERIFY(list->isVisible());
+    QCOMPARE(list->currentItem()->data(Qt::UserRole).toString(), QStringLiteral("code"));
+    QCOMPARE(list->count(), 5);   // the added preset shows in the draft
+    QStringList marks;
+    for (int i = 0; i < list->count(); ++i) for (auto *m : list->itemWidget(list->item(i))->findChildren<QLabel *>("teamCatalogMark")) marks << m->text();
+    QCOMPARE(marks, (QStringList{"CHANGED", "NEW · kept"}));
+    // The plate inside the editor, the changed field, every field read only.
+    auto *card = editor->findChild<QWidget *>("teamPipelineEditor");
+    QVERIFY(card);
+    QVERIFY(editor->findChild<QFrame *>("teamProposalPlate"));
+    const auto diff = editor->findChildren<QLabel *>("teamPipelineDiffLine");
+    QCOMPARE(diff.size(), 1);
+    QVERIFY(diff.first()->text().contains("Test works in") && diff.first()->text().contains("Detached checkout"));
+    QVERIFY(editor->findChild<QLineEdit *>("teamPipelineName")->isReadOnly());
+    QVERIFY(!editor->findChild<QPushButton *>("teamPipelineAddStage")->isEnabled());
+    QVERIFY(editor->findChild<QRadioButton *>("teamPipelineFolderCheckout")->isChecked());
+    shot(&page, "u36-designer-dark");
+    page.setDark(false); lightShot(&page, "u36-designer-light"); darkPalette(); page.setDark(true);
+    // Keep on the editor's plate decides that proposal, through the controller.
+    editor->findChild<QFrame *>("teamProposalPlate")->findChild<QPushButton *>("teamProposalKeep")->click();
+    QTRY_COMPARE(calls(script(), "catalog decide").size(), 1);
+    QCOMPARE(calls(script(), "catalog decide").first()["proposal"].toString(), QStringLiteral("pp1"));
+    QCOMPARE(calls(script(), "catalog decide").first()["decision"].toString(), QStringLiteral("keep"));
+    // Kept: the plate offers Undo; an added preset has no old value to show.
+    QTRY_VERIFY(editor->findChild<QFrame *>("teamProposalPlate") && editor->findChild<QFrame *>("teamProposalPlate")->findChild<QPushButton *>("teamProposalUndo"));
+    page.findChildren<QPushButton *>("teamProposalShow").at(1)->click();
+    QTRY_COMPARE(list->currentItem()->data(Qt::UserRole).toString(), QStringLiteral("docs-lite"));
+    QVERIFY(editor->findChildren<QLabel *>("teamPipelineDiffLine").isEmpty());   // an added preset has no old value
+}
+
+// U36: Try it walks a task through a preset with today's members: the first
+// free member of each stage's role (never the implementer), where it works,
+// the folder hold, a single Tester and a land stage without land_allowed.
+void TestTeamsUi::catalogPipelineTryWalksASampleTask()
+{
+    QSettings().setValue("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([this] { QSettings().remove("workspace/skin"); darkPalette(); writeCatalog(script(), catalog()); });
+    const auto c = parseCatalog(pipelineCatalog());
+    Team team; team.folder = "/work/orbit";
+    const auto member = [&](const QString &id, const QString &role, const QString &agent, const QString &model) {
+        Member m; m.id = id; m.role = role; m.agent = agent; m.model = model; m.lead = id == "lead"; m.directory = "/work/orbit-team/" + id;
+        team.members.append(m);
+    };
+    member("lead", "Lead", "claude", "claude-opus"); member("frontend", "Frontend", "codex", "gpt-6.1-sol");
+    member("reviewer", "Reviewer", "claude", "claude-sonnet-4-6"); member("build-01", "Tester", "kimi", "kimi-k2.5");
+    Task busy; busy.id = 5; busy.title = "Cart"; busy.assignee = "build-01"; busy.status = "in_progress";
+    Attempt working; working.n = 1; working.member = "build-01"; working.state = "delivered"; busy.attempts = {working};
+    Task task; task.id = 4; task.title = "Address validation"; task.assignee = "frontend"; task.status = "in_progress";
+    task.attempts.append(Attempt{}); task.attempts.first().n = 1;
+    team.tasks = {busy, task};
+    auto walked = TeamCatalogEditor::walk(c, *c.pipeline("code"), team, task);
+    QStringList kinds, members;
+    for (const auto &step : walked.steps) { kinds << step.kind; members << step.member; }
+    QCOMPARE(kinds, (QStringList{"implement", "review", "test", "lead"}));
+    QCOMPARE(members, (QStringList{"frontend", "reviewer", "build-01", "lead"}));
+    QVERIFY(walked.steps[1].detail.contains("free now"));
+    QVERIFY(walked.steps[1].where.contains("/work/orbit-team/frontend") && walked.steps[1].where.contains("attempt 2"));
+    QVERIFY(walked.steps[2].detail.contains("busy with #5"));
+    QVERIFY(walked.steps[2].where.contains("Holds the folder"));
+    QCOMPARE(walked.warnings.size(), 1);
+    QVERIFY(walked.warnings.first().startsWith("One Tester"));
+    // The implementer never takes its own stage: with Frontend as the only
+    // reviewer the review waits.
+    Pipeline own = *c.pipeline("docs"); own.stages[0].role = "frontend";
+    walked = TeamCatalogEditor::walk(c, own, team, task);
+    QVERIFY(walked.steps[1].member.isEmpty());
+    QVERIFY(walked.warnings.join('\n').contains("No Frontend besides the implementer"));
+    QCOMPARE(walked.steps.last().kind, QStringLiteral("auto"));
+    // A detached checkout frees the implementer; a land stage decides itself
+    // and warns while the team's land_allowed is off.
+    Pipeline land = *c.pipeline("code"); land.folder = "checkout";
+    PipelineStage step; step.kind = "land"; step.hasCommand = true; step.command = "scripts/land.sh"; step.exits = {{"0", "accepted"}, {"2", "returned"}};
+    land.stages.append(step);
+    walked = TeamCatalogEditor::walk(c, land, team, task);
+    QCOMPARE(walked.steps.last().kind, QStringLiteral("land"));
+    QVERIFY(walked.steps[2].where.contains("is free while it runs"));
+    QVERIFY(walked.steps.last().where.contains("exit 2: returned to the implementer"));
+    QVERIFY(walked.warnings.join('\n').contains("land_allowed is off"));
+    team.settingsJson = QJsonObject{{"land_allowed", true}};
+    QVERIFY(!TeamCatalogEditor::walk(c, land, team, task).warnings.join('\n').contains("land_allowed"));
+    // In the tab: Try shows the walk under the editor, and an edit walks again.
+    writeCatalog(script(), pipelineCatalog());
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamCatalogEditor editor(&controller);
+    editor.resize(1320, 1180); editor.show();
+    QTRY_COMPARE(editor.findChild<QListWidget *>("teamCatalogRoles")->count(), 4);
+    QVERIFY(clickSegment(editor.findChild<QWidget *>("teamCatalogTabs"), "pipelines"));
+    QTRY_VERIFY(editor.findChild<QPushButton *>("teamPipelineTry"));
+    QVERIFY(editor.findChildren<QWidget *>("teamPipelineTryStep").isEmpty());
+    editor.findChild<QPushButton *>("teamPipelineTry")->click();
+    QTRY_COMPARE(editor.findChildren<QWidget *>("teamPipelineTryStep").size(), 4);
+    QVERIFY(calls(script(), "catalog set").isEmpty());   // nothing is sent
+    editor.findChild<QPushButton *>("teamPipelineAddStage")->click();
+    QTRY_COMPARE(editor.findChildren<QWidget *>("teamPipelineTryStep").size(), 5);
+    editor.findChildren<QToolButton *>("teamPipelineStageDelete").last()->click();
+    QTRY_COMPARE(editor.findChildren<QWidget *>("teamPipelineTryStep").size(), 4);
+    editor.findChild<QScrollArea *>("teamCatalogEditorArea")->verticalScrollBar()->setValue(100000);
+    shot(&editor, "u36-pipelines-try-dark");
+    editor.setDark(false); lightShot(&editor, "u36-pipelines-try-light"); darkPalette(); editor.setDark(true);
 }
 
 void TestTeamsUi::catalogEditorMarksManualEdits()

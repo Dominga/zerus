@@ -1534,6 +1534,7 @@ Role parseRole(const QJsonObject &v)
     r.danger = v.value("danger").toObject();
     r.models = parseModelChoices(v.value("models"));
     r.contextBeforeTask = str(v, "context_before_task");
+    r.pipeline = str(v, "pipeline");
     const auto notes = v.value("notes").toObject();
     for (auto it = notes.begin(); it != notes.end(); ++it) r.notes.insert(it.key(), it.value().toString());
     r.raw = v;
@@ -1575,6 +1576,8 @@ QJsonObject Role::json() const
     // U45/U46: written only when set or when the role came with them.
     put("models", modelChoicesJson(models), models.isEmpty());
     put("context_before_task", contextBeforeTask, contextBeforeTask.isEmpty());
+    // U36: the server skips an empty pipeline; an older catalog gains none.
+    if (pipeline.isEmpty()) o.remove("pipeline"); else o.insert("pipeline", pipeline);
     return o;
 }
 
@@ -1605,7 +1608,7 @@ Template parseTemplate(const QJsonObject &v)
     t.id = str(v, "id"); t.name = str(v, "name"); t.description = str(v, "description"); t.leadProtocol = str(v, "lead_protocol");
     t.planning = str(v, "planning"); t.approval = str(v, "approval"); t.phaseApproval = str(v, "phase_approval");
     t.maxMembers = v.value("max_members").toInt(6);
-    t.work = str(v, "work"); t.phases = str(v, "phases");
+    t.work = str(v, "work"); t.phases = str(v, "phases"); t.pipeline = str(v, "pipeline");
     for (const auto &seat : v.value("roster").toArray()) {
         const auto o = seat.toObject();
         t.roster.append({str(o, "role"), o.value("count").toInt(1), o.value("optional").toBool(), o});
@@ -1633,6 +1636,65 @@ QJsonObject Template::json() const
             {"max_members", maxMembers}});
     if (!work.isEmpty() || raw.contains("work")) o.insert("work", work);
     if (!phases.isEmpty() || raw.contains("phases")) o.insert("phases", phases);
+    if (pipeline.isEmpty()) o.remove("pipeline"); else o.insert("pipeline", pipeline);
+    return o;
+}
+
+PipelineStage parsePipelineStage(const QJsonObject &v)
+{
+    PipelineStage s;
+    s.kind = str(v, "kind"); s.role = str(v, "role"); s.member = str(v, "member");
+    // U47: {command, expect_exit (0), timeout_minutes (30)}, as model.rs Check reads it.
+    if (const auto command = v.value("command").toObject(); v.value("command").isObject()) {
+        s.hasCommand = true;
+        s.command = str(command, "command");
+        s.expectExit = command.value("expect_exit").toInt(0);
+        s.timeoutMinutes = command.value("timeout_minutes").toInt(30);
+    }
+    const auto exits = v.value("exits").toObject();
+    for (auto it = exits.begin(); it != exits.end(); ++it) s.exits.insert(it.key(), it.value().toString());
+    s.raw = v;
+    return s;
+}
+
+// A review or test stage names a role or a member and nothing to run; a
+// command or land stage only its command (catalog.rs validate).
+QJsonObject PipelineStage::json() const
+{
+    auto o = over(raw, {{"kind", kind}});
+    for (const auto &key : {"role", "member", "command", "exits"}) o.remove(QLatin1String(key));
+    if (runByZerus()) {
+        auto check = raw.value("command").toObject();
+        check.insert("command", command); check.insert("expect_exit", expectExit); check.insert("timeout_minutes", timeoutMinutes);
+        o.insert("command", check);
+        if (kind == QLatin1String("land") && !exits.isEmpty()) {
+            QJsonObject codes; for (auto it = exits.cbegin(); it != exits.cend(); ++it) codes.insert(it.key(), it.value());
+            o.insert("exits", codes);
+        }
+    } else if (!member.isEmpty()) o.insert("member", member);
+    else o.insert("role", role);
+    return o;
+}
+
+Pipeline parsePipeline(const QJsonObject &v)
+{
+    Pipeline p;
+    p.id = str(v, "id"); p.name = str(v, "name");
+    for (const auto &stage : v.value("stages").toArray()) p.stages.append(parsePipelineStage(stage.toObject()));
+    p.maxRounds = v.value("max_rounds").toInt(0);
+    p.folder = str(v, "folder"); p.accept = str(v, "accept");
+    p.raw = v;
+    return p;
+}
+
+// Skipped when empty, as the server writes a preset.
+QJsonObject Pipeline::json() const
+{
+    QJsonArray list; for (const auto &stage : stages) list.append(stage.json());
+    auto o = over(raw, {{"id", id}, {"name", name}, {"stages", list}});
+    const auto put = [&o](const char *key, const QJsonValue &value, bool empty) { if (empty) o.remove(QLatin1String(key)); else o.insert(QLatin1String(key), value); };
+    put("max_rounds", maxRounds, maxRounds <= 0);
+    put("folder", folder, folder.isEmpty()); put("accept", accept, accept.isEmpty());
     return o;
 }
 
@@ -1674,6 +1736,12 @@ const Template *Catalog::templ(const QString &id) const
     return nullptr;
 }
 
+const Pipeline *Catalog::pipeline(const QString &id) const
+{
+    for (const auto &p : pipelines) if (p.id == id) return &p;
+    return nullptr;
+}
+
 QJsonObject Catalog::json() const
 {
     QJsonArray r, t, u;
@@ -1683,6 +1751,12 @@ QJsonObject Catalog::json() const
     QJsonObject out{{"version", version}, {"roles", r}, {"templates", t}, {"routing", u}};
     // U28: a save keeps the rules; leaving them out would reset them.
     if (planningRulesKnown) out.insert("planning_rules", planningRules);
+    // U36: the presets go back whole; a catalog that came without them gains
+    // the field only once one is added.
+    if (pipelinesKnown || !pipelines.isEmpty()) {
+        QJsonArray p; for (const auto &x : pipelines) p.append(x.json());
+        out.insert("pipelines", p);
+    }
     return out;
 }
 
@@ -1721,6 +1795,8 @@ Catalog parseCatalog(const QJsonObject &get)
     for (const auto &v : catalog.value("routing").toArray()) c.routing.append(parseRule(v.toObject()));
     c.planningRulesKnown = catalog.value("planning_rules").isString();
     c.planningRules = catalog.value("planning_rules").toString();
+    c.pipelinesKnown = catalog.value("pipelines").isArray();
+    for (const auto &v : catalog.value("pipelines").toArray()) c.pipelines.append(parsePipeline(v.toObject()));
     const auto draft = get.value("draft").toObject();
     c.draftBase = draft.value("base").toInteger();
     for (const auto &v : draft.value("proposals").toArray()) {
@@ -1748,6 +1824,7 @@ Catalog withProposals(const Catalog &catalog, bool includeUndecided)
         if (p.kind == "role") apply(c.roles, parseRole(p.value));
         else if (p.kind == "template") apply(c.templates, parseTemplate(p.value));
         else if (p.kind == "rule") apply(c.routing, parseRule(p.value));
+        else if (p.kind == "pipeline") apply(c.pipelines, parsePipeline(p.value));
         else if (p.kind == "planning_rules" && !remove) { c.planningRules = p.text; c.planningRulesKnown = true; }
     }
     return c;

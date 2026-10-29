@@ -3,6 +3,7 @@ import * as bridge from "../../bridge";
 import { terminal } from "../../store/terminal";
 import { TerminalTab } from "./Terminal";
 import { ProcessesTab } from "./Processes";
+import { drops } from "../../store/drops";
 import { processes, processesTab } from "../../store/processes";
 import { flag } from "../../store/settings";
 import type { TerminalStatus } from "../../types";
@@ -183,6 +184,8 @@ createRoot(() => createEffect(() => { if (!tabs().find((t) => t.id === detailTab
 export function SessionDetail() {
   return (
     <section class="detail" aria-label="Session">
+      {/* Qt's drop overlay (SessionFileDrop): what a drop on this panel does. */}
+      <Show when={drops.hint()}>{(text) => <div class="drop-overlay" aria-hidden="true"><span>{text()}</span></div>}</Show>
       <Show when={selected()} fallback={<EmptyDetail />}>
         <Header />
         <div class="work">

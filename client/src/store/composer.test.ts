@@ -39,6 +39,7 @@ function fakes(reply: SendReply = { kind: "sending" }, opened: ComposerView | nu
     },
     edit: async (_h, rev, _epoch, text) => { calls.push(`edit ${rev} ${text}`); },
     pick: () => new Promise<void>((resolve) => { calls.push("pick"); attachDone = resolve; }),
+    attach: async (_h, paths, start, end) => { calls.push(`attach ${paths.join(",")} ${start}-${end}`); },
     pasteImage: async (_h, bytes) => { calls.push(`paste ${bytes.length}`); },
     send: async (_h, rev, _epoch, text) => { calls.push(`send ${rev} ${text}`); return reply; },
     answer: async (token, answer) => { calls.push(`answer ${token} ${JSON.stringify(answer)}`); return answerReply; },
@@ -632,6 +633,33 @@ describe("composer store", () => {
       expect(c.operationLocked()).toBe(false);
       await c.refresh();
       expect(f.calls).toEqual(["refresh 1"]);
+    });
+  });
+});
+
+describe("dropped files (MessageComposer::attachDroppedFiles, 961-967)", () => {
+  it("attach at the cursor, the selection collapsed, after the typing is saved", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers);
+      c.apply(view());
+      c.input("hello world", 6, 11);
+      expect(c.canAttach()).toBe(true);
+      await c.attachDropped(["/srv/home/example/notes.txt"]);
+      expect(f.calls.slice(-2)).toEqual(["edit 1 hello world", "attach /srv/home/example/notes.txt 11-11"]);
+    });
+  });
+
+  it("can attach only while the session takes attachments and nothing locks the composer", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers);
+      c.apply(view({ attachments_available: false }));
+      expect(c.canAttach()).toBe(false);
+      c.apply(view({ sending: true }));
+      expect(c.canAttach()).toBe(false);
+      await c.attachDropped(["/srv/a.txt"]);
+      expect(f.calls.some((call) => call.startsWith("attach"))).toBe(false);
     });
   });
 });

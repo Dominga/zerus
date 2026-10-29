@@ -19,6 +19,8 @@ mod composer;
 mod desk;
 mod display;
 #[cfg(feature = "live")]
+mod drops;
+#[cfg(feature = "live")]
 mod files;
 mod identity;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -895,6 +897,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         composer::composer_allow_retry,
         composer::composer_refresh,
         composer::composer_tab,
+        drops::dropped_files,
         composer::fetch::attachment_fetch,
         composer::fetch::attachment_pin,
         composer::fetch::attachment_unpin,

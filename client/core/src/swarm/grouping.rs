@@ -216,12 +216,23 @@ impl Grouping {
     }
 
     fn upsert(&mut self, computer: &ComputerId, key: &str, row: &crate::ViewRow) {
-        let (machine, name, title) = (row.machine.as_str(), row.name.as_str(), row.title.as_str());
         let run = row
             .run_id
             .as_ref()
             .filter(|run| !run.is_empty() && row.state != "archived" && row.archive_id.is_none())
             .cloned();
+        self.upsert_with_run(computer, key, &row.machine, &row.name, &row.title, run);
+    }
+
+    fn upsert_with_run(
+        &mut self,
+        computer: &ComputerId,
+        key: &str,
+        machine: &str,
+        name: &str,
+        title: &str,
+        run: Option<String>,
+    ) {
         let at = (computer.clone(), key.to_owned());
         let member = super::member(machine, name);
         let mut seq = None;
@@ -291,14 +302,15 @@ impl Grouping {
                     slot.seq,
                     at.clone(),
                     slot.member.clone(),
+                    slot.run.clone(),
                     slot.title.clone(),
                 )
             })
             .collect();
         slots.sort_unstable_by_key(|slot| slot.0);
-        for (_, at, member, title) in slots {
+        for (_, at, member, run, title) in slots {
             if let Some((machine, name)) = member.split_once('\n') {
-                self.upsert(&at.0, &at.1, machine, name, &title);
+                self.upsert_with_run(&at.0, &at.1, machine, name, &title, run);
             }
         }
     }

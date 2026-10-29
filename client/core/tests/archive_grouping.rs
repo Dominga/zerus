@@ -144,6 +144,11 @@ fn run_memory_follows_live_rows_on_observe_and_present_and_forgets_implicit_ones
         grouping.take_layout().is_none(),
         "an older unchanged run is not rewritten as newest either"
     );
+    grouping.replace_runs(zerus_client_core::swarm::runs::Runs::default());
+    assert!(
+        grouping.take_layout().is_none(),
+        "loading rename tokens preserves actual slot runs and their project ages"
+    );
     grouping.observe(&Change::Remove {
         computer: ComputerId::local(),
         key: "run:next".into(),

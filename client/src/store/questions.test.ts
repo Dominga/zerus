@@ -158,6 +158,20 @@ describe("question cards", () => {
     dispose();
   }));
 
+  it("a cold question goes with its card: Cancel, nothing sent", () => createRoot(async (dispose) => {
+    const f = fakes();
+    const q = createQuestions(f.port, f.clock);
+    q.apply(card());
+    f.reply({ kind: "cold", token: 9, prompt: { title: "Submit with a cold cache?", text: "…", proceed: "Submit with full context" } });
+    await q.submit();
+    q.apply(card({}, 2));
+    expect(q.dialog()?.token).toBe(9);
+    q.apply({ ...card(), card: "question\nanother" });
+    expect(q.dialog()).toBeUndefined();
+    expect(f.calls).toEqual(["submit", "cold 9 false"]);
+    dispose();
+  }));
+
   it("a notice reply raises a sticky error", () => createRoot(async (dispose) => {
     const f = fakes();
     const q = createQuestions(f.port, f.clock);

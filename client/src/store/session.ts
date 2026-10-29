@@ -2,6 +2,7 @@ import { batch, createEffect, createRoot, createSignal, on } from "solid-js";
 import { activityPort, composerTab, processesFollow, processesShown, windowVisibility } from "../bridge";
 import { applyBatch, computerFresh, onReplaced, orderedRows, setDraftKeys } from "./catalog";
 import { composer } from "./composer";
+import { terminal } from "./terminal";
 import { flag, num } from "./settings";
 import { bindActivity, bindSelection, followedFor, notify } from "./actions";
 import { observeMarks } from "./marks";
@@ -45,7 +46,7 @@ function composerEvent(e: ComposerEvent) {
   // An error stays until dismissed unless it is transient (showNotice, SessionsWindow.cpp:5210).
   if (e.kind === "notice") notify(e.error ? "error" : "info", e.text, e.error && !e.transient);
   // Codex's hooks review and Update now continue in Terminal (1157-1178); showing the tab connects it.
-  else if (composer.view()?.key === e.key) setDetailTab("terminal");
+  else if (composer.view()?.key === e.key) { terminal.opened(); setDetailTab("terminal"); }
 }
 
 createRoot(() => {

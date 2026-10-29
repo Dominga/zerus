@@ -56,7 +56,7 @@ const toneClass = (tone: ChipTone) => (tone === "danger" ? "danger" : tone === "
  * double-click or Home to reset, Up and Down resize by 20 px. The field never
  * grows past the room above it: Activity keeps at least 120 px.
  */
-function ResizeHandle(props: { edge?: boolean }) {
+function ResizeHandle(props: { edge?: boolean; hidden?: boolean }) {
   const [dragging, setDragging] = createSignal(false);
   const limit = (el: HTMLElement) => {
     const pane = el.closest(".activity-wrap")?.getBoundingClientRect();
@@ -86,7 +86,7 @@ function ResizeHandle(props: { edge?: boolean }) {
     e.preventDefault();
   };
   return (
-    <div class="cmp-resize" classList={{ dragging: dragging(), edge: props.edge, gap: !props.edge }} tabindex={props.edge ? -1 : 0} role="separator" aria-orientation="horizontal"
+    <div class="cmp-resize" classList={{ dragging: dragging(), edge: props.edge, gap: !props.edge }} hidden={props.hidden} tabindex={props.edge ? -1 : 0} role="separator" aria-orientation="horizontal"
       aria-label="Message field height" aria-valuemin={EDITOR.min} aria-valuemax={EDITOR.max} aria-valuenow={editorHeight()}
       onPointerDown={down} onDblClick={resetEditorHeight} onKeyDown={key}>
       <Show when={!props.edge}><i class="cmp-grip" /></Show>
@@ -214,10 +214,11 @@ export function Composer() {
   const jumpCaption = () => (unseen() > 0 ? `Jump to latest activity (${unseen()} new)` : "Jump to latest activity");
   const editorTip = () => v()?.waiting ?? (v()?.session_blocks_input ? v()!.session_status : undefined);
   // A required question card stands in for the editor, its grip and the action row; the toolbar stays (setInputVisible, 1126-1131).
+  // They stay mounted and only hide, as Qt's setVisible: the editor's command, observer and flush need it.
   const input = () => v()?.input_visible !== false;
   return (
     <div class="composer" ref={root} data-shortcut-context="composer" classList={{ blocked: !!v()?.session_blocks_input }}>
-      <Show when={input()}><ResizeHandle edge /></Show>
+      <ResizeHandle edge hidden={!input()} />
       <div class="cmp-toolbar">
         <AttachmentsChip compact={compact()} />
         {/* The voice slot: Task 13. */}
@@ -243,7 +244,8 @@ export function Composer() {
         <Show when={v()?.cancel_send}>
           <button type="button" class="tchip link" title={CANCEL_SEND} onClick={() => { void composer.cancelSend(); editor.focus(); }}>Cancel send</button>
         </Show>
-        <Show when={input()} fallback={<span class="grow" />}><ResizeHandle /></Show>
+        <ResizeHandle hidden={!input()} />
+        <Show when={!input()}><span class="grow" /></Show>
         <Show when={v()}><CacheChip compact={compact()} /></Show>
         <Show when={v()?.context.visible}>
           <span class={`tchip ${toneClass(v()!.context.tone)}`} title={v()!.context.tooltip} aria-label={v()!.context.accessible_name}>
@@ -254,14 +256,13 @@ export function Composer() {
           </span>
         </Show>
       </div>
-      <Show when={input()}>
-      <textarea ref={editor} class="cmp-editor" style={{ height: `${editorHeight() * contentScale()}px` }} aria-label="Message to selected agent"
+      <textarea ref={editor} class="cmp-editor" hidden={!input()} style={{ height: `${editorHeight() * contentScale()}px` }} aria-label="Message to selected agent"
         placeholder="Message this agent…" readOnly={composer.locked()} disabled={!v()} value={composer.text()} title={editorTip()}
         onInput={(e) => { const c = caret(); composer.input(e.currentTarget.value, c.anchor, c.position); }}
         onSelect={remember} onKeyUp={remember} onMouseUp={remember}
         onBlur={() => { void composer.flush(); }} onKeyDown={onKey} onPaste={onPaste} />
-      <Show when={composer.hint()}><div class="cmp-hint" role="status">{composer.hint()}</div></Show>
-      <div class="cmp-actions">
+      <Show when={input() && composer.hint()}><div class="cmp-hint" role="status">{composer.hint()}</div></Show>
+      <div class="cmp-actions" hidden={!input()}>
         <span class="cmp-files">
           <button type="button" class="icon-btn cmp-attach" disabled={!v() || composer.locked() || !v()!.attachments_available} aria-label="Attach files to message"
             title={v()?.attachments_available === false ? v()!.attachments_reason : ATTACH}
@@ -290,7 +291,6 @@ export function Composer() {
         <button type="button" class="btn primary" aria-label="Send" disabled={!composer.sendEnabled()} title={v()?.waiting ?? undefined}
           onClick={() => { void composer.send(); }}>{v()?.send_label ?? "Send"}<Icon name="arrow-up" size={13} /></button>
       </div>
-      </Show>
     </div>
   );
 }

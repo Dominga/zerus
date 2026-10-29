@@ -399,6 +399,9 @@
 @keyframes insp-out { to { opacity: 0; translate: 24px 0; } }
 @keyframes cmp-progress { from { translate: -100% 0; } to { translate: 250% 0; } }
 
+/* A required question card hides the composer's input without unmounting it. */
+.composer [hidden] { display: none !important; }
+
 /* The question card (Qt's QuestionCard), between Activity and the composer. */
 .qcard { display: flex; flex-direction: column; gap: 9px; padding: 12px 14px; margin-bottom: 8px; background: var(--z-color-surface);
   border: 1px solid var(--z-color-border); border-radius: var(--z-radius-lg); max-height: 60vh; }

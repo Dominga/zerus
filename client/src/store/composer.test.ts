@@ -715,6 +715,10 @@ describe("the batch envelope", () => {
     expect(isEmptyBatch(normalize({}))).toBe(true);
     expect(isEmptyBatch(normalize({ composer: view() }))).toBe(false);
     expect(isEmptyBatch(normalize({ draft_keys: [] }))).toBe(false);
+    // Notices and Terminal requests that arrive after their call are content too (A2).
+    const events = [{ kind: "notice" as const, text: "Response recorded.", error: false, transient: false }];
+    expect(isEmptyBatch(normalize({ composer_events: events }))).toBe(false);
+    expect(normalize({ composer_events: events }).composer_events).toEqual(events);
     expect(normalize({ draft_keys: [KEY] }).draft_keys).toEqual([KEY]);
   });
 });

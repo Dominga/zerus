@@ -185,7 +185,8 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
   /** Qt's Send state (MessageComposer.cpp:1185), from Rust's view and the text being typed. */
   const sendEnabled = () => {
     const v = view();
-    if (!v || !v.loaded || !v.available || v.uncertain || locked() || tooLong() || !hasContent()) return false;
+    // A required question card hides Send with the editor (setInputVisible).
+    if (!v || !v.loaded || !v.available || v.uncertain || v.input_visible === false || locked() || tooLong() || !hasContent()) return false;
     return !(v.attachments.length > 0 && !v.attachments_available);
   };
 
@@ -377,7 +378,8 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
     undo: () => handBackAfter((h) => port.undo(h)),
     async send() {
       const h = handle();
-      if (h === undefined || locked()) return;
+      // Under a required question card the editor is hidden and takes no command (setInputVisible).
+      if (h === undefined || locked() || view()?.input_visible === false) return;
       if (!sendEnabled()) {
         // Qt shows the status at the editor when there is something to send (MessageComposer.cpp:814-818).
         const status = statusLine(view(), error(), tooLong()).text;

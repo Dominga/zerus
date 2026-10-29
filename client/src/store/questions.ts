@@ -35,7 +35,7 @@ const browserClock: Clock = {
 export function createQuestions(port: QuestionPort, clock: Clock = browserClock) {
   const [view, setView] = createSignal<QuestionView | undefined>();
   const [left, setLeft] = createSignal(REVIEW_MS / 1000);
-  const [dialog, setDialog] = createSignal<{ token: number; prompt: ColdAnswer } | undefined>();
+  const [dialog, setDialog] = createSignal<{ token: number; prompt: ColdAnswer; card: string } | undefined>();
   let active = false;
   let started: number | undefined;
   let shown = "";
@@ -53,6 +53,9 @@ export function createQuestions(port: QuestionPort, clock: Clock = browserClock)
 
   /** A new card or a rebuilt one (its revision) starts the review again; a grown epoch alone does not. Only a review card ticks. */
   function apply(next: QuestionView | null | undefined) {
+    // A cold question goes with its card: Cancel, nothing sent (the hub drops it too).
+    const d = dialog();
+    if (d && next?.card !== d.card) { setDialog(undefined); void port.cold(d.token, false).catch(() => {}); }
     const id = next ? `${next.card}\n${next.revision}` : "";
     if (id !== shown) { shown = id; started = undefined; setLeft(secondsLeft(0)); }
     setView(next ?? undefined);
@@ -65,15 +68,15 @@ export function createQuestions(port: QuestionPort, clock: Clock = browserClock)
   const reviewing = (b: ButtonView) => b.review_label !== null && left() > 0;
   const label = (b: ButtonView) => (reviewing(b) ? `${b.review_label} (${left()})` : b.label);
   const enabled = (b: ButtonView) => b.visible && b.enabled && !reviewing(b);
-  const reply = (r: QuestionReply) => {
-    if (r.kind === "cold") setDialog({ token: r.token, prompt: r.prompt });
+  const reply = (r: QuestionReply, card: string) => {
+    if (r.kind === "cold") setDialog({ token: r.token, prompt: r.prompt, card });
     else if (r.kind === "notice") port.notify(r.text);
   };
   const card = () => view()?.card;
 
   async function submit() {
     const v = view();
-    if (v && enabled(v.view.submit)) reply(await port.submit(v.card));
+    if (v && enabled(v.view.submit)) reply(await port.submit(v.card), v.card);
   }
 
   return {
@@ -88,14 +91,14 @@ export function createQuestions(port: QuestionPort, clock: Clock = browserClock)
     async enter(repeat: boolean) { if (!repeat && view()?.view.submit.visible) await submit(); },
     async decide(allow: boolean) {
       const v = view();
-      if (v && enabled(allow ? v.view.approve : v.view.deny)) reply(await port.decide(v.card, allow));
+      if (v && enabled(allow ? v.view.approve : v.view.deny)) reply(await port.decide(v.card, allow), v.card);
     },
-    async skip() { const v = view(); if (v && enabled(v.view.skip)) reply(await port.skip(v.card)); },
+    async skip() { const v = view(); if (v && enabled(v.view.skip)) reply(await port.skip(v.card), v.card); },
     async answerCold(proceed: boolean) {
       const d = dialog();
       if (!d) return;
       setDialog(undefined);
-      reply(await port.cold(d.token, proceed));
+      reply(await port.cold(d.token, proceed), d.card);
     },
   };
 }

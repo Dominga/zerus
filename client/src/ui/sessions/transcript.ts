@@ -171,7 +171,9 @@ export function buildTranscript(events: readonly ActivityEvent[], summary?: Reco
       }
       // An answer to a question card, or a message holding Codex replies (ActivityView.cpp:1036-1038).
       const replies = role === "user" && e.question_replies?.length ? e.question_replies : undefined;
-      const label = role === "user" && (e.type === "QuestionAnswered" || replies) ? "You (answer)" : undefined;
+      // Qt's order: a queued prompt first, then an answer (ActivityView.cpp:1036-1038).
+      const label = role !== "user" ? undefined : e.type === "UserPromptQueued" ? "You (queued)"
+        : e.type === "QuestionAnswered" || replies ? "You (answer)" : undefined;
       items.push({ id, kind: role === "user" ? "user" : "agent", at, body: e.detail ?? "", attachments: attachments(e), receipt, label, replies });
       i++; continue;
     }

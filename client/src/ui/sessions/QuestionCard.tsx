@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createMemo, on, onCleanup, onMount, untrack } from "solid-js";
+import { Index, Show, createEffect, createMemo, createSignal, onCleanup, onMount, untrack } from "solid-js";
 import { Icon } from "../lib/icons";
 import { questions } from "../../store/questions";
 import { terminal } from "../../store/terminal";
@@ -18,15 +18,36 @@ export function QuestionCard() {
   );
 }
 
-/** Rust's answers come back with every grown epoch; `apply` puts them into a field the user may have changed. */
+/**
+ * Rust's answers come back when the epoch grows; `apply` puts them into a
+ * field the user may have changed. An echo of the same epoch (every edit's
+ * own view) leaves the field alone.
+ */
 function onEpoch(apply: () => void) {
-  createEffect(on(() => questions.view()?.epoch, () => apply(), { defer: true }));
+  const epoch = createMemo(() => questions.view()?.epoch);
+  let last = untrack(epoch);
+  createEffect(() => {
+    const now = epoch();
+    if (now !== undefined && last !== undefined && now > last) untrack(apply);
+    last = now;
+  });
+}
+
+/** Enter or Space held down never acts again, and Enter on a button does nothing: Qt's card buttons are not auto-default (QuestionCard.cpp:907). */
+function guardKeys(e: KeyboardEvent) {
+  if (e.isComposing || e.keyCode === 229 || (e.key !== "Enter" && e.key !== " ")) return;
+  if (e.repeat || (e.key === "Enter" && e.target instanceof HTMLButtonElement)) { e.preventDefault(); e.stopPropagation(); }
 }
 
 function Card() {
   const q = () => questions.view()!;
   const c = () => q().view;
-  const formId = () => c().forms[c().page]?.id;
+  // Tabs stay browsable while the card is locked; the draft keeps its page (QuestionCard.cpp:249-255).
+  const [browse, setBrowse] = createSignal<number>();
+  createEffect(() => { if (!c().locked) setBrowse(undefined); });
+  const page = () => (c().locked ? browse() ?? c().page : c().page);
+  const formId = () => c().forms[page()]?.id;
+  const choose = (i: number) => { if (c().locked) setBrowse(i); else void questions.page(i); };
   let el!: HTMLDivElement;
   onMount(() => {
     // The review delay counts only while the card is on screen and the window is active (237-246).
@@ -48,12 +69,13 @@ function Card() {
   const native = () => q().terminal_label === "Open native UI";
   const terminalTip = () => (native() ? "Arrives with Native UI." : terminal.texts()?.available ? undefined : terminal.texts()?.reason);
   const onKey = (e: KeyboardEvent) => {
+    if (e.isComposing || e.keyCode === 229) return;
     if (e.key !== "Enter" || e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) return;
     e.preventDefault();
     void questions.enter(e.repeat);
   };
   return (
-    <div class="qcard" ref={el} role="group" aria-label={c().heading}>
+    <div class="qcard" ref={el} role="group" aria-label={c().heading} onKeyDown={guardKeys}>
       <div class="qcard-head">
         <b class="qcard-title">{c().heading}</b><span class="grow" />
         <Show when={c().progress}><span class="qcard-dim">{c().progress}</span></Show>
@@ -73,17 +95,17 @@ function Card() {
       </div>
       <Show when={c().tabs_visible}>
         <div class="qcard-tabs tabs" role="tablist">
-          <For each={c().forms}>{(f, i) => (
-            <button type="button" class="tab" role="tab" classList={{ on: i() === c().page }} aria-selected={i() === c().page} disabled={c().locked}
-              onClick={() => void questions.page(i())}>{f.tab}</button>
-          )}</For>
+          <Index each={c().forms}>{(f, i) => (
+            <button type="button" class="tab" role="tab" classList={{ on: i === page() }} aria-selected={i === page()}
+              onClick={() => choose(i)}>{f().tab}</button>
+          )}</Index>
         </div>
       </Show>
       <Show when={formId()} keyed>{(id) => <Form id={id} onKey={onKey} />}</Show>
-      <p class="qcard-status" classList={{ error: c().status_error }} title={c().status}>{c().status}</p>
+      <p class="qcard-status" classList={{ error: c().status_error }} title={c().status} role="status" aria-live="polite">{c().status}</p>
       <div class="qcard-actions">
         <button type="button" class="btn ghost" disabled={native() || !terminal.texts()?.available} title={terminalTip()}
-          onClick={() => setDetailTab("terminal")}>{q().terminal_label}</button>
+          onClick={() => { terminal.opened(); setDetailTab("terminal"); }}>{q().terminal_label}</button>
         <span class="grow" />
         <Show when={c().skip.visible}><button type="button" class="btn ghost" title={c().skip_tip} disabled={!questions.enabled(c().skip)} onClick={() => void questions.skip()}>{c().skip.label}</button></Show>
         <Show when={c().retry}><button type="button" class="btn ghost" title={c().retry_tip} onClick={() => void questions.allowRetry()}>Allow retry</button></Show>
@@ -109,7 +131,7 @@ function Form(props: { id: string; onKey: (e: KeyboardEvent) => void }) {
             <Show when={form().markdown} fallback={<p class="qcard-body wrap-pre" classList={{ mono: form().monospace_body }}>{form().body}</p>}><div class="qcard-body"><Body text={form().body} /></div></Show>
           </Show>
           <Show when={form().mode_visible}><p class="qcard-mode">{form().mode}</p></Show>
-          <For each={form().options}>{(o) => <Choice form={form()} id={o.id} group={group} onKey={props.onKey} />}</For>
+          <Index each={form().options}>{(o) => <Choice form={form()} id={o().id} group={group} onKey={props.onKey} />}</Index>
           <Show when={form().other}><Choice form={form()} group={group} other onKey={props.onKey} /></Show>
         </div>
         <Show when={form().text?.visible}><AnswerLine id={props.id} onKey={props.onKey} /></Show>
@@ -173,6 +195,8 @@ function ColdAnswerDialog() {
     if (!el.open) el.showModal();
     queueMicrotask(() => el?.querySelector<HTMLElement>("[data-initial]")?.focus());
   });
+  // A dialog that goes unanswered answers Cancel, so the hub holds no question nobody can answer.
+  onCleanup(() => { if (questions.dialog()) void questions.answerCold(false); });
   return (
     <dialog class="dlg" ref={el} role="alertdialog" aria-labelledby="qcard-cold-title" aria-describedby="qcard-cold-text" style={{ width: "460px" }}
       onClose={() => { if (questions.dialog()) void questions.answerCold(false); }}>

@@ -11,7 +11,7 @@ use crate::reads::READ_LIMIT;
 use crate::run::run_limited;
 use crate::ComputerId;
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -150,6 +150,8 @@ pub struct Schedule {
     every: Intervals,
     due: BTreeMap<Slot, Instant>,
     running: BTreeMap<Slot, ()>,
+    started: BTreeMap<Slot, Instant>,
+    refreshes: BTreeSet<Slot>,
     /// Consecutive failed listings; the status's attempt.
     failures: u32,
     /// A listing succeeded since polling started.
@@ -191,6 +193,8 @@ impl Schedule {
         }));
         let slots: Vec<Slot> = wanted.iter().map(Read::slot).collect();
         self.due.retain(|slot, _| slots.contains(slot));
+        self.started.retain(|slot, _| slots.contains(slot));
+        self.refreshes.retain(|slot| slots.contains(slot));
         let mut reads = Vec::new();
         for read in wanted {
             let slot = read.slot();
@@ -199,6 +203,8 @@ impl Schedule {
             }
             let at = *self.due.entry(slot.clone()).or_insert(now);
             if at <= now {
+                self.started.insert(slot.clone(), now);
+                self.refreshes.remove(&slot);
                 self.running.insert(slot, ());
                 reads.push(read);
             }
@@ -216,7 +222,27 @@ impl Schedule {
             Read::Activity { .. } => self.every.activity,
             Read::Processes { .. } => self.every.processes,
         };
-        self.due.insert(slot, now + every);
+        let due = if self.refreshes.contains(&slot) {
+            now.max(self.started.get(&slot).copied().unwrap_or(now) + Duration::from_secs(1))
+        } else {
+            now + every
+        };
+        self.due.insert(slot, due);
+    }
+
+    /// A one-shot processes read, including while polling an older CLI. Keep
+    /// one in flight and a one-second minimum gap; repeated requests coalesce.
+    pub fn refresh_processes(&mut self, key: &str, now: Instant) -> bool {
+        let slot = Slot::Processes(key.into());
+        let Some(started) = self.started.get(&slot).copied() else {
+            return false;
+        };
+        self.refreshes.insert(slot.clone());
+        if !self.running.contains_key(&slot) {
+            self.due
+                .insert(slot, now.max(started + Duration::from_secs(1)));
+        }
+        true
     }
 
     /// When the next read not in flight is due.
@@ -253,6 +279,34 @@ mod tests {
     use super::*;
 
     const SECOND: Duration = Duration::from_secs(1);
+
+    #[test]
+    fn a_process_refresh_is_one_bounded_read_after_the_gap() {
+        let start = Instant::now();
+        let mut schedule = Schedule::new(Intervals::default());
+        let followed = [("run:r".into(), "codex/p/t".into())];
+        let follows = Follows {
+            activity: &[],
+            processes: &followed,
+        };
+        let first = schedule.due(start, &follows);
+        let read = first
+            .iter()
+            .find(|read| matches!(read, Read::Processes { .. }))
+            .unwrap();
+        for _ in 0..2 {
+            assert!(schedule.refresh_processes("run:r", start));
+        }
+        schedule.done(read, start + Duration::from_millis(100));
+        assert!(schedule
+            .due(start + Duration::from_millis(999), &follows)
+            .is_empty());
+        let refreshed = schedule.due(start + SECOND, &follows);
+        assert_eq!(refreshed.len(), 1);
+        schedule.done(&refreshed[0], start + SECOND);
+        assert!(schedule.due(start + SECOND * 2, &follows).is_empty());
+        assert!(!schedule.refresh_processes("missing", start));
+    }
 
     #[test]
     fn reads_follow_the_qt_cadence_with_one_in_flight_each() {

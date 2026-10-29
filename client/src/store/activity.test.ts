@@ -30,6 +30,18 @@ describe("activity store", () => {
     });
   });
 
+  it("reads its attachments in the inspected conversation, else the row's", () => {
+    createRoot((dispose) => {
+      const { store } = setup();
+      expect(store.attachmentScope()).toBeUndefined();
+      store.follow({ ...target, conversationId: "conv-row" });
+      expect(store.attachmentScope()).toEqual({ computer: "", name: target.name, conversation_id: "conv-row", archive_id: null });
+      store.applyActivity([out("state", { value: { conversation_id: "conv-inspected" } })]);
+      expect(store.attachmentScope()?.conversation_id).toBe("conv-inspected");
+      dispose();
+    });
+  });
+
   it("reads older pages with `after` and doubles the reach after an empty read", () => {
     createRoot((dispose) => {
       const { store, calls } = setup();

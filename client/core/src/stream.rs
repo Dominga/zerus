@@ -339,6 +339,9 @@ enum Input {
         key: String,
         session: SessionRef,
     },
+    RefreshProcesses {
+        key: String,
+    },
     SubscribeTasks {
         key: String,
     },
@@ -385,8 +388,14 @@ struct Follow {
 }
 
 type Follows = Arc<Mutex<BTreeMap<String, Follow>>>;
-/// Sessions whose processes are followed, by key.
-type ProcessFollows = Arc<Mutex<BTreeMap<String, SessionRef>>>;
+#[derive(Clone, Debug)]
+struct ProcessFollow {
+    session: SessionRef,
+    interval_ms: Option<u64>,
+}
+
+/// Sessions whose processes are followed, by key, with their requested cadence.
+type ProcessFollows = Arc<Mutex<BTreeMap<String, ProcessFollow>>>;
 /// Projects whose task lists are followed.
 type TaskFollows = Arc<Mutex<BTreeSet<String>>>;
 
@@ -504,18 +513,59 @@ impl StreamHandle {
         {
             let mut follows = lock(&self.processes);
             if let Some(old) = follows.get(&key) {
-                if *old == session {
+                if old.session == session {
                     return Ok(key);
                 }
             } else if follows.len() >= self.processes_limit.load(Ordering::Relaxed) {
                 return Err(FollowError::TooMany);
             }
-            follows.insert(key.clone(), session);
+            let interval_ms = follows.get(&key).and_then(|follow| follow.interval_ms);
+            follows.insert(
+                key.clone(),
+                ProcessFollow {
+                    session,
+                    interval_ms,
+                },
+            );
         }
         self.tx
             .send(Input::SubscribeProcesses { key: key.clone() })
             .map_err(|_| FollowError::Stopped)?;
         Ok(key)
+    }
+
+    /// Changes a followed session's cadence without dropping its current state.
+    /// The request survives reconnects; older watch servers keep their default.
+    pub fn set_processes_interval(&self, key: &str, interval_ms: u64) -> Result<(), FollowError> {
+        if self.stopped() {
+            return Err(FollowError::Stopped);
+        }
+        {
+            let mut follows = lock(&self.processes);
+            let follow = follows.get_mut(key).ok_or(FollowError::KeyMismatch)?;
+            let interval = Some(interval_ms.clamp(1_000, 600_000));
+            if follow.interval_ms == interval {
+                return Ok(());
+            }
+            follow.interval_ms = interval;
+        }
+        self.tx
+            .send(Input::SubscribeProcesses { key: key.into() })
+            .map_err(|_| FollowError::Stopped)
+    }
+
+    /// Requests one fresh inventory for an existing subscription. Repeated
+    /// requests coalesce on the server and retain the current state meanwhile.
+    pub fn refresh_processes(&self, key: &str) -> Result<(), FollowError> {
+        if self.stopped() {
+            return Err(FollowError::Stopped);
+        }
+        if !lock(&self.processes).contains_key(key) {
+            return Err(FollowError::KeyMismatch);
+        }
+        self.tx
+            .send(Input::RefreshProcesses { key: key.into() })
+            .map_err(|_| FollowError::Stopped)
     }
 
     /// Stops following a session's processes and drops their state without an
@@ -526,7 +576,7 @@ impl StreamHandle {
         };
         let _ = self.tx.send(Input::UnsubscribeProcesses {
             key: key.to_owned(),
-            session,
+            session: session.session,
         });
         true
     }
@@ -889,7 +939,7 @@ impl Supervisor {
             let processes: Vec<(String, String)> = lock(&self.processes)
                 .iter()
                 .filter(|(key, _)| self.state.processes().is_followed(key))
-                .map(|(key, session)| (key.clone(), session.name.clone()))
+                .map(|(key, follow)| (key.clone(), follow.session.name.clone()))
                 .collect();
             let follows = crate::legacy::Follows {
                 activity: &activity,
@@ -919,6 +969,11 @@ impl Supervisor {
                     self.legacy_windows.remove(&key);
                 }
                 Ok(Input::SubscribeProcesses { key }) => self.state.processes_mut().follow(&key),
+                Ok(Input::RefreshProcesses { key }) => {
+                    if let Some(schedule) = &mut self.legacy {
+                        schedule.refresh_processes(&key, Instant::now());
+                    }
+                }
                 Ok(Input::UnsubscribeProcesses { key, .. }) => {
                     self.state.processes_mut().unfollow(&key)
                 }
@@ -1115,6 +1170,7 @@ impl Supervisor {
                     }
                 }
                 Ok(Input::SubscribeProcesses { key }) => self.subscribe_processes(&key),
+                Ok(Input::RefreshProcesses { key }) => self.send_processes_subscription(&key, true),
                 Ok(Input::UnsubscribeProcesses { key, session }) => {
                     self.state.processes_mut().unfollow(&key);
                     self.unsubscribe_processes(session);
@@ -1161,8 +1217,8 @@ impl Supervisor {
                 } => {
                     // The server may still follow a key the catalog dropped.
                     let removed = lock(&self.processes).remove(key);
-                    if let Some(session) = removed {
-                        self.unsubscribe_processes(session);
+                    if let Some(follow) = removed {
+                        self.unsubscribe_processes(follow.session);
                     }
                 }
                 Change::Tasks {
@@ -1251,9 +1307,9 @@ impl Supervisor {
     /// the topic, subscribes it. A key the live catalog lacks ends at once, and
     /// so does one beyond the stream's limit.
     fn subscribe_processes(&mut self, key: &str) {
-        let Some(session) = lock(&self.processes).get(key).cloned() else {
+        if !lock(&self.processes).contains_key(key) {
             return;
-        };
+        }
         self.state.processes_mut().follow(key);
         if !self.greeted {
             return;
@@ -1269,9 +1325,21 @@ impl Supervisor {
             }
             return;
         }
+        self.send_processes_subscription(key, false);
+    }
+
+    fn send_processes_subscription(&mut self, key: &str, refresh: bool) {
+        if !self.greeted || self.state.processes_limit().is_none() {
+            return;
+        }
+        let Some(follow) = lock(&self.processes).get(key).cloned() else {
+            return;
+        };
         self.write(&Control::Subscribe(Subscription {
             topic: topic::PROCESSES.into(),
-            session: Some(session),
+            session: Some(follow.session),
+            interval_ms: follow.interval_ms,
+            refresh: refresh.then_some(true),
             ..Subscription::default()
         }));
     }

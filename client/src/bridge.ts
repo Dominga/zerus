@@ -1,6 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type Batch, type ComputerId, type Details, type EditOutcome, type Outcome, type ReadMark, type Target, type TerminalConnected, type TerminalFacts, type TerminalFinished, type TerminalStatus, type TerminalTarget, type ArchivePage, type ArchivedActivity, type ProcessTarget } from "./types";
+import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type Batch, type ComputerId, type Details, type EditOutcome, type Outcome, type ReadMark, type Target, type TerminalConnected, type TerminalFacts, type TerminalFinished, type TerminalStatus, type TerminalTarget, type ArchivePage, type ArchivedActivity, type ProcessTarget, type Answer, type ComposerTab, type ComposerView, type Inspect, type SendReply, type SessionRef, type AttachmentRef, type Fetched } from "./types";
 import type { ActivityPort, FollowRequest } from "./store/activity";
 import { documentVisibility, type PageVisibility } from "./store/visibility";
 
@@ -135,13 +135,18 @@ export function pump(from: Source, onBatch: (b: Batch) => void, host: PumpHost =
   return unsubscribe;
 }
 
-/** Missing arrays default to empty, so a core that omits empty fields still applies. The grouping is kept: a batch of only grouping is content. */
-function normalize(b: Partial<Batch>): Batch {
+/**
+ * Missing arrays default to empty, so a core that omits empty fields still
+ * applies. The grouping, the composer's view and the draft keys are kept: a
+ * batch of only one of them is content (Rust sends each once).
+ */
+export function normalize(b: Partial<Batch>): Batch {
   const e = emptyBatch();
   return {
     upserts: b.upserts ?? e.upserts, removes: b.removes ?? e.removes, replaces: b.replaces ?? e.replaces, computers: b.computers ?? e.computers,
     machines: b.machines ?? [], activity: b.activity ?? e.activity, groups: b.groups ?? [], grouping: b.grouping ?? undefined,
     processes_view: b.processes_view ?? undefined,
+    composer: b.composer ?? undefined, draft_keys: b.draft_keys ?? undefined,
   };
 }
 
@@ -492,4 +497,69 @@ export function processesSelect(key: string, ids: string[], current: string | nu
 /** Stop selected, through the hub's sequential queue: the processes `ids` of the view `key` shows. */
 export function processesStop(key: string, ids: string[]) {
   if (inTauri()) void invoke("processes_stop", { key, ids }).catch(() => {});
+}
+
+// The composer (src-tauri/src/composer). Outside the app each call rejects
+// with DESKTOP_ACTIONS, and there is no composer to open.
+
+const DESKTOP_ACTIONS = "Actions need the desktop app.";
+const desktop = <T>(command: string, args: Record<string, unknown>): Promise<T> =>
+  inTauri() ? invoke<T>(command, args) : Promise.reject(DESKTOP_ACTIONS);
+
+/** Opens the selected session's composer (undefined: none is open); null outside the app. */
+export const composerOpen = (session: SessionRef | undefined) =>
+  inTauri() ? invoke<ComposerView | null>("composer_open", { session: session ?? null }) : Promise.resolve(null);
+export const composerEdit = (handle: number, rev: number, epoch: number, text: string, position: number, anchor: number) =>
+  desktop<void>("composer_edit", { handle, rev, epoch, text, position, anchor });
+/** The native file picker, then the reads; resolves once they ended. */
+export const composerPick = (handle: number, start: number, end: number) => desktop<void>("composer_pick", { handle, start, end });
+export const composerAttach = (handle: number, paths: string[], start: number, end: number) => desktop<void>("composer_attach", { handle, paths, start, end });
+/** A pasted image goes as a raw IPC body, never as JSON. */
+export async function composerPasteImage(handle: number, png: Uint8Array, start: number, end: number): Promise<void> {
+  if (!inTauri()) throw DESKTOP_ACTIONS;
+  await invoke("composer_paste_image", png, { headers: { "x-zerus-composer": String(handle), "x-zerus-start": String(start), "x-zerus-end": String(end) } });
+}
+export const composerRemove = (handle: number, index: number) => desktop<void>("composer_remove", { handle, index });
+export const composerUndoRemove = (handle: number) => desktop<void>("composer_undo_remove", { handle });
+export const composerAllowRetry = (handle: number) => desktop<void>("composer_allow_retry", { handle });
+/** The status line's Refresh: the open session is read again (Qt's sessionRefreshRequested). */
+export const composerRefresh = (handle: number) => desktop<void>("composer_refresh", { handle });
+/** The detail tab that shows: Terminal and Native UI retry a failed read at Qt's background interval. */
+export const composerTab = (tab: ComposerTab) => (inTauri() ? invoke<void>("composer_tab", { tab }) : Promise.resolve());
+export const sendMessage = (handle: number, rev: number, epoch: number, text: string, position: number, anchor: number) =>
+  desktop<SendReply>("send_message", { handle, rev, epoch, text, position, anchor });
+export const sendAnswer = (token: number, answer: Answer) => desktop<SendReply>("send_answer", { token, answer });
+export const sendCancel = (handle: number) => desktop<void>("send_cancel", { handle });
+export const sendInterrupted = (handle: number) => desktop<void>("send_interrupted", { handle });
+/** Answers once the clear ended (up to 45 s). */
+export const clearContext = (handle: number, run: string, conversation: string, dismiss: boolean) =>
+  desktop<SendReply>("clear_context", { handle, run, conversation, dismiss });
+export const localRetry = (handle: number, id: string) => desktop<SendReply>("local_retry", { handle, id });
+export const localDelete = (handle: number, id: string) => desktop<void>("local_delete", { handle, id });
+export const localInspect = (handle: number, id: string) => desktop<Inspect | null>("local_inspect", { handle, id });
+/** Reads an Activity attachment into the private cache, after the reads ahead of it (composer/fetch.rs). */
+export async function attachmentFetch(computer: string, file: AttachmentRef): Promise<Fetched> {
+  if (!inTauri()) throw "Attachments need the desktop app.";
+  return invoke<Fetched>("attachment_fetch", { computer, file });
+}
+
+/** A view shows the cached copy at `path`: the cache bound keeps it until it is unpinned. */
+export function attachmentPin(path: string) {
+  if (inTauri()) void invoke("attachment_pin", { path }).catch(() => {});
+}
+
+export function attachmentUnpin(path: string) {
+  if (inTauri()) void invoke("attachment_unpin", { path }).catch(() => {});
+}
+
+/** Opens an Activity attachment: null when it opened, a notice when the file manager shows it instead; rejects with why not. */
+export async function attachmentOpen(computer: string, file: AttachmentRef): Promise<string | null> {
+  if (!inTauri()) throw "Opening attachments needs the desktop app.";
+  return invoke<string | null>("attachment_open", { computer, file });
+}
+
+/** Opens the composer attachment the view lists at `path` (`draft/{handle}/{list}/{index}`), as `attachmentOpen` answers. */
+export async function attachmentOpenDraft(path: string): Promise<string | null> {
+  if (!inTauri()) throw "Opening attachments needs the desktop app.";
+  return invoke<string | null>("attachment_open_draft", { path });
 }

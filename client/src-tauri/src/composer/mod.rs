@@ -23,7 +23,9 @@
 //! one for the life of the process, and tests keep theirs, since a store
 //! dropped on its own writer thread would wait for itself.
 
+pub mod fetch;
 pub mod files;
+pub mod questions;
 pub mod send;
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
@@ -39,6 +41,7 @@ use zerus_client_core::cache::Chip;
 use zerus_client_core::drafts::{DraftStore, IndexPage, Loaded, StoredDraft, ALREADY_EXISTS};
 use zerus_client_core::local_messages::{LocalMessage, LocalMessages};
 use zerus_client_core::send::{CompactSend, StartSend};
+use zerus_client_core::session_usage::ContextChip;
 use zerus_client_core::{Action, Batch, Outcome, Target, ViewRow};
 
 use crate::actions::WriteKind;
@@ -164,10 +167,16 @@ pub struct ComposerView {
     pub session_status: String,
     pub session_status_error: bool,
     pub session_blocks_input: bool,
+    /// The open session's last read failed (Qt's `m_inspectError`): its
+    /// Activity reads as unavailable, so the compaction indicator hides
+    /// (`SessionsWindow.cpp:3975`).
+    pub inspect_error: bool,
     /// The cache chip, its popover's warning and its detail lines.
     pub cache: Chip,
     pub cache_warning: String,
     pub cache_details: String,
+    /// The Context chip (R1, Qt's `SessionUsage::ContextButton`).
+    pub context: ContextChip,
     /// The session's local message rows (at most 50): what was sent until
     /// the agent's own history shows it, and what failed.
     pub local: Vec<LocalMessage>,
@@ -178,6 +187,11 @@ pub struct ComposerView {
     pub compacting: bool,
     /// Clear session and the cache popover's Clear context (`clearContext`).
     pub clear: send::ClearControl,
+    /// The agent's question card shown in the composer (A2-1).
+    pub question: Option<questions::QuestionView>,
+    /// The editor and the action row show: false while a required card
+    /// stands in for them (`MessageComposer::setInputVisible`).
+    pub input_visible: bool,
 }
 
 /// One composer's draft and state (`MessageComposer::Draft` plus its sets).
@@ -376,6 +390,13 @@ pub(crate) struct Hub {
     /// The draft key whose context reset runs: one at a time across all
     /// sessions (Qt's `m_clearKey` while `m_clearRequest`).
     pub(crate) clearing: Option<String>,
+    /// The agent's question cards: their answer drafts and the shown card.
+    pub(crate) answers: questions::Answers,
+    /// How long a failed read of the open session waits before it is tried
+    /// again while another detail tab shows: Qt's `backgroundMs` behind
+    /// Terminal or Native UI, `activeMs` behind Processes
+    /// (`SessionsWindow.cpp:2013-2016`); None is Activity's 2.5 s.
+    pub(crate) poll: Option<f64>,
 }
 
 impl Hub {
@@ -510,6 +531,9 @@ impl Composers {
             hub.open = None;
             hub.open_key = None;
             hub.followed = Followed::default();
+            // Qt clears the details with the selection (SessionsWindow.cpp:451):
+            // the card shown on a later selection is built again.
+            hub.answers.deselect();
             drop(hub);
             self.changed();
             return None;
@@ -557,6 +581,7 @@ impl Composers {
         self.trim(&mut hub);
         let view = self.view_of(&hub, &key);
         drop(hub);
+        self.sync_questions();
         self.changed();
         view
     }
@@ -1237,12 +1262,14 @@ impl Composers {
     }
 
     /// What a change of the followed session's Activity sets off: the
-    /// local rows it shows go (`reconcileMessages`), and a continuation
+    /// local rows it shows go (`reconcileMessages`), a continuation
     /// waiting for the open session reads the new details (Qt's
-    /// `continueAfterCompact` and `continueAfterStart`, 3607).
+    /// `continueAfterCompact` and `continueAfterStart`, 3607), and the
+    /// question cards follow (`renderQuestion`).
     fn after_observe(&self) {
         self.reconcile();
         self.continue_open();
+        self.sync_questions();
         self.changed();
     }
 
@@ -1277,6 +1304,7 @@ impl Composers {
     pub(crate) fn view_of(&self, hub: &Hub, key: &str) -> Option<ComposerView> {
         let composer = hub.composers.get(key)?;
         let session = send::session_view(self, hub, composer);
+        let (question, input_visible) = self.question_part(hub);
         let attachments_blocked =
             !composer.draft.attachments.is_empty() && !session.attachments_available;
         let too_long = composer.draft.text.len() > MAX_TEXT_BYTES;
@@ -1374,14 +1402,18 @@ impl Composers {
             session_status: session.session_status,
             session_status_error: session.session_status_error,
             session_blocks_input: session.session_blocks_input,
+            inspect_error: session.inspect_error,
             cache: session.cache,
             cache_warning: session.cache_warning,
             cache_details: session.cache_details,
+            context: session.context,
             local: hub.local.rows(&composer.key).to_vec(),
             cancel_send: hub.compacts.contains_key(key)
                 || hub.start.as_ref().is_some_and(|(p, _)| p.key == key),
             compacting: hub.compacts.contains_key(key),
             clear: session.clear,
+            question,
+            input_visible,
         })
     }
 }
@@ -1506,6 +1538,24 @@ pub fn composer_undo_remove(state: State<'_, Composers>, handle: u64) {
 #[tauri::command]
 pub fn composer_allow_retry(state: State<'_, Composers>, handle: u64) {
     state.allow_retry(handle);
+}
+
+/// Refresh in the composer's status line (Qt's `sessionRefreshRequested`).
+#[tauri::command]
+pub fn composer_refresh(state: State<'_, Composers>, handle: u64) {
+    state.refresh(handle);
+}
+
+/// The detail tab that shows. Terminal and Native UI retry a failed read at
+/// Settings > Processes' background interval, Processes at its active one,
+/// as Qt's poll timer does (`SessionsWindow.cpp:2013-2016`).
+#[tauri::command]
+pub fn composer_tab(
+    state: State<'_, Composers>,
+    settings: State<'_, crate::settings::Store>,
+    tab: String,
+) {
+    state.set_poll(send::poll_seconds(&tab, |name| settings.0.number(name)));
 }
 
 #[cfg(test)]

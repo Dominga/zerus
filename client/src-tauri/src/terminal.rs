@@ -14,7 +14,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -37,6 +37,65 @@ const READ_BYTES: usize = 256 << 10;
 const IN_FLIGHT: usize = 2;
 /// A webview that stops acknowledging (it reloads, say) holds delivery this long.
 const ACK_WAIT: Duration = Duration::from_secs(1);
+
+const DROP_CHANGED: &str =
+    "Terminal changed during file transfer. Drop the files again in the intended session.";
+
+/// `SessionsWindow::dropTerminalFiles` (2645-2659): a peer's guarded stage
+/// identity, or this computer's paths when `computer` is empty.
+#[derive(Clone, Debug, Deserialize)]
+pub struct DropTarget {
+    pub computer: String,
+    pub name: String,
+    pub machine: String,
+    pub run_id: String,
+    pub conversation_id: String,
+    pub tracked: bool,
+    pub created: i64,
+}
+
+/// Qt's `QDir::isAbsolutePath` check (SessionsWindow.cpp:1612). Peers return
+/// POSIX paths; Windows clients additionally accept rooted drives and UNC.
+fn transferred_absolute(path: &str, windows: bool) -> bool {
+    if path.starts_with('/') {
+        return true;
+    }
+    if !windows {
+        return false;
+    }
+    let bytes = path.as_bytes();
+    if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'/' | b'\\')
+    {
+        return true;
+    }
+    path.strip_prefix("\\\\").is_some_and(|unc| {
+        let mut parts = unc.split('\\');
+        parts.next().is_some_and(|server| !server.is_empty())
+            && parts.next().is_some_and(|share| !share.is_empty())
+    })
+}
+
+/// The staged receipt's absolute, control-free paths, exactly `count`, as
+/// Qt checks them before pasting (SessionsWindow.cpp:1609-1616).
+pub fn staged_paths(receipt: &Value, count: usize) -> Result<Vec<String>, String> {
+    let mut paths = Vec::new();
+    for file in receipt["files"].as_array().into_iter().flatten() {
+        let path = file["path"].as_str().unwrap_or("");
+        if !transferred_absolute(path, cfg!(windows))
+            || path.chars().any(|c| (c as u32) < 0x20 || c == '\u{7f}')
+        {
+            return Err("Invalid transferred file path".into());
+        }
+        paths.push(path.to_owned());
+    }
+    if paths.len() != count {
+        return Err("Incomplete file transfer".into());
+    }
+    Ok(paths)
+}
 
 /// What a view attaches to: `computer` is "" for this computer, else the
 /// alias; `machine` names the computer in the disconnected status.
@@ -137,6 +196,8 @@ struct Open {
     pipe: Arc<Pipe>,
     size: (u16, u16),
     resizes: usize,
+    /// A hidden Terminal tab keeps its attach but cannot accept file drops.
+    shown: bool,
 }
 
 struct Inner {
@@ -148,6 +209,17 @@ struct Inner {
     /// One connect at a time, so two never start an attach for one view.
     connecting: Mutex<()>,
     next: AtomicU64,
+    /// Qt's one `m_terminalDropRequest` for the whole window.
+    dropping: AtomicBool,
+}
+
+/// Release the transfer on every exit, including cancellation and unwinding.
+struct Dropping<'a>(&'a AtomicBool);
+
+impl Drop for Dropping<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
 }
 
 /// The managed state of the terminal commands; clones share it.
@@ -168,6 +240,7 @@ impl Terminals {
             targets: Mutex::new(HashMap::new()),
             connecting: Mutex::new(()),
             next: AtomicU64::new(0),
+            dropping: AtomicBool::new(false),
         }))
     }
 
@@ -262,6 +335,7 @@ impl Terminals {
                 pipe,
                 size: (cols, rows),
                 resizes: 0,
+                shown: true,
             },
         );
         Ok(Connected {
@@ -338,6 +412,107 @@ impl Terminals {
             Some(open) if open.generation == generation => open.attach.write(bytes),
             _ => Ok(()),
         }
+    }
+
+    pub fn generation(&self, view: &str) -> Option<u64> {
+        lock(&self.0.views).get(view).map(|open| open.generation)
+    }
+
+    /// The tab's current visibility; an older attach's callback changes nothing.
+    pub fn set_shown(&self, view: &str, generation: u64, shown: bool) {
+        if let Some(open) = lock(&self.0.views)
+            .get_mut(view)
+            .filter(|open| open.generation == generation)
+        {
+            open.shown = shown;
+        }
+    }
+
+    /// Dropped paths go only to the attach the drop named. Checking and
+    /// queuing the paste share the views lock, so a reconnect cannot slip
+    /// between them. No Enter is added (`pasteTerminalPaths`, 2625-2642).
+    pub fn paste(&self, view: &str, generation: u64, text: &str) -> Result<(), String> {
+        match lock(&self.0.views).get(view) {
+            Some(open) if open.generation == generation && open.shown => {
+                open.attach.write(text.as_bytes())
+            }
+            _ => Err(DROP_CHANGED.into()),
+        }
+    }
+
+    /// `dropTerminalFiles` and its finish (SessionsWindow.cpp:2645-2659,
+    /// 1602-1620), with a test dispatcher that never touches live sessions.
+    async fn drop_files_with<F>(
+        &self,
+        view: &str,
+        generation: u64,
+        target: DropTarget,
+        paths: Vec<String>,
+        dispatch: impl FnOnce(zerus_client_core::Target, zerus_client_core::Action) -> F,
+    ) -> Result<Option<String>, String>
+    where
+        F: std::future::Future<Output = Result<zerus_client_core::Outcome, String>>,
+    {
+        if self.generation(view) != Some(generation) {
+            return Ok(None);
+        }
+        // Qt checks the transfer before even a local paste (2650-2651).
+        if self.0.dropping.swap(true, Ordering::SeqCst) {
+            return Ok(Some("Wait for the current file transfer to finish.".into()));
+        }
+        let _dropping = Dropping(&self.0.dropping);
+        if target.computer.is_empty() {
+            self.paste(
+                view,
+                generation,
+                &terminal::paste_paths(&paths, cfg!(windows))?,
+            )?;
+            return Ok(None);
+        }
+        let untracked =
+            target.run_id.is_empty() && target.conversation_id.is_empty() && !target.tracked;
+        if target.run_id.is_empty() && !untracked {
+            return Err("Wait for the session identity to load, then drop the files again.".into());
+        }
+        let staged = dispatch(
+            zerus_client_core::Target {
+                computer: target.computer,
+                name: target.name,
+                run_id: target.run_id,
+                conversation_id: target.conversation_id,
+            },
+            zerus_client_core::Action::StageFiles {
+                paths: paths.iter().map(PathBuf::from).collect(),
+                expected_created: untracked.then_some(target.created),
+            },
+        )
+        .await;
+        let receipt = match staged {
+            Ok(zerus_client_core::Outcome::Done { receipt, .. }) => receipt,
+            Err(detail) if detail == crate::actions::BUSY => {
+                return Ok(Some("Wait for the session update to finish.".into()));
+            }
+            Ok(
+                zerus_client_core::Outcome::Failed { detail }
+                | zerus_client_core::Outcome::Uncertain { detail },
+            )
+            | Err(detail) => {
+                if untracked && detail.contains("no saved binding") {
+                    return Err(format!(
+                        "Update hgs on {} to drop files into an untracked session.",
+                        target.machine
+                    ));
+                }
+                return Err(detail);
+            }
+        };
+        if self.generation(view) != Some(generation) {
+            return Err(DROP_CHANGED.into());
+        }
+        let staged = staged_paths(&receipt, paths.len())?;
+        // Every peer uses POSIX quoting, even from a Windows client.
+        self.paste(view, generation, &terminal::paste_paths(&staged, false)?)?;
+        Ok(None)
     }
 
     /// Applies a new size; an unchanged size never reaches the PTY.
@@ -462,6 +637,53 @@ fn blocking<T: Send + 'static>(
     async move { task.await.map_err(|error| error.to_string()) }
 }
 
+/// `Ok(Some(..))` is an info notice, `Err(..)` a sticky one. The frontend
+/// alone shows the transfer-in-progress notice. A stage is never replayed.
+#[tauri::command(rename_all = "snake_case")]
+#[allow(clippy::too_many_arguments)] // Managed state and the drop's IPC arguments.
+pub async fn terminal_drop(
+    webview: tauri::Webview,
+    terminals: State<'_, Terminals>,
+    actions: State<'_, crate::actions::Actions>,
+    view: String,
+    generation: u64,
+    target: DropTarget,
+    paths: Vec<String>,
+) -> Result<Option<String>, String> {
+    drop_origin(webview.label(), &view)?;
+    let (terminals, actions) = (terminals.inner().clone(), actions.inner().clone());
+    blocking(move || {
+        tauri::async_runtime::block_on(terminals.drop_files_with(
+            &view,
+            generation,
+            target,
+            paths,
+            |target, action| crate::actions::dispatch(&actions, target, action),
+        ))
+    })
+    .await?
+}
+
+fn drop_origin(origin: &str, view: &str) -> Result<(), String> {
+    if origin != crate::MAIN_WINDOW || view != crate::MAIN_WINDOW {
+        return Err("Terminal drops are available only in the main view.".into());
+    }
+    Ok(())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn terminal_shown(
+    webview: tauri::Webview,
+    state: State<'_, Terminals>,
+    view: String,
+    generation: u64,
+    shown: bool,
+) -> Result<(), String> {
+    drop_origin(webview.label(), &view)?;
+    state.set_shown(&view, generation, shown);
+    Ok(())
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub async fn terminal_connect(
     state: State<'_, Terminals>,
@@ -538,6 +760,104 @@ pub fn terminal_status(input: StatusInput) -> TerminalStatus {
     status(input)
 }
 
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    #[test]
+    fn staged_receipts_are_checked_as_qt_does() {
+        let receipt = json!({"files": [{"path": "/home/example/.hgs/drop/a.txt"}, {"path": "/home/example/.hgs/drop/b c.txt"}]});
+        assert_eq!(
+            staged_paths(&receipt, 2).unwrap(),
+            [
+                "/home/example/.hgs/drop/a.txt",
+                "/home/example/.hgs/drop/b c.txt"
+            ]
+        );
+        for malformed in [json!({}), json!({"files": {}}), json!({"files": []})] {
+            assert_eq!(
+                staged_paths(&malformed, 1),
+                Err("Incomplete file transfer".into())
+            );
+        }
+        assert_eq!(
+            staged_paths(&receipt, 3),
+            Err("Incomplete file transfer".into())
+        );
+        assert_eq!(
+            staged_paths(&receipt, 1),
+            Err("Incomplete file transfer".into())
+        );
+        for path in [
+            "relative.txt",
+            "C:relative.txt",
+            "/home/example/a\nb",
+            "/home/example/a\u{1f}b",
+            "/home/example/a\u{7f}b",
+            "/home/example/a\0b",
+        ] {
+            assert_eq!(
+                staged_paths(&json!({"files": [{"path": path}]}), 1),
+                Err("Invalid transferred file path".into()),
+                "{path:?}"
+            );
+        }
+        assert_eq!(
+            staged_paths(&json!({"files": [{}]}), 1),
+            Err("Invalid transferred file path".into())
+        );
+        assert_eq!(
+            staged_paths(&json!({"files": [{"path": 42}]}), 1),
+            Err("Invalid transferred file path".into())
+        );
+    }
+
+    #[test]
+    fn transferred_paths_follow_the_clients_platform() {
+        for windows in [false, true] {
+            assert!(transferred_absolute("/home/example/staged.txt", windows));
+            for path in [
+                "relative.txt",
+                "C:relative.txt",
+                "\\root-relative.txt",
+                "1:\\file",
+                "C:",
+                "C|/file",
+                r"\\server",
+                r"\\\share",
+                r"\\server\",
+            ] {
+                assert!(
+                    !transferred_absolute(path, windows),
+                    "{path:?} windows={windows}"
+                );
+            }
+            for path in [
+                "C:\\Users\\example\\staged.txt",
+                "Z:/drop/staged.txt",
+                "\\\\server\\share\\staged.txt",
+            ] {
+                assert_eq!(transferred_absolute(path, windows), windows, "{path:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn only_the_main_webview_can_drop_into_the_main_terminal() {
+        assert_eq!(drop_origin("main", "main"), Ok(()));
+        for (origin, view) in [
+            ("native-ui", "main"),
+            ("main", "native-ui"),
+            ("native-ui", "native-ui"),
+        ] {
+            assert_eq!(
+                drop_origin(origin, view),
+                Err("Terminal drops are available only in the main view.".into())
+            );
+        }
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -607,6 +927,529 @@ mod tests {
     fn hello(t: &Terminals, generation: u64, sink: &Collect) {
         until(t, generation, sink, |s| s.text().contains("\"COLORTERM\""));
         until(t, generation, sink, |s| s.text().ends_with("\r\n"));
+    }
+
+    #[test]
+    fn a_paste_goes_to_the_current_attach() {
+        let _tree = crate::PROCESS_TREE.read().unwrap();
+        let t = terminals();
+        let sink = Arc::new(Collect::default());
+        let c = t
+            .connect("main", target("run-1"), 80, 24, sink.clone())
+            .unwrap();
+        hello(&t, c.generation, &sink);
+        assert_eq!(t.generation("main"), Some(c.generation));
+        t.write("main", c.generation, b"echo ").unwrap();
+        let text = terminal::paste_paths(&["/home/example/it's.txt".to_owned()], false).unwrap();
+        t.paste("main", c.generation, &text).unwrap();
+        t.write("main", c.generation, b"\r").unwrap();
+        until(&t, c.generation, &sink, |s| {
+            s.text().contains("echo '/home/example/it'\\''s.txt'")
+        });
+        t.disconnect("main");
+        assert_eq!(t.generation("main"), None);
+        assert_eq!(t.paste("main", c.generation, "x"), Err("Terminal changed during file transfer. Drop the files again in the intended session.".into()));
+    }
+
+    fn drop_target() -> DropTarget {
+        DropTarget {
+            computer: "studio".into(),
+            name: "claude/sample-project/review".into(),
+            machine: "studio".into(),
+            run_id: "run-1".into(),
+            conversation_id: "conversation-1".into(),
+            tracked: true,
+            created: 1234,
+        }
+    }
+
+    fn dropped_paths() -> Vec<String> {
+        vec!["/home/example/source's.txt".into()]
+    }
+
+    fn stage_done() -> zerus_client_core::Outcome {
+        zerus_client_core::Outcome::Done {
+            receipt: json!({"files": [{"path": "/home/example/staged's.txt"}]}),
+            cleanup: None,
+        }
+    }
+
+    fn drop_with(
+        t: &Terminals,
+        generation: u64,
+        target: DropTarget,
+        dispatch: impl FnOnce(
+            zerus_client_core::Target,
+            zerus_client_core::Action,
+        ) -> Result<zerus_client_core::Outcome, String>,
+    ) -> Result<Option<String>, String> {
+        let mut future = Box::pin(t.drop_files_with(
+            "main",
+            generation,
+            target,
+            dropped_paths(),
+            |target, action| std::future::ready(dispatch(target, action)),
+        ));
+        match std::future::Future::poll(
+            future.as_mut(),
+            &mut std::task::Context::from_waker(std::task::Waker::noop()),
+        ) {
+            std::task::Poll::Ready(result) => result,
+            std::task::Poll::Pending => {
+                panic!("the synchronous test dispatcher must finish in one poll")
+            }
+        }
+    }
+
+    #[test]
+    fn a_stale_drop_stages_and_pastes_nothing() {
+        let _tree = crate::PROCESS_TREE.read().unwrap();
+        let t = terminals();
+        let sink = Arc::new(Collect::default());
+        let c = t
+            .connect("main", target("run-1"), 80, 24, sink.clone())
+            .unwrap();
+        hello(&t, c.generation, &sink);
+        assert_eq!(
+            drop_with(&t, c.generation + 1, drop_target(), |_, _| panic!(
+                "must not stage"
+            )),
+            Ok(None)
+        );
+        t.write("main", c.generation, b"echo probe\r").unwrap();
+        until(&t, c.generation, &sink, |s| s.text().contains("echo probe"));
+        assert!(!sink.text().contains("staged"));
+        t.disconnect("main");
+    }
+
+    #[test]
+    fn local_drops_paste_quoted_paths_without_staging_or_enter() {
+        let _tree = crate::PROCESS_TREE.read().unwrap();
+        let t = terminals();
+        let sink = Arc::new(Collect::default());
+        let c = t
+            .connect("main", target("run-1"), 80, 24, sink.clone())
+            .unwrap();
+        hello(&t, c.generation, &sink);
+        let mut local = drop_target();
+        local.computer.clear();
+        t.write("main", c.generation, b"echo ").unwrap();
+        assert_eq!(
+            drop_with(&t, c.generation, local, |_, _| panic!(
+                "local files never stage"
+            )),
+            Ok(None)
+        );
+        t.write("main", c.generation, b"end\r").unwrap();
+        until(&t, c.generation, &sink, |s| s.text().contains("end"));
+        assert!(sink
+            .text()
+            .contains("echo '/home/example/source'\\''s.txt' end"));
+        t.disconnect("main");
+    }
+
+    #[test]
+    fn a_peer_drop_stages_once_with_exact_identity_then_pastes_posix_paths() {
+        let _tree = crate::PROCESS_TREE.read().unwrap();
+        let t = terminals();
+        let sink = Arc::new(Collect::default());
+        let c = t
+            .connect("main", target("run-1"), 80, 24, sink.clone())
+            .unwrap();
+        hello(&t, c.generation, &sink);
+        t.write("main", c.generation, b"echo ").unwrap();
+        let mut calls = 0;
+        assert_eq!(
+            drop_with(&t, c.generation, drop_target(), |target, action| {
+                calls += 1;
+                assert_eq!(
+                    target,
+                    zerus_client_core::Target {
+                        computer: "studio".into(),
+                        name: "claude/sample-project/review".into(),
+                        run_id: "run-1".into(),
+                        conversation_id: "conversation-1".into()
+                    }
+                );
+                assert!(
+                    matches!(action, zerus_client_core::Action::StageFiles { paths, expected_created: None } if paths == dropped_paths().iter().map(PathBuf::from).collect::<Vec<_>>())
+                );
+                Ok(stage_done())
+            }),
+            Ok(None)
+        );
+        assert_eq!(calls, 1);
+        t.write("main", c.generation, b"end\r").unwrap();
+        until(&t, c.generation, &sink, |s| s.text().contains("end"));
+        assert!(sink
+            .text()
+            .contains("echo '/home/example/staged'\\''s.txt' end"));
+        assert!(!sink.text().contains("source"));
+        t.disconnect("main");
+    }
+
+    #[test]
+    fn only_an_untracked_drop_uses_creation_identity() {
+        let _tree = crate::PROCESS_TREE.read().unwrap();
+        let t = terminals();
+        let sink = Arc::new(Collect::default());
+        let c = t.connect("main", target("run-1"), 80, 24, sink).unwrap();
+        let mut target = drop_target();
+        target.run_id.clear();
+        for tracked in [true, false] {
+            target.tracked = tracked;
+            assert_eq!(
+                drop_with(&t, c.generation, target.clone(), |_, _| panic!(
+                    "incomplete identity never stages"
+                )),
+                Err("Wait for the session identity to load, then drop the files again.".into())
+            );
+        }
+        target.conversation_id.clear();
+        target.tracked = true;
+        assert_eq!(
+            drop_with(&t, c.generation, target.clone(), |_, _| panic!(
+                "tracked identity never stages"
+            )),
+            Err("Wait for the session identity to load, then drop the files again.".into())
+        );
+        target.tracked = false;
+        assert_eq!(
+            drop_with(&t, c.generation, target.clone(), |target, action| {
+                assert!(target.run_id.is_empty() && target.conversation_id.is_empty());
+                assert!(matches!(
+                    action,
+                    zerus_client_core::Action::StageFiles {
+                        expected_created: Some(1234),
+                        ..
+                    }
+                ));
+                Err("no saved binding".into())
+            }),
+            Err("Update hgs on studio to drop files into an untracked session.".into())
+        );
+        assert!(!t.0.dropping.load(Ordering::SeqCst));
+        t.disconnect("main");
+    }
+
+    #[test]
+    fn failed_and_uncertain_stages_never_paste_or_replay() {
+        let _tree = crate::PROCESS_TREE.read().unwrap();
+        let t = terminals();
+        let sink = Arc::new(Collect::default());
+        let c = t
+            .connect("main", target("run-1"), 80, 24, sink.clone())
+            .unwrap();
+        hello(&t, c.generation, &sink);
+        let mut calls = 0;
+        for result in [
+            Ok(zerus_client_core::Outcome::Failed {
+                detail: "failed".into(),
+            }),
+            Ok(zerus_client_core::Outcome::Uncertain {
+                detail: "uncertain".into(),
+            }),
+            Err("dispatch error".into()),
+        ] {
+            let expected = match &result {
+                Ok(
+                    zerus_client_core::Outcome::Failed { detail }
+                    | zerus_client_core::Outcome::Uncertain { detail },
+                )
+                | Err(detail) => detail.clone(),
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                drop_with(&t, c.generation, drop_target(), |_, _| {
+                    calls += 1;
+                    result
+                }),
+                Err(expected)
+            );
+            assert!(!t.0.dropping.load(Ordering::SeqCst));
+        }
+        assert_eq!(calls, 3);
+        t.write("main", c.generation, b"echo probe\r").unwrap();
+        until(&t, c.generation, &sink, |s| s.text().contains("echo probe"));
+        assert!(!sink.text().contains("source") && !sink.text().contains("staged"));
+        t.disconnect("main");
+    }
+
+    #[test]
+    fn a_reconnect_during_staging_never_pastes_into_the_new_attach() {
+        let _tree = crate::PROCESS_TREE.read().unwrap();
+        let t = terminals();
+        let first = Arc::new(Collect::default());
+        let c = t.connect("main", target("run-1"), 80, 24, first).unwrap();
+        let second = Arc::new(Collect::default());
+        let mut next = None;
+        assert_eq!(drop_with(&t, c.generation, drop_target(), |_, _| {
+            next = Some(t.connect("main", target("run-2"), 80, 24, second.clone()).unwrap());
+            Ok(stage_done())
+        }), Err("Terminal changed during file transfer. Drop the files again in the intended session.".into()));
+        let next = next.unwrap();
+        hello(&t, next.generation, &second);
+        assert_eq!(
+            t.paste("main", c.generation, "stale"),
+            Err(DROP_CHANGED.into())
+        );
+        t.write("main", next.generation, b"echo probe\r").unwrap();
+        until(&t, next.generation, &second, |s| {
+            s.text().contains("echo probe")
+        });
+        assert!(!second.text().contains("staged"));
+        assert!(!t.0.dropping.load(Ordering::SeqCst));
+        t.disconnect("main");
+    }
+
+    #[test]
+    fn a_transfer_blocks_other_peer_and_local_drops() {
+        let _tree = crate::PROCESS_TREE.read().unwrap();
+        let t = terminals();
+        let sink = Arc::new(Collect::default());
+        let c = t
+            .connect("main", target("run-1"), 80, 24, sink.clone())
+            .unwrap();
+        hello(&t, c.generation, &sink);
+        assert_eq!(
+            drop_with(&t, c.generation, drop_target(), |_, _| {
+                let mut local = drop_target();
+                local.computer.clear();
+                for other in [drop_target(), local] {
+                    assert_eq!(
+                        drop_with(&t, c.generation, other, |_, _| panic!(
+                            "a second transfer never starts"
+                        )),
+                        Ok(Some("Wait for the current file transfer to finish.".into()))
+                    );
+                    assert!(
+                        t.0.dropping.load(Ordering::SeqCst),
+                        "refused drops cannot release the first claim"
+                    );
+                }
+                Ok(stage_done())
+            }),
+            Ok(None)
+        );
+        t.write("main", c.generation, b"\recho probe\r").unwrap();
+        until(&t, c.generation, &sink, |s| s.text().contains("echo probe"));
+        assert!(!sink.text().contains("source"));
+        assert!(!t.0.dropping.load(Ordering::SeqCst));
+        t.disconnect("main");
+    }
+
+    #[test]
+    fn a_dispatch_panic_releases_the_transfer_claim() {
+        let _tree = crate::PROCESS_TREE.read().unwrap();
+        let t = terminals();
+        let sink = Arc::new(Collect::default());
+        let c = t.connect("main", target("run-1"), 80, 24, sink).unwrap();
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop_with(&t, c.generation, drop_target(), |_, _| {
+                panic!("synthetic dispatch panic")
+            })
+        }));
+        assert!(panic.is_err());
+        assert!(!t.0.dropping.load(Ordering::SeqCst));
+        assert_eq!(
+            drop_with(&t, c.generation, drop_target(), |_, _| Err(
+                "next transfer reached dispatch".into()
+            )),
+            Err("next transfer reached dispatch".into())
+        );
+        t.disconnect("main");
+    }
+
+    #[test]
+    fn cancelling_a_drop_releases_the_transfer_claim() {
+        let _tree = crate::PROCESS_TREE.read().unwrap();
+        let t = terminals();
+        let sink = Arc::new(Collect::default());
+        let c = t.connect("main", target("run-1"), 80, 24, sink).unwrap();
+        let mut pending = Box::pin(t.drop_files_with(
+            "main",
+            c.generation,
+            drop_target(),
+            dropped_paths(),
+            |_, _| std::future::pending(),
+        ));
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(std::future::Future::poll(pending.as_mut(), &mut context).is_pending());
+        assert!(t.0.dropping.load(Ordering::SeqCst));
+        drop(pending);
+        assert!(!t.0.dropping.load(Ordering::SeqCst));
+        assert_eq!(
+            drop_with(&t, c.generation, drop_target(), |_, _| Err(
+                "next transfer reached dispatch".into()
+            )),
+            Err("next transfer reached dispatch".into())
+        );
+        t.disconnect("main");
+    }
+
+    #[test]
+    fn an_invalid_receipt_pastes_nothing_and_releases_the_claim() {
+        let _tree = crate::PROCESS_TREE.read().unwrap();
+        let t = terminals();
+        let sink = Arc::new(Collect::default());
+        let c = t
+            .connect("main", target("run-1"), 80, 24, sink.clone())
+            .unwrap();
+        hello(&t, c.generation, &sink);
+        for receipt in [
+            json!({"files": []}),
+            json!({"files": [{"path": "relative.txt"}]}),
+        ] {
+            assert!(drop_with(&t, c.generation, drop_target(), |_, _| Ok(
+                zerus_client_core::Outcome::Done {
+                    receipt,
+                    cleanup: None
+                }
+            ))
+            .is_err());
+            assert!(!t.0.dropping.load(Ordering::SeqCst));
+        }
+        t.write("main", c.generation, b"echo probe\r").unwrap();
+        until(&t, c.generation, &sink, |s| s.text().contains("echo probe"));
+        t.disconnect("main");
+    }
+
+    #[test]
+    fn a_tracked_drop_keeps_a_no_saved_binding_failure_unchanged() {
+        let _tree = crate::PROCESS_TREE.read().unwrap();
+        let t = terminals();
+        let c = t
+            .connect(
+                "main",
+                target("run-1"),
+                80,
+                24,
+                Arc::new(Collect::default()),
+            )
+            .unwrap();
+        assert_eq!(
+            drop_with(&t, c.generation, drop_target(), |_, _| Ok(
+                zerus_client_core::Outcome::Failed {
+                    detail: "no saved binding".into()
+                }
+            )),
+            Err("no saved binding".into())
+        );
+        t.disconnect("main");
+    }
+
+    #[test]
+    fn a_reconnect_is_reported_before_an_invalid_receipt() {
+        let _tree = crate::PROCESS_TREE.read().unwrap();
+        let t = terminals();
+        let c = t
+            .connect(
+                "main",
+                target("run-1"),
+                80,
+                24,
+                Arc::new(Collect::default()),
+            )
+            .unwrap();
+        assert_eq!(
+            drop_with(&t, c.generation, drop_target(), |_, _| {
+                t.connect(
+                    "main",
+                    target("run-2"),
+                    80,
+                    24,
+                    Arc::new(Collect::default()),
+                )
+                .unwrap();
+                Ok(zerus_client_core::Outcome::Done {
+                    receipt: json!({"files": [{"path": "relative.txt"}]}),
+                    cleanup: None,
+                })
+            }),
+            Err(DROP_CHANGED.into())
+        );
+        t.disconnect("main");
+    }
+
+    #[test]
+    fn a_taken_write_lane_is_an_info_notice_and_is_never_replayed() {
+        let _tree = crate::PROCESS_TREE.read().unwrap();
+        let t = terminals();
+        let c = t
+            .connect(
+                "main",
+                target("run-1"),
+                80,
+                24,
+                Arc::new(Collect::default()),
+            )
+            .unwrap();
+        let mut calls = 0;
+        assert_eq!(
+            drop_with(&t, c.generation, drop_target(), |_, _| {
+                calls += 1;
+                Err(crate::actions::BUSY.into())
+            }),
+            Ok(Some("Wait for the session update to finish.".into()))
+        );
+        assert_eq!(calls, 1);
+        assert!(!t.0.dropping.load(Ordering::SeqCst));
+        t.disconnect("main");
+    }
+
+    #[test]
+    fn a_stage_finishing_while_the_terminal_tab_is_hidden_pastes_nothing() {
+        let _tree = crate::PROCESS_TREE.read().unwrap();
+        let t = terminals();
+        let sink = Arc::new(Collect::default());
+        let c = t
+            .connect("main", target("run-1"), 80, 24, sink.clone())
+            .unwrap();
+        hello(&t, c.generation, &sink);
+        assert_eq!(
+            drop_with(&t, c.generation, drop_target(), |_, _| {
+                t.set_shown("main", c.generation, false);
+                Ok(stage_done())
+            }),
+            Err(DROP_CHANGED.into())
+        );
+        assert_eq!(
+            t.paste("main", c.generation, "hidden"),
+            Err(DROP_CHANGED.into())
+        );
+        t.set_shown("main", c.generation, true);
+        t.write("main", c.generation, b"echo probe\r").unwrap();
+        until(&t, c.generation, &sink, |s| s.text().contains("echo probe"));
+        assert!(!sink.text().contains("staged") && !sink.text().contains("hidden"));
+        t.disconnect("main");
+    }
+
+    #[test]
+    fn a_stale_tab_visibility_update_never_changes_the_current_attach() {
+        let _tree = crate::PROCESS_TREE.read().unwrap();
+        let t = terminals();
+        let sink = Arc::new(Collect::default());
+        let first = t
+            .connect(
+                "main",
+                target("run-1"),
+                80,
+                24,
+                Arc::new(Collect::default()),
+            )
+            .unwrap();
+        let current = t
+            .connect("main", target("run-2"), 80, 24, sink.clone())
+            .unwrap();
+        hello(&t, current.generation, &sink);
+        t.set_shown("main", first.generation, false);
+        t.write("main", current.generation, b"echo ").unwrap();
+        t.paste("main", current.generation, "shown").unwrap();
+        t.write("main", current.generation, b"\r").unwrap();
+        until(&t, current.generation, &sink, |s| {
+            s.text().contains("echo shown")
+        });
+        t.disconnect("main");
     }
 
     #[test]

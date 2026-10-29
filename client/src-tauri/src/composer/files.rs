@@ -16,26 +16,42 @@
 //! `convertFileSrc` encodes it whole. A response names the type `sniff`
 //! finds in the bytes, never one a webview would run as a page.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tauri::http::{header, response::Builder, Method, Request, Response, StatusCode};
 use zerus_client_core::attachments;
 
-use super::{Composers, Spawn};
+use super::{lock, Composers, Spawn};
+
+/// Copies another owner still needs, by path (a failed message's files that
+/// Retry sends again).
+pub type Keep = Arc<dyn Fn() -> HashSet<PathBuf> + Send + Sync>;
+
+/// The most copies pinned at once: the webview pins only what it shows, so
+/// this bound is never reached in use; past it a pin is ignored, and a
+/// thumbnail whose copy went is read once more.
+const PIN_LIMIT: usize = 1024;
 
 /// The private attachment cache: `{root}/{sha256}/{name}`, as
 /// `attachments::store_at` writes it.
 pub struct Cache {
     root: PathBuf,
+    /// The size `prune_later` keeps the cache under.
+    limit: u64,
     /// A prune runs on the blocking pool.
     pruning: AtomicBool,
     /// A store arrived during the prune: one more runs after it.
     again: AtomicBool,
+    /// Copies the webview shows now, by canonical path and how many views
+    /// show each: a prune never removes them.
+    pins: Mutex<HashMap<PathBuf, usize>>,
+    /// Copies another owner keeps, asked at every prune.
+    extra: Mutex<Option<Keep>>,
 }
 
 pub(crate) fn canonical(path: &Path) -> PathBuf {
@@ -44,21 +60,74 @@ pub(crate) fn canonical(path: &Path) -> PathBuf {
 
 impl Cache {
     pub fn new(root: PathBuf) -> Arc<Self> {
+        Self::with_limit(root, attachments::CACHE_LIMIT)
+    }
+
+    /// A cache bounded to `limit` bytes.
+    pub fn with_limit(root: PathBuf, limit: u64) -> Arc<Self> {
         let _ = std::fs::create_dir_all(&root);
         Arc::new(Cache {
             root: canonical(&root),
+            limit,
             pruning: AtomicBool::new(false),
             again: AtomicBool::new(false),
+            pins: Mutex::new(HashMap::new()),
+            extra: Mutex::new(None),
         })
     }
 
+    /// One more view shows the copy at `path`: no prune removes it until
+    /// every view that pinned it unpins it.
+    pub fn pin(&self, path: &Path) {
+        let path = canonical(path);
+        let mut pins = lock(&self.pins);
+        if pins.len() < PIN_LIMIT || pins.contains_key(&path) {
+            *pins.entry(path).or_default() += 1;
+        }
+    }
+
+    /// A view no longer shows the copy at `path`.
+    pub fn unpin(&self, path: &Path) {
+        let path = canonical(path);
+        let mut pins = lock(&self.pins);
+        if let Some(count) = pins.get_mut(&path) {
+            *count -= 1;
+            if *count == 0 {
+                pins.remove(&path);
+            }
+        }
+    }
+
+    /// A reloaded webview shows nothing yet.
+    pub fn clear_pins(&self) {
+        lock(&self.pins).clear();
+    }
+
+    /// The copies another owner keeps, asked at every prune from now on.
+    pub fn set_extra(&self, extra: Keep) {
+        *lock(&self.extra) = Some(extra);
+    }
+
+    /// The copy a view names as `cache/{digest}/{name}`, when it is one.
+    pub fn shown(&self, path: &str) -> Option<PathBuf> {
+        self.copy(path.strip_prefix("cache/")?)
+    }
+
+    /// Where a view's `cache/{digest}/{name}` would be, even when the copy
+    /// is gone (to unpin it).
+    pub fn shown_at(&self, path: &str) -> Option<PathBuf> {
+        let (digest, name) = path.strip_prefix("cache/")?.split_once('/')?;
+        let digest_ok = digest.len() == 64
+            && digest
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+        (digest_ok && plain_name(name)).then(|| self.root.join(digest).join(name))
+    }
+
     /// One prune after a store, on the blocking pool; a store during a prune
-    /// runs exactly one more. `extra` names the copies Retry still needs.
-    pub fn prune_later(
-        self: &Arc<Self>,
-        spawn: &Spawn,
-        extra: Arc<dyn Fn() -> HashSet<PathBuf> + Send + Sync>,
-    ) {
+    /// runs exactly one more. A copy survives while it is pinned, or named
+    /// by `extra` or by the extra the cache was given.
+    pub fn prune_later(self: &Arc<Self>, spawn: &Spawn, extra: Keep) {
         // Asked for before the claim: a prune that ends between the two
         // still sees it.
         self.again.store(true, Ordering::SeqCst);
@@ -68,9 +137,15 @@ impl Cache {
         let cache = Arc::clone(self);
         spawn(Box::new(move || loop {
             cache.again.store(false, Ordering::SeqCst);
-            let kept: HashSet<PathBuf> = extra().iter().map(|path| canonical(path)).collect();
-            attachments::prune(&cache.root, attachments::CACHE_LIMIT, |path| {
-                kept.contains(&canonical(path))
+            let mut kept: HashSet<PathBuf> = extra().iter().map(|path| canonical(path)).collect();
+            let more = lock(&cache.extra).clone();
+            if let Some(more) = more {
+                kept.extend(more().iter().map(|path| canonical(path)));
+            }
+            let pins: HashSet<PathBuf> = lock(&cache.pins).keys().cloned().collect();
+            attachments::prune(&cache.root, cache.limit, |path| {
+                let path = canonical(path);
+                pins.contains(&path) || kept.contains(&path)
             });
             if cache.again.load(Ordering::SeqCst) {
                 continue;
@@ -280,7 +355,7 @@ fn unsatisfiable(len: usize) -> Response<Vec<u8>> {
 }
 
 /// `{handle}/{list}/{index}`, each plain decimal digits.
-fn draft_numbers(rest: &str) -> Option<[u64; 3]> {
+pub(super) fn draft_numbers(rest: &str) -> Option<[u64; 3]> {
     let mut parts = rest.split('/').map(|part| {
         (!part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
             .then(|| part.parse::<u64>().ok())
@@ -1196,5 +1271,102 @@ mod tests {
         assert!(jobs.lock().unwrap().is_empty());
         cache.prune_later(&spawn, extra);
         assert_eq!(jobs.lock().unwrap().len(), 1, "a later store prunes again");
+    }
+
+    #[test]
+    fn a_prune_keeps_shown_copies_and_retry_files() {
+        let root = dir("prune-pins");
+        let cache = Cache::with_limit(root.join("cache"), 10);
+        let keep = attachments::store_at(cache.root(), "open.png", &[1u8; 8]).unwrap();
+        let retry = attachments::store_at(cache.root(), "retry.txt", &[2u8; 8]).unwrap();
+        let old = attachments::store_at(cache.root(), "old.txt", &[3u8; 8]).unwrap();
+        cache.pin(&keep);
+        let kept = retry.clone();
+        cache.set_extra(Arc::new(move || HashSet::from([kept.clone()])));
+        let spawn: Spawn = Arc::new(|job| job());
+        cache.prune_later(&spawn, Arc::new(HashSet::new));
+        assert!(
+            keep.exists() && retry.exists(),
+            "pinned and Retry's copies survive"
+        );
+        assert!(!old.exists(), "the other copy went to stay under the bound");
+        cache.unpin(&keep);
+        cache.prune_later(&spawn, Arc::new(HashSet::new));
+        assert!(!keep.exists(), "unpinned, it goes");
+        assert!(retry.exists());
+    }
+
+    #[test]
+    fn pins_are_counted_per_view_and_cleared_by_a_reload() {
+        let root = dir("pin-counts");
+        let cache = Cache::with_limit(root.join("cache"), 0);
+        let shot = attachments::store_at(cache.root(), "shot.png", &[1u8; 8]).unwrap();
+        let spawn: Spawn = Arc::new(|job| job());
+        cache.pin(&shot);
+        cache.pin(&shot);
+        cache.unpin(&shot);
+        cache.prune_later(&spawn, Arc::new(HashSet::new));
+        assert!(shot.exists(), "another view still shows it");
+        cache.clear_pins();
+        cache.prune_later(&spawn, Arc::new(HashSet::new));
+        assert!(!shot.exists(), "a reloaded webview shows nothing");
+        // An unpin without a pin changes nothing.
+        cache.unpin(&shot);
+        assert!(lock(&cache.pins).is_empty());
+    }
+
+    #[test]
+    fn pins_stay_bounded() {
+        let root = dir("pin-limit");
+        let cache = Cache::new(root.join("cache"));
+        for i in 0..PIN_LIMIT + 10 {
+            cache.pin(&cache.root().join(format!("{i:064x}")).join("shot.png"));
+        }
+        assert_eq!(lock(&cache.pins).len(), PIN_LIMIT);
+        let first = cache.root().join(format!("{:064x}", 0)).join("shot.png");
+        cache.pin(&first);
+        assert_eq!(
+            lock(&cache.pins)[&canonical(&first)],
+            2,
+            "a pinned copy still counts"
+        );
+    }
+
+    #[test]
+    fn a_view_names_only_copies_in_the_cache() {
+        let root = dir("shown");
+        let cache = Cache::new(root.join("cache"));
+        let shot =
+            attachments::store_at(cache.root(), "shot.png", b"\x89PNG\r\n\x1a\nrest").unwrap();
+        let relative = shot
+            .strip_prefix(cache.root())
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        assert_eq!(
+            cache.shown(&format!("cache/{relative}")),
+            Some(shot.clone())
+        );
+        assert_eq!(
+            cache.shown_at(&format!("cache/{relative}")),
+            Some(shot.clone())
+        );
+        let digest = relative.split_once('/').unwrap().0;
+        let gone = format!("cache/{digest}/gone.png");
+        assert_eq!(cache.shown(&gone), None, "a missing copy is not shown");
+        assert_eq!(
+            cache.shown_at(&gone),
+            Some(cache.root().join(digest).join("gone.png"))
+        );
+        for bad in [
+            "cache/../outside.txt",
+            "draft/1/1/0",
+            &relative,
+            "cache/abc/shot.png",
+            &format!("cache/{digest}/a/b"),
+        ] {
+            assert_eq!(cache.shown(bad), None, "{bad}");
+            assert_eq!(cache.shown_at(bad), None, "{bad}");
+        }
     }
 }

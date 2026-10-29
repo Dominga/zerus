@@ -139,6 +139,10 @@ export interface Batch {
   groups?: GroupOut[];
   /** The headers and the edit state, when they changed. */
   grouping?: GroupingOut;
+  /** The open composer's view, when it changed (src-tauri `next_batch` envelope). */
+  composer?: ComposerView;
+  /** The draft keys (`computer + "\n" + name`, plus `"\n" + archive id`) of the nonempty drafts, when they changed. */
+  draft_keys?: string[];
   /** The Processes tab's view (src-tauri processes.rs), when it changed. */
   processes_view?: ProcessesView;
 }
@@ -194,9 +198,10 @@ export interface ProcessTarget {
 
 export const emptyBatch = (): Batch => ({ upserts: [], removes: [], replaces: [], computers: [], machines: [], activity: [] });
 
+/** A batch with nothing to apply. A composer view or a draft key set is content: Rust sends each once. */
 export const isEmptyBatch = (b: Batch) =>
   !b.upserts.length && !b.removes.length && !b.replaces.length && !b.computers.length && !b.machines?.length && !b.activity.length
-  && !b.groups?.length && !b.grouping && !b.processes_view;
+  && !b.groups?.length && !b.grouping && !b.processes_view && !b.composer && !b.draft_keys;
 
 /** One Activity event as `inspect` returns it; unknown fields are kept. */
 export interface ActivityEvent {
@@ -212,7 +217,7 @@ export interface ActivityEvent {
   sender?: string;
   activity_key?: string;
   message_id?: string;
-  attachments?: { name?: string; path?: string; size?: number; kind?: string; mime?: string }[];
+  attachments?: EventAttachment[];
   voice?: Record<string, unknown>;
   [field: string]: unknown;
 }
@@ -410,4 +415,89 @@ export interface ArchivedActivity {
   cursor: number;
   /** The other top-level fields, what `buildTranscript` reads as the summary. */
   summary: Record<string, unknown>;
+}
+
+// The composer (src-tauri/src/composer): the mirrors of its serde shapes.
+
+/** One attachment of the open draft; `path` is its `zerus-file` path. */
+export interface AttachmentView { name: string; mime: string; reference: string; bytes: number; path: string; excerpt: string | null }
+export type ChipTone = "quiet" | "danger" | "warning" | "success";
+/** The cache chip (core `cache::Chip`); hidden when not `visible`. */
+export interface Chip { visible: boolean; tone: ChipTone; label: string; short_label: string }
+/** The Context chip (core `session_usage::ContextChip`); hidden when not `visible`. */
+export interface ContextChip { visible: boolean; text: string; tooltip: string; warning: boolean; tone: ChipTone; percent: number | null; accessible_name: string }
+/** Clear session and the cache popover's Clear context, with the dialog the confirmation shows. */
+export interface ClearControl {
+  enabled: boolean; dismiss: boolean; title: string; text: string; confirm: string; run: string; conversation: string;
+  /** The cache popover's Clear context (Qt 3792). */
+  cache_enabled: boolean;
+  /** A context reset runs: "Clearing…". */
+  running: boolean;
+  /** The tooltips' reason sentences, empty for the usual tooltip. */
+  reason: string; cache_reason: string;
+}
+/** One local message row (core `local_messages::LocalMessage`). */
+export interface LocalMessage {
+  id: string; text: string; status: "sending" | "sent" | "error"; attachments: Record<string, unknown>[]; run_id: string; conversation_id: string;
+  submitted_at: number; error: string; uncertain: boolean; message_id: string | null; submitted_text: string | null; source: string | null; voice: Record<string, unknown> | null;
+}
+export interface ComposerView {
+  handle: number; key: string; loaded: boolean; rev: number; text_epoch: number; text: string; position: number; anchor: number;
+  attachments: AttachmentView[]; removed: string | null; attaching: boolean; sending: boolean; waiting: string | null; uncertain: boolean;
+  status: string; status_error: boolean; can_send: boolean; send_label: string; available: boolean; unavailable_reason: string; block_reason: string | null;
+  attachments_available: boolean; attachments_reason: string; session_status: string; session_status_error: boolean; session_blocks_input: boolean;
+  /** The open session's last read failed (Qt's m_inspectError). */
+  inspect_error: boolean;
+  cache: Chip; cache_warning: string; cache_details: string; context: ContextChip; local: LocalMessage[];
+  cancel_send: boolean; compacting: boolean; clear: ClearControl;
+}
+export type ColdAction = "send" | "compact" | "clear";
+export interface ColdChoice { action: ColdAction; label: string; enabled: boolean; tooltip: string }
+export interface ColdPrompt { title: string; text: string; informative: string; choices: ColdChoice[] }
+export type StartChoice = "resume" | "resume_compact" | "fresh";
+export interface StartOption { choice: StartChoice; label: string; enabled: boolean; tooltip: string }
+export interface StartQuestion { title: string; text: string; informative: string; options: StartOption[] }
+export type SendReply =
+  | { kind: "sending" } | { kind: "busy" } | { kind: "blocked"; reason: string } | { kind: "notice"; text: string; error: boolean }
+  | { kind: "cold"; token: number; prompt: ColdPrompt } | { kind: "clear_context"; token: number } | { kind: "start"; token: number; question: StartQuestion };
+export type Answer = { kind: "cold"; action: ColdAction } | { kind: "start"; choice: StartChoice } | { kind: "cancel" };
+/** Where Inspect on a failed local row leads. */
+export type Inspect = { kind: "native_ui" } | { kind: "terminal" } | { kind: "refresh"; notice: string };
+/** The session a composer belongs to (src-tauri `SessionRef`): `key` is the catalog key. */
+export interface SessionRef { computer: ComputerId; key: string; name: string; archive_id: string | null }
+/** The detail tab that shows, for the composer's inspect retry (Qt's poll interval). */
+export type ComposerTab = "activity" | "terminal" | "native" | "processes";
+/** A file of an Activity message, as the journal lists it. */
+export interface EventAttachment {
+  name?: string;
+  mime?: string;
+  bytes?: number;
+  /** `[Image #n]` or `[File #n]` in the message text. */
+  reference?: string;
+  /** The message's request, which `hgs attachment` reads the file by; none when it saved no reference. */
+  request_id?: string;
+  /** The file's place in the message, -1 when it has none. */
+  index?: number;
+  path?: string;
+  size?: number;
+  kind?: string;
+}
+
+/** One attachment of an Activity message, as `hgs attachment` reads it (core `reads::AttachmentRef`). */
+export interface AttachmentRef {
+  /** The session's name. */
+  name: string;
+  request_id: string;
+  index: number;
+  conversation_id: string;
+  archive_id: string | null;
+  /** A subagent's ID for a subagent's message. */
+  agent_id: string | null;
+}
+
+/** An attachment in the private cache: `path` is its `zerus-file` path (`cache/{digest}/{name}`). */
+export interface Fetched {
+  path: string; name: string; mime: string; bytes: number;
+  /** An image whose header gives its size, at most Qt's 64M pixels: a card may show its thumbnail. */
+  thumbnail: boolean;
 }

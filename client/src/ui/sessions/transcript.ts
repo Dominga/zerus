@@ -71,22 +71,24 @@ export function messageRole(e: ActivityEvent): Role {
 /** Approvals and failures open their group and are never merged with others. */
 const attention = (e: ActivityEvent) => e.type === "PermissionRequest" || e.type === "PostToolUseFailure" || e.type === "StopFailure" || e.type === "Interrupt";
 
-function size(bytes: unknown): string {
-  const n = typeof bytes === "number" ? bytes : 0;
-  if (!n) return "";
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
-  return `${(n / 1024 / 1024).toFixed(1)} MB`;
-}
 
-function attachments(e: ActivityEvent): ActivityItem["attachments"] {
+/** A message's files as Qt's attachment cards show them (ActivityView.cpp:759-782). */
+export function attachments(e: ActivityEvent): ActivityItem["attachments"] {
   const list = Array.isArray(e.attachments) ? e.attachments : [];
   if (!list.length) return undefined;
   return list.map((a) => {
-    const record = a as Record<string, unknown>;
-    const name = String(record.name ?? record.reference ?? "attachment");
-    const mime = String(record.mime ?? "");
-    return { name, size: size(record.bytes), kind: mime.startsWith("image/") ? "image" : "file" };
+    const text = (value: unknown) => (typeof value === "string" ? value : "");
+    const name = text(a?.name), reference = text(a?.reference), mime = text(a?.mime);
+    const bytes = typeof a?.bytes === "number" && Number.isFinite(a.bytes) ? a.bytes : 0;
+    return {
+      name,
+      caption: (reference ? `${reference} ` : "") + name,
+      mime,
+      meta: bytes > 0 ? `${Math.max(1, Math.ceil(bytes / 1024))} KiB` : "File",
+      request_id: text(a?.request_id),
+      index: typeof a?.index === "number" && Number.isInteger(a.index) ? a.index : -1,
+      image: mime.startsWith("image/") && mime !== "image/svg+xml",
+    };
   });
 }
 

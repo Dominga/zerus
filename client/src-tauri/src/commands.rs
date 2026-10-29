@@ -62,6 +62,21 @@ impl AppState {
         self.live.follow_processes(target)
     }
 
+    pub fn set_processes_interval(
+        &self,
+        target: &crate::processes::ProcessTarget,
+        ms: u64,
+    ) -> Result<(), String> {
+        self.live.set_processes_interval(target, ms)
+    }
+
+    pub fn refresh_processes(
+        &self,
+        target: &crate::processes::ProcessTarget,
+    ) -> Result<(), String> {
+        self.live.refresh_processes(target)
+    }
+
     pub fn unfollow_processes(&self, target: &crate::processes::ProcessTarget) {
         self.live.unfollow_processes(target);
     }
@@ -265,6 +280,40 @@ mod live {
             }
         }
 
+        pub fn set_processes_interval(
+            &self,
+            target: &ProcessTarget,
+            ms: u64,
+        ) -> Result<(), String> {
+            match self
+                .source
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+            {
+                Some(Source::Fleet(fleet)) => fleet
+                    .set_processes_interval(&ComputerId(target.computer.clone()), &target.key, ms)
+                    .map_err(|error| error.to_string()),
+                Some(Source::Replay(_)) => Ok(()),
+                None => Err("not started".into()),
+            }
+        }
+
+        pub fn refresh_processes(&self, target: &ProcessTarget) -> Result<(), String> {
+            match self
+                .source
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+            {
+                Some(Source::Fleet(fleet)) => fleet
+                    .refresh_processes(&ComputerId(target.computer.clone()), &target.key)
+                    .map_err(|error| error.to_string()),
+                Some(Source::Replay(_)) => Ok(()),
+                None => Err("not started".into()),
+            }
+        }
+
         /// Not followed (it ended meanwhile) is not an error.
         pub fn unfollow_processes(&self, target: &ProcessTarget) {
             match self
@@ -328,6 +377,8 @@ pub async fn start(
     let live = Arc::clone(&state.live);
     composers.resend();
     processes.resend();
+    // A reloaded webview shows no attachment yet.
+    composers.cache().clear_pins();
     blocking(move || live.start()).await
 }
 

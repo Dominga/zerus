@@ -55,6 +55,8 @@
   .activity-wrap { --col: calc(900px * var(--content-scale, 1)); flex: 1; min-height: 0; display: flex; flex-direction: column; }
   .activity { flex: 1; min-height: 0; display: flex; }
   .act-scroll { flex: 1; overflow-y: auto; overflow-x: hidden; scroll-behavior: smooth; }
+  /* It takes the focus only from code (a toolbar chip that hides), as Qt's browser does; no ring. */
+  .act-scroll:focus { outline: none; }
   .act-col { position: relative; container: act-col / inline-size; box-sizing: border-box; min-height: 100%; width: min(var(--col), calc(100% - 32px)); margin: 0 auto; padding: 10px 0 18px; display: flex; flex-direction: column; gap: 10px; font-size: calc(var(--fs-base) * var(--content-scale, 1)); }
   /* Column edges: 10 px handles just outside the column. A 2 px line shows on
      hover and while dragging; nothing else moves. */
@@ -83,9 +85,15 @@
   .md-list { padding-left: 20px !important; list-style: disc !important; }
   .md-list li { margin: 2px 0; }
   .act-code { margin: 8px 0 0; padding: 9px 12px; border-radius: var(--z-radius-md); background: var(--z-color-code-bg); border: 1px solid var(--z-color-divider); font-size: calc(var(--fs-base) * .9); line-height: 1.45; overflow-x: auto; white-space: pre; }
-  .act-attachments { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-  .att-chip { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border-radius: var(--z-radius-md); border: 1px solid var(--z-color-border); background: var(--z-color-surface); font-size: var(--fs-xs); }
-  .att-chip:hover { border-color: var(--z-color-accent-muted); }
+  .act-attachments { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; margin-top: 8px; }
+  /* Qt's attachment card (ActivityView.cpp:779): one bordered row, an image's thumbnail in a fixed 96x64 cell. */
+  .att-card { display: inline-flex; align-items: center; gap: 8px; max-width: 100%; padding: 8px; border-radius: var(--z-radius-md); border: 1px solid var(--z-color-border); background: var(--z-color-surface); font: inherit; font-size: var(--fs-xs); color: var(--z-color-text); text-align: left; }
+  button.att-card { cursor: pointer; }
+  button.att-card:hover { border-color: var(--z-color-accent-muted); }
+  .att-thumb { flex: none; width: 96px; height: 64px; display: grid; place-items: center; overflow: hidden; }
+  .att-thumb img { max-width: 96px; max-height: 64px; object-fit: contain; }
+  .att-caption { color: var(--z-color-accent); overflow-wrap: anywhere; }
+  .att-open { flex: none; color: var(--z-color-muted); }
   .act-tools { border: 1px solid var(--z-color-divider); border-radius: var(--z-radius-lg); padding: 6px 10px; font-size: var(--fs-sm); animation: rise var(--z-motion-slow) var(--ease) both; }
   .act-tools-head { display: flex; align-items: center; gap: 6px; width: 100%; text-align: left; }
   .act-tools-head .chev { transition: rotate var(--z-motion-base) var(--ease); color: var(--z-color-dim); }
@@ -190,6 +198,7 @@
   .cmp-resize.gap:hover .cmp-grip, .cmp-resize.gap:focus-visible .cmp-grip, .composer:has(.cmp-resize.edge:hover) .cmp-grip { width: min(52px, calc(100% - 12px)); background: var(--z-color-accent); }
   .cmp-resize.dragging .cmp-grip, .composer:has(.cmp-resize.dragging) .cmp-grip { width: min(52px, calc(100% - 12px)); background: var(--z-color-accent); transition: none; }
   .tchip:disabled { opacity: .45; cursor: default; }
+  .tchip[hidden] { display: none; }
   .tchip.on { color: var(--z-color-text); background: var(--z-color-segment-on); }
   /* Attachments list (MessageComposer attachmentsPopover): rows with a 30×22
      thumbnail, "[Image #1] name" over its size, and a separate remove button;
@@ -236,6 +245,27 @@
   .cmp-attach { width: 32px; height: 32px; }
   .cmp-status { font-size: var(--fs-xs); color: var(--z-color-dim); }
   .cmp-model { gap: 4px; max-width: 330px; font-size: var(--fs-xs); }
+  /* The status line's colours (MessageComposer updateControls 1224-1226): an
+     error, or a send that waits; the field while the session status blocks it. */
+  .cmp-status { min-width: 0; }
+  .cmp-status.error { color: var(--z-color-danger); }
+  .cmp-status.waiting { color: var(--z-color-warn); }
+  .composer.blocked .cmp-editor { color: var(--z-color-muted); }
+  /* Cancel send: a borderless link-like button (SessionsWindow.cpp:961). */
+  .tchip.link { background: transparent; padding: 0 6px; }
+  .tchip.link:hover { text-decoration: underline; }
+  /* Compacting context: a 48×5 indeterminate bar before its caption (ActivityView.cpp 1269-1279). */
+  .cmp-progress { position: relative; flex: none; width: 48px; height: 5px; border-radius: 3px; overflow: hidden; background: color-mix(in srgb, currentColor 20%, transparent); }
+  .cmp-progress::after { content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 40%; border-radius: 3px; background: currentColor; animation: cmp-progress 1.4s ease-in-out infinite; }
+  /* The cache popover (cachePopover: 14×12 padding, 8 px spacing). */
+  .att-pop.cache-pop { padding: 12px 14px; gap: 8px; }
+  .cache-pop p { margin: 0; font-size: var(--fs-xs); line-height: 1.45; white-space: pre-line; color: var(--z-color-text-2); }
+  .cache-pop .cache-warning { color: var(--z-color-warn); }
+  .cache-actions { display: flex; justify-content: flex-end; gap: 8px; }
+  /* A disabled Send shows the status at the field for 5 s (Qt's QToolTip there). */
+  .cmp-hint { position: absolute; z-index: 2; left: 12px; bottom: 46px; max-width: calc(100% - 24px); padding: 4px 8px; border-radius: var(--z-radius-sm);
+    border: 1px solid var(--z-color-border); background: var(--z-color-raised); box-shadow: var(--z-shadow-popover); color: var(--z-color-text);
+    font-size: var(--fs-xs); white-space: pre-line; pointer-events: none; animation: fadeIn var(--z-motion-fast) both; }
 
   /* Inspector: a pane-colored panel of grouped, collapsible cards. It slides
      in from the right and fades (~200 ms); while leaving it is taken out of
@@ -367,3 +397,4 @@
 @keyframes insp-in { from { opacity: 0; translate: 24px 0; } }
 @keyframes vm-drift { to { transform: rotate(360deg); } }
 @keyframes insp-out { to { opacity: 0; translate: 24px 0; } }
+@keyframes cmp-progress { from { translate: -100% 0; } to { translate: 250% 0; } }

@@ -92,14 +92,16 @@ pub(crate) struct SessionView {
     pub(crate) session_status: String,
     pub(crate) session_status_error: bool,
     pub(crate) session_blocks_input: bool,
+    pub(crate) inspect_error: bool,
     pub(crate) cache: Chip,
     pub(crate) cache_warning: String,
     pub(crate) cache_details: String,
+    pub(crate) context: session_usage::ContextChip,
     pub(crate) clear: ClearControl,
 }
 
 /// What Qt's session hint reads (`SessionsWindow.cpp:3913-3922, 3955-3958`).
-/// A2 fills `question_error` (`pending_questions_error`); Piece E fills
+/// `question_error` is `pending_questions_error` (A2-1); Piece E fills
 /// `restore_error` (`last_restore_error`) and `occupied` (another session
 /// uses this archived session's name).
 #[derive(Default)]
@@ -379,9 +381,32 @@ impl Composers {
         }));
     }
 
+    /// Refresh in the composer's status line: one read of the open session
+    /// while `handle` is still its composer (Qt's `sessionRefreshRequested`,
+    /// `SessionsWindow.cpp:1031-1034`, which calls `inspect()`).
+    pub fn refresh(&self, handle: u64) {
+        let open = {
+            let hub = self.lock();
+            hub.open_key
+                .as_ref()
+                .and_then(|key| hub.composers.get(key))
+                .is_some_and(|composer| composer.handle == handle)
+        };
+        if open {
+            self.refresh_details();
+        }
+    }
+
+    /// The detail tab's retry interval (`poll_seconds`); a value that is not
+    /// a positive number is Activity's.
+    pub fn set_poll(&self, seconds: Option<f64>) {
+        self.lock().poll = seconds.filter(|s| s.is_finite() && *s > 0.0);
+    }
+
     /// Whether the tick inspects. Never read yet: once no Activity state
     /// arrived within 3 s of opening, and at once after the follow ended.
-    /// Read: a failure again every 2.5 s, and any read again when the row's
+    /// Read: a failure again every 2.5 s (the tab's `poll` while another
+    /// detail tab shows), and any read again when the row's
     /// run, conversation or state changed.
     fn wants_details(&self, hub: &Hub, now: f64) -> bool {
         let followed = &hub.followed;
@@ -391,7 +416,8 @@ impl Composers {
         match &followed.inspected {
             None => followed.details.is_some() || now - followed.opened_at >= DETAILS_WAIT,
             Some(basis) => {
-                (followed.inspect_error.is_some() && now - followed.inspected_at >= RETRY_WAIT)
+                (followed.inspect_error.is_some()
+                    && now - followed.inspected_at >= hub.poll.unwrap_or(RETRY_WAIT))
                     || self
                         .context(hub)
                         .is_some_and(|ctx| Basis::of(&ctx.row) != *basis)
@@ -422,6 +448,7 @@ impl Composers {
             self.changed();
         }
         self.tick_continuations(now);
+        self.retry_answer_saves();
     }
 
     /// Ticks once a second while a composer is open, until the app quits.
@@ -501,6 +528,11 @@ pub(crate) fn session_view(composers: &Composers, hub: &Hub, composer: &Composer
                 .inspect_error
                 .then_some(hub.followed.inspect_error.as_deref())
                 .flatten(),
+            // Qt shows `pending_questions_error` only here (3913-3918, 3984-3986).
+            question_error: details
+                .get("pending_questions_error")
+                .and_then(Value::as_str)
+                .unwrap_or(""),
             ..HintFacts::default()
         },
         reason.is_some(),
@@ -535,9 +567,24 @@ pub(crate) fn session_view(composers: &Composers, hub: &Hub, composer: &Composer
         session_status: status.text,
         session_status_error: status.error,
         session_blocks_input: status.blocks_input,
+        inspect_error: ctx.facts.inspect_error,
         cache: cache::chip(details, now),
         cache_warning: cache::warning(details, now),
         cache_details: cache::details(details, recorded, local),
+        // Qt's `m_contextUsage->setData(m_details["session_usage"], recorded)` (3788).
+        context: session_usage::context(&details["session_usage"], recorded),
+    }
+}
+
+/// The retry interval of a failed read while `tab` shows (Qt's poll timer,
+/// `SessionsWindow.cpp:2013-2016`): Settings > Processes' background seconds
+/// behind Terminal or Native UI, its active seconds behind Processes, and
+/// Activity's 2.5 s (None) otherwise.
+pub(crate) fn poll_seconds(tab: &str, number: impl Fn(&str) -> f64) -> Option<f64> {
+    match tab {
+        "terminal" | "native" => Some(number("processes/backgroundSeconds")),
+        "processes" => Some(number("processes/activeSeconds")),
+        _ => None,
     }
 }
 
@@ -3128,6 +3175,111 @@ pub(crate) mod tests {
         }
         std::thread::sleep(Duration::from_millis(50));
         assert_eq!(fake.inspects.load(Ordering::SeqCst), 6);
+    }
+
+    /// Behind Terminal or Native UI a failed read waits Qt's background
+    /// interval (`SessionsWindow.cpp:2013-2016`); back on Activity, 2.5 s.
+    #[test]
+    fn behind_terminal_a_failed_inspect_waits_the_background_interval() {
+        let root = dir("inspect-background");
+        let (c, fake) = send_hub(&root);
+        let settings = |name: &str| match name {
+            "processes/backgroundSeconds" => 30.0,
+            "processes/activeSeconds" => 2.5,
+            _ => 0.0,
+        };
+        c.set_poll(poll_seconds("terminal", settings));
+        c.open(Some(session()));
+        until(&c, |v| v.loaded);
+        let reads = |n| {
+            eventually(|| {
+                fake.inspects.load(Ordering::SeqCst) == n && c.lock().followed.inspecting.is_none()
+            })
+        };
+        let wait = |seconds: f64| {
+            *lock(&fake.now) += seconds;
+            c.tick();
+        };
+        wait(3.5);
+        reads(1);
+        wait(2.5);
+        wait(10.0);
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(fake.inspects.load(Ordering::SeqCst), 1, "not before 30 s");
+        wait(17.5);
+        reads(2);
+        c.set_poll(poll_seconds("activity", settings));
+        wait(2.5);
+        reads(3);
+    }
+
+    #[test]
+    fn the_tab_picks_qts_poll_interval() {
+        let settings = |name: &str| match name {
+            "processes/backgroundSeconds" => 45.0,
+            "processes/activeSeconds" => 1.5,
+            _ => 0.0,
+        };
+        assert_eq!(poll_seconds("terminal", settings), Some(45.0));
+        assert_eq!(poll_seconds("native", settings), Some(45.0));
+        assert_eq!(poll_seconds("processes", settings), Some(1.5));
+        assert_eq!(poll_seconds("activity", settings), None);
+        let root = dir("poll-bounds");
+        let (c, _) = send_hub(&root);
+        c.set_poll(Some(30.0));
+        assert_eq!(c.lock().poll, Some(30.0));
+        for odd in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            c.set_poll(Some(odd));
+            assert_eq!(c.lock().poll, None, "{odd}");
+        }
+    }
+
+    /// Refresh reads the open session, and only for its own composer.
+    #[test]
+    fn refresh_reads_the_open_session_for_its_composer_only() {
+        let root = dir("refresh");
+        let (c, fake) = send_hub(&root);
+        c.open(Some(session()));
+        let view = until(&c, |v| v.loaded);
+        c.refresh(view.handle + 1);
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(fake.inspects.load(Ordering::SeqCst), 0, "another handle");
+        c.refresh(view.handle);
+        eventually(|| {
+            fake.inspects.load(Ordering::SeqCst) == 1 && c.lock().followed.inspecting.is_none()
+        });
+        let view = until(&c, |v| v.session_status_error);
+        assert_eq!(view.session_status, "Could not refresh activity: timed out");
+        assert!(view.inspect_error, "the read error is in the view");
+        *lock(&fake.inspected) = Some(ready());
+        c.refresh(view.handle);
+        let view = until(&c, |v| v.block_reason.is_none() && !v.session_status_error);
+        assert!(!view.inspect_error);
+        assert_eq!(fake.inspects.load(Ordering::SeqCst), 2);
+        // Nothing is read while the stream keeps the details.
+        c.observe(&state(ready()));
+        c.refresh(view.handle);
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(fake.inspects.load(Ordering::SeqCst), 2, "streamed");
+    }
+
+    /// R1's Context chip: the reported context size as a share of its window.
+    #[test]
+    fn the_context_chip_shows_the_reported_usage() {
+        let root = dir("context-chip");
+        let (c, _) = send_hub(&root);
+        let mut details = ready();
+        details["session_usage"] = json!({"context": {"used": 85_300, "limit": 200_000}});
+        let view = opened(&c, details);
+        assert!(view.context.visible);
+        assert_eq!(view.context.text, "43% (85.3k/200k)");
+        let shown = serde_json::to_value(&view).unwrap();
+        assert_eq!(shown["context"]["tone"], "success");
+        assert_eq!(shown["context"]["visible"], true);
+        let root = dir("context-chip-none");
+        let (c, _) = send_hub(&root);
+        let view = opened(&c, ready());
+        assert!(!view.context.visible && view.context.text.is_empty());
     }
 
     #[test]

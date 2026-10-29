@@ -70,6 +70,12 @@ export interface Session {
    * a projection without `needs_attention`.
    */
   attentionNeeded?: boolean;
+  /**
+   * Qt's `needsAction() && !attentionAcknowledged` with this device's marks:
+   * what a project header counts as needing a response, beside Review later
+   * and children. Undefined for a projection without `needs_attention`.
+   */
+  actionNeeded?: boolean;
   /** A subagent asks while the session runs and the attention is not acknowledged. */
   childAttention?: boolean;
   optionalQuestions?: number;
@@ -143,6 +149,21 @@ export interface Session {
   notificationRevision?: number;
 }
 
+/** A file of a message, as Qt's attachment card shows it (ActivityView.cpp:759-782). */
+export interface ItemAttachment {
+  name: string;
+  /** `{reference }{name}`. */
+  caption: string;
+  mime: string;
+  /** "{n} KiB", or "File" when its size is unknown. */
+  meta: string;
+  /** The message's request and the file's place in it; the request is empty when the message saved no reference. */
+  request_id: string;
+  index: number;
+  /** An image the card shows a thumbnail of: any image but SVG. */
+  image: boolean;
+}
+
 export interface ActivityItem {
   id: string;
   kind: "user" | "agent" | "tool" | "tools" | "question" | "approval" | "system" | "receipt" | "thinking" | "report" | "voice" | "cleared" | "context";
@@ -151,7 +172,7 @@ export interface ActivityItem {
   body?: string;
   code?: string;
   lines?: string[];
-  attachments?: { name: string; size: string; kind: "image" | "file" }[];
+  attachments?: ItemAttachment[];
   sender?: string;
   /** Receipt line under a user message ("Sent", "Queued at this time"). */
   receipt?: string;

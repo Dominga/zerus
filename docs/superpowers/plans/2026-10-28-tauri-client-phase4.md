@@ -202,7 +202,7 @@ Rulings on the open questions; the tasks follow them.
   - **The review delay** (3 s) runs in the webview store, which knows the card's visibility and the window's focus. The card's view says which buttons it gates. Rust does not time it: Qt's gate is the button state too.
   - **Question drafts** use the app's one draft store with Qt's keys (`question\n…`) and `form_state`, so Saved drafts and the switch's import see them.
   - **Later notices.** Rust's notices that arrive after the call (push endings, send-now results, answer follow-ups) and the Terminal tab a Codex update opens reach the webview as `composer_events` in the envelope, at most 16 per batch.
-  - **The question read error.** The client has no session hint banner yet: Qt's "Could not load agent questions: … Check Terminal." shows at the top of the composer column.
+  - **The question read error.** Qt builds "Could not load agent questions: … Check Terminal." into the session hint (`SessionsWindow.cpp:3913-3918`), hides the hint banner (`m_hint->hide()`, 3953) and shows the hint only as the composer's session status (3984-3986). The client has that one path: `send::HintFacts.question_error` puts it into `session_status`, in the error tone and locking input while a block reason stands (A2-1 ruling, 2026-10-29).
   - **Naming.** Task 4b's "questions" are the hub's own dialogs (cold cache, start). The agent's requests are "question cards" (`questions.rs`, `QuestionReply`).
 - **The push envelope.** `next_batch` serializes `{...batch, composer?, processes_view?, draft_keys?}`. Only the open composer and the followed processes are projected; `draft_keys` lists the sessions with a nonempty draft among the 200 newest drafts plus the composers in memory, so the cards' draft marks stay bounded. Part A2 adds `composer_events?`, and the composer view carries the question card, the queue panel and the inbox state.
 - **Editing protocol.**
@@ -6089,6 +6089,50 @@ git commit -m "feat(client): resume-then-send, compact-to-send and Clear context
 
 ### Task 6: The composer view
 
+**As built** (`c5e94b2a` and its review fix rounds, `94efe79d` and `f1eef421`). Where the steps below differ, the code and this list win (Qt wins over the brief; `MessageComposer.cpp`, `SessionsWindow.cpp` and `ActivityView.cpp` lines). Task 7 binds to this list:
+- **The store** is `createComposer(port, timers?, images?, notices?)`; `notices` defaults to the app's `notify`. `ComposerPort` gains `refresh(handle)`. It exports `EDIT_MS`, `MAX_TEXT_BYTES`, `MAX_PIXELS`, `TOO_LONG`, `draftKey`, `statusLine`, and the `Dialog`, `Images`, `Notices` and `ComposerPort` types.
+  - Its API: `view`, `text`, `selection` (`start` is Qt's anchor, `end` its position), `dialog`, `locked`, `operationLocked`, `sendEnabled`, `hint`, `status`, `apply`, `receive`, `open`, `input`, `select`, `flush`, `attachFiles`, `pasteImage`, `remove`, `undo`, `send`, `answer`, `closeDialog`, `openClear`, `confirmClear`, `cancelSend`, `allowRetry`, `interrupted` and `refresh`.
+- **The locks** follow Qt's `locked` (1148-1149). `operationLocked` covers an `open` under way, the open composer's own attach or paste, a remove or Undo until a higher epoch, the open composer's own send or answer call (locked before its flush, so one Enter sends once; the attach and call locks are sets of handles, so a call keeps locking its own composer after the user went to another one and back), a started send until the view shows `sending`/`waiting` or a higher epoch, an open cold cache or start question, and Rust's `!loaded`/`attaching`/`sending`/`waiting`. `locked` adds `session_blocks_input`.
+  - An `open` flushes the composer being left first and keeps the editor read-only until it answers, so no key is typed into the composer being left.
+  - A refused Send (`busy`, `blocked`) stays locked until Rust hands the text back. An answer's refusal changes nothing.
+  - A question keeps the epoch, so closing it unlocks the editor. The store flushes before answering.
+  - A question still open when the composer changes or goes answers Cancel.
+- **Replies keep their composer.** Every send, answer and clear keeps the handle its call started on (`reply(r, h, at, refused)`). A reply that arrives after another composer opened keeps only its notice. A cold or start question it asks is answered Cancel and never shown. Busy, blocked, sending and the `clear_context` reply change nothing there. Task 7's `local_retry` replies go through the same `reply`.
+- **`sendEnabled`** is Qt's Send rule (1185), computed from the view's facts and the text being typed, so it does not wait for an edit's round trip. A disabled Send pressed with content shows the status at the editor for 5 s (`hint`, 814-818).
+- **Edits.** A cursor move counts as an edit (`rememberCursor`). Every key flushes at once while the view has `status_error`, an uncertain mark or a failed local row. Unflushed typing also goes when the page hides or goes: `flushWhenHidden` listens to `visibilitychange`, `pagehide` and Rust's `window-visibility` event. Cmd+Q's exit handshake is `zerus-5wmh.9.30`.
+- **The 64 KiB check** is a memo of the text: a text of at most a third of the limit in UTF-16 units needs no encoding, and one over the limit in units is too long.
+- **Envelope views** go through `receive`. It drops a view of another composer (by draft key, or by the open handle). It holds views that arrive while an `open` runs and applies them after the open's answer.
+- **The status line** is `statusLine(view, ownError, tooLong)`. Its order: waiting, the store's own error, then Rust's status unless that is the session status, the block reason or the stale length text, then the length.
+- **Qt over the brief:**
+  - The store's own error (a refused paste) survives typing, as Qt's `showError` notice (textChanged, 366-376).
+  - A paste is refused above 32 000 000 pixels, not at it (394; the core's `pasted_image`).
+  - Notices are sticky only in the error tone (`showNotice`, `SessionsWindow.cpp:5210`).
+  - The placeholder is always "Message this agent…" (`updatePlaceholder`, 569); the unavailable reason is in the status line.
+- **`Dialog`** is `cold | start | clear`. `clear` holds only its `control` snapshot: the `clear_context` reply's token is already spent in Rust. `openClear()` opens only while `clear.enabled`, as Qt's `clearContext()` returns early. `ComposerDialogs` is mounted once in `SessionDetail`, so the header's Clear works on any tab.
+- **The toolbar** keeps Qt's slot order (`ComposerToolbar.h:105`, `leading` at `ComposerToolbar.cpp:242`): Attachments, the voice slot (Task 13), Latest, Mark as read, the compaction indicator, Cancel send, the grip, the cache chip and the Context chip. Below 600 px (times the content scale) the chips shorten: "{n}", the cache's `short_label`, an icon-only Mark as read.
+  - Mark as read uses `markReadChip(s, online)` (this base's signature) with Qt's `read-all` icon (982). A focused chip moves the focus to the transcript before it hides (1038), as the Latest chip does (`ActivityView.cpp:1611`): `.act-scroll` takes the focus from code (`tabindex="-1"`, through Activity's `focusTranscript()`, which answers false when no transcript is shown). Without one, the message field takes it while shown and enabled, the toolbar's focus fallback (`MessageComposer.cpp:280`; `ComposerToolbar.cpp:225-227, 266-267`). Both are `moveFocusOff` in `ui/sessions/composer-ui.ts`.
+  - The compaction indicator needs the row `tracked`, online and `running`, no read error (`ComposerView.inspect_error`, Qt's `m_inspectError`), and the followed state's `phase` `compacting`, `runtime_state` `live`, `process_state` `running` and a `state` other than `archived` (1899-1901; `SessionsWindow.cpp:3974-3975`).
+  - The cache chip shows the warning glyph except when warm (`CacheStatus.h`). Its popover's Clear context shows only with a warning (3791), is enabled by `clear.cache_enabled`, and its tooltip is `cache_reason` or Qt's.
+  - The Context chip is R1's `ComposerView.context` (`session_usage::ContextChip`, 3788). It is not clickable until the side panel exists.
+- **The action row** follows Qt's order (364): Attach, Reference file (disabled), the status line, Refresh, Allow retry, the model button (disabled), Stop and Send.
+  - Refresh shows while the session status is an error and is enabled while `!operationLocked` (1194-1195). It calls `composer_refresh`.
+  - Allow retry needs `uncertain && !operationLocked` (1193).
+  - Send's tooltip is only the waiting text, since no tooltip names a chord.
+  - The status line takes the warning colour while a send waits (1224-1226).
+- **Stop.** Every Stop (the composer's, the header icon, the header menu) calls `composer.interrupted()` before phase 2's `actionEntries(...).stop.action()`, since every Qt Stop is the composer's `interruptRequested` (1187-1191).
+- **Clear session** in the header (button and menu entry) uses `composer.view()?.clear`: `enabled`, `reason` as the hint and "Clearing…" while `running`. It calls `composer.openClear()`.
+- **Placement.** The composer is hidden while a subagent is open and for an archived row's recorded Activity (`activityReadOnly`). `store/session.ts` opens no composer for such a row.
+- **Keyboard.** The composer root has `data-shortcut-context="composer"`. `message.send` is registered with `onCommand(id, handler, editor)` while mounted. `message.push` is not registered: push is not enabled before A2 (Qt's `setPushEnabled`, 841-847). The attachments list and the cache popover are `data-shortcut-context="none"`.
+- **src-tauri:**
+  - `composer_refresh(handle)` runs `Composers::refresh`, which calls `refresh_details` for the open composer's handle only.
+  - `composer_tab(tab)` sets `Hub.poll` through `Composers::set_poll(send::poll_seconds(tab, settings))`. Terminal and Native UI take `processes/backgroundSeconds`, Processes takes `processes/activeSeconds`, and any other tab keeps 2.5 s for a failed read's retry (2013-2016).
+  - `ComposerView` and `SessionView` gain `context: ContextChip` and `inspect_error: bool` (the open session's last read failed).
+- **Envelope and catalog.** `bridge.normalize` is exported and keeps `composer` and `draft_keys`; `isEmptyBatch` counts both. `session.receive` calls `composer.receive` and `setDraftKeys`. `setDraftKeys(keys)` marks rows by `computer + "\n" + name` and keeps the mark through later upserts.
+- **Activity** exports `following`, `unseen` (events whose `seq` follows the newest one seen, while not following), `jumpToLatest()` and `focusTranscript(): boolean`.
+- **Attachment rows** are keyed by their `reference` (a view's attachments are new objects every time), so a new view keeps the rows and their focus. A row reads its attachment through `keptItem(items, reference)` (`ui/sessions/composer-ui.ts`): once its reference went, it keeps its own last item until Solid disposes it, never another row's.
+- **Follow-ups ruled in the review:** the archived composer (`zerus-5wmh.9.29`), the exit flush handshake (`zerus-5wmh.9.30`) and Refresh while offline (`zerus-5wmh.9.31`).
+- **For Task 7:** the bridge already has `localRetry`, `localDelete` and `localInspect`, and `ComposerView.local` is typed as `LocalMessage[]`.
+
 **Depends on:**
 - Tasks 3a-5;
 - for the Mark as read chip, `markReadChip(session)` and `runMarkRead(row)` from the menu-parity Piece B (`zerus-5wmh.16`, PR #406, `ui/sessions/mark-entries.ts`): until it merges, the chip stays hidden;
@@ -7845,6 +7889,20 @@ They share `composer/mod.rs`, `Composer.tsx` and `SessionDetail.tsx` only additi
 
 ### Task A2-1: Question cards in the composer hub: drafts, the shown card and its view
 
+**As built** (this task's commit and its review rounds). Where the steps below differ, the code and this list win (Qt wins over the brief):
+- **The question read error** shows only as the composer's session status, as in Qt (`SessionsWindow.cpp:3913-3918`, `m_hint->hide()` 3953, `setSessionStatus` 3984-3986). `send::session_view` fills `HintFacts.question_error` from `pending_questions_error`, so `session_status` reads "Could not load agent questions: {error}. Check Terminal." in the error tone and locks input while a block reason stands. There is no `ComposerView.questions_error`, and `question_part` returns `(Option<QuestionView>, bool)` (ruling, 2026-10-29). Its test is `a_failed_question_read_is_the_session_status`.
+- **Revision and epoch** (the composer's text epoch rules, ruling 2026-10-29):
+  - `QuestionView.revision` bumps only on Qt's `changed` in `setQuestion` (`QuestionCard.cpp:387`): a new card, a changed form or a restored answer. The webview restarts the review delay and resets its fields.
+  - `QuestionView.epoch` (`Answers.epoch`) bumps with every change of the answers that comes from Rust: every revision, a draft load of the shown card (Qt's load rebuilds the form without restarting the review, 289-301), seeded OpenCode defaults, and a refused edit. The webview takes the fields' values again whenever it grows.
+  - `question_edit(card, epoch, edit)` applies only an edit of the current epoch. A stale one is dropped and Rust's answers stand. One the card refuses (loading, locked, an unchecked radio, a text over its bound) bumps the epoch and so hands Rust's answers back.
+  - `question_page`, `question_navigate` and `question_allow_retry` take no epoch: Qt applies them at once.
+  - Tests: `a_rebuild_bumps_the_revision_and_the_epoch`, `a_stale_edit_after_a_draft_load_leaves_rusts_answers`, `a_refused_edit_hands_the_answers_back`.
+- **"Asked"** is formatted before the hub lock is taken (`Answers.asked`, refreshed by `sync_questions`), as Task 4a formats the cache expiry: local time may read the time zone files.
+- **Commands** use `rename_all = "snake_case"` like the composer's and sit in the live handler only (the composer is `live`-only). `question_allow_retry` does nothing once the hub has closed.
+- **Review round 1.** Drafts whose newest save has not answered and drafts of cards the open session lists now are never evicted. A selection change, or details not read yet, clears the shown card, so the next card is built again (Qt clears its details, `SessionsWindow.cpp:451`). The "Asked" cache takes only the details it was formatted from. Nothing loads or saves once the hub has closed. Allow retry acts on the shown card only (Qt's `m_key`). Each ensure numbers its load, and only that load lands (`Answers.loads`): a load whose mark a Codex record cleared, then an eviction and a new ensure, can no longer land an older read. Seven tests pin the retry timer, eviction, the choice cap, Codex's recorded answers, OpenCode's defaults, a new run and the page.
+- **A2-3 sends every input event** of the card to `question_edit` at once, without a debounce (ruling, 2026-10-29). The epoch is global across cards, and Qt captures each keystroke.
+- **Later tasks bind to this:** A2-2's tests take the card and its epoch from `tests::shown(&c)`. A2-3 calls `question_edit` with `{ card, epoch, edit }`, and its `QuestionView` has `epoch: number`.
+
 **Depends on:**
 - R7 (`questions::{pending, questions_error, select, Selection, AnswerFacts, unavailable, store_key, label, AnswerDraft, Edit, CardContext, CardView, card, same_form}`);
 - Tasks 3a, 4a and 4b (`Context`, `after_observe`, `tick`, and the test helpers `send_hub`, `send_hub_on`, `opened`, `ready`, `state`, `Fake`).
@@ -9227,13 +9285,14 @@ export interface QueueNav { previous: boolean; next: boolean; previous_tip: stri
 export interface CardView { heading: string; progress: string; pending: string; pending_tip: string; nav: QueueNav | null; tabs_visible: boolean;
   page: number; forms: FormView[]; status: string; status_error: boolean; available: boolean; locked: boolean; review: boolean; created_at: number;
   submit: ButtonView; approve: ButtonView; deny: ButtonView; skip: ButtonView; previous: ButtonView; next: ButtonView; retry: boolean; skip_tip: string; retry_tip: string }
-export interface QuestionView { card: string; revision: number; asked: string; asked_tip: string; terminal_label: string; view: CardView }
+export interface QuestionView { card: string; revision: number; epoch: number; asked: string; asked_tip: string; terminal_label: string; view: CardView }
 export type QuestionEdit = { kind: "option"; item: string; option: string; checked: boolean } | { kind: "other"; item: string; checked: boolean } | { kind: "text"; item: string; text: string };
 export interface ColdAnswer { title: string; text: string; proceed: string }
 export type QuestionReply = { kind: "sending" } | { kind: "busy" } | { kind: "cold"; token: number; prompt: ColdAnswer } | { kind: "notice"; text: string };
 export type ComposerEvent = { kind: "notice"; text: string; error: boolean; transient: boolean } | { kind: "open_terminal"; key: string };
 export interface Reply { question: string; answer: string }
-// ComposerView gains: question: QuestionView | null; input_visible: boolean; questions_error: string | null
+// ComposerView gains: question: QuestionView | null; input_visible: boolean
+// (a failed question read is the composer's session_status, A2-1 As built)
 // Batch gains: composer_events?: ComposerEvent[]
 // store/questions.ts
 export const REVIEW_MS = 3000;
@@ -9543,7 +9602,7 @@ export const questions = createRoot(() => createQuestions({
 The bridge, in `client/src/bridge.ts`. Outside Tauri each wrapper rejects with "Actions need the desktop app.", as the composer's do:
 
 ```ts
-export const questionEdit = (card: string, edit: QuestionEdit) => desktop<void>("question_edit", { card, edit });
+export const questionEdit = (card: string, epoch: number, edit: QuestionEdit) => desktop<void>("question_edit", { card, epoch, edit });
 export const questionPage = (card: string, page: number) => desktop<void>("question_page", { card, page });
 export const questionNavigate = (direction: number) => desktop<void>("question_navigate", { direction });
 export const questionAllowRetry = (card: string) => desktop<void>("question_allow_retry", { card });
@@ -9574,7 +9633,7 @@ function composerEvent(e: ComposerEvent) {
 
 In `receive`: `if (b.composer) questions.apply(b.composer.question);` after `composer.apply(...)`, then `for (const e of b.composer_events ?? []) composerEvent(e);`. The selection effect calls `questions.apply(undefined)` when no session is selected.
 
-Task 6's `view()` fixture in `store/composer.test.ts` gains `question: null, input_visible: true, questions_error: null`, so the type check passes.
+Task 6's `view()` fixture in `store/composer.test.ts` gains `question: null, input_visible: true`, so the type check passes. A failed question read needs nothing here: it is the composer's `session_status`, which Task 6 shows.
 
 - [ ] **Step 6: The transcript.** In `client/src/ui/sessions/types.ts`, `TranscriptItem` gains `replies?: Reply[]`, and `ActivityEvent` gains `question_replies?: Reply[]`. In `transcript.ts`:
   - A user item's label is "You (answer)" when `e.type === "QuestionAnswered"` or `e.question_replies?.length`, and it carries `replies: e.question_replies`.
@@ -9775,7 +9834,6 @@ function ColdAnswerDialog() {
 
 ```tsx
 <div class="cmp-col">
-  <Show when={composer.view()?.questions_error}>{(e) => <p class="qcard-error">{e()}</p>}</Show>
   <QuestionCard />
   <Composer />
 </div>
@@ -10750,6 +10808,16 @@ Tasks 8-12 complete Part A. Task 12 runs the smoke for Part A and Part A2.
 
 ### Task 8: Dropped files: composer attach, Terminal paste and stage
 
+**As built (Rust backend, a2hub; webui rulings, 2026-10-29).** The frontend is a separate webui change. Where the snippets below differ, these rules and the current source win:
+- `Terminals::paste(view, generation, text)` checks the named generation and queues the paste under one views lock. A missing view or a mismatch returns "Terminal changed during file transfer. Drop the files again in the intended session.". The command IPC arguments and `Ok`/`Err` meanings are unchanged.
+- `terminal_drop` is async and runs its work on the blocking pool, using `actions::dispatch` once for a peer. It refuses a webview or a view other than `main`. The live handler registers it; the non-live handler lists no Terminal commands and needs no stub.
+- Review follow-up: `terminal_shown(view, generation, shown)` records the tab visibility for that attach; stale updates are ignored and a new attach starts shown. Paste checks visibility with its generation under the same views lock, so a transfer finishing while the tab is hidden refuses, as Qt's `terminalDropTarget` does (2620). The frontend calls it on tab hide/show.
+- A taken write lane (`dispatch` returning `Err(actions::BUSY)`) is a definite pre-dispatch refusal and returns `Ok(Some("Wait for the session update to finish."))`, an info notice (Qt 4395). No native failed or uncertain outcome is converted into that refusal.
+- A drop guard releases the window-wide `dropping` claim after success, refusal, failure, cancellation or a dispatch panic. A pending peer transfer blocks local drops too, before the local paste, as Qt does (`SessionsWindow.cpp:2650-2651`).
+- Receipt paths accept a leading `/` on every platform. Windows builds also accept a fully rooted alphabetic drive path or UNC path; drive-relative paths and control characters refuse. The pure receipt and platform-policy tests live under `cfg(test)` separately from the Unix fake-attach tests, so the parameterized policy test also executes on Windows; actual Windows execution remains in `zerus-5wmh.52`.
+- Windows quoting continues to consume core `terminal::paste_paths` unchanged. Its pre-existing difference from Qt's `SessionCommands::powerShellQuote` (smart apostrophes and the safe bare-word whitelist, `SessionCommands.h:40-51`) is core follow-up `zerus-5wmh.61`, off the Mac switch bar; actual Windows coverage remains in `zerus-5wmh.52`.
+- The fake attach must print its hello before the paste test writes input: switching the fake PTY to raw mode otherwise flushes that input. Tests also cover remote identities, one dispatch, uncertain outcomes without replay, reconnects, malformed receipts, concurrent drops and release during cancellation or unwinding.
+
 **Depends on:** A2 `zerus-5wmh.9.4` (#404): `Action::StageFiles {paths, expected_created}` and its `staged` receipt; `Session.created` from #406; Tasks 2, 3a and 6.
 
 **Qt reference:**
@@ -11002,6 +11070,17 @@ git commit -m "feat(client): dropped files attach to the composer or paste into 
 ---
 
 ### Task 9: Activity attachments: fetch, preview and open
+
+**As built** (branch `work-ba0ed9fd-attachments`, the surface webui approved on 2026-10-29). Where the steps below differ, the code and this list win (Qt wins over the brief; `AttachmentViewer.h`, `ActivityView.cpp`, `SessionsWindow.cpp` and `MessageComposer.cpp` lines):
+- **R2 is in.** `external_file` (#424) is on the base, so Open is wired, never disabled with "Arrives with the downloaded-file marker.".
+- **The Fetcher** lives in `composer/fetch.rs` and is Qt's `AttachmentLoader` (162-243). `fetch(computer, file, priority)` runs one read per file key (computer, session, conversation, archive, agent, request, index), at most three reads at once (`pump`), and moves a priority read ahead of the waiting ones. It remembers the last 256 files read (`m_paths`) and answers them from their copies while `cached_at` accepts them. A file without `request_id` answers Qt's "This attachment has no saved file reference." without the CLI.
+- **Activity Open is one fetch, then open** (`AttachmentLoader::open`, 196-211): `attachment_open(computer, file: AttachmentRef)` takes a priority read, then `external_file::open` as `Origin::OtherMachine`. It answers `Ok(None)` when opened, `Ok(revealed_notice)`, or `Err` with `reveal_failed_notice`, Qt's "No application could open this file." or the read's error. No command opens a path the webview names. The page shows "Opening attachment…" first (`SessionsWindow.cpp:1096`); an error replaces it as an error notice and a reveal as a plain one.
+- **Draft Open** is `attachment_open_draft(path)`, where `path` is the view's `draft/{handle}/{list}/{index}`, resolved as the `zerus-file` scheme resolves it, so a changed list opens nothing. It prepares the one attachment into the cache and opens it as `Origin::ThisComputer` (`MessageComposer.cpp:1067-1085`). It fails with the prepare's error, "Could not open the attachment." or "Could not open the attachment with its default application.". The composer's attachment row opens its file on a click, Enter or Space, titled "Open {name}" (Qt's eventFilter, 1104-1117), closing the list first; an outcome other than a plain open shows in the composer's status line (Qt's showError), only while that composer is still the open one.
+- **Thumbnails, not previews.** Qt's Activity has no hover preview: an image other than SVG gets an inline thumbnail in a fixed 96x64 cell (`ActivityView.cpp:771-777`), read at render at normal priority (2126-2131). It is pinned while mounted; a failed load reads once more, then the card shows none, as Qt shows none for a failed read. There is no text preview, no `attachment_head` and no CORS change on `zerus-file`.
+- **The card** (759-782) reads `{reference }{name}`, `{n} KiB` or "File", and "Open →"; a file without `request_id` reads "Attachment: {name}" and opens nothing. Each Activity source gives its `attachmentScope()`: the live follow's conversation is its inspection's, else the row's; the archived row's is the one its last read named, with its archive ID. The main Activity's messages are the session's own (`agent_id` null).
+- **The cache** keeps `limit`, counted pins by canonical path (at most 1024; `clear_pins` in `start`) and the composers' `retry_files` as its set extra. `attachment_pin` pins only a copy the cache holds.
+- **The opener** is `tauri-plugin-opener`, used from Rust only: no capability gives the webview its commands.
+- **The session-file dialog** (`SessionsWindow.cpp:709-877`: Download…, Download and open, Open local copy, Show file, through `HgsClient::downloadFileToCache` and the DownloadCache) is not in Task 9. Nothing in the client opens it yet: it needs Activity's Markdown links, and file references stay after the switch (ruling of 2026-10-28). It is the follow-up `zerus-5wmh.60`, whose description holds its surface: R9 and `session_files.rs` for the core owner, the dialog and the file-link activation for the UI. The composer's "Arrives with file references." control keeps its place.
 
 **Depends on:**
 - A3 `zerus-5wmh.9.5` (#410): `reads::{AttachmentRef, fetch_attachment, CachedAttachment, attachment_message}`;

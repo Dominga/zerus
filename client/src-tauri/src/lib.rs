@@ -212,6 +212,12 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
+        // Rust opens attachments; the webview's links stay its own (no injected click handler).
+        .plugin(
+            tauri_plugin_opener::Builder::new()
+                .open_js_links_on_click(false)
+                .build(),
+        )
         .manage(commands::AppState::default())
         .manage(window_visibility::Visibility::default())
         .manage(lifecycle::Lifecycle { menu_bar });
@@ -420,6 +426,47 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 // and the inspect fallback; it sleeps while no composer is open.
                 composers.start_ticker();
                 app.manage(processes_hub(app.handle(), allowed));
+                // Activity attachments share the composers' cache: one root,
+                // one set of pins and one prune lane, which keeps Retry's files.
+                let retry = std::sync::Arc::downgrade(&composers.0);
+                composers.cache().set_extra(std::sync::Arc::new(move || {
+                    retry
+                        .upgrade()
+                        .map(|shared| composer::Composers(shared).retry_files())
+                        .unwrap_or_default()
+                }));
+                app.manage(composer::fetch::Fetcher::new(
+                    composers.cache(),
+                    {
+                        // A replay without an explicit ZERUS_CLIENT_HGS never reaches the real CLI.
+                        let allowed = actions::actions_allowed(
+                            std::env::var("ZERUS_CLIENT_REPLAY").ok().as_deref(),
+                            std::env::var("ZERUS_CLIENT_HGS").ok().as_deref(),
+                        );
+                        let hgs = zerus_client_core::default_hgs();
+                        std::sync::Arc::new(move |computer: &zerus_client_core::ComputerId, file: &zerus_client_core::reads::AttachmentRef, root: &std::path::Path| {
+                            if !allowed {
+                                return Err(actions::REPLAY_NEEDS_HGS.to_owned());
+                            }
+                            zerus_client_core::reads::fetch_attachment(&hgs, computer, file, root)
+                        })
+                    },
+                    std::sync::Arc::new(|job: composer::Job| {
+                        tauri::async_runtime::spawn_blocking(job);
+                    }),
+                ));
+                app.manage({
+                    use tauri_plugin_opener::OpenerExt;
+                    let (open, reveal) = (app.handle().clone(), app.handle().clone());
+                    composer::fetch::Opener {
+                        open: std::sync::Arc::new(move |path: &std::path::Path| {
+                            open.opener().open_path(path.to_string_lossy(), None::<&str>).is_ok()
+                        }),
+                        reveal: std::sync::Arc::new(move |path: &std::path::Path| {
+                            reveal.opener().reveal_item_in_dir(path).is_ok()
+                        }),
+                    }
+                });
                 // The menu-bar item, before the fleet starts so its first catalog reaches it.
                 #[cfg(target_os = "macos")]
                 {
@@ -523,6 +570,8 @@ fn processes_hub(app: &AppHandle, allowed: bool) -> processes::ProcessHub {
     let start = std::time::Instant::now();
     let follows = app.clone();
     let unfollows = app.clone();
+    let intervals = app.clone();
+    let refreshes = app.clone();
     let actions = app.state::<actions::Actions>().inner().clone();
     let hgs = zerus_client_core::default_hgs();
     let hub = processes::ProcessHub::new(
@@ -546,6 +595,16 @@ fn processes_hub(app: &AppHandle, allowed: bool) -> processes::ProcessHub {
                 unfollows
                     .state::<commands::AppState>()
                     .unfollow_processes(target)
+            }),
+            set_interval: Arc::new(move |target, ms| {
+                let _ = intervals
+                    .state::<commands::AppState>()
+                    .set_processes_interval(target, ms);
+            }),
+            refresh: Arc::new(move |target| {
+                let _ = refreshes
+                    .state::<commands::AppState>()
+                    .refresh_processes(target);
             }),
             read: Arc::new(
                 move |computer: &zerus_client_core::ComputerId, read: &zerus_client_core::Read| {
@@ -824,6 +883,8 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         terminal::terminal_disconnect,
         terminal::terminal_retarget,
         terminal::terminal_status,
+        terminal::terminal_drop,
+        terminal::terminal_shown,
         composer::composer_open,
         composer::composer_edit,
         composer::composer_pick,
@@ -832,6 +893,13 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         composer::composer_remove,
         composer::composer_undo_remove,
         composer::composer_allow_retry,
+        composer::composer_refresh,
+        composer::composer_tab,
+        composer::fetch::attachment_fetch,
+        composer::fetch::attachment_pin,
+        composer::fetch::attachment_unpin,
+        composer::fetch::attachment_open,
+        composer::fetch::attachment_open_draft,
         composer::send::send_message,
         composer::send::send_answer,
         composer::send::local_retry,
@@ -840,6 +908,10 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         composer::send::send_cancel,
         composer::send::send_interrupted,
         composer::send::clear_context,
+        composer::questions::question_edit,
+        composer::questions::question_page,
+        composer::questions::question_navigate,
+        composer::questions::question_allow_retry,
         processes::processes_follow,
         processes::processes_shown,
         processes::processes_select,

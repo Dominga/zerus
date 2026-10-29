@@ -3418,7 +3418,9 @@ for a GUI that is not running, by its signature and its own `--build-info`) and
 only then becomes the one rollback copy in `~/.local/share/hgs/desktop-previous`;
 a new GUI that does not start is replaced by it again. A replaced bundle without
 its identity, executable or valid signature never becomes the rollback copy, and
-a Zerus process started during the update stops the change. Those cases and an
+a Zerus process started during the update stops the change. After the Mac switch,
+Qt stays the rollback copy; if it cannot be verified as complete, including when
+its signature check times out, the replaced client is kept too. Those cases and an
 interrupted update keep the replaced GUI in a `.hgs-tray-kept-*` folder beside
 the installed one and print where; later updates list such folders and never
 remove them. Links at the
@@ -4116,8 +4118,16 @@ catalog key. Its `state` value is `{processes, process_work}` exactly as
 `hgs inspect NAME` reports them. The first follows the subscription; later ones
 only when the value changed apart from both `sampled_at` fields. Two worker
 threads run the inspection, so a slow `ps` or native host delays no other frame.
-A session is read again when its catalog row changes and at least every 10 s;
-reads of one session start at least 2 s apart. A session that leaves the
+A session is read again when its catalog row changes and every 10 s by default;
+reads of one session start at least 1 s apart. A processes subscription may
+include `interval_ms` (clamped to 1,000–600,000 ms). Repeating the subscription with `interval_ms`
+changes its interval while keeping the current inventory, revision and running
+read. Adding `"refresh":true` requests one read as soon as the minimum gap
+allows; repeated refreshes while a read runs coalesce into one follow-up read.
+Both fields are additive watch-v1 options: older servers ignore them and keep
+their 10 s default. Plain resubscriptions without either option retain the
+original behavior: replace the subscription and resend its first state.
+A session that leaves the
 catalog ends with `subscription_ended`, and an inspection that fails sends a
 non-fatal `inspect_failed`. A stream follows the processes of at most 16
 sessions (`limits.processes_subscriptions`).

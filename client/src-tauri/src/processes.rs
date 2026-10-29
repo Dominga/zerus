@@ -163,6 +163,10 @@ pub type Epoch = Arc<dyn Fn() -> f64 + Send + Sync>;
 /// Follows a session's processes topic; the error is the refusal's text.
 pub type Follow = Arc<dyn Fn(&ProcessTarget) -> Result<(), String> + Send + Sync>;
 pub type Unfollow = Arc<dyn Fn(&ProcessTarget) + Send + Sync>;
+/// Update an existing topic subscription; no inventory is dropped.
+pub type SetInterval = Arc<dyn Fn(&ProcessTarget, u64) + Send + Sync>;
+/// Request one inventory read after a stop or mismatched output reply.
+pub type Refresh = Arc<dyn Fn(&ProcessTarget) + Send + Sync>;
 /// One `hgs processes NAME --output ID ...`; blocking.
 pub type ReadOutput = Arc<dyn Fn(&ComputerId, &Read) -> Result<Value, String> + Send + Sync>;
 /// One guarded stop (`actions::dispatch_as`); blocking.
@@ -177,6 +181,8 @@ pub struct ProcessDeps {
     pub epoch: Epoch,
     pub follow: Follow,
     pub unfollow: Unfollow,
+    pub set_interval: SetInterval,
+    pub refresh: Refresh,
     pub read: ReadOutput,
     pub stop: Stop,
 }
@@ -220,6 +226,8 @@ struct Hub {
     wanted: Option<ProcessTarget>,
     /// The topic follow that succeeded, if any.
     subscribed: Option<ProcessTarget>,
+    /// Last cadence sent for the current subscription (one entry, no history).
+    interval: Option<(String, String, u64)>,
     /// The (computer, key) whose inventory `value` holds.
     value_key: Option<(String, String)>,
     /// Qt's view key of the session shown.
@@ -438,6 +446,7 @@ impl Hub {
         let keep =
             matches!((&self.subscribed, follows), (Some(old), Some(new)) if old.same_follow(new));
         if !keep {
+            self.interval = None;
             if let Some(old) = self.subscribed.take() {
                 let same_key =
                     follows.is_some_and(|new| new.computer == old.computer && new.key == old.key);
@@ -452,12 +461,32 @@ impl Hub {
                 }
             }
         }
+        self.sync_interval(deps);
         let identity = Self::identity_of(next.as_ref());
         if identity != self.identity {
             self.reset(identity, now);
         }
         self.changed = true;
         self.place(now)
+    }
+
+    /// Qt polls faster while the tab shows (SessionsWindow.cpp:2015,3473).
+    /// Changing cadence leaves the topic and the displayed inventory intact.
+    fn sync_interval(&mut self, deps: &ProcessDeps) {
+        let Some(target) = &self.subscribed else {
+            self.interval = None;
+            return;
+        };
+        let ms = if self.shown {
+            self.settings.active_ms()
+        } else {
+            self.settings.background_ms()
+        };
+        let interval = (target.computer.clone(), target.key.clone(), ms);
+        if self.interval.as_ref() != Some(&interval) {
+            (deps.set_interval)(target, ms);
+            self.interval = Some(interval);
+        }
     }
 
     /// Takes the inventory as `setSession` does (116-143): normalized
@@ -890,6 +919,7 @@ impl ProcessHub {
             return;
         }
         hub.shown = shown;
+        hub.sync_interval(&self.0.deps);
         hub.changed = true;
         hub.update_busy(now);
         let read = if shown {
@@ -1108,6 +1138,14 @@ impl ProcessHub {
     }
 
     /// The output reply (`ProcessView.cpp:89-96`).
+    fn refresh_inventory(&self, hub: &Hub) {
+        if self.0.hgs_allowed && !hub.closed {
+            if let Some(target) = &hub.subscribed {
+                (self.0.deps.refresh)(target);
+            }
+        }
+    }
+
     fn output_read(&self, call: OutputCall, result: Result<Value, String>) {
         let now = self.now();
         let mut hub = self.lock();
@@ -1125,9 +1163,12 @@ impl ProcessHub {
                         .target()
                         .map(|t| (t.run_id.clone(), t.conversation_id.clone()))
                         .unwrap_or_default();
-                    // A reply of another session asks Qt for a fresh
-                    // inventory; the topic sends one when the session changes.
+                    // Qt re-inspects after a mismatched reply (ProcessView.cpp:93).
+                    // The token guard above prevents an old selection refreshing a new one.
                     let shown = rules::output(&reply, &call.process, &run, &conversation);
+                    if shown.refresh {
+                        self.refresh_inventory(&hub);
+                    }
                     if let Some(text) = shown.text {
                         hub.output.text = Some(text);
                     }
@@ -1171,6 +1212,9 @@ impl ProcessHub {
             hub.stopping = None;
             hub.queue.finished(result);
             hub.changed = true;
+            // Every current stop answer, including uncertain or failed, asks
+            // for one read; the stop itself is never replayed (ProcessView.cpp:87).
+            self.refresh_inventory(&hub);
             if hub.closed {
                 None
             } else {
@@ -1237,6 +1281,8 @@ mod tests {
         stops: Mutex<Vec<String>>,
         stop_ok: Mutex<bool>,
         follows: Mutex<Vec<String>>,
+        intervals: Mutex<Vec<(String, u64)>>,
+        refreshes: Mutex<Vec<String>>,
         follow_error: Mutex<Option<String>>,
         /// Jobs held for the test to run, when `hold` is set.
         held: Mutex<Vec<Job>>,
@@ -1260,6 +1306,8 @@ mod tests {
             stops: Mutex::new(vec![]),
             stop_ok: Mutex::new(true),
             follows: Mutex::new(vec![]),
+            intervals: Mutex::new(vec![]),
+            refreshes: Mutex::new(vec![]),
             follow_error: Mutex::new(None),
             held: Mutex::new(vec![]),
             hold: Mutex::new(false),
@@ -1277,6 +1325,8 @@ mod tests {
             fake.clone(),
             fake.clone(),
         );
+        let intervals = Arc::clone(&fake);
+        let refreshes = Arc::clone(&fake);
         let hub = ProcessHub::new(
             ProcessDeps {
                 spawn: Arc::new(move |job| {
@@ -1294,6 +1344,12 @@ mod tests {
                     lock(&d.follow_error).clone().map_or(Ok(()), Err)
                 }),
                 unfollow: Arc::new(move |target| lock(&e.follows).push(format!("-{}", target.key))),
+                set_interval: Arc::new(move |target, ms| {
+                    lock(&intervals.intervals).push((target.key.clone(), ms))
+                }),
+                refresh: Arc::new(move |target| {
+                    lock(&refreshes.refreshes).push(target.key.clone())
+                }),
                 read: Arc::new(move |computer, read| {
                     lock(&b.calls).push(format!("{computer:?} {read:?}"));
                     let Read::ProcessOutput {
@@ -1424,6 +1480,85 @@ mod tests {
         lock(&hub.0.hub).changed = true;
         hub.take_view()
             .unwrap_or_else(|| lock(&hub.0.hub).last.clone().unwrap())
+    }
+
+    #[test]
+    fn the_inventory_interval_tracks_visibility_and_settings_without_a_new_follow() {
+        let (hub, fake) = hub();
+        enabled(&hub);
+        assert_eq!(*lock(&fake.intervals), [("run:run-1".into(), 30_000)]);
+        hub.observe(&mut state(vec![process("p1", "running", "hook")]));
+        select(&hub, &["p1"], "p1");
+        hub.shown(true);
+        hub.shown(true);
+        hub.settings(Settings {
+            enabled: true,
+            active_seconds: 1.25,
+            background_seconds: 40.0,
+            ..Settings::default()
+        });
+        hub.shown(false);
+        hub.follow(Some(target()));
+        assert_eq!(
+            *lock(&fake.intervals),
+            [
+                ("run:run-1".into(), 30_000),
+                ("run:run-1".into(), 2_500),
+                ("run:run-1".into(), 1_250),
+                ("run:run-1".into(), 40_000),
+            ]
+        );
+        assert_eq!(
+            *lock(&fake.follows),
+            ["+run:run-1"],
+            "a cadence change keeps the subscription"
+        );
+        assert_eq!(snapshot(&hub).current.as_deref(), Some("p1"));
+        hub.settings(Settings::default());
+        let changes = lock(&fake.intervals).len();
+        hub.shown(true);
+        assert_eq!(
+            lock(&fake.intervals).len(),
+            changes,
+            "disabled has no subscription"
+        );
+        enabled(&hub);
+        assert_eq!(
+            lock(&fake.intervals).last(),
+            Some(&("run:run-1".into(), 2_500))
+        );
+    }
+
+    #[test]
+    fn every_current_stop_answer_requests_one_inventory_read_without_replaying_the_stop() {
+        for confirmed in [true, false] {
+            let (hub, fake) = hub();
+            enabled(&hub);
+            hub.observe(&mut state(vec![
+                process("p1", "running", "hook"),
+                process("p2", "running", "hook"),
+            ]));
+            select(&hub, &["p1", "p2"], "p1");
+            *lock(&fake.stop_ok) = confirmed;
+            stop(&hub);
+            assert_eq!(*lock(&fake.refreshes), ["run:run-1", "run:run-1"]);
+            hub.tick();
+            assert_eq!(lock(&fake.stops).len(), 2);
+            assert_eq!(lock(&fake.refreshes).len(), 2);
+        }
+    }
+
+    #[test]
+    fn a_stop_answer_after_close_never_refreshes_the_inventory() {
+        let (hub, fake) = hub();
+        enabled(&hub);
+        hub.observe(&mut state(vec![process("p1", "running", "hook")]));
+        select(&hub, &["p1"], "p1");
+        *lock(&fake.hold) = true;
+        stop(&hub);
+        hub.close();
+        assert_eq!(run_held(&fake), 1);
+        assert!(lock(&fake.refreshes).is_empty());
     }
 
     #[test]
@@ -1612,6 +1747,10 @@ mod tests {
         assert_eq!(snapshot(&hub).stop_notice, "Sending stop requests…");
         assert_eq!(lock(&fake.held).len(), 1, "only the old stop is out");
         assert_eq!(run_held(&fake), 1, "the old stop answers");
+        assert!(
+            lock(&fake.refreshes).is_empty(),
+            "an old generation never refreshes the new inventory"
+        );
         assert_eq!(
             snapshot(&hub).stop_notice,
             "Sending stop requests…",
@@ -1953,6 +2092,7 @@ mod tests {
             "the shown output stays"
         );
         assert_eq!(view.groups.len(), 1, "and so does the inventory");
+        assert_eq!(*lock(&fake.refreshes), ["run:run-1"]);
     }
 
     #[test]
@@ -2173,6 +2313,7 @@ mod tests {
         select(&hub, &["p1"], "p1");
         stop(&hub);
         assert!(lock(&fake.reads).is_empty() && lock(&fake.stops).is_empty());
+        assert!(lock(&fake.refreshes).is_empty());
         let view = snapshot(&hub);
         assert_eq!(
             view.detail.unwrap().notice,

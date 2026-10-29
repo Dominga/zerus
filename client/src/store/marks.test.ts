@@ -201,6 +201,8 @@ describe("the shared overlay fixture", () => {
     expect(s.marks.readState(row)).toEqual({ reviewLater: c.expect.review_later, unreadReply: c.expect.unread_reply, unread: c.expect.unread, ack: c.expect.acknowledged });
     expect({ reviewLater: row.reviewLater, unread: row.unread, attentionNeeded: attentionNeeded(row) })
       .toEqual({ reviewLater: c.expect.review_later, unread: c.expect.unread, attentionNeeded: c.expect.needs_attention });
+    // A project header's request part (SessionsWindowRows.cpp:400-401): needsAction() && !attentionAcknowledged.
+    expect(row.actionNeeded).toBe(!!c.view.needs_action && !c.expect.acknowledged);
     // FleetState::attentionSessions, as menubar::Desk::attention counts a row.
     const counts = (current: boolean) => !row.muted && (!!row.reviewLater || (current && attentionNeeded(row)));
     expect({ counts: counts(true), counts_stale: counts(false) }).toEqual({ counts: c.expect.counts, counts_stale: c.expect.counts_stale });

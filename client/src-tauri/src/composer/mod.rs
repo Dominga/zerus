@@ -156,6 +156,27 @@ pub struct SessionRef {
     pub archive_id: Option<String>,
 }
 
+impl SessionRef {
+    /// Archive selection is an identity boundary even if an older caller omits its id.
+    pub(crate) fn archived(&self) -> bool {
+        self.key.starts_with("archive:")
+            || self.archive_id.as_ref().is_some_and(|id| !id.is_empty())
+    }
+}
+
+/// Archived rows are paged outside the live catalog. Give their composers
+/// a stopped context without falling back to a live row of the same name.
+/// The caller supplies the computer's current online state separately.
+pub fn archived_row(key: &str, name: &str) -> Option<ViewRow> {
+    let id = key.strip_prefix("archive:")?;
+    Some(ViewRow {
+        name: name.into(),
+        state: "archived".into(),
+        archive_id: Some(id.into()),
+        ..ViewRow::default()
+    })
+}
+
 /// Qt's draft key: `machine\nsession[\narchive]` (`SessionsWindow.cpp:438`).
 pub fn draft_key(computer: &str, name: &str, archive: Option<&str>) -> String {
     match archive.filter(|id| !id.is_empty()) {

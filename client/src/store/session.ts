@@ -58,11 +58,11 @@ createRoot(() => {
     activity.follow(s && !activityReadOnly(s.key) ? { id: s.key, computer: s.computer, key: s.catalogKey, name: s.name, runId: s.runId, conversationId: s.conversationId } : undefined);
   }));
   // The selected session's composer. A rename keeps the catalog key, so Rust
-  // moves its draft to the new name. An archived row's recorded Activity has
-  // no composer (store/activitySource.ts), so none is open for it.
+  // moves its draft to the new name. An archived row opens its own editable
+  // draft too; only its recorded Activity stays read-only (Qt selectSession).
   createEffect(on(() => {
     const s = selected();
-    return s && !activityReadOnly(s.key) ? `${s.computer}\n${s.catalogKey}\n${s.name}\n${s.state === "archived" ? s.archiveId ?? "" : ""}` : undefined;
+    return s ? `${s.computer}\n${s.catalogKey}\n${s.name}\n${s.state === "archived" ? s.archiveId ?? "" : ""}` : undefined;
   }, (identity) => {
     const s = selected();
     void composer.open(identity && s ? { computer: s.computer, key: s.catalogKey, name: s.name, archive_id: s.state === "archived" ? s.archiveId ?? null : null } : undefined);

@@ -386,7 +386,8 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                         rows: {
                             let pump = app.state::<commands::AppState>().pump();
                             std::sync::Arc::new(move |computer: &str, key: &str, name: &str| {
-                                pump.row(computer, key)
+                                composer::archived_row(key, name)
+                                    .or_else(|| pump.row(computer, key))
                                     .or_else(|| pump.row_named(computer, name))
                                     .map(|row| (row, pump.online(computer)))
                             })

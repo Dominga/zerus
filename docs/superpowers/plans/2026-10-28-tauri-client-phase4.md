@@ -6121,7 +6121,7 @@ git commit -m "feat(client): resume-then-send, compact-to-send and Clear context
   - The status line takes the warning colour while a send waits (1224-1226).
 - **Stop.** Every Stop (the composer's, the header icon, the header menu) calls `composer.interrupted()` before phase 2's `actionEntries(...).stop.action()`, since every Qt Stop is the composer's `interruptRequested` (1187-1191).
 - **Clear session** in the header (button and menu entry) uses `composer.view()?.clear`: `enabled`, `reason` as the hint and "Clearing…" while `running`. It calls `composer.openClear()`.
-- **Placement.** The composer is hidden while a subagent is open and for an archived row's recorded Activity (`activityReadOnly`). `store/session.ts` opens no composer for such a row.
+- **Placement (updated by zerus-5wmh.9.29).** The composer is hidden only while a subagent is open. An archived row opens its own draft key and keeps the editor mounted and editable; Send is blocked with "Resume the session to send a message." while online (Qt `SessionsWindow.cpp:3454,4393`). Recorded Activity remains read-only and is never followed live. The hub resolves an archive key without a live catalog row, isolates it from any live session of the same name, and starts no composer inspection for it. Offline block-reason priority is unchanged.
 - **Keyboard.** The composer root has `data-shortcut-context="composer"`. `message.send` is registered with `onCommand(id, handler, editor)` while mounted. `message.push` is not registered: push is not enabled before A2 (Qt's `setPushEnabled`, 841-847). The attachments list and the cache popover are `data-shortcut-context="none"`.
 - **src-tauri:**
   - `composer_refresh(handle)` runs `Composers::refresh`, which calls `refresh_details` for the open composer's handle only.
@@ -6963,7 +6963,7 @@ git commit -m "feat(client): the composer with its toolbar, attachments list and
   - Copy text uses the page's clipboard: `copy_text` refuses a line break.
   - The dialog opens from the session list's Saved drafts button, for the open composer, or for none while a subagent shows (Qt picks the subagent composer, 488).
 - **The session menu's Clear session** (Task 5's As built) opens `composer.openClear()` for the selected row only, with `clear.enabled` and `clear.reason` (5339-5340). A row whose state changed since the menu opened shows "The session state changed. Open its actions again." (5487-5488).
-- **The restore notice** is "The restored conversation could not be verified. Your archived draft remains in Saved drafts." (3331). The client's follow-up moves no draft: the archived row has no composer, and its draft stays under its archive key.
+- **The restore notice** is "The restored conversation could not be verified. Your archived draft remains in Saved drafts." (3331). The client's follow-up moves no draft: its draft stays under its archive key (now editable there after zerus-5wmh.9.29).
 - `dialog.dlg` has `max-width: calc(100vw - 48px)`, so an inline width never exceeds the window.
 - **Follow-ups:** Go to session's simplifications (filters, subagent, Tasks, Qt's row roles) are `zerus-5wmh.9.34`; Clear session's "Checking whether this session can be cleared…" for an unselected row is `zerus-5wmh.9.35`; restoring an archived draft waits for `zerus-5wmh.9.29`.
 - **Tests:** src-tauri 479 (18 in `composer::saved`; the recovered draft's save is tested with the store's writer held, not a wait), vitest 1330. Hand mutations: 14 Rust and 27 TypeScript, all killed.

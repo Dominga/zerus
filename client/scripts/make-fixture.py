@@ -161,9 +161,11 @@ CAPTIONS = {"attention": None, "error": "Rate limit reached", "paused": "Paused"
 
 
 def processes_for(row):
-    """The `processes` topic's value for one session, as `hgs inspect` reports it
-    (src/state/watch_source.rs): a live `cargo test` tree, a recorded build with no
-    live confirmation and a finished fetch."""
+    """The `processes` topic's value for one session: `processes` and `process_work`
+    as `hgs inspect` reports them, without the `run_id` the topic strips
+    (src/watch/processes.rs). A live `cargo test` tree (an OS tree's output stays in
+    the recorded command or Terminal), a recorded build with no live confirmation
+    and a finished fetch, whose output both can be read."""
     at = row["last_event_at"]
 
     def item(id, **fields):
@@ -173,7 +175,7 @@ def processes_for(row):
     items = [
         item("tree-cargo-test", source="process_tree", command="cargo test --workspace", status="running",
              started_at=at - 95, updated_at=at, observed=True, background=True, os_pid=48211, child_count=3,
-             description="PID 48211 (3 child processes)", capabilities={"output": True, "stop": True, "stdin": False}),
+             description="PID 48211 (3 child processes)", capabilities={"output": False, "stop": True, "stdin": False}),
         item("call-npm-build", call_id="toolu_build", source="hooks", command="npm run build", status="unknown",
              last_status="running", started_at=at - 300, updated_at=at - 240, observed=False, background=True,
              capabilities={"output": True, "stop": False, "stdin": False}),
@@ -183,7 +185,7 @@ def processes_for(row):
     ]
     processes = {"items": items, "active_count": 0, "live_count": 1, "unknown_count": 1, "complete": True,
                  "sampled_at": at, "notes": []}
-    return {"run_id": row["run_id"], "processes": processes,
+    return {"processes": processes,
             "process_work": {"count": 1, "started_at": at - 95, "command": "cargo test --workspace", "sampled_at": at}}
 
 

@@ -442,5 +442,11 @@ mod tests {
             commands,
             ["cargo test --workspace", "npm run build", "git fetch"]
         );
+        // As the topic sends it: no run ID, and an OS tree's output is not captured.
+        assert!(value.get("run_id").is_none());
+        assert_eq!(
+            value["processes"]["items"][0]["capabilities"]["output"],
+            serde_json::json!(false)
+        );
     }
 }

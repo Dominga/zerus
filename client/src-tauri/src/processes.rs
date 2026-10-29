@@ -5,6 +5,11 @@
 //! queue, sequential and never retried, cancelled by a change of the session's
 //! identity (host, name, archive, run, conversation, host generation).
 //!
+//! Selections and stops name the view they were made in (its key and, for a
+//! stop, its selection), so a late click never acts on another view. An
+//! archived session is shown without a follow: the topic has no archived
+//! sessions (`ARCHIVED`).
+//!
 //! The five settings come from the app's one settings store
 //! ([`ProcessHub::settings_from`], `processes/*` in `<data dir>/settings.json`).
 //! The hub reads no file and writes none.
@@ -34,6 +39,11 @@ pub const TICK: Duration = Duration::from_millis(250);
 const VIEWS: usize = 30;
 /// Qt's notice while stop requests go out (`stopSelected`, 196).
 const SENDING: &str = "Sending stop requests…";
+/// An archived session is never followed: its catalog key (`archive:ID`)
+/// is no live session's, and its recorded processes need the archive
+/// inventory read (core request zerus-5wmh.63).
+pub const ARCHIVED: &str =
+    "Recorded processes of archived sessions arrive with the archive inventory read.";
 
 /// The session the tab follows, as the webview names it. `live` is Qt's
 /// `!recorded` (`SessionsWindow.cpp:3783`): online, not archived or paused,
@@ -71,6 +81,12 @@ impl ProcessTarget {
         } else {
             &self.machine
         }
+    }
+
+    /// An archived session (`archive:ID`), which the topic cannot follow.
+    fn archived(&self) -> bool {
+        self.key.starts_with("archive:")
+            || self.archive_id.as_deref().is_some_and(|id| !id.is_empty())
     }
 
     /// The topic's follow: another session ref is another subscription.
@@ -223,8 +239,14 @@ struct Hub {
     output: OutputState,
     queue: StopQueue,
     stop_notice: String,
-    /// The stop in flight (`m_stopRequest`), by its token.
-    stopping: Option<u64>,
+    /// The queue's stop (`m_stopRequest`): sent, or held in `held`.
+    stopping: Option<InFlight>,
+    /// The queue's stop while a stop of an earlier identity still holds its
+    /// lane: it goes out when that one answers, so it never finds the lane busy.
+    held: Option<StopCall>,
+    /// Stops of earlier identities still under way; their answers only free
+    /// their lane.
+    draining: Vec<InFlight>,
     /// Since when a request has run while the tab shows (`m_busyDelay`).
     busy_since: Option<u64>,
     busy_seen: bool,
@@ -250,6 +272,20 @@ struct OutputCall {
     computer: ComputerId,
     read: Read,
     process: String,
+}
+
+/// A stop under way, by its token, and its lane in `actions` (one stop per
+/// session name and computer, `Lane::Process`).
+struct InFlight {
+    token: u64,
+    computer: String,
+    name: String,
+}
+
+impl InFlight {
+    fn lane_of(&self, call: &StopCall) -> bool {
+        self.computer == call.target.computer && self.name == call.target.name
+    }
 }
 
 /// A stop to dispatch, off the hub's lock.
@@ -364,7 +400,18 @@ impl Hub {
         }
         self.output = OutputState::default();
         self.queue.reset();
-        self.stopping = None;
+        // A stop that went out still holds its lane until it answers; a held
+        // one never went out.
+        if let Some(stop) = self.stopping.take() {
+            if self
+                .held
+                .as_ref()
+                .is_none_or(|held| held.token != stop.token)
+            {
+                self.draining.push(stop);
+            }
+        }
+        self.held = None;
         self.stop_notice.clear();
         self.selected.clear();
         self.current = None;
@@ -386,18 +433,19 @@ impl Hub {
             self.failed = None;
             self.value_key = key;
         }
+        // An archived session is shown without a follow (`ARCHIVED`).
+        let follows = next.as_ref().filter(|target| !target.archived());
         let keep =
-            matches!((&self.subscribed, &next), (Some(old), Some(new)) if old.same_follow(new));
+            matches!((&self.subscribed, follows), (Some(old), Some(new)) if old.same_follow(new));
         if !keep {
             if let Some(old) = self.subscribed.take() {
-                let same_key = next
-                    .as_ref()
-                    .is_some_and(|new| new.computer == old.computer && new.key == old.key);
+                let same_key =
+                    follows.is_some_and(|new| new.computer == old.computer && new.key == old.key);
                 if !same_key {
                     (deps.unfollow)(&old);
                 }
             }
-            if let Some(new) = &next {
+            if let Some(new) = follows {
                 match (deps.follow)(new) {
                     Ok(()) => self.subscribed = Some(new.clone()),
                     Err(error) => self.failed = Some(error),
@@ -620,9 +668,13 @@ impl Hub {
                 // `available` holds a target.
                 let target = target?;
                 self.tokens += 1;
-                self.stopping = Some(self.tokens);
+                self.stopping = Some(InFlight {
+                    token: self.tokens,
+                    computer: target.computer.clone(),
+                    name: target.name.clone(),
+                });
                 self.update_busy(now);
-                Some(StopCall {
+                let call = StopCall {
                     token: self.tokens,
                     target: Target {
                         computer: target.computer.clone(),
@@ -636,9 +688,23 @@ impl Hub {
                         generation: target.generation.clone().filter(|g| !g.is_empty()),
                     },
                     process: id,
-                })
+                };
+                if self.draining.iter().any(|stop| stop.lane_of(&call)) {
+                    self.held = Some(call);
+                    return None;
+                }
+                Some(call)
             }
         }
+    }
+
+    /// The held stop, once no earlier stop holds its lane.
+    fn release_held(&mut self) -> Option<StopCall> {
+        let held = self.held.as_ref()?;
+        if self.draining.iter().any(|stop| stop.lane_of(held)) {
+            return None;
+        }
+        self.held.take()
     }
 
     fn view(&self, now: u64, epoch: f64) -> ProcessesView {
@@ -661,7 +727,11 @@ impl Hub {
             .value
             .as_ref()
             .map_or(&Value::Null, |value| &value["processes"]);
-        let (notes, summary_tooltip) = rules::notes(processes);
+        let (notes, summary_tooltip) = if self.target().is_some_and(ProcessTarget::archived) {
+            (ARCHIVED.to_owned(), ARCHIVED.to_owned())
+        } else {
+            rules::notes(processes)
+        };
         let host = self.target().map_or("", ProcessTarget::host);
         let detail = self.current.as_ref().and_then(|id| {
             let record = self.record(id)?;
@@ -830,12 +900,14 @@ impl ProcessHub {
         self.finish(hub, read, None);
     }
 
-    /// The webview's selection and current row (`select`, 145-157). A new
-    /// current process drops the read in flight and reads its output at once.
-    pub fn select(&self, ids: Vec<String>, current: Option<String>) {
+    /// The webview's selection and current row (`select`, 145-157), for the
+    /// view it showed as `key`: a selection made in another session's view
+    /// changes nothing. A new current process drops the read in flight and
+    /// reads its output at once.
+    pub fn select(&self, key: &str, ids: Vec<String>, current: Option<String>) {
         let now = self.now();
         let mut hub = self.lock();
-        if hub.closed {
+        if hub.closed || hub.identity != key {
             return;
         }
         let mut selected: Vec<String> = Vec::new();
@@ -856,12 +928,15 @@ impl ProcessHub {
         self.finish(hub, read, None);
     }
 
-    /// Stop selected (`stopSelected`, 193-197): only while the button is
-    /// enabled; the stops go out one at a time.
-    pub fn stop(&self) {
+    /// Stop selected (`stopSelected`, 193-197) for the view the click saw:
+    /// only when `key` is still the session's identity and `ids` still its
+    /// selection (Qt's `key==m_key && ids==selectedIds()`, 74), and only while
+    /// the button is enabled. The stops go out one at a time.
+    pub fn stop(&self, key: &str, ids: &[String]) {
         let now = self.now();
         let mut hub = self.lock();
-        if hub.closed || !hub.control().enabled {
+        if hub.closed || hub.identity != key || hub.selected_ids() != ids || !hub.control().enabled
+        {
             return;
         }
         hub.changed = true;
@@ -987,6 +1062,7 @@ impl ProcessHub {
         let mut hub = self.lock();
         hub.closed = true;
         hub.queue.reset();
+        hub.held = None;
         drop(hub);
         self.0.wake.notify_all();
     }
@@ -1087,13 +1163,34 @@ impl ProcessHub {
         };
         let now = self.now();
         let mut hub = self.lock();
-        if hub.stopping != Some(call.token) {
+        let next = if hub
+            .stopping
+            .as_ref()
+            .is_some_and(|stop| stop.token == call.token)
+        {
+            hub.stopping = None;
+            hub.queue.finished(result);
+            hub.changed = true;
+            if hub.closed {
+                None
+            } else {
+                hub.next_stop(now)
+            }
+        } else if let Some(at) = hub
+            .draining
+            .iter()
+            .position(|stop| stop.token == call.token)
+        {
+            // An earlier identity's stop: its lane is free now.
+            hub.draining.remove(at);
+            if hub.closed {
+                None
+            } else {
+                hub.release_held()
+            }
+        } else {
             return;
-        }
-        hub.stopping = None;
-        hub.queue.finished(result);
-        hub.changed = true;
-        let next = if hub.closed { None } else { hub.next_stop(now) };
+        };
         hub.update_busy(now);
         self.finish(hub, None, next);
     }
@@ -1109,24 +1206,28 @@ pub fn processes_shown(hub: tauri::State<'_, ProcessHub>, shown: bool) {
     hub.shown(shown);
 }
 
+/// `key` is the `ProcessesView.key` the selection was made in.
 #[tauri::command]
 pub fn processes_select(
     hub: tauri::State<'_, ProcessHub>,
+    key: String,
     ids: Vec<String>,
     current: Option<String>,
 ) {
-    hub.select(ids, current);
+    hub.select(&key, ids, current);
 }
 
+/// `key` and `ids` are the `ProcessesView.key` and `selected` the click saw.
 #[tauri::command]
-pub fn processes_stop(hub: tauri::State<'_, ProcessHub>) {
-    hub.stop();
+pub fn processes_stop(hub: tauri::State<'_, ProcessHub>, key: String, ids: Vec<String>) {
+    hub.stop(&key, &ids);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::collections::HashSet;
     use std::sync::atomic::{AtomicU64, Ordering};
     use zerus_client_core::ProcessesOut;
 
@@ -1143,6 +1244,13 @@ mod tests {
         output: Mutex<Value>,
         /// Every read and stop as the hub asked for it.
         calls: Mutex<Vec<String>>,
+        /// The conversation an output reply names.
+        reply_conversation: Mutex<String>,
+        /// `actions`' process lanes: one stop per computer and session name
+        /// at a time, `Err("busy")` otherwise (`actions::dispatch_with`).
+        lanes: Mutex<HashSet<String>>,
+        /// Runs while the next stop holds its lane, as a stop in flight.
+        during: Mutex<Option<Job>>,
     }
 
     fn hub_with(allowed: bool) -> (ProcessHub, Arc<Fake>) {
@@ -1157,6 +1265,9 @@ mod tests {
             hold: Mutex::new(false),
             output: Mutex::new(json!("running 42 tests")),
             calls: Mutex::new(vec![]),
+            reply_conversation: Mutex::new("conv-1".into()),
+            lanes: Mutex::new(HashSet::new()),
+            during: Mutex::new(None),
         });
         let (a, b, c, d, e, f) = (
             fake.clone(),
@@ -1192,8 +1303,9 @@ mod tests {
                         panic!()
                     };
                     lock(&b.reads).push(process_id.clone());
+                    let conversation = lock(&b.reply_conversation).clone();
                     Ok(
-                        json!({"id": process_id, "run_id": run_id, "conversation_id": "conv-1",
+                        json!({"id": process_id, "run_id": run_id, "conversation_id": conversation,
                                "output": lock(&b.output).clone(), "truncated": false}),
                     )
                 }),
@@ -1202,7 +1314,16 @@ mod tests {
                     let Action::StopProcess { process_id, .. } = action else {
                         panic!()
                     };
+                    let lane = format!("{}\n{}", target.computer, target.name);
+                    if !lock(&c.lanes).insert(lane.clone()) {
+                        return Err("busy".into());
+                    }
                     lock(&c.stops).push(process_id.clone());
+                    let during = lock(&c.during).take();
+                    if let Some(during) = during {
+                        during();
+                    }
+                    lock(&c.lanes).remove(&lane);
                     Ok(if *lock(&c.stop_ok) {
                         Outcome::Done {
                             receipt: json!({"id": process_id, "run_id": target.run_id,
@@ -1223,6 +1344,26 @@ mod tests {
 
     fn hub() -> (ProcessHub, Arc<Fake>) {
         hub_with(true)
+    }
+
+    /// The view key the webview would send back.
+    fn key_of(hub: &ProcessHub) -> String {
+        lock(&hub.0.hub).identity.clone()
+    }
+
+    /// A click in the view as shown now.
+    fn select(hub: &ProcessHub, ids: &[&str], current: &str) {
+        let ids = ids.iter().map(|id| id.to_string()).collect();
+        hub.select(&key_of(hub), ids, Some(current.into()));
+    }
+
+    /// Stop selected as the view shows it now.
+    fn stop(hub: &ProcessHub) {
+        let (key, ids) = {
+            let hub = lock(&hub.0.hub);
+            (hub.identity.clone(), hub.selected_ids())
+        };
+        hub.stop(&key, &ids);
     }
 
     /// Runs the jobs held so far, in order, and returns how many ran.
@@ -1360,12 +1501,12 @@ mod tests {
             process("p1", "running", "hook"),
             process("p2", "running", "hook"),
         ]));
-        hub.select(vec!["p1".into(), "p2".into()], Some("p1".into()));
+        select(&hub, &["p1", "p2"], "p1");
         let view = hub.take_view().unwrap();
         assert_eq!(view.stop.label, "Stop selected (2)");
         assert!(view.stop.enabled);
         *lock(&fake.stop_ok) = false;
-        hub.stop();
+        stop(&hub);
         assert_eq!(*lock(&fake.stops), ["p1", "p2"]);
         let view = hub.take_view().unwrap();
         assert!(view
@@ -1380,12 +1521,12 @@ mod tests {
         let (hub, fake) = hub();
         enabled(&hub);
         hub.observe(&mut state(vec![process("p1", "running", "hook")]));
-        hub.select(vec!["p1".into()], Some("p1".into()));
+        select(&hub, &["p1"], "p1");
         let mut other = target();
         other.run_id = "run-2".into();
         other.key = "run:run-2".into();
         hub.follow(Some(other));
-        hub.stop();
+        stop(&hub);
         assert!(lock(&fake.stops).is_empty());
     }
 
@@ -1398,12 +1539,9 @@ mod tests {
             process("p2", "running", "hook"),
             process("p3", "running", "hook"),
         ]));
-        hub.select(
-            vec!["p3".into(), "p1".into(), "p2".into()],
-            Some("p1".into()),
-        );
+        select(&hub, &["p3", "p1", "p2"], "p1");
         *lock(&fake.hold) = true;
-        hub.stop();
+        stop(&hub);
         let view = snapshot(&hub);
         assert_eq!(view.stop_notice, "Sending stop requests…");
         assert!(!view.stop.enabled);
@@ -1414,7 +1552,7 @@ mod tests {
             ["p3"],
             "the selection's order, one at a time"
         );
-        hub.stop();
+        stop(&hub);
         hub.tick();
         assert_eq!(run_held(&fake), 1, "a second Stop sends nothing more");
         assert_eq!(*lock(&fake.stops), ["p3", "p1"]);
@@ -1447,9 +1585,9 @@ mod tests {
             process("p1", "running", "hook"),
             process("p2", "running", "hook"),
         ]));
-        hub.select(vec!["p1".into(), "p2".into()], Some("p1".into()));
+        select(&hub, &["p1", "p2"], "p1");
         *lock(&fake.hold) = true;
-        hub.stop();
+        stop(&hub);
         // The host restarted: the same session under a new generation.
         let mut restarted = target();
         restarted.generation = Some("gen-2".into());
@@ -1467,24 +1605,20 @@ mod tests {
         );
         assert_eq!(view.current.as_deref(), Some("p1"));
         assert!(view.stop.enabled, "the old stop no longer counts");
-        // A stop of the new generation goes out before the old one answers.
-        hub.select(vec!["p1".into(), "p2".into()], Some("p1".into()));
-        hub.stop();
-        assert_eq!(
-            lock(&fake.calls).len(),
-            0,
-            "both stops are held: none has run"
-        );
-        let mut jobs = std::mem::take(&mut *lock(&fake.held)).into_iter();
-        assert_eq!(jobs.len(), 2);
-        (jobs.next().unwrap())();
+        // A stop of the new generation waits until the old one frees the
+        // session's stop lane, so it never answers busy.
+        select(&hub, &["p1", "p2"], "p1");
+        stop(&hub);
+        assert_eq!(snapshot(&hub).stop_notice, "Sending stop requests…");
+        assert_eq!(lock(&fake.held).len(), 1, "only the old stop is out");
+        assert_eq!(run_held(&fake), 1, "the old stop answers");
         assert_eq!(
             snapshot(&hub).stop_notice,
             "Sending stop requests…",
             "the old answer neither ends nor steps the new queue"
         );
-        assert!(lock(&fake.held).is_empty(), "and sends nothing");
-        (jobs.next().unwrap())();
+        assert_eq!(lock(&fake.held).len(), 1, "the new stop goes out now");
+        assert_eq!(run_held(&fake), 1);
         assert_eq!(run_held(&fake), 1);
         assert_eq!(run_held(&fake), 0);
         assert_eq!(*lock(&fake.stops), ["p1", "p1", "p2"]);
@@ -1527,9 +1661,9 @@ mod tests {
             let (hub, fake) = hub();
             enabled(&hub);
             hub.observe(&mut two());
-            hub.select(vec!["p1".into(), "p2".into()], Some("p2".into()));
+            select(&hub, &["p1", "p2"], "p2");
             *lock(&fake.hold) = true;
-            hub.stop();
+            stop(&hub);
             let before = snapshot(&hub).key;
             let mut other = target();
             change(&mut other);
@@ -1547,9 +1681,9 @@ mod tests {
         let (hub, fake) = hub();
         enabled(&hub);
         hub.observe(&mut two());
-        hub.select(vec!["p1".into(), "p2".into()], Some("p2".into()));
+        select(&hub, &["p1", "p2"], "p2");
         *lock(&fake.hold) = true;
-        hub.stop();
+        stop(&hub);
         let mut offline = target();
         offline.online = false;
         hub.follow(Some(offline));
@@ -1691,7 +1825,7 @@ mod tests {
             process("b", "running", "hook"),
             process("c", "running", "hook"),
         ]));
-        hub.select(vec!["b".into()], Some("b".into()));
+        select(&hub, &["b"], "b");
         // The inventory sorts new work first; the tree keeps first-seen order.
         hub.observe(&mut state(vec![
             process("d", "running", "hook"),
@@ -1725,7 +1859,7 @@ mod tests {
             process("p1", "running", "hook"),
             process("p2", "running", "hook"),
         ]));
-        hub.select(vec!["p1".into(), "p2".into()], Some("p2".into()));
+        select(&hub, &["p1", "p2"], "p2");
         assert_eq!(*lock(&fake.reads), ["p1", "p2"]);
         let mut other = target();
         other.key = "run:run-2".into();
@@ -1776,7 +1910,7 @@ mod tests {
             process("p1", "running", "hook"),
             process("p2", "running", "hook"),
         ]));
-        hub.select(vec!["p2".into()], Some("p2".into()));
+        select(&hub, &["p2"], "p2");
         let mut jobs = std::mem::take(&mut *lock(&fake.held)).into_iter();
         assert_eq!(jobs.len(), 2, "p1's read, then p2's at once");
         *lock(&fake.output) = json!("p1 output");
@@ -1800,15 +1934,223 @@ mod tests {
         enabled(&hub);
         hub.shown(true);
         hub.observe(&mut state(vec![process("p1", "running", "hook")]));
+        assert_eq!(
+            snapshot(&hub).detail.unwrap().output.as_deref(),
+            Some("running 42 tests")
+        );
+        // The session moved on: the next answer names another conversation.
+        *lock(&fake.reply_conversation) = "conv-2".into();
+        *lock(&fake.output) = json!("another conversation's output");
+        fake.now.store(2500, Ordering::SeqCst);
+        hub.tick();
+        assert_eq!(lock(&fake.reads).len(), 2);
+        let view = snapshot(&hub);
+        let detail = view.detail.unwrap();
+        assert_eq!(detail.notice, "Session changed. Refreshing processes…");
+        assert_eq!(
+            detail.output.as_deref(),
+            Some("running 42 tests"),
+            "the shown output stays"
+        );
+        assert_eq!(view.groups.len(), 1, "and so does the inventory");
+    }
+
+    #[test]
+    fn one_output_read_runs_at_a_time() {
+        let (hub, fake) = hub();
+        enabled(&hub);
+        hub.shown(true);
+        *lock(&fake.hold) = true;
+        hub.observe(&mut state(vec![process("p1", "running", "hook")]));
+        assert_eq!(lock(&fake.held).len(), 1);
+        for at in [2500, 5000, 60_000] {
+            fake.now.store(at, Ordering::SeqCst);
+            hub.tick();
+        }
+        // Showing again forces a read, but not beside the one under way.
+        hub.shown(false);
+        hub.shown(true);
+        assert_eq!(lock(&fake.held).len(), 1, "none starts while one runs");
+        assert_eq!(run_held(&fake), 1);
+        assert_eq!(*lock(&fake.reads), ["p1"]);
+        hub.tick();
+        assert_eq!(lock(&fake.held).len(), 1, "the next one after the answer");
+    }
+
+    #[test]
+    fn the_queue_stops_when_the_session_stops_being_live() {
+        let (hub, fake) = hub();
+        enabled(&hub);
+        hub.observe(&mut state(vec![
+            process("p1", "running", "hook"),
+            process("p2", "running", "hook"),
+        ]));
+        select(&hub, &["p1", "p2"], "p1");
+        *lock(&fake.hold) = true;
+        stop(&hub);
+        let mut stopped = target();
+        stopped.live = false;
+        hub.follow(Some(stopped));
+        assert_eq!(run_held(&fake), 1);
+        assert_eq!(run_held(&fake), 0, "p2 is never sent");
+        assert_eq!(*lock(&fake.stops), ["p1"]);
+        assert_eq!(
+            snapshot(&hub).stop_notice,
+            "Stop requested for 1 process(es). Waiting for completion. 1 not confirmed. No automatic retries.\nMachine or session became unavailable; remaining requests were cancelled."
+        );
+    }
+
+    #[test]
+    fn busy_clears_on_a_new_identity() {
+        let (hub, fake) = hub();
+        enabled(&hub);
+        hub.shown(true);
+        *lock(&fake.hold) = true;
+        hub.observe(&mut state(vec![process("p1", "running", "hook")]));
+        fake.now.store(600, Ordering::SeqCst);
+        hub.tick();
+        assert!(snapshot(&hub).busy, "a read past the 0.5 s delay");
+        let mut other = target();
+        other.key = "run:run-2".into();
+        other.run_id = "run-2".into();
+        hub.follow(Some(other));
+        assert!(!snapshot(&hub).busy);
+        fake.now.store(5000, Ordering::SeqCst);
+        hub.tick();
+        assert!(!snapshot(&hub).busy, "the old read no longer counts");
+        assert_eq!(run_held(&fake), 1);
+        assert!(
+            snapshot(&hub).detail.is_none(),
+            "and its answer shows nowhere"
+        );
+    }
+
+    #[test]
+    fn a_stale_stop_click_never_stops_the_auto_selected_process() {
+        // The review's probe: the user selected p2, then the host restarted
+        // and the new view selected p1 by default before the click arrived.
+        let (hub, fake) = hub();
+        enabled(&hub);
+        hub.observe(&mut state(vec![
+            process("p1", "running", "hook"),
+            process("p2", "running", "hook"),
+        ]));
+        select(&hub, &["p2"], "p2");
+        let (clicked, ids) = (key_of(&hub), vec!["p2".to_owned()]);
+        let mut restarted = target();
+        restarted.generation = Some("gen-2".into());
+        hub.follow(Some(restarted));
+        assert_eq!(snapshot(&hub).selected, ["p1"]);
+        hub.stop(&clicked, &ids);
+        assert!(lock(&fake.stops).is_empty(), "another view's click");
+        let now = key_of(&hub);
+        hub.stop(&now, &ids);
+        assert!(lock(&fake.stops).is_empty(), "another selection");
+        assert_eq!(snapshot(&hub).stop_notice, "");
+        hub.stop(&now, &["p1".to_owned()]);
+        assert_eq!(*lock(&fake.stops), ["p1"]);
+    }
+
+    #[test]
+    fn a_click_in_another_identitys_view_stops_nothing_even_for_the_same_ids() {
+        let (hub, fake) = hub();
+        enabled(&hub);
+        hub.observe(&mut state(vec![
+            process("p1", "running", "hook"),
+            process("p2", "running", "hook"),
+        ]));
+        select(&hub, &["p1"], "p1");
+        let clicked = key_of(&hub);
         let mut moved = target();
         moved.conversation_id = "conv-2".into();
         hub.follow(Some(moved));
-        // conv-1 answers for conv-2.
-        assert_eq!(lock(&fake.reads).len(), 2);
-        let detail = snapshot(&hub).detail.unwrap();
-        assert_eq!(detail.notice, "Session changed. Refreshing processes…");
-        assert_eq!(detail.output, None);
-        assert!(!snapshot(&hub).groups.is_empty(), "the inventory stays");
+        assert_eq!(snapshot(&hub).selected, ["p1"], "selected again by default");
+        hub.stop(&clicked, &["p1".to_owned()]);
+        assert!(lock(&fake.stops).is_empty());
+        assert_eq!(snapshot(&hub).stop_notice, "");
+        hub.stop(&key_of(&hub), &["p1".to_owned()]);
+        assert_eq!(*lock(&fake.stops), ["p1"]);
+    }
+
+    #[test]
+    fn a_selection_made_in_another_sessions_view_changes_nothing() {
+        let (hub, fake) = hub();
+        enabled(&hub);
+        hub.shown(true);
+        hub.observe(&mut state(vec![
+            process("p1", "running", "hook"),
+            process("p2", "running", "hook"),
+        ]));
+        let old = key_of(&hub);
+        let mut restarted = target();
+        restarted.generation = Some("gen-2".into());
+        hub.follow(Some(restarted));
+        let reads = lock(&fake.reads).len();
+        hub.select(&old, vec!["p2".into()], Some("p2".into()));
+        let view = snapshot(&hub);
+        assert_eq!(
+            (view.selected, view.current.as_deref()),
+            (vec!["p1".to_owned()], Some("p1"))
+        );
+        assert_eq!(lock(&fake.reads).len(), reads, "nothing is read for it");
+        select(&hub, &["p2"], "p2");
+        assert_eq!(snapshot(&hub).current.as_deref(), Some("p2"));
+    }
+
+    #[test]
+    fn a_new_identitys_stop_waits_for_the_old_stops_lane() {
+        let (hub, fake) = hub();
+        enabled(&hub);
+        hub.observe(&mut state(vec![
+            process("p1", "running", "hook"),
+            process("p2", "running", "hook"),
+        ]));
+        select(&hub, &["p1"], "p1");
+        let during = hub.clone();
+        *lock(&fake.during) = Some(Box::new(move || {
+            // While p1's stop holds the session's lane, the host restarts and
+            // the user stops p1 again.
+            let mut restarted = target();
+            restarted.generation = Some("gen-2".into());
+            during.follow(Some(restarted));
+            select(&during, &["p1"], "p1");
+            stop(&during);
+        }));
+        stop(&hub);
+        let view = snapshot(&hub);
+        assert_eq!(
+            view.stop_notice, "Stop requested for 1 process(es). Waiting for completion.",
+            "nothing answers busy"
+        );
+        assert_eq!(*lock(&fake.stops), ["p1", "p1"]);
+        assert!(lock(&fake.calls)[1].contains("generation: Some(\"gen-2\")"));
+        assert!(lock(&fake.lanes).is_empty());
+        assert!(!view.busy && lock(&hub.0.hub).draining.is_empty());
+    }
+
+    #[test]
+    fn an_archived_session_is_never_followed() {
+        let (hub, fake) = hub();
+        hub.settings(Settings {
+            enabled: true,
+            ..Settings::default()
+        });
+        let archived = ProcessTarget {
+            key: "archive:a1".into(),
+            archive_id: Some("a1".into()),
+            live: false,
+            ..target()
+        };
+        hub.follow(Some(target()));
+        hub.follow(Some(archived.clone()));
+        assert_eq!(*lock(&fake.follows), ["+run:run-1", "-run:run-1"]);
+        hub.follow(Some(archived));
+        assert_eq!(lock(&fake.follows).len(), 2, "never followed");
+        let view = snapshot(&hub);
+        assert!(view.groups.is_empty() && view.failed.is_none());
+        assert_eq!(view.notes, ARCHIVED);
+        assert_eq!(view.summary, "No shell commands recorded yet");
+        assert_eq!(view.count, 0);
     }
 
     #[test]
@@ -1828,8 +2170,8 @@ mod tests {
         enabled(&hub);
         hub.shown(true);
         hub.observe(&mut state(vec![process("p1", "running", "hook")]));
-        hub.select(vec!["p1".into()], Some("p1".into()));
-        hub.stop();
+        select(&hub, &["p1"], "p1");
+        stop(&hub);
         assert!(lock(&fake.reads).is_empty() && lock(&fake.stops).is_empty());
         let view = snapshot(&hub);
         assert_eq!(

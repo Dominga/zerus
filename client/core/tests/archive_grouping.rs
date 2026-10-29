@@ -179,6 +179,43 @@ fn loading_a_seed_reobserves_current_live_membership() {
 }
 
 #[test]
+fn a_worker_seed_merges_with_live_layout_changes_and_applies_once() {
+    let mut grouping = Grouping::default();
+    present(
+        &mut grouping,
+        &["workstation\ncodex/sample-project/review"],
+        &[],
+        1,
+    );
+    grouping.observe(&live(
+        "workstation",
+        "codex/sample-project/review",
+        "native",
+    ));
+    grouping.observe(&live(
+        "workstation",
+        "codex/sample-project/implicit",
+        "implicit",
+    ));
+    grouping.set_collapsed("alpha", true);
+    grouping.seed_runs(json!({"workstation\nnative":"beta", "workstation\nimplicit":"beta", "workstation\nhistorical":"beta"}).as_object().unwrap());
+    let layout = saved(&mut grouping);
+    assert!(layout.runs_seeded());
+    assert!(layout.collapsed("alpha"));
+    assert_eq!(layout.run_project("workstation", "native"), Some("alpha"));
+    assert_eq!(layout.run_project("workstation", "implicit"), None);
+    assert_eq!(
+        layout.run_project("workstation", "historical"),
+        Some("beta")
+    );
+    grouping.seed_runs(json!({"workstation\nlate":"alpha"}).as_object().unwrap());
+    assert!(
+        grouping.take_layout().is_none(),
+        "the seed is not reapplied"
+    );
+}
+
+#[test]
 fn archived_or_runless_catalog_rows_do_not_change_live_run_memory() {
     let mut layout = Layout::default();
     layout.remember_run("workstation", "run", Some("beta"));

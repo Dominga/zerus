@@ -99,6 +99,17 @@ pub fn draft_file(replay: bool) -> &'static str {
     }
 }
 
+/// The switch seeds run_groups from the same read-only store as Settings.
+/// Replays and development identities never read Qt for organization data.
+pub fn run_seed_source(
+    identifier: &str,
+    replay: bool,
+) -> Option<zerus_client_core::settings::QtStore> {
+    (!replay)
+        .then(|| crate::settings::seed_source(identifier))
+        .flatten()
+}
+
 #[derive(Default)]
 struct Hub {
     sync: Controller,
@@ -145,6 +156,8 @@ struct Shared {
     layout: PathBuf,
     draft: PathBuf,
     clock: Instant,
+    /// One Qt seed read at a time; failed reads leave the persisted mark unset.
+    seed_started: std::sync::atomic::AtomicBool,
     /// Passes the worker started, so a test can tell when it acted.
     #[cfg(test)]
     passes: std::sync::atomic::AtomicUsize,
@@ -202,6 +215,7 @@ impl Organization {
             layout,
             draft: draft_path,
             clock: Instant::now(),
+            seed_started: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             passes: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
@@ -222,6 +236,47 @@ impl Organization {
         }
         organization.spawn();
         organization
+    }
+
+    pub fn seed_runs(&self, source: Option<zerus_client_core::settings::QtStore>) {
+        if let Some(source) = source {
+            self.seed_runs_with(move || zerus_client_core::swarm::layout::qt_run_groups(&source));
+        }
+    }
+
+    fn seed_runs_with(
+        &self,
+        read: impl FnOnce() -> Result<serde_json::Map<String, Value>, String> + Send + 'static,
+    ) {
+        use std::sync::atomic::Ordering::SeqCst;
+        if self.0.pump.runs_seeded() || self.0.seed_started.swap(true, SeqCst) {
+            return;
+        }
+        let shared = Arc::downgrade(&self.0);
+        let started = std::thread::Builder::new()
+            .name("zerus-run-seed".into())
+            .spawn(move || {
+                // Neither the pump nor the hub, writer or a strong organization
+                // reference is held across Qt's file/cfprefsd I/O and JSON parsing.
+                let groups = read();
+                let Some(shared) = shared.upgrade() else {
+                    return;
+                };
+                match groups {
+                    Ok(groups) => {
+                        shared.pump.seed_runs(&groups);
+                        shared.wake.notify_all();
+                    }
+                    Err(error) => {
+                        shared.seed_started.store(false, SeqCst);
+                        eprintln!("zerus-client: the archive project seed was not loaded: {error}");
+                    }
+                }
+            });
+        if let Err(error) = started {
+            self.0.seed_started.store(false, SeqCst);
+            eprintln!("zerus-client: the archive project seed worker did not start: {error}");
+        }
     }
 
     fn lock(&self) -> MutexGuard<'_, Hub> {
@@ -1266,6 +1321,135 @@ mod tests {
     /// The passes the worker started.
     fn passes(organization: &Organization) -> usize {
         organization.0.passes.load(Ordering::SeqCst)
+    }
+
+    #[test]
+    fn only_a_live_switch_identity_reads_qt_for_the_run_seed() {
+        assert!(run_seed_source("dev.zerus.next", false).is_none());
+        assert!(run_seed_source("dev.zerus.next.phase2", false).is_none());
+        assert!(run_seed_source(crate::settings::SWITCH_IDENTITY, true).is_none());
+        assert_eq!(
+            run_seed_source(crate::settings::SWITCH_IDENTITY, false),
+            crate::settings::seed_source(crate::settings::SWITCH_IDENTITY)
+        );
+    }
+
+    #[test]
+    fn a_blocked_run_seed_does_not_stall_catalog_changes_and_merges_the_current_layout() {
+        let fake = Fake::landing();
+        let pump = Pump::default();
+        let organization = fake.organization(&pump, true);
+        let org = full("d1")["organization"].clone();
+        pump.present(
+            &org,
+            Arc::new(zerus_client_core::swarm::members(&org)),
+            1,
+            SyncView::default(),
+        );
+        let (entered, started) = std::sync::mpsc::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        organization.seed_runs_with(move || {
+            entered.send(()).unwrap();
+            held.recv().unwrap();
+            Ok(
+                json!({"workstation\nlive":"alpha", "workstation\nold":"alpha"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            )
+        });
+        started.recv_timeout(Duration::from_secs(2)).unwrap();
+        // A duplicate startup callback neither reads again nor blocks.
+        organization.seed_runs_with(|| panic!("the seed is already being read"));
+        let changed = pump.clone();
+        let (flowed, flow) = std::sync::mpsc::channel();
+        let drain = std::thread::spawn(move || {
+            changed.push(Change::Upsert {
+                computer: ComputerId::local(),
+                key: "run:live".into(),
+                row: ViewRow {
+                    machine: "workstation".into(),
+                    name: "codex/sample-project/implicit".into(),
+                    state: "running".into(),
+                    run_id: Some("live".into()),
+                    ..ViewRow::default()
+                },
+            });
+            changed.set_collapsed("alpha", true);
+            flowed.send(()).unwrap();
+        });
+        let result = flow.recv_timeout(Duration::from_secs(2));
+        release.send(()).unwrap();
+        drain.join().unwrap();
+        assert!(
+            result.is_ok(),
+            "the catalog flowed before the Qt read finished"
+        );
+        wait_until("the run seed to merge", || pump.runs_seeded());
+        organization.flush();
+        let saved = zerus_client_core::swarm::layout::Layout::from_json(
+            &std::fs::read(fake.layout()).unwrap(),
+        );
+        assert!(saved.collapsed("alpha"));
+        assert_eq!(
+            saved.run_project("workstation", "live"),
+            None,
+            "live implicit membership clears the stale seed"
+        );
+        assert_eq!(saved.run_project("workstation", "old"), Some("alpha"));
+        organization.seed_runs_with(|| panic!("a saved seed never reads Qt again"));
+        fake.finish(organization);
+    }
+
+    #[test]
+    fn a_run_seed_read_error_leaves_the_mark_pending_and_can_be_retried() {
+        let fake = Fake::landing();
+        let pump = Pump::default();
+        let organization = fake.organization(&pump, true);
+        organization.seed_runs_with(|| Err("synthetic seed read error".into()));
+        wait_until("the seed read to fail", || {
+            !organization.0.seed_started.load(Ordering::SeqCst)
+        });
+        assert!(!pump.runs_seeded());
+        organization.seed_runs_with(|| {
+            Ok(json!({"workstation\nold":"alpha"})
+                .as_object()
+                .unwrap()
+                .clone())
+        });
+        wait_until("the retry to seed", || pump.runs_seeded());
+        organization.flush();
+        let saved = zerus_client_core::swarm::layout::Layout::from_json(
+            &std::fs::read(fake.layout()).unwrap(),
+        );
+        assert_eq!(saved.run_project("workstation", "old"), Some("alpha"));
+        fake.finish(organization);
+    }
+
+    #[test]
+    fn a_blocked_run_seed_never_keeps_the_organization_alive_during_quit() {
+        let fake = Fake::landing();
+        let pump = Pump::default();
+        let organization = fake.organization(&pump, true);
+        let weak = Arc::downgrade(&organization.0);
+        let (entered, started) = std::sync::mpsc::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        organization.seed_runs_with(move || {
+            entered.send(()).unwrap();
+            held.recv().unwrap();
+            Ok(serde_json::Map::new())
+        });
+        started.recv_timeout(Duration::from_secs(2)).unwrap();
+        drop(organization);
+        let until = Instant::now() + Duration::from_secs(2);
+        while weak.strong_count() != 0 && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let ended = weak.strong_count() == 0;
+        release.send(()).unwrap();
+        wait_until("the organization to end", || weak.strong_count() == 0);
+        std::fs::remove_dir_all(fake.dir).unwrap();
+        assert!(ended, "quit did not wait for the seed read");
     }
 
     /// The layout saves done; taken under the writer's lock, so a save in

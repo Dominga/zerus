@@ -54,9 +54,18 @@ pub fn seed_runs_from_qt(
     if layout.runs_seeded() {
         return Ok(0);
     }
+    Ok(layout.seed_runs(&qt_run_groups(store)?))
+}
+
+/// Reads and parses Qt's run memory off the main thread and outside the
+/// grouping lock. Only the newest [`MAX_RUNS`] valid entries cross that lock.
+/// The order is Qt's object order (Qt stores no per-entry write timestamps).
+pub fn qt_run_groups(
+    store: &crate::settings::QtStore,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
     let values = store.read()?;
     let organization = values.and_then(|(mut values, _)| values.remove("workspace/organization"));
-    let organization: serde_json::Map<String, serde_json::Value> = match organization {
+    let mut organization: serde_json::Map<String, serde_json::Value> = match organization {
         Some(value) => {
             let bytes = match value {
                 crate::settings::qt::QtValue::Bytes(bytes) => bytes,
@@ -66,12 +75,28 @@ pub fn seed_runs_from_qt(
         }
         None => serde_json::Map::new(),
     };
-    let empty = serde_json::Map::new();
-    let groups = organization
-        .get("run_groups")
-        .and_then(serde_json::Value::as_object)
-        .unwrap_or(&empty);
-    Ok(layout.seed_runs(groups))
+    let groups = match organization.remove("run_groups") {
+        Some(serde_json::Value::Object(groups)) => groups,
+        _ => serde_json::Map::new(),
+    };
+    let mut newest: Vec<_> = groups
+        .into_iter()
+        .rev()
+        .filter(|(token, project)| {
+            let Some((machine, run)) = token.split_once('\n') else {
+                return false;
+            };
+            valid_part(machine) && valid_part(run) && project.as_str().is_some_and(valid_part)
+        })
+        .take(MAX_RUNS)
+        .collect();
+    // Preserve iteration order even when serde_json uses preserve_order.
+    newest.reverse();
+    Ok(newest.into_iter().collect())
+}
+
+fn valid_part(part: &str) -> bool {
+    !part.trim().is_empty() && !part.chars().any(char::is_control)
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -172,8 +197,10 @@ impl Layout {
     /// an implicit assignment (Qt 239-243). Observers compare the old project
     /// first, as Qt does, so unchanged live rows do not refresh its age.
     pub fn remember_run(&mut self, machine: &str, run: &str, project: Option<&str>) -> bool {
-        let valid = |part: &str| !part.trim().is_empty() && !part.chars().any(char::is_control);
-        if !valid(machine) || !valid(run) || project.is_some_and(|project| !valid(project)) {
+        if !valid_part(machine)
+            || !valid_part(run)
+            || project.is_some_and(|project| !valid_part(project))
+        {
             return false;
         }
         let token = format!("{machine}\n{run}");

@@ -510,6 +510,23 @@ impl Grouping {
         }
     }
 
+    pub fn runs_seeded(&self) -> bool {
+        self.layout.runs_seeded()
+    }
+
+    /// Merge a seed read on a worker into the current layout, retaining newer
+    /// native assignments. Reobserve live rows: implicit assignments made
+    /// while the read was pending must remove their old Qt run memory again.
+    pub fn seed_runs(&mut self, groups: &serde_json::Map<String, Value>) -> usize {
+        if self.layout.runs_seeded() {
+            return 0;
+        }
+        let imported = self.layout.seed_runs(groups);
+        let layout = std::mem::take(&mut self.layout);
+        self.replace_layout(layout);
+        imported
+    }
+
     pub fn set_sync(&mut self, sync: SyncView) {
         self.sync = sync;
         self.headers_dirty = true;

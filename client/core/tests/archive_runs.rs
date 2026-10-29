@@ -228,3 +228,30 @@ fn unreadable_or_malformed_qt_seed_preserves_native_runs_and_can_be_retried() {
     assert!(layout.runs_seeded());
     assert_eq!(layout.run_project("peer", "old"), Some("q"));
 }
+
+#[test]
+fn the_worker_passes_only_the_newest_valid_runs_across_the_grouping_lock() {
+    let dir = Scratch::new("worker-cap");
+    let path = dir.0.join("qt.ini");
+    let mut groups = serde_json::Map::new();
+    for n in 0..MAX_RUNS + 5 {
+        groups.insert(format!("workstation\nrun-{n:05}"), json!("p"));
+    }
+    groups.insert("zz-invalid".into(), json!("p"));
+    groups.insert("zz\ncontrol\nextra".into(), json!("p"));
+    groups.insert("zz\nempty-project".into(), json!(""));
+    groups.insert("zz\nnumber".into(), json!(42));
+    std::fs::write(
+        &path,
+        qt_ini(&serde_json::to_vec(&json!({"run_groups": groups})).unwrap()),
+    )
+    .unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let groups =
+        zerus_client_core::swarm::layout::qt_run_groups(&QtStore::Ini(path.clone())).unwrap();
+    assert_eq!(groups.len(), MAX_RUNS);
+    assert!(!groups.contains_key("workstation\nrun-00004"));
+    assert!(groups.contains_key("workstation\nrun-00005"));
+    assert_eq!(groups.keys().next().unwrap(), "workstation\nrun-00005");
+    assert_eq!(std::fs::read(path).unwrap(), before, "Qt stays read-only");
+}

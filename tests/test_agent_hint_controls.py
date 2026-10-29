@@ -160,9 +160,10 @@ class HintFixtureControls(unittest.TestCase):
         loader = unittest.TestLoader()
         with patch.dict(sys.modules, {'test_agent_hint_native': module}):
             for provider in ('Claude', 'Codex'):
+                case = getattr(module, 'NativeWindows' + provider + 'Hint')
                 names = ['test_agent_hint_native.NativeWindows' + provider + 'Hint.' + method
                          for method in fixture.CASE_METHODS]
-                suite = loader.loadTestsFromNames(names)
+                suite = loader.loadTestsFromNames(fixture.CASE_METHODS, module=case)
                 actual = [test.id() for group in suite for test in group]
                 self.assertEqual(actual, names)
                 self.assertEqual(loader.errors, [])

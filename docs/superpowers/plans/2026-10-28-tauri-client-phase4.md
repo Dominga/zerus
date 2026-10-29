@@ -10750,6 +10750,13 @@ Tasks 8-12 complete Part A. Task 12 runs the smoke for Part A and Part A2.
 
 ### Task 8: Dropped files: composer attach, Terminal paste and stage
 
+**As built (Rust backend, a2hub; webui rulings, 2026-10-29).** The frontend is a separate webui change. Where the snippets below differ, these rules and the current source win:
+- `Terminals::paste(view, generation, text)` checks the named generation and queues the paste under one views lock. A missing view or a mismatch returns "Terminal changed during file transfer. Drop the files again in the intended session.". The command IPC arguments and `Ok`/`Err` meanings are unchanged.
+- `terminal_drop` is async and runs its work on the blocking pool, using `actions::dispatch` once for a peer. It refuses a webview or a view other than `main`. The live handler registers it; the non-live handler lists no Terminal commands and needs no stub.
+- A drop guard releases the window-wide `dropping` claim after success, refusal, failure, cancellation or a dispatch panic. A pending peer transfer blocks local drops too, before the local paste, as Qt does (`SessionsWindow.cpp:2650-2651`).
+- Receipt paths accept a leading `/` on every platform. Windows builds also accept a fully rooted alphabetic drive path or UNC path; drive-relative paths and control characters refuse. The platform policy has a parameterized test that runs on every platform; actual Windows execution remains in `zerus-5wmh.52`.
+- The fake attach must print its hello before the paste test writes input: switching the fake PTY to raw mode otherwise flushes that input. Tests also cover remote identities, one dispatch, uncertain outcomes without replay, reconnects, malformed receipts, concurrent drops and release during cancellation or unwinding.
+
 **Depends on:** A2 `zerus-5wmh.9.4` (#404): `Action::StageFiles {paths, expected_created}` and its `staged` receipt; `Session.created` from #406; Tasks 2, 3a and 6.
 
 **Qt reference:**

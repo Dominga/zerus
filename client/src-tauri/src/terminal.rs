@@ -857,6 +857,10 @@ mod tests {
                 "\\root-relative.txt",
                 "1:\\file",
                 "C:",
+                "C|/file",
+                r"\\server",
+                r"\\\share",
+                r"\\server\",
             ] {
                 assert!(
                     !transferred_absolute(path, windows),

@@ -756,7 +756,10 @@ async function unreadSmoke(allowed: boolean) {
     await until(() => grouping().ready && orderedRows().length > 0, 30_000, "the replay organization was not ready");
     await sleep(500);
     setStateFilter("all");
-    const projectUnread = () => listRows().find((row) => row.type === "header" && row.project === defaultProject())?.unread ?? -1;
+    const projectUnread = () => {
+      const header = listRows().find((row) => row.type === "header" && row.project === defaultProject());
+      return header?.type === "header" ? header.unread : -1;
+    };
     const computerStatus = (status: string) => applyBatch({ upserts: [], removes: [], replaces: [], computers: [{ computer: "", status, attempt: 1 }], activity: [] });
     const onlineOthers = projectUnread();
     computerStatus("reconnecting");

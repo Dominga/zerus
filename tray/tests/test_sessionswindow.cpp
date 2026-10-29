@@ -1765,6 +1765,15 @@ void TestSessionsWindow::sessionStatesShowOnCardsAndHeader()
     QCOMPARE(services("claude/orbit/release"), 1);
     QVERIFY(list->item(rowOf("claude/orbit/docs"))->data(SessionRoles::Unread).toBool());
     QCOMPARE(statusOf("claude/orbit/docs").caption, QString("New reply"));
+    // #590 (QA #512 findings 1-3, handoff Status 10, 12, 14): a reply to read
+    // is the user state, so its avatar dot is warn like an approval's, not the
+    // unread blue; the working badge reads "Working 1m 05s"; an approval's
+    // line 3 asks "Run command? <command>".
+    QCOMPARE(SessionDelegate::avatarDot(statusOf("claude/orbit/docs"), theme == "dark"), QColor("#e8a75a"));
+    QCOMPARE(SessionDelegate::avatarDot(statusOf("claude/orbit/docs"), theme == "dark"), SessionDelegate::avatarDot(statusOf("claude/orbit/migrate"), theme == "dark"));
+    QCOMPARE(SessionDelegate::avatarDot(statusOf("claude/orbit/checkout"), theme == "dark"), QColor("#7dd3b0"));
+    QVERIFY2(QRegularExpression("^Working 1m [0-5][0-9]s$").match(statusOf("claude/orbit/checkout").caption).hasMatch(), qPrintable(statusOf("claude/orbit/checkout").caption));
+    QCOMPARE(list->item(rowOf("claude/orbit/migrate"))->data(SessionRoles::Detail).toString(), QString("Needs approval: Run command? cargo sqlx migrate run"));
     QVERIFY(!list->item(rowOf("claude/orbit/ledger"))->data(SessionRoles::Unread).toBool());
     // Counters stay as they were: deps, cooling and cold are not attention.
     QVERIFY(!list->item(rowOf("claude/orbit/api-refactor"))->data(SessionRoles::Attention).toBool());

@@ -10,6 +10,14 @@ use std::io::{Read, Seek, SeekFrom};
 /// The most a pass reads from the session file, and the most frames it decodes.
 pub(crate) const MAX_BYTES: usize = 512 * 1024;
 pub(crate) const MAX_FRAMES: usize = 200;
+/// N7: the most one frame may decode to, and the most one pass decodes in all.
+/// A frame past either bound is skipped by its own header, never decoded.
+pub(crate) const MAX_DECODED: usize = 8 * 1024 * 1024;
+pub(crate) const MAX_DECODED_TOTAL: usize = 32 * 1024 * 1024;
+/// N7: how far the header walk follows one frame, so a corrupt header cannot
+/// make it read the file forever.
+const MAX_FRAME_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_FRAME_BLOCKS: usize = 4096;
 
 pub(crate) fn path() -> PathBuf {
     root().join("session-upload-block.json")
@@ -64,7 +72,9 @@ pub(crate) struct Tail {
 
 /// Reads at most `MAX_BYTES` and `MAX_FRAMES` frames from the stored frame
 /// boundary. A half-written last frame joins the next pass: its bytes are not
-/// consumed and the caller keeps the previous offset.
+/// consumed and the caller keeps the previous offset. N7: a frame this pass
+/// cannot decode (larger than the pass, or over the decoded cap) is skipped by
+/// its own header, so the stored offset always moves on instead of stalling.
 pub(crate) fn read_tail(path: &Path, offset: u64) -> Result<Tail> {
     let mut handle = fs::File::open(path).map_err(|error| error.to_string())?;
     let length = handle.metadata().map_err(|error| error.to_string())?.len();
@@ -77,18 +87,135 @@ pub(crate) fn read_tail(path: &Path, offset: u64) -> Result<Tail> {
     handle.by_ref().take(MAX_BYTES as u64).read_to_end(&mut buffer).map_err(|error| error.to_string())?;
     let mut cursor = 0usize;
     let mut frames = 0usize;
+    let mut decoded_total = 0usize;
     let mut records = Vec::new();
-    while frames < MAX_FRAMES && cursor < buffer.len() {
+    while frames < MAX_FRAMES && decoded_total < MAX_DECODED_TOTAL && cursor < buffer.len() {
+        let remaining = buffer.len() - cursor;
         let mut counted = Counted { data: &buffer[cursor..], pos: 0 };
-        let Ok(decoded) = decode_frame(&mut counted) else { break };
-        if counted.pos == 0 {
+        let decoded = decode_frame(&mut counted, MAX_DECODED);
+        // A frame read whole within the decoded cap.
+        if let Ok(bytes) = &decoded {
+            if bytes.len() < MAX_DECODED {
+                decoded_total += bytes.len();
+                records.extend(parse_records(bytes));
+                cursor += counted.pos;
+                frames += 1;
+                continue;
+            }
+        }
+        // N7: a frame this pass cannot decode (larger than a pass or the
+        // decoded cap, or corrupt) is skipped by its own header, so the stored
+        // offset always moves on. A frame that merely extends past this pass
+        // waits for the next one, so none of its records is dropped.
+        let frame_start = start + cursor as u64;
+        let Some(size) = frame_length(&mut handle, frame_start, length) else { break };
+        let Some(end) = frame_start.checked_add(size) else { break };
+        if end > length {
             break;
         }
-        records.extend(parse_records(&decoded));
-        cursor += counted.pos;
+        let capped = matches!(&decoded, Ok(bytes) if bytes.len() >= MAX_DECODED);
+        let whole = size <= remaining as u64;
+        if !whole && !capped && size <= MAX_BYTES as u64 {
+            // It fits a pass; the next pass reads it whole.
+            break;
+        }
+        if end > start + buffer.len() as u64 {
+            // The skipped frame reaches past the bytes this pass read.
+            return Ok(Tail { records, offset: end });
+        }
+        cursor = (end - start) as usize;
         frames += 1;
     }
     Ok(Tail { records, offset: start + cursor as u64 })
+}
+
+/// N7: the total length of the zstd frame at `start`, walked through its frame
+/// header and block headers in the file without decoding its content. None when
+/// the header is incomplete, torn or not a frame this reader knows.
+fn frame_length(handle: &mut fs::File, start: u64, length: u64) -> Option<u64> {
+    const MAGIC: u32 = 0xFD2F_B528;
+    let mut header = [0u8; 18];
+    let read = read_at(handle, start, &mut header, length)?;
+    if read < 5 || u32::from_le_bytes([header[0], header[1], header[2], header[3]]) != MAGIC {
+        return None;
+    }
+    let descriptor = header[4];
+    let single_segment = descriptor & 0x20 != 0;
+    let checksum = descriptor & 0x04 != 0;
+    let dictionary = match descriptor & 0x03 {
+        0 => 0,
+        1 => 1,
+        2 => 2,
+        _ => 4,
+    };
+    let fcs = (descriptor >> 6) & 0x03;
+    let pos = 5 + usize::from(!single_segment) + dictionary
+        + match fcs {
+            0 if single_segment => 1,
+            0 => 0,
+            1 => 2,
+            2 => 4,
+            _ => 8,
+        };
+    if pos > read {
+        return None;
+    }
+    let mut frame_end = start + pos as u64;
+    let mut blocks = 0usize;
+    loop {
+        let mut block = [0u8; 3];
+        if read_at(handle, frame_end, &mut block, length)? != 3 {
+            return None;
+        }
+        frame_end += 3;
+        let header = u32::from_le_bytes([block[0], block[1], block[2], 0]);
+        let last = header & 1 == 1;
+        let kind = (header >> 1) & 0x03;
+        let size = u64::from(header >> 3);
+        let body = match kind {
+            0 => size,
+            1 => 1,
+            2 => size,
+            // A reserved block kind is not a frame this reader can skip.
+            _ => return None,
+        };
+        frame_end = frame_end.checked_add(body)?;
+        if frame_end > length {
+            return None;
+        }
+        if last {
+            break;
+        }
+        blocks += 1;
+        if blocks > MAX_FRAME_BLOCKS || frame_end - start > MAX_FRAME_BYTES {
+            return None;
+        }
+    }
+    if checksum {
+        frame_end = frame_end.checked_add(4)?;
+        if frame_end > length {
+            return None;
+        }
+    }
+    Some(frame_end - start)
+}
+
+/// Reads up to `buffer.len()` bytes at `offset`; None when the file ends first.
+fn read_at(handle: &mut fs::File, offset: u64, buffer: &mut [u8], length: u64) -> Option<usize> {
+    if offset >= length {
+        return Some(0);
+    }
+    handle.seek(SeekFrom::Start(offset)).ok()?;
+    let want = usize::try_from((length - offset).min(buffer.len() as u64)).ok()?;
+    let mut filled = 0usize;
+    while filled < want {
+        match handle.read(&mut buffer[filled..want]) {
+            Ok(0) => break,
+            Ok(size) => filled += size,
+            Err(_) => return None,
+        }
+    }
+    Some(filled)
 }
 
 /// A slice reader that counts the bytes a decoder took, so the next frame's
@@ -108,12 +235,23 @@ impl ruzstd::io::Read for Counted<'_> {
     }
 }
 
-fn decode_frame(reader: &mut Counted<'_>) -> std::result::Result<Vec<u8>, String> {
+/// N7: decodes at most `limit` bytes of one frame; a larger frame is reported
+/// as capped by the caller, which skips it by its header.
+fn decode_frame(reader: &mut Counted<'_>, limit: usize) -> std::result::Result<Vec<u8>, String> {
     let mut decoder = ruzstd::decoding::StreamingDecoder::new(reader).map_err(|error| error.to_string())?;
     let mut decoded = Vec::new();
-    use ruzstd::io::Read as _;
-    decoder.read_to_end(&mut decoded).map_err(|error| error.to_string())?;
-    Ok(decoded)
+    let mut chunk = [0u8; 64 * 1024];
+    loop {
+        let want = limit.saturating_sub(decoded.len()).min(chunk.len());
+        if want == 0 {
+            return Err("frame is larger than the decoded cap".into());
+        }
+        match ruzstd::io::Read::read(&mut decoder, &mut chunk[..want]) {
+            Ok(0) => return Ok(decoded),
+            Ok(size) => decoded.extend_from_slice(&chunk[..size]),
+            Err(error) => return Err(error.to_string()),
+        }
+    }
 }
 
 /// The record heads one frame holds: the type (or event), its dsh time and seq.
@@ -294,5 +432,35 @@ mod tests {
         let second = read_tail(&file, first.offset).unwrap();
         assert_eq!(second.offset as usize, bytes.len());
         assert_eq!(first.records.len() + second.records.len(), 150);
+    }
+
+    /// N7: a frame larger than one pass is skipped by its header, so the stored
+    /// offset moves on and the record written after it is still found.
+    #[test]
+    fn a_frame_larger_than_one_pass_is_skipped_by_its_header_and_the_offset_moves() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("session.v4.jsonl.zstd");
+        // Hex of a random stream does not compress: one frame over the pass.
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut padding = String::with_capacity(MAX_BYTES * 4);
+        while padding.len() < MAX_BYTES * 4 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            padding.push_str(&format!("{seed:016x}"));
+        }
+        let big = json!({"type":"assistant/message","seq":1,"time":1_000_000.0,"pad":padding});
+        let compressed = ruzstd::encoding::compress_to_vec(big.to_string().as_bytes(), ruzstd::encoding::CompressionLevel::Fastest);
+        assert!(compressed.len() > MAX_BYTES, "the fixture frame fits one pass: {}", compressed.len());
+        let acceptance = json!({"type":"session-log-deepseek/delivery-accepted","seq":2,"time":2_000_500.0});
+        let mut bytes = compressed.clone();
+        bytes.extend(ruzstd::encoding::compress_to_vec(acceptance.to_string().as_bytes(), ruzstd::encoding::CompressionLevel::Fastest));
+        std::fs::write(&file, &bytes).unwrap();
+        let first = read_tail(&file, 0).unwrap();
+        assert!(first.records.is_empty(), "a skipped frame is not decoded: {:?}", first.records);
+        assert_eq!(first.offset as usize, compressed.len(), "the oversized frame is skipped by its header");
+        let second = read_tail(&file, first.offset).unwrap();
+        assert_eq!(second.offset as usize, bytes.len());
+        assert!(uploaded_after(&second.records, 1_500.0), "the record after the skipped frame is read");
     }
 }

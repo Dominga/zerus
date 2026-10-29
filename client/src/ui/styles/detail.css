@@ -190,6 +190,7 @@
   .cmp-resize.gap:hover .cmp-grip, .cmp-resize.gap:focus-visible .cmp-grip, .composer:has(.cmp-resize.edge:hover) .cmp-grip { width: min(52px, calc(100% - 12px)); background: var(--z-color-accent); }
   .cmp-resize.dragging .cmp-grip, .composer:has(.cmp-resize.dragging) .cmp-grip { width: min(52px, calc(100% - 12px)); background: var(--z-color-accent); transition: none; }
   .tchip:disabled { opacity: .45; cursor: default; }
+  .tchip[hidden] { display: none; }
   .tchip.on { color: var(--z-color-text); background: var(--z-color-segment-on); }
   /* Attachments list (MessageComposer attachmentsPopover): rows with a 30×22
      thumbnail, "[Image #1] name" over its size, and a separate remove button;
@@ -236,6 +237,27 @@
   .cmp-attach { width: 32px; height: 32px; }
   .cmp-status { font-size: var(--fs-xs); color: var(--z-color-dim); }
   .cmp-model { gap: 4px; max-width: 330px; font-size: var(--fs-xs); }
+  /* The status line's colours (MessageComposer updateControls 1224-1226): an
+     error, or a send that waits; the field while the session status blocks it. */
+  .cmp-status { min-width: 0; }
+  .cmp-status.error { color: var(--z-color-danger); }
+  .cmp-status.waiting { color: var(--z-color-warn); }
+  .composer.blocked .cmp-editor { color: var(--z-color-muted); }
+  /* Cancel send: a borderless link-like button (SessionsWindow.cpp:961). */
+  .tchip.link { background: transparent; padding: 0 6px; }
+  .tchip.link:hover { text-decoration: underline; }
+  /* Compacting context: a 48×5 indeterminate bar before its caption (ActivityView.cpp 1269-1279). */
+  .cmp-progress { position: relative; flex: none; width: 48px; height: 5px; border-radius: 3px; overflow: hidden; background: color-mix(in srgb, currentColor 20%, transparent); }
+  .cmp-progress::after { content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 40%; border-radius: 3px; background: currentColor; animation: cmp-progress 1.4s ease-in-out infinite; }
+  /* The cache popover (cachePopover: 14×12 padding, 8 px spacing). */
+  .att-pop.cache-pop { padding: 12px 14px; gap: 8px; }
+  .cache-pop p { margin: 0; font-size: var(--fs-xs); line-height: 1.45; white-space: pre-line; color: var(--z-color-text-2); }
+  .cache-pop .cache-warning { color: var(--z-color-warn); }
+  .cache-actions { display: flex; justify-content: flex-end; gap: 8px; }
+  /* A disabled Send shows the status at the field for 5 s (Qt's QToolTip there). */
+  .cmp-hint { position: absolute; z-index: 2; left: 12px; bottom: 46px; max-width: calc(100% - 24px); padding: 4px 8px; border-radius: var(--z-radius-sm);
+    border: 1px solid var(--z-color-border); background: var(--z-color-raised); box-shadow: var(--z-shadow-popover); color: var(--z-color-text);
+    font-size: var(--fs-xs); white-space: pre-line; pointer-events: none; animation: fadeIn var(--z-motion-fast) both; }
 
   /* Inspector: a pane-colored panel of grouped, collapsible cards. It slides
      in from the right and fades (~200 ms); while leaving it is taken out of
@@ -348,3 +370,4 @@
 @keyframes insp-in { from { opacity: 0; translate: 24px 0; } }
 @keyframes vm-drift { to { transform: rotate(360deg); } }
 @keyframes insp-out { to { opacity: 0; translate: 24px 0; } }
+@keyframes cmp-progress { from { translate: -100% 0; } to { translate: 250% 0; } }

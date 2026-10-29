@@ -39,6 +39,7 @@ use zerus_client_core::cache::Chip;
 use zerus_client_core::drafts::{DraftStore, IndexPage, Loaded, StoredDraft, ALREADY_EXISTS};
 use zerus_client_core::local_messages::{LocalMessage, LocalMessages};
 use zerus_client_core::send::{CompactSend, StartSend};
+use zerus_client_core::session_usage::ContextChip;
 use zerus_client_core::{Action, Batch, Outcome, Target, ViewRow};
 
 use crate::actions::WriteKind;
@@ -168,6 +169,8 @@ pub struct ComposerView {
     pub cache: Chip,
     pub cache_warning: String,
     pub cache_details: String,
+    /// The Context chip (R1, Qt's `SessionUsage::ContextButton`).
+    pub context: ContextChip,
     /// The session's local message rows (at most 50): what was sent until
     /// the agent's own history shows it, and what failed.
     pub local: Vec<LocalMessage>,
@@ -376,6 +379,11 @@ pub(crate) struct Hub {
     /// The draft key whose context reset runs: one at a time across all
     /// sessions (Qt's `m_clearKey` while `m_clearRequest`).
     pub(crate) clearing: Option<String>,
+    /// How long a failed read of the open session waits before it is tried
+    /// again while another detail tab shows: Qt's `backgroundMs` behind
+    /// Terminal or Native UI, `activeMs` behind Processes
+    /// (`SessionsWindow.cpp:2013-2016`); None is Activity's 2.5 s.
+    pub(crate) poll: Option<f64>,
 }
 
 impl Hub {
@@ -1377,6 +1385,7 @@ impl Composers {
             cache: session.cache,
             cache_warning: session.cache_warning,
             cache_details: session.cache_details,
+            context: session.context,
             local: hub.local.rows(&composer.key).to_vec(),
             cancel_send: hub.compacts.contains_key(key)
                 || hub.start.as_ref().is_some_and(|(p, _)| p.key == key),
@@ -1506,6 +1515,24 @@ pub fn composer_undo_remove(state: State<'_, Composers>, handle: u64) {
 #[tauri::command]
 pub fn composer_allow_retry(state: State<'_, Composers>, handle: u64) {
     state.allow_retry(handle);
+}
+
+/// Refresh in the composer's status line (Qt's `sessionRefreshRequested`).
+#[tauri::command]
+pub fn composer_refresh(state: State<'_, Composers>, handle: u64) {
+    state.refresh(handle);
+}
+
+/// The detail tab that shows. Terminal and Native UI retry a failed read at
+/// Settings > Processes' background interval, Processes at its active one,
+/// as Qt's poll timer does (`SessionsWindow.cpp:2013-2016`).
+#[tauri::command]
+pub fn composer_tab(
+    state: State<'_, Composers>,
+    settings: State<'_, crate::settings::Store>,
+    tab: String,
+) {
+    state.set_poll(send::poll_seconds(&tab, |name| settings.0.number(name)));
 }
 
 #[cfg(test)]

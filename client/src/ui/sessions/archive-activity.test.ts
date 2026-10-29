@@ -38,6 +38,10 @@ vi.mock("../../bridge", () => ({
   terminalDisconnect: vi.fn(async () => {}),
   terminalRetarget: vi.fn(async () => {}),
   windowVisibility: { hidden: () => false, onChange: () => () => {} },
+  // The selected session's composer (store/composer), opened by store/session.
+  composerOpen: vi.fn(async () => null), composerEdit: vi.fn(async () => {}), composerPick: vi.fn(async () => {}), composerPasteImage: vi.fn(async () => {}),
+  composerRemove: vi.fn(async () => {}), composerUndoRemove: vi.fn(async () => {}), composerAllowRetry: vi.fn(async () => {}), composerRefresh: vi.fn(async () => {}),
+  composerTab: vi.fn(async () => {}), sendMessage: vi.fn(), sendAnswer: vi.fn(), sendCancel: vi.fn(async () => {}), sendInterrupted: vi.fn(async () => {}), clearContext: vi.fn(),
 }));
 
 import * as bridge from "../../bridge";
@@ -141,6 +145,9 @@ describe("the app's archived Activity", () => {
     expect(reads.map((r) => r.args)).toEqual([["", "codex/example/a1", uuid(1), 0]]);
     expect(mocked.activityPort.follow).not.toHaveBeenCalled();
     expect(followedFor(key)).toEqual({ value: undefined, settled: true });
+    // Recorded Activity has no composer: none is opened for the archived row.
+    await flush();
+    expect(mocked.composerOpen.mock.calls.every(([session]) => session === undefined)).toBe(true);
     reads[0].resolve({ events: [ev(1, "UserPromptSubmit", "Summarize the notes"), ev(2, "Stop", "Done.")], replace_events: false, conversation_id: "conv-a1", run_id: "run-a1", cleared_conversations: [], cursor: 2, summary: {} });
     await flush();
     expect(archiveActivity.events().map((e) => e.seq)).toEqual([1, 2]);
@@ -158,6 +165,8 @@ describe("the app's archived Activity", () => {
     expect(archiveActivity.target()).toBeUndefined();
     expect(archiveActivity.events()).toEqual([]);
     expect(mocked.activityPort.follow).toHaveBeenCalledWith(expect.objectContaining({ key: "run:run-live" }));
+    await flush();
+    expect(mocked.composerOpen).toHaveBeenLastCalledWith({ computer: "", key: "run:run-live", name: "codex/example/live", archive_id: null });
     vi.advanceTimersByTime(10_000);
     expect(reads.length).toBe(2);
   });

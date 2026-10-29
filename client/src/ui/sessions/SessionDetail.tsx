@@ -210,8 +210,8 @@ export function SessionDetail() {
                 <Match when={detailTab() === "activity"}>
                   <div class="activity-wrap" style={columnStyle()}>
                     <ActivityView source={activitySourceFor(selected()!.key)} />
-                    {/* The subagent view stays read only; an archived row's recorded Activity has no composer. */}
-                    <Show when={!subagentOpen() && !activityReadOnly(selected()!.key)}>
+                    {/* Only the subagent view stays read-only; archives keep their editable draft (Qt 3454). */}
+                    <Show when={!subagentOpen()}>
                       <QueuePanel /><div class="cmp-col"><QuestionCard /><Composer /></div>
                     </Show>
                   </div>

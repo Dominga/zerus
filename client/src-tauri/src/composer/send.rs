@@ -276,14 +276,31 @@ impl Composers {
     pub(crate) fn context(&self, hub: &Hub) -> Option<Context> {
         let session = hub.open.clone()?;
         let key = hub.open_key.clone()?;
-        let (row, online) = (self.0.deps.rows)(&session.computer, &session.key, &session.name)?;
-        let followed = hub.followed.computer == session.computer && hub.followed.key == session.key;
+        let (mut row, online) = (self.0.deps.rows)(&session.computer, &session.key, &session.name)?;
+        let archived = session.archived();
+        if archived {
+            // Never borrow a current run's identity, abilities or status for
+            // a recorded draft (SessionsWindow.cpp:3454,4393).
+            row = ViewRow {
+                name: session.name.clone(),
+                state: "archived".into(),
+                archive_id: session.archive_id.clone(),
+                ..ViewRow::default()
+            };
+        }
+        let followed = !archived
+            && hub.followed.computer == session.computer
+            && hub.followed.key == session.key;
         let details = if followed {
             hub.followed.details.clone()
         } else {
             None
         };
-        let write = (self.0.deps.facts)(&session.computer, &session.name);
+        let write = if archived {
+            None
+        } else {
+            (self.0.deps.facts)(&session.computer, &session.name)
+        };
         let facts = BlockFacts {
             // Qt's `m_startSend.key`, `m_compacts` and `m_clearKey`
             // (`messageBlockReason`, 4388-4390): this session's own.
@@ -325,7 +342,7 @@ impl Composers {
         };
         let followed =
             hub.followed.computer == ctx.session.computer && hub.followed.key == ctx.session.key;
-        if !followed || !ctx.online {
+        if !followed || !ctx.online || ctx.session.archived() {
             return;
         }
         hub.next_inspect += 1;
@@ -412,7 +429,10 @@ impl Composers {
     /// run, conversation or state changed.
     fn wants_details(&self, hub: &Hub, now: f64) -> bool {
         let followed = &hub.followed;
-        if hub.open.is_none() || followed.inspecting.is_some() || followed.streamed {
+        if hub.open.as_ref().is_none_or(SessionRef::archived)
+            || followed.inspecting.is_some()
+            || followed.streamed
+        {
             return false;
         }
         match &followed.inspected {
@@ -2883,6 +2903,188 @@ pub(crate) mod tests {
         c.open(Some(session()));
         c.observe(&state(details));
         until(c, |v| v.loaded)
+    }
+
+    fn archive_session() -> SessionRef {
+        SessionRef {
+            key: "archive:10000000-0000-4000-8000-000000000001".into(),
+            archive_id: Some("10000000-0000-4000-8000-000000000001".into()),
+            ..session()
+        }
+    }
+
+    #[test]
+    fn an_archived_draft_stays_editable_and_separate_from_a_live_session_of_its_name() {
+        let root = dir("archive-composer-draft");
+        let store = drafts(&root);
+        let (c, fake) = send_hub_on(&store);
+        let live = opened(&c, ready());
+        c.edit(live.handle, 1, live.text_epoch, "live draft".into(), 10, 10);
+        let archived = archive_session();
+        c.open(Some(archived.clone()));
+        let view = until(&c, |v| v.loaded);
+        assert!(view.text.is_empty());
+        assert_eq!(
+            view.block_reason.as_deref(),
+            Some("Resume the session to send a message.")
+        );
+        assert!(!view.available && !view.can_send && !view.session_blocks_input);
+        c.edit(
+            view.handle,
+            1,
+            view.text_epoch,
+            "archive draft".into(),
+            13,
+            4,
+        );
+        let view = c.current().unwrap();
+        assert_eq!(
+            (view.text.as_str(), view.position, view.anchor),
+            ("archive draft", 13, 4)
+        );
+        assert!(matches!(
+            c.send_message(view.handle, 2, view.text_epoch, view.text.clone(), 13, 4),
+            SendReply::Blocked { .. }
+        ));
+        assert!(lock(&fake.calls).is_empty());
+        c.open(Some(session()));
+        assert_eq!(until(&c, |v| v.loaded).text, "live draft");
+        c.flush();
+        store.flush();
+        let (restarted, _) = send_hub_on(&store);
+        restarted.open(Some(archived));
+        let view = until(&restarted, |v| v.loaded);
+        assert_eq!(
+            (view.text.as_str(), view.position, view.anchor),
+            ("archive draft", 13, 4)
+        );
+        assert!(!view.can_send && !view.session_blocks_input);
+    }
+
+    #[test]
+    fn an_archived_composer_never_uses_live_details_or_inspects_its_name() {
+        let root = dir("archive-composer-details");
+        let jobs: Arc<Mutex<Vec<Job>>> = Default::default();
+        let queued = Arc::clone(&jobs);
+        let (c, fake) = send_hub_with(&drafts(&root), Arc::new(move |job| lock(&queued).push(job)));
+        let mut details = ready();
+        details["input_queue"] =
+            json!({"id": "live-queue", "messages": [{"text": "live message"}]});
+        opened(&c, details.clone());
+        *lock(&fake.inspected) = Some(details.clone());
+        *lock(&fake.write) = Some(WriteKind::Terminate);
+        c.open(Some(archive_session()));
+        let view = until(&c, |v| v.loaded);
+        assert!(
+            !view.session_blocks_input,
+            "a live same-name write does not lock the archived draft"
+        );
+        for _ in 0..3 {
+            c.observe(&state(details.clone()));
+            *lock(&fake.now) += 10.0;
+            c.tick();
+            c.refresh(view.handle);
+        }
+        {
+            let hub = c.lock();
+            assert!(c.context(&hub).unwrap().details.is_none());
+            assert!(!c.wants_details(&hub, *lock(&fake.now)));
+        }
+        assert_eq!(fake.inspects.load(Ordering::SeqCst), 0);
+        assert!(
+            lock(&jobs).is_empty(),
+            "no composer inspection is even scheduled"
+        );
+        // Even a state frame addressed to the archive cannot lend it a live queue.
+        let mut addressed = state(details);
+        addressed.activity[0].key = archive_session().key;
+        c.observe(&addressed);
+        assert!(c.context(&c.lock()).unwrap().details.is_none());
+        let view = c.current().unwrap();
+        assert!(view.question.is_none() && view.queue.is_none() && !view.clear.enabled);
+        assert!(!c.send_queue_now(None));
+        assert!(lock(&fake.calls).is_empty());
+        *lock(&fake.online) = false;
+        assert_eq!(
+            c.current().unwrap().block_reason.as_deref(),
+            Some("Machine unavailable. Your draft stays here.")
+        );
+    }
+
+    #[test]
+    fn an_archive_identity_refuses_send_with_either_key_or_id() {
+        let root = dir("archive-composer-key");
+        let (c, fake) = send_hub(&root);
+        let mut key_only = archive_session();
+        key_only.archive_id = None;
+        let mut id_only = archive_session();
+        id_only.key = session().key;
+        for archived in [key_only, id_only] {
+            c.open(Some(archived));
+            let view = until(&c, |v| v.loaded);
+            assert_eq!(
+                view.block_reason.as_deref(),
+                Some("Resume the session to send a message.")
+            );
+            assert!(matches!(
+                c.send_push(
+                    view.handle,
+                    1,
+                    view.text_epoch,
+                    "keep this draft".into(),
+                    15,
+                    15
+                ),
+                SendReply::Busy
+            ));
+            assert!(lock(&fake.calls).is_empty());
+            assert!(c.lock().queue.pusher.active().is_none());
+        }
+    }
+
+    #[test]
+    fn an_archived_composer_opens_without_a_live_catalog_row() {
+        let root = dir("archive-composer-no-live-row");
+        let store = drafts(&root);
+        assert!(crate::composer::archived_row("run:run-1", &session().name).is_none());
+        let c = Composers::new(
+            Arc::clone(&store),
+            Config {
+                cache: root.join("cache"),
+                qt_drafts: None,
+                dev_drafts: Vec::new(),
+            },
+            Deps {
+                spawn: Arc::new(|job| {
+                    std::thread::spawn(job);
+                }),
+                notify: Arc::new(|| {}),
+                clock: Arc::new(|| 1_793_000_100.0),
+                rows: Arc::new(|_, key, name| {
+                    crate::composer::archived_row(key, name).map(|row| (row, true))
+                }),
+                facts: Arc::new(|_, _| None),
+                inspect: Arc::new(|_, _| panic!("archived composer must not inspect")),
+                dispatch: Arc::new(|_, _, _| panic!("archived composer must not dispatch")),
+            },
+        );
+        c.open(Some(archive_session()));
+        let view = until(&c, |v| v.loaded);
+        assert_eq!(
+            view.block_reason.as_deref(),
+            Some("Resume the session to send a message.")
+        );
+        c.edit(
+            view.handle,
+            1,
+            view.text_epoch,
+            "archive without a live row".into(),
+            25,
+            25,
+        );
+        assert_eq!(c.current().unwrap().text, "archive without a live row");
+        c.refresh(view.handle);
+        c.tick();
     }
 
     #[test]

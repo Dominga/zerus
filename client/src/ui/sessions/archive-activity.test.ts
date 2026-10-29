@@ -181,9 +181,9 @@ describe("the app's archived Activity", () => {
     expect(reads.map((r) => r.args)).toEqual([["", "codex/example/a1", uuid(1), 0]]);
     expect(mocked.activityPort.follow).not.toHaveBeenCalled();
     expect(followedFor(key)).toEqual({ value: undefined, settled: true });
-    // Recorded Activity has no composer: none is opened for the archived row.
+    // Its recorded Activity stays read-only, while its own draft opens for editing.
     await flush();
-    expect(mocked.composerOpen.mock.calls.every(([session]) => session === undefined)).toBe(true);
+    expect(mocked.composerOpen).toHaveBeenLastCalledWith({ computer: "", key: `archive:${uuid(1)}`, name: "codex/example/a1", archive_id: uuid(1) });
     reads[0].resolve({ events: [ev(1, "UserPromptSubmit", "Summarize the notes"), ev(2, "Stop", "Done.")], replace_events: false, conversation_id: "conv-a1", run_id: "run-a1", cleared_conversations: [], cursor: 2, summary: {} });
     await flush();
     expect(archiveActivity.events().map((e) => e.seq)).toEqual([1, 2]);

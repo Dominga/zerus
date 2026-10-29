@@ -33,6 +33,9 @@
 #include <QToolButton>
 #include "ProcessSettings.h"
 #include "ForkUpdater.h"
+#include "ChildProcess.h"
+#include "JsonParse.h"
+#include "ProcessRunner.h"
 #include "QuestionNotificationSettings.h"
 #include "UiLanguage.h"
 #include "WorkspaceSkin.h"
@@ -71,12 +74,20 @@ inline void hgsSettingCall(QObject *owner, const QString &executable, const QStr
         if (error == QProcess::FailedToStart) finish({}, QCoreApplication::translate("SettingsPage", "hgs did not start"));
     });
     QObject::connect(process, &QProcess::finished, process, [process, finish](int code, QProcess::ExitStatus status) {
-        const auto document = QJsonDocument::fromJson(process->readAllStandardOutput());
-        if (status == QProcess::NormalExit && code == 0 && document.isObject()) { finish(document.object(), {}); return; }
+        const auto bytes = process->readAllStandardOutput();
         const auto error = QString::fromUtf8(process->readAllStandardError()).trimmed().section(QLatin1Char('\n'), 0, 0).left(300);
-        finish({}, !error.isEmpty() ? error : QCoreApplication::translate("SettingsPage", "hgs exited with code %1").arg(code));
+        if (status != QProcess::NormalExit || code != 0) {
+            finish({}, !error.isEmpty() ? error : QCoreApplication::translate("SettingsPage", "hgs exited with code %1").arg(code));
+            return;
+        }
+        ProcessRunner::post(process, [bytes] { QString error; const auto object = JsonParse::object(bytes, &error); return qMakePair(object, error); },
+            [finish, code, error](const QPair<QJsonObject, QString> &parsed) {
+                if (parsed.second.isEmpty()) finish(parsed.first, {});
+                else finish({}, !error.isEmpty() ? error : QCoreApplication::translate("SettingsPage", "hgs exited with code %1").arg(code));
+            });
     });
     QObject::connect(timer, &QTimer::timeout, process, [finish] { finish({}, QCoreApplication::translate("SettingsPage", "hgs did not answer within 8 seconds")); });
+    ChildProcess::inheritStdioOnly(*process);
     process->start(executable, args);
     if (!input.isEmpty()) process->write(input);
     process->closeWriteChannel();
@@ -109,7 +120,8 @@ inline void bindHgsSetting(QObject *owner, const QString &executable, QCheckBox 
     read({});
     QObject::connect(box, &QCheckBox::toggled, owner, [=](bool on) {
         box->setEnabled(false);
-        const QJsonObject input{{"request_id", QUuid::createUuid().toString(QUuid::WithoutBraces)}, {key, on}};
+        // C6: these settings are the owner's; the desktop speaks as the person.
+        const QJsonObject input{{"request_id", QUuid::createUuid().toString(QUuid::WithoutBraces)}, {key, on}, {"by", QStringLiteral("human")}};
         hgsSettingCall(owner, executable, {command, QStringLiteral("set"), QStringLiteral("--json")}, QJsonDocument(input).toJson(QJsonDocument::Compact),
                        [=](const QJsonObject &result, const QString &error) {
             // Either way the box then shows what hgs reads.
@@ -194,6 +206,7 @@ public:
             skin->setCurrentIndex(qMax(0,skin->findData(WorkspaceSkin::currentId())));
         };
         fillSkins();
+        connect(WorkspaceSkin::changes(), &QTimer::timeout, this, [this, fillSkins] { fillSkins(); if (appearanceChanged) appearanceChanged(); });
         auto *duplicateSkin=new QPushButton(tr("Duplicate…"));duplicateSkin->setObjectName("duplicateWorkspaceSkin");duplicateSkin->setAutoDefault(false);
         auto *skinFolder=new QPushButton(tr("Open skins folder"));skinFolder->setObjectName("openWorkspaceSkins");skinFolder->setAutoDefault(false);
         auto *skinRow=new QHBoxLayout;skinRow->setSpacing(8);skinRow->addWidget(skin,1);skinRow->addWidget(duplicateSkin);skinRow->addWidget(skinFolder);
@@ -311,8 +324,7 @@ public:
         repository->setIcon(workspaceIcon("github",palette().color(QPalette::WindowText)));repository->setIconSize(QSize(20,20));repository->setAutoDefault(false);
         repository->setCursor(Qt::PointingHandCursor);repository->setToolTip(QStringLiteral("https://github.com/ufna/zerus"));repository->setAccessibleName(tr("Open Zerus repository on GitHub"));
         connect(repository,&QPushButton::clicked,this,[]{QDesktopServices::openUrl(QUrl(QStringLiteral("https://github.com/ufna/zerus")));});
-        // WhiteWh fork: this build is the fork; its repository is the active
-        // one, and its releases are where this build updates from.
+        // WhiteWh fork: this build is the fork and its releases are the update source.
         auto *fork=new QPushButton(QStringLiteral("WhiteWh/zerus"));fork->setObjectName("aboutForkRepository");fork->setProperty("glyph","github");
         fork->setIcon(workspaceIcon("github",palette().color(QPalette::WindowText)));fork->setIconSize(QSize(20,20));fork->setAutoDefault(false);fork->setCheckable(true);fork->setChecked(true);
         fork->setCursor(Qt::PointingHandCursor);fork->setToolTip(tr("Active: this build is the WhiteWh fork · https://github.com/WhiteWh/zerus"));fork->setAccessibleName(tr("Open the WhiteWh fork on GitHub (the active repository)"));
@@ -323,7 +335,7 @@ public:
         forkStatus=new QLabel;forkStatus->setObjectName("aboutForkStatus");forkStatus->setWordWrap(true);
         forkUpdate=new QPushButton;forkUpdate->setObjectName("aboutForkUpdate");forkUpdate->setAutoDefault(false);
         connect(forkUpdate,&QPushButton::clicked,this,[this,updater]{
-            if(updater->ready()){if(updater->startInstall())QCoreApplication::quit();return;}
+            if(updater->ready()){updater->startInstall();return;}
             // #511 N10: a build without a fork number is replaced only once confirmed.
             if(const qint64 build=updater->offeredBuild();build>0){
                 if(confirmForkReplacement(build,updater->runningCommit(),updater->offeredCommit()))updater->confirmReplacement();
@@ -377,6 +389,7 @@ public:
         const int at=speechSection;nav->insertItem(at,name);
         if(page->objectName().isEmpty())page->setObjectName("settingsContent");
         auto *scroll=new QScrollArea;scroll->setFrameShape(QFrame::NoFrame);scroll->setWidgetResizable(true);scroll->setWidget(page);scroll->setMinimumWidth(0);
+        page->setAutoFillBackground(false);scroll->viewport()->setAutoFillBackground(false);   // as addPage
         pages->insertWidget(at,scroll);
         for(int *later:{&speechSection,&keyboardSection,&analyticsSection,&aboutSection})if(*later>=at)++*later;
         return at;
@@ -432,6 +445,10 @@ private:
     }
     void updateResets(){for(const auto &reset:resets)reset.button->setVisible(reset.slider->isEnabled()&&reset.slider->value()!=reset.value);}
     struct Reset{QPushButton *button;QSlider *slider;int value;};QList<Reset> resets;
-    void addPage(QWidget *page){if(page->objectName().isEmpty())page->setObjectName("settingsContent");auto *scroll=new QScrollArea;scroll->setFrameShape(QFrame::NoFrame);scroll->setWidgetResizable(true);scroll->setWidget(page);scroll->setMinimumWidth(0);pages->addWidget(scroll);}
+    // QScrollArea::setWidget turns the page's background fill on, which paints
+    // the system palette (light on Windows) under a page whose own name the
+    // theme's transparent rule does not list (Worktrees, user report
+    // 2026-10-28): every page shows the theme's background instead.
+    void addPage(QWidget *page){if(page->objectName().isEmpty())page->setObjectName("settingsContent");auto *scroll=new QScrollArea;scroll->setFrameShape(QFrame::NoFrame);scroll->setWidgetResizable(true);scroll->setWidget(page);page->setAutoFillBackground(false);scroll->viewport()->setAutoFillBackground(false);scroll->setMinimumWidth(0);pages->addWidget(scroll);}
     QListWidget *nav;QStackedWidget *pages;RecoverySync *sync;RecoverySettings *recovery;QCheckBox *onTop;QLabel *onTopHint;QSlider *activityWidth;QLabel *activityWidthValue;QCheckBox *activityFullWidth;
 };

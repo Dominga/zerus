@@ -101,7 +101,11 @@ class ProcessControl(unittest.TestCase):
         self.assertIsNone(row['state_reason'])
         inspected=self.cli('inspect',self.name)
         self.assertEqual((inspected['process_work']['count'],len(jobs(inspected))),(0,2))
-        self.assertNotIn('process_work',self.cli('inspect',self.name,'--skip-processes'))
+        light=self.cli('inspect',self.name,'--skip-processes')
+        # Shared state projection represents an unsampled workload as null.
+        # It must not leak the full inspection's jobs or claim an empty sample.
+        self.assertIsNone(light['process_work'])
+        self.assertNotIn('processes',light)
         for pid in self.children:os.killpg(pid,signal.SIGKILL)
         self.wait_for(lambda:not jobs(listed()))
         self.assertEqual(listed()['process_work']['count'],0)

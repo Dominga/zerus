@@ -499,22 +499,23 @@ void armConfirm(TeamPanel *panel, bool cancel, int tries = 300)
     });
 }
 
-// Answers the next confirmation after recording its title and text: Cancel
+// Answers the next confirmation after recording its object name and text: Cancel
 // clicks the reject button, otherwise the destructive action. F12/N40 uses it
 // to check what the owner is warned about.
-void armConfirmRecord(TeamPanel *panel, bool cancel, QString *title, QString *text, int delay = 0, int tries = 300)
+void armConfirmRecord(TeamPanel *panel, bool cancel, QString *name, QString *text, int delay = 0, int tries = 300)
 {
-    QTimer::singleShot(delay, panel, [panel, cancel, title, text, tries] {
+    QTimer::singleShot(delay, panel, [panel, cancel, name, text, tries] {
         auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
         if (!box) {
-            if (tries > 0) armConfirmRecord(panel, cancel, title, text, 10, TestWait::busy() ? tries : tries - 1);
+            if (tries > 0) armConfirmRecord(panel, cancel, name, text, 10, TestWait::busy() ? tries : tries - 1);
             return;
         }
-        if (title) *title = box->windowTitle();
+        if (name) *name = box->objectName();
         if (text) *text = box->text();
         for (auto *button : box->buttons())
             if (cancel ? box->buttonRole(button) == QMessageBox::RejectRole
                        : box->buttonRole(button) == QMessageBox::DestructiveRole) { button->click(); return; }
+        box->reject();
     });
 }
 
@@ -686,9 +687,15 @@ private slots:
     void workspaceAddsAMember();
     void graphRoutesEdgesAroundNodes();
     void graphEdgesAreEditedByHandleAndSelection();
+    void graphHoverLightSurvivesPolls();
     void graphRoutingStaysFastForTheLargestPlan();
     void aTallLayerWrapsIntoColumns();
     void graphNodesInTwoLinesWithDraftEdits();
+    void planEditKeepsTheRoadmap();
+    void planEditsWaitForTheFullPlan();
+    void catalogApplySaysUndecidedChangesAreDropped();
+    void designerRedoAsksOnlyARunningDesigner();
+    void boardPhaseHeaderKeepsItsActionsInView();
     void workAheadSwitchAndBadge();
     void graphNodesCarryTheActivityLabel();
     void subLeadsAreATreeInMembersAndTheInspector();
@@ -700,10 +707,13 @@ private slots:
     void designerQuestionIsAnsweredInTheWindow();
     void coordinatorQueuesASecondMessageWithCancel_data();
     void coordinatorQueuesASecondMessageWithCancel();
+    void coordinatorTakesPastedImagesAndFiles();
+    void terminalDraftIsShownAndSentFromTheConversation();
     void catalogEditorMarksManualEdits();
     void boardScrollsInsteadOfSqueezingColumns();
     void planningBoardScrollsInsteadOfSqueezingColumns();
     void catalogRoleEditorEditsEveryField();
+    void aPromptOrderSavesTheTaskTemplateItShows();
     void catalogRoleListGrowsToItsRows();
     void aboutNamesTheForkAndItsUpdate();
     void catalogTemplateEditorRosterSkeletonAndChecks();
@@ -732,6 +742,7 @@ private:
 
 void TestTeamsUi::initTestCase()
 {
+    WorkspaceSkin::preload();
     QVERIFY(m_dir.isValid());
     // #525: a pending Activity render is work in flight for the waits. A hidden
     // view stays dirty until it is shown, so only a visible one counts.
@@ -814,6 +825,10 @@ elif a[:2]==['team','draft']:
  else:print(json.dumps({'status':'ok'}))
 elif a[:2]==['account','ls']:print(json.dumps({'profiles':[{'id':'native-claude','provider':'claude','label':'Default','account_status':{'status':'ok'}},
  {'id':'work','provider':'claude','label':'Claude work','account_status':{'status':'signed_out'}}]}))
+elif a[:2]==['account','model-settings']:
+ models={'native-claude':[{'id':'opus'},{'id':'sonnet'},{'id':'haiku'}],
+         'native-kimi':[{'id':'kimi-code/kimi-for-coding'},{'id':'kimi-code/k3.1-pro'}]}
+ print(json.dumps({'account_id':a[2],'models':models.get(a[2],[])}))
 else:print(json.dumps({'status':'ok','version':4,'request_id':body.get('request_id')}))
 )PY"));
 }
@@ -1652,6 +1667,10 @@ void TestTeamsUi::catalogRoleChoosesAccountModelAndComputer()
     QCOMPARE(lead["computer"].toString(), QStringLiteral("devbox"));
     QCOMPARE(lead["machines"].toArray(), (QJsonArray{"devbox", "laptop"}));
     QCOMPARE(lead.value("account").toString(), QString());
+
+    auto *agent = editor.findChild<QComboBox *>("teamRoleAgent");
+    agent->setCurrentIndex(agent->findData("kimi")); emit agent->activated(agent->currentIndex());
+    QTRY_VERIFY(editor.findChild<QComboBox *>("teamRoleModel")->findText("kimi-code/k3.1-pro") >= 0);
 }
 
 void TestTeamsUi::designerDraftIsKeptThenApplied()
@@ -1720,6 +1739,7 @@ void TestTeamsUi::workspaceShowsGraphBoardAndFocus()
     QVERIFY(workspace.findChildren<QPushButton *>("teamConversationAsk").isEmpty());
     // U25: the views carry their icons and their names.
     auto *views = workspace.findChild<QWidget *>("teamWorkspaceView");
+    QVERIFY(views);
     for (auto *b : views->findChildren<QPushButton *>()) QVERIFY(!b->text().isEmpty() && !b->icon().isNull());
     for (auto *b : views->findChildren<QPushButton *>()) if (b->property("segment") == "board") { b->click(); break; }
     QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceBoard"));
@@ -1921,11 +1941,12 @@ void TestTeamsUi::phaseApprovalAlongsideARunningPhaseAsksFirst()
     workspace.render();
     QTest::qWait(150);
     // Cancel: the warning names the cost and nothing is sent.
-    QString title, text;
-    armConfirmRecord(&panel, true, &title, &text);
+    QString name, text;
+    armConfirmRecord(&panel, true, &name, &text);
     phaseAction(&workspace, 3, "teamPhaseAccept")->click();
     QTest::qWait(150);
-    QVERIFY2(title.contains(QStringLiteral("Approve phase 3 now?")), qPrintable(title));
+    QCOMPARE(name, QStringLiteral("teamApproveAlongsideConfirm"));
+    QVERIFY2(text.contains(QStringLiteral("approve phase 3 now")), qPrintable(text));
     QVERIFY2(text.contains(QStringLiteral("while phase 2 still runs")), qPrintable(text));
     QVERIFY2(text.contains(QStringLiteral("can no longer edit this phase")), qPrintable(text));
     QVERIFY2(text.contains(QStringLiteral("Are you sure?")), qPrintable(text));
@@ -2233,6 +2254,10 @@ void TestTeamsUi::rolePromptFromTheMemberMenuKeepsItsButton()
 void TestTeamsUi::memberEditorPicksAnExistingSession()
 {
     setTeam(team("planning"));
+    // Exercise the list-before-status ordering rather than racing the two
+    // children: the first member menu captures a summary, not an editable plan.
+    QFile hold(script() + ".statushold"); QVERIFY(hold.open(QIODevice::WriteOnly)); hold.close();
+    const auto release = qScopeGuard([&] { QFile::remove(hold.fileName()); });
     HgsClient client(FakeCli::program(script()));
     TeamController controller(&client);
     TeamPanel panel(&controller);
@@ -2253,6 +2278,13 @@ void TestTeamsUi::memberEditorPicksAnExistingSession()
     controller.refresh();
     panel.showTeam("team-1");
     QTRY_VERIFY(panel.findChild<QWidget *>("teamPlanFooter"));
+    QVERIFY(!controller.watched() || !controller.watched()->full);
+    QVERIFY(calls(script(), "plan").isEmpty());
+    QVERIFY(QFile::remove(hold.fileName()));
+    WAIT_VERIFY(controller.watched() && controller.watched()->full);
+    // The full status schedules a render. Its validation box proves the new
+    // member menu captures that full plan before we take its action pointer.
+    WAIT_VERIFY(panel.findChild<QFrame *>("teamPlanErrorsBox"));
     // The tester's row offers the free session only.
     QWidget *tester = nullptr;
     for (auto *card : panel.findChildren<QFrame *>("teamCard"))
@@ -2268,7 +2300,9 @@ void TestTeamsUi::memberEditorPicksAnExistingSession()
     QVERIFY(pick->actions().first()->text().contains(QStringLiteral("claude/checkout/other")));
     // Picking it sends the session identity with the plan.
     pick->actions().first()->trigger();
-    QTRY_COMPARE(calls(script(), "plan").size(), 1);
+    // Follow the actual child request; a loaded runner can take longer than
+    // QTRY's default while the plan write is still in flight.
+    WAIT_COMPARE(calls(script(), "plan").size(), 1);
     const auto plan = calls(script(), "plan").first();
     QJsonObject adopted;
     for (const auto &value : plan["members"].toArray())
@@ -2491,7 +2525,9 @@ void TestTeamsUi::followUpsShowThePermissionAnswerAndPlanFixes()
             if (label->isVisible() && !label->geometry().isEmpty()) return label;
         return nullptr;
     };
-    QTRY_VERIFY(([&] { controller.refresh(); return visibleLabel(&planPanel, "teamPlanCheck") != nullptr; })());
+    // The initial refresh already requested this unchanged fixture. Repeating
+    // it in the predicate adds child processes and renders while we wait.
+    WAIT_VERIFY(visibleLabel(&planPanel, "teamPlanCheck"));
     auto *checkLine = visibleLabel(&planPanel, "teamPlanCheck");
     QVERIFY(checkLine->text().contains(QStringLiteral("cargo test --locked --bin hgs teams")));
     QVERIFY(planPanel.rect().contains(checkLine->mapTo(&planPanel, QPoint(0, 0))));
@@ -2505,7 +2541,7 @@ void TestTeamsUi::followUpsShowThePermissionAnswerAndPlanFixes()
     TeamPanel lightPanel(&controller);
     lightPalette(); lightPanel.setTheme(false);
     lightPanel.resize(480, 1100); lightPanel.show(); lightPanel.showTeam("team-1");
-    QTRY_VERIFY(([&] { controller.refresh(); return visibleLabel(&lightPanel, "teamPlanCheck") != nullptr; })());
+    WAIT_VERIFY(visibleLabel(&lightPanel, "teamPlanCheck"));
     auto *lightCheck = visibleLabel(&lightPanel, "teamPlanCheck");
     QVERIFY(lightCheck->text().contains(QStringLiteral("cargo test --locked --bin hgs teams")));
     QVERIFY(lightPanel.rect().contains(lightCheck->mapTo(&lightPanel, QPoint(0, 0))));
@@ -2648,6 +2684,15 @@ void TestTeamsUi::permissionAttentionNamesTheMemberAndAnswers()
     workspace.activateWindow(); QVERIFY(QTest::qWaitForWindowActive(&workspace));
     workspace.findChild<QPushButton *>("teamAttentionAnswer")->click();
     QTRY_COMPARE(QApplication::focusWidget(), static_cast<QWidget *>(workspace.findChild<QPushButton *>("teamMemberPermissionAllow")));
+    // A newer request must not inherit Allow focus (and a following Enter).
+    auto changedQuestion = backend["question"].toObject();
+    changedQuestion["question_hash"] = QStringLiteral("new-request-hash");
+    changedQuestion["command"] = QStringLiteral("cargo test --new-request");
+    backend["question"] = changedQuestion; members[1] = backend; team["members"] = members;
+    setTeam(team);
+    QTRY_VERIFY(([&] { controller.refresh(); auto *line = workspace.findChild<QLabel *>("teamMemberPermissionCommand");
+                       return line && line->text() == QStringLiteral("cargo test --new-request"); })());
+    QVERIFY(QApplication::focusWidget() != workspace.findChild<QPushButton *>("teamMemberPermissionAllow"));
     // No answer box from this hgs: the command goes to the clipboard.
     backend.remove("question"); members[1] = backend; team["members"] = members;
     setTeam(team);
@@ -3345,7 +3390,8 @@ void TestTeamsUi::boardColumnsKeepTheirScroll()
     controller.refresh();
     panel.showTeam("team-1");
     workspace.showTeam("team-1");
-    QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceView"));
+    // The first team read took 6.6 s on a loaded computer.
+    QTRY_VERIFY_WITH_TIMEOUT(workspace.findChild<QWidget *>("teamWorkspaceView"), 30000);
     const auto showBoard = [&workspace] {
         for (auto *b : workspace.findChild<QWidget *>("teamWorkspaceView")->findChildren<QPushButton *>()) if (b->property("segment") == "board") { b->click(); break; }
     };
@@ -3399,6 +3445,8 @@ elif a[:2]==['session-upload-block','set']:
     QVERIFY(calls.open(QIODevice::ReadOnly));
     const auto sent = QJsonDocument::fromJson(calls.readAll().trimmed()).object();
     QCOMPARE(sent.value("confirm").toBool(), true);
+    // C6: the set names the owner, or the CLI refuses it as an agent session.
+    QCOMPARE(sent.value("by").toString(), QStringLiteral("human"));
     const auto id = sent.value("request_id").toString();
     QVERIFY2(!QUuid(id).isNull() && QUuid(id).toString(QUuid::WithoutBraces) == id, qPrintable(id));
     // The same page carries the DeepSeek upload block from #481, on by default.
@@ -3416,6 +3464,7 @@ elif a[:2]==['session-upload-block','set']:
         QVERIFY(wrote.open(QIODevice::ReadOnly));
         const auto sent = QJsonDocument::fromJson(wrote.readAll().trimmed()).object();
         QCOMPARE(sent.value("block").toBool(true), false);
+        QCOMPARE(sent.value("by").toString(), QStringLiteral("human"));
         const auto id = sent.value("request_id").toString();
         QVERIFY2(!QUuid(id).isNull() && QUuid(id).toString(QUuid::WithoutBraces) == id, qPrintable(id));
     }
@@ -4265,6 +4314,95 @@ void TestTeamsUi::aTallLayerWrapsIntoColumns()
     view.resize(view.size()); shot(&view, "graph-wrapped-layer");
 }
 
+// #570 (owner): hovering a task lights its linked tasks; every poll rebuilt
+// the phase graphs and the light went out under a resting pointer.
+void TestTeamsUi::graphHoverLightSurvivesPolls()
+{
+    setTeam(graphTeam());
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.resize(1500, 900); workspace.show();
+    controller.refresh();
+    QTRY_VERIFY(controller.team("team-1"));
+    panel.showTeam("team-1"); workspace.showTeam("team-1");
+    // Every render replaces the phase graphs: always ask for the current one.
+    const auto graph = [&] { return phaseGraphOf(&workspace, 2); };
+    QTRY_VERIFY(graph() && graph()->nodeRect(3).width() > 0 && graph()->isVisible());
+    const auto at = [&](const QPointF &point) { return QPoint(int(std::round(point.x() * graph()->zoom)), int(std::round(point.y() * graph()->zoom))); };
+    // #4 is not linked to #3: it dims while #3 is lit.
+    const auto pixels = [&](int task) {
+        const QRectF r = graph()->nodeRect(task);
+        return graph()->grab(QRect(at(r.topLeft()), at(r.bottomRight()))).toImage();
+    };
+    TestWait::settle();
+    const QImage plain = pixels(4);
+    QTest::mouseMove(graph(), at(graph()->nodeRect(3).center()));
+    QTRY_COMPARE(graph()->hovered(), 3);
+    QVERIFY(graph()->chain(3).contains(5) && graph()->chain(3).contains(6) && !graph()->chain(3).contains(4));
+    TestWait::settle();
+    const QImage lit = pixels(4);
+    QVERIFY(lit != plain);
+    int revision = 21;
+    const auto poll = [&](QJsonObject next) {
+        QPointer<TeamUi::TaskView> old = graph();
+        next["revision"] = ++revision;
+        setTeam(next);
+        controller.refresh();
+        QTRY_VERIFY(!old && graph() && graph()->nodeRect(4).width() > 0);
+        TestWait::settle();
+    };
+    // Several polls with new revisions; the pointer does not move.
+    for (int i = 0; i < 3; ++i) {
+        poll(graphTeam());
+        QCOMPARE(graph()->hovered(), 3);
+        QCOMPARE(pixels(4), lit);
+        QVERIFY(graph()->toolTip().startsWith(QStringLiteral("#3 Card form UI")));
+    }
+    // Another phase's graph never takes the light.
+    QCOMPARE(phaseGraphOf(&workspace, 3)->hovered(), 0);
+    // The pointer moves to the gutter right of #3: the light goes, and a poll
+    // keeps it off.
+    const QRectF three = graph()->nodeRect(3);
+    QTest::mouseMove(graph(), at(QPointF(three.right() + 12, three.center().y())));
+    QTRY_COMPARE(graph()->hovered(), 0);
+    poll(graphTeam());
+    QCOMPARE(graph()->hovered(), 0);
+    QCOMPARE(pixels(4), plain);
+    // Back on #3, then the pointer leaves the view: off, also after a poll.
+    QTest::mouseMove(graph(), at(graph()->nodeRect(3).center()));
+    QTRY_COMPARE(graph()->hovered(), 3);
+    QEvent leave(QEvent::Leave);
+    QCoreApplication::sendEvent(graph(), &leave);
+    QCOMPARE(graph()->hovered(), 0);
+    poll(graphTeam());
+    QCOMPARE(graph()->hovered(), 0);
+    // A task that is gone takes its light with it. (A move to where the
+    // pointer already is sends nothing: go by the gutter.)
+    QTest::mouseMove(graph(), at(QPointF(graph()->nodeRect(3).right() + 12, graph()->nodeRect(3).center().y())));
+    QTest::mouseMove(graph(), at(graph()->nodeRect(3).center()));
+    QTRY_COMPARE(graph()->hovered(), 3);
+    auto gone = graphTeam();
+    QJsonArray tasks;
+    for (const auto &value : gone["tasks"].toArray()) {
+        auto task = value.toObject();
+        if (task["id"].toInt() == 3) continue;
+        QJsonArray deps;
+        for (const auto &d : task["deps"].toArray()) if (d.toObject()["task"].toInt() != 3) deps.append(d);
+        task["deps"] = deps;
+        tasks.append(task);
+    }
+    gone["tasks"] = tasks;
+    auto phases = gone["phases"].toArray();
+    auto second = phases[0].toObject(); second["tasks"] = QJsonArray{2, 4, 5, 6}; phases[0] = second;
+    gone["phases"] = phases;
+    poll(gone);
+    QCOMPARE(graph()->hovered(), 0);
+    poll(graphTeam());
+    QCOMPARE(graph()->hovered(), 0);
+}
+
 void TestTeamsUi::graphEdgesAreEditedByHandleAndSelection()
 {
     TeamUi::TaskView view(TeamUi::colorsFor(true), TeamUi::TaskView::Wide);
@@ -5091,6 +5229,45 @@ void TestTeamsUi::catalogTemplateEditorRosterSkeletonAndChecks()
     QCOMPARE(tasks[3].toObject()["title"].toString(), QStringLiteral("New task"));
 }
 
+// C1 (#543): a role whose task template was never typed shows the default
+// template. Whatever writes its prompt order (a move, or typing in Team
+// protocol) saves that template too, so the server never gets an order with
+// "task" and an empty template.
+void TestTeamsUi::aPromptOrderSavesTheTaskTemplateItShows()
+{
+    QSettings().setValue("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([] { QSettings().remove("workspace/skin"); darkPalette(); });
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamCatalogEditor editor(&controller);
+    editor.resize(1180, 1500); editor.show();
+    auto *roles = editor.findChild<QListWidget *>("teamCatalogRoles");
+    QTRY_COMPARE(roles->count(), 3);
+    const auto block = [&](const QString &key) -> QFrame * {
+        for (auto *b : editor.findChildren<QFrame *>("teamPromptBlock")) if (b->property("block") == key) return b;
+        return nullptr;
+    };
+    roles->setCurrentRow(1);   // Backend: typing in Team protocol
+    QTRY_COMPARE(editor.findChild<QLineEdit *>("teamRoleName")->text(), QStringLiteral("Backend"));
+    const QString shown = editor.findChild<QPlainTextEdit *>("teamRoleTaskTemplate")->toPlainText();
+    QVERIFY(shown.contains("{title}"));
+    editor.findChild<QPlainTextEdit *>("teamRoleProtocol")->setPlainText("Report each endpoint.");
+    roles->setCurrentRow(2);   // Tester: one move
+    QTRY_COMPARE(editor.findChild<QLineEdit *>("teamRoleName")->text(), QStringLiteral("Tester"));
+    QTRY_VERIFY(block("task"));
+    block("task")->findChild<QToolButton *>("teamPromptUp")->click();
+    QTRY_VERIFY(block("task") && block("task")->findChild<QToolButton *>("teamPromptDown")->isEnabled());   // no longer last
+    editor.findChild<QPushButton *>("teamCatalogSave")->click();
+    QTRY_COMPARE_WITH_TIMEOUT(calls(script(), "catalog set").size(), 1, 20000);
+    const auto saved = calls(script(), "catalog set").first()["catalog"].toObject()["roles"].toArray();
+    for (const int row : {1, 2}) {
+        const auto role = saved[row].toObject();
+        QVERIFY2(role["prompt_order"].toArray().contains("task"), qPrintable(role["id"].toString()));
+        QCOMPARE(role["task_template"].toString(), shown);
+    }
+    QCOMPARE(saved[0].toObject()["task_template"].toString(), QString());   // the untouched Lead keeps none
+}
+
 // U25 part 9 (spec 11.5): routing rules are edited in place - order, words,
 // Use (a template or "+ role"), approval - and Try it names the template, the
 // rule, the added roles, approval and work mode, with the roster as chips.
@@ -5107,10 +5284,22 @@ void TestTeamsUi::catalogRoutingEditsAndTriesAGoal()
     auto found = TeamCatalogEditor::route(c, "Add tests for checkout");
     QCOMPARE(found.rule, 1); QCOMPARE(found.templateId, QStringLiteral("feature"));
     QCOMPARE(found.added, QStringList{"tester"}); QCOMPARE(found.approval, QStringLiteral("auto"));
-    Rule words; words.id = "words"; words.when = "the and for"; words.templateId = "feature";
+    Rule words; words.id = "words"; words.when = "the and with"; words.templateId = "feature";
     c.routing = {words};
-    found = TeamCatalogEditor::route(c, "the and for");
+    found = TeamCatalogEditor::route(c, "the and with");
     QCOMPARE(found.rule, -1); QCOMPARE(found.templateId, QStringLiteral("feature"));   // the first template, no rule
+    // N1: the prototype's own rules r1 and r2 and a "*" catch-all. "label",
+    // "files" and "services" are stop words; a substring and a plural's
+    // singular match; "*" alone always matches.
+    Rule r1; r1.id = "r1"; r1.when = QStringLiteral("label \u201cbug\u201d \u00b7 \u2264 3 files"); r1.templateId = "feature";
+    Rule r2; r2.id = "r2"; r2.when = QStringLiteral("services/payments/** \u00b7 **/auth/**"); r2.use = "+tester";
+    Rule star; star.id = "star"; star.when = " * "; star.templateId = "feature";
+    c.routing = {r1, r2, star};
+    found = TeamCatalogEditor::route(c, "Tidy the label files of the services");
+    QCOMPARE(found.rule, 2); QVERIFY(found.added.isEmpty());
+    QCOMPARE(TeamCatalogEditor::route(c, "Debug the login").rule, 0);
+    found = TeamCatalogEditor::route(c, "Round the payment total (OAuth)");
+    QCOMPARE(found.rule, 2); QCOMPARE(found.added, QStringList{"tester"});
     HgsClient client(FakeCli::program(script()));
     TeamController controller(&client);
     TeamCatalogEditor editor(&controller);
@@ -5249,11 +5438,21 @@ void TestTeamsUi::catalogHeaderRevertDraftAndBanners()
     QTRY_COMPARE(calls(script(), "catalog decide").size(), 1);
     QCOMPARE(calls(script(), "catalog decide").first()["proposal"].toString(), QStringLiteral("p1"));
     QCOMPARE(calls(script(), "catalog decide").first()["decision"].toString(), QStringLiteral("keep"));
+    // The fixture logs the decision before it saves the draft. On a loaded
+    // runner that save came after the catalog below and put version 3 back,
+    // so the banner never showed (fork builds 88 and 95): wait for the save.
+    QTRY_VERIFY_WITH_TIMEOUT(([&] {
+        QFile saved(script() + ".catalog");
+        if (!saved.open(QIODevice::ReadOnly)) return false;
+        const auto proposals = QJsonDocument::fromJson(saved.readAll()).object()["draft"].toObject()["proposals"].toArray();
+        return !proposals.isEmpty() && proposals[0].toObject()["state"].toString() == QStringLiteral("kept");
+    })(), 30000);
     // The catalog moved on after the draft: Apply is off; redo or discard.
     auto moved = catalog(); auto inner = moved["catalog"].toObject(); inner["version"] = 4; moved["catalog"] = inner;
-    { QFile c(script() + ".catalog"); QVERIFY(c.open(QIODevice::WriteOnly)); c.write(QJsonDocument(moved).toJson(QJsonDocument::Compact)); }
+    QVERIFY(FakeCli::replace(script() + ".catalog", QJsonDocument(moved).toJson(QJsonDocument::Compact)));
     controller.refreshCatalog();
-    QTRY_COMPARE(draft.findChild<QLabel *>("teamCatalogBannerTitle")->text(), QStringLiteral("Draft is out of date — Apply is off"));
+    // The fixture's catalog read takes more than QTRY's 5 s on a loaded Windows runner.
+    QTRY_COMPARE_WITH_TIMEOUT(draft.findChild<QLabel *>("teamCatalogBannerTitle")->text(), QStringLiteral("Draft is out of date — Apply is off"), 30000);
     QVERIFY(draft.findChild<QFrame *>("teamCatalogBanner")->isVisible());
     QVERIFY(!draft.findChild<QPushButton *>("teamDesignerApply")->isEnabled());
     shot(&draft, "ux-9-draft-stale-dark");
@@ -5668,6 +5867,133 @@ void TestTeamsUi::planningRulesAreEditedSavedResetAndProposed()
     QCOMPARE(calls(script(), "catalog decide").last()["decision"].toString(), QStringLiteral("reject"));
 }
 
+// Owner, 2026-10-28: only Activity took files; in the lead's conversation a
+// pasted image became "[Image #1]" text and the file was lost. Every
+// conversation has Attach, and a pasted image is an attachment sent with it.
+void TestTeamsUi::coordinatorTakesPastedImagesAndFiles()
+{
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    const QString program = dir.filePath("hgs");
+    QVERIFY(FakeCli::install(program, R"PY(#!/usr/bin/env python3
+import json,os,sys
+a=sys.argv[1:]
+if a and a[0].startswith('@'):a=a[1:]
+here=__file__
+if a[:1]==['inspect']:
+ print(json.dumps({'name':a[1],'run_id':'run-1','conversation_id':'conv-1','runtime_state':'live','process_state':'running',
+  'activity':'idle','phase':'idle','cursor':0,'events':[]}))
+elif a[:1]==['send']:
+ body=json.load(sys.stdin)
+ open(here+'.sends','a').write(json.dumps(body)+'\n')
+ print(json.dumps({'request_id':body['request_id'],'name':a[1],'run_id':'run-1','conversation_id':'conv-1','first_message':False,
+  'status':'submitted','text':body['text']}))
+else:print('{}')
+)PY"));
+    TeamConversation::setPollInterval(100);
+    const auto restore = qScopeGuard([] { TeamConversation::setPollInterval(2000); });
+    HgsClient client(FakeCli::program(program));
+    TeamConversation conversation(&client);
+    QSignalSpy inspections(&client, &HgsClient::inspectionReady);
+    conversation.setSession({}, "claude/checkout/lead");
+    conversation.resize(560, 420); conversation.show();
+    auto *attach = conversation.findChild<QPushButton *>("teamConversationAttach");
+    QVERIFY(attach); QTRY_VERIFY(attach->isVisible()); QVERIFY(attach->isEnabled());
+    auto *input = conversation.findChild<QPlainTextEdit *>("teamConversationInput");
+    auto *sendButton = conversation.findChild<QPushButton *>("teamConversationSend");
+    QTRY_VERIFY(sendButton->isEnabled());
+    // Sending needs the exact inspected identity, not merely an enabled button.
+    WAIT_VERIFY(std::any_of(inspections.cbegin(), inspections.cend(), [](const QList<QVariant> &reply) {
+        const auto detail = reply.at(2).toJsonObject();
+        return reply.at(0).toString().isEmpty() && reply.at(1).toString() == "claude/checkout/lead"
+            && detail["run_id"] == "run-1" && detail["conversation_id"] == "conv-1";
+    }));
+    QImage image(8, 8, QImage::Format_ARGB32); image.fill(Qt::red);
+    QGuiApplication::clipboard()->setImage(image);
+    input->setFocus(); input->insertPlainText("Look at "); input->paste();
+    QCOMPARE(input->toPlainText(), QString("Look at [Image #1] "));
+    auto *files = conversation.findChild<QWidget *>("teamConversationFiles"); QVERIFY(files); QVERIFY(files->isVisible());
+    sendButton->click();
+    const auto sends = [&] {
+        QList<QJsonObject> found; QFile file(program + ".sends");
+        if (file.open(QIODevice::ReadOnly)) for (const auto &line : file.readAll().split('\n')) if (!line.isEmpty()) found << QJsonDocument::fromJson(line).object();
+        return found;
+    };
+    QTRY_COMPARE(sends().size(), 1);
+    const auto attachments = sends().first()["attachments"].toArray();
+    QCOMPARE(attachments.size(), 1);
+    QCOMPARE(attachments[0].toObject()["mime"].toString(), QString("image/png"));
+    QVERIFY(sends().first()["text"].toString().contains("[Image #1]"));
+    // Sent: the field and the files clear.
+    QTRY_VERIFY(input->toPlainText().isEmpty()); QTRY_VERIFY(!files->isVisible());
+}
+
+// Owner, 2026-10-28: with text in the agent's Terminal input no window could
+// send. The refusal shows that draft with Send it, which presses Enter in
+// Terminal only for the draft shown; the owner's own message stays.
+void TestTeamsUi::terminalDraftIsShownAndSentFromTheConversation()
+{
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    const QString program = dir.filePath("hgs");
+    QVERIFY(FakeCli::install(program, R"PY(#!/usr/bin/env python3
+import json,os,sys
+a=sys.argv[1:]
+if a and a[0].startswith('@'):a=a[1:]
+here=__file__
+draft=os.path.exists(here+'.draft')
+if a[:1]==['inspect']:
+ print(json.dumps({'name':a[1],'run_id':'run-1','conversation_id':'conv-1','runtime_state':'live','process_state':'running',
+  'activity':'idle','phase':'idle','cursor':0,'events':[]}))
+elif a[:1]==['send']:
+ body=json.load(sys.stdin)
+ if draft:
+  sys.stderr.write('hgs: terminal has a draft, dialog, or unrecognized prompt; open Terminal and return to an empty agent prompt\n');sys.exit(1)
+ print(json.dumps({'request_id':body['request_id'],'name':a[1],'run_id':'run-1','conversation_id':'conv-1','status':'submitted','text':body['text']}))
+elif a[:1]==['terminal']:
+ body=json.load(sys.stdin)
+ open(here+'.terminal','a').write(json.dumps(body)+'\n')
+ base={'request_id':body['request_id'],'name':a[1],'run_id':'run-1','conversation_id':'conv-1'}
+ if body['action']=='draft':
+  print(json.dumps(dict(base,status='draft',draft_supported=True,draft='fix the build' if draft else None,draft_hash='a'*64)))
+ else:
+  os.remove(here+'.draft');print(json.dumps(dict(base,status='submitted')))
+else:print('{}')
+)PY"));
+    QFile(program + ".draft").open(QIODevice::WriteOnly);
+    TeamConversation::setPollInterval(100);
+    const auto restore = qScopeGuard([] { TeamConversation::setPollInterval(2000); });
+    HgsClient client(FakeCli::program(program));
+    TeamConversation conversation(&client);
+    QString opened;
+    conversation.openTerminal = [&](const QString &host, const QString &name) { opened = host + '|' + name; };
+    conversation.setSession({}, "claude/checkout/lead");
+    conversation.resize(560, 420); conversation.show();
+    auto *input = conversation.findChild<QPlainTextEdit *>("teamConversationInput");
+    auto *sendButton = conversation.findChild<QPushButton *>("teamConversationSend");
+    auto *bar = conversation.findChild<QFrame *>("teamConversationTerminalDraft");
+    QVERIFY(bar); QVERIFY(!bar->isVisible());
+    QTRY_VERIFY(sendButton->isEnabled());
+    QTest::qWait(300);   // the first read of the session
+    input->setPlainText("Also re-run the migrations"); sendButton->click();
+    QTRY_VERIFY(bar->isVisible());
+    QVERIFY(bar->findChild<QLabel *>("terminalDraftText")->text().contains("fix the build"));
+    QCOMPARE(input->toPlainText(), QString("Also re-run the migrations"));
+    bar->findChild<QPushButton *>("terminalDraftOpen")->click();
+    QCOMPARE(opened, QString("|claude/checkout/lead"));
+    bar->findChild<QPushButton *>("terminalDraftSend")->click();
+    QTRY_VERIFY(!bar->isVisible());
+    QList<QJsonObject> calls; QFile file(program + ".terminal"); QVERIFY(file.open(QIODevice::ReadOnly));
+    for (const auto &line : file.readAll().split('\n')) if (!line.isEmpty()) calls << QJsonDocument::fromJson(line).object();
+    QCOMPARE(calls.size(), 2);
+    QCOMPARE(calls[0]["action"].toString(), QString("draft"));
+    QCOMPARE(calls[1]["action"].toString(), QString("submit_draft"));
+    QCOMPARE(calls[1]["draft_hash"].toString(), QString(64, 'a'));
+    QCOMPARE(calls[1]["expected_run_id"].toString(), QString("run-1"));
+    // The owner's message is still there and now goes.
+    QCOMPARE(input->toPlainText(), QString("Also re-run the migrations"));
+    sendButton->click();
+    QTRY_VERIFY(input->toPlainText().isEmpty());
+}
+
 // U35: the coordinator's composer, against an hgs that holds a message while
 // the lead has not taken the previous one. The held message shows "Queued
 // until the lead takes your previous message" with Cancel; Cancel sends
@@ -5903,11 +6229,14 @@ void TestTeamsUi::lanesGroupACollapseInEveryView()
     workspace.render();
     QTest::qWait(150);
     // Board and Layers group the phase the same way.
-    auto *views = workspace.findChild<QWidget *>("teamWorkspaceView");
+    QPointer<QWidget> views = workspace.findChild<QWidget *>("teamWorkspaceView");
     QVERIFY(views);
     for (auto *button : views->findChildren<QPushButton *>())
         if (button->property("segment") == "board") { button->click(); break; }
     QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceBoard"));
+    // Rendering another view replaces the toolbar too. Track its destruction
+    // and fetch the current toolbar before the next click.
+    QTRY_VERIFY(views.isNull());
     QTRY_VERIFY_WITH_TIMEOUT(([&] { const auto headers = laneHeaders(3); return headers.size() == 3 && laneBody(3, 2); })(), 20000);
     const auto cards = [&workspace](const QList<int> &ids) {
         int n = 0;
@@ -5918,10 +6247,14 @@ void TestTeamsUi::lanesGroupACollapseInEveryView()
     QCOMPARE(cards({5, 6}), 2);
     QCOMPARE(cards({7}), 1);
     QCOMPARE(cards({8}), 1);
+    views = workspace.findChild<QWidget *>("teamWorkspaceView");
+    QVERIFY(views);
     for (auto *button : views->findChildren<QPushButton *>())
         if (button->property("segment") == "layers") { button->click(); break; }
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceLayers"));
+    QTRY_VERIFY(views.isNull());
     QTRY_VERIFY_WITH_TIMEOUT(([&] { const auto headers = laneHeaders(3); return headers.size() == 3 && laneBody(3, 2); })(), 20000);
-    // The lane bodies survive the view switch: the layers view groups the same way.
+    // The new layers view groups the same lanes after replacing the board.
     QTRY_VERIFY_WITH_TIMEOUT(([&] { const auto headers = laneHeaders(3); return headers.size() == 3 && laneBody(3, 1) && laneBody(3, 2); })(), 20000);
 }
 
@@ -6659,7 +6992,8 @@ void TestTeamsUi::limitedAndSharedHostMembersAreMarked()
     darkPalette();
     workspace.setTheme(true); workspace.render();
     workspace.render();
-    // Resume after limits: the team setting, sent with the other settings.
+    // Resume after limits: the team setting. N33 (#548): only its own field
+    // goes; the server merges it, so the lead's newer settings stay.
     QTRY_VERIFY(workspace.findChild<QPushButton *>("teamWorkspaceResumeLimits"));
     auto *toggle = workspace.findChild<QPushButton *>("teamWorkspaceResumeLimits");
     QVERIFY(toggle->isCheckable() && !toggle->isChecked());
@@ -6667,8 +7001,7 @@ void TestTeamsUi::limitedAndSharedHostMembersAreMarked()
     QTRY_COMPARE(calls(script(), "settings").size(), 1);
     const auto settings = calls(script(), "settings").first()["settings"].toObject();
     QVERIFY(settings["resume_after_limits"].toBool());
-    QCOMPARE(settings["approval"].toString(), QStringLiteral("review"));
-    QCOMPARE(settings["report_timeout_seconds"].toInt(), 120);
+    QCOMPARE(settings.keys(), QStringList{QStringLiteral("resume_after_limits")});
     // With it on and the member waiting for its reset, the mark says so.
     auto on = proposalsTeam(resetsAt);
     auto onSettings = on["settings"].toObject(); onSettings["resume_after_limits"] = true; on["settings"] = onSettings;
@@ -7091,12 +7424,16 @@ void TestTeamsUi::leadHeaderFollowsTheTeamState()
         setTeam(clean);
         QPushButton *approve = nullptr;
         QTRY_VERIFY(([&] { controller.refresh(); approve = workspace.findChild<QPushButton *>("teamWorkspaceApprove"); return approve && approve->isEnabled(); })());
-        QString asked;
+        QString asked, dialogName, dialogTitle, confirmAction;
+        bool cancelIsDefault = false;
         QTimer watch; watch.setInterval(10);
         QObject::connect(&watch, &QTimer::timeout, &panel, [&] {
             auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
             if (!box || !asked.isEmpty()) return;
-            asked = box->windowTitle() + QLatin1Char('|') + box->text();
+            asked = box->text(); dialogName = box->objectName(); dialogTitle = box->windowTitle();
+            cancelIsDefault = box->defaultButton() == box->button(QMessageBox::Cancel);
+            for (auto *button : box->buttons())
+                if (box->buttonRole(button) == QMessageBox::DestructiveRole) confirmAction = button->text();
             box->button(QMessageBox::Cancel)->click();
         });
         watch.start();
@@ -7104,7 +7441,14 @@ void TestTeamsUi::leadHeaderFollowsTheTeamState()
         QTRY_VERIFY(!asked.isEmpty());
         watch.stop();
         QTest::qWait(50); QCOMPARE(calls(script(), "approve").size(), 0);
-        QVERIFY2(asked.startsWith(QStringLiteral("Approve plan and run?|")), qPrintable(asked));
+        QCOMPARE(dialogName, QStringLiteral("teamApproveConfirm"));
+        // Native macOS message boxes omit the window title. The body and the
+        // destructive action carry the approval there as on other platforms.
+#ifndef Q_OS_MACOS
+        QCOMPARE(dialogTitle, QStringLiteral("Approve plan and run?"));
+#endif
+        QVERIFY2(asked.startsWith(QStringLiteral("Approve the plan of Checkout redesign and run it?")), qPrintable(asked));
+        QCOMPARE(confirmAction, QStringLiteral("Approve and run")); QVERIFY(cancelIsDefault);
         QVERIFY2(asked.contains(QStringLiteral("It starts 2 member sessions: Backend (codex), Tester (kimi on msi-old).")), qPrintable(asked));
         armConfirm(&panel, false);
         workspace.findChild<QPushButton *>("teamWorkspaceApprove")->click();
@@ -7863,10 +8207,23 @@ void TestTeamsUi::leadAnswersAMembersSubagentRequest()
     auto *allow = workspace.findChild<QPushButton *>("teamMemberPermissionAllow");
     QCOMPARE(allow->text(), QStringLiteral("Allow all"));
     QVERIFY(allow->isEnabled());
+    QTRY_VERIFY(workspace.findChild<QPushButton *>("teamMemberPermissionAllow")->isVisible());
     // The attention strip's Answer brings the lead to the same box.
     workspace.activateWindow(); QVERIFY(QTest::qWaitForWindowActive(&workspace));
     workspace.findChild<QPushButton *>("teamAttentionAnswer")->click();
-    QTRY_COMPARE(QApplication::focusWidget(), static_cast<QWidget *>(workspace.findChild<QPushButton *>("teamMemberPermissionAllow")));
+    // The window's focus: the application's is empty whenever the window is
+    // briefly inactive on a loaded runner (fork builds 93 and 98).
+    QTRY_COMPARE(workspace.focusWidget(), static_cast<QWidget *>(workspace.findChild<QPushButton *>("teamMemberPermissionAllow")));
+    // A status/feed refresh can arrive immediately after Answer. Rebuild
+    // deterministically: the new button for this request keeps keyboard focus.
+    const QPointer<QPushButton> oldAllow = workspace.findChild<QPushButton *>("teamMemberPermissionAllow");
+    workspace.render();
+    QVERIFY(workspace.findChild<QPushButton *>("teamMemberPermissionAllow") != oldAllow.data());
+    QTRY_COMPARE(workspace.focusWidget(), static_cast<QWidget *>(workspace.findChild<QPushButton *>("teamMemberPermissionAllow")));
+    // Lost before a rebuild, it comes back to the same question's Allow.
+    workspace.findChild<QPushButton *>("teamMemberPermissionAllow")->clearFocus();
+    workspace.render();
+    QTRY_COMPARE(workspace.focusWidget(), static_cast<QWidget *>(workspace.findChild<QPushButton *>("teamMemberPermissionAllow")));
     shot(&workspace, "u19-lead-subagents-three-dark");
     workspace.setTheme(false); lightShot(&workspace, "u19-lead-subagents-three-light"); darkPalette(); workspace.setTheme(true);
     QTRY_VERIFY(workspace.findChild<QPushButton *>("teamMemberPermissionAllow"));
@@ -7893,6 +8250,184 @@ void TestTeamsUi::leadAnswersAMembersSubagentRequest()
     QTRY_COMPARE(calls(script(), "answer").size(), 2);
     answer = calls(script(), "answer").last();
     QCOMPARE(answer["answers"].toArray(), (QJsonArray{QJsonObject{{"question_id", "approval"}, {"selected_option_ids", QJsonArray{"2"}}, {"text", "Not in this phase"}}}));
+}
+
+// C3 (#548): a desktop edit of a planning team with a roadmap keeps it: the
+// plan carries each task's phase and the later phases, through phase 3's graph.
+void TestTeamsUi::planEditKeepsTheRoadmap()
+{
+    auto planning = graphTeam();
+    planning["status"] = "planning";
+    auto phases = planning["phases"].toArray();
+    for (int i = 0; i < phases.size(); ++i) { auto p = phases[i].toObject(); p["state"] = "draft"; phases[i] = p; }
+    auto last = phases[1].toObject(); last["barrier"] = true; phases[1] = last;
+    planning["phases"] = phases;
+    auto tasks = planning["tasks"].toArray();
+    for (int i = 0; i < tasks.size(); ++i) {
+        auto t = tasks[i].toObject(); t["status"] = "draft"; t.remove("attempts");
+        t["description"] = QStringLiteral("Description of #%1").arg(t["id"].toInt());
+        tasks[i] = t;
+    }
+    planning["tasks"] = tasks;
+    setTeam(planning);
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.resize(1500, 900); workspace.show();
+    controller.refresh();
+    QTRY_VERIFY(controller.team("team-1"));
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    TeamUi::TaskView *draft = nullptr;
+    QTRY_VERIFY(([&] { draft = phaseGraphOf(&workspace, 3); return draft && draft->linked && controller.watched() && controller.watched()->full; })());
+    draft->linked(9, 8);
+    QTRY_COMPARE(calls(script(), "plan").size(), 1);
+    const auto plan = calls(script(), "plan").first();
+    QMap<int, int> phaseOf;
+    for (const auto &value : plan["tasks"].toArray()) phaseOf.insert(value.toObject()["id"].toInt(), value.toObject()["phase"].toInt());
+    QCOMPARE(phaseOf, (QMap<int, int>{{1, 1}, {2, 2}, {3, 2}, {4, 2}, {5, 2}, {6, 2}, {7, 3}, {8, 3}, {9, 3}}));
+    const auto roadmap = plan["phases"].toArray();
+    QCOMPARE(roadmap.size(), 2);
+    QCOMPARE(roadmap[0].toObject()["n"].toInt(), 2);
+    QCOMPARE(roadmap[0].toObject()["title"].toString(), QStringLiteral("Build"));
+    QCOMPARE(roadmap[1].toObject()["n"].toInt(), 3);
+    QCOMPARE(roadmap[1].toObject()["title"].toString(), QStringLiteral("Verify & ship"));
+    QVERIFY(roadmap[1].toObject()["barrier"].toBool());
+    // The edit itself: #8 now depends on #2 and #9; the descriptions stay.
+    for (const auto &value : plan["tasks"].toArray()) {
+        const auto task = value.toObject();
+        QCOMPARE(task["description"].toString(), QStringLiteral("Description of #%1").arg(task["id"].toInt()));
+        if (task["id"].toInt() == 8) QCOMPARE(task["deps"].toArray().size(), 2);
+    }
+}
+
+// C4 (#548): before the full plan (`team status`) arrives, a plan edit sends
+// nothing built from the `team list` summary; it says the plan is loading and
+// the same edit goes once the full plan is here.
+void TestTeamsUi::planEditsWaitForTheFullPlan()
+{
+    setTeam(team("planning"));
+    QFile hold(script() + ".statushold"); QVERIFY(hold.open(QIODevice::WriteOnly)); hold.close();
+    const auto release = qScopeGuard([&] { QFile::remove(hold.fileName()); });
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.resize(1500, 900); workspace.show();
+    controller.refresh();
+    QTRY_VERIFY(controller.team("team-1"));
+    QVERIFY(!controller.team("team-1")->full);
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    TeamUi::TaskView *graph = nullptr;
+    QTRY_VERIFY(([&] { graph = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph")); return graph && graph->linked; })());
+    QVERIFY(!controller.watched() || !controller.watched()->full);
+    graph->linked(3, 5);
+    QTest::qWait(300);
+    QVERIFY(calls(script(), "plan").isEmpty());
+    QTRY_VERIFY(workspace.findChild<QLabel *>("teamWorkspaceErrorText")
+                && workspace.findChild<QLabel *>("teamWorkspaceErrorText")->text().startsWith(QStringLiteral("Loading the plan")));
+    // The panel's own save refuses a summary copy too.
+    panel.link(*controller.team("team-1"), 3, 5, true);
+    QTest::qWait(200);
+    QVERIFY(calls(script(), "plan").isEmpty());
+    // The full plan arrives: the same edit goes, with the full tasks.
+    QFile::remove(hold.fileName());
+    QTRY_VERIFY(controller.watched() && controller.watched()->full);
+    QTRY_VERIFY(([&] { graph = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph")); return graph && graph->linked; })());
+    graph->linked(3, 5);
+    QTRY_COMPARE(calls(script(), "plan").size(), 1);
+    QCOMPARE(calls(script(), "plan").first()["revision"].toInt(), 12);
+}
+
+// N37 (#548): Apply ends the whole draft, so its confirmation names the
+// undecided changes it drops instead of saying they stay.
+void TestTeamsUi::catalogApplySaysUndecidedChangesAreDropped()
+{
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamCatalogEditor draft(&controller);
+    draft.setShowDraft(true);
+    QString asked;
+    draft.confirm = [&](const QString &name, const QString &, const QString &text, const QString &) { asked = name + ':' + text; return false; };
+    draft.resize(1180, 900); draft.show();
+    QTRY_VERIFY(draft.findChild<QPushButton *>("teamDesignerApply") && draft.findChild<QPushButton *>("teamDesignerApply")->isEnabled());
+    draft.findChild<QPushButton *>("teamDesignerApply")->click();
+    QTRY_VERIFY(!asked.isEmpty());
+    QVERIFY2(asked.startsWith(QStringLiteral("teamCatalogApplyConfirm:Write 1 kept change as the next catalog version?")), qPrintable(asked));
+    QVERIFY2(asked.contains(QStringLiteral("The 1 undecided change is dropped with the draft.")), qPrintable(asked));
+    QVERIFY(!asked.contains(QStringLiteral("stay in the draft")));
+    QVERIFY(calls(script(), "catalog apply").isEmpty());
+}
+
+// N38 (#548): "Ask designer to redo" only asks a running designer; with none
+// the click would start a new designer session, so only Discard is offered.
+void TestTeamsUi::designerRedoAsksOnlyARunningDesigner()
+{
+    auto moved = catalog(); auto inner = moved["catalog"].toObject(); inner["version"] = 4; moved["catalog"] = inner;
+    { QFile c(script() + ".catalog"); QVERIFY(c.open(QIODevice::WriteOnly)); c.write(QJsonDocument(moved).toJson(QJsonDocument::Compact)); }
+    const auto restore = qScopeGuard([this] { QFile c(script() + ".catalog"); if (c.open(QIODevice::WriteOnly)) c.write(QJsonDocument(catalog()).toJson(QJsonDocument::Compact)); });
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamDesignerPage page(&controller);
+    QString running; int starts = 0;
+    page.designerSession = [&] { return running; };
+    page.startDesigner = [&](const QString &, const QString &, const QJsonObject &) { ++starts; };
+    page.openDesigner = [](const QString &) {};
+    page.confirm = [](const QString &, const QString &, const QString &, const QString &) { return true; };
+    page.setContext("/work/checkout", "checkout");
+    page.resize(1440, 900); page.show();
+    QTRY_VERIFY(page.findChild<QLabel *>("teamCatalogBannerTitle")
+                && page.findChild<QLabel *>("teamCatalogBannerTitle")->text() == QStringLiteral("Draft is out of date — Apply is off"));
+    auto *redo = page.findChild<QPushButton *>("teamCatalogRedo");
+    QVERIFY(redo);
+    QVERIFY(!redo->isVisible());   // no designer runs
+    QVERIFY(page.findChild<QPushButton *>("teamCatalogBannerDiscard")->isVisible());
+    // A running designer is asked in its own conversation.
+    running = QStringLiteral("claude/checkout/team-designer");
+    page.refresh();   // as the window does on each fleet update while the page shows
+    QTRY_VERIFY(redo->isVisible());
+    QCOMPARE(starts, 0);
+}
+
+// QA #500, finding 1 (SPEC 5.3): on Board at 1440x900 a phase header keeps
+// its actions in view while the five columns scroll sideways.
+void TestTeamsUi::boardPhaseHeaderKeepsItsActionsInView()
+{
+    setTeam(graphTeam());
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.resize(1440, 900); workspace.show();
+    controller.refresh();
+    QTRY_VERIFY(controller.team("team-1"));
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceView"));
+    for (auto *b : workspace.findChild<QWidget *>("teamWorkspaceView")->findChildren<QPushButton *>())
+        if (b->property("segment") == "board") { b->click(); break; }
+    // A poll rebuilds the board: the area is looked up each time.
+    const auto area = [&] { return qobject_cast<QScrollArea *>(workspace.findChild<QWidget *>("teamWorkspaceBoard")); };
+    QTRY_VERIFY(area() && phaseScrollOf(&workspace, 3) && phaseScrollOf(&workspace, 3)->findChild<QPushButton *>("teamPhaseAccept"));
+    // The columns need more room than the viewport: the page scrolls sideways.
+    QTRY_VERIFY(area() && area()->horizontalScrollBar()->maximum() > 0);
+    const auto inView = [&](const char *name, int place) {
+        auto *board = area();
+        auto *scroll = phaseScrollOf(&workspace, 3);
+        auto *widget = scroll ? scroll->findChild<QWidget *>(name) : nullptr;
+        if (!board || !widget || !widget->isVisible()) return false;
+        // Placed at a fraction of the sideways range: 0, half or the end.
+        auto *bar = board->horizontalScrollBar();
+        const int value = bar->maximum() * place / 2;
+        if (bar->value() != value) { bar->setValue(value); return false; }
+        const QRect rect(widget->mapTo(board->viewport(), QPoint(0, 0)), widget->size());
+        return board->viewport()->rect().contains(rect);
+    };
+    for (int place : {0, 1, 2})
+        for (const char *name : {"teamPhaseAutoAccept", "teamPhaseReject", "teamPhaseAccept", "teamPhaseMore"})
+            QTRY_VERIFY2(inView(name, place), qPrintable(QStringLiteral("%1 at %2/2 of the sideways range").arg(name).arg(place)));
 }
 
 #include "test_teamsui.moc"

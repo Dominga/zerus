@@ -24,6 +24,34 @@ pub const WINDOWS_PROVIDER_REFUSAL: &str = "provider is unavailable on a Windows
 pub fn windows_provider(provider: &Value) -> bool {
     matches!(provider.as_str(), Some("codex" | "claude" | "kimi"))
 }
+/// External rows are read/inbox targets, never additional launch providers.
+pub fn external_workstream(row: &Value) -> bool {
+    let context = &row["client_context"];
+    row["backend"] == "external-workstream"
+        && row["external_protocol"] == "cooperative-inbox-v1"
+        && row["send_delivery"] == "cooperative_inbox"
+        && row["external_cloud_control"] == false
+        && context["schema_version"].as_u64() == Some(1)
+        && context["evidence"] == "explicit_registration"
+        && matches!(
+            context["kind"].as_str(),
+            Some("chatgpt_chat" | "chatgpt_work" | "codex_chat")
+        )
+        && row["name"]
+            .as_str()
+            .is_some_and(|name| name.starts_with("external/"))
+}
+pub fn windows_session(row: &Value) -> bool {
+    if row["agent"] == "external" || row["cmd"] == "external" {
+        return external_workstream(row);
+    }
+    windows_provider(&row["agent"]) || windows_provider(&row["cmd"])
+}
+
+pub fn external_operation_allowed(operation: &str) -> bool {
+    matches!(operation, "inspect" | "history" | "send")
+}
+
 pub const WINDOWS_OPERATIONS: &[&str] = &[
     "inspect",
     "history",
@@ -551,12 +579,7 @@ impl Flags {
         }
         if self.windows_gateway {
             features.retain(|feature| {
-                ![
-                    "send_agent",
-                    "gateway_one_hop",
-                    "inspect_agent",
-                ]
-                .contains(feature)
+                !["send_agent", "gateway_one_hop", "inspect_agent"].contains(feature)
             });
             reasons.insert("windows_scope".into(), json!("Local Codex, Claude and Kimi sessions, including new ones in project working folders; browsing folders, worktrees, peers, DeepSeek/OpenCode and voice/speech are unavailable"));
         }

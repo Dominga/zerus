@@ -320,10 +320,17 @@ on a 250 ms pulse:
   30 s safety tick, and checks of one path start at least 1 s apart. The
   `git-status` code (with its 60 s remote cache) runs in-process on two worker
   threads, the concurrency the desktop's polls had, so no check delays the
-  stream's other frames. The desktop gives each live stream the folders of its
-  computer's sessions (selected first, then shown rows) and polls only folders
-  the stream does not follow; a followed value is dated anew every 15 s, with
-  its remote age carried forward.
+  stream's other frames. Streams on one computer share checks through small
+  private files in the state directory: a stream takes a check another one
+  started after the change that made the path due (the journal row's time, or
+  at most 30 s earlier for the safety tick) when the Git metadata stat is
+  unchanged, waits up to 4 s for one that is running, and then checks again a
+  second after the stream that ran it, so a computer serving several clients
+  checks each path about as often as one stream (zerus-40l8). The desktop
+  gives each live stream the folders of its computer's sessions (selected
+  first, then shown rows) and polls only folders the stream does not follow;
+  a followed value is dated anew every 15 s, with its remote age carried
+  forward.
 - **Tasks**: stats of `replica/<project>/project.loro` and its `tasks/`
   directory, then the existing task listing. Loro stays inside `crates/replica`.
 

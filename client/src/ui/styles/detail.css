@@ -348,7 +348,3 @@
 @keyframes insp-in { from { opacity: 0; translate: 24px 0; } }
 @keyframes vm-drift { to { transform: rotate(360deg); } }
 @keyframes insp-out { to { opacity: 0; translate: 24px 0; } }
-@media (prefers-reduced-motion: reduce) {
-  .inspector, .icard, .icard-body, .vm-text, .vm-frames { animation: none !important; }
-  .icard-chev, .col-edge::before, .insp-resize > i, .sp-resize > i { transition: none; }
-}

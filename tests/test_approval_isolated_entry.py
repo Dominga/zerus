@@ -32,8 +32,8 @@ class ApprovalIsolatedEntryTests(unittest.TestCase):
                 entry = ROOT / "tests" / name
                 self.assertNotEqual(entry, Path(__file__).resolve())
                 with self.subTest(entry=name):
-                    result = subprocess.run([sys.executable, "-I", "-B", str(entry)],
-                        cwd=scratch, env=env, capture_output=True, text=True, timeout=30)
+                    result = subprocess.run([sys.executable, "-I", "-B", "-X", "utf8", str(entry)],
+                        cwd=scratch, env=env, capture_output=True, text=True, encoding="utf-8", timeout=30)
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                     self.assertRegex(result.stderr, r"Ran [1-9][0-9]* tests? in ")
                     self.assertRegex(result.stderr, r"\nOK\s*\Z")

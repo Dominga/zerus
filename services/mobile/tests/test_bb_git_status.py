@@ -235,16 +235,18 @@ class GitStatusTests(SessionCase):
                 await self.assert_replays(request, result, process)
         self.assertNotIn("BB-PRIVATE", process.output())
 
-    async def test_git_read_has_a_five_second_native_budget_and_never_retries_that_identity(self):
+    async def test_git_read_has_a_25_second_native_budget_and_never_retries_that_identity(self):
         self.answer(stdout=snapshot(), delay=60)
         process = await self.launch()
         request = self.read()
         started = time.monotonic()
-        result = await self.submit(request, process, timeout=15)
+        # The CLI can spend up to 19 seconds on bounded Git evidence reads;
+        # the connector gives the whole native command 25 seconds.
+        result = await self.submit(request, process, timeout=35)
         elapsed = time.monotonic() - started
         self.assertEqual(result, failed("native command timed out"))
-        self.assertGreaterEqual(elapsed, 4.0)
-        self.assertLess(elapsed, 15)
+        self.assertGreaterEqual(elapsed, 24.0)
+        self.assertLess(elapsed, 35)
         [call] = self.native_calls()
         self.assertEqual((call["argv"], call["stdin"]), (argv(), ""))
         self.assertIsNone(self.hgs.finished(call["pid"]), "the timed-out fake native command ran to its end")

@@ -34,8 +34,8 @@ DEADLINE = time.monotonic() + 570
 def admit(environment, system):
     if (system != "Darwin" or environment.get("GITHUB_ACTIONS") != "true"
             or environment.get("RUNNER_ENVIRONMENT") != "github-hosted"
-            or environment.get("GITHUB_REPOSITORY") != "ufna/zerus"):
-        raise ValueError("The isolated Mac user requires an upstream disposable hosted runner")
+            or environment.get("GITHUB_REPOSITORY") not in {"ufna/zerus", "WhiteWh/zerus", "romanilyin/zerus"}):
+        raise ValueError("The isolated Mac user requires an authorized disposable hosted runner")
 
 
 def command(*arguments, check=True):

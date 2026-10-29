@@ -240,3 +240,34 @@ fn a_task_notification_ends_its_background_job() {
     observe(&mut r, &json!({"hook_event_name":"UserPromptSubmit","prompt":"<task-notification><task-id>b2</task-id><status>failed</status></task-notification>"}));
     assert_eq!(r["shell_jobs"][id(&r, "main", "call-c")]["status"], "failed");
 }
+
+/// Owner, 2026-10-28: a Claude background command is running while its command
+/// runs in the session's process tree, and ended once it runs nowhere.
+#[test]
+fn claude_background_jobs_follow_the_process_tree() {
+    let record = json!({"agent":"claude","run_id":"r1"});
+    let hooks = |id: &str, command: &str, started: f64| {
+        json!({"id":id,"source":"hooks","background":true,"provider":"claude","run_id":"r1","status":"unknown",
+            "observed":false,"command":command,"started_at":started})
+    };
+    let mut jobs: Jobs = BTreeMap::new();
+    jobs.insert("a".into(), hooks("a", "sleep 600; echo 'done'", 1000.0));
+    jobs.insert("b".into(), hooks("b", "cargo test --bin hgs", 1000.0));
+    jobs.insert("c".into(), hooks("c", "echo fresh", 1990.0));
+    jobs.insert(
+        "os-1".into(),
+        json!({"id":"os-1","source":"process_tree","background":true,"status":"running",
+            "command":"C:\\Program Files\\Git\\bin\\bash.exe -c source x.sh && eval 'sleep 600; echo '\"'\"'done'\"'\"'' < /dev/null"}),
+    );
+    claude_background(&record, &mut jobs, 2000.0);
+    assert_eq!(jobs["a"]["status"], "running");
+    assert!(!jobs.contains_key("os-1"), "the tree entry of a placed call is dropped");
+    assert_eq!(jobs["b"]["status"], "ended");
+    // A call in its first half minute may not have started its process yet.
+    assert_eq!(jobs["c"]["status"], "unknown");
+    // Another agent's jobs are left alone.
+    let mut other = jobs.clone();
+    other.insert("d".into(), hooks("d", "make", 1000.0));
+    claude_background(&json!({"agent":"codex","run_id":"r1"}), &mut other, 2000.0);
+    assert_eq!(other["d"]["status"], "unknown");
+}

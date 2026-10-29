@@ -585,7 +585,13 @@ sys.exit(0 if signed_in else 1)
         marker=self.root/'unexpected-network'
         curl=self.bin/'curl';curl.write_text('#!/bin/sh\nprintf unexpected > '+str(marker)+'\nexit 99\n');curl.chmod(0o755)
         result=json.loads(self.run_hgs('account','inspect','claude-work','--refresh').stdout)
-        self.assertEqual((result['auth_status'],result['status']),('signed_in','unavailable'))
+        # WhiteWh reports an expired quota token explicitly while preserving the
+        # independently verified native sign-in (12848a65).
+        self.assertEqual((result['auth_status'],result['status']),('signed_in','expired'))
+        self.assertNotIn('SYNTHETIC-EXPIRED-TOKEN', json.dumps(result))
+        row=next(p for p in self.ls()['profiles'] if p['id']=='claude-work')
+        self.assertEqual((row['account_status']['auth_status'],row['account_status']['status']),
+                         ('signed_in','expired'))
         self.assertEqual(result['windows'],[])
         self.assertEqual(credentials.read_bytes(),before)
         self.assertFalse(marker.exists())

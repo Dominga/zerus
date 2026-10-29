@@ -1109,6 +1109,21 @@ answered; a denial cannot carry an explanation.
     lead had to take it from the member's last message. A queued report must
     store its whole text or nothing, and a member must be able to replace a
     placeholder before the lead decides.
+  - The Android app module did not compile since U30 (#509): SessionCardUi.kt
+    used `20.sp` without its import, so QA could not run Android and nothing
+    showed it (fixed in #535's c68c2e7b). With it compiling, four U30 tests
+    fail on the merits: DesktopSessionPaletteTest (3, e.g. Attention expected,
+    Neutral shown) and SessionStateContractTest (1: the reason of
+    zerus-build-defers-the-reply). They need a fix with the contract. 27 more
+    fail only on Windows (POSIX file permissions in AttachmentStore and the
+    conversation caches) and one on a queue shutdown wait.
+  - A plan edit (`plan`) recreates the phases it is given as Draft records with
+    this edit's proposer and time, ordered by number: an order chosen with
+    move-phase and the original proposer are lost (#548's residual). Phases
+    that already exist keep their order, proposer and time.
+  - `hgs team expect` from a DeepSeek member's sandbox is refused ("the sandbox
+    blocks the team store") instead of being queued in the member's folder like
+    a report, ask or commit, so a sandboxed member cannot declare a budget.
   - After the lead answers a permission with `hgs team answer`, the next
     question sync records the same question again as answered "by unknown":
     the answer leaves `pending` set. The answer clears it.
@@ -1120,6 +1135,136 @@ answered; a denial cannot carry an explanation.
     findings (N1 a Zerus build is not Background in the capture gate; N2
     work-ahead ignores dependencies inside a draft phase; N5 a failed held
     message is lost silently; ...).
+
+- **U43. A team member's mute on every device (for the owner).** A team member
+  is muted by default only on the desktop that shows the team (#547 N36): the
+  phone and other desktops keep notifying. Phase 42 makes the desktop's text
+  honest ("Muted on this computer"). The shared fix makes hgs apply the team
+  default itself: a member of an active team without a recorded choice reads
+  muted in `notification_preferences`, so Android and every desktop follow.
+  That changes the notification semantics and the mobile contract, so it waits
+  for the owner's direction.
+
+- **U44. Agent teams on the phone (found in #535).** Android has no agent-team
+  view, and the mobile relay and connector carry no team status. Phase 42 adds
+  only the Kotlin model and presentation of the pipeline stages, checked
+  against the shared fixture. A team view on the phone (the graph or board, the
+  lead's inbox, the stage chips) needs a team status API through the connector
+  and relay first; it is a feature of its own for the owner to plan.
+
+### U45-U52. Team customization for outside users (owner, 2026-10-28)
+
+An outside user moving a pipeline of their own (a tracker, dispatch scripts,
+pre-review gates, a landing queue) onto Zerus teams asked for these. Every one
+is opt-in: a team, role or task that sets none of the new fields behaves
+exactly as today, and the existing tests keep passing unchanged. The owner
+sets them in the catalog, the team settings or the plan; members never do.
+
+- **U45. A model per task, and a task for a role.** A task may name
+  `models` (the models allowed for it) and `role` instead of an assignee. A
+  member may list `models` it can switch between (`[{model, effort}]`;
+  default: only its launch model). A task for a role goes to a free member of
+  that role whose list allows one of the task's models; before the hand-out
+  Zerus switches the member's model and effort through the agent's native
+  settings change (Claude, Codex, DeepSeek where the agent supports it) and
+  hands out only after the change is confirmed. A refused or unconfirmed
+  change leaves the task waiting with its reason, never on the wrong model.
+  Rebalancing keeps a task's model rule.
+- **U46. The context before a task.** A role or member may set
+  `context_before_task: none | compact | clear` (default `none`). Before each
+  hand-out, a pipeline stage's included, Zerus runs the agent's native
+  compact or clear, waits for its confirmation and only then hands out; an
+  agent without the command gets `none` with a note in the feed. The hand-off
+  text then names only the task's own input.
+- **U47. A stage Zerus runs itself.** A pipeline preset (U36) may hold a
+  `command` stage: a command, its expected exit code and a time limit. Zerus
+  runs it in the stage's folder as a detached run (`hgs run`), with no model;
+  the exit code is the verdict, and a return carries the output's tail as the
+  finding to the implementer. Only the owner's catalog defines the command.
+- **U48. Landing and a branch per task.** A preset may end with a `land`
+  stage: a `command` stage run once the earlier stages pass, whose exit codes
+  map to accepted, returned to the implementer (conflict, red) or held for
+  the lead (busy, infrastructure). A team may set `branch_per_task` with a
+  name template (`task/{id}`): each hand-out starts the task's branch in the
+  member's folder from the team's base, so a squash landing never brings back
+  work already landed. Default: one branch per member, as today.
+- **U49. Scale and drain.** `scale {role, agent, model, count}` adds several
+  members at once (the owner, or the lead on the owner's word naming the
+  count); `drain {member}` lets a member finish its current attempt, hands it
+  nothing new, then stops its session and removes it.
+- **U50. One list of what waits for the owner.** A desktop page lists, across
+  all teams, every item that waits for the owner: draft phases, reports or
+  permissions escalated to the owner, the owner's word asked for, finished
+  teams. It only reads what the teams already record. The phone follows with
+  the team status API (U44).
+- **U51. An intake for urgent tasks.** The owner may create an intake key for
+  a team in Zerus state. A process presenting it (a health watcher) may add
+  tasks only as one urgent phase, bounded in size, with the key named in the
+  feed; it gets none of the owner's other rights. Without a key, as today,
+  only the owner and the lead change a plan.
+- **U52. Restart a member that crashed.** A team may set `restart_crashed`
+  (default off). A member session that exits on its own (not stopped by the
+  owner, not a usage limit) is launched again into the same folder at most
+  three times an hour, its open attempt returned as unconfirmed for the lead;
+  the feed records each restart.
+- **U53. Change the account of a running session (owner, 2026-10-28).** The
+  composer shows the session's account beside the model; its menu lists the
+  same provider's logged-in accounts. Choosing one, after the owner confirms,
+  waits for an idle session, copies the conversation into that account's
+  native store and resumes the agent into the same conversation, folder and
+  name; a failed launch returns to the old account, an unconfirmed one is
+  reported uncertain and never retried. Nothing changes until the owner
+  chooses; a team member's account changes only through swap-member.
+- **U54. Move a team to another account (owner, 2026-10-29).** Moving team
+  528aebfe's Claude members and its lead off an account near its weekly limit
+  took two owner scripts in an outside PowerShell, a manual pause of six old
+  sessions and a folder fix. Zerus handles it as one ordinary owner action:
+  - *One action for a team.* "Move members on account X to account Y" (the
+    team's members menu; `swap-member` takes a list) swaps every member of
+    that provider whose session runs on X, the lead included, after one
+    confirmation that names them. The roster shows each member's real
+    account, read from its session, not only the configured one: an empty
+    `account` used to hide that the lead and reviewer ran on Additional.
+  - *Keep the conversation where it can.* With U53, a same-provider account
+    change resumes the member's own conversation on the new account (same
+    name, folder and attempt) instead of a fresh session with a continuation.
+    A fresh session stays the fallback, and the owner's choice for another
+    agent.
+  - *The old session never blocks the new one.* A fresh member session
+    reuses the member's session name, and `hgs` refused the launch ("This
+    session already has an account") while the old session lived. The swap
+    pauses the old session once it is idle (never a kill; its conversation
+    stays under Saved) before launching, or waits for idle with that reason.
+    A busy old session is never interrupted without the owner's choice.
+    A pause alone is not enough: the paused session keeps its account
+    binding, and `--new` with an explicit account is still refused, so the
+    swap also renames the old session to `<name>-<old account label>` (its
+    conversation and account kept) before the launch.
+  - *A failed launch after a swap is retried.* The failed first launch cleared
+    `launch_after_swap`, so after the owner's relaunch the member stayed Not
+    created until work was ready. A relaunch of a swapped member launches it
+    at once, and the error names its fix.
+  - *A member folder left on a task branch.* frontend2's worktree was on
+    `team/528aebfe/frontend2-570`, so its launch failed ("is not this member's
+    folder"). When the folder is clean and the task branch is already merged
+    into the member's or the lead's branch, Zerus checks out the member's
+    branch again (the task branch is kept) and records it in the feed;
+    otherwise the error offers that checkout as a review action, never a
+    reset.
+  - *The lead on the owner's word.* The lead may swap, relaunch and pause the
+    old sessions of its own team on the owner's word in its session (the U26
+    roster rule), so the owner does not need an outside shell. A swap to an
+    existing session (the lead moving to a new session) stays owner-confirmed.
+  - *A renamed member session stays the member.* After the new lead's session
+    was renamed (work-e1f3aa6e to Zerus_Iterations), every team command from
+    it was refused ("This session is not a member"): the caller is matched by
+    the stored session name only. A rename keeps the member: the caller is
+    matched by its run and conversation, and the team record follows the
+    session's rename, as `hgs inspect` already does.
+  - *The new lead gets the old lead's context.* A lead swapped to another
+    conversation gets, in its brief, the previous lead's session name and
+    conversation, the path of its transcript and its latest compact summary
+    (bounded), and the old lead stays paused, not stopped.
 
 ## Phases 37-40 (replanned 2026-10-27)
 

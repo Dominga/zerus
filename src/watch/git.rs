@@ -10,9 +10,9 @@ use super::stamps;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use zerus_watch_protocol as protocol;
 
 /// Every folder is checked at least this often, for what neither its Git
@@ -44,6 +44,9 @@ pub(super) struct Job {
     pub path: String,
     /// The files the previous check watched, stamped before this one runs.
     pub watched: Vec<PathBuf>,
+    /// A check another stream made at or after this Unix time, of the same
+    /// metadata, is current enough to take instead of running Git.
+    pub fresh_after: f64,
     cancelled: Arc<AtomicBool>,
 }
 
@@ -58,24 +61,128 @@ pub(super) struct Done {
     /// they are the ones it started with.
     pub watched: Vec<PathBuf>,
     pub stamp: u64,
+    /// When the check this result came from ran, if another stream ran it.
+    pub cached_at: Option<f64>,
 }
 
 /// Runs one check with `status` (`git-status` for a folder).
-pub(super) fn check(job: Job, status: impl Fn(&Path) -> Result<Value, String>) -> Done {
-    let Job { token, path, watched: before, cancelled } = job;
+pub(super) fn check(job: Job, status: impl Fn(&Path) -> Result<Value, String>, cache: Option<&Path>) -> Done {
+    let Job { token, path, watched: before, fresh_after, cancelled } = job;
     if cancelled.load(Ordering::SeqCst) {
-        return Done { token, path, value: None, watched: before, stamp: 0 };
+        return Done { token, path, value: None, watched: before, stamp: 0, cached_at: None };
     }
     // Stamped first: a change while Git runs is seen on the next pulse.
     let stamp = stamps::files(&before);
-    let value = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| status(Path::new(&path))))
-        .unwrap_or_else(|_| Err("the git status check failed".into()));
+    let mut cached = cache.and_then(|dir| shared::read(dir, &path, &before, stamp, fresh_after, unix_now()));
+    // Another stream checking the folder now is waited for: its check may
+    // be current for this one too.
+    let _held = match (cache, &cached) {
+        (Some(dir), None) => {
+            let held = shared::lock(dir, &path);
+            cached = shared::read(dir, &path, &before, stamp, fresh_after, unix_now());
+            held
+        }
+        _ => None,
+    };
+    let started = unix_now();
+    let cached_at = cached.as_ref().map(|(at, _)| *at);
+    let value = match cached {
+        Some((_, value)) => Ok(value),
+        None => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| status(Path::new(&path))))
+            .unwrap_or_else(|_| Err("the git status check failed".into())),
+    };
     let now_watched = match &value {
         Ok(value) => watched(&path, value),
         Err(_) => before.clone(),
     };
     let stamp = if now_watched == before { stamp } else { stamps::files(&now_watched) };
-    Done { token, path, value: Some(value), watched: now_watched, stamp }
+    // Kept with the files the next check watches, as this stream holds them.
+    if let (Some(dir), Ok(value), None) = (cache, &value, cached_at) {
+        shared::write(dir, &path, &now_watched, stamp, started, value);
+    }
+    Done { token, path, value: Some(value), watched: now_watched, stamp, cached_at }
+}
+
+fn unix_now() -> f64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0, |elapsed| elapsed.as_secs_f64())
+}
+
+/// Checks shared between the streams of one computer: each real check is kept
+/// in a small file per folder, and a stream takes one that ran after it needed
+/// it, of unchanged Git metadata, instead of running Git again. Streams then
+/// share one schedule, so a computer with several clients checks each folder
+/// about as often as one stream would.
+pub(super) mod shared {
+    use super::*;
+    use sha2::{Digest, Sha256};
+    use std::io::Write;
+
+    /// Entries older than this are removed now and then.
+    const KEEP: Duration = Duration::from_secs(24 * 60 * 60);
+    /// How long a check waits for another stream's check of the folder; Git
+    /// status gives up after 3 s.
+    const WAIT: Duration = Duration::from_secs(4);
+    static WRITES: AtomicUsize = AtomicUsize::new(0);
+
+    fn file(dir: &Path, path: &str, extension: &str) -> PathBuf {
+        let hash = Sha256::digest(path.as_bytes());
+        let name: String = hash[..16].iter().map(|byte| format!("{byte:02x}")).collect();
+        dir.join(format!("{name}.{extension}"))
+    }
+
+    /// Holds the folder's check while it runs; None when another stream's
+    /// check outlasts the wait, and the check runs anyway.
+    pub(in super::super) fn lock(dir: &Path, path: &str) -> Option<crate::platform::FileLock> {
+        crate::state::watch_source::lock_until(&file(dir, path, "lock"), Instant::now() + WAIT).ok().flatten()
+    }
+
+    /// The kept check of `path` with these watched files and stamp, made at or
+    /// after `fresh_after`, and its time; its remote age grown by its own age.
+    pub(in super::super) fn read(dir: &Path, path: &str, watched: &[PathBuf], stamp: u64, fresh_after: f64, now: f64) -> Option<(f64, Value)> {
+        let entry: Value = serde_json::from_slice(&std::fs::read(file(dir, path, "json")).ok()?).ok()?;
+        let at = entry["checked_at"].as_f64()?;
+        let same = entry["path"] == path
+            && entry["stamp"].as_str() == Some(stamp.to_string().as_str())
+            && serde_json::to_value(watched).is_ok_and(|watched| entry["watched"] == watched);
+        if !same || at < fresh_after || at > now + 1.0 {
+            return None;
+        }
+        let mut value = entry["value"].clone();
+        if let Some(age) = value.get("remote_age_seconds").and_then(Value::as_f64) {
+            value["remote_age_seconds"] = serde_json::json!(age + (now - at).max(0.0));
+        }
+        Some((at, value))
+    }
+
+    /// Keeps a real check; one that saw files change while it ran is not kept.
+    /// The folder is private: states name branches and paths.
+    pub(in super::super) fn write(dir: &Path, path: &str, watched: &[PathBuf], stamp: u64, at: f64, value: &Value) {
+        if value.get("state").and_then(Value::as_str) == Some("changed_during_check") || crate::platform::private_dir(dir).is_err() {
+            return;
+        }
+        let Ok(watched) = serde_json::to_value(watched) else { return };
+        let entry = serde_json::json!({"path": path, "watched": watched, "stamp": stamp.to_string(), "checked_at": at, "value": value});
+        if let Ok(mut temporary) = tempfile::Builder::new().prefix(".hgs-").tempfile_in(dir) {
+            if temporary.write_all(entry.to_string().as_bytes()).is_ok() {
+                let _ = crate::platform::persist(temporary, file(dir, path, "json"));
+            }
+        }
+        if WRITES.fetch_add(1, Ordering::Relaxed).is_multiple_of(64) {
+            prune(dir);
+        }
+    }
+
+    pub(in super::super) fn prune(dir: &Path) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let old = entry.metadata().and_then(|meta| meta.modified()).ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .is_some_and(|age| age > KEEP);
+            if old {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
 }
 
 /// Worker threads that run checks in the order they were asked for.
@@ -85,18 +192,19 @@ pub(super) struct Pool {
 
 impl Pool {
     /// Starts `workers` threads; `finished` receives every check.
-    pub(super) fn spawn(workers: usize, finished: impl Fn(Done) + Clone + Send + 'static) -> Self {
+    pub(super) fn spawn(workers: usize, cache: Option<PathBuf>, finished: impl Fn(Done) + Clone + Send + 'static) -> Self {
         let (jobs, queue) = mpsc::channel::<Job>();
         let queue = Arc::new(Mutex::new(queue));
         for index in 0..workers {
             let queue = Arc::clone(&queue);
             let finished = finished.clone();
+            let cache = cache.clone();
             std::thread::Builder::new()
                 .name(format!("hgs-watch-git-{index}"))
                 .spawn(move || loop {
                     let job = queue.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).recv();
                     let Ok(job) = job else { return };
-                    finished(check(job, crate::state::watch_source::git_status));
+                    finished(check(job, crate::state::watch_source::git_status, cache.as_deref()));
                 })
                 .expect("start a git status worker");
         }
@@ -131,6 +239,9 @@ struct Folder {
     /// When the latest check started.
     started: Instant,
     due: Option<Instant>,
+    /// When the latest change not yet checked happened (Unix time): only a
+    /// check that started after it is current.
+    trigger_at: Option<f64>,
     /// The digest of the state the client holds.
     sent: Option<Digest32>,
     /// A state not sent yet, with its digest.
@@ -228,7 +339,12 @@ fn scope(path: &str, value: &Value) -> Vec<PathBuf> {
     scope
 }
 
-fn trigger(folder: &mut Folder, now: Instant) {
+/// A change at `at` (Unix time; when it was seen if unknown) makes the folder
+/// due; only a check that started after it is current.
+fn trigger(folder: &mut Folder, at: Option<f64>, now: Instant) {
+    let seen = unix_now();
+    let at = at.filter(|at| at.is_finite() && *at <= seen).unwrap_or(seen);
+    folder.trigger_at = Some(folder.trigger_at.map_or(at, |known| known.max(at)));
     if folder.running {
         folder.again = true;
         return;
@@ -270,6 +386,8 @@ impl Git {
                 again: false,
                 started: now,
                 due: Some(now),
+                // A new subscription takes no earlier check.
+                trigger_at: Some(unix_now()),
                 sent: None,
                 unsent: None,
             },
@@ -298,20 +416,25 @@ impl Git {
         folder.started = now;
         folder.due = None;
         self.queued += 1;
+        // Without a change since the last check, any check newer than the
+        // safety interval is current.
+        let fresh_after = folder.trigger_at.unwrap_or(unix_now() - SAFETY.as_secs_f64());
         Some(Job {
             token: folder.token,
             path: path.to_owned(),
             watched: folder.watched.clone(),
+            fresh_after,
             cancelled: Arc::clone(&folder.cancelled),
         })
     }
 
     /// Folders that hold one of `dirs`, where sessions changed files, are
-    /// checked again soon.
-    pub(super) fn touch(&mut self, dirs: &[PathBuf], now: Instant) {
+    /// checked again soon. `at` is when the journal recorded the change: a
+    /// check another stream started after it is current.
+    pub(super) fn touch(&mut self, dirs: &[PathBuf], at: Option<f64>, now: Instant) {
         for folder in self.folders.values_mut() {
             if dirs.iter().any(|dir| folder.scope.iter().any(|scope| dir.starts_with(scope))) {
-                trigger(folder, now);
+                trigger(folder, at, now);
             }
         }
     }
@@ -319,7 +442,7 @@ impl Git {
     /// Every folder is checked again soon (too many journal rows to tell).
     pub(super) fn touch_all(&mut self, now: Instant) {
         for folder in self.folders.values_mut() {
-            trigger(folder, now);
+            trigger(folder, None, now);
         }
     }
 
@@ -330,7 +453,7 @@ impl Git {
         for (path, folder) in self.folders.iter_mut().filter(|(_, folder)| !folder.running) {
             let current = stamp(&folder.watched);
             if folder.stamp.is_some_and(|known| known != current) {
-                trigger(folder, now);
+                trigger(folder, None, now);
             }
             folder.stamp = Some(current);
             if let Some(at) = folder.due.filter(|at| *at <= now) {
@@ -347,7 +470,15 @@ impl Git {
         self.queued = self.queued.saturating_sub(1);
         let folder = self.folders.get_mut(&done.path).filter(|folder| folder.token == done.token)?;
         folder.running = false;
-        let mut next = folder.started + SAFETY;
+        // A shared check sets the schedule: the next one is due a second
+        // after the stream that ran it checks again.
+        let mut next = match done.cached_at {
+            Some(at) => {
+                let left = at + (SAFETY + GAP).as_secs_f64() - unix_now();
+                now + Duration::from_secs_f64(left.clamp(GAP.as_secs_f64(), (SAFETY + GAP).as_secs_f64()))
+            }
+            None => folder.started + SAFETY,
+        };
         let mut again = std::mem::take(&mut folder.again);
         let value = match done.value {
             Some(Ok(value)) => value,
@@ -356,6 +487,11 @@ impl Git {
                 return outcome.and_then(Result::err);
             }
         };
+        // The check covered every change before it started; one seen while it
+        // ran stays for the next.
+        if !again {
+            folder.trigger_at = None;
+        }
         folder.watched = done.watched;
         folder.stamp = Some(done.stamp);
         folder.scope = scope(&done.path, &value);
@@ -363,7 +499,10 @@ impl Git {
             let left = Duration::from_secs_f64((REMOTE_TTL - age).clamp(0.0, REMOTE_TTL) + 0.25);
             next = next.min(now + left);
         }
-        again |= value.get("state").and_then(Value::as_str) == Some("changed_during_check");
+        if value.get("state").and_then(Value::as_str) == Some("changed_during_check") {
+            again = true;
+            folder.trigger_at = Some(unix_now());
+        }
         if again {
             next = next.min(now);
         }
@@ -422,7 +561,7 @@ mod tests {
 
     fn finish(git: &mut Git, job: Job, value: Value, now: Instant) -> Option<String> {
         let watched = watched(&job.path, &value);
-        git.done(Done { token: job.token, path: job.path, value: Some(Ok(value)), watched, stamp: 7 }, now)
+        git.done(Done { token: job.token, path: job.path, value: Some(Ok(value)), watched, stamp: 7, cached_at: None }, now)
     }
 
     fn sent(git: &mut Git) -> Vec<(String, Value, u64)> {
@@ -506,16 +645,16 @@ mod tests {
         assert!(job.is_none(), "within a second of the previous check");
         let job = git.pulse(now + SECOND, |_| stamp.get()).pop().expect("a changed HEAD or index starts a check");
         // A change while the check runs checks again one second after it started.
-        git.touch(&[inside("sample", "src")], now + SECOND);
+        git.touch(&[inside("sample", "src")], None, now + SECOND);
         finish(&mut git, job, status(&folder("sample"), "main", 1), now + SECOND + SECOND / 10);
         assert!(git.pulse(now + SECOND + SECOND / 2, |_| 7).is_empty());
         let job = git.pulse(now + 2 * SECOND, |_| 7).pop().expect("the change during the check");
         finish(&mut git, job, status(&folder("sample"), "main", 1), now + 2 * SECOND);
         // Sessions elsewhere change nothing; under the folder or its root they do.
-        git.touch(&[PathBuf::from(folder("other")), PathBuf::from(folder("samples"))], now + 5 * SECOND);
+        git.touch(&[PathBuf::from(folder("other")), PathBuf::from(folder("samples"))], None, now + 5 * SECOND);
         assert!(git.pulse(now + 5 * SECOND, |_| 7).is_empty());
-        git.touch(&[PathBuf::from(folder("sample"))], now + 5 * SECOND);
-        git.touch(&[inside("sample", "deep/folder")], now + 5 * SECOND);
+        git.touch(&[PathBuf::from(folder("sample"))], None, now + 5 * SECOND);
+        git.touch(&[inside("sample", "deep/folder")], None, now + 5 * SECOND);
         let jobs = git.pulse(now + 5 * SECOND, |_| 7);
         assert_eq!(jobs.len(), 1, "a burst checks once");
         finish(&mut git, jobs.into_iter().next().unwrap(), status(&folder("sample"), "main", 1), now + 5 * SECOND);
@@ -547,10 +686,14 @@ mod tests {
         let job = git.pulse(now + 71 * SECOND, |_| 7).pop().unwrap();
         assert!(git.unsubscribe(&folder("sample")));
         let ran = Cell::new(false);
-        let done = check(job, |_| {
-            ran.set(true);
-            Ok(Value::Null)
-        });
+        let done = check(
+            job,
+            |_| {
+                ran.set(true);
+                Ok(Value::Null)
+            },
+            None,
+        );
         assert!(!ran.get() && done.value.is_none());
         assert!(git.done(done, now + 72 * SECOND).is_none());
         assert!(!git.pending());
@@ -562,11 +705,19 @@ mod tests {
         let now = Instant::now();
         let mut git = Git::new();
         let job = git.subscribe(&folder("sample"), now).unwrap().unwrap();
-        let done = check(job, |_| Err("Local sessions are unsupported".into()));
+        let subscribed = job.fresh_after;
+        let done = check(job, |_| Err("Local sessions are unsupported".into()), None);
         assert_eq!(git.done(done, now).as_deref(), Some("Local sessions are unsupported"));
         assert!(!git.pending());
         assert!(git.pulse(now + SAFETY - SECOND, |_| 7).is_empty());
-        assert_eq!(git.pulse(now + SAFETY, |_| 7).len(), 1);
+        // The retry still takes only a check newer than the subscription.
+        let retry = git.pulse(now + SAFETY, |_| 7).pop().expect("the safety tick");
+        assert_eq!(retry.fresh_after, subscribed);
+        let watched = retry.watched.clone();
+        git.done(Done { token: retry.token, path: retry.path, value: Some(Ok(status(&folder("sample"), "main", 0))), watched, stamp: 7, cached_at: None }, now + SAFETY);
+        let next = git.pulse(now + 2 * SAFETY, |_| 7).pop().expect("the next safety tick");
+        // After a check succeeded, the safety interval sets what is current.
+        assert!(next.fresh_after < subscribed, "{} against {subscribed}", next.fresh_after);
     }
 
     #[test]
@@ -602,5 +753,141 @@ mod tests {
         std::fs::create_dir_all(common.join("refs/heads/feature")).unwrap();
         std::fs::write(common.join("refs/heads/feature/x"), "0".repeat(40)).unwrap();
         assert_ne!(stamps::files(&files), before);
+    }
+
+    #[test]
+    fn a_check_another_stream_ran_after_it_was_needed_is_taken_instead_of_running_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("watch-git");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        let path = repo.to_str().unwrap().to_owned();
+        let runs = Cell::new(0);
+        let status = |_: &Path| {
+            runs.set(runs.get() + 1);
+            let mut value = status(&path, "main", runs.get());
+            value["remote_age_seconds"] = json!(5.0);
+            Ok(value)
+        };
+        let mut first = Git::new();
+        let job = first.subscribe(&path, Instant::now()).unwrap().unwrap();
+        let done = check(job, status, Some(&cache));
+        assert_eq!((runs.get(), done.cached_at), (1, None));
+        let watched = done.watched.clone();
+        let first_value = done.value.clone().unwrap().unwrap();
+        first.done(done, Instant::now());
+        // A new subscription of another stream checks for itself.
+        let mut second = Git::new();
+        let now = Instant::now();
+        let job = second.subscribe(&path, now).unwrap().unwrap();
+        let done = check(job, status, Some(&cache));
+        assert_eq!((runs.get(), done.cached_at), (2, None));
+        second.done(done, now);
+        // Its safety check takes the newer check the first stream kept.
+        let later = now + SAFETY;
+        let job = second.pulse(later, stamps::files).pop().expect("the safety check");
+        assert_eq!(job.watched, watched);
+        let done = check(job, status, Some(&cache));
+        let cached_at = done.cached_at.expect("the kept check is taken");
+        assert_eq!(runs.get(), 2);
+        let value = done.value.clone().unwrap().unwrap();
+        assert_eq!(value["changed_files"], json!(2));
+        assert!(value["remote_age_seconds"].as_f64().unwrap() >= 5.0, "the remote age grows with the kept check's");
+        assert_ne!(value, first_value);
+        // The next check is due when the stream that ran it checks again.
+        second.done(done, later);
+        let next = cached_at + (SAFETY + GAP).as_secs_f64() - unix_now();
+        let due = second.folders[&path].due.unwrap() - later;
+        assert!((due.as_secs_f64() - next).abs() < 0.5, "{due:?} against {next}");
+        // A change seen after the kept check runs Git again.
+        second.touch(&[repo.join("src")], None, later);
+        let job = second.pulse(later + SAFETY, stamps::files).pop().expect("the triggered check");
+        assert!(job.fresh_after > cached_at);
+        assert_eq!(check(job, status, Some(&cache)).cached_at, None);
+        assert_eq!(runs.get(), 3);
+        // So do changed Git metadata and a changed watched list.
+        let job = Job { token: 1, path: path.clone(), watched: watched.clone(), fresh_after: 0.0, cancelled: Arc::default() };
+        assert!(check(job, status, Some(&cache)).cached_at.is_some());
+        std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/other\n").unwrap();
+        let job = Job { token: 1, path: path.clone(), watched: watched.clone(), fresh_after: 0.0, cancelled: Arc::default() };
+        assert_eq!(check(job, status, Some(&cache)).cached_at, None);
+        let job = Job { token: 1, path: path.clone(), watched: vec![repo.join(".git")], fresh_after: 0.0, cancelled: Arc::default() };
+        assert_eq!(check(job, status, Some(&cache)).cached_at, None);
+        assert_eq!(runs.get(), 5);
+    }
+
+    #[test]
+    fn a_check_that_saw_files_change_is_not_kept_and_old_entries_are_pruned() {
+        let dir = tempfile::tempdir().unwrap();
+        let watched = vec![PathBuf::from("/work/a/.git")];
+        let mut value = status("/work/a", "main", 1);
+        value["state"] = json!("changed_during_check");
+        shared::write(dir.path(), "/work/a", &watched, 3, 100.0, &value);
+        assert!(shared::read(dir.path(), "/work/a", &watched, 3, 0.0, 101.0).is_none());
+        value["state"] = json!("ok");
+        shared::write(dir.path(), "/work/a", &watched, 3, 100.0, &value);
+        assert_eq!(shared::read(dir.path(), "/work/a", &watched, 3, 100.0, 101.0), Some((100.0, value.clone())));
+        // Too old, from the future, of another stamp or another folder.
+        assert!(shared::read(dir.path(), "/work/a", &watched, 3, 100.5, 101.0).is_none());
+        assert!(shared::read(dir.path(), "/work/a", &watched, 3, 0.0, 98.0).is_none());
+        assert!(shared::read(dir.path(), "/work/a", &watched, 4, 0.0, 101.0).is_none());
+        assert!(shared::read(dir.path(), "/work/b", &watched, 3, 0.0, 101.0).is_none());
+        let files: Vec<_> = std::fs::read_dir(dir.path()).unwrap().flatten().map(|entry| entry.path()).collect();
+        assert_eq!(files.len(), 1, "only the entry file is left: {files:?}");
+        // A day-old entry goes; a fresh one stays.
+        let old = std::fs::File::options().write(true).open(&files[0]).unwrap();
+        old.set_modified(SystemTime::now() - Duration::from_secs(25 * 60 * 60)).unwrap();
+        drop(old);
+        shared::write(dir.path(), "/work/b", &watched, 3, 100.0, &value);
+        shared::prune(dir.path());
+        assert!(!files[0].exists());
+        assert!(shared::read(dir.path(), "/work/b", &watched, 3, 0.0, 101.0).is_some());
+    }
+
+    #[test]
+    fn a_stream_waits_for_a_running_check_it_can_take_and_journal_times_set_what_is_current() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("watch-git");
+        let path = folder("busy");
+        let runs = std::sync::atomic::AtomicUsize::new(0);
+        let slow = |_: &Path| {
+            runs.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(300));
+            Ok(status(&path, "main", 1))
+        };
+        // As a stream holds them after a first check.
+        let files = watched(&path, &status(&path, "main", 1));
+        let job = |fresh_after| Job { token: 1, path: path.clone(), watched: files.clone(), fresh_after, cancelled: Arc::default() };
+        let needed = unix_now();
+        let (first, second) = std::thread::scope(|scope| {
+            let first = scope.spawn(|| check(job(needed), slow, Some(&cache)));
+            std::thread::sleep(Duration::from_millis(100));
+            let second = scope.spawn(|| check(job(needed), slow, Some(&cache)));
+            (first.join().unwrap(), second.join().unwrap())
+        });
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "the second stream took the running check");
+        assert_eq!(first.cached_at, None);
+        assert!(second.cached_at.is_some_and(|at| at >= needed));
+        assert_eq!(first.value, second.value);
+        // A check that started before the change it needs runs Git again.
+        assert_eq!(check(job(unix_now()), slow, Some(&cache)).cached_at, None);
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+        // The journal's time of a change is what a check must follow; a time
+        // not yet reached is taken as now.
+        let now = Instant::now();
+        let mut git = Git::new();
+        let started = git.subscribe(&path, now).unwrap().unwrap();
+        git.done(Done { token: started.token, path: path.clone(), value: Some(Ok(status(&path, "main", 1))), watched: vec![], stamp: 0, cached_at: None }, now);
+        let changed = unix_now() - 5.0;
+        git.touch(&[PathBuf::from(&path)], Some(changed - 10.0), now);
+        git.touch(&[PathBuf::from(&path)], Some(changed), now);
+        let job = git.pulse(now + SECOND, |_| 0).pop().expect("the touched folder");
+        assert_eq!(job.fresh_after, changed);
+        git.done(Done { token: job.token, path: path.clone(), value: Some(Ok(status(&path, "main", 1))), watched: vec![], stamp: 0, cached_at: None }, now + SECOND);
+        let before = unix_now();
+        git.touch(&[PathBuf::from(&path)], Some(before + 60.0), now + SECOND);
+        let job = git.pulse(now + 2 * SECOND, |_| 0).pop().expect("the touched folder");
+        assert!(job.fresh_after >= before && job.fresh_after <= unix_now());
     }
 }

@@ -7,6 +7,7 @@
 #include "AccountFilter.h"
 #include "ArchiveBrowser.h"
 #include "CacheKeepalive.h"
+#include "ConversationSource.h"
 #include "GitStatusBadge.h"
 #include "JsonParse.h"
 #include "MachineAppearance.h"
@@ -204,14 +205,22 @@ void SessionsWindow::requestRows()
 
 void SessionsWindow::postRows()
 {
+    // One preparation at a time on the shared preparation thread: requests
+    // while it runs fold into one more after it. Stale preparations queued
+    // one behind another held up the replies that share that thread, such as
+    // the inspection of a newly selected session (user report: up to 40 s).
+    if (m_rowPreparing) { ++m_rowGeneration; m_rowsPending = true; m_rowsAgain = true; return; }
+    m_rowPreparing = true; ++m_postedRowPreparations;
     auto inputs = rowInputs(); inputs.generation = ++m_rowGeneration;
     m_rowsPending = true;
     ProcessRunner::post(this, [inputs = std::move(inputs)] { return prepareRows(inputs); },
         [this](const PreparedRows &prepared) {
+            m_rowPreparing = false;
+            const bool again = m_rowsAgain; m_rowsAgain = false;
             // A newer request supersedes this one; its own result follows.
-            if (prepared.generation != m_rowGeneration) { ++m_droppedRowPreparations; return; }
-            m_rowsPending = false;
-            applyRows(prepared);
+            if (prepared.generation != m_rowGeneration) ++m_droppedRowPreparations;
+            else { m_rowsPending = false; applyRows(prepared); }
+            if (again) postRows();
         });
 }
 
@@ -221,10 +230,15 @@ QMap<int, QVariant> SessionsWindow::sessionCardRoles(const Entry &e, const RowIn
     const auto &s = e.session;
     const bool ending = terminating(e, inputs);
     const QString rowStatus = ending ? tr("Terminating…") : status(s, e.online);
-    const QString desc = ending ? tr("Waiting for the session to stop") : currentAction(s, e.online).simplified();
-    roles.insert(SessionRoles::Model, s.model.isEmpty() ? (s.cmd == "sh" ? QString() : tr("Model unknown")) : s.model);
+    QString desc = ending ? tr("Waiting for the session to stop") : currentAction(s, e.online).simplified();
+    // U22/N17: an owner warning about DeepSeek's session-log upload owns line
+    // three; an activity excerpt never hides it, because the block's promise is
+    // what the owner needs to see.
+    const bool uploadWarning = !s.uploadNote.isEmpty();
+    if (uploadWarning) desc = s.uploadNote;
+    roles.insert(SessionRoles::Model, s.model.isEmpty() ? (s.cmd == "sh" || s.cmd == "external" ? QString() : tr("Model unknown")) : s.model);
     roles.insert(SessionRoles::Effort, s.effort.isEmpty() ? QStringLiteral("—") : s.effort);
-    roles.insert(SessionRoles::Title, sessionLabel(s)); roles.insert(SessionRoles::Agent, s.cmd);
+    roles.insert(SessionRoles::Title, sessionLabel(s)); roles.insert(SessionRoles::Agent, ConversationSource::badge(s.cmd, s.clientContext));
     // F4: the Team designer keeps its fixed name, whatever hgs called the session.
     const bool designer = Teams::isDesignerSession(e.host, s.name);
     if (designer) roles.insert(SessionRoles::Title, Teams::designerTitle());
@@ -239,17 +253,20 @@ QMap<int, QVariant> SessionsWindow::sessionCardRoles(const Entry &e, const RowIn
         break;
     }
     QString meta = SessionPresentation::checkoutLine(s);
+    const auto sourceLabel = ConversationSource::label(s.cmd, s.clientContext);
+    if (!sourceLabel.isEmpty()) meta = sourceLabel + (meta.isEmpty() ? QString() : QStringLiteral(" | ") + meta);
     roles.insert(SessionRoles::MetaIcon, SessionPresentation::checkoutIcon(s));
     if (s.state == "archived" && s.archivedAt > 0) {
         if (!meta.isEmpty()) meta += QStringLiteral(" / ");
         meta += QDateTime::fromSecsSinceEpoch(qint64(s.archivedAt)).toLocalTime().toString("d MMM HH:mm");
     }
     roles.insert(SessionRoles::Meta, meta); roles.insert(SessionRoles::Status, rowStatus); roles.insert(SessionRoles::Detail, desc);
+    if (uploadWarning) roles.insert(SessionRoles::UploadWarning, true);
     const auto gitPath = SessionPresentation::gitStatusPath(s);
     const auto git = SessionPresentation::gitStatus(s, inputs.gitStatus.value(e.host + '\n' + gitPath), e.online);
     roles.insert(SessionRoles::GitHost, e.host); roles.insert(SessionRoles::GitPath, gitPath);
     roles.insert(SessionRoles::GitStatus, git);
-    roles.insert(Qt::AccessibleDescriptionRole, GitStatusBadge::tooltip(git));
+    roles.insert(Qt::AccessibleDescriptionRole, (sourceLabel.isEmpty() ? QString() : sourceLabel + QStringLiteral(". ")) + GitStatusBadge::tooltip(git));
     roles.insert(SessionRoles::Attention, !ending && (s.reviewLater || (e.online && !s.attentionAcknowledged
         && (s.needsAction() || SessionRows::childNeedsAction(e, inputs.selection)))));
     roles.insert(SessionRoles::ReviewLater, s.reviewLater);

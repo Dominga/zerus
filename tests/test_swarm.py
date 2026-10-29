@@ -260,39 +260,64 @@ class Swarm(unittest.TestCase):
         self.assertEqual({f['path'] for f in projects[0]['folders']}, {'/a', '/b'})
         self.assertTrue(list((self.root / 'a/swarm').glob('backup-before-join-*.json')))
 
-    def test_local_windows_folders_never_reach_the_catalog(self):
-        # A desktop keeps its local Windows folders (D15); an older or newer GUI
-        # that sends one still applies, and neither node's catalog shows it.
+    def test_local_unc_folders_never_reach_the_catalog(self):
+        # WhiteWh shares drive paths, but this desktop's network-share folders
+        # remain local. Keep those distinct rather than undoing the fork feature.
         self.join('a', 'b')
         before = self.call('a', 'get'); desired = copy.deepcopy(before['organization'])
         project_a = next(p for p in desired['projects'] if p['id'] == 'a')
-        project_a['name'] = 'Renamed beside Windows folders'
-        # This machine by its alias, or by its ID once a snapshot named it.
-        project_a['folders'] += [dict(id='drive', machine='a', path='C:\\work', name='Drive'),
-                                 dict(id='unc', machine='a', path='//server/share/dir', name='Share'),
-                                 dict(id='by-id', machine='desktop', machine_id=before['node_id'], path='c:/Users/user/project', name='')]
-        windows = copy.deepcopy(desired)
+        project_a['name'] = 'Renamed with local shares'
+        project_a['folders'] += [dict(id='unc', machine='a', path='//server/share/dir', name='Share'),
+                                 dict(id='by-id', machine='desktop', machine_id=before['node_id'], path=r'\\server\share\private', name='')]
+        local_shares = copy.deepcopy(desired)
         self.patch('a', before, desired); self.call('a', 'sync')
         for node in ('a', 'b'):
             projects = {p['id']: p for p in self.call(node, 'get')['organization']['projects']}
-            self.assertEqual(projects['a']['name'], 'Renamed beside Windows folders')
+            self.assertEqual(projects['a']['name'], 'Renamed with local shares')
             self.assertEqual([f['path'] for f in projects['a']['folders']], ['/a'])
         exported = json.dumps(self.call('a', 'export'))
-        for private in ['C:\\\\work', '//server/share', 'Users/user']:
-            self.assertNotIn(private, exported)
-        # Removing them again is no change; other invalid paths, a peer's drive
-        # path among them, still fail.
+        self.assertNotIn('//server/share', exported)
+        self.assertNotIn('private', exported)
+        # Removing these local-only shares is still no catalog change.
         saved = self.call('a', 'get'); desired = copy.deepcopy(saved['organization'])
-        self.patch('a', dict(saved, organization=windows), desired)
+        self.patch('a', dict(saved, organization=local_shares), desired)
         self.assertEqual(saved['digest'], self.call('a', 'get')['digest'])
         for folder in [dict(id='relative', machine='a', path='work', name=''),
-                       dict(id='peer-drive', machine='b', path='C:\\work', name=''),
-                       dict(id='unknown', machine='windows-desktop', path='c:/Users/user/project', name='')]:
+                       dict(id='drive-relative', machine='b', path='C:work', name=''),
+                       dict(id='root-relative', machine='a', path=r'\work', name=''),
+                       dict(id='invalid-new-machine', machine='windows-desktop', path='c:/bad'+chr(0), name='')]:
             failing = copy.deepcopy(desired)
             next(p for p in failing['projects'] if p['id'] == 'a')['folders'].append(folder)
-            self.call('a', 'apply', data=dict(base=saved['organization'], desired=failing, versions=saved['versions']), ok=False)
+            with self.subTest(folder=folder['id']):
+                self.call('a', 'apply', data=dict(base=saved['organization'], desired=failing, versions=saved['versions']), ok=False)
         self.assertEqual(saved['digest'], self.call('a', 'get')['digest'])
         self.assertNotIn('windows-desktop', json.dumps(self.call('a', 'export')))
+
+    def test_windows_drive_folders_replicate_with_exact_machine_identity(self):
+        # Intentional WhiteWh contract (4b51c490): share descriptions, not files.
+        self.join('a', 'b')
+        before = self.call('a', 'get'); desired = copy.deepcopy(before['organization'])
+        node_a, node_b = before['node_id'], self.call('b', 'get')['node_id']
+        added = [dict(id='drive', machine='a', path=r'C:\work', name='Drive'),
+                 dict(id='by-id', machine='desktop', machine_id=node_a, path='c:/Users/user/project', name=''),
+                 dict(id='peer-drive', machine='b', path=r'D:\other', name='Peer drive')]
+        next(p for p in desired['projects'] if p['id'] == 'a')['folders'].extend(added)
+        self.patch('a', before, desired); self.call('a', 'sync')
+        for node in ('a', 'b'):
+            project_a = next(p for p in self.call(node, 'get')['organization']['projects'] if p['id'] == 'a')
+            folders = {f['id']: f for f in project_a['folders']}
+            for folder in added:
+                self.assertEqual(folders[folder['id']]['path'], folder['path'])
+                self.assertEqual(folders[folder['id']]['machine_id'], node_b if folder['id']=='peer-drive' else node_a)
+            exported=json.dumps(self.call(node,'export'))
+            self.assertNotIn('host-secret.invalid',exported)
+            self.assertNotIn('/private/key',exported)
+        saved = self.call('a','get'); desired = copy.deepcopy(saved['organization'])
+        next(p for p in desired['projects'] if p['id']=='a')['folders'] = [dict(id='folder-a',machine='a',path='/a',name='')]
+        self.patch('a',saved,desired); self.call('a','sync')
+        for node in ('a','b'):
+            project_a=next(p for p in self.call(node,'get')['organization']['projects'] if p['id']=='a')
+            self.assertEqual([f['path'] for f in project_a['folders']],['/a'])
 
     def test_a_peers_unc_shaped_folder_syncs_as_a_posix_path(self):
         # A Windows GUI can store "//server/share" for a POSIX peer. The catalog

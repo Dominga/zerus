@@ -6,6 +6,9 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.time.Instant
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
 
 /**
  * U30: the shared session-state contract (mobile/android/app/src/test/resources/session-state-contract.json)
@@ -32,6 +35,17 @@ class SessionStateContractTest {
             if (expect.has("kind")) {
                 val reason = JSONObject(expect.toString())
                 reason.remove("session_state")
+                if (expect.has("text_prefix")) {
+                    // A prefix is a Rust assertion, not a wire field. The host
+                    // sends complete text with its local reset clock; model a
+                    // UTC host deterministically instead of a missing reason.
+                    check(expect.getString("kind") == "usage_limit")
+                    val reset = raw.getJSONObject("provider_error").getDouble("reset_at")
+                    val clock = DateTimeFormatter.ofPattern("HH:mm").withZone(ZoneOffset.UTC)
+                        .format(Instant.ofEpochSecond(reset.toLong()))
+                    reason.put("text", expect.getString("text_prefix") + clock)
+                    reason.remove("text_prefix")
+                }
                 raw.put("state_reason", reason)
             }
             return raw
@@ -62,7 +76,17 @@ class SessionStateContractTest {
             assertTrue("$name line 3", status.detail.isNotBlank())
             // Section 2: deps always names its reason, in the host's exact words; so does a build.
             if (expected.optString("session_state") in setOf("deps", "build")) {
-                assertEquals("$name reason", expected.optString("text"), status.detail)
+                if (expected.has("text")) {
+                    assertEquals("$name reason", expected.getString("text"), status.detail)
+                } else if (expected.has("text_prefix")) {
+                    assertTrue("$name reason", status.detail.startsWith(expected.getString("text_prefix")))
+                    assertEquals("$name host text", raw.getJSONObject("state_reason").getString("text"), status.detail)
+                } else if (status.state == SessionState.Building) {
+                    // Partial fixture expectations omit the host's text. The
+                    // phone still names the build from its structured fields.
+                    val build = raw.getJSONObject("build")
+                    assertTrue("$name build", status.detail.contains(build.optString("label").ifEmpty { build.getString("command") }))
+                }
             }
             assertTrue("$name badge title", status.reason.isNotBlank())
         }

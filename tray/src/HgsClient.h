@@ -18,6 +18,7 @@ class QTimer;
 namespace DownloadCache { struct Pending; }
 
 struct SessionInfo {
+    QJsonObject clientContext;
     QJsonObject recovery;
     QJsonObject providerError;
     QJsonObject gitStatus;
@@ -95,6 +96,12 @@ struct SessionInfo {
     QString sessionState;
     QJsonObject stateReason, cacheTtl, build;
     double lastActive = 0;
+    // U22/N17: DeepSeek's session-log upload. uploadSeen is the verified mark -
+    // the session's own records still accepted an upload after its launch;
+    // uploadMayBeActive marks a session whose running host was started before
+    // the block. uploadNote is the sentence the session card and Accounts show.
+    QJsonObject uploadSeen, uploadMayBeActive;
+    QString uploadNote;
     int subagentCount = 0;
     // Pending optional Codex questions ("optional_questions"): the exact count,
     // the IDs the host lists (the newest ones) and the newest question's time.
@@ -161,6 +168,9 @@ struct BoxState {
     // pid, protocol, conpty, integrity, windows_session, and error when it is
     // unavailable). Empty on Unix and from an older CLI.
     QJsonObject localHost;
+    // WhiteWh fork, #569: "private_stores", the stores this computer's hgs
+    // refuses now (path, kind, reason, fix, source, at). Empty when none.
+    QJsonArray privateStores;
     // "ended_launches" by launch ID: launches whose session ended before this
     // listing without a listed session or record ("name", "code" or null,
     // "output", its last lines). Empty from an older CLI.
@@ -233,6 +243,9 @@ public:
     // `hgs [@host] account favorite native-opencode --model VALUE --favorite on|off --request-id UUID --json`:
     // a fresh request identity per call. A failure is reported, never retried.
     quint64 requestOpenCodeFavorite(const QString &host, const QString &value, bool favorite);
+    // Local lexical mapping only: no remote process or filesystem access.
+    quint64 requestWslFileProof(const QString &alias, const QJsonObject &input);
+    quint64 requestPathRef(const QString &operation, const QJsonObject &input);
     quint64 requestMachines(const QStringList &arguments = {QStringLiteral("ls")});
     // hgs [@host] mobile …: phones of the workspace that host's mobile connection
     // reaches. Probes the host CLI first, so an older one is never asked.
@@ -241,6 +254,10 @@ public:
     // WhiteWh fork: `hgs [@host] team <operation> --json` with `input` on stdin
     // (agent teams). A change carries its own request_id; none is retried.
     quint64 requestTeam(const QString &host, const QString &operation, const QJsonObject &input);
+    // The draft in the agent's own Terminal input (owner, 2026-10-28): read it,
+    // or with submitHash press Enter only while it is still exactly that draft.
+    quint64 requestTerminalDraft(const QString &host, const QString &name, const QString &run, const QString &conversation,
+                                 const QString &submitHash = {});
     // `hgs task <arguments>` on this computer, whose replica holds the project's
     // tasks. A prompt, report or comment travels on stdin; the reply is the JSON object.
     quint64 requestTask(const QStringList &arguments, const QString &input = {});
@@ -270,7 +287,8 @@ public:
     quint64 requestGitDiff(const QString &host, const QString &path);
     quint64 createWorktree(const QString &host, const QString &path, const QString &commonDir,
                            const QString &branch, const QString &base, const QString &destination,
-                           const QString &requestId = {}, bool receipt = false, const QString &expectedMachine = {});
+                           const QString &requestId = {}, bool receipt = false, const QString &expectedMachine = {},
+                           bool sandbox = false);
     quint64 worktreeReceipt(const QString &host, const QString &action, const QString &requestId, const QString &expectedMachine = {});
     // Cleanup verdicts are computed on the owning machine. Whole-repository reviews
     // stay cached for five minutes for the Clean up reminder; removal repeats every
@@ -410,6 +428,10 @@ signals:
     void effortFinished(quint64 request, bool ok, const QJsonObject &receipt, const QString &error);
     void searchReady(quint64 request, const QString &host, const QJsonObject &data);
     void searchFailed(quint64 request, const QString &host, const QString &error);
+    void wslFileProofReady(quint64 request, const QJsonObject &result);
+    void wslFileProofFailed(quint64 request, const QString &error);
+    void pathRefReady(quint64 request, const QJsonObject &result);
+    void pathRefFailed(quint64 request, const QString &error);
     void accountsReady(quint64 request, const QString &host, const QJsonObject &result);
     void accountsFailed(quint64 request, const QString &host, const QString &error);
     void claudeAppSessionsReady(quint64 request, const QString &host, const QJsonObject &result);
@@ -428,6 +450,8 @@ signals:
     void swarmFailed(quint64 request, const QString &error);
     void teamReady(quint64 request, const QString &host, const QString &operation, const QJsonObject &result);
     void teamFailed(quint64 request, const QString &host, const QString &operation, const QString &error);
+    void terminalDraftReady(quint64 request, const QJsonObject &result);
+    void terminalDraftFailed(quint64 request, const QString &error);
     void taskReady(quint64 request, const QJsonObject &result);
     void taskFailed(quint64 request, const QString &error);
     void sessionHostReady(quint64 request, const QJsonObject &result);
@@ -547,8 +571,11 @@ private:
     quint64 m_mobileRequest = 0;
     quint64 m_swarmRequest = 0;
     quint64 m_teamRequest = 0;
+    quint64 m_terminalDraftRequest = 0;
     quint64 m_taskRequest = 0;
     quint64 m_sessionHostRequest = 0;
+    quint64 m_wslFileProofRequest = 0;
+    quint64 m_pathRefRequest = 0;
     quint64 m_accountRequest = 0;
     quint64 m_socratiCodeRequest = 0;
     quint64 m_claudeAppRequest = 0;

@@ -69,6 +69,9 @@ pub fn run(config: &Config, target: &str, args: &[String], dry: bool) -> Result<
 }
 
 fn this(config: &Config) -> Result<Value> {
+    // #569: the known private stores are checked (and repaired when only too
+    // open) here, never on the listing path.
+    crate::private_stores::check_known();
     let listing = crate::cli::local_json(config)?;
     let executable = std::env::current_exe().ok().map(|path| path.display().to_string());
     Ok(json!({"host":config.host(),"ok":true,"hgs_version":VERSION,"executable":executable,
@@ -76,7 +79,8 @@ fn this(config: &Config) -> Result<Value> {
         "services":{"desktop":desktop(),"swarm_worker":swarm(config),
             "recovery_worker":crate::state::recovery_worker_running().map(running),
             "team_worker":crate::state::team_worker_running().map(running),
-            "mobile_connector":connector(config)}}))
+            "mobile_connector":connector(config)},
+        "private_stores":crate::private_stores::refused()}))
 }
 
 fn running(value: bool) -> &'static str {
@@ -158,6 +162,7 @@ pub(crate) fn locked(path: &std::path::Path) -> bool {
 }
 
 fn ssh(config: &Config, peer: &str, command: &str) -> Result<std::process::Output> {
+    if crate::wsl::profile(config, peer).is_some() { return Err(Error::new(2,"WSL profiles cannot use an SSH command")); }
     if peer.starts_with('-') || peer.chars().any(char::is_whitespace) {
         return Err(Error::new(1, "invalid SSH host alias"));
     }
@@ -178,7 +183,10 @@ fn detail(output: &std::process::Output) -> String {
 }
 
 fn peer(config: &Config, peer: &str) -> Value {
-    let output = match ssh(config, peer, &platform::remote_sh(PEER_COMMAND)) {
+    let response = if let Some(profile) = crate::wsl::profile(config, peer) {
+        crate::wsl::capture(profile, &["status".into(), "--local".into(), "--json".into()], 2 * 1024 * 1024, 10)
+    } else { ssh(config, peer, &platform::remote_sh(PEER_COMMAND)) };
+    let output = match response {
         Ok(output) => output,
         Err(error) => return json!({"host":peer,"ok":false,"error":"offline","detail":error.message}),
     };
@@ -240,6 +248,15 @@ fn render(machine: &Value, this: bool) -> String {
         };
         text += &format!("  {label}: {state}\n");
     }
+    // #569: a refused private store is never silent.
+    for store in machine["private_stores"].as_array().into_iter().flatten() {
+        text += &format!(
+            "  Private store refused: {} ({})\n    Fix: {}\n",
+            store["path"].as_str().unwrap_or("?"),
+            store["reason"].as_str().unwrap_or("?"),
+            store["fix"].as_str().unwrap_or("?")
+        );
+    }
     text
 }
 
@@ -271,6 +288,18 @@ mod tests {
             Services: not reported; update hgs on mac to see them\n");
         let offline = json!({"host":"mac","ok":false,"detail":"ssh: connect to host mac: timed out\nmore"});
         assert_eq!(render(&offline, false), "mac: offline: ssh: connect to host mac: timed out\n");
+    }
+
+    #[test]
+    fn a_refused_private_store_is_shown_with_its_fix() {
+        let machine = json!({"host":"arch","ok":true,"hgs_version":"1.2.3","sessions":{},"services":{},
+            "private_stores":[{"path":"/home/user/.local/state/hgs/sessions/read-marks.json","reason":"it is owned by uid 0",
+                "fix":"sudo chown \"$USER\" '/home/user/.local/state/hgs/sessions/read-marks.json' && chmod 600 '/home/user/.local/state/hgs/sessions/read-marks.json'"}]});
+        let text = render(&machine, true);
+        assert!(text.ends_with("  Private store refused: /home/user/.local/state/hgs/sessions/read-marks.json (it is owned by uid 0)\n    \
+            Fix: sudo chown \"$USER\" '/home/user/.local/state/hgs/sessions/read-marks.json' && chmod 600 '/home/user/.local/state/hgs/sessions/read-marks.json'\n"), "{text}");
+        let quiet = json!({"host":"arch","ok":true,"hgs_version":"1.2.3","sessions":{},"services":{},"private_stores":[]});
+        assert!(!render(&quiet, true).contains("Private store"));
     }
 
     #[test]

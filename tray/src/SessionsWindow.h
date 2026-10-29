@@ -180,6 +180,7 @@ public:
     quint64 rowGenerationForTests() const { return m_rowGeneration; }
     bool rowsPendingForTests() const { return m_rowsPending || m_rowRequestQueued; }
     int droppedRowPreparationsForTests() const { return m_droppedRowPreparations; }
+    int postedRowPreparationsForTests() const { return m_postedRowPreparations; }
 
 signals:
     // Prepared rows of this generation were written to the list.
@@ -191,6 +192,8 @@ signals:
     void notificationPreferencesChanged(const QString &host, const QString &name, const QString &run,
                                         const QString &conversation, const QJsonObject &preferences);
     void refreshRequested();
+    // One computer's listing now: a created session waits to be confirmed there.
+    void hostRefreshRequested(const QString &host);
     void sessionActivated(const QString &host, const QString &name, const QString &tty);
     void terminalOpenRequested(const QString &host, const QString &name, const QString &tty);
     void folderShellRequested(const QString &host, const QString &directory);
@@ -270,7 +273,11 @@ private:
     static inline RowPreparation s_rowPreparation = RowPreparation::Async;
     quint64 m_rowGeneration = 0;
     bool m_rowsPending = false, m_rowRequestQueued = false;
-    int m_droppedRowPreparations = 0;
+    // One row preparation in flight; requests meanwhile fold into one more.
+    bool m_rowPreparing = false, m_rowsAgain = false;
+    QTimer *m_confirmPoll = nullptr; QElapsedTimer m_confirmPollAge;
+    void pollConfirmingCreations();
+    int m_droppedRowPreparations = 0, m_postedRowPreparations = 0;
     // One-time choices rebuild() made for the next applied rows: the row to
     // select instead of the selected session, a placed creation, a fork whose
     // terminal opens once it is selected, and a row to reveal.
@@ -346,7 +353,7 @@ private:
     // Spec D5: asks before resuming or restoring this selected session starts its
     // agent in a session host of another Windows session. False after Cancel, or
     // when the selection changed while the warning was open.
-    bool confirmLocalStart(const Entry &original);
+    bool confirmLocalStart(Entry original);
     void terminateSession();
     // F7: a member session a Done/Stopped team left running. The Team tab has
     // already confirmed; this selects it and runs the terminate flow without
@@ -770,6 +777,7 @@ private:
     // U35: the messages hgs holds for the selected session, with Cancel; the
     // ones just queued per session until a read lists them; cancels in flight.
     class HeldInputBar *m_heldBar = nullptr;
+    class TerminalDraftBar *m_terminalDraft = nullptr;
     QHash<QString, QJsonArray> m_justHeld;
     QHash<quint64, QPair<QString, QString>> m_heldCancels;
     void renderHeld();

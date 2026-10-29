@@ -1,5 +1,6 @@
 #include "CacheKeepalive.h"
 #include "SessionRowPreferences.h"
+#include "SettingsJson.h"
 #include <QJsonDocument>
 #include <QSet>
 #include <QSettings>
@@ -9,7 +10,7 @@ namespace {
 const char *const SettingsKey = "workspace/cacheKeepWarm";
 // Bounded like the other device-local session preferences.
 constexpr int MaxSessions = 10000;
-QJsonObject saved() { return QJsonDocument::fromJson(QSettings().value(SettingsKey).toByteArray()).object(); }
+QJsonObject saved() { return SettingsJson::object(QString::fromLatin1(SettingsKey)); }
 QString id(const QString &host, const SessionInfo &session) { return QString::fromLatin1(SessionRowPreferences::key(host, session).toHex()); }
 }
 
@@ -30,7 +31,7 @@ void CacheKeepalive::setHours(const QString &host, const SessionInfo &session, i
     auto values = saved(); const auto key = id(host, session);
     if (hours <= 0) values.remove(key);
     else if (values.contains(key) || values.size() < MaxSessions) values.insert(key, std::min(hours, int(MaxHours)));
-    QSettings().setValue(SettingsKey, QJsonDocument(values).toJson(QJsonDocument::Compact));
+    SettingsJson::store(QString::fromLatin1(SettingsKey), QJsonDocument(values));
 }
 
 int CacheKeepalive::ttl(const QJsonObject &details)

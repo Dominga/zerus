@@ -17,6 +17,7 @@ class QPlainTextEdit;
 class QPushButton;
 class QuestionCard;
 class HeldInputBar;
+class TerminalDraftBar;
 
 // WhiteWh fork: agent teams. One session's conversation shown inside another
 // view: the Team designer's chat (D1) and the coordinator (D3). It reads the
@@ -83,6 +84,10 @@ private:
     void fitInput();
     void updateSend();
     void showFiles();
+    // Adds a file or a pasted image; a pasted one also puts its reference
+    // at the caret, as the session's own composer does.
+    bool addFile(const QString &path, bool reference);
+    void addImage(const QImage &image);
     bool m_designer = false, m_starting = false;
     QWidget *m_intro = nullptr, *m_above = nullptr, *m_bottom = nullptr, *m_filesRow = nullptr;
     class QFrame *m_card = nullptr;
@@ -102,6 +107,7 @@ private:
     QuestionCard *m_question = nullptr;
     // U35: the messages hgs holds, and the one just queued until the next read.
     HeldInputBar *m_held = nullptr;
+    TerminalDraftBar *m_terminalDraft = nullptr;
     QJsonArray m_justHeld;
     QString m_agentName;
     QPushButton *m_openTerminal = nullptr;

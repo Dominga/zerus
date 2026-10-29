@@ -1,0 +1,1 @@
+{"environment_override": null, "local": {"name": "workstation"}, "machines": [{"alias": "studio", "connection": "studio.example.net", "enabled": true, "inherited": false, "source": "settings"}], "revision": "rev-3"}

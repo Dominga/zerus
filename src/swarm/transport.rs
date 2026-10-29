@@ -54,8 +54,11 @@ pub fn run(config: &Config, alias: &str, words: &[&str], input: Option<&Value>) 
         bytes.len() as u64 <= MAX_BYTES,
         "swarm exchange is too large"
     );
-    let mut command = platform::ssh();
-    command
+    let wsl = crate::wsl::profile(config, alias);
+    let mut command = if let Some(profile) = wsl {
+        crate::wsl::command(profile, &words.iter().map(|word| word.to_string()).collect::<Vec<_>>())?
+    } else { platform::ssh() };
+    if wsl.is_none() { command
         .args([
             "-o",
             "BatchMode=yes",
@@ -72,6 +75,7 @@ pub fn run(config: &Config, alias: &str, words: &[&str], input: Option<&Value>) 
             crate::windows_peer::hgs(config, alias, &words.iter().map(|word| word.to_string()).collect::<Vec<_>>())
                 .map_err(|e| anyhow::anyhow!(e.message.clone()))?,
         );
+    }
     let ssh = platform::spawn_ssh(&mut command, true, true, true).context("start swarm connection")?;
     let mut child = ssh.child;
     let mut stdin = ssh.stdin.unwrap();

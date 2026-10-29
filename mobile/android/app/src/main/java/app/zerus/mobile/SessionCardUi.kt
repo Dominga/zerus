@@ -28,13 +28,19 @@ import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 
 /** The desktop card's checkout line: folder / branch with a Git branch mark, or an ordinary folder's name. */
 @Composable internal fun SessionCheckoutLine(session: Session, gitBadge: GitStatusBadge? = null) {
     val line = SessionCardPresentation.line(session.raw)
-    if (line.isEmpty() && gitBadge == null) return
+    val source = ConversationSource.label(session.agent, session.raw)
+    if (line.isEmpty() && gitBadge == null && source.isEmpty()) return
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
     Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        if (source.isNotEmpty()) Text(source, color = MaterialTheme.colorScheme.tertiary,
+            style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.clearAndSetSemantics { contentDescription = "Conversation source: $source" })
+
         if (line.isNotEmpty()) Row(Modifier.fillMaxWidth().clearAndSetSemantics {
             contentDescription = SessionCardPresentation.checkoutDescription(session.raw)
         }, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {

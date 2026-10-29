@@ -199,11 +199,16 @@ export function Composer() {
 
   onMount(() => {
     // Composer chords go through the window router (store/shortcuts.ts) while the focus is in the field.
-    // message.push is registered only while push is enabled (Qt's setPushEnabled, MessageComposer.cpp:841-847), which A2 adds.
     const stops = [onCommand("message.send", () => { void composer.send(); }, editor)];
     const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(() => setCompact(root.clientWidth < COMPACT_WIDTH * contentScale()));
     observer?.observe(root);
     onCleanup(() => { for (const stop of stops) stop(); observer?.disconnect(); void composer.flush(); });
+  });
+  createEffect(() => {
+    if (!composer.pushEnabled()) return;
+    // Remove the action when disabled, so Cut keeps its keys (Qt 841-853).
+    const stop = onCommand("message.push", () => { void composer.push(); }, editor);
+    onCleanup(stop);
   });
 
   const status = () => composer.status();

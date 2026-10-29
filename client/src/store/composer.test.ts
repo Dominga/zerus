@@ -9,7 +9,7 @@ const KEY = "studio\nclaude/sample-project/review";
 const SESSION: SessionRef = { computer: "studio", key: "run:run-1", name: "claude/sample-project/review", archive_id: null };
 
 const view = (extra: Partial<ComposerView> = {}): ComposerView => ({
-  handle: 1, key: KEY, loaded: true, rev: 0, text_epoch: 1, text: "", position: 0, anchor: 0, question: null, input_visible: true,
+  handle: 1, key: KEY, loaded: true, rev: 0, text_epoch: 1, text: "", position: 0, anchor: 0, question: null, input_visible: true, queue: null,
   attachments: [], removed: null, attaching: false, sending: false, waiting: null, uncertain: false, status: "", status_error: false,
   can_send: true, send_label: "Send", available: true, unavailable_reason: "", block_reason: null, attachments_available: true,
   attachments_reason: "", session_status: "", session_status_error: false, session_blocks_input: false, inspect_error: false,
@@ -43,6 +43,8 @@ function fakes(reply: SendReply = { kind: "sending" }, opened: ComposerView | nu
     attach: async (_h, paths, start, end) => { calls.push(`attach ${paths.join(",")} ${start}-${end}`); },
     pasteImage: async (_h, bytes) => { calls.push(`paste ${bytes.length}`); },
     send: async (_h, rev, _epoch, text) => { calls.push(`send ${rev} ${text}`); return reply; },
+    push: async (_h, rev, _epoch, text, position, anchor) => { calls.push(`push ${rev} ${text} ${position} ${anchor}`); return reply; },
+    sendNow: async (id) => { calls.push(`send-now ${id}`); return true; },
     answer: async (token, answer) => { calls.push(`answer ${token} ${JSON.stringify(answer)}`); return answerReply; },
     remove: async (_h, index) => { calls.push(`remove ${index}`); }, undo: async () => { calls.push("undo"); },
     allowRetry: async () => { calls.push("allow retry"); }, cancelSend: async () => { calls.push("cancel send"); },
@@ -81,6 +83,181 @@ function held<T>() {
 const images = (width: number, height: number): Images => ({ size: async () => ({ width, height }), png: async () => new Uint8Array([1, 2, 3]) });
 
 describe("composer store", () => {
+  it("push flushes the field and cursor once through the captured composer", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers);
+      c.apply(view());
+      c.input("also lint", 2, 9);
+      await c.push();
+      expect(f.calls).toEqual(["edit 1 also lint", "push 1 also lint 9 2"]);
+    });
+  });
+
+  it.each([false, true])("an empty/sending field (sending=%s) pushes its own handle and waits for Busy hand-back", async (sending) => {
+    const f = fakes();
+    const captured: unknown[][] = [];
+    const port: ComposerPort = { ...f.port, push: async (...args) => { captured.push(args); return { kind: "busy" }; } };
+    await createRoot(async () => {
+      const c = createComposer(port, f.timers);
+      const text = sending ? "old message" : "";
+      c.apply(view({ handle: 7, rev: 4, text_epoch: 8, sending, text }));
+      await c.push();
+      expect(captured).toEqual([[7, 4, 8, text, 0, 0]]);
+      expect(f.calls).toEqual([]);
+      expect(c.locked()).toBe(true);
+      c.apply(view({ handle: 7, text_epoch: 9, text }));
+      expect(c.locked()).toBe(false);
+    });
+  });
+
+  it("a hand-back during the push flush never substitutes its new epoch or text", async () => {
+    const f = fakes();
+    const edit = held<void>();
+    const captured: unknown[][] = [];
+    const port: ComposerPort = { ...f.port, edit: () => edit.call(), push: async (...args) => { captured.push(args); return { kind: "busy" }; } };
+    await createRoot(async () => {
+      const c = createComposer(port, f.timers);
+      c.apply(view());
+      c.input("also lint", 9, 9);
+      const pushing = c.push();
+      await tick();
+      c.apply(view({ text_epoch: 2, text: "handed back", uncertain: true }));
+      edit.answer();
+      await pushing;
+      expect(captured).toEqual([[1, 1, 1, "also lint", 9, 9]]);
+      expect(c.text()).toBe("handed back");
+      expect(c.locked()).toBe(false);
+    });
+  });
+
+  it.each(["busy", "blocked"] as const)("a %s push waits for its text hand-back and then unlocks", async (kind) => {
+    const f = fakes(kind === "busy" ? { kind } : { kind, reason: "Wait for the session update to finish." });
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers);
+      c.apply(view({ text: "hello" }));
+      await c.push();
+      expect(c.locked()).toBe(true);
+      c.apply(view({ text: "hello", text_epoch: 2 }));
+      expect(c.locked()).toBe(false);
+      expect(c.text()).toBe("hello");
+      expect(f.calls).toEqual(["push 0 hello 0 0"]);
+    });
+  });
+
+  it("a required card refuses push before either message or queue dispatch", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers);
+      for (const sending of [false, true]) {
+        c.apply(view({ input_visible: false, sending, text: "hello" }));
+        expect(c.pushEnabled()).toBe(false);
+        await c.push();
+      }
+      expect(f.calls).toEqual([]);
+    });
+  });
+
+  it.each([{text: "hello", sending: false}, {text: "", sending: false}, {text: "", sending: true}])("a second push while its bridge call is held sends nothing (%j)", async (field) => {
+    const f = fakes();
+    const pending = held<SendReply>();
+    const port: ComposerPort = { ...f.port, push: () => pending.call() };
+    await createRoot(async () => {
+      const c = createComposer(port, f.timers);
+      c.apply(view(field));
+      const first = c.push();
+      await tick();
+      expect(pending.count()).toBe(1);
+      const second = c.push();
+      await tick();
+      expect(pending.count()).toBe(1);
+      pending.answer({ kind: "sending" });
+      await first;
+      await second;
+    });
+  });
+
+  it("a selection changed during the flush never dispatches its push", async () => {
+    const f = fakes();
+    const edit = held<void>();
+    const port: ComposerPort = { ...f.port, edit: () => edit.call() };
+    await createRoot(async () => {
+      const c = createComposer(port, f.timers);
+      c.apply(view());
+      c.input("A's message", 0, 11);
+      const pushing = c.push();
+      await tick();
+      c.apply(view({ handle: 2, key: "studio\nclaude/sample-project/other", text: "B's draft" }));
+      edit.answer();
+      await pushing;
+      expect(f.calls).toEqual([]);
+      expect(c.text()).toBe("B's draft");
+      expect(c.locked()).toBe(false);
+    });
+  });
+
+  it("an open that starts during the flush cancels push before its old handle changes", async () => {
+    const f = fakes();
+    const edit = held<void>();
+    const port: ComposerPort = { ...f.port, edit: () => edit.call() };
+    await createRoot(async () => {
+      const c = createComposer(port, f.timers);
+      c.apply(view());
+      c.input("A's message", 0, 11);
+      const pushing = c.push();
+      await tick();
+      f.holdOpens();
+      const other: SessionRef = { ...SESSION, key: "run:other", name: "claude/sample-project/other" };
+      const opening = c.open(other);
+      await tick();
+      edit.answer();
+      await pushing;
+      expect(f.calls).toEqual(["open claude/sample-project/other"]);
+      f.finishOpen(view({ handle: 2, key: draftKey(other), text: "B's draft" }));
+      await opening;
+      expect(c.text()).toBe("B's draft");
+      expect(c.locked()).toBe(false);
+    });
+  });
+
+  it("Send now passes the panel id or null and reports bridge errors", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers, undefined, f.notify);
+      c.apply(view());
+      await c.sendNow("queue-1");
+      await c.sendNow();
+      expect(f.calls).toEqual(["send-now queue-1", "send-now null"]);
+      const failed = createComposer({ ...f.port, sendNow: async () => { throw "Bridge unavailable"; } }, f.timers, undefined, f.notify);
+      await failed.sendNow();
+      expect(f.notices).toEqual(["error sticky Bridge unavailable"]);
+    });
+  });
+
+  it("a window Send now during a composer switch never uses the previous session", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers, undefined, f.notify);
+      const queue = { id: "queue-a", text: "A's queue", hint: "", can_send_now: true, enabled: true, label: "Send now" };
+      c.apply(view({ queue }));
+      expect(c.queue()).toEqual(queue);
+      const other: SessionRef = { ...SESSION, key: "run:other", name: "claude/sample-project/other" };
+      f.holdOpens();
+      const opening = c.open(other);
+      await tick();
+      expect(c.queue()).toBeNull();
+      await c.sendNow();
+      expect(f.calls).toEqual(["open claude/sample-project/other"]);
+      expect(f.notices).toEqual(["info timed Nothing queued can be sent now"]);
+      expect(c.pushEnabled()).toBe(false);
+      f.finishOpen(view({ handle: 2, key: draftKey(other), queue: { ...queue, id: "queue-b", text: "B's queue" } }));
+      await opening;
+      expect(c.queue()?.id).toBe("queue-b");
+      await c.sendNow("queue-b");
+      expect(f.calls.at(-1)).toBe("send-now queue-b");
+    });
+  });
+
   it("edits are debounced and flushed before a send", async () => {
     const f = fakes();
     await createRoot(async () => {

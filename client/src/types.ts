@@ -445,6 +445,8 @@ export interface LocalMessage {
   id: string; text: string; status: "sending" | "sent" | "error"; attachments: Record<string, unknown>[]; run_id: string; conversation_id: string;
   submitted_at: number; error: string; uncertain: boolean; message_id: string | null; submitted_text: string | null; source: string | null; voice: Record<string, unknown> | null;
 }
+/** The native queue (core input_queue::QueueView), kept separate from local messages. */
+export interface QueueView { id: string; text: string; hint: string; can_send_now: boolean; enabled: boolean; label: string }
 export interface ComposerView {
   handle: number; key: string; loaded: boolean; rev: number; text_epoch: number; text: string; position: number; anchor: number;
   attachments: AttachmentView[]; removed: string | null; attaching: boolean; sending: boolean; waiting: string | null; uncertain: boolean;
@@ -458,6 +460,7 @@ export interface ComposerView {
   question: QuestionView | null;
   /** False while a required card stands in for the editor and the action row (Qt's setInputVisible). */
   input_visible: boolean;
+  queue: QueueView | null;
 }
 
 // The question card (src-tauri composer/questions.rs, core questions.rs).

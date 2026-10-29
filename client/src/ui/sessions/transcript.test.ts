@@ -10,6 +10,14 @@ const local = (status: "sending" | "error" | "sent", uncertain = false, extra: P
 });
 
 describe("local message rows (ActivityView.cpp:665-720, 1053-1068)", () => {
+  it("a native queued prompt keeps its queued label before answer labels", () => {
+    const events: ActivityEvent[] = [{ seq: 1, type: "UserPromptQueued", at: 10, detail: "also lint",
+      question_replies: [{ question: "Which checks?", answer: "Lint" }] }];
+    expect(buildTranscript(events)[0]).toMatchObject({ label: "You (queued)", receipt: "Queued at this time" });
+    events.push({ seq: 2, type: "UserPromptSubmit", at: 11, detail: "also lint" });
+    expect(buildTranscript(events)[0]).toMatchObject({ label: "You (queued)", receipt: "Sent" });
+  });
+
   it("local rows follow Qt's stamps and buttons", () => {
     const items = buildTranscript([], {}, [local("sending"), local("error"), local("error", true), local("sent")]) as ActivityItem[];
     expect(items.map((i) => i.local?.stamp)).toEqual(["Sending…", "Not sent", "Delivery not confirmed", "Submitted to terminal"]);

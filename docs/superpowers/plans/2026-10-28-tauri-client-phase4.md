@@ -10424,6 +10424,15 @@ git commit -m "feat(client): the native queue, Send now and Send and push now in
 
 ### Task A2-5: The queue panel, the push chord and "You (queued)"
 
+**As built** (webui rulings, 2026-10-29; these override the snippets below):
+- The existing shortcut router and registry own both commands. There is no second `chords.ts`, chord parser or window key listener. `queue.sendNow` registers at window scope while Sessions shows a selected session, on every detail tab; Terminal uses the router's existing context rule. `message.push` registers on the message field only while its composer is open and its input is visible (`Shortcuts.cpp:39-41,61,70`; `MessageComposer.cpp:841-853`).
+- There are exactly three Send now sources: the queue panel's button, the window shortcut, and the push chord on an empty or sending field. There is no separate Activity link (`ActivityView.cpp:1292`; `SessionsWindow.cpp:1221,1859`; `MessageComposer.cpp:837`).
+- The panel uses the queue's plain text and hub-projected enabled state and label, in the shared reading column. Its tooltip combines the native hint with the first configured registry chord, in Qt's order (`ActivityView.cpp:1477-1486,1890-1896`); this corrects the brief's hint-only tooltip.
+- An open under way hides the old session's queue. An explicit Send now in that gap sends nothing, shows "Nothing queued can be sent now" as info, and schedules no action for later. Push is also disabled during that gap; a required card disables and unregisters it.
+- Push always calls `send_push` with the handle, revision, epoch, text and cursor captured at the chord, including an empty or sending field. Rust decides under that handle whether it becomes Send now (`MessageComposer.cpp:837` carries the field's own key). This corrects the brief's direct `queue_send_now(null)` call for a sending field; only the panel and window shortcut call `queue_send_now` directly.
+- Push and ordinary Send share the flush, per-handle call lock and reply handling. Busy/Blocked from push waits for Rust's bumped text epoch before unlocking. After the flush, a changed handle or an open under way cancels dispatch. A hand-back crossing a push's flush never substitutes a different epoch or message for the captured payload.
+- The bridge adds only `sendPush` and `queueSendNow`; `ComposerView.queue` mirrors A2-4's `QueueView`. The app resolves the new bridge methods at call time. Native queued prompts already received "You (queued)" before answer labels in A2-3; the regression also pins its receipt changing to "Sent" after a matching submit.
+
 **Depends on:** A2-4, Task 6 (the composer store and view).
 
 **Qt reference:**

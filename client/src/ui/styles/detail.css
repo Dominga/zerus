@@ -194,6 +194,13 @@
   .q-option small { color: var(--z-color-muted); font-size: var(--fs-xs); }
   .question-card footer { display: flex; align-items: center; gap: 10px; }
 
+  /* The native queue shares the reading column (ActivityView.cpp:1280-1292). */
+  .act-queue { width: min(var(--col), calc(100% - 32px)); margin: 0 auto 8px; padding: 8px 12px; flex-shrink: 0;
+    background: var(--z-color-surface); border: 1px solid var(--z-color-border); border-radius: var(--z-radius-md); }
+  .act-queue-head { display: flex; align-items: center; gap: 8px; }
+  .act-queue-head b { color: var(--z-color-muted); font-weight: 600; }
+  .act-queue-text { max-height: 100px; overflow-y: auto; user-select: text; }
+
   /* Composer: toolbar 34, editor 76, action row 34. */
   .cmp-col { width: min(var(--col), calc(100% - 32px)); margin: 0 auto 10px; }
   .composer { border: 1px solid var(--z-color-border); border-radius: var(--z-radius-xl); background: var(--z-color-field); transition: border-color var(--z-motion-fast), box-shadow var(--z-motion-fast); }

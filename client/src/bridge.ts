@@ -553,6 +553,9 @@ export const composerRefresh = (handle: number) => desktop<void>("composer_refre
 export const composerTab = (tab: ComposerTab) => (inTauri() ? invoke<void>("composer_tab", { tab }) : Promise.resolve());
 export const sendMessage = (handle: number, rev: number, epoch: number, text: string, position: number, anchor: number) =>
   desktop<SendReply>("send_message", { handle, rev, epoch, text, position, anchor });
+export const sendPush = (handle: number, rev: number, epoch: number, text: string, position: number, anchor: number) =>
+  desktop<SendReply>("send_push", { handle, rev, epoch, text, position, anchor });
+export const queueSendNow = (queueId: string | null) => desktop<boolean>("queue_send_now", { queue_id: queueId });
 export const sendAnswer = (token: number, answer: Answer) => desktop<SendReply>("send_answer", { token, answer });
 export const sendCancel = (handle: number) => desktop<void>("send_cancel", { handle });
 export const sendInterrupted = (handle: number) => desktop<void>("send_interrupted", { handle });

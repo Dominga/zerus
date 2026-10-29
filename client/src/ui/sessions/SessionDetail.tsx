@@ -1,4 +1,4 @@
-import { For, Match, Show, Switch, createEffect, createMemo, createRoot, createSignal, on } from "solid-js";
+import { For, Match, Show, Switch, createEffect, createMemo, createRoot, createSignal, on, onCleanup } from "solid-js";
 import * as bridge from "../../bridge";
 import { terminal } from "../../store/terminal";
 import { TerminalTab } from "./Terminal";
@@ -23,6 +23,8 @@ import { markEntry } from "./mark-entries";
 import { Composer } from "./Composer";
 import { ComposerDialogs } from "./ComposerDialogs";
 import { QuestionCard } from "./QuestionCard";
+import { QueuePanel } from "./QueuePanel";
+import { onCommand } from "../../store/shortcuts";
 import { composer } from "../../store/composer";
 
 // The session header and its Activity with the composer under it, after
@@ -183,6 +185,12 @@ const tabs = () => {
 createRoot(() => createEffect(() => { if (!tabs().find((t) => t.id === detailTab())?.show) setDetailTab("activity"); }));
 
 export function SessionDetail() {
+  createEffect(() => {
+    if (page() !== "sessions" || !selected()) return;
+    // Window scope on every detail tab (SessionsWindowShortcuts.cpp:202,242).
+    const stop = onCommand("queue.sendNow", () => { void composer.sendNow(); });
+    onCleanup(stop);
+  });
   return (
     <section class="detail" aria-label="Session">
       {/* Qt's drop overlay (SessionFileDrop): what a drop on this panel does. */}
@@ -203,7 +211,9 @@ export function SessionDetail() {
                   <div class="activity-wrap" style={columnStyle()}>
                     <ActivityView source={activitySourceFor(selected()!.key)} />
                     {/* The subagent view stays read only; an archived row's recorded Activity has no composer. */}
-                    <Show when={!subagentOpen() && !activityReadOnly(selected()!.key)}><div class="cmp-col"><QuestionCard /><Composer /></div></Show>
+                    <Show when={!subagentOpen() && !activityReadOnly(selected()!.key)}>
+                      <QueuePanel /><div class="cmp-col"><QuestionCard /><Composer /></div>
+                    </Show>
                   </div>
                 </Match>
                 <Match when={detailTab() === "terminal"}><TerminalTab /></Match>

@@ -46,6 +46,8 @@ export interface ComposerPort {
   attach(handle: number, paths: string[], start: number, end: number): Promise<void>;
   pasteImage(handle: number, png: Uint8Array, start: number, end: number): Promise<void>;
   send(handle: number, rev: number, epoch: number, text: string, position: number, anchor: number): Promise<SendReply>;
+  push(handle: number, rev: number, epoch: number, text: string, position: number, anchor: number): Promise<SendReply>;
+  sendNow(queueId: string | null): Promise<boolean>;
   answer(token: number, answer: Answer): Promise<SendReply>;
   remove(handle: number, index: number): Promise<void>;
   undo(handle: number): Promise<void>;
@@ -197,6 +199,10 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
     if (!v || !v.loaded || !v.available || v.uncertain || v.input_visible === false || locked() || tooLong() || !hasContent()) return false;
     return !(v.attachments.length > 0 && !v.attachments_available);
   };
+  /** Qt adds the push action to this message field only (MessageComposer.cpp:841-853). */
+  const pushEnabled = () => opening() === 0 && !!view() && view()?.input_visible !== false;
+  /** The old session's queue must not remain actionable while its successor opens. */
+  const queue = () => opening() > 0 ? null : view()?.queue ?? null;
 
   /** The composer goes or changes: its open question answers Cancel, as its modal dialog would. */
   function dropDialog() {
@@ -329,8 +335,59 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
     try { await call(h); } catch { if (epoch === at) setHandBack(undefined); }
   }
 
+  /** Panel and window shortcut use this hub command; a push keeps its own handle. */
+  async function sendNow(queueId?: string): Promise<boolean> {
+    if (opening() > 0) {
+      notices("info", "Nothing queued can be sent now", false);
+      return false;
+    }
+    try { return await port.sendNow(queueId ?? null); }
+    catch (e) { notices("error", typeof e === "string" ? e : e instanceof Error ? e.message : String(e), true); return false; }
+  }
+
+  /** Ordinary Send and push share the flush, handle guard and reply hand-back. */
+  async function sendField(pushing: boolean) {
+    const h = handle();
+    // Under a required question card the editor is hidden and takes no command (setInputVisible).
+    if (h === undefined || calling.has(h) || view()?.input_visible === false || (pushing && !pushEnabled())) return;
+    // Rust decides whether an empty/sending push becomes Send now, under
+    // the captured handle (MessageComposer.cpp:837 carries the field's key).
+    const queuePush = pushing && (view()?.sending || !hasContent());
+    if (locked() && !queuePush) return;
+    if (!queuePush && !sendEnabled()) {
+      // Qt shows the status at the editor when there is something to send (MessageComposer.cpp:814-818).
+      const status = statusLine(view(), error(), tooLong()).text;
+      if (hasContent() && status) showHint(status);
+      return;
+    }
+    hintTimer?.();
+    setHint(undefined);
+    // Locked before the flush awaits, so a second Enter meanwhile sends nothing.
+    calling.add(h);
+    let r: SendReply;
+    let at = epoch;
+    const captured = { rev, epoch, text: text(), position: selection().end, anchor: selection().start };
+    try {
+      await flush();
+      if (h !== handle() || opening() > 0) { calling.remove(h); return; }
+      setError(undefined);
+      if (pushing) {
+        r = await port.push(h, captured.rev, captured.epoch, captured.text, captured.position, captured.anchor);
+      } else {
+        at = epoch;
+        const s = selection();
+        r = await port.send(h, rev, at, text(), s.end, s.start);
+      }
+    } catch (e) {
+      calling.remove(h);
+      notices("error", typeof e === "string" ? e : e instanceof Error ? e.message : String(e), true);
+      return;
+    }
+    batch(() => { calling.remove(h); reply(r, h, at, true); });
+  }
+
   return {
-    view, text, selection, dialog, locked, operationLocked, sendEnabled, hint,
+    view, text, selection, dialog, locked, operationLocked, sendEnabled, pushEnabled, queue, hint,
     /** The status line: Qt's order, with the composer's own error and the typed length. */
     status: (): StatusLine => statusLine(view(), error(), tooLong()),
     apply, receive,
@@ -391,35 +448,9 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
     },
     remove: (index: number) => handBackAfter((h) => port.remove(h, index)),
     undo: () => handBackAfter((h) => port.undo(h)),
-    async send() {
-      const h = handle();
-      // Under a required question card the editor is hidden and takes no command (setInputVisible).
-      if (h === undefined || locked() || view()?.input_visible === false) return;
-      if (!sendEnabled()) {
-        // Qt shows the status at the editor when there is something to send (MessageComposer.cpp:814-818).
-        const status = statusLine(view(), error(), tooLong()).text;
-        if (hasContent() && status) showHint(status);
-        return;
-      }
-      hintTimer?.();
-      setHint(undefined);
-      // Locked before the flush awaits, so a second Enter meanwhile sends nothing.
-      calling.add(h);
-      let r: SendReply;
-      let at = epoch;
-      try {
-        await flush();
-        at = epoch;
-        const s = selection();
-        setError(undefined);
-        r = await port.send(h, rev, at, text(), s.end, s.start);
-      } catch (e) {
-        calling.remove(h);
-        notices("error", typeof e === "string" ? e : e instanceof Error ? e.message : String(e), true);
-        return;
-      }
-      batch(() => { calling.remove(h); reply(r, h, at, true); });
-    },
+    send: () => sendField(false),
+    push: () => sendField(true),
+    sendNow,
     /** Answers the open question with its token. The question kept the epoch: closing it unlocks the editor. */
     async answer(answer: Answer) {
       const d = dialog();
@@ -523,7 +554,7 @@ export type ComposerStore = ReturnType<typeof createComposer>;
 
 export const composer = createRoot(() => createComposer({
   open: bridge.composerOpen, edit: bridge.composerEdit, pick: bridge.composerPick, attach: (h, paths, start, end) => bridge.composerAttach(h, paths, start, end), pasteImage: bridge.composerPasteImage,
-  send: bridge.sendMessage, answer: bridge.sendAnswer, remove: bridge.composerRemove, undo: bridge.composerUndoRemove,
+  send: bridge.sendMessage, push: (...args) => bridge.sendPush(...args), sendNow: (id) => bridge.queueSendNow(id), answer: bridge.sendAnswer, remove: bridge.composerRemove, undo: bridge.composerUndoRemove,
   allowRetry: bridge.composerAllowRetry, cancelSend: bridge.sendCancel, interrupted: bridge.sendInterrupted, clear: bridge.clearContext,
   refresh: bridge.composerRefresh, openAttachment: (path) => bridge.attachmentOpenDraft(path), localRetry: bridge.localRetry, localDelete: bridge.localDelete, localInspect: bridge.localInspect,
 }));

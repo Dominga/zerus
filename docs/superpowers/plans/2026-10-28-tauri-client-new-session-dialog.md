@@ -834,11 +834,19 @@ It reads Task 5's surface: `creations_view`, the `creations` event, `creation_de
 ```ts
 export const creations: () => CreationCard[];                 // by id, newest first
 export const selectedCreation: () => string | undefined;      // m_selectedCreation
+export const selectedCard: () => CreationCard | undefined;
+export const cardVersion: (id: string) => number;
 export function selectCreation(id: string): void;             // selectCreation (3717-3728)
-export function revealCreation(id: string): void;             // admission and the status menu (475, 2916-2919)
-export function withCreations(rows: Row[], scope: ListScope): Row[];   // the creation rows and the adopted session (SessionsWindowRows 269-341)
 export function creationStatusMenu(): MenuEntry[];            // 463-480
-export function creationFooter(): string;                     // ", 1 creation" or ", {n} creations" (474-479)
+export function creationFooter(afterSessions: boolean): string; // ", 1 creation" or ", {n} creations" (474-479)
+export const creationCount: () => number;                     // the shown cards, including a collapsed project's
+export function withCreations(rows: Row[], scope: ListScope): Row[];   // the creation rows and the adopted session (SessionsWindowRows 269-341)
+export function runCreationAction(id: string, action: CreationAction): Promise<void>;
+export function hideCreation(id: string): Promise<void>;
+export function editChoices(id: string): Promise<void>;
+export function returnToFilters(): void;
+export function creationDetailsText(id: string): Promise<string | null>;
+export function creationAdmitted(id: string, plan: LaunchPlan): void;  // admission (2914-2919)
 ```
 
 Rules, each Qt's:
@@ -854,7 +862,7 @@ Rules, each Qt's:
 - **The row** (376-391):
   - the title is the tag;
   - the status is `caption`;
-  - the detail is the error, else "Preparing the session in the background" (384);
+  - the detail is the error, else "Preparing the session in the background" only while the state is `saving` (384; the first stage writes the error field, even when empty);
   - also the folder (`target`), the agent's glyph and the computer with its colour;
   - the accessible text is "{tag}, {computer}, {caption}" (390).
 
@@ -1086,11 +1094,9 @@ Deviations from Qt:
     that copy (`WorktreePanel.h:83`).
 13. Start from steps from the item its typed text names, else from the last item chosen or stepped to. Qt's QComboBox steps
     from its current index, which typing moves to a matching item only once the edit finishes (focus leaves, or Return).
-14. A bound creation hands its selection to the live session of its computer with its agent and tag. Qt also requires the
-    operation's launch ID (`placeLaunchedSessions` 3031-3034), which the watch rows do not carry (Q3); the host binds by it.
-15. A card action the host refuses (the operation is gone or bound) or whose call is lost shows its text as an error notice.
-    Qt's actions run in process and return silently (`SessionCreationController.cpp` 359-408).
-16. Under the Archive filter the list is the archive's, so a revealed card does not show there; its progress view still does.
+14. Only a card action whose call is lost shows its text as an error notice. A refusal because the operation is gone or
+    bound stays silent, as Qt's in-process actions do (`SessionCreationController.cpp` 359-408). No outcome is replayed.
+15. Under the Archive filter the list is the archive's, so a revealed card does not show there; its progress view still does.
     Qt's rows show a revealed card under every filter (SessionsWindowRows.cpp:310).
 
 ## Order and handoff

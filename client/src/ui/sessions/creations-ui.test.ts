@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-  BUTTON, NO_PENDING, OLDER, PREPARING, accessibleText, computerOf, creationOfRow, creationRowId, elapsed, footerText, machineOf,
+  BUTTON, NO_PENDING, OLDER, PREPARING, accessibleText, computerOf, createDetailsView, creationOfRow, creationRowId, elapsed, footerText, machineOf,
   newestFirst, noticeOf, panelButtons, panelStatus, placeCreations, projectOf, rowDetail, statusMenu, type ListScope, type Placement,
 } from "./creations-ui";
 import { toSession } from "../../store/catalog";
@@ -128,6 +128,16 @@ describe("the creation rows (SessionsWindowRows.cpp 300-341)", () => {
     expect(placeCreations(onlyFirst, scopeOf(g, members), { ...state, adopted: session(2, { state: "archived" } as Partial<ViewRow>) })).toBe(onlyFirst);
   });
 
+  it("count an adopted session once in a collapsed project's header", () => {
+    const folded = grouping([header("alpha", true), header("ungrouped")]);
+    const adopted = session(2);
+    const state = stateOf([], { adopted, groupOf: () => "alpha" });
+    // groupRows already counts this visible member although its collapsed project has no card row.
+    expect(shape(placeCreations(sessionRows(folded, members), scopeOf(folded, members), state))).toEqual(["#alpha:2", "#ungrouped:1", "s3"]);
+    // One the ordinary visibility rule excluded is the single adopted addition.
+    expect(shape(placeCreations(sessionRows(folded, members), scopeOf(folded, members, { visible: () => false }), state))).toEqual(["#alpha:3", "#ungrouped:1", "s3"]);
+  });
+
   it("leave the rows as they are without a card to show", () => {
     expect(placeCreations(rows, scopeOf(g, members), stateOf([]))).toBe(rows);
     expect(placeCreations(rows, scopeOf(g, members, { filter: "paused" }), stateOf([card("a")]))).toBe(rows);
@@ -148,8 +158,9 @@ describe("the creation rows (SessionsWindowRows.cpp 300-341)", () => {
 });
 
 describe("a creation row's texts (376-391)", () => {
-  it("shows the error, else that it is preparing, as the card's detail", () => {
-    expect(rowDetail(card("a"))).toBe(PREPARING);
+  it("shows the error, else that it is preparing only before the first stage", () => {
+    expect(rowDetail(card("a", { state: "saving" }))).toBe(PREPARING);
+    expect(rowDetail(card("a"))).toBe("");
     expect(rowDetail(card("a", { error: "The folder is gone." }))).toBe("The folder is gone.");
     // paintCard drops a detail that repeats the status.
     expect(rowDetail(card("a", { caption: "Creation failed", error: "Creation failed: the folder is gone." }))).toBe("the folder is gone.");
@@ -193,6 +204,38 @@ describe("the progress view (renderCreation 3729-3756)", () => {
     expect(elapsed(c, 1000 + 65.9)).toBe("1:05");
     expect(elapsed(c, 999)).toBe("0:00");
     expect(panelStatus(c, 1000 + 600)).toBe("Creating worktree… (10:00)");
+  });
+});
+
+describe("the progress details' answers", () => {
+  it("drop a stale card's answer and keep the scroll on refresh", () => {
+    let value = "", top = 0;
+    // A textarea resets its scroll when the test writes its value, as the DOM does.
+    const box = {
+      get value() { return value; },
+      set value(next: string) { value = next; top = 0; },
+      get scrollTop() { return top; },
+      set scrollTop(next: number) { top = next; },
+    };
+    const view = createDetailsView(box);
+    const first = view.read("a");
+    first("one");
+    expect(box.value).toBe("one");
+    const stale = view.read("a");
+    const other = view.read("b");
+    stale("stale");
+    first("also stale");
+    expect([box.value, box.scrollTop]).toEqual(["", 0]);
+    other("two");
+    expect(box.value).toBe("two");
+    box.scrollTop = 37;
+    const refresh = view.read("b");
+    refresh("three");
+    expect([box.value, box.scrollTop]).toEqual(["three", 37]);
+    const pending = view.read("b");
+    view.read(undefined);
+    pending("late");
+    expect([box.value, box.scrollTop]).toEqual(["", 0]);
   });
 });
 

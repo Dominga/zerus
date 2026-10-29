@@ -1,5 +1,5 @@
-import { Show, createEffect, on } from "solid-js";
-import { BUTTON, PROGRESS, panelButtons, panelStatus } from "./creations-ui";
+import { Show, createEffect } from "solid-js";
+import { BUTTON, PROGRESS, createDetailsView, panelButtons, panelStatus } from "./creations-ui";
 import { cardVersion, creationDetailsText, editChoices, hideCreation, returnToFilters, runCreationAction, selectedCard } from "../../store/creations";
 import { now } from "../../store/ui";
 import "../styles/creations.css";
@@ -14,30 +14,21 @@ import "../styles/creations.css";
 
 export function CreationPanel() {
   let text: HTMLTextAreaElement | undefined;
-  let asked = 0, shown = 0;
+  let details: { element: HTMLTextAreaElement; view: ReturnType<typeof createDetailsView> } | undefined;
   const card = selectedCard;
   const id = () => card()?.id;
 
-  // Another card starts from an empty text.
-  createEffect(on(id, () => {
-    shown = ++asked;
-    if (text) { text.value = ""; text.scrollTop = 0; }
-  }));
   createEffect(() => {
+    if (!text) return;
+    if (details?.element !== text) details = { element: text, view: createDetailsView(text) };
     const current = id();
+    if (current !== undefined) {
+      cardVersion(current);
+      now();
+    }
+    const answer = details.view.read(current);
     if (current === undefined) return;
-    cardVersion(current);
-    now();
-    const mine = ++asked;
-    creationDetailsText(current).then((value) => {
-      // An answer older than the one shown, or for another card, changes nothing.
-      if (mine < shown || id() !== current || !text || value == null) return;
-      shown = mine;
-      if (text.value === value) return;
-      const top = text.scrollTop;
-      text.value = value;
-      text.scrollTop = top;
-    }, () => {});
+    creationDetailsText(current).then(answer, () => {});
   });
 
   return (

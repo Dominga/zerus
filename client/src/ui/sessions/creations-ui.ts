@@ -52,11 +52,42 @@ export const computerOf = (c: Pick<CreationCard, "machine" | "host">) => c.host 
 /** The row's accessible text (390). */
 export const accessibleText = (c: CreationCard) => `${c.tag}, ${computerOf(c)}, ${c.caption}`;
 
-/** The row's detail line: the error, else "Preparing the session in the background" (384), as paintCard words it (SessionCardDelegate.h). */
-export function rowDetail(c: Pick<CreationCard, "error" | "caption">): string {
-  const detail = c.error || PREPARING;
+/** The row's detail line: the error, else "Preparing the session in the background" only before the first stage writes the error field (384). */
+export function rowDetail(c: Pick<CreationCard, "error" | "caption" | "state">): string {
+  const detail = c.error || (c.state === "saving" ? PREPARING : "");
   if (detail === c.caption) return "";
   return detail.startsWith(`${c.caption}: `) ? detail.slice(c.caption.length + 2) : detail;
+}
+
+export interface DetailsBox {
+  value: string;
+  scrollTop: number;
+}
+
+/** The progress details' request bookkeeping: only the newest answer for the card still shown renders, with its scroll kept. */
+export function createDetailsView(box: DetailsBox) {
+  let asked = 0, shown = 0;
+  let current: string | undefined;
+  return {
+    read(id: string | undefined): (value: string | null) => void {
+      if (id !== current) {
+        current = id;
+        shown = ++asked;
+        box.value = "";
+        box.scrollTop = 0;
+      }
+      if (id === undefined) return () => {};
+      const mine = ++asked;
+      return (value) => {
+        if (mine < shown || current !== id || value == null) return;
+        shown = mine;
+        if (box.value === value) return;
+        const top = box.scrollTop;
+        box.value = value;
+        box.scrollTop = top;
+      };
+    },
+  };
 }
 
 export interface PanelButtons {
@@ -173,7 +204,7 @@ export function shownCards(scope: CardScope, state: Pick<Placement, "cards" | "r
 
 type HeaderRow = Extract<Row, { type: "header" }>;
 
-/** A header for a project the sessions' rows left out: its counters over every member, as `groupRows` counts them (398-404). */
+/** A header for a project the sessions' rows left out: its counters copy `model.ts` `groupRows`' loop over every member (100-106; Qt 398-404). */
 function headerRow(h: HeaderOut, all: readonly Session[]): HeaderRow {
   let attention = 0, unread = 0, working = 0;
   for (const s of all) {
@@ -231,9 +262,11 @@ export function placeCreations(rows: Row[], scope: ListScope, state: Placement):
     const segment = segments.get(h.id);
     const cards = shown.get(h.id) ?? [];
     const adds = missing && adoptedGroup === h.id ? missing : undefined;
+    // Only a collapsed header can already count an adopted member whose card row is absent.
+    const counted = h.collapsed && adds && scope.visible(adds) && (!scope.projects.length || scope.projects.includes(h.id));
     if (!segment && !cards.length && !adds) continue;
     const header = segment?.header ?? headerRow(h, scope.members.get(h.id) ?? []);
-    out.push({ ...header, total: header.total + cards.length + (adds ? 1 : 0) });
+    out.push({ ...header, total: header.total + cards.length + (adds && !counted ? 1 : 0) });
     if (h.collapsed) continue;
     const members = segment?.rows ?? [];
     out.push(...(adds ? withSession(members, adds, scope.members.get(h.id) ?? [], scope) : members), ...cardRows(cards));

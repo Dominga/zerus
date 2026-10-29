@@ -431,4 +431,22 @@ describe("a card never opens a composer or touches drafts", () => {
     expect(t.calls.filter((c) => c.name === "creationAction")).toHaveLength(1);
     t.dispose();
   });
+
+  it("stays silent when the host says the creation is already resolved", async () => {
+    const t = setup([card("a")], { refuse: RESOLVED });
+    await t.started;
+    await t.store.act("a", "check");
+    expect(t.notices).toEqual([]);
+    t.dispose();
+  });
+
+  it("stays silent when the card resolves before its action's answer crosses back", async () => {
+    const t = setup([card("a")], { refuse: "The answer was lost." });
+    await t.started;
+    const action = t.store.act("a", "check");
+    t.emit({ id: "a", removed: true });
+    await action;
+    expect(t.notices).toEqual([]);
+    t.dispose();
+  });
 });

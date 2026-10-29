@@ -203,9 +203,13 @@ export function createCreations(deps: CreationsDeps) {
     deps.reveal(creationRowId(id));
   }
 
-  /** One action on the exact operation; a refusal (gone or bound) or a lost call is shown, never sent again. */
+  /** One action on the exact operation; a gone or bound creation is silent, while a lost call shows its text and is never sent again. */
   async function act(id: string, action: CreationAction): Promise<void> {
-    try { await deps.bridge.creationAction(id, action); } catch (failure) { deps.notify("error", errorText(failure), true); }
+    try { await deps.bridge.creationAction(id, action); } catch (failure) {
+      const text = errorText(failure);
+      if (text === RESOLVED || !cards[id]) return;
+      deps.notify("error", text, true);
+    }
   }
 
   /** Edit choices… (1525-1528): New session with the operation as its recipe, while it can still be edited. */

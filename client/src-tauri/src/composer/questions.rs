@@ -2660,6 +2660,16 @@ pub(crate) mod tests {
             Some(&a),
             "A's entry stays A's"
         );
+        // A still owns the lane: another Skip stays refused and keeps B's
+        // definite notice instead of replacing A's in-flight entry.
+        assert_eq!(c.question_skip(&b), QuestionReply::Busy);
+        assert_eq!(c.lock().answers.drafts[&b].notice, ALREADY_ANSWERING);
+        assert_eq!(
+            tries.load(Ordering::SeqCst),
+            1,
+            "the third Skip made no call"
+        );
+        assert_eq!(c.lock().answers.in_flight.get(&key), Some(&a));
         release_call.send(()).unwrap();
         until(&c, |_| c.lock().answers.in_flight.is_empty());
         assert_eq!(tries.load(Ordering::SeqCst), 1, "B never reached the lane");
@@ -2777,5 +2787,25 @@ pub(crate) mod tests {
         assert!(c.lock().answers.cold.is_none());
         assert_eq!(c.question_cold(token, true), QuestionReply::Busy);
         assert!(sent(&fake).is_empty());
+    }
+
+    #[test]
+    fn nothing_is_sent_while_a_required_card_stands_in_for_the_editor() {
+        let root = dir("q-send-hidden");
+        let (c, fake) = send_hub(&root);
+        let view = opened(&c, asking(vec![card_json("tool:t1")]));
+        with_card(&c);
+        let epoch = view.text_epoch;
+        c.edit(view.handle, 1, epoch, "hello".into(), 5, 5);
+        // A chord from the toolbar reaches Rust even though Send is hidden.
+        let reply = c.send_message(view.handle, 2, epoch, "hello".into(), 5, 5);
+        assert!(
+            matches!(reply, crate::composer::send::SendReply::Busy),
+            "{reply:?}"
+        );
+        assert!(sent(&fake).is_empty());
+        let after = c.current().unwrap();
+        assert!(after.text_epoch > epoch, "the text is handed back");
+        assert_eq!(after.text, "hello", "the draft stays");
     }
 }

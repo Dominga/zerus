@@ -26,10 +26,12 @@
 pub mod fetch;
 pub mod files;
 pub mod questions;
+pub mod queue;
+pub mod saved;
 pub mod send;
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -114,6 +116,33 @@ pub struct Config {
     /// The private attachment cache (`files::Cache`): the app's own cache
     /// folder, never Qt's.
     pub cache: PathBuf,
+    /// Qt's draft store ([`qt_store`]), only ever read: Saved drafts' "From
+    /// the previous Zerus app", its previews, Recover and Restore.
+    pub qt_drafts: Option<PathBuf>,
+    /// The dev app's draft stores, only ever read: the previews and Restore
+    /// of the drafts the switch import left there (Saved drafts' conflicts).
+    pub dev_drafts: Vec<PathBuf>,
+}
+
+/// Qt's draft store, read-only, unless it is, holds or sits inside the
+/// client's own root: then it is left out, so nothing the client writes can
+/// land in Qt's folder. The same rule as the switch import's sources
+/// (`drafts::import_sources`), which also compares folders not created yet
+/// by their longest existing ancestor.
+pub fn qt_store(own: &Path, qt: Option<PathBuf>) -> Option<PathBuf> {
+    zerus_client_core::drafts::import_sources(own, qt, Vec::new())
+        .into_iter()
+        .next()
+        .map(|source| source.root)
+}
+
+/// The dev app's draft stores, without any that is, holds or sits inside
+/// the client's own root.
+pub fn dev_stores(own: &Path, dev: Vec<PathBuf>) -> Vec<PathBuf> {
+    zerus_client_core::drafts::import_sources(own, None, dev)
+        .into_iter()
+        .map(|source| source.root)
+        .collect()
 }
 
 /// The session a composer belongs to, as the webview opened it.
@@ -125,6 +154,27 @@ pub struct SessionRef {
     pub name: String,
     #[serde(default)]
     pub archive_id: Option<String>,
+}
+
+impl SessionRef {
+    /// Archive selection is an identity boundary even if an older caller omits its id.
+    pub(crate) fn archived(&self) -> bool {
+        self.key.starts_with("archive:")
+            || self.archive_id.as_ref().is_some_and(|id| !id.is_empty())
+    }
+}
+
+/// Archived rows are paged outside the live catalog. Give their composers
+/// a stopped context without falling back to a live row of the same name.
+/// The caller supplies the computer's current online state separately.
+pub fn archived_row(key: &str, name: &str) -> Option<ViewRow> {
+    let id = key.strip_prefix("archive:")?;
+    Some(ViewRow {
+        name: name.into(),
+        state: "archived".into(),
+        archive_id: Some(id.into()),
+        ..ViewRow::default()
+    })
 }
 
 /// Qt's draft key: `machine\nsession[\narchive]` (`SessionsWindow.cpp:438`).
@@ -207,6 +257,7 @@ pub struct ComposerView {
     pub clear: send::ClearControl,
     /// The agent's question card shown in the composer (A2-1).
     pub question: Option<questions::QuestionView>,
+    pub queue: Option<zerus_client_core::input_queue::QueueView>,
     /// The editor and the action row show: false while a required card
     /// stands in for them (`MessageComposer::setInputVisible`).
     pub input_visible: bool,
@@ -415,6 +466,7 @@ pub(crate) struct Hub {
     /// Terminal or Native UI, `activeMs` behind Processes
     /// (`SessionsWindow.cpp:2013-2016`); None is Activity's 2.5 s.
     pub(crate) poll: Option<f64>,
+    pub(crate) queue: queue::Queue,
     /// Events for the next batch (`composer_events`), at most 16.
     pub(crate) events: VecDeque<ComposerEvent>,
 }
@@ -438,6 +490,11 @@ pub(crate) struct Shared {
     pub(crate) store: Arc<DraftStore>,
     /// The private attachment cache the `zerus-file` scheme serves.
     pub(crate) cache: Arc<files::Cache>,
+    /// Qt's draft store, read-only (`Config::qt_drafts`, checked again by
+    /// [`qt_store`]).
+    pub(crate) qt: Option<PathBuf>,
+    /// The dev app's draft stores, read-only.
+    pub(crate) dev: Vec<PathBuf>,
     pub(crate) deps: Deps,
     /// Counts `changed` calls.
     changes: AtomicU64,
@@ -489,6 +546,8 @@ impl Composers {
     pub fn new(drafts: Arc<DraftStore>, config: Config, deps: Deps) -> Self {
         let composers = Composers(Arc::new(Shared {
             hub: Mutex::new(Hub::default()),
+            qt: qt_store(drafts.root(), config.qt_drafts),
+            dev: dev_stores(drafts.root(), config.dev_drafts),
             store: drafts,
             cache: files::Cache::new(config.cache),
             deps,
@@ -547,6 +606,10 @@ impl Composers {
     /// catalog row under a new name is a rename: its draft moves (`renameDraft`).
     pub fn open(&self, session: Option<SessionRef>) -> Option<ComposerView> {
         let mut hub = self.lock();
+        let next = session
+            .as_ref()
+            .map(|s| draft_key(&s.computer, &s.name, s.archive_id.as_deref()));
+        self.push_selection(&mut hub, next.as_deref());
         let Some(session) = session else {
             hub.open = None;
             hub.open_key = None;
@@ -1247,6 +1310,7 @@ impl Composers {
                 kept.pop_front();
             }
         }
+        let accepted_details = followed && matches!(update, Some(Some(_)));
         let state_changed = match update.filter(|_| followed) {
             Some(Some((details, expiry))) => {
                 hub.followed.details = Some(details);
@@ -1270,7 +1334,7 @@ impl Composers {
         let touched = hub.open.as_ref().is_some_and(|open| touches(batch, open));
         drop(hub);
         if state_changed {
-            self.after_observe();
+            self.after_observe(accepted_details);
         } else if new_events {
             // New events alone change the view only when they reconcile a row.
             if self.reconcile() || touched {
@@ -1286,10 +1350,15 @@ impl Composers {
     /// waiting for the open session reads the new details (Qt's
     /// `continueAfterCompact` and `continueAfterStart`, 3607), and the
     /// question cards follow (`renderQuestion`).
-    fn after_observe(&self) {
+    fn after_observe(&self, accepted_details: bool) {
         self.reconcile();
         self.continue_open();
         self.sync_questions();
+        // Qt's pushInspected runs only for an accepted details read (3627,
+        // 3653), never for an ended frame or an inspection failure.
+        if accepted_details {
+            self.queue_observed();
+        }
         self.changed();
     }
 
@@ -1450,6 +1519,7 @@ impl Composers {
             compacting: hub.compacts.contains_key(key),
             clear: session.clear,
             question,
+            queue: self.queue_part(hub),
             input_visible,
         })
     }
@@ -1669,6 +1739,23 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn hub_on(store: &Arc<DraftStore>) -> (Composers, Arc<AtomicUsize>) {
+        hub_with_qt(store, None)
+    }
+
+    /// A hub whose Qt draft store is `qt` (read-only).
+    pub(crate) fn hub_with_qt(
+        store: &Arc<DraftStore>,
+        qt: Option<PathBuf>,
+    ) -> (Composers, Arc<AtomicUsize>) {
+        hub_with_stores(store, qt, Vec::new())
+    }
+
+    /// A hub with Qt's and the dev app's draft stores (read-only).
+    pub(crate) fn hub_with_stores(
+        store: &Arc<DraftStore>,
+        qt: Option<PathBuf>,
+        dev: Vec<PathBuf>,
+    ) -> (Composers, Arc<AtomicUsize>) {
         let notified = Arc::new(AtomicUsize::new(0));
         let count = Arc::clone(&notified);
         let composers = Composers::new(
@@ -1676,6 +1763,8 @@ pub(crate) mod tests {
             // The `cache` folder beside the test's `drafts`.
             Config {
                 cache: store.root().with_file_name("cache"),
+                qt_drafts: qt,
+                dev_drafts: dev,
             },
             Deps {
                 spawn: Arc::new(|job: Job| {

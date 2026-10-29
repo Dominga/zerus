@@ -3,7 +3,7 @@ import * as bridge from "../bridge";
 import { notify } from "./actions";
 import { documentVisibility, type PageVisibility } from "./visibility";
 import type { Timers } from "./terminal";
-import type { Answer, ClearControl, ColdPrompt, ComposerView, SendReply, SessionRef, StartQuestion } from "../types";
+import type { Answer, ClearControl, ColdPrompt, ComposerView, Inspect, SendReply, SessionRef, StartQuestion } from "../types";
 
 // The open composer (Qt MessageComposer) over the Rust hub. The webview owns
 // the text while the user types: edits go to Rust 250 ms after the last key,
@@ -42,8 +42,12 @@ export interface ComposerPort {
   open(session: SessionRef | undefined): Promise<ComposerView | null>;
   edit(handle: number, rev: number, epoch: number, text: string, position: number, anchor: number): Promise<void>;
   pick(handle: number, start: number, end: number): Promise<void>;
+  /** Attaches files by path, their references going where `start..end` is (composer_attach). */
+  attach(handle: number, paths: string[], start: number, end: number): Promise<void>;
   pasteImage(handle: number, png: Uint8Array, start: number, end: number): Promise<void>;
   send(handle: number, rev: number, epoch: number, text: string, position: number, anchor: number): Promise<SendReply>;
+  push(handle: number, rev: number, epoch: number, text: string, position: number, anchor: number): Promise<SendReply>;
+  sendNow(queueId: string | null): Promise<boolean>;
   answer(token: number, answer: Answer): Promise<SendReply>;
   remove(handle: number, index: number): Promise<void>;
   undo(handle: number): Promise<void>;
@@ -54,6 +58,10 @@ export interface ComposerPort {
   refresh(handle: number): Promise<void>;
   /** Opens a draft attachment by its `zerus-file` path: null when it opened, else a notice; rejects with why not (Task 9). */
   openAttachment(path: string): Promise<string | null>;
+  /** A local row's Retry, Delete and Check (src-tauri `local_retry`, `local_delete`, `local_inspect`). */
+  localRetry(handle: number, id: string): Promise<SendReply>;
+  localDelete(handle: number, id: string): Promise<void>;
+  localInspect(handle: number, id: string): Promise<Inspect | null>;
 }
 
 /** Image decoding for pastes that are not PNG; tests pass their own. */
@@ -143,8 +151,14 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
   const [handBack, setHandBack] = createSignal<number | undefined>();
   /** The composers whose send or answer call is on its way. */
   const calling = handleSet();
+  /** The local rows whose Retry is on its way, by composer and row: one click sends one Retry. */
+  const retrying = new Set<string>();
   /** Opens under way: the editor stays read-only, so no key is typed into the composer being left. */
   const [opening, setOpening] = createSignal(0);
+  /** Quit has asked for the last text: freeze typing while its bounded handshake runs. */
+  const [closing, setClosing] = createSignal(false);
+  /** Edits already handed to IPC, including a composer left meanwhile. */
+  const edits = new Set<Promise<void>>();
   /** A send started: locked until Rust's view shows it (sending, waiting) or hands the text back. */
   const [starting, setStarting] = createSignal(false);
   /** The disabled Send's hint (Qt shows the status as a tooltip at the editor). */
@@ -174,7 +188,7 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
   const operationLocked = () => {
     const v = view();
     const h = v?.handle;
-    return opening() > 0 || (h !== undefined && (pending.has(h) || calling.has(h))) || handBack() !== undefined || starting() || question()
+    return closing() || opening() > 0 || (h !== undefined && (pending.has(h) || calling.has(h))) || handBack() !== undefined || starting() || question()
       || !v?.loaded || v.attaching || v.sending || !!v.waiting;
   };
   const locked = () => operationLocked() || !!view()?.session_blocks_input;
@@ -185,9 +199,14 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
   /** Qt's Send state (MessageComposer.cpp:1185), from Rust's view and the text being typed. */
   const sendEnabled = () => {
     const v = view();
-    if (!v || !v.loaded || !v.available || v.uncertain || locked() || tooLong() || !hasContent()) return false;
+    // A required question card hides Send with the editor (setInputVisible).
+    if (!v || !v.loaded || !v.available || v.uncertain || v.input_visible === false || locked() || tooLong() || !hasContent()) return false;
     return !(v.attachments.length > 0 && !v.attachments_available);
   };
+  /** Qt adds the push action to this message field only (MessageComposer.cpp:841-853). */
+  const pushEnabled = () => !closing() && opening() === 0 && !!view() && view()?.input_visible !== false;
+  /** The old session's queue must not remain actionable while its successor opens. */
+  const queue = () => opening() > 0 ? null : view()?.queue ?? null;
 
   /** The composer goes or changes: its open question answers Cancel, as its modal dialog would. */
   function dropDialog() {
@@ -249,7 +268,20 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
     if (!dirty || h === undefined) return;
     dirty = false;
     const s = selection();
-    try { await port.edit(h, rev, epoch, text(), s.end, s.start); } catch { /* outside the app: nothing to keep */ }
+    let write: Promise<void> | undefined;
+    try {
+      write = port.edit(h, rev, epoch, text(), s.end, s.start);
+      edits.add(write);
+      await write;
+    } catch { /* outside the app: nothing to keep */ }
+    finally { if (write) edits.delete(write); }
+  }
+
+  /** The page acknowledges quit only after its last edit has reached Rust. */
+  async function flushForExit() {
+    setClosing(true);
+    await flush();
+    await Promise.allSettled([...edits]);
   }
 
   function changed() {
@@ -320,12 +352,65 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
     try { await call(h); } catch { if (epoch === at) setHandBack(undefined); }
   }
 
+  /** Panel and window shortcut use this hub command; a push keeps its own handle. */
+  async function sendNow(queueId?: string): Promise<boolean> {
+    if (closing()) return false;
+    if (opening() > 0) {
+      notices("info", "Nothing queued can be sent now", false);
+      return false;
+    }
+    try { return await port.sendNow(queueId ?? null); }
+    catch (e) { notices("error", typeof e === "string" ? e : e instanceof Error ? e.message : String(e), true); return false; }
+  }
+
+  /** Ordinary Send and push share the flush, handle guard and reply hand-back. */
+  async function sendField(pushing: boolean) {
+    const h = handle();
+    // Under a required question card the editor is hidden and takes no command (setInputVisible).
+    if (h === undefined || calling.has(h) || view()?.input_visible === false || (pushing && !pushEnabled())) return;
+    // Rust decides whether an empty/sending push becomes Send now, under
+    // the captured handle (MessageComposer.cpp:837 carries the field's key).
+    const queuePush = pushing && (view()?.sending || !hasContent());
+    if (locked() && !queuePush) return;
+    if (!queuePush && !sendEnabled()) {
+      // Qt shows the status at the editor when there is something to send (MessageComposer.cpp:814-818).
+      const status = statusLine(view(), error(), tooLong()).text;
+      if (hasContent() && status) showHint(status);
+      return;
+    }
+    hintTimer?.();
+    setHint(undefined);
+    // Locked before the flush awaits, so a second Enter meanwhile sends nothing.
+    calling.add(h);
+    let r: SendReply;
+    let at = epoch;
+    const captured = { rev, epoch, text: text(), position: selection().end, anchor: selection().start };
+    try {
+      await flush();
+      if (h !== handle() || opening() > 0) { calling.remove(h); return; }
+      setError(undefined);
+      if (pushing) {
+        r = await port.push(h, captured.rev, captured.epoch, captured.text, captured.position, captured.anchor);
+      } else {
+        at = epoch;
+        const s = selection();
+        r = await port.send(h, rev, at, text(), s.end, s.start);
+      }
+    } catch (e) {
+      calling.remove(h);
+      notices("error", typeof e === "string" ? e : e instanceof Error ? e.message : String(e), true);
+      return;
+    }
+    batch(() => { calling.remove(h); reply(r, h, at, true); });
+  }
+
   return {
-    view, text, selection, dialog, locked, operationLocked, sendEnabled, hint,
+    view, text, selection, dialog, locked, operationLocked, sendEnabled, pushEnabled, queue, hint,
     /** The status line: Qt's order, with the composer's own error and the typed length. */
     status: (): StatusLine => statusLine(view(), error(), tooLong()),
     apply, receive,
     async open(session: SessionRef | undefined) {
+      if (closing()) return;
       setOpening((n) => n + 1);
       try {
         // The composer being left keeps what was typed: its edit goes first.
@@ -356,8 +441,15 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
       setSelection({ start, end });
       if (!locked() && view()) changed();
     },
-    flush,
+    flush, flushForExit,
     attachFiles: () => exclusive((h) => { const s = ordered(); return port.pick(h, s.start, s.end); }),
+    /** Qt's canAttachFiles: the session takes attachments and nothing locks the composer. */
+    canAttach: () => !!view()?.attachments_available && !locked(),
+    /**
+     * Dropped files (MessageComposer::attachDroppedFiles, 961-967): the
+     * selection collapses to the cursor and their references go there.
+     */
+    attachDropped: (paths: string[]) => exclusive((h) => { const at = selection().end; return port.attach(h, paths, at, at); }),
     async pasteImage(blob: Blob) {
       await exclusive(async (h) => {
         let png: Uint8Array;
@@ -375,34 +467,9 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
     },
     remove: (index: number) => handBackAfter((h) => port.remove(h, index)),
     undo: () => handBackAfter((h) => port.undo(h)),
-    async send() {
-      const h = handle();
-      if (h === undefined || locked()) return;
-      if (!sendEnabled()) {
-        // Qt shows the status at the editor when there is something to send (MessageComposer.cpp:814-818).
-        const status = statusLine(view(), error(), tooLong()).text;
-        if (hasContent() && status) showHint(status);
-        return;
-      }
-      hintTimer?.();
-      setHint(undefined);
-      // Locked before the flush awaits, so a second Enter meanwhile sends nothing.
-      calling.add(h);
-      let r: SendReply;
-      let at = epoch;
-      try {
-        await flush();
-        at = epoch;
-        const s = selection();
-        setError(undefined);
-        r = await port.send(h, rev, at, text(), s.end, s.start);
-      } catch (e) {
-        calling.remove(h);
-        notices("error", typeof e === "string" ? e : e instanceof Error ? e.message : String(e), true);
-        return;
-      }
-      batch(() => { calling.remove(h); reply(r, h, at, true); });
-    },
+    send: () => sendField(false),
+    push: () => sendField(true),
+    sendNow,
     /** Answers the open question with its token. The question kept the epoch: closing it unlocks the editor. */
     async answer(answer: Answer) {
       const d = dialog();
@@ -462,16 +529,53 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
       try { notice = await port.openAttachment(a.path); } catch (e) { notice = typeof e === "string" ? e : String(e); }
       if (notice && handle() === v.handle) setError(notice);
     },
+    /**
+     * Retry on a failed local row (Qt's messageAction "retry"): Rust sends a
+     * definite failure again as a new submission with a new request id, and
+     * never an uncertain one. Its reply keeps the composer it started on, as
+     * a send's: a cold question for a composer left meanwhile is answered
+     * Cancel, and only a notice still shows.
+     */
+    async localRetry(id: string) {
+      const h = handle();
+      if (h === undefined) return;
+      const mark = `${h}\n${id}`;
+      if (retrying.has(mark)) return;
+      retrying.add(mark);
+      let r: SendReply;
+      let at = epoch;
+      try {
+        await flush();
+        at = epoch;
+        r = await port.localRetry(h, id);
+      } catch (e) {
+        notices("error", typeof e === "string" ? e : e instanceof Error ? e.message : String(e), true);
+        return;
+      } finally {
+        retrying.delete(mark);
+      }
+      reply(r, h, at, false);
+    },
+    /** Delete on a failed local row (the view asked first). */
+    async localDelete(id: string) { const h = handle(); if (h !== undefined) await port.localDelete(h, id).catch(() => {}); },
+    /** Check Terminal or Check native UI on a failed row: where it leads, or nothing once another composer opened. */
+    async localInspect(id: string): Promise<Inspect | undefined> {
+      const h = handle();
+      if (h === undefined) return undefined;
+      let routed: Inspect | null = null;
+      try { routed = await port.localInspect(h, id); } catch { return undefined; }
+      return routed && h === handle() ? routed : undefined;
+    },
   };
 }
 
 export type ComposerStore = ReturnType<typeof createComposer>;
 
 export const composer = createRoot(() => createComposer({
-  open: bridge.composerOpen, edit: bridge.composerEdit, pick: bridge.composerPick, pasteImage: bridge.composerPasteImage,
-  send: bridge.sendMessage, answer: bridge.sendAnswer, remove: bridge.composerRemove, undo: bridge.composerUndoRemove,
+  open: bridge.composerOpen, edit: bridge.composerEdit, pick: bridge.composerPick, attach: (h, paths, start, end) => bridge.composerAttach(h, paths, start, end), pasteImage: bridge.composerPasteImage,
+  send: bridge.sendMessage, push: (...args) => bridge.sendPush(...args), sendNow: (id) => bridge.queueSendNow(id), answer: bridge.sendAnswer, remove: bridge.composerRemove, undo: bridge.composerUndoRemove,
   allowRetry: bridge.composerAllowRetry, cancelSend: bridge.sendCancel, interrupted: bridge.sendInterrupted, clear: bridge.clearContext,
-  refresh: bridge.composerRefresh, openAttachment: (path) => bridge.attachmentOpenDraft(path),
+  refresh: bridge.composerRefresh, openAttachment: (path) => bridge.attachmentOpenDraft(path), localRetry: bridge.localRetry, localDelete: bridge.localDelete, localInspect: bridge.localInspect,
 }));
 
 /**

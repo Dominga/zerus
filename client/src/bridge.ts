@@ -1,6 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type Batch, type ComputerId, type Details, type EditOutcome, type Outcome, type ReadMark, type Target, type TerminalConnected, type TerminalFacts, type TerminalFinished, type TerminalStatus, type TerminalTarget, type ArchivePage, type ArchivedActivity, type ProcessTarget, type Answer, type ComposerTab, type ComposerView, type Inspect, type SendReply, type SessionRef, type AttachmentRef, type Fetched } from "./types";
+import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type Batch, type ComputerId, type Details, type EditOutcome, type Outcome, type ReadMark, type Target, type TerminalConnected, type TerminalFacts, type TerminalFinished, type TerminalStatus, type TerminalTarget, type ArchivePage, type ArchivedActivity, type ProcessTarget, type Answer, type ComposerTab, type ComposerView, type Inspect, type SendReply, type SessionRef, type AttachmentRef, type Fetched, type ConflictsPage, type DraftSource, type SavedDraftDetail, type SavedDraftsPage, type QuestionEdit, type QuestionReply } from "./types";
 import type { ActivityPort, FollowRequest } from "./store/activity";
 import { documentVisibility, type PageVisibility } from "./store/visibility";
 
@@ -146,7 +146,7 @@ export function normalize(b: Partial<Batch>): Batch {
     upserts: b.upserts ?? e.upserts, removes: b.removes ?? e.removes, replaces: b.replaces ?? e.replaces, computers: b.computers ?? e.computers,
     machines: b.machines ?? [], activity: b.activity ?? e.activity, groups: b.groups ?? [], grouping: b.grouping ?? undefined,
     processes_view: b.processes_view ?? undefined,
-    composer: b.composer ?? undefined, draft_keys: b.draft_keys ?? undefined,
+    composer: b.composer ?? undefined, draft_keys: b.draft_keys ?? undefined, composer_events: b.composer_events ?? undefined,
   };
 }
 
@@ -410,6 +410,22 @@ export async function terminalResize(view: string, generation: number, cols: num
 export function terminalAck(view: string, generation: number): void {
   if (inTauri()) void invoke("terminal_ack", { view, generation }).catch(() => {});
 }
+/** The Terminal tab of attach `generation` shows or hides: a dropped file's paste waits for neither (Qt's terminalDropTarget). */
+export function terminalShown(view: string, generation: number, shown: boolean): void {
+  if (inTauri()) void invoke("terminal_shown", { view, generation, shown }).catch(() => {});
+}
+/** The session a Terminal drop goes to (src-tauri terminal.rs `DropTarget`). */
+export interface DropTarget { computer: string; name: string; machine: string; run_id: string; conversation_id: string; tracked: boolean; created: number }
+/** Pastes dropped files' paths into attach `generation`, after staging them on a peer: null when done (or stale), else an information notice; rejects with a warning. */
+export async function terminalDrop(view: string, generation: number, target: DropTarget, paths: string[]): Promise<string | null> {
+  if (!inTauri()) throw "Dropping files needs the desktop app.";
+  return invoke<string | null>("terminal_drop", { view, generation, target, paths });
+}
+/** Whether every dropped path names a file (Qt's LocalFile::readable); a folder refuses the drop. */
+export async function droppedFiles(paths: string[]): Promise<boolean> {
+  if (!inTauri()) return false;
+  return invoke<boolean>("dropped_files", { paths }).catch(() => false);
+}
 export async function terminalDisconnect(view: string): Promise<string | null> {
   return inTauri() ? invoke<string | null>("terminal_disconnect", { view }) : null;
 }
@@ -462,6 +478,10 @@ function onEvent<T>(name: string, listener: (payload: T) => void): Promise<() =>
 export const onOpenSession = (listener: (target: OpenSession) => void) => onEvent<OpenSession>("open-session", listener);
 /** `desk-notice`: a notice for the window; resolves with the stop once listening. */
 export const onDeskNotice = (listener: (notice: DeskNotice) => void) => onEvent<DeskNotice>("desk-notice", listener);
+
+/** Rust asks every mounted composer to flush before its bounded quit. */
+export const onExitFlush = (listener: (nonce: string) => void) => onEvent<string>("exit-flush", listener);
+export const acknowledgeExitFlush = (nonce: string) => invoke<void>("exit_flush_ack", { nonce });
 
 type DeskWindow = { __zerusDeskPage?: number; __zerusDeskPageReady?: (page: number) => void };
 
@@ -522,12 +542,24 @@ export async function composerPasteImage(handle: number, png: Uint8Array, start:
 export const composerRemove = (handle: number, index: number) => desktop<void>("composer_remove", { handle, index });
 export const composerUndoRemove = (handle: number) => desktop<void>("composer_undo_remove", { handle });
 export const composerAllowRetry = (handle: number) => desktop<void>("composer_allow_retry", { handle });
+// The question card (A2-1, A2-2). Every edit names the epoch its fields are based on.
+export const questionEdit = (card: string, epoch: number, edit: QuestionEdit) => desktop<void>("question_edit", { card, epoch, edit });
+export const questionPage = (card: string, page: number) => desktop<void>("question_page", { card, page });
+export const questionNavigate = (direction: number) => desktop<void>("question_navigate", { direction });
+export const questionAllowRetry = (card: string) => desktop<void>("question_allow_retry", { card });
+export const questionSubmit = (card: string) => desktop<QuestionReply>("question_submit", { card });
+export const questionDecide = (card: string, allow: boolean) => desktop<QuestionReply>("question_decide", { card, allow });
+export const questionSkip = (card: string) => desktop<QuestionReply>("question_skip", { card });
+export const questionCold = (token: number, proceed: boolean) => desktop<QuestionReply>("question_cold", { token, proceed });
 /** The status line's Refresh: the open session is read again (Qt's sessionRefreshRequested). */
 export const composerRefresh = (handle: number) => desktop<void>("composer_refresh", { handle });
 /** The detail tab that shows: Terminal and Native UI retry a failed read at Qt's background interval. */
 export const composerTab = (tab: ComposerTab) => (inTauri() ? invoke<void>("composer_tab", { tab }) : Promise.resolve());
 export const sendMessage = (handle: number, rev: number, epoch: number, text: string, position: number, anchor: number) =>
   desktop<SendReply>("send_message", { handle, rev, epoch, text, position, anchor });
+export const sendPush = (handle: number, rev: number, epoch: number, text: string, position: number, anchor: number) =>
+  desktop<SendReply>("send_push", { handle, rev, epoch, text, position, anchor });
+export const queueSendNow = (queueId: string | null) => desktop<boolean>("queue_send_now", { queue_id: queueId });
 export const sendAnswer = (token: number, answer: Answer) => desktop<SendReply>("send_answer", { token, answer });
 export const sendCancel = (handle: number) => desktop<void>("send_cancel", { handle });
 export const sendInterrupted = (handle: number) => desktop<void>("send_interrupted", { handle });
@@ -563,3 +595,16 @@ export async function attachmentOpenDraft(path: string): Promise<string | null> 
   if (!inTauri()) throw "Opening attachments needs the desktop app.";
   return invoke<string | null>("attachment_open_draft", { path });
 }
+
+// Saved drafts (src-tauri composer/saved.rs). Qt's and the dev app's stores
+// are only read; each page is one bounded read.
+/** One page of a section, newest first; `before` is the previous page's `next`. */
+export const savedDrafts = (source: DraftSource, limit: number, before: string | null) =>
+  desktop<SavedDraftsPage>("saved_drafts", { source, limit, before });
+/** One page of the switch import's conflicts, from `after`. */
+export const draftConflicts = (limit: number, after: number) => desktop<ConflictsPage>("draft_conflicts", { limit, after });
+export const savedDraft = (source: DraftSource, key: string) => desktop<SavedDraftDetail>("saved_draft", { source, key });
+/** Copies a Qt draft into this computer's store, never over a draft here; rejects with why not. */
+export const draftRecover = (key: string) => desktop<void>("draft_recover", { key });
+/** Replaces the open composer's draft with the selected one; rejects with why not. */
+export const draftRestore = (handle: number, source: DraftSource, key: string) => desktop<void>("draft_restore", { handle, source, key });

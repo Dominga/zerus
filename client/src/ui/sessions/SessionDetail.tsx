@@ -1,8 +1,9 @@
-import { For, Match, Show, Switch, createEffect, createMemo, createRoot, createSignal, on } from "solid-js";
+import { For, Match, Show, Switch, createEffect, createMemo, createRoot, createSignal, on, onCleanup } from "solid-js";
 import * as bridge from "../../bridge";
 import { terminal } from "../../store/terminal";
 import { TerminalTab } from "./Terminal";
 import { ProcessesTab } from "./Processes";
+import { drops } from "../../store/drops";
 import { processes, processesTab } from "../../store/processes";
 import { flag } from "../../store/settings";
 import type { TerminalStatus } from "../../types";
@@ -21,6 +22,9 @@ import { snapshotOf } from "./actions-ui";
 import { markEntry } from "./mark-entries";
 import { Composer } from "./Composer";
 import { ComposerDialogs } from "./ComposerDialogs";
+import { QuestionCard } from "./QuestionCard";
+import { QueuePanel } from "./QueuePanel";
+import { onCommand } from "../../store/shortcuts";
 import { composer } from "../../store/composer";
 
 // The session header and its Activity with the composer under it, after
@@ -181,8 +185,16 @@ const tabs = () => {
 createRoot(() => createEffect(() => { if (!tabs().find((t) => t.id === detailTab())?.show) setDetailTab("activity"); }));
 
 export function SessionDetail() {
+  createEffect(() => {
+    if (page() !== "sessions" || !selected()) return;
+    // Window scope on every detail tab (SessionsWindowShortcuts.cpp:202,242).
+    const stop = onCommand("queue.sendNow", () => { void composer.sendNow(); });
+    onCleanup(stop);
+  });
   return (
     <section class="detail" aria-label="Session">
+      {/* Qt's drop overlay (SessionFileDrop): what a drop on this panel does. */}
+      <Show when={drops.hint()}>{(text) => <div class="drop-overlay" aria-hidden="true"><span>{text()}</span></div>}</Show>
       <Show when={selected()} fallback={<EmptyDetail />}>
         <Header />
         <div class="work">
@@ -198,8 +210,10 @@ export function SessionDetail() {
                 <Match when={detailTab() === "activity"}>
                   <div class="activity-wrap" style={columnStyle()}>
                     <ActivityView source={activitySourceFor(selected()!.key)} />
-                    {/* The subagent view stays read only; an archived row's recorded Activity has no composer. */}
-                    <Show when={!subagentOpen() && !activityReadOnly(selected()!.key)}><div class="cmp-col"><Composer /></div></Show>
+                    {/* Only the subagent view stays read-only; archives keep their editable draft (Qt 3454). */}
+                    <Show when={!subagentOpen()}>
+                      <QueuePanel /><div class="cmp-col"><QuestionCard /><Composer /></div>
+                    </Show>
                   </div>
                 </Match>
                 <Match when={detailTab() === "terminal"}><TerminalTab /></Match>

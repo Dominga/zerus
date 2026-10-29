@@ -11,7 +11,8 @@ import { runningCommandsEntry } from "../../store/processes";
 import { flag } from "../../store/settings";
 import { archiveCount, archiveTip } from "../../store/archive";
 import { ArchiveBar, datePanelOpen } from "./ArchiveBar";
-import { detailsFor, followedFor, updating } from "../../store/actions";
+import { detailsFor, followedFor, notify, updating } from "../../store/actions";
+import { STATE_CHANGED } from "./actions-ui";
 import { running } from "../../store/batch";
 import { grouping, headerOf, moveProject, setProjectCollapsed, setProjectToShow, sortProject } from "../../store/organization";
 import { TOOL_WIDTH, clearArchiveMenuEntry, machineMenu, runSelection, selectedRows, selectionContextMenu, selectionCount } from "./selection-live";
@@ -30,6 +31,8 @@ import {
 } from "../../store/ui";
 import type { Session } from "./types";
 import { motionReduced } from "../motion";
+import { composer } from "../../store/composer";
+import { SavedDraftsDialog, openSavedDrafts } from "./SavedDrafts";
 import { bulkSelect, clearMulti, multiCount, setAnchor, dragItem, setDragItem, drop, setDrop, endDrag, placement, applyDrop, SESSION_MIME, type DragItem } from "./organize";
 
 /** Actions that go through guarded `hgs` calls arrive in phase 2; their menu entries show disabled. */
@@ -101,6 +104,23 @@ function setRowCompact(key: string, compact: boolean) {
   morphTimer = window.setTimeout(() => setMorphing(false), MORPH.duration + 40);
 }
 
+/**
+ * The menu's Clear session (Qt's SessionMenuAction::Clear, SessionsWindow.cpp
+ * 5339-5340 and 5485-5490): only for the selected row, with the header's
+ * state and reason, and through the composer's Clear dialog. A row whose
+ * state changed since the menu opened asks to open its actions again.
+ */
+function clearEntry(s: Session): MenuEntry {
+  const control = s.key === selectedKey() && !subagentOpen() ? composer.view()?.clear : undefined;
+  return {
+    label: "Clear session…", icon: "clear", disabled: !control?.enabled, hint: control?.reason || undefined,
+    action: () => {
+      if (catalog.rows[s.key]?.state !== s.state) { notify("error", STATE_CHANGED, true); return; }
+      composer.openClear();
+    },
+  };
+}
+
 export function sessionMenu(s: Session): MenuEntry[] {
   // The selected row's menu reads the same details as the header (Qt's m_details).
   const details = s.key === selectedKey() && !subagentOpen() ? detailsFor(s, !computerOffline(s.computer), followedFor(s.key)) : undefined;
@@ -124,7 +144,7 @@ export function sessionMenu(s: Session): MenuEntry[] {
     ...(archived ? [] : [{ separator: true } as const, ...(mute ? [mute] : []), ...(mark ? [mark] : [])]),
     { separator: true },
     act.change,
-    ...(fresh ? [fresh] : archived ? [] : [{ label: "Clear session…", icon: "clear", disabled: LATER }]),
+    ...(fresh ? [fresh] : archived ? [] : [clearEntry(s)]),
     act.rename,
     { label: "Fork session…", icon: "git-fork", disabled: LATER },
     ...(act.archive ? [act.archive] : []),
@@ -457,10 +477,13 @@ export function SessionList() {
           <span class="grow" />
           <button class="icon-btn small" data-tip="Session creation status" disabled><Icon name="clock" size={16} /></button>
           <button class="icon-btn small" title={markAllTip(markAllEntry())} disabled={markAllEntry().disabled} onClick={() => runMarkAll()}><Icon name="read-all" size={16} /></button>
-          <button class="icon-btn small" data-tip="Saved drafts: recover local drafts, including those from ended sessions" disabled><Icon name="drafts" size={16} /></button>
+          {/* The open composer is the dialog's target, none while a subagent shows (SessionsWindow.cpp:485-489). */}
+          <button class="icon-btn small" data-tip="Saved drafts: recover local drafts, including those from ended sessions" aria-label="Saved drafts"
+            onClick={(e) => openSavedDrafts(e.currentTarget, subagentOpen() ? undefined : composer.view()?.handle)}><Icon name="drafts" size={16} /></button>
         </footer>
       </div>
       <Show when={!stripMode()}><ResizeHandle /></Show>
+      <SavedDraftsDialog />
     </section>
   );
 }

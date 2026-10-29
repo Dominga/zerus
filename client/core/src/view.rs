@@ -20,6 +20,10 @@ pub struct ViewRow {
     pub name: String,
     /// The card title: the tag, else the name after its project, else the project.
     pub title: String,
+    /// Qt's full project / tag title (`SessionPresentation.h:196-203`),
+    /// projected before the original tag and project fields are lost.
+    #[serde(default)]
+    pub display_title: String,
     /// `claude`, `codex`, `kimi`, `deepseek`, `opencode`, `sh` or what `hgs` reports.
     pub agent: String,
     /// The presentation status: `attention`, `error`, `working`, `background`,
@@ -705,6 +709,24 @@ impl<'a> Session<'a> {
         }
     }
 
+    fn display_title(&self) -> String {
+        let project = self.project();
+        if project.is_empty() {
+            return self.name.to_owned();
+        }
+        let tag = text(self.row, "tag");
+        let tag = if tag.is_empty() {
+            section(self.name, 2)
+        } else {
+            tag
+        };
+        if tag.is_empty() {
+            project
+        } else {
+            format!("{project} / {tag}")
+        }
+    }
+
     fn title(&self) -> String {
         let tag = text(self.row, "tag");
         let tag = if tag.is_empty() {
@@ -1096,6 +1118,7 @@ pub fn row(value: &Value) -> ViewRow {
     ViewRow {
         name: session.name.to_owned(),
         title: session.title(),
+        display_title: session.display_title(),
         agent: if agent == "dsh" { "deepseek" } else { agent }.to_owned(),
         status: status.to_owned(),
         caption,
@@ -1393,6 +1416,47 @@ mod tests {
             "an error without recovery needs attention"
         );
         assert_eq!(row(&error).status, "error", "while its status stays");
+    }
+
+    #[test]
+    fn display_titles_keep_qt_s_original_project_and_tag_fallbacks() {
+        for (source, expected) in [
+            (json!({"name": "claude/project/tag"}), "project / tag"),
+            (json!({"name": "claude/project/a/b"}), "project / a/b"),
+            (json!({"name": "sh/project"}), "project"),
+            (json!({"name": "shell"}), "shell"),
+            (json!({"name": "shell", "tag": "custom"}), "shell"),
+            (json!({"name": "shell", "project": "project"}), "project"),
+            (
+                json!({"name": "shell", "project": "project", "tag": "project"}),
+                "project / project",
+            ),
+            (
+                json!({"name": "shell", "project": "project", "tag": "custom"}),
+                "project / custom",
+            ),
+            (
+                json!({"name": "claude/old/fallback", "project": "new", "tag": "explicit"}),
+                "new / explicit",
+            ),
+            (
+                json!({"name": "claude/old/fallback", "project": "new", "tag": ""}),
+                "new / fallback",
+            ),
+            (
+                json!({"name": "claude/project/tag", "project": null, "tag": 7}),
+                "project / tag",
+            ),
+            (json!({"name": "claude//tag"}), "claude//tag"),
+            (json!({}), ""),
+        ] {
+            assert_eq!(row(&source).display_title, expected, "{source}");
+        }
+        let repeated = row(&json!({"name": "shell", "project": "project", "tag": "project"}));
+        assert_eq!(repeated.title, "project", "the card title is unchanged");
+        let old: ViewRow = serde_json::from_value(json!({"name": "old", "title": "kept"})).unwrap();
+        assert_eq!(old.display_title, "", "old saved projections still load");
+        assert_eq!(old.title, "kept");
     }
 
     #[test]

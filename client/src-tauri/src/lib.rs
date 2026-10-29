@@ -19,6 +19,9 @@ mod composer;
 mod desk;
 mod display;
 #[cfg(feature = "live")]
+mod drops;
+mod exit_flush;
+#[cfg(feature = "live")]
 mod files;
 mod identity;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -220,7 +223,16 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
         )
         .manage(commands::AppState::default())
         .manage(window_visibility::Visibility::default())
-        .manage(lifecycle::Lifecycle { menu_bar });
+        .manage(lifecycle::Lifecycle { menu_bar })
+        .manage(exit_flush::ExitFlush::default());
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .menu(exit_flush::app_menu)
+        .on_menu_event(|app, event| {
+            if event.id().as_ref() == exit_flush::QUIT_ID {
+                exit_flush::quit_with_flush(app, 0);
+            }
+        });
     // tao activates the app when it finishes launching, taking the focus from
     // the app in front; a menu-bar build activates only to show its window.
     #[cfg(target_os = "macos")]
@@ -361,9 +373,24 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     })
                     .flatten()
                     .map(|now| (now, std::time::Instant::now()));
+                // Saved drafts reads Qt's store and the dev app's, never
+                // writing to them; a replay lists neither.
+                let qt_drafts = composer::qt_store(
+                    drafts.root(),
+                    (!replay).then(zerus_client_core::drafts::qt_root).flatten(),
+                );
+                let dev_drafts = if replay {
+                    Vec::new()
+                } else {
+                    composer::dev_stores(drafts.root(), zerus_client_core::drafts::dev_roots())
+                };
                 app.manage(composer::Composers::new(
                     drafts,
-                    composer::Config { cache },
+                    composer::Config {
+                        cache,
+                        qt_drafts,
+                        dev_drafts,
+                    },
                     composer::Deps {
                         spawn: std::sync::Arc::new(|job: composer::Job| {
                             tauri::async_runtime::spawn_blocking(job);
@@ -380,7 +407,8 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                         rows: {
                             let pump = app.state::<commands::AppState>().pump();
                             std::sync::Arc::new(move |computer: &str, key: &str, name: &str| {
-                                pump.row(computer, key)
+                                composer::archived_row(key, name)
+                                    .or_else(|| pump.row(computer, key))
                                     .or_else(|| pump.row_named(computer, name))
                                     .map(|row| (row, pump.online(computer)))
                             })
@@ -756,8 +784,8 @@ fn close_drafts(composers: Option<&composer::Composers>, flush_store: impl FnOnc
 }
 
 /// SIGTERM, SIGINT or SIGHUP (`signals.rs`, Qt's `TerminationSignals`):
-/// the app quits as Qt's posted quit does. `app.exit` ends in
-/// `RunEvent::Exit`, where the one exit hook runs once, on the main thread.
+/// the app quits as Qt's posted quit does, through the page flush helper
+/// before `RunEvent::Exit` runs the one final exit hook.
 /// Should the process not end within five seconds, the fallback ends it.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn exit_on_signals(app: AppHandle) {
@@ -770,7 +798,7 @@ fn exit_on_signals(app: AppHandle) {
                 || std::process::exit(0),
             )
         });
-        app.exit(0);
+        exit_flush::quit_with_flush(&app, 0);
     });
     if let Err(error) = installed {
         eprintln!("zerus-client: termination signals keep their default action: {error}");
@@ -822,6 +850,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::smoke_resume,
         commands::display_hz,
         commands::exit_app,
+        exit_flush::exit_flush_ack,
         commands::perf_away,
         commands::build_info,
         renderer::renderer_frame,
@@ -908,12 +937,20 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         composer::composer_allow_retry,
         composer::composer_refresh,
         composer::composer_tab,
+        drops::dropped_files,
         composer::fetch::attachment_fetch,
         composer::fetch::attachment_pin,
         composer::fetch::attachment_unpin,
         composer::fetch::attachment_open,
         composer::fetch::attachment_open_draft,
+        composer::saved::saved_drafts,
+        composer::saved::saved_draft,
+        composer::saved::draft_conflicts,
+        composer::saved::draft_recover,
+        composer::saved::draft_restore,
         composer::send::send_message,
+        composer::queue::queue_send_now,
+        composer::queue::send_push,
         composer::send::send_answer,
         composer::send::local_retry,
         composer::send::local_delete,
@@ -965,6 +1002,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::perf_log,
         commands::display_hz,
         commands::exit_app,
+        exit_flush::exit_flush_ack,
         commands::perf_away,
         commands::build_info,
         renderer::renderer_frame,
@@ -1048,6 +1086,8 @@ mod tests {
             Arc::clone(&store),
             composer::Config {
                 cache: root.join("cache"),
+                qt_drafts: None,
+                dev_drafts: Vec::new(),
             },
             Deps {
                 spawn: Arc::new(|job: Job| {

@@ -9,7 +9,7 @@ const KEY = "studio\nclaude/sample-project/review";
 const SESSION: SessionRef = { computer: "studio", key: "run:run-1", name: "claude/sample-project/review", archive_id: null };
 
 const view = (extra: Partial<ComposerView> = {}): ComposerView => ({
-  handle: 1, key: KEY, loaded: true, rev: 0, text_epoch: 1, text: "", position: 0, anchor: 0,
+  handle: 1, key: KEY, loaded: true, rev: 0, text_epoch: 1, text: "", position: 0, anchor: 0, question: null, input_visible: true, queue: null,
   attachments: [], removed: null, attaching: false, sending: false, waiting: null, uncertain: false, status: "", status_error: false,
   can_send: true, send_label: "Send", available: true, unavailable_reason: "", block_reason: null, attachments_available: true,
   attachments_reason: "", session_status: "", session_status_error: false, session_blocks_input: false, inspect_error: false,
@@ -27,6 +27,7 @@ function fakes(reply: SendReply = { kind: "sending" }, opened: ComposerView | nu
   let attachDone: (() => void) | undefined;
   let openDone: ((v: ComposerView | null) => void) | undefined;
   let answerReply: SendReply = { kind: "sending" };
+  let retryReply: SendReply = { kind: "sending" };
   let holdOpen = false;
   /** What opening a draft attachment answers next: null (opened), a notice, or a thrown error. */
   let openReply: () => string | null = () => null;
@@ -39,8 +40,11 @@ function fakes(reply: SendReply = { kind: "sending" }, opened: ComposerView | nu
     },
     edit: async (_h, rev, _epoch, text) => { calls.push(`edit ${rev} ${text}`); },
     pick: () => new Promise<void>((resolve) => { calls.push("pick"); attachDone = resolve; }),
+    attach: async (_h, paths, start, end) => { calls.push(`attach ${paths.join(",")} ${start}-${end}`); },
     pasteImage: async (_h, bytes) => { calls.push(`paste ${bytes.length}`); },
     send: async (_h, rev, _epoch, text) => { calls.push(`send ${rev} ${text}`); return reply; },
+    push: async (_h, rev, _epoch, text, position, anchor) => { calls.push(`push ${rev} ${text} ${position} ${anchor}`); return reply; },
+    sendNow: async (id) => { calls.push(`send-now ${id}`); return true; },
     answer: async (token, answer) => { calls.push(`answer ${token} ${JSON.stringify(answer)}`); return answerReply; },
     remove: async (_h, index) => { calls.push(`remove ${index}`); }, undo: async () => { calls.push("undo"); },
     allowRetry: async () => { calls.push("allow retry"); }, cancelSend: async () => { calls.push("cancel send"); },
@@ -48,6 +52,9 @@ function fakes(reply: SendReply = { kind: "sending" }, opened: ComposerView | nu
     clear: async (_h, run, conversation, dismiss) => { calls.push(`clear ${run} ${conversation} ${dismiss}`); return { kind: "notice", text: "Context cleared. Your draft is ready to send.", error: false }; },
     refresh: async (h) => { calls.push(`refresh ${h}`); },
     openAttachment: async (path) => { calls.push(`open file ${path}`); return openReply(); },
+    localRetry: async (h, id) => { calls.push(`retry ${h} ${id}`); return retryReply; },
+    localDelete: async (h, id) => { calls.push(`delete ${h} ${id}`); },
+    localInspect: async (h, id) => { calls.push(`inspect ${h} ${id}`); return { kind: "terminal" }; },
   };
   const notify: Notices = (tone, text, sticky) => { notices.push(`${tone} ${sticky ? "sticky" : "timed"} ${text}`); };
   let clock = 0;
@@ -62,6 +69,7 @@ function fakes(reply: SendReply = { kind: "sending" }, opened: ComposerView | nu
     finishOpen: (v: ComposerView | null) => openDone?.(v),
     answerWith: (r: SendReply) => { answerReply = r; },
     openWith: (reply: () => string | null) => { openReply = reply; },
+    retryWith: (r: SendReply) => { retryReply = r; },
   };
 }
 
@@ -74,7 +82,212 @@ function held<T>() {
 }
 const images = (width: number, height: number): Images => ({ size: async () => ({ width, height }), png: async () => new Uint8Array([1, 2, 3]) });
 
+describe("composer exit flush", () => {
+  it("flushes pending debounce and waits for the edit before returning", async () => {
+    const f = fakes(); const writing = held<void>();
+    await createRoot(async () => {
+      const c = createComposer({ ...f.port, edit: () => writing.call() }, f.timers);
+      c.apply(view()); c.input("last keystroke", 14, 14);
+      let done = false; const flushing = c.flushForExit().then(() => { done = true; });
+      await tick(); expect(writing.count()).toBe(1); expect(done).toBe(false);
+      expect(c.locked()).toBe(true); expect(c.pushEnabled()).toBe(false);
+      c.input("too late", 8, 8); await c.push(); await c.sendNow();
+      expect(c.text()).toBe("last keystroke"); expect(f.calls).toEqual([]);
+      writing.answer(); await flushing; expect(done).toBe(true);
+      f.advance(EDIT_MS); await tick(); expect(writing.count()).toBe(0);
+    });
+  });
+
+  it("waits for an edit already sent by blur, including one from the previous composer", async () => {
+    const f = fakes(); const writing = held<void>();
+    await createRoot(async () => {
+      const c = createComposer({ ...f.port, edit: () => writing.call() }, f.timers);
+      c.apply(view()); c.input("draft A", 7, 7);
+      const blurred = c.flush(); await tick();
+      c.apply(view({handle:2,key:"studio\nclaude/example/other",text:"draft B"}));
+      let done=false; const flushing=c.flushForExit().then(()=>{done=true;});
+      await tick(); expect(done).toBe(false);
+      writing.answer(); await blurred; await flushing; expect(done).toBe(true);
+    });
+  });
+});
+
 describe("composer store", () => {
+  it("push flushes the field and cursor once through the captured composer", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers);
+      c.apply(view());
+      c.input("also lint", 2, 9);
+      await c.push();
+      expect(f.calls).toEqual(["edit 1 also lint", "push 1 also lint 9 2"]);
+    });
+  });
+
+  it.each([false, true])("an empty/sending field (sending=%s) pushes its own handle and waits for Busy hand-back", async (sending) => {
+    const f = fakes();
+    const captured: unknown[][] = [];
+    const port: ComposerPort = { ...f.port, push: async (...args) => { captured.push(args); return { kind: "busy" }; } };
+    await createRoot(async () => {
+      const c = createComposer(port, f.timers);
+      const text = sending ? "old message" : "";
+      c.apply(view({ handle: 7, rev: 4, text_epoch: 8, sending, text }));
+      await c.push();
+      expect(captured).toEqual([[7, 4, 8, text, 0, 0]]);
+      expect(f.calls).toEqual([]);
+      expect(c.locked()).toBe(true);
+      c.apply(view({ handle: 7, text_epoch: 9, text }));
+      expect(c.locked()).toBe(false);
+    });
+  });
+
+  it("a hand-back during the push flush never substitutes its new epoch or text", async () => {
+    const f = fakes();
+    const edit = held<void>();
+    const captured: unknown[][] = [];
+    const port: ComposerPort = { ...f.port, edit: () => edit.call(), push: async (...args) => { captured.push(args); return { kind: "busy" }; } };
+    await createRoot(async () => {
+      const c = createComposer(port, f.timers);
+      c.apply(view());
+      c.input("also lint", 9, 9);
+      const pushing = c.push();
+      await tick();
+      c.apply(view({ text_epoch: 2, text: "handed back", uncertain: true }));
+      edit.answer();
+      await pushing;
+      expect(captured).toEqual([[1, 1, 1, "also lint", 9, 9]]);
+      expect(c.text()).toBe("handed back");
+      expect(c.locked()).toBe(false);
+    });
+  });
+
+  it.each(["busy", "blocked"] as const)("a %s push waits for its text hand-back and then unlocks", async (kind) => {
+    const f = fakes(kind === "busy" ? { kind } : { kind, reason: "Wait for the session update to finish." });
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers);
+      c.apply(view({ text: "hello" }));
+      await c.push();
+      expect(c.locked()).toBe(true);
+      c.apply(view({ text: "hello", text_epoch: 2 }));
+      expect(c.locked()).toBe(false);
+      expect(c.text()).toBe("hello");
+      expect(f.calls).toEqual(["push 0 hello 0 0"]);
+    });
+  });
+
+  it("a required card refuses push before either message or queue dispatch", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers);
+      for (const sending of [false, true]) {
+        c.apply(view({ input_visible: false, sending, text: "hello" }));
+        expect(c.pushEnabled()).toBe(false);
+        await c.push();
+      }
+      expect(f.calls).toEqual([]);
+    });
+  });
+
+  it.each([{text: "hello", sending: false}, {text: "", sending: false}, {text: "", sending: true}])("a second push while its bridge call is held sends nothing (%j)", async (field) => {
+    const f = fakes();
+    const pending = held<SendReply>();
+    const port: ComposerPort = { ...f.port, push: () => pending.call() };
+    await createRoot(async () => {
+      const c = createComposer(port, f.timers);
+      c.apply(view(field));
+      const first = c.push();
+      await tick();
+      expect(pending.count()).toBe(1);
+      const second = c.push();
+      await tick();
+      expect(pending.count()).toBe(1);
+      pending.answer({ kind: "sending" });
+      await first;
+      await second;
+    });
+  });
+
+  it("a selection changed during the flush never dispatches its push", async () => {
+    const f = fakes();
+    const edit = held<void>();
+    const port: ComposerPort = { ...f.port, edit: () => edit.call() };
+    await createRoot(async () => {
+      const c = createComposer(port, f.timers);
+      c.apply(view());
+      c.input("A's message", 0, 11);
+      const pushing = c.push();
+      await tick();
+      c.apply(view({ handle: 2, key: "studio\nclaude/sample-project/other", text: "B's draft" }));
+      edit.answer();
+      await pushing;
+      expect(f.calls).toEqual([]);
+      expect(c.text()).toBe("B's draft");
+      expect(c.locked()).toBe(false);
+    });
+  });
+
+  it("an open that starts during the flush cancels push before its old handle changes", async () => {
+    const f = fakes();
+    const edit = held<void>();
+    const port: ComposerPort = { ...f.port, edit: () => edit.call() };
+    await createRoot(async () => {
+      const c = createComposer(port, f.timers);
+      c.apply(view());
+      c.input("A's message", 0, 11);
+      const pushing = c.push();
+      await tick();
+      f.holdOpens();
+      const other: SessionRef = { ...SESSION, key: "run:other", name: "claude/sample-project/other" };
+      const opening = c.open(other);
+      await tick();
+      edit.answer();
+      await pushing;
+      expect(f.calls).toEqual(["open claude/sample-project/other"]);
+      f.finishOpen(view({ handle: 2, key: draftKey(other), text: "B's draft" }));
+      await opening;
+      expect(c.text()).toBe("B's draft");
+      expect(c.locked()).toBe(false);
+    });
+  });
+
+  it("Send now passes the panel id or null and reports bridge errors", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers, undefined, f.notify);
+      c.apply(view());
+      await c.sendNow("queue-1");
+      await c.sendNow();
+      expect(f.calls).toEqual(["send-now queue-1", "send-now null"]);
+      const failed = createComposer({ ...f.port, sendNow: async () => { throw "Bridge unavailable"; } }, f.timers, undefined, f.notify);
+      await failed.sendNow();
+      expect(f.notices).toEqual(["error sticky Bridge unavailable"]);
+    });
+  });
+
+  it("a window Send now during a composer switch never uses the previous session", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers, undefined, f.notify);
+      const queue = { id: "queue-a", text: "A's queue", hint: "", can_send_now: true, enabled: true, label: "Send now" };
+      c.apply(view({ queue }));
+      expect(c.queue()).toEqual(queue);
+      const other: SessionRef = { ...SESSION, key: "run:other", name: "claude/sample-project/other" };
+      f.holdOpens();
+      const opening = c.open(other);
+      await tick();
+      expect(c.queue()).toBeNull();
+      await c.sendNow();
+      expect(f.calls).toEqual(["open claude/sample-project/other"]);
+      expect(f.notices).toEqual(["info timed Nothing queued can be sent now"]);
+      expect(c.pushEnabled()).toBe(false);
+      f.finishOpen(view({ handle: 2, key: draftKey(other), queue: { ...queue, id: "queue-b", text: "B's queue" } }));
+      await opening;
+      expect(c.queue()?.id).toBe("queue-b");
+      await c.sendNow("queue-b");
+      expect(f.calls.at(-1)).toBe("send-now queue-b");
+    });
+  });
+
   it("edits are debounced and flushed before a send", async () => {
     const f = fakes();
     await createRoot(async () => {
@@ -139,6 +352,23 @@ describe("composer store", () => {
       expect(c.text()).toBe("typing");
       c.apply(view({ text: "loaded [File #1] ", text_epoch: 3, rev: 1 }));
       expect(c.text()).toBe("loaded [File #1] ");
+    });
+  });
+
+  it("a required card disables Send and ignores a toolbar chord without a hint", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers);
+      c.apply(view({ input_visible: false, text: "draft", status: "Answer the question to continue." }));
+      expect(c.sendEnabled()).toBe(false);
+      await c.send();
+      expect(f.calls).toEqual([]);
+      expect(c.hint()).toBeUndefined();
+      expect(c.text()).toBe("draft");
+      c.apply(view({ text: "draft" }));
+      expect(c.sendEnabled()).toBe(true);
+      await c.send();
+      expect(f.calls.filter((call) => call.startsWith("send "))).toHaveLength(1);
     });
   });
 
@@ -636,6 +866,33 @@ describe("composer store", () => {
   });
 });
 
+describe("dropped files (MessageComposer::attachDroppedFiles, 961-967)", () => {
+  it("attach at the cursor, the selection collapsed, after the typing is saved", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers);
+      c.apply(view());
+      c.input("hello world", 6, 11);
+      expect(c.canAttach()).toBe(true);
+      await c.attachDropped(["/srv/home/example/notes.txt"]);
+      expect(f.calls.slice(-2)).toEqual(["edit 1 hello world", "attach /srv/home/example/notes.txt 11-11"]);
+    });
+  });
+
+  it("can attach only while the session takes attachments and nothing locks the composer", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers);
+      c.apply(view({ attachments_available: false }));
+      expect(c.canAttach()).toBe(false);
+      c.apply(view({ sending: true }));
+      expect(c.canAttach()).toBe(false);
+      await c.attachDropped(["/srv/a.txt"]);
+      expect(f.calls.some((call) => call.startsWith("attach"))).toBe(false);
+    });
+  });
+});
+
 describe("opening a draft attachment (MessageComposer::openAttachment, 1067-1085)", () => {
   const shot = { name: "shot.png", mime: "image/png", reference: "[Image #1]", bytes: 8, path: "draft/1/2/0", excerpt: null };
 
@@ -715,6 +972,96 @@ describe("the batch envelope", () => {
     expect(isEmptyBatch(normalize({}))).toBe(true);
     expect(isEmptyBatch(normalize({ composer: view() }))).toBe(false);
     expect(isEmptyBatch(normalize({ draft_keys: [] }))).toBe(false);
+    // Notices and Terminal requests that arrive after their call are content too (A2).
+    const events = [{ kind: "notice" as const, text: "Response recorded.", error: false, transient: false }];
+    expect(isEmptyBatch(normalize({ composer_events: events }))).toBe(false);
+    expect(normalize({ composer_events: events }).composer_events).toEqual(events);
     expect(normalize({ draft_keys: [KEY] }).draft_keys).toEqual([KEY]);
+  });
+
+  describe("local rows (Task 7)", () => {
+    const failed = { id: "req-1", text: "hello", status: "error" as const, attachments: [], run_id: "run-1", conversation_id: "conv-1",
+      submitted_at: 1_793_000_000, error: "hgs: refused", uncertain: false, message_id: null, submitted_text: null, source: null, voice: null };
+
+    it("Retry flushes the editor first and its cold question opens for the same composer", async () => {
+      const f = fakes();
+      f.retryWith({ kind: "cold", token: 7, prompt: { title: "Continue with a cold cache?", text: "", informative: "", choices: [] } });
+      await createRoot(async () => {
+        const c = createComposer(f.port, f.timers, images(1, 1), f.notify);
+        c.apply(view({ local: [failed] }));
+        c.input("typed", 5, 5);
+        await c.localRetry("req-1");
+        // A failed row flushes every key at once; the Retry finds nothing left to flush.
+        expect(f.calls).toEqual(["edit 1 typed", "retry 1 req-1"]);
+        expect(c.dialog()).toMatchObject({ kind: "cold", token: 7 });
+        expect(c.locked()).toBe(true);
+      });
+    });
+
+    it("a Retry reply that arrives after another composer opened keeps only its notice, and its question answers Cancel", async () => {
+      const f = fakes();
+      const retry = held<SendReply>();
+      const port: ComposerPort = { ...f.port, localRetry: (h, id) => { f.calls.push(`retry ${h} ${id}`); return retry.call(); } };
+      await createRoot(async () => {
+        const c = createComposer(port, f.timers, images(1, 1), f.notify);
+        c.apply(view({ local: [failed] }));
+        const first = c.localRetry("req-1");
+        await tick();
+        c.apply(view({ handle: 2, key: "studio\nclaude/sample-project/other", text_epoch: 1 }));
+        retry.answer({ kind: "cold", token: 9, prompt: { title: "Continue with a cold cache?", text: "", informative: "", choices: [] } });
+        await first;
+        await tick();
+        expect(c.dialog()).toBeUndefined();
+        expect(f.calls).toContain('answer 9 {"kind":"cancel"}');
+        const second = c.localRetry("req-1");
+        await tick();
+        c.apply(view({ handle: 3, key: "studio\nclaude/sample-project/third", text_epoch: 1 }));
+        retry.answer({ kind: "notice", text: "The session changed. Your draft was kept without sending.", error: true });
+        await second;
+        expect(f.notices).toEqual(["error sticky The session changed. Your draft was kept without sending."]);
+      });
+    });
+
+    it("one Retry runs per row: a second click while it is on its way sends nothing", async () => {
+      const f = fakes();
+      const retry = held<SendReply>();
+      const port: ComposerPort = { ...f.port, localRetry: (h, id) => { f.calls.push(`retry ${h} ${id}`); return retry.call(); } };
+      await createRoot(async () => {
+        const c = createComposer(port, f.timers, images(1, 1), f.notify);
+        c.apply(view({ local: [failed] }));
+        const first = c.localRetry("req-1");
+        await tick();
+        await c.localRetry("req-1");
+        expect(f.calls.filter((x) => x.startsWith("retry"))).toEqual(["retry 1 req-1"]);
+        retry.answer({ kind: "busy" });
+        await first;
+        // A refused Retry hands nothing back: the editor is not locked by it.
+        expect(c.locked()).toBe(false);
+        const again = c.localRetry("req-1");
+        await tick();
+        expect(f.calls.filter((x) => x.startsWith("retry"))).toEqual(["retry 1 req-1", "retry 1 req-1"]);
+        retry.answer({ kind: "sending" });
+        await again;
+      });
+    });
+
+    it("Check answers where it leads only while its composer is still open", async () => {
+      const f = fakes();
+      let answer: (v: { kind: "terminal" } | null) => void = () => {};
+      const port: ComposerPort = { ...f.port, localInspect: () => new Promise((resolve) => { answer = resolve; }) };
+      await createRoot(async () => {
+        const c = createComposer(port, f.timers, images(1, 1), f.notify);
+        c.apply(view({ local: [{ ...failed, uncertain: true }] }));
+        const shown = c.localInspect("req-1");
+        answer({ kind: "terminal" });
+        expect(await shown).toEqual({ kind: "terminal" });
+        const late = c.localInspect("req-1");
+        c.apply(view({ handle: 2, key: "studio\nclaude/sample-project/other" }));
+        answer({ kind: "terminal" });
+        expect(await late).toBeUndefined();
+        await c.localDelete("req-1");
+        expect(f.calls).toContain("delete 2 req-1");
+      });
+    });
   });
 });

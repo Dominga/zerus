@@ -1,5 +1,7 @@
 //! The commands the frontend calls: `start`, `next_batch`, `follow`,
 //! `unfollow` and `metrics`. Blocking work runs off the main thread.
+//! `next_batch` hands the followed processes to the Processes hub
+//! (`processes.rs`) and sends its view as `processes_view`.
 //!
 //! Data comes from zerus-client-core (feature `live`): `Fleet` runs
 //! `hgs [@host] watch --json` per computer, or, with `ZERUS_CLIENT_REPLAY`
@@ -54,6 +56,15 @@ impl AppState {
     ) {
         self.live.apply_notifications(target, preferences);
     }
+
+    /// Follows the processes of the session the Processes tab shows.
+    pub fn follow_processes(&self, target: &crate::processes::ProcessTarget) -> Result<(), String> {
+        self.live.follow_processes(target)
+    }
+
+    pub fn unfollow_processes(&self, target: &crate::processes::ProcessTarget) {
+        self.live.unfollow_processes(target);
+    }
 }
 
 #[cfg(feature = "live")]
@@ -62,10 +73,11 @@ mod live {
     use std::sync::{mpsc, Arc, Mutex, OnceLock, PoisonError};
     use std::time::Duration;
 
-    use zerus_client_core::{default_hgs, ComputerId, Fleet, OrganizationSnapshot};
+    use zerus_client_core::{default_hgs, ComputerId, Fleet, FollowError, OrganizationSnapshot};
     use zerus_watch_protocol::SessionRef;
 
     use crate::organization::Organization;
+    use crate::processes::ProcessTarget;
     use crate::pump::Pump;
     use crate::replay::Replay;
 
@@ -218,6 +230,59 @@ mod live {
             }
         }
 
+        /// Follows a session's processes (`Fleet::follow_processes`); the
+        /// session's catalog key must be the target's. A replay serves the
+        /// fixture's processes state.
+        pub fn follow_processes(&self, target: &ProcessTarget) -> Result<(), String> {
+            match self
+                .source
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+            {
+                Some(Source::Fleet(fleet)) => {
+                    let computer = ComputerId(target.computer.clone());
+                    let filled = |id: &str| Some(id.to_owned()).filter(|id| !id.is_empty());
+                    let session = SessionRef {
+                        name: target.name.clone(),
+                        run_id: filled(&target.run_id),
+                        conversation_id: filled(&target.conversation_id),
+                    };
+                    let key = fleet
+                        .follow_processes(&computer, session)
+                        .map_err(|error| error.to_string())?;
+                    if key != target.key {
+                        fleet.unfollow_processes(&computer, &key);
+                        return Err(FollowError::KeyMismatch.to_string());
+                    }
+                    Ok(())
+                }
+                Some(Source::Replay(replay)) => {
+                    replay.follow_processes(&target.computer, &target.key);
+                    Ok(())
+                }
+                None => Err("not started".into()),
+            }
+        }
+
+        /// Not followed (it ended meanwhile) is not an error.
+        pub fn unfollow_processes(&self, target: &ProcessTarget) {
+            match self
+                .source
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+            {
+                Some(Source::Fleet(fleet)) => {
+                    fleet.unfollow_processes(&ComputerId(target.computer.clone()), &target.key);
+                }
+                Some(Source::Replay(replay)) => {
+                    replay.unfollow_processes(&target.computer, &target.key);
+                }
+                None => {}
+            }
+        }
+
         pub fn unfollow(&self, computer: String, key: String) -> Result<(), String> {
             match self
                 .source
@@ -258,9 +323,11 @@ async fn blocking<T: Send + 'static>(
 pub async fn start(
     state: State<'_, AppState>,
     composers: State<'_, crate::composer::Composers>,
+    processes: State<'_, crate::processes::ProcessHub>,
 ) -> Result<String, String> {
     let live = Arc::clone(&state.live);
     composers.resend();
+    processes.resend();
     blocking(move || live.start()).await
 }
 
@@ -282,6 +349,8 @@ struct Envelope<'a> {
     composer: Option<crate::composer::ComposerView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     draft_keys: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    processes_view: Option<crate::processes::ProcessesView>,
 }
 
 /// Everything pending since the last call; parks up to 250 ms while nothing is.
@@ -294,12 +363,16 @@ pub async fn next_batch(
     state: State<'_, AppState>,
     actions: State<'_, crate::actions::Actions>,
     composers: State<'_, crate::composer::Composers>,
+    processes: State<'_, crate::processes::ProcessHub>,
 ) -> Result<tauri::ipc::Response, String> {
     let live = Arc::clone(&state.live);
     let actions = actions.inner().clone();
     let composers = composers.inner().clone();
+    let processes = processes.inner().clone();
     let bytes = blocking(move || {
-        let batch = live.pump.take(crate::pump::PARK);
+        let mut batch = live.pump.take(crate::pump::PARK);
+        // The followed processes go to the Processes hub, not to the webview.
+        processes.observe(&mut batch);
         // The host's rows settle pending read marks, whether they arrive as
         // single upserts or inside a computer's snapshot.
         actions.observe(&batch);
@@ -313,6 +386,7 @@ pub async fn next_batch(
             batch: &batch,
             composer: composers.take_view(),
             draft_keys: composers.take_draft_keys(),
+            processes_view: processes.take_view(),
         };
         serde_json::to_vec(&envelope).map_err(|error| error.to_string())
     })

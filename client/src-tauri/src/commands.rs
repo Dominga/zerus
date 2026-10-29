@@ -328,6 +328,8 @@ pub async fn start(
     let live = Arc::clone(&state.live);
     composers.resend();
     processes.resend();
+    // A reloaded webview shows no attachment yet.
+    composers.cache().clear_pins();
     blocking(move || live.start()).await
 }
 

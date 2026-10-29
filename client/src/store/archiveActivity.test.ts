@@ -23,7 +23,7 @@ vi.mock("../bridge", () => ({
   setNotifications: vi.fn(),
 }));
 
-import { createRoot, createSignal } from "solid-js";
+import { createMemo, createRoot, createSignal } from "solid-js";
 import { ARCHIVED_EVENTS_MAX, ARCHIVED_POLL_MS, ARCHIVED_RETRY_MS, createArchiveActivity, type ArchiveTarget } from "./archiveActivity";
 import { activityReadOnly } from "./activitySource";
 import type { ActivityEvent, ArchivedActivity } from "../types";
@@ -85,6 +85,24 @@ describe("archived Activity (Qt inspect 3467-3492, acceptInspection 3587-3660)",
     // Following the same row again changes nothing.
     t.store.follow(target(2, "box"));
     expect(t.calls.length).toBe(3);
+    t.dispose();
+  });
+
+  it("reads its attachments in the archived row's conversation, as the last read named it", async () => {
+    const t = setup();
+    // Read as Activity reads it: through a memo, which reruns only on a reactive change.
+    let scope!: () => ReturnType<typeof t.store.attachmentScope>;
+    const disposeScope = createRoot((d) => { scope = createMemo(() => t.store.attachmentScope()); return d; });
+    expect(scope()).toBeUndefined();
+    t.store.follow(target(1, "box"));
+    expect(scope()).toEqual({ computer: "box", name: "codex/example/a1", conversation_id: "", archive_id: uuid(1) });
+    await t.answer(reply([ev(1)]));
+    expect(scope()?.conversation_id).toBe("conv-1");
+    // Another conversation's window names its own.
+    vi.advanceTimersByTime(ARCHIVED_POLL_MS);
+    await t.answer(reply([ev(1)], { conversation_id: "conv-2" }));
+    expect(scope()?.conversation_id).toBe("conv-2");
+    disposeScope();
     t.dispose();
   });
 

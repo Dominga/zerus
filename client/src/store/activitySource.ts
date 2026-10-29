@@ -29,6 +29,20 @@ export interface ActivitySource {
    * or interrupt. The live follow leaves it out.
    */
   readonly readOnly?: boolean;
+  /** Where its attachments are read from; undefined while nothing is shown. A source without it opens no attachment. */
+  attachmentScope?(): AttachmentScope | undefined;
+}
+
+/**
+ * The conversation an Activity's attachments belong to (Qt's
+ * AttachmentLoader::fetch arguments): its computer, session, conversation and
+ * archive. The main Activity's messages are the session's own (no subagent).
+ */
+export interface AttachmentScope {
+  computer: string;
+  name: string;
+  conversation_id: string;
+  archive_id: string | null;
 }
 
 type Holds<T extends true> = T;

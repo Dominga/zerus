@@ -36,6 +36,13 @@ serde_json = "1"
 tauri-plugin-clipboard-manager = "2"
 # The composer's Attach files picker (`composer_pick`), called from Rust only.
 tauri-plugin-dialog = "2"
+# Opening and revealing attachments (`composer/fetch.rs`), called from Rust only:
+# no capability lets the webview reach it.
+tauri-plugin-opener = "2"
+# A queued attachment read is awaited on a oneshot, holding no thread (composer/fetch.rs).
+tokio = { version = "1", default-features = false, features = ["sync"] }
+# Windows canonical paths lose their \\?\ prefix before a notice or an opener sees them.
+dunce = "1"
 zerus-watch-protocol = { path = "../../crates/watch-protocol" }
 uuid = { version = "1", features = ["v4"] }
 # The composer's cache details show the expiry in local time (Qt's `d MMM HH:mm:ss`).

@@ -166,7 +166,7 @@ export interface ActivityEvent {
   sender?: string;
   activity_key?: string;
   message_id?: string;
-  attachments?: { name?: string; path?: string; size?: number; kind?: string; mime?: string }[];
+  attachments?: EventAttachment[];
   voice?: Record<string, unknown>;
   [field: string]: unknown;
 }
@@ -416,3 +416,37 @@ export type Inspect = { kind: "native_ui" } | { kind: "terminal" } | { kind: "re
 export interface SessionRef { computer: ComputerId; key: string; name: string; archive_id: string | null }
 /** The detail tab that shows, for the composer's inspect retry (Qt's poll interval). */
 export type ComposerTab = "activity" | "terminal" | "native" | "processes";
+/** A file of an Activity message, as the journal lists it. */
+export interface EventAttachment {
+  name?: string;
+  mime?: string;
+  bytes?: number;
+  /** `[Image #n]` or `[File #n]` in the message text. */
+  reference?: string;
+  /** The message's request, which `hgs attachment` reads the file by; none when it saved no reference. */
+  request_id?: string;
+  /** The file's place in the message, -1 when it has none. */
+  index?: number;
+  path?: string;
+  size?: number;
+  kind?: string;
+}
+
+/** One attachment of an Activity message, as `hgs attachment` reads it (core `reads::AttachmentRef`). */
+export interface AttachmentRef {
+  /** The session's name. */
+  name: string;
+  request_id: string;
+  index: number;
+  conversation_id: string;
+  archive_id: string | null;
+  /** A subagent's ID for a subagent's message. */
+  agent_id: string | null;
+}
+
+/** An attachment in the private cache: `path` is its `zerus-file` path (`cache/{digest}/{name}`). */
+export interface Fetched {
+  path: string; name: string; mime: string; bytes: number;
+  /** An image whose header gives its size, at most Qt's 64M pixels: a card may show its thumbnail. */
+  thumbnail: boolean;
+}

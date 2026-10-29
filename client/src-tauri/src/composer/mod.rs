@@ -23,6 +23,7 @@
 //! one for the life of the process, and tests keep theirs, since a store
 //! dropped on its own writer thread would wait for itself.
 
+pub mod fetch;
 pub mod files;
 pub mod questions;
 pub mod send;

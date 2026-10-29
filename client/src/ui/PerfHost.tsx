@@ -679,6 +679,72 @@ async function organizationSmoke(allowed: boolean) {
   }
 }
 
+// `?background-smoke=1`: the list background menu and its New project dialog on the replay.
+async function backgroundSmoke(allowed: boolean) {
+  const exit = (code: number) => invoke("exit_app", { code }).catch(() => {});
+  if (!allowed) {
+    log("background-smoke not started: it needs ZERUS_CLIENT_REPLAY, ZERUS_CLIENT_HGS and ZERUS_CLIENT_PERF");
+    return;
+  }
+  try {
+    await until(() => grouping().ready && orderedRows().length > 0, 30_000, "the replay organization was not ready");
+    const panel = document.querySelector<HTMLElement>(".sp-panel");
+    if (!panel) throw new Error("no Sessions panel");
+    panel.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 320, clientY: 240 }));
+    const clear = clearArchiveMenuEntry();
+    const clearLabel = "label" in clear ? clear.label : "";
+    const labels = ["New session…", "New project…", "Expand all projects", "Collapse all projects", "Expand all collapsed", "Mark all as read", clearLabel];
+    await until(() => !!document.querySelector(".menu") && labels.every((text) => document.querySelector(".menu")?.textContent?.includes(text)), 3000, "the background menu did not list every entry");
+    const newProject = [...document.querySelectorAll<HTMLButtonElement>(".menu button")].find((button) => button.textContent?.trim() === "New project…");
+    if (!newProject) throw new Error("New project is missing");
+    newProject.click();
+    await until(() => document.querySelector("#org-dlg-title")?.textContent === "New project", 3000, "the New project dialog did not open");
+    const cancel = [...document.querySelectorAll<HTMLButtonElement>("dialog[open] button")].find((button) => button.textContent?.trim() === "Cancel");
+    if (!cancel) throw new Error("the New project dialog has no Cancel button");
+    cancel.click();
+    await until(() => !document.querySelector("dialog[open]"), 2000, "the New project dialog did not close");
+    const collapse = async (label: string) => {
+      panel.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 320, clientY: 240 }));
+      let button: HTMLButtonElement | undefined;
+      await until(() => {
+        button = [...document.querySelectorAll<HTMLButtonElement>(".menu button")].find((candidate) => candidate.textContent?.trim() === label);
+        if (!button) throw new Error(`${label} is missing`);
+        return true;
+      }, 3000, `${label} did not appear`);
+      button!.click();
+    };
+    await collapse("Collapse all projects");
+    await until(() => grouping().headers.every((header) => header.collapsed), 3000, "Collapse all projects did not apply");
+    await collapse("Expand all projects");
+    await until(() => grouping().headers.every((header) => !header.collapsed), 3000, "Expand all projects did not apply");
+    const row = document.querySelector<HTMLElement>(".sp-scroll .rowhit");
+    if (!row) throw new Error("no session row");
+    row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 320, clientY: 240 }));
+    await until(() => !!document.querySelector(".menu"), 3000, "the session menu did not open");
+    const compact = [...document.querySelectorAll<HTMLButtonElement>(".menu button")].find((button) => button.textContent?.trim() === "Compact session row");
+    if (!compact) throw new Error("Compact session row is missing");
+    compact.click();
+    await until(() => !!document.querySelector(".scard.compact"), 3000, "the session row did not compact");
+    const rail = document.querySelector<HTMLElement>(".rail-btn");
+    if (!rail) throw new Error("no Sessions rail button");
+    rail.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 40, clientY: 240 }));
+    let expand: HTMLButtonElement | undefined;
+    await until(() => {
+      expand = [...document.querySelectorAll<HTMLButtonElement>(".menu button")].find((button) => button.textContent?.trim() === "Expand all collapsed");
+      return expand?.getAttribute("aria-disabled") === "false";
+    }, 3000, "the rail's Expand all collapsed did not enable");
+    if (expand!.title !== "Restore full session rows, including sessions hidden by filters") throw new Error("the rail entry has the wrong hint");
+    expand!.click();
+    await until(() => !document.querySelector(".scard.compact"), 3000, "the rail entry did not expand the row");
+    log("background-smoke rail-expand: done");
+    log("background-smoke menu: done");
+    await exit(0);
+  } catch (error) {
+    log(`background-smoke failed: ${String(error)}`);
+    await exit(1);
+  }
+}
+
 const onScenarioStart = (id: string, index: number, total: number) => log(`scenario ${index + 1}/${total} ${id} start`);
 const onScenarioEnd = (id: string, index: number, total: number, ms: number, result: ScenarioResult) => {
   finished.push(result);
@@ -710,6 +776,7 @@ export function PerfHost() {
       const { phase4Smoke } = await import("../perf/phase4Smoke");
       void phase4Smoke(!!config().actions_smoke, config().smoke_file ?? undefined);
     }
+    if (new URLSearchParams(location.search).get("background-smoke") === "1" && inTauri()) void backgroundSmoke(!!config().actions_smoke);
     if (config().mode === "auto") {
       setOpen(true);
       void autoRun(config());

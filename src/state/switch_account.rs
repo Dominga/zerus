@@ -156,7 +156,14 @@ fn switch(config: &crate::config::Config, name: &str, account: &str, request: &s
     let run_id = uuid::Uuid::new_v4().to_string();
     match launch(name, &run_id) {
         Ok(()) => match confirm(name, &run_id, &conversation, Instant::now() + bounds().0, bounds().1) {
-            Confirmation::Confirmed => Ok(receipt("switched", &run_id, Value::Null)),
+            Confirmation::Confirmed => {
+                // U53: the switch confirms the resume itself. Codex defers its
+                // own SessionStart until the first turn, so its supervisor's
+                // expected id would outlive the switch; a confirmed binding
+                // names the conversation with no expected id.
+                clear_expected(name, &run_id);
+                Ok(receipt("switched", &run_id, Value::Null))
+            }
             Confirmation::Unconfirmed => Ok(receipt("uncertain", &run_id, json!({"note":"the resumed conversation did not confirm; it is never retried on its own"}))),
             Confirmation::Failed(reason) => Ok(rollback(config, name, &old, &conversation, request, &run_id, &reason)),
         },
@@ -177,6 +184,18 @@ fn bounds() -> (Duration, Duration) {
         return (confirm, settle);
     }
     (CONFIRM, SETTLE)
+}
+
+/// Clears the resume's expected conversation id once the switch confirmed it,
+/// changing nothing else and only for the run it confirmed.
+fn clear_expected(name: &str, run_id: &str) {
+    let Ok(_guard) = lock(None) else { return };
+    let Ok(mut current) = read(name) else { return };
+    if string(&current, "run_id") != run_id || string(&current, "expected_id").is_empty() {
+        return;
+    }
+    current["expected_id"] = json!("");
+    let _ = write(&mut current);
 }
 
 /// Writes the new account into the saved binding, keeping the conversation.
@@ -501,6 +520,9 @@ mod switch_tests {
     thread_local! {
         static WORLD: std::cell::RefCell<Option<&'static Mutex<World>>> = const { std::cell::RefCell::new(None) };
         static DEFERRED_POLLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+        /// A resumed Codex supervisor keeps its expected id until the first
+        /// turn (its SessionStart is deferred).
+        static EXPECTED_STAYS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     }
 
     struct Backend;
@@ -568,8 +590,18 @@ mod switch_tests {
         record["pane"] = json!("%1");
         record["pid"] = json!(std::process::id());
         record["process_start"] = json!(process_start(std::process::id()));
-        record["conversation_id"] = json!(conversation);
-        record["expected_id"] = json!("");
+        record["conversation_id"] = json!(conversation.clone());
+        if EXPECTED_STAYS.with(|cell| cell.get()) {
+            // As a resumed Codex writes it: the expected id waits for the first
+            // turn's own SessionStart.
+            record["expected_id"] = json!(conversation);
+            record["startup_kind"] = json!("resume");
+            record["activity"] = json!("unknown");
+            record["phase"] = json!("unknown");
+            record["last_event_at"] = json!(0.0);
+        } else {
+            record["expected_id"] = json!("");
+        }
         for key in ["paused", "pausing", "exited_at", "session_end"] {
             record.as_object_mut().unwrap().remove(key);
         }
@@ -769,6 +801,23 @@ mod switch_tests {
             assert_eq!(saved["account_id"], json!("second"));
             assert_eq!(saved["conversation_id"], record["conversation_id"]);
         });
+    }
+
+    /// U53: a resumed Codex keeps its expected id until its first turn; the
+    /// switch confirms the resume and leaves the binding without that id.
+    #[test]
+    fn a_codex_switch_leaves_a_confirmed_resume_without_an_expected_id() {
+        EXPECTED_STAYS.with(|cell| cell.set(true));
+        run_test("codex", false, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", |config, record| {
+            let receipt = switch(config, "claude/project/account", "second", &request(), false).unwrap();
+            assert_eq!(receipt["status"], json!("switched"), "{receipt}");
+            let saved = read("claude/project/account").unwrap();
+            assert_eq!(saved["run_id"], receipt["run_id"]);
+            assert_eq!(saved["expected_id"], json!(""));
+            assert_eq!(saved["conversation_id"], record["conversation_id"]);
+            assert_eq!(saved["account_id"], json!("second"));
+        });
+        EXPECTED_STAYS.with(|cell| cell.set(false));
     }
 
     #[test]

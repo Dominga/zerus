@@ -1236,6 +1236,10 @@ sets them in the catalog, the team settings or the plan; members never do.
     pauses the old session once it is idle (never a kill; its conversation
     stays under Saved) before launching, or waits for idle with that reason.
     A busy old session is never interrupted without the owner's choice.
+    A pause alone is not enough: the paused session keeps its account
+    binding, and `--new` with an explicit account is still refused, so the
+    swap also renames the old session to `<name>-<old account label>` (its
+    conversation and account kept) before the launch.
   - *A failed launch after a swap is retried.* The failed first launch cleared
     `launch_after_swap`, so after the owner's relaunch the member stayed Not
     created until work was ready. A relaunch of a swapped member launches it

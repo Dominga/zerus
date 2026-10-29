@@ -4116,8 +4116,14 @@ catalog key. Its `state` value is `{processes, process_work}` exactly as
 `hgs inspect NAME` reports them. The first follows the subscription; later ones
 only when the value changed apart from both `sampled_at` fields. Two worker
 threads run the inspection, so a slow `ps` or native host delays no other frame.
-A session is read again when its catalog row changes and at least every 10 s;
-reads of one session start at least 2 s apart. A session that leaves the
+A session is read again when its catalog row changes and every 10 s by default;
+reads of one session start at least 1 s apart. A processes subscription may
+include `interval_ms` (clamped to 1,000–600,000 ms). Repeating the subscription
+changes its interval while keeping the current inventory, revision and running
+read. Adding `"refresh":true` requests one read as soon as the minimum gap
+allows; repeated refreshes while a read runs coalesce into one follow-up read.
+Both fields are additive watch-v1 options: older servers ignore them and keep
+their 10 s default. A session that leaves the
 catalog ends with `subscription_ended`, and an inspection that fails sends a
 non-fatal `inspect_failed`. A stream follows the processes of at most 16
 sessions (`limits.processes_subscriptions`).

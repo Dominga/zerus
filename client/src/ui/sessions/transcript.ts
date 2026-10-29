@@ -1,4 +1,4 @@
-import type { ActivityEvent } from "../../types";
+import type { ActivityEvent, Reply } from "../../types";
 import { eventKey } from "../../store/activity";
 import type { ActivityItem, MediaMessage, TranscriptItem, VoiceState } from "./types";
 
@@ -125,7 +125,9 @@ function recordedContext(summary: Record<string, unknown> | undefined): Transcri
   const answer = typeof summary?.last_message === "string" ? summary.last_message.trim() : "";
   if (!prompt && !answer) return [];
   const items: TranscriptItem[] = [{ id: "context", kind: "context", at: "", body: "Recorded context — outside the available timeline" }];
-  if (prompt) items.push({ id: "prompt-snapshot", kind: "user", at: "", label: "You (recorded request)", body: prompt });
+  // A recorded prompt that holds Codex replies reads as one (Rust's prompt_replies).
+  const replies = Array.isArray(summary?.prompt_replies) && summary.prompt_replies.length ? summary.prompt_replies as Reply[] : undefined;
+  if (prompt) items.push({ id: "prompt-snapshot", kind: "user", at: "", label: replies ? "You (recorded answer)" : "You (recorded request)", body: prompt, replies });
   if (answer) items.push({ id: "answer-snapshot", kind: "agent", at: "", label: "Agent (recorded response)", body: answer });
   return items;
 }
@@ -167,7 +169,10 @@ export function buildTranscript(events: readonly ActivityEvent[], summary?: Reco
         }
         receipt = accepted ? "Sent" : "Queued at this time";
       }
-      items.push({ id, kind: role === "user" ? "user" : "agent", at, body: e.detail ?? "", attachments: attachments(e), receipt });
+      // An answer to a question card, or a message holding Codex replies (ActivityView.cpp:1036-1038).
+      const replies = role === "user" && e.question_replies?.length ? e.question_replies : undefined;
+      const label = role === "user" && (e.type === "QuestionAnswered" || replies) ? "You (answer)" : undefined;
+      items.push({ id, kind: role === "user" ? "user" : "agent", at, body: e.detail ?? "", attachments: attachments(e), receipt, label, replies });
       i++; continue;
     }
     // Adjacent operational events form one group; messages and attention stay boundaries.

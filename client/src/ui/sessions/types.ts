@@ -1,3 +1,4 @@
+import type { Reply } from "../../types";
 // View models the session list and Activity render. A `Session` is the
 // catalog store's row: the Rust view row plus the presentation fields derived
 // from it once per upsert (store/catalog.ts `toSession`).
@@ -178,8 +179,10 @@ export interface ActivityItem {
   receipt?: string;
   /** Operational group that contains an attention event (approval, failure). */
   warn?: boolean;
-  /** A header other than "You" or "Agent" (recorded context). */
+  /** A header other than "You" or "Agent" (recorded context, answers). */
   label?: string;
+  /** Codex question replies the message holds, shown as Question and Your answer blocks (ActivityView.cpp:347-363). */
+  replies?: Reply[];
 }
 
 export type VoiceState =

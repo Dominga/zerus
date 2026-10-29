@@ -167,7 +167,7 @@ function blocks(text: string): Block[] {
   return out;
 }
 
-function Body(props: { text: string }) {
+export function Body(props: { text: string }) {
   return (
     <For each={blocks(props.text)}>
       {(b) => b.kind === "code" ? <pre class="act-code mono">{b.text}</pre> : b.kind === "ul" ? (
@@ -391,7 +391,18 @@ function Item(props: { item: TranscriptItem; scope?: AttachmentScope }) {
           <Show when={it.kind === "agent"}><button class="icon-btn small act-copy" title="Copy as Markdown" onClick={() => copyText(it.body ?? "", "The reply is on the clipboard")}><Icon name="copy" size={12} /></button></Show>
         </header>
         <div class="act-body">
-          <Show when={it.kind === "user"} fallback={<Body text={it.body ?? ""} />}><p>{it.body}</p></Show>
+          <Show when={it.kind === "user"} fallback={<Body text={it.body ?? ""} />}>
+            {/* A Codex question reply reads as Question and Your answer blocks (ActivityView.cpp:347-363). */}
+            <Show when={it.replies?.length} fallback={<p>{it.body}</p>}>
+              <For each={it.replies}>{(r) => (
+                <div class="act-reply">
+                  <div class="act-reply-q">Question</div>
+                  <p class="wrap-pre">{r.question}</p>
+                  <div class="act-reply-a"><b>Your answer</b><p class="wrap-pre">{r.answer}</p></div>
+                </div>
+              )}</For>
+            </Show>
+          </Show>
           <Show when={it.code}><pre class="act-code mono">{it.code}</pre></Show>
           <Show when={it.attachments}>
             <div class="act-attachments">

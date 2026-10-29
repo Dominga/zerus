@@ -3,16 +3,16 @@ import { activityPort, composerTab, processesFollow, processesShown, windowVisib
 import { applyBatch, computerFresh, onReplaced, orderedRows, setDraftKeys } from "./catalog";
 import { composer } from "./composer";
 import { flag, num } from "./settings";
-import { bindActivity, bindSelection, followedFor } from "./actions";
+import { bindActivity, bindSelection, followedFor, notify } from "./actions";
 import { observeMarks } from "./marks";
 import { createActivity } from "./activity";
 import { applyGrouping } from "./organization";
 import { activityReadOnly } from "./activitySource";
-import { compactRows, detailTab, page, selected, selectedKey, setCompactRows, setSelectedKey, subagentOpen } from "./ui";
+import { compactRows, detailTab, page, selected, selectedKey, setCompactRows, setDetailTab, setSelectedKey, subagentOpen } from "./ui";
 import { startScreens } from "./screens";
 import { documentVisibility } from "./visibility";
 import { processes, trackFollow, trackShown } from "./processes";
-import type { Batch } from "../types";
+import type { Batch, ComposerEvent } from "../types";
 
 // Wires the stores together: batches go to the catalog, the grouping, the
 // followed Activity and the open composer, the selected session is the
@@ -37,6 +37,15 @@ export function receive(b: Batch) {
   if (b.processes_view) processes.apply(b.processes_view);
   if (b.composer) composer.receive(b.composer);
   if (b.draft_keys) setDraftKeys(b.draft_keys);
+  for (const e of b.composer_events ?? []) composerEvent(e);
+}
+
+/** What Rust says after a call ended: Qt's showNotice, or the Terminal tab its receipt asks for. */
+function composerEvent(e: ComposerEvent) {
+  // An error stays until dismissed unless it is transient (showNotice, SessionsWindow.cpp:5210).
+  if (e.kind === "notice") notify(e.error ? "error" : "info", e.text, e.error && !e.transient);
+  // Codex's hooks review and Update now continue in Terminal (1157-1178); showing the tab connects it.
+  else if (composer.view()?.key === e.key) setDetailTab("terminal");
 }
 
 createRoot(() => {

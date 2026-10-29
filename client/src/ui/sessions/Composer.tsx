@@ -213,9 +213,11 @@ export function Composer() {
   };
   const jumpCaption = () => (unseen() > 0 ? `Jump to latest activity (${unseen()} new)` : "Jump to latest activity");
   const editorTip = () => v()?.waiting ?? (v()?.session_blocks_input ? v()!.session_status : undefined);
+  // A required question card stands in for the editor, its grip and the action row; the toolbar stays (setInputVisible, 1126-1131).
+  const input = () => v()?.input_visible !== false;
   return (
     <div class="composer" ref={root} data-shortcut-context="composer" classList={{ blocked: !!v()?.session_blocks_input }}>
-      <ResizeHandle edge />
+      <Show when={input()}><ResizeHandle edge /></Show>
       <div class="cmp-toolbar">
         <AttachmentsChip compact={compact()} />
         {/* The voice slot: Task 13. */}
@@ -241,7 +243,7 @@ export function Composer() {
         <Show when={v()?.cancel_send}>
           <button type="button" class="tchip link" title={CANCEL_SEND} onClick={() => { void composer.cancelSend(); editor.focus(); }}>Cancel send</button>
         </Show>
-        <ResizeHandle />
+        <Show when={input()} fallback={<span class="grow" />}><ResizeHandle /></Show>
         <Show when={v()}><CacheChip compact={compact()} /></Show>
         <Show when={v()?.context.visible}>
           <span class={`tchip ${toneClass(v()!.context.tone)}`} title={v()!.context.tooltip} aria-label={v()!.context.accessible_name}>
@@ -252,6 +254,7 @@ export function Composer() {
           </span>
         </Show>
       </div>
+      <Show when={input()}>
       <textarea ref={editor} class="cmp-editor" style={{ height: `${editorHeight() * contentScale()}px` }} aria-label="Message to selected agent"
         placeholder="Message this agent…" readOnly={composer.locked()} disabled={!v()} value={composer.text()} title={editorTip()}
         onInput={(e) => { const c = caret(); composer.input(e.currentTarget.value, c.anchor, c.position); }}
@@ -287,6 +290,7 @@ export function Composer() {
         <button type="button" class="btn primary" aria-label="Send" disabled={!composer.sendEnabled()} title={v()?.waiting ?? undefined}
           onClick={() => { void composer.send(); }}>{v()?.send_label ?? "Send"}<Icon name="arrow-up" size={13} /></button>
       </div>
+      </Show>
     </div>
   );
 }

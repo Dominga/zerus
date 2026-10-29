@@ -398,3 +398,29 @@
 @keyframes vm-drift { to { transform: rotate(360deg); } }
 @keyframes insp-out { to { opacity: 0; translate: 24px 0; } }
 @keyframes cmp-progress { from { translate: -100% 0; } to { translate: 250% 0; } }
+
+/* The question card (Qt's QuestionCard), between Activity and the composer. */
+.qcard { display: flex; flex-direction: column; gap: 9px; padding: 12px 14px; margin-bottom: 8px; background: var(--z-color-surface);
+  border: 1px solid var(--z-color-border); border-radius: var(--z-radius-lg); max-height: 60vh; }
+.qcard-head, .qcard-meta, .qcard-actions { display: flex; align-items: center; gap: 8px; }
+.qcard-title { color: var(--z-color-accent); font-weight: 600; }
+.qcard-dim, .qcard-mode { color: var(--z-color-muted); font-size: 11px; }
+.qcard-page { display: flex; flex-direction: column; gap: 7px; min-height: 0; }
+.qcard-scroll { display: flex; flex-direction: column; gap: 7px; overflow-y: auto; min-height: 40px; }
+.qcard-prompt { font-weight: 600; }
+.qcard-body { color: var(--z-color-muted); font-size: 11px; }
+.qchoice { display: flex; gap: 8px; align-items: flex-start; padding: 9px 12px 9px 10px; border: 1px solid var(--z-color-border);
+  border-radius: var(--z-radius-md); background: var(--z-color-raised); cursor: pointer; }
+.qchoice:hover, .qchoice.on { border-color: var(--z-color-accent); }
+.qchoice.on { background: var(--z-color-accent-bg); }
+.qchoice.off { cursor: default; opacity: .7; }
+.qchoice-copy { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.qchoice-desc { color: var(--z-color-muted); font-size: 11px; }
+.qcard-text { min-height: 35px; padding: 7px; border: 1px solid var(--z-color-border); border-radius: var(--z-radius-md); background: var(--z-color-raised); color: var(--z-color-text); }
+.qcard-text:focus { border-color: var(--z-color-accent); outline: none; }
+.qcard-status { color: var(--z-color-muted); font-size: 11px; margin: 0; }
+.qcard-status.error { color: var(--z-color-danger); }
+.wrap-pre { white-space: pre-wrap; }
+.act-reply-q { color: var(--z-color-muted); font-size: 10px; margin-bottom: 3px; }
+.act-reply-a { border: 1px solid var(--z-color-border); background: var(--z-color-code-bg); padding: 10px; border-radius: var(--z-radius-md); margin-bottom: 10px; }
+.act-reply-a b { color: var(--z-color-accent); font-size: 10px; }

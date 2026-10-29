@@ -389,6 +389,15 @@ pub async fn start(state: State<'_, AppState>) -> Result<String, String> {
     Err(NO_LIVE.into())
 }
 
+/// Codex's question replies become `question_replies` on their events
+/// (R7's `annotate_replies`), so the webview never parses them.
+#[cfg(feature = "live")]
+pub(crate) fn annotate(batch: &mut zerus_client_core::Batch) {
+    for out in &mut batch.activity {
+        zerus_client_core::questions::annotate_replies(&mut out.payload);
+    }
+}
+
 /// What `next_batch` returns: the core's batch, plus the hubs' projected views
 /// when they changed (latest value wins).
 #[cfg(feature = "live")]
@@ -425,6 +434,8 @@ pub async fn next_batch(
     let processes = processes.inner().clone();
     let bytes = blocking(move || {
         let mut batch = live.pump.take(crate::pump::PARK);
+        // Codex's question replies are parsed here, never in the webview.
+        annotate(&mut batch);
         // The followed processes go to the Processes hub, not to the webview.
         processes.observe(&mut batch);
         // The host's rows settle pending read marks, whether they arrive as
@@ -676,5 +687,26 @@ mod tests {
         let info = super::build_info();
         assert_eq!(info, crate::cli::build_info(&crate::cli::BUILD));
         assert_eq!(info["version"], env!("ZERUS_VERSION"));
+    }
+
+    #[cfg(feature = "live")]
+    #[test]
+    fn question_replies_are_annotated_before_the_webview() {
+        use zerus_client_core::{ActivityOut, Batch, ComputerId};
+        let detail = "<send_user_message_question_reply>{\"questionItemId\":\"q1\",\"question\":\"Which checks?\",\"answer\":\"Unit\"}</send_user_message_question_reply>";
+        let mut batch = Batch {
+            activity: vec![ActivityOut {
+                computer: ComputerId::from("studio"),
+                key: "run:run-1".into(),
+                kind: "events".into(),
+                payload: serde_json::json!({"events": [{"seq": 1, "type": "UserPromptSubmit", "detail": detail}], "cursor": 1}),
+            }],
+            ..Batch::default()
+        };
+        super::annotate(&mut batch);
+        assert_eq!(
+            batch.activity[0].payload["events"][0]["question_replies"],
+            serde_json::json!([{"question": "Which checks?", "answer": "Unit"}])
+        );
     }
 }

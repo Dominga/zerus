@@ -132,3 +132,21 @@ describe("transcript", () => {
     expect((items[6] as { sender?: string }).sender).toBe("Message from codex/p/review");
   });
 });
+
+describe("question replies in the transcript", () => {
+  it("answers are labelled and keep their questions", () => {
+    const items = buildTranscript([
+      { seq: 1, type: "QuestionAnswered", at: 10, detail: "Which checks? → Unit" },
+      { seq: 2, type: "UserPromptSubmit", at: 11, detail: "<send_user_message_question_reply>…", question_replies: [{ question: "Which checks?", answer: "Unit" }] },
+    ] as ActivityEvent[]);
+    expect(items.map((i) => (i as { label?: string }).label)).toEqual(["You (answer)", "You (answer)"]);
+    expect((items[1] as { replies?: unknown }).replies).toEqual([{ question: "Which checks?", answer: "Unit" }]);
+  });
+
+  it("a recorded prompt with answers reads as a recorded answer", () => {
+    const items = buildTranscript([], { prompt: "<send_user_message_question_reply>…", prompt_replies: [{ question: "Q", answer: "A" }] });
+    const prompt = items.find((i) => i.id === "prompt-snapshot") as { label?: string; replies?: unknown };
+    expect(prompt.label).toBe("You (recorded answer)");
+    expect(prompt.replies).toEqual([{ question: "Q", answer: "A" }]);
+  });
+});

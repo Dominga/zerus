@@ -1,6 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type Batch, type ComputerId, type Details, type EditOutcome, type Outcome, type ReadMark, type Target, type TerminalConnected, type TerminalFacts, type TerminalFinished, type TerminalStatus, type TerminalTarget, type ArchivePage, type ArchivedActivity, type ProcessTarget, type Answer, type ComposerTab, type ComposerView, type Inspect, type SendReply, type SessionRef, type AttachmentRef, type Fetched } from "./types";
+import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type Batch, type ComputerId, type Details, type EditOutcome, type Outcome, type ReadMark, type Target, type TerminalConnected, type TerminalFacts, type TerminalFinished, type TerminalStatus, type TerminalTarget, type ArchivePage, type ArchivedActivity, type ProcessTarget, type Answer, type ComposerTab, type ComposerView, type Inspect, type SendReply, type SessionRef, type AttachmentRef, type Fetched, type QuestionEdit, type QuestionReply } from "./types";
 import type { ActivityPort, FollowRequest } from "./store/activity";
 import { documentVisibility, type PageVisibility } from "./store/visibility";
 
@@ -146,7 +146,7 @@ export function normalize(b: Partial<Batch>): Batch {
     upserts: b.upserts ?? e.upserts, removes: b.removes ?? e.removes, replaces: b.replaces ?? e.replaces, computers: b.computers ?? e.computers,
     machines: b.machines ?? [], activity: b.activity ?? e.activity, groups: b.groups ?? [], grouping: b.grouping ?? undefined,
     processes_view: b.processes_view ?? undefined,
-    composer: b.composer ?? undefined, draft_keys: b.draft_keys ?? undefined,
+    composer: b.composer ?? undefined, draft_keys: b.draft_keys ?? undefined, composer_events: b.composer_events ?? undefined,
   };
 }
 
@@ -522,6 +522,15 @@ export async function composerPasteImage(handle: number, png: Uint8Array, start:
 export const composerRemove = (handle: number, index: number) => desktop<void>("composer_remove", { handle, index });
 export const composerUndoRemove = (handle: number) => desktop<void>("composer_undo_remove", { handle });
 export const composerAllowRetry = (handle: number) => desktop<void>("composer_allow_retry", { handle });
+// The question card (A2-1, A2-2). Every edit names the epoch its fields are based on.
+export const questionEdit = (card: string, epoch: number, edit: QuestionEdit) => desktop<void>("question_edit", { card, epoch, edit });
+export const questionPage = (card: string, page: number) => desktop<void>("question_page", { card, page });
+export const questionNavigate = (direction: number) => desktop<void>("question_navigate", { direction });
+export const questionAllowRetry = (card: string) => desktop<void>("question_allow_retry", { card });
+export const questionSubmit = (card: string) => desktop<QuestionReply>("question_submit", { card });
+export const questionDecide = (card: string, allow: boolean) => desktop<QuestionReply>("question_decide", { card, allow });
+export const questionSkip = (card: string) => desktop<QuestionReply>("question_skip", { card });
+export const questionCold = (token: number, proceed: boolean) => desktop<QuestionReply>("question_cold", { token, proceed });
 /** The status line's Refresh: the open session is read again (Qt's sessionRefreshRequested). */
 export const composerRefresh = (handle: number) => desktop<void>("composer_refresh", { handle });
 /** The detail tab that shows: Terminal and Native UI retry a failed read at Qt's background interval. */

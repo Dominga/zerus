@@ -9256,6 +9256,16 @@ git commit -m "feat(client): answer question cards and approvals through the gua
 
 ### Task A2-3: The question card view, and answers in Activity
 
+**As built** (this task's commit and its review rounds). Where the steps below differ, the code and this list win (Qt wins over the brief):
+- **The epoch** (A2-1 As built). `questionEdit(card, epoch, edit)` names the epoch the fields show, and every input event goes at once, without a debounce. The review restarts only when the card or its revision changes. A grown epoch alone keeps it running (Qt's load rebuilds the form without restarting the review, `QuestionCard.cpp:289-301`).
+- **Rust's values win on a grown epoch.** Forms are keyed by their id, not by the form object, which is new with every view, so an echo never remounts the text field. When the epoch grows, the answer line and every option input take Rust's values again. Solid does not set an unchanged `checked` again, so without this a dropped stale click would stay on screen.
+- **The card follows the composer's accepted view** (`composer.view()?.question`), not the raw envelope. Task 6's `receive` drops or holds a view of another composer, and the card follows the same view.
+- **No read-error element.** A failed question read is the composer's `session_status` (A2-1 As built), which Task 6 shows.
+- **Open Terminal** and the `open_terminal` event only show the Terminal tab; showing it connects (`terminal.show`). Its availability and reason come from `terminal.texts()`.
+- **A required card** hides both resize handles (Qt hides `m_resizeHandle`, `MessageComposer.cpp:1129`), the editor, its hint and the action row. The toolbar keeps a plain spacer where its grip was, so the trailing chips stay on the right.
+- **The store's port** reads the bridge at each call, not when the module loads.
+- **Tests:** the brief's six, plus "an unavailable card holds the review at its start" (`QuestionCard.cpp:239-240`), "a grown epoch alone keeps the review running" and "every edit goes at once, with the epoch the fields show". The client has no DOM test environment, so the card component itself is not unit-tested.
+
 **Depends on:**
 - A2-2;
 - Task 2 (`terminal`, `setDetailTab`) and Task 6 (`composer`, `SessionDetail`'s composer column);

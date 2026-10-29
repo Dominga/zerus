@@ -522,7 +522,7 @@ class WorkflowSecurityTests(unittest.TestCase):
     def test_native_client_jobs_cover_media_and_platform_code(self):
         checks = (ROOT / ".github/workflows/checks.yml").read_text()
         for name, runner, selected, timeout in (("client-native-linux", "ubuntu-24.04", "linux", "45"),
-                                                ("client-native-macos", "macos-15", "macos", "60"),
+                                                ("client-native-macos", "macos-15", "macos", "90"),
                                                 ("client-native-windows", "windows-2025", "windows", "60")):
             native = job(checks, name)
             with self.subTest(job=name):

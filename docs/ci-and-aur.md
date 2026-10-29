@@ -49,7 +49,8 @@ Windows run that stopped at the first core-test failure. To bound cold builds
 with registry-only caches, macOS and Windows disable dev/test debug info and use
 `client/src-tauri` clippy with all targets instead of a redundant cargo check
 with all targets. The separate media/video check remains because the app's
-default features do not include media.
+default features do not include media. The macOS job's timeout is 90 minutes,
+because its first cold run passed 60; Linux keeps 45 and Windows 60.
 
 Quick checks and the full suites start together once the commit is resolved, so
 a quick-check failure no longer holds back the other suites. New PR/manual runs cancel

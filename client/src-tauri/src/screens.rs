@@ -806,22 +806,26 @@ impl Screens {
         hub.stale = true;
     }
 
-    /// A `launch_accounts` call stopped waiting: once its ask was answered it
-    /// asks for the limits of the catalog (`requestUsage`), taking the
-    /// Refresh's force so that it applies once. A reply filed after the last
-    /// caller stopped waiting asks for them itself.
+    /// A `launch_accounts` call stopped waiting: once its ask was answered
+    /// successfully it asks for the limits of the catalog (`requestUsage`),
+    /// taking the Refresh's force so that it applies once. A failed answer asks
+    /// for none. A good reply filed after the last caller stopped waiting asks
+    /// for them itself.
     fn launch_waited(&self, computer: &ComputerId) -> Vec<Run> {
         let mut hub = self.lock();
-        let force = match hub.launch.as_mut() {
+        let (force, failed) = match hub.launch.as_mut() {
             Some(watch) if watch.computer == *computer => {
                 watch.waiting = watch.waiting.saturating_sub(1);
                 if !watch.answered {
                     return Vec::new();
                 }
-                std::mem::take(&mut watch.force)
+                (std::mem::take(&mut watch.force), watch.error.is_some())
             }
             _ => return Vec::new(),
         };
+        if failed {
+            return Vec::new();
+        }
         self.launch_limits(&mut hub, computer, force)
     }
 
@@ -1994,6 +1998,32 @@ mod tests {
             h.screens.launch_rows(&here).error.as_deref(),
             Some("Could not load accounts: hgs: account catalog busy"),
             "the Refresh's own reply answers it"
+        );
+    }
+
+    // A failed answer to the dialog's own request asks for no limits, even
+    // when the rows still show the last good catalog (NewSessionDialog 380-395).
+    #[test]
+    fn a_failed_dialog_answer_asks_for_no_limits() {
+        let h = harness(launch_replies(false), true);
+        let here = ComputerId::local();
+        launch_ask(&h, &here, false);
+        let before = launch_inspects(&h);
+        h.fake.set_reply(
+            "account ls",
+            json!({"stderr": "hgs: account catalog busy\n", "exit": 1}),
+        );
+        let runs = h.screens.launch_start(&here, true, None);
+        h.screens.run(runs);
+        h.drain();
+        let runs = h.screens.launch_waited(&here);
+        assert!(runs.is_empty(), "a failed answer starts no limit reads");
+        h.screens.run(runs);
+        h.drain();
+        assert_eq!(launch_inspects(&h), before);
+        assert_eq!(
+            h.screens.launch_rows(&here).error.as_deref(),
+            Some("Could not load accounts: hgs: account catalog busy")
         );
     }
 

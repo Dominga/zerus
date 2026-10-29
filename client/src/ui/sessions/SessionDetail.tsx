@@ -3,7 +3,7 @@ import * as bridge from "../../bridge";
 import { terminal } from "../../store/terminal";
 import { TerminalTab } from "./Terminal";
 import { ProcessesTab } from "./Processes";
-import { processes } from "../../store/processes";
+import { processes, processesTab } from "../../store/processes";
 import { flag } from "../../store/settings";
 import type { TerminalStatus } from "../../types";
 import { Icon } from "../lib/icons";
@@ -154,8 +154,7 @@ const tabs = () => {
   const all = [
     { id: "activity" as const, label: "Activity", show: true },
     { id: "terminal" as const, label: "Terminal", show: !!terminalTexts()?.supported && !subagentOpen() },
-    // Settings > Processes shows the tab; its count is the hub's (SessionsWindow.cpp:1330, 3786-3787).
-    { id: "processes" as const, label: count > 0 ? `Processes (${count})` : "Processes", show: flag("processes/enabled") },
+    processesTab(flag("processes/enabled"), count),
   ];
   const s = selected();
   return s ? detailTabs(s.key, all) : all;

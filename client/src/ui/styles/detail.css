@@ -329,6 +329,8 @@
   .proc-table tr.grp { cursor: pointer; }
   .proc-chevron { display: inline-block; width: 14px; }
   .proc-table tr.current td:first-child { box-shadow: inset 2px 0 0 var(--z-color-accent); }
+  .proc-list:focus { outline: none; }
+  .proc-list:focus-visible .proc-table tr.focused td { box-shadow: inset 0 0 0 1px var(--z-color-accent); }
   /* Qt's state colours (ProcessView.cpp:224). */
   .proc-state.danger { color: light-dark(#b42332, #ff8c93); }
   .proc-state.muted { color: light-dark(#657582, #9aabb8); }

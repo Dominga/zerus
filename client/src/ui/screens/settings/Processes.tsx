@@ -6,7 +6,7 @@ import { Group, NumberField, Row, SectionHead, ToggleRow } from "./ui";
 // and one decimal. The Rust hub reads the five keys from the settings store
 // at start and after every change of one (src-tauri processes.rs).
 
-const TIMINGS = [
+export const TIMINGS = [
   { key: "processes/activeSeconds", label: "Open Processes tab", min: 1, max: 60 },
   { key: "processes/backgroundSeconds", label: "Background process count", min: 5, max: 600 },
   { key: "processes/unknownSeconds", label: "Unconfirmed process output", min: 1, max: 600 },

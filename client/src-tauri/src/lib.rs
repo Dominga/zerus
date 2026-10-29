@@ -803,6 +803,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         actions::archived_activity,
         actions::cancel_archive_pages,
         clipboard::copy_text,
+        clipboard::copy_verbatim,
         organization::move_to_project,
         organization::create_project,
         organization::rename_project,
@@ -879,6 +880,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::build_info,
         renderer::renderer_frame,
         clipboard::copy_text,
+        clipboard::copy_verbatim,
         desk_take_pending,
     ]
 }

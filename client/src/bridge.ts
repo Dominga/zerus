@@ -278,6 +278,14 @@ export async function copyText(text: string): Promise<void> {
   await navigator.clipboard.writeText(text);
 }
 
+/** Copies `text` exactly as it is (a process's command, as Qt's ProcessView copies it); refuses only an empty text. */
+export async function copyVerbatim(text: string): Promise<void> {
+  if (inTauri()) return invoke<void>("copy_verbatim", { text });
+  if (!text) throw "nothing to copy: the command is empty";
+  if (!navigator.clipboard) throw "The clipboard is unavailable.";
+  await navigator.clipboard.writeText(text);
+}
+
 // Project organization edits (client/src-tauri `organization.rs`). Each is
 // one call, which the Rust side sends as one `hgs swarm apply`; members are
 // "<host>\n<session name>". Outside the app an edit is refused.

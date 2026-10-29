@@ -1,5 +1,5 @@
-import { batch, createEffect, createRoot, on } from "solid-js";
-import { activityPort, processesFollow, processesShown } from "../bridge";
+import { batch, createEffect, createRoot, createSignal, on } from "solid-js";
+import { activityPort, processesFollow, processesShown, windowVisibility } from "../bridge";
 import { applyBatch, computerFresh, onReplaced, orderedRows } from "./catalog";
 import { bindActivity, bindSelection, followedFor } from "./actions";
 import { observeMarks } from "./marks";
@@ -8,9 +8,9 @@ import { applyGrouping } from "./organization";
 import { activityReadOnly } from "./activitySource";
 import { compactRows, detailTab, page, selected, selectedKey, setCompactRows, setSelectedKey, subagentOpen } from "./ui";
 import { startScreens } from "./screens";
-import { documentVisibility, pageHidden } from "./visibility";
+import { documentVisibility } from "./visibility";
 import { flag } from "./settings";
-import { processes, processTarget } from "./processes";
+import { processes, trackFollow, trackShown } from "./processes";
 import type { Batch } from "../types";
 
 // Wires the stores together: batches go to the catalog, the grouping and
@@ -46,22 +46,25 @@ createRoot(() => {
 });
 
 // The Processes tab follows the selected session while Settings > Processes
-// is on (Qt polls nothing while it is off). Every change of the row sends the
-// target again: the hub follows again after a failed follow, even of the
-// same target, and ignores an unchanged one otherwise.
+// is on (Qt polls nothing while it is off); output reads and the busy
+// indicator run only while the tab shows in a shown window.
+const [windowHidden, setWindowHidden] = createSignal(windowVisibility.hidden());
+windowVisibility.onChange(() => setWindowHidden(windowVisibility.hidden()));
 createRoot(() => {
-  createEffect(() => {
-    const s = selected();
-    if (!flag("processes/enabled") || !s) { processesFollow(null); return; }
-    const host = followedFor(s.key).value?.host_generation;
-    processesFollow(processTarget(s, {
-      online: computerFresh(s.computer),
-      generation: typeof host === "string" && host ? host : null,
-      inspectFailed: activity.target()?.id === s.key && !!activity.error(),
-    }));
+  const enabled = () => flag("processes/enabled");
+  trackFollow({
+    enabled, selected,
+    facts: (s) => {
+      const host = followedFor(s.key).value?.host_generation;
+      return {
+        online: computerFresh(s.computer),
+        generation: typeof host === "string" && host ? host : null,
+        inspectFailed: activity.target()?.id === s.key && !!activity.error(),
+      };
+    },
+    follow: processesFollow,
   });
-  // Output reads and the busy indicator run only while the tab shows.
-  createEffect(() => processesShown(flag("processes/enabled") && !!selected() && page() === "sessions" && detailTab() === "processes" && !pageHidden()));
+  trackShown({ enabled, selected: () => !!selected(), page, tab: detailTab, hidden: windowHidden, shown: processesShown });
 });
 
 // `?select=<session name>` opens that session once it is listed (screenshots, scripted measurements).

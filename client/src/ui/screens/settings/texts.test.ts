@@ -281,6 +281,14 @@ describe("Settings texts", () => {
     expect(qt).toContain(`tr("${text}")`);
     expect(source("Processes.tsx")).toContain(text);
   });
+  it("Processes keeps Qt's timing ranges", () => {
+    const TIMINGS = [...source("Processes.tsx").matchAll(/\{ key: "([^"]+)", label: "([^"]+)", min: ([\d.]+), max: ([\d.]+) \}/g)]
+      .map((m) => ({ key: m[1], label: m[2], min: Number(m[3]), max: Number(m[4]) }));
+    const qtTimings = [...qt.matchAll(/timing\("(\w+)",tr\("([^"]+)"\),ProcessSettings::\w+\(\),([\d.]+),([\d.]+)\)/g)]
+      .map((m) => ({ key: `processes/${m[1]}`, label: m[2], min: Number(m[3]), max: Number(m[4]) }));
+    expect(qtTimings.length).toBe(4);
+    expect(TIMINGS.map((t) => ({ key: t.key, label: t.label, min: t.min, max: t.max }))).toEqual(qtTimings);
+  });
   it.each(PROCESS_TAB)("the Processes tab shows Qt's %s", (text) => {
     expect(processView).toContain(`tr("${text}`);
     expect(sessionsUi("Processes.tsx")).toContain(text);
@@ -289,7 +297,7 @@ describe("Settings texts", () => {
     expect(processView).toContain('tr("Terminate selected (%1)")');
     expect(sessionsUi("Processes.tsx")).toContain("`Terminate selected (${ids.length})`");
     expect(sessionsWindow).toContain('tr("Processes (%1)")');
-    expect(sessionsUi("SessionDetail.tsx")).toContain("`Processes (${count})`");
+    expect(processStore).toContain("`Processes (${count})`");
   });
   it.each(PROCESS_MENU)("the session menu shows Qt's %s", (text) => {
     expect(sessionsWindow).toContain(`tr("${text}")`);

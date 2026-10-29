@@ -110,7 +110,7 @@ export function sessionMenu(s: Session): MenuEntry[] {
   const mark = markEntry(s);
   const fresh = freshActionEntry(s);
   const archived = s.state === "archived";
-  const commands = runningCommandsEntry(s, computerFresh(s.computer), flag("processes/enabled"), () => { setSelectedKey(s.key); setDetailTab("processes"); });
+  const commands = runningCommandsEntry(s, () => computerFresh(s.computer), () => flag("processes/enabled"), () => { setSelectedKey(s.key); setDetailTab("processes"); });
   return [
     { label: compactRows[s.key] ? "Expand session row" : "Compact session row", icon: compactRows[s.key] ? "expand-row" : "compact-row", action: () => setRowCompact(s.key, !compactRows[s.key]) },
     { label: "Expand all collapsed", icon: "expand-row", disabled: !Object.values(compactRows).some(Boolean), action: () => Object.keys(compactRows).forEach((k) => setCompactRows(k, false)) },

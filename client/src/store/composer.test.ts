@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createRoot } from "solid-js";
-import { createComposer, draftKey, EDIT_MS, statusLine, TOO_LONG, type ComposerPort, type Images, type Notices } from "./composer";
+import { createComposer, draftKey, EDIT_MS, flushWhenHidden, MAX_TEXT_BYTES, statusLine, TOO_LONG, type ComposerPort, type Images, type Notices } from "./composer";
 import { isEmptyBatch, type ComposerView, type SendReply, type SessionRef } from "../types";
 import { normalize } from "../bridge";
 import type { Timers } from "./terminal";
@@ -12,7 +12,7 @@ const view = (extra: Partial<ComposerView> = {}): ComposerView => ({
   handle: 1, key: KEY, loaded: true, rev: 0, text_epoch: 1, text: "", position: 0, anchor: 0,
   attachments: [], removed: null, attaching: false, sending: false, waiting: null, uncertain: false, status: "", status_error: false,
   can_send: true, send_label: "Send", available: true, unavailable_reason: "", block_reason: null, attachments_available: true,
-  attachments_reason: "", session_status: "", session_status_error: false, session_blocks_input: false,
+  attachments_reason: "", session_status: "", session_status_error: false, session_blocks_input: false, inspect_error: false,
   cache: { visible: false, tone: "quiet", label: "", short_label: "" }, cache_warning: "", cache_details: "",
   context: { visible: false, text: "", tooltip: "", warning: false, tone: "quiet", percent: null, accessible_name: "" }, local: [],
   cancel_send: false, compacting: false,
@@ -62,6 +62,12 @@ function fakes(reply: SendReply = { kind: "sending" }, opened: ComposerView | nu
 }
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+/** Calls whose answers the test gives later. */
+function held<T>() {
+  const waiting: ((value: T) => void)[] = [];
+  return { call: () => new Promise<T>((resolve) => { waiting.push(resolve); }), answer: (value: T) => waiting.shift()?.(value), count: () => waiting.length };
+}
 const images = (width: number, height: number): Images => ({ size: async () => ({ width, height }), png: async () => new Uint8Array([1, 2, 3]) });
 
 describe("composer store", () => {
@@ -351,6 +357,219 @@ describe("composer store", () => {
       expect(c.view()).toBeUndefined();
       c.receive(view({ handle: 8, key: draftKey(other), text_epoch: 5 }));
       expect(c.view()).toBeUndefined();
+    });
+  });
+
+  // Review fix round 1, I1 (probe P5): a reply arrives after another composer opened.
+  it("a clear that ends after the switch to another composer neither locks nor changes it; its notice still shows", async () => {
+    const f = fakes();
+    const clear = held<SendReply>();
+    const port: ComposerPort = { ...f.port, clear: () => clear.call() };
+    await createRoot(async () => {
+      const c = createComposer(port, f.timers, undefined, f.notify);
+      c.apply(view());
+      c.openClear();
+      const confirmed = c.confirmClear();
+      c.apply(view({ handle: 2, key: "studio\nclaude/sample-project/other" }));
+      clear.answer({ kind: "sending" });
+      await confirmed;
+      expect(c.locked()).toBe(false);
+      c.openClear();
+      const again = c.confirmClear();
+      c.apply(view({ handle: 3, key: "studio\nclaude/sample-project/third" }));
+      clear.answer({ kind: "notice", text: "Context cleared. Your draft is ready to send.", error: false });
+      await again;
+      expect(f.notices).toEqual(["info timed Context cleared. Your draft is ready to send."]);
+      expect(c.locked()).toBe(false);
+    });
+  });
+
+  // I1 (probe P6): a question for the composer left is answered Cancel, never shown over another.
+  it("a cold or start question that arrives after the switch is answered Cancel and not shown", async () => {
+    const f = fakes();
+    const send = held<SendReply>();
+    const port: ComposerPort = { ...f.port, send: (_h, rev, _epoch, text) => { f.calls.push(`send ${rev} ${text}`); return send.call(); } };
+    await createRoot(async () => {
+      const c = createComposer(port, f.timers);
+      c.apply(view());
+      c.input("for A", 5, 5);
+      const sent = c.send();
+      await tick();
+      c.apply(view({ handle: 2, key: "studio\nclaude/sample-project/other", text: "B's draft", text_epoch: 1 }));
+      send.answer({ kind: "cold", token: 11, prompt: { title: "Continue with a cold cache?", text: "", informative: "", choices: [] } });
+      await sent;
+      await tick();
+      expect(c.dialog()).toBeUndefined();
+      expect(f.calls.at(-1)).toBe(`answer 11 {"kind":"cancel"}`);
+      expect(c.text()).toBe("B's draft");
+      expect(c.locked()).toBe(false);
+      // A busy, blocked or sending reply for the composer left changes nothing either.
+      c.input("for B", 5, 5);
+      const second = c.send();
+      await tick();
+      c.apply(view({ handle: 4, key: "studio\nclaude/sample-project/fourth", text_epoch: 1 }));
+      send.answer({ kind: "busy" });
+      await second;
+      expect(c.locked()).toBe(false);
+    });
+  });
+
+  it("the editor stays locked while an answer is on its way", async () => {
+    const f = fakes({ kind: "start", token: 12, question: { title: "Start the session to send?", text: "", informative: "", options: [] } });
+    const answer = held<SendReply>();
+    const port: ComposerPort = { ...f.port, answer: (token, a) => { f.calls.push(`answer ${token} ${JSON.stringify(a)}`); return answer.call(); } };
+    await createRoot(async () => {
+      const c = createComposer(port, f.timers);
+      c.apply(view());
+      c.input("hi", 2, 2);
+      await c.send();
+      const answering = c.answer({ kind: "start", choice: "resume" });
+      expect(c.dialog()).toBeUndefined();
+      expect(c.locked()).toBe(true);
+      await tick();
+      answer.answer({ kind: "busy" });
+      await answering;
+      expect(c.locked()).toBe(false);
+    });
+  });
+
+  // M1 (probe P1): a second Enter while the first send flushes sends nothing.
+  it("two sends from one Enter: the second finds the editor locked", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers);
+      c.apply(view());
+      c.input("hello", 5, 5);
+      const first = c.send();
+      const second = c.send();
+      await Promise.all([first, second]);
+      expect(f.calls.filter((x) => x.startsWith("send"))).toEqual(["send 1 hello"]);
+    });
+  });
+
+  // M2 (probe P2) and M6: the composer being left gets its typing first, and nothing is typed while another opens.
+  it("opening another session flushes the one left first and locks the editor until it answers", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers);
+      await c.open(SESSION);
+      f.calls.length = 0;
+      c.input("typed on A", 10, 10);
+      f.holdOpens();
+      const other = { ...SESSION, key: "run:run-9", name: "claude/sample-project/other" };
+      const opening = c.open(other);
+      expect(c.locked()).toBe(true);
+      c.input("lost?", 5, 5);
+      expect(c.text()).toBe("typed on A");
+      await tick();
+      expect(f.calls).toEqual(["edit 1 typed on A", "open claude/sample-project/other"]);
+      f.finishOpen(view({ handle: 8, key: draftKey(other), text: "B", text_epoch: 1 }));
+      await opening;
+      expect(c.locked()).toBe(false);
+      expect(c.text()).toBe("B");
+    });
+  });
+
+  // M6: an envelope view held while an open ran is applied after its answer.
+  it("a view of the opened composer that arrived during the open is applied afterwards", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers);
+      f.holdOpens();
+      const opening = c.open(SESSION);
+      await tick();
+      c.receive(view({ text: "newer", text_epoch: 2, status: "Newer status." }));
+      f.finishOpen(view({ text: "older", text_epoch: 1 }));
+      await opening;
+      expect(c.text()).toBe("newer");
+      expect(c.view()?.status).toBe("Newer status.");
+    });
+  });
+
+  // M6: Qt's Send needs no uncertain mark (MessageComposer.cpp:1185).
+  it("an uncertain mark disables Send until Allow retry", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers);
+      c.apply(view({ uncertain: true }));
+      c.input("hello", 5, 5);
+      expect(c.sendEnabled()).toBe(false);
+      await c.send();
+      expect(f.calls.some((x) => x.startsWith("send"))).toBe(false);
+      c.apply(view());
+      expect(c.sendEnabled()).toBe(true);
+    });
+  });
+
+  // M6: Qt saves the cursor with the draft (rememberCursor, MessageComposer.cpp:380-386).
+  it("a cursor move is an edit", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers);
+      c.apply(view({ text: "hello", position: 5, anchor: 5 }));
+      c.select(5, 5);
+      f.advance(EDIT_MS);
+      await tick();
+      expect(f.calls).toEqual([]);
+      c.select(0, 2);
+      f.advance(EDIT_MS);
+      await tick();
+      expect(f.calls).toEqual(["edit 1 hello"]);
+    });
+  });
+
+  // M6: Refresh is off while an operation locks the composer (MessageComposer.cpp:1195).
+  it("Refresh does nothing while an operation locks the composer", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers);
+      c.apply(view({ sending: true, session_status: "Could not refresh activity: timed out", session_status_error: true }));
+      expect(c.operationLocked()).toBe(true);
+      await c.refresh();
+      expect(f.calls).toEqual([]);
+    });
+  });
+
+  // M8: typing not yet flushed goes when the window hides or the page goes.
+  it("hiding the window or leaving the page flushes the typing", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers);
+      let hidden = false;
+      const listeners: (() => void)[] = [];
+      let pagehide: (() => void) | undefined;
+      flushWhenHidden(() => { void c.flush(); }, [{ hidden: () => hidden, onChange: (l) => { listeners.push(l); return () => {}; } }],
+        { addEventListener: (_type, listener) => { pagehide = listener; } });
+      c.apply(view());
+      c.input("a", 1, 1);
+      for (const l of listeners) l();
+      await tick();
+      expect(f.calls).toEqual([]);
+      hidden = true;
+      for (const l of listeners) l();
+      await tick();
+      expect(f.calls).toEqual(["edit 1 a"]);
+      c.input("ab", 2, 2);
+      pagehide?.();
+      await tick();
+      expect(f.calls).toEqual(["edit 1 a", "edit 2 ab"]);
+    });
+  });
+
+  // M3: the length is measured once per text, with Qt's UTF-8 rule at the edge.
+  it("the 64 KiB limit counts UTF-8 bytes at the edge", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers);
+      c.apply(view());
+      c.input("a".repeat(MAX_TEXT_BYTES), 0, 0);
+      expect(c.status().text).toBe("");
+      c.input("a".repeat(MAX_TEXT_BYTES + 1), 0, 0);
+      expect(c.status().text).toBe(TOO_LONG);
+      c.input("ж".repeat(MAX_TEXT_BYTES / 2), 0, 0);
+      expect(c.status().text).toBe("");
+      c.input(`${"ж".repeat(MAX_TEXT_BYTES / 2 - 1)}€`, 0, 0);
+      expect(c.status().text).toBe(TOO_LONG);
     });
   });
 

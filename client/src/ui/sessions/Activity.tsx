@@ -376,8 +376,16 @@ const [unseen, setUnseen] = createSignal(0);
 let liveScroller: HTMLDivElement | undefined;
 export { following, unseen };
 
-/** Scrolls to the newest item and follows it again. */
-export function jumpToLatest() {
+/** Puts the focus in the transcript (Qt's browser), e.g. before a focused chip there hides. */
+export function focusTranscript() { liveScroller?.focus({ preventScroll: true }); }
+
+/**
+ * Scrolls to the newest item and follows it again. `fromFocus`: the jump's
+ * own control had the focus, which stays in the transcript (Qt's
+ * jumpToLatest, ActivityView.cpp:1611), since the control hides.
+ */
+export function jumpToLatest(fromFocus = false) {
+  if (fromFocus) focusTranscript();
   setFollowing(true);
   setUnseen(0);
   liveScroller?.scrollTo({ top: liveScroller.scrollHeight, behavior: "instant" });
@@ -464,7 +472,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
   const states = createMemo(() => paneStates(source(), s()));
   return (
     <div class="activity">
-      <div class="act-scroll" ref={scroller} onContextMenu={activityMenu} onScroll={onScroll}>
+      <div class="act-scroll" ref={scroller} tabindex="-1" onContextMenu={activityMenu} onScroll={onScroll}>
         <div class="act-col">
           <Show when={!fullWidth()}><ColumnEdge /><ColumnEdge right /></Show>
           <Show when={subagentOpen()}>

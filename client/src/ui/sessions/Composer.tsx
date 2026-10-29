@@ -9,7 +9,7 @@ import { actionEntries } from "./ActionDialogs";
 import { snapshotOf } from "./actions-ui";
 import { markReadChip, runMarkRead } from "./mark-entries";
 import { AttachmentsChip } from "./Attachments";
-import { following, jumpToLatest, unseen } from "./Activity";
+import { focusTranscript, following, jumpToLatest, unseen } from "./Activity";
 import type { ChipTone } from "../../types";
 
 // The message composer (Qt MessageComposer, 300-366), after the mockup's
@@ -151,10 +151,10 @@ export function Composer() {
   const act = createMemo(() => actionEntries(s(), details()));
   const mark = createMemo(() => markReadChip(s(), computerFresh(s().computer)));
   // Qt's compaction indicator (ActivityView.cpp 1899-1901) over the details it is given (3974-3975: an
-  // offline host or a session not running reads as unavailable).
+  // offline host, a failed read or a session not running reads as unavailable).
   const compacting = createMemo(() => {
     const state = followedFor(s().key).value ?? {};
-    return s().tracked && online() && s().state === "running" && state.phase === "compacting" && state.runtime_state === "live"
+    return s().tracked && online() && !v()?.inspect_error && s().state === "running" && state.phase === "compacting" && state.runtime_state === "live"
       && state.process_state === "running" && state.state !== "archived";
   });
   const [compact, setCompact] = createSignal(false);
@@ -219,13 +219,14 @@ export function Composer() {
         <AttachmentsChip compact={compact()} />
         {/* The voice slot: Task 13. */}
         <Show when={!following()}>
-          <button type="button" class="tchip icon" title={jumpCaption()} aria-label={jumpCaption()} onClick={jumpToLatest}><Icon name="chevrons-down" size={14} /></button>
+          <button type="button" class="tchip icon" title={jumpCaption()} aria-label={jumpCaption()}
+            onClick={(e) => jumpToLatest(document.activeElement === e.currentTarget)}><Icon name="chevrons-down" size={14} /></button>
         </Show>
         <Show when={mark().active}>
           <button type="button" class="tchip accent" classList={{ icon: compact() }} title={mark().detail} aria-label="Mark as read"
             onClick={(e) => {
-              // The chip goes once read: its focus moves on first (SessionsWindow.cpp:1038; the toolbar's focus fallback is the field).
-              if (document.activeElement === e.currentTarget) editor.focus();
+              // The chip goes once read: its focus moves to the transcript first (SessionsWindow.cpp:1038).
+              if (document.activeElement === e.currentTarget) focusTranscript();
               runMarkRead(snapshotOf(s()));
             }}>
             <Icon name="read-all" size={13} /><Show when={!compact()}>Mark as read</Show>

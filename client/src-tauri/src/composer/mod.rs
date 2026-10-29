@@ -165,6 +165,10 @@ pub struct ComposerView {
     pub session_status: String,
     pub session_status_error: bool,
     pub session_blocks_input: bool,
+    /// The open session's last read failed (Qt's `m_inspectError`): its
+    /// Activity reads as unavailable, so the compaction indicator hides
+    /// (`SessionsWindow.cpp:3975`).
+    pub inspect_error: bool,
     /// The cache chip, its popover's warning and its detail lines.
     pub cache: Chip,
     pub cache_warning: String,
@@ -1382,6 +1386,7 @@ impl Composers {
             session_status: session.session_status,
             session_status_error: session.session_status_error,
             session_blocks_input: session.session_blocks_input,
+            inspect_error: session.inspect_error,
             cache: session.cache,
             cache_warning: session.cache_warning,
             cache_details: session.cache_details,

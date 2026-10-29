@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createSignal, on, onCleanup, onMount } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Icon } from "../lib/icons";
 import { composer } from "../../store/composer";
@@ -22,6 +22,8 @@ export const attachedLabel = (n: number, compact: boolean) => (compact ? String(
 
 export function AttachmentsChip(props: { compact?: boolean }) {
   const items = () => composer.view()?.attachments ?? [];
+  /** The rows' keys: a view's attachments are new objects every time, their references are not. */
+  const references = createMemo(() => items().map((a) => a.reference), undefined, { equals: (a, b) => a.length === b.length && a.every((r, i) => r === b[i]) });
   const [open, setOpen] = createSignal(false);
   const [preview, setPreview] = createSignal<number>();
   // The toolbar clips its overflow, so the list is placed in the viewport above
@@ -47,7 +49,7 @@ export function AttachmentsChip(props: { compact?: boolean }) {
     void composer.remove(index);
   };
   // Stay in the list: the row that took this place, else the one before it, else Undo.
-  createEffect(on(items, () => {
+  createEffect(on(references, () => {
     if (refocus === undefined || !open()) return;
     const index = refocus;
     refocus = undefined;
@@ -85,21 +87,25 @@ export function AttachmentsChip(props: { compact?: boolean }) {
         <div class={`att-pop pv-${pos().side}`} ref={list} tabindex="-1" role="dialog" aria-label="Attachments" data-shortcut-context="none" onKeyDown={onKey}
           style={{ left: `${pos().left}px`, bottom: `${pos().bottom}px` }}>
           <div class="att-head"><b>Attachments</b><span class="dim">{items().length} of 8, up to 10 MiB each</span></div>
-          <For each={items()}>{(a, i) => (
-            <div class="att-row" tabindex="0" aria-label={a.name}
-              onMouseEnter={() => setPreview(i())} onMouseLeave={() => setPreview(undefined)} onFocus={() => { if (arrowed) setPreview(i()); }}
-              onKeyDown={(e) => {
-                if (e.target !== e.currentTarget) return;
-                if (e.key === "Delete" || e.key === "Backspace") { e.preventDefault(); remove(i()); }
-              }}>
-              <span class="att-thumb" classList={{ file: !image(a) }}>
-                <Show when={image(a)} fallback={<Icon name="file-text" size={16} />}><img src={src(a)} alt="" /></Show>
-              </span>
-              <span class="att-text"><span class="ell"><span class="att-ref">{a.reference}</span> {a.name}</span><span class="dim tabular">{kib(a.bytes)}</span></span>
-              <button type="button" class="icon-btn small att-remove" aria-label={`Remove attachment ${a.name}`} title="Remove" disabled={composer.locked()}
-                onClick={(e) => { e.stopPropagation(); remove(i()); }}><Icon name="x" size={13} /></button>
-            </div>
-          )}</For>
+          {/* Rows are keyed by their reference, so a new view (a minute tick) keeps them and their focus. */}
+          <For each={references()}>{(reference, i) => {
+            const a = () => items().find((x) => x.reference === reference) ?? items()[i()];
+            return (
+              <div class="att-row" tabindex="0" aria-label={a().name}
+                onMouseEnter={() => setPreview(i())} onMouseLeave={() => setPreview(undefined)} onFocus={() => { if (arrowed) setPreview(i()); }}
+                onKeyDown={(e) => {
+                  if (e.target !== e.currentTarget) return;
+                  if (e.key === "Delete" || e.key === "Backspace") { e.preventDefault(); remove(i()); }
+                }}>
+                <span class="att-thumb" classList={{ file: !image(a()) }}>
+                  <Show when={image(a())} fallback={<Icon name="file-text" size={16} />}><img src={src(a())} alt="" /></Show>
+                </span>
+                <span class="att-text"><span class="ell"><span class="att-ref">{reference}</span> {a().name}</span><span class="dim tabular">{kib(a().bytes)}</span></span>
+                <button type="button" class="icon-btn small att-remove" aria-label={`Remove attachment ${a().name}`} title="Remove" disabled={composer.locked()}
+                  onClick={(e) => { e.stopPropagation(); remove(i()); }}><Icon name="x" size={13} /></button>
+              </div>
+            );
+          }}</For>
           <Show when={composer.view()?.removed}>{(name) => (
             <div class="att-removed"><span class="ell">Removed {name()}</span><span class="grow" />
               <button type="button" class="btn small ghost att-undo" disabled={composer.locked()} onClick={() => { refocus = 0; void composer.undo(); }}>Undo</button></div>

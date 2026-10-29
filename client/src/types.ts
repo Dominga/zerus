@@ -395,6 +395,8 @@ export interface ComposerView {
   attachments: AttachmentView[]; removed: string | null; attaching: boolean; sending: boolean; waiting: string | null; uncertain: boolean;
   status: string; status_error: boolean; can_send: boolean; send_label: string; available: boolean; unavailable_reason: string; block_reason: string | null;
   attachments_available: boolean; attachments_reason: string; session_status: string; session_status_error: boolean; session_blocks_input: boolean;
+  /** The open session's last read failed (Qt's m_inspectError). */
+  inspect_error: boolean;
   cache: Chip; cache_warning: string; cache_details: string; context: ContextChip; local: LocalMessage[];
   cancel_send: boolean; compacting: boolean; clear: ClearControl;
 }

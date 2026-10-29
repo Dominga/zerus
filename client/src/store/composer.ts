@@ -1,6 +1,7 @@
-import { batch, createSignal } from "solid-js";
+import { batch, createMemo, createRoot, createSignal } from "solid-js";
 import * as bridge from "../bridge";
 import { notify } from "./actions";
+import { documentVisibility, type PageVisibility } from "./visibility";
 import type { Timers } from "./terminal";
 import type { Answer, ClearControl, ColdPrompt, ComposerView, SendReply, SessionRef, StartQuestion } from "../types";
 
@@ -15,13 +16,17 @@ import type { Answer, ClearControl, ColdPrompt, ComposerView, SendReply, Session
 // delivery's end, a refused change).
 //
 // The editor is read-only (Qt's `locked`, MessageComposer.cpp:1148-1149):
-// while an attach or paste runs (one at a time, as Qt's synchronous attach);
-// during a remove or Undo until a view with a higher epoch arrives; while a
-// send or an answer is on its way and until Rust's view takes the lock over
-// (sending, waiting) or hands the text back; while the cold cache or start
-// question is open (it keeps the epoch, so closing it unlocks); while Rust
-// says the draft is not loaded, is sending, attaching or waiting; and while
-// the session status blocks input.
+// while another session's composer opens; while an attach or paste runs (one
+// at a time, as Qt's synchronous attach); during a remove or Undo until a
+// view with a higher epoch arrives; while a send or an answer is on its way
+// and until Rust's view takes the lock over (sending, waiting) or hands the
+// text back; while the cold cache or start question is open (it keeps the
+// epoch, so closing it unlocks); while Rust says the draft is not loaded, is
+// sending, attaching or waiting; and while the session status blocks input.
+//
+// Every call keeps the handle it started on. A reply that arrives after
+// another composer opened changes nothing there: its notice still shows, a
+// question it asks is answered Cancel, and the rest is dropped.
 
 export const EDIT_MS = 250;
 export const MAX_TEXT_BYTES = 64 * 1024;
@@ -113,15 +118,17 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
   const [text, setText] = createSignal("");
   /** `start` is the anchor and `end` the cursor position (Qt's anchor and position); start may follow end. */
   const [selection, setSelection] = createSignal({ start: 0, end: 0 });
-  /** An attach or paste runs. */
-  const [pending, setPending] = createSignal(false);
+  /** The composer whose attach or paste runs. */
+  const [pending, setPending] = createSignal<number | undefined>();
   /** The composer's own error (a refused paste), Qt's `showError`: it stays until a hand-back, a send or Allow retry. */
   const [error, setError] = createSignal<string | undefined>();
   const [dialog, setDialog] = createSignal<Dialog | undefined>();
   /** The epoch a remove, Undo or refused send waits to see exceeded. */
   const [handBack, setHandBack] = createSignal<number | undefined>();
-  /** A send or answer call is on its way. */
-  const [calling, setCalling] = createSignal(false);
+  /** The composer whose send or answer call is on its way. */
+  const [calling, setCalling] = createSignal<number | undefined>();
+  /** Opens under way: the editor stays read-only, so no key is typed into the composer being left. */
+  const [opening, setOpening] = createSignal(0);
   /** A send started: locked until Rust's view shows it (sending, waiting) or hands the text back. */
   const [starting, setStarting] = createSignal(false);
   /** The disabled Send's hint (Qt shows the status as a tooltip at the editor). */
@@ -139,12 +146,19 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
   let held: ComposerView | undefined;
 
   const handle = () => view()?.handle;
-  const tooLong = () => utf8.encode(text()).length > MAX_TEXT_BYTES;
+  /** Over 64 KiB of UTF-8, measured once per text: a UTF-16 unit is 1 to 3 bytes, so most texts need no encoding. */
+  const tooLong = createMemo(() => {
+    const t = text();
+    if (t.length * 3 <= MAX_TEXT_BYTES) return false;
+    if (t.length > MAX_TEXT_BYTES) return true;
+    return utf8.encode(t).length > MAX_TEXT_BYTES;
+  });
   const question = () => { const d = dialog(); return d?.kind === "cold" || d?.kind === "start"; };
   /** Qt's `operationLocked`: everything but the session status's lock. */
   const operationLocked = () => {
     const v = view();
-    return pending() || handBack() !== undefined || calling() || starting() || question()
+    const h = v?.handle;
+    return opening() > 0 || (h !== undefined && (pending() === h || calling() === h)) || handBack() !== undefined || starting() || question()
       || !v?.loaded || v.attaching || v.sending || !!v.waiting;
   };
   const locked = () => operationLocked() || !!view()?.session_blocks_input;
@@ -243,8 +257,18 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
     if (control?.enabled && !dialog()) setDialog({ kind: "clear", control: { ...control } });
   }
 
-  /** A reply of a send or an answer; `at` is the epoch it was made at, `refused` whether a refusal hands the text back. */
-  function reply(r: SendReply, at: number, refused: boolean) {
+  /**
+   * A reply of a send, an answer or a clear: `h` is the composer its call
+   * started on, `at` the epoch it was made at, `refused` whether a refusal
+   * hands the text back. Another composer open by now keeps only the notice;
+   * a question for the one left is answered Cancel.
+   */
+  function reply(r: SendReply, h: number, at: number, refused: boolean) {
+    if (h !== handle()) {
+      if (r.kind === "notice") notices(r.error ? "error" : "info", r.text, r.error);
+      else if (r.kind === "cold" || r.kind === "start") void port.answer(r.token, { kind: "cancel" }).catch(() => {});
+      return;
+    }
     const v = view();
     switch (r.kind) {
       case "busy": case "blocked":
@@ -266,8 +290,8 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
   async function exclusive(work: (h: number) => Promise<void>) {
     const h = handle();
     if (h === undefined || locked()) return;
-    setPending(true);
-    try { await flush(); await work(h); } catch { /* outside the app */ } finally { setPending(false); }
+    setPending(h);
+    try { await flush(); await work(h); } catch { /* outside the app */ } finally { if (pending() === h) setPending(undefined); }
   }
 
   /** Remove and Undo change the text in Rust: locked until it hands the text back. */
@@ -286,17 +310,23 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
     status: (): StatusLine => statusLine(view(), error(), tooLong()),
     apply, receive,
     async open(session: SessionRef | undefined) {
-      await flush();
-      expected = session ? draftKey(session) : undefined;
-      const mine = ++opens;
-      inFlight++;
-      let next: ComposerView | null = null;
-      try { next = await port.open(session); } catch { next = null; } finally { inFlight--; }
-      if (mine !== opens) return;
-      apply(next ?? undefined);
-      const later = held;
-      held = undefined;
-      if (later && inFlight === 0) receive(later);
+      setOpening((n) => n + 1);
+      try {
+        // The composer being left keeps what was typed: its edit goes first.
+        await flush();
+        expected = session ? draftKey(session) : undefined;
+        const mine = ++opens;
+        inFlight++;
+        let next: ComposerView | null = null;
+        try { next = await port.open(session); } catch { next = null; } finally { inFlight--; }
+        if (mine !== opens) return;
+        apply(next ?? undefined);
+        const later = held;
+        held = undefined;
+        if (later && inFlight === 0) receive(later);
+      } finally {
+        setOpening((n) => n - 1);
+      }
     },
     input(next: string, start: number, end: number) {
       if (locked() || !view()) return;
@@ -340,30 +370,40 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
       }
       hintTimer?.();
       setHint(undefined);
-      await flush();
-      const at = epoch;
-      const s = selection();
-      setCalling(true);
-      setError(undefined);
+      // Locked before the flush awaits, so a second Enter meanwhile sends nothing.
+      setCalling(h);
       let r: SendReply;
-      try { r = await port.send(h, rev, at, text(), s.end, s.start); } catch (e) {
-        setCalling(false);
+      let at = epoch;
+      try {
+        await flush();
+        at = epoch;
+        const s = selection();
+        setError(undefined);
+        r = await port.send(h, rev, at, text(), s.end, s.start);
+      } catch (e) {
+        if (calling() === h) setCalling(undefined);
         notices("error", typeof e === "string" ? e : e instanceof Error ? e.message : String(e), true);
         return;
       }
-      batch(() => { setCalling(false); reply(r, at, true); });
+      batch(() => { if (calling() === h) setCalling(undefined); reply(r, h, at, true); });
     },
     /** Answers the open question with its token. The question kept the epoch: closing it unlocks the editor. */
     async answer(answer: Answer) {
       const d = dialog();
-      if (!d || d.kind === "clear") return;
-      setDialog(undefined);
-      await flush();
-      const at = epoch;
-      setCalling(true);
+      const h = handle();
+      if (!d || d.kind === "clear" || h === undefined) return;
+      batch(() => { setDialog(undefined); setCalling(h); });
       let r: SendReply;
-      try { r = await port.answer(d.token, answer); } catch { setCalling(false); return; }
-      batch(() => { setCalling(false); reply(r, at, false); });
+      let at = epoch;
+      try {
+        await flush();
+        at = epoch;
+        r = await port.answer(d.token, answer);
+      } catch {
+        if (calling() === h) setCalling(undefined);
+        return;
+      }
+      batch(() => { if (calling() === h) setCalling(undefined); reply(r, h, at, false); });
     },
     /** Cancel or Escape: a question answers Cancel; the Clear dialog just closes. */
     closeDialog: dropDialog,
@@ -380,7 +420,7 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
         notices("error", typeof e === "string" ? e : String(e), true);
         return;
       }
-      reply(r, at, false);
+      reply(r, h, at, false);
     },
     async cancelSend() { const h = handle(); if (h !== undefined) await port.cancelSend(h).catch(() => {}); },
     async allowRetry() {
@@ -398,9 +438,21 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
 
 export type ComposerStore = ReturnType<typeof createComposer>;
 
-export const composer = createComposer({
+export const composer = createRoot(() => createComposer({
   open: bridge.composerOpen, edit: bridge.composerEdit, pick: bridge.composerPick, pasteImage: bridge.composerPasteImage,
   send: bridge.sendMessage, answer: bridge.sendAnswer, remove: bridge.composerRemove, undo: bridge.composerUndoRemove,
   allowRetry: bridge.composerAllowRetry, cancelSend: bridge.sendCancel, interrupted: bridge.sendInterrupted, clear: bridge.clearContext,
   refresh: bridge.composerRefresh,
-});
+}));
+
+/**
+ * Typing not yet flushed goes to Rust when the window hides or the page goes:
+ * `visibilities` report hiding (the page's and Rust's window-visibility
+ * event), `page` fires pagehide.
+ */
+export function flushWhenHidden(flush: () => void, visibilities: PageVisibility[], page?: { addEventListener(type: "pagehide", listener: () => void): void }) {
+  for (const v of visibilities) v.onChange(() => { if (v.hidden()) flush(); });
+  page?.addEventListener("pagehide", () => flush());
+}
+
+flushWhenHidden(() => { void composer.flush(); }, [documentVisibility, bridge.windowVisibility], typeof window === "undefined" ? undefined : window);

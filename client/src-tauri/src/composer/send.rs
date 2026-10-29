@@ -92,6 +92,7 @@ pub(crate) struct SessionView {
     pub(crate) session_status: String,
     pub(crate) session_status_error: bool,
     pub(crate) session_blocks_input: bool,
+    pub(crate) inspect_error: bool,
     pub(crate) cache: Chip,
     pub(crate) cache_warning: String,
     pub(crate) cache_details: String,
@@ -560,6 +561,7 @@ pub(crate) fn session_view(composers: &Composers, hub: &Hub, composer: &Composer
         session_status: status.text,
         session_status_error: status.error,
         session_blocks_input: status.blocks_input,
+        inspect_error: ctx.facts.inspect_error,
         cache: cache::chip(details, now),
         cache_warning: cache::warning(details, now),
         cache_details: cache::details(details, recorded, local),
@@ -3242,9 +3244,11 @@ pub(crate) mod tests {
         });
         let view = until(&c, |v| v.session_status_error);
         assert_eq!(view.session_status, "Could not refresh activity: timed out");
+        assert!(view.inspect_error, "the read error is in the view");
         *lock(&fake.inspected) = Some(ready());
         c.refresh(view.handle);
-        until(&c, |v| v.block_reason.is_none() && !v.session_status_error);
+        let view = until(&c, |v| v.block_reason.is_none() && !v.session_status_error);
+        assert!(!view.inspect_error);
         assert_eq!(fake.inspects.load(Ordering::SeqCst), 2);
         // Nothing is read while the stream keeps the details.
         c.observe(&state(ready()));

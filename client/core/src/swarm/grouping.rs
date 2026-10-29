@@ -28,6 +28,20 @@ pub struct GroupOut {
     pub key: String,
     pub group: String,
     pub rank: u64,
+    /// The archive read whose reply owns this placement. Live rows omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_request: Option<u64>,
+}
+
+/// One checked archive placement identity, without session content. The caller
+/// supplies its page key and the computer's machine identity, as for live rows.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ArchivedRow {
+    pub computer: ComputerId,
+    pub key: String,
+    pub machine: String,
+    pub archive_id: String,
+    pub run_id: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -86,11 +100,27 @@ pub struct GroupingOut {
 #[derive(Debug)]
 struct Slot {
     member: String,
+    /// Only live, non-archived rows remember a run's project.
+    run: Option<String>,
     title: String,
     group: String,
     rank: u64,
     /// Arrival order; a placement of many rows keeps it.
     seq: u64,
+}
+
+#[derive(Debug)]
+struct ArchiveSlot {
+    row: ArchivedRow,
+    group: String,
+    rank: u64,
+    dirty: bool,
+}
+
+#[derive(Debug)]
+struct ArchivePage {
+    request: u64,
+    rows: Vec<ArchiveSlot>,
 }
 
 type At = (ComputerId, String);
@@ -107,6 +137,9 @@ pub struct Grouping {
     default: String,
     membership: Arc<BTreeMap<String, String>>,
     rows: HashMap<At, Slot>,
+    /// Only the last produced page's identities, at most 50 per configured computer.
+    archives: BTreeMap<ComputerId, ArchivePage>,
+    archive_reset_through: u64,
     dirty: BTreeSet<At>,
     sent: Option<GroupingOut>,
     sync: SyncView,
@@ -146,6 +179,8 @@ impl Grouping {
             default: INBOX.into(),
             membership: Arc::default(),
             rows: HashMap::new(),
+            archives: BTreeMap::new(),
+            archive_reset_through: 0,
             dirty: BTreeSet::new(),
             sent: None,
             sync: SyncView::default(),
@@ -156,7 +191,8 @@ impl Grouping {
         }
     }
 
-    fn group_of(&self, member: &str) -> String {
+    /// The current project of an identity, including one whose live row left.
+    pub fn group_for(&self, member: &str) -> String {
         self.membership
             .get(member)
             .filter(|project| self.listed.contains(project.as_str()))
@@ -164,8 +200,31 @@ impl Grouping {
             .unwrap_or_else(|| self.default.clone())
     }
 
-    fn place(&mut self, at: At, member: String, title: String, seq: u64) {
-        let group = self.group_of(&member);
+    fn place(
+        &mut self,
+        at: At,
+        member: String,
+        run: Option<String>,
+        title: String,
+        seq: u64,
+    ) -> bool {
+        let group = self.group_for(&member);
+        // Qt's run_groups is distinct from the rename token map. Unchanged
+        // observations do not refresh the written age (SessionOrganization.cpp:239-243).
+        let mut run_changed = false;
+        if let Some((machine, run)) = member
+            .split_once('\n')
+            .and_then(|(machine, _)| run.as_deref().map(|run| (machine, run)))
+        {
+            let project = self
+                .membership
+                .get(&member)
+                .map(String::as_str)
+                .filter(|project| self.listed.contains(*project));
+            if self.layout.run_project(machine, run) != project {
+                run_changed = self.layout.remember_run(machine, run, project);
+            }
+        }
         let rank = self.layout.rank(&group, &member);
         let changed = self
             .rows
@@ -178,15 +237,34 @@ impl Grouping {
             at,
             Slot {
                 member,
+                run,
                 title,
                 group,
                 rank,
                 seq,
             },
         );
+        run_changed
     }
 
-    fn upsert(&mut self, computer: &ComputerId, key: &str, machine: &str, name: &str, title: &str) {
+    fn upsert(&mut self, computer: &ComputerId, key: &str, row: &crate::ViewRow) {
+        let run = row
+            .run_id
+            .as_ref()
+            .filter(|run| !run.is_empty() && row.state != "archived" && row.archive_id.is_none())
+            .cloned();
+        self.upsert_with_run(computer, key, &row.machine, &row.name, &row.title, run);
+    }
+
+    fn upsert_with_run(
+        &mut self,
+        computer: &ComputerId,
+        key: &str,
+        machine: &str,
+        name: &str,
+        title: &str,
+        run: Option<String>,
+    ) {
         let at = (computer.clone(), key.to_owned());
         let member = super::member(machine, name);
         let mut seq = None;
@@ -205,7 +283,10 @@ impl Grouping {
             self.next_seq
         });
         if self.loaded {
-            self.place(at, member, title.to_owned(), seq);
+            if self.place(at, member, run, title.to_owned(), seq) {
+                // A run write can evict another computer's oldest remembered run.
+                self.reposition_archives();
+            }
         } else {
             // Before the first catalog the row is only recorded: no placement,
             // no rank, no group. A rename above has already moved the layout's
@@ -215,6 +296,7 @@ impl Grouping {
                 at,
                 Slot {
                     member,
+                    run,
                     title: title.to_owned(),
                     group: String::new(),
                     rank: 0,
@@ -255,14 +337,15 @@ impl Grouping {
                     slot.seq,
                     at.clone(),
                     slot.member.clone(),
+                    slot.run.clone(),
                     slot.title.clone(),
                 )
             })
             .collect();
         slots.sort_unstable_by_key(|slot| slot.0);
-        for (_, at, member, title) in slots {
+        for (_, at, member, run, title) in slots {
             if let Some((machine, name)) = member.split_once('\n') {
-                self.upsert(&at.0, &at.1, machine, name, &title);
+                self.upsert_with_run(&at.0, &at.1, machine, name, &title, run);
             }
         }
     }
@@ -279,9 +362,7 @@ impl Grouping {
     /// A row change from the pump.
     pub fn observe(&mut self, change: &Change) {
         match change {
-            Change::Upsert { computer, key, row } => {
-                self.upsert(computer, key, &row.machine, &row.name, &row.title)
-            }
+            Change::Upsert { computer, key, row } => self.upsert(computer, key, row),
             Change::Remove { computer, key, .. } => {
                 let at = (computer.clone(), key.clone());
                 self.rows.remove(&at);
@@ -294,8 +375,14 @@ impl Grouping {
                 self.dirty
                     .retain(|(owner, key)| owner != computer || keep.contains(key.as_str()));
                 for (key, row) in rows {
-                    self.upsert(computer, key, &row.machine, &row.name, &row.title);
+                    self.upsert(computer, key, row);
                 }
+            }
+            Change::Computer {
+                computer,
+                status: crate::ComputerStatus::Ended,
+            } => {
+                self.archives.remove(computer);
             }
             _ => {}
         }
@@ -308,10 +395,149 @@ impl Grouping {
     }
 
     fn prune_layout(&mut self) {
+        self.prune_layout_with(&HashSet::new());
+    }
+
+    fn prune_layout_with(&mut self, page: &HashSet<String>) {
         let listed: HashSet<String> = self.rows.values().map(|slot| slot.member.clone()).collect();
+        let retained: HashSet<_> = self
+            .archives
+            .values()
+            .flat_map(|page| page.rows.iter())
+            .map(|slot| super::archive_member(&slot.row.machine, &slot.row.archive_id))
+            .collect();
         let membership = Arc::clone(&self.membership);
-        self.layout
-            .prune(|member| listed.contains(member) || membership.contains_key(member));
+        self.layout.prune(|member| {
+            listed.contains(member)
+                || membership.contains_key(member)
+                || page.contains(member)
+                || retained.contains(member)
+        });
+    }
+
+    /// Place one archive page: explicit archive membership, then the run's
+    /// last project if it still exists, then the default (Qt observe,
+    /// SessionOrganization.cpp:223-247). A page adds no live rows or stream
+    /// changes. The normal archive reader rejects oversized pages; this
+    /// boundary also caps work at [`crate::reads::ARCHIVE_PAGE_ROWS`].
+    pub fn place_archived(&mut self, rows: &[ArchivedRow]) -> Vec<GroupOut> {
+        self.place_archive_rows(rows.iter())
+    }
+
+    fn place_archive_rows<'a>(
+        &mut self,
+        rows: impl Iterator<Item = &'a ArchivedRow>,
+    ) -> Vec<GroupOut> {
+        let mut page = HashSet::new();
+        let out = rows
+            .take(crate::reads::ARCHIVE_PAGE_ROWS)
+            .map(|row| {
+                let (group, rank) = self.archive_place(row);
+                page.insert(super::archive_member(&row.machine, &row.archive_id));
+                GroupOut {
+                    computer: row.computer.clone(),
+                    key: row.key.clone(),
+                    group,
+                    rank,
+                    archive_request: None,
+                }
+            })
+            .collect();
+        if self.layout.len() > super::layout::MAX_MEMBERS.max(self.prune_floor) + 1024 {
+            self.prune_layout_with(&page);
+            self.prune_floor = self.layout.len();
+        }
+        out
+    }
+
+    fn archive_place(&mut self, row: &ArchivedRow) -> (String, u64) {
+        let member = super::archive_member(&row.machine, &row.archive_id);
+        let project = self
+            .membership
+            .get(&member)
+            .map(String::as_str)
+            .filter(|project| self.listed.contains(*project))
+            .or_else(|| {
+                self.layout
+                    .run_project(&row.machine, &row.run_id)
+                    .filter(|project| self.listed.contains(*project))
+            })
+            .unwrap_or(&self.default)
+            .to_owned();
+        let rank = self.layout.rank(&project, &member);
+        (project, rank)
+    }
+
+    /// Produce the reply's placement before retaining its identities. The caller
+    /// holds the pump lock across both: no delta for this request can exist before
+    /// this snapshot. A later edit's delta may beat IPC delivery; the UI merges it
+    /// by archive_request after applying that reply (SessionsWindowRows.cpp:266-300).
+    /// The caller checks that this computer is still configured and its source current.
+    pub fn retain_archive_page(
+        &mut self,
+        computer: &ComputerId,
+        request: u64,
+        rows: &[ArchivedRow],
+    ) -> Option<Vec<GroupOut>> {
+        if request <= self.archive_reset_through
+            || self
+                .archives
+                .get(computer)
+                .is_some_and(|page| request <= page.request)
+        {
+            return None;
+        }
+        let rows = rows.iter().filter(|row| &row.computer == computer);
+        let mut out = self.place_archive_rows(rows.clone());
+        for place in &mut out {
+            place.archive_request = Some(request);
+        }
+        let retained = rows
+            .zip(&out)
+            .map(|(row, place)| ArchiveSlot {
+                row: row.clone(),
+                group: place.group.clone(),
+                rank: place.rank,
+                dirty: false,
+            })
+            .collect();
+        self.archives.insert(
+            computer.clone(),
+            ArchivePage {
+                request,
+                rows: retained,
+            },
+        );
+        Some(out)
+    }
+
+    /// Explicit page reset, separate from hiding/cancelling in-flight reads.
+    /// The watermark also rejects a pre-reset reply that arrives late.
+    pub fn reset_archive_pages(&mut self, through: u64) {
+        self.archive_reset_through = self.archive_reset_through.max(through);
+        self.archives.retain(|_, page| page.request > through);
+    }
+
+    fn reposition_archive_computer(&mut self, computer: &ComputerId) {
+        let Some(mut page) = self.archives.remove(computer) else {
+            return;
+        };
+        for slot in &mut page.rows {
+            let (group, rank) = self.archive_place(&slot.row);
+            if slot.group != group || slot.rank != rank {
+                slot.group = group;
+                slot.rank = rank;
+                slot.dirty = true;
+            }
+        }
+        self.archives.insert(computer.clone(), page);
+    }
+
+    fn reposition_archives(&mut self) {
+        let computers: Vec<_> = self.archives.keys().cloned().collect();
+        for computer in computers {
+            self.reposition_archive_computer(&computer);
+        }
     }
 
     /// The organization the list shows; `revision` changes whenever it does.
@@ -382,7 +608,7 @@ impl Grouping {
             self.prune_layout();
             self.prune_floor = self.layout.len();
         }
-        let mut slots: Vec<(u64, At, String, String)> = self
+        let mut slots: Vec<_> = self
             .rows
             .iter()
             .map(|(at, slot)| {
@@ -390,14 +616,16 @@ impl Grouping {
                     slot.seq,
                     at.clone(),
                     slot.member.clone(),
+                    slot.run.clone(),
                     slot.title.clone(),
                 )
             })
             .collect();
         slots.sort_unstable_by_key(|slot| slot.0);
-        for (seq, at, member, title) in slots {
-            self.place(at, member, title, seq);
+        for (seq, at, member, run, title) in slots {
+            self.place(at, member, run, title, seq);
         }
+        self.reposition_archives();
     }
 
     /// Replaces the saved layout, keeping the observed rows, membership and
@@ -407,7 +635,7 @@ impl Grouping {
         self.prune_floor = 0;
         self.headers_dirty = true;
         if self.loaded {
-            let mut slots: Vec<(u64, At, String, String)> = self
+            let mut slots: Vec<_> = self
                 .rows
                 .iter()
                 .map(|(at, slot)| {
@@ -415,15 +643,34 @@ impl Grouping {
                         slot.seq,
                         at.clone(),
                         slot.member.clone(),
+                        slot.run.clone(),
                         slot.title.clone(),
                     )
                 })
                 .collect();
             slots.sort_unstable_by_key(|slot| slot.0);
-            for (seq, at, member, title) in slots {
-                self.place(at, member, title, seq);
+            for (seq, at, member, run, title) in slots {
+                self.place(at, member, run, title, seq);
             }
         }
+        self.reposition_archives();
+    }
+
+    pub fn runs_seeded(&self) -> bool {
+        self.layout.runs_seeded()
+    }
+
+    /// Merge a seed read on a worker into the current layout, retaining newer
+    /// native assignments. Reobserve live rows: implicit assignments made
+    /// while the read was pending must remove their old Qt run memory again.
+    pub fn seed_runs(&mut self, groups: &serde_json::Map<String, Value>) -> usize {
+        if self.layout.runs_seeded() {
+            return 0;
+        }
+        let imported = self.layout.seed_runs(groups);
+        let layout = std::mem::take(&mut self.layout);
+        self.replace_layout(layout);
+        imported
     }
 
     pub fn set_sync(&mut self, sync: SyncView) {
@@ -507,7 +754,7 @@ impl Grouping {
 
     /// What changed since the last take.
     pub fn take(&mut self) -> (Vec<GroupOut>, Option<GroupingOut>) {
-        let groups = std::mem::take(&mut self.dirty)
+        let mut groups: Vec<_> = std::mem::take(&mut self.dirty)
             .into_iter()
             .filter_map(|at| {
                 let slot = self.rows.get(&at)?;
@@ -516,9 +763,23 @@ impl Grouping {
                     key: at.1,
                     group: slot.group.clone(),
                     rank: slot.rank,
+                    archive_request: None,
                 })
             })
             .collect();
+        for (computer, page) in &mut self.archives {
+            for slot in &mut page.rows {
+                if std::mem::take(&mut slot.dirty) {
+                    groups.push(GroupOut {
+                        computer: computer.clone(),
+                        key: slot.row.key.clone(),
+                        group: slot.group.clone(),
+                        rank: slot.rank,
+                        archive_request: Some(page.request),
+                    });
+                }
+            }
+        }
         let headers = if std::mem::take(&mut self.headers_dirty) {
             let out = self.out();
             (self.sent.as_ref() != Some(&out)).then(|| {

@@ -44,6 +44,11 @@ pub fn member(machine: &str, name: &str) -> String {
     format!("{machine}\n{name}")
 }
 
+/// The archived session's organization identity (SessionOrganization.cpp:225).
+pub fn archive_member(machine: &str, archive_id: &str) -> String {
+    format!("{machine}\narchive\n{archive_id}")
+}
+
 /// The listed projects, in the catalog's order.
 pub fn projects(organization: &Value) -> &[Value] {
     organization

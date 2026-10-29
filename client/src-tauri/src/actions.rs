@@ -210,7 +210,7 @@ fn blocks_messages(action: &Action) -> bool {
 /// Terminations that succeeded, kept as Qt keeps `m_terminating` after the
 /// call (`SessionsWindow.cpp:1932-1934`) until the listing no longer shows
 /// that run running (`reconcileTerminations`, 3106-3115). At most this many.
-const TERMINATED: usize = 64;
+const TERMINATED: usize = crate::pump::MAX_TERMINATIONS;
 
 /// The managed state of the action commands; clones share it.
 #[derive(Clone)]
@@ -225,6 +225,8 @@ pub struct Actions {
     /// Computer, session name and the run each succeeded termination ended,
     /// oldest first.
     terminated: Arc<Mutex<VecDeque<(String, String, String)>>>,
+    /// The archive placement capture, set once before the source starts.
+    termination_pump: Arc<OnceLock<crate::pump::WeakPump>>,
     /// Hears every change of the pending marks.
     pub(crate) listener: MarksListener,
 }
@@ -239,6 +241,7 @@ impl Actions {
             writes: Arc::default(),
             hook: Arc::default(),
             terminated: Arc::default(),
+            termination_pump: Arc::default(),
             listener: MarksListener::default(),
         }
     }
@@ -248,6 +251,10 @@ impl Actions {
     /// write starts and in `writeDone`). Later calls change nothing.
     pub fn on_writes(&self, hook: WritesHook) {
         let _ = self.hook.set(hook);
+    }
+
+    pub fn set_termination_pump(&self, pump: crate::pump::Pump) {
+        let _ = self.termination_pump.set(pump.downgrade());
     }
 
     /// The running write as the send rules see it from the session
@@ -883,6 +890,16 @@ async fn dispatch_with(
     // workers with the call itself.
     let hgs = default_hgs();
     let (call_target, call_action) = (target.clone(), action.clone());
+    let termination: Option<crate::pump::Termination> = (WriteKind::of(&action)
+        == WriteKind::Terminate)
+        .then(|| {
+            state
+                .termination_pump
+                .get()?
+                .upgrade()?
+                .capture_termination(&target)
+        })
+        .flatten();
     let ran = tauri::async_runtime::spawn_blocking(move || {
         let inv = invocation(&call_target, &call_action, &request_id)?;
         let exit = runner(&hgs, &inv);
@@ -894,6 +911,17 @@ async fn dispatch_with(
         Ok((inv, exit)) => {
             let outcome = classify(&target, &action, &inv, exit);
             state.finished(&target, &action, &outcome);
+            if matches!(outcome, Outcome::Done { .. }) {
+                if let (Some(pump), Some(capture)) = (
+                    state
+                        .termination_pump
+                        .get()
+                        .and_then(crate::pump::WeakPump::upgrade),
+                    termination,
+                ) {
+                    pump.termination_succeeded(capture);
+                }
+            }
             Ok(outcome)
         }
         Err(refusal) => Ok(failed(refusal)),
@@ -1032,6 +1060,83 @@ impl ArchiveReads {
     }
 }
 
+/// A checked archive row and its Rust-owned organization projection. The
+/// original ViewRow fields stay flat in IPC; the webview receives no catalog.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct ArchiveRow {
+    #[serde(flatten)]
+    pub row: ViewRow,
+    pub group: String,
+    pub rank: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct ArchivePageOut {
+    pub rows: Vec<ArchiveRow>,
+    pub next_cursor: String,
+    pub previous_cursor: Option<String>,
+    pub total: u64,
+    pub position: Option<u64>,
+}
+
+struct ArchiveContext {
+    request: u64,
+    generation: u64,
+    eligible: Vec<uuid::Uuid>,
+}
+
+fn grouped_archive_page(
+    pump: &crate::pump::Pump,
+    computer: &ComputerId,
+    context: &ArchiveContext,
+    mut page: ArchivePage,
+) -> Result<ArchivePageOut, String> {
+    let groups = pump.place_archived(
+        computer,
+        context.request,
+        context.generation,
+        &mut page.rows,
+    )?;
+    Ok(ArchivePageOut {
+        rows: page
+            .rows
+            .into_iter()
+            .zip(groups)
+            .map(|(row, place)| ArchiveRow {
+                row,
+                group: place.group,
+                rank: place.rank,
+            })
+            .collect(),
+        next_cursor: page.next_cursor,
+        previous_cursor: page.previous_cursor,
+        total: page.total,
+        position: page.position,
+    })
+}
+
+fn finish_archive_page(
+    pump: &crate::pump::Pump,
+    computer: &ComputerId,
+    context: &ArchiveContext,
+    cancelled: &AtomicBool,
+    page: ArchivePage,
+) -> Result<ArchivePageOut, String> {
+    if cancelled.load(Ordering::Relaxed) {
+        return Err("superseded".into());
+    }
+    // Construct the reply's placement snapshot before a verified termination can
+    // edit the organization and publish a delta. That delta may arrive before
+    // this RPC reply; archive_request lets the UI merge it after the reply.
+    let reply = grouped_archive_page(pump, computer, context, page)?;
+    pump.observe_archive_terminations(
+        computer,
+        &context.eligible,
+        reply.rows.iter().map(|row| &row.row),
+    );
+    Ok(reply)
+}
+
 /// One checked page of the computer's archive (30 s, Qt's validation).
 /// `request` is the archive store's request number. A newer request for the
 /// same computer, or a cancel through this number, ends this one's `hgs` and
@@ -1041,13 +1146,14 @@ impl ArchiveReads {
 #[allow(clippy::too_many_arguments)]
 pub async fn archive_page(
     state: State<'_, ArchiveReads>,
+    app: State<'_, crate::commands::AppState>,
     computer: String,
     from: f64,
     until: f64,
     cursor: String,
     query: String,
     request: u64,
-) -> Result<ArchivePage, String> {
+) -> Result<ArchivePageOut, String> {
     if blocked() {
         return Err(REPLAY_NEEDS_HGS.to_owned());
     }
@@ -1058,8 +1164,16 @@ pub async fn archive_page(
     let hgs = default_hgs();
     let id = ComputerId::from(computer.as_str());
     let job = Arc::clone(&flag);
+    let pump = app.pump();
     let result = tauri::async_runtime::spawn_blocking(move || {
+        let context = ArchiveContext {
+            request,
+            generation: pump.archive_generation(&id),
+            eligible: pump.archive_termination_ids(&id),
+        };
         reads::archive_page_cancellable(&hgs, &id, from, until, &cursor, &query, &job)
+            .map_err(|error| error.to_string())
+            .and_then(|page| finish_archive_page(&pump, &id, &context, &job, page))
     })
     .await
     .map_err(|error| error.to_string());
@@ -1068,7 +1182,7 @@ pub async fn archive_page(
     if flag.load(Ordering::Relaxed) {
         return Err("superseded".into());
     }
-    result?.map_err(|error| error.to_string())
+    result?
 }
 
 /// The archived Activity reads in flight, one per computer, name and archive
@@ -1161,6 +1275,23 @@ fn annotate_events(events: &mut Vec<serde_json::Value>) {
 #[tauri::command]
 pub fn cancel_archive_pages(state: State<'_, ArchiveReads>, through: u64) {
     state.cancel_through(through);
+}
+
+/// Drops loaded archive placement identities on an explicit page reset (filter,
+/// project, query or Clear archive), and cancels the old reads. Hiding Archive
+/// uses cancel_archive_pages and retains the loaded identities instead.
+#[tauri::command]
+pub fn reset_archive_pages(
+    state: State<'_, ArchiveReads>,
+    app: State<'_, crate::commands::AppState>,
+    through: u64,
+) {
+    reset_archive_pages_with(&state, &app.pump(), through);
+}
+
+fn reset_archive_pages_with(state: &ArchiveReads, pump: &crate::pump::Pump, through: u64) {
+    state.cancel_through(through);
+    pump.reset_archive_pages(through);
 }
 
 /// The command that opens the session in a terminal, written for this
@@ -1547,6 +1678,97 @@ mod tests {
     }
 
     #[test]
+    fn an_uncertain_or_failed_termination_never_registers_archive_placement() {
+        use zerus_client_core::{Change, ComputerStatus, Exit};
+        let actions =
+            Actions::new(std::env::temp_dir().join("zerus-archive-termination-marks.json"));
+        let pump = crate::pump::Pump::default();
+        let computer = ComputerId::from("studio");
+        let target = review();
+        pump.push(Change::Computer {
+            computer: computer.clone(),
+            status: ComputerStatus::Live,
+        });
+        pump.push(Change::Upsert {
+            computer: computer.clone(),
+            key: "run:run-1".into(),
+            row: ViewRow {
+                name: target.name.clone(),
+                run_id: Some(target.run_id.clone()),
+                machine: "studio".into(),
+                created: 7,
+                state: "running".into(),
+                ..Default::default()
+            },
+        });
+        actions.set_termination_pump(pump.clone());
+        for (action, exit) in [
+            (Action::Terminate, Exit::TimedOut),
+            (
+                Action::Terminate,
+                Exit::Code {
+                    code: 1,
+                    stdout: Vec::new(),
+                    stderr: "synthetic refusal".into(),
+                },
+            ),
+            (
+                Action::Pause,
+                Exit::Code {
+                    code: 0,
+                    stdout: Vec::new(),
+                    stderr: String::new(),
+                },
+            ),
+        ] {
+            tauri::async_runtime::block_on(dispatch_with(
+                &actions,
+                target.clone(),
+                action,
+                uuid::Uuid::new_v4().to_string(),
+                move |_, _| exit,
+            ))
+            .unwrap();
+            assert!(pump.archive_termination_ids(&computer).is_empty());
+        }
+        let vanished = pump.clone();
+        let outcome = tauri::async_runtime::block_on(dispatch_with(
+            &actions,
+            target,
+            Action::Terminate,
+            uuid::Uuid::new_v4().to_string(),
+            move |_, _| {
+                vanished.push(Change::Remove {
+                    computer: ComputerId::from("studio"),
+                    key: "run:run-1".into(),
+                    reason: Some("archived".into()),
+                });
+                Exit::Code {
+                    code: 0,
+                    stdout: Vec::new(),
+                    stderr: String::new(),
+                }
+            },
+        ))
+        .unwrap();
+        assert!(matches!(outcome, Outcome::Done { .. }));
+        assert_eq!(
+            pump.archive_termination_ids(&computer).len(),
+            1,
+            "only the successful guarded termination is eligible"
+        );
+    }
+
+    #[test]
+    fn the_termination_hook_does_not_keep_the_catalog_or_its_desk_alive() {
+        let actions = Actions::new(std::env::temp_dir().join("zerus-archive-weak-marks.json"));
+        let pump = crate::pump::Pump::default();
+        let weak = pump.downgrade();
+        actions.set_termination_pump(pump);
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
     fn a_send_carries_the_callers_request_id_into_its_one_call() {
         use zerus_client_core::Exit;
         let actions = Actions::new(std::env::temp_dir().join("zerus-dispatch-as-test-marks.json"));
@@ -1815,6 +2037,419 @@ mod tests {
         assert!(reads.begin("other", 3).load(Ordering::Relaxed));
         reads.finish("studio", 1);
         assert!(!later.load(Ordering::Relaxed));
+    }
+
+    fn archive_context(request: u64) -> ArchiveContext {
+        ArchiveContext {
+            request,
+            generation: 0,
+            eligible: Vec::new(),
+        }
+    }
+
+    fn archive_fixture() -> ArchivePage {
+        ArchivePage {
+            rows: vec![ViewRow {
+                name: "codex/sample-project/review".into(),
+                state: "archived".into(),
+                archive_id: Some("00000000-0000-4000-8000-000000000001".into()),
+                run_id: Some("run-1".into()),
+                ..ViewRow::default()
+            }],
+            next_cursor: "older".into(),
+            previous_cursor: Some("newer".into()),
+            total: 12,
+            position: Some(3),
+        }
+    }
+
+    #[test]
+    fn archive_page_rows_carry_group_and_rank_with_the_hello_host_without_live_rows() {
+        let pump = crate::pump::Pump::default();
+        let computer = ComputerId::local();
+        let mut catalog = zerus_client_core::CatalogState::new();
+        let hello = include_str!("../../core/tests/fixtures/basic.ndjson")
+            .lines()
+            .next()
+            .unwrap();
+        for change in catalog.apply(&computer, &zerus_watch_protocol::decode(hello).unwrap()) {
+            pump.push(change);
+        }
+        let id = zerus_client_core::swarm::archive_member(
+            "workstation",
+            "00000000-0000-4000-8000-000000000001",
+        );
+        let org = serde_json::json!({"default_project":"ungrouped", "projects":[{"id":"alpha","sessions":[id]},{"id":"ungrouped","sessions":[]}]});
+        pump.present(
+            &org,
+            Arc::new(zerus_client_core::swarm::members(&org)),
+            1,
+            Default::default(),
+        );
+        let page =
+            grouped_archive_page(&pump, &computer, &archive_context(1), archive_fixture()).unwrap();
+        assert_eq!(page.rows[0].group, "alpha");
+        assert!(page.rows[0].rank > 0);
+        assert_eq!(page.rows[0].row.machine, "workstation");
+        assert!(
+            pump.row_named("", "codex/sample-project/review").is_none(),
+            "placement identities never enter the session-content mirror"
+        );
+        let json = serde_json::to_value(&page).unwrap();
+        assert_eq!(json["rows"][0]["name"], "codex/sample-project/review");
+        assert_eq!(json["rows"][0]["group"], "alpha");
+        assert_eq!(json["rows"][0]["rank"], page.rows[0].rank);
+        assert!(json["rows"][0].get("row").is_none(), "ViewRow remains flat");
+        assert_eq!(
+            (
+                page.total,
+                page.position,
+                page.next_cursor.as_str(),
+                page.previous_cursor.as_deref()
+            ),
+            (12, Some(3), "older", Some("newer"))
+        );
+        assert_eq!(
+            grouped_archive_page(&pump, &computer, &archive_context(2), archive_fixture()).unwrap(),
+            page
+        );
+    }
+
+    #[test]
+    fn archive_page_rows_use_the_peer_alias_and_refuse_unknown_local_identity() {
+        let pump = crate::pump::Pump::default();
+        pump.push(zerus_client_core::Change::Computer {
+            computer: ComputerId::local(),
+            status: zerus_client_core::ComputerStatus::Live,
+        });
+        assert_eq!(
+            grouped_archive_page(
+                &pump,
+                &ComputerId::local(),
+                &archive_context(1),
+                archive_fixture()
+            )
+            .unwrap_err(),
+            reads::ARCHIVE_IDENTITY_INVALID
+        );
+        let id = zerus_client_core::swarm::archive_member(
+            "studio",
+            "00000000-0000-4000-8000-000000000001",
+        );
+        let org = serde_json::json!({"default_project":"ungrouped", "projects":[{"id":"alpha","sessions":[id]},{"id":"ungrouped","sessions":[]}]});
+        pump.present(
+            &org,
+            Arc::new(zerus_client_core::swarm::members(&org)),
+            1,
+            Default::default(),
+        );
+        pump.push(zerus_client_core::Change::Machine {
+            computer: ComputerId::from("studio"),
+            machine: zerus_client_core::MachineMeta {
+                host: Some("remote-hostname".into()),
+                ..Default::default()
+            },
+        });
+        let page = grouped_archive_page(
+            &pump,
+            &ComputerId::from("studio"),
+            &archive_context(1),
+            archive_fixture(),
+        )
+        .unwrap();
+        assert_eq!(page.rows[0].row.machine, "studio");
+        assert_eq!(page.rows[0].group, "alpha");
+    }
+
+    #[test]
+    fn archive_page_projection_refuses_oversized_or_unidentified_rows_and_keeps_empty_pages() {
+        let pump = crate::pump::Pump::default();
+        pump.push(zerus_client_core::Change::Computer {
+            computer: ComputerId::local(),
+            status: zerus_client_core::ComputerStatus::Live,
+        });
+        let computer = ComputerId::from("studio");
+        pump.push(zerus_client_core::Change::Computer {
+            computer: computer.clone(),
+            status: zerus_client_core::ComputerStatus::Live,
+        });
+        let mut page = archive_fixture();
+        page.rows[0].archive_id = None;
+        assert_eq!(
+            grouped_archive_page(&pump, &computer, &archive_context(1), page).unwrap_err(),
+            reads::ARCHIVE_IDENTITY_INVALID
+        );
+        let mut page = archive_fixture();
+        page.rows = vec![page.rows[0].clone(); reads::ARCHIVE_PAGE_ROWS + 1];
+        assert_eq!(
+            grouped_archive_page(&pump, &computer, &archive_context(1), page).unwrap_err(),
+            reads::ARCHIVE_PAGE_INVALID
+        );
+        let mut page = archive_fixture();
+        page.rows.clear();
+        assert!(
+            grouped_archive_page(&pump, &ComputerId::local(), &archive_context(1), page)
+                .unwrap()
+                .rows
+                .is_empty()
+        );
+    }
+
+    fn archive_pump() -> crate::pump::Pump {
+        let pump = crate::pump::Pump::default();
+        pump.push(zerus_client_core::Change::Computer {
+            computer: ComputerId::local(),
+            status: zerus_client_core::ComputerStatus::Live,
+        });
+        pump.push(zerus_client_core::Change::Machine {
+            computer: ComputerId::local(),
+            machine: zerus_client_core::MachineMeta {
+                host: Some("workstation".into()),
+                ..Default::default()
+            },
+        });
+        archive_project(&pump, "alpha", 1);
+        pump.take(std::time::Duration::ZERO);
+        pump
+    }
+
+    fn archive_project(pump: &crate::pump::Pump, project: &str, revision: u64) {
+        let id = zerus_client_core::swarm::archive_member(
+            "workstation",
+            "00000000-0000-4000-8000-000000000001",
+        );
+        let org = serde_json::json!({"default_project":"ungrouped", "projects":[{"id":project,"sessions":[id]},{"id":"ungrouped","sessions":[]}]});
+        pump.present(
+            &org,
+            Arc::new(zerus_client_core::swarm::members(&org)),
+            revision,
+            Default::default(),
+        );
+    }
+
+    #[test]
+    fn an_archive_delta_can_beat_rpc_delivery_but_never_its_reply_snapshot() {
+        let pump = archive_pump();
+        let (ready, snapshot) = std::sync::mpsc::sync_channel(0);
+        let (deliver, held) = std::sync::mpsc::sync_channel(0);
+        let worker = {
+            let pump = pump.clone();
+            std::thread::spawn(move || {
+                let reply = grouped_archive_page(
+                    &pump,
+                    &ComputerId::local(),
+                    &archive_context(37),
+                    archive_fixture(),
+                )
+                .unwrap();
+                ready.send(()).unwrap();
+                held.recv().unwrap();
+                reply
+            })
+        };
+        snapshot.recv().unwrap();
+        assert!(
+            pump.take(std::time::Duration::ZERO).groups.is_empty(),
+            "no delta exists for the newly produced reply"
+        );
+        archive_project(&pump, "beta", 2);
+        let delta = pump.take(std::time::Duration::ZERO).groups;
+        assert_eq!(delta.len(), 1);
+        assert_eq!(
+            (delta[0].group.as_str(), delta[0].archive_request),
+            ("beta", Some(37))
+        );
+        deliver.send(()).unwrap();
+        let reply = worker.join().unwrap();
+        assert_eq!(
+            reply.rows[0].group, "alpha",
+            "the UI merges the held request-37 delta after this earlier snapshot"
+        );
+    }
+
+    #[test]
+    fn hiding_archive_keeps_loaded_placements_but_an_explicit_reset_clears_them() {
+        let pump = archive_pump();
+        let reads = ArchiveReads::default();
+        grouped_archive_page(
+            &pump,
+            &ComputerId::local(),
+            &archive_context(8),
+            archive_fixture(),
+        )
+        .unwrap();
+        let hidden = reads.begin("", 9);
+        reads.cancel_through(9); // The production hide/cancel path, with no reset.
+        assert!(hidden.load(Ordering::Relaxed));
+        archive_project(&pump, "beta", 2);
+        let delta = pump.take(std::time::Duration::ZERO).groups;
+        assert_eq!(delta[0].archive_request, Some(8));
+        assert_eq!(delta[0].group, "beta");
+        let pending = reads.begin("", 10);
+        reset_archive_pages_with(&reads, &pump, 10);
+        assert!(pending.load(Ordering::Relaxed));
+        archive_project(&pump, "alpha", 3);
+        assert!(pump.take(std::time::Duration::ZERO).groups.is_empty());
+        assert_eq!(
+            grouped_archive_page(
+                &pump,
+                &ComputerId::local(),
+                &archive_context(10),
+                archive_fixture()
+            )
+            .unwrap_err(),
+            "superseded"
+        );
+        grouped_archive_page(
+            &pump,
+            &ComputerId::local(),
+            &archive_context(11),
+            archive_fixture(),
+        )
+        .unwrap();
+        archive_project(&pump, "beta", 4);
+        let delta = pump.take(std::time::Duration::ZERO).groups;
+        assert_eq!(delta[0].archive_request, Some(11));
+    }
+
+    #[test]
+    fn an_ended_computer_clears_archive_placements_and_rejects_reads_from_its_old_source() {
+        let pump = archive_pump();
+        let computer = ComputerId::local();
+        grouped_archive_page(&pump, &computer, &archive_context(1), archive_fixture()).unwrap();
+        archive_project(&pump, "beta", 2);
+        pump.push(zerus_client_core::Change::Computer {
+            computer: computer.clone(),
+            status: zerus_client_core::ComputerStatus::Ended,
+        });
+        assert!(pump.take(std::time::Duration::ZERO).groups.is_empty());
+        assert_eq!(
+            grouped_archive_page(&pump, &computer, &archive_context(2), archive_fixture())
+                .unwrap_err(),
+            "superseded"
+        );
+        pump.push(zerus_client_core::Change::Computer {
+            computer: computer.clone(),
+            status: zerus_client_core::ComputerStatus::Live,
+        });
+        pump.push(zerus_client_core::Change::Machine {
+            computer: computer.clone(),
+            machine: zerus_client_core::MachineMeta {
+                host: Some("workstation".into()),
+                ..Default::default()
+            },
+        });
+        assert_eq!(
+            grouped_archive_page(&pump, &computer, &archive_context(2), archive_fixture())
+                .unwrap_err(),
+            "superseded"
+        );
+        let context = ArchiveContext {
+            request: 3,
+            generation: pump.archive_generation(&computer),
+            eligible: Vec::new(),
+        };
+        grouped_archive_page(&pump, &computer, &context, archive_fixture()).unwrap();
+        archive_project(&pump, "alpha", 3);
+        let delta = pump.take(std::time::Duration::ZERO).groups;
+        assert_eq!(delta[0].archive_request, Some(3));
+        assert_eq!(delta[0].group, "alpha");
+        assert_eq!(
+            grouped_archive_page(
+                &pump,
+                &ComputerId::from("unknown"),
+                &archive_context(4),
+                archive_fixture()
+            )
+            .unwrap_err(),
+            "superseded"
+        );
+        let peer = ComputerId::from("studio");
+        pump.push(zerus_client_core::Change::Computer {
+            computer: peer.clone(),
+            status: zerus_client_core::ComputerStatus::Live,
+        });
+        pump.push(zerus_client_core::Change::Computer {
+            computer: peer.clone(),
+            status: zerus_client_core::ComputerStatus::Ended,
+        });
+        let ended = ArchiveContext {
+            request: 4,
+            generation: pump.archive_generation(&peer),
+            eligible: Vec::new(),
+        };
+        assert_eq!(
+            grouped_archive_page(&pump, &peer, &ended, archive_fixture()).unwrap_err(),
+            "superseded"
+        );
+    }
+
+    #[test]
+    fn an_unprojectable_archive_reply_never_supplies_termination_placement() {
+        let pump = crate::pump::Pump::default();
+        let computer = ComputerId::local();
+        let row = ViewRow {
+            machine: "workstation".into(),
+            name: "codex/sample-project/review".into(),
+            run_id: Some("run-1".into()),
+            state: "running".into(),
+            ..Default::default()
+        };
+        let target = Target {
+            computer: String::new(),
+            name: row.name.clone(),
+            run_id: "run-1".into(),
+            conversation_id: String::new(),
+        };
+        pump.push(zerus_client_core::Change::Computer {
+            computer: computer.clone(),
+            status: zerus_client_core::ComputerStatus::Live,
+        });
+        pump.push(zerus_client_core::Change::Upsert {
+            computer: computer.clone(),
+            key: "run:run-1".into(),
+            row,
+        });
+        pump.termination_succeeded(pump.capture_termination(&target).unwrap());
+        pump.push(zerus_client_core::Change::Remove {
+            computer: computer.clone(),
+            key: "run:run-1".into(),
+            reason: None,
+        });
+        let context = ArchiveContext {
+            request: 1,
+            generation: 0,
+            eligible: pump.archive_termination_ids(&computer),
+        };
+        // The live row named the machine, but no hello/meta card has verified it
+        // for this archive reply. A failed projection must not supply an edit.
+        assert_eq!(
+            finish_archive_page(
+                &pump,
+                &computer,
+                &context,
+                &AtomicBool::new(false),
+                archive_fixture()
+            )
+            .unwrap_err(),
+            reads::ARCHIVE_IDENTITY_INVALID
+        );
+        assert!(pump.archive_moves().is_empty());
+    }
+
+    #[test]
+    fn a_cancelled_archive_page_never_changes_grouping_or_termination_observation() {
+        let pump = crate::pump::Pump::default();
+        let result = finish_archive_page(
+            &pump,
+            &ComputerId::from("studio"),
+            &archive_context(1),
+            &AtomicBool::new(true),
+            archive_fixture(),
+        );
+        assert_eq!(result.unwrap_err(), "superseded");
+        assert!(pump.take_layout().is_none());
+        assert_eq!(pump.termination_count(), 0);
     }
 
     #[test]

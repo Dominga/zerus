@@ -316,6 +316,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(actions::ActivityReads::default());
                 app.manage(actions::Attention::new(dir.join(actions::attention_file(replay))));
                 let pump = app.state::<commands::AppState>().pump();
+                app.state::<actions::Actions>().set_termination_pump(pump.clone());
                 let allowed = actions::actions_allowed(
                     std::env::var("ZERUS_CLIENT_REPLAY").ok().as_deref(),
                     std::env::var("ZERUS_CLIENT_HGS").ok().as_deref(),
@@ -336,6 +337,9 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     draft_path,
                     replay,
                 );
+                organization.seed_runs(organization::run_seed_source(
+                    &app.state::<identity::Identity>().bundle_id, replay,
+                ));
                 // Before any start of the source (the menu bar's below, or the webview's).
                 app.state::<commands::AppState>().set_organization(organization.clone());
                 let screens = screens::Screens::tauri(app.handle().clone(), pump.clone());
@@ -904,6 +908,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         actions::archive_page,
         actions::archived_activity,
         actions::cancel_archive_pages,
+        actions::reset_archive_pages,
         clipboard::copy_text,
         clipboard::copy_verbatim,
         organization::move_to_project,

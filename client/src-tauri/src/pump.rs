@@ -8,17 +8,20 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::mpsc::Receiver;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
 
 use serde_json::Value;
 use zerus_client_core::swarm::edit::Intent;
-use zerus_client_core::swarm::grouping::{Grouping, SyncView};
+use zerus_client_core::swarm::grouping::{ArchivedRow, GroupOut, Grouping, SyncView};
 use zerus_client_core::swarm::layout::Layout;
 use zerus_client_core::views::FleetEntry;
 use zerus_client_core::{
     Batch, Change, Coalescer, ComputerId, ComputerStatus, MachineMeta, ViewRow,
 };
+
+mod terminations;
+pub(crate) use terminations::{Termination, MAX_TERMINATIONS};
 
 /// The longest `next_batch` waits for a change before it returns an empty batch.
 pub const PARK: Duration = Duration::from_millis(250);
@@ -34,6 +37,7 @@ struct Inner {
     mirror: Mirror,
     grouping: Grouping,
     tap: Option<Tap>,
+    terminations: terminations::Terminations,
 }
 
 /// Shared by the drain thread and the commands.
@@ -45,7 +49,32 @@ pub struct Pump(
     Arc<std::sync::atomic::AtomicUsize>,
 );
 
+/// Action callbacks must not keep the catalog (and its tap/desk) alive.
+#[derive(Clone)]
+pub(crate) struct WeakPump(
+    Weak<(Mutex<Inner>, Condvar)>,
+    #[cfg(test)] Weak<std::sync::atomic::AtomicUsize>,
+);
+
+impl WeakPump {
+    pub(crate) fn upgrade(&self) -> Option<Pump> {
+        Some(Pump(
+            self.0.upgrade()?,
+            #[cfg(test)]
+            self.1.upgrade()?,
+        ))
+    }
+}
+
 impl Pump {
+    pub(crate) fn downgrade(&self) -> WeakPump {
+        WeakPump(
+            Arc::downgrade(&self.0),
+            #[cfg(test)]
+            Arc::downgrade(&self.1),
+        )
+    }
+
     fn lock(&self) -> MutexGuard<'_, Inner> {
         self.0 .0.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -190,6 +219,103 @@ impl Pump {
         self.wake(inner);
     }
 
+    pub fn runs_seeded(&self) -> bool {
+        self.lock().grouping.runs_seeded()
+    }
+
+    /// Qt was read and parsed on the seed worker; merge only its bounded
+    /// run memory, without replacing layout changes made during that read.
+    pub fn seed_runs(&self, groups: &serde_json::Map<String, Value>) {
+        let mut inner = self.lock();
+        inner.grouping.seed_runs(groups);
+        self.wake(inner);
+    }
+
+    /// One checked archive page, resolved against one organization snapshot.
+    /// The local host comes from hello/meta even when its live list is empty;
+    /// a peer always uses its configured alias (as live catalog rows do).
+    pub fn place_archived(
+        &self,
+        computer: &ComputerId,
+        request: u64,
+        generation: u64,
+        rows: &mut [ViewRow],
+    ) -> Result<Vec<GroupOut>, &'static str> {
+        if rows.len() > zerus_client_core::reads::ARCHIVE_PAGE_ROWS {
+            return Err(zerus_client_core::reads::ARCHIVE_PAGE_INVALID);
+        }
+        let mut inner = self.lock();
+        if !inner
+            .mirror
+            .computers
+            .get(&computer.0)
+            .is_some_and(|source| {
+                source.status != Some(ComputerStatus::Ended)
+                    && source.archive_generation == generation
+            })
+        {
+            return Err("superseded");
+        }
+        let machine = computer
+            .alias()
+            .map(str::to_owned)
+            .or_else(|| {
+                inner
+                    .mirror
+                    .computers
+                    .get(&computer.0)?
+                    .machine
+                    .as_ref()?
+                    .host
+                    .clone()
+            })
+            .filter(|machine| !machine.is_empty());
+        if !rows.is_empty() && machine.is_none() {
+            return Err(zerus_client_core::reads::ARCHIVE_IDENTITY_INVALID);
+        }
+        let machine = machine.unwrap_or_default();
+        let identities: Vec<_> = rows
+            .iter_mut()
+            .map(|row| {
+                let id = row
+                    .archive_id
+                    .as_deref()
+                    .filter(|id| !id.is_empty())
+                    .ok_or(zerus_client_core::reads::ARCHIVE_IDENTITY_INVALID)?;
+                row.machine.clone_from(&machine);
+                Ok(ArchivedRow {
+                    computer: computer.clone(),
+                    key: format!("archive:{id}"),
+                    machine: machine.clone(),
+                    archive_id: id.to_owned(),
+                    run_id: row.run_id.clone().unwrap_or_default(),
+                })
+            })
+            .collect::<Result<_, &'static str>>()?;
+        let out = inner
+            .grouping
+            .retain_archive_page(computer, request, &identities)
+            .ok_or("superseded")?;
+        self.wake(inner);
+        Ok(out)
+    }
+
+    /// Pin the source before archive I/O; an ended/restarted source invalidates it.
+    pub fn archive_generation(&self, computer: &ComputerId) -> u64 {
+        self.lock()
+            .mirror
+            .computers
+            .get(&computer.0)
+            .map_or(0, |rows| rows.archive_generation)
+    }
+
+    /// Reset loaded placement identities without conflating it with hiding Archive.
+    pub fn reset_archive_pages(&self, through: u64) {
+        let mut inner = self.lock();
+        inner.grouping.reset_archive_pages(through);
+        self.wake(inner);
+    }
+
     /// A computer's machine card, once its listing named one.
     pub fn machine(&self, computer: &ComputerId) -> Option<MachineMeta> {
         self.lock()
@@ -299,6 +425,7 @@ struct Mirror {
 
 #[derive(Default)]
 struct Rows {
+    archive_generation: u64,
     status: Option<ComputerStatus>,
     /// The latest card data; an `ended` status drops it.
     machine: Option<MachineMeta>,
@@ -341,6 +468,7 @@ impl Mirror {
                 let entry = self.computers.entry(computer.0.clone()).or_default();
                 entry.status = Some(*status);
                 if *status == ComputerStatus::Ended {
+                    entry.archive_generation = entry.archive_generation.saturating_add(1);
                     entry.machine = None;
                 }
             }

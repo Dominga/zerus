@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createMemo, createSignal, on, onCleanup } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import { Icon } from "../lib/icons";
 import { selected, toast, contentScale, subagentOpen, setSubagentOpen, setMenu, type MenuEntry } from "../../store/ui";
@@ -366,6 +366,33 @@ const OLDER_EDGE = 120;
 /** Within this distance of the bottom, new events keep the view at the bottom. */
 const STICK_EDGE = 48;
 
+// The jump to the latest activity (ActivityView.cpp 1607-1636): whether the
+// view follows the newest item, how many events arrived since it stopped,
+// and the jump back. The composer toolbar shows the jump while the view does
+// not follow (Qt's useCompactJumpButton in its Latest slot).
+const [following, setFollowing] = createSignal(true);
+const [unseen, setUnseen] = createSignal(0);
+/** The mounted transcript's scroller (one Activity view shows at a time). */
+let liveScroller: HTMLDivElement | undefined;
+export { following, unseen };
+
+/**
+ * Puts the focus in the transcript (Qt's browser), e.g. before a focused chip
+ * hides; false when no transcript is shown to take it.
+ */
+export function focusTranscript(): boolean {
+  if (!liveScroller?.isConnected) return false;
+  liveScroller.focus({ preventScroll: true });
+  return true;
+}
+
+/** Scrolls to the newest item and follows it again. */
+export function jumpToLatest() {
+  setFollowing(true);
+  setUnseen(0);
+  liveScroller?.scrollTo({ top: liveScroller.scrollHeight, behavior: "instant" });
+}
+
 /** The transcript items of a source. */
 export const transcriptOf = (source: ActivitySource) => buildTranscript(source.events(), source.summary());
 
@@ -406,24 +433,39 @@ export function ActivityView(props: { source?: ActivitySource }) {
   createEffect(() => setView("items", reconcile(built(), { key: "id" })));
 
   // Stay at the bottom while it is in view; keep the reading position when an older page lands above.
-  let atBottom = true;
   let anchor: { height: number; top: number } | undefined;
+  /** The newest event's seq the view has seen, for the count of new ones. */
+  let newest: number | undefined;
+  onMount(() => { liveScroller = scroller; });
+  onCleanup(() => { if (liveScroller === scroller) liveScroller = undefined; });
   const onScroll = () => {
-    atBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < STICK_EDGE;
+    const atBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < STICK_EDGE;
+    if (atBottom !== following()) setFollowing(atBottom);
+    if (atBottom && unseen()) setUnseen(0);
     if (scroller.scrollTop < OLDER_EDGE && readsOlder(source())) {
       anchor = { height: scroller.scrollHeight, top: scroller.scrollTop };
       source().loadOlder();
     }
   };
-  createEffect(on(() => source().target()?.id, () => { atBottom = true; anchor = undefined; }));
+  createEffect(on(() => source().target()?.id, () => { setFollowing(true); setUnseen(0); anchor = undefined; newest = undefined; }));
+  // Events after the newest one seen count as new while the view does not follow (Qt's m_unseen).
+  createEffect(on(() => source().events(), (events) => {
+    const last = events.at(-1)?.seq;
+    if (newest !== undefined && last !== undefined && last > newest && !following()) {
+      let added = 0;
+      for (let i = events.length - 1; i >= 0 && (events[i].seq ?? -Infinity) > newest; i--) added++;
+      setUnseen((n) => n + added);
+    }
+    if (last !== undefined) newest = last;
+  }));
   createEffect(on(() => view.items.length, () => {
     queueMicrotask(() => {
       if (!scroller) return;
-      if (anchor && !atBottom) {
+      if (anchor && !following()) {
         const grown = scroller.scrollHeight - anchor.height;
         if (grown > 0) scroller.scrollTo({ top: anchor.top + grown, behavior: "instant" });
         anchor = undefined;
-      } else if (atBottom) scroller.scrollTo({ top: scroller.scrollHeight, behavior: "instant" });
+      } else if (following()) scroller.scrollTo({ top: scroller.scrollHeight, behavior: "instant" });
     });
   }));
 
@@ -432,7 +474,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
   const states = createMemo(() => paneStates(source(), s()));
   return (
     <div class="activity">
-      <div class="act-scroll" ref={scroller} onContextMenu={activityMenu} onScroll={onScroll}>
+      <div class="act-scroll" ref={scroller} tabindex="-1" onContextMenu={activityMenu} onScroll={onScroll}>
         <div class="act-col">
           <Show when={!fullWidth()}><ColumnEdge /><ColumnEdge right /></Show>
           <Show when={subagentOpen()}>

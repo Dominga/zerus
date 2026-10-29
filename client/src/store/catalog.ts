@@ -194,8 +194,12 @@ export function createCatalog(given?: RowMarks, onMachines?: (b: Batch) => void)
   // different batches).
   const replaced = new Map<string, { id: string; at: number }>();
   const replacedListeners = new Set<(oldId: string, newId: string) => void>();
+  /** The draft keys of the nonempty drafts (Rust's `draft_keys`): a row's `draft` mark. */
+  let drafts = new Set<string>();
+  const drafted = (row: Pick<Session, "computer" | "name">) => drafts.has(`${row.computer}\n${row.name}`);
 
   const put = (id: string, next: Session, fresh: string[]) => {
+    next.draft = drafted(next);
     if (catalog.rows[id]) setCatalog("rows", id, reconcile(next));
     else {
       setCatalog("rows", id, next);
@@ -259,11 +263,26 @@ export function createCatalog(given?: RowMarks, onMachines?: (b: Batch) => void)
     return () => replacedListeners.delete(listener);
   }
 
-  return { catalog, applyBatch, onReplaced };
+  /**
+   * The sessions with a nonempty draft (Qt's SessionDelegate draft status):
+   * Rust's draft keys, `computer + "\n" + name` for a live session. Rows that
+   * arrive later take their mark from the same set.
+   */
+  function setDraftKeys(keys: readonly string[]) {
+    drafts = new Set(keys);
+    batch(() => {
+      for (const id of catalog.order) {
+        const row = catalog.rows[id];
+        if (row && row.draft !== drafted(row)) setCatalog("rows", id, "draft", drafted(row));
+      }
+    });
+  }
+
+  return { catalog, applyBatch, onReplaced, setDraftKeys };
 }
 
 /** The app's catalog. Tests build their own with `createCatalog`. */
-export const { catalog, applyBatch, onReplaced } = createCatalog(appMarks, applyMachines);
+export const { catalog, applyBatch, onReplaced, setDraftKeys } = createCatalog(appMarks, applyMachines);
 
 /** Rows in display order. */
 export const orderedRows = () => catalog.order.map((id) => catalog.rows[id]).filter(Boolean);

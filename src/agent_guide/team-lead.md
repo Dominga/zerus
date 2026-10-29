@@ -1,39 +1,32 @@
-Lead a running team: phases, checks and finish (hgs guide team-lead)
+Lead a team: phases, pipelines and members (hgs guide team-lead)
 
-The approved plan is phase 1; other work is a new phase:
-  {"request_id":"UUID","team":"ID","phase_title":"QA fixes","barrier":true,
-   "tasks":[{"id":18,"title":"Fix the crash","assignee":"api","pinned":true,
-     "deps":[{"task":12}]}]} | hgs team extend --json
-- ids continue after the highest used; 50 tasks/phase, 500/team. barrier: no
-  task starts before every earlier phase is done. pinned keeps its assignee.
-- "review": a draft waits for the owner (approve-phase, discard-phase);
-  "auto" starts at once if no draft is ahead. Until then extend "phase":N,
-  edit-draft {phase, title?, tasks_update?, tasks_remove?} or move-phase
-  {phase, to, position}. Sent back: edit it, then rework-phase
-  {phase, note?} returns it as a draft.
-- Running phase: add-to-phase {phase, tasks, owner_word} gives a warning and
-  pending; show it, then {phase, confirm: pending, owner_word} (later yes).
-- Read validation.health. A check task {"kind":"check","check":
-  {"command":"cargo test"}} runs in the member's folder; exit decides.
+The plan is phase 1; new work is a phase (extend: phase_title, tasks).
+barrier holds its tasks behind earlier phases; pinned keeps its member. A
+"review" draft waits for you, "auto" starts once none is ahead: extend
+"phase":N, edit-draft, move-phase, rework-phase. A running phase takes work on
+your word: add-to-phase {phase, tasks, owner_word}, then confirm. A check's
+exit decides.
+
+Pipelines (U36): per task "pipeline":"code" (review, test), "docs" (review),
+"check" (none) or "none", else the role's or template's default. A stage
+member's verdict (hgs team report --json) passes it on or returns it with
+findings; after the rounds (3) you decide. Override with skip-stage or
+send-back; a test holds the folder for the next task.
+
+Customization (U45-U52): hgs guide team-custom.
 
 Members:
-- Routine commands: hgs guide team-run; record a shape once: hgs guide team-safe.
-- A question (hgs team ask) waits for your reply; it is not a report:
-    {"request_id":"UUID","team":"ID","question":"q3","text":"..."} |
-    hgs team reply --json
-- reject with "hold":true; release gives a held task out. A captured report holds
-  its member: decide it. Roster: owner_word or propose.
-- Budgets: hgs team expect {"label":"install","minutes":15}; red says so once.
-- Rate a permission by its command: allow what the task needs in the member's
-  folder; ask the owner for anything outside or destructive; deny a wrong one.
+- Routine: hgs guide team-run; shapes: hgs guide team-safe. A question is not a
+  report: answer it with hgs team reply; reject with "hold":true, release gives
+  a held task out; a captured report holds its member: decide it; a report may
+  be replaced; roster: owner_word or propose.
+- Budgets: hgs team expect {"label":"x","minutes":15}; red says once.
+- A permission: allow what the task needs in the member's folder; ask the owner
+  for anything outside or destructive.
 - Approve a plan or phase only on the owner's sentence in your session (<30
-  min): {"owner_word":{"text":"plan approved"}} with approve or approve-phase;
-  approval auto starts the plan alone.
-- Sub-lead: hgs team sub-lead {"member":"qalead","sub":true} makes one; hgs
-  team reports-to {"member":"qa","parent":"qalead"} sets who reviews; it
-  decides its reports.
-- Cancel empty tasks first. When all tasks are decided, extend or finish:
-  {"request_id":"UUID","team":"ID","summary":"What was built and checked"} |
-    hgs team finish --json
-- The owner may finish too; the owner's stop is final.
+  min): {"owner_word":{"text":"plan approved"}} with approve/approve-phase.
+- Sub-lead: hgs team sub-lead {"member":"qalead","sub":true}; reports-to
+  {member, parent} sets who it reviews.
+- Cancel empty tasks first; when all are decided, extend or finish: hgs team
+  finish --json. The owner may finish too; the owner's stop is final.
 Sub-teams: hgs guide team-tree.

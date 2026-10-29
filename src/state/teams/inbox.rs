@@ -231,12 +231,21 @@ fn all_items(team: &Team) -> Vec<Item> {
                         },
                         command: decide_command(team, task, true),
                         // A7: a captured reply may be only an acknowledgement;
-                        // its member waits for this decision.
-                        detail: if report.captured && attempt.member != team.lead {
-                            captured_hold_note(team, &attempt.member)
-                        } else {
-                            String::new()
-                        },
+                        // its member waits for this decision. U36: after the
+                        // round limit the lead reads every round's findings
+                        // with the report.
+                        detail: [
+                            if report.captured && attempt.member != team.lead {
+                                captured_hold_note(team, &attempt.member)
+                            } else {
+                                String::new()
+                            },
+                            super::pipeline::rounds_text(task),
+                        ]
+                        .into_iter()
+                        .filter(|part| !part.is_empty())
+                        .collect::<Vec<_>>()
+                        .join("\n"),
                     });
                 }
             }
@@ -506,6 +515,17 @@ pub(crate) fn waits(team: &Team, task: &Task, ready: bool) -> Option<Value> {
         return Some(json!({
             "for":"lead","on":[team.role_of(&team.lead)],"unblock":format!("accept #{}", task.id)
         }));
+    }
+    // U36: a stage waits for its member (or for one with its role).
+    if let Some(run) = task.pipeline_run.as_ref().filter(|_| task.status.in_stage()) {
+        let open = run.open_run();
+        let who = match open {
+            Some(stage) if !stage.member.is_empty() => team.role_of(&stage.member),
+            Some(stage) => run.stages.get(stage.stage).map(|spec| spec.role.clone()).unwrap_or_default(),
+            None => String::new(),
+        };
+        let kind = open.map(|stage| stage.kind.clone()).unwrap_or_default();
+        return Some(json!({"for":"stage","on":[who],"unblock":format!("the {kind} of #{} by {who}", task.id)}));
     }
     if let Some(attempt) = task.open_attempt() {
         let role = team.role_of(&attempt.member);

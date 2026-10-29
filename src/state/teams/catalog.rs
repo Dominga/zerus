@@ -77,6 +77,10 @@ pub(crate) struct Role {
     pub prompt_off: Vec<String>,
     #[serde(default)]
     pub notes: BTreeMap<String, String>,
+    /// U36: the pipeline this role's tasks use unless the plan names one; a
+    /// docs role uses Docs. Empty falls back to the template's.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub pipeline: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -139,7 +143,50 @@ pub(crate) struct Template {
     /// U25: same, owner or lead (new phases).
     #[serde(default)]
     pub phases: String,
+    /// U36: the pipeline a team from this template gives its tasks by default.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub pipeline: String,
 }
+
+/// U36: one stage of a pipeline preset: what it checks and who does it, a
+/// role (its first free member) or a pinned member.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct Stage {
+    /// review or test.
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub role: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub member: String,
+}
+
+/// U36: a named pipeline preset ("Code: review, test, lead"): its stages after
+/// the implementer's report, the review rounds before the lead decides, the
+/// folder rule of a test stage and who gives the final acceptance.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct Pipeline {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub stages: Vec<Stage>,
+    /// Returned rounds before the task goes to the lead; 0 reads as 3.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub max_rounds: u32,
+    /// hold (the test holds the task's folder) or checkout (a detached
+    /// checkout of the attempt's commits); empty reads as hold.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub folder: String,
+    /// lead, sub_lead or auto; empty reads as lead.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub accept: String,
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
+/// U36: the rounds a preset allows when it names none.
+pub(crate) const DEFAULT_ROUNDS: u32 = 3;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Rule {
@@ -168,6 +215,9 @@ pub(crate) struct Catalog {
     /// U28: the lead's planning rules, versioned with the catalog.
     #[serde(default = "default_planning_rules")]
     pub planning_rules: String,
+    /// U36: the pipeline presets; an old catalog has none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pipelines: Vec<Pipeline>,
 }
 
 pub(crate) fn default_planning_rules() -> String {
@@ -232,7 +282,7 @@ pub(crate) struct Proposal {
     /// Given by hgs when the proposal is made.
     #[serde(default)]
     pub id: String,
-    /// role, template or rule.
+    /// role, template, rule, pipeline or planning_rules.
     pub kind: String,
     /// add, change or remove.
     pub action: String,
@@ -284,8 +334,8 @@ pub(crate) fn builtin() -> Catalog {
         role("architect", "Architect", "#8e9bff", "claude", "", "read_only", &format!("You are the Architect: design interfaces and boundaries; change code only when a task asks. {finish}")),
         role("backend", "Backend", "#6fa8ff", "codex", "", "worktree", &format!("You are the Backend engineer of this team. Work only inside your folder. Keep APIs backward compatible unless the task says otherwise. {finish}")),
         role("frontend", "Frontend", "#f08bb4", "codex", "", "worktree", &format!("You are the Frontend engineer of this team. Work only inside your folder. {finish}")),
-        role("tester", "Tester", "#56c8e0", "claude", "", "worktree", &format!("You are the Tester of this team. Write and run tests; report what passed and what failed. {finish}")),
-        role("reviewer", "Reviewer", "#d9b38c", "claude", "", "read_only", &format!("You are the Reviewer: read the changes, report findings by severity, change nothing. {finish}")),
+        role("tester", "Tester", "#56c8e0", "claude", "", "worktree", &format!("You are the Tester of this team: write and run tests and report what passed and what failed. In a task's test stage, run only the suites of the files its change touched, take the criteria's shots, edit none of the task's files, and answer with a verdict (pass, or return with the command and its failure). {finish}")),
+        role("reviewer", "Reviewer", "#d9b38c", "claude", "", "read_only", &format!("You are the Reviewer: read a change against the task's criteria and report findings by severity; change nothing. In a task's review stage, read the attempt's change in the task's folder, edit none of its files, and answer with a verdict: pass, or return with findings that name the file and the line. {finish}")),
         role("security", "Security", "#e48de0", "claude", "", "read_only", &format!("You are the Security reviewer: look for secrets, injection, authorization and data exposure. {finish}")),
         role("integrator", "Integrator", "#a3b1c6", "codex", "", "shared", &format!("You are the Integrator: merge the members' branches, resolve conflicts, run the full checks. {finish}")),
         role("researcher", "Researcher", "#b9d36b", "claude", "", "read_only", &format!("You are the Researcher: find facts and options with sources; change no code. {finish}")),
@@ -322,7 +372,26 @@ pub(crate) fn builtin() -> Catalog {
         },
     ];
     let routing = vec![Rule { id: "bug".into(), when: "bug fix".into(), template: "bugfix".into(), approval: "review".into(), use_: String::new() }];
-    Catalog { version: 1, roles, templates, routing, planning_rules: default_planning_rules() }
+    Catalog { version: 1, roles, templates, routing, planning_rules: default_planning_rules(), pipelines: builtin_pipelines() }
+}
+
+/// U36: the built-in presets. No template names one yet, so a team keeps
+/// today's flow until the owner picks a default.
+pub(crate) fn builtin_pipelines() -> Vec<Pipeline> {
+    let stage = |kind: &str, role: &str| Stage { kind: kind.into(), role: role.into(), member: String::new() };
+    let preset = |id: &str, name: &str, stages: Vec<Stage>, accept: &str| Pipeline {
+        id: id.into(),
+        name: name.into(),
+        stages,
+        max_rounds: DEFAULT_ROUNDS,
+        folder: "hold".into(),
+        accept: accept.into(),
+    };
+    vec![
+        preset("code", "Code: review, test, lead", vec![stage("review", "reviewer"), stage("test", "tester")], "lead"),
+        preset("docs", "Docs: review, auto", vec![stage("review", "reviewer")], "auto"),
+        preset("check", "Check: lead", Vec::new(), "lead"),
+    ]
 }
 
 pub(crate) fn load() -> anyhow::Result<Catalog> {
@@ -440,6 +509,11 @@ fn clean_id(id: &str) -> anyhow::Result<String> {
     Ok(id.to_owned())
 }
 
+/// A team member id as `hgs team` takes it: letters, digits, - and _.
+fn member_id_shape(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 40 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 /// Checks a whole catalog: unique ids, known roles and templates.
 pub(crate) fn validate(catalog: &Catalog) -> anyhow::Result<()> {
     let mut roles = BTreeMap::new();
@@ -483,6 +557,33 @@ pub(crate) fn validate(catalog: &Catalog) -> anyhow::Result<()> {
         for task in &template.tasks {
             ensure!(task.phase >= 1, "Template {}: a task phase starts at 1", template.id);
         }
+    }
+    // U36: presets with known stage kinds and roles; "none" is reserved for
+    // a task without a pipeline.
+    ensure!(catalog.pipelines.len() <= 20, "The catalog has at most 20 pipelines");
+    let mut pipelines = BTreeMap::new();
+    for pipeline in &catalog.pipelines {
+        clean_id(&pipeline.id)?;
+        ensure!(pipeline.id != "none", "Pipeline id none is reserved for no pipeline");
+        ensure!(!pipeline.name.trim().is_empty() && pipeline.name.chars().count() <= 80, "Pipeline {} needs a name of at most 80 characters", pipeline.id);
+        ensure!(pipelines.insert(pipeline.id.clone(), ()).is_none(), "Pipeline {} is listed twice", pipeline.id);
+        ensure!(pipeline.stages.len() <= 8, "Pipeline {} has at most 8 stages", pipeline.id);
+        ensure!(pipeline.max_rounds <= 10, "Pipeline {}: at most 10 rounds", pipeline.id);
+        ensure!(matches!(pipeline.folder.as_str(), "" | "hold" | "checkout"), "Pipeline {}: folder is hold or checkout", pipeline.id);
+        ensure!(matches!(pipeline.accept.as_str(), "" | "lead" | "sub_lead" | "auto"), "Pipeline {}: accept is lead, sub_lead or auto", pipeline.id);
+        for (i, stage) in pipeline.stages.iter().enumerate() {
+            ensure!(matches!(stage.kind.as_str(), "review" | "test"), "Pipeline {} stage {}: kind is review or test", pipeline.id, i + 1);
+            ensure!(stage.role.is_empty() != stage.member.is_empty(), "Pipeline {} stage {}: name a role or a member", pipeline.id, i + 1);
+            ensure!(stage.role.is_empty() || roles.contains_key(&stage.role), "Pipeline {} stage {} names unknown role {}", pipeline.id, i + 1, stage.role);
+            ensure!(stage.member.is_empty() || member_id_shape(&stage.member), "Pipeline {} stage {}: invalid member {}", pipeline.id, i + 1, stage.member);
+        }
+    }
+    let known_pipeline = |id: &str| id.is_empty() || id == "none" || pipelines.contains_key(id);
+    for role in &catalog.roles {
+        ensure!(known_pipeline(&role.pipeline), "Role {} names unknown pipeline {}", role.id, role.pipeline);
+    }
+    for template in &catalog.templates {
+        ensure!(known_pipeline(&template.pipeline), "Template {} names unknown pipeline {}", template.id, template.pipeline);
     }
     for rule in &catalog.routing {
         clean_id(&rule.id)?;
@@ -551,6 +652,11 @@ fn apply_one(catalog: &mut Catalog, proposal: &Proposal) -> anyhow::Result<()> {
         "rule" => {
             let value: Option<Rule> = if remove { None } else { Some(serde_json::from_value(proposal.value.clone()).context("Invalid rule")?) };
             upsert(&mut catalog.routing, &proposal.target, value, |r| r.id.as_str());
+        }
+        // U36: the Pipelines tab's presets, kept or rejected like the others.
+        "pipeline" => {
+            let value: Option<Pipeline> = if remove { None } else { Some(serde_json::from_value(proposal.value.clone()).context("Invalid pipeline")?) };
+            upsert(&mut catalog.pipelines, &proposal.target, value, |p| p.id.as_str());
         }
         // U28: the planning rules are designer-editable text like roles.
         "planning_rules" => {

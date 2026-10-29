@@ -211,6 +211,10 @@ pub(crate) enum Step {
     HandOut { task: u32, member: String },
     /// U31: an idle member takes an independent task of the next draft phase.
     WorkAhead { task: u32, member: String },
+    /// U49: a draining member owes nothing: pause its session, then remove it.
+    /// `pause` is false when there is no live session to keep (an agent with no
+    /// separate process, or a session already stopped).
+    Drain { member: String, pause: bool },
     /// The member's first turn after the hand-off began (A1).
     Started { task: u32 },
     /// The hand-out did not start in `start_timeout_seconds` (A1).
@@ -468,6 +472,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         }
         // H6: a swapped member's new session starts even before work is ready.
         if member.launch_after_swap
+            && !member.draining
             && member.session.is_none()
             && member.launch_id.is_empty()
             && member.error.is_empty()
@@ -824,7 +829,8 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         let Some(found) = seen.iter().find(|seen| seen.host == session.host && seen.name == session.name) else { continue };
         let has_work = busy.contains(member.id.as_str())
             || ready_ids.iter().any(|id| team.task(*id).is_some_and(|task| task.assignee == member.id));
-        if !staging_open || owner_wait || has_work || !(found.free && found.live) {
+        // U49: a draining member is idle on purpose; its episode ends quietly.
+        if !staging_open || owner_wait || has_work || member.draining || !(found.free && found.live) {
             if member.starved_since.is_some() {
                 steps.push(Step::StarvedEnded { member: member.id.clone() });
             }
@@ -899,6 +905,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     };
     let available = |member: &Member, busy: &BTreeSet<&str>| {
         !matches!(member.state, MemberState::Removed | MemberState::Paused)
+            && !member.draining
             && !busy.contains(member.id.as_str())
             && member.session.is_some()
             && !member.needs_settings()
@@ -944,7 +951,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                 }
             }
         }
-        if matches!(member.state, MemberState::Removed | MemberState::Paused) || busy.contains(member.id.as_str()) {
+        if matches!(member.state, MemberState::Removed | MemberState::Paused) || member.draining || busy.contains(member.id.as_str()) {
             continue;
         }
         if member.session.is_none() {
@@ -995,7 +1002,56 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             }
         }
     }
+    // U49: a draining member finishes its open attempt and stage run, takes
+    // nothing new, then its session is paused and the member leaves the roster.
+    // Its queued work went to a peer above; while it still owes anything the
+    // drain waits.
+    for member in &team.members {
+        if !member.draining || member.id == team.lead || member.state == MemberState::Removed {
+            continue;
+        }
+        if !drained(team, &member.id) {
+            continue;
+        }
+        // A computer that did not answer leaves the drain to the next tick, and
+        // a turn still in flight is its last work: pause only an idle session.
+        if listed.is_some_and(|hosts| member.session.as_ref().is_some_and(|session| !hosts.contains(&session.host))) {
+            continue;
+        }
+        let found = session_of(member, seen);
+        if found.is_some_and(|found| found.live && !found.free) {
+            continue;
+        }
+        // U49: an agent with no separate process to pause (OpenCode) has
+        // nothing to keep; every other live session is paused, never killed.
+        let pause = found.is_some_and(|found| found.live) && member.agent != "opencode";
+        steps.push(Step::Drain { member: member.id.clone(), pause });
+    }
     coalesce_lead(steps)
+}
+
+/// U49: whether a draining member owes nothing any more: no open attempt, no
+/// stage run it still holds, no task it still has to start or work on, and no
+/// report of its own. A task at the lead or in a stage is the lead's now.
+fn drained(team: &Team, member: &str) -> bool {
+    let open_attempt = team
+        .tasks
+        .iter()
+        .any(|task| task.open_attempt().is_some_and(|attempt| attempt.member == member));
+    let open_stage = team.tasks.iter().any(|task| {
+        task.pipeline_run
+            .as_ref()
+            .and_then(PipelineRun::open_run)
+            .is_some_and(|run| run.state == StageState::Delivered && run.member == member)
+    });
+    let work = team.tasks.iter().any(|task| task.assignee == member && task_owes(task));
+    !open_attempt && !open_stage && !work && team.reports_of(member).is_empty()
+}
+
+/// U49: a task still to start or work on, as opposed to one at the lead or in
+/// a stage of its pipeline (which no implementer waits for).
+fn task_owes(task: &Task) -> bool {
+    matches!(task.status, TaskStatus::Draft | TaskStatus::Pending | TaskStatus::Assigned | TaskStatus::InProgress)
 }
 
 /// At most one message reaches the free lead per tick; the others wait for the
@@ -1207,7 +1263,22 @@ pub(crate) fn hand_off_text_with(
     }
     text += &dependencies_text(team, task, report_host);
     if let Some(previous) = task.attempts.iter().rev().find(|a| a.n < attempt.n && a.state == AttemptState::Rejected) {
-        text += &format!("\nAttempt {} was rejected: {}\n", previous.n, task.decision_reason);
+        // U36: a stage returned it (no lead step): its findings, not a decision.
+        let returned = task.pipeline_run.as_ref().and_then(|run| {
+            let stage = run.runs.iter().rev().find(|stage| stage.attempt == previous.n && stage.state != super::model::StageState::Revoked)?;
+            (stage.state == super::model::StageState::Returned).then(|| (stage.clone(), run.max_rounds))
+        });
+        if let Some((stage, max_rounds)) = returned {
+            text += &format!("\nAttempt {} was returned by the {} of {} (round {} of {max_rounds}). Fix these findings:\n", previous.n, stage.kind, stage.by, stage.round);
+            if !stage.text.trim().is_empty() {
+                text += &format!("{}\n", stage.text.trim());
+            }
+            for finding in &stage.findings {
+                text += &format!("- {finding}\n");
+            }
+        } else {
+            text += &format!("\nAttempt {} was rejected: {}\n", previous.n, task.decision_reason);
+        }
     }
     if let Some(check) = task.check.as_ref().filter(|_| task.is_check()) {
         // C5: the member runs the exact command; Zerus decides by its exit code.
@@ -1258,6 +1329,93 @@ pub(crate) fn hand_off_text_with(
     text += "\nStart builds and long tests through Zerus (hgs team run, or hgs run: hgs guide run) so your session shows \
              as Building and your reply waits for them; a job you leave in your own shell after your turn counts as a \
              service, and your session looks idle.";
+    text
+}
+
+/// U36/#536: the hand-off to a stage member (review or test), sent when the
+/// stage delivery (#532) gives the open stage run `run` to its member. It says
+/// what to read (the attempt's change), where (the task's own folder), what a
+/// verdict must contain (`pass` or `return` with findings) and that a stage
+/// never edits the task's files.
+#[cfg_attr(not(test), allow(dead_code))] // the stage delivery (#532) sends it
+pub(crate) fn stage_hand_off_text(team: &Team, task: &Task, run: &StageRun) -> String {
+    let implementer = team.member(&task.assignee);
+    let checked = task.attempts.iter().find(|attempt| attempt.n == run.attempt);
+    // The change is in the folder of the member that made the attempt, which
+    // may differ from the task's assignee after a reassignment.
+    let author = checked.and_then(|attempt| team.member(&attempt.member)).or(implementer);
+    let implementer_role = author.map(|member| member.role.clone()).unwrap_or_default();
+    let commits: Vec<&str> = checked.map(|attempt| attempt.commits.iter().map(|commit| commit.sha.as_str()).collect()).unwrap_or_default();
+    let reported: String = checked
+        .and_then(|attempt| attempt.report.as_ref())
+        .map(|report| report.text.trim().chars().take(700).collect())
+        .unwrap_or_default();
+    let max_rounds = task.pipeline_run.as_ref().map(|pipeline| pipeline.max_rounds).filter(|rounds| *rounds > 0).unwrap_or(3);
+    let folder = author
+        .map(|member| if member.directory.is_empty() { team.folder.clone() } else { member.directory.clone() })
+        .filter(|folder| !folder.is_empty())
+        .unwrap_or_else(|| "(the implementer's folder)".to_owned());
+    let shared = author.is_some_and(|member| member.folder == MemberFolder::Shared);
+    let mut text = format!(
+        "[Zerus team \u{b7} from: Lead \u{b7} task: #{} \u{b7} stage: {} \u{b7} round {} of {}]\nTeam: {}. Your role: {}.\n",
+        task.id, run.kind, run.round, max_rounds, team.name, team.role_of(&run.member)
+    );
+    if !team.goal.is_empty() {
+        text += &format!("Team goal: {}\n", team.goal);
+    }
+    text += &format!("\nTask #{}: {}\n", task.id, task.title);
+    if !task.description.is_empty() {
+        text += &format!("{}\n", task.description);
+    }
+    if !task.criteria.is_empty() {
+        text += "\nAcceptance criteria:\n";
+        for criterion in &task.criteria {
+            text += &format!("- {criterion}\n");
+        }
+    }
+    if reported.is_empty() {
+        text += &format!("\nThe implementer ({implementer_role}) reported attempt {} without a text.\n", run.attempt);
+    } else {
+        text += &format!("\nThe implementer ({implementer_role}) reported attempt {}:\n{reported}\n", run.attempt);
+    }
+    // U36: what changed comes from the attempt - its commits in a Git checkout,
+    // otherwise the report's changed files; both are read in the task's folder.
+    text += &format!("\nRead attempt {}'s change in the task's own folder: {folder}\n", run.attempt);
+    if commits.is_empty() {
+        text += "- No commits were recorded: the report names the changed files; read them in that folder as they are now.\n";
+    } else {
+        text += &format!(
+            "- Its commits: {}. Read what each changed with `git show <sha>` (and `git log -p`) in that folder.\n",
+            commits.join(", ")
+        );
+    }
+    if shared {
+        text += "- This is the team's shared folder: only the files the report names are this task's; the other members keep working in it.\n";
+    }
+    if run.kind == "test" {
+        text += "\nThis is a test stage: run only the suites of the files this change touched and take the criteria's shots; \
+                 never the full suites - the lead runs them once at integration. While the task is in its test stage its folder \
+                 is held: the implementer's next task in that folder waits.\n";
+    } else {
+        text += "\nThis is a review stage: read the change against the criteria and name what is wrong by file and line.\n";
+    }
+    text += "Change nothing in the task's files: a stage reads, builds and tests only, writes only build output and its own \
+             temporary folder, and never edits, commits or reverts the task's files.\n";
+    let verdict = json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":team.id,"task":task.id,"attempt":run.id,
+        "verdict":"pass|return","findings":["file:line - what is wrong"],"text":"..."});
+    text += &format!(
+        "\nReport a verdict, not a progress line, with hgs team report --json, JSON on stdin:\n  {}\n\
+         pass moves the task to its next stage; return sends your findings to the implementer as a new attempt, without the lead. \
+         Round {} of {}: after {} returned rounds the lead decides with every round's findings.\n\
+         Questions for the lead: {} | hgs team ask --json\n\
+         Your stage again: {} | hgs team current --json\n",
+        verdict,
+        run.round,
+        max_rounds,
+        max_rounds,
+        json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":team.id,"task":task.id,"attempt":run.id,"text":"..."}),
+        json!({"attempt":run.id})
+    );
     text
 }
 
@@ -2369,6 +2527,44 @@ fn team_override(session: &SessionRef, on: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// U49: the end of a drain. The session is paused, never killed: its
+/// conversation stays under Saved; a session that is already gone needs no
+/// pause. Then the member leaves the roster, as remove-member takes it out.
+fn drain_member(store: &mut Store, team: &Team, member: &str, pause: bool) -> anyhow::Result<()> {
+    // Read the member fresh: a drain may have been cancelled since the step.
+    let current = store.load(&team.id)?.context("Unknown team")?;
+    let Some(found) = current.member(member) else { return Ok(()) };
+    if !found.draining || found.state == MemberState::Removed {
+        return Ok(());
+    }
+    if pause {
+        if let Some(session) = found.session.clone() {
+            let output = hgs(&session.host, &["pause", &session.name], None, Duration::from_secs(60))?;
+            anyhow::ensure!(
+                output.status.success(),
+                "The session of {} was not paused: {}",
+                current.role_of(member),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+    }
+    change(store, &team.id, |team, events| {
+        let role = team.role_of(member);
+        anyhow::ensure!(
+            team.tasks.iter().all(|task| task.assignee != member || !task_owes(task)),
+            "{} still owes a task",
+            role
+        );
+        anyhow::ensure!(team.reports_of(member).is_empty(), "{} still has reports", role);
+        let found = team.members.iter_mut().find(|found| found.id == member).context("Unknown member")?;
+        anyhow::ensure!(found.draining, "the drain was cancelled");
+        found.draining = false;
+        found.state = MemberState::Removed;
+        events.push(Event::new("member_removed", json!({"by":"Zerus","member":role,"draining":true})));
+        Ok(())
+    })
+}
+
 fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, from: Option<&str>, host: &str) -> anyhow::Result<()> {
     // Record the attempt before sending; a crash leaves it Unconfirmed.
     let attempt_id = uuid::Uuid::new_v4().to_string();
@@ -2379,6 +2575,8 @@ fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, fro
     let mut git_job: Option<(String, f64)> = None;
     change(store, team_id, |team, events| {
         anyhow::ensure!(team.status == TeamStatus::Running && plan::ready(team).contains(&task_id), "no longer ready");
+        // U36: the task's pipeline as the catalog has it at its first hand-out.
+        super::pipeline::snapshot(team, task_id);
         let session = team.member(member_id).and_then(|m| m.session.clone()).context("no session")?;
         let member_host = team.member(member_id).map(|m| m.computer.clone()).unwrap_or_default();
         let roles = from.map(|from| (team.role_of(from), team.role_of(member_id)));
@@ -3651,6 +3849,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
                 Ok(())
             })
         }
+        Step::Drain { member, pause } => drain_member(store, team, member, *pause),
         Step::Rebalance { task, from, to } => hand_out(store, &team.id, *task, to, Some(from), host),
         Step::Rebalanced { tasks } => tell_lead_rebalanced(store, team, tasks),
         Step::TurnEnded { task, at, reply } => change(store, &team.id, |team, _| {
@@ -4134,7 +4333,10 @@ fn start_run(
         return refuse(format!("the folder belongs to {}", team.role_of(&member.id)));
     }
     let attempt = request["attempt"].as_str().unwrap_or_default();
-    if !team.tasks.iter().any(|task| task.open_attempt().is_some_and(|found| found.id == attempt && found.member == member.id)) {
+    // U36: a test stage builds under its stage run, as an attempt.
+    if !team.tasks.iter().any(|task| task.open_attempt().is_some_and(|found| found.id == attempt && found.member == member.id))
+        && super::pipeline::open_run_task(team, attempt, &member.id).is_none()
+    {
         return refuse(format!("attempt {attempt} does not run for this member"));
     }
     let template = request["template"].as_str().unwrap_or_default();
@@ -4284,10 +4486,11 @@ fn run_request(store: &mut Store, folder: &Path, request: &Value) {
 
 /// One queued request, applied as the member's own write (U20). The member's
 /// input keys the store receipt, so a request applied twice (a worker that died
-/// before it removed the file) is a replay, not a second report.
+/// before it removed the file) is a replay, not a second report. U42: a budget
+/// (`expect`) has no attempt; the folder itself proves the member.
 fn apply_outbox(store: &mut Store, team: &Team, member: &Member, request: &Value) -> anyhow::Result<Value> {
     let op = request["op"].as_str().unwrap_or_default();
-    anyhow::ensure!(matches!(op, "report" | "ask" | "commit" | "reply"), "Unknown outbox request {op}");
+    anyhow::ensure!(matches!(op, "report" | "ask" | "commit" | "reply" | "expect"), "Unknown outbox request {op}");
     anyhow::ensure!(request["team"] == team.id.as_str(), "a request for another team");
     anyhow::ensure!(request["member"] == member.id.as_str(), "the folder belongs to {}", team.role_of(&member.id));
     // The member's own request, unchanged: a replay keys the same store receipt.
@@ -4298,15 +4501,36 @@ fn apply_outbox(store: &mut Store, team: &Team, member: &Member, request: &Value
     if let Some(receipt) = store.receipt(&request_id, &input)? {
         return Ok(receipt);
     }
-    let attempt_id = request["attempt"].as_str().unwrap_or_default();
-    anyhow::ensure!(attempt_id == input["attempt"].as_str().unwrap_or_default(), "the request names another attempt");
-    let task = team
-        .tasks
-        .iter()
-        .find(|task| task.open_attempt().is_some_and(|attempt| attempt.id == attempt_id && attempt.member == member.id));
-    let Some(task) = task else { anyhow::bail!("attempt {attempt_id} does not run for this member") };
-    if input["task"].as_u64().is_some() {
-        anyhow::ensure!(input["task"] == json!(task.id), "the request names another task");
+    if op != "expect" {
+        let attempt_id = request["attempt"].as_str().unwrap_or_default();
+        anyhow::ensure!(attempt_id == input["attempt"].as_str().unwrap_or_default(), "the request names another attempt");
+        let task = team
+            .tasks
+            .iter()
+            .find(|task| task.open_attempt().is_some_and(|attempt| attempt.id == attempt_id && attempt.member == member.id))
+            .map(|task| task.id)
+            // U42: a queued report also reaches an attempt whose report already
+            // landed (the placeholder repair), while the task is undecided.
+            .or_else(|| {
+                if op != "report" {
+                    return None;
+                }
+                team.tasks
+                    .iter()
+                    .find(|task| {
+                        task.status.reported()
+                            && task.attempts.iter().any(|attempt| {
+                                attempt.id == attempt_id && attempt.member == member.id && attempt.state == AttemptState::Reported
+                            })
+                    })
+                    .map(|task| task.id)
+            })
+            // U36: a stage member in a sandbox queues its verdict the same way.
+            .or_else(|| super::pipeline::open_run_task(team, attempt_id, &member.id));
+        let Some(task) = task else { anyhow::bail!("attempt {attempt_id} does not run for this member") };
+        if input["task"].as_u64().is_some() {
+            anyhow::ensure!(input["task"] == json!(task), "the request names another task");
+        }
     }
     if op == "commit" {
         return super::commands::commit_in_team(team, &member.id, &input);
@@ -4649,6 +4873,89 @@ mod tests {
         t.members.iter_mut().find(|member| member.id == "dev").unwrap().prompt_snapshot = None;
         let text = hand_off_text(&t, &task, &attempt, "", "");
         assert!(!text.contains("SNAPSHOT EXTRA"), "{text}");
+    }
+
+    #[test]
+    fn a_stage_hand_off_names_the_change_the_folder_and_the_verdict() {
+        // U36/#536: a review or test hand-off says what to read, where, what a
+        // verdict contains and that a stage never edits the task's files.
+        let mut t = team();
+        {
+            let dev = t.members.iter_mut().find(|member| member.id == "dev").unwrap();
+            dev.directory = "/work/checkout-dev".into();
+            dev.folder = MemberFolder::Worktree;
+        }
+        {
+            let task = t.tasks.iter_mut().find(|task| task.id == 1).unwrap();
+            task.description = "Build the cards API".into();
+            task.criteria = vec!["Paged list".into(), "No N+1".into()];
+            let mut attempt = Attempt { n: 1, id: "a1".into(), member: "dev".into(), state: AttemptState::Reported, ..Default::default() };
+            attempt.commits.push(CommitRef { sha: "abc1234".into(), files: 2, ..Default::default() });
+            attempt.report = Some(Report { text: "Changed src/cards.rs and src/db.rs".into(), at: 1.0, ..Default::default() });
+            task.attempts.push(attempt);
+            task.pipeline_run = Some(PipelineRun {
+                id: "code".into(),
+                name: "Code: review, test, lead".into(),
+                max_rounds: 3,
+                round: 1,
+                folder: "hold".into(),
+                accept: "lead".into(),
+                ..Default::default()
+            });
+        }
+        let task = t.task(1).unwrap().clone();
+        let review = StageRun {
+            id: "stage-run-1".into(),
+            stage: 0,
+            kind: "review".into(),
+            round: 1,
+            attempt: 1,
+            member: "qa".into(),
+            state: StageState::Delivered,
+            ..Default::default()
+        };
+        let text = stage_hand_off_text(&t, &task, &review);
+        for part in [
+            "from: Lead",
+            "task: #1",
+            "stage: review",
+            "round 1 of 3",
+            "Your role: Tester",
+            "Build the cards API",
+            "Acceptance criteria:",
+            "Paged list",
+            "No N+1",
+            "Changed src/cards.rs and src/db.rs",
+            "/work/checkout-dev",
+            "abc1234",
+            "git show",
+            "review stage",
+            "Change nothing in the task's files",
+            "\"verdict\":\"pass|return\"",
+            "\"attempt\":\"stage-run-1\"",
+            "return sends your findings to the implementer",
+            "hgs team report --json",
+            "hgs team ask --json",
+            "hgs team current --json",
+        ] {
+            assert!(text.contains(part), "{part} missing in\n{text}");
+        }
+        assert!(!text.contains("shared folder"), "{text}");
+        // A test stage says what to run and that the folder is held.
+        let test = StageRun { kind: "test".into(), ..review.clone() };
+        let text = stage_hand_off_text(&t, &task, &test);
+        for part in ["stage: test", "only the suites of the files", "take the criteria's shots", "folder is held"] {
+            assert!(text.contains(part), "{part} missing in\n{text}");
+        }
+        // A shared folder says which files are the task's, and no commits names
+        // the report's changed-file list instead.
+        t.members.iter_mut().find(|member| member.id == "dev").unwrap().folder = MemberFolder::Shared;
+        let text = stage_hand_off_text(&t, &t.task(1).unwrap().clone(), &review);
+        assert!(text.contains("shared folder") && text.contains("only the files the report names"), "{text}");
+        let mut without = t.clone();
+        without.tasks.iter_mut().find(|task| task.id == 1).unwrap().attempts[0].commits.clear();
+        let text = stage_hand_off_text(&without, &without.task(1).unwrap().clone(), &review);
+        assert!(text.contains("No commits were recorded"), "{text}");
     }
 
     #[test]
@@ -5303,6 +5610,296 @@ mod tests {
         let saved = store.load(&t.id).unwrap().unwrap();
         assert_eq!(saved.task(1).unwrap().attempts.last().unwrap().state, AttemptState::Delivered);
         assert!(saved.task(1).unwrap().reopen_note.is_empty());
+    }
+
+    #[test]
+    fn a_queued_report_repairs_a_placeholder_while_the_task_is_undecided() {
+        // U42 (#512): the QA's whole report reached the worker after the queued
+        // placeholder had closed its attempt. A queued report now reaches that
+        // attempt while the lead has not decided.
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+            let mut t = team();
+            {
+                let task = t.task_mut(1).unwrap();
+                task.attempts.push(Attempt {
+                    n: 1,
+                    id: "A1".into(),
+                    member: "dev".into(),
+                    state: AttemptState::Reported,
+                    ..Default::default()
+                });
+                task.attempts[0].report = Some(Report { text: "poll".into(), at: 1.0, unstructured: true, ..Default::default() });
+                task.status = TaskStatus::Submitted;
+            }
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+            let saved = store.load(&t.id).unwrap().unwrap();
+            let dev = saved.member("dev").unwrap().clone();
+            let request = json!({"op":"report","request_id":"44444444-4444-4444-8444-444444444444","team":t.id,"member":"dev","attempt":"A1",
+                "input":{"request_id":"44444444-4444-4444-8444-444444444444","team":t.id,"task":1,"attempt":"A1",
+                    "text":"The whole report: 512 checks and their totals"}});
+            let outcome = apply_outbox(&mut store, &saved, &dev, &request).unwrap();
+            assert_eq!(outcome["status"], "submitted");
+            let saved = store.load(&t.id).unwrap().unwrap();
+            let report = saved.task(1).unwrap().attempts[0].report.as_ref().unwrap();
+            assert_eq!(report.text, "The whole report: 512 checks and their totals");
+            assert_eq!(report.replaced[0].text, "poll");
+            // Once the lead decides, the queue refuses the attempt again.
+            store
+                .mutate(None, &t.id, None, |team, _| {
+                    team.task_mut(1).unwrap().status = TaskStatus::Accepted;
+                    Ok(Value::Null)
+                })
+                .unwrap();
+            let saved = store.load(&t.id).unwrap().unwrap();
+            let later = json!({"op":"report","request_id":"55555555-5555-4555-8555-555555555555","team":t.id,"member":"dev","attempt":"A1",
+                "input":{"request_id":"55555555-5555-4555-8555-555555555555","team":t.id,"task":1,"attempt":"A1","text":"later"}});
+            let error = apply_outbox(&mut store, &saved, &dev, &later).unwrap_err().to_string();
+            assert!(error.contains("does not run for this member"), "{error}");
+        });
+    }
+
+    #[test]
+    fn a_queued_budget_is_applied_as_the_members_own() {
+        // U42: `hgs team expect` from a sandbox queues like a report. The worker
+        // applies it as the member's own budget, with no attempt to name; the
+        // folder still proves the member.
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+            let t = team();
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+            let saved = store.load(&t.id).unwrap().unwrap();
+            let dev = saved.member("dev").unwrap().clone();
+            let request = json!({"op":"expect","request_id":"33333333-3333-4333-8333-333333333333","team":t.id,"member":"dev","attempt":"",
+                "input":{"request_id":"33333333-3333-4333-8333-333333333333","team":t.id,"label":"the suites","minutes":15}});
+            let outcome = apply_outbox(&mut store, &saved, &dev, &request).unwrap();
+            assert_eq!((outcome["status"].as_str(), outcome["label"].as_str()), (Some("expected"), Some("the suites")));
+            let saved = store.load(&t.id).unwrap().unwrap();
+            let budget = saved.member("dev").unwrap().budget.as_ref().unwrap();
+            assert_eq!((budget.label.as_str(), budget.minutes, budget.red_minutes), ("the suites", 15, 30));
+            let events = store.events(&t.id, None, 20).unwrap();
+            assert!(
+                events["items"].as_array().unwrap().iter().any(|event| event["kind"] == "budget_declared"),
+                "{events}"
+            );
+            // The folder proves the member: another member's request is refused.
+            let qa = saved.member("qa").unwrap().clone();
+            let error = apply_outbox(&mut store, &saved, &qa, &request).unwrap_err().to_string();
+            assert!(error.contains("the folder belongs to"), "{error}");
+        });
+    }
+
+    #[test]
+    fn a_draining_member_finishes_its_attempt_then_its_session_is_paused_and_it_leaves() {
+        // U49: the member owes its open attempt; then its session is paused
+        // (never killed) and the member leaves the roster.
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+            let mut t = team();
+            // dev owes only task 1.
+            let mut events = Vec::new();
+            ops::apply(&mut t, "cancel", &json!({"task":2}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+            let task = t.task_mut(1).unwrap();
+            task.attempts.push(Attempt {
+                n: 1,
+                id: "A1".into(),
+                member: "dev".into(),
+                state: AttemptState::Delivered,
+                sent_at: 10.0,
+                delivered_at: Some(10.0),
+                ..Default::default()
+            });
+            task.status = TaskStatus::InProgress;
+            t.members.iter_mut().find(|member| member.id == "dev").unwrap().draining = true;
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+            let seen = [session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", true)];
+            assert!(
+                !steps(&t, &seen, 100.0).iter().any(|step| matches!(step, Step::Drain { .. })),
+                "the open attempt is finished first"
+            );
+            // The report ends the attempt; the task waits at the lead, which is
+            // no work of the member any more.
+            store
+                .mutate(None, &t.id, None, |team, events| {
+                    ops::apply(team, "report", &json!({"task":1,"attempt":"A1","text":"Done"}), &Actor::Member("dev".into()), &BTreeSet::new(), events)
+                })
+                .unwrap();
+            let after = store.load(&t.id).unwrap().unwrap();
+            assert!(steps(&after, &seen, 200.0).iter().any(|step| matches!(step, Step::Drain { member, .. } if member == "dev")));
+            // The session is paused, never killed, and the member leaves.
+            let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::<Vec<String>>::new()));
+            let record = calls.clone();
+            set_fake_hgs(Some(Box::new(move |_, args: &[&str], _| {
+                record.borrow_mut().push(args.iter().map(|arg| (*arg).to_owned()).collect());
+                Ok(fake_output(0, "", ""))
+            })));
+            run_step(&mut store, &after, &Step::Drain { member: "dev".into(), pause: true }, "").unwrap();
+            set_fake_hgs(None);
+            assert_eq!(calls.borrow()[0], vec!["pause".to_owned(), "codex/x/dev".to_owned()]);
+            assert_eq!(calls.borrow().len(), 1, "one pause, no kill and no terminate");
+            let saved = store.load(&t.id).unwrap().unwrap();
+            let dev = saved.member("dev").unwrap();
+            assert_eq!((dev.state, dev.draining), (MemberState::Removed, false));
+            let events = store.events(&t.id, None, 100).unwrap();
+            let removed = events["items"].as_array().unwrap().iter().find(|event| event["kind"] == "member_removed").unwrap();
+            assert_eq!((removed["detail"]["by"].clone(), removed["detail"]["member"].clone()), (json!("Zerus"), json!("Backend")));
+        });
+    }
+
+    #[test]
+    fn a_draining_member_finishes_its_stage_run_first() {
+        // U49: an open stage run it holds keeps the drain waiting; a stage never
+        // goes to a draining member.
+        let mut t = team();
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        // qa owes only its stage run.
+        ops::apply(&mut t, "cancel", &json!({"task":3}), &Actor::Human, &none, &mut events).unwrap();
+        {
+            let task = t.task_mut(1).unwrap();
+            task.attempts.push(Attempt { n: 1, id: "A1".into(), member: "dev".into(), state: AttemptState::Reported, ..Default::default() });
+            task.status = TaskStatus::InReview;
+            task.pipeline_run = Some(PipelineRun {
+                id: "code".into(),
+                name: "Code".into(),
+                stages: vec![PipelineStage { kind: "review".into(), role: "Reviewer".into(), member: "qa".into() }],
+                max_rounds: 3,
+                folder: "hold".into(),
+                accept: "lead".into(),
+                round: 1,
+                runs: vec![StageRun {
+                    id: "S1".into(),
+                    stage: 0,
+                    kind: "review".into(),
+                    round: 1,
+                    attempt: 1,
+                    member: "qa".into(),
+                    state: StageState::Delivered,
+                    at: 10.0,
+                    delivered_at: Some(10.0),
+                    ..Default::default()
+                }],
+            });
+        }
+        t.members.iter_mut().find(|member| member.id == "qa").unwrap().draining = true;
+        let seen = [session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", true)];
+        assert!(
+            !steps(&t, &seen, 100.0).iter().any(|step| matches!(step, Step::Drain { .. })),
+            "its stage run is finished first"
+        );
+        assert!(super::super::pipeline::candidates(&t, 1).is_empty(), "a stage never goes to a draining member");
+        // The verdict ends the run and the task waits at the lead.
+        let task = t.task_mut(1).unwrap();
+        task.pipeline_run.as_mut().unwrap().runs[0].state = StageState::Passed;
+        task.status = TaskStatus::Submitted;
+        assert!(steps(&t, &seen, 200.0).iter().any(|step| matches!(step, Step::Drain { member, .. } if member == "qa")));
+    }
+
+    #[test]
+    fn a_drain_with_nothing_to_finish_ends_at_once_and_a_cancelled_one_never_does() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+            let mut t = team();
+            let mut events = Vec::new();
+            let none = BTreeSet::new();
+            for id in [1, 2] {
+                ops::apply(&mut t, "cancel", &json!({"task":id}), &Actor::Human, &none, &mut events).unwrap();
+            }
+            t.members.iter_mut().find(|member| member.id == "dev").unwrap().draining = true;
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+            let seen = [session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", true)];
+            assert!(steps(&t, &seen, 100.0).iter().any(|step| matches!(step, Step::Drain { member, .. } if member == "dev")));
+            // Undo before it ends: nothing is paused and nothing is removed.
+            store
+                .mutate(None, &t.id, None, |team, events| {
+                    ops::apply(team, "drain", &json!({"member":"dev","draining":false}), &Actor::Human, &BTreeSet::new(), events)
+                })
+                .unwrap();
+            let undone = store.load(&t.id).unwrap().unwrap();
+            assert!(!steps(&undone, &seen, 200.0).iter().any(|step| matches!(step, Step::Drain { .. })));
+            let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::<Vec<String>>::new()));
+            let record = calls.clone();
+            set_fake_hgs(Some(Box::new(move |_, args: &[&str], _| {
+                record.borrow_mut().push(args.iter().map(|arg| (*arg).to_owned()).collect());
+                Ok(fake_output(0, "", ""))
+            })));
+            run_step(&mut store, &undone, &Step::Drain { member: "dev".into(), pause: true }, "").unwrap();
+            set_fake_hgs(None);
+            assert!(calls.borrow().is_empty(), "a step decided before the undo does nothing");
+            let saved = store.load(&t.id).unwrap().unwrap();
+            assert_eq!(saved.member("dev").unwrap().state, MemberState::Active);
+        });
+    }
+
+    #[test]
+    fn a_session_with_no_process_to_pause_is_not_paused() {
+        // U49: OpenCode has no separate process to pause; the member still leaves.
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+            let mut t = team();
+            let mut events = Vec::new();
+            for id in [1, 2] {
+                ops::apply(&mut t, "cancel", &json!({"task":id}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+            }
+            {
+                let dev = t.members.iter_mut().find(|member| member.id == "dev").unwrap();
+                dev.agent = "opencode".into();
+                dev.draining = true;
+            }
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+            let seen = [session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", true)];
+            let found = steps(&t, &seen, 100.0);
+            assert!(found.iter().any(|step| matches!(step, Step::Drain { pause: false, .. })), "{found:?}");
+            let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::<Vec<String>>::new()));
+            let record = calls.clone();
+            set_fake_hgs(Some(Box::new(move |_, args: &[&str], _| {
+                record.borrow_mut().push(args.iter().map(|arg| (*arg).to_owned()).collect());
+                Ok(fake_output(0, "", ""))
+            })));
+            run_step(&mut store, &t, &Step::Drain { member: "dev".into(), pause: false }, "").unwrap();
+            set_fake_hgs(None);
+            assert!(calls.borrow().is_empty(), "nothing to pause and nothing to kill");
+            assert_eq!(store.load(&t.id).unwrap().unwrap().member("dev").unwrap().state, MemberState::Removed);
+        });
+    }
+
+    #[test]
+    fn a_draining_member_gets_no_new_task() {
+        // U49: a draining member takes nothing new, and its ready task is a
+        // rebalancing source for a member of the same role.
+        let mut t = team();
+        t.members.iter_mut().find(|member| member.id == "dev").unwrap().draining = true;
+        let seen = [session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", true)];
+        let found = steps(&t, &seen, 100.0);
+        assert!(!found.iter().any(|step| matches!(step, Step::HandOut { member, .. } if member == "dev")), "{found:?}");
+        // It still owes its two ready tasks, so the drain waits while they are
+        // assigned to it and no peer can take them.
+        assert!(!found.iter().any(|step| matches!(step, Step::Drain { .. })), "{found:?}");
+        let mut with_peer = t.clone();
+        with_peer.members.push(Member {
+            id: "dev2".into(),
+            role: "Backend".into(),
+            agent: "codex".into(),
+            state: MemberState::Active,
+            session: Some(SessionRef { name: "codex/x/dev2".into(), run_id: "r2".into(), conversation_id: "c".into(), ..Default::default() }),
+            ..Default::default()
+        });
+        let seen = [
+            session("claude/x/lead", "r0", true),
+            session("codex/x/dev", "r1", true),
+            session("codex/x/dev2", "r2", true),
+        ];
+        let found = steps(&with_peer, &seen, 100.0);
+        assert!(
+            found.iter().any(|step| matches!(step, Step::Rebalance { task: 1, from, to } if from == "dev" && to == "dev2")),
+            "{found:?}"
+        );
+        assert!(!found.iter().any(|step| matches!(step, Step::HandOut { task: 1, member } if member == "dev")), "{found:?}");
     }
 
     /// The sessions the local recovery service is asked to wait for.

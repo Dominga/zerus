@@ -1103,6 +1103,20 @@ fn grouped_archive_page(
     })
 }
 
+fn finish_archive_page(
+    pump: &crate::pump::Pump,
+    computer: &ComputerId,
+    eligible: &[uuid::Uuid],
+    cancelled: &AtomicBool,
+    page: ArchivePage,
+) -> Result<ArchivePageOut, String> {
+    if cancelled.load(Ordering::Relaxed) {
+        return Err("superseded".into());
+    }
+    pump.observe_archive_terminations(computer, eligible, &page.rows);
+    grouped_archive_page(pump, computer, page)
+}
+
 /// One checked page of the computer's archive (30 s, Qt's validation).
 /// `request` is the archive store's request number. A newer request for the
 /// same computer, or a cancel through this number, ends this one's `hgs` and
@@ -1135,13 +1149,7 @@ pub async fn archive_page(
         let eligible = pump.archive_termination_ids(&id);
         reads::archive_page_cancellable(&hgs, &id, from, until, &cursor, &query, &job)
             .map_err(|error| error.to_string())
-            .and_then(|page| {
-                if job.load(Ordering::Relaxed) {
-                    return Err("superseded".into());
-                }
-                pump.observe_archive_terminations(&id, &eligible, &page.rows);
-                grouped_archive_page(&pump, &id, page)
-            })
+            .and_then(|page| finish_archive_page(&pump, &id, &eligible, &job, page))
     })
     .await
     .map_err(|error| error.to_string());
@@ -1682,15 +1690,23 @@ mod tests {
             .unwrap();
             assert!(pump.archive_termination_ids(&computer).is_empty());
         }
+        let vanished = pump.clone();
         let outcome = tauri::async_runtime::block_on(dispatch_with(
             &actions,
             target,
             Action::Terminate,
             uuid::Uuid::new_v4().to_string(),
-            |_, _| Exit::Code {
-                code: 0,
-                stdout: Vec::new(),
-                stderr: String::new(),
+            move |_, _| {
+                vanished.push(Change::Remove {
+                    computer: ComputerId::from("studio"),
+                    key: "run:run-1".into(),
+                    reason: Some("archived".into()),
+                });
+                Exit::Code {
+                    code: 0,
+                    stdout: Vec::new(),
+                    stderr: String::new(),
+                }
             },
         ))
         .unwrap();
@@ -2102,6 +2118,21 @@ mod tests {
             .unwrap()
             .rows
             .is_empty());
+    }
+
+    #[test]
+    fn a_cancelled_archive_page_never_changes_grouping_or_termination_observation() {
+        let pump = crate::pump::Pump::default();
+        let result = finish_archive_page(
+            &pump,
+            &ComputerId::from("studio"),
+            &[],
+            &AtomicBool::new(true),
+            archive_fixture(),
+        );
+        assert_eq!(result.unwrap_err(), "superseded");
+        assert!(pump.take_layout().is_none());
+        assert_eq!(pump.termination_count(), 0);
     }
 
     #[test]

@@ -167,6 +167,19 @@ impl Pump {
         self.wake(inner);
     }
 
+    pub fn take_runs(&self) -> Option<Vec<u8>> {
+        self.lock().grouping.take_runs()
+    }
+
+    /// Called by the organization worker, never the main thread. Decode
+    /// before taking the pump lock; rows may already have arrived.
+    pub fn load_runs(&self, bytes: &[u8]) {
+        let runs = zerus_client_core::swarm::runs::Runs::from_json(bytes);
+        let mut inner = self.lock();
+        inner.grouping.replace_runs(runs);
+        self.wake(inner);
+    }
+
     /// A computer's machine card, once its listing named one.
     pub fn machine(&self, computer: &ComputerId) -> Option<MachineMeta> {
         self.lock()

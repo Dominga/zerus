@@ -25,6 +25,10 @@
 //! the hub's lock, in an idle pass and in `flush` still run under it. So the
 //! callback must never block on the main thread, which takes the writer's
 //! lock in `flush` as the app quits, and must never take the writer's lock.
+//! Run-token I/O has its own RunsWriter lock, owned by Writer. Copy its handle
+//! under Shared.writer, release that lock, then take RunsWriter; never hold
+//! both. Startup token reads and all token checkpoints run off main. The exit
+//! path waits at most 500 ms before independently flushing draft and layout.
 
 use std::collections::HashMap;
 use std::io;
@@ -40,6 +44,7 @@ use zerus_client_core::reads::{Read, ReadError};
 use zerus_client_core::swarm::draft::{self, Draft, DraftWrite, Load};
 use zerus_client_core::swarm::edit::Intent;
 use zerus_client_core::swarm::grouping::{by_name, SyncView};
+use zerus_client_core::swarm::runs;
 use zerus_client_core::swarm::sync::{Controller, Due, EditOutcome, Observation, Ticket, STOPPED};
 use zerus_client_core::{run_limited, Change, Exit, OrganizationSnapshot, OrganizationUpdate};
 
@@ -50,6 +55,8 @@ use crate::pump::Pump;
 const SAVE_EVERY: Duration = Duration::from_secs(1);
 /// The longest the worker waits, in milliseconds, when nothing is due sooner.
 const IDLE_MS: u64 = 1_000;
+/// An explicit exit waits at most this long for the token checkpoint.
+const RUNS_EXIT_WAIT: Duration = Duration::from_millis(500);
 /// A failing write logs at most one line in this long.
 const LOG_EVERY: Duration = Duration::from_secs(60);
 
@@ -121,6 +128,7 @@ struct Shared {
     hgs: PathBuf,
     allowed: bool,
     layout: PathBuf,
+    runs: PathBuf,
     draft: PathBuf,
     clock: Instant,
     /// Passes the worker started, so a test can tell when it acted.
@@ -168,6 +176,13 @@ impl Organization {
             pump,
             hgs,
             allowed,
+            runs: layout.with_file_name(
+                if layout.file_name().and_then(|name| name.to_str()) == Some(layout_file(true)) {
+                    runs::REPLAY_FILE
+                } else {
+                    runs::FILE
+                },
+            ),
             layout,
             draft: draft_path,
             clock: Instant::now(),
@@ -199,6 +214,12 @@ impl Organization {
 
     fn writer(&self) -> MutexGuard<'_, Writer> {
         self.0.writer.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Copy the handle under Shared.writer, then release it before taking
+    /// RunsWriter. No code holds both locks, including the exit path.
+    fn runs_writer(&self) -> Arc<Mutex<RunsWriter>> {
+        Arc::clone(&self.writer().runs)
     }
 
     fn now(&self) -> u64 {
@@ -406,6 +427,21 @@ impl Organization {
     /// which the next start sends. It runs on the main thread, and so does
     /// a Projects call it makes ([`Presented`]).
     pub fn flush(&self) {
+        // No token serialization or I/O on main. A slow token write must
+        // never hold up the independent draft/layout checkpoint after 500 ms.
+        let runs = self.runs_writer();
+        let pump = self.0.pump.clone();
+        let path = self.0.runs.clone();
+        let (done, finished) = sync_channel(1);
+        let checkpoint = std::thread::spawn(move || {
+            runs.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .save(&pump, &path, true);
+            let _ = done.send(());
+        });
+        if finished.recv_timeout(RUNS_EXIT_WAIT).is_ok() {
+            let _ = checkpoint.join();
+        }
         let mut writer = self.writer();
         let hub = self.save_draft(self.lock(), &mut writer);
         self.release(hub);
@@ -447,6 +483,10 @@ impl Organization {
                 panic!("a test stops the organization worker");
             }
         }
+        self.runs_writer()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .save(&self.0.pump, &self.0.runs, false);
         let mut writer = self.writer();
         let mut hub = self.lock();
         self.renames(&mut hub);
@@ -639,6 +679,8 @@ impl Throttle {
 
 /// What the draft and layout writes keep between them, behind the writer's lock.
 struct Writer {
+    /// Separate lock: stuck token I/O never blocks the draft/layout writer.
+    runs: Arc<Mutex<RunsWriter>>,
     /// An unusable draft is still in place; no draft is written before it moved.
     aside: bool,
     saved: Instant,
@@ -654,6 +696,7 @@ struct Writer {
 impl Writer {
     fn new(aside: bool) -> Self {
         Self {
+            runs: Arc::new(Mutex::new(RunsWriter::default())),
             aside,
             saved: Instant::now(),
             layout: None,
@@ -708,6 +751,74 @@ impl Writer {
         #[cfg(test)]
         {
             self.saves += 1;
+        }
+    }
+}
+
+/// Token writes are independent of layout/draft writes. Only background
+/// threads take this lock, and never while holding Shared.writer or Hub.
+struct RunsWriter {
+    loaded: bool,
+    saved: Instant,
+    pending: Option<Vec<u8>>,
+    log: Throttle,
+    #[cfg(test)]
+    stuck: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
+    #[cfg(test)]
+    thread: Option<std::thread::ThreadId>,
+}
+
+impl Default for RunsWriter {
+    fn default() -> Self {
+        Self {
+            loaded: false,
+            saved: Instant::now(),
+            pending: None,
+            log: Throttle::default(),
+            #[cfg(test)]
+            stuck: None,
+            #[cfg(test)]
+            thread: None,
+        }
+    }
+}
+
+impl RunsWriter {
+    fn save(&mut self, pump: &Pump, path: &Path, force: bool) {
+        if !self.loaded {
+            // Also used by an immediate exit checkpoint. Serialize the first
+            // load with writes, so exiting before the worker's first pass
+            // cannot replace the saved history with just this start's rows.
+            match zerus_client_core::swarm::layout::read(path) {
+                Ok(Some(bytes)) => pump.load_runs(&bytes),
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("zerus-client: the run identities were not loaded: {error}")
+                }
+            }
+            self.loaded = true;
+        }
+        if !force && self.saved.elapsed() < SAVE_EVERY {
+            return;
+        }
+        self.saved = Instant::now();
+        let bytes = pump.take_runs().or_else(|| self.pending.take());
+        let Some(bytes) = bytes else { return };
+        // A new snapshot supersedes the bytes of any failed write.
+        self.pending = None;
+        #[cfg(test)]
+        {
+            self.thread = Some(std::thread::current().id());
+            if let Some((entered, release)) = self.stuck.take() {
+                let _ = entered.send(());
+                let _ = release.recv();
+            }
+        }
+        if let Err(error) = draft::write(path, &bytes) {
+            if self.log.allow() {
+                eprintln!("zerus-client: the run identities were not saved: {error}");
+            }
+            self.pending = Some(bytes);
         }
     }
 }
@@ -920,6 +1031,10 @@ mod tests {
 
         fn draft(&self) -> PathBuf {
             self.dir.join("draft.json")
+        }
+
+        fn runs(&self) -> PathBuf {
+            self.dir.join(zerus_client_core::swarm::runs::FILE)
         }
 
         fn organization(&self, pump: &Pump, allowed: bool) -> Organization {
@@ -1523,6 +1638,221 @@ mod tests {
         assert_eq!(sent["base"]["projects"][0]["sessions"], json!([R]));
         assert_eq!(sent["desired"]["projects"][0]["sessions"], json!([R2]));
         fake.finish(organization);
+    }
+
+    /// Qt's persisted m_runs discovers a rename even without an old-name
+    /// upsert this time. Rows may arrive before the background file load.
+    #[test]
+    fn a_saved_run_migrates_a_rename_made_while_closed_with_one_apply() {
+        for rows_first in [false, true] {
+            let fake = Fake::landing();
+            let previous = Pump::default();
+            previous.push(row("run:1", "claude/sample-project/review"));
+            draft::write(&fake.runs(), &previous.take_runs().unwrap()).unwrap();
+            let pump = Pump::default();
+            if rows_first {
+                pump.push(row("run:1", "claude/sample-project/review-2"));
+            }
+            let organization = fake.organization(&pump, true);
+            organization.set_source(snapshot("d1"));
+            organization.observe(&state("d1"));
+            if !rows_first {
+                pump.push(row("run:1", "claude/sample-project/review-2"));
+            }
+            wait_until("the persisted rename to land", || fake.settled_after(1));
+            let log = fake.applies();
+            assert_eq!(log.len(), 1);
+            assert_eq!(
+                input(&log[0])["base"]["projects"][0]["sessions"],
+                json!([R])
+            );
+            assert_eq!(
+                input(&log[0])["desired"]["projects"][0]["sessions"],
+                json!([R2])
+            );
+            fake.finish(organization);
+        }
+    }
+
+    #[test]
+    fn a_persisted_rename_already_migrated_by_the_other_writer_needs_no_apply() {
+        let fake = Fake::landing();
+        let previous = Pump::default();
+        previous.push(row("run:1", "claude/sample-project/review"));
+        draft::write(&fake.runs(), &previous.take_runs().unwrap()).unwrap();
+        let pump = Pump::default();
+        pump.push(row("run:1", "claude/sample-project/review-2"));
+        let organization = fake.organization(&pump, true);
+        organization.set_source(snapshot("d2"));
+        let mut migrated = state("d2");
+        let Change::Organization {
+            update: OrganizationUpdate::State {
+                value, membership, ..
+            },
+            ..
+        } = &mut migrated
+        else {
+            unreachable!()
+        };
+        Arc::make_mut(value)["organization"]["projects"][0]["sessions"] = json!([R2]);
+        *membership = Arc::new(zerus_client_core::swarm::members(&value["organization"]));
+        organization.observe(&migrated);
+        let first = parked(&organization);
+        organization.0.wake.notify_all();
+        wait_until("startup token processing", || {
+            parked(&organization) > first + 1
+        });
+        assert!(fake.applies().is_empty());
+        assert!(!fake.draft().exists());
+        fake.finish(organization);
+    }
+
+    #[test]
+    fn a_layout_only_change_does_not_rewrite_the_runs_file() {
+        let fake = Fake::landing();
+        let pump = Pump::default();
+        let organization = fake.organization(&pump, true);
+        organization.set_source(snapshot("d1"));
+        organization.observe(&state("d1"));
+        pump.push(row("run:1", "claude/sample-project/review"));
+        wait_until("the first run save", || fake.runs().is_file());
+        let before = std::fs::read(fake.runs()).unwrap();
+        let modified = std::fs::metadata(fake.runs()).unwrap().modified().unwrap();
+        pump.set_collapsed("alpha", true);
+        let first = saves(&organization);
+        wait_until("a layout-only save", || saves(&organization) > first);
+        assert_eq!(std::fs::read(fake.runs()).unwrap(), before);
+        assert_eq!(
+            std::fs::metadata(fake.runs()).unwrap().modified().unwrap(),
+            modified
+        );
+        fake.finish(organization);
+    }
+
+    #[test]
+    fn exit_checkpoints_a_run_observed_inside_the_debounce_off_main() {
+        let fake = Fake::landing();
+        let pump = Pump::default();
+        let organization = fake.organization(&pump, true);
+        pump.push(row("run:exit", "claude/sample-project/review"));
+        organization.flush();
+        assert!(fake.runs().is_file());
+        let runs = organization.runs_writer();
+        assert_ne!(
+            runs.lock().unwrap().thread,
+            Some(std::thread::current().id())
+        );
+        let mut saved = runs::Runs::from_json(&std::fs::read(fake.runs()).unwrap());
+        assert_eq!(
+            saved.observe("workstation", "exit", "renamed"),
+            Some(R.into())
+        );
+        fake.finish(organization);
+    }
+
+    #[test]
+    fn an_immediate_exit_loads_old_tokens_before_writing_new_ones() {
+        let fake = Fake::landing();
+        let old = Pump::default();
+        old.push(row("run:previous", "claude/sample-project/previous"));
+        draft::write(&fake.runs(), &old.take_runs().unwrap()).unwrap();
+        let pump = Pump::default();
+        let organization = fake.organization(&pump, true);
+        pump.push(row("run:new", "claude/sample-project/new"));
+        organization.flush();
+        let mut saved = runs::Runs::from_json(&std::fs::read(fake.runs()).unwrap());
+        assert_eq!(
+            saved.observe("workstation", "previous", "next"),
+            Some("workstation\nclaude/sample-project/previous".into())
+        );
+        assert_eq!(
+            saved.observe("workstation", "new", "next"),
+            Some("workstation\nclaude/sample-project/new".into())
+        );
+        fake.finish(organization);
+    }
+
+    #[test]
+    fn a_stuck_runs_write_bounds_exit_and_does_not_block_the_draft_or_layout() {
+        let fake = Fake::landing();
+        let pump = Pump::default();
+        let organization = fake.organization(&pump, true);
+        organization.set_source(snapshot("d1"));
+        organization.observe(&state("d1"));
+        wait_until("startup", || parked(&organization) >= 1);
+        let (entered, writing) = std::sync::mpsc::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let runs = organization.runs_writer();
+        {
+            let mut writer = runs.lock().unwrap();
+            writer.stuck = Some((entered, blocked));
+            writer.saved = Instant::now() - SAVE_EVERY;
+        }
+        pump.push(row("run:stuck", "claude/sample-project/review"));
+        organization.0.wake.notify_all();
+        writing.recv_timeout(Duration::from_secs(5)).unwrap();
+        // The normal background run save is now held in I/O. Its independent
+        // lock leaves both the shared writer and the pump available.
+        assert!(organization.0.writer.try_lock().is_ok());
+        {
+            let mut hub = organization.lock();
+            hub.sync.edit(&move_to_inbox(), organization.now()).unwrap();
+        }
+        pump.set_collapsed("alpha", true);
+        let before = saves(&organization);
+        let started = Instant::now();
+        organization.flush();
+        assert!(started.elapsed() >= RUNS_EXIT_WAIT);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(
+            saves(&organization) > before,
+            "layout save ran concurrently with runs I/O"
+        );
+        assert!(fake.layout().is_file());
+        assert!(
+            fake.draft().is_file(),
+            "pending edits were flushed despite the stuck token write"
+        );
+        release.send(()).unwrap();
+        // The detached exit checkpoint also finishes before the fake is removed.
+        wait_until("the held run write", || fake.runs().is_file());
+        drop(runs.lock().unwrap());
+        fake.finish(organization);
+    }
+
+    #[test]
+    fn replay_run_tokens_never_touch_the_live_file() {
+        let fake = Fake::landing();
+        let pump = Pump::default();
+        let organization = Organization::new(
+            pump.clone(),
+            fake.hgs.clone(),
+            false,
+            fake.dir.join(layout_file(true)),
+            fake.dir.join(draft_file(true)),
+        );
+        pump.push(row("run:replay", "claude/sample-project/review"));
+        organization.flush();
+        assert!(fake.dir.join(runs::REPLAY_FILE).is_file());
+        assert!(!fake.runs().exists());
+        fake.finish(organization);
+    }
+
+    #[test]
+    fn a_failed_runs_save_is_replaced_by_the_newer_tokens() {
+        let fake = Fake::landing();
+        let pump = Pump::default();
+        let mut writer = RunsWriter::default();
+        std::fs::create_dir(fake.runs()).unwrap();
+        pump.push(row("run:1", "claude/sample-project/review"));
+        writer.save(&pump, &fake.runs(), true);
+        assert!(writer.pending.is_some());
+        std::fs::remove_dir(fake.runs()).unwrap();
+        pump.push(row("run:1", "claude/sample-project/review-2"));
+        writer.save(&pump, &fake.runs(), true);
+        assert!(writer.pending.is_none());
+        let mut runs = runs::Runs::from_json(&std::fs::read(fake.runs()).unwrap());
+        assert_eq!(runs.observe("workstation", "1", "again"), Some(R2.into()));
     }
 
     /// Runs `submit` on a thread; its answer comes back on the receiver.

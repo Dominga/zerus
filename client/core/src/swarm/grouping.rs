@@ -30,6 +30,17 @@ pub struct GroupOut {
     pub rank: u64,
 }
 
+/// One checked archive-page row, not retained by [`Grouping`]. The caller
+/// supplies its page key and the computer's machine identity, as for live rows.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ArchivedRow {
+    pub computer: ComputerId,
+    pub key: String,
+    pub machine: String,
+    pub archive_id: String,
+    pub run_id: String,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct HeaderOut {
     pub id: String,
@@ -86,6 +97,8 @@ pub struct GroupingOut {
 #[derive(Debug)]
 struct Slot {
     member: String,
+    /// Only live, non-archived rows remember a run's project.
+    run: Option<String>,
     title: String,
     group: String,
     rank: u64,
@@ -164,8 +177,23 @@ impl Grouping {
             .unwrap_or_else(|| self.default.clone())
     }
 
-    fn place(&mut self, at: At, member: String, title: String, seq: u64) {
+    fn place(&mut self, at: At, member: String, run: Option<String>, title: String, seq: u64) {
         let group = self.group_of(&member);
+        // Qt's run_groups is distinct from the rename token map. Unchanged
+        // observations do not refresh the written age (SessionOrganization.cpp:239-243).
+        if let Some((machine, run)) = member
+            .split_once('\n')
+            .and_then(|(machine, _)| run.as_deref().map(|run| (machine, run)))
+        {
+            let project = self
+                .membership
+                .get(&member)
+                .map(String::as_str)
+                .filter(|project| self.listed.contains(*project));
+            if self.layout.run_project(machine, run) != project {
+                self.layout.remember_run(machine, run, project);
+            }
+        }
         let rank = self.layout.rank(&group, &member);
         let changed = self
             .rows
@@ -178,6 +206,7 @@ impl Grouping {
             at,
             Slot {
                 member,
+                run,
                 title,
                 group,
                 rank,
@@ -186,7 +215,13 @@ impl Grouping {
         );
     }
 
-    fn upsert(&mut self, computer: &ComputerId, key: &str, machine: &str, name: &str, title: &str) {
+    fn upsert(&mut self, computer: &ComputerId, key: &str, row: &crate::ViewRow) {
+        let (machine, name, title) = (row.machine.as_str(), row.name.as_str(), row.title.as_str());
+        let run = row
+            .run_id
+            .as_ref()
+            .filter(|run| !run.is_empty() && row.state != "archived" && row.archive_id.is_none())
+            .cloned();
         let at = (computer.clone(), key.to_owned());
         let member = super::member(machine, name);
         let mut seq = None;
@@ -205,7 +240,7 @@ impl Grouping {
             self.next_seq
         });
         if self.loaded {
-            self.place(at, member, title.to_owned(), seq);
+            self.place(at, member, run, title.to_owned(), seq);
         } else {
             // Before the first catalog the row is only recorded: no placement,
             // no rank, no group. A rename above has already moved the layout's
@@ -215,6 +250,7 @@ impl Grouping {
                 at,
                 Slot {
                     member,
+                    run,
                     title: title.to_owned(),
                     group: String::new(),
                     rank: 0,
@@ -279,9 +315,7 @@ impl Grouping {
     /// A row change from the pump.
     pub fn observe(&mut self, change: &Change) {
         match change {
-            Change::Upsert { computer, key, row } => {
-                self.upsert(computer, key, &row.machine, &row.name, &row.title)
-            }
+            Change::Upsert { computer, key, row } => self.upsert(computer, key, row),
             Change::Remove { computer, key, .. } => {
                 let at = (computer.clone(), key.clone());
                 self.rows.remove(&at);
@@ -294,7 +328,7 @@ impl Grouping {
                 self.dirty
                     .retain(|(owner, key)| owner != computer || keep.contains(key.as_str()));
                 for (key, row) in rows {
-                    self.upsert(computer, key, &row.machine, &row.name, &row.title);
+                    self.upsert(computer, key, row);
                 }
             }
             _ => {}
@@ -308,10 +342,58 @@ impl Grouping {
     }
 
     fn prune_layout(&mut self) {
+        self.prune_layout_with(&HashSet::new());
+    }
+
+    fn prune_layout_with(&mut self, page: &HashSet<String>) {
         let listed: HashSet<String> = self.rows.values().map(|slot| slot.member.clone()).collect();
         let membership = Arc::clone(&self.membership);
-        self.layout
-            .prune(|member| listed.contains(member) || membership.contains_key(member));
+        self.layout.prune(|member| {
+            listed.contains(member) || membership.contains_key(member) || page.contains(member)
+        });
+    }
+
+    /// Place one archive page: explicit archive membership, then the run's
+    /// last project if it still exists, then the default (Qt observe,
+    /// SessionOrganization.cpp:223-247). A page adds no live rows or stream
+    /// changes. The normal archive reader rejects oversized pages; this
+    /// boundary also caps work at [`crate::reads::ARCHIVE_PAGE_ROWS`].
+    pub fn place_archived(&mut self, rows: &[ArchivedRow]) -> Vec<GroupOut> {
+        let mut page = HashSet::new();
+        let out = rows
+            .iter()
+            .take(crate::reads::ARCHIVE_PAGE_ROWS)
+            .map(|row| {
+                let member = super::archive_member(&row.machine, &row.archive_id);
+                let project = self
+                    .membership
+                    .get(&member)
+                    .map(String::as_str)
+                    .filter(|project| self.listed.contains(*project))
+                    .or_else(|| {
+                        self.layout
+                            .run_project(&row.machine, &row.run_id)
+                            .filter(|project| self.listed.contains(*project))
+                    })
+                    .unwrap_or(&self.default)
+                    .to_owned();
+                let rank = self.layout.rank(&project, &member);
+                page.insert(member);
+                GroupOut {
+                    computer: row.computer.clone(),
+                    key: row.key.clone(),
+                    group: project,
+                    rank,
+                }
+            })
+            .collect();
+        // Pages can change while the live catalog is quiet. Keep rank caching
+        // bounded on this path too, preserving the current page through pruning.
+        if self.layout.len() > super::layout::MAX_MEMBERS.max(self.prune_floor) + 1024 {
+            self.prune_layout_with(&page);
+            self.prune_floor = self.layout.len();
+        }
+        out
     }
 
     /// The organization the list shows; `revision` changes whenever it does.
@@ -382,7 +464,7 @@ impl Grouping {
             self.prune_layout();
             self.prune_floor = self.layout.len();
         }
-        let mut slots: Vec<(u64, At, String, String)> = self
+        let mut slots: Vec<_> = self
             .rows
             .iter()
             .map(|(at, slot)| {
@@ -390,13 +472,14 @@ impl Grouping {
                     slot.seq,
                     at.clone(),
                     slot.member.clone(),
+                    slot.run.clone(),
                     slot.title.clone(),
                 )
             })
             .collect();
         slots.sort_unstable_by_key(|slot| slot.0);
-        for (seq, at, member, title) in slots {
-            self.place(at, member, title, seq);
+        for (seq, at, member, run, title) in slots {
+            self.place(at, member, run, title, seq);
         }
     }
 
@@ -407,7 +490,7 @@ impl Grouping {
         self.prune_floor = 0;
         self.headers_dirty = true;
         if self.loaded {
-            let mut slots: Vec<(u64, At, String, String)> = self
+            let mut slots: Vec<_> = self
                 .rows
                 .iter()
                 .map(|(at, slot)| {
@@ -415,13 +498,14 @@ impl Grouping {
                         slot.seq,
                         at.clone(),
                         slot.member.clone(),
+                        slot.run.clone(),
                         slot.title.clone(),
                     )
                 })
                 .collect();
             slots.sort_unstable_by_key(|slot| slot.0);
-            for (seq, at, member, title) in slots {
-                self.place(at, member, title, seq);
+            for (seq, at, member, run, title) in slots {
+                self.place(at, member, run, title, seq);
             }
         }
     }

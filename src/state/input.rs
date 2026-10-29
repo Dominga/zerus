@@ -560,7 +560,7 @@ fn claude_input_frame_empty(screen: &str, cursor_y: usize) -> bool {
             text.starts_with('●') && text.contains("/effort")
         })
     };
-    for composer in (cursor_y.saturating_sub(2))..=(cursor_y + 2) {
+    for composer in 0..lines.len() {
         if !empty_prompt(composer) || !rule(composer + 1) {
             continue;
         }
@@ -570,11 +570,14 @@ fn claude_input_frame_empty(screen: &str, cursor_y: usize) -> bool {
         if composer < 2 || !rule(composer - 1) || !effort(composer - 2) {
             continue;
         }
-        // A caret on the composer itself is the prompt-row check's business.
-        if cursor_y == composer {
-            continue;
-        }
-        if (composer - 2..=composer + 2).contains(&cursor_y) {
+        // The caret may rest anywhere around this frame: on it, above it, or on
+        // a blank row below it. Text below the footer (a dialog) means the
+        // screen is not a plain empty input.
+        let footer = composer + 2;
+        let blank = |index: usize| {
+            lines.get(index).is_none_or(|row| styled_row(row).iter().all(|(ch, _)| ch.is_whitespace()))
+        };
+        if cursor_y <= footer || ((footer + 1)..=cursor_y).all(blank) {
             return true;
         }
     }
@@ -770,6 +773,22 @@ pub(super) fn checked_terminal(record: &Value, empty: bool) -> Result<()> {
             cursor_y,
             codex_footer_model(record),
         ) {
+            // U53 diagnostics: one native run prints which check refused and
+            // where the caret and its row are, behind a flag only a test sets.
+            if nonempty_env("HGS_INPUT_TRACE").is_some() {
+                let agent = string(record, "agent");
+                let lines: Vec<&str> = screen.lines().collect();
+                let row = lines.get(cursor_y).copied().unwrap_or("");
+                let previous = cursor_y
+                    .checked_sub(1)
+                    .and_then(|y| lines.get(y))
+                    .copied()
+                    .unwrap_or("");
+                let prompt = prompt_empty(agent, row, previous, &screen, cursor_x);
+                return Err(format!(
+                    "{DRAFT} [trace: agent={agent} cursor=({cursor_x},{cursor_y}) prompt_empty={prompt} row={row:?}]"
+                ));
+            }
             return Err(DRAFT.into());
         }
     }
@@ -1306,6 +1325,14 @@ mod tests {
         // A dialog that replaces the composer row is not an empty input.
         let dialog = screen.replace("❯\u{a0}", "╭─ Question ─╮");
         assert!(!composer_empty("claude", &dialog, 2, composer));
+        // A hidden caret parked on a blank row below the footer is the same
+        // input; text there (a dialog) is never accepted.
+        let mut parked = lines.clone();
+        parked.extend([String::new(), String::new(), String::new()]);
+        assert!(composer_empty("claude", &parked.join("\n"), 0, composer + 4));
+        let mut text_below = lines.clone();
+        text_below.push("  Approve command?".into());
+        assert!(!composer_empty("claude", &text_below.join("\n"), 0, composer + 3));
     }
 
     #[test]

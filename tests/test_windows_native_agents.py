@@ -289,12 +289,28 @@ class NativeAgent:
                           rc=None)
         return json.loads(result.stdout)["ok"]["text"] if result.returncode == 0 else f"(no capture: {result.stderr})"
 
+    def pane(self, name):
+        """The host's pane facts, including where its caret is, in cells."""
+        result = self.hgs("__host", "call", json.dumps({"op": "pane_info", "target": {"name": name}}), rc=None)
+        return json.loads(result.stdout)["ok"] if result.returncode == 0 else {}
+
     def describe(self):
-        """The screens, the listing, the host's log and the fake model's requests, for failure messages."""
+        """The screens, the caret, the listing, the host's log and the fake model's requests, for
+        failure messages."""
         parts = []
         for name in self.names:
             try:
                 parts.append(f"screen of {name}:\n{self.capture(name)}")
+                pane = self.pane(name)
+                parts.append(f"pane of {name}: " + json.dumps(
+                    {key: pane.get(key) for key in ("width", "height", "cursor_x", "cursor_y", "dead")}))
+                styled = self.hgs("__host", "call", json.dumps(
+                    {"op": "capture", "target": {"name": name}, "styled": True}), rc=None)
+                rows = (json.loads(styled.stdout)["ok"]["text"].splitlines()
+                        if styled.returncode == 0 else [])
+                cursor_y = pane.get("cursor_y")
+                if isinstance(cursor_y, int) and 0 <= cursor_y < len(rows):
+                    parts.append(f"styled row {cursor_y} of {name}: {rows[cursor_y]!r}")
                 parts.append(f"record of {name}: " + json.dumps(
                     {key: self.record(name).get(key) for key in ("activity", "phase", "conversation_id", "run_id",
                                                                "expected_id", "error", "input_pending_at",
@@ -630,6 +646,9 @@ class NativeAgent:
         agent: the same conversation, folder and name, copied into the new account's native
         store, and the agent resumes it there; the old account keeps its own copy."""
         name = self.launch(tag, *([self.NO_HOOK_REVIEW] if self.NO_HOOK_REVIEW else []))
+        # A refused send names which empty-composer check refused and where the
+        # caret is (Claude 2.1.312 parks it outside the prompt row).
+        self.env["HGS_INPUT_TRACE"] = "1"
         # A real turn first: Claude writes its transcript only after the first prompt, and
         # Codex names it in the record only then.
         self.deliver(name, MESSAGES[0])
@@ -652,9 +671,13 @@ class NativeAgent:
                          (name, str(self.project), conversation, "second", str(folder)))
         self.assertNotEqual(switched["run_id"], before["run_id"])
         self.assertFalse(switched.get("expected_id"), switched.get("expected_id"))
-        # The copy is in the new account's store; the old account keeps its own.
+        # The copy is in the new account's store and starts with the conversation's
+        # records: the resumed agent may append to it. The old account keeps its own
+        # file unchanged.
         copy = next(folder.rglob(f"*{conversation}.jsonl"))
-        self.assertEqual(copy.read_bytes(), original)
+        copied = copy.read_bytes()
+        self.assertEqual(copied[:len(original)], original, "the copy does not start with the conversation")
+        self.assertEqual(transcript.read_bytes(), original, "the old account's file changed")
         self.assertTrue(transcript.is_file())
         # The listing and the inspection both name the account.
         self.assertEqual((self.row(name)["account_id"], self.row(name)["account_label"]),

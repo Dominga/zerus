@@ -3,7 +3,7 @@ import { archiveRows } from "../../store/archive";
 import { catalog, computerFresh, orderedRows } from "../../store/catalog";
 import { defaultProject, grouping, groups } from "../../store/organization";
 import { stateFilter, matchesFilter, search, machineFilter, projectFilter, expandedChildren, compactRows } from "../../store/ui";
-import { headerAttention, isWorking, needsAttention } from "../../store/attention";
+import { headerAttention, isWorking, needsAttention, visibleUnreadReply } from "../../store/attention";
 import type { GroupingOut } from "../../types";
 import type { Session, Subagent } from "./types";
 
@@ -103,7 +103,7 @@ export function groupRows(input: ListInput): Row[] {
       const up = input.online(s);
       if (!s.muted && headerAttention(s, up)) attention++;
       // An offline computer's unread replies count too (visibleUnreadReply, HgsClient.h:104-105).
-      if (!s.muted && s.unread) unread++;
+      if (!s.muted && visibleUnreadReply(s, up)) unread++;
       if (isWorking(s, up)) working++;
     }
     out.push({ type: "header", id: `h:${h.id}`, project: h.id, name: h.name, color: h.color, palette: h.palette,

@@ -334,6 +334,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     allowed,
                     dir.join(organization::layout_file(replay)),
                     draft_path,
+                    replay,
                 );
                 // Before any start of the source (the menu bar's below, or the webview's).
                 app.state::<commands::AppState>().set_organization(organization.clone());

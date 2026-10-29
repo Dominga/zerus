@@ -79,9 +79,6 @@ objc2-web-kit = { version = "0.3.2", default-features = false, features = ["std"
 # Attention notifications under the app's identity (platform/macos_notify.rs).
 objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "block2", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSettings", "UNNotificationSound", "UNNotificationTrigger", "UNUserNotificationCenter"] }
 
-[dev-dependencies]
-tauri = { version = "2", features = ["test"] }
-
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

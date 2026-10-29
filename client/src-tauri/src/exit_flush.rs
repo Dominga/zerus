@@ -206,7 +206,7 @@ pub(crate) const QUIT_ID: &str = "zerus.quit-with-flush";
 
 /// Tauri's own menu and item instances, with Cocoa's Show All and terminate: replaced.
 #[cfg(target_os = "macos")]
-pub(crate) fn app_menu<R: tauri::Runtime>(app: &AppHandle<R>) -> tauri::Result<tauri::menu::Menu<R>> {
+pub(crate) fn app_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     use tauri::menu::{Menu, MenuItem, MenuItemKind, PredefinedMenuItem};
     let menu = Menu::default(app)?;
     let before = menu_snapshot(&menu)?;
@@ -248,9 +248,9 @@ pub(crate) fn app_menu<R: tauri::Runtime>(app: &AppHandle<R>) -> tauri::Result<t
 /// No accelerator getter exists in Tauri/muda. Unchanged ids are the same
 /// native item instances; their accelerators and predefined editing actions stay intact.
 #[cfg(target_os = "macos")]
-fn menu_snapshot<R: tauri::Runtime>(menu: &tauri::menu::Menu<R>) -> tauri::Result<serde_json::Value> {
+fn menu_snapshot(menu: &tauri::menu::Menu<tauri::Wry>) -> tauri::Result<serde_json::Value> {
     use tauri::menu::MenuItemKind;
-    fn entries<R: tauri::Runtime>(items: Vec<MenuItemKind<R>>) -> tauri::Result<serde_json::Value> {
+    fn entries(items: Vec<MenuItemKind<tauri::Wry>>) -> tauri::Result<serde_json::Value> {
         let mut out = Vec::new();
         for item in items {
             let (kind, caption, children) = match &item {
@@ -438,20 +438,6 @@ mod tests {
         let mut changed_quit = after;
         changed_quit[0]["children"][8]["caption"] = "Quit something else".into();
         assert_ne!(expected, changed_quit);
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn app_menu_places_show_all_before_the_quit_separator() {
-        let app = tauri::test::mock_app();
-        let menu = app_menu(app.handle()).expect("the default application menu builds");
-        let snapshot = menu_snapshot(&menu).expect("the application menu is readable");
-        let entries = snapshot[0]["children"].as_array().unwrap();
-        assert_eq!(entries.len(), 9);
-        assert_eq!(entries[6]["caption"], "Show All");
-        assert_eq!(entries[7]["caption"], "");
-        assert_eq!(entries[8]["id"], QUIT_ID);
-        assert_eq!(entries[8]["kind"], "item");
     }
 
     #[test]

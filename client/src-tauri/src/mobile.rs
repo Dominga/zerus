@@ -10,7 +10,7 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -60,6 +60,9 @@ pub struct Mobile(Arc<Inner>);
 
 struct Inner {
     page: Mutex<Page>,
+    /// The page's clock: monotonic, so a changed system time neither names
+    /// nor hides the sync service early.
+    started: Instant,
     blocked: bool,
     calls: Calls,
     notify: Box<dyn Fn() + Send + Sync>,
@@ -76,12 +79,6 @@ pub fn start(app: &AppHandle) -> Mobile {
     )))
 }
 
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| since.as_millis() as i64)
-}
-
 /// Runs `work` on a thread of its own; false when it could not start.
 fn spawn(name: &str, work: impl FnOnce() + Send + 'static) -> bool {
     std::thread::Builder::new()
@@ -94,10 +91,15 @@ impl Inner {
     fn new(blocked: bool, calls: Calls, notify: Box<dyn Fn() + Send + Sync>) -> Inner {
         Inner {
             page: Mutex::new(Page::new()),
+            started: Instant::now(),
             blocked,
             calls,
             notify,
         }
+    }
+
+    fn now_ms(&self) -> i64 {
+        i64::try_from(self.started.elapsed().as_millis()).unwrap_or(i64::MAX)
     }
 
     fn page(&self) -> MutexGuard<'_, Page> {
@@ -108,7 +110,7 @@ impl Inner {
     fn view(&self, snapshot: Option<&Value>) -> View {
         let mut page = self.page();
         if let Some(snapshot) = snapshot {
-            page.swarm_snapshot(snapshot, now_ms());
+            page.swarm_snapshot(snapshot, self.now_ms());
         }
         page.view()
     }
@@ -171,7 +173,7 @@ impl Inner {
         });
         if !started {
             let failed = mobile::phones_view(Vec::new(), Some("could not start".into()), false);
-            self.page().phones_answered(failed);
+            self.page().phones_unstarted(failed);
         }
     }
 
@@ -218,7 +220,7 @@ impl Inner {
             let mut call = call;
             loop {
                 let answer = (inner.calls.delivery)(&call);
-                let next = inner.page().delivery_answered(answer, now_ms());
+                let next = inner.page().delivery_answered(answer, inner.now_ms());
                 (inner.notify)();
                 match next {
                     Some(again) => call = again,
@@ -227,8 +229,8 @@ impl Inner {
             }
         });
         if !started {
-            self.page()
-                .delivery_answered(Err("hgs did not respond".into()), now_ms());
+            let now = self.now_ms();
+            self.page().delivery_unstarted(now);
         }
     }
 

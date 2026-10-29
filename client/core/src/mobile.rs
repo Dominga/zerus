@@ -532,8 +532,8 @@ pub struct PhoneList {
     pub phones: Vec<Phone>,
 }
 
-/// One shell word: as it is when nothing in it needs quoting.
-fn shell_word(text: &str) -> String {
+/// One POSIX shell word: as it is when nothing in it needs quoting.
+fn posix_word(text: &str) -> String {
     let plain = !text.is_empty()
         && text
             .chars()
@@ -542,6 +542,30 @@ fn shell_word(text: &str) -> String {
         text.to_owned()
     } else {
         format!("'{}'", text.replace('\'', "'\\''"))
+    }
+}
+
+/// One PowerShell word. `@` starts a splat and `,` an array there, so both
+/// are quoted; a quote doubles inside single quotes.
+fn powershell_word(text: &str) -> String {
+    let plain = !text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_.:/=+%".contains(c));
+    if plain {
+        text.to_owned()
+    } else {
+        format!("'{}'", text.replace('\'', "''"))
+    }
+}
+
+/// One word of the terminal the person types the command into: PowerShell
+/// on Windows, a POSIX shell elsewhere.
+fn shell_word(text: &str) -> String {
+    if cfg!(windows) {
+        powershell_word(text)
+    } else {
+        posix_word(text)
     }
 }
 

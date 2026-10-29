@@ -2582,12 +2582,24 @@ fn swap_member(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<E
                 member.error = text(failure, "error").to_owned();
             }
         }
-        let keep = input["bulk"].as_bool() == Some(true);
+        // A member the switch could not move falls back to a fresh session; the
+        // old one was paused and renamed, and the feed says so.
+        let fresh: Vec<String> = input["fresh"]
+            .as_array()
+            .map(|ids| ids.iter().filter_map(|id| id.as_str()).map(str::to_owned).collect())
+            .unwrap_or_default();
+        for note in input["notes"].as_array().into_iter().flatten() {
+            events.push(Event::new(
+                "member_retired",
+                json!({"member":team.role_of(text(note, "member")),"note":text(note, "note")}),
+            ));
+        }
         let mut swapped = Vec::new();
         for id in ids.iter().filter_map(|id| id.as_str()) {
+            let keep = input["bulk"].as_bool() == Some(true) && !fresh.iter().any(|fresh| fresh == id);
             swapped.push(swap_one(team, input, id, keep, actor, events)?);
         }
-        return Ok(json!({"status":"swapped","members":swapped}));
+        return Ok(json!({"status":"swapped","members":swapped,"fresh":fresh}));
     }
     let id = text(input, "member").to_owned();
     ensure!(!id.is_empty(), "A member id is required");
@@ -3720,7 +3732,11 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
         "expect" => expect(team, input, actor, events),
         "swap-member" => swap_member(team, input, actor, events),
         "relaunch" => {
-            ensure!(matches!(actor, Actor::Human), "Only you relaunch a member");
+            // U54: the owner relaunches directly; the lead on its verified word.
+            ensure!(
+                matches!(actor, Actor::Human) || (actor.is_lead(team) && input["roster_word"].as_bool() == Some(true)),
+                "Only you relaunch a member; the lead needs your word"
+            );
             let id = text(input, "member").to_owned();
             let member = team.members.iter_mut().find(|m| m.id == id).context("Unknown member")?;
             ensure!(member.session.is_none() && !member.error.is_empty(), "This member's session did not fail to start");

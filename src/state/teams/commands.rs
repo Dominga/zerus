@@ -158,6 +158,27 @@ fn switch_member_account(name: &str, account: &str, request: &str) -> anyhow::Re
     crate::state::switch_account::switch_member(&config, name, account, request).map_err(|error| anyhow::anyhow!(error))
 }
 
+/// U54: the fresh-session fallback. The old session is paused once it is idle
+/// (never killed; its conversation stays under Saved) and renamed to
+/// `<name>-<old account>` so the member's new session of the same name can
+/// start. A busy one is left alone (`Err` names the wait).
+fn retire_old_session(name: &str, from: &str) -> std::result::Result<String, String> {
+    let record = crate::state::storage::read(name)
+        .map_err(|error| format!("the old session was not paused: {error}"))?;
+    crate::state::lifecycle::pause_one_quiet(&record, None, true)
+        .map_err(|_| "waiting for the old session to finish its turn".to_owned())?;
+    let label = from.trim();
+    let label = if label.is_empty() || label == "native" {
+        "native".to_owned()
+    } else {
+        label.trim_start_matches("native-").to_owned()
+    };
+    let renamed = format!("{name}-{label}");
+    crate::state::rename::dispatch(&[name.to_owned(), renamed.clone()], false)
+        .map_err(|error| format!("the old session was paused but not renamed: {error}"))?;
+    Ok(format!("the old session was paused and saved as {renamed}"))
+}
+
 /// The member whose dsh session carries this conversation id. A dsh session
 /// has no process environment of an hgs session; its harness exports the
 /// conversation id as `DSH_SESSION_ID` instead (A3, A4).
@@ -2526,6 +2547,21 @@ fn roster_word_rule(team: &Team, op: &str, input: &Value) -> super::owner_word::
                 }
             }
         }
+        "relaunch" => {
+            // U54: the lead relaunches a member's session on the owner's word.
+            let id = text(input, "member");
+            if id.is_empty() {
+                WordRule::default()
+            } else {
+                WordRule {
+                    phrases: ROSTER_PHRASES,
+                    all: Vec::new(),
+                    add: false,
+                    verbs: super::owner_word::RELAUNCH_VERBS,
+                    names: names_for(id),
+                }
+            }
+        }
         "settings" => {
             let cap = input["settings"]["max_members"].as_u64();
             match cap {
@@ -3290,6 +3326,8 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                 let ids = bulk_swap_members(&team, &sessions, &from, &provider);
                 ensure!(!ids.is_empty(), format!("No member of team {} runs on account {from}", team.name));
                 let mut moved = Vec::new();
+                let mut fresh = Vec::new();
+                let mut notes = Vec::new();
                 let mut failed = Vec::new();
                 for id in &ids {
                     let member = team.member(id).context("Unknown member")?;
@@ -3306,15 +3344,26 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                     let request = uuid::Uuid::from_bytes(bytes).to_string();
                     match switch_member_account(&session.name, &to, &request) {
                         Ok(receipt) if receipt["status"] == "switched" => moved.push(id.clone()),
-                        Ok(receipt) => failed.push(json!({
-                            "member":id,
-                            "error":format!("{}: the account switch is {}; the session stays on account {}", session.name, receipt["status"], from)
-                        })),
-                        Err(error) => failed.push(json!({"member":id,"error":error.to_string()})),
+                        Ok(receipt) => match retire_old_session(&session.name, &from) {
+                            Ok(note) => {
+                                fresh.push(id.clone());
+                                notes.push(json!({"member":id,"note":format!("the account switch is {}; {note}", receipt["status"])}));
+                            }
+                            Err(wait) => failed.push(json!({"member":id,"error":format!("the account switch is {}; {wait}", receipt["status"])})),
+                        },
+                        Err(error) => match retire_old_session(&session.name, &from) {
+                            Ok(note) => {
+                                fresh.push(id.clone());
+                                notes.push(json!({"member":id,"note":format!("{error}; {note}")}));
+                            }
+                            Err(wait) => failed.push(json!({"member":id,"error":format!("{error}; {wait}")})),
+                        },
                     }
                 }
-                ensure!(!moved.is_empty(), format!("No member of team {} could move to account {to}", team.name));
+                ensure!(!moved.is_empty() || !fresh.is_empty(), format!("No member of team {} could move to account {to}", team.name));
                 filled["members"] = json!(moved);
+                filled["fresh"] = json!(fresh);
+                filled["notes"] = json!(notes);
                 filled["bulk"] = json!(true);
                 filled["account"] = json!(to);
                 filled["failed"] = json!(failed);
@@ -3396,7 +3445,7 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             }
             // U26: a lead changes the roster (or max_members) only on the
             // owner's fresh word, and only for the change that word names.
-            if matches!(op, "add-member" | "scale" | "drain" | "swap-member" | "remove-member" | "settings") {
+            if matches!(op, "add-member" | "scale" | "drain" | "swap-member" | "remove-member" | "relaunch" | "settings") {
                 let team = store.load(team_id)?.context("Unknown team")?;
                 let caller = actor(&team, op, &filled)?;
                 check_roster_word(&team, op, input, &mut filled, &caller, |team, input, rule, now| {
@@ -3714,6 +3763,26 @@ mod tests {
         assert_eq!(task.attempts[0].state, AttemptState::Delivered);
         assert!(task.continuation.is_none());
         assert!(events.iter().any(|event| event.kind == "member_swapped"));
+    }
+
+    /// U54: the lead relaunches a member only on a word that names it.
+    #[test]
+    fn the_leads_relaunch_needs_a_word_that_names_the_member() {
+        use super::*;
+        use crate::state::teams::model::Member;
+        let team = Team {
+            id: "t".into(),
+            name: "T".into(),
+            lead: "lead".into(),
+            members: vec![Member { id: "dev".into(), role: "Backend".into(), agent: "claude".into(), ..Default::default() }],
+            ..Default::default()
+        };
+        let rule = roster_word_rule(&team, "relaunch", &json!({"member":"dev"}));
+        assert!(rule.needed());
+        assert!(rule.names.iter().any(|name| name == "dev"), "{:?}", rule.names);
+        assert!(rule.names.iter().any(|name| name.eq_ignore_ascii_case("backend")), "{:?}", rule.names);
+        // Another member's relaunch is not this word's.
+        assert!(!roster_word_rule(&team, "relaunch", &json!({"member":""})).needed());
     }
 
     /// U54: a renamed session stays the member. The caller matches by its run

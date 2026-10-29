@@ -93,6 +93,8 @@ pub(crate) struct Seen {
     /// Its agent (claude, codex, dsh, ...): a DeepSeek session's listing
     /// `last_event_at` does not advance with its native tool events (#628).
     pub agent: String,
+    /// U54: the account its session really runs on, from the listing.
+    pub account_id: String,
 }
 
 /// The newest Background job of a session (C12).
@@ -213,6 +215,7 @@ pub(crate) fn seen(listing: &Value) -> Vec<Seen> {
                 limited,
                 model: field("model").to_owned(),
                 effort: field("effort").to_owned(),
+                account_id: field("account_id").to_owned(),
             });
         }
     }

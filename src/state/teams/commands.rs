@@ -118,6 +118,46 @@ fn follow_session_rename(store: &mut Store, team_id: &str, record: Option<&Value
     Ok(())
 }
 
+/// U54: the members a bulk swap moves: those of `provider` (any when empty)
+/// whose session really runs on `from` (the listing's account, not only the
+/// configured one), the lead included.
+fn bulk_swap_members(team: &Team, sessions: &[super::dispatcher::Seen], from: &str, provider: &str) -> Vec<String> {
+    let native = from.is_empty() || from == "native" || from.starts_with("native-");
+    team.members
+        .iter()
+        .filter(|member| member.state != MemberState::Removed)
+        .filter(|member| provider.is_empty() || member.agent == provider)
+        .filter(|member| {
+            let Some(session) = member
+                .session
+                .as_ref()
+                .filter(|session| session.host.is_empty() && !session.name.is_empty())
+            else {
+                return false;
+            };
+            sessions
+                .iter()
+                .find(|seen| seen.name == session.name && (session.run_id.is_empty() || session.run_id == seen.run_id))
+                .is_some_and(|seen| if native { seen.account_id.is_empty() } else { seen.account_id == from })
+        })
+        .map(|member| member.id.clone())
+        .collect()
+}
+
+/// U54: a same-agent account move goes through U53's switch, which keeps the
+/// session, conversation and attempt; a test replaces the live switch.
+#[cfg(test)]
+pub(crate) type TestSwitch = fn(&str, &str, &str) -> anyhow::Result<Value>;
+
+fn switch_member_account(name: &str, account: &str, request: &str) -> anyhow::Result<Value> {
+    #[cfg(test)]
+    if let Some(switch) = tests::test_switch() {
+        return switch(name, account, request);
+    }
+    let config = crate::config::Config::load().map_err(|error| anyhow::anyhow!(error.message))?;
+    crate::state::switch_account::switch_member(&config, name, account, request).map_err(|error| anyhow::anyhow!(error))
+}
+
 /// The member whose dsh session carries this conversation id. A dsh session
 /// has no process environment of an hgs session; its harness exports the
 /// conversation id as `DSH_SESSION_ID` instead (A3, A4).
@@ -732,6 +772,9 @@ pub(super) fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::d
             if member.state == MemberState::Removed {
                 continue;
             }
+            // U54: the real account of the member's session, beside its
+            // configured one.
+            entry["session_account"] = json!(session_account(member));
             let folder = super::dispatcher::member_folder_path(team, member).unwrap_or_default();
             // C11: a member on another computer works in a folder there; this
             // computer cannot read it, so its facts stay empty rather than
@@ -782,6 +825,23 @@ fn findings_page(team: &Team, before: Option<u64>) -> Value {
     json!({"items":items,"next_cursor":next_cursor})
 }
 
+/// U54: the account a member's session really runs on, read from its record -
+/// the configured account only while the session is remote or unknown, so the
+/// roster never hides where a member really runs.
+fn session_account(member: &Member) -> String {
+    let Some(session) = member
+        .session
+        .as_ref()
+        .filter(|session| session.host.is_empty() && !session.name.is_empty())
+    else {
+        return member.account.clone();
+    };
+    crate::state::storage::read(&session.name)
+        .ok()
+        .and_then(|record| record["account_id"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| member.account.clone())
+}
+
 /// A team as the session list shows it: members with their sessions and each
 /// task's state, without descriptions, reports or the feed. The list never
 /// reads the live session listing: the desktop polls it often (C1).
@@ -793,6 +853,7 @@ fn summary(team: &Team) -> Value {
         .filter(|m| m.state != MemberState::Removed)
         .map(|m| {
             let mut value = json!({"id":m.id,"role":team.role_of(&m.id),"agent":m.agent,"model":m.model,"computer":m.computer,
+                "account":m.account,"session_account":session_account(m),
                 "session":m.session,"state":m.state,"error":m.error,"queue":member_queue(team, &m.id),
                 "stage_queue":super::stages::queue(team, &m.id),
                 "services":m.services,"question":m.permission});
@@ -2445,11 +2506,24 @@ fn roster_word_rule(team: &Team, op: &str, input: &Value) -> super::owner_word::
             }
         }
         "swap-member" => {
-            let id = text(input, "member");
-            if id.is_empty() {
+            // U54: a bulk swap names every member it moves.
+            let mut ids: Vec<String> = input["members"]
+                .as_array()
+                .map(|ids| ids.iter().filter_map(|id| id.as_str()).map(str::to_owned).collect())
+                .unwrap_or_default();
+            if ids.is_empty() {
+                ids.push(text(input, "member").to_owned());
+            }
+            if ids.iter().any(String::is_empty) {
                 WordRule::default()
             } else {
-                WordRule { phrases: ROSTER_PHRASES, all: Vec::new(), add: false, verbs: SWAP_VERBS, names: names_for(id) }
+                WordRule {
+                    phrases: ROSTER_PHRASES,
+                    all: Vec::new(),
+                    add: false,
+                    verbs: SWAP_VERBS,
+                    names: ids.iter().flat_map(|id| names_for(id)).collect(),
+                }
             }
         }
         "settings" => {
@@ -3201,6 +3275,50 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                 object.remove("owner_word_change");
                 object.remove("roster_word");
             }
+            // U54: one owner action moves every member whose session really
+            // runs on from_account, of the requested agent, the lead included.
+            // A same-provider move keeps the conversation through U53's switch;
+            // a member whose switch does not confirm stays where it is and the
+            // answer names why.
+            if op == "swap-member" && !text(&filled, "from_account").is_empty() {
+                let from = text(&filled, "from_account").to_owned();
+                let to = text(&filled, "to_account").to_owned();
+                ensure!(!to.is_empty(), "A bulk swap needs to_account");
+                let provider = text(&filled, "provider").to_owned();
+                let team = store.load(team_id)?.context("Unknown team")?;
+                let sessions = live_sessions()?;
+                let ids = bulk_swap_members(&team, &sessions, &from, &provider);
+                ensure!(!ids.is_empty(), format!("No member of team {} runs on account {from}", team.name));
+                let mut moved = Vec::new();
+                let mut failed = Vec::new();
+                for id in &ids {
+                    let member = team.member(id).context("Unknown member")?;
+                    let Some(session) = member.session.as_ref().filter(|session| session.host.is_empty() && !session.name.is_empty()) else {
+                        failed.push(json!({"member":id,"error":"the member has no local session to move"}));
+                        continue;
+                    };
+                    // A deterministic request id makes a replayed bulk swap
+                    // the same U53 request, never a second switch.
+                    use sha2::{Digest, Sha256};
+                    let digest = Sha256::digest(format!("{}:{}:{}", text(&filled, "request_id"), id, to).as_bytes());
+                    let mut bytes = [0u8; 16];
+                    bytes.copy_from_slice(&digest[..16]);
+                    let request = uuid::Uuid::from_bytes(bytes).to_string();
+                    match switch_member_account(&session.name, &to, &request) {
+                        Ok(receipt) if receipt["status"] == "switched" => moved.push(id.clone()),
+                        Ok(receipt) => failed.push(json!({
+                            "member":id,
+                            "error":format!("{}: the account switch is {}; the session stays on account {}", session.name, receipt["status"], from)
+                        })),
+                        Err(error) => failed.push(json!({"member":id,"error":error.to_string()})),
+                    }
+                }
+                ensure!(!moved.is_empty(), format!("No member of team {} could move to account {to}", team.name));
+                filled["members"] = json!(moved);
+                filled["bulk"] = json!(true);
+                filled["account"] = json!(to);
+                filled["failed"] = json!(failed);
+            }
             if op == "use-last-reply" && text(input, "attempt").is_empty() {
                 // Without an attempt, the task's open one.
                 let team = store.load(team_id)?.context("Unknown team")?;
@@ -3430,6 +3548,174 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
 
 #[cfg(test)]
 mod tests {
+    thread_local! {
+        static TEST_SWITCH: std::cell::RefCell<Option<super::TestSwitch>> = const { std::cell::RefCell::new(None) };
+    }
+
+    pub(crate) fn set_test_switch(switch: Option<super::TestSwitch>) {
+        TEST_SWITCH.with(|slot| *slot.borrow_mut() = switch);
+    }
+
+    pub(crate) fn test_switch() -> Option<super::TestSwitch> {
+        TEST_SWITCH.with(|slot| *slot.borrow())
+    }
+
+    thread_local! {
+        static SWITCH_CALLS: std::cell::RefCell<Vec<(String, String)>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    fn switched_switch(name: &str, account: &str, _request: &str) -> anyhow::Result<Value> {
+        SWITCH_CALLS.with(|calls| calls.borrow_mut().push((name.to_owned(), account.to_owned())));
+        Ok(json!({"status":"switched"}))
+    }
+
+    fn uncertain_switch(_name: &str, _account: &str, _request: &str) -> anyhow::Result<Value> {
+        Ok(json!({"status":"uncertain"}))
+    }
+
+    /// U54: one owner action moves the members on the account through U53's
+    /// switch (keeping the session) and reports a switch that does not confirm.
+    #[test]
+    fn a_bulk_swap_moves_the_lead_through_u53_and_reports_a_refusal() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            live_sessions_override(Some(vec![crate::state::teams::dispatcher::Seen {
+                name: "claude/x/lead".into(),
+                run_id: "r0".into(),
+                account_id: "x".into(),
+                ..Default::default()
+            }]));
+            let _worker = hold_worker_lock();
+            let mut store = Store::open(true).unwrap();
+            let team = running_team();
+            let id = team.id.clone();
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+            set_test_switch(Some(switched_switch));
+            let receipt = run(
+                "swap-member",
+                &json!({"request_id":"22222222-2222-4222-8222-222222222222","team":id,
+                    "from_account":"x","to_account":"y","provider":"claude","by":"human"}),
+                false,
+            )
+            .unwrap();
+            assert_eq!(receipt["status"], "swapped", "{receipt}");
+            assert_eq!(
+                SWITCH_CALLS.with(|calls| calls.borrow().clone()),
+                vec![("claude/x/lead".to_owned(), "y".to_owned())]
+            );
+            let stored = store.load(&id).unwrap().unwrap();
+            let lead = stored.member("lead").unwrap();
+            assert_eq!(lead.account, "y");
+            assert!(lead.session.is_some());
+            // A switch that does not confirm moves nobody and names the reason.
+            set_test_switch(Some(uncertain_switch));
+            let error = run(
+                "swap-member",
+                &json!({"request_id":"33333333-3333-4333-8333-333333333333","team":id,
+                    "from_account":"x","to_account":"z","provider":"claude","by":"human"}),
+                false,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("could move to account z"), "{error}");
+            set_test_switch(None);
+            live_sessions_override(None);
+        });
+    }
+    /// U54: a bulk swap selects the members of one provider whose session
+    /// really runs on the account, the lead included, and the roster reads the
+    /// real account from the session record.
+    #[test]
+    fn a_bulk_swap_selects_members_by_their_sessions_real_account() {
+        use crate::state::teams::dispatcher::Seen;
+        use crate::state::teams::model::{Member, SessionRef, Team, TeamStatus};
+        let seen = |name: &str, account: &str| Seen {
+            name: name.into(),
+            run_id: format!("{name}-run"),
+            account_id: account.into(),
+            ..Default::default()
+        };
+        let mut team = Team { id: "t".into(), name: "T".into(), lead: "lead".into(), status: TeamStatus::Running, ..Default::default() };
+        let member = |id: &str, agent: &str, name: &str, account: &str| Member {
+            id: id.into(),
+            role: id.into(),
+            agent: agent.into(),
+            account: account.into(),
+            session: Some(SessionRef { name: name.into(), run_id: format!("{name}-run"), ..Default::default() }),
+            ..Default::default()
+        };
+        team.members = vec![
+            member("lead", "claude", "claude/x/lead", "x"),
+            member("dev", "claude", "claude/x/dev", "x"),
+            member("qa", "codex", "codex/x/qa", "x"),
+        ];
+        let sessions = vec![seen("claude/x/lead", "x"), seen("claude/x/dev", "x"), seen("codex/x/qa", "x")];
+        assert_eq!(bulk_swap_members(&team, &sessions, "x", "claude"), ["lead".to_owned(), "dev".to_owned()]);
+        assert_eq!(bulk_swap_members(&team, &sessions, "x", ""), ["lead".to_owned(), "dev".to_owned(), "qa".to_owned()]);
+        let elsewhere = vec![seen("claude/x/lead", "y"), seen("claude/x/dev", "x"), seen("codex/x/qa", "x")];
+        assert_eq!(bulk_swap_members(&team, &elsewhere, "x", "claude"), ["dev".to_owned()]);
+        let native = vec![seen("claude/x/lead", ""), seen("claude/x/dev", "x")];
+        assert_eq!(bulk_swap_members(&team, &native, "native-claude", "claude"), ["lead".to_owned()]);
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let mut record = json!({"version":1,"name":"claude/x/dev","agent":"claude","account_id":"y"});
+            crate::state::storage::write(&mut record).unwrap();
+            assert_eq!(session_account(team.member("dev").unwrap()), "y");
+            // A session without a readable record keeps its configured account.
+            assert_eq!(session_account(team.member("qa").unwrap()), "x");
+        });
+    }
+
+    /// U54: a bulk swap keeps each member's session, conversation and open
+    /// attempt and only changes the account.
+    #[test]
+    fn a_bulk_swap_keeps_each_members_session_and_open_attempt() {
+        use super::*;
+        use crate::state::teams::model::{Attempt, AttemptState, Member, SessionRef, Task, TaskStatus, Team, TeamStatus};
+        let mut team = Team { id: "t".into(), name: "T".into(), lead: "lead".into(), status: TeamStatus::Running, ..Default::default() };
+        let member = |id: &str| Member {
+            id: id.into(),
+            role: id.into(),
+            agent: "claude".into(),
+            account: "x".into(),
+            session: Some(SessionRef { name: format!("claude/x/{id}"), run_id: "r".into(), ..Default::default() }),
+            ..Default::default()
+        };
+        team.members = vec![member("lead"), member("dev")];
+        team.tasks.push(Task {
+            id: 1,
+            title: "A".into(),
+            assignee: "dev".into(),
+            status: TaskStatus::InProgress,
+            attempts: vec![Attempt { n: 1, id: "a1".into(), member: "dev".into(), state: AttemptState::Delivered, ..Default::default() }],
+            ..Default::default()
+        });
+        let mut events = Vec::new();
+        let result = ops::apply(
+            &mut team,
+            "swap-member",
+            &json!({"members":["lead","dev"],"bulk":true,"account":"y"}),
+            &Actor::Human,
+            &BTreeSet::new(),
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(result["status"], "swapped", "{result}");
+        assert_eq!(result["members"].as_array().unwrap().len(), 2);
+        for id in ["lead", "dev"] {
+            let found = team.member(id).unwrap();
+            assert_eq!(found.account, "y");
+            assert!(found.session.is_some());
+            assert!(!found.launch_after_swap);
+        }
+        let task = team.task(1).unwrap();
+        assert_eq!(task.status, TaskStatus::InProgress);
+        assert_eq!(task.attempts[0].state, AttemptState::Delivered);
+        assert!(task.continuation.is_none());
+        assert!(events.iter().any(|event| event.kind == "member_swapped"));
+    }
+
     /// U54: a renamed session stays the member. The caller matches by its run
     /// id or conversation id as well as by name, and the team record follows the
     /// rename once (the next command matches by name again).

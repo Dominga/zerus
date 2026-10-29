@@ -1196,10 +1196,11 @@ impl<'a> Watch<'a> {
             );
             return;
         }
-        // A repeated subscribe changes scheduling without dropping the inventory
-        // or cancelling its in-flight read. Old clients omit both new fields.
+        // Additive options change scheduling without dropping the inventory
+        // or cancelling its read. An older client's plain resubscribe still
+        // replaces the subscription and sends its first state as before.
         let now = Instant::now();
-        if self.processes.configure(&key, interval_ms, refresh, now) {
+        if (interval_ms.is_some() || refresh) && self.processes.configure(&key, interval_ms, refresh, now) {
             return;
         }
         // A renamed session keeps its run key; follow its current name.

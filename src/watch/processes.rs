@@ -406,6 +406,13 @@ mod tests {
             processes.pulse(start + SECOND * 2).is_empty(),
             "the refresh is consumed once"
         );
+        // A stop can also answer while no inventory read is running.
+        processes.configure("run:r", None, true, start + Duration::from_millis(1_100));
+        processes.configure("run:r", None, true, start + Duration::from_millis(1_200));
+        assert!(processes.pulse(start + Duration::from_millis(1_999)).is_empty());
+        let idle_refresh = processes.pulse(start + SECOND * 2).pop().unwrap();
+        processes.done(result(&idle_refresh, inventory("r", 1, 3.0)));
+        assert!(processes.pulse(start + SECOND * 3).is_empty());
         assert!(!processes.configure("missing", Some(1_000), true, start));
     }
 

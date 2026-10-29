@@ -35,6 +35,8 @@ struct Shared {
     /// Whether the peers the local listing names get streams.
     peers: bool,
     streams: Mutex<BTreeMap<ComputerId, StreamHandle>>,
+    /// The peers the local listing last named; None until one names them.
+    listed: Mutex<Option<BTreeSet<String>>>,
     /// None once the fleet stops: no stream starts after that.
     events: Mutex<Option<Sender<StreamEvent>>>,
 }
@@ -106,6 +108,7 @@ impl Fleet {
             timing,
             peers,
             streams: Mutex::new(BTreeMap::new()),
+            listed: Mutex::new(None),
             events: Mutex::new(Some(tx)),
         });
         {
@@ -194,6 +197,20 @@ impl Fleet {
         handle.follow_tasks(project)
     }
 
+    /// Applies the preferences the host confirmed for a Mute or Unmute to the
+    /// session's row on `target.computer` at once; the window and the menu
+    /// bar get the changed row as any change. False for a computer without
+    /// a stream.
+    pub fn apply_notifications(
+        &self,
+        target: &crate::actions::Target,
+        preferences: serde_json::Value,
+    ) -> bool {
+        guard(&self.shared.streams)
+            .get(&ComputerId(target.computer.clone()))
+            .is_some_and(|handle| handle.apply_notifications(target.clone(), preferences))
+    }
+
     /// Stops following a project's task list; false when it was not followed.
     pub fn unfollow_tasks(&self, computer: &ComputerId, project: &str) -> bool {
         guard(&self.shared.streams)
@@ -241,6 +258,13 @@ impl Fleet {
         guard(&self.shared.streams)
             .get(computer)
             .is_some_and(|handle| handle.send(control))
+    }
+
+    /// The peers this computer's listing names (valid aliases only), whether
+    /// or not they get streams; None until a listing with a `peers` array has
+    /// arrived. An older host's listing without one keeps the previous peers.
+    pub fn peers(&self) -> Option<BTreeSet<String>> {
+        guard(&self.shared.listed).clone()
     }
 
     /// The computers with a stream, this computer first.
@@ -298,14 +322,15 @@ fn route(shared: &Shared, rx: Receiver<StreamEvent>, sink: Sender<Change>) {
                 computer,
                 peers: listed,
             } => {
-                if !computer.is_local() || !shared.peers {
+                if !computer.is_local() {
                     continue;
                 }
                 let wanted: BTreeSet<String> = listed
                     .into_iter()
                     .filter(|alias| valid_alias(alias))
                     .collect();
-                if peers.as_ref() != Some(&wanted) {
+                *guard(&shared.listed) = Some(wanted.clone());
+                if shared.peers && peers.as_ref() != Some(&wanted) {
                     shared.set_peers(&wanted);
                     peers = Some(wanted);
                 }

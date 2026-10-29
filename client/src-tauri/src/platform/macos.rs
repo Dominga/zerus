@@ -80,6 +80,13 @@ pub struct PreferenceOutcome {
 
 impl PreferenceOutcome {
     /// True when the configuration renders at the display rate as far as WebKit says.
+    #[cfg_attr(
+        target_os = "macos",
+        allow(
+            dead_code,
+            reason = "used by client/perf-probe-mac, which includes this file by path"
+        )
+    )]
     pub fn applied(&self) -> bool {
         self.error.is_none() && self.after == Some(false)
     }
@@ -143,6 +150,13 @@ pub fn feature_key(feature: &AnyObject) -> Option<String> {
 }
 
 /// The feature's display name (`-[_WKFeature name]`).
+#[cfg_attr(
+    target_os = "macos",
+    allow(
+        dead_code,
+        reason = "used by client/perf-probe-mac, which includes this file by path"
+    )
+)]
 pub fn feature_name(feature: &AnyObject) -> Option<String> {
     guarded(|| {
         if !responds(feature, sel!(name)) {
@@ -187,6 +201,13 @@ pub fn find_feature(key: &str) -> Result<(Retained<AnyObject>, usize), SpiError>
 
 /// Keys of WebKit features whose key contains any of `fragments` (diagnostics:
 /// shows a renamed key).
+#[cfg_attr(
+    target_os = "macos",
+    allow(
+        dead_code,
+        reason = "used by client/perf-probe-mac, which includes this file by path"
+    )
+)]
 pub fn feature_keys_matching(fragments: &[&str]) -> Result<Vec<String>, SpiError> {
     let list = features()?;
     guarded(|| {
@@ -260,6 +281,13 @@ pub fn set_near_60fps(preferences: &WKPreferences, enabled: bool) -> PreferenceO
 
 /// The near-60 fps preference of `preferences` (for example a live webview's
 /// `configuration.preferences`), or None when the SPI or the key is missing.
+#[cfg_attr(
+    target_os = "macos",
+    allow(
+        dead_code,
+        reason = "used by client/perf-probe-mac, which includes this file by path"
+    )
+)]
 pub fn preference_state_of(preferences: &WKPreferences) -> Option<bool> {
     let (feature, _) = find_feature(FEATURE_KEY).ok()?;
     is_enabled(preferences, &feature).ok()
@@ -268,6 +296,13 @@ pub fn preference_state_of(preferences: &WKPreferences) -> Option<bool> {
 /// The near-60 fps preference read back from the last configuration that
 /// `webview_configuration` made: Some(false) renders at the display rate,
 /// Some(true) stays near 60 fps, None when the SPI failed or none was made.
+#[cfg_attr(
+    target_os = "macos",
+    allow(
+        dead_code,
+        reason = "used by client/perf-probe-mac, which includes this file by path"
+    )
+)]
 pub fn preference_state() -> Option<bool> {
     match LAST_STATE.load(Ordering::Relaxed) {
         1 => Some(false),
@@ -307,6 +342,13 @@ pub fn configure(
 }
 
 /// "Version 27.0.1 (Build 26A434)" from NSProcessInfo.
+#[cfg_attr(
+    target_os = "macos",
+    allow(
+        dead_code,
+        reason = "used by client/perf-probe-mac, which includes this file by path"
+    )
+)]
 pub fn macos_version() -> String {
     NSProcessInfo::processInfo()
         .operatingSystemVersionString()
@@ -338,6 +380,13 @@ pub fn screen_max_fps(_mtm: MainThreadMarker) -> Option<i64> {
 }
 
 /// The CGDirectDisplayID of the screen a window (an NSWindow) is on.
+#[cfg_attr(
+    target_os = "macos",
+    allow(
+        dead_code,
+        reason = "used by client/perf-probe-mac, which includes this file by path"
+    )
+)]
 pub fn window_display_id(window: &AnyObject) -> Option<u32> {
     guarded(|| {
         // SAFETY: screen returns the window's NSScreen or nil.
@@ -411,6 +460,13 @@ extern "C" fn count_frame(
 /// counted for `duration` after a 200 ms warm-up. Blocks the calling thread; the
 /// callbacks run on CoreVideo's own thread, so any thread may call it. Needs a
 /// display; None when CoreVideo refuses.
+#[cfg_attr(
+    target_os = "macos",
+    allow(
+        dead_code,
+        reason = "the display-link control of the client/bench/README.md procedure"
+    )
+)]
 pub fn display_link_hz(display: Option<u32>, duration: Duration) -> Option<f64> {
     // SAFETY: plain CoreVideo calls; the counter outlives the link (stopped and released below).
     unsafe {
@@ -440,4 +496,63 @@ pub fn display_link_hz(display: Option<u32>, duration: Duration) -> Option<f64> 
         drop(counter);
         (elapsed > 0.0).then(|| frames as f64 / elapsed)
     }
+}
+
+/// The running bundle's identifier; None outside a bundle (`cargo run`, tests).
+pub fn bundle_identifier() -> Option<String> {
+    objc2_foundation::NSBundle::mainBundle()
+        .bundleIdentifier()
+        .map(|id| id.to_string())
+}
+
+/// A value Qt's QSettings saved in the running bundle's defaults domain,
+/// which is Qt's own (`com.hgdev.hgs-tray`) only under the switch identity:
+/// `group/key` is stored as `group.key`, a QByteArray as data
+/// (`qsettings_mac.cpp`). Read only, never written (Decision 11). Any thread:
+/// `NSUserDefaults` is thread-safe.
+#[cfg(feature = "live")]
+pub fn qt_default_data(key: &str) -> Option<Vec<u8>> {
+    let defaults = objc2_foundation::NSUserDefaults::standardUserDefaults();
+    let key = NSString::from_str(key);
+    if let Some(data) = defaults.dataForKey(&key) {
+        return Some(data.to_vec());
+    }
+    defaults
+        .stringForKey(&key)
+        .map(|text| text.to_string().into_bytes())
+}
+
+/// LaunchServices gives an app's main thread this QoS; the LaunchAgent does
+/// not, and its `ProcessType Interactive` only lifts the clamp
+/// (`tray/src/main.cpp:256-263`). Call on the main thread.
+pub fn raise_main_thread_qos() {
+    // SAFETY: changes the calling thread's own QoS class.
+    unsafe {
+        libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0)
+    };
+}
+
+/// Runs `beat` on the main thread every `every`, in the common run-loop modes,
+/// so an open menu or a modal panel does not stop it, as Qt's `QTimer` does
+/// not stop (the watchdog's heartbeat). The run loop keeps the timer for the
+/// life of the app.
+pub fn heartbeat(_mtm: MainThreadMarker, every: Duration, beat: impl Fn() + 'static) {
+    let block =
+        block2::RcBlock::new(move |_timer: std::ptr::NonNull<objc2_foundation::NSTimer>| beat());
+    // SAFETY: the binding asks for a block that may run on any thread. This one
+    // is made on the main thread (`_mtm`) and only the main run loop, below,
+    // calls it, so what it captures never leaves the main thread. The repeating
+    // timer owns the block.
+    let timer = unsafe {
+        objc2_foundation::NSTimer::timerWithTimeInterval_repeats_block(
+            every.as_secs_f64(),
+            true,
+            &block,
+        )
+    };
+    // SAFETY: Foundation's constant mode name; the main run loop, on the main thread.
+    unsafe {
+        objc2_foundation::NSRunLoop::mainRunLoop()
+            .addTimer_forMode(&timer, objc2_foundation::NSRunLoopCommonModes)
+    };
 }

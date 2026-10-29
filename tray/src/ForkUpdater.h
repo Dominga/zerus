@@ -42,6 +42,14 @@ public:
     static ForkUpdater *instance();
     // The fork workflow's run number, or 0 for a build made elsewhere.
     static qint64 installedBuild();
+    // #511 N10: what the feed's build is to the running one. The running
+    // commit is never offered again; a numbered build takes a higher number;
+    // an unnumbered build (made locally or experimental) has no order, so the
+    // feed's build can only replace it, once the owner confirms.
+    enum class Offer { Current, Newer, Replacement };
+    static Offer offerFor(qint64 installed, const QString &runningCommit, qint64 build, const QString &commit);
+    // The source_commit in a portable folder's build-info.json, or empty.
+    static QString sourceCommit(const QString &folder);
     // Built with a feed and running from a portable folder.
     bool enabled() const { return m_enabled; }
     // A portable Windows build can check WhiteWh releases by hand even when
@@ -49,6 +57,12 @@ public:
     bool manualAvailable() const { return m_portable; }
     // Check the configured or latest WhiteWh feed now.
     void checkNow();
+    // A build the running unnumbered build can only be replaced with.
+    qint64 offeredBuild() const { return m_offeredBuild; }
+    QString offeredCommit() const { return m_offeredBuild > 0 ? m_commit : QString(); }
+    QString runningCommit() const { return m_runningCommit; }
+    // The owner confirmed the replacement: it downloads and waits for Restart.
+    void confirmReplacement();
     // A verified newer build waits next to the installation.
     bool ready() const { return m_readyBuild > 0; }
     qint64 readyBuild() const { return m_readyBuild; }
@@ -90,5 +104,8 @@ private:
     qint64 m_build = 0, m_size = 0;
     QString m_commit;
     QUrl m_url;
+    // build-info.json's commit of the running build, and the replacement offered.
+    QString m_runningCommit;
+    qint64 m_offeredBuild = 0;
     QByteArray m_sha256;
 };

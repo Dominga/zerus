@@ -163,6 +163,13 @@ QString Team::roleOf(const QString &id) const
     return id;
 }
 
+QString Team::assigneeRole(const Task &task, const QString &none) const
+{
+    if (!task.assignee.isEmpty()) return roleOf(task.assignee);
+    if (!task.role.isEmpty()) return QCoreApplication::translate("Teams", "Any free %1").arg(task.role);
+    return none;
+}
+
 QList<int> memberQueue(const Team &team, const QString &member)
 {
     // The same list hgs sends for an older hgs: every task with an open attempt
@@ -374,6 +381,9 @@ Team parse(const QJsonObject &v)
         }
         member.parent = str(m, "parent");
         member.sub = m.value("sub").toBool();
+        member.models = parseModelChoices(m.value("models"));
+        member.contextBeforeTask = str(m, "context_before_task");
+        member.draining = m.value("draining").toBool();
         member.lead = member.id == team.lead;
         if (member.lead && member.role.isEmpty()) member.role = tr("Lead");
         team.members.append(member);
@@ -406,6 +416,8 @@ Team parse(const QJsonObject &v)
         task.id = t.value("id").toInt(); task.phase = qMax(1, t.value("phase").toInt(1)); task.pinned = t.value("pinned").toBool();
         task.title = str(t, "title"); task.description = str(t, "description");
         task.status = str(t, "status"); task.assignee = str(t, "assignee");
+        for (const auto &model : t.value("models").toArray()) task.models.append(model.toString());
+        task.role = str(t, "role");
         task.decidedBy = str(t, "decided_by"); task.reason = str(t, "decision_reason");
         // U27: the visual lane the task is drawn in.
         if (t.value("lane").isObject()) {
@@ -424,6 +436,24 @@ Team parse(const QJsonObject &v)
         if (t.value("added_late").isObject()) {
             const auto a = t.value("added_late").toObject();
             task.addedLate = {str(a, "by"), str(a, "request"), str(a, "confirm"), a.value("at").toDouble(), true};
+        }
+        if (t.value("timing").isObject()) {
+            // U37: the working time and the waits, computed by hgs.
+            const auto o = t.value("timing").toObject();
+            const auto w = o.value("waits").toObject();
+            auto &timing = task.timing;
+            timing.known = true;
+            timing.worked = qint64(o.value("worked_s").toDouble());
+            timing.runningSince = o.value("running_since").toDouble();
+            timing.deps = qint64(w.value("deps_s").toDouble());
+            timing.member = qint64(w.value("member_s").toDouble());
+            timing.lead = qint64(w.value("lead_s").toDouble());
+            for (const auto &u : o.value("unknown").toArray()) timing.unknown.append(u.toString());
+            for (const auto &v : o.value("attempts").toArray()) {
+                const auto s = v.toObject();
+                timing.attempts.append({s.value("n").toInt(), str(s, "member"), str(s, "state"), s.value("from").toDouble(), s.value("to").toDouble(),
+                                        qint64(s.value("worked_s").toDouble()), qint64(s.value("member_s").toDouble()), qint64(s.value("lead_s").toDouble())});
+            }
         }
         // G1: the sub-team this task delegated to, with its rolled-up counts.
         if (t.value("subteam").isObject()) {
@@ -724,6 +754,10 @@ Team parse(const QJsonObject &v)
     team.resumeAfterLimits = settings.value("resume_after_limits").toBool();
     team.autoAccept = settings.value("auto_accept").toBool() || v.value("auto_accept").toBool();
     team.workAhead = settings.value("work_ahead").toBool();
+    for (const auto &value : v.value("intakes").toArray()) {
+        const auto i = value.toObject();
+        team.intakes.append({str(i, "id"), str(i, "label"), i.value("created").toDouble()});
+    }
     for (const auto &id : v.value("stuck_scope").toArray()) team.stuckScope.append(id.toInt());
     team.previous = str(v, "previous"); team.next = str(v, "next");
     for (const auto &value : v.value("proposals").toArray()) {
@@ -787,6 +821,9 @@ QJsonObject Member::json() const
     if (!folder.isEmpty()) o.insert("folder", folder);
     if (!parent.isEmpty()) o.insert("parent", parent);
     if (sub) o.insert("sub", true);
+    // U45/U46: kept through a plan edit, and absent when never set.
+    if (!models.isEmpty()) o.insert("models", modelChoicesJson(models));
+    if (!contextBeforeTask.isEmpty()) o.insert("context_before_task", contextBeforeTask);
     if (!session.isEmpty()) {
         // F8: an adopted session keeps its identity, so hgs finds the same one.
         QJsonObject ref{{"host", host}, {"name", session}};
@@ -806,6 +843,9 @@ QJsonObject Task::json() const
     // C3 (#548): the phase it is planned in; hgs puts a task without one in phase 1.
     value.insert("phase", qMax(1, phase));
     if (lane.known()) value.insert("lane", QJsonObject{{"n", lane.n}, {"label", lane.label}});
+    // U45: only a task that names them; a plan without them is as before.
+    if (!models.isEmpty()) value.insert("models", QJsonArray::fromStringList(models));
+    if (!role.isEmpty()) value.insert("role", role);
     return value;
 }
 
@@ -1507,6 +1547,8 @@ Role parseRole(const QJsonObject &v)
     const auto list = [&v](const char *key) { QStringList out; for (const auto &x : v.value(QLatin1String(key)).toArray()) out.append(x.toString()); return out; };
     r.machines = list("machines"); r.messageTo = list("message_to"); r.promptOrder = list("prompt_order"); r.promptOff = list("prompt_off");
     r.danger = v.value("danger").toObject();
+    r.models = parseModelChoices(v.value("models"));
+    r.contextBeforeTask = str(v, "context_before_task");
     const auto notes = v.value("notes").toObject();
     for (auto it = notes.begin(); it != notes.end(); ++it) r.notes.insert(it.key(), it.value().toString());
     r.raw = v;
@@ -1545,7 +1587,31 @@ QJsonObject Role::json() const
     put("danger", danger, danger.isEmpty());
     QJsonObject noteValues; for (auto it = notes.cbegin(); it != notes.cend(); ++it) noteValues.insert(it.key(), it.value());
     put("notes", noteValues, notes.isEmpty());
+    // U45/U46: written only when set or when the role came with them.
+    put("models", modelChoicesJson(models), models.isEmpty());
+    put("context_before_task", contextBeforeTask, contextBeforeTask.isEmpty());
     return o;
+}
+
+QList<ModelChoice> parseModelChoices(const QJsonValue &value)
+{
+    QList<ModelChoice> choices;
+    for (const auto &item : value.toArray()) {
+        const auto o = item.toObject();
+        if (!str(o, "model").isEmpty()) choices.append({str(o, "model"), str(o, "effort")});
+    }
+    return choices;
+}
+
+QJsonArray modelChoicesJson(const QList<ModelChoice> &choices)
+{
+    QJsonArray out;
+    for (const auto &choice : choices) {
+        QJsonObject o{{"model", choice.model}};
+        if (!choice.effort.isEmpty()) o.insert("effort", choice.effort);
+        out.append(o);
+    }
+    return out;
 }
 
 Template parseTemplate(const QJsonObject &v)

@@ -595,9 +595,9 @@ pub(crate) fn launch(
         create_session(&mut record)?;
         record["paused"] = json!(false);
         record["run_id"] = json!(uuid::Uuid::new_v4().to_string());
-        // U22: the verification reads records written after this launch.
-        record["upload_since"] = json!(now());
-        record["upload_checked_at"] = json!(0);
+        // U22/N8: the verification reads records written after this launch,
+        // starting at the store's length at it.
+        mark_upload_start(&mut record);
         save(&record)?;
         return Ok(());
     }
@@ -605,10 +605,14 @@ pub(crate) fn launch(
     ensure_sandbox_folder(&cwd)?;
     let mut record = json!({"backend":"dsh","name":name,"agent":"dsh","agent_home":native_home(),"cwd":cwd,
         "conversation_id":format!("session-{}",uuid::Uuid::new_v4()),"run_id":uuid::Uuid::new_v4().to_string(),
-        "created":now(),"upload_since":now(),"launch_id":launch_id,"paused":false});
+        "created":now(),"launch_id":launch_id,"paused":false});
     let block_stale = ensure_host(&record)?;
     mark_upload_may_be_active(&mut record, block_stale);
     create_session(&mut record)?;
+    // U22/N8: a new session's store appears with this launch; remember where it
+    // is and count only what comes after it.
+    mark_upload_start(&mut record);
+    save(&record)?;
     if let Ok(config) = crate::config::Config::load() {
         crate::swarm::infer_new_session(&config, name, &cwd);
     }
@@ -643,7 +647,7 @@ pub(crate) fn check_upload(name: &str) -> Option<Value> {
     if !super::session_upload::block() {
         return None;
     }
-    let mut record = binding(name).ok()?;
+    let record = binding(name).ok()?;
     if let Some(seen) = record.get("upload_seen").filter(|seen| seen.is_object()) {
         return Some(seen.clone());
     }
@@ -651,20 +655,70 @@ pub(crate) fn check_upload(name: &str) -> Option<Value> {
     if at - record["upload_checked_at"].as_f64().unwrap_or(0.0) < UPLOAD_CHECK_SECONDS {
         return None;
     }
-    let path = super::session_upload::file(string(&record, "agent_home"), string(&record, "conversation_id"))?;
+    // N8: the store's path is remembered on the binding; one lookup is bounded
+    // and only made until it is known. A session with no store yet still
+    // records its check time, so a listing does not scan for it on every poll.
+    let mut path = PathBuf::from(string(&record, "upload_path"));
+    if !path.is_file() {
+        match super::session_upload::file(string(&record, "agent_home"), string(&record, "conversation_id")) {
+            Some(found) => path = found,
+            None => {
+                remember_upload(name, &record, at, None, None);
+                return None;
+            }
+        }
+    }
     let offset = record["upload_offset"].as_u64().unwrap_or(0);
     let since = record["upload_since"].as_f64().or_else(|| record["created"].as_f64()).unwrap_or(0.0);
     let Ok(tail) = super::session_upload::read_tail(&path, offset) else { return None };
-    record["upload_checked_at"] = json!(at);
-    record["upload_offset"] = json!(tail.offset);
-    if super::session_upload::uploaded_after(&tail.records, since) {
-        let seen = json!({"at":at,"plugin":"session-log-deepseek","offset":tail.offset});
-        record["upload_seen"] = seen.clone();
-        let _ = save(&record);
-        return Some(seen);
+    let seen = super::session_upload::uploaded_after(&tail.records, since)
+        .then(|| json!({"at":at,"plugin":"session-log-deepseek","offset":tail.offset}));
+    remember_upload(name, &record, at, Some((&path, tail.offset)), seen.as_ref());
+    seen
+}
+
+/// N8: starts the verification at the store's length at launch and remembers
+/// the store's path, so the first pass reads only what the launch appended and
+/// a view never scans the agent home again.
+fn mark_upload_start(record: &mut Value) {
+    let path = super::session_upload::file(string(record, "agent_home"), string(record, "conversation_id"));
+    let offset = path
+        .as_ref()
+        .and_then(|path| fs::metadata(path).ok())
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    record["upload_since"] = json!(now());
+    record["upload_checked_at"] = json!(0);
+    record["upload_offset"] = json!(offset);
+    match path {
+        Some(path) => record["upload_path"] = json!(path),
+        None => {
+            if let Some(object) = record.as_object_mut() {
+                object.remove("upload_path");
+            }
+        }
     }
-    let _ = save(&record);
-    None
+}
+
+/// C2: writes only the upload fields into a binding re-read under the bindings
+/// lock, so a poll overlapping a resume, rename or forget never reverts it. A
+/// binding that is gone or changed since the check read it is skipped.
+fn remember_upload(name: &str, read: &Value, at: f64, tail: Option<(&Path, u64)>, seen: Option<&Value>) -> Option<()> {
+    let _guard = lock(Some(&root().join("dsh/bindings.lock"))).ok()?;
+    let mut current = binding(name).ok()?;
+    if current["run_id"] != read["run_id"] || current["conversation_id"] != read["conversation_id"] {
+        return None;
+    }
+    current["upload_checked_at"] = json!(at);
+    if let Some((path, offset)) = tail {
+        current["upload_path"] = json!(path);
+        current["upload_offset"] = json!(offset);
+    }
+    if let Some(seen) = seen {
+        current["upload_seen"] = seen.clone();
+    }
+    save(&current).ok()?;
+    Some(())
 }
 
 pub(crate) fn snapshots() -> Result<Vec<Value>> {
@@ -1822,13 +1876,12 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
             if command == "resume" {
                 let block_stale = ensure_host(&record)?;
                 mark_upload_may_be_active(&mut record, block_stale);
-                // N17: a resume into a host that was already running is verified
-                // from the records written after it, like a launch.
-                record["upload_since"] = json!(now());
-                record["upload_checked_at"] = json!(0);
             }
             if command == "resume" {
                 create_session(&mut record)?;
+                // N17/U22/N8: a resume is verified from the records written
+                // after it, starting at the store's length at it.
+                mark_upload_start(&mut record);
             } else {
                 rpc(
                     &record,
@@ -2172,5 +2225,89 @@ mod notification_tests {
             Some(value) => std::env::set_var("HGS_STATE_DIR", value),
             None => std::env::remove_var("HGS_STATE_DIR"),
         }
+    }
+
+    /// C2: the upload check writes only its own fields, under the bindings
+    /// lock, into a binding re-read there; a resume or forget between the read
+    /// and the write is never reverted.
+    #[test]
+    fn an_upload_check_never_reverts_a_binding_changed_under_it() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let name = "dsh/project/session";
+            let base = json!({"backend":"dsh","name":name,"agent":"dsh",
+                "agent_home":dir.path().join("home").display().to_string(),
+                "cwd":"/work/example","conversation_id":"session-one","run_id":"run-1","created":1.0});
+            save(&base).unwrap();
+            // A resume replaced the run between the check's read and its write.
+            let mut resumed = base.clone();
+            resumed["run_id"] = json!("run-2");
+            save(&resumed).unwrap();
+            assert!(remember_upload(name, &base, 10.0, None, None).is_none());
+            let kept = binding(name).unwrap();
+            assert_eq!(kept["run_id"], json!("run-2"));
+            assert!(kept.get("upload_checked_at").is_none(), "a changed binding was written");
+            // The same binding: only the upload fields change; a field the
+            // check never read keeps what the fresh record says.
+            let mut changed = base.clone();
+            changed["paused"] = json!(true);
+            save(&changed).unwrap();
+            let seen = json!({"at":10.0,"plugin":"session-log-deepseek","offset":42});
+            assert!(remember_upload(name, &base, 10.0, None, Some(&seen)).is_some());
+            let saved = binding(name).unwrap();
+            assert_eq!(saved["paused"], json!(true), "another field was reverted");
+            assert_eq!(saved["upload_checked_at"], json!(10.0));
+            assert_eq!(saved["upload_seen"], seen);
+            // A forgotten binding is skipped, never recreated.
+            std::fs::remove_file(binding_path(name)).unwrap();
+            assert!(remember_upload(name, &base, 20.0, None, Some(&seen)).is_none());
+            assert!(!binding_path(name).exists());
+        });
+    }
+
+    /// N8: a launch starts at the store's length and remembers its path.
+    #[test]
+    fn a_launch_starts_the_upload_offset_at_the_store_length_and_remembers_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let store = home.join("sessions").join("--encoded--").join("session-one");
+        std::fs::create_dir_all(&store).unwrap();
+        let file = store.join("session.v4.jsonl.zstd");
+        std::fs::write(&file, b"0123456789").unwrap();
+        let mut record = json!({"agent_home":home.display().to_string(),"conversation_id":"session-one"});
+        mark_upload_start(&mut record);
+        assert_eq!(std::path::PathBuf::from(string(&record, "upload_path")), file);
+        assert_eq!(record["upload_offset"], json!(10));
+        assert_eq!(record["upload_checked_at"], json!(0));
+        assert!(record["upload_since"].as_f64().is_some_and(|since| since > 0.0));
+        // A session without a store yet records no path and starts at zero.
+        let mut fresh = json!({"agent_home":home.display().to_string(),"conversation_id":"session-two"});
+        mark_upload_start(&mut fresh);
+        assert!(fresh.get("upload_path").is_none());
+        assert_eq!(fresh["upload_offset"], json!(0));
+    }
+
+    /// N8: a session that has written no store still records the check time, so
+    /// a listing does not look for it on every poll.
+    #[test]
+    fn a_missing_store_records_the_check_time_and_is_not_scanned_again() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let name = "dsh/project/session";
+            save(&json!({"backend":"dsh","name":name,"agent":"dsh",
+                "agent_home":dir.path().join("home").display().to_string(),
+                "cwd":"/work/example","conversation_id":"session-one","run_id":"run-1","created":1.0})).unwrap();
+            assert!(check_upload(name).is_none());
+            let saved = binding(name).unwrap();
+            let at = saved["upload_checked_at"].as_f64().unwrap_or(0.0);
+            assert!(at > 0.0, "{saved}");
+            assert!(saved.get("upload_path").is_none(), "{saved}");
+            assert_eq!(saved["run_id"], json!("run-1"));
+            // Within the minute it is neither checked nor scanned again.
+            assert!(check_upload(name).is_none());
+            let again = binding(name).unwrap();
+            assert_eq!(again["upload_checked_at"], json!(at));
+            assert!(again.get("upload_seen").is_none());
+        });
     }
 }

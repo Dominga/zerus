@@ -8,7 +8,6 @@
   /* Groups that hold an approval or a failure read in the warning colour, as in Qt. */
   .act-tools.warn .act-tools-head b { color: var(--z-color-warn); }
   .act-live b { min-width: 0; }
-  .later-screen { flex: 1; align-self: center; }
   /* Settings so far (ui/components/SettingsScreen.tsx): the mockup's rows (design/webui styles/settings.css). */
   .set-scroll { flex: 1; min-width: 0; overflow-y: auto; overflow-x: hidden; }
   .set-content { max-width: 850px; padding: 22px 28px 48px; display: flex; flex-direction: column; gap: 14px; }

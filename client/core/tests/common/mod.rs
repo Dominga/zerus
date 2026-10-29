@@ -23,12 +23,14 @@ impl FakeHgs {
         std::fs::create_dir_all(&dir).unwrap();
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
         let script = dir.join("hgs");
-        std::fs::copy(manifest.join("tests/support/fake_hgs.py"), &script).unwrap();
+        // A symlink to the checked-in (executable) script, never a copy:
+        // writing a new executable while another test thread forks lets the
+        // child inherit the write fd, and exec then fails with ETXTBSY. The
+        // fake finds its config beside the link, not beside the target.
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        std::os::unix::fs::symlink(manifest.join("tests/support/fake_hgs.py"), &script).unwrap();
+        #[cfg(not(unix))]
+        std::fs::copy(manifest.join("tests/support/fake_hgs.py"), &script).unwrap();
         let config = json!({"fixtures": manifest.join("tests/fixtures"), "hosts": hosts});
         std::fs::write(dir.join("config.json"), config.to_string()).unwrap();
         std::fs::write(dir.join("log.ndjson"), "").unwrap();

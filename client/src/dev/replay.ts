@@ -1,4 +1,4 @@
-import { emptyBatch, type ActivityEvent, type Batch, type ComputerOut, type ReplaceOut, type RowOut, type KeyOut } from "../types";
+import { emptyBatch, type ActivityEvent, type Batch, type ComputerOut, type GroupingOut, type GroupOut, type MachineOut, type ReplaceOut, type RowOut, type KeyOut } from "../types";
 import type { FollowRequest } from "../store/activity";
 
 // Browser-only stand-in for the Rust side, for `npm run dev` without Tauri.
@@ -10,9 +10,14 @@ import type { FollowRequest } from "../store/activity";
 interface Fixture {
   interval_ms: number;
   computers: ComputerOut[];
+  machines?: MachineOut[];
   snapshot: ReplaceOut[];
-  deltas: { upserts?: RowOut[]; removes?: KeyOut[] }[];
+  /** `groups` places the rows a delta adds (a replaced run), as the Rust grouping does. */
+  deltas: { upserts?: RowOut[]; removes?: KeyOut[]; groups?: GroupOut[] }[];
   activity: Record<string, { events: ActivityEvent[]; cursor: number; state?: Record<string, unknown> }>;
+  /** The snapshot rows' projects and the headers, sent with the first batch. */
+  groups?: GroupOut[];
+  grouping?: GroupingOut;
 }
 
 const PARK_MS = 250;
@@ -33,10 +38,13 @@ export function createReplay() {
 
   void import("../../fixtures/replay-batches.json").then((m) => {
     fixture = m.default as unknown as Fixture;
-    push({ computers: fixture.computers, replaces: fixture.snapshot });
+    pending.groups = fixture.groups ?? [];
+    pending.grouping = fixture.grouping;
+    push({ computers: fixture.computers, machines: fixture.machines ?? [], replaces: fixture.snapshot });
     setInterval(() => {
       if (!fixture?.deltas.length) return;
       const delta = fixture.deltas[tick++ % fixture.deltas.length];
+      if (delta.groups?.length) pending.groups = [...(pending.groups ?? []), ...delta.groups];
       push({ upserts: delta.upserts ?? [], removes: delta.removes ?? [] });
     }, fixture.interval_ms);
   });

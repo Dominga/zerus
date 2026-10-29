@@ -75,6 +75,11 @@ The license expressions and source repositories of the first are recorded in
 This inventory is metadata, not a replacement for dependency license texts.
 Cargo downloads the corresponding sources and license files from crates.io.
 
+The desktop client in `client/` locks its Rust dependencies in
+`client/src-tauri/Cargo.lock`. It links `selectors` under MPL-2.0, unmodified
+from crates.io, where its source code is available; its bundles carry the notices
+of every crate they ship, from the crates or from `packaging/rust-licenses`.
+
 The GUI links Qt 6 (Widgets, Network and Multimedia), and on Linux the KDE
 Frameworks KStatusNotifierItem, KWindowSystem and KIdleTime. These retain their
 own licenses. On Linux, the optional embedded DeepSeek native UI plugin

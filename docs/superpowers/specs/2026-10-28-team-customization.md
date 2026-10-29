@@ -196,6 +196,26 @@ phases); it stores nothing. The phone follows with the team status API (U44).
 Tests: one fixture per kind; paging stable while items arrive; an empty list
 (tests, shots in both themes).
 
+Built (#578): the read is `hgs team waiting --json`, beside the other
+cross-team reads (`list`, `leftovers`), over the 1000 most recently changed
+Planning, Running and Paused teams. Input `{limit, before}`: `limit` 1-200
+(default 50), `before` the `next` cursor `{since, id}` of the previous page.
+Answer `{items, next, total}`, newest first, ties by `id`
+(`<team>/<kind>/<key>`); items may add `phase`, `task`, `member`,
+`proposal` or `finding`. Each kind comes from a record the team keeps:
+`phase_draft` the attention list's next draft phase; `plan_draft` a Planning
+team with tasks whose approval is `review`; `report_escalated` and
+`permission_escalated` the attention list's `report` and `permission`, past
+`remind_owner_minutes` and `remind_owner_permission_minutes`;
+`owner_word_asked` an open lead proposal (F8), an addition to a running
+phase waiting for its confirmation (U29) and a paused replan (N17);
+`task_waits_owner` a task the owner holds (A5); `team_finished` a Running or
+Paused team with every task decided and no draft phase. `task.waits` (U45)
+joins `task_waits_owner` once it exists. The desktop page is the rail's
+Waiting for you, after the Team designer: pages of 50 with Show older; a
+poll reads every shown item and a page more, so an arrival never pushes a
+shown item out; a row opens its team's Team tab, a draft phase unfolded.
+
 ## 8. U51: an intake for urgent tasks
 
 `hgs team intake-key --json {request_id, team, label}` (owner only) creates a
@@ -290,3 +310,99 @@ word; the brief (tests, one real-agent contract test for the swap).
 write tasks for a role with `models` when the owner's catalog has model
 lists; clear-context roles get self-contained descriptions; a land stage is
 the owner's to configure.
+
+## 13. Examples: an outside pipeline
+
+A user moving a tracker and its dispatch scripts onto Zerus configures the
+owner's side once — roles, a preset and the team settings — and leaves the
+plan to the lead. The example is one such pipeline: an implementer role with
+several models and a clear context, a reviewer, a command stage that runs the
+project's tests and a land stage that pushes.
+
+The catalog is the whole object (`hgs team catalog get`), saved with the
+version just read; these are the parts the pipeline adds (keep `templates`,
+`routing` and `planning_rules` from the `get`):
+
+```json
+{"version":3,"catalog":{
+  "roles":[
+    {"id":"implementer","name":"Implementer","agent":"claude",
+     "model":"claude-sonnet-4-5","folder":"worktree",
+     "models":[{"model":"claude-opus-4-1","effort":"high"},
+               {"model":"claude-sonnet-4-5"}],
+     "context_before_task":"clear"},
+    {"id":"reviewer","name":"Reviewer","agent":"codex","model":"gpt-5",
+     "models":[{"model":"gpt-5"},{"model":"gpt-5-codex"}],
+     "context_before_task":"compact"}],
+  "pipelines":[
+    {"id":"deliver","name":"Deliver","max_rounds":2,"folder":"checkout",
+     "accept":"lead","stages":[
+       {"kind":"review","role":"reviewer"},
+       {"kind":"command","command":{"command":"npm test -- --runInBand",
+         "expect_exit":0,"timeout_minutes":20}},
+       {"kind":"land","exits":{"0":"accepted","2":"returned","3":"held"},
+        "command":{"command":"./scripts/land.sh","timeout_minutes":10}}]}]}}
+```
+
+The team settings ask for a branch per task, a base to start it from, the
+land stage the preset needs and restarts:
+
+```json
+{"request_id":"<uuid>","team":"<id>","by":"human","settings":{
+  "max_members":10,"branch_per_task":{"template":"task/{id}"},
+  "base_branch":"main","land_allowed":true,"restart_crashed":true}} |
+  hgs team settings --json
+```
+
+`"context_before_task":"clear"` starts a new conversation for every task of
+the Implementer, so each task description must stand alone; `compact` keeps
+the conversation and folds it. `branch_per_task` gives task 1 the branch
+`task/1` from `main`, and the land stage runs only because `land_allowed` is
+true.
+
+The lead's plan names the role, the models and the preset:
+
+```json
+{"members":[
+  {"id":"impl1","role":"Implementer","agent":"claude",
+   "model":"claude-sonnet-4-5"},
+  {"id":"rev1","role":"Reviewer","agent":"codex","model":"gpt-5"}],
+ "tasks":[{"id":1,"title":"Fix the checkout crash","role":"Implementer",
+   "models":["claude-opus-4-1"],"pipeline":"deliver",
+   "criteria":["Carts survive a reload"]}]}
+```
+
+Zerus gives task #1 to `impl1` (the role's member whose models allow one of
+the task's), switches it to `claude-opus-4-1` with its `effort: high`, waits
+for the session to confirm, clears its context, creates
+`task/1` and hands the task out with its full description. The implementer
+reports; `rev1` reviews; the command stage runs `npm test`; the land stage runs
+`./scripts/land.sh` and maps its exit: 0 accepts the task, 2 returns it to the
+implementer with the output, 3 holds it for the lead. A returned task keeps
+`task/1`.
+
+The owner grows and shrinks the roster as the queue does:
+
+```sh
+{"request_id":"<uuid>","team":"<id>","role":"Implementer","agent":"claude",
+ "count":2} | hgs team scale --json
+{"request_id":"<uuid>","team":"<id>","member":"impl1"} | hgs team drain --json
+```
+
+and lets a health watcher add an urgent task without any of the owner's other
+rights:
+
+```sh
+{"request_id":"<uuid>","team":"<id>","label":"health watch","by":"human"} |
+  hgs team intake-key --json
+{"key":"<the key shown once>","team":"<id>",
+ "tasks":[{"title":"Fix the outage","role":"Implementer"}]} |
+  hgs team intake --json
+```
+
+`restart_crashed` in the same settings launches a crashed member again, at most
+three times an hour, and returns its open attempt to the lead as `uncertain`;
+the fourth crash in an hour leaves it stopped for the owner to look at. The
+key's urgent phase is `Urgent: health watch`, approved at once, without a
+barrier and ahead of the other ready tasks; the key adds nothing else.
+

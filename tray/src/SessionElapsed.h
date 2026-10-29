@@ -30,5 +30,12 @@ inline QString status(const QString &label, double started, qint64 now = QDateTi
     const auto elapsed = text(started, now);
     return label + (elapsed.isEmpty() ? QString() : " (" + elapsed + ")");
 }
-inline QString working(double started, qint64 now = QDateTime::currentSecsSinceEpoch()) { return status(QObject::tr("Working"), started, now); }
+// U42 (#590, handoff Status/10-working): a card badge reads "Working 53s",
+// its time after the word without parentheses.
+inline QString badge(const QString &label, double started, qint64 now = QDateTime::currentSecsSinceEpoch())
+{
+    const auto elapsed = text(started, now);
+    return label + (elapsed.isEmpty() ? QString() : " " + elapsed);
+}
+inline QString working(double started, qint64 now = QDateTime::currentSecsSinceEpoch()) { return badge(QObject::tr("Working"), started, now); }
 }

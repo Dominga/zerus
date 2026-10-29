@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createComputed, createRoot } from "solid-js";
 import { createCatalog, rowId, statusOf, toSession } from "./catalog";
+import { createMarks, marks as appMarks } from "./marks";
 import { emptyBatch, type Batch, type RowOut, type ViewRow } from "../types";
 
 const view = (name: string, extra: Partial<ViewRow> = {}): ViewRow => ({
@@ -79,6 +80,17 @@ describe("applyBatch", () => {
     });
   });
 
+  it("attaches only the marks it is given, never retargeting the app's", () => {
+    const appAttach = vi.spyOn(appMarks, "attach");
+    createCatalog();
+    expect(appAttach).not.toHaveBeenCalled();
+    const own = createMarks({ attentionMarks: async () => ({ marks: {}, replies: {} }), updateAttentionMarks: async () => {}, queueReadMarks: async () => [], pendingReadMarks: async () => [] }, { load: () => [], save: () => {} });
+    const ownAttach = vi.spyOn(own, "attach");
+    createCatalog(own);
+    expect(ownAttach).toHaveBeenCalledTimes(1);
+    appAttach.mockRestore();
+  });
+
   it("records computer status", () => {
     createRoot((dispose) => {
       const { catalog, applyBatch } = createCatalog();
@@ -90,6 +102,12 @@ describe("applyBatch", () => {
 });
 
 describe("toSession", () => {
+  it("takes bulk lifecycle from the row, else from the agent", () => {
+    expect(toSession("", "k", view("a", { agent: "claude" })).bulkLifecycle).toBe(true);
+    expect(toSession("", "k", view("a", { agent: "opencode" })).bulkLifecycle).toBe(false);
+    expect(toSession("", "k", view("a", { agent: "opencode", bulk_lifecycle_supported: true })).bulkLifecycle).toBe(true);
+    expect(toSession("", "k", view("a", { agent: "claude", bulk_lifecycle_supported: false })).bulkLifecycle).toBe(false);
+  });
   it("derives the presentation status from status kinds and raw phases", () => {
     expect(statusOf(view("a", { status: "working" }))).toBe("working");
     expect(statusOf(view("a", { status: "", phase: "approval" }))).toBe("attention");
@@ -108,12 +126,12 @@ describe("toSession", () => {
     const s = toSession("", "run:a", view("dsh/sample-project/a", {
       agent: "deepseek", state: "paused", tracked: true, resumable: true, activity: "idle", process_state: "exited", archive_id: null,
       reply_id: "r1", attention_signature: "s1", shared_read: true, allowed_actions: ["resume", "rename"],
-      action_reasons: { archive: "No archive", terminate: "Use Pause", pause: "Not live" },
+      action_reasons: { archive: "No archive", terminate: "Use Pause", forget: "No forget", pause: "Not live" },
     }));
     expect(s).toMatchObject({
       agent: "deepseek", cmd: "deepseek", state: "paused", tracked: true, resumable: true, activity: "idle", processState: "exited",
       archiveId: undefined, replyId: "r1", attentionSignature: "s1", sharedRead: true, allowed: "resume rename",
-      archiveReason: "No archive", terminateReason: "Use Pause",
+      archiveReason: "No archive", terminateReason: "Use Pause", forgetReason: "No forget",
     });
     expect(Object.values(s).some((v) => typeof v === "object" && v !== null)).toBe(false);
     expect(toSession("", "run:a", view("a", { allowed_actions: null })).allowed).toBeUndefined();

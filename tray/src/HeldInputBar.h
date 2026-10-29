@@ -92,3 +92,53 @@ private:
     QString m_agent;
     QColor m_text, m_muted, m_border, m_background;
 };
+
+// #511 N5: the held messages a composer queued, until hgs either delivers them
+// or lists them as not delivered (the inspection's held_settled: failed, or
+// uncertain). A message that was not delivered comes back to its composer
+// once, with why; a delivered one simply leaves. Bounded, oldest first.
+class HeldSent {
+public:
+    struct Lost { QString text, error; bool uncertain = false; };
+    void add(const QString &requestId, const QString &text)
+    {
+        if (requestId.isEmpty()) return;
+        m_sent.append({requestId, text});
+        while (m_sent.size() > 32) m_sent.removeFirst();
+    }
+    void clear() { m_sent.clear(); }
+    // The messages of this composer that `settled` lists, each taken once.
+    QList<Lost> take(const QJsonArray &settled)
+    {
+        QList<Lost> lost;
+        for (const auto &value : settled) {
+            const auto item = value.toObject();
+            const QString id = item.value("request_id").toString();
+            for (int i = 0; i < m_sent.size(); ++i) {
+                if (m_sent.at(i).first != id) continue;
+                const QString text = m_sent.at(i).second.isEmpty() ? item.value("text").toString() : m_sent.at(i).second;
+                lost.append({text, item.value("error").toString(), item.value("status").toString() == QLatin1String("uncertain")});
+                m_sent.removeAt(i);
+                break;
+            }
+        }
+        return lost;
+    }
+    // The text an editor shows after `lost` comes back: an empty editor takes
+    // it, one with a draft keeps the draft and gets it below.
+    static QString restored(const QString &current, const QString &lost)
+    {
+        if (current.contains(lost)) return current;
+        return current.trimmed().isEmpty() ? lost : current + QStringLiteral("\n\n") + lost;
+    }
+    // What the composer says: an uncertain message may have arrived.
+    static QString notice(const Lost &lost)
+    {
+        return lost.uncertain
+            ? QObject::tr("Delivery unconfirmed — check the conversation before sending again. %1").arg(lost.error).trimmed()
+            : QObject::tr("Not delivered: %1 The text is back in the composer.").arg(lost.error.trimmed().endsWith('.') ? lost.error.trimmed() : lost.error.trimmed() + '.');
+    }
+    int size() const { return int(m_sent.size()); }
+private:
+    QList<QPair<QString, QString>> m_sent;
+};

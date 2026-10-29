@@ -75,6 +75,9 @@ private:
     // F10 arrows move a draft among the drafts.
     bool approvePhase(const QString &team, int phase);
     bool discardPhase(const QString &team, int phase);
+    // U42: an accepted phase whose work has not started goes back to a draft
+    // that waits for your approval again; asks first.
+    bool returnPhaseToDraft(const QString &team, int phase);
     void movePhase(const Teams::Team &team, int phase, int to, const QString &position);
     QWidget *inboxStrip(const Teams::Team &team, const QList<Teams::InboxItem> &items);
     // F8: the lead's open membership proposals with Accept and Reject; remove
@@ -93,6 +96,8 @@ private:
     QWidget *swappedList(const Teams::Team &team);
     // F7/F8: opens another team in this workspace (previous, next, a new one).
     void openOtherTeam(const QString &team);
+    void teamSettings(const Teams::Team &team);
+    void scaleRole(const Teams::Team &team, const Teams::Member &member);
     void attentionRows(const Teams::Team &team, QVBoxLayout *into);
     // N7: Answer on a permission item: the member's Allow / Deny box, or its
     // command on the clipboard when this hgs sends no box.

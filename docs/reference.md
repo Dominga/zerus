@@ -732,6 +732,16 @@ old events when it reconnects. This does not mark the underlying work as read.
 muted or acknowledging pending work. Muted sessions remain available in the
 Needs attention filter.
 
+A team member is muted on every device by default. While a session is a
+non-lead member of an active team (planning, running or paused) and the owner
+has not recorded a choice, its host reports `notification_preferences.muted`
+true at revision 0, so every desktop and the phone follow one preference; the
+team's lead is never muted this way. The default is computed when the host is
+read and writes nothing. Unmuting records a choice at revision 1 or more, which
+wins on every device. A desktop whose host predates the shared default still
+mutes the member locally and says "Muted on this computer"; an updated host
+reports the shared mute, and the desktop says "Muted on all devices".
+
 Notifications open Activity for the exact requesting run and conversation,
 including remote or renamed sessions. Polling and restarts do not repeat the same
 request; resolved notifications are removed. Main-agent reply banners wait until
@@ -907,6 +917,14 @@ say what the session does now and what it waits for.
 | Cooling | `cooling` | Done and waiting for a new task; the prompt cache is still warm. |
 | Cold | `cold` | Done and idle; the prompt cache expired, a new session is cheaper. |
 | Stopped | `stopped` | Stopped by you, or saved and not running. |
+
+Clients draw the states in these tones (dark / light): Building `#4cc98a` /
+`#2a9d63` (Working's green; the desktop tells them apart by Building's frame
+and terminal glyph), Waiting for dependencies `#6fa8ff` / `#2f66c9`, Cooling
+`#56c8e0` / `#137f95`, Cold `#8fa6c4` / `#55708f`, Stopped `#8b939e` /
+`#6b7785`. On the desktop a badge in one of these states has a frame and a
+caption in its tone (`SessionStatusBadge.h` is the reference); Android fills a
+Building badge with 13 % of the tone over the card.
 
 The host computes them in this order: Working, unless the turn waits for
 subagents in flight (`Waiting for 2 subagents: explorer, reviewer`) or for a
@@ -1283,6 +1301,179 @@ covers one add per count it names: the same sentence cannot add a second
 member. `remove-member` and `swap-member` still need the member's id in the
 sentence, and a separate lead `settings` cap change still names the new cap.
 The team's roster and feed say "Added by Lead on your word" with the quote.
+
+### Task pipelines and stage verdicts
+
+A task may pass its team's pipeline before it reaches the lead: an ordered list
+of `review` and `test` stages, each done by a member the stage names (a role, or
+a pinned member; the implementer never takes its own task's stage). A preset
+may also hold a `command` stage and a final `land` stage, which Zerus runs
+itself with no member (below). While a stage runs the task is `in_review` or
+`in_test`, between `submitted` and `accepted`.
+
+The team catalog keeps named presets: `code` (review by the reviewer, test by
+the tester, then the lead), `docs` (review, then the pipeline accepts) and
+`check` (no stages; the lead decides), each with its maximum rounds (3 by
+default), folder rule (`hold` or `checkout`) and final acceptance (`lead`,
+`sub_lead` or `auto`). A template or a role may name a default preset; a task
+names its own with `"pipeline":"code"`, `"docs"`, `"check"` or `"none"` in
+`plan`, `extend` or `edit-draft`. Zerus snapshots the preset when the task is
+first handed out, so a later catalog edit never changes a running task.
+
+A stage member reports with `hgs team report --json` and a verdict, naming the
+stage's attempt id: `{"task":7,"attempt":"STAGE-ATTEMPT","verdict":"pass",
+"findings":[],"text":"..."}`, or `"verdict":"return"` with the findings (at most
+50, each naming file and line). `pass` moves the task to its next stage;
+`return` sends the findings to the implementer as a new attempt, without the
+lead, and each such round counts. After the preset's maximum rounds the task
+returns to the lead with every round's findings. The lead and the owner can
+still skip a stage (`hgs team skip-stage {"task":7,"reason":"..."}`), send the
+task back from any stage (`hgs team send-back`), accept or reject, each with a
+reason; the feed names who did it.
+
+A stage works in the task's own folder: the implementer's worktree or clone, or
+the team's shared folder. Review reads the attempt's change against the task's
+criteria; test runs only the suites of the files the change touched and takes
+the criteria's shots. Neither edits the task's files: a stage writes only build
+output and its own temporary folder. What changed is the attempt's commits in a
+Git checkout, otherwise the changed files its report names. A `hold` preset
+(the default) holds the folder while the task is in its test stage, so the
+implementer's next task in that folder waits; a `checkout` preset tests a
+detached checkout of the attempt's commits instead and frees it.
+
+### A model per task, a task for a role, and the context before one
+
+The owner's catalog gives a role the models its members may switch between,
+`"models":[{"model":"claude-opus-4-1","effort":"high"},
+{"model":"claude-sonnet-4-5"}]`; a member copies that list when it joins, so a
+later catalog edit changes no running team, and the owner may edit a member's
+list in the team settings. With no list a member runs only its launch model and
+effort.
+
+A task may name `"models":["claude-opus-4-1","claude-sonnet-4-5@high"]` (a
+model, or `model@effort`); empty means any model of its member. It may name
+`"role":"Backend"` instead of an assignee: such a task must not be `pinned`,
+and a task naming both an assignee and a role is refused at `plan`, `extend`
+and `edit-draft`. A plan naming a role with no member of that role is an
+error. Zerus gives the task to the first free member of the role, in roster
+order, whose models allow one of the task's; a member already on an allowed
+model is preferred over one that needs a switch, and rebalancing never moves a
+task to a member that cannot run one of its models. A role with members but
+none whose models allow the task's gives a health warning at plan time and a
+waiting reason at run time.
+
+Before the hand-out Zerus switches the member's model and effort with
+`hgs settings NAME --json {"model":"...","effort":"..."}` (Claude, Codex and
+DeepSeek; Kimi and OpenCode cannot switch) and waits until the session record
+shows the new model, up to 60 seconds. A refusal, or no confirmation, leaves
+the task waiting with `waits`
+(`{"for":"zerus","on":["model"],"reason":"...","at":...}`) and one inbox item;
+`hgs team retry` or a reassignment clears it, and a waiting task is never
+retried on its own. The steps Zerus took are recorded on the attempt's
+`prepare` (`[{step, from, to, at, result, reason}]` in the order branch, model,
+context; `result` is `done`, `skipped`, `refused` or `uncertain`).
+
+`context_before_task` on a role (copied into the member when it joins, and
+overridable per member in the team settings) is `none` (default), `compact` or
+`clear`. Before each hand-out, a stage's included, Zerus runs
+`hgs compact-context` or `hgs clear-context` on the idle member session and
+waits for its confirmation; a clear starts a new conversation and the member's
+`SessionRef` follows it, so the task text must not say "as before". An agent
+without the action (OpenCode) gets `none` with one feed note; a refused action
+leaves the task waiting, an unconfirmed one is `uncertain` and is never retried.
+While the action runs the task's `waits` is `{"for":"zerus","on":["context"],
+"state":"waiting",...}` with the action's request, so a restarted worker reads
+the same request instead of running it again; it is not an inbox item until it
+fails.
+
+### Stages Zerus runs itself: a command, a land, a branch per task
+
+The owner's catalog may give a preset a `command` stage — a command, its
+expected exit code and a time limit — and a final `land` stage:
+
+```json
+{"kind":"command","command":{"command":"cargo test --locked",
+ "expect_exit":0,"timeout_minutes":30}}
+{"kind":"land","exits":{"0":"accepted","2":"returned","3":"held"},
+ "command":{"command":"./scripts/land.sh","timeout_minutes":10}}
+```
+
+A command or land stage names no role or member: Zerus runs it in the stage's
+folder as a detached `hgs run`, with no model, so the session shows Building
+and the output is kept in the run log. The exit code is the verdict: the
+expected one passes; any other returns the task to the implementer with the
+last 4000 characters of the output as the finding, counting toward the preset's
+rounds. The same output on the same commit twice in a row is marked `flaky`
+and goes to the lead; a timeout returns "timed out after N min". The plan
+chooses a preset, never a command: only the owner's catalog writes it.
+
+A `land` stage runs once every earlier stage passed and is the preset's last
+stage. Its `exits` map an exit code to `accepted` (Zerus accepts the task,
+`decided_by` is Zerus, and the feed names the stage), `returned` (back to the
+implementer with the output) or `held` (the task waits for the lead with the
+output). The default is 0 accepted and any other held. Because a land stage may
+push, it needs the owner's `"land_allowed":true`: without it a plan choosing
+the preset is refused, and a team that turns it off later holds the task for
+the lead instead of running the stage.
+
+`Settings.branch_per_task` gives each task its own branch: `{"template":
+"task/{id}"}` fills `{id}`, `{member}` and `{team8}` and must be a valid Git
+branch name; `base_branch` (default the lead's branch) is what the branch
+starts from. Before each hand-out Zerus refuses a folder with uncommitted
+changes (the task waits "folder has changes"), then creates the branch in the
+member's folder from the base or checks it out; a returned or reopened task
+gets its existing branch. Branches are never deleted. Without `branch_per_task`
+a member keeps one branch, as before.
+
+### Scaling and draining the roster
+
+`hgs team scale --json {"request_id":"<uuid>","team":"<id>","role":"Backend",
+"agent":"codex","model":"gpt-5","effort":"high","account":"work","count":2}`
+adds `count` members of that role at once, as `add-member` adds one: their ids
+are the first free of the role's words (`backend`, `backend2`, ...), and the
+model, effort and account are copied. The whole scale is refused when it does
+not fit `max_members` or the tree's session budget, and scale never raises the
+cap. Only the owner, or the lead on the owner's word naming the role and the
+count, may scale.
+
+`hgs team drain --json {"request_id":"<uuid>","team":"<id>","member":"impl1"}`
+lets the member finish its open attempt and stage run and gives it nothing new
+(`member.draining: true`; its other ready tasks go to a same-role peer). When
+it owes nothing, Zerus pauses its session (never a kill: the conversation stays
+under Saved) and removes it, and the feed records both. A drain is undone
+before it ends with the same command and `"draining":false`. The owner, or the
+lead on the owner's remove word, may drain; the lead cannot drain itself, and a
+sub-lead's reports move first.
+
+### An intake key for urgent tasks
+
+```sh
+{"request_id":"<uuid>","team":"<id>","label":"health watch","by":"human"} | hgs team intake-key --json
+{"key":"<the key shown once>","team":"<id>","tasks":[{"title":"Fix the outage","assignee":"backend"}]} | hgs team intake --json
+```
+
+The owner creates a key for one team; Zerus stores only its SHA-256 hash and
+shows the key once, in the created receipt (a replay returns the receipt
+without it). A process presenting the key may add one urgent phase: at most
+five tasks, approved at once, without a barrier, titled `Urgent: <label>`,
+handed out before the other ready tasks, with the key's label in the feed. The
+key grants nothing else: any other operation presenting a key is refused, and
+so is an unknown or revoked key or another team's. A team keeps at most eight
+keys; the owner revokes one by id (`"revoke":"i1"`). Without a key only the
+owner and the lead change a plan, as before.
+
+### Restarting a crashed member
+
+`Settings.restart_crashed` (off by default, only the owner sets it) launches a
+member's session again into the same folder and conversation when its process
+exits on its own: not a pause, an archive, a usage limit, a swap, or a session
+Zerus has not seen running since its last restart. It happens at most three
+times an hour per member (`member.restarts`, the last 20 kept); each restart
+returns the member's open attempt to the lead as `uncertain` ("the session
+crashed at T; restarted") and records `member_restarted`. The fourth crash in
+an hour leaves the session stopped with one inbox item and `member_crashed`;
+pausing the team stops restarts, a member the team paused is never restarted,
+and a launch that fails records `restart_failed`.
 
 <a id="activity"></a>
 
@@ -3722,9 +3913,17 @@ restarts native agents, tmux servers or DeepSeek hosts. A changed build replaces
 running Zerus through `tray/update-installed.py`, the only supported live update:
 Zerus quits as its Quit action does, so drafts are saved, then starts again through
 systemd or launchd. Do not stage GUI copies in `~/Applications` or `~/.local/bin` by
-hand. The update keeps one rollback copy in `~/.local/share/hgs/desktop-previous`,
-restores it when the new GUI does not start, and confirms the running image,
-unchanged nonempty drafts and native agent and tmux processes. It records the
+hand. The GUI it replaces stays aside until the new one was verified (running, or,
+for a GUI that is not running, by its signature and its own `--build-info`) and
+only then becomes the one rollback copy in `~/.local/share/hgs/desktop-previous`;
+a new GUI that does not start is replaced by it again. A replaced bundle without
+its identity, executable or valid signature never becomes the rollback copy, and
+a Zerus process started during the update stops the change. Those cases and an
+interrupted update keep the replaced GUI in a `.hgs-tray-kept-*` folder beside
+the installed one and print where; later updates list such folders and never
+remove them. Links at the
+installed path or in the rollback folder are refused. The update confirms the
+running image, unchanged nonempty drafts and native agent and tmux processes. It records the
 installed builds in `~/.local/share/hgs/build-provenance.json`, then removes hidden
 `.zerus-*` staging folders left beside the GUI by earlier hand-made updates once
 they are an hour old, hold only installer copies and no process uses them. A
@@ -3733,6 +3932,23 @@ gracefully on SIGTERM, SIGINT and SIGHUP; an older running build that does not
 is closed from its tray menu, or the installer asks you to quit it first. Use
 `HGS_TRAY_RESTART=0 ./tray/install.sh` to stage a GUI update while keeping a running
 workspace and its unsaved drafts. The new UI starts on the next launch.
+
+The installer refuses to put an unnumbered build over a numbered Dev
+installation (AGENTS.md), right after its build and before it changes anything,
+for the live update and `HGS_TRAY_RESTART=0` alike. A numbered Dev installation is
+replaced only by a numbered Dev build or by a local preview build: configure
+`tray/build` with `-DZERUS_DEV_BUILD_NUMBER=N`, or build the Tauri client with
+`ZERUS_DEV_BUILD_NUMBER=N` in its environment, N being the CI sequence of the
+main push the build comes from, or build an owner-requested branch preview with
+`ZERUS_LOCAL_PREVIEW_LABEL`. The label is at most 32 lowercase letters and
+digits in hyphen-separated words; it needs a clean Git checkout and no Dev
+number, and the build shows as `DEV_VERSION-preview.LABEL.COMMIT`. The Qt GUI
+reads it as a CMake cache variable (configure `tray/build` with
+`-DZERUS_DEV_BUILD_NUMBER= -DZERUS_LOCAL_PREVIEW_LABEL=task-board` before
+running `tray/install.sh`); the Tauri client reads the environment variable
+when it builds. Clear the label before building main again. On macOS, a switch
+between the Qt GUI and the Tauri client always takes the live update, never
+`HGS_TRAY_RESTART=0`.
 
 Linux installs the binary under `~/.local/bin`, a systemd user service under
 `~/.config/systemd/user` and a launcher under `~/.local/share/applications`.

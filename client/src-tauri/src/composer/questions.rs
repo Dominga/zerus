@@ -93,6 +93,9 @@ pub(crate) struct Answers {
     /// The answer under way per session key, by card (`m_answersInFlight`).
     pub(crate) in_flight: HashMap<String, String>,
     next_token: u64,
+    /// Runs once between `sync_moving`'s two lock sections (tests only).
+    #[cfg(test)]
+    pub(crate) between: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl Answers {
@@ -207,8 +210,17 @@ impl Composers {
 
     fn sync_moving(&self, navigation: i32) {
         let listed = {
-            let hub = self.lock();
-            self.context(&hub).and_then(|ctx| ctx.details)
+            #[allow(unused_mut)]
+            let mut hub = self.lock();
+            #[cfg(test)]
+            let between = hub.answers.between.take();
+            let details = self.context(&hub).and_then(|ctx| ctx.details);
+            drop(hub);
+            #[cfg(test)]
+            if let Some(between) = between {
+                between();
+            }
+            details
         };
         let asked: Vec<_> = listed
             .as_deref()
@@ -226,21 +238,35 @@ impl Composers {
                 hub.answers.asked = asked;
             }
         }
-        let Some(ctx) = self.context(&hub) else {
+        // Every way out trims, with the cards the open session lists now.
+        let mut listed = HashSet::new();
+        let wake = self.place(&mut hub, navigation, &mut listed);
+        Self::trim_answers(&mut hub, &listed);
+        drop(hub);
+        if wake {
+            self.changed();
+        }
+    }
+
+    /// `sync_moving` under the hub lock: fills `listed` with the open
+    /// session's card keys, and says whether the view changed.
+    fn place(&self, hub: &mut Hub, navigation: i32, listed: &mut HashSet<String>) -> bool {
+        let Some(ctx) = self.context(hub) else {
             hub.answers.shown = None;
-            return;
+            return false;
         };
         let Some(details) = ctx.details.clone() else {
             // Qt clears its details on a selection change (SessionsWindow.cpp:451),
             // so the card shown next is a new one for setQuestion.
             hub.answers.shown = None;
-            return;
+            return false;
         };
         let label = rules::label(&ctx.key);
-        let listed: HashSet<String> = rules::pending(&details)
-            .iter()
-            .filter_map(|q| rules::store_key(&ctx.key, q))
-            .collect();
+        listed.extend(
+            rules::pending(&details)
+                .iter()
+                .filter_map(|q| rules::store_key(&ctx.key, q)),
+        );
         let mut restored = HashSet::new();
         for q in rules::pending(&details)
             .into_iter()
@@ -249,7 +275,7 @@ impl Composers {
             let Some(key) = rules::store_key(&ctx.key, &q) else {
                 continue;
             };
-            self.ensure_answer(&mut hub, &key, &label);
+            self.ensure_answer(hub, &key, &label);
             let Some(draft) = hub.answers.drafts.get_mut(&key) else {
                 continue;
             };
@@ -260,23 +286,21 @@ impl Composers {
             }
             if changed {
                 restored.insert(key.clone());
-                self.save_answer(&mut hub, &key, false, None);
+                self.save_answer(hub, &key, false, None);
             }
         }
-        let Some((selection, scope)) = self.selection(&hub, &ctx, navigation) else {
-            return;
+        let Some((selection, scope)) = self.selection(hub, &ctx, navigation) else {
+            return false;
         };
         hub.answers.remember(scope, selection.chosen.clone());
         let Some(question) = selection.question else {
             hub.answers.shown = None;
-            drop(hub);
-            self.changed();
-            return;
+            return true;
         };
         let Some(key) = rules::store_key(&ctx.key, &question) else {
-            return;
+            return false;
         };
-        self.ensure_answer(&mut hub, &key, &label);
+        self.ensure_answer(hub, &key, &label);
         let mut seeded = false;
         if !hub.answers.loading.contains(&key) {
             if let Some(draft) = hub.answers.drafts.get_mut(&key) {
@@ -299,9 +323,7 @@ impl Composers {
             hub.answers.epoch += 1;
         }
         hub.answers.shown = Some((key, question));
-        Self::trim_answers(&mut hub, &listed);
-        drop(hub);
-        self.changed();
+        true
     }
 
     /// Loads a card's draft that is not in memory (`ensureDraft`, 282-309).
@@ -337,6 +359,9 @@ impl Composers {
         // A load whose mark a restore cleared, or that a later ensure of the
         // same key replaced, read an older store: it counts for nothing.
         if !hub.answers.loading.contains(key) || hub.answers.loads.get(key) != Some(&ticket) {
+            if hub.answers.loads.get(key) == Some(&ticket) {
+                hub.answers.loads.remove(key);
+            }
             return;
         }
         hub.answers.loading.remove(key);
@@ -378,6 +403,7 @@ impl Composers {
             answers.order.remove(i);
             answers.drafts.remove(&key);
             answers.saves.remove(&key);
+            answers.loads.remove(&key);
         }
     }
 
@@ -1647,6 +1673,13 @@ pub(crate) mod tests {
             "an answer Codex recorded is not offered again"
         );
         store.flush();
+        assert!(
+            !c.lock()
+                .answers
+                .loads
+                .contains_key(&store_key("codex:done")),
+            "the load the record overtook leaves no ticket"
+        );
         let saved = read_draft(&root.join("drafts"), &store_key("codex:done"));
         assert_eq!(saved.draft.form_state["submitted"], json!(true));
         assert_eq!(
@@ -1839,15 +1872,23 @@ pub(crate) mod tests {
         details["pending_questions"] = json!([recorded]);
         c.observe(&state(details));
         assert!(c.lock().answers.drafts[&key].submitted);
-        // The draft leaves memory, as an eviction does once its save answered ...
+        // That save answered (the held store cannot say so itself) ...
+        c.lock().answers.unsaved.remove(&key);
+        // ... and 70 other cards push the draft out through the trim.
+        let mut others = ready();
+        others["pending_questions"] = json!((0..70)
+            .map(|i| optional_card(&format!("codex:{i}"), 100.0 + f64::from(i)))
+            .collect::<Vec<_>>());
+        c.observe(&state(others));
         {
-            let mut hub = c.lock();
-            hub.answers.drafts.remove(&key);
-            hub.answers.order.retain(|k| *k != key);
-            hub.answers.saves.remove(&key);
-            hub.answers.unsaved.remove(&key);
+            let hub = c.lock();
+            assert!(!hub.answers.drafts.contains_key(&key), "evicted");
+            assert!(
+                !hub.answers.loads.contains_key(&key),
+                "its load ticket goes with it"
+            );
         }
-        // ... and comes back without the record: L2 starts.
+        // It comes back without the record: L2 starts.
         let mut details = ready();
         details["pending_questions"] = json!([optional_card("codex:k", 10.0)]);
         c.observe(&state(details));
@@ -2364,5 +2405,60 @@ pub(crate) mod tests {
                 },
             ]
         );
+    }
+
+    // Review round 2 of A2-1 (minors on top of A2-2).
+
+    #[test]
+    fn leaving_many_cards_for_none_drops_back_to_64_drafts() {
+        let root = dir("q-none-left");
+        let (c, _) = send_hub(&root);
+        let mut details = ready();
+        details["pending_questions"] = json!((0..70)
+            .map(|i| optional_card(&format!("codex:{i}"), f64::from(i)))
+            .collect::<Vec<_>>());
+        opened(&c, details);
+        with_card(&c);
+        loaded_all(&c);
+        assert_eq!(c.lock().answers.drafts.len(), 70);
+        c.observe(&state(ready()));
+        until(&c, |v| v.question.is_none());
+        assert_eq!(c.lock().answers.drafts.len(), HELD);
+    }
+
+    #[test]
+    fn closing_the_selection_forgets_the_shown_card() {
+        let root = dir("q-close");
+        let (c, _) = send_hub(&root);
+        opened(&c, asking(vec![card_json("tool:t1")]));
+        with_card(&c);
+        c.open(None);
+        assert!(
+            c.lock().answers.shown.is_none(),
+            "Qt clears its details with the selection (SessionsWindow.cpp:451)"
+        );
+    }
+
+    #[test]
+    fn the_asked_times_come_only_from_the_details_they_were_formatted_from() {
+        let root = dir("q-asked");
+        let (c, _) = send_hub(&root);
+        let mut old = card_json("tool:t1");
+        old["created_at"] = json!(1_700_000_000.0);
+        opened(&c, asking(vec![old]));
+        with_card(&c);
+        // A newer card arrives while a sync formats the older details' times.
+        let newer = asking(vec![card_json("tool:t2")]);
+        let other = c.clone();
+        c.lock().answers.between = Some(Box::new(move || other.observe(&state(newer))));
+        c.sync_questions();
+        let q = until(&c, |v| {
+            v.question
+                .as_ref()
+                .is_some_and(|q| q.card == store_key("tool:t2"))
+        })
+        .question
+        .unwrap();
+        assert!(q.asked.starts_with("Asked "), "{q:?}");
     }
 }

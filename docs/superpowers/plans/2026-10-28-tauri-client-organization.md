@@ -32,7 +32,7 @@
 >   This device's choice changes only when Delete project removes the default project (`SessionOrganization::removeGroup`). Setting a default is 3c.
 > - **Local layout:** the collapsed state, the order of sessions inside a project and the default project are local, as in Qt. They live in `organization-layout.json` in the app data directory, because Qt's QSettings cannot be shared (deviation 1 below). The project order is shared (`project_order`).
 > - **Edits run while the catalog is ready.** Before that, the entries show disabled with the reason. Qt queues edits made before its first reply. This client refuses them until its first state, also on top of a draft restored from the last run (deviation 4).
-> - **Never `swarm initialize`.** This client has no GUI cache to import. An initialize from it would mark the catalog imported and skip the Qt GUI's one-time import (`src/swarm/mod.rs:212-215`, `SwarmController.cpp:86-88`). With `initialized: false`, edits stay disabled. Task 10 files the follow-up for computers without the Qt GUI.
+> - **The client never calls `swarm initialize`.** It has no GUI cache to import (`SwarmController.cpp:86-88`). With `initialized: false`, edits stay disabled. For `zerus-5wmh.48`, the owner approved hgs-side bootstrap of an empty, name-free catalog only when Qt's settings store is definitely absent (2026-10-29). A `swarm get` or first read of an explicit organization subscription uses one idempotent operation under the existing catalog lock when `imported` is false. Existing operations, peers, bindings and machine names are preserved; no creator provenance or digest is needed. Get retains its existing locked load, self-binding and machine-name refresh, save and stable uninitialized node identity. Only steady-state organization watch reads stay lock-free. Hello remains unchanged and may create an uninitialized catalog, but never bootstraps. Store presence or uncertainty prevents bootstrap and keeps the Qt import path unchanged; a watch retries that probe only on a new subscription. Before the catalog save, hgs writes a separate node-bound `gui-import-pending.json`, retaining `imported=true` for old callers. A later `initialize` with that marker imports only missing fields, saves the catalog, then clears the marker. Existing values, tombstones and concurrent heads survive; imported catalogs without a matching marker remain a no-op. Qt stores, catalog and replica wire formats stay unchanged. See `docs/reference.md` for the platform probes, crash ordering and compatibility boundary.
 > - **A failed or timed-out apply is sent again, as in Qt** (coordinator ruling, 2026-10-28; it withdraws this plan's first "never sent again" rule):
 >   - **Qt:** a failure leaves `m_base`, `m_desired` and `m_versions` as they were (`SwarmController.cpp:67-73`), and so does a reply of another schema (194-196). The next 5 s `refresh` sends `apply` again from them (55, 96-101; `send` 102-110). An edit made meanwhile restarts the 120 ms flush (94), which sends the same base and versions with the newer desired state.
 >   - **Why this is not a replay:** it is reconciliation toward a desired state, not the repeat of a side effect. `swarm apply` writes each field that differs between base and desired, with the observed versions as parents (`src/swarm/model.rs:126-201`; `catalog.rs:418-444`). A duplicate of a diff that already landed adds a head with the same value, and the snapshot reports conflicts only for differing values (`model.rs:298-312`), so it is a no-op for the list. A stale base surfaces as a conflict instead of clobbering anything. The spec's never-replay rule covers non-idempotent actions (send, interrupt, terminate), and dropping the user's move on a network blip would regress from Qt.
@@ -5070,3 +5070,29 @@ token checkpoint at 500 ms before the independent draft/layout flush. Regression
 tests cover restart after a failed draft, corrupt and oversized replacement,
 newer-version preservation across saves and exit, I/O retry, concurrent layout
 saves, and both oversized version 1 and version 2 files.
+
+## As built: CLI-side catalog bootstrap (`zerus-5wmh.48`)
+
+`swarm::bootstrap::maybe` is the shared operation for get and the initial
+organization read, called with the existing catalog lock held. It changes only
+`imported` plus the separate node-bound pending GUI-import marker; the marker is
+durable first. Uninitialized catalogs created by older get calls or watch hello
+are eligible, with all existing metadata retained. Get keeps its ordinary
+loader and save; it still persists an uninitialized identity when Qt settings
+exist. The watch job marks only an explicit subscription as eligible; changed-file
+and safety refreshes never probe again or take the write lock. A new subscription
+can retry a previously undecidable probe. Hello is unchanged.
+
+Pending initialize imports only absent fields through `Store::import_missing`,
+keeping tombstones and every concurrent head. It saves the catalog before
+removing the marker. Crash tests pin both persistence boundaries and the
+missing-field retry. Qt's `SwarmController.cpp:76-88` remains the first-start
+import reference; the explicit empty CLI bootstrap is the owner-approved change.
+The catalog Store and replica wire formats stay unchanged. `docs/reference.md`
+records the platform probes and older-CLI compatibility boundary.
+
+An unreadable, malformed or unsupported pending marker blocks only bootstrap.
+Get and the first organization read still return the uninitialized state without
+replacing the marker; one stderr note per process avoids repeated watch noise.
+Explicit initialize keeps refusing the unknown import state. Unit and real CLI
+get/watch regressions pin the preserved catalog, marker and once-only note.

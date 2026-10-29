@@ -352,7 +352,8 @@ fn confirms(lowered: &str, phase: u32) -> bool {
     let confirm = has_token(text, "confirm") || has_token(text, "confirmed") || text.contains("подтвер");
     let bare = matches!(
         text,
-        "yes" | "да" | "ok" | "okay" | "sure" | "confirm" | "confirmed" | "add" | "add it" | "добавь" | "подтверждаю"
+        "yes" | "да" | "ok" | "okay" | "ок" | "окей" | "sure" | "confirm" | "confirmed" | "add" | "add it" | "добавь"
+            | "подтверждаю"
     );
     bare
         || starts_with(text, "yes")
@@ -363,7 +364,8 @@ fn confirms(lowered: &str, phase: u32) -> bool {
         || starts_with(text, "подтверждаю")
         || starts_with(text, "add")
         || starts_with(text, "добавь")
-        || ((starts_with(text, "ok") || starts_with(text, "okay")) && (add || confirm))
+        || ((starts_with(text, "ok") || starts_with(text, "okay") || starts_with(text, "ок") || starts_with(text, "окей"))
+            && (add || confirm))
 }
 
 /// U29: verifies the owner's request (or confirmation) for an addition to
@@ -661,6 +663,7 @@ mod tests {
             (2020.0, "Confirmed, add it now"),
             (2030.0, "да, добавь"),
             (2040.0, "подтверждаю"),
+            (2045.0, "ок, добавь"),
             (2050.0, "No, don't add it"),
             (2060.0, "не добавляй"),
             (2070.0, "ok, what's the status"),
@@ -672,7 +675,7 @@ mod tests {
         let request = |text: &str| verify_phase_in(&db, "claude/x/lead", "c1", text, 3, PhaseWord::Request, 0.0, 2100.0);
         let confirm = |text: &str| verify_phase_in(&db, "claude/x/lead", "c1", text, 3, PhaseWord::Confirm, 1990.0, 2100.0);
         // The real confirmations, in both languages, still work.
-        for said in ["Yes, add it", "Confirmed, add it now", "да, добавь", "подтверждаю"] {
+        for said in ["Yes, add it", "Confirmed, add it now", "да, добавь", "подтверждаю", "ок, добавь"] {
             confirm(said).unwrap_or_else(|error| panic!("{said}: {error}"));
         }
         // A refusal never confirms.

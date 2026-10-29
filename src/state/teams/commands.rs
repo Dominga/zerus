@@ -3765,6 +3765,22 @@ mod tests {
         assert!(events.iter().any(|event| event.kind == "member_swapped"));
     }
 
+    /// U54: a swap never interrupts a session that is busy or unreachable; the
+    /// member waits with that reason and the session keeps running.
+    #[test]
+    fn a_busy_old_session_is_never_interrupted_by_a_swap() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let mut record = json!({"version":1,"name":"claude/x/dev","agent":"claude","run_id":"r","conversation_id":"c"});
+            crate::state::storage::write(&mut record).unwrap();
+            let error = retire_old_session("claude/x/dev", "second").unwrap_err();
+            assert!(error.contains("waiting for the old session"), "{error}");
+            let saved = crate::state::storage::read("claude/x/dev").unwrap();
+            assert!(saved.get("paused").is_none(), "a busy session is not paused");
+        });
+    }
+
     /// U54: the lead relaunches a member only on a word that names it.
     #[test]
     fn the_leads_relaunch_needs_a_word_that_names_the_member() {

@@ -918,6 +918,14 @@ say what the session does now and what it waits for.
 | Cold | `cold` | Done and idle; the prompt cache expired, a new session is cheaper. |
 | Stopped | `stopped` | Stopped by you, or saved and not running. |
 
+Clients draw the states in these tones (dark / light): Building `#4cc98a` /
+`#2a9d63` (Working's green; the desktop tells them apart by Building's frame
+and terminal glyph), Waiting for dependencies `#6fa8ff` / `#2f66c9`, Cooling
+`#56c8e0` / `#137f95`, Cold `#8fa6c4` / `#55708f`, Stopped `#8b939e` /
+`#6b7785`. On the desktop a badge in one of these states has a frame and a
+caption in its tone (`SessionStatusBadge.h` is the reference); Android fills a
+Building badge with 13 % of the tone over the card.
+
 The host computes them in this order: Working, unless the turn waits for
 subagents in flight (`Waiting for 2 subagents: explorer, reviewer`) or for a
 tool call running 30 seconds or more (`Waiting for cargo test --workspace ·

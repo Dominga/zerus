@@ -6,6 +6,7 @@ import { notices } from "../store/actions";
 import { composer } from "../store/composer";
 import { terminal } from "../store/terminal";
 import { processes } from "../store/processes";
+import { questions } from "../store/questions";
 import { selectedKey, setDetailTab, setSelectedKey } from "../store/ui";
 import { flag, setSetting } from "../store/settings";
 import type { Session } from "../ui/sessions/types";
@@ -14,10 +15,22 @@ import type { Session } from "../ui/sessions/types";
 const API = "claude/sample-project/api-refactor";
 const PAGINATION = "codex/sample-project/pagination";
 const REVIEW = "claude/sample-project/review";
+const DOCS = "claude/sample-project/docs-pass";
+const FLAKY = "kimi/sample-project/flaky-test";
+const RELEASE = "codex/sample-project/release-notes";
+const QUESTION_HASH = "0123456789abcdef".repeat(4);
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 
 interface SmokeEntry { argv: string[]; stdin: string }
+interface AnswerRequest {
+  question_id: string;
+  expected_question_hash: string;
+  expected_run_id: string;
+  expected_conversation_id: string;
+  answers: { question_id: string; selected_option_ids: string[]; text: string }[];
+}
+interface QueueRequest { queue_id: string }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -200,6 +213,63 @@ async function previewStep() {
   }, 10_000, "the convertFileSrc thumbnail did not decode");
 }
 
+async function questionStep() {
+  const row = await select(DOCS);
+  await until(() => document.querySelector(".qcard-title")?.textContent === "Agent needs your answer" && composer.view()?.input_visible === false,
+    10_000, "the required question card did not hide the editor");
+  const card = document.querySelector(".qcard")!;
+  const unit = [...card.querySelectorAll<HTMLElement>("label.qchoice")].find((choice) => choice.textContent?.trim() === "Unit");
+  if (!unit) throw new Error("the Unit option is missing");
+  const input = unit.querySelector("input")!;
+  await until(() => !input.disabled, 10_000, "the Unit option stayed disabled");
+  input.click();
+  await until(() => input.checked, 3000, "the Unit option was not selected");
+  await until(() => !button("Submit answer", card).disabled, 5000, "Submit stayed disabled");
+  button("Submit answer", card).click();
+  const sent = await waitCall("answer", 1);
+  const request = JSON.parse(sent[0].stdin) as AnswerRequest;
+  if (request.question_id !== "tool:fixture-1" || request.expected_question_hash !== QUESTION_HASH
+    || request.expected_run_id !== row.runId || request.expected_conversation_id !== row.conversationId) {
+    throw new Error("the answer has the wrong question identity");
+  }
+  if (request.answers.length !== 1 || request.answers[0].question_id !== "q_0"
+    || request.answers[0].selected_option_ids.join(",") !== "opt_0_0" || request.answers[0].text !== "") {
+    throw new Error("the answer has the wrong selected option");
+  }
+  await until(() => document.querySelector(".qcard-status")?.textContent === "Answer sent. Waiting for the agent…", 5000, "the answer status did not appear");
+}
+
+async function approvalStep() {
+  await select(FLAKY);
+  await until(() => !!document.querySelector(".qcard"), 10_000, "the approval card did not appear");
+  questions.setActive(true);
+  const card = document.querySelector(".qcard")!;
+  await until(() => [...card.querySelectorAll("button")].some((candidate) => candidate.textContent?.trim() === "Approve once (3)"), 3000, "the review countdown did not start");
+  if (!button("Approve once (3)", card).disabled) throw new Error("Approve once was enabled during the review");
+  await sleep(3200);
+  if (button("Approve once", card).disabled) throw new Error("Approve once stayed disabled after the review");
+  button("Approve once", card).click();
+  const sent = await waitCall("answer", 2);
+  const request = JSON.parse(sent[1].stdin) as AnswerRequest;
+  if (request.answers.length !== 1 || request.answers[0].selected_option_ids.join(",") !== "allow") {
+    throw new Error("the approval has the wrong decision");
+  }
+}
+
+async function queueStep() {
+  await select(RELEASE);
+  await until(() => document.querySelector(".act-queue")?.textContent?.includes("↳ also update the changelog") === true,
+    10_000, "the native queue did not appear");
+  const panel = document.querySelector(".act-queue")!;
+  if (button("Send now", panel).disabled) throw new Error("Send now is disabled");
+  button("Send now", panel).click();
+  const sent = await waitCall("send-now", 1);
+  const request = JSON.parse(sent[0].stdin) as QueueRequest;
+  if (request.queue_id !== "queue-fixture") throw new Error("Send now names the wrong queue");
+  await until(() => notices().some((notice) => notice.text === "Send now requested. Waiting for the agent to accept the queue."),
+    5000, "the Send now notice did not appear");
+}
+
 async function imagePasteStep() {
   await select(API);
   const bytes = Uint8Array.from(atob(PNG), (char) => char.charCodeAt(0));
@@ -240,6 +310,9 @@ export async function phase4Smoke(allowed: boolean, smokeFile?: string) {
     ["start", startStep],
     ["processes", processesStep],
     ["preview", previewStep],
+    ["question", questionStep],
+    ["approval", approvalStep],
+    ["queue", queueStep],
     ["image-paste", imagePasteStep],
     ["clear-close-order", clearCloseOrderStep],
   ];

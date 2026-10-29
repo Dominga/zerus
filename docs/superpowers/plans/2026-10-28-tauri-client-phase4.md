@@ -12080,7 +12080,7 @@ git commit -m "feat(client): the Processes tab and Settings > Processes"
   8. `preview`: fetch the fixture message's `orders.json` and expect its metadata, then wait for the `pixel.png` card's `convertFileSrc` thumbnail to decode at its natural size.
   9. `question` (A2):
      - select `claude/sample-project/docs-pass`;
-     - expect the card "Agent needs your answer" and no editor;
+     - expect the card "Agent needs your answer" and `input_visible: false` (the editor stays mounted but hidden);
      - choose "Unit" and Submit;
      - expect one `answer` call whose stdin carries `question_id: "tool:fixture-1"`, the fixture's `expected_question_hash`, run and conversation, and `selected_option_ids: ["opt_0_0"]`;
      - expect the status "Answer sent. Waiting for the agent…".

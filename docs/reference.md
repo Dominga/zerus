@@ -1311,6 +1311,35 @@ member. `remove-member` and `swap-member` still need the member's id in the
 sentence, and a separate lead `settings` cap change still names the new cap.
 The team's roster and feed say "Added by Lead on your word" with the quote.
 
+### An intake key for urgent tasks
+
+```sh
+{"request_id":"<uuid>","team":"<id>","label":"health watch","by":"human"} | hgs team intake-key --json
+{"key":"<the key shown once>","team":"<id>","tasks":[{"title":"Fix the outage","assignee":"backend"}]} | hgs team intake --json
+```
+
+You create an intake key for one team; Zerus stores only its hash and shows the
+key once, in that receipt (a replay returns the receipt without it). A process
+presenting the key may add one **urgent** phase: at most five tasks, approved at
+once, without a barrier, titled `Urgent: <label>`, handed out before the other
+ready tasks, and the feed names the key's label. The key grants nothing else:
+any other operation presenting a key is refused, and so is a key whose team
+differs, was revoked, or belongs to another team. Without a key nothing
+changes. Revoke a key by its id with
+`{"request_id":"<uuid>","team":"<id>","revoke":"i1","by":"human"}`; the team
+keeps at most eight keys.
+
+### Restarting a crashed member
+
+`restart_crashed` (off by default, only you set it) launches a member's session
+again into the same folder and conversation when its process exits on its own:
+not a pause, not an archive, not a usage limit and not a session Zerus has not
+seen running since its last restart. It happens at most three times an hour per
+member, and each restart returns the member's open attempt as `uncertain` for
+the lead ("the session crashed at T; restarted"). The fourth crash in an hour
+leaves the session stopped with one inbox item and a feed entry. Pausing the
+team stops restarts, and a member the team paused is never restarted.
+
 <a id="activity"></a>
 
 ## Activity, messages and native controls

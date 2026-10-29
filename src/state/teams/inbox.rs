@@ -148,6 +148,31 @@ fn all_items(team: &Team) -> Vec<Item> {
             detail: member.error.clone(),
         });
     }
+    // U52: a member whose session crashed too often this hour stays stopped
+    // until the owner or the lead starts it again.
+    for member in team.members.iter().filter(|member| member.id != team.lead && member.crash_told).filter(|_| active) {
+        let role = team.role_of(&member.id);
+        let at = member.crash.unwrap_or_else(crate::state::now);
+        let restarts = member.restarts.iter().filter(|restart| crate::state::now() - **restart <= 3600.0).count();
+        let command = member
+            .session
+            .as_ref()
+            .map(|session| format!("hgs resume {} -d", session.name))
+            .unwrap_or_default();
+        items.push(Item {
+            subagents: Value::Null,
+            kind: "crashed",
+            key: format!("crashed:{}", member.id),
+            task: None,
+            member: role.clone(),
+            since: at,
+            summary: summary(&format!(
+                "{role}'s session crashed again after {restarts} restart(s) this hour and stays stopped"
+            )),
+            command,
+            detail: "The team's restart_crashed setting launches a crashed member at most three times an hour; a fourth crash waits for you.".into(),
+        });
+    }
     // F8: each decided proposal reaches the lead with the decision and the
     // owner's reason, not only as a feed event; the latest few, by decision.
     let mut decided: Vec<&Value> = team

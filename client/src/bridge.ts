@@ -410,6 +410,22 @@ export async function terminalResize(view: string, generation: number, cols: num
 export function terminalAck(view: string, generation: number): void {
   if (inTauri()) void invoke("terminal_ack", { view, generation }).catch(() => {});
 }
+/** The Terminal tab of attach `generation` shows or hides: a dropped file's paste waits for neither (Qt's terminalDropTarget). */
+export function terminalShown(view: string, generation: number, shown: boolean): void {
+  if (inTauri()) void invoke("terminal_shown", { view, generation, shown }).catch(() => {});
+}
+/** The session a Terminal drop goes to (src-tauri terminal.rs `DropTarget`). */
+export interface DropTarget { computer: string; name: string; machine: string; run_id: string; conversation_id: string; tracked: boolean; created: number }
+/** Pastes dropped files' paths into attach `generation`, after staging them on a peer: null when done (or stale), else an information notice; rejects with a warning. */
+export async function terminalDrop(view: string, generation: number, target: DropTarget, paths: string[]): Promise<string | null> {
+  if (!inTauri()) throw "Dropping files needs the desktop app.";
+  return invoke<string | null>("terminal_drop", { view, generation, target, paths });
+}
+/** Whether every dropped path names a file (Qt's LocalFile::readable); a folder refuses the drop. */
+export async function droppedFiles(paths: string[]): Promise<boolean> {
+  if (!inTauri()) return false;
+  return invoke<boolean>("dropped_files", { paths }).catch(() => false);
+}
 export async function terminalDisconnect(view: string): Promise<string | null> {
   return inTauri() ? invoke<string | null>("terminal_disconnect", { view }) : null;
 }

@@ -42,6 +42,8 @@ export interface ComposerPort {
   open(session: SessionRef | undefined): Promise<ComposerView | null>;
   edit(handle: number, rev: number, epoch: number, text: string, position: number, anchor: number): Promise<void>;
   pick(handle: number, start: number, end: number): Promise<void>;
+  /** Attaches files by path, their references going where `start..end` is (composer_attach). */
+  attach(handle: number, paths: string[], start: number, end: number): Promise<void>;
   pasteImage(handle: number, png: Uint8Array, start: number, end: number): Promise<void>;
   send(handle: number, rev: number, epoch: number, text: string, position: number, anchor: number): Promise<SendReply>;
   answer(token: number, answer: Answer): Promise<SendReply>;
@@ -358,6 +360,13 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
     },
     flush,
     attachFiles: () => exclusive((h) => { const s = ordered(); return port.pick(h, s.start, s.end); }),
+    /** Qt's canAttachFiles: the session takes attachments and nothing locks the composer. */
+    canAttach: () => !!view()?.attachments_available && !locked(),
+    /**
+     * Dropped files (MessageComposer::attachDroppedFiles, 961-967): the
+     * selection collapses to the cursor and their references go there.
+     */
+    attachDropped: (paths: string[]) => exclusive((h) => { const at = selection().end; return port.attach(h, paths, at, at); }),
     async pasteImage(blob: Blob) {
       await exclusive(async (h) => {
         let png: Uint8Array;
@@ -468,7 +477,7 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
 export type ComposerStore = ReturnType<typeof createComposer>;
 
 export const composer = createRoot(() => createComposer({
-  open: bridge.composerOpen, edit: bridge.composerEdit, pick: bridge.composerPick, pasteImage: bridge.composerPasteImage,
+  open: bridge.composerOpen, edit: bridge.composerEdit, pick: bridge.composerPick, attach: (h, paths, start, end) => bridge.composerAttach(h, paths, start, end), pasteImage: bridge.composerPasteImage,
   send: bridge.sendMessage, answer: bridge.sendAnswer, remove: bridge.composerRemove, undo: bridge.composerUndoRemove,
   allowRetry: bridge.composerAllowRetry, cancelSend: bridge.sendCancel, interrupted: bridge.sendInterrupted, clear: bridge.clearContext,
   refresh: bridge.composerRefresh, openAttachment: (path) => bridge.attachmentOpenDraft(path),

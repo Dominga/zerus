@@ -1,7 +1,11 @@
 /* Session detail: header, tabs, Activity, composer, inspector, terminal. */
 @layer components {
   .sessions-page { display: flex; flex: 1; min-width: 0; min-height: 0; gap: 0; }
-  .detail { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; margin: 8px; background: var(--z-color-surface); border: 1px solid var(--z-color-divider); border-radius: 12px; overflow: hidden; }
+  .detail { position: relative; flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; margin: 8px; background: var(--z-color-surface); border: 1px solid var(--z-color-divider); border-radius: 12px; overflow: hidden; }
+  /* Qt's file drop overlay (SessionFileDrop.h:33-34): a dashed panel over the session with what a drop does. */
+  .drop-overlay { position: absolute; inset: 0; z-index: 30; display: grid; place-items: center; pointer-events: none; border-radius: 10px;
+    background: light-dark(rgba(237, 249, 243, 0.92), rgba(24, 45, 39, 0.9)); border: 2px dashed light-dark(#167357, #8bdfc0); }
+  .drop-overlay span { color: light-dark(#167357, #8bdfc0); font-size: 16px; padding: 24px; text-align: center; }
   .detail-empty { margin: auto; text-align: center; color: var(--z-color-muted); }
   .detail-empty h2 { font-size: 21px; font-weight: 600; color: var(--z-color-text-2); margin-bottom: 8px; }
 

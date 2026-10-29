@@ -22,6 +22,7 @@ function fakes() {
     ack: (_view, generation) => { calls.push(`ack ${generation}`); },
     disconnect: async () => { calls.push("disconnect"); return "Disconnected — the session continues on studio"; },
     retarget: async (_view, t) => { calls.push(`retarget ${t.run_id}`); return changed; },
+    shown: (_view, generation, on) => { calls.push(`shown ${generation} ${on}`); },
   };
   let clock = 0;
   const pending: { at: number; fn: () => void }[] = [];
@@ -71,6 +72,28 @@ describe("terminal store", () => {
       f.emit(new TextEncoder().encode("while hidden").buffer);
       expect(f.written).toEqual([]);
       expect(f.calls.at(-1)).toBe("ack 7");
+    });
+  });
+
+  it("tells Rust when the tab of the current attach hides or shows, for a dropped file's paste", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const t = createTerminal(f.port, f.timers, f.visibility);
+      await t.setTarget(target(), ok);
+      expect(t.generation()).toBe(0);
+      t.show(f.screen);
+      await tick();
+      expect(t.generation()).toBe(7);
+      // A new attach starts shown in Rust: nothing to tell.
+      expect(f.calls.filter((c) => c.startsWith("shown"))).toEqual([]);
+      t.hide();
+      t.show(f.screen);
+      expect(f.calls.filter((c) => c.startsWith("shown"))).toEqual(["shown 7 false", "shown 7 true"]);
+      // A hidden window drops the attach after saying it no longer shows.
+      f.setHidden(true);
+      await tick();
+      expect(f.calls.filter((c) => c.startsWith("shown") || c === "disconnect").slice(-2)).toEqual(["shown 7 false", "disconnect"]);
+      expect(t.generation()).toBe(0);
     });
   });
 
@@ -224,6 +247,7 @@ function rustLike() {
       const generation = ++next; views.set(view, { generation, run: t.run_id }); return { generation, status: "Connected", reused: false };
     },
     write: async () => {}, resize: async (_v, g, c, r) => { calls.push(`resize ${g} ${c}x${r}`); },
+    shown: () => {},
     ack: (_v, g) => { calls.push(`ack ${g}`); },
     disconnect: async (view) => { calls.push("disconnect"); if (holdDisconnect) await holdDisconnect.p; return views.delete(view) ? "Disconnected" : null; },
     retarget: async (view, t) => { calls.push(`retarget ${t.run_id}`); const changed = remembered !== t.run_id; remembered = t.run_id; if (changed) views.delete(view); return changed; },

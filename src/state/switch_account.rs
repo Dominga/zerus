@@ -253,38 +253,48 @@ fn launch(name: &str, run_id: &str) -> Result<()> {
 fn confirm(name: &str, run_id: &str, conversation: &str, deadline: Instant, settle: Duration) -> Confirmation {
     let mut since: Option<Instant> = None;
     loop {
-        let record = match read(name) {
-            Ok(record) => record,
-            Err(error) => return Confirmation::Failed(error),
-        };
-        if string(&record, "run_id") != run_id {
-            return Confirmation::Unconfirmed;
-        }
-        let live = process_alive(&record) && matches(&record, live().ok().and_then(|live| live.get(name).cloned()).as_ref());
-        let failed = !string(&record, "error").is_empty()
-            || record.get("exited_at").is_some()
-            || record.get("session_end").is_some();
-        // A failed launch that still runs cannot be rolled back safely: the old
-        // account would start a second agent under the same name. Wait for it.
-        if failed && !live {
-            let reason = record["error"].as_str().filter(|error| !error.is_empty())
-                .unwrap_or("the agent exited before it confirmed the conversation");
-            return Confirmation::Failed(reason.to_owned());
-        }
-        // Claude confirms the resumed conversation with its own SessionStart
-        // hook, which clears `expected_id`; Codex defers that hook until the
-        // first turn, so its live binding with the expected conversation is the
-        // confirmation (`resume_input::pending`).
-        let bound = string(&record, "conversation_id") == conversation
-            && (string(&record, "expected_id").is_empty()
-                || (string(&record, "agent") == "codex" && resume_input::pending(&record)));
-        if !failed && live && bound {
-            let started = since.get_or_insert_with(Instant::now);
-            if started.elapsed() >= settle {
-                return Confirmation::Confirmed;
+        // The supervisor writes its binding after its session starts: the first
+        // polls still read the paused old run, which says nothing about the new
+        // one. Wait for the new record; never report the old state as the
+        // switch's outcome.
+        #[cfg(test)]
+        tests::before_confirm_poll();
+        let Ok(record) = read(name) else {
+            // A replace in flight is not an outcome; only the deadline is.
+            if Instant::now() >= deadline {
+                return Confirmation::Unconfirmed;
             }
-        } else {
-            since = None;
+            std::thread::sleep(POLL);
+            continue;
+        };
+        if string(&record, "run_id") == run_id {
+            let live = process_alive(&record) && matches(&record, live().ok().and_then(|live| live.get(name).cloned()).as_ref());
+            let failed = !string(&record, "error").is_empty()
+                || record.get("exited_at").is_some()
+                || record.get("session_end").is_some();
+            // A failed launch that still runs cannot be rolled back safely: the
+            // old account would start a second agent under the same name. Wait
+            // for it.
+            if failed && !live {
+                let reason = record["error"].as_str().filter(|error| !error.is_empty())
+                    .unwrap_or("the agent exited before it confirmed the conversation");
+                return Confirmation::Failed(reason.to_owned());
+            }
+            // Claude confirms the resumed conversation with its own SessionStart
+            // hook, which clears `expected_id`; Codex defers that hook until the
+            // first turn, so its live binding with the expected conversation is
+            // the confirmation (`resume_input::pending`).
+            let bound = string(&record, "conversation_id") == conversation
+                && (string(&record, "expected_id").is_empty()
+                    || (string(&record, "agent") == "codex" && resume_input::pending(&record)));
+            if !failed && live && bound {
+                let started = since.get_or_insert_with(Instant::now);
+                if started.elapsed() >= settle {
+                    return Confirmation::Confirmed;
+                }
+            } else {
+                since = None;
+            }
         }
         if Instant::now() >= deadline {
             return Confirmation::Unconfirmed;
@@ -442,6 +452,7 @@ mod tests {
     thread_local! {
         static TEST_START: Cell<Option<TestStart>> = const { Cell::new(None) };
         static TEST_BOUNDS: Cell<Option<(Duration, Duration)>> = const { Cell::new(None) };
+        static BEFORE_CONFIRM_POLL: Cell<Option<fn()>> = const { Cell::new(None) };
     }
 
     pub(super) fn test_start() -> Option<TestStart> {
@@ -455,6 +466,17 @@ mod tests {
     pub(super) fn set(start: Option<TestStart>, bounds: Option<(Duration, Duration)>) {
         TEST_START.with(|cell| cell.set(start));
         TEST_BOUNDS.with(|cell| cell.set(bounds));
+    }
+
+    /// A test simulating the supervisor's write between two confirmation polls.
+    pub(super) fn set_before_confirm_poll(hook: Option<fn()>) {
+        BEFORE_CONFIRM_POLL.with(|cell| cell.set(hook));
+    }
+
+    pub(super) fn before_confirm_poll() {
+        if let Some(hook) = BEFORE_CONFIRM_POLL.with(Cell::get) {
+            hook();
+        }
     }
 }
 
@@ -470,11 +492,15 @@ mod switch_tests {
         run: String,
         conversation: String,
         fail: bool,
+        /// The host returns from a start before the resumed supervisor writes
+        /// its binding (the switch's first poll must wait for it).
+        defer: bool,
         starts: usize,
     }
 
     thread_local! {
         static WORLD: std::cell::RefCell<Option<&'static Mutex<World>>> = const { std::cell::RefCell::new(None) };
+        static DEFERRED_POLLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     }
 
     struct Backend;
@@ -511,10 +537,11 @@ mod switch_tests {
     }
 
     /// The supervisor a successful launch starts: the new run, the same pane
-    /// and conversation. `fail` refuses the first launch instead.
+    /// and conversation. `fail` refuses the first launch instead; `defer`
+    /// leaves the write to `write_on_second_poll`, as a real host does.
     fn start(name: &str, run_id: &str) -> Result<()> {
         let world = WORLD.with(|world| *world.borrow()).ok_or("no test world")?;
-        {
+        let defer = {
             let mut world = world.lock().unwrap();
             world.starts += 1;
             if world.fail {
@@ -524,18 +551,45 @@ mod switch_tests {
             world.run = run_id.into();
             world.dead = false;
             world.live = true;
+            world.defer
+        };
+        if defer {
+            return Ok(());
         }
+        supervisor_record(name, run_id)
+    }
+
+    /// The binding a resumed supervisor writes once its session runs.
+    fn supervisor_record(name: &str, run_id: &str) -> Result<()> {
+        let world = WORLD.with(|world| *world.borrow()).ok_or("no test world")?;
+        let conversation = world_conversation(world);
         let mut record = read(name)?;
         record["run_id"] = json!(run_id);
         record["pane"] = json!("%1");
         record["pid"] = json!(std::process::id());
         record["process_start"] = json!(process_start(std::process::id()));
-        record["conversation_id"] = json!(world_conversation(world));
+        record["conversation_id"] = json!(conversation);
         record["expected_id"] = json!("");
         for key in ["paused", "pausing", "exited_at", "session_end"] {
             record.as_object_mut().unwrap().remove(key);
         }
         write(&mut record)
+    }
+
+    /// A supervisor that writes one poll after the host's start answered.
+    fn write_on_second_poll() {
+        let polls = DEFERRED_POLLS.with(|cell| {
+            let polls = cell.get() + 1;
+            cell.set(polls);
+            polls
+        });
+        if polls < 2 {
+            return;
+        }
+        tests::set_before_confirm_poll(None);
+        let world = WORLD.with(|world| *world.borrow()).expect("test world");
+        let run = world.lock().unwrap().run.clone();
+        supervisor_record("claude/project/account", &run).unwrap();
     }
 
     fn world_conversation(world: &'static Mutex<World>) -> String {
@@ -549,6 +603,7 @@ mod switch_tests {
             run: "run-1".into(),
             conversation: String::new(),
             fail: false,
+            defer: false,
             starts: 0,
         })))
     }
@@ -613,6 +668,10 @@ mod switch_tests {
 
     /// A private state root, one fake terminal, and the test launcher.
     fn run_test(agent: &str, fail: bool, conversation: &str, body: impl FnOnce(&crate::config::Config, &mut Value)) {
+        run_test_with(agent, fail, conversation, false, body)
+    }
+
+    fn run_test_with(agent: &str, fail: bool, conversation: &str, defer: bool, body: impl FnOnce(&crate::config::Config, &mut Value)) {
         let root = tempfile::tempdir().unwrap();
         let config = accounts(root.path(), agent);
         let mut record = binding(&config, agent, "work", conversation, root.path().to_str().unwrap());
@@ -623,15 +682,18 @@ mod switch_tests {
                 let mut world = world.lock().unwrap();
                 world.conversation = conversation.into();
                 world.fail = fail;
+                world.defer = defer;
                 world.live = true;
                 world.dead = false;
                 world.run = "run-1".into();
             }
             WORLD.with(|slot| *slot.borrow_mut() = Some(world));
+            DEFERRED_POLLS.with(|cell| cell.set(0));
             tests::set(Some(start), Some((Duration::from_millis(400), Duration::from_millis(50))));
             write(&mut record).unwrap();
             crate::state::backend::with_fake(&Backend, || body(&config, &mut record));
             tests::set(None, None);
+            tests::set_before_confirm_poll(None);
             WORLD.with(|slot| *slot.borrow_mut() = None);
         });
     }
@@ -691,6 +753,22 @@ mod switch_tests {
                 assert!(!home(config, "second").join("sessions").exists(), "{agent}");
             });
         }
+    }
+
+    /// The host answers a start before the resumed supervisor writes its
+    /// binding: the switch's first poll reads the paused old run. It must wait
+    /// for the new record instead of reporting uncertain on the old state.
+    #[test]
+    fn a_switch_waits_for_the_supervisors_record_instead_of_the_old_one() {
+        tests::set_before_confirm_poll(Some(write_on_second_poll));
+        run_test_with("claude", false, "99999999-9999-4999-8999-999999999999", true, |config, record| {
+            let receipt = switch(config, "claude/project/account", "second", &request(), false).unwrap();
+            assert_eq!(receipt["status"], json!("switched"), "{receipt}");
+            let saved = read("claude/project/account").unwrap();
+            assert_eq!(saved["run_id"], receipt["run_id"]);
+            assert_eq!(saved["account_id"], json!("second"));
+            assert_eq!(saved["conversation_id"], record["conversation_id"]);
+        });
     }
 
     #[test]

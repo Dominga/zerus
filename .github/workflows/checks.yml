@@ -708,8 +708,11 @@ jobs:
           key: client-native-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('client/core/Cargo.lock', 'client/media/Cargo.lock', 'client/src-tauri/Cargo.lock') }}
           restore-keys: client-native-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-
       - name: Tauri tests
+        timeout-minutes: 25
         run: bash scripts/ci/client-native.sh macos tauri-test
       - name: Tauri clippy
+        if: always()
+        timeout-minutes: 25
         run: bash scripts/ci/client-native.sh macos tauri-clippy
       - name: Save native client Rust cache
         if: inputs.save_caches && steps.rust-cache.outputs.cache-hit != 'true'

@@ -15,7 +15,8 @@ media_check() {
 }
 
 tauri_tests() {
-    cargo +1.99.1 test --locked --manifest-path client/src-tauri/Cargo.toml
+    cargo +1.99.1 test --locked --manifest-path client/src-tauri/Cargo.toml -- --list
+    RUST_BACKTRACE=1 cargo +1.99.1 test --locked --manifest-path client/src-tauri/Cargo.toml -- --test-threads=1
 }
 
 tauri_clippy() {

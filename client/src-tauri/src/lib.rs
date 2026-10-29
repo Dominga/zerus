@@ -316,6 +316,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(actions::ActivityReads::default());
                 app.manage(actions::Attention::new(dir.join(actions::attention_file(replay))));
                 let pump = app.state::<commands::AppState>().pump();
+                app.state::<actions::Actions>().set_termination_pump(pump.clone());
                 let allowed = actions::actions_allowed(
                     std::env::var("ZERUS_CLIENT_REPLAY").ok().as_deref(),
                     std::env::var("ZERUS_CLIENT_HGS").ok().as_deref(),
@@ -334,7 +335,11 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     allowed,
                     dir.join(organization::layout_file(replay)),
                     draft_path,
+                    replay,
                 );
+                organization.seed_runs(organization::run_seed_source(
+                    &app.state::<identity::Identity>().bundle_id, replay,
+                ));
                 // Before any start of the source (the menu bar's below, or the webview's).
                 app.state::<commands::AppState>().set_organization(organization.clone());
                 let screens = screens::Screens::tauri(app.handle().clone(), pump.clone());
@@ -365,6 +370,14 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 let notify_pump = app.state::<commands::AppState>().pump();
                 // A replay never touches the real attachment cache either.
                 let cache = attachments_root(&cache_dir(app.handle()), replay);
+                let smoke_clock = crate::actions::smoke_env_allowed()
+                    .then(|| {
+                        std::env::var("ZERUS_CLIENT_SMOKE_NOW")
+                            .ok()
+                            .and_then(|value| value.parse::<f64>().ok())
+                    })
+                    .flatten()
+                    .map(|now| (now, std::time::Instant::now()));
                 // Saved drafts reads Qt's store and the dev app's, never
                 // writing to them; a replay lists neither.
                 let qt_drafts = composer::qt_store(
@@ -388,7 +401,10 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                             tauri::async_runtime::spawn_blocking(job);
                         }),
                         notify: std::sync::Arc::new(move || notify_pump.poke()),
-                        clock: std::sync::Arc::new(|| {
+                        clock: std::sync::Arc::new(move || {
+                            if let Some((base, started)) = smoke_clock {
+                                return base + started.elapsed().as_secs_f64();
+                            }
                             std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .map_or(0.0, |d| d.as_secs_f64())
@@ -835,6 +851,8 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::perf_config,
         commands::save_perf,
         commands::perf_log,
+        commands::smoke_log,
+        commands::smoke_resume,
         commands::display_hz,
         commands::exit_app,
         exit_flush::exit_flush_ack,
@@ -890,6 +908,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         actions::archive_page,
         actions::archived_activity,
         actions::cancel_archive_pages,
+        actions::reset_archive_pages,
         clipboard::copy_text,
         clipboard::copy_verbatim,
         organization::move_to_project,

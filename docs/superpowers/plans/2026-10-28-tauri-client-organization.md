@@ -45,7 +45,13 @@
 >   - **Here:** the controller's base, desired state and versions go to `organization-draft.json` in the app data directory, beside `organization-layout.json` (`organization-draft-replay.json` in a replay). The file is written atomically, through a temporary file and a rename, as `client/core/src/readmarks.rs:117-140` does. The hub writes it whenever pending edits change, before their apply runs, and removes it when they settle.
 >   - **On start:** the hub loads the draft, and the list shows it at once. Nothing is sent before the first organization state. That state is not adopted under the draft; it makes the controller ready and starts the 120 ms flush. Then one apply carries the saved base, desired state and versions, so a catalog that changed meanwhile surfaces as a conflict through `swarm apply`'s merge, never as an overwrite. After that, the rules above apply.
 >   - A replay starts from the fixture's catalog, so it removes a leftover replay draft at start.
-> - **A rename keeps the project.** While the client runs, the same run under a new name moves the old name's explicit membership to the new name, as Qt's `renameSession` does. It is one apply, and only when the old name was explicit. With Qt and this client side by side, both migrate the same rename (Qt on its own rename, `SessionsWindow.cpp:1942`, and on observed ones by run token, `SessionOrganization::observe`, `SessionOrganization.cpp:223-230`). Task 4 tests that the second migration is a no-op or a clean merge. Qt also follows renames made while it was closed, by persisted run tokens; that is a follow-up (Task 10).
+> - **A rename keeps the project.** While the client runs, the same run under a new name moves the old name's explicit membership to the new name, as Qt's `renameSession` does. It is one apply, and only when the old name was explicit. With Qt and this client side by side, both migrate the same rename (Qt on its own rename, `SessionsWindow.cpp:1942`, and on observed ones by run token, `SessionOrganization::observe`, `SessionOrganization.cpp:223-230`). Task 4 tests that the second migration is a no-op or a clean merge. The client also follows renames made while it was closed through the persisted live-run tokens specified below (`zerus-5wmh.47`).
+>   - **Persisted live run identities (`zerus-5wmh.47`, webui rulings, 2026-10-29).** `swarm::runs::Runs` records `machine\nrun -> member`, as Qt's `m_runs` (`SessionOrganization.cpp:59, 223-231, 336`). Tokens are bounded by both 100,000 entries and `swarm::layout::MAX_BYTES` (24 MiB) of encoded JSON, with exact escaped-byte accounting. Oldest-written entries are evicted until both bounds hold; an unchanged observation does not refresh age. Archives and empty identities are excluded. Qt never evicts: these count and byte caps are the bounded-state difference. No per-component length limits are added. Tokens live separately in `organization-runs.json` (`organization-runs-replay.json` for an explicit replay flag), beside the layout, so a collapse or local order change never rewrites them.
+>   - **Rename acknowledgement (`.47`).** A known run under a new name enters `Intent::Renamed`; only an explicit old member causes an apply. The old persisted member stays until that rename's pending draft is durably saved. A failed or uncertain save leaves it old, so the next start discovers the rename again. An authoritative membership check that needs no edit acknowledges immediately; an absence caused by our own pending draft waits until every pending draft change is written. A no-op queued behind an already durable pending draft acknowledges without requiring another write. A migration another writer already made sends nothing. Observed names suppress duplicate intents independently of persisted names; indexed acknowledgement handles chained renames in order. At most 100,000 pending acknowledgements are held; dropping an old one conservatively leaves its old token for rediscovery.
+>   - **Independent token writer (`.47`).** Startup reads use typed structs off main, with the same 24 MiB read limit, never truncate-parsing. Malformed JSON or a wrong shape at a supported/missing version starts from this run's observations and is replaced by the next save. A complete parseable object with a version greater than 1 stays untouched for the whole run, including exit; typed version probing also protects a newer file whose runs shape changed. Other I/O errors leave observations in memory, prevent replacement of the unreadable history, and retry the load later. The 24 MiB limit takes precedence over version protection (owner ruling, 2026-10-29): oversized history resets without parsing its version, even if it claims a newer one. Only complete parseable files within the bound receive newer-version protection. Successful late loads retain newly observed tokens, even after their rows leave. A dedicated `RunsWriter` thread atomically checkpoints changes at most once per second; its coalescing mailbox never grows with requests. It takes a bounded snapshot of shared strings under the pump lock, then serializes and writes without that lock or the organization worker. Applies, drafts and renames never wait on token serialization or I/O. Qt's store is never written.
+>   - **Token checkpoint on exit (`.47`).** The existing `Organization::flush` requests a forced checkpoint from that same background writer and waits at most 500 ms, then flushes the draft and layout independently. No token serialization or file I/O runs on main. `Writer` owns the worker handle; code copies it briefly under `Shared.writer`, releases that lock, then requests a pass. Only the dedicated token thread takes `RunsWriter`; those locks are never held together. A stuck token write cannot stop the draft/layout checkpoint. A token first seen inside the final debounce can miss the checkpoint when this bounded wait expires; unacknowledged renames retain the old saved member for safe rediscovery.
+
+
 > - **Move to project takes a set of members.** It is one `swarm apply` from one snapshot. The session menu passes one member; the batch menu of `zerus-5wmh.20` passes the selection.
 > - **Sort sessions by name** compares titles case-folded, then as written, then by member (deviation 2).
 > - **Headers and colours:** a header's colour is the project's `color`, else its palette slot, as on 3a's Projects screen. The vivid style and local colours are 3c.
@@ -57,7 +63,7 @@
 >   2. Sort sessions by name folds case, then compares as written, then by member. Qt uses `QString::localeAwareCompare` (`SessionsWindow.cpp:2603-2608`), which has no equivalent in the core.
 >   3. No `swarm initialize` (above).
 >   4. Edits made before the first ready catalog are refused, not queued (above).
->   5. Renames made while the client was closed are not followed yet (Task 10 follow-up).
+>   5. Implemented by `zerus-5wmh.47`: persisted live-run identities follow renames made while the client was closed, with the acknowledgement and bounded token storage above. Qt never evicts its `m_runs`; the client evicts oldest-written entries to satisfy both the 100,000-token and 24 MiB bounds (repository rule: no unbounded per-session state).
 >   6. Closed by `zerus-5wmh.40` (coordinator ruling, 2026-10-29): archived sessions are placed as Qt places them. An archived row is keyed by its archive identity, `machine\narchive\n<archive id>` (`SessionOrganization.cpp:225`); its project is the shared organization's entry for that identity, else its run's remembered project (deviation 1's run memory), else the default project, unassigned. After a verified Terminate whose run is archived, the archive identity moves into the live session's project in one swarm apply (`SessionsWindow.cpp:3106-3125`). The Archive view groups by project (newest archived first, `3238-3242`), the project filter and counts apply under Archive, Clear archive works under a project filter, and Move to project moves the archive identity. Split: the placement, the run memory, the post-Terminate intent and the `archive_page` group and rank go to the core owner; the Archive view and `zerus-5wmh.45` to the UI. Until it lands the interim refusals stay:
 >      - the Archive view and its count ignore the project filter (`store/archive.ts` `inScope`);
 >      - Clear archive takes no row while a project filter is set, and says why;
@@ -5042,6 +5048,28 @@ git commit -m "docs(client): the shared organization in the Sessions list, its s
 | New session… in the header menu | phase 5 |
 | Renames while the client was closed, a catalog without the Qt GUI, card colours and the background menu | the Task 10 follow-ups |
 
+## As built: persisted live-run identities (`zerus-5wmh.47`)
+
+`swarm::runs::Runs` keeps Qt's persisted `m_runs` identity contract
+(`SessionOrganization.cpp:223-231, 336`), with the separate files and count/byte
+bounds in Decisions. `Runs::from_json` and `Pump::load_runs` return
+`runs::DecodeError::Newer(version)` or `Invalid(error)`. The dedicated writer
+replaces oversized or malformed supported history from this start's observations,
+leaves a complete newer-version file within the bound untouched for the whole
+run, and retries other I/O failures without overwriting history. The owner ruled
+that the 24 MiB size limit comes first: an oversized file's version is never
+parsed, including a claimed newer version.
+
+`Runs` separates observed and saved members; `Snapshot::to_json` runs only on the
+token writer's thread. `Grouping::acknowledge_rename` advances the saved token
+after a durable draft or authoritative no-op. `Organization::save_draft` releases
+queued acknowledgements only once every draft change is durable; this also
+handles a no-op behind an already saved pending draft without another write.
+A failed save retains all acknowledgements. The existing exit path bounds the
+token checkpoint at 500 ms before the independent draft/layout flush. Regression
+tests cover restart after a failed draft, corrupt and oversized replacement,
+newer-version preservation across saves and exit, I/O retry, concurrent layout
+saves, and both oversized version 1 and version 2 files.
 
 ## As built: CLI-side catalog bootstrap (`zerus-5wmh.48`)
 

@@ -19,6 +19,7 @@ pub mod draft;
 pub mod edit;
 pub mod grouping;
 pub mod layout;
+pub mod runs;
 pub mod sync;
 
 use serde_json::Value;
@@ -41,6 +42,11 @@ pub const STARTING: &str = "Project sync is starting.";
 /// and the session name (SessionOrganization.cpp:225).
 pub fn member(machine: &str, name: &str) -> String {
     format!("{machine}\n{name}")
+}
+
+/// The archived session's organization identity (SessionOrganization.cpp:225).
+pub fn archive_member(machine: &str, archive_id: &str) -> String {
+    format!("{machine}\narchive\n{archive_id}")
 }
 
 /// The listed projects, in the catalog's order.

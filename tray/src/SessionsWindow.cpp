@@ -20,6 +20,7 @@
 #include "SessionPresentation.h"
 #include "TeamAttentionNotices.h"
 #include "AccountUsage.h"
+#include "AccountSwitch.h"
 #include "SessionUsage.h"
 #include "CacheKeepalive.h"
 #include "SessionStates.h"
@@ -1438,6 +1439,25 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         m_detailTabs->setCurrentWidget(m_terminal); m_terminal->connectSession();
     });
     connect(m_composer, &MessageComposer::settingsRequested, this, &SessionsWindow::changeModelSettings);
+    // U53: the owner's confirmed account choice; one switch at a time.
+    m_composer->accountChip()->switchRequested = [this](const QString &key, const QString &account) {
+        const auto *entry = selected();
+        if (m_accountSwitchRequest || !entry || entry->key != key || !accountSwitchBlockReason(*entry).isEmpty()) {
+            m_composer->accountChip()->finish(key, {}, tr("the session changed before the switch began; choose again"));
+            return renderDetails();
+        }
+        m_accountSwitchKey = key;
+        m_accountSwitchRequest = m_client.requestSwitchAccount(entry->host, entry->session.name, account);
+    };
+    connect(&m_client, &HgsClient::switchAccountFinished, this, [this](quint64 request, const QString &, const QString &, const QJsonObject &receipt, const QString &error) {
+        if (request != m_accountSwitchRequest) return;
+        m_accountSwitchRequest = 0;
+        const auto key = std::exchange(m_accountSwitchKey, QString());
+        const auto outcome = m_composer->accountChip()->finish(key, receipt, error);
+        if (!outcome.text.isEmpty()) showNotice(outcome.text, outcome.kind != AccountSwitch::Outcome::Switched);
+        // The session runs again (or still) under the account the receipt names.
+        refreshRequested(); if (const auto *entry = selected(); entry && entry->key == key) inspect();
+    });
     connectOpenCodeModels();
     connect(&m_client, &HgsClient::settingsFinished, this, [this](quint64 request, bool ok, const QJsonObject &receipt, const QString &error) {
         if (request != m_settingsRequest) return;
@@ -4592,6 +4612,7 @@ void SessionsWindow::renderDetails()
         m_question->setQuestion({}, {}); m_question->hide();
         m_terminal->setAvailable(false, tr("Select a running session."));
         m_composer->setCooperativeInbox(false);
+        m_composer->accountChip()->setSession({}, {}, {}, {});
         m_composer->setAvailability(false, tr("Select a session.")); return;
     }
     m_composer->setFileReferenceTarget(m_subagentId.isEmpty() ? entry->key : QString(), entry->host, entry->machine,
@@ -4861,6 +4882,7 @@ void SessionsWindow::renderDetails()
         m_details.value("pending_model").toString(), m_details.value("pending_effort").toString(),
         m_details.value("settings_apply_when").toString(), s.cmd == "opencode");
     m_composer->setSettingsNotice(m_details.value("settings_change_notice").toString());
+    updateAccountChip(*entry, archived || restoredPending);
     renderQuestion(*entry);
     updateSessionFeedback();
     m_terminal->setSession(m_client.executable(), entry->host, s.name, m_details.value("run_id").toString(), entry->machine);
@@ -5206,6 +5228,38 @@ QString SessionsWindow::modelSettingsBlockReason(const Entry &entry) const
         const QString reason = m_details.value("settings_change_reason").toString();
         return reason.isEmpty() ? tr("Model settings are not available for this session.") : reason;
     }
+    return {};
+}
+
+// U53: the session's account by its label (inspect's account_label; an older
+// hgs names none and shows no chip), the same agent's signed-in accounts on
+// that computer, and the reason it cannot change now.
+void SessionsWindow::updateAccountChip(const Entry &entry, bool unavailable)
+{
+    auto *chip = m_composer->accountChip();
+    const auto &s = entry.session;
+    const auto account = m_details.value("account_id").toString(s.accountId);
+    chip->setSession(entry.key, s.cmd, account, unavailable ? QString() : m_details.value("account_label").toString());
+    // The window's copy of the accounts page's listing; removed profiles are skipped.
+    chip->setOptions(AccountSwitch::options(m_sessionAccountDetailsProfiles, entry.host, s.cmd, AccountSwitch::accountOf(s.cmd, account), m_dark));
+    // A team member's account changes only with swap-member (U53, U54).
+    const auto *team = m_teams ? m_teams->teamOfSession(entry.host, s.name) : nullptr;
+    const bool member = team && QStringList{"planning", "running", "paused"}.contains(team->status);
+    chip->setLocked(member ? tr("A member of team %1: its account changes with Swap member in the team's Members.").arg(team->name) : QString());
+    chip->setBlocked(accountSwitchBlockReason(entry));
+}
+
+QString SessionsWindow::accountSwitchBlockReason(const Entry &entry) const
+{
+    if (!entry.online) return tr("%1 is offline; change the account when it is back.").arg(entry.machine);
+    if (entry.session.state != "running") return tr("The session is not running; resume it to change its account.");
+    if (isTerminating(entry) || m_pending || !m_renameKey.isEmpty() || !m_forkKey.isEmpty() || m_composer->isSending(entry.key))
+        return tr("Wait for the session update to finish.");
+    if (!m_inspectError.isEmpty()) return tr("Refresh the session before changing its account.");
+    const auto phase = m_details.value("phase").toString(entry.session.phase);
+    if (QStringList{"working", "tool", "compacting"}.contains(phase))
+        return tr("The agent is working; change its account once it is idle.");
+    if (m_details.value("build").isObject()) return tr("A build Zerus runs for the session is still going; wait for it.");
     return {};
 }
 

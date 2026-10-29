@@ -381,6 +381,14 @@ label, in `account_id` and `account_label`.
 A team member's account changes only through `hgs team swap-member`, on your
 word; `switch-account` refuses a member's session and names the team.
 
+On the desktop, the composer shows the session's account by its label beside
+the model, in Activity, the team conversations and the designer. Its menu lists
+the same agent's signed-in accounts on that computer, each with its usage. A
+choice asks you to confirm, then the chip says **Switching to …** until the
+receipt or the refusal, and the notice names how it ended. While the agent works,
+is stopped or its computer is offline, the chip is disabled with the reason; a
+team member's menu lists the accounts but changes none.
+
 You can also resume native history created outside `hgs`:
 
 ```sh

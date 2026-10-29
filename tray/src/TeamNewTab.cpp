@@ -778,6 +778,8 @@ void TeamNewTab::renderLead()
     m_leadSetup->setVisible(!drafting);
     m_leadStarting->setVisible(drafting && m_leadSessionName.isEmpty());
     if (drafting && m_leadSessionName != m_chat->session()) m_chat->setSession({}, m_leadSessionName);
+    // U53: the draft's lead is its team's member; swap-member changes its account.
+    m_chat->setAccountLocked(tr("The lead of this draft: its account changes with Swap member once the team exists, or choose it above."));
     if (!drafting && !m_chat->session().isEmpty()) m_chat->setSession({}, {});
     m_chat->setVisible(drafting && !m_leadSessionName.isEmpty());
     m_leadTitle->setText(!drafting ? QString() : m_leadSessionName.isEmpty() ? tr("new session") : m_leadSessionName);

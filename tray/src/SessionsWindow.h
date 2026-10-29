@@ -470,6 +470,9 @@ private:
     bool archiveNameOccupied(const Entry &archive) const;
     QString messageBlockReason(const Entry &entry) const;
     QString modelSettingsBlockReason(const Entry &entry) const;
+    // U53: the account chip beside the model, and why it cannot change now.
+    void updateAccountChip(const Entry &entry, bool unavailable);
+    QString accountSwitchBlockReason(const Entry &entry) const;
     void changeModelSettings(const QString &key, const QString &model, const QString &effort);
     // OpenCode's grouped model picker in the composer: catalog and favorite requests.
     void connectOpenCodeModels();
@@ -856,6 +859,9 @@ private:
     ProjectsDialog *m_projectsPage;
     QPushButton *m_projectsNav;
     bool m_dark = false;
+    // U53: the one account switch in flight: its request and session.
+    quint64 m_accountSwitchRequest = 0;
+    QString m_accountSwitchKey;
     QFileSystemWatcher *m_skinWatcher = nullptr;
     QString m_fg, m_muted, m_surface, m_border, m_accent;
 };

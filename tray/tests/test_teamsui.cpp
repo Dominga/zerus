@@ -55,6 +55,10 @@
 #include "TeamDesignerPage.h"
 #include "TeamWaitingPage.h"
 #include "TeamConversation.h"
+#include "AccountSwitch.h"
+#include "MessageComposer.h"
+#include <QPainter>
+#include <QUuid>
 #include "QuestionCard.h"
 #include "ActivityView.h"
 #include "TeamDesignerPanel.h"
@@ -724,6 +728,8 @@ private slots:
     void coordinatorRestoresAHeldMessageThatWasNotDelivered();
     void coordinatorTakesPastedImagesAndFiles();
     void terminalDraftIsShownAndSentFromTheConversation();
+    void conversationAccountPickerConfirmsAndSwitches();
+    void accountPickerStatesInShots();
     void catalogEditorMarksManualEdits();
     void teamCustomizationIsOptIn();
     void catalogRoleModelsAndContextAreSaved();
@@ -10389,6 +10395,276 @@ void TestTeamsUi::planEditorPicksATasksPipeline()
     }
     QCOMPARE(chosen, QString("docs"));
     QVERIFY2(!others, "the other tasks keep their default");
+}
+
+
+// U53 (#618): the account picker of a composer. Profiles as `hgs account ls`
+// lists them: two signed-in Claude accounts, a signed-out one and a Codex one.
+static QJsonArray switchProfiles()
+{
+    const auto window = [](int used) { return QJsonArray{QJsonObject{{"window_minutes", 300}, {"used_percent", used}, {"resets_at", "2099-01-01T00:00:00Z"}}}; };
+    return QJsonArray{
+        QJsonObject{{"id", "work"}, {"provider", "claude"}, {"label", "Work"}, {"host", ""}, {"usage", QJsonObject{{"status", "ok"}, {"windows", window(64)}}}},
+        QJsonObject{{"id", "second"}, {"provider", "claude"}, {"label", "Second"}, {"host", ""}, {"usage", QJsonObject{{"status", "ok"}, {"windows", window(12)}}}},
+        QJsonObject{{"id", "old"}, {"provider", "claude"}, {"label", "Old"}, {"host", ""}, {"usage", QJsonObject{{"status", "signed_out"}}}},
+        QJsonObject{{"id", "cx"}, {"provider", "codex"}, {"label", "Codex work"}, {"host", ""}, {"usage", QJsonObject{{"status", "ok"}}}},
+        QJsonObject{{"id", "far"}, {"provider", "claude"}, {"label", "Far"}, {"host", "box"}, {"usage", QJsonObject{{"status", "ok"}}}}};
+}
+
+// The chip's rows in its open popover: the account id, its usage, enabled.
+static QList<QPushButton *> accountRows(AccountSwitchChip *chip)
+{
+    QList<QPushButton *> rows;
+    for (auto *row : chip->accountPopover()->findChildren<QPushButton *>("sessionAccountOption")) if (row->isVisible()) rows << row;
+    return rows;
+}
+
+// A shot of a composer with its open popover above it, as the owner sees them.
+static void shotWithPopover(QWidget *host, QWidget *popover, const QString &name)
+{
+    if (qEnvironmentVariable("ZERUS_TEAM_SHOTS").isEmpty()) return;
+    TestWait::settle();
+    const QRect hostRect(host->mapToGlobal(QPoint()), host->size());
+    QRect all = hostRect;
+    const bool open = popover && popover->isVisible();
+    if (open) all = all.united(QRect(popover->mapToGlobal(QPoint()), popover->size()));
+    QImage image(all.size(), QImage::Format_ARGB32_Premultiplied);
+    image.fill(host->palette().color(QPalette::Window));
+    QPainter painter(&image);
+    painter.drawPixmap(hostRect.topLeft() - all.topLeft(), host->grab());
+    if (open) painter.drawPixmap(popover->mapToGlobal(QPoint()) - all.topLeft(), popover->grab());
+    painter.end();
+    const QString path = QDir(qEnvironmentVariable("ZERUS_TEAM_SHOTS")).filePath(name + ".png");
+    if (!image.save(path)) qWarning() << "screenshot not saved:" << path;
+}
+
+// Choosing an account asks first; Cancel sends nothing; Move sends one
+// switch-account with the account and a new request id, the chip says
+// Switching… until the receipt, then the conversation names the result and
+// the next read the new account. A refusal names its reason and changes
+// nothing; while the agent works the chip is disabled and says why.
+void TestTeamsUi::conversationAccountPickerConfirmsAndSwitches()
+{
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    const QString program = dir.filePath("hgs");
+    QVERIFY(FakeCli::install(program, R"PY(#!/usr/bin/env python3
+import json,os,sys,time
+a=sys.argv[1:]
+if a and a[0].startswith('@'):a=a[1:]
+here=__file__
+moved=os.path.exists(here+'.moved')
+if a[:1]==['inspect']:
+ phase='working' if os.path.exists(here+'.busy') else 'idle'
+ print(json.dumps({'name':a[1],'agent':'claude','account_id':'second' if moved else 'work','account_label':'Second' if moved else 'Work',
+  'run_id':'run-2' if moved else 'run-1','conversation_id':'conv-1','runtime_state':'live','process_state':'running',
+  'activity':'busy' if phase=='working' else 'idle','phase':phase,'cursor':0,'events':[]}))
+elif a[:1]==['account']:
+ w=lambda used:[{'window_minutes':300,'used_percent':used,'resets_at':'2099-01-01T00:00:00Z'}]
+ print(json.dumps({'profiles':[
+  {'id':'work','provider':'claude','label':'Work','account_status':{'status':'ok','windows':w(64)}},
+  {'id':'second','provider':'claude','label':'Second','account_status':{'status':'ok','windows':w(12)}},
+  {'id':'old','provider':'claude','label':'Old','account_status':{'status':'signed_out'}},
+  {'id':'cx','provider':'codex','label':'Codex work','account_status':{'status':'ok'}}]}))
+elif a[:1]==['switch-account']:
+ open(here+'.switches','a').write(json.dumps(a)+'\n')
+ time.sleep(0.8)
+ if os.path.exists(here+'.refuse'):
+  sys.stderr.write('hgs: claude/checkout/lead: the session is not idle; a turn is running\n');sys.exit(1)
+ open(here+'.moved','w').write('1')
+ print(json.dumps({'status':'switched','session':a[1],'request_id':a[5],'conversation_id':'conv-1',
+  'from':{'account_id':'work','label':'Work'},'to':{'account_id':'second','label':'Second'},'run_id':'run-2'}))
+else:print('{}')
+)PY"));
+    const auto switches = [&] {
+        QList<QStringList> found; QFile file(program + ".switches");
+        if (file.open(QIODevice::ReadOnly)) for (const auto &line : file.readAll().split('\n')) if (!line.isEmpty()) {
+            QStringList args; for (const auto &v : QJsonDocument::fromJson(line).array()) args << v.toString(); found << args;
+        }
+        return found;
+    };
+    TeamConversation::setPollInterval(100);
+    const auto restore = qScopeGuard([] { TeamConversation::setPollInterval(2000); });
+    HgsClient client(FakeCli::program(program));
+    TeamConversation conversation(&client);
+    conversation.setTheme(true);
+    conversation.setSession({}, "claude/checkout/lead");
+    conversation.resize(620, 420); conversation.show();
+    auto *chip = conversation.accountChip();
+    QVERIFY(chip); QTRY_VERIFY(chip->isVisible());
+    QTRY_COMPARE(chip->fullLabel(), QStringLiteral("Work"));
+    QVERIFY(chip->isEnabled());
+    QVERIFY(chip->toolTip().contains("Account: Work"));
+    // The menu: the same agent's signed-in accounts on this computer, each with its usage.
+    QTRY_VERIFY(([&] { chip->click(); const bool two = accountRows(chip).size() == 2; if (!two) chip->accountPopover()->hide(); return two; }()));
+    auto rows = accountRows(chip);
+    QCOMPARE(rows[0]->property("account").toString(), QStringLiteral("work"));
+    QVERIFY(!rows[0]->isEnabled());   // the current one
+    QCOMPARE(rows[1]->property("account").toString(), QStringLiteral("second"));
+    QVERIFY(rows[1]->isEnabled());
+    QCOMPARE(rows[1]->findChild<QLabel *>("sessionAccountOptionUsage")->text(), QStringLiteral("5h 12% used"));
+    QCOMPARE(rows[0]->findChild<QLabel *>("sessionAccountOptionCurrent")->text(), QStringLiteral("Current"));
+    // Choosing asks first; Cancel goes back and sends nothing.
+    rows[1]->click();
+    auto *confirm = chip->accountPopover()->findChild<QWidget *>("sessionAccountConfirm");
+    QVERIFY(confirm); QTRY_VERIFY(confirm->isVisible());
+    QCOMPARE(confirm->findChild<QLabel *>("sessionAccountConfirmTitle")->text(), QStringLiteral("Move this session to Second?"));
+    QVERIFY(confirm->findChild<QLabel *>("sessionAccountConfirmText")->text().contains("restarts there in the same conversation, folder and name"));
+    confirm->findChild<QPushButton *>("sessionAccountCancel")->click();
+    QTRY_COMPARE(accountRows(chip).size(), 2);
+    QTest::qWait(150); QVERIFY(switches().isEmpty());
+    // Move: one switch-account, Switching… until its receipt.
+    accountRows(chip)[1]->click();
+    confirm = chip->accountPopover()->findChild<QWidget *>("sessionAccountConfirm");
+    QVERIFY(confirm);
+    confirm->findChild<QPushButton *>("sessionAccountMove")->click();
+    QVERIFY(!chip->accountPopover()->isVisible());
+    QCOMPARE(chip->fullLabel(), QStringLiteral("Switching to Second…"));
+    QVERIFY(!chip->isEnabled());
+    QTRY_COMPARE(switches().size(), 1);
+    const auto args = switches().first();
+    QCOMPARE(args.mid(0, 5), (QStringList{"switch-account", "claude/checkout/lead", "--account", "second", "--request-id"}));
+    QVERIFY(!QUuid::fromString(args.value(5)).isNull());
+    auto *status = conversation.findChild<QLabel *>("teamConversationStatus");
+    QTRY_COMPARE(status->text(), QStringLiteral("Moved to Second; the agent resumed the same conversation."));
+    QVERIFY(status->isVisible());
+    QTRY_COMPARE(chip->fullLabel(), QStringLiteral("Second"));
+    QVERIFY(chip->isEnabled());
+    // A refusal: its reason, nothing changed, the chip says so.
+    QFile(program + ".refuse").open(QIODevice::WriteOnly);
+    QTRY_VERIFY(([&] { chip->click(); const bool open = accountRows(chip).size() == 2; if (!open) chip->accountPopover()->hide(); return open; }()));
+    accountRows(chip)[1]->click();   // Work: the current account, Second, comes first
+    chip->accountPopover()->findChild<QPushButton *>("sessionAccountMove")->click();
+    QTRY_COMPARE(switches().size(), 2);
+    QTRY_COMPARE(status->text(), QStringLiteral("Not moved: claude/checkout/lead: the session is not idle; a turn is running"));
+    QCOMPARE(chip->fullLabel(), QStringLiteral("Second"));
+    QCOMPARE(chip->tone(), ChipTone::Danger);
+    // While the agent works the chip is disabled and says why.
+    QFile(program + ".busy").open(QIODevice::WriteOnly);
+    QTRY_VERIFY(!chip->isEnabled());
+    QVERIFY(chip->toolTip().contains("The agent is working; change its account once it is idle."));
+    chip->click(); QVERIFY(!chip->accountPopover()->isVisible());
+    // The lead's conversation lists the accounts but changes none: swap-member does.
+    QFile::remove(program + ".busy");
+    conversation.setAccountLocked("The lead of Orbit: its account changes with Swap member in the team's Members.");
+    QTRY_VERIFY(chip->isEnabled());
+    chip->click(); QTRY_VERIFY(chip->accountPopover()->isVisible());
+    QCOMPARE(chip->accountPopover()->findChild<QLabel *>("sessionAccountNote")->text(),
+             QStringLiteral("The lead of Orbit: its account changes with Swap member in the team's Members."));
+    for (auto *row : accountRows(chip)) QVERIFY(!row->isEnabled());
+    chip->accountPopover()->hide();
+    QCOMPARE(switches().size(), 2);
+}
+
+// Each state of the Activity composer's account chip, in both themes:
+// the menu, the confirmation, Switching…, a rollback, an unconfirmed move,
+// a refusal and the disabled chip of a working session.
+void TestTeamsUi::accountPickerStatesInShots()
+{
+    for (const bool dark : {true, false}) {
+        if (dark) darkPalette(); else lightPalette();
+        const QString theme = dark ? QStringLiteral("dark") : QStringLiteral("light");
+        QWidget window; window.setObjectName("accountShotWindow");
+        window.setStyleSheet(QStringLiteral("QWidget#accountShotWindow{background:%1;}").arg(dark ? "#15191f" : "#f5f7f9"));
+        auto *v = new QVBoxLayout(&window); v->setContentsMargins(16, 16, 16, 16);
+        auto *composer = new MessageComposer; v->addWidget(composer);
+        composer->setSessionKey("claude/orbit/api");
+        QTRY_VERIFY(!composer->isDraftLoading("claude/orbit/api"));
+        composer->setAvailability(true);
+        composer->setModelSettings("claude-opus-5-5", "high", QJsonArray{QJsonObject{{"id", "claude-opus-5-5"}, {"effort_options", QJsonArray{"high"}}}}, true, {});
+        composer->setCompact(true); composer->setTheme(dark);
+        // Low on the screen: the popover opens above the chip, as in a window.
+        window.resize(760, 190); window.move(20, 380); window.show();
+        auto *chip = composer->accountChip();
+        QStringList requested;
+        chip->switchRequested = [&](const QString &key, const QString &account) { requested << key + '=' + account; };
+        chip->setSession("claude/orbit/api", "claude", "work", "Work");
+        chip->setOptions(AccountSwitch::options(switchProfiles(), {}, "claude", "work", dark));
+        QTRY_VERIFY(chip->isVisible());
+        // Beside the model, on its left.
+        auto *model = composer->findChild<QPushButton *>("sessionModelSettings");
+        QVERIFY(chip->mapTo(composer, QPoint()).x() + chip->width() <= model->mapTo(composer, QPoint()).x());
+        QVERIFY(model->mapTo(composer, QPoint()).x() - (chip->mapTo(composer, QPoint()).x() + chip->width()) < 24);
+        shot(&window, "u53-chip-" + theme);
+        chip->click(); QTRY_VERIFY(chip->accountPopover()->isVisible());
+        // Only Work and Second: not the signed-out, Codex or other computer's accounts.
+        QCOMPARE(accountRows(chip).size(), 2);
+        QCOMPARE(accountRows(chip)[0]->findChild<QLabel *>("sessionAccountOptionUsage")->text(), QStringLiteral("5h 64% used"));
+        shotWithPopover(&window, chip->accountPopover(), "u53-menu-" + theme);
+        accountRows(chip)[1]->click();
+        QVERIFY(chip->accountPopover()->findChild<QWidget *>("sessionAccountConfirm"));
+        shotWithPopover(&window, chip->accountPopover(), "u53-confirm-" + theme);
+        chip->accountPopover()->findChild<QPushButton *>("sessionAccountMove")->click();
+        QCOMPARE(requested, QStringList{"claude/orbit/api=second"});
+        QCOMPARE(chip->fullLabel(), QStringLiteral("Switching to Second…"));
+        shot(&window, "u53-switching-" + theme);
+        // A failed launch went back to Work.
+        auto outcome = chip->finish("claude/orbit/api", QJsonObject{{"status", "rolled_back"}, {"reason", "launch refused"}, {"relaunched", true},
+            {"from", QJsonObject{{"account_id", "work"}, {"label", "Work"}}}, {"to", QJsonObject{{"account_id", "work"}, {"label", "Work"}}}}, {});
+        QCOMPARE(outcome.kind, AccountSwitch::Outcome::RolledBack);
+        QCOMPARE(outcome.text, QStringLiteral("Stayed on Work: Second could not start the agent (launch refused). It resumed on Work."));
+        QCOMPARE(chip->fullLabel(), QStringLiteral("Work")); QCOMPARE(chip->tone(), ChipTone::Warning);
+        chip->click(); QTRY_VERIFY(chip->accountPopover()->isVisible());
+        QCOMPARE(chip->accountPopover()->findChild<QLabel *>("sessionAccountOutcome")->text(), outcome.text);
+        shotWithPopover(&window, chip->accountPopover(), "u53-rolledback-" + theme);
+        // An unconfirmed move names the new account and is never retried.
+        accountRows(chip)[1]->click(); chip->accountPopover()->findChild<QPushButton *>("sessionAccountMove")->click();
+        outcome = chip->finish("claude/orbit/api", QJsonObject{{"status", "uncertain"}, {"to", QJsonObject{{"account_id", "second"}, {"label", "Second"}}},
+            {"from", QJsonObject{{"account_id", "work"}, {"label", "Work"}}}}, {});
+        QCOMPARE(outcome.kind, AccountSwitch::Outcome::Uncertain);
+        QCOMPARE(chip->fullLabel(), QStringLiteral("Second")); QCOMPARE(chip->tone(), ChipTone::Warning);
+        QCOMPARE(requested.size(), 2);
+        // A refusal changes nothing.
+        chip->setSession("claude/orbit/api", "claude", "second", "Second");
+        chip->setOptions(AccountSwitch::options(switchProfiles(), {}, "claude", "second", dark));
+        chip->click(); QTRY_VERIFY(chip->accountPopover()->isVisible());
+        accountRows(chip)[1]->click(); chip->accountPopover()->findChild<QPushButton *>("sessionAccountMove")->click();
+        QCOMPARE(requested.last(), QStringLiteral("claude/orbit/api=work"));
+        outcome = chip->finish("claude/orbit/api", {}, "hgs: Account 'work' is not signed in on this computer; log in to it before moving a session.");
+        QCOMPARE(outcome.kind, AccountSwitch::Outcome::Refused);
+        QCOMPARE(outcome.text, QStringLiteral("Not moved: Account 'work' is not signed in on this computer; log in to it before moving a session."));
+        QCOMPARE(chip->fullLabel(), QStringLiteral("Second")); QCOMPARE(chip->tone(), ChipTone::Danger);
+        chip->click(); QTRY_VERIFY(chip->accountPopover()->isVisible());
+        shotWithPopover(&window, chip->accountPopover(), "u53-refused-" + theme);
+        chip->accountPopover()->hide();
+        // A working session: disabled, with the reason; nothing opens.
+        chip->setBlocked("The agent is working; change its account once it is idle.");
+        QVERIFY(!chip->isEnabled());
+        QVERIFY(chip->toolTip().contains("The agent is working; change its account once it is idle."));
+        chip->click(); QVERIFY(!chip->accountPopover()->isVisible());
+        QCOMPARE(chip->tone(), ChipTone::Quiet);
+        shot(&window, "u53-working-" + theme);
+        // A team member's session: the accounts are listed, none is chosen here.
+        chip->setBlocked({});
+        chip->setLocked("A member of team Orbit: its account changes with Swap member in the team's Members.");
+        chip->click(); QTRY_VERIFY(chip->accountPopover()->isVisible());
+        QTRY_VERIFY(!accountRows(chip).isEmpty());
+        for (auto *row : accountRows(chip)) QVERIFY(!row->isEnabled());
+        shotWithPopover(&window, chip->accountPopover(), "u53-member-" + theme);
+        chip->accountPopover()->hide(); chip->setLocked({});
+        // An agent that cannot change accounts lists none to choose.
+        chip->setBlocked({}); chip->setSession("dsh/orbit/api", "dsh", "", "DeepSeek");
+        chip->setOptions({});
+        chip->click(); QTRY_VERIFY(chip->accountPopover()->isVisible());
+        QCOMPARE(chip->accountPopover()->findChild<QLabel *>("sessionAccountNote")->text(), QStringLiteral("Only Claude and Codex sessions change their account."));
+        chip->accountPopover()->hide();
+        // A receipt for a session no longer shown leaves the shown one alone,
+        // and its outcome shows again on return.
+        chip->setSession("claude/orbit/api", "claude", "work", "Work");
+        chip->setOptions(AccountSwitch::options(switchProfiles(), {}, "claude", "work", dark));
+        chip->click(); QTRY_VERIFY(chip->accountPopover()->isVisible());
+        accountRows(chip)[1]->click(); chip->accountPopover()->findChild<QPushButton *>("sessionAccountMove")->click();
+        chip->setSession("claude/orbit/web", "claude", "work", "Work");
+        QVERIFY(!chip->isEnabled());   // one switch at a time
+        outcome = chip->finish("claude/orbit/api", {}, "hgs: claude/orbit/api: the session is not running");
+        QCOMPARE(outcome.kind, AccountSwitch::Outcome::Refused);
+        QCOMPARE(chip->tone(), ChipTone::Quiet); QVERIFY(chip->isEnabled()); QCOMPARE(chip->fullLabel(), QStringLiteral("Work"));
+        chip->setSession("claude/orbit/api", "claude", "work", "Work");
+        QCOMPARE(chip->tone(), ChipTone::Danger); QCOMPARE(chip->lastOutcome().text, QStringLiteral("Not moved: claude/orbit/api: the session is not running"));
+        QCOMPARE(requested.size(), 4);
+        // An hgs without U53 names no account: no chip.
+        chip->setSession("claude/orbit/old", "claude", "", "");
+        QVERIFY(!chip->isVisible());
+    }
 }
 
 #include "test_teamsui.moc"

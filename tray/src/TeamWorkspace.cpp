@@ -3506,6 +3506,8 @@ void TeamWorkspace::renderCoordinator(const Team &team)
     }
     // U35: the coordinator has no quick-ask chips; the owner writes to the lead.
     m_conversation->setSession(lead ? lead->host : QString(), lead ? lead->session : QString());
+    // U53: the lead is a member; its account changes only with swap-member.
+    m_conversation->setAccountLocked(tr("The lead of %1: its account changes with Swap member in the team's Members.").arg(team.name));
 }
 
 QWidget *TeamWorkspace::feed(const Team &team)

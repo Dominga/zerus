@@ -94,6 +94,7 @@
 #include "DirectoryDialog.h"
 #include "ProjectsDialog.h"
 #include "MessageComposer.h"
+#include "AccountSwitch.h"
 #include "OpenCodeModelPicker.h"
 #include "OpenCodeModels.h"
 #include "NativeBrowser.h"
@@ -491,6 +492,7 @@ private slots:
     void scheduledSettingsApplyOncePerReady_data();
     void scheduledSettingsApplyOncePerReady();
     void inspectionBehindSettingsReceiptKeepsTheChange();
+    void activityAccountPickerSwitchesTheSession();
     void coldQuestionSubmissionRevalidatesConsent_data();
     void coldQuestionSubmissionRevalidatesConsent();
     void questionAnswersStayWithOriginalSession();
@@ -6879,6 +6881,62 @@ elif args[0]=='settings':
     QCOMPARE(composer->editor()->toPlainText(), QString("[File #1] Saved draft for original session"));
     QCOMPARE(composer->findChildren<QPushButton *>("removeAttachment").size(), 1);
     QTest::qWait(80); QCOMPARE(changes.size(), state == "running" ? 2 : 1);
+}
+
+// U53 (#618): Activity's composer names the session's account beside the
+// model; a confirmed choice runs switch-account for exactly that session and
+// the notice says how it ended; the next read names the new account.
+void TestSessionsWindow::activityAccountPickerSwitchesTheSession()
+{
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    const QString program = directory.filePath("hgs");
+    QVERIFY(FakeCli::install(program, R"PY(#!/usr/bin/env python3
+import json,sys,pathlib
+root=pathlib.Path(__file__).parent
+a=sys.argv[1:]
+if a and a[0].startswith('@'):a=a[1:]
+moved=(root/'moved').exists()
+if a[:1]==['inspect']:
+ if a[1]!='codex/hgs/dashboard':
+  print(json.dumps({'tracked':True,'run_id':'run-other','conversation_id':'conversation-other','activity':'idle','phase':'idle','cursor':0,'events':[]}));sys.exit()
+ print(json.dumps({'tracked':True,'run_id':'run-2' if moved else 'run-1','conversation_id':'conversation-one','activity':'idle','phase':'idle',
+  'agent':'codex','account_id':'second' if moved else 'work','account_label':'Second' if moved else 'Work','cursor':0,'events':[]}))
+elif a[:1]==['account']:
+ w=lambda used:[{'window_minutes':10080,'used_percent':used,'resets_at':'2099-01-01T00:00:00Z'}]
+ print(json.dumps({'profiles':[{'id':'work','provider':'codex','label':'Work','account_status':{'status':'ok','checked_at':4102444800,'windows':w(81)}},
+  {'id':'second','provider':'codex','label':'Second','account_status':{'status':'ok','checked_at':4102444800,'windows':w(9)}}]}))
+elif a[:1]==['switch-account']:
+ with (root/'switches.jsonl').open('a') as out: out.write(json.dumps(a)+'\n')
+ (root/'moved').write_text('1')
+ print(json.dumps({'status':'switched','session':a[1],'from':{'account_id':'work','label':'Work'},'to':{'account_id':'second','label':'Second'}}))
+else:print('{}')
+)PY"));
+    SessionsWindow window(FakeCli::program(program)); window.setDetailsPollForTests(100, 200);
+    window.setFleet(fleet()); window.show(); window.showSession({}, "codex/hgs/dashboard");
+    auto *composer = window.findChild<MessageComposer *>("messageComposer");
+    auto *chip = composer->accountChip();
+    QTRY_COMPARE(chip->fullLabel(), QStringLiteral("Work"));
+    QTRY_VERIFY(chip->isVisible() && chip->isEnabled());
+    const auto rows = [&] {
+        QList<QPushButton *> found;
+        for (auto *row : chip->accountPopover()->findChildren<QPushButton *>("sessionAccountOption")) if (row->isVisible()) found << row;
+        return found;
+    };
+    // The accounts page reads the catalog; the menu lists both Codex accounts.
+    QTRY_VERIFY(([&] { chip->click(); const bool two = rows().size() == 2; if (!two) chip->accountPopover()->hide(); return two; }()));
+    QCOMPARE(rows()[1]->property("account").toString(), QStringLiteral("second"));
+    QCOMPARE(rows()[1]->findChild<QLabel *>("sessionAccountOptionUsage")->text(), QStringLiteral("7d 9% used"));
+    rows()[1]->click();
+    chip->accountPopover()->findChild<QPushButton *>("sessionAccountMove")->click();
+    QCOMPARE(chip->fullLabel(), QStringLiteral("Switching to Second…"));
+    QTRY_COMPARE(window.findChild<QLabel *>("notice")->text(), QStringLiteral("Moved to Second; the agent resumed the same conversation."));
+    QFile calls(directory.filePath("switches.jsonl")); QVERIFY(calls.open(QIODevice::ReadOnly));
+    const auto lines = calls.readAll().trimmed().split('\n');
+    QCOMPARE(lines.size(), 1);
+    const auto args = QJsonDocument::fromJson(lines[0]).array();
+    QCOMPARE(args[0].toString(), QStringLiteral("switch-account")); QCOMPARE(args[1].toString(), QStringLiteral("codex/hgs/dashboard"));
+    QCOMPARE(args[2].toString(), QStringLiteral("--account")); QCOMPARE(args[3].toString(), QStringLiteral("second"));
+    QTRY_COMPARE(chip->fullLabel(), QStringLiteral("Second"));
 }
 
 void TestSessionsWindow::inspectionBehindSettingsReceiptKeepsTheChange()

@@ -34,13 +34,23 @@ conservative change selection, including both sides of renames.
 | iOS core tests and simulator build | Affected PR; full nightly/stable | The project task replica built with Rust 1.99.1 for the iPhone, the simulator and macOS (`mobile/ios/scripts/build-replica.sh`, without the release profile's LTO in this check), then `swift test` for the ZerusKit core and an unsigned Release build of the app for the iOS simulator, with the newest installed Xcode 26 or later and no signing identity |
 | Android unit tests and lint | Always | `testDebugUnitTest` and `lintRelease` of the Firebase variant that Dev ships, with a synthetic `google-services.json` and no credentials |
 | Linux CLI | Always | Stable Rust unit tests, terminal smoke tests, Python integration modules, release build |
-| Native desktop client | Linux with the CLI; macOS/Windows with their desktop jobs | Linux `client/media` audio/video tests, including synthetic GStreamer recordings, and `client/src-tauri` tests under headless Xvfb plus clippy with video; native macOS `client/core` and `client/src-tauri` tests, `client/media` video checks and `client/src-tauri` check plus clippy; native Windows `client/core` tests, `client/media` video checks and `client/src-tauri` check plus clippy (its test suite stays pending `zerus-5wmh.52`), all on standard runners with Rust 1.99.1 |
+| Native desktop client | Linux with the CLI; macOS/Windows with their desktop jobs | Linux `client/media` audio/video tests, including synthetic GStreamer recordings, and `client/src-tauri` tests under headless Xvfb plus clippy with video; native macOS `client/core` and `client/src-tauri` tests, `client/media` video checks and `client/src-tauri` clippy; native Windows `client/core` tests, `client/media` video checks and `client/src-tauri` clippy (its test suite stays pending `zerus-5wmh.52`), all on standard runners with Rust 1.99.1 |
 | Arch desktop | Always | Qt build and all CTest suites |
 | Arch package | Always | Production package with the recipe's `check()`, namcap, staged and installed bundle checks; the only producer of the `arch-x86_64-<commit>` candidate artifact |
 | macOS CLI and desktop | Always | Native CLI integration and all Qt CTest suites on two standard macOS jobs |
 | Windows client and desktop | Affected PR; full nightly/stable | Rust tests, Rust 1.99 clippy for the Windows target, Windows client and session host integration tests, MSVC Qt build with all offscreen CTest suites, and the portable zip checked from an isolated extraction |
 | Windows real agents | Affected PR; full nightly/stable | One latest `win32-x64` Claude Code and Codex release in isolated session hosts of the release build, each against a local fake API; skipped or empty suites fail |
 | CI gate | Always | Requires every selected suite to succeed; fails on unexpected skips, cancellation and errors |
+
+PR #430's first native-client run at `b3716dd8` (run `40898847326`) measured an
+11-minute-19-second green Linux check run, a 65-minute macOS check-run span that
+ended in cancellation at the 60-minute job timeout, and a 1-minute-51-second
+Windows run that stopped at the first core-test failure. To bound cold builds
+with registry-only caches, macOS and Windows disable dev/test debug info and use
+`client/src-tauri` clippy with all targets instead of a redundant cargo check
+with all targets. The separate media/video check remains because the app's
+default features do not include media. The macOS job's timeout is 90 minutes,
+because its first cold run passed 60; Linux keeps 45 and Windows 60.
 
 Quick checks and the full suites start together once the commit is resolved, so
 a quick-check failure no longer holds back the other suites. New PR/manual runs cancel

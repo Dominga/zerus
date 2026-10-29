@@ -522,7 +522,7 @@ class WorkflowSecurityTests(unittest.TestCase):
     def test_native_client_jobs_cover_media_and_platform_code(self):
         checks = (ROOT / ".github/workflows/checks.yml").read_text()
         for name, runner, selected, timeout in (("client-native-linux", "ubuntu-24.04", "linux", "45"),
-                                                ("client-native-macos", "macos-15", "macos", "60"),
+                                                ("client-native-macos", "macos-15", "macos", "90"),
                                                 ("client-native-windows", "windows-2025", "windows", "60")):
             native = job(checks, name)
             with self.subTest(job=name):
@@ -533,6 +533,9 @@ class WorkflowSecurityTests(unittest.TestCase):
                 self.assertIn("ref: ${{ needs.source.outputs.commit }}\n          persist-credentials: false", native)
                 self.assertIn(f"run: bash scripts/ci/client-native.sh {selected}", native)
                 self.assertIn("CARGO_INCREMENTAL: 0", native)
+                if selected != "linux":
+                    self.assertIn("CARGO_PROFILE_DEV_DEBUG: 0", native)
+                    self.assertIn("CARGO_PROFILE_TEST_DEBUG: 0", native)
                 self.assertIn("hashFiles('client/core/Cargo.lock', 'client/media/Cargo.lock', 'client/src-tauri/Cargo.lock')", native)
                 cache = self.checks_step(name, "rust-cache")
                 self.assertNotIn("run_id", cache)
@@ -552,10 +555,10 @@ class WorkflowSecurityTests(unittest.TestCase):
             "cargo +1.99.1 test --locked --manifest-path client/core/Cargo.toml",
             "cargo +1.99.1 test --locked --manifest-path client/src-tauri/Cargo.toml",
             "cargo +1.99.1 check --locked --manifest-path client/media/Cargo.toml --all-targets --features video",
-            "cargo +1.99.1 check --locked --manifest-path client/src-tauri/Cargo.toml --all-targets",
             "cargo +1.99.1 clippy --locked --manifest-path client/src-tauri/Cargo.toml --all-targets -- -D warnings",
         ):
             self.assertIn(command, script)
+        self.assertNotIn("cargo +1.99.1 check --locked --manifest-path client/src-tauri/Cargo.toml --all-targets\n", script)
         self.assertIn('if [[ "$platform" == macos ]]; then', script)
 
     def checks_steps(self, name):

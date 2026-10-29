@@ -40,7 +40,16 @@ export function createQuestions(port: QuestionPort, clock: Clock = browserClock)
   let started: number | undefined;
   let shown = "";
   let stop: (() => void) | undefined;
+  let coldEpoch = 0;
   const secondsLeft = (elapsed: number) => Math.ceil(Math.max(0, REVIEW_MS - elapsed) / 1000);
+
+  /** A gone card or view cancels even a cold reply still crossing the bridge. */
+  function cancelCold() {
+    coldEpoch++;
+    const d = dialog();
+    setDialog(undefined);
+    if (d) void port.cold(d.token, false).catch(() => {});
+  }
 
   /** The count runs only while the card is on screen, the window is active and the card is available. */
   function tick() {
@@ -54,8 +63,7 @@ export function createQuestions(port: QuestionPort, clock: Clock = browserClock)
   /** A new card or a rebuilt one (its revision) starts the review again; a grown epoch alone does not. Only a review card ticks. */
   function apply(next: QuestionView | null | undefined) {
     // A cold question goes with its card: Cancel, nothing sent (the hub drops it too).
-    const d = dialog();
-    if (d && next?.card !== d.card) { setDialog(undefined); void port.cold(d.token, false).catch(() => {}); }
+    if (next?.card !== view()?.card) cancelCold();
     const id = next ? `${next.card}\n${next.revision}` : "";
     if (id !== shown) { shown = id; started = undefined; setLeft(secondsLeft(0)); }
     setView(next ?? undefined);
@@ -68,19 +76,23 @@ export function createQuestions(port: QuestionPort, clock: Clock = browserClock)
   const reviewing = (b: ButtonView) => b.review_label !== null && left() > 0;
   const label = (b: ButtonView) => (reviewing(b) ? `${b.review_label} (${left()})` : b.label);
   const enabled = (b: ButtonView) => b.visible && b.enabled && !reviewing(b);
-  const reply = (r: QuestionReply, card: string) => {
-    if (r.kind === "cold") setDialog({ token: r.token, prompt: r.prompt, card });
+  const reply = (r: QuestionReply, card: string, at: number) => {
+    if (r.kind === "cold") {
+      if (at !== coldEpoch || view()?.card !== card) void port.cold(r.token, false).catch(() => {});
+      else setDialog({ token: r.token, prompt: r.prompt, card });
+    }
     else if (r.kind === "notice") port.notify(r.text);
   };
   const card = () => view()?.card;
 
   async function submit() {
     const v = view();
-    if (v && enabled(v.view.submit)) reply(await port.submit(v.card), v.card);
+    const at = coldEpoch;
+    if (v && enabled(v.view.submit)) reply(await port.submit(v.card), v.card, at);
   }
 
   return {
-    view, left, dialog, apply, label, enabled, submit,
+    view, left, dialog, apply, label, enabled, submit, cancelCold,
     setActive(on: boolean) { active = on; tick(); },
     /** Every edit goes at once, naming the epoch the fields show; Rust drops one of an older epoch. */
     edit(e: QuestionEdit) { const v = view(); if (v) void port.edit(v.card, v.epoch, e); },
@@ -91,14 +103,16 @@ export function createQuestions(port: QuestionPort, clock: Clock = browserClock)
     async enter(repeat: boolean) { if (!repeat && view()?.view.submit.visible) await submit(); },
     async decide(allow: boolean) {
       const v = view();
-      if (v && enabled(allow ? v.view.approve : v.view.deny)) reply(await port.decide(v.card, allow), v.card);
+      const at = coldEpoch;
+      if (v && enabled(allow ? v.view.approve : v.view.deny)) reply(await port.decide(v.card, allow), v.card, at);
     },
-    async skip() { const v = view(); if (v && enabled(v.view.skip)) reply(await port.skip(v.card), v.card); },
+    async skip() { const v = view(), at = coldEpoch; if (v && enabled(v.view.skip)) reply(await port.skip(v.card), v.card, at); },
     async answerCold(proceed: boolean) {
       const d = dialog();
       if (!d) return;
+      const at = coldEpoch;
       setDialog(undefined);
-      reply(await port.cold(d.token, proceed), d.card);
+      reply(await port.cold(d.token, proceed), d.card, at);
     },
   };
 }

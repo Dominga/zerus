@@ -196,7 +196,7 @@ function ColdAnswerDialog() {
     queueMicrotask(() => el?.querySelector<HTMLElement>("[data-initial]")?.focus());
   });
   // A dialog that goes unanswered answers Cancel, so the hub holds no question nobody can answer.
-  onCleanup(() => { if (questions.dialog()) void questions.answerCold(false); });
+  onCleanup(() => questions.cancelCold());
   return (
     <dialog class="dlg" ref={el} role="alertdialog" aria-labelledby="qcard-cold-title" aria-describedby="qcard-cold-text" style={{ width: "460px" }}
       onClose={() => { if (questions.dialog()) void questions.answerCold(false); }}>

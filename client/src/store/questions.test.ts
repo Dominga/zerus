@@ -172,6 +172,35 @@ describe("question cards", () => {
     dispose();
   }));
 
+  it("a cold reply arriving after its card changed is cancelled without showing", () => createRoot(async (dispose) => {
+    const f = fakes();
+    let answer!: (reply: Awaited<ReturnType<QuestionPort["submit"]>>) => void;
+    const q = createQuestions({ ...f.port, submit: () => new Promise((resolve) => { answer = resolve; }) }, f.clock);
+    q.apply(card());
+    const pending = q.submit();
+    q.apply({ ...card(), card: "question\nanother" });
+    answer({ kind: "cold", token: 10, prompt: { title: "Submit with a cold cache?", text: "…", proceed: "Submit with full context" } });
+    await pending;
+    expect(q.dialog()).toBeUndefined();
+    expect(f.calls).toEqual(["cold 10 false"]);
+    dispose();
+  }));
+
+  it("a cold reply arriving after unmount is cancelled even if the same card returns", () => createRoot(async (dispose) => {
+    const f = fakes();
+    let answer!: (reply: Awaited<ReturnType<QuestionPort["submit"]>>) => void;
+    const q = createQuestions({ ...f.port, submit: () => new Promise((resolve) => { answer = resolve; }) }, f.clock);
+    q.apply(card());
+    const pending = q.submit();
+    q.cancelCold();
+    q.apply(card());
+    answer({ kind: "cold", token: 11, prompt: { title: "Submit with a cold cache?", text: "…", proceed: "Submit with full context" } });
+    await pending;
+    expect(q.dialog()).toBeUndefined();
+    expect(f.calls).toEqual(["cold 11 false"]);
+    dispose();
+  }));
+
   it("a notice reply raises a sticky error", () => createRoot(async (dispose) => {
     const f = fakes();
     const q = createQuestions(f.port, f.clock);

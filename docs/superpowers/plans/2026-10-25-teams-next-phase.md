@@ -1218,6 +1218,33 @@ sets them in the catalog, the team settings or the plan; members never do.
   name; a failed launch returns to the old account, an unconfirmed one is
   reported uncertain and never retried. Nothing changes until the owner
   chooses; a team member's account changes only through swap-member.
+- **U56. A stuck member never blocks its tasks silently (owner, 2026-10-29).**
+  From team 6d0aabee (RogueDOD QA bot): member b-body stayed in context
+  compaction for over 80 minutes after its report; its pinned tasks #15/#16
+  were never handed out, the only signal was a starved notice about another
+  member, named by role, and the lead could neither release nor relaunch.
+  - *Stuck.* A member busy in one phase (compacting, a turn) with no session
+    event for 10 minutes (setting `stuck_minutes`) is marked stuck
+    (`state_reason: compaction_timeout | no_progress`); the lead gets one
+    `member_stuck` item naming the member id, phase, duration and the tasks
+    that wait for it. The member's open attempt, if any, keeps today's silent
+    rule.
+  - *Tasks waiting for an unavailable member.* A pending task pinned to a
+    stuck, stopped or offline member says so in its waits and in one inbox
+    item, with the commands that free it.
+  - *Ids, not roles.* Every notice names the member id with its role
+    ("b-body (backend-opus)"); several members may share a role.
+  - *The lead on a stuck member.* With the owner's team setting
+    `lead_restarts_stuck` (default off), the lead may interrupt or relaunch a
+    member Zerus marks stuck; otherwise the item tells the lead to ask the
+    owner and names the command.
+  - *Status without inspect.* `hgs team status` shows each member's phase,
+    activity summary and minutes without progress.
+  - *Small fixes.* A refused owner's word names the expected sentence ("plan
+    approved", "phase N approved"); the lead may discard an empty draft phase;
+    `hgs team draft` seen documents its request_id; a captured reply that says
+    it still waits ("waiting for the editor to close") is not made a report;
+    a team setting `keep_assignees` (default off) pins every planned assignee.
 - **U55. What waits for the owner is shown where the owner looks (owner,
   2026-10-29).** Mock-up #530 waited a day for the owner, who never knew. An
   item that waits for the owner (the kinds of U50's `hgs team waiting`: a

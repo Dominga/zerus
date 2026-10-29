@@ -5284,6 +5284,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "uuid",
  "windows-sys 0.61.2",
  "zerus-watch-protocol",
 ]

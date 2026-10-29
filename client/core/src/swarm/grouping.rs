@@ -412,7 +412,10 @@ impl Grouping {
                 }
                 self.layout.forget(project);
             }
-            Intent::Rename { .. } | Intent::Reorder { .. } | Intent::Renamed { .. } => {}
+            Intent::Rename { .. }
+            | Intent::Reorder { .. }
+            | Intent::Renamed { .. }
+            | Intent::AddFolder { .. } => {}
         }
         self.revision = None;
         self.headers_dirty = true;

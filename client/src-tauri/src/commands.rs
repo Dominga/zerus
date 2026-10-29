@@ -44,6 +44,12 @@ impl AppState {
         let _ = self.live.organization.set(organization);
     }
 
+    /// Set once before the source starts. The host's observer never blocks
+    /// the source drain or takes the pump/organization locks.
+    pub fn set_creations(&self, host: crate::creations::CreationHost) {
+        let _ = self.live.creations.set(host);
+    }
+
     /// Applies the preferences the host confirmed for a Mute or Unmute to the
     /// session's row at once, for the window and the menu bar alike
     /// (`FleetState::applyNotificationPreferences`). A replay has no hosts.
@@ -79,6 +85,7 @@ mod live {
         pub pump: Pump,
         source: Mutex<Option<Source>>,
         pub organization: OnceLock<Organization>,
+        pub creations: OnceLock<crate::creations::CreationHost>,
     }
 
     /// Follows this computer's organization: the catalog is shared, so its
@@ -107,6 +114,7 @@ mod live {
         /// here before `source` is taken, so the two locks never nest.
         pub fn start(self: &Arc<Self>) -> Result<String, String> {
             let organization = self.organization.get().cloned();
+            let creations = self.creations.get().cloned();
             if let Some(organization) = &organization {
                 let live = Arc::downgrade(self);
                 organization.set_source(Arc::new(move || live.upgrade()?.organization_snapshot()));
@@ -139,6 +147,9 @@ mod live {
             self.pump.drain_with(changes, move |change| {
                 if let Some(organization) = &organization {
                     organization.observe(change);
+                }
+                if let Some(creations) = &creations {
+                    creations.observe(change);
                 }
             });
             *source = Some(started);

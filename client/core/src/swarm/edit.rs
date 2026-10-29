@@ -42,6 +42,14 @@ pub enum Intent {
         name: String,
         members: Vec<String>,
     },
+    /// A creation's source or cloned folder (SessionOrganization.cpp:258-269).
+    AddFolder {
+        project: String,
+        machine: String,
+        path: String,
+        name: String,
+        style: crate::paths::Style,
+    },
     /// renameGroup (147-152).
     Rename { project: String, name: String },
     /// removeGroup (154-166): its members and the listed rows it showed go
@@ -145,6 +153,38 @@ pub fn apply(organization: &Value, intent: &Intent) -> Result<Value, String> {
             }
             if !members.is_empty() {
                 move_into(&mut next, members, id)?;
+            }
+        }
+        Intent::AddFolder {
+            project,
+            machine,
+            path,
+            name,
+            style,
+        } => {
+            if machine.trim().is_empty()
+                || !crate::paths::absolute(path, *style)
+                || path.contains('\n')
+            {
+                return Err("The computer did not confirm this folder.".into());
+            }
+            let at = position(&next, project).ok_or(GONE)?;
+            let clean = crate::paths::clean(path, *style);
+            let project = &mut projects_mut(&mut next).ok_or(GONE)?[at];
+            if !project["folders"].is_array() {
+                project["folders"] = json!([]);
+            }
+            let folders = project["folders"].as_array_mut().ok_or(GONE)?;
+            if !folders.iter().any(|folder| {
+                folder["machine"].as_str() == Some(machine)
+                    && crate::paths::same(
+                        folder["path"].as_str().unwrap_or_default(),
+                        &clean,
+                        *style,
+                    )
+            }) {
+                folders.push(json!({"id": uuid::Uuid::new_v4().to_string(), "machine": machine,
+                    "path": clean, "name": name.trim().chars().take(NAME_CHARS).collect::<String>()}));
             }
         }
         Intent::Rename { project, name } => {

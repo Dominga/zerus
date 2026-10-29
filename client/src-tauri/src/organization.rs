@@ -374,6 +374,36 @@ impl Organization {
             .unwrap_or_default()
     }
 
+    /// Creation placement reads the same presented model as the Sessions
+    /// list, including edits accepted but not yet synchronized.
+    pub(crate) fn creation_projects(&self, local: &str) -> Vec<zerus_client_core::launch::Project> {
+        let hub = self.lock();
+        hub.sync
+            .presented()
+            .map(|(organization, _)| {
+                swarm::projects(organization)
+                    .iter()
+                    .take(swarm::MAX_PROJECTS)
+                    .map(|project| zerus_client_core::launch::Project {
+                        id: swarm::project_id(project).into(),
+                        name: project["name"].as_str().unwrap_or_default().into(),
+                        folders: swarm::folders(project)
+                            .into_iter()
+                            .map(|folder| zerus_client_core::launch::ProjectFolder {
+                                machine: if folder.machine == local {
+                                    String::new()
+                                } else {
+                                    folder.machine
+                                },
+                                path: folder.path,
+                            })
+                            .collect(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// The catalog's `swarm_id`, empty before the first state: New session
     /// infers a folder's project only from this swarm
     /// (SessionsWindow.cpp:2922).
@@ -389,6 +419,26 @@ impl Organization {
     #[cfg(all(test, unix))]
     pub fn submit(&self, intent: Intent) -> EditOutcome {
         self.submit_with(move |_| intent)
+    }
+
+    /// Records a creation's edit and returns without waiting for swarm apply,
+    /// as Qt's resolvePlacement edits its local model (SessionsWindow.cpp:1539-1569).
+    /// A later sync failure belongs to the organization's status line.
+    pub(crate) fn accept(&self, intent: impl FnOnce(&Pump) -> Intent) -> Result<(), String> {
+        if !self.0.allowed {
+            return Err(REPLAY_NEEDS_HGS.into());
+        }
+        let mut hub = self.lock();
+        if hub.stopped {
+            return Err(STOPPED.into());
+        }
+        let intent = intent(&self.0.pump);
+        hub.sync.edit(&intent, self.now())?;
+        self.0.pump.edited(&intent);
+        self.publish(&mut hub);
+        self.release(hub);
+        self.0.wake.notify_all();
+        Ok(())
     }
 
     /// Runs one edit; answers once the first apply that carries it ended.
@@ -1077,6 +1127,94 @@ mod tests {
             project: "ungrouped".into(),
             before: None,
         }
+    }
+
+    #[test]
+    fn creation_placement_returns_while_swarm_apply_is_held() {
+        let fake = Fake::new(json!([{"stdout": full("d2"), "gate": "go"}]));
+        let organization = fake.organization(&Pump::default(), true);
+        organization.set_source(snapshot("d1"));
+        organization.observe(&state("d1"));
+        let accepting = organization.clone();
+        let (send, answer) = sync_channel(1);
+        let edit = std::thread::spawn(move || {
+            let _ = send.send(accepting.accept(|_| move_to_inbox()));
+        });
+        let accepted = answer.recv_timeout(Duration::from_secs(2));
+        wait_until("the held apply", || !fake.applies().is_empty());
+        let no_waiter = organization.lock().waiting.is_empty();
+        std::fs::write(fake.dir.join("go"), b"").unwrap();
+        edit.join().unwrap();
+        assert!(no_waiter, "accept registers no apply waiter");
+        assert_eq!(accepted, Ok(Ok(())), "placement waited for swarm apply");
+        fake.finish(organization);
+    }
+
+    #[test]
+    fn creation_placement_refuses_not_ready_replay_and_stopped_with_their_details() {
+        let fake = Fake::landing();
+        let organization = fake.organization(&Pump::default(), true);
+        let detail = organization
+            .lock()
+            .sync
+            .edit(&move_to_inbox(), organization.now())
+            .unwrap_err();
+        assert_eq!(organization.accept(|_| move_to_inbox()), Err(detail));
+        organization.lock().stopped = true;
+        assert_eq!(
+            organization.accept(|_| move_to_inbox()),
+            Err(STOPPED.into())
+        );
+        fake.finish(organization);
+        let fake = Fake::landing();
+        let organization = fake.organization(&Pump::default(), false);
+        assert_eq!(
+            organization.accept(|_| move_to_inbox()),
+            Err(REPLAY_NEEDS_HGS.into())
+        );
+        assert!(fake.applies().is_empty());
+        fake.finish(organization);
+    }
+
+    #[test]
+    fn creation_placement_reads_the_accepted_project_and_folder_before_apply() {
+        let fake = Fake::new(json!([{"stdout": full("d2"), "gate": "go"}]));
+        let organization = fake.organization(&Pump::default(), true);
+        organization.set_source(snapshot("d1"));
+        organization.observe(&state("d1"));
+        organization
+            .accept(|_| Intent::Create {
+                id: "reserved".into(),
+                name: "Repository".into(),
+                members: Vec::new(),
+            })
+            .unwrap();
+        for _ in 0..2 {
+            organization
+                .accept(|_| Intent::AddFolder {
+                    project: "reserved".into(),
+                    machine: "workstation".into(),
+                    path: "/srv/repo".into(),
+                    name: String::new(),
+                    style: zerus_client_core::paths::Style::Posix,
+                })
+                .unwrap();
+        }
+        let projects = organization.creation_projects("workstation");
+        let created = projects
+            .iter()
+            .find(|project| project.id == "reserved")
+            .unwrap();
+        assert_eq!(created.name, "Repository");
+        assert_eq!(
+            created.folders.len(),
+            1,
+            "Continue setup adds the same folder idempotently"
+        );
+        assert_eq!(created.folders[0].machine, "");
+        assert_eq!(created.folders[0].path, "/srv/repo");
+        std::fs::write(fake.dir.join("go"), b"").unwrap();
+        fake.finish(organization);
     }
 
     #[test]

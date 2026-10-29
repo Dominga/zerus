@@ -10,7 +10,7 @@ use super::store::{self, canonical_uuid, Event, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|add-to-phase|approve-phase|discard-phase|return-to-draft|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|waiting|run|templates|safe-action|reports-to|sub-lead --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|add-to-phase|approve-phase|discard-phase|return-to-draft|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|run|templates|safe-action|reports-to|sub-lead --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
 
 const MUTATIONS: &[&str] = &[
     "plan", "extend", "edit-draft", "move-phase", "add-to-phase", "approve-phase", "discard-phase", "return-to-draft", "reject-phase", "undo-reject-phase",
@@ -2934,7 +2934,71 @@ fn safe_action_command(input: &Value) -> anyhow::Result<Value> {
     Ok(listed(&team))
 }
 
+/// U51: the owner creates an intake key (shown once, never stored) or revokes
+/// one by id. The team keeps only the key's hash.
+fn intake_key(input: &Value) -> anyhow::Result<Value> {
+    let request = text(input, "request_id");
+    ensure!(canonical_uuid(request), "A canonical request_id is required");
+    let team_id = text(input, "team");
+    ensure!(!team_id.is_empty(), "Name the team");
+    let mut secret = None;
+    let mut store = Store::open(true)?;
+    let mut receipt = store.mutate(Some((request, input)), team_id, input["revision"].as_u64(), |team, events| {
+        let by = actor(team, "intake-key", input)?;
+        let mut value = ops::apply(team, "intake-key", input, &by, &BTreeSet::new(), events)?;
+        // The stored receipt names the key, never its secret.
+        if let Some(object) = value.as_object_mut() {
+            secret = object.remove("key").and_then(|key| key.as_str().map(str::to_owned));
+        }
+        Ok(value)
+    })?;
+    if receipt["status"] == "created" {
+        if let Some(secret) = secret {
+            receipt["key"] = json!(secret);
+        }
+    }
+    Ok(receipt)
+}
+
+/// U51: a process presenting the owner's intake key adds one bounded urgent
+/// phase. No session identity is needed: the key is the whole authority, and
+/// the team names its label in the feed. The key never enters the stored
+/// request or the receipt.
+fn intake(input: &Value) -> anyhow::Result<Value> {
+    let key = text(input, "key");
+    ensure!(!key.is_empty(), "An intake request carries the owner's key");
+    let team_id = text(input, "team");
+    ensure!(!team_id.is_empty(), "Name the team");
+    let request = text(input, "request_id");
+    let generated = uuid::Uuid::new_v4().to_string();
+    let request = if request.is_empty() { generated.as_str() } else { request };
+    ensure!(canonical_uuid(request), "A canonical request_id is required when one is given");
+    // The stored request keeps no secret; a retry with the same key replays.
+    let mut stored = input.clone();
+    if let Some(object) = stored.as_object_mut() {
+        object["key"] = json!("");
+    }
+    let mut store = Store::open(true)?;
+    store.mutate(Some((request, &stored)), team_id, input["revision"].as_u64(), |team, events| {
+        let label = ops::intake_label(team, key).context("Unknown or revoked intake key for this team")?;
+        ops::apply(team, "intake", input, &Actor::Intake(label), &BTreeSet::new(), events)
+    })
+}
+
 fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
+    // U51: an intake key adds tasks; it is refused for every other operation,
+    // and nothing else may present one.
+    let presented = text(input, "key");
+    ensure!(
+        presented.is_empty() || op == "intake",
+        "An intake key adds urgent tasks only: use hgs team intake"
+    );
+    if op == "intake" {
+        return intake(input);
+    }
+    if op == "intake-key" {
+        return intake_key(input);
+    }
     // F5: the draft's read and its start are not mutations.
     if op == "draft" {
         match text(input, "action") {
@@ -6983,5 +7047,106 @@ mod tests {
         let next = receipt["result"]["team"].as_str().unwrap().to_owned();
         assert_eq!(store.load(&next).unwrap().unwrap().goal, "Ship v2");
         assert_eq!(store.load("t").unwrap().unwrap().next, next);
+    }
+
+    /// U51: the owner's key adds one bounded urgent phase and nothing else.
+    #[test]
+    fn an_intake_key_adds_one_urgent_phase_and_no_other_operation() {
+        let (team, _, _) = review_team();
+        with_review_team(&team, || {
+            // A team with none of the new fields behaves as today.
+            let before = stored();
+            assert!(before.intakes.is_empty() && before.intakes_seq == 0, "{before:?}");
+            assert!(!before.settings.restart_crashed);
+            assert!(before.members.iter().all(|member| member.restarts.is_empty() && member.crash.is_none() && !member.crash_told));
+            let request = "11111111-2222-4333-8444-555555555551";
+            let created = run("intake-key", &json!({"request_id":request,"team":"rv","label":"health watch","by":"human"}), false).unwrap();
+            assert_eq!((created["status"].clone(), created["id"].clone()), (json!("created"), json!("i1")));
+            let key = created["key"].as_str().unwrap().to_owned();
+            assert!(!key.is_empty());
+            let saved = stored();
+            assert_eq!(saved.intakes.len(), 1);
+            assert_eq!(saved.intakes[0].label, "health watch");
+            assert_eq!(saved.intakes[0].hash, ops::intake_hash(&key));
+            assert_ne!(saved.intakes[0].hash, key);
+            // A replay returns its first receipt, and the key is not shown again.
+            let again = run("intake-key", &json!({"request_id":request,"team":"rv","label":"health watch","by":"human"}), false).unwrap();
+            assert_eq!(again["status"], json!("created"));
+            assert!(again.get("key").is_none(), "{again}");
+            // The key adds one urgent phase: barrier off, approved at once.
+            let added = call("intake", json!({"key":key,"tasks":[{"title":"Hotfix","assignee":"dev"},{"title":"Probe","assignee":"qa"}]})).unwrap();
+            assert_eq!(added["status"], json!("intake"));
+            let saved = stored();
+            let phase = saved.phases.last().unwrap();
+            assert!(phase.urgent && !phase.barrier, "{phase:?}");
+            assert_eq!(phase.approval, Approval::Auto);
+            assert_eq!(phase.title, "Urgent: health watch");
+            assert_eq!(phase.state, PhaseState::Approved);
+            assert_eq!(phase.tasks, vec![4, 5]);
+            // The feed names the key's label, never the key.
+            let feed = Store::open(false).unwrap().events("rv", None, 50).unwrap().to_string();
+            assert!(feed.contains("Intake health watch"), "{feed}");
+            assert!(!feed.contains(&key), "{feed}");
+            // Bounded: one to five tasks, and never a named phase.
+            for tasks in [vec![json!({"title":"A","assignee":"dev"}); 6], Vec::new()] {
+                let error = call("intake", json!({"key":key,"tasks":tasks})).unwrap_err();
+                assert!(error.to_string().contains("1 to 5"), "{error}");
+            }
+            let error = call("intake", json!({"key":key,"phase":2,"tasks":[{"title":"X","assignee":"dev"}]})).unwrap_err();
+            assert!(error.to_string().contains("cannot name"), "{error}");
+            // The key opens no other operation.
+            for op in ["status", "inbox", "extend", "plan", "report", "accept", "settings", "intake-key", "relaunch", "stop"] {
+                let error = call(op, json!({"key":key})).unwrap_err();
+                assert!(error.to_string().contains("intake key adds urgent tasks only"), "{op}: {error}");
+            }
+            // A member cannot create a key; the owner revokes it by id.
+            let denied = as_lead(|| {
+                run("intake-key", &json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":"rv","label":"x","by":"human"}), false)
+            })
+            .unwrap_err();
+            assert!(denied.to_string().contains("Only you"), "{denied}");
+            let revoked = call("intake-key", json!({"revoke":"i1","by":"human"})).unwrap();
+            assert_eq!(revoked["status"], json!("revoked"));
+            assert!(stored().intakes.is_empty());
+            let after = call("intake", json!({"key":key,"tasks":[{"title":"Late","assignee":"dev"}]})).unwrap_err();
+            assert!(after.to_string().contains("Unknown or revoked"), "{after}");
+            // Without a key nothing changes.
+            let error = call("intake", json!({"tasks":[{"title":"Late","assignee":"dev"}]})).unwrap_err();
+            assert!(error.to_string().contains("carries the owner's key"), "{error}");
+        });
+    }
+
+    /// U51/U52: a team stored before this phase carries none of the new fields,
+    /// loads with today's defaults and writes none of them back.
+    #[test]
+    fn a_stored_team_without_the_new_fields_loads_and_behaves_as_today() {
+        let (team, _, _) = review_team();
+        let mut value = serde_json::to_value(&team).unwrap();
+        for key in ["intakes", "intakes_seq"] {
+            value.as_object_mut().unwrap().remove(key);
+        }
+        value["settings"].as_object_mut().unwrap().remove("restart_crashed");
+        for member in value["members"].as_array_mut().unwrap() {
+            for key in ["restarts", "crash", "crash_told"] {
+                member.as_object_mut().unwrap().remove(key);
+            }
+        }
+        let mut legacy: Team = serde_json::from_value(value).unwrap();
+        assert!(legacy.intakes.is_empty() && legacy.intakes_seq == 0);
+        assert!(!legacy.settings.restart_crashed);
+        assert!(legacy.members.iter().all(|member| member.restarts.is_empty() && member.crash.is_none() && !member.crash_told));
+        // The same plan, hand-out and settings work; none of the new fields is
+        // written for a team that does not set them.
+        let mut events = Vec::new();
+        ops::apply(&mut legacy, "settings", &json!({"settings":{"restart_crashed":true}}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        assert!(legacy.settings.restart_crashed);
+        let refused = ops::apply(&mut legacy, "settings", &json!({"settings":{"restart_crashed":false}}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap_err();
+        assert!(refused.to_string().contains("restart_crashed"), "{refused}");
+        legacy.settings.restart_crashed = false;
+        let written = serde_json::to_value(&legacy).unwrap();
+        assert!(written.get("intakes").is_none() && written.get("intakes_seq").is_none(), "{written}");
+        assert!(written["settings"].get("restart_crashed").is_none(), "{written}");
+        assert!(written["members"].as_array().unwrap().iter().all(|member| member.get("restarts").is_none()
+            && member.get("crash").is_none() && member.get("crash_told").is_none()), "{written}");
     }
 }

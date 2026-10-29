@@ -140,6 +140,10 @@ pub(crate) struct Settings {
     /// U48: the branch a task's branch starts from; empty is the lead's branch.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub base_branch: String,
+    /// U52: a member session that exits on its own is launched again into its
+    /// conversation, at most three times an hour; off by default.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub restart_crashed: bool,
 }
 
 /// U48: the name of a task's branch: `{id}`, `{member}` and `{team8}` are
@@ -226,6 +230,7 @@ impl Default for Settings {
             land_allowed: false,
             branch_per_task: None,
             base_branch: String::new(),
+            restart_crashed: false,
         }
     }
 }
@@ -436,6 +441,17 @@ pub(crate) struct Member {
     /// N10: the sub-lead brief has not been sent yet.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub sub_brief: bool,
+    /// U52: when this member's session was launched again after crashing on
+    /// its own, oldest first, at most 20.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub restarts: Vec<f64>,
+    /// U52: the last crash seen by the dispatcher, for the lead's inbox item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crash: Option<f64>,
+    /// U52: the lead already heard that this member's session stays stopped
+    /// after too many crashes this hour.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub crash_told: bool,
 }
 
 /// U45: a model a member may run a task on, with its effort (empty: the
@@ -1378,6 +1394,20 @@ pub(crate) struct PendingAddition {
     pub warned_at: f64,
 }
 
+/// U51: an owner-created key that lets one process add an urgent phase. The
+/// team stores only the key's hash; the key is shown once when it is created.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct Intake {
+    /// `i1`, `i2`, ... in creation order.
+    pub id: String,
+    #[serde(default)]
+    pub label: String,
+    /// The SHA-256 of the key, hex.
+    pub hash: String,
+    #[serde(default)]
+    pub created: f64,
+}
+
 /// U27: a visual lane of a phase, in order: the tasks drawn in it read as one
 /// row; the label names the row ("Checkpoint 1").
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -1620,6 +1650,14 @@ pub(crate) struct Team {
     /// with its phase, newest last, at most 20.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stops: Vec<StopNotice>,
+    /// U51: the owner's intake keys; the key itself is never stored, only its
+    /// hash, and the key is shown once when it is created.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub intakes: Vec<Intake>,
+    /// U51: the last intake key number given; ids stay unique after a
+    /// revocation.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub intakes_seq: u64,
 }
 
 /// #511 N3: a revoked worked-ahead attempt whose member must stop. The

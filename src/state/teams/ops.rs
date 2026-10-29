@@ -7,6 +7,7 @@ use super::plan;
 use super::store::Event;
 use anyhow::{bail, ensure, Context};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
 /// Who asks for a change.
@@ -19,6 +20,9 @@ pub(crate) enum Actor {
     /// C6: the parent team's lead, proven by its session in the parent team
     /// (section 9.3), acting on this sub-team.
     ParentLead,
+    /// U51: a process presenting the owner's intake key (its label). It may add
+    /// one urgent phase and nothing else.
+    Intake(String),
 }
 
 impl Actor {
@@ -27,6 +31,7 @@ impl Actor {
             Actor::Human => "You".into(),
             Actor::Member(id) => team.role_of(id),
             Actor::ParentLead => "Parent lead".into(),
+            Actor::Intake(label) => format!("Intake {label}"),
         }
     }
     pub(crate) fn is_lead(&self, team: &Team) -> bool {
@@ -41,7 +46,7 @@ impl Actor {
         match self {
             Actor::Human => true,
             Actor::Member(id) => *id == team.lead || (!member.is_empty() && team.reviewer_of(member) == *id),
-            Actor::ParentLead => false,
+            Actor::ParentLead | Actor::Intake(_) => false,
         }
     }
 }
@@ -818,7 +823,7 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
 /// C4: the settings that decide who approves, how far a team may grow and
 /// what runs without the owner stay the owner's; the lead changes the rest.
 /// Spec 6.1 lets the lead set resume_after_limits too.
-pub(crate) const OWNER_SETTINGS: [&str; 14] = [
+pub(crate) const OWNER_SETTINGS: [&str; 15] = [
     "approval",
     "phase_approval",
     "max_members",
@@ -835,6 +840,8 @@ pub(crate) const OWNER_SETTINGS: [&str; 14] = [
     "land_allowed",
     "branch_per_task",
     "base_branch",
+    // U52: only the owner lets Zerus launch a crashed member again.
+    "restart_crashed",
 ];
 
 fn ensure_lead_settings(old: &Settings, new: &Settings, actor: &Actor, on_word: bool) -> anyhow::Result<()> {
@@ -853,7 +860,10 @@ fn ensure_lead_settings(old: &Settings, new: &Settings, actor: &Actor, on_word: 
 }
 
 fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<String>, events: &mut Vec<Event>) -> anyhow::Result<Value> {
-    ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you extend the team");
+    ensure!(
+        matches!(actor, Actor::Human | Actor::Intake(_)) || actor.is_lead(team),
+        "Only the lead or you extend the team"
+    );
     ensure!(
         matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused),
         "Only a planning, running or paused team takes a new phase"
@@ -875,10 +885,10 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
             Some(draft_phase(team, n)?)
         }
     };
-    let approval = phase_approval(team);
     // D2: an urgent phase runs at once: no approval under review, no barrier,
-    // and its tasks are handed out first.
+    // and its tasks are handed out first. U51: it is approved automatically.
     let urgent = input["urgent"].as_bool() == Some(true);
+    let approval = if urgent { Approval::Auto } else { phase_approval(team) };
     // Several drafts may queue, in order; a phase added while an earlier one is
     // still a Draft is a Draft too, whatever the approval says (F9).
     let drafting = !urgent
@@ -995,6 +1005,84 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
         json!({"by":by,"phase":n,"title":title,"tasks":ids.len(),"barrier":barrier,"approval":approval}),
     ));
     Ok(json!({"status":"added","phase":n,"tasks":ids,"approval":approval,"validation":validation}))
+}
+
+/// U51: the hash of an intake key; the team keeps only this.
+pub(crate) fn intake_hash(key: &str) -> String {
+    format!("{:x}", Sha256::digest(key.as_bytes()))
+}
+
+/// U51: a fresh intake key, shown once to the owner.
+pub(crate) fn intake_secret() -> String {
+    format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple())
+}
+
+/// U51: the label of the key a process presents, when this team has it.
+pub(crate) fn intake_label(team: &Team, key: &str) -> Option<String> {
+    if key.is_empty() {
+        return None;
+    }
+    let hash = intake_hash(key);
+    team.intakes
+        .iter()
+        .find(|intake| !intake.hash.is_empty() && intake.hash == hash)
+        .map(|intake| intake.label.clone())
+}
+
+/// U51: the owner creates a key, or revokes one by id. The key is returned
+/// once; the team keeps only its hash and names its label in the feed.
+fn intake_key(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    ensure!(matches!(actor, Actor::Human), "Only you create or revoke an intake key");
+    let revoke = text(input, "revoke").trim().to_owned();
+    if !revoke.is_empty() {
+        let position = team
+            .intakes
+            .iter()
+            .position(|intake| intake.id == revoke)
+            .with_context(|| format!("Unknown intake key {revoke}"))?;
+        let removed = team.intakes.remove(position);
+        events.push(Event::new("intake_revoked", json!({"id":removed.id,"label":removed.label})));
+        return Ok(json!({"status":"revoked","id":revoke}));
+    }
+    let label = clean(text(input, "label").trim(), 80, "An intake label")?;
+    ensure!(!label.is_empty(), "An intake key needs a label");
+    ensure!(team.intakes.len() < 8, "A team keeps at most 8 intake keys");
+    let key = intake_secret();
+    team.intakes_seq += 1;
+    let id = format!("i{}", team.intakes_seq);
+    team.intakes.push(Intake { id: id.clone(), label: label.clone(), hash: intake_hash(&key), created: now() });
+    events.push(Event::new("intake_key", json!({"id":id,"label":label})));
+    Ok(json!({"status":"created","id":id,"label":label,"key":key}))
+}
+
+/// U51: one bounded urgent phase from the owner's intake key. The key adds
+/// tasks; it gets none of the owner's other rights, and the feed names its
+/// label.
+fn intake_phase(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<String>, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    let label = match actor {
+        Actor::Intake(label) => label.clone(),
+        _ => bail!("An intake key adds one urgent phase"),
+    };
+    ensure!(input.get("phase").is_none(), "An intake adds its own phase; it cannot name one");
+    let values = input["tasks"].as_array().context("An intake carries \"tasks\"")?;
+    ensure!((1..=5).contains(&values.len()), "An intake adds 1 to 5 tasks");
+    let last = team.tasks.iter().map(|task| task.id).max().unwrap_or(0);
+    let next = last.checked_add(1).context("Task numbers are exhausted")?;
+    let mut tasks = Vec::new();
+    for (index, value) in values.iter().enumerate() {
+        let mut task = value.clone();
+        let object = task.as_object_mut().context("An intake task is an object")?;
+        object.insert("id".into(), json!(next + index as u32));
+        // An urgent task lands now: it queues behind nothing it cannot see.
+        object.remove("deps");
+        object.remove("check");
+        object.remove("kind");
+        tasks.push(task);
+    }
+    let filled = json!({"urgent":true,"phase_title":format!("Urgent: {label}"),"tasks":tasks});
+    let added = extend(team, &filled, actor, offline, events)?;
+    events.push(Event::new("intake", json!({"key":label,"phase":added["phase"],"tasks":added["tasks"]})));
+    Ok(json!({"status":"intake","phase":added["phase"],"tasks":added["tasks"],"validation":added["validation"]}))
 }
 
 /// U29: how long a warned addition waits for the owner's confirmation.
@@ -2267,6 +2355,7 @@ fn report(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
         Actor::Member(member) => member.clone(),
         Actor::Human => String::new(),
         Actor::ParentLead => bail!("The parent lead does not report on a sub-team's task"),
+        Actor::Intake(_) => bail!("An intake key adds urgent tasks; it cannot report"),
     };
     let label = actor.label(team);
     let team_lead = team.lead.clone();
@@ -3515,13 +3604,16 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
     let result = match op {
         "plan" => check_land_choices(team, input).and_then(|()| plan(team, input, actor, events)),
         "extend" => {
-            // C15: an urgent phase comes only from the finding action.
+            // C15: an urgent phase comes only from the finding action or the
+            // owner's intake key.
             let mut plain = input.clone();
             if let Some(object) = plain.as_object_mut() {
                 object.remove("urgent");
             }
             check_land_choices(team, &plain).and_then(|()| extend(team, &plain, actor, offline, events))
         }
+        "intake" => intake_phase(team, input, actor, offline, events),
+        "intake-key" => intake_key(team, input, actor, events),
         "edit-draft" => check_land_choices(team, input).and_then(|()| edit_draft(team, input, actor, offline, events)),
         "reports-to" | "sub-lead" => hierarchy(team, op, input, actor, events),
         "move-phase" => move_phase(team, input, actor, events),

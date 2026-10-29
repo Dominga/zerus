@@ -73,6 +73,9 @@ pub(crate) struct Seen {
     pub asking: bool,
     /// Its process or native session runs.
     pub live: bool,
+    /// The listing's own state: running, stopped, paused or archived (U52
+    /// restarts only a session that is `stopped`).
+    pub state: String,
     /// Its working folder, where a member that may not write the team's
     /// files leaves its report.
     pub cwd: String,
@@ -203,6 +206,7 @@ pub(crate) fn seen(listing: &Value) -> Vec<Seen> {
                 last_event_at: record["last_event_at"].as_f64(),
                 agent: field("agent").to_owned(),
                 live,
+                state: field("state").to_owned(),
                 cwd: field("cwd").to_owned(),
                 muted: record["notification_preferences"]["muted"] == true,
                 notify_revision: record["notification_preferences"]["revision"].as_u64(),
@@ -309,6 +313,12 @@ pub(crate) enum Step {
     /// The dispatcher saw a member's session live or stopped; status derives
     /// `stopped` from it without a listing of its own (L3).
     Liveness { member: String, live: bool },
+    /// U52: the member's session exited on its own and the team setting lets
+    /// Zerus launch it again into the same conversation.
+    Restart { member: String },
+    /// U52: the member crashed too often this hour: it stays stopped and the
+    /// lead hears once.
+    CrashStopped { member: String },
     NoReport { task: u32 },
     /// The planning brief of a team created from the desktop.
     Brief,
@@ -397,6 +407,11 @@ fn listed_hosts(listing: &Value) -> BTreeSet<String> {
     }
     hosts
 }
+
+/// U52: how many times one member's session is launched again in an hour, and
+/// the window those restarts are counted over.
+const RESTARTS_PER_HOUR: usize = 3;
+const RESTART_WINDOW: f64 = 3600.0;
 
 /// A session quiet enough for its ended turn to become the attempt's report
 /// (A2): idle, no question, input or approval, and no Background work.
@@ -680,6 +695,32 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                 .any(|(old, new)| old.name != new.name || old.command != new.command || old.since != new.since);
         if changed {
             steps.push(Step::Services { member: member.id.clone(), services: found.services.clone() });
+        }
+    }
+    // U52: a member session that exited on its own is launched again into its
+    // own conversation, at most three times an hour. A paused, archived,
+    // limited or swapped session is never restarted, and neither is one that
+    // has not been seen live since (a failed relaunch does not loop).
+    if team.settings.restart_crashed && team.status == TeamStatus::Running {
+        for member in &team.members {
+            if member.id == team.lead
+                || member.agent == "opencode"
+                || member.state != MemberState::Active
+                || member.session.is_none()
+                || member.limited.is_some()
+            {
+                continue;
+            }
+            let Some(found) = session_of(member, seen) else { continue };
+            if found.live || found.state != "stopped" || found.limited.is_some() || !member.seen.is_some_and(|seen| seen.live) {
+                continue;
+            }
+            let restarted = member.restarts.iter().filter(|at| now - **at <= RESTART_WINDOW).count();
+            if restarted < RESTARTS_PER_HOUR {
+                steps.push(Step::Restart { member: member.id.clone() });
+            } else if !member.crash_told {
+                steps.push(Step::CrashStopped { member: member.id.clone() });
+            }
         }
     }
     // A hand-out that never started: the lead hears once, when free (A1).
@@ -4383,6 +4424,61 @@ fn tell_lead_starved(store: &mut Store, team: &Team, member_id: &str) -> anyhow:
     })
 }
 
+/// U52: the crashed member's session is launched again into the same
+/// conversation, folder and name, and its open attempt is returned as
+/// unconfirmed for the lead. The restart is counted before it is attempted, so
+/// an agent that keeps failing cannot loop.
+fn restart_crashed(store: &mut Store, team: &Team, member_id: &str) -> anyhow::Result<()> {
+    let session = team.member(member_id).and_then(|member| member.session.clone()).context("the member has no session")?;
+    let at = now();
+    change(store, &team.id, |team, events| {
+        let role = team.role_of(member_id);
+        let found = team.members.iter_mut().find(|found| found.id == member_id).context("unknown member")?;
+        found.restarts.push(at);
+        if found.restarts.len() > 20 {
+            let extra = found.restarts.len() - 20;
+            found.restarts.drain(..extra);
+        }
+        found.crash = Some(at);
+        found.crash_told = false;
+        for task in &mut team.tasks {
+            let task_id = task.id;
+            if let Some(attempt) = task.open_attempt_mut().filter(|attempt| attempt.member == member_id) {
+                attempt.state = AttemptState::Unconfirmed;
+                attempt.error = format!("the session crashed at {at:.0}; restarted");
+                events.push(Event::new("unconfirmed", json!({"task":task_id,"attempt":attempt.n,"error":attempt.error})));
+            }
+        }
+        events.push(Event::new("member_restarted", json!({"member":role,"at":at})));
+        Ok(())
+    })?;
+    let outcome = hgs(&session.host, &["resume", session.name.as_str(), "-d"], None, Duration::from_secs(120));
+    let error = match outcome {
+        Ok(output) if output.status.success() => return Ok(()),
+        Ok(output) => String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        Err(error) => error.to_string(),
+    };
+    change(store, &team.id, |team, events| {
+        events.push(Event::new("restart_failed", json!({"member":team.role_of(member_id),"error":error})));
+        Ok(())
+    })
+}
+
+/// U52: too many crashes this hour leave the session stopped; the lead hears
+/// once, through the inbox item `crash_told` shows.
+fn crash_stopped(store: &mut Store, team: &Team, member_id: &str) -> anyhow::Result<()> {
+    let at = now();
+    change(store, &team.id, |team, events| {
+        let role = team.role_of(member_id);
+        let found = team.members.iter_mut().find(|found| found.id == member_id).context("unknown member")?;
+        found.crash = Some(at);
+        found.crash_told = true;
+        let restarts = found.restarts.iter().filter(|restart| at - **restart <= RESTART_WINDOW).count();
+        events.push(Event::new("member_crashed", json!({"member":role,"restarts":restarts})));
+        Ok(())
+    })
+}
+
 /// The last lines of a job's output, bounded (C12).
 fn output_tail(text: &str) -> String {
     let lines: Vec<&str> = text.lines().filter(|line| !line.trim().is_empty()).collect();
@@ -5066,8 +5162,14 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             // change lets status derive `stopped` by itself (L3).
             let found = team.members.iter_mut().find(|found| found.id == *member).context("unknown member")?;
             found.seen = Some(MemberSeen { at: now(), live: *live });
+            if *live {
+                // U52: a session that runs again can crash again later.
+                found.crash_told = false;
+            }
             Ok(())
         }),
+        Step::Restart { member } => restart_crashed(store, team, member),
+        Step::CrashStopped { member } => crash_stopped(store, team, member),
         Step::Services { member, services } => change(store, &team.id, |team, _| {
             if let Some(found) = team.members.iter_mut().find(|found| found.id == *member) {
                 found.services = services
@@ -6156,6 +6258,117 @@ mod tests {
 
     fn session(name: &str, run: &str, free: bool) -> Seen {
         Seen { name: name.into(), run_id: run.into(), conversation_id: "c".into(), free, idle: free, live: true, ..Default::default() }
+    }
+
+    /// U52: the listing row of a session that is no longer running, with the
+    /// state the listing reports for it.
+    fn stopped(name: &str, run: &str, state: &str) -> Seen {
+        Seen { name: name.into(), run_id: run.into(), conversation_id: "c".into(), live: false, state: state.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn a_restart_launches_the_same_conversation_and_returns_the_attempt_unconfirmed() {
+        use crate::state::teams::model::{Attempt, AttemptState, TaskStatus};
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+            let mut t = team();
+            t.settings.restart_crashed = true;
+            t.members.iter_mut().find(|member| member.id == "dev").unwrap().seen = Some(MemberSeen { at: 1.0, live: false });
+            let task = t.tasks.iter_mut().find(|task| task.assignee == "dev").unwrap();
+            let task_id = task.id;
+            task.attempts.push(Attempt { n: 1, id: "a1".into(), member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
+            task.status = TaskStatus::InProgress;
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+            let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::<Vec<String>>::new()));
+            let record = calls.clone();
+            set_fake_hgs(Some(Box::new(move |_, args: &[&str], _: Option<&Value>| {
+                record.borrow_mut().push(args.iter().map(|arg| arg.to_string()).collect());
+                Ok(fake_output(0, "{}", ""))
+            })));
+            run_step(&mut store, &t, &Step::Restart { member: "dev".into() }, "").unwrap();
+            run_step(&mut store, &t, &Step::CrashStopped { member: "dev".into() }, "").unwrap();
+            set_fake_hgs(None);
+            let after = store.load(&t.id).unwrap().unwrap();
+            let dev = after.members.iter().find(|member| member.id == "dev").unwrap();
+            assert_eq!(dev.restarts.len(), 1);
+            assert!(dev.crash.is_some() && dev.crash_told);
+            let attempt = after.task(task_id).unwrap().open_attempt().unwrap();
+            assert_eq!(attempt.state, AttemptState::Unconfirmed);
+            assert!(attempt.error.contains("crashed"), "{}", attempt.error);
+            assert_eq!(
+                calls.borrow().first().map(Vec::as_slice),
+                Some(["resume".to_owned(), "codex/x/dev".to_owned(), "-d".to_owned()].as_slice())
+            );
+            let feed = store.events(&t.id, None, 50).unwrap().to_string();
+            assert!(feed.contains("member_restarted") && feed.contains("member_crashed"), "{feed}");
+        });
+    }
+
+    #[test]
+    fn a_crashed_member_is_restarted_only_when_the_team_allows_it() {
+        let mut t = team();
+        t.members.iter_mut().find(|member| member.id == "dev").unwrap().seen = Some(MemberSeen { at: 1.0, live: true });
+        let crashed = stopped("codex/x/dev", "r1", "stopped");
+        // Default off: only the liveness record changes, as today.
+        let found = steps(&t, std::slice::from_ref(&crashed), 20.0);
+        assert!(found.contains(&Step::Liveness { member: "dev".into(), live: false }), "{found:?}");
+        assert!(!found.iter().any(|step| matches!(step, Step::Restart { .. } | Step::CrashStopped { .. })), "{found:?}");
+        // On: the same tick asks for the restart.
+        t.settings.restart_crashed = true;
+        let found = steps(&t, std::slice::from_ref(&crashed), 20.0);
+        assert!(found.contains(&Step::Restart { member: "dev".into() }), "{found:?}");
+        // Three restarts in the hour: the session stays stopped, once.
+        t.members.iter_mut().find(|member| member.id == "dev").unwrap().restarts = vec![10.0, 15.0, 18.0];
+        let found = steps(&t, std::slice::from_ref(&crashed), 20.0);
+        assert!(found.contains(&Step::CrashStopped { member: "dev".into() }), "{found:?}");
+        assert!(!found.iter().any(|step| matches!(step, Step::Restart { .. })));
+        t.members.iter_mut().find(|member| member.id == "dev").unwrap().crash_told = true;
+        assert!(!steps(&t, std::slice::from_ref(&crashed), 20.0).iter().any(|step| matches!(step, Step::CrashStopped { .. })));
+        // An hour later the old restarts no longer count.
+        let found = steps(&t, std::slice::from_ref(&crashed), 4000.0);
+        assert!(found.contains(&Step::Restart { member: "dev".into() }), "{found:?}");
+    }
+
+    #[test]
+    fn a_paused_archived_limited_or_unseen_session_is_never_restarted() {
+        let mut t = team();
+        t.settings.restart_crashed = true;
+        for (state, limited) in [("paused", false), ("archived", false), ("stopped", true)] {
+            {
+                let dev = t.members.iter_mut().find(|member| member.id == "dev").unwrap();
+                dev.seen = Some(MemberSeen { at: 1.0, live: true });
+                dev.limited = None;
+                dev.state = MemberState::Active;
+                dev.restarts.clear();
+                dev.crash_told = false;
+            }
+            let mut crashed = stopped("codex/x/dev", "r1", state);
+            if limited {
+                crashed.limited = Some(SeenLimit { at: 1.0, resets_at: Some(99.0), detail: "usage limit".into() });
+            }
+            let found = steps(&t, &[crashed], 20.0);
+            assert!(!found.iter().any(|step| matches!(step, Step::Restart { .. } | Step::CrashStopped { .. })), "{state}: {found:?}");
+        }
+        // A member the team paused, or one a limit stopped, is not restarted.
+        for (state, limited) in [(MemberState::Paused, None), (MemberState::Active, Some(MemberLimit { at: 1.0, resets_at: Some(99.0), detail: "limit".into() }))] {
+            {
+                let dev = t.members.iter_mut().find(|member| member.id == "dev").unwrap();
+                dev.seen = Some(MemberSeen { at: 1.0, live: true });
+                dev.state = state;
+                dev.limited = limited;
+            }
+            let found = steps(&t, &[stopped("codex/x/dev", "r1", "stopped")], 20.0);
+            assert!(!found.iter().any(|step| matches!(step, Step::Restart { .. })), "{state:?}: {found:?}");
+        }
+        // A session not seen live since the last restart does not loop.
+        {
+            let dev = t.members.iter_mut().find(|member| member.id == "dev").unwrap();
+            dev.state = MemberState::Active;
+            dev.limited = None;
+            dev.seen = Some(MemberSeen { at: 1.0, live: false });
+        }
+        assert!(!steps(&t, &[stopped("codex/x/dev", "r1", "stopped")], 20.0).iter().any(|step| matches!(step, Step::Restart { .. })));
     }
 
     #[test]

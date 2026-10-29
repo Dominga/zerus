@@ -152,7 +152,6 @@ pub(crate) fn pending(folder: &Path, limit: usize) -> anyhow::Result<Vec<(PathBu
     let age = |modified: SystemTime| now.duration_since(modified).unwrap_or_default();
     let mut candidates: Vec<(SystemTime, PathBuf)> = Vec::new();
     let mut results: Vec<(SystemTime, PathBuf)> = Vec::new();
-    let mut claims: Vec<(SystemTime, PathBuf)> = Vec::new();
     let mut rejected_any = false;
     for entry in entries.take(SCAN_LIMIT).flatten() {
         let path = entry.path();
@@ -169,8 +168,10 @@ pub(crate) fn pending(folder: &Path, limit: usize) -> anyhow::Result<Vec<(PathBu
         } else if name.ends_with(".result.json") {
             results.push((modified, path));
         } else if name.ends_with(".running.json") {
-            // C1: a claimed run is never a request; its runner settles it.
-            claims.push((modified, path));
+            // C1/N11: a claimed run is never a request, and its claim is never
+            // pruned here: the runner (or the stale-claim check) settles it.
+            // A live claim dropped by this scan would let the same id run twice.
+            continue;
         } else if name.ends_with(".tmp") {
             if age(modified) > TEMP_AGE {
                 let _ = fs::remove_file(&path);
@@ -183,7 +184,6 @@ pub(crate) fn pending(folder: &Path, limit: usize) -> anyhow::Result<Vec<(PathBu
         }
     }
     prune(&mut results, age);
-    prune(&mut claims, age);
     candidates.sort();
     let mut requests = Vec::new();
     // At most READS_PER_TICK files are opened: unusable ones are answered and
@@ -336,6 +336,20 @@ mod tests {
         assert!(!request_path(folder, "11111111-1111-4111-8111-111111111111").exists());
         assert!(wait(folder, "11111111-1111-4111-8111-111111111111", 0.0).unwrap()["status"] == "applied");
         assert!(wait(folder, "22222222-2222-4222-8222-222222222222", 0.0).is_none());
+    }
+
+    /// N11: a live run's claim is never pruned by the tick's scan. Dropping
+    /// one let the same request id be claimed again and run twice.
+    #[test]
+    fn a_live_claim_is_never_pruned_from_the_outbox() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path();
+        for n in 0..150u32 {
+            let id = format!("{n:08x}-1111-4111-8111-111111111111");
+            write_running(folder, &id, &json!({"request_id":id,"started":1.0,"timeout_secs":1800})).unwrap();
+        }
+        assert!(pending(folder, PER_TICK).unwrap().is_empty(), "a claim is not a request");
+        assert_eq!(running_all(folder).len(), 150, "every live claim stays");
     }
 
     #[test]

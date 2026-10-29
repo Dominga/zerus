@@ -97,6 +97,11 @@ def inspect(path, required=REQUIRED):
         require(0 < len(entries) <= ENTRY_LIMIT, "Unexpected Windows portable entry count.")
         names, folded, total = set(), set(), 0
         for entry in entries:
+            # ZipInfo normalizes Windows separators (and truncates NUL) while
+            # reading. Validate the original stored spelling before that change
+            # can make an ambiguous archive look safe on the current OS.
+            require(entry.orig_filename == entry.filename,
+                    f"Windows portable entry changes under ZIP decoding: {entry.orig_filename!r}")
             name = safe_name(entry.filename)
             require(not FORBIDDEN.search(name), f"Windows portable bundle must not contain {name}")
             # conpty.dll would run an OpenConsole.exe from a subfolder when none sat next to it.

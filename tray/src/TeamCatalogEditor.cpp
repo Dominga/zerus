@@ -1,3 +1,5 @@
+#include "JsonParse.h"
+#include "ProcessRunner.h"
 #include "TeamCatalogEditor.h"
 #include "TeamController.h"
 #include "HgsClient.h"
@@ -502,15 +504,25 @@ TeamCatalogEditor::TeamCatalogEditor(TeamController *teams, QWidget *parent) : Q
     connect(m_import, &QPushButton::clicked, this, [this] {
         const auto path = QFileDialog::getOpenFileName(this, tr("Import team catalog"), {}, tr("JSON (*.json)"));
         if (path.isEmpty()) return;
-        QFile file(path);
-        const auto doc = file.open(QIODevice::ReadOnly) ? QJsonDocument::fromJson(file.readAll()) : QJsonDocument();
-        if (!doc.isObject()) { m_meta->setText(tr("⚠ %1 is not a team catalog").arg(path).toHtmlEscaped()); return; }
+        const auto before = m_catalog.json();
         const qint64 version = m_catalog.version;
-        // An export holds the catalog itself; `catalog get` wraps it.
-        m_catalog = parseCatalog(doc.object().contains("catalog") ? doc.object() : QJsonObject{{"catalog", doc.object()}});
-        m_catalog.version = version; m_catalog.proposals.clear();
-        m_readOnly = false;
-        changed(); rebuildLists(); rebuildEditor();
+        ProcessRunner::post(this, [path] {
+            QFile file(path);
+            QString error;
+            if (!file.open(QIODevice::ReadOnly)) return qMakePair(QJsonObject(), false);
+            const auto data = JsonParse::object(file.readAll(), &error);
+            return qMakePair(data, error.isEmpty());
+        }, [this, path, before, version](const QPair<QJsonObject, bool> &parsed) {
+            if (!parsed.second) { m_meta->setText(tr("⚠ %1 is not a team catalog").arg(path).toHtmlEscaped()); return; }
+            if (m_catalog.version != version || m_catalog.json() != before) {
+                m_meta->setText(tr("⚠ The catalog changed while importing; try again.")); return;
+            }
+            // An export holds the catalog itself; `catalog get` wraps it.
+            m_catalog = parseCatalog(parsed.first.contains("catalog") ? parsed.first : QJsonObject{{"catalog", parsed.first}});
+            m_catalog.version = version; m_catalog.proposals.clear();
+            m_readOnly = false;
+            changed(); rebuildLists(); rebuildEditor();
+        });
     });
     connect(m_teams, &TeamController::catalogChanged, this, [this] { if (!m_dirty) load(); else updateHeader(); });
     setDark(true);
@@ -662,6 +674,11 @@ void TeamCatalogEditor::updateHeader()
     for (auto *b : {m_import, m_export, m_revert, m_save}) b->setVisible(!draft);
     m_openDesigner->setVisible(m_openDesigner->property("wanted").toBool() && !draft);
     m_revert->setEnabled(m_dirty); m_save->setEnabled(m_dirty);
+    // Reset waits for Save or Revert: an edit after the tab was built disables it too.
+    for (auto *reset : findChildren<QPushButton *>(QStringLiteral("teamPlanningRulesReset"))) {
+        reset->setEnabled(!m_dirty && base.planningRulesKnown);
+        reset->setToolTip(m_dirty ? tr("Save or revert your edits first") : tr("Replace the rules with Zerus's built-in ones and save the catalog"));
+    }
     m_discard->setVisible(draft); m_apply->setVisible(draft);
     m_apply->setText(QStringLiteral("✓ ") + counted(kept, tr("Apply %1 change"), tr("Apply %1 changes")));
     m_apply->setEnabled(draft && kept > 0 && !stale);
@@ -700,7 +717,7 @@ void TeamCatalogEditor::updateHeader()
     m_banner->setStyleSheet(QStringLiteral("QFrame#teamCatalogBanner{background:%1;border:1px solid %2;border-radius:9px;}"
                                            "QLabel#teamCatalogBannerTitle{color:%3;font-weight:600;font-size:13px;} QLabel#teamCatalogBannerText{color:%4;font-size:12px;}")
                                 .arg(alpha(tone, .08).name(QColor::HexArgb), alpha(tone, .45).name(QColor::HexArgb), c.fg.name(), c.text2.name()));
-    m_bannerAction->setVisible(redo && askRedo);
+    m_bannerAction->setVisible(redo && askRedo && (!canRedo || canRedo()));
     m_bannerAction->setText(tr("Ask designer to redo"));
     m_bannerAction->setToolTip(tr("Ask the designer to propose again on v%1").arg(base.version));
     m_bannerDiscard->setVisible(redo);
@@ -943,10 +960,10 @@ QWidget *TeamCatalogEditor::roleEditor(int index)
     auto *agent = choice(agentItems, r.agent, "teamRoleAgent");
     auto *account = new QComboBox; account->setObjectName("teamRoleAccount"); fillAccounts(account, r);
     m_accountChoice = account; m_accountRole = index;
-    // Suggestions only: any model the agent's command line knows.
+    // Native account models replace the offline suggestions when they arrive.
     auto *model = new QComboBox; model->setObjectName("teamRoleModel"); model->setEditable(true); model->setInsertPolicy(QComboBox::NoInsert);
-    model->addItems(Teams::knownModels(r.agent)); model->setCurrentText(r.model); model->lineEdit()->setPlaceholderText(tr("default model"));
-    model->setEnabled(r.agent != "dsh");
+    fillModels(model, r); model->lineEdit()->setPlaceholderText(tr("default model"));
+    m_modelChoice = model; m_modelRole = index; requestModels(r);
     auto *effort = choice({{"", "—"}, {"low", "low"}, {"medium", "medium"}, {"high", "high"}, {"xhigh", "xhigh"}}, r.effort, "teamRoleEffort");
     for (auto *combo : {agent, account, model, effort}) combo->setMinimumWidth(60);
     agentRow->addWidget(logo); agentRow->addWidget(agent, 11); agentRow->addWidget(account, 10); agentRow->addWidget(model, 11); agentRow->addWidget(effort, 7);
@@ -956,7 +973,10 @@ QWidget *TeamCatalogEditor::roleEditor(int index)
         role.agent = value; role.account.clear(); role.model = Teams::knownModels(value).value(0);
         changed(); rebuildEditor();
     });
-    connect(account, &QComboBox::activated, this, set([this, index, account] { m_catalog.roles[index].account = account->currentData().toString(); }));
+    connect(account, &QComboBox::activated, this, [this, index, account, model] {
+        auto &role = m_catalog.roles[index]; role.account = account->currentData().toString(); changed();
+        fillModels(model, role); requestModels(role);
+    });
     const auto modelChanged = [this, index, model] {
         const auto text = model->currentText().trimmed(); if (text == m_catalog.roles[index].model) return;
         m_catalog.roles[index].model = text; changed();
@@ -1712,9 +1732,14 @@ void TeamCatalogEditor::applyKept()
     // U15: from the draft's own state, not this editor's mode: the designer
     // page applies while a hand edit hides the draft here.
     const auto &base = m_teams->catalog();
-    int kept = 0; for (const auto &p : base.proposals) kept += p.state == "kept";
+    int kept = 0, undecided = 0;
+    for (const auto &p : base.proposals) { kept += p.state == "kept"; undecided += p.state == "proposed"; }
     if (!kept || base.draftBase != base.version) return;
-    if (confirm && !confirm(QStringLiteral("teamCatalogApplyConfirm"), tr("Apply changes"), counted(kept, tr("Write %1 kept change as the next catalog version?"), tr("Write %1 kept changes as the next catalog version?")) + QLatin1Char(' ') + tr("Undecided ones stay in the draft; running teams keep their roster."), tr("Apply"))) return;
+    // N37 (#548): Apply ends the whole draft (catalog.rs, "apply": save_draft
+    // of an empty draft); undecided changes would be based on the old version.
+    const QString dropped = undecided ? counted(undecided, tr("The %1 undecided change is dropped with the draft."),
+                                                tr("The %1 undecided changes are dropped with the draft.")) + QLatin1Char(' ') : QString();
+    if (confirm && !confirm(QStringLiteral("teamCatalogApplyConfirm"), tr("Apply changes"), counted(kept, tr("Write %1 kept change as the next catalog version?"), tr("Write %1 kept changes as the next catalog version?")) + QLatin1Char(' ') + dropped + tr("Running teams keep their roster."), tr("Apply"))) return;
     m_teams->applyDraft([this](bool ok, const QJsonObject &result, const QString &) {
         if (!ok) return;   // the controller keeps the refusal for the banner
         m_applied = tr("Applied as v%1").arg(result.value("version").toInteger());
@@ -1727,7 +1752,16 @@ void TeamCatalogEditor::setSources(HgsClient *client, const QList<Computer> &com
     m_computers = computers;
     if (client && client != m_client) {
         m_client = client;
-        connect(m_client, &HgsClient::accountsReady, this, [this](quint64, const QString &host, const QJsonObject &result) {
+        m_modelCatalogs.clear(); m_modelPending.clear(); m_modelRequests.clear();
+        connect(m_client, &HgsClient::accountsReady, this, [this](quint64 request, const QString &host, const QJsonObject &result) {
+            if (m_modelRequests.contains(request)) {
+                const QString key = m_modelRequests.take(request); m_modelPending.remove(key);
+                m_modelCatalogs.insert(key, result.value("models").toArray());
+                if (m_modelChoice && m_modelRole >= 0 && m_modelRole < m_catalog.roles.size()
+                    && modelKey(m_catalog.roles[m_modelRole]) == key)
+                    fillModels(m_modelChoice, m_catalog.roles[m_modelRole]);
+                return;
+            }
             if (host != QString() && std::none_of(m_computers.cbegin(), m_computers.cend(), [&](const Computer &c) { return c.alias == host; })) return;
             QList<Account> list;
             for (const auto &value : result.value("profiles").toArray()) {
@@ -1737,6 +1771,9 @@ void TeamCatalogEditor::setSources(HgsClient *client, const QList<Computer> &com
             }
             m_accounts.insert(host, list);
             if (m_accountChoice && m_accountRole >= 0 && m_accountRole < m_catalog.roles.size()) fillAccounts(m_accountChoice, m_catalog.roles[m_accountRole]);
+        });
+        connect(m_client, &HgsClient::accountsFailed, this, [this](quint64 request, const QString &, const QString &) {
+            const QString key = m_modelRequests.take(request); m_modelPending.remove(key);
         });
     }
     if (!m_client) return;
@@ -1754,4 +1791,36 @@ void TeamCatalogEditor::fillAccounts(QComboBox *box, const Teams::Role &role) co
     // An account this computer did not report (yet) stays as written.
     if (!role.account.isEmpty() && box->findData(role.account) < 0) box->addItem(role.account, role.account);
     box->setCurrentIndex(qMax(0, box->findData(role.account)));
+}
+
+QString TeamCatalogEditor::modelKey(const Teams::Role &role) const
+{
+    const QString agent = role.agent.isEmpty() ? QStringLiteral("claude") : role.agent;
+    return role.computer + QLatin1Char('\n') + (role.account.isEmpty() ? QStringLiteral("native-") + agent : role.account);
+}
+
+void TeamCatalogEditor::fillModels(QComboBox *box, const Teams::Role &role) const
+{
+    const QSignalBlocker blocker(box);
+    box->clear();
+    const auto models = m_modelCatalogs.value(modelKey(role));
+    if (models.isEmpty()) box->addItems(Teams::knownModels(role.agent));
+    for (const auto &value : models) {
+        const QString id = value.toObject().value("id").toString();
+        if (!id.isEmpty() && box->findText(id) < 0) box->addItem(id, id);
+    }
+    if (!role.model.isEmpty() && box->findText(role.model) < 0) box->addItem(role.model, role.model);
+    box->setCurrentText(role.model);
+}
+
+void TeamCatalogEditor::requestModels(const Teams::Role &role)
+{
+    const QString agent = role.agent.isEmpty() ? QStringLiteral("claude") : role.agent;
+    if (!m_client || !QStringList{"claude", "codex", "kimi", "dsh"}.contains(agent)) return;
+    const QString key = modelKey(role);
+    if (m_modelCatalogs.contains(key) || m_modelPending.contains(key)) return;
+    const QString account = key.section(QLatin1Char('\n'), 1);
+    m_modelPending.insert(key);
+    const quint64 request = m_client->requestAccounts(role.computer, {"model-settings", account, "--json"});
+    m_modelRequests.insert(request, key);
 }

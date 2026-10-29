@@ -803,16 +803,24 @@ QJsonObject Task::json() const
     for (const auto &dep : deps) d.append(QJsonObject{{"task", dep.task}, {"kind", dep.soft ? "soft" : "hard"}});
     for (const auto &criterion : criteria) c.append(criterion);
     QJsonObject value{{"id", id}, {"title", title}, {"description", description}, {"criteria", c}, {"assignee", assignee}, {"deps", d}};
+    // C3 (#548): the phase it is planned in; hgs puts a task without one in phase 1.
+    value.insert("phase", qMax(1, phase));
     if (lane.known()) value.insert("lane", QJsonObject{{"n", lane.n}, {"label", lane.label}});
     return value;
 }
 
 QJsonObject planInput(const Team &team)
 {
-    QJsonArray members, tasks;
+    QJsonArray members, tasks, phases;
     for (const auto &m : team.members) if (!m.lead) members.append(m.json());
     for (const auto &t : team.tasks) if (t.status != "cancelled") tasks.append(t.json());
-    return {{"members", members}, {"tasks", tasks}};
+    // C3 (#548): the roadmap of later phases, in their order; `plan` replaces
+    // team.phases with what it is sent, so a plan without it wipes them.
+    QList<const Phase *> later;
+    for (const auto &p : team.phases) if (p.n >= 2) later.append(&p);
+    std::stable_sort(later.begin(), later.end(), [](const Phase *a, const Phase *b) { return a->n < b->n; });
+    for (const auto *p : later) phases.append(QJsonObject{{"n", p->n}, {"title", p->title}, {"barrier", p->barrier}});
+    return {{"members", members}, {"tasks", tasks}, {"phases", phases}};
 }
 
 int nextTaskId(const Team &team)

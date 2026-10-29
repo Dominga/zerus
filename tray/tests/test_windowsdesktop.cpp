@@ -6,6 +6,7 @@
 #include <QJsonDocument>
 #include <QProcess>
 #include <QScreen>
+#include <QScopeGuard>
 #include <QSignalSpy>
 #include <QSystemTrayIcon>
 #include <QTemporaryDir>
@@ -18,6 +19,7 @@
 #include "CommandBackend.h"
 #include "ConsoleHost.h"
 #include "FakeCli.h"
+#include "PowerShell7.h"
 #include "SessionCommands.h"
 #include "StartupNotice.h"
 #include "SwarmWorkerSupervisor.h"
@@ -95,6 +97,8 @@ private slots:
     void terminalStartsTheProgramDirectly();
     void terminalRefusesArgumentsItWouldChange();
     void terminalOpensPowerShellInTheFolder();
+    void powerShellSelectionRequiresVerifiedCore();
+    void missingPowerShellRefusesBeforeOpeningAConsole();
     void consoleHostArgumentsCarryTheExactCommand();
     void consoleFallbackHandsTheExactArgumentsToTheHost();
     void shellFallbackStartsTheConsoleInTheFolder();
@@ -147,21 +151,18 @@ void TestWindowsDesktop::terminalRefusesArgumentsItWouldChange()
 void TestWindowsDesktop::terminalOpensPowerShellInTheFolder()
 {
     using Backend = WindowsTerminalBackend;
-    // PowerShell 7 when installed, otherwise Windows PowerShell without its banner.
+    // Only an already verified PowerShell Core 7+ becomes a shell command.
     const QStringList pwsh{"C:/Program Files/PowerShell/7/pwsh.exe"};
     QCOMPARE(Backend::shell(pwsh.first()), pwsh);
-    const QStringList windowsPowerShell = Backend::shell({});
-    QCOMPARE(windowsPowerShell.size(), 2);
-    QVERIFY(windowsPowerShell.first().endsWith("/System32/WindowsPowerShell/v1.0/powershell.exe"));
-    QCOMPARE(windowsPowerShell.last(), QString("-NoLogo"));
+    QVERIFY(Backend::shell({}).isEmpty());
     // The tab starts in the folder (native separators); no command line changes
     // into it, so nothing is quoted.
     QCOMPARE(Backend::shellArguments(Backend::OpenMode::Auto, "C:/work/my project", pwsh),
              (QStringList{"-w", "0", "new-tab", "-d", "C:\\work\\my project", "--title", "Zerus: C:\\work\\my project",
                           "--", "C:\\Program Files\\PowerShell\\7\\pwsh.exe"}));
-    QCOMPARE(Backend::shellArguments(Backend::OpenMode::Window, "//server/share/dir", windowsPowerShell),
+    QCOMPARE(Backend::shellArguments(Backend::OpenMode::Window, "//server/share/dir", pwsh),
              (QStringList{"-w", "new", "new-tab", "-d", "\\\\server\\share\\dir", "--title", "Zerus: \\\\server\\share\\dir",
-                          "--", QString(windowsPowerShell.first()).replace('/', '\\'), "-NoLogo"}));
+                          "--", QString(pwsh.first()).replace('/', '\\')}));
     QCOMPARE(Backend::shellArguments(Backend::OpenMode::Tab, "c:\\", pwsh).mid(3, 2), (QStringList{"-d", "c:\\"}));
     // ';' separates wt subcommands, in the folder and the title as well.
     QCOMPARE(Backend::shellArguments(Backend::OpenMode::Auto, "C:/work/a;b", pwsh).mid(3, 4),
@@ -173,6 +174,44 @@ void TestWindowsDesktop::terminalOpensPowerShellInTheFolder()
         QVERIFY2(Backend::shellArguments(Backend::OpenMode::Auto, folder, pwsh).isEmpty(), qPrintable(folder));
     QVERIFY(Backend::shellArguments(Backend::OpenMode::Auto, "C:/work", {"C:/Users/user/50%off/pwsh.exe"}).isEmpty());
     QVERIFY(Backend::shellArguments(Backend::OpenMode::Auto, "C:/work", {}).isEmpty());
+}
+
+void TestWindowsDesktop::powerShellSelectionRequiresVerifiedCore()
+{
+    const QString old = QStringLiteral("C:/tools/pwsh.exe");
+    const QString core = QStringLiteral("C:/Program Files/PowerShell/7/pwsh.exe");
+    QStringList seen;
+    const auto probe = [&](const QString &path) { seen << path; return path == core; };
+    QString error;
+    QCOMPARE(PowerShell7::select({}, {old, core}, probe, &error), core);
+    QCOMPARE(seen, (QStringList{old, core}));
+    QVERIFY(error.isEmpty());
+    for (const QString &configured : {QStringLiteral("pwsh.exe"), QStringLiteral("C:pwsh.exe"), old}) {
+        seen.clear();
+        QVERIFY(PowerShell7::select(configured, {core}, probe, &error).isEmpty());
+        QVERIFY(error.contains(QStringLiteral("HGS_PWSH")));
+        QVERIFY(!seen.contains(core)); // An invalid override never falls back.
+    }
+    QCOMPARE(PowerShell7::select(core, {}, probe, &error), core);
+    QVERIFY(PowerShell7::select({}, {}, probe, &error).isEmpty());
+    QVERIFY(error.contains(QStringLiteral("PowerShell 7")));
+}
+
+void TestWindowsDesktop::missingPowerShellRefusesBeforeOpeningAConsole()
+{
+    const bool wasSet = qEnvironmentVariableIsSet("HGS_PWSH");
+    const QByteArray saved = qgetenv("HGS_PWSH");
+    const auto restore = qScopeGuard([&] {
+        if (wasSet) qputenv("HGS_PWSH", saved); else qunsetenv("HGS_PWSH");
+    });
+    qputenv("HGS_PWSH", "relative-pwsh.exe");
+    using Backend = WindowsTerminalBackend;
+    Backend backend(Backend::OpenMode::Console, {}, QStringLiteral("C:/never-start-this.exe"));
+    QString error;
+    QVERIFY(!backend.openShell(QStringLiteral("C:/work"), &error));
+    QVERIFY(error.contains(QStringLiteral("HGS_PWSH")));
+    QVERIFY(error.contains(QStringLiteral("PowerShell 7")));
+    QVERIFY(backend.takeAdvisory().isEmpty());
 }
 
 void TestWindowsDesktop::consoleHostArgumentsCarryTheExactCommand()
@@ -363,22 +402,23 @@ void TestWindowsDesktop::templateProgramGetsAConsoleWindow()
 void TestWindowsDesktop::powerShellTemplateRunsTheExactCommand()
 {
 #ifndef Q_OS_WIN
-    QSKIP("Windows PowerShell exists only on Windows");
+    QSKIP("This PowerShell Core contract runs on Windows");
 #else
     // The documented template without -NoExit, run hidden: PowerShell parses {cmd}
     // into the exact arguments, also through the Start-Process form.
     QTemporaryDir dir; QVERIFY(dir.isValid());
     const QString script = dir.filePath("hgs");
-    // The fixture outlives Start-Process -Wait's setup: Windows PowerShell 5.1 fails
-    // with "the process has exited" when the program ends before it is waited on.
+    // Keep the fixture alive while Start-Process -Wait establishes its wait.
     QVERIFY(FakeCli::install(script, "#!/usr/bin/env python3\nimport json,sys,time\n"
         "open(__file__+'.argv','w',encoding='utf-8').write(json.dumps(sys.argv[1:]))\ntime.sleep(.5)\n"));
     for (const QStringList &arguments : {QStringList{"@mac", "a", QString::fromUtf8("codex/проект/my name"), "it's"},
                                          awkwardArguments()}) {
         QFile::remove(script + ".argv");
         QString error;
+        const QString shell = PowerShell7::locate(&error);
+        QVERIFY2(!shell.isEmpty(), qPrintable(error));
         QStringList argv = CommandBackend::buildArgv(
-            "powershell.exe -NoLogo -NoProfile -NonInteractive -Command {cmd}",
+            QStringLiteral("\"%1\" -NoLogo -NoProfile -NonInteractive -Command {cmd}").arg(QDir::fromNativeSeparators(shell)),
             SessionCommands::command(FakeCli::program(script), arguments, SessionCommands::Shell::PowerShell), &error);
         QVERIFY2(!argv.isEmpty(), qPrintable(error));
         QProcess process;

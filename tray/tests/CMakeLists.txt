@@ -478,10 +478,11 @@ target_link_libraries(test_sessionswindow PRIVATE Qt6::Test Qt6::Widgets hgs-ter
     hgs-tray-views)
 # The longest suite runs as parallel shards of its test functions and of the data
 # rows of its slowest functions, balanced by qt-shard-durations.txt. COST: see the
-# end of this file.
-foreach(shard RANGE 9)
+# end of this file. WhiteWh fork: 16 shards, since the fork's functions make the
+# suite about 2200 s on the Windows runner and ten shards ran near ctest's 240 s.
+foreach(shard RANGE 15)
     add_test(NAME sessionswindow-${shard} COMMAND ${CMAKE_COMMAND} -DTEST=$<TARGET_FILE:test_sessionswindow>
-        -DSUITE=sessionswindow -DSEED=${CMAKE_CURRENT_SOURCE_DIR}/qt-shard-durations.txt -DSHARD=${shard} -DSHARDS=10
+        -DSUITE=sessionswindow -DSEED=${CMAKE_CURRENT_SOURCE_DIR}/qt-shard-durations.txt -DSHARD=${shard} -DSHARDS=16
         -DRESULTS=${ZERUS_QT_RESULTS_DIR} -P ${CMAKE_CURRENT_SOURCE_DIR}/RunQtShard.cmake)
     set_tests_properties(sessionswindow-${shard} PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endforeach()
@@ -609,6 +610,24 @@ target_link_libraries(test_machinefilter PRIVATE Qt6::Test Qt6::Widgets hgs-tray
 zerus_add_test(machinefilter test_machinefilter)
 set_tests_properties(machinefilter PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+add_executable(test_wslfileopen test_wslfileopen.cpp)
+target_include_directories(test_wslfileopen PRIVATE ../src)
+target_link_libraries(test_wslfileopen PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
+zerus_add_test(wslfileopen test_wslfileopen)
+set_tests_properties(wslfileopen PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+add_executable(test_wslpathmapping test_wslpathmapping.cpp)
+target_include_directories(test_wslpathmapping PRIVATE ../src)
+target_link_libraries(test_wslpathmapping PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
+zerus_add_test(wslpathmapping test_wslpathmapping)
+set_tests_properties(wslpathmapping PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+add_executable(test_opencodeexisting test_opencodeexisting.cpp)
+target_include_directories(test_opencodeexisting PRIVATE ../src)
+target_link_libraries(test_opencodeexisting PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
+zerus_add_test(opencodeexisting test_opencodeexisting)
+set_tests_properties(opencodeexisting PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 add_executable(test_accountspage test_accountspage.cpp)
 target_include_directories(test_accountspage PRIVATE ../src)
 target_link_libraries(test_accountspage PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
@@ -683,7 +702,7 @@ set_tests_properties(claudeappsessions PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=o
 # WhiteWh fork: a project's iron rules.
 add_executable(test_ironrules test_ironrules.cpp)
 target_include_directories(test_ironrules PRIVATE ../src)
-target_link_libraries(test_ironrules PRIVATE Qt6::Test Qt6::Widgets)
+target_link_libraries(test_ironrules PRIVATE Qt6::Test Qt6::Widgets hgs-tray-core)
 zerus_add_test(ironrules test_ironrules)
 set_tests_properties(ironrules PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
@@ -761,7 +780,7 @@ set_tests_properties(windowsdesktop PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offs
 # default order stays: on the 3-vCPU macOS runner, starting every sessionswindow
 # shard at once saved 18 s but made timing-sensitive suites fail (zerus-niu8).
 if(WIN32 AND NOT EXISTS "${CMAKE_BINARY_DIR}/Testing/Temporary/CTestCostData.txt")
-    foreach(shard RANGE 9)
+    foreach(shard RANGE 15)
         set_tests_properties(sessionswindow-${shard} PROPERTIES COST 48)
     endforeach()
     set_tests_properties(activityview PROPERTIES COST 54)
@@ -772,6 +791,12 @@ if(WIN32 AND NOT EXISTS "${CMAKE_BINARY_DIR}/Testing/Temporary/CTestCostData.txt
     set_tests_properties(windowsdesktop PROPERTIES COST 10)
     set_tests_properties(sessionsearch processview PROPERTIES COST 7)
 endif()
+
+add_executable(test_conversationsource test_conversationsource.cpp)
+target_include_directories(test_conversationsource PRIVATE ../src)
+target_link_libraries(test_conversationsource PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
+zerus_add_test(conversationsource test_conversationsource)
+set_tests_properties(conversationsource PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 get_property(zerus_test_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
 foreach(target IN LISTS zerus_test_targets)

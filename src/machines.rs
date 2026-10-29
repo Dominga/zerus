@@ -22,6 +22,10 @@ fn yes() -> bool {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Connection {
+    #[serde(skip_serializing_if = "crate::wsl::Transport::is_ssh")]
+    pub transport: crate::wsl::Transport,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wsl: Option<crate::wsl::WslConnection>,
     pub hostname: String,
     pub user: String,
     pub port: Option<u16>,
@@ -32,6 +36,8 @@ pub struct Connection {
 impl Default for Connection {
     fn default() -> Self {
         Self {
+            transport: crate::wsl::Transport::Ssh,
+            wsl: None,
             hostname: String::new(),
             user: String::new(),
             port: None,
@@ -88,6 +94,13 @@ fn validate_alias(alias: &str) -> Result<()> {
 }
 fn validate(alias: &str, c: &Connection) -> Result<()> {
     validate_alias(alias)?;
+    if c.transport == crate::wsl::Transport::WslLocal {
+        if !c.hostname.is_empty() || !c.user.is_empty() || c.port.is_some() || !c.identity_file.is_empty() {
+            return Err(Error::new(2, "wsl-local profiles cannot contain SSH overrides"));
+        }
+        return c.wsl.as_ref().ok_or_else(|| Error::new(2,"wsl-local requires an explicit WSL profile"))?.validate();
+    }
+    if c.wsl.is_some() { return Err(Error::new(2,"SSH profiles cannot contain WSL settings")); }
     if c.hostname.len() > 253
         || c.hostname.starts_with('-')
         || !c
@@ -286,6 +299,10 @@ fn resolve_output(command: &mut Command) -> Result<Output> {
     Ok(output)
 }
 fn resolve(config: &Config, alias: &str) -> Result<Value> {
+    if let Some(profile) = crate::wsl::profile(config, alias) {
+        return Ok(json!({"alias":alias,"effective":{"transport":"wsl-local","distribution":profile.distribution,
+            "user":profile.user,"hgs_path":profile.hgs_path,"service_policy":"existing-only"}}));
+    }
     let out = resolve_output(
         platform::ssh()
             .args(ssh_options(config, alias))
@@ -339,6 +356,7 @@ fn resolve(config: &Config, alias: &str) -> Result<Value> {
 }
 const PROBE: &str = r#"export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"; printf '\n__HGS_MACHINE__\n'; printf 'os='; uname -s; printf 'arch='; uname -m; printf 'hgs='; if test -x "$HOME/.local/bin/hgs"; then "$HOME/.local/bin/hgs" --version 2>/dev/null; else printf '\n'; fi; printf 'tmux='; tmux -V 2>/dev/null || printf '\n'; printf 'cargo='; command -v cargo || true"#;
 fn check(config: &Config, alias: &str) -> Result<Value> {
+    if let Some(profile) = crate::wsl::profile(config, alias) { return crate::wsl::check(profile, alias); }
     let out = platform::ssh_output(
         platform::ssh()
             .args(ssh_options(config, alias))
@@ -437,6 +455,9 @@ fn check_windows(config: &Config, alias: &str) -> Result<Option<Value>> {
 }
 
 fn setup(config: &Config, alias: &str, source: Option<&str>, dry: bool) -> Result<i32> {
+    if crate::wsl::profile(config, alias).is_some() {
+        return Err(Error::new(2,"Install the fork's Linux hgs in the selected WSL environment explicitly; WSL setup never replaces an installed agent or starts OpenCode"));
+    }
     if crate::windows_peer::is_windows(config, alias) {
         return Err(Error::new(1, "This is a Windows computer: install Zerus there and enable local sessions in Machines, then choose Check."));
     }
@@ -547,6 +568,11 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
         ));
     }
     match command {
+        "file-proof" => {
+            if args.len()!=3 || args[2]!="--json" {return Err(Error::new(2,"usage: hgs machine file-proof <alias> --json"));}
+            crate::wsl_file::run(config,alias,dry).map_err(|e|Error::new(1,e.to_string()))?;
+            Ok(0)
+        }
         "resolve" => {
             if args.len() != 2 {
                 return Err(Error::new(1, "usage: hgs machine resolve <alias>"));
@@ -640,6 +666,9 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
                     ))
                 }
             };
+            if let Some(profile) = crate::wsl::profile(config, alias) {
+                return crate::wsl::shell(profile, directory.map(String::as_str), dry);
+            }
             let mut arguments = ssh_options(config, alias);
             if directory.is_some() {
                 arguments.push("-t".into());

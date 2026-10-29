@@ -38,8 +38,9 @@ try {
       result.api_key_configured = true;
       result.status = 'configured';
       result.identity = {auth_method: 'API key', account_id: await keyId(key)};
-      const balances = await apiBalance(key);
+      const [balances, models] = await Promise.all([apiBalance(key), apiModels(key)]);
       if (balances) { result.balances = balances; result.status = 'ok'; }
+      if (models) result.models = models;
     }
   }
 } catch {}
@@ -105,5 +106,20 @@ async function apiBalance(key) {
       .filter(v => ['USD','CNY'].includes(v?.currency) && /^-?\d+(\.\d+)?$/.test(String(v.total_balance)))
       .map(v => ({currency: v.currency, balance: String(v.total_balance), kind: 'API'}));
     return balances.length ? balances : null;
+  } catch { return null; }
+}
+
+// Public model fallback when no resident host can serve its richer catalog.
+async function apiModels(key) {
+  try {
+    const response = await fetch('https://api.deepseek.com/models', {
+      headers: {Authorization: 'Bearer ' + key, Accept: 'application/json'}, redirect: 'error', signal: AbortSignal.timeout(6000)});
+    if (!response.ok) return null;
+    const data = await response.json();
+    const models = (Array.isArray(data?.data) ? data.data : [])
+      .map(v => typeof v?.id === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$/.test(v.id) ? v.id : '')
+      .filter(Boolean).slice(0, 64)
+      .map(id => ({id: 'deepseek-official/' + id, label: id + ' (DeepSeek)', effort_options: [], default_effort: ''}));
+    return models.length ? models : null;
   } catch { return null; }
 }

@@ -4,8 +4,13 @@
 //! snapshot pages are staged until the page with `last` and then replace the
 //! rows at once, so a `gap` never empties the list; a delta gives one upsert or
 //! removal per item; Activity frames of followed sessions become
-//! [`Change::Activity`]. Frame types and topics it does not know change nothing.
-use crate::{view, ActivityUpdate, Change, ComputerId, ComputerStatus, ViewRow};
+//! [`Change::Activity`], processes frames [`Change::Processes`], tasks frames
+//! [`Change::Tasks`], a changed `catalog.meta` [`Change::Machine`] and the
+//! organization's frames [`Change::Organization`]. Frame types and topics it
+//! does not know change nothing.
+use crate::{
+    view, ActivityUpdate, Change, ComputerId, ComputerStatus, ProcessesState, TasksState, ViewRow,
+};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
@@ -19,6 +24,17 @@ pub const PROVIDER_MESSAGES: usize = 100;
 pub const REPEAT_SECONDS: f64 = 3.0;
 /// Event revisions remembered per followed session.
 const EVENT_REVISIONS: usize = 1024;
+
+/// What an inspection holds besides the summary, as the server leaves out of
+/// Activity `state` frames.
+const NOT_STATE: [&str; 6] = [
+    "events",
+    "processes",
+    "process_work",
+    "cursor",
+    "history_truncated",
+    "replace_events",
+];
 
 /// The removal reasons a [`Change::Remove`] keeps; others become None.
 const REASONS: [&str; 4] = [
@@ -132,7 +148,12 @@ pub struct CatalogState {
     rows: BTreeMap<String, ViewRow>,
     staged: Option<BTreeMap<String, ViewRow>>,
     meta: Option<Value>,
+    /// The card data last sent for this computer.
+    machine: Option<crate::MachineMeta>,
     activity: HashMap<String, ActivityState>,
+    processes: ProcessesState,
+    tasks: TasksState,
+    organization: crate::OrganizationState,
     live: bool,
     failed: bool,
     failures: u32,
@@ -168,15 +189,8 @@ impl CatalogState {
                     staged.insert(key.to_owned(), project(row, &machine));
                 }
                 if snapshot.last {
-                    self.rows = self.staged.take().unwrap_or_default();
-                    changes.push(Change::Replace {
-                        computer: computer.clone(),
-                        rows: self
-                            .rows
-                            .iter()
-                            .map(|(key, row)| (key.clone(), row.clone()))
-                            .collect(),
-                    });
+                    let rows = self.staged.take().unwrap_or_default();
+                    changes.extend(self.replace_rows(computer, rows));
                     if !self.live {
                         self.live = true;
                         changes.push(Change::Computer {
@@ -188,7 +202,9 @@ impl CatalogState {
             }
             Body::Snapshot(snapshot) if snapshot.topic == topic::CATALOG_META => {
                 if snapshot.last {
-                    self.meta = snapshot.value.clone();
+                    if let Some(meta) = snapshot.value.clone() {
+                        changes.extend(self.set_meta(computer, meta));
+                    }
                 }
             }
             Body::Snapshot(snapshot) if snapshot.topic == topic::ACTIVITY => {
@@ -242,6 +258,7 @@ impl CatalogState {
                         key: removal.key.clone(),
                         reason,
                     });
+                    changes.extend(self.processes.end(computer, &removal.key));
                 }
             }
             Body::Events(events) if events.topic == topic::ACTIVITY => {
@@ -283,6 +300,27 @@ impl CatalogState {
                     ));
                 }
             }
+            Body::State(state) if state.topic == topic::PROCESSES => {
+                changes.extend(
+                    self.processes
+                        .state(computer, &state.key, &state.value, state.rev),
+                );
+            }
+            Body::Snapshot(snapshot) if snapshot.topic == topic::ORGANIZATION => {
+                changes.extend(self.organization.snapshot_page(computer, snapshot));
+            }
+            Body::Delta(delta) if delta.topic == topic::ORGANIZATION => {
+                changes.extend(self.organization.delta(computer, delta));
+            }
+            Body::Error(error) if error.topic.as_deref() == Some(topic::ORGANIZATION) => {
+                changes.extend(self.organization.error(computer, error));
+            }
+            Body::Snapshot(snapshot) if snapshot.topic == topic::TASKS => {
+                changes.extend(self.tasks.snapshot(computer, snapshot));
+            }
+            Body::Gap(gap) if gap.topic == topic::TASKS => {
+                self.tasks.gap(gap.key.as_deref().unwrap_or(""));
+            }
             Body::Gap(gap) if gap.topic == topic::CATALOG => {
                 // The rows stay until the snapshot that follows is complete.
                 self.staged = None;
@@ -295,6 +333,12 @@ impl CatalogState {
             }
             Body::Error(error) if error.fatal => {
                 return self.end(computer, Instant::now());
+            }
+            Body::Error(error) if error.topic.as_deref() == Some(topic::PROCESSES) => {
+                changes.extend(self.processes.error(computer, error));
+            }
+            Body::Error(error) if error.topic.as_deref() == Some(topic::TASKS) => {
+                changes.extend(self.tasks.error(computer, error));
             }
             Body::Error(error) => {
                 let ended = matches!(
@@ -312,6 +356,178 @@ impl CatalogState {
             _ => {}
         }
         changes
+    }
+
+    /// Replaces every row, as a complete catalog does; followed processes of
+    /// keys it lacks end.
+    fn replace_rows(
+        &mut self,
+        computer: &ComputerId,
+        rows: BTreeMap<String, ViewRow>,
+    ) -> Vec<Change> {
+        self.rows = rows;
+        let mut changes = vec![Change::Replace {
+            computer: computer.clone(),
+            rows: self
+                .rows
+                .iter()
+                .map(|(key, row)| (key.clone(), row.clone()))
+                .collect(),
+        }];
+        let rows = &self.rows;
+        changes.extend(
+            self.processes
+                .retain(computer, |key| rows.contains_key(key)),
+        );
+        changes
+    }
+
+    /// Keeps a `catalog.meta` value; a changed machine card is a change.
+    fn set_meta(&mut self, computer: &ComputerId, meta: Value) -> Option<Change> {
+        let machine = crate::MachineMeta::project(&meta);
+        self.meta = Some(meta);
+        (self.machine.as_ref() != Some(&machine)).then(|| {
+            self.machine = Some(machine.clone());
+            Change::Machine {
+                computer: computer.clone(),
+                machine,
+            }
+        })
+    }
+
+    /// A listing of a computer without the stream (`hgs [@host] ls --json`):
+    /// its sessions replace the rows and the rest is its `catalog.meta`, as the
+    /// stream's snapshots would be. Followed sessions it lacks end.
+    pub(crate) fn listing(&mut self, computer: &ComputerId, listing: &Value) -> Vec<Change> {
+        let machine = match computer.alias() {
+            Some(alias) => alias.to_owned(),
+            None => listing["host"].as_str().unwrap_or_default().to_owned(),
+        };
+        let rows: BTreeMap<String, ViewRow> = listing["sessions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|row| {
+                let name = row["name"].as_str()?;
+                let key = zerus_watch_protocol::key_for(row["run_id"].as_str(), name);
+                Some((key, project(row, &machine)))
+            })
+            .collect();
+        let mut changes = self.replace_rows(computer, rows);
+        let gone: Vec<String> = self
+            .activity
+            .keys()
+            .filter(|key| !self.rows.contains_key(*key))
+            .cloned()
+            .collect();
+        for key in gone {
+            self.activity.remove(&key);
+            changes.push(activity_change(computer, &key, ActivityUpdate::Ended));
+        }
+        let mut meta = listing.clone();
+        if let Some(object) = meta.as_object_mut() {
+            object.remove("sessions");
+        }
+        changes.extend(self.set_meta(computer, meta));
+        changes
+    }
+
+    /// An `inspect NAME --after CURSOR` of a followed session without the
+    /// stream: new events after its cursor (a window replacement for its first
+    /// read, a gap or a replaced window), and its summary when that changed.
+    /// A read of another run ends the follow.
+    pub(crate) fn activity_polled(
+        &mut self,
+        computer: &ComputerId,
+        key: &str,
+        run_id: Option<&str>,
+        inspection: &Value,
+        window: bool,
+    ) -> Vec<Change> {
+        let Some(activity) = self.activity.get_mut(key) else {
+            return Vec::new();
+        };
+        let seen = inspection["run_id"].as_str().filter(|run| !run.is_empty());
+        if run_id
+            .zip(seen)
+            .is_some_and(|(wanted, seen)| wanted != seen)
+        {
+            self.activity.remove(key);
+            return vec![activity_change(computer, key, ActivityUpdate::Ended)];
+        }
+        let mut changes = Vec::new();
+        let events = inspection["events"].as_array().cloned().unwrap_or_default();
+        let cursor = inspection["cursor"].as_i64().unwrap_or(activity.cursor);
+        let replace = window
+            || inspection["history_truncated"] == true
+            || inspection["replace_events"] == true;
+        if replace {
+            changes.push(activity_change(
+                computer,
+                key,
+                ActivityUpdate::Replace { events, cursor },
+            ));
+        } else if !events.is_empty() {
+            changes.push(activity_change(
+                computer,
+                key,
+                ActivityUpdate::Events { events, cursor },
+            ));
+        }
+        activity.cursor = cursor;
+        let mut value = inspection.clone();
+        if let Some(object) = value.as_object_mut() {
+            for field in NOT_STATE {
+                object.remove(field);
+            }
+        }
+        let steady = |value: &Value| {
+            let mut value = value.clone();
+            if let Some(object) = value.as_object_mut() {
+                object.remove("goal_observed_at");
+            }
+            value
+        };
+        if activity.state.as_ref().map(steady) != Some(steady(&value)) {
+            let rev = activity.rev + 1;
+            activity.replace_state(value.clone(), rev);
+            changes.push(activity_change(
+                computer,
+                key,
+                ActivityUpdate::State { value, rev },
+            ));
+        }
+        changes
+    }
+
+    /// An `inspect NAME` of a followed session's processes without the
+    /// stream: its `{processes, process_work}` when that changed apart from
+    /// sampling times.
+    pub(crate) fn processes_polled(
+        &mut self,
+        computer: &ComputerId,
+        key: &str,
+        inspection: &Value,
+    ) -> Option<Change> {
+        let value = serde_json::json!({
+            "processes": inspection["processes"],
+            "process_work": inspection["process_work"],
+        });
+        let steady = |value: &Value| {
+            let mut value = value.clone();
+            for part in ["processes", "process_work"] {
+                if let Some(object) = value[part].as_object_mut() {
+                    object.remove("sampled_at");
+                }
+            }
+            value
+        };
+        let previous = self.processes.value(key);
+        if previous.is_some_and(|(old, _)| steady(old) == steady(&value)) {
+            return None;
+        }
+        let rev = previous.map_or(1, |(_, rev)| rev + 1);
+        self.processes.state(computer, key, &value, rev)
     }
 
     /// The rows as last known, by key.
@@ -332,6 +548,8 @@ impl CatalogState {
         for activity in self.activity.values_mut() {
             activity.staged = None;
         }
+        self.tasks.begin();
+        self.organization.begin();
     }
 
     /// The stream ended, failed or stayed silent: the computer reconnects and
@@ -412,6 +630,60 @@ impl CatalogState {
 
     pub fn activity(&self, key: &str) -> Option<&ActivityState> {
         self.activity.get(key)
+    }
+
+    /// The followed processes; see [`crate::processes`].
+    pub fn processes(&self) -> &ProcessesState {
+        &self.processes
+    }
+
+    pub fn processes_mut(&mut self) -> &mut ProcessesState {
+        &mut self.processes
+    }
+
+    /// The processes limit of the latest `hello`; None when it lacks the topic.
+    pub fn processes_limit(&self) -> Option<usize> {
+        let hello = self.hello.as_ref()?;
+        hello
+            .topics
+            .iter()
+            .any(|name| name == topic::PROCESSES)
+            .then_some(hello.limits.processes_subscriptions)
+    }
+
+    /// The followed organization; see [`crate::organization`].
+    pub fn organization(&self) -> &crate::OrganizationState {
+        &self.organization
+    }
+
+    pub fn organization_mut(&mut self) -> &mut crate::OrganizationState {
+        &mut self.organization
+    }
+
+    /// Whether the latest `hello` offers the organization topic.
+    pub fn organization_offered(&self) -> bool {
+        self.hello
+            .as_ref()
+            .is_some_and(|hello| hello.topics.iter().any(|name| name == topic::ORGANIZATION))
+    }
+
+    /// The followed task lists; see [`crate::tasks`].
+    pub fn tasks(&self) -> &TasksState {
+        &self.tasks
+    }
+
+    pub fn tasks_mut(&mut self) -> &mut TasksState {
+        &mut self.tasks
+    }
+
+    /// The tasks limit of the latest `hello`; None when it lacks the topic.
+    pub fn tasks_limit(&self) -> Option<usize> {
+        let hello = self.hello.as_ref()?;
+        hello
+            .topics
+            .iter()
+            .any(|name| name == topic::TASKS)
+            .then_some(hello.limits.tasks_subscriptions)
     }
 
     /// The name rows carry: a peer's alias, or this computer's host name.
@@ -771,6 +1043,122 @@ mod tests {
             !state.is_followed("run:run-review-1"),
             "the subscription ended"
         );
+    }
+
+    fn processes_of(changes: Vec<Change>) -> Vec<(String, crate::ProcessesUpdate)> {
+        changes
+            .into_iter()
+            .filter_map(|change| match change {
+                Change::Processes { key, update, .. } => Some((key, update)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn processes_of_followed_sessions_change_until_they_leave_the_catalog() {
+        use crate::ProcessesUpdate;
+        let frames = fixture("basic.ndjson");
+        let local = ComputerId::local();
+        let mut state = CatalogState::new();
+        for key in ["run:run-review-1", "run:run-lint-1", "run:missing"] {
+            state.processes_mut().follow(key);
+        }
+        // A complete catalog without a followed key ends it.
+        let ended = processes_of(apply_all(&mut state, &local, &frames[..4]));
+        assert_eq!(ended, vec![("run:missing".into(), ProcessesUpdate::Ended)]);
+        let value = json!({"processes": {"items": [], "active_count": 1, "sampled_at": 1.0}, "process_work": null});
+        let states = processes_of(apply_all(
+            &mut state,
+            &local,
+            &[
+                frame(
+                    json!({"v":1,"seq":20,"t":"state","topic":"processes","key":"run:run-review-1","value":value,"rev":4}),
+                ),
+                frame(
+                    json!({"v":1,"seq":21,"t":"state","topic":"processes","key":"run:run-tests-1","value":value,"rev":1}),
+                ),
+                frame(
+                    json!({"v":1,"seq":22,"t":"error","code":"inspect_failed","message":"ps failed","topic":"processes","key":"run:run-review-1","fatal":false}),
+                ),
+            ],
+        ));
+        assert_eq!(
+            states,
+            vec![
+                (
+                    "run:run-review-1".into(),
+                    ProcessesUpdate::State {
+                        value: value.clone(),
+                        rev: 4
+                    }
+                ),
+                (
+                    "run:run-review-1".into(),
+                    ProcessesUpdate::Failed {
+                        code: "inspect_failed".into(),
+                        message: "ps failed".into()
+                    }
+                ),
+            ]
+        );
+        assert_eq!(
+            state.processes().value("run:run-review-1"),
+            Some((&value, 4))
+        );
+        // The basic fixture's processes error names no key; its delta removes
+        // the lint session, which ends that follow.
+        let changes = apply_all(&mut state, &local, &frames[4..]);
+        assert_eq!(
+            processes_of(changes),
+            vec![("run:run-lint-1".into(), ProcessesUpdate::Ended)]
+        );
+        assert!(state.processes().is_followed("run:run-review-1"));
+        assert!(!state.processes().is_followed("run:run-lint-1"));
+        assert_eq!(
+            state.processes_limit(),
+            None,
+            "the fixture's hello lacks the topic"
+        );
+    }
+
+    #[test]
+    fn a_changed_catalog_meta_gives_the_computer_card_once() {
+        let frames = fixture("basic.ndjson");
+        let local = ComputerId::local();
+        let mut state = CatalogState::new();
+        let machines = |changes: Vec<Change>| -> Vec<crate::MachineMeta> {
+            changes
+                .into_iter()
+                .filter_map(|change| match change {
+                    Change::Machine { computer, machine } => {
+                        assert!(computer.is_local());
+                        Some(machine)
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let first = machines(apply_all(&mut state, &local, &frames[..5]));
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].host.as_deref(), Some("workstation"));
+        // The same meta again, as after a reconnect, sends nothing; a new
+        // sample does.
+        assert!(machines(apply_all(&mut state, &local, &frames[4..5])).is_empty());
+        let sampled = frame(
+            json!({"v":1,"seq":50,"t":"snapshot","topic":"catalog.meta","page":0,"last":true,"cursor":1,
+                   "value":{"host":"workstation","ok":true,"metrics":{"cpu_percent":42.0,"sampled_at":1787840100.0}}}),
+        );
+        let next = machines(state.apply(&local, &sampled));
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].metrics.cpu_percent, Some(42.0));
+        assert_eq!(next[0].metrics.sampled_at, Some(1787840100.0));
+        // A page before the last changes nothing.
+        let partial = frame(
+            json!({"v":1,"seq":51,"t":"snapshot","topic":"catalog.meta","page":0,"last":false,"cursor":1,
+                   "value":{"host":"elsewhere"}}),
+        );
+        assert!(machines(state.apply(&local, &partial)).is_empty());
     }
 
     #[test]

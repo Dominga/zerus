@@ -1,5 +1,6 @@
 import { For, Show, createEffect, onCleanup } from "solid-js";
 import { Icon } from "../lib/icons";
+import { menuItemActivates } from "../sessions/actions-ui";
 import { menu, setMenu, toasts } from "../../store/ui";
 
 /** Context and dropdown menus share one positioned popover. */
@@ -45,7 +46,8 @@ export function MenuLayer() {
               "separator" in item ? <div class="menu-sep" role="separator" /> :
               "heading" in item ? <div class="menu-label">{item.heading}</div> : (
                 <button class="menu-item" classList={{ danger: item.danger }} role={item.checked !== undefined ? "menuitemcheckbox" : "menuitem"}
-                  aria-checked={item.checked} aria-disabled={item.disabled} onClick={() => { setMenu(undefined); item.action?.(); }}>
+                  aria-checked={item.checked} aria-disabled={item.disabled} title={item.hint}
+                  onClick={() => { if (!menuItemActivates(item)) return; setMenu(undefined); item.action?.(); }}>
                   <Show when={item.checked !== undefined} fallback={<Show when={item.icon} fallback={<span style={{ width: "14px" }} />}><Icon name={item.icon!} size={14} /></Show>}>
                     <Icon name={item.checked ? "check" : "minus"} size={14} style={{ opacity: item.checked ? 1 : 0 }} />
                   </Show>

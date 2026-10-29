@@ -1,0 +1,1 @@
+{"conflicts": [], "digest": "0f1e2d3c", "initialized": true, "machines": [{"connection": "local", "id": "00000000-0000-4000-8000-000000000001", "local": true, "name": "workstation"}], "node_id": "node-1", "organization": {"projects": []}, "peers": [], "preferences": {}, "schema": 1, "swarm_id": "swarm-1", "versions": {}, "worker": {"state": "idle"}, "written": 1787840000.0}

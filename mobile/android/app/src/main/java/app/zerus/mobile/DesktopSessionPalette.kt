@@ -13,7 +13,15 @@ object DesktopSessionPalette {
         if (SessionStateContract.hasHostState(raw) || !online) {
             val status = SessionStateContract.status(raw, online)
             val muted = SessionNotificationPreferences.muted(session)
-            val kind = if (muted && status.state == SessionState.User) DesktopBadgeKind.Neutral else sessionStateKind(status.state)
+            // A device-local reminder keeps its attention color when the host
+            // is offline or reports a calm state, as on the desktop.
+            val reviewLater = !SessionFilters.archived(session) &&
+                (raw.optBoolean("review_later") || raw.optBoolean("mobile_review_later"))
+            val kind = when {
+                muted && (status.state == SessionState.User || reviewLater) -> DesktopBadgeKind.Neutral
+                reviewLater -> DesktopBadgeKind.Attention
+                else -> sessionStateKind(status.state)
+            }
             return DesktopSessionBadge(status.caption, kind, false)
         }
         val state = SessionFilters.status(session, online)

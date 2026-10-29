@@ -70,6 +70,7 @@ signals:
     // The chip disappeared while it or its popover held keyboard focus.
     void focusReleased();
 protected:
+    bool event(QEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
     void paintEvent(QPaintEvent *event) override;
 private:

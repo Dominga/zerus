@@ -152,6 +152,90 @@ impl Fleet {
             .is_some_and(|handle| handle.unfollow(key))
     }
 
+    /// Follows a session's processes on one computer (see
+    /// [`crate::processes`]), independent of its Activity follow; returns the
+    /// session's catalog key. A followed session stays followed across
+    /// reconnects until [`Self::unfollow_processes`] or its end.
+    pub fn follow_processes(
+        &self,
+        computer: &ComputerId,
+        session: SessionRef,
+    ) -> Result<String, FollowError> {
+        let streams = guard(&self.shared.streams);
+        let handle = streams.get(computer).ok_or(FollowError::UnknownComputer)?;
+        handle.follow_processes(session)
+    }
+
+    /// Stops following a session's processes; false when it was not followed.
+    pub fn unfollow_processes(&self, computer: &ComputerId, key: &str) -> bool {
+        guard(&self.shared.streams)
+            .get(computer)
+            .is_some_and(|handle| handle.unfollow_processes(key))
+    }
+
+    /// The sessions whose processes a computer follows, by key.
+    pub fn followed_processes(&self, computer: &ComputerId) -> Vec<String> {
+        guard(&self.shared.streams)
+            .get(computer)
+            .map(StreamHandle::followed_processes)
+            .unwrap_or_default()
+    }
+
+    /// Follows a project's task list on one computer (see [`crate::tasks`]);
+    /// returns its key, the project ID. A followed project stays followed
+    /// across reconnects until [`Self::unfollow_tasks`] or its end.
+    pub fn follow_tasks(
+        &self,
+        computer: &ComputerId,
+        project: &str,
+    ) -> Result<String, FollowError> {
+        let streams = guard(&self.shared.streams);
+        let handle = streams.get(computer).ok_or(FollowError::UnknownComputer)?;
+        handle.follow_tasks(project)
+    }
+
+    /// Stops following a project's task list; false when it was not followed.
+    pub fn unfollow_tasks(&self, computer: &ComputerId, project: &str) -> bool {
+        guard(&self.shared.streams)
+            .get(computer)
+            .is_some_and(|handle| handle.unfollow_tasks(project))
+    }
+
+    /// The projects whose task lists a computer follows.
+    pub fn followed_tasks(&self, computer: &ComputerId) -> Vec<String> {
+        guard(&self.shared.streams)
+            .get(computer)
+            .map(StreamHandle::followed_tasks)
+            .unwrap_or_default()
+    }
+
+    /// Follows a computer's shared project catalog (see
+    /// [`crate::organization`]), usually only this computer's. It stays
+    /// followed across reconnects until [`Self::unfollow_organization`].
+    pub fn follow_organization(&self, computer: &ComputerId) -> Result<(), FollowError> {
+        let streams = guard(&self.shared.streams);
+        let handle = streams.get(computer).ok_or(FollowError::UnknownComputer)?;
+        handle.follow_organization()
+    }
+
+    /// Stops following a computer's organization; false when it was not.
+    pub fn unfollow_organization(&self, computer: &ComputerId) -> bool {
+        guard(&self.shared.streams)
+            .get(computer)
+            .is_some_and(StreamHandle::unfollow_organization)
+    }
+
+    /// The organization the view shows and the versions observed with it, for
+    /// one digest: what `swarm apply {base, desired, versions}` starts from.
+    pub fn organization_snapshot(
+        &self,
+        computer: &ComputerId,
+    ) -> Option<crate::OrganizationSnapshot> {
+        guard(&self.shared.streams)
+            .get(computer)
+            .and_then(StreamHandle::organization_snapshot)
+    }
+
     /// Writes a control line (a `ping`, say) to one computer's stream.
     pub fn send(&self, computer: &ComputerId, control: Control) -> bool {
         guard(&self.shared.streams)

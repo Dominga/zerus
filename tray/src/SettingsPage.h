@@ -33,6 +33,9 @@
 #include <QToolButton>
 #include "ProcessSettings.h"
 #include "ForkUpdater.h"
+#include "ChildProcess.h"
+#include "JsonParse.h"
+#include "ProcessRunner.h"
 #include "QuestionNotificationSettings.h"
 #include "UiLanguage.h"
 #include "WorkspaceSkin.h"
@@ -46,20 +49,86 @@
 #include <QJsonObject>
 #include <QUuid>
 #include <QSignalBlocker>
+#include <QTimer>
+#include <functional>
 
-// U19: the subagent setting lives in hgs, not QSettings; one bounded call each
-// way. An unavailable hgs keeps the default (on) and changes nothing.
-inline QJsonObject subagentSetting(const QString &executable, const QStringList &args, const QByteArray &input = {})
+// U19, U22: settings hgs keeps, not QSettings (`hgs <command> get|set --json`).
+// N34 of #499: each call runs in the background, bounded to 8 s, so a slow or
+// older hgs never stalls opening Zerus or a click.
+inline void hgsSettingCall(QObject *owner, const QString &executable, const QStringList &args, const QByteArray &input,
+                           const std::function<void(const QJsonObject &result, const QString &error)> &done)
 {
-    if (executable.isEmpty()) return {};
-    QProcess process;
-    process.start(executable, args);
-    if (!process.waitForStarted(3000)) return {};
-    if (!input.isEmpty()) process.write(input);
-    process.closeWriteChannel();
-    if (!process.waitForFinished(5000)) return {};
-    const auto document = QJsonDocument::fromJson(process.readAllStandardOutput());
-    return document.isObject() ? document.object() : QJsonObject{};
+    // Not the owner's child: a page closed while hgs runs would destroy the
+    // process among its widgets, and its finish would reach deleted ones. The
+    // call ends on its own (8 s at most) and answers only a page still there.
+    auto *process = new QProcess;
+    auto *timer = new QTimer(process); timer->setSingleShot(true);
+    auto over = std::make_shared<bool>(false);
+    const QPointer<QObject> alive(owner);
+    const auto finish = [process, over, alive, done](const QJsonObject &result, const QString &error) {
+        if (*over) return;
+        *over = true; process->disconnect(); process->deleteLater();
+        if (alive) done(result, error);
+    };
+    QObject::connect(process, &QProcess::errorOccurred, process, [finish](QProcess::ProcessError error) {
+        if (error == QProcess::FailedToStart) finish({}, QCoreApplication::translate("SettingsPage", "hgs did not start"));
+    });
+    QObject::connect(process, &QProcess::finished, process, [process, finish](int code, QProcess::ExitStatus status) {
+        const auto bytes = process->readAllStandardOutput();
+        const auto error = QString::fromUtf8(process->readAllStandardError()).trimmed().section(QLatin1Char('\n'), 0, 0).left(300);
+        if (status != QProcess::NormalExit || code != 0) {
+            finish({}, !error.isEmpty() ? error : QCoreApplication::translate("SettingsPage", "hgs exited with code %1").arg(code));
+            return;
+        }
+        ProcessRunner::post(process, [bytes] { QString error; const auto object = JsonParse::object(bytes, &error); return qMakePair(object, error); },
+            [finish, code, error](const QPair<QJsonObject, QString> &parsed) {
+                if (parsed.second.isEmpty()) finish(parsed.first, {});
+                else finish({}, !error.isEmpty() ? error : QCoreApplication::translate("SettingsPage", "hgs exited with code %1").arg(code));
+            });
+    });
+    QObject::connect(timer, &QTimer::timeout, process, [finish] { finish({}, QCoreApplication::translate("SettingsPage", "hgs did not answer within 8 seconds")); });
+    ChildProcess::inheritStdioOnly(*process);
+    process->start(executable, args);
+    if (!input.isEmpty()) process->write(input);
+    process->closeWriteChannel();
+    timer->start(8000);
+}
+
+// A check box for one of those settings. It is disabled while a call runs,
+// shows what hgs reads after every change, and says under itself when a read
+// or a change failed. An unavailable hgs keeps the default.
+inline void bindHgsSetting(QObject *owner, const QString &executable, QCheckBox *box, QLabel *note,
+                           const QString &command, const QString &key, bool fallback)
+{
+    const auto show = [box](bool value) { const QSignalBlocker blocker(box); box->setChecked(value); };
+    show(fallback); note->hide();
+    if (executable.isEmpty()) return;
+    // The value hgs confirmed last, which the box keeps when a read fails.
+    auto confirmed = std::make_shared<bool>(fallback);
+    const auto read = [=](const QString &failure) {
+        box->setEnabled(false);
+        hgsSettingCall(owner, executable, {command, QStringLiteral("get"), QStringLiteral("--json")}, {},
+                       [=](const QJsonObject &result, const QString &error) {
+            const auto value = result.value(key);
+            if (value.isBool()) *confirmed = value.toBool();
+            show(*confirmed); box->setEnabled(true);
+            const QString text = !failure.isEmpty() ? failure : value.isBool() ? QString()
+                : QCoreApplication::translate("SettingsPage", "Could not read this setting from hgs: %1").arg(error.isEmpty() ? QStringLiteral("no value") : error);
+            note->setText(text); note->setVisible(!text.isEmpty());
+        });
+    };
+    read({});
+    QObject::connect(box, &QCheckBox::toggled, owner, [=](bool on) {
+        box->setEnabled(false);
+        // C6: these settings are the owner's; the desktop speaks as the person.
+        const QJsonObject input{{"request_id", QUuid::createUuid().toString(QUuid::WithoutBraces)}, {key, on}, {"by", QStringLiteral("human")}};
+        hgsSettingCall(owner, executable, {command, QStringLiteral("set"), QStringLiteral("--json")}, QJsonDocument(input).toJson(QJsonDocument::Compact),
+                       [=](const QJsonObject &result, const QString &error) {
+            // Either way the box then shows what hgs reads.
+            read(result.value(key).isBool() ? QString()
+                 : QCoreApplication::translate("SettingsPage", "Could not change this setting: %1").arg(error.isEmpty() ? QStringLiteral("no answer") : error));
+        });
+    });
 }
 
 class SettingsPage : public QWidget {
@@ -137,6 +206,7 @@ public:
             skin->setCurrentIndex(qMax(0,skin->findData(WorkspaceSkin::currentId())));
         };
         fillSkins();
+        connect(WorkspaceSkin::changes(), &QTimer::timeout, this, [this, fillSkins] { fillSkins(); if (appearanceChanged) appearanceChanged(); });
         auto *duplicateSkin=new QPushButton(tr("Duplicate…"));duplicateSkin->setObjectName("duplicateWorkspaceSkin");duplicateSkin->setAutoDefault(false);
         auto *skinFolder=new QPushButton(tr("Open skins folder"));skinFolder->setObjectName("openWorkspaceSkins");skinFolder->setAutoDefault(false);
         auto *skinRow=new QHBoxLayout;skinRow->setSpacing(8);skinRow->addWidget(skin,1);skinRow->addWidget(duplicateSkin);skinRow->addWidget(skinFolder);
@@ -168,25 +238,15 @@ public:
         auto *optionalHint=new QLabel(tr("Off by default. Shows a system notification once for each new optional question, which the agent keeps working without. It is withdrawn when the questions are answered or skipped, or the session is marked as read. Questions that need an answer always notify."));optionalHint->setWordWrap(true);sessions->addWidget(optionalHint);
         connect(optionalQuestions,&QCheckBox::toggled,this,[](bool on){QuestionNotificationSettings::setEnabled(on);});
         // U19: read and write the hgs setting; text says what the ask contains.
-        auto *subagents=new QCheckBox(tr("Ask before an agent starts subagents"));subagents->setObjectName("workspaceConfirmSubagents");
-        const auto current=subagentSetting(executable,{QStringLiteral("subagents-confirm"),QStringLiteral("get"),QStringLiteral("--json")});
-        subagents->setChecked(current.value("confirm").toBool(true));sessions->addWidget(subagents);
+        auto *subagents=new QCheckBox(tr("Ask before an agent starts subagents"));subagents->setObjectName("workspaceConfirmSubagents");sessions->addWidget(subagents);
+        auto *subagentsError=new QLabel;subagentsError->setObjectName("workspaceConfirmSubagentsError");subagentsError->setWordWrap(true);sessions->addWidget(subagentsError);
+        bindHgsSetting(this,executable,subagents,subagentsError,QStringLiteral("subagents-confirm"),QStringLiteral("confirm"),true);
         auto *subagentsHint=new QLabel(tr("Zerus asks you before a session starts subagents, with how many, which type and model."));subagentsHint->setWordWrap(true);sessions->addWidget(subagentsHint);
-        connect(subagents,&QCheckBox::toggled,this,[executable](bool on){
-            const QJsonObject input{{"request_id",QUuid::createUuid().toString(QUuid::WithoutBraces)},{"confirm",on}};
-            subagentSetting(executable,{QStringLiteral("subagents-confirm"),QStringLiteral("set"),QStringLiteral("--json")},
-                QJsonDocument(input).toJson(QJsonDocument::Compact));
-        });
         // U22: block DeepSeek's own session-log upload; on by default.
-        auto *upload=new QCheckBox(tr("Block DeepSeek session-log upload"));upload->setObjectName("workspaceSessionUploadBlock");
-        const auto uploadCurrent=subagentSetting(executable,{QStringLiteral("session-upload-block"),QStringLiteral("get"),QStringLiteral("--json")});
-        upload->setChecked(uploadCurrent.value("block").toBool(true));sessions->addWidget(upload);
+        auto *upload=new QCheckBox(tr("Block DeepSeek session-log upload"));upload->setObjectName("workspaceSessionUploadBlock");sessions->addWidget(upload);
+        auto *uploadError=new QLabel;uploadError->setObjectName("workspaceSessionUploadBlockError");uploadError->setWordWrap(true);sessions->addWidget(uploadError);
+        bindHgsSetting(this,executable,upload,uploadError,QStringLiteral("session-upload-block"),QStringLiteral("block"),true);
         auto *uploadHint=new QLabel(tr("On by default. Zerus starts and resumes every DeepSeek session with the official session-log upload off, without editing your dsh configuration. Off restores dsh's own behaviour."));uploadHint->setWordWrap(true);sessions->addWidget(uploadHint);
-        connect(upload,&QCheckBox::toggled,this,[executable](bool on){
-            const QJsonObject input{{"request_id",QUuid::createUuid().toString(QUuid::WithoutBraces)},{"block",on}};
-            subagentSetting(executable,{QStringLiteral("session-upload-block"),QStringLiteral("set"),QStringLiteral("--json")},
-                QJsonDocument(input).toJson(QJsonDocument::Compact));
-        });
 #ifdef Q_OS_WIN
         // WhiteWh fork: other computers start sessions here over SSH (src/windows_peer.rs).
         auto *residentHost=new QCheckBox(tr("Keep the session host running for other computers"));residentHost->setObjectName("residentSessionHost");
@@ -264,8 +324,7 @@ public:
         repository->setIcon(workspaceIcon("github",palette().color(QPalette::WindowText)));repository->setIconSize(QSize(20,20));repository->setAutoDefault(false);
         repository->setCursor(Qt::PointingHandCursor);repository->setToolTip(QStringLiteral("https://github.com/ufna/zerus"));repository->setAccessibleName(tr("Open Zerus repository on GitHub"));
         connect(repository,&QPushButton::clicked,this,[]{QDesktopServices::openUrl(QUrl(QStringLiteral("https://github.com/ufna/zerus")));});
-        // WhiteWh fork: this build is the fork; its repository is the active
-        // one, and its releases are where this build updates from.
+        // WhiteWh fork: this build is the fork and its releases are the update source.
         auto *fork=new QPushButton(QStringLiteral("WhiteWh/zerus"));fork->setObjectName("aboutForkRepository");fork->setProperty("glyph","github");
         fork->setIcon(workspaceIcon("github",palette().color(QPalette::WindowText)));fork->setIconSize(QSize(20,20));fork->setAutoDefault(false);fork->setCheckable(true);fork->setChecked(true);
         fork->setCursor(Qt::PointingHandCursor);fork->setToolTip(tr("Active: this build is the WhiteWh fork · https://github.com/WhiteWh/zerus"));fork->setAccessibleName(tr("Open the WhiteWh fork on GitHub (the active repository)"));
@@ -276,7 +335,7 @@ public:
         forkStatus=new QLabel;forkStatus->setObjectName("aboutForkStatus");forkStatus->setWordWrap(true);
         forkUpdate=new QPushButton;forkUpdate->setObjectName("aboutForkUpdate");forkUpdate->setAutoDefault(false);
         connect(forkUpdate,&QPushButton::clicked,this,[updater]{
-            if(updater->ready()){if(updater->startInstall())QCoreApplication::quit();return;}
+            if(updater->ready()){updater->startInstall();return;}
             updater->checkNow();
         });
         auto *updateRow=new QHBoxLayout;updateRow->setSpacing(10);updateRow->addWidget(forkUpdate);updateRow->addWidget(forkStatus,1);
@@ -311,6 +370,7 @@ public:
         const int at=speechSection;nav->insertItem(at,name);
         if(page->objectName().isEmpty())page->setObjectName("settingsContent");
         auto *scroll=new QScrollArea;scroll->setFrameShape(QFrame::NoFrame);scroll->setWidgetResizable(true);scroll->setWidget(page);scroll->setMinimumWidth(0);
+        page->setAutoFillBackground(false);scroll->viewport()->setAutoFillBackground(false);   // as addPage
         pages->insertWidget(at,scroll);
         for(int *later:{&speechSection,&keyboardSection,&analyticsSection,&aboutSection})if(*later>=at)++*later;
         return at;
@@ -366,6 +426,10 @@ private:
     }
     void updateResets(){for(const auto &reset:resets)reset.button->setVisible(reset.slider->isEnabled()&&reset.slider->value()!=reset.value);}
     struct Reset{QPushButton *button;QSlider *slider;int value;};QList<Reset> resets;
-    void addPage(QWidget *page){if(page->objectName().isEmpty())page->setObjectName("settingsContent");auto *scroll=new QScrollArea;scroll->setFrameShape(QFrame::NoFrame);scroll->setWidgetResizable(true);scroll->setWidget(page);scroll->setMinimumWidth(0);pages->addWidget(scroll);}
+    // QScrollArea::setWidget turns the page's background fill on, which paints
+    // the system palette (light on Windows) under a page whose own name the
+    // theme's transparent rule does not list (Worktrees, user report
+    // 2026-10-28): every page shows the theme's background instead.
+    void addPage(QWidget *page){if(page->objectName().isEmpty())page->setObjectName("settingsContent");auto *scroll=new QScrollArea;scroll->setFrameShape(QFrame::NoFrame);scroll->setWidgetResizable(true);scroll->setWidget(page);page->setAutoFillBackground(false);scroll->viewport()->setAutoFillBackground(false);scroll->setMinimumWidth(0);pages->addWidget(scroll);}
     QListWidget *nav;QStackedWidget *pages;RecoverySync *sync;RecoverySettings *recovery;QCheckBox *onTop;QLabel *onTopHint;QSlider *activityWidth;QLabel *activityWidthValue;QCheckBox *activityFullWidth;
 };

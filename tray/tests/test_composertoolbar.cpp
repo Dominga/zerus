@@ -69,6 +69,7 @@ class TestComposerToolbar : public QObject {
     Q_OBJECT
 private slots:
     void slotsFixOrderAndRowHeight();
+    void aChipWithoutAParentNeverShowsAsAWindow();
     void narrowRowsShortenInPriorityOrder_data();
     void narrowRowsShortenInPriorityOrder();
     void compactChipsKeepFullAccessibleNames();
@@ -276,6 +277,21 @@ void TestComposerToolbar::accentChipIsAGreenPill()
         QVERIFY2(style.contains(QString("color:%1;").arg(text)) && style.contains(QString("background:%1;").arg(fill))
             && style.contains(QString("border:1px solid %1;").arg(border)) && style.contains("border-radius:11px;"), qPrintable(style));
     }
+}
+
+// User log 2026-10-28: the task inspector made its executor chip active before
+// adding it to a layout, and every start flashed it as a window of its own.
+void TestComposerToolbar::aChipWithoutAParentNeverShowsAsAWindow()
+{
+    auto *chip = new ToolbarChip; chip->setObjectName("orphanChip");
+    chip->setLabels(QStringLiteral("Executor")); chip->setActive(true);
+    QVERIFY(chip->isActive()); QVERIFY(!chip->isVisible());
+    for (auto *widget : QApplication::topLevelWidgets()) QVERIFY(!(widget == chip && widget->isVisible()));
+    QWidget host; auto *layout = new QVBoxLayout(&host); layout->addWidget(chip);
+    host.show(); QVERIFY(QTest::qWaitForWindowExposed(&host));
+    QVERIFY(!chip->isWindow()); QVERIFY(chip->isVisible());
+    chip->setActive(false); QVERIFY(!chip->isVisible());
+    chip->setActive(true); QVERIFY(chip->isVisible());
 }
 
 QTEST_MAIN(TestComposerToolbar)

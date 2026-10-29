@@ -285,7 +285,3 @@
   :root[data-agent-mark="glyph"] .agent-badge .ab-label { display: none; }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .sbadge.k-working .sb-mark::after, .gb-count.working { animation: none; }
-}
-:root[data-reduce-motion="1"] .sbadge.k-working .sb-mark::after, :root[data-reduce-motion="1"] .gb-count.working { animation: none; }

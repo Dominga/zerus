@@ -4,7 +4,11 @@ import { listRows } from "./sessions/model";
 import { orderedRows } from "../store/catalog";
 import { selectedKey, setSelectedKey } from "../store/ui";
 import { activity } from "../store/session";
-import { inTauri, metrics } from "../bridge";
+import { copyFolder, copyName, copyCommand, lastCopied, copyReference, end, perform } from "../store/actions";
+import { snapshotOf, terminateCopy, type ActionRow } from "./sessions/actions-ui";
+import type { Action, Outcome } from "../types";
+import { inTauri, metrics, pumpStats } from "../bridge";
+import { restoreSettings, setSetting } from "../store/settings";
 import type { ScenarioResult } from "../perf/scenarios";
 
 // The measurement panel (src/perf), loaded on demand: `?perf=1` in the window
@@ -14,7 +18,10 @@ import type { ScenarioResult } from "../perf/scenarios";
 // ZERUS_CLIENT_PERF=auto (or `?perf=auto`) runs it unattended: once the
 // catalog has rows and the followed Activity has events, it runs every
 // scenario, samples the process tree after 10 s idle, writes the report to
-// ZERUS_CLIENT_PERF_OUT (save_perf) and exits the app. Each stage goes to the
+// ZERUS_CLIENT_PERF_OUT (save_perf) and exits the app. The idle windows run
+// as displayed, with Animate working sessions off, with Reduce motion (both
+// tried without being stored), with the window hidden and then minimised
+// (perf_away), each followed by a window as displayed again, all 10 s. Each stage goes to the
 // app's stderr (`zerus-client perf: ...`, no session names). A scenario that
 // gets no frames ends as skipped after 60 s; the whole run ends after 8 minutes
 // with what it has, so a hidden or occluded window never hangs it.
@@ -28,6 +35,7 @@ interface PerfConfig {
   representative?: boolean;
   preference?: string;
   display?: string | null;
+  actions_smoke?: boolean;
 }
 
 /** Resolves once `ready` holds; fails after `ms`. Timers, not frames: rAF stops while a window is hidden. */
@@ -65,6 +73,13 @@ function countFrames(ms: number): Promise<number> {
     requestAnimationFrame(tick);
     setTimeout(() => { running = false; resolve(count); }, ms);
   });
+}
+
+/** Animations by play state ("running 0, paused 10"), for the hidden-window log. */
+function animationStates(): string {
+  const counts = new Map<string, number>();
+  for (const animation of document.getAnimations()) counts.set(animation.playState, (counts.get(animation.playState) ?? 0) + 1);
+  return [...counts].map(([state, count]) => `${state} ${count}`).join(", ") || "none";
 }
 
 /** Running animations by name ("halo x12, zl-spin x1"), for the idle log. */
@@ -142,7 +157,22 @@ async function autoRun(config: PerfConfig) {
     platform: { label: config.label ?? null, representative: config.representative ?? null }, preference: config.preference ?? null,
     scenarios: finished,
   }), 1);
-  const onVisibility = () => log(`visibility ${document.visibilityState} after ${elapsed()}`);
+  /** The page while the window was last away (perf_away): its animations and what the pump did until it returned. */
+  type Pump = typeof pumpStats;
+  let away: { visibility: string; animations?: string; hidden_ms?: number; pump?: Pump } = { visibility: document.visibilityState };
+  let atHide: { at: number; pump: Pump } | undefined;
+  const onVisibility = () => {
+    if (document.visibilityState === "hidden") {
+      atHide = { at: performance.now(), pump: { ...pumpStats } };
+      away = { visibility: "hidden", animations: animationStates() };
+    } else if (atHide) {
+      const before = atHide.pump;
+      away.hidden_ms = Math.round(performance.now() - atHide.at);
+      away.pump = Object.fromEntries((Object.keys(pumpStats) as (keyof Pump)[]).map((k) => [k, pumpStats[k] - before[k]])) as Pump;
+      atHide = undefined;
+    }
+    log(`visibility ${document.visibilityState} after ${elapsed()}${away.animations && document.visibilityState === "hidden" ? `; animations ${away.animations}` : ""}`);
+  };
   document.addEventListener("visibilitychange", onVisibility);
   const cutoff = setTimeout(() => { log(`run timeout after ${elapsed()}, saving ${finished.length} scenarios`); void failed("run timeout (8 min)"); }, RUN_TIMEOUT_MS);
   try {
@@ -195,27 +225,102 @@ async function autoRun(config: PerfConfig) {
     log(`frames: ${frames} in 3 s (visibility ${document.visibilityState}, focus ${document.hasFocus()}, window ${innerWidth}x${innerHeight} at ${devicePixelRatio}x, display ${await displayHz() ?? "unknown"} Hz, cross-origin isolated ${crossOriginIsolated})`);
     await until(() => !!globalThis.zerusPerf, 30_000, "the Diagnostics panel did not start");
     const report = await globalThis.zerusPerf!.run();
-    log(`scenarios done after ${elapsed()}; settling 10 s, then two 10 s idle windows`);
+    log(`scenarios done after ${elapsed()}; settling 10 s, then seven 10 s idle windows`);
     await sleep(10_000);
     // Idle as displayed (working halos, header pulses, the mark while a session
-    // needs attention keep producing frames), then with Reduce motion on, so a
-    // report separates what the motion costs from what the app does.
+    // needs attention keep producing frames), then with each motion setting, so
+    // a report separates what the motion costs from what the app does. The
+    // settings are tried without being stored.
     log(`running animations: ${runningAnimations()}`);
     const idle = await idleSample("idle");
-    const root = document.documentElement;
-    const before = root.dataset.reduceMotion;
-    root.dataset.reduceMotion = "1";
+    setSetting("animateActivity", false, { persist: false });
+    await sleep(1000);
+    log(`running animations with Animate working sessions off: ${runningAnimations()}`);
+    const still = await idleSample("idle with Animate working sessions off");
+    restoreSettings();
+    setSetting("reduceMotion", true, { persist: false });
     await sleep(1000);
     log(`running animations with Reduce motion: ${runningAnimations()}`);
     const calm = await idleSample("idle with Reduce motion");
-    if (before === undefined) delete root.dataset.reduceMotion; else root.dataset.reduceMotion = before;
-    report.resources = { ...(report.resources ?? {}), idle, idle_reduced_motion: calm };
+    restoreSettings();
+    await sleep(1000);
+    // Hidden, then minimised: the native side takes the window away, samples
+    // the process tree and brings it back. The pump and the motion must stop.
+    const gone: Record<string, unknown> = {};
+    for (const how of ["hide", "minimize"] as const) {
+      away = { visibility: document.visibilityState };
+      const result = await invoke<{ sample?: unknown; minimized?: boolean }>("perf_away", { how, window_ms: 10_000 }).catch((error) => ({ error: String(error) }));
+      // The page reports its return a moment after the window is back.
+      await until(() => document.visibilityState === "visible" && (away.visibility !== "hidden" || !!away.pump), 3000).catch(() => {});
+      const s = (result as { sample?: { total?: { cpu_percent?: number }; processes?: { role?: string; cpu_percent?: number | null }[]; window_ms?: number } }).sample;
+      const roles = (s?.processes ?? []).map((p) => `${p.role} ${p.cpu_percent ?? "n/a"}%`).join(", ");
+      const pump = away.pump ? Object.entries(away.pump).map(([k, v]) => `${k} +${v}`).join(", ") : "n/a";
+      const page = away.visibility === "hidden" ? `hidden for ${away.hidden_ms ?? "n/a"} ms, animations ${away.animations}, pump while hidden ${pump}` : `stayed ${away.visibility}`;
+      log(`window ${how}: ${s?.total?.cpu_percent ?? "n/a"}% CPU over ${s?.window_ms ?? "n/a"} ms (${roles}); page ${page}${"minimized" in result ? `; minimized ${result.minimized}` : ""}${"error" in result ? `; ${(result as { error: string }).error}` : ""}`);
+      await sleep(1000);
+      // As displayed again: the motion resumed and the pump caught up.
+      log(`running animations after the window returned: ${runningAnimations()}`);
+      gone[how] = { ...result, page: away, returned: await idleSample(`idle after ${how}`) };
+    }
+    report.resources = { ...(report.resources ?? {}), idle, idle_still_working: still, idle_reduced_motion: calm, idle_away: gone };
     clearTimeout(cutoff);
     await finish(toJson({ ...report, preference: config.preference ?? null }), 0);
   } catch (error) {
     clearTimeout(cutoff);
     log(`failed: ${String(error)}`);
     await failed(error);
+  }
+}
+
+// `?actions-smoke=1` (ZERUS_CLIENT_QUERY=actions-smoke=1, with ZERUS_CLIENT_PERF
+// set to any value but auto so that exit_app is allowed) is the end-to-end check
+// of the guarded actions: with ZERUS_CLIENT_REPLAY supplying the catalog and
+// ZERUS_CLIENT_HGS a fake hgs, it selects the replay session (its details come
+// from the Activity state value, or one inspect), runs pause, resume, rename,
+// archive, the end call the Terminate dialog picks for it through the
+// dialog's confirmation (`end`), then the other end call (terminate or kill)
+// once each, and exits 0 (1 when an outcome failed).
+const SMOKE_SESSION = "claude/sample-project/review";
+const SMOKE_RENAMED = "claude/sample-project/review-renamed";
+
+async function actionsSmoke(allowed: boolean) {
+  const exit = (code: number) => invoke("exit_app", { code }).catch(() => {});
+  if (!allowed) {
+    log("actions-smoke not started: it needs ZERUS_CLIENT_REPLAY, ZERUS_CLIENT_HGS and ZERUS_CLIENT_PERF");
+    return;
+  }
+  try {
+    await until(() => orderedRows().some((s) => s.name === SMOKE_SESSION && s.runId), 30_000, "the replay session did not appear");
+    const row = (): ActionRow => {
+      const s = orderedRows().find((r) => r.name === SMOKE_SESSION);
+      if (!s) throw new Error("the replay session is gone");
+      return snapshotOf(s);
+    };
+    setSelectedKey(row().key);
+    const chosen = terminateCopy(row()).action;
+    log(`actions-smoke end call the Terminate dialog picks: ${chosen}`);
+    const steps: [string, () => Promise<Outcome>][] = [
+      ["copy session reference", () => copyReference(row())],
+      ["copy connect command", () => copyCommand(row())],
+      ["copy session name", () => copyName(row())],
+      ["copy folder path", () => copyFolder(row())],
+      ...([{ kind: "pause" }, { kind: "resume" }, { kind: "rename", new_name: SMOKE_RENAMED, archive_id: null }, { kind: "archive" }] as Action[])
+        .map((action): [string, () => Promise<Outcome>] => [action.kind, () => perform(row(), action)]),
+      [chosen, () => end(row(), chosen)],
+      ...(["terminate", "kill"] as const).filter((kind) => kind !== chosen)
+        .map((kind): [string, () => Promise<Outcome>] => [kind, () => perform(row(), { kind })]),
+    ];
+    let bad = 0;
+    for (const [kind, step] of steps) {
+      const out = await step();
+      const text = kind.startsWith("copy ") && out.outcome === "done" ? ` ${lastCopied()}` : "";
+      log(`actions-smoke ${kind.startsWith("copy ") ? `copy-${kind.slice(5).replace(/ /g, "-")}` : kind}: ${out.outcome}${out.outcome === "failed" ? ` (${out.detail})` : ""}${text}`);
+      if (out.outcome === "failed") bad++;
+    }
+    await exit(bad ? 1 : 0);
+  } catch (error) {
+    log(`actions-smoke failed: ${String(error)}`);
+    await exit(1);
   }
 }
 
@@ -241,6 +346,7 @@ export function PerfHost() {
       const native = await invoke<PerfConfig>("perf_config").catch(() => undefined);
       if (native) setConfig({ ...native, mode: native.mode ?? urlMode });
     }
+    if (new URLSearchParams(location.search).get("actions-smoke") === "1" && inTauri()) void actionsSmoke(!!config().actions_smoke);
     if (config().mode === "auto") {
       setOpen(true);
       void autoRun(config());

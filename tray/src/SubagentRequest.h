@@ -11,7 +11,8 @@
 // `subagents` ({id, type, model, effort when known, description}); an older
 // hgs sends only the question text "Start N subagents: type (model M, effort
 // E): task; ...", which is read back here. The card is answered as any
-// permission card: Allow all is its own one-time Yes, Deny its No.
+// permission card: Allow all is its own one-time Yes, Deny its No, and
+// "Allow all, don't ask again" its broader Yes that stops asking.
 namespace SubagentRequest {
 
 struct Call { QString id, type, model, effort, description; };
@@ -76,6 +77,22 @@ inline QString optionId(const QJsonObject &question, const QString &label)
     for (const auto &value : question.value("options").toArray()) {
         const auto option = value.toObject();
         if (option.value("label").toString().compare(label, Qt::CaseInsensitive) == 0) return option.value("id").toString();
+    }
+    return {};
+}
+
+// The card's option that allows every subagent and stops asking: hgs's own
+// "Yes, and don't ask again for subagents" on a hook card, Claude's "Yes, and
+// don't ask again ..." on a screen card. A broader Yes only; none without one.
+inline QString alwaysOptionId(const QJsonObject &question)
+{
+    for (const auto &value : question.value("options").toArray()) {
+        const auto option = value.toObject();
+        QString label = option.value("label").toString().simplified();
+        label.replace(QChar(0x2019), QLatin1Char('\''));
+        if (option.value("scope").toString() == QLatin1String("broader") && label.startsWith(QLatin1String("Yes"))
+            && label.contains(QLatin1String("don't ask again")))
+            return option.value("id").toString();
     }
     return {};
 }

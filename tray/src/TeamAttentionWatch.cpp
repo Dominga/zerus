@@ -1,0 +1,35 @@
+#include "TeamAttentionWatch.h"
+#include "TeamAttentionNotices.h"
+#include "TeamController.h"
+#include <QSettings>
+
+TeamAttentionWatch::TeamAttentionWatch(HgsClient *client, QObject *parent, int intervalMs)
+    : QObject(parent), m_teams(new TeamController(client, this))
+{
+    m_teams->setInterval(intervalMs);
+    connect(m_teams, &TeamController::teamsChanged, this, &TeamAttentionWatch::observe);
+}
+
+TeamAttentionWatch::~TeamAttentionWatch() = default;
+
+void TeamAttentionWatch::setActive(bool active)
+{
+    if (active == isActive()) return;
+    // The window may have changed the known items since this watch last ran.
+    if (active) m_notices = std::make_unique<TeamAttentionNotices>(QSettings().value("teams/attentionNotified").toStringList());
+    else m_notices.reset();
+    m_teams->setActive(active);
+    // An unchanged list is not announced again: compare the teams read before.
+    if (active && !m_teams->teams().isEmpty()) observe();
+}
+
+void TeamAttentionWatch::observe()
+{
+    // An answer that arrives after the window took over is not ours.
+    if (!m_notices) return;
+    const auto changes = m_notices->observe(m_teams->teams());
+    if (changes.raised.isEmpty() && changes.cleared.isEmpty()) return;
+    QSettings().setValue("teams/attentionNotified", m_notices->known());
+    for (const auto &token : changes.cleared) emit cleared(token);
+    for (const auto &notice : changes.raised) emit raised(notice.token, notice.title, notice.body);
+}

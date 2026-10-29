@@ -19,19 +19,37 @@ scope_spec.loader.exec_module(scope)
 
 
 class HostedMacAdmission(unittest.TestCase):
-    def test_owner_and_non_upstream_hosts_refuse_before_allocation_or_sudo(self):
-        admitted = dict(GITHUB_ACTIONS='true', RUNNER_ENVIRONMENT='github-hosted', GITHUB_REPOSITORY='ufna/zerus')
-        for system, changes in [('Darwin', {'GITHUB_ACTIONS': ''}),
-                ('Darwin', {'RUNNER_ENVIRONMENT': 'self-hosted'}),
-                ('Darwin', {'GITHUB_REPOSITORY': 'fixture/fork'}), ('Linux', {})]:
-            with self.subTest(system=system, changes=changes), \
-                    patch.dict(os.environ, dict(admitted, **changes), clear=True), \
-                    patch.object(scope.platform, 'system', return_value=system), \
-                    patch.object(scope, 'command') as command, \
+    def test_only_authorized_repositories_on_hosted_macos_are_admitted(self):
+        for repository in ('ufna/zerus', 'WhiteWh/zerus', 'romanilyin/zerus'):
+            with self.subTest(repository=repository):
+                admitted = dict(GITHUB_ACTIONS='true', RUNNER_ENVIRONMENT='github-hosted', GITHUB_REPOSITORY=repository)
+                self.assertIsNone(scope.admit(admitted, 'Darwin'))
+                for system, changes in [('Darwin', {'GITHUB_ACTIONS': ''}),
+                        ('Darwin', {'RUNNER_ENVIRONMENT': 'self-hosted'}), ('Linux', {}),
+                        ('Darwin', {'GITHUB_REPOSITORY': 'fixture/fork'}),
+                        ('Darwin', {'GITHUB_REPOSITORY': 'romanilyin/zerus-extra'}),
+                        ('Darwin', {'GITHUB_REPOSITORY': ''})]:
+                    with self.subTest(system=system, changes=changes), \
+                            patch.dict(os.environ, dict(admitted, **changes), clear=True), \
+                            patch.object(scope.platform, 'system', return_value=system), \
+                            patch.object(scope, 'command') as command, \
+                            patch.object(scope.tempfile, 'mkdtemp') as allocate:
+                        with self.assertRaisesRegex(ValueError, 'disposable hosted runner'):
+                            scope.run('test_worktrees', Path('/nonexistent/normal-hgs'))
+                        command.assert_not_called()
+                        allocate.assert_not_called()
+
+    def test_admitted_runner_still_rejects_a_mismatched_checkout_before_allocation(self):
+        for repository in ('ufna/zerus', 'WhiteWh/zerus', 'romanilyin/zerus'):
+            environment = dict(GITHUB_ACTIONS='true', RUNNER_ENVIRONMENT='github-hosted',
+                               GITHUB_REPOSITORY=repository, SOURCE_COMMIT='a' * 40)
+            with self.subTest(repository=repository), patch.dict(os.environ, environment, clear=True), \
+                    patch.object(scope.platform, 'system', return_value='Darwin'), \
+                    patch.object(scope, 'command', return_value=subprocess.CompletedProcess([], 0, 'b' * 40, '')) as command, \
                     patch.object(scope.tempfile, 'mkdtemp') as allocate:
-                with self.assertRaisesRegex(ValueError, 'disposable hosted runner'):
+                with self.assertRaisesRegex(ValueError, 'differs from the admitted CI source'):
                     scope.run('test_worktrees', Path('/nonexistent/normal-hgs'))
-                command.assert_not_called()
+                command.assert_called_once_with('git', 'rev-parse', 'HEAD')
                 allocate.assert_not_called()
 
     def test_unknown_directory_service_failure_never_proves_account_absence(self):

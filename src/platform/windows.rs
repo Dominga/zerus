@@ -2,7 +2,7 @@
 //! machines through the system OpenSSH client and, once local sessions are
 //! enabled, runs agent sessions in its session host (spec D2, D8).
 use super::{
-    capture, ExitInfo, FileIdentity, Presence, Private, ProcessIdentity, ProcessImage, ProcessRow,
+    capture, ExitInfo, FileIdentity, Presence, Private, PrivateRepair, ProcessIdentity, ProcessImage, ProcessRow,
     RunError,
 };
 use crate::{
@@ -365,22 +365,92 @@ fn native_program(name: &str) -> Option<PathBuf> {
         })
         .find(|path| path.is_file())
 }
-/// The interactive shell of an `sh` session (spec D8): PowerShell 7 (`pwsh.exe`)
-/// from PATH, else Windows PowerShell without its banner, by absolute path.
-pub fn powershell() -> std::result::Result<Vec<String>, String> {
-    let absolute = |path: PathBuf| canonical(&path).ok().map(|path| path.display().to_string());
-    if let Some(pwsh) = native_program("pwsh").and_then(absolute) {
-        return Ok(vec![pwsh]);
+const POWERSHELL_REQUIRED: &str = "PowerShell 7 or newer (Core) is required. Install PowerShell 7 or set HGS_PWSH to its absolute pwsh.exe path.";
+const POWERSHELL_PROBE: &str = "$ErrorActionPreference='Stop'; if ($PSVersionTable.PSEdition -ne 'Core' -or $PSVersionTable.PSVersion.Major -lt 7) { exit 64 }; [Console]::Out.Write('hgs-pwsh-core-7'); exit 0";
+
+/// Probe the exact executable, without profiles, input, updates or a visible
+/// console. Neither its filename nor a successful process exit proves Core 7.
+fn checked_powershell(path: &Path) -> Option<String> {
+    if !path.is_absolute() || !path.is_file() {
+        return None;
     }
-    let system = env::var_os("SystemRoot")
-        .map(|root| PathBuf::from(root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe"))
-        .filter(|path| path.is_file());
-    system
-        .or_else(|| native_program("powershell"))
-        .and_then(absolute)
-        .map(|powershell| vec![powershell, "-NoLogo".into()])
-        .ok_or_else(|| "neither pwsh.exe nor powershell.exe was found".into())
+    let path = canonical(path).ok()?;
+    let mut command = Command::new(&path);
+    command.args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", POWERSHELL_PROBE])
+        .env("POWERSHELL_UPDATECHECK", "Off")
+        .creation_flags(CREATE_NO_WINDOW);
+    let (status, output, _) = run_bounded(
+        &mut command, [128, 4096], Instant::now() + Duration::from_secs(5), &|| false,
+    ).ok()?;
+    (status.success() && output == b"hgs-pwsh-core-7")
+        .then(|| path.to_string_lossy().into_owned())
 }
+
+/// An explicit override is authoritative: an invalid one must not silently
+/// launch another shell. The injected probe also keeps policy tests isolated.
+fn select_powershell(
+    configured: Option<&OsStr>,
+    candidates: &[PathBuf],
+    mut probe: impl FnMut(&Path) -> Option<String>,
+) -> std::result::Result<Vec<String>, String> {
+    if let Some(configured) = configured.filter(|value| !value.is_empty()) {
+        let path = Path::new(configured);
+        if path.is_absolute() {
+            if let Some(program) = probe(path) {
+                return Ok(vec![program]);
+            }
+        }
+        return Err(format!("HGS_PWSH must name an absolute, working PowerShell 7 or newer (Core) executable. {POWERSHELL_REQUIRED}"));
+    }
+    for path in candidates {
+        if path.is_absolute() {
+            if let Some(program) = probe(path) {
+                return Ok(vec![program]);
+            }
+        }
+    }
+    Err(POWERSHELL_REQUIRED.into())
+}
+
+/// Interactive shells and Windows installers use verified PowerShell Core 7+.
+/// Windows PowerShell is never a fallback. Standard installations need not have
+/// added pwsh.exe to the PATH inherited by the running desktop.
+pub fn powershell() -> std::result::Result<Vec<String>, String> {
+    let mut candidates: Vec<PathBuf> = native_program("pwsh").into_iter().collect();
+    for variable in ["ProgramW6432", "ProgramFiles"] {
+        if let Some(folder) = env::var_os(variable).filter(|value| !value.is_empty()) {
+            let path = PathBuf::from(folder).join(r"PowerShell\7\pwsh.exe");
+            if !candidates.contains(&path) {
+                candidates.push(path);
+            }
+        }
+    }
+    let configured = env::var_os("HGS_PWSH");
+    match select_powershell(configured.as_deref(), &candidates, checked_powershell) {
+        Ok(found) => Ok(found),
+        // An explicit override stays authoritative: it never falls back.
+        Err(error) if configured.as_ref().is_some_and(|value| !value.is_empty()) => Err(error),
+        Err(error) => match windows_powershell() {
+            Some(legacy) => {
+                eprintln!("hgs: {POWERSHELL_UPGRADE}");
+                Ok(vec![legacy, "-NoLogo".into()])
+            }
+            None => Err(error),
+        },
+    }
+}
+
+/// Without PowerShell 7, shells and installers fall back to Windows PowerShell
+/// 5.1 with this warning instead of failing (owner, 2026-10-28: a clean Windows
+/// has only 5.1).
+pub const POWERSHELL_UPGRADE: &str = "PowerShell 7 was not found, so Windows PowerShell 5.1 is used. Install PowerShell 7 for full support: winget install --id Microsoft.PowerShell --source winget";
+
+/// Windows PowerShell 5.1 by its absolute system path.
+fn windows_powershell() -> Option<String> {
+    let path = PathBuf::from(env::var_os("SystemRoot")?).join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+    path.is_file().then(|| canonical(&path).ok()).flatten().map(|path| path.to_string_lossy().into_owned())
+}
+
 /// The stable CLI `<home>\.local\bin\hgs.exe` (spec D2, D8), the only hgs.exe a
 /// session, hook, recipe or record names, so none of them names a portable
 /// folder that a GUI update replaces. Whichever hgs.exe runs, this is the one
@@ -1600,6 +1670,173 @@ mod process {
         }
         Ok(true)
     }
+    /// #569: makes the entry at `path` private when it is this user's and only
+    /// too open. A protected DACL that grants this user FullControl (inherited
+    /// by a folder's new entries) replaces the open one, through a handle that
+    /// never follows a link; the content and the owner stay. Another owner, a
+    /// reparse point, another kind of entry or a second link is refused and the
+    /// entry is left as it is.
+    pub fn repair_private(path: &Path, kind: Private) -> io::Result<PrivateRepair> {
+        use windows_sys::Win32::Security::{Authorization::SetSecurityInfo, PROTECTED_DACL_SECURITY_INFORMATION};
+        let open = |access: u32| {
+            fs::OpenOptions::new()
+                .access_mode(access)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+                .open(path)
+        };
+        // Looked at first through a handle that changes nothing.
+        let entry = open(READ_CONTROL | FILE_READ_ATTRIBUTES)?;
+        let info = file_information(&entry)?;
+        let attributes = info.dwFileAttributes;
+        if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Ok(PrivateRepair::Refused("it is a link or reparse point".into()));
+        }
+        let directory = attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
+        match kind {
+            Private::Directory if !directory => return Ok(PrivateRepair::Refused("it is not a folder".into())),
+            Private::File if directory => return Ok(PrivateRepair::Refused("it is a folder, not a file".into())),
+            Private::File if info.nNumberOfLinks != 1 => {
+                return Ok(PrivateRepair::Refused(format!("the file has {} links", info.nNumberOfLinks)));
+            }
+            _ => {}
+        }
+        let user = current_user().ok_or_else(|| io::Error::other("this user's identity is unavailable"))?;
+        let (owner, open_aces) = security(entry.as_raw_handle() as HANDLE, user)?;
+        match owner {
+            Some(owner) if owner == user => {}
+            Some(owner) => return Ok(PrivateRepair::Refused(format!("it is owned by {}", account_label(&owner)))),
+            None => return Ok(PrivateRepair::Refused("it has no owner".into())),
+        }
+        if open_aces.is_empty() {
+            return Ok(PrivateRepair::Private);
+        }
+        // Changed through a second handle that names the same file: never one
+        // renamed into its place meanwhile.
+        let writer = match open(READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES) {
+            Ok(writer) => writer,
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                return Ok(PrivateRepair::Refused(format!("this user cannot change its permissions ({error})")));
+            }
+            Err(error) => return Err(error),
+        };
+        let same = file_information(&writer)?;
+        if (same.dwVolumeSerialNumber, same.nFileIndexHigh, same.nFileIndexLow)
+            != (info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow)
+            || same.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        {
+            return Ok(PrivateRepair::Refused("it changed while it was checked".into()));
+        }
+        let handle = writer.as_raw_handle() as HANDLE;
+        let acl = owner_only_acl(kind == Private::Directory)?;
+        let code = unsafe {
+            SetSecurityInfo(
+                handle,
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                acl.0,
+                std::ptr::null(),
+            )
+        };
+        if code != ERROR_SUCCESS {
+            let error = io::Error::from_raw_os_error(code as i32);
+            return Ok(PrivateRepair::Refused(format!("its permissions could not be changed ({error})")));
+        }
+        if !private_security(handle)? {
+            return Ok(PrivateRepair::Refused("it is still open after the repair".into()));
+        }
+        Ok(PrivateRepair::Repaired(open_aces))
+    }
+    /// The owner of the entry behind `handle` and the accesses its DACL grants
+    /// anyone but this user, SYSTEM, Administrators and OWNER RIGHTS.
+    fn security(handle: HANDLE, user: &[u8]) -> io::Result<(Option<Vec<u8>>, Vec<String>)> {
+        let mut owner: PSID = std::ptr::null_mut();
+        let mut dacl: *mut ACL = std::ptr::null_mut();
+        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        let code = unsafe {
+            GetSecurityInfo(
+                handle,
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                &mut owner,
+                std::ptr::null_mut(),
+                &mut dacl,
+                std::ptr::null_mut(),
+                &mut descriptor,
+            )
+        };
+        if code != ERROR_SUCCESS {
+            return Err(io::Error::from_raw_os_error(code as i32));
+        }
+        let _descriptor = Descriptor(descriptor);
+        let owner = if owner.is_null() { None } else { Some(unsafe { sid_bytes(owner) }.to_vec()) };
+        Ok((owner, unsafe { open_aces(dacl, user) }?))
+    }
+    /// The accesses a DACL grants anyone but this user, SYSTEM, Administrators
+    /// and OWNER RIGHTS, by account; a missing DACL grants everyone everything.
+    ///
+    /// # Safety
+    /// `dacl` is null or points to a valid ACL.
+    unsafe fn open_aces(dacl: *mut ACL, user: &[u8]) -> io::Result<Vec<String>> {
+        if dacl.is_null() {
+            return Ok(vec!["Everyone (no DACL)".into()]);
+        }
+        let mut open = Vec::new();
+        for index in 0..u32::from((*dacl).AceCount) {
+            let mut ace = std::ptr::null_mut();
+            if GetAce(dacl, index, &mut ace) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let header = &*(ace as *const ACE_HEADER);
+            if u32::from(header.AceFlags) & INHERIT_ONLY_ACE != 0 || header.AceType == ACCESS_DENIED_ACE_TYPE {
+                continue;
+            }
+            if header.AceType != ACCESS_ALLOWED_ACE_TYPE {
+                open.push(format!("an access entry of type {}", header.AceType));
+                continue;
+            }
+            let sid = std::ptr::addr_of!((*(ace as *const ACCESS_ALLOWED_ACE)).SidStart) as PSID;
+            let trusted = sid_bytes(sid) == user
+                || IsWellKnownSid(sid, WinLocalSystemSid) != 0
+                || IsWellKnownSid(sid, WinBuiltinAdministratorsSid) != 0
+                || IsWellKnownSid(sid, WinCreatorOwnerRightsSid) != 0;
+            if !trusted {
+                let label = account_label(sid_bytes(sid));
+                if !open.contains(&label) {
+                    open.push(label);
+                }
+            }
+        }
+        Ok(open)
+    }
+    /// `DOMAIN\name (S-1-...)`, or the SID alone when no account is found.
+    fn account_label(sid: &[u8]) -> String {
+        use windows_sys::Win32::Security::{LookupAccountSidW, SID_NAME_USE};
+        let text = sid_string(sid);
+        let mut name = [0u16; 256];
+        let mut domain = [0u16; 256];
+        let (mut name_len, mut domain_len) = (name.len() as u32, domain.len() as u32);
+        let mut kind: SID_NAME_USE = 0;
+        let found = unsafe {
+            LookupAccountSidW(
+                std::ptr::null(),
+                sid.as_ptr() as PSID,
+                name.as_mut_ptr(),
+                &mut name_len,
+                domain.as_mut_ptr(),
+                &mut domain_len,
+                &mut kind,
+            )
+        } != 0;
+        if !found {
+            return text;
+        }
+        let name = String::from_utf16_lossy(&name[..name_len as usize]);
+        let domain = String::from_utf16_lossy(&domain[..domain_len as usize]);
+        if domain.is_empty() { format!("{name} ({text})") } else { format!("{domain}\\{name} ({text})") }
+    }
     /// # Safety
     /// `sid` points to a valid SID.
     unsafe fn sid_bytes<'a>(sid: PSID) -> &'a [u8] {
@@ -1775,6 +2012,30 @@ mod process {
         let created = creation_ticks(process.0)?;
         Some(ProcessIdentity {
             parent: verified_parent(listed_parent(pid)?, created),
+            group: None,
+            birth: created.to_string(),
+            started: unix_seconds(created),
+        })
+    }
+    /// `process_identity` for a process of a table taken at `listed_at` (Unix
+    /// seconds, read before the snapshot) that listed `parent` as its parent.
+    /// A process created before that snapshot and alive now is the one it
+    /// listed, so its parent comes from the table instead of a snapshot of
+    /// every process per ID; one created after it reuses a listed ID and is
+    /// refused. A listing took a snapshot per descendant of every agent: 6 s
+    /// of kernel time, run by `hgs watch` every 5 s (owner, 2026-10-28).
+    pub fn listed_identity(pid: u32, parent: u32, listed_at: f64) -> Option<ProcessIdentity> {
+        let process =
+            open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE).ok()?;
+        if exited(process.0) || token_user(process.0).as_deref() != current_user() {
+            return None;
+        }
+        let created = creation_ticks(process.0)?;
+        if unix_seconds(created) > listed_at {
+            return None;
+        }
+        Some(ProcessIdentity {
+            parent: verified_parent(parent, created),
             group: None,
             birth: created.to_string(),
             started: unix_seconds(created),
@@ -2191,8 +2452,19 @@ mod process {
         deadline: Instant,
         cancelled: &dyn Fn() -> bool,
     ) -> std::result::Result<(ExitStatus, Vec<u8>, Vec<u8>), RunError> {
+        run_bounded_stdin(command, Stdio::null(), limits, deadline, cancelled)
+    }
+
+    /// Bounded execution with explicitly supplied stdin; ownership/deadlines match run_bounded.
+    pub fn run_bounded_stdin(
+        command: &mut Command,
+        input: Stdio,
+        limits: [usize; 2],
+        deadline: Instant,
+        cancelled: &dyn Fn() -> bool,
+    ) -> std::result::Result<(ExitStatus, Vec<u8>, Vec<u8>), RunError> {
         command
-            .stdin(Stdio::null())
+            .stdin(input)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let mut child = spawn_group(command).map_err(RunError::Spawn)?;
@@ -2425,6 +2697,12 @@ mod tests {
         let member = repo.join("member");
         fs::create_dir(&member).unwrap();
         let missing = missing_sandbox_rights(&member).unwrap();
+        if missing.is_empty() {
+            // An elevated account (a CI runner's administrator) keeps
+            // WRITE_OWNER through its privileges: nothing to grant here.
+            eprintln!("this account keeps full rights on a Modify-only folder; skipped");
+            return;
+        }
         assert!(missing.contains(&"WRITE_OWNER"), "{missing:?}");
         let problem = sandbox_folder_problem(&member).unwrap().expect("the sandbox cannot use this folder yet");
         assert!(problem.starts_with("the DeepSeek sandbox needs full control of "), "{problem}");
@@ -2899,6 +3177,12 @@ mod tests {
             .unwrap()
             .as_secs_f64();
         assert!(identity.started > now - 86_400. && identity.started <= now + 1.);
+        // From a table: its parent without a snapshot per ID, and nothing for
+        // a process created after the table (a reused ID).
+        let listed = process_table().unwrap()[&own].parent;
+        let from_table = listed_identity(own, listed, now).unwrap();
+        assert_eq!((from_table.parent, from_table.birth.as_str()), (identity.parent, start.as_str()));
+        assert!(listed_identity(own, listed, identity.started - 1.).is_none());
         assert_eq!(process_table().unwrap()[&own].group, None);
         let image = describe(own).unwrap();
         assert_eq!(
@@ -3365,4 +3649,38 @@ mod tests {
         assert!(spawn_group(&mut command).unwrap().wait().unwrap().success());
         assert!(command.status().unwrap().success());
     }
+    #[test]
+    fn powershell_override_is_absolute_and_never_falls_back() {
+        let installed = PathBuf::from(r"C:\Program Files\PowerShell\7\pwsh.exe");
+        let candidates = [installed.clone()];
+        for invalid in ["pwsh.exe", r"C:pwsh.exe", r"C:\missing\pwsh.exe"] {
+            let mut seen = Vec::new();
+            let result = select_powershell(Some(OsStr::new(invalid)), &candidates, |path| {
+                seen.push(path.to_owned());
+                (path == installed).then(|| path.display().to_string())
+            });
+            assert!(result.unwrap_err().contains("HGS_PWSH"));
+            assert!(!seen.contains(&installed));
+        }
+        assert_eq!(select_powershell(Some(installed.as_os_str()), &[], |path| {
+            Some(path.display().to_string())
+        }).unwrap(), vec![installed.display().to_string()]);
+    }
+
+    #[test]
+    fn powershell_skips_unverified_candidates_and_reports_missing_core() {
+        let old = PathBuf::from(r"C:\tools\pwsh.exe");
+        let core = PathBuf::from(r"C:\Program Files\PowerShell\7\pwsh.exe");
+        let candidates = [old.clone(), core.clone()];
+        let mut seen = Vec::new();
+        let selected = select_powershell(None, &candidates, |path| {
+            seen.push(path.to_owned());
+            (path == core).then(|| path.display().to_string())
+        }).unwrap();
+        assert_eq!(selected, vec![core.display().to_string()]);
+        assert_eq!(seen, candidates);
+        assert!(select_powershell(None, &[old], |_| None).unwrap_err().contains("PowerShell 7"));
+        assert!(select_powershell(None, &[], |_| unreachable!()).is_err());
+    }
+
 }

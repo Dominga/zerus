@@ -371,6 +371,11 @@ pub(crate) struct Member {
     /// episode withdraws it for that session, not for the next one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit_session: Option<SessionRef>,
+    /// N30: when this member's remote reset request was last refreshed. A
+    /// refresh on another computer costs an `hgs` call with a 60 s bound, so a
+    /// slow peer is asked once a minute, never on every tick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit_refreshed_at: Option<f64>,
     /// H6: a swapped member's new session starts even before its next task.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub launch_after_swap: bool,
@@ -835,6 +840,11 @@ pub(crate) struct Question {
     /// parent's answer is copied back here.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub forwarded: String,
+    /// N24: on a parent-side question, the child question it carries (created
+    /// by an escalation); the answer travels on down to it. A team stored
+    /// before this field keeps that child id in `forwarded`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub source: String,
 }
 
 impl Question {
@@ -1392,9 +1402,31 @@ impl Team {
             .map(|used| used["change"].as_str().unwrap_or_default().to_owned())
     }
 
+    /// U32/N7: how many times that word has paid for a change so far (a stored
+    /// word without the count paid once).
+    pub(crate) fn owner_word_uses(&self, event: i64) -> usize {
+        self.used_owner_words
+            .iter()
+            .find(|used| used["event"].as_i64() == Some(event))
+            .map(|used| used["uses"].as_u64().unwrap_or(1) as usize)
+            .unwrap_or(0)
+    }
+
+    /// U32/N7: whether the next use of that word is still the change it says:
+    /// a count word ("add two backends") authorizes that many adds, every other
+    /// word one change.
+    pub(crate) fn owner_word_allowed_again(&self, event: i64, allowed: usize, change: &str) -> bool {
+        match self.owner_word_used(event) {
+            None => true,
+            Some(used) => used == change && self.owner_word_uses(event) < allowed.max(1),
+        }
+    }
+
     pub(crate) fn record_owner_word(&mut self, event: i64, change: &str) {
-        if self.owner_word_used(event).is_none() {
-            self.used_owner_words.push(serde_json::json!({"event":event,"change":change}));
+        if let Some(used) = self.used_owner_words.iter_mut().find(|used| used["event"].as_i64() == Some(event)) {
+            used["uses"] = serde_json::json!(used["uses"].as_u64().unwrap_or(1) + 1);
+        } else {
+            self.used_owner_words.push(serde_json::json!({"event":event,"change":change,"uses":1}));
             let excess = self.used_owner_words.len().saturating_sub(50);
             self.used_owner_words.drain(..excess);
         }

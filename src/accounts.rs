@@ -574,6 +574,13 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
         "model-defaults"=>{println!("{}",model_defaults::set(config,args,dry)?);},
         "set-key"=>{println!("{}",deepseek::set_key(config,args,dry)?);},
         "install"=>return install::run(id,dry),
+        "bind-existing"=>{
+            if id!="native-opencode" || args.len()!=3 || args[2]!="--json" {return Err(Error::new(2,"usage: hgs [@host] account bind-existing native-opencode --json (JSON stdin)"));}
+            #[cfg(unix)]
+            {println!("{}",crate::state::opencode::bind_existing(config,dry).map_err(|e|Error::new(1,e))?);}
+            #[cfg(not(unix))]
+            return Err(Error::new(2,"Bind OpenCode on its Linux or macOS environment; select its WSL or SSH machine"));
+        },
         "start"=>{
             if id!="native-opencode" {return Err(Error::new(1,"Only the native OpenCode account has a service to start"));}
             #[cfg(unix)]
@@ -1202,9 +1209,9 @@ mod permission_tests {
     #[test]
     fn claude_project_keys_use_forward_slashes_on_windows() {
         // N19: as Claude writes them; the mixed form was another project.
-        let mixed = "C:\\Users\\owner\\.local/state\\hgs/sessions\\team-designer";
-        assert_eq!(claude::project_key(mixed, true), "C:/Users/owner/.local/state/hgs/sessions/team-designer");
-        assert_eq!(claude::project_key("/home/owner/a\\b", false), "/home/owner/a\\b");
+        let mixed = "C:\\Users\\example\\.local/state\\hgs/sessions\\team-designer";
+        assert_eq!(claude::project_key(mixed, true), "C:/Users/example/.local/state/hgs/sessions/team-designer");
+        assert_eq!(claude::project_key("/home/example/a\\b", false), "/home/example/a\\b");
     }
     #[test]
     fn auto_mode_is_claude_only() {

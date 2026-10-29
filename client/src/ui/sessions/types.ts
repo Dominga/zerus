@@ -66,6 +66,35 @@ export interface Session {
   turnStarted?: number;
   runId?: string;
   conversationId?: string;
+  // What the guarded actions read, copied flat from the core's row: a nested
+  // row in the store would double the cost of reconciling a large catalog.
+  /** The agent as the core reports it (`deepseek` for `dsh`); `agent` draws unknown agents as Claude. */
+  cmd: string;
+  /** The raw state (`running`, `paused`, `stopped`, `archived`, ...). */
+  state: string;
+  tracked: boolean;
+  resumable: boolean;
+  /** The raw activity (`idle`, `busy`, ...). */
+  activity: string;
+  processState: string;
+  archiveId?: string;
+  /** The latest reply and the attention it raised, for marking them read. */
+  replyId?: string;
+  attentionSignature?: string;
+  /** The host shares read marks. */
+  sharedRead: boolean;
+  /** The operations the host reports as allowed, space separated; undefined when it reports none. */
+  allowed?: string;
+  /** The host's reasons for a disallowed archive or terminate. */
+  archiveReason?: string;
+  terminateReason?: string;
+  /** The raw working directory (`cwd` is the folder name). */
+  cwdPath: string;
+  /** The row's terminal support, and whether the host reported it (NativeSessionCapabilities::terminal). */
+  terminalSupported: boolean;
+  terminalReported: boolean;
+  terminalAttachSupported: boolean;
+  terminalAttachReported: boolean;
 }
 
 export interface ActivityItem {

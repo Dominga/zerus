@@ -1,7 +1,8 @@
 //! What `hgs watch` (src/watch) reads from session state: inspections and the
 //! Activity journal exactly as `hgs inspect` reads them, as values instead of
 //! printed output. Nothing here writes session state beyond what `hgs inspect`
-//! and `hgs ls` already do.
+//! and `hgs ls` already do, apart from the lock files of the git topic's shared
+//! checks.
 use super::*;
 use rusqlite::{Connection, OpenFlags};
 use std::collections::BTreeSet;
@@ -94,20 +95,30 @@ pub(crate) fn changed_names(db: &Connection, after: i64, limit: usize) -> Result
 }
 
 /// The journal names whose rows after `after`, from at most `limit` rows,
-/// record a finished call of a tool that can change a checkout's files. A
-/// session that ran one makes the git topic check its folders again.
-pub(crate) fn writing_names(db: &Connection, after: i64, limit: usize) -> Result<Vec<String>> {
-    const QUERY: &str = "SELECT DISTINCT name FROM (SELECT name, payload FROM events WHERE seq>?1 ORDER BY seq LIMIT ?2) \
+/// record a finished call of a tool that can change a checkout's files, with
+/// the latest such row's time. A session that ran one makes the git topic
+/// check its folders again.
+pub(crate) fn writing_names(db: &Connection, after: i64, limit: usize) -> Result<Vec<(String, Option<f64>)>> {
+    const QUERY: &str = "SELECT name, MAX(CASE WHEN json_valid(payload) THEN json_extract(payload, '$.at') END) \
+        FROM (SELECT name, payload FROM events WHERE seq>?1 ORDER BY seq LIMIT ?2) \
         WHERE CASE WHEN json_valid(payload) THEN json_extract(payload, '$.type') END IN ('PostToolUse','PostToolUseFailure') \
         AND CASE WHEN json_valid(payload) THEN json_extract(payload, '$.tool') END \
-        IN ('Edit','Write','MultiEdit','NotebookEdit','apply_patch','Bash')";
+        IN ('Edit','Write','MultiEdit','NotebookEdit','apply_patch','Bash') GROUP BY name";
     let mut statement = db.prepare(QUERY).map_err(|e| e.to_string())?;
     let names = statement
-        .query_map(rusqlite::params![after, limit as i64], |row| row.get::<_, Option<String>>(0))
+        .query_map(rusqlite::params![after, limit as i64], |row| {
+            Ok(row.get::<_, Option<String>>(0)?.map(|name| (name, row.get::<_, Option<f64>>(1).ok().flatten())))
+        })
         .map_err(|e| e.to_string())?
         .filter_map(|row| row.ok().flatten())
         .collect();
     Ok(names)
+}
+
+/// An exclusive lock on an auxiliary file, or None when another process
+/// still holds it at `deadline`.
+pub(crate) fn lock_until(path: &Path, deadline: std::time::Instant) -> Result<Option<crate::platform::FileLock>> {
+    storage::lock_until(path, deadline)
 }
 
 /// `hgs git-status --path PATH --json` as a value: the same read-only checks,
@@ -362,4 +373,30 @@ pub(crate) fn binding_identity(path: &Path) -> Option<(String, String)> {
         return None;
     }
     Some((name.to_owned(), journal::journal_name(&value).to_owned()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn writing_names_carry_their_latest_file_changing_call() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE events (seq INTEGER PRIMARY KEY, name TEXT, conversation TEXT, payload TEXT);").unwrap();
+        let rows = [
+            ("codex/a", json!({"type":"PostToolUse","tool":"Bash","at":10.5})),
+            ("codex/a", json!({"type":"PostToolUse","tool":"Edit","at":12.25})),
+            ("codex/a", json!({"type":"PostToolUse","tool":"Read","at":20.0})),
+            ("codex/b", json!({"type":"PostToolUseFailure","tool":"apply_patch"})),
+            ("codex/c", json!({"type":"Stop","at":30.0})),
+        ];
+        for (name, payload) in rows {
+            db.execute("INSERT INTO events(name,conversation,payload) VALUES(?,'c',?)", rusqlite::params![name, payload.to_string()]).unwrap();
+        }
+        db.execute("INSERT INTO events(name,conversation,payload) VALUES('codex/d','c','not json')", []).unwrap();
+        let mut names = writing_names(&db, 0, 100).unwrap();
+        names.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(names, vec![("codex/a".to_owned(), Some(12.25)), ("codex/b".to_owned(), None)]);
+        assert_eq!(writing_names(&db, 2, 100).unwrap(), vec![("codex/b".to_owned(), None)]);
+    }
 }

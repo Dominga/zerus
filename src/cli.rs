@@ -46,6 +46,8 @@ impl From<std::io::Error> for Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [-n tag] [-d] [--rc] [--dry-run] [-- args...]
+       hgs external register|checkpoint|handoff|inbox|ack|list --json   cooperative external chats (external-workstream-v1)
+       hgs path-ref describe|validate|map   explicit lexical identity (JSON stdin)
        hgs mobile-peers --json        guarded direct-peer discovery (mobile-peer ABI 1)
        hgs approval-log begin|finish|list|detail  local automatic-approval journal (JSON stdin)
        hgs mobile-peer --json         guarded direct-peer native request from JSON stdin
@@ -81,7 +83,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] wait begin|ack|finish|cancel|list --json   explicit independent-agent waits (JSON stdin)
        hgs [@host] team OPERATION --json   agent teams: plan, run, report and decide tasks (JSON stdin)
        hgs run --json [--wait] | --list --json   a build Zerus tracks as this session's work (JSON stdin)
-       hgs [@host] terminal <session> --json scoped terminal screen/input
+       hgs [@host] terminal <session> --json scoped terminal screen/input; draft/submit_draft for the composer draft
        hgs [@host] AGENT DIRECTORY --new -n TAG -d --launch-id UUID
        hgs [@host] session-action <session> --json scoped native lifecycle action
        hgs [@host] compact-context <session> --json compact the idle agent context using its native command
@@ -89,7 +91,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] interrupt <session> --json   interrupt the current turn, keep the session
        hgs [@host] attachment <session> --request ID --index N --conversation ID   read a sent attachment
        hgs [@host] file-read <session> --json   read a document on the conversation computer
-       hgs @host download --path REMOTE_PATH --output LOCAL_FILE   download a file through configured SSH
+       hgs @host download --path REMOTE_PATH --output LOCAL_FILE   download a copy through configured SSH or explicit WSL
        hgs [@host] answer <session> --json   answer an exact pending question from JSON stdin
        hgs [@host] read <session> --json   mark the current reply/attention read (JSON stdin)
        hgs [@host] notifications <session> --json   shared mute preference (session-notifications-v1)
@@ -106,6 +108,8 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs swarm session-project --json  read an exact session's logical project choices
        hgs swarm assign-session --json   move only the exact session's project grouping
        hgs presence set --json        desktop idle/lock time from JSON stdin (written by the tray)
+       hgs subagents-confirm get|set --json   ask before an agent starts subagents on this computer (JSON stdin for set)
+       hgs session-upload-block get|set --json   block DeepSeek's session-log upload on this computer (JSON stdin for set)
        hgs swarm preference get --json   shared phone notification timing
        hgs swarm preference set mobile_delivery VALUE --json   immediate|away|away_5|away_10|away_15|away_30
        hgs machine check <alias> | ssh <alias> [--directory PATH] | setup <alias> [--source <checkout>]
@@ -115,6 +119,8 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] account model-settings ID   inspect this account's native model catalog and launch defaults
        hgs [@host] account model-defaults ID --model MODEL [--effort LEVEL] [--revision REV]   defaults for new sessions
        hgs [@host] account set-key native-dsh --json   save API key from private JSON stdin
+       hgs machine file-proof <alias> --json   verify a scoped WSL file before explicit local mapping (wsl-file-proof-v1)
+       hgs [@host] account bind-existing native-opencode --json   preview and bind one native conversation (opencode-bind-existing-v1)
        hgs [@host] account start native-opencode   start the shared OpenCode service if none runs; inspection never starts it
        hgs [@host] account favorite native-opencode --model PROVIDER/MODEL --favorite on|off --request-id UUID   star an OpenCode model on that computer
        hgs [@host] account models native-opencode [--location DIR]   every OpenCode model of that computer and folder as JSON; never starts OpenCode
@@ -126,7 +132,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] worktrees --path PATH [--refresh] [--json]   existing checkouts as JSON
        hgs [@host] git-status --path PATH --json   read-only checkout/publication status
        hgs [@host] git-diff --path PATH --json     read-only diff against HEAD (256 KiB)
-       hgs [@host] worktrees create --path REPO --branch NAME --destination PATH [--base HEAD] [--json]
+       hgs [@host] worktrees create --path REPO --branch NAME --destination PATH [--base HEAD] [--clone] [--sandbox] [--json]
        hgs [@host] worktrees create ... --request-id UUID --receipt --json   durable creation, no replay
        hgs [@host] worktrees status|cancel --request-id UUID --json   original creation receipt
        Worktree creation ABI: worktree-requests-v1
@@ -230,6 +236,46 @@ fn state_command(verb: &str, args: &[String]) -> Result<i32> {
     let mut command = vec![verb.to_owned()];
     command.extend_from_slice(args);
     state::dispatch(&command).map_err(|e| Error::new(1, e))
+}
+
+/// WhiteWh fork: settings hgs keeps for this computer (U19, U22). They live in
+/// its state, where the hooks that follow them run, so they need no local
+/// sessions; they are never an agent launch.
+fn kept_setting(command: &str) -> bool {
+    matches!(command, "subagents-confirm" | "session-upload-block")
+}
+
+/// What a `@host` that is a WSL profile of this computer runs: every command
+/// in that distribution, except a download, which publishes on this Windows
+/// client, and a `kept_setting`, which never leaves this computer. None for
+/// any other host.
+fn wsl_forward(config: &Config, target: &str, command: &str, args: &[String], dry: bool) -> Option<Result<i32>> {
+    if target.is_empty() || config.is_self(target) {
+        return None;
+    }
+    let profile = crate::wsl::profile(config, target)?;
+    if kept_setting(command) {
+        return Some(setting_command(false, command, args, dry));
+    }
+    // Download publishes on this Windows client. Its output path must
+    // never be forwarded as a Linux receiver destination.
+    if command == "download" {
+        return Some(crate::download::dispatch(config, target, args, dry));
+    }
+    Some(crate::wsl::run(profile, command, args, dry))
+}
+
+/// A `kept_setting` command. Only this computer's: its owner gate trusts a set
+/// from a process outside every agent session, which an SSH hop or a WSL
+/// distribution cannot prove.
+fn setting_command(local: bool, command: &str, args: &[String], dry: bool) -> Result<i32> {
+    if !local {
+        return Err(Error::new(1, format!("hgs {command} changes the computer it runs on; run it on that computer")));
+    }
+    if dry {
+        return Err(Error::new(1, format!("hgs {command} does not support --dry-run")));
+    }
+    state_command(command, args)
 }
 fn has(args: &[String], arg: &str) -> bool {
     args.iter().any(|a| a == arg)
@@ -410,6 +456,12 @@ fn usage_text(tmux: bool) -> Cow<'static, str> {
 }
 
 pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
+    if args.first().is_some_and(|s| s == "swarm") && args.get(1).is_some_and(|s| s == crate::wsl::RECEIVER) {
+        crate::wsl::validate_request(&args[2..])?;
+        if !cfg!(target_os = "linux") { return Err(Error::new(2,"The wsl-local receiver requires a Linux hgs build")); }
+        env::set_var(crate::wsl::POLICY, "existing-only");
+        args.drain(..2);
+    }
     // Private: the screen model behind the differential tmux capture test.
     if args.first().is_some_and(|a| a == "__screen-capture") {
         return crate::screen::cli(&args[1..]).map_err(|e| Error::new(2, e));
@@ -511,6 +563,9 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
         return Ok(1);
     };
     let args = &args[index + 1..];
+    if let Some(result) = wsl_forward(&config, &target, command, args, dry) {
+        return result;
+    }
     match command.as_str() {
         "--expect-machine" => {
             if dry { return Err(Error::new(2,"Guarded calls do not support --dry-run")); }
@@ -528,10 +583,20 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
             }
             print!("{}", usage_text(cfg!(unix)));
             println!("Encrypted workspace ABI: guarded-local-v1");
+            println!("WSL local receiver ABI: wsl-local-v1 (OpenCode existing-only)");
+            #[cfg(target_os = "linux")]
+            println!("WSL file snapshot ABI: wsl-file-snapshot-v1");
             println!("Desktop creation ABI: guarded-create-v1");
             #[cfg(windows)]
             print!("{}\nMobile gateway ABI: windows-local-v1\n", crate::host::admin::HELP);
             return Ok(0);
+        }
+        "path-ref" => {
+            if !target.is_empty() && !config.is_self(&target) {
+                return Err(Error::new(2, "path-ref is local-only; specify the environment in JSON"));
+            }
+            if dry { return Err(Error::new(2, "path-ref does not support --dry-run")); }
+            return crate::path_ref::run(args).map(|()| 0).map_err(|e| Error::new(2, format!("{e:#}")));
         }
         "--version" | "version" => return crate::status::version(&config, &target, args),
         // Read-only on every machine; never routed as an agent launch.
@@ -562,6 +627,9 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
             }
             local_sessions()?;
             return crate::session_reference::current(&config, args);
+        }
+        setting if kept_setting(setting) => {
+            return setting_command(target.is_empty() || config.is_self(&target), setting, args, dry);
         }
         _ => {}
     }
@@ -634,6 +702,11 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
     }
     if !target.is_empty() && !config.is_self(&target) {
         return remote(&config, &target, command, args, dry);
+    }
+    if command == "external" { return crate::external_workstreams::dispatch(&config,args,dry); }
+    if args.first().is_some_and(|name| crate::external_workstreams::reserved(name))
+        && matches!(command.as_str(), "inspect" | "send" | "history" | "a" | "kill" | "rename" | "archive" | "terminate" | "pause" | "resume" | "fork" | "processes" | "send-now" | "session-action" | "terminal" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "read" | "notifications" | "attachment" | "file-read") {
+        return crate::external_workstreams::session_command(&config,command,args,dry);
     }
     // Commands that only read or change this machine's configuration, or reach
     // remote machines, also run on a build without local sessions.
@@ -915,6 +988,7 @@ fn peer_ls(config: &Config, peer: &str, archives: bool) -> String {
     crate::windows_peer::hgs(config, peer, &args).unwrap_or_default()
 }
 fn peer_json_archives(config: &Config, peer: &str, archives: bool) -> Value {
+    if let Some(profile) = crate::wsl::profile(config, peer) { return crate::wsl::listing(profile, peer, archives); }
     // WhiteWh fork: a Windows peer answers through its lasting channel.
     if crate::windows_peer::is_windows(config, peer) {
         let mut args: Vec<String> = ["ls", "--local", "--json"].map(String::from).into();
@@ -986,6 +1060,7 @@ fn remote(
     args: &[String],
     global_dry: bool,
 ) -> Result<i32> {
+    if let Some(profile) = crate::wsl::profile(config, target) { return crate::wsl::run(profile, command, args, global_dry); }
     if target.starts_with('-') || target.chars().any(char::is_whitespace) {
         return Err(Error::new(1, "invalid SSH host alias"));
     }
@@ -1235,6 +1310,14 @@ fn run_with_input(ssh: &mut std::process::Command, mut flags: Vec<String>, targe
 }
 
 pub(crate) fn local_json(config: &Config) -> Result<Value> { local_json_archives(config, true) }
+/// #569: the private stores refused now (path, reason, fix), read from the
+/// small current set only; absent when none is refused.
+fn private_stores(raw: &mut Value) {
+    let stores = crate::private_stores::refused();
+    if !stores.is_empty() {
+        raw["private_stores"] = json!(stores);
+    }
+}
 /// `ls --json --local --no-archives`, which `hgs watch` streams.
 pub(crate) fn local_listing(config: &Config) -> Result<Value> { local_json_archives(config, false) }
 fn local_json_archives(config: &Config, archives: bool) -> Result<Value> {
@@ -1246,10 +1329,12 @@ fn local_json_archives(config: &Config, archives: bool) -> Result<Value> {
             raw["desktop_presence"] = presence;
         }
         raw["preferences"] = crate::swarm::preferences(config);
+        private_stores(&mut raw);
         #[cfg(windows)]
         {
             raw["local_host"] = crate::host::admin::local_host(&config.state);
         }
+        crate::external_workstreams::append_listing(config,&mut raw)?;
         return Ok(raw);
     }
     let mut projects = serde_json::Map::new();
@@ -1268,6 +1353,7 @@ fn local_json_archives(config: &Config, archives: bool) -> Result<Value> {
         raw["desktop_presence"] = presence;
     }
     raw["preferences"] = crate::swarm::preferences(config);
+    private_stores(&mut raw);
     // Windows: the session host as found, never started (spec D2). Unix
     // listings stay as they were.
     #[cfg(windows)]
@@ -1283,6 +1369,7 @@ fn local_json_archives(config: &Config, archives: bool) -> Result<Value> {
     if !ended.is_empty() {
         merged["ended_launches"] = json!(ended);
     }
+    crate::external_workstreams::append_listing(config,&mut merged)?;
     Ok(merged)
 }
 fn local_list(config: &Config) -> Result<()> {
@@ -1336,6 +1423,13 @@ fn list(config: &Config, args: &[String], global_dry: bool) -> Result<i32> {
     local_list(config)?;
     for peer in &config.peers {
         println!("{peer}:");
+        if let Some(profile) = crate::wsl::profile(config, peer) {
+            match crate::wsl::capture(profile, &["ls".into(), "--local".into()], 16 * 1024 * 1024, 10) {
+                Ok(out) if out.status.success() => print!("{}", String::from_utf8_lossy(&out.stdout)),
+                _ => println!("  offline"),
+            }
+            continue;
+        }
         let mut flags = crate::machines::ssh_options(config, peer);
         flags.extend(
             [
@@ -2533,6 +2627,66 @@ mod tests {
         }
     }
 
+    /// Settings > Sessions runs `hgs subagents-confirm` and `hgs
+    /// session-upload-block`: settings this computer keeps, read from its hgs
+    /// state like `hgs __state`, never an agent launch, and never sent to a peer.
+    #[test]
+    fn kept_settings_reach_hgs_state_instead_of_a_launch() {
+        let dir = tempfile::tempdir().unwrap();
+        state::with_test_state_root(dir.path(), || {
+            let get = ["get", "--json"].map(String::from);
+            for command in ["subagents-confirm", "session-upload-block"] {
+                assert!(kept_setting(command), "{command}");
+                assert!(usage_text(cfg!(unix)).contains(&format!("\n       hgs {command} get|set --json   ")), "{command}");
+                assert_eq!(setting_command(true, command, &get, false).unwrap(), 0, "{command}");
+                // A malformed request gets the setting's own usage, not the
+                // launch's "unknown option --json".
+                let error = setting_command(true, command, &get[..1], false).unwrap_err();
+                assert_eq!(error.message, format!("usage: hgs {command} get|set --json"));
+                let error = setting_command(false, command, &get, false).unwrap_err();
+                assert_eq!(error.message, format!("hgs {command} changes the computer it runs on; run it on that computer"));
+                let error = setting_command(true, command, &get, true).unwrap_err();
+                assert_eq!(error.message, format!("hgs {command} does not support --dry-run"));
+            }
+        });
+        for command in ["claude", "sh", "subagents", "session-upload", "__state"] {
+            assert!(!kept_setting(command), "{command}");
+        }
+    }
+
+    /// A WSL profile of this computer gets every other command, but not the
+    /// settings this computer keeps: they are refused before the forward.
+    #[test]
+    fn kept_settings_never_go_to_a_wsl_profile() {
+        let mut config = Config {
+            home: String::new(),
+            dir: PathBuf::new(),
+            state: PathBuf::new(),
+            selves: vec!["this-box".into()],
+            peers: Vec::new(),
+            base_peers: Vec::new(),
+            peers_from_environment: false,
+            machines: Default::default(),
+            tab: false,
+            tab_colors: String::new(),
+        };
+        config.machines.insert("ubuntu".into(), crate::machines::Connection {
+            transport: crate::wsl::Transport::WslLocal,
+            wsl: Some(crate::wsl::WslConnection { distribution: "Ubuntu".into(), user: "dev".into(), hgs_path: String::new() }),
+            ..Default::default()
+        });
+        config.machines.insert("peer".into(), crate::machines::Connection::default());
+        let get = ["get", "--json"].map(String::from);
+        for command in ["subagents-confirm", "session-upload-block"] {
+            let refused = wsl_forward(&config, "ubuntu", command, &get, false).unwrap().unwrap_err();
+            assert_eq!(refused.message, format!("hgs {command} changes the computer it runs on; run it on that computer"));
+            // Neither a configured SSH peer nor this computer is a WSL profile.
+            for host in ["", "this-box", "peer"] {
+                assert!(wsl_forward(&config, host, command, &get, false).is_none(), "{host}");
+            }
+        }
+    }
+
     #[test]
     fn shared_notifications_advertises_its_exact_standalone_marker_on_every_platform() {
         for tmux in [false, true] {
@@ -2708,6 +2862,29 @@ mod tests {
                     ""
                 )
         );
+    }
+
+    #[test]
+    fn new_exact_resume_preserves_the_whitewh_contract() {
+        let id = "11111111-2222-4333-8444-555555555555";
+        for flag in ["-c", "--resume", "--continue"] {
+            let args = ["--new", flag, id, "-n", "exact-new"].map(String::from);
+            let parsed = LaunchOptions::parse(&args, true).unwrap();
+            assert!(parsed.new_only && parsed.resume);
+            assert_eq!(parsed.resume_id.as_deref(), Some(id));
+            assert_eq!(parsed.tag, "exact-new");
+        }
+        let args = vec![format!("--resume={id}"), "--new".into()];
+        assert_eq!(LaunchOptions::parse(&args, true).unwrap().resume_id.as_deref(), Some(id));
+    }
+
+    #[test]
+    fn new_session_refuses_ambiguous_resume_and_fresh() {
+        for args in [["--new", "-c"], ["--new", "--resume"], ["--new", "--fresh"]] {
+            assert!(LaunchOptions::parse(&args.map(String::from), true).is_err());
+        }
+        let args = ["--new", "-c", "11111111-2222-4333-8444-555555555555", "--fresh"].map(String::from);
+        assert!(LaunchOptions::parse(&args, true).is_err());
     }
 
     #[test]

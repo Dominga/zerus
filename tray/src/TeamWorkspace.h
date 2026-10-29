@@ -1,4 +1,5 @@
 #pragma once
+#include <QElapsedTimer>
 #include <QHash>
 #include <QPoint>
 #include <QPointer>
@@ -95,7 +96,8 @@ private:
     void attentionRows(const Teams::Team &team, QVBoxLayout *into);
     // N7: Answer on a permission item: the member's Allow / Deny box, or its
     // command on the clipboard when this hgs sends no box.
-    void answerAttention(const QString &teamId, const QString &member, const QString &command);
+    // attempts: a member's box not shown yet is looked for again (fork CI).
+    void answerAttention(const QString &teamId, const QString &member, const QString &command, int attempts = 10);
     // A planning, running or paused team takes a settings change (ops.rs settings).
     static bool settingsOpen(const Teams::Team &team)
     {
@@ -105,6 +107,10 @@ private:
     // The team as the controller currently has it, by id (a poll may have
     // replaced the copy a widget was built with).
     const Teams::Team *currentTeam(const QString &id) const;
+    // C4 (#548): the full copy (`team status`) a plan edit is built from; null,
+    // after asking for it and showing "Loading the plan", while only the
+    // `team list` summary is here.
+    const Teams::Team *planTeam(const QString &id);
     QWidget *toolbar(const Teams::Team &team);
     QWidget *canvas(const Teams::Team &team);
     void linkDraft(const Teams::Team &team, int dependency, int task, bool add);
@@ -134,7 +140,8 @@ private:
     // a team without phases).
     void graphNodes(TeamUi::TaskView *view, const Teams::Team &team, const QList<int> &order, const QSet<int> &phase);
     // #465 N18: a graph view takes back the owner's half-made link and
-    // selected edge, and reports their changes, per team.
+    // selected edge, and reports their changes, per team; #570: the same for
+    // the task under the resting pointer, so its linked tasks stay lit.
     void keepGraphEdit(TeamUi::TaskView *view, const QString &team);
     // U33: the narrowest readable Board column (two-line cards); wider windows
     // share their room. Five fit the Board of a 1600 px workspace.
@@ -169,6 +176,10 @@ private:
     QList<Computer> m_computers;
     QString m_team, m_view = QStringLiteral("graph"), m_filter = QStringLiteral("all"), m_focus;
     QString m_error;
+    // Answer focused this exact question's Allow; rebuilds in the next few
+    // seconds focus it again, even when the focus was already lost.
+    QString m_answerTeam, m_answerMember, m_answerQuestion, m_answerHash;
+    QElapsedTimer m_answerAt;
     bool m_dark = true, m_pending = false, m_feedOpen = false, m_inboxOpen = false, m_fit = true;
     // G9: one phase decision is in flight at a time; a second click on a header
     // before the answer arrives sends nothing. After an answer, that phase stays
@@ -194,6 +205,7 @@ private:
     // #465 N18: per team, the task a click-to-connect started from and the
     // selected edge (dependency, task), across re-renders.
     QHash<QString, std::pair<int, QPair<int, int>>> m_graphEdit;
+    QHash<QString, int> m_graphHover;   // #570: the hovered task per team
     static QString rejectKey(const Teams::Team &team, int phase);
     bool m_showBlockers = false, m_rejectFocus = false, m_zoomManual = false;
     double m_zoom = 1.0;

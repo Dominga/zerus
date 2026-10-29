@@ -16,3 +16,12 @@ Used as the ANSI/VT parser and terminal state machine. Builds offline.
    with "screen_resize failed to update cursor position". The cursor now goes
    to row 0, as for the line's other rows. Covered by
    `reflowedLongLineKeepsTheCursorInside` in `tray/tests/test_terminalview.cpp`.
+2. `src/screen.c`, `resize_buffer()`, the walk back over continuation rows
+   stops at row 0 (`old_row > 0`, upstream `>= 0`). When the top row of the
+   screen continues a line whose head is in the scrollback, upstream walked to
+   row -1 and copied cells from before the buffer: the desktop crashed with an
+   access violation on a resize (owner, 2026-10-28, a 261-column terminal).
+   Covered by `reflowFromAContinuedTopRowStaysInsideTheBuffer`.
+3. `src/screen.c`, `resize_buffer()`: a cursor the reflow did not place no
+   longer aborts the process ("screen_resize failed to update cursor
+   position", a 0xc0000409 crash on 2026-10-27); it goes inside the screen.

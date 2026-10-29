@@ -29,7 +29,9 @@ pub fn display_hz(window: &WebviewWindow) -> Option<f64> {
 #[cfg(target_os = "macos")]
 fn native(_window: &WebviewWindow) -> Option<f64> {
     let mtm = objc2::MainThreadMarker::new()?;
-    crate::platform::macos::screen_max_fps(mtm).filter(|fps| *fps > 0).map(|fps| fps as f64)
+    crate::platform::macos::screen_max_fps(mtm)
+        .filter(|fps| *fps > 0)
+        .map(|fps| fps as f64)
 }
 
 #[cfg(target_os = "linux")]

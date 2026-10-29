@@ -464,9 +464,11 @@ void TestQuestionCard::reviewCountdownAndNextNavigation()
 // U19 (#520): hgs's subagent card (claude_approval, #519) as the session shows
 // it: "Start N subagents", one row per subagent (type, model, effort when
 // known, task), Allow all after the review delay and Deny, answering that
-// exact card with its own one-time Yes or No. Three from the card's list, one
-// from the question text an older hgs sends.
-QJsonObject subagentCard(const QString &hash, const QJsonArray &calls, const QString &text, const QJsonArray &list = {})
+// exact card with its own one-time Yes or No, and "Allow all, don't ask
+// again" with its broader Yes after a second, explicit Confirm. Three from
+// the card's list, one from the question text an older hgs sends without the
+// broader Yes.
+QJsonObject subagentCard(const QString &hash, const QJsonArray &calls, const QString &text, const QJsonArray &list = {}, bool always = true)
 {
     QJsonObject card{{"question_id", "claude-approval:subagents"}, {"question_hash", hash}, {"tool_call_id", "toolu_one"},
         {"run_id", "run"}, {"conversation_id", "conversation"}, {"source", "claude_tool_approval"}, {"can_answer", true},
@@ -476,8 +478,14 @@ QJsonObject subagentCard(const QString &hash, const QJsonArray &calls, const QSt
             {"body", text + "\n\nAgent\n\n{\"subagent_type\":\"Explore\"}"}, {"allow_other", true},
             {"other_label", "Tell Claude what to do instead"},
             {"options", QJsonArray{QJsonObject{{"id", "1"}, {"label", "Yes"}, {"scope", "once"}},
+                                   QJsonObject{{"id", "3"}, {"label", "Yes, and don't ask again for subagents"}, {"scope", "broader"}},
                                    QJsonObject{{"id", "2"}, {"label", "No"}, {"scope", "once"}}}}}}}};
     if (!list.isEmpty()) card["subagents"] = list;
+    if (!always) {
+        auto questions = card["questions"].toArray(); auto question = questions.first().toObject();
+        auto options = question["options"].toArray(); options.removeAt(1);
+        question["options"] = options; questions[0] = question; card["questions"] = questions;
+    }
     return card;
 }
 
@@ -510,10 +518,13 @@ void TestQuestionCard::subagentCardListsEachSubagentAndAnswersTheCard()
     QVERIFY(!card.findChild<QLineEdit *>("questionFreeText"));
     QVERIFY(submit(card)->isHidden());
     auto *allow = card.findChild<QPushButton *>("approveToolRequest"), *deny = card.findChild<QPushButton *>("denyToolRequest");
-    QVERIFY(allow->isVisible() && deny->isVisible());
+    auto *always = card.findChild<QPushButton *>("approveSubagentsAlways");
+    QVERIFY(allow->isVisible() && deny->isVisible() && always->isVisible());
     QCOMPARE(deny->text(), QStringLiteral("Deny"));
     QTRY_VERIFY(allow->isEnabled());
+    QVERIFY(always->isEnabled());
     QCOMPARE(allow->text(), QStringLiteral("Allow all"));
+    QCOMPARE(always->text(), QStringLiteral("Allow all, don't ask again"));
     if (!shots.isEmpty()) {
         card.setTheme(true); QTest::qWait(50); QVERIFY(card.grab().save(shots + "/u19-subagents-three-dark.png"));
         card.setTheme(false); QTest::qWait(50); QVERIFY(card.grab().save(shots + "/u19-subagents-three-light.png"));
@@ -524,9 +535,40 @@ void TestQuestionCard::subagentCardListsEachSubagentAndAnswersTheCard()
     QCOMPARE(sent.first()[0].toString(), QStringLiteral("session"));
     QCOMPARE(sent.first()[1].toString(), QStringLiteral("claude-approval:subagents"));
     QCOMPARE(sent.first()[2].toJsonArray(), (QJsonArray{QJsonObject{{"question_id", "approval"}, {"selected_option_ids", QJsonArray{"1"}}, {"text", ""}}}));
-    // One subagent, from an older hgs's question text alone: Deny answers No.
+    // "Allow all, don't ask again" answers the card's broader Yes, which also
+    // stops asking for the session, only after a second, explicit Confirm.
     sent.clear();
-    setQuestionReady(card, "session", subagentCard("one", QJsonArray{"toolu_four"}, "Start 1 subagent: Explore (model haiku): Find the callers"));
+    setQuestionReady(card, "session", subagentCard("again", QJsonArray{"toolu_one", "toolu_two", "toolu_three"}, three, list));
+    QTRY_VERIFY(always->isEnabled());
+    always->click();
+    QCOMPARE(sent.size(), 0);
+    QCOMPARE(always->text(), QStringLiteral("Confirm"));
+    QVERIFY(card.findChild<QLabel *>("questionStatus")->text().contains(QStringLiteral("Select Confirm")));
+    QVERIFY(allow->isEnabled() && deny->isEnabled());
+    if (!shots.isEmpty()) { QTest::qWait(50); QVERIFY(card.grab().save(shots + "/u19-subagents-always-confirm-dark.png")); }
+    always->click();
+    QCOMPARE(sent.size(), 1);
+    QCOMPARE(sent.first()[2].toJsonArray(), (QJsonArray{QJsonObject{{"question_id", "approval"}, {"selected_option_ids", QJsonArray{"3"}}, {"text", ""}}}));
+    // Claude's own "don't ask again" on a screen card is that choice too; its
+    // other broader choices are not.
+    sent.clear();
+    auto screen = subagentCard("screen", QJsonArray{"toolu_one"}, "Start 1 subagent: Explore (model haiku): Find the callers", {}, false);
+    auto screenQuestion = screen["questions"].toArray().first().toObject();
+    screenQuestion["options"] = QJsonArray{QJsonObject{{"id", "1"}, {"label", "Yes"}, {"scope", "once"}},
+        QJsonObject{{"id", "2"}, {"label", "Yes, and switch to auto mode"}, {"scope", "broader"}},
+        QJsonObject{{"id", "3"}, {"label", "Yes, and don't ask again for Agent commands in /work/project"}, {"scope", "broader"}},
+        QJsonObject{{"id", "4"}, {"label", "No"}, {"scope", "once"}}};
+    screen["questions"] = QJsonArray{screenQuestion}; screen["answer_transport"] = "claude_tui";
+    setQuestionReady(card, "session", screen);
+    QTRY_VERIFY(always->isEnabled());
+    always->click(); always->click();
+    QCOMPARE(sent.size(), 1);
+    QCOMPARE(sent.first()[2].toJsonArray().first().toObject().value("selected_option_ids").toArray(), QJsonArray{"3"});
+    // One subagent, from an older hgs's question text alone: Deny answers No,
+    // and without the broader Yes there is nothing to stop asking with.
+    sent.clear();
+    setQuestionReady(card, "session", subagentCard("one", QJsonArray{"toolu_four"}, "Start 1 subagent: Explore (model haiku): Find the callers", {}, false));
+    QVERIFY(always->isHidden());
     QCOMPARE(card.findChild<QLabel *>("questionHeading")->text(), QStringLiteral("Start 1 subagent"));
     QCOMPARE(card.findChildren<QFrame *>("questionSubagent").size(), 1);
     QCOMPARE(card.findChild<QLabel *>("questionSubagentModel")->text(), QStringLiteral("model haiku"));
@@ -545,6 +587,7 @@ void TestQuestionCard::subagentCardListsEachSubagentAndAnswersTheCard()
     setQuestionReady(card, "session", plain);
     QVERIFY(card.findChildren<QFrame *>("questionSubagent").isEmpty());
     QVERIFY(!submit(card)->isHidden());
+    QVERIFY(always->isHidden());
 }
 
 void TestQuestionCard::claudeApprovalListsNativeOptionsAndConfirmsBroaderOnes()

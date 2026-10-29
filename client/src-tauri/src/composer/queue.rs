@@ -190,6 +190,12 @@ impl Composers {
             self.hand_back(hub, handle);
             return SendReply::Busy;
         };
+        // A required card replaces the editor and both Send chords, even
+        // when a native queue is visible (A2-3/A2-4 review ruling).
+        if !self.question_part(&hub).1 {
+            self.hand_back(hub, handle);
+            return SendReply::Busy;
+        }
         if composer.sending || !composer.has_content() {
             // Claim the chord's queue before releasing its selected session.
             let delivery = self.begin_queue(&mut hub, None);
@@ -1285,6 +1291,52 @@ mod tests {
         assert_eq!(view_after.text, "later");
         assert!(view_after.text_epoch > view.text_epoch);
         assert!(sent(&fake).is_empty());
+    }
+
+    fn required_card_blocks_push(text: &str) {
+        let root = dir(if text.is_empty() {
+            "required-empty-push"
+        } else {
+            "required-text-push"
+        });
+        let (c, fake) = send_hub(&root);
+        *lock(&fake.outcome) = Box::new(submitted);
+        let mut details = queued("❯ earlier", true);
+        details["pending_questions"] = json!([crate::composer::questions::tests::card_json(
+            "tool:required"
+        )]);
+        opened(&c, details);
+        let view = crate::composer::questions::tests::with_card(&c);
+        assert!(!view.input_visible);
+        assert_eq!(
+            c.send_push(view.handle, 1, view.text_epoch, text.into(), 5, 5),
+            SendReply::Busy
+        );
+        let next = c.current().unwrap();
+        assert!(
+            next.text_epoch > view.text_epoch,
+            "the hidden editor is handed back"
+        );
+        assert_eq!(next.text, text);
+        let hub = c.lock();
+        assert!(hub.queue.pusher.active().is_none(), "no push was armed");
+        assert!(
+            hub.queue.sending.is_none(),
+            "no native queue action was claimed"
+        );
+        drop(hub);
+        assert!(sent(&fake).is_empty());
+        assert!(c.take_events().is_empty());
+    }
+
+    #[test]
+    fn a_required_card_blocks_push_of_text() {
+        required_card_blocks_push("later");
+    }
+
+    #[test]
+    fn a_required_card_blocks_push_of_an_empty_queue_chord() {
+        required_card_blocks_push("");
     }
 
     #[test]

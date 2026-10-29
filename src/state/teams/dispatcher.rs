@@ -63,6 +63,9 @@ pub(crate) struct Seen {
     pub background: bool,
     /// The newest Background job: its command and when it started (C12).
     pub work: Option<SeenWork>,
+    /// #511 N1: a build Zerus runs for the session (`hgs run`, or a claimed
+    /// `hgs team run` in its folder) is work, as the listing's `build` says.
+    pub building: bool,
     /// The MCP servers and services it runs, which are not Background work
     /// (G7).
     pub services: Vec<SeenService>,
@@ -188,6 +191,7 @@ pub(crate) fn seen(listing: &Value) -> Vec<Seen> {
                 phase: field("phase").to_owned(),
                 background,
                 work,
+                building: record["build"].is_object(),
                 services,
                 asking: live && matches!(field("phase"), "question" | "input" | "approval"),
                 last_event_at: record["last_event_at"].as_f64(),
@@ -304,6 +308,9 @@ pub(crate) enum Step {
     StageCommand { task: u32, run: String },
     /// U47/U48: read a started command or land stage's run record.
     StageCommandEnded { task: u32, run: String },
+    /// #511 N3: tell a member its worked-ahead attempt was revoked with its
+    /// phase, so it stops.
+    TellStop { stop: String },
 }
 
 /// U18: the lead's turn has ended and it can take a message, also while its own
@@ -353,7 +360,8 @@ fn listed_hosts(listing: &Value) -> BTreeSet<String> {
 /// A session quiet enough for its ended turn to become the attempt's report
 /// (A2): idle, no question, input or approval, and no Background work.
 fn capture_open(found: &Seen) -> bool {
-    found.live && found.idle && matches!(found.phase.as_str(), "" | "idle" | "ready") && !found.background
+    // #511 N1: a Zerus build keeps the turn open: the session is Building.
+    found.live && found.idle && matches!(found.phase.as_str(), "" | "idle" | "ready") && !found.background && !found.building
 }
 
 /// The reply identity recorded with the turn end is still the session's last
@@ -781,6 +789,13 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             steps.push(Step::SubInbox { member: sub.id.clone() });
         }
     }
+    // #511 N3: a member whose worked-ahead attempt was revoked hears it once,
+    // as soon as its session runs; the message waits behind its turn.
+    for stop in team.stops.iter().filter(|stop| stop.notice == Notice::Pending) {
+        if team.member(&stop.member).and_then(|member| session_of(member, seen)).is_some_and(|found| found.live) {
+            steps.push(Step::TellStop { stop: stop.id.clone() });
+        }
+    }
     // U47/U48: a started stage command ends while the team is paused too; a
     // new one starts only while it runs.
     for (task, run) in super::pipeline::commands_running(team) {
@@ -970,42 +985,66 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         steps.push(if member.needs_settings() { Step::Settings { member: member.id.clone() } } else { Step::HandOut { task: id, member: member.id.clone() } });
     }
     // U31: work ahead. An idle member may take an independent task of the next
-    // draft phase: no dependency on an open running-phase task and no file it
-    // names that an open running task also names.
+    // draft phase (#511 N2: every dependency accepted).
     if team.settings.work_ahead {
-        let running: Vec<&Task> = team.tasks.iter().filter(|task| {
-            !task.status.finished() && team.phases.iter().find(|phase| phase.n == task.phase).is_none_or(|phase| phase.state == PhaseState::Approved)
-        }).collect();
-        let running_ids: BTreeSet<u32> = running.iter().map(|task| task.id).collect();
-        let files = |text: &str| -> BTreeSet<String> {
-            text.split_whitespace()
-                .map(|word| word.trim_matches(|c: char| "`'\",;()[]{}".contains(c)))
-                .filter(|word| word.contains('/') || word.contains('\\') || word.rsplit_once('.').is_some_and(|(_, ext)| !ext.is_empty() && ext.len() <= 4))
-                .map(str::to_lowercase)
-                .collect()
-        };
-        let running_files: BTreeSet<String> = running.iter().flat_map(|task| files(&format!("{} {}", task.title, task.description))).collect();
+        let ahead = work_ahead_tasks(team);
         for member in &team.members {
             if !available(member, &busy) || busy.contains(member.id.as_str()) {
                 continue;
             }
-            let draft = team.phases.iter().filter(|phase| phase.state == PhaseState::Draft).map(|phase| phase.n).min();
-            let Some(draft) = draft else { break };
-            let task = team.tasks.iter().find(|task| {
-                task.phase == draft
-                    && matches!(task.status, TaskStatus::Pending | TaskStatus::Draft)
-                    && task.assignee == member.id
-                    && task.kind == TaskKind::Task
-                    && !task.deps.iter().any(|dep| running_ids.contains(&dep.task))
-                    && files(&format!("{} {}", task.title, task.description)).is_disjoint(&running_files)
-            });
-            if let Some(task) = task {
+            if let Some(task) = ahead.iter().filter_map(|id| team.task(*id)).find(|task| task.assignee == member.id) {
                 busy.insert(member.id.as_str());
                 steps.push(Step::WorkAhead { task: task.id, member: member.id.clone() });
             }
         }
     }
     coalesce_lead(steps)
+}
+
+/// U31: the tasks of the next draft phase an idle member may work ahead on: a
+/// task (not a check) still waiting for its phase, whose dependencies are all
+/// accepted (#511 N2: a dependency inside a draft or queued phase counts too)
+/// and that names no file an open running task also names.
+pub(crate) fn work_ahead_tasks(team: &Team) -> Vec<u32> {
+    if !team.settings.work_ahead {
+        return Vec::new();
+    }
+    let Some(draft) = team.phases.iter().filter(|phase| phase.state == PhaseState::Draft).map(|phase| phase.n).min() else { return Vec::new() };
+    let running: Vec<&Task> = team
+        .tasks
+        .iter()
+        .filter(|task| {
+            !task.status.finished() && team.phases.iter().find(|phase| phase.n == task.phase).is_none_or(|phase| phase.state == PhaseState::Approved)
+        })
+        .collect();
+    let files = |text: &str| -> BTreeSet<String> {
+        text.split_whitespace()
+            .map(|word| word.trim_matches(|c: char| "`'\",;()[]{}".contains(c)))
+            .filter(|word| word.contains('/') || word.contains('\\') || word.rsplit_once('.').is_some_and(|(_, ext)| !ext.is_empty() && ext.len() <= 4))
+            .map(str::to_lowercase)
+            .collect()
+    };
+    let running_files: BTreeSet<String> = running.iter().flat_map(|task| files(&format!("{} {}", task.title, task.description))).collect();
+    team.tasks
+        .iter()
+        .filter(|task| {
+            task.phase == draft
+                && matches!(task.status, TaskStatus::Pending | TaskStatus::Draft)
+                && task.kind == TaskKind::Task
+                && task.hold.is_none()
+                && task.waits.is_none()
+                && task.deps.iter().all(|dep| plan::satisfied(team, dep.task, DependencyKind::Hard))
+                && files(&format!("{} {}", task.title, task.description)).is_disjoint(&running_files)
+        })
+        .map(|task| task.id)
+        .collect()
+}
+
+/// Whether Zerus may hand `task_id` out now: a ready task of the running plan,
+/// or (U31) a task of the next draft phase an idle member works ahead on. A
+/// draft phase's tasks are Draft, which `plan::ready` never lists.
+fn can_hand_out(team: &Team, task_id: u32) -> bool {
+    team.status == TeamStatus::Running && (plan::ready(team).contains(&task_id) || work_ahead_tasks(team).contains(&task_id))
 }
 
 /// At most one message reaches the free lead per tick; the others wait for the
@@ -2599,6 +2638,49 @@ fn task_waits(team: &mut Team, task_id: u32, member_id: &str, step: &PrepareStep
     Ok(())
 }
 
+/// #511 N3: the message that tells a member to stop a worked-ahead attempt
+/// Zerus revoked with its phase.
+pub(crate) fn stop_text(team: &Team, stop: &StopNotice) -> String {
+    format!(
+        "[Zerus team \u{b7} from: Zerus \u{b7} task: #{} \u{b7} stop]\n\
+         Stop working on task #{} {}: {}, so Zerus revoked your attempt {} that worked ahead of it. \
+         Do not report it and commit nothing more for it. The lead gives the task out again once phase {} is approved; \
+         until then wait for your next task (team {}).",
+        stop.task, stop.task, stop.title, stop.reason, stop.attempt, stop.phase, team.name
+    )
+}
+
+/// #511 N3: sends one stop notice under its own request id. A refusal is tried
+/// again on a later tick, ten times at most; an uncertain send is never
+/// repeated (it may have arrived) and stays unconfirmed in status.
+fn tell_stop(store: &mut Store, team: &Team, id: &str) -> anyhow::Result<()> {
+    let Some(stop) = team.stops.iter().find(|stop| stop.id == id && stop.notice == Notice::Pending).cloned() else { return Ok(()) };
+    let session = team.member(&stop.member).and_then(|member| member.session.clone()).context("the member has no session")?;
+    let outcome = send(&session, &stop.id, &stop_text(team, &stop));
+    change(store, &team.id, |team, events| {
+        let role = team.role_of(&stop.member);
+        let Some(found) = team.stops.iter_mut().find(|found| found.id == stop.id) else { return Ok(()) };
+        match &outcome {
+            Sent::Delivered => {
+                found.notice = Notice::Sent;
+                events.push(Event::new("stop_told", json!({"task":stop.task,"member":role,"attempt":stop.attempt})));
+            }
+            Sent::Refused(error) => {
+                found.refused += 1;
+                if found.refused >= 10 {
+                    found.notice = Notice::Unconfirmed;
+                    events.push(Event::new("stop_unconfirmed", json!({"task":stop.task,"member":role,"attempt":stop.attempt,"error":error})));
+                }
+            }
+            Sent::Uncertain(error) => {
+                found.notice = Notice::Unconfirmed;
+                events.push(Event::new("stop_unconfirmed", json!({"task":stop.task,"member":role,"attempt":stop.attempt,"error":error})));
+            }
+        }
+        Ok(())
+    })
+}
+
 /// U47/U48: starts a command or land stage as a detached `hgs run` in the
 /// stage's folder (the folder of the member whose attempt it checks), with no
 /// model. The command is the task's snapshot of the owner's catalog; a land
@@ -2679,7 +2761,7 @@ fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, fro
     // U48 (spec 1, step 2): the task's branch, confirmed before the hand-out;
     // a refused or unconfirmed one leaves the task waiting.
     let prepared = match store.load(team_id)? {
-        Some(team) if team.status == TeamStatus::Running && plan::ready(&team).contains(&task_id) => prepare_branch(&team, task_id, member_id),
+        Some(team) if can_hand_out(&team, task_id) => prepare_branch(&team, task_id, member_id),
         _ => None,
     };
     if let Some(step) = prepared.as_ref().filter(|step| matches!(step.result.as_str(), "refused" | "uncertain")) {
@@ -2693,7 +2775,7 @@ fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, fro
     let mut extra = String::new();
     let mut git_job: Option<(String, f64)> = None;
     change(store, team_id, |team, events| {
-        anyhow::ensure!(team.status == TeamStatus::Running && plan::ready(team).contains(&task_id), "no longer ready");
+        anyhow::ensure!(can_hand_out(team, task_id), "no longer ready");
         // U36: the task's pipeline as the catalog has it at its first hand-out.
         super::pipeline::snapshot(team, task_id);
         let session = team.member(member_id).and_then(|m| m.session.clone()).context("no session")?;
@@ -2824,7 +2906,7 @@ pub(crate) fn blocked_text(team: &Team, task: &Task, attempt: &Attempt, now: f64
     } else {
         format!(
             "[Zerus team \u{b7} from: Zerus \u{b7} task: #{} \u{b7} waiting {minutes} min]\n\
-             {role}'s turn on task #{} {} has not ended for {minutes} min: Background work still runs. \
+             {role}'s turn on task #{} {} has not ended for {minutes} min: Background work or a Zerus build still runs. \
              Zerus takes no report while it runs; message the member or check its session.",
             task.id, task.id, task.title
         )
@@ -3966,6 +4048,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
         Step::Rebalance { task, from, to } => hand_out(store, &team.id, *task, to, Some(from), host),
         Step::StageCommand { task, run } => start_stage_command(store, team, *task, run),
         Step::StageCommandEnded { task, run } => settle_stage_command(store, team, *task, run),
+        Step::TellStop { stop } => tell_stop(store, team, stop),
         Step::Rebalanced { tasks } => tell_lead_rebalanced(store, team, tasks),
         Step::TurnEnded { task, at, reply } => change(store, &team.id, |team, _| {
             if let Some(attempt) = team.task_mut(*task).and_then(|t| t.attempts.last_mut()) {
@@ -9165,5 +9248,216 @@ mod tests {
                 assert!(!stored.contains(key), "{key} in the stored team");
             }
         });
+    }
+
+    #[test]
+    fn a_zerus_build_keeps_the_turn_open_and_reaches_the_lead_as_a_block() {
+        // #511 N1: a member that ends its turn with `hgs run` or `hgs team run`
+        // still building is Building: its reply is not the report, and a long
+        // build reaches the lead like Background work.
+        let listing = json!([{"sessions":[
+            {"name":"codex/x/dev","run_id":"r1","state":"running","activity":"idle","phase":"idle",
+                "build":{"source":"team_run","request_id":"b1","label":"cargo-test","command":"cargo test","since":40.0}},
+            {"name":"claude/x/lead","run_id":"r0","state":"running","activity":"idle","phase":"idle","build":null}]}]);
+        let listed = seen(&listing);
+        assert!(listed[0].building && !listed[0].background && listed[0].free, "a build is work, not Background, and the member takes messages");
+        assert!(!listed[1].building);
+        let mut team = team();
+        delivered(&mut team);
+        let mut building = session("codex/x/dev", "r1", true);
+        building.reply_at = Some(50.0);
+        building.reply_id = "r7".into();
+        building.building = true;
+        // The finished turn is not captured; the block starts instead.
+        let found = steps(&team, &[building.clone()], 60.0);
+        assert!(!found.iter().any(|step| matches!(step, Step::TurnEnded { .. })), "{found:?}");
+        assert!(found.contains(&Step::GateClosed { task: 1 }), "{found:?}");
+        let mut done = building.clone();
+        done.building = false;
+        assert!(steps(&team, &[done.clone()], 60.0).contains(&Step::TurnEnded { task: 1, at: 50.0, reply: "r7".into() }));
+        // A recorded turn end waits too, and never times out into No report.
+        let timeout = team.settings.report_timeout_seconds as f64;
+        {
+            let attempt = &mut team.task_mut(1).unwrap().attempts[0];
+            attempt.turn_ended_at = Some(50.0);
+            attempt.turn_reply = "r7".into();
+            attempt.report_ready_at = Some(50.0);
+        }
+        assert!(!steps(&team, &[building.clone()], 50.0 + timeout).iter().any(|step| matches!(step, Step::NoReport { .. })));
+        assert!(steps(&team, &[done], 50.0 + timeout).contains(&Step::NoReport { task: 1 }));
+        // The blocked reminder counts the build as well.
+        team.task_mut(1).unwrap().attempts[0].blocked_since = Some(50.0);
+        let lead = session("claude/x/lead", "r0", true);
+        let blocked = team.settings.blocked_timeout_seconds as f64;
+        assert!(steps(&team, &[lead, building], 50.0 + blocked).contains(&Step::BlockedLate { task: 1 }));
+        let task = team.task(1).unwrap();
+        assert!(blocked_text(&team, task, &task.attempts[0], 50.0 + blocked).contains("a Zerus build still runs"));
+    }
+
+    /// A team whose running phase has no ready work, and a draft phase 2 with
+    /// #4 (dev), #5 (qa) that depends on #4, and #6 (dev) that depends on the
+    /// running #1.
+    fn work_ahead_team() -> Team {
+        let mut t = team();
+        for task in &mut t.tasks {
+            if task.phase == 1 {
+                task.status = TaskStatus::Submitted;
+                task.attempts.push(Attempt { n: 1, state: AttemptState::Reported, member: "dev".into(), ..Default::default() });
+            }
+        }
+        let mut events = Vec::new();
+        ops::apply(&mut t, "extend", &json!({"phase_title":"Next","tasks":[
+            {"id":4,"title":"Independent docs","assignee":"dev"},
+            {"id":5,"title":"Tests of the docs","assignee":"qa","deps":[{"task":4,"kind":"hard"}]},
+            {"id":6,"title":"After the API","assignee":"dev","deps":[{"task":1,"kind":"soft"}]}]}),
+            &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        t.settings.work_ahead = true;
+        t.members.iter_mut().find(|member| member.id == "qa").unwrap().session =
+            Some(SessionRef { name: "kimi/x/qa".into(), run_id: "r3".into(), ..Default::default() });
+        t
+    }
+
+    #[test]
+    fn work_ahead_waits_for_every_dependency_even_inside_the_draft_phase() {
+        // #511 N2: #5 depends on #4 of the same draft phase; #6 on a running task
+        // that is not accepted, even by a soft dependency.
+        let mut t = work_ahead_team();
+        let seen = vec![session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", true), session("kimi/x/qa", "r3", true)];
+        assert_eq!(work_ahead_tasks(&t), [4]);
+        let found = steps(&t, &seen, 100.0);
+        assert!(found.contains(&Step::WorkAhead { task: 4, member: "dev".into() }), "{found:?}");
+        assert!(!found.iter().any(|step| matches!(step, Step::WorkAhead { task: 5 | 6, .. })), "qa waits for #4: {found:?}");
+        // Once #4 is accepted, #5 may go ahead.
+        t.task_mut(4).unwrap().status = TaskStatus::Accepted;
+        assert!(steps(&t, &seen, 100.0).contains(&Step::WorkAhead { task: 5, member: "qa".into() }));
+        t.task_mut(1).unwrap().status = TaskStatus::Accepted;
+        assert_eq!(work_ahead_tasks(&t), [5, 6]);
+        t.settings.work_ahead = false;
+        assert!(work_ahead_tasks(&t).is_empty());
+    }
+
+    #[test]
+    fn a_work_ahead_step_hands_the_draft_task_out() {
+        // U31: a draft phase's task is Draft, which plan::ready never lists; the
+        // hand-out takes it all the same, and only while it may go ahead.
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let mut t = work_ahead_team();
+            t.id = "88888888-8888-4888-8888-888888888888".into();
+            assert_eq!(t.task(4).unwrap().status, TaskStatus::Draft);
+            let mut store = Store::open_at(&super::super::store::path(), true).unwrap();
+            store.create(&uuid::Uuid::new_v4().to_string(), &json!({}), t.clone(), vec![]).unwrap();
+            set_fake_hgs(Some(Box::new(|_, args: &[&str], _| {
+                assert_eq!(args.first().copied(), Some("send"));
+                Ok(fake_output(0, r#"{"status":"submitted"}"#, ""))
+            })));
+            run_step(&mut store, &t, &Step::WorkAhead { task: 4, member: "dev".into() }, "").unwrap();
+            // #5 waits for #4: its hand-out is refused, nothing is sent.
+            let refused = hand_out(&mut store, &t.id, 5, "qa", None, "");
+            set_fake_hgs(None);
+            assert!(refused.unwrap_err().to_string().contains("no longer ready"));
+            let saved = store.load(&t.id).unwrap().unwrap();
+            let task = saved.task(4).unwrap();
+            assert_eq!((task.status, task.attempts.len()), (TaskStatus::InProgress, 1));
+            assert!(task.attempts[0].worked_ahead && task.attempts[0].state == AttemptState::Delivered);
+            assert!(saved.task(5).unwrap().attempts.is_empty());
+        });
+    }
+
+    #[test]
+    fn a_phase_sent_back_tells_the_member_working_ahead_to_stop() {
+        // #511 N3: the revoked attempt's member hears it once, under its own
+        // request id; a refusal is tried again, an uncertain send never.
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let mut t = work_ahead_team();
+            t.id = "99999999-9999-4999-8999-999999999999".into();
+            {
+                let task = t.task_mut(4).unwrap();
+                task.status = TaskStatus::InProgress;
+                task.attempts.push(Attempt { n: 1, id: "a4".into(), member: "dev".into(), state: AttemptState::Delivered, worked_ahead: true, ..Default::default() });
+            }
+            let mut events = Vec::new();
+            ops::apply(&mut t, "reject-phase", &json!({"phase":2,"comment":"Split the docs"}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+            let task = t.task(4).unwrap();
+            assert_eq!((task.status, task.attempts.len()), (TaskStatus::Draft, 0));
+            assert_eq!(t.stops.len(), 1);
+            let stop = t.stops[0].clone();
+            assert_eq!((stop.task, stop.member.as_str(), stop.attempt, stop.notice), (4, "dev", 1, Notice::Pending));
+            assert!(events.iter().any(|event| event.kind == "work_ahead_revoked" && event.payload["member"] == "Backend"));
+            let text = stop_text(&t, &stop);
+            assert!(text.contains("Stop working on task #4 Independent docs: phase 2 was sent back") && text.contains("Do not report it"), "{text}");
+            // A busy member's session still gets it (it waits behind the turn);
+            // a stopped session does not.
+            let mut busy = session("codex/x/dev", "r1", false);
+            busy.idle = false;
+            assert!(steps(&t, &[busy], 100.0).contains(&Step::TellStop { stop: stop.id.clone() }));
+            let mut gone = session("codex/x/dev", "r1", false);
+            gone.live = false;
+            assert!(!steps(&t, &[gone], 100.0).iter().any(|step| matches!(step, Step::TellStop { .. })));
+            let mut store = Store::open_at(&super::super::store::path(), true).unwrap();
+            store.create(&uuid::Uuid::new_v4().to_string(), &json!({}), t.clone(), vec![]).unwrap();
+            let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::<Value>::new()));
+            let record = sent.clone();
+            let answer = std::rc::Rc::new(std::cell::Cell::new(1));
+            let answering = answer.clone();
+            set_fake_hgs(Some(Box::new(move |_, args: &[&str], input: Option<&Value>| {
+                assert_eq!(args.first().copied(), Some("send"));
+                record.borrow_mut().push(input.cloned().unwrap_or_default());
+                Ok(match answering.get() {
+                    1 => fake_output(1, "", "hgs: the session is busy"),
+                    2 => fake_output(0, r#"{"status":"submitted"}"#, ""),
+                    _ => fake_output(1, "", "hgs: delivery uncertain"),
+                })
+            })));
+            tell_stop(&mut store, &t, &stop.id).unwrap();
+            assert_eq!(store.load(&t.id).unwrap().unwrap().stops[0].notice, Notice::Pending, "a refusal is tried again");
+            answer.set(2);
+            let current = store.load(&t.id).unwrap().unwrap();
+            tell_stop(&mut store, &current, &stop.id).unwrap();
+            let saved = store.load(&t.id).unwrap().unwrap();
+            assert_eq!(saved.stops[0].notice, Notice::Sent);
+            // Sent once: nothing more goes out.
+            tell_stop(&mut store, &saved, &stop.id).unwrap();
+            assert!(!steps(&saved, &[session("codex/x/dev", "r1", true)], 100.0).iter().any(|step| matches!(step, Step::TellStop { .. })));
+            // An uncertain send is left unconfirmed and never repeated.
+            store
+                .mutate(None, &t.id, None, |team, _| {
+                    team.stops[0].notice = Notice::Pending;
+                    Ok(Value::Null)
+                })
+                .unwrap();
+            answer.set(3);
+            let current = store.load(&t.id).unwrap().unwrap();
+            tell_stop(&mut store, &current, &stop.id).unwrap();
+            set_fake_hgs(None);
+            assert_eq!(store.load(&t.id).unwrap().unwrap().stops[0].notice, Notice::Unconfirmed);
+            let sent = sent.borrow();
+            assert_eq!(sent.len(), 3);
+            assert!(sent.iter().all(|input| input["request_id"] == stop.id.as_str()), "one request id for the notice");
+            // A team that never worked ahead stores no stops.
+            assert!(!serde_json::to_string(&team()).unwrap().contains("\"stops\""));
+        });
+    }
+
+    #[test]
+    fn edit_draft_refuses_a_task_with_a_live_worked_ahead_attempt() {
+        // #511 N3, second half: a worked-ahead task is handed out, so it is no
+        // longer Draft; edit-draft changes and removes only Draft tasks
+        // (ops.rs edit_draft). Its text never changes under the member.
+        let mut t = work_ahead_team();
+        {
+            let task = t.task_mut(4).unwrap();
+            task.status = TaskStatus::InProgress;
+            task.attempts.push(Attempt { n: 1, id: "a4".into(), member: "dev".into(), state: AttemptState::Delivered, worked_ahead: true, ..Default::default() });
+        }
+        let phase = t.task(4).unwrap().phase;
+        let mut events = Vec::new();
+        let lead = Actor::Member("lead".into());
+        let error = ops::apply(&mut t, "edit-draft", &json!({"phase":phase,"tasks_update":[{"id":4,"title":"Other docs"}]}), &lead, &BTreeSet::new(), &mut events).unwrap_err();
+        assert!(error.to_string().contains("Task #4 is not a draft"), "{error}");
+        let error = ops::apply(&mut t, "edit-draft", &json!({"phase":phase,"tasks_remove":[4]}), &lead, &BTreeSet::new(), &mut events).unwrap_err();
+        assert!(error.to_string().contains("Task #4 is not a draft"), "{error}");
+        assert_eq!(t.task(4).unwrap().title, "Independent docs");
     }
 }

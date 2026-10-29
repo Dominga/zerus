@@ -1239,13 +1239,39 @@ fn send_back(team: &mut Team, op: &str, input: &Value, actor: &Actor, events: &m
             let record = &mut team.phases[at];
             record.state = PhaseState::Rejected;
             record.rejection = Some(PhaseRejection { comment: comment.clone(), by: label.clone(), at: now(), reworked_at: None });
-            // U31: sending the phase back revokes work done ahead of it.
+            // U31: sending the phase back revokes work done ahead of it. #511 N3:
+            // a member still on it (or whose report waits) is told to stop.
+            let at_now = now();
+            let mut stops = Vec::new();
             for task in team.tasks.iter_mut().filter(|task| task.phase == n) {
                 if task.attempts.iter().any(|attempt| attempt.worked_ahead) {
+                    for attempt in task.attempts.iter().filter(|attempt| {
+                        attempt.worked_ahead
+                            && matches!(attempt.state, AttemptState::Delivering | AttemptState::Delivered | AttemptState::Unconfirmed | AttemptState::Reported)
+                    }) {
+                        stops.push(StopNotice {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            task: task.id,
+                            title: task.title.clone(),
+                            member: attempt.member.clone(),
+                            attempt: attempt.n,
+                            phase: n,
+                            reason: format!("phase {n} was sent back"),
+                            at: at_now,
+                            notice: Notice::Pending,
+                            refused: 0,
+                        });
+                    }
                     task.status = TaskStatus::Draft;
                     task.attempts.clear();
                 }
             }
+            for stop in &stops {
+                events.push(Event::new("work_ahead_revoked", json!({"by":label,"phase":n,"task":stop.task,"member":team.role_of(&stop.member),"attempt":stop.attempt})));
+            }
+            team.stops.extend(stops);
+            let excess = team.stops.len().saturating_sub(20);
+            team.stops.drain(..excess);
             events.push(Event::new("phase_rejected", json!({"by":label,"phase":n,"title":title,"comment":comment})));
             Ok(json!({"status":"phase_rejected","phase":n}))
         }

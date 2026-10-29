@@ -1480,6 +1480,39 @@ pub(crate) struct Team {
     /// U29: additions to running phases waiting for the owner's confirmation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_additions: Vec<PendingAddition>,
+    /// #511 N3: members to tell that their worked-ahead attempt was revoked
+    /// with its phase, newest last, at most 20.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stops: Vec<StopNotice>,
+}
+
+/// #511 N3: a revoked worked-ahead attempt whose member must stop. The
+/// dispatcher sends it once under `id`; an uncertain send is never repeated.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct StopNotice {
+    /// The send's request id.
+    pub id: String,
+    pub task: u32,
+    #[serde(default)]
+    pub title: String,
+    pub member: String,
+    /// The revoked attempt's number.
+    pub attempt: u32,
+    #[serde(default)]
+    pub phase: u32,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub at: f64,
+    #[serde(default)]
+    pub notice: Notice,
+    /// Refused sends so far; after ten it is left unconfirmed for the lead.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub refused: u32,
+}
+
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
 }
 
 impl Team {

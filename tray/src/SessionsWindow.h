@@ -29,6 +29,7 @@ class QPlainTextEdit;
 #include "TeamModel.h"   // WhiteWh fork: agent teams
 #include "TeamCatalogEditor.h"
 #include "SessionAccounts.h"
+#include "HeldInputBar.h"
 #include "SessionRows.h"
 #include <QFont>
 
@@ -779,6 +780,8 @@ private:
     class HeldInputBar *m_heldBar = nullptr;
     class TerminalDraftBar *m_terminalDraft = nullptr;
     QHash<QString, QJsonArray> m_justHeld;
+    // #511 N5: the held messages each session's composer queued, until hgs settles them.
+    QHash<QString, HeldSent> m_sentHeld;
     QHash<quint64, QPair<QString, QString>> m_heldCancels;
     void renderHeld();
     void openSessionTerminal(const QString &host, const QString &name);

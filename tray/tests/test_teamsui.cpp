@@ -706,6 +706,8 @@ private slots:
     void draftIsDecidedWithoutADesignerSession();
     void designerQuestionIsAnsweredInTheWindow();
     void coordinatorQueuesASecondMessageWithCancel();
+    void heldSentTakesEachLostMessageOnce();
+    void coordinatorRestoresAHeldMessageThatWasNotDelivered();
     void coordinatorTakesPastedImagesAndFiles();
     void terminalDraftIsShownAndSentFromTheConversation();
     void catalogEditorMarksManualEdits();
@@ -5996,6 +5998,112 @@ else:print('{}')
     QCOMPARE(input->toPlainText(), QString("Also re-run the migrations"));
     sendButton->click();
     QTRY_VERIFY(input->toPlainText().isEmpty());
+}
+
+void TestTeamsUi::heldSentTakesEachLostMessageOnce()
+{
+    // #511 N5: only this composer's messages come back, each once, with why.
+    HeldSent sent;
+    sent.add("a", "Also re-run the migrations");
+    sent.add("b", "Then the docs");
+    const QJsonArray settled{
+        QJsonObject{{"request_id", "other"}, {"text", "someone else's"}, {"status", "failed"}, {"error", "x"}},
+        QJsonObject{{"request_id", "a"}, {"text", "Also re-run the migrations"}, {"status", "failed"}, {"error", "session identity changed; nothing was sent"}},
+        QJsonObject{{"request_id", "b"}, {"text", "Then the docs"}, {"status", "uncertain"}, {"error", "delivery uncertain"}}};
+    const auto lost = sent.take(settled);
+    QCOMPARE(lost.size(), 2);
+    QCOMPARE(lost[0].text, QString("Also re-run the migrations"));
+    QVERIFY(!lost[0].uncertain && lost[1].uncertain);
+    QCOMPARE(HeldSent::notice(lost[0]), QString("Not delivered: session identity changed; nothing was sent. The text is back in the composer."));
+    QVERIFY(HeldSent::notice(lost[1]).startsWith(QString::fromUtf8("Delivery unconfirmed — check the conversation before sending again.")));
+    QVERIFY(sent.take(settled).isEmpty());
+    QCOMPARE(sent.size(), 0);
+    // A draft stays and the lost text comes below it; it never comes twice.
+    QCOMPARE(HeldSent::restored({}, "lost"), QString("lost"));
+    QCOMPARE(HeldSent::restored("draft", "lost"), QString("draft\n\nlost"));
+    QCOMPARE(HeldSent::restored("draft\n\nlost", "lost"), QString("draft\n\nlost"));
+    for (int i = 0; i < 40; ++i) sent.add(QString::number(i), "x");
+    QCOMPARE(sent.size(), 32);
+}
+
+void TestTeamsUi::coordinatorRestoresAHeldMessageThatWasNotDelivered()
+{
+    // #511 N5: hgs held the message, then could not deliver it: its text comes
+    // back to the composer and the status says why; an uncertain one says
+    // Delivery unconfirmed.
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    const QString program = dir.filePath("hgs");
+    QVERIFY(FakeCli::install(program, R"PY(#!/usr/bin/env python3
+import json,os,sys
+a=sys.argv[1:]
+if a and a[0].startswith('@'):a=a[1:]
+here=__file__
+held=json.load(open(here+'.held')) if os.path.exists(here+'.held') else []
+settled=json.load(open(here+'.settled')) if os.path.exists(here+'.settled') else []
+if a[:1]==['inspect']:
+ print(json.dumps({'name':a[1],'run_id':'run-1','conversation_id':'conv-1','runtime_state':'live','process_state':'running',
+  'activity':'busy','phase':'working','cursor':0,'events':[],'input_hold_supported':True,'held_inputs':held,'held_settled':settled}))
+elif a[:1]==['send']:
+ body=json.load(sys.stdin)
+ open(here+'.sends','a').write(json.dumps(body)+'\n')
+ held.append({'request_id':body['request_id'],'text':body['text'],'queued_at':1.0});json.dump(held,open(here+'.held','w'))
+ print(json.dumps({'request_id':body['request_id'],'name':a[1],'run_id':'run-1','conversation_id':'conv-1','first_message':False,
+  'status':'queued','text':body['text']}))
+else:print('{}')
+)PY"));
+    TeamConversation::setPollInterval(100);
+    const auto restore = qScopeGuard([] { TeamConversation::setPollInterval(2000); });
+    HgsClient client(FakeCli::program(program));
+    TeamConversation conversation(&client);
+    conversation.setAgentName("the lead");
+    conversation.setSession({}, "claude/checkout/lead");
+    conversation.resize(560, 420); conversation.show();
+    auto *input = conversation.findChild<QPlainTextEdit *>("teamConversationInput");
+    auto *sendButton = conversation.findChild<QPushButton *>("teamConversationSend");
+    auto *status = conversation.findChild<QLabel *>("teamConversationStatus");
+    const auto sends = [&] {
+        QList<QJsonObject> found; QFile file(program + ".sends");
+        if (file.open(QIODevice::ReadOnly)) for (const auto &line : file.readAll().split('\n')) if (!line.isEmpty()) found << QJsonDocument::fromJson(line).object();
+        return found;
+    };
+    const auto settle = [&](const QString &id, const QString &text, const QString &state, const QString &error) {
+        QJsonArray list; QFile file(program + ".settled");
+        if (file.open(QIODevice::ReadOnly)) { list = QJsonDocument::fromJson(file.readAll()).array(); file.close(); }
+        list.append(QJsonObject{{"request_id", id}, {"text", text}, {"status", state}, {"error", error}, {"queued_at", 1.0}, {"settled_at", 2.0}});
+        QVERIFY(FakeCli::replace(program + ".held", "[]"));
+        QVERIFY(FakeCli::replace(program + ".settled", QJsonDocument(list).toJson()));
+    };
+    QTRY_VERIFY(sendButton->isEnabled());
+    QTest::qWait(300);
+    // Another composer's lost message is not this one's.
+    settle("someone-else", "Not mine", "failed", "session identity changed");
+    input->setPlainText("Also re-run the migrations"); sendButton->click();
+    QTRY_COMPARE(sends().size(), 1);
+    QTRY_VERIFY(input->toPlainText().isEmpty());
+    QTest::qWait(400);
+    QVERIFY(input->toPlainText().isEmpty());
+    // The session restarted under it: the text comes back, with why.
+    settle(sends().first()["request_id"].toString(), "Also re-run the migrations", "failed", "session identity changed; nothing was sent");
+    QTRY_COMPARE(input->toPlainText(), QStringLiteral("Also re-run the migrations"));
+    QTRY_VERIFY(status->isVisible());
+    QCOMPARE(status->text(), QStringLiteral("Not delivered: session identity changed; nothing was sent. The text is back in the composer."));
+    shot(&conversation, "n5-held-not-delivered-dark");
+    lightPalette(); conversation.setTheme(false); lightShot(&conversation, "n5-held-not-delivered-light"); darkPalette(); conversation.setTheme(true);
+    // It comes back once: the next reads keep the composer as the owner left it.
+    input->setPlainText("A new draft");
+    QTest::qWait(400);
+    QCOMPARE(input->toPlainText(), QStringLiteral("A new draft"));
+    // Sent again and left uncertain: the text comes back below the draft and
+    // the status says Delivery unconfirmed; nothing is sent again.
+    sendButton->click();
+    QTRY_COMPARE(sends().size(), 2);
+    QTRY_VERIFY(input->toPlainText().isEmpty());
+    input->setPlainText("Draft meanwhile");
+    settle(sends().last()["request_id"].toString(), "A new draft", "uncertain", "delivery uncertain: the terminal did not confirm");
+    QTRY_COMPARE(input->toPlainText(), QStringLiteral("Draft meanwhile\n\nA new draft"));
+    QTRY_VERIFY(status->text().startsWith(QString::fromUtf8("Delivery unconfirmed — check the conversation before sending again.")));
+    QTest::qWait(400);
+    QCOMPARE(sends().size(), 2);
 }
 
 void TestTeamsUi::coordinatorQueuesASecondMessageWithCancel()

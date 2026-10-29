@@ -4271,6 +4271,14 @@ void SessionsWindow::acceptInspection(const QString &host, const QString &name, 
             else (*held)[i] = item;
         }
     }
+    // #511 N5: a held message hgs could not deliver comes back to this
+    // session's composer with why; an uncertain one says Delivery unconfirmed.
+    if (auto sent = m_sentHeld.find(entry->key); sent != m_sentHeld.end() && entry->key == m_selectedKey) {
+        for (const auto &lost : sent->take(data.value("held_settled").toArray())) {
+            m_composer->editor()->setPlainText(HeldSent::restored(m_composer->editor()->toPlainText(), lost.text));
+            showNotice(HeldSent::notice(lost), true);
+        }
+    }
     // WhiteWh fork: the Tasks card's background jobs come from the same read,
     // whether or not the Processes tab is on (it drops the rest).
     if(data.contains("processes")){
@@ -6027,9 +6035,12 @@ void SessionsWindow::finishMessage(quint64 request, bool ok, const QJsonObject &
     auto &messages = m_localMessages[pending.key];
     // U35: a held message shows in the queued line, not as a sent card.
     if (ok && receipt.value("status") == "queued") {
+        // #511 N5: the text the owner wrote, without the iron rules sent ahead of it.
+        QString written;
         for (qsizetype i = 0; i < messages.size(); ++i)
-            if (messages.at(i).toObject().value("id").toString() == QString::number(request)) { messages.removeAt(i); break; }
+            if (messages.at(i).toObject().value("id").toString() == QString::number(request)) { written = messages.at(i).toObject().value("text").toString(); messages.removeAt(i); break; }
         m_justHeld[pending.key].append(QJsonObject{{"request_id", receipt.value("request_id")}, {"text", receipt.value("text")}});
+        m_sentHeld[pending.key].add(receipt.value("request_id").toString(), written.isEmpty() ? receipt.value("text").toString() : written);
         if (pending.key == m_selectedKey) { renderHeld(); renderDetails(); inspect(); }
         emit refreshRequested();
         return;

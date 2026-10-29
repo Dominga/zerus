@@ -17,9 +17,11 @@ pub(crate) struct Queue {
     pub(crate) pusher: Pusher,
     /// One Send now across all sessions (`m_queueSendRequest`).
     pub(crate) sending: Option<String>,
-    /// Hide the completed snapshot until another state is accepted.
-    pub(crate) hidden: bool,
     session: Option<SessionRef>,
+    #[cfg(test)]
+    after_release: Option<super::Job>,
+    #[cfg(test)]
+    before_send: Option<Box<dyn FnOnce(&mut Hub) + Send>>,
 }
 
 /// Captured under the hub lock, so a selection change cannot redirect a push
@@ -44,9 +46,6 @@ fn event(notice: Notice) -> ComposerEvent {
 
 impl Composers {
     pub(crate) fn queue_part(&self, hub: &Hub) -> Option<QueueView> {
-        if hub.queue.hidden {
-            return None;
-        }
         let ctx = self.context(hub)?;
         let details = ctx.details.as_deref()?;
         rules::queue_view(
@@ -150,13 +149,12 @@ impl Composers {
         let current = hub.open_key.as_deref() == Some(key) && outcome.is_some();
         if current {
             // Remove the actual held queue too: the next chord must not use
-            // the snapshot we just acted on (Qt 1863), even while hidden.
+            // the snapshot we just acted on (Qt 1863).
             if let Some(details) = hub.followed.details.as_mut() {
                 if let Some(fields) = std::sync::Arc::make_mut(details).as_object_mut() {
                     fields.remove("input_queue");
                 }
             }
-            hub.queue.hidden = true;
             self.event(
                 &mut hub,
                 event(rules::send_now_notice(
@@ -185,14 +183,27 @@ impl Composers {
         self.edit(handle, rev, epoch, text.clone(), position, anchor);
         let mut hub = self.lock();
         let Some(key) = hub.open_key.clone() else {
+            self.hand_back(hub, handle);
             return SendReply::Busy;
         };
         let Some(composer) = hub.composers.get(&key).filter(|c| c.handle == handle) else {
+            self.hand_back(hub, handle);
             return SendReply::Busy;
         };
         if composer.sending || !composer.has_content() {
-            drop(hub);
-            self.send_queue_now(None);
+            // Claim the chord's queue before releasing its selected session.
+            let delivery = self.begin_queue(&mut hub, None);
+            #[cfg(test)]
+            let between = hub.queue.after_release.take();
+            self.hand_back(hub, handle);
+            #[cfg(test)]
+            if let Some(between) = between {
+                between();
+            }
+            if let Some(delivery) = delivery {
+                self.dispatch_queue(delivery);
+            }
+            self.changed();
             return SendReply::Busy;
         }
         if composer.text_epoch != epoch || composer.draft.text != text {
@@ -200,6 +211,7 @@ impl Composers {
             return SendReply::Busy;
         }
         if !self.view_of(&hub, &key).is_some_and(|v| v.can_send) {
+            self.hand_back(hub, handle);
             return SendReply::Busy;
         }
         let message = composer.draft.text.clone();
@@ -209,6 +221,10 @@ impl Composers {
         hub.queue.session = hub.open.clone();
         // Keep the selected-session arm and the ordinary send's checks under
         // one lock, exactly as send_message holds them. Its save is unchanged.
+        #[cfg(test)]
+        if let Some(between) = hub.queue.before_send.take() {
+            between(&mut hub);
+        }
         let reply = self.send_held(&mut hub, handle, epoch, &text);
         if matches!(reply, SendReply::Busy | SendReply::Blocked { .. }) {
             self.hand_back(hub, handle);
@@ -282,7 +298,7 @@ impl Composers {
             .session
             .as_ref()
             .and_then(|s| (self.0.deps.rows)(&s.computer, &s.key, &s.name))
-            .map(|(row, _)| row.title)
+            .map(|(row, _)| row.display_title)
             .filter(|title| !title.is_empty())
             .unwrap_or(fallback);
         if let Some(notice) = hub.queue.pusher.selection_changed(key, &title) {
@@ -510,6 +526,7 @@ mod tests {
         let root = dir("push-switch");
         let (c, fake) = send_hub(&root);
         lock(&fake.row).title = "review".into();
+        lock(&fake.row).display_title = "sample-project / review".into();
         *lock(&fake.outcome) = Box::new(submitted);
         let view = opened(&c, working());
         c.send_push(view.handle, 1, view.text_epoch, "later".into(), 5, 5);
@@ -524,7 +541,7 @@ mod tests {
         assert_eq!(
             c.take_events(),
             vec![notice(
-                "The message to review was not pushed: another session was selected"
+                "The message to sample-project / review was not pushed: another session was selected"
             )]
         );
     }
@@ -837,6 +854,7 @@ mod tests {
             ),
         ] {
             let root = dir(label);
+            let expected_notice = event(rules::send_now_notice(&outcome));
             let (c, calls, release) = overlap_hub(&root, outcome);
             let view = opened(&c, working());
             assert_eq!(
@@ -856,10 +874,16 @@ mod tests {
                 c.lock().queue.pusher.active().is_none(),
                 "the explicit action owns this intent even without its text acknowledgement"
             );
+            assert_eq!(
+                c.take_events(),
+                vec![expected_notice],
+                "no extra push notice"
+            );
             release.send(()).unwrap();
             until(&c, |v| !v.sending);
             c.observe(&state(queued("❯ later", true)));
             c.tick();
+            assert!(c.take_events().is_empty(), "the consumed push stays quiet");
             assert_eq!(
                 lock(&calls)
                     .iter()
@@ -1057,6 +1081,210 @@ mod tests {
             }]
         );
         assert_eq!(send_nows(&fake), 0);
+    }
+
+    #[test]
+    fn ended_frames_and_failed_inspects_never_push_the_held_snapshot() {
+        use std::sync::atomic::Ordering;
+        let root = dir("push-fresh-details-only");
+        let (c, fake, holding, jobs) = held_queue_hub(&root);
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let held = Mutex::new(held);
+        *lock(&fake.outcome) = Box::new(move |action, id| {
+            if matches!(action, Action::Send { .. }) {
+                lock(&held).recv_timeout(Duration::from_secs(5)).unwrap();
+            }
+            submitted(action, id)
+        });
+        let view = opened(&c, working());
+        c.send_push(view.handle, 1, view.text_epoch, "later".into(), 5, 5);
+        wait_for(|| {
+            c.lock()
+                .queue
+                .pusher
+                .active()
+                .is_some_and(|p| p.request.is_some())
+        });
+        c.observe(&state(queued("❯ later", true)));
+        release.send(()).unwrap();
+        until(&c, |v| !v.sending);
+        assert_eq!(send_nows(&fake), 0);
+        holding.store(true, Ordering::SeqCst);
+        c.observe(&crate::composer::send::tests::ended());
+        assert!(
+            c.lock().queue.sending.is_none(),
+            "an ended frame contains no new details"
+        );
+        assert!(lock(&jobs).is_empty());
+        c.refresh_details();
+        let inspect = std::mem::take(&mut *lock(&jobs));
+        assert_eq!(inspect.len(), 1);
+        for job in inspect {
+            job();
+        }
+        assert!(c.lock().followed.inspect_error.is_some());
+        assert!(
+            c.lock().queue.sending.is_none(),
+            "a failed inspect contains no new details"
+        );
+        assert!(lock(&jobs).is_empty());
+        assert!(c.lock().queue.pusher.active().is_some());
+        c.observe(&state(queued("❯ later", true)));
+        let dispatch = std::mem::take(&mut *lock(&jobs));
+        assert_eq!(dispatch.len(), 1, "an accepted state may push");
+        for job in dispatch {
+            job();
+        }
+        assert_eq!(send_nows(&fake), 1);
+    }
+
+    #[test]
+    fn a_matching_snapshot_while_another_send_now_runs_preserves_the_push() {
+        use std::sync::atomic::Ordering;
+        let root = dir("push-queue-busy-snapshot");
+        let (c, fake, holding, jobs) = held_queue_hub(&root);
+        *lock(&fake.outcome) = Box::new(submitted);
+        let view = opened(&c, working());
+        c.send_push(view.handle, 1, view.text_epoch, "later".into(), 5, 5);
+        until(&c, |v| !v.sending);
+        c.observe(&state(queued("❯ older", true)));
+        holding.store(true, Ordering::SeqCst);
+        assert!(c.send_queue_now(None));
+        c.observe(&state(queued("❯ later", true)));
+        assert!(
+            c.lock().queue.pusher.active().is_some(),
+            "wait, do not consume while busy"
+        );
+        assert_eq!(lock(&jobs).len(), 1);
+        let pending = std::mem::take(&mut *lock(&jobs));
+        for job in pending {
+            job();
+        }
+        assert_eq!(send_nows(&fake), 1);
+        c.observe(&state(queued("❯ later", true)));
+        assert!(c.lock().queue.pusher.active().is_none());
+        assert_eq!(lock(&jobs).len(), 1);
+        let pending = std::mem::take(&mut *lock(&jobs));
+        for job in pending {
+            job();
+        }
+        assert_eq!(send_nows(&fake), 2);
+    }
+
+    #[test]
+    fn an_accepted_inspection_shows_the_queue_again_after_send_now() {
+        let root = dir("queue-inspect-restores");
+        let (c, fake) = send_hub(&root);
+        *lock(&fake.outcome) = Box::new(submitted);
+        opened(&c, queued("❯ earlier", true));
+        *lock(&fake.inspected) = Some(queued("❯ returned by inspection", true));
+        c.lock().followed.streamed = false;
+        assert!(c.send_queue_now(None));
+        until(&c, |v| {
+            v.queue
+                .as_ref()
+                .is_some_and(|q| q.text == "❯ returned by inspection")
+        });
+        assert!(fake.inspects.load(std::sync::atomic::Ordering::SeqCst) > 0);
+    }
+
+    #[test]
+    fn another_sessions_queue_never_shows_sending_for_the_inflight_action() {
+        use std::sync::atomic::Ordering;
+        let root = dir("queue-other-session-label");
+        let (c, fake, holding, jobs) = held_queue_hub(&root);
+        opened(&c, queued("❯ original", true));
+        holding.store(true, Ordering::SeqCst);
+        assert!(c.send_queue_now(None));
+        c.open(Some(SessionRef {
+            computer: "studio".into(),
+            key: "run:run-2".into(),
+            name: "claude/sample-project/other".into(),
+            archive_id: None,
+        }));
+        let mut second = state(queued("❯ other", true));
+        second.activity[0].key = "run:run-2".into();
+        c.observe(&second);
+        until(&c, |v| {
+            v.loaded && v.queue.as_ref().is_some_and(|q| q.label == "Send now")
+        });
+        assert_eq!(c.current().unwrap().queue.unwrap().label, "Send now");
+        c.open(None);
+        for job in std::mem::take(&mut *lock(&jobs)) {
+            job();
+        }
+        assert_eq!(send_nows(&fake), 1);
+    }
+
+    #[test]
+    fn every_busy_push_reply_hands_the_editor_back() {
+        for empty in [false, true] {
+            let root = dir(if empty {
+                "push-empty-hand-back"
+            } else {
+                "push-disabled-hand-back"
+            });
+            let (c, fake) = send_hub(&root);
+            let view = opened(&c, working());
+            *lock(&fake.online) = false;
+            let text = if empty { "" } else { "later" };
+            assert_eq!(
+                c.send_push(view.handle, 1, view.text_epoch, text.into(), 5, 5),
+                SendReply::Busy
+            );
+            assert!(c.current().unwrap().text_epoch > view.text_epoch);
+            assert_eq!(c.current().unwrap().text, text);
+        }
+    }
+
+    #[test]
+    fn an_empty_field_chord_captures_its_session_before_unlocking() {
+        let root = dir("push-empty-captured-selection");
+        let (c, fake) = send_hub(&root);
+        let view = opened(&c, queued("❯ original", true));
+        let changed = c.clone();
+        c.lock().queue.after_release = Some(Box::new(move || {
+            changed.open(Some(SessionRef {
+                computer: "studio".into(),
+                key: "run:run-2".into(),
+                name: "claude/sample-project/other".into(),
+                archive_id: None,
+            }));
+            let mut other = state(queued("❯ other", true));
+            other.activity[0].key = "run:run-2".into();
+            changed.observe(&other);
+        }));
+        assert_eq!(
+            c.send_push(view.handle, 1, view.text_epoch, String::new(), 0, 0),
+            SendReply::Busy
+        );
+        wait_for(|| send_nows(&fake) == 1);
+        let calls = sent(&fake);
+        assert_eq!(calls[0].0.name, "claude/sample-project/review");
+        assert_eq!(calls[0].0.run_id, "run-1");
+        assert_eq!(
+            c.current().unwrap().key.as_str(),
+            "studio\nclaude/sample-project/other"
+        );
+    }
+
+    #[test]
+    fn a_push_refused_by_the_held_send_hands_the_editor_back() {
+        let root = dir("push-held-busy-hand-back");
+        let (c, fake) = send_hub(&root);
+        let view = opened(&c, working());
+        c.lock().queue.before_send = Some(Box::new(|hub| {
+            let key = hub.open_key.as_ref().unwrap();
+            hub.composers.get_mut(key).unwrap().attaching = true;
+        }));
+        assert_eq!(
+            c.send_push(view.handle, 1, view.text_epoch, "later".into(), 5, 5),
+            SendReply::Busy
+        );
+        let view_after = c.current().unwrap();
+        assert_eq!(view_after.text, "later");
+        assert!(view_after.text_epoch > view.text_epoch);
+        assert!(sent(&fake).is_empty());
     }
 
     #[test]

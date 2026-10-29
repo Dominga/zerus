@@ -1289,9 +1289,9 @@ impl Composers {
                 kept.pop_front();
             }
         }
+        let accepted_details = followed && matches!(update, Some(Some(_)));
         let state_changed = match update.filter(|_| followed) {
             Some(Some((details, expiry))) => {
-                hub.queue.hidden = false;
                 hub.followed.details = Some(details);
                 hub.followed.expiry = expiry;
                 hub.followed.inspect_error = None;
@@ -1313,7 +1313,7 @@ impl Composers {
         let touched = hub.open.as_ref().is_some_and(|open| touches(batch, open));
         drop(hub);
         if state_changed {
-            self.after_observe();
+            self.after_observe(accepted_details);
         } else if new_events {
             // New events alone change the view only when they reconcile a row.
             if self.reconcile() || touched {
@@ -1329,11 +1329,15 @@ impl Composers {
     /// waiting for the open session reads the new details (Qt's
     /// `continueAfterCompact` and `continueAfterStart`, 3607), and the
     /// question cards follow (`renderQuestion`).
-    fn after_observe(&self) {
+    fn after_observe(&self, accepted_details: bool) {
         self.reconcile();
         self.continue_open();
         self.sync_questions();
-        self.queue_observed();
+        // Qt's pushInspected runs only for an accepted details read (3627,
+        // 3653), never for an ended frame or an inspection failure.
+        if accepted_details {
+            self.queue_observed();
+        }
         self.changed();
     }
 

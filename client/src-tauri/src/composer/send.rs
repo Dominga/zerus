@@ -361,11 +361,12 @@ impl Composers {
             }
             hub.followed.inspecting = None;
             // A state frame that arrived meanwhile is newer.
+            let mut accepted_details = false;
             if !hub.followed.streamed {
                 match read {
                     Ok((details, expiry, events)) => {
+                        accepted_details = true;
                         hub.followed.inspect_error = None;
-                        hub.queue.hidden = false;
                         hub.followed.details = Some(details);
                         hub.followed.expiry = expiry;
                         let (replace, events) = events;
@@ -378,7 +379,7 @@ impl Composers {
                 }
             }
             drop(hub);
-            me.after_observe();
+            me.after_observe(accepted_details);
         }));
     }
 

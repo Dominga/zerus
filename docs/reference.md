@@ -1993,6 +1993,10 @@ missing-field import. An already imported catalog without a matching marker
 keeps the existing initialize no-op. The catalog and peer wire formats are
 unchanged; older hgs versions can read the catalog but do not perform the pending
 GUI import. Qt's settings store is never changed by the bootstrap or import.
+An unreadable, malformed or unsupported pending marker prevents bootstrap but
+does not fail get or the initial organization read: they return the existing
+uninitialized state and leave the marker untouched. A stderr note is emitted
+once per process. Explicit initialize still refuses that unknown import state.
 
 The independent `hgs-swarm` service (`com.hgdev.hgs-swarm` on macOS) makes no network
 requests without members. Local changes normally trigger exchange within three

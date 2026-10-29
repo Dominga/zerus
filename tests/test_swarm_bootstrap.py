@@ -98,6 +98,36 @@ class SwarmBootstrap(unittest.TestCase):
         self.assertFalse(self.marker.exists())
         self.assertEqual(qt.read_bytes(), before)
 
+    def test_a_corrupt_pending_marker_keeps_get_successful_and_the_catalog_unchanged(self):
+        self.qt_store().unlink()
+        # Create the same uninitialized state as hello without bootstrapping.
+        stream = Stream(self)
+        stream.next(lambda frame: frame['t'] == 'hello')
+        self.assertEqual(stream.close(), 0)
+        before = self.catalog.read_bytes()
+        for contents in (b'{broken', b'{"version":2,"node_id":"future-node"}'):
+            with self.subTest(contents=contents):
+                self.marker.write_bytes(contents)
+                self.assertFalse(self.call('get')['initialized'])
+                self.assertEqual(self.catalog.read_bytes(), before)
+                self.assertEqual(self.marker.read_bytes(), contents)
+
+    def test_a_corrupt_pending_marker_keeps_watch_readable_and_warns_only_once(self):
+        stream = Stream(self)
+        stream.next(lambda frame: frame['t'] == 'hello')
+        before = self.catalog.read_bytes()
+        self.marker.write_bytes(b'{broken')
+        for _ in range(2):
+            stream.send(op='subscribe', topic='organization')
+            frame = stream.next(lambda frame: frame['t'] == 'snapshot'
+                                and frame['topic'] == 'organization')
+            snapshot = next(item['row'] for item in frame['items'] if item['key'] == 'organization')
+            self.assertFalse(snapshot['initialized'])
+        self.assertEqual(stream.close(), 0)
+        self.assertEqual(stream.process.stderr.read().count('catalog bootstrap skipped:'), 1)
+        self.assertEqual(self.catalog.read_bytes(), before)
+        self.assertEqual(self.marker.read_bytes(), b'{broken')
+
     def test_initial_organization_watch_bootstraps_and_a_later_gui_import_preserves_edits(self):
         stream, snapshot = self.organization()
         self.assertTrue(snapshot['initialized'])

@@ -5062,3 +5062,9 @@ missing-field retry. Qt's `SwarmController.cpp:76-88` remains the first-start
 import reference; the explicit empty CLI bootstrap is the owner-approved change.
 The catalog Store and replica wire formats stay unchanged. `docs/reference.md`
 records the platform probes and older-CLI compatibility boundary.
+
+An unreadable, malformed or unsupported pending marker blocks only bootstrap.
+Get and the first organization read still return the uninitialized state without
+replacing the marker; one stderr note per process avoids repeated watch noise.
+Explicit initialize keeps refusing the unknown import state. Unit and real CLI
+get/watch regressions pin the preserved catalog, marker and once-only note.

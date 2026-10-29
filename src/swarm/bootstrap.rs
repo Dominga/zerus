@@ -59,6 +59,13 @@ pub(super) fn maybe(store: &mut LockedStore, config: &Config) -> Result<()> {
 
 fn maybe_with(store: &mut LockedStore, absent: impl Fn() -> bool) -> Result<()> {
     if !store.data.imported && absent() {
+        if let Err(error) = marker(store.path.parent().expect("catalog directory")) {
+            // Unknown import metadata blocks a bootstrap, never a legacy read.
+            // A watch may resubscribe repeatedly, so report it once per process.
+            static NOTE: std::sync::Once = std::sync::Once::new();
+            NOTE.call_once(|| eprintln!("hgs: catalog bootstrap skipped: {error:#}"));
+            return Ok(());
+        }
         bootstrap_at(store, || Ok(()))?;
     }
     Ok(())
@@ -78,7 +85,7 @@ fn read_snapshot_with(config: &Config, absent: impl Fn() -> bool) -> Result<Valu
 /// an older CLI can see imported=true and skip the GUI's later import.
 fn bootstrap_at(store: &mut LockedStore, after_marker: impl FnOnce() -> Result<()>) -> Result<()> {
     let dir = store.path.parent().expect("catalog directory");
-    marker(dir)?; // Never replace an unreadable or unsupported pending marker.
+    // maybe_with validated the marker while holding this same catalog lock.
     store::replace(
         &dir.join(PENDING),
         &serde_json::to_vec(&Pending {
@@ -366,6 +373,62 @@ mod tests {
         store.save().unwrap();
         assert!(!store.data.imported);
         assert!(marker(store.path.parent().unwrap()).unwrap().is_none());
+    }
+
+    #[test]
+    fn an_unknown_pending_marker_blocks_bootstrap_but_not_get_or_watch_reads() {
+        for bytes in [
+            b"{broken".to_vec(),
+            serde_json::to_vec(&json!({"version":2,"node_id":super::super::catalog::new_id()}))
+                .unwrap(),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let config = test_config(root.path());
+            let path = config.dir.join("swarm/catalog.json");
+            let pending = path.with_file_name(PENDING);
+            {
+                let mut store = LockedStore::load(&config).unwrap();
+                store.save().unwrap();
+            }
+            std::fs::write(&pending, &bytes).unwrap();
+            let before = std::fs::read(&path).unwrap();
+            {
+                let mut store = LockedStore::load(&config).unwrap();
+                maybe_with(&mut store, || true).unwrap();
+                assert!(!store.data.imported);
+                store.save().unwrap();
+            }
+            assert_eq!(
+                read_snapshot_with(&config, || true).unwrap()["initialized"],
+                false
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            assert_eq!(std::fs::read(&pending).unwrap(), bytes);
+            let mut store = LockedStore::load(&config).unwrap();
+            assert!(initialize(&mut store, &gui()).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            assert_eq!(std::fs::read(&pending).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn an_unreadable_pending_marker_does_not_fail_an_organization_read() {
+        let root = tempfile::tempdir().unwrap();
+        let config = test_config(root.path());
+        let path = config.dir.join("swarm/catalog.json");
+        let pending = path.with_file_name(PENDING);
+        {
+            let mut store = LockedStore::load(&config).unwrap();
+            store.save().unwrap();
+        }
+        std::fs::create_dir(&pending).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        assert_eq!(
+            read_snapshot_with(&config, || true).unwrap()["initialized"],
+            false
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(pending.is_dir());
     }
 
     #[test]

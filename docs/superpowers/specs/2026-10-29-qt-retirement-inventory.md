@@ -356,12 +356,7 @@ G7 has been filed as `zerus-5wmh.66.2`; G1-G6 remain proposed work packages pend
 
 Move the window-independent parts of `EventStream`, `TrayAgent`, `DesktopPresence`, `AttentionTracker`, `ReadMarkSync` and `AutomaticApprovals` into one bounded service architecture: local/peer watch fanout, owner idle/lock sampling, attention tokens and posting intent, read-mark retries, durable attention counts and native routing. Include `.54` and `.65` rather than duplicating them.
 
-**Decision needed — service topology:**
-
-- **(a) One new durable per-user `hgs desktop` service**, installed as a systemd user unit, LaunchAgent and Windows startup registration. This gives fleet/presence/notification state one explicit lifetime and writer, and isolates it from recovery/voice jobs. The cost is a new cross-platform unit, upgrade protocol and resource budget to review.
-- **(b) Extend the existing swarm worker, `com.hgdev.hgs-recovery` and `com.hgdev.hgs-voice` services.** This avoids another unit and reuses maintained startup paths, but couples unrelated restart/failure domains and risks multiple pollers, writers or notification posters unless ownership is deliberately partitioned.
-
-**Recommendation:** choose (a), with one bounded event fanout and explicitly partitioned writers. It makes post-exit ownership and upgrades auditable without restarting recovery/voice work or any native agent. This is not an implementation decision: the owner must choose before G1 starts. Either option must use bounded indexed reads/resources, one writer per durable intent, no duplicate pollers or notifications, and maintained upgrades that preserve running native agents.
+**Decision — service topology (owner, 2026-10-29):** option (a). One new durable per-user `hgs desktop` service, installed as a systemd user unit, a LaunchAgent and a Windows startup registration. It has one bounded event fanout and explicitly partitioned writers, one writer per durable intent, and is isolated from the `com.hgdev.hgs-recovery` and `com.hgdev.hgs-voice` services and the swarm worker. It uses bounded indexed reads and resources, runs no duplicate pollers or notification posters, and its maintained upgrades preserve running native agents and never restart recovery or voice work. Option (b), extending the existing swarm worker and the recovery and voice services, was not chosen. Recorded on `zerus-5wmh.66` and as the Beads memory `qt-retirement-g1-topology`. The G1 design document goes to `claude/zerus-work-e94411a3/webui-ac` for review before implementation.
 
 Acceptance: closing every client leaves correct alerts/read delivery/badge state working on Linux, macOS and Windows; no second poller or duplicate notification appears after reconnect or upgrade.
 

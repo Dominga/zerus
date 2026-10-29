@@ -365,6 +365,14 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 let notify_pump = app.state::<commands::AppState>().pump();
                 // A replay never touches the real attachment cache either.
                 let cache = attachments_root(&cache_dir(app.handle()), replay);
+                let smoke_clock = crate::actions::smoke_env_allowed()
+                    .then(|| {
+                        std::env::var("ZERUS_CLIENT_SMOKE_NOW")
+                            .ok()
+                            .and_then(|value| value.parse::<f64>().ok())
+                    })
+                    .flatten()
+                    .map(|now| (now, std::time::Instant::now()));
                 // Saved drafts reads Qt's store and the dev app's, never
                 // writing to them; a replay lists neither.
                 let qt_drafts = composer::qt_store(
@@ -388,7 +396,10 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                             tauri::async_runtime::spawn_blocking(job);
                         }),
                         notify: std::sync::Arc::new(move || notify_pump.poke()),
-                        clock: std::sync::Arc::new(|| {
+                        clock: std::sync::Arc::new(move || {
+                            if let Some((base, started)) = smoke_clock {
+                                return base + started.elapsed().as_secs_f64();
+                            }
                             std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .map_or(0.0, |d| d.as_secs_f64())
@@ -835,6 +846,8 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::perf_config,
         commands::save_perf,
         commands::perf_log,
+        commands::smoke_log,
+        commands::smoke_resume,
         commands::display_hz,
         commands::exit_app,
         exit_flush::exit_flush_ack,

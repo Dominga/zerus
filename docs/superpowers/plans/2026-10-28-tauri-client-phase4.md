@@ -12076,11 +12076,11 @@ git commit -m "feat(client): the Processes tab and Settings > Processes"
   4. `send`: Send, wait for the local row "Submitted to terminal", and check that `log.ndjson` has one `send` call whose stdin names the file and whose argv has no message text (the hook reads the log through a `perf_log`-guarded command `smoke_log`, allowed only in a measurement run).
   5. `cold`: select `codex/sample-project/pagination`, Send, expect the "Continue with a cold cache?" dialog, choose "Send with full context", and expect a second `send` call.
   6. `start`: select the paused `claude/sample-project/review`, Send, expect "Start the session to send?", choose "Resume and send", and expect `resume` in the log, then the waiting text.
-  7. `processes`: set `processesEnabled` (not persisted), open Processes, expect three groups, and wait for the output "running 42 tests".
-  8. `preview`: hover the fixture message's `orders.json` chip and expect a ready preview.
+  7. `processes`: enable `processes/enabled` through the real settings store in the isolated smoke scratch, open Processes, expect three groups, and wait for the output "running 42 tests".
+  8. `preview`: fetch the fixture message's `orders.json` and expect its metadata, then wait for the `pixel.png` card's `convertFileSrc` thumbnail to decode at its natural size.
   9. `question` (A2):
      - select `claude/sample-project/docs-pass`;
-     - expect the card "Agent needs your answer" and no editor;
+     - expect the card "Agent needs your answer" and `input_visible: false` (the editor stays mounted but hidden);
      - choose "Unit" and Submit;
      - expect one `answer` call whose stdin carries `question_id: "tool:fixture-1"`, the fixture's `expected_question_hash`, run and conversation, and `selected_option_ids: ["opt_0_0"]`;
      - expect the status "Answer sent. Waiting for the agent…".
@@ -12095,6 +12095,8 @@ git commit -m "feat(client): the Processes tab and Settings > Processes"
       - expect "Queued in agent" with the fixture text;
       - click Send now;
       - expect one `send-now` call with `queue_id: "queue-fixture"` and the notice "Send now requested. Waiting for the agent to accept the queue.".
+  12. `image-paste` (Task 6's WebKitGTK review): paste the one-pixel PNG through the composer store, open its attachment list and wait for the draft's `convertFileSrc` thumbnail to decode.
+  13. `clear-close-order` (Task 6's WebKitGTK review): with the fake's `clear-context` reply delayed, confirm Clear session and require the dialog to close while the command is still running, then wait for its one receipt.
 
   The command the hook reads the fake's log with, in `commands.rs` (live builds only, registered beside `perf_log`):
 
@@ -12168,6 +12170,8 @@ Expected:
 - `log.ndjson` shows exactly one `send` per Send, one `answer` per Submit or Approve once, and one `send-now` per Send now, with message and answer text only in stdin.
 
 Keep the raw log with its sha256 and the executed test counts for the handoff.
+
+**As built (2026-10-29):** the smoke driver is `client/src/perf/phase4Smoke.ts`, with `client/scripts/phase4-smoke.py` preparing a fresh scratch and `client/scripts/test_phase4_smoke.py` covering the fixture and fake. Every catalog row and Activity state carries `tracked`, run and conversation identity; the six driven sessions stay out of ordinary replay deltas. Resume publishes a fresh live inspection, and `smoke_resume` advances the replay's catalog and Activity to that run. The runner pins `ZERUS_CLIENT_SMOKE_NOW` only inside the guarded smoke, keeping the planned warm cache valid without changing production time. `smoke_log` reads off the main thread, both smoke commands answer only the main webview, and session selection waits out the transient "Checking the session…" state. The added `pixel.png` and Clear steps cover Task 6's requested WebKitGTK paths.
 
 - [ ] **Step 6: Commit**
 

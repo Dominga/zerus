@@ -115,19 +115,27 @@ fn a_detail_shows_the_question_and_the_answer_chosen() {
 
 /// A fake `hgs` logging its arguments and answering per case.
 #[cfg(unix)]
-fn fake(dir: &std::path::Path, help: &str, list: &str) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
+fn fake(
+    dir: &std::path::Path,
+    help: &[u8],
+    reply: &[u8],
+    failure: Option<&[u8]>,
+) -> std::path::PathBuf {
+    std::fs::write(dir.join("help"), help).unwrap();
+    std::fs::write(dir.join("reply"), reply).unwrap();
+    if let Some(error) = failure {
+        std::fs::write(dir.join("fail"), error).unwrap();
+    } else {
+        let _ = std::fs::remove_file(dir.join("fail"));
+    }
     let script = dir.join("hgs");
-    let staged = dir.join("hgs.new");
-    std::fs::write(
-        &staged,
-        format!(
-            "#!/bin/sh\nhere=$(dirname \"$0\")\necho \"$*\" >> \"$here/calls\"\ncat >/dev/null\ncase \"$*\" in\n  --help) {help};;\n  'approval-log list') {list};;\n  'approval-log detail') echo '{{\"status\":\"approved\",\"detail\":\"\"}}';;\n  *) exit 9;;\nesac\n"
-        ),
+    let _ = std::fs::remove_file(&script);
+    std::os::unix::fs::symlink(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/support/fake_hgs_approvals.sh"),
+        &script,
     )
     .unwrap();
-    std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755)).unwrap();
-    std::fs::rename(&staged, &script).unwrap();
     script
 }
 
@@ -145,12 +153,9 @@ fn only_the_journal_s_reads_run_and_oversized_output_fails_as_intended() {
     }
     let _gone = Gone(dir.clone());
     let calls = || std::fs::read_to_string(dir.join("calls")).unwrap_or_default();
-    let help = "echo 'hgs approval-log begin|finish|list|detail (JSON stdin)'";
-    let hgs = fake(
-        &dir,
-        help,
-        "echo '{\"entries\":[],\"next\":null,\"previous\":null}'",
-    );
+    let help = b"hgs approval-log begin|finish|list|detail (JSON stdin)\n";
+    let entries = b"{\"entries\":[],\"next\":null,\"previous\":null}\n";
+    let hgs = fake(&dir, help, entries, None);
     let mut supported = false;
     let request = list_request("", "", 0, 0);
     assert!(call(&hgs, Operation::List, &request, &mut supported).is_ok());
@@ -158,23 +163,20 @@ fn only_the_journal_s_reads_run_and_oversized_output_fails_as_intended() {
     // The probe runs once, then only list and detail: never begin or finish.
     assert_eq!(calls(), "--help\napproval-log list\napproval-log detail\n");
     // A reply past the limit: the CLI's own error when it wrote one.
-    let hgs = fake(
-        &dir,
-        help,
-        "echo 'journal busy' >&2; head -c 300000 /dev/zero | tr '\\0' x; exit 3",
-    );
+    let oversized = vec![b'x'; 300000];
+    let hgs = fake(&dir, help, &oversized, Some(b"journal busy\n"));
     let failed = call(&hgs, Operation::List, &request, &mut supported).unwrap_err();
     assert!(
         failed == "journal busy" || failed == "Invalid automatic approval journal response.",
         "{failed}"
     );
-    let hgs = fake(&dir, help, "head -c 300000 /dev/zero | tr '\\0' x");
+    let hgs = fake(&dir, help, &oversized, None);
     assert_eq!(
         call(&hgs, Operation::List, &request, &mut supported).unwrap_err(),
         "Invalid automatic approval journal response."
     );
     // A help past its limit is its own error, not a failed exit.
-    let hgs = fake(&dir, "head -c 300000 /dev/zero | tr '\\0' x", "true");
+    let hgs = fake(&dir, &oversized, entries, None);
     let mut fresh = false;
     assert_eq!(
         call(&hgs, Operation::List, &request, &mut fresh).unwrap_err(),

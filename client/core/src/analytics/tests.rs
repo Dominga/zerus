@@ -689,25 +689,20 @@ type Answers = (Result<Summary, String>, Result<Speech, String>);
 /// reached it), prints `help` for `--help` and `reply` (or fails) otherwise.
 #[cfg(unix)]
 fn fake_hgs(dir: &Path, help: &str, reply: &[u8], fail: bool) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-    let script = dir.join("hgs");
-    let staged = dir.join("hgs.new");
     std::fs::write(dir.join("help"), help).unwrap();
     std::fs::write(dir.join("reply"), reply).unwrap();
-    let answer = if fail {
-        "echo private-stderr-sentinel >&2; exit 1"
+    if fail {
+        std::fs::write(dir.join("fail"), "").unwrap();
     } else {
-        "cat \"$here/reply\""
-    };
-    std::fs::write(
-        &staged,
-        format!(
-            "#!/bin/sh\nhere=$(dirname \"$0\")\necho \"$* session=${{HGS_SESSION:-unset}} run=${{HGS_RUN_ID:-unset}}\" >> \"$here/calls\"\ncase \"$*\" in *--help*) cat \"$here/help\"; exit 0;; esac\ncat >/dev/null\n{answer}\n"
-        ),
+        let _ = std::fs::remove_file(dir.join("fail"));
+    }
+    let script = dir.join("hgs");
+    let _ = std::fs::remove_file(&script);
+    std::os::unix::fs::symlink(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/fake_hgs_analytics.sh"),
+        &script,
     )
     .unwrap();
-    std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755)).unwrap();
-    std::fs::rename(&staged, &script).unwrap();
     script
 }
 

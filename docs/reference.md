@@ -732,6 +732,16 @@ old events when it reconnects. This does not mark the underlying work as read.
 muted or acknowledging pending work. Muted sessions remain available in the
 Needs attention filter.
 
+A team member is muted on every device by default. While a session is a
+non-lead member of an active team (planning, running or paused) and the owner
+has not recorded a choice, its host reports `notification_preferences.muted`
+true at revision 0, so every desktop and the phone follow one preference; the
+team's lead is never muted this way. The default is computed when the host is
+read and writes nothing. Unmuting records a choice at revision 1 or more, which
+wins on every device. A desktop whose host predates the shared default still
+mutes the member locally and says "Muted on this computer"; an updated host
+reports the shared mute, and the desktop says "Muted on all devices".
+
 Notifications open Activity for the exact requesting run and conversation,
 including remote or renamed sessions. Polling and restarts do not repeat the same
 request; resolved notifications are removed. Main-agent reply banners wait until

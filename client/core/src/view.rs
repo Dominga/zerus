@@ -955,6 +955,14 @@ mod tests {
         let other = row(&json!({"cmd": "codex", "conversation_id": "c",
             "notification_preferences": {"conversation_id": "d", "muted": true}}));
         assert!(!other.muted);
+        // U43: the host applies a team member's default mute, so a revision 0
+        // preference already reads muted on this desktop; a recorded unmute wins.
+        let team = row(&json!({"conversation_id": "c",
+            "notification_preferences": {"conversation_id": "c", "muted": true, "revision": 0}}));
+        assert!(team.muted);
+        let chosen = row(&json!({"conversation_id": "c",
+            "notification_preferences": {"conversation_id": "c", "muted": false, "revision": 1}}));
+        assert!(!chosen.muted);
     }
 
     #[test]

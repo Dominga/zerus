@@ -650,6 +650,8 @@ jobs:
     timeout-minutes: 60
     env:
       CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -670,7 +672,7 @@ jobs:
             ~/.cargo/git
           key: client-native-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('client/core/Cargo.lock', 'client/media/Cargo.lock', 'client/src-tauri/Cargo.lock') }}
           restore-keys: client-native-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-
-      - name: Core tests, media checks and Tauri checks and clippy
+      - name: Core tests, media checks and Tauri clippy
         run: bash scripts/ci/client-native.sh macos
       - name: Save native client Rust cache
         if: inputs.save_caches && steps.rust-cache.outputs.cache-hit != 'true'
@@ -692,6 +694,8 @@ jobs:
         shell: bash
     env:
       CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - name: Check out text files unchanged
         run: git config --global core.autocrlf false
@@ -714,7 +718,7 @@ jobs:
             ~/.cargo/git
           key: client-native-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('client/core/Cargo.lock', 'client/media/Cargo.lock', 'client/src-tauri/Cargo.lock') }}
           restore-keys: client-native-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-
-      - name: Core tests, media checks and Tauri checks and clippy
+      - name: Core tests, media checks and Tauri clippy
         run: bash scripts/ci/client-native.sh windows
       - name: Save native client Rust cache
         if: inputs.save_caches && steps.rust-cache.outputs.cache-hit != 'true'

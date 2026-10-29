@@ -354,6 +354,9 @@ class WorkflowContracts(unittest.TestCase):
             results.update({name:{'result':'success' if macos else 'skipped'} for name in mac})
             results.update({name:{'result':'skipped'} for name in ('arch','arch-package','ios','windows-host','windows-desktop')})
             results['cli']={'result':'success' if linux else 'skipped'}
+            results['client-native-linux']={'result':'success' if linux else 'skipped'}
+            results['client-native-macos']={'result':'success' if macos else 'skipped'}
+            results['client-native-windows']={'result':'skipped'}
             env=dict(RESULTS=json.dumps(results),RUN_LINUX=json.dumps(linux),RUN_MACOS=json.dumps(macos),RUN_ARCH='false',RUN_WINDOWS='false',RUN_IOS='false')
             with patch.dict(os.environ,env):exec(code,{})
             for name in mac[:4]:

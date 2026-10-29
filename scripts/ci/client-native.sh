@@ -19,7 +19,6 @@ case "$platform" in
             cargo +1.99.1 test --locked --manifest-path client/src-tauri/Cargo.toml
         fi
         cargo +1.99.1 check --locked --manifest-path client/media/Cargo.toml --all-targets --features video
-        cargo +1.99.1 check --locked --manifest-path client/src-tauri/Cargo.toml --all-targets
         cargo +1.99.1 clippy --locked --manifest-path client/src-tauri/Cargo.toml --all-targets -- -D warnings
         ;;
     *)

@@ -32,7 +32,7 @@
 //! path waits at most 500 ms before independently flushing draft and layout.
 
 use std::collections::{HashMap, VecDeque};
-use std::io;
+use std::io::{self, Read as _};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{sync_channel, SyncSender};
@@ -605,22 +605,18 @@ impl Organization {
         writer: &mut Writer,
     ) -> MutexGuard<'a, Hub> {
         while let Some((change, write)) = hub.sync.take_draft() {
-            let acks = std::mem::take(&mut hub.run_acks);
             self.release(hub);
             let written = writer.store_draft(&self.0.draft, &write);
             hub = self.lock();
             if !written {
-                // Earlier acknowledgements remain ahead of newer chained edits.
-                let newer = std::mem::replace(&mut hub.run_acks, acks);
-                for (from, to) in newer {
-                    hub.acknowledge_after_draft(from, to);
-                }
-                break;
+                return hub;
             }
             hub.sync.draft_written(change);
-            for (from, to) in acks {
-                self.0.pump.acknowledge_rename(&from, &to);
-            }
+        }
+        // No draft changes lag disk. This also releases a no-op queued behind
+        // an already durable pending draft without waiting for another edit.
+        for (from, to) in std::mem::take(&mut hub.run_acks) {
+            self.0.pump.acknowledge_rename(&from, &to);
         }
         hub
     }
@@ -886,10 +882,35 @@ impl Drop for RunsWorker {
     }
 }
 
+enum RunsFile {
+    Missing,
+    Oversize,
+    Bytes(Vec<u8>),
+}
+
+fn read_runs(path: &Path) -> io::Result<RunsFile> {
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(RunsFile::Missing),
+        Err(error) => return Err(error),
+    };
+    let mut bytes = Vec::new();
+    file.take(runs::MAX_BYTES + 1).read_to_end(&mut bytes)?;
+    // The size bound takes precedence over version protection. An oversized
+    // file is never prefix-parsed, even when it claims a newer version.
+    Ok(if bytes.len() as u64 > runs::MAX_BYTES {
+        RunsFile::Oversize
+    } else {
+        RunsFile::Bytes(bytes)
+    })
+}
+
 /// Only the dedicated thread takes this lock. Snapshot copying is bounded;
 /// serialization and file I/O run without the pump, hub or Shared.writer.
 struct RunsWriter {
     loaded: bool,
+    /// A newer file stays untouched throughout this run, including exit.
+    read_only: bool,
     saved: Instant,
     pending: Option<runs::Snapshot>,
     log: Throttle,
@@ -903,6 +924,7 @@ impl Default for RunsWriter {
     fn default() -> Self {
         Self {
             loaded: false,
+            read_only: false,
             saved: Instant::now(),
             pending: None,
             log: Throttle::default(),
@@ -916,24 +938,35 @@ impl Default for RunsWriter {
 
 impl RunsWriter {
     fn save(&mut self, pump: &Pump, path: &Path, force: bool) {
+        if self.read_only {
+            return;
+        }
         if !self.loaded {
-            // Also used by an immediate exit checkpoint. Serialize the first
-            // load with writes, so exiting before the worker's first pass
-            // cannot replace the saved history with just this start's rows.
-            let loaded = zerus_client_core::swarm::layout::read(path).and_then(|bytes| {
-                if let Some(bytes) = bytes {
-                    pump.load_runs(&bytes)
-                        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            match read_runs(path) {
+                Ok(RunsFile::Missing) => {}
+                Ok(RunsFile::Oversize) => {
+                    eprintln!(
+                        "zerus-client: run identities exceed the size limit; starting afresh"
+                    );
                 }
-                Ok(())
-            });
-            if let Err(error) = loaded {
-                if self.log.allow() {
-                    eprintln!("zerus-client: the run identities were not loaded: {error}");
+                Ok(RunsFile::Bytes(bytes)) => match pump.load_runs(&bytes) {
+                    Ok(()) => {}
+                    Err(runs::DecodeError::Newer(version)) => {
+                        eprintln!("zerus-client: run identities use newer version {version}; leaving the file untouched");
+                        self.read_only = true;
+                        return;
+                    }
+                    Err(runs::DecodeError::Invalid(_)) => {
+                        eprintln!("zerus-client: invalid run identities; starting afresh");
+                    }
+                },
+                Err(error) => {
+                    if self.log.allow() {
+                        eprintln!("zerus-client: the run identities were not loaded: {error}");
+                    }
+                    // Transient I/O errors retry without replacing the history.
+                    return;
                 }
-                // Keep this start's observations in memory and retry loading.
-                // Never overwrite unreadable, malformed or oversized history.
-                return;
             }
             self.loaded = true;
         }
@@ -1962,6 +1995,19 @@ mod tests {
             panic!("the rename draft was not saved")
         };
         assert_eq!(saved.desired["projects"][0]["sessions"], json!([R2]));
+        // Reobserve behind an already durable pending draft. No second file
+        // write is needed before this candidate's token is safe to commit.
+        pump.load_runs(&std::fs::read(fake.runs()).unwrap())
+            .unwrap();
+        {
+            let mut writer = organization.writer();
+            let mut hub = organization.lock();
+            organization.renames(&mut hub);
+            assert_eq!(hub.run_acks.len(), 1);
+            assert!(hub.sync.take_draft().is_none());
+            let hub = organization.save_draft(hub, &mut writer);
+            assert!(hub.run_acks.is_empty());
+        }
         organization.runs_writer().flush(RUNS_EXIT_WAIT);
         let mut saved = runs::Runs::from_json(&std::fs::read(fake.runs()).unwrap()).unwrap();
         assert_eq!(saved.observe("workstation", "1", "probe"), Some(R2.into()));
@@ -2170,55 +2216,115 @@ mod tests {
     }
 
     #[test]
-    fn unreadable_malformed_and_oversize_history_is_never_overwritten() {
-        use std::io::Write;
-        for kind in ["directory", "malformed", "oversize"] {
+    fn an_io_error_leaves_the_history_and_retries_loading() {
+        let fake = Fake::landing();
+        std::fs::create_dir(fake.runs()).unwrap();
+        let pump = Pump::default();
+        let mut writer = RunsWriter::default();
+        pump.push(row("run:new", "claude/sample-project/new"));
+        for _ in 0..2 {
+            writer.save(&pump, &fake.runs(), true);
+            assert!(!writer.loaded && !writer.read_only);
+            assert!(fake.runs().is_dir());
+        }
+        std::fs::remove_dir(fake.runs()).unwrap();
+        pump.push(Change::Remove {
+            computer: ComputerId::local(),
+            key: "run:new".into(),
+            reason: None,
+        });
+        let old = Pump::default();
+        old.push(row("run:old", "claude/sample-project/old"));
+        draft::write(&fake.runs(), &old.take_runs().unwrap().to_json()).unwrap();
+        writer.save(&pump, &fake.runs(), true);
+        assert!(writer.loaded);
+        let json: Value = serde_json::from_slice(&std::fs::read(fake.runs()).unwrap()).unwrap();
+        assert_eq!(
+            json["runs"].as_array().unwrap().len(),
+            2,
+            "old history plus observations whose rows left"
+        );
+    }
+
+    #[test]
+    fn malformed_supported_history_is_replaced_from_current_observations() {
+        for bytes in [
+            b"{broken".as_slice(),
+            br#"{"version":1,"runs":{}}"#,
+            br#"{"runs":false}"#,
+            b"[]",
+        ] {
             let fake = Fake::landing();
-            match kind {
-                "directory" => std::fs::create_dir(fake.runs()).unwrap(),
-                "malformed" => std::fs::write(fake.runs(), b"{broken").unwrap(),
-                _ => {
-                    let mut file = std::fs::File::create(fake.runs()).unwrap();
-                    file.write_all(b"{").unwrap();
-                    file.set_len(runs::MAX_BYTES + 1).unwrap();
-                }
-            }
+            std::fs::write(fake.runs(), bytes).unwrap();
             let pump = Pump::default();
             let mut writer = RunsWriter::default();
             pump.push(row("run:new", "claude/sample-project/new"));
             writer.save(&pump, &fake.runs(), true);
-            assert!(!writer.loaded);
-            if kind == "directory" {
-                assert!(fake.runs().is_dir());
-                std::fs::remove_dir(fake.runs()).unwrap();
-            } else {
-                let expected = if kind == "malformed" {
-                    7
-                } else {
-                    runs::MAX_BYTES + 1
-                };
-                assert_eq!(std::fs::metadata(fake.runs()).unwrap().len(), expected);
-            }
-            pump.push(Change::Remove {
-                computer: ComputerId::local(),
-                key: "run:new".into(),
-                reason: None,
-            });
-            let old = Pump::default();
-            old.push(row("run:old", "claude/sample-project/old"));
-            draft::write(&fake.runs(), &old.take_runs().unwrap().to_json()).unwrap();
-            writer.save(&pump, &fake.runs(), true);
-            assert!(writer.loaded, "a later load can recover");
-            let saved = runs::Runs::from_json(&std::fs::read(fake.runs()).unwrap())
-                .unwrap()
-                .snapshot()
-                .to_json();
-            let json: Value = serde_json::from_slice(&saved).unwrap();
+            assert!(writer.loaded && !writer.read_only);
+            let json: Value = serde_json::from_slice(&std::fs::read(fake.runs()).unwrap()).unwrap();
             assert_eq!(
-                json["runs"].as_array().unwrap().len(),
-                2,
-                "old history plus this run's observations"
+                json["runs"],
+                json!([["workstation\nnew", "workstation\nclaude/sample-project/new"]])
             );
+        }
+    }
+
+    #[test]
+    fn oversize_history_is_replaced_without_truncate_parsing() {
+        use std::io::Write;
+        for version in [1, 2] {
+            let fake = Fake::landing();
+            let mut file = std::fs::File::create(fake.runs()).unwrap();
+            write!(file, "{{\"version\":{version},\"runs\":[],\"unused\":\"").unwrap();
+            let block = [b'x'; 4096];
+            for _ in 0..=runs::MAX_BYTES / block.len() as u64 {
+                file.write_all(&block).unwrap();
+            }
+            file.write_all(br#""}"#).unwrap();
+            drop(file);
+            assert!(matches!(
+                read_runs(&fake.runs()).unwrap(),
+                RunsFile::Oversize
+            ));
+            let pump = Pump::default();
+            let mut writer = RunsWriter::default();
+            pump.push(row("run:new", "claude/sample-project/new"));
+            writer.save(&pump, &fake.runs(), true);
+            assert!(writer.loaded && !writer.read_only);
+            let json: Value = serde_json::from_slice(&std::fs::read(fake.runs()).unwrap()).unwrap();
+            assert_eq!(json["runs"].as_array().unwrap().len(), 1);
+            assert!(std::fs::metadata(fake.runs()).unwrap().len() < runs::MAX_BYTES);
+        }
+    }
+
+    #[test]
+    fn newer_history_is_untouched_across_saves_and_exit() {
+        for bytes in [
+            br#"{"version":2,"runs":[]}"#.as_slice(),
+            br#"{"version":3,"runs":{"new":"shape"}}"#,
+        ] {
+            let fake = Fake::landing();
+            std::fs::write(fake.runs(), bytes).unwrap();
+            let pump = Pump::default();
+            pump.push(row("run:new", "claude/sample-project/new"));
+            let organization = fake.organization(&pump, true);
+            wait_until("the newer version to become read-only", || {
+                organization.runs_writer().state.lock().unwrap().read_only
+            });
+            for n in 0..3 {
+                pump.push(row(&format!("run:{n}"), "claude/sample-project/new"));
+                organization.runs_writer().request(false);
+                flush_with_deadline(&organization);
+                assert_eq!(std::fs::read(fake.runs()).unwrap(), bytes);
+            }
+            // A newer file makes this whole run read-only, even if another
+            // writer replaces it with a supported version before a later quit.
+            let replacement = br#"{"version":1,"runs":[]}"#;
+            std::fs::write(fake.runs(), replacement).unwrap();
+            flush_with_deadline(&organization);
+            assert_eq!(std::fs::read(fake.runs()).unwrap(), replacement);
+            assert!(pump.take_runs().is_some(), "observations stay in memory");
+            fake.finish(organization);
         }
     }
 

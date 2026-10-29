@@ -1,6 +1,7 @@
 //! Qt's persisted live run identities (SessionOrganization.cpp:59, 223-231,
 //! 336). Separate from layout; Qt never evicts, while this client bounds both
 //! the count and encoded bytes, oldest written first (zerus-5wmh.47).
+use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -14,8 +15,33 @@ const EMPTY: &[u8] = br#"{"version":1,"runs":[]}"#;
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct Saved {
+    version: u64,
     runs: Vec<(String, String)>,
 }
+
+/// A typed probe also preserves a newer file whose run representation changed.
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct Version {
+    version: u64,
+}
+
+#[derive(Debug)]
+pub enum DecodeError {
+    Newer(u64),
+    Invalid(serde_json::Error),
+}
+
+impl std::fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Newer(version) => write!(f, "run identities use newer version {version}"),
+            Self::Invalid(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for DecodeError {}
 
 /// Only shared strings are copied under the pump lock. Serialization belongs
 /// to the independent file writer, never to the pump or organization worker.
@@ -63,8 +89,21 @@ pub struct Runs {
 }
 
 impl Runs {
-    pub fn from_json(bytes: &[u8]) -> Result<Self, serde_json::Error> {
-        let saved: Saved = serde_json::from_slice(bytes)?;
+    pub fn from_json(bytes: &[u8]) -> Result<Self, DecodeError> {
+        if bytes.iter().find(|byte| !byte.is_ascii_whitespace()) != Some(&b'{') {
+            return Err(DecodeError::Invalid(serde_json::Error::custom(
+                "run identities need an object",
+            )));
+        }
+        let saved: Saved = serde_json::from_slice(bytes).map_err(|error| {
+            match serde_json::from_slice::<Version>(bytes) {
+                Ok(version) if version.version > 1 => DecodeError::Newer(version.version),
+                _ => DecodeError::Invalid(error),
+            }
+        })?;
+        if saved.version > 1 {
+            return Err(DecodeError::Newer(saved.version));
+        }
         let mut runs = Self::default();
         for (token, member) in saved.runs {
             if let (Some((machine, run)), Some((owner, name))) =
@@ -332,6 +371,29 @@ mod tests {
         .unwrap();
         assert_eq!(runs.tokens.len(), 1);
         assert!(runs.take_dirty().is_none());
+    }
+
+    #[test]
+    fn newer_versions_are_distinguished_from_invalid_supported_files() {
+        for bytes in [
+            br#"{"version":2,"runs":[]}"#.as_slice(),
+            br#"{"version":3,"runs":{"new":"shape"}}"#,
+        ] {
+            assert!(matches!(Runs::from_json(bytes), Err(DecodeError::Newer(_))));
+        }
+        for bytes in [
+            br#"{"version":1,"runs":{}}"#.as_slice(),
+            b"{broken",
+            b"[]",
+            br#"{"runs":false}"#,
+        ] {
+            assert!(matches!(
+                Runs::from_json(bytes),
+                Err(DecodeError::Invalid(_))
+            ));
+        }
+        assert!(Runs::from_json(br#"{"runs":[]}"#).is_ok());
+        assert!(Runs::from_json(br#"{"version":0,"runs":[]}"#).is_ok());
     }
 
     #[test]

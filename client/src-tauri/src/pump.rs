@@ -173,7 +173,10 @@ impl Pump {
 
     /// Called by the organization worker, never the main thread. Decode
     /// before taking the pump lock; rows may already have arrived.
-    pub fn load_runs(&self, bytes: &[u8]) -> Result<(), serde_json::Error> {
+    pub fn load_runs(
+        &self,
+        bytes: &[u8],
+    ) -> Result<(), zerus_client_core::swarm::runs::DecodeError> {
         let runs = zerus_client_core::swarm::runs::Runs::from_json(bytes)?;
         let mut inner = self.lock();
         inner.grouping.replace_runs(runs);

@@ -57,6 +57,11 @@ impl AppState {
         self.live.apply_notifications(target, preferences);
     }
 
+    /// Applies the resumed run to the replay after the fake accepted Resume.
+    pub fn smoke_resume(&self, key: &str, ready: Value) -> Result<(), String> {
+        self.live.smoke_resume(key, ready)
+    }
+
     /// Follows the processes of the session the Processes tab shows.
     pub fn follow_processes(&self, target: &crate::processes::ProcessTarget) -> Result<(), String> {
         self.live.follow_processes(target)
@@ -88,6 +93,7 @@ mod live {
     use std::sync::{mpsc, Arc, Mutex, OnceLock, PoisonError};
     use std::time::Duration;
 
+    use serde_json::Value;
     use zerus_client_core::{default_hgs, ComputerId, Fleet, FollowError, OrganizationSnapshot};
     use zerus_watch_protocol::SessionRef;
 
@@ -196,6 +202,18 @@ mod live {
             {
                 Some(Source::Fleet(fleet)) => fleet.peers(),
                 _ => None,
+            }
+        }
+
+        pub fn smoke_resume(&self, key: &str, ready: Value) -> Result<(), String> {
+            match self
+                .source
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_mut()
+            {
+                Some(Source::Replay(replay)) => replay.resume("", key, ready),
+                _ => Err("not a replay".into()),
             }
         }
 
@@ -535,6 +553,7 @@ pub fn perf_config() -> Value {
         "display": crate::display::display_name(),
         // The actions smoke runs only on a replay with an explicit fake hgs.
         "actions_smoke": actions_smoke_allowed(),
+        "smoke_file": var("ZERUS_CLIENT_SMOKE_FILE"),
         // A replay run measures a synthetic Activity (the auto run tries every session for it).
         "replay": var("ZERUS_CLIENT_REPLAY").is_some(),
         // The Linux WebKit renderer decision (renderer, reason, nvidia, wayland, marker_state).
@@ -594,6 +613,50 @@ pub fn display_hz(window: tauri::WebviewWindow) -> Option<f64> {
 pub fn perf_log(line: String) {
     let line: String = line.chars().filter(|c| !c.is_control()).take(500).collect();
     eprintln!("zerus-client perf: {line}");
+}
+
+/// The fake `hgs` call log beside `ZERUS_CLIENT_HGS`, for the phase 4 smoke.
+/// Refused outside a smoke run, so a real `hgs` folder is never read.
+#[cfg(feature = "live")]
+#[tauri::command]
+pub async fn smoke_log() -> Result<Vec<serde_json::Value>, String> {
+    if !crate::actions::smoke_env_allowed() {
+        return Err("not a smoke run".into());
+    }
+    let hgs =
+        std::path::PathBuf::from(std::env::var("ZERUS_CLIENT_HGS").map_err(|e| e.to_string())?);
+    tauri::async_runtime::spawn_blocking(move || {
+        let log = hgs.with_file_name("log.ndjson");
+        let text =
+            std::fs::read_to_string(&log).map_err(|error| format!("{}: {error}", log.display()))?;
+        Ok(text
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// Advances the replay after the fake's Resume, only in the phase 4 smoke.
+#[cfg(feature = "live")]
+#[tauri::command]
+pub async fn smoke_resume(state: State<'_, AppState>, key: String) -> Result<(), String> {
+    if !crate::actions::smoke_env_allowed() {
+        return Err("not a smoke run".into());
+    }
+    let hgs =
+        std::path::PathBuf::from(std::env::var("ZERUS_CLIENT_HGS").map_err(|e| e.to_string())?);
+    let ready = tauri::async_runtime::spawn_blocking(move || {
+        let path = hgs.with_file_name("config.json");
+        let text = std::fs::read_to_string(&path)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        let config: Value = serde_json::from_str(&text).map_err(|error| error.to_string())?;
+        Ok::<Value, String>(config["resume_ready"].clone())
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    state.smoke_resume(&key, ready)
 }
 
 /// This build's identity, as `--build-info` prints it (Qt's

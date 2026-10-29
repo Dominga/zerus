@@ -987,6 +987,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         composer::composer_undo_remove,
         composer::composer_allow_retry,
         composer::composer_refresh,
+        composer::composer_clear_control,
         composer::composer_tab,
         drops::dropped_files,
         composer::fetch::attachment_fetch,

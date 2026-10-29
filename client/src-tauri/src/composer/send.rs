@@ -1928,6 +1928,50 @@ fn clear_control(hub: &Hub, ctx: &Context, details: &Value) -> ClearControl {
 }
 
 impl Composers {
+    /// Clear session for an unselected menu row, using that row's own inspect
+    /// and the same control as the open composer (Qt's checking tooltip and
+    /// inspectionReady). The identities must still match the listed row.
+    pub fn clear_control_for(&self, session: SessionRef) -> Option<ClearControl> {
+        let (row, online) = (self.0.deps.rows)(&session.computer, &session.key, &session.name)?;
+        let target = Target {
+            computer: session.computer.clone(),
+            name: session.name.clone(),
+            run_id: row.run_id.clone().unwrap_or_default(),
+            conversation_id: row.conversation_id.clone().unwrap_or_default(),
+        };
+        let details = (self.0.deps.inspect)(&target, session.archive_id.as_deref()).ok()?;
+        if details["run_id"].as_str() != Some(target.run_id.as_str())
+            || details["conversation_id"].as_str() != Some(target.conversation_id.as_str())
+        {
+            return None;
+        }
+        let hub = self.lock();
+        let key = session.key.clone();
+        let clearing = (self.0.deps.facts)(&session.computer, &session.name)
+            == Some(WriteKind::Clear)
+            || hub.clearing.as_ref() == Some(&key);
+        let facts = BlockFacts {
+            clearing,
+            online,
+            state: row.state.clone(),
+            cmd: cmd(&row),
+            ..BlockFacts::default()
+        };
+        let context = Context {
+            session,
+            key,
+            row,
+            online,
+            details: Some(Arc::new(details)),
+            facts,
+        };
+        Some(clear_control(
+            &hub,
+            &context,
+            context.details.as_deref().unwrap(),
+        ))
+    }
+
     /// The catalog's view of the open session for S3.
     fn rules_session(ctx: &Context) -> Session {
         rules_of_row(
@@ -2811,6 +2855,7 @@ pub(crate) mod tests {
     /// The session, clock, inspect and calls a test controls.
     pub(crate) struct Fake {
         pub(crate) row: Mutex<ViewRow>,
+        pub(crate) listed: Mutex<bool>,
         pub(crate) now: Mutex<f64>,
         pub(crate) inspected: Mutex<Option<Value>>,
         pub(crate) inspects: AtomicUsize,
@@ -2857,6 +2902,7 @@ pub(crate) mod tests {
     ) -> (Composers, Arc<Fake>) {
         let fake = Arc::new(Fake {
             row: Mutex::new(row("claude/sample-project/review")),
+            listed: Mutex::new(true),
             now: Mutex::new(1_793_000_100.0),
             inspected: Mutex::new(None),
             inspects: AtomicUsize::new(0),
@@ -2881,7 +2927,13 @@ pub(crate) mod tests {
                 spawn,
                 notify: Arc::new(|| {}),
                 clock: Arc::new(move || *lock(&f1.now)),
-                rows: Arc::new(move |_, _, _| Some((lock(&f2.row).clone(), *lock(&f2.online)))),
+                rows: Arc::new(move |_, _, _| {
+                    if *lock(&f2.listed) {
+                        Some((lock(&f2.row).clone(), *lock(&f2.online)))
+                    } else {
+                        None
+                    }
+                }),
                 facts: Arc::new(move |_, _| *lock(&f4.write)),
                 reconnect: reconnect.unwrap_or_else(|| {
                     Arc::new(move |computer| {
@@ -5415,7 +5467,7 @@ mod continuations {
         receipt, send_hub, send_hub_on, send_hub_with, state, Fake, Held,
     };
     use super::*;
-    use crate::composer::tests::{dir, drafts, hold, until, KEY};
+    use crate::composer::tests::{dir, drafts, hold, session, until, KEY};
     use crate::composer::{lock, Job};
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -5726,6 +5778,30 @@ mod continuations {
         );
         assert_eq!(view.text, "slow");
         assert!(sends(&fake).is_empty());
+    }
+
+    #[test]
+    fn an_unselected_clear_control_uses_the_rows_inspection() {
+        let root = dir("clear-unselected");
+        let (c, fake) = send_hub(&root);
+        *lock(&fake.inspected) = Some(ready());
+        let control = c.clear_control_for(session()).unwrap();
+        assert!(control.enabled && !control.dismiss && control.cache_enabled);
+        assert_eq!(
+            (control.run.as_str(), control.conversation.as_str()),
+            ("run-1", "conv-1")
+        );
+        assert_eq!(fake.inspects.load(Ordering::SeqCst), 1);
+        *lock(&fake.inspected) = Some(json!({
+            "run_id": "somebody-else",
+            "conversation_id": "conv-1",
+            "clear_context_supported": true
+        }));
+        assert!(c.clear_control_for(session()).is_none());
+        assert_eq!(fake.inspects.load(Ordering::SeqCst), 2);
+        *lock(&fake.listed) = false;
+        assert!(c.clear_control_for(session()).is_none());
+        assert_eq!(fake.inspects.load(Ordering::SeqCst), 2);
     }
 
     #[test]

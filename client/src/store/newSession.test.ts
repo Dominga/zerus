@@ -10,6 +10,7 @@ import type { Session } from "../ui/sessions/types";
 
 vi.mock("./ui", () => ({ selected: () => undefined, machineFilter: () => [], setPage: () => {} }));
 vi.mock("../bridge", () => ({}));
+vi.mock("./creations", () => ({ creationAdmitted: () => {} }));
 
 describe("accounts (NewSessionDialog.cpp 865-1023)", () => {
   // macOS gives the dialog's first focus to the list: while it loads, its only row (Run shell) is no choice.

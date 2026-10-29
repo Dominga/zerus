@@ -144,7 +144,7 @@ Everything in the phase 2 plan's Global Constraints applies. In addition:
   - favorites (423-453);
   - worktree catalogs and the prefill (454-465);
   - the folder browser (`DirectoryDialog.cpp:127-157`).
-- **No dots as separators** (`scripts/check-ui-separators.py`). The dialog's Qt texts with " · " follow ruling D4. The creation cards' texts with " · " wait for D6.
+- **No dots as separators** (`scripts/check-ui-separators.py`). The dialog's Qt texts with " · " follow ruling D4. The creation cards' texts with " · " follow ruling D6.
 - **No obvious keyboard hints.** Shortcut names stay in tooltips only where the client already shows them.
 - **Rules from the client owner session (webui, 2026-10-28):**
   1. **Shortcut.** Ctrl/Cmd+N is Qt's `session.new` (`tray/src/Shortcuts.cpp:29, 58`, a Window shortcut). Bind it as `session.new` through the events stream's client shortcut registry built on Qt's ids (Settings > Keyboard). If the registry is not on the branch yet, bind a fixed default under that id. The Mac app menu has no Cmd+N item, so the webview receives the key.
@@ -216,6 +216,8 @@ client/src/store/newSessionOpencode.ts (+test)  its OpenCode part: models, folde
 client/src/store/newSessionFake.ts           the store tests' recorded bridge and fake world
 client/src/ui/lib/json.ts                    the shared JSON readers (object, array, string)
 client/src/store/creations.ts (+test)        creations, notices, card selection and reveal, withCreations, the status menu
+client/src/ui/sessions/creations-ui.ts (+test)  the cards' view rules: their rows (placeCreations), the progress view's buttons,
+                                             the status menu, the footer and the notices' texts (Task 6)
 client/src/ui/sessions/newsession-ui.ts (+test)  rows: computers, projects, folders, accounts; usage text; folderLaunchProblem
 client/src/ui/sessions/opencode-models.ts (+test)  OpenCodeModels and the picker's list rules, OpenCodeEffort
 client/src/ui/sessions/paths.ts (+test)      the port of paths.rs and three launch.rs folder helpers (the scoped exception);
@@ -235,7 +237,8 @@ client/src/ui/sessions/worktree-dialogs.ts (+test)  the rules of both worktree d
 client/src/ui/sessions/CreationCard.tsx      a creation row in Sessions
 client/src/ui/sessions/CreationPanel.tsx     the creation progress view in the detail pane
 client/src/ui/components/FolderBrowser.tsx (+ folder-browser.ts, test)  DirectoryDialog for a peer
-client/src/ui/styles/newsession.css          the dialog's and cards' styles (ported from design/webui setup styles)
+client/src/ui/styles/newsession.css          the dialog's styles (ported from design/webui setup styles)
+client/src/ui/styles/creations.css           the cards' and progress view's styles, in the main chunk (Task 6)
 client/src/ui/styles/folder-browser.css      the folder browser's styles (Task 4)
 client/src/App.tsx, ui/components/Rail.tsx, ui/sessions/SessionList.tsx, ui/sessions/model.ts,
 client/src/ui/screens/Projects.tsx, ui/screens/reasons.ts, store/projects.ts, store/actions.ts,
@@ -1012,7 +1015,7 @@ New modules owned by this plan:
   - or the applied `swarm apply`, so the creation waits for it?
 
   Proposal: acceptance into the draft, since the draft survives restarts and the Controller owns delivery. A refused intent is an error.
-- **D6 (design session):** Qt texts with dots in the creation cards:
+- **D6 (design session, ruled 2026-10-28; see the rulings below):** Qt texts with dots in the creation cards:
   - the panel title "{tag} · {caption} · {m}:{ss}" (`SessionsWindow.cpp:3742`). Proposal: the tag as the title, with "{caption} ({m}:{ss})" under it;
   - the status menu entries "{tag} · {caption}" (472). Proposal: "{tag}: {caption}".
 
@@ -1030,6 +1033,12 @@ Agreed with the client owner session (webui) on 2026-10-28 (Task 3 fix round 1):
 Ruled by the design session on 2026-10-28, verbatim:
 > D1 yes, the creation cards (rows, progress, Continue/Check/Stop/Hide/Edit, the status menu) go in the same milestone PR, since without them an admitted creation is invisible; D2 yes, five launch options now, the executor-only "Project changed…" path arrives with the Tasks view; D3 approved: the official tauri-plugin-dialog, Rust side only, pinned in Cargo.toml and Cargo.lock, with the license check passing (scripts/collect-licenses.py if it covers src-tauri, say which check), the dialog opened from Rust, never by giving the webview the plugin's JS permission; D4 approved: "Default, Favorite, Free" and "{provider} (this folder)"; D5 yes, keep " (offline)".
 
+Ruled by the design session on 2026-10-28 (D6):
+- the panel's title is the tag, with "{caption} ({m}:{ss})" under it;
+- the status menu entries read "{tag}: {caption}";
+- "Older creations…" is a heading before each further 50;
+- under a search, a card whose details contain the query stays.
+
 How the plan applies them:
 - **D1:** Task 6.
 - **D2:** the Goal, and Task 3's Start texts. The foreground path's texts wait for the Tasks view:
@@ -1044,13 +1053,14 @@ How the plan applies them:
 - **D3:** Task 1. The license check is `scripts/collect-licenses.py` with `--manifest-path client/src-tauri/Cargo.toml`. It covers `src-tauri` only with that argument: CI's "Rust license notices" step runs it for the root workspace.
 - **D4:** Tasks 2 and 4.
 - **D5:** Tasks 2 and 3.
+- **D6:** Task 6.
 
 Deviations from Qt:
 1. Background creation only (ruling D2).
 2. No pending clone record exists in the client, because only the foreground clone saves one (`RepositoryClone.cpp:83-93`). So "A previous clone is unconfirmed. Check its original result before continuing." (`RepositoryClone.cpp:37`), Check result and Choose another destination… never show in the dialog (196, 711-713).
 3. New worktree's absolute-path check and its destination suggestion use the selected computer's path style (core `paths.rs`). Qt's `QDir::isAbsolutePath`, `QDir::filePath` and `QFileInfo` use this computer's style (`NewWorktreeDialog.h:33, 67, 71`). N1 made the same choice for Auto (`launch::automatic_worktree_available`).
 4. The remembered launch choices live in the events core settings store under Qt's key names, never in QSettings (webui rule 4). Until that store is on the base, they are not remembered.
-5. The dot separators of ruling D4, and of D6 once ruled.
+5. The dot separators of rulings D4 and D6.
 6. Creation cards under a search query: kept in place when their details match (D6), since the client has no separate search results list.
 7. The folder path rules and three folder helpers have a TypeScript copy (`paths.ts`), the scoped exception above; the shared fixture keeps it equal to the core.
 8. The dialog keeps at most 64 verified worktree catalogs (Qt keeps them for the dialog's life without a bound).
@@ -1067,6 +1077,12 @@ Deviations from Qt:
     that copy (`WorktreePanel.h:83`).
 13. Start from steps from the item its typed text names, else from the last item chosen or stepped to. Qt's QComboBox steps
     from its current index, which typing moves to a matching item only once the edit finishes (focus leaves, or Return).
+14. A bound creation hands its selection to the live session of its computer with its agent and tag. Qt also requires the
+    operation's launch ID (`placeLaunchedSessions` 3031-3034), which the watch rows do not carry (Q3); the host binds by it.
+15. A card action the host refuses (the operation is gone or bound) or whose call is lost shows its text as an error notice.
+    Qt's actions run in process and return silently (`SessionCreationController.cpp` 359-408).
+16. Under the Archive filter the list is the archive's, so a revealed card does not show there; its progress view still does.
+    Qt's rows show a revealed card under every filter (SessionsWindowRows.cpp:310).
 
 ## Order and handoff
 

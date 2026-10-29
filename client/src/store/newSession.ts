@@ -18,6 +18,7 @@ import { machineCards, requestMachine } from "./machines";
 import { defaultProject as organizationDefault, groupOf, grouping, setProjectToShow } from "./organization";
 import { detailsFor, followedFor, notify } from "./actions";
 import { machineFilter, selected, setPage } from "./ui";
+import { creationAdmitted } from "./creations";
 import { snapshotOf } from "../ui/sessions/actions-ui";
 
 // The one open New session dialog (tray/src/NewSessionDialog.cpp with
@@ -1285,6 +1286,9 @@ const app = createNewSessionStore({
   every: (ms, run) => { const timer = setInterval(run, ms); return () => clearInterval(timer); },
   now: () => Date.now() / 1000,
 });
+
+// Each admitted creation's card is selected and revealed (SessionsWindow 2914-2919).
+app.onCreationAdmitted(creationAdmitted);
 
 // Fleet updates reach the open dialog (SessionsWindow 2692).
 createRoot(() => {

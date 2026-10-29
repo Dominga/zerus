@@ -3,7 +3,8 @@ import { archiveRows } from "../../store/archive";
 import { catalog, orderedRows } from "../../store/catalog";
 import { defaultProject, grouping, groups } from "../../store/organization";
 import { stateFilter, matchesFilter, search, machineFilter, projectFilter, expandedChildren, compactRows } from "../../store/ui";
-import type { GroupingOut } from "../../types";
+import { withCreations } from "../../store/creations";
+import type { CreationCard, GroupingOut } from "../../types";
 import type { Session, Subagent } from "./types";
 
 // Flattened list model. Heights match tray/src/SessionCardDelegate.h
@@ -15,7 +16,8 @@ export type Row =
   /** `project` is the project's id; `name` and the colour come from the organization's header. */
   | { type: "header"; id: string; project: string; name: string; color: string | null; palette: number; collapsed: boolean; total: number; attention: number; unread: number; working: number }
   | { type: "card"; id: string; session: Session; expandable: boolean; expanded: boolean; compactRow: boolean }
-  | { type: "child"; id: string; parent: Session; child: Subagent; first: boolean; last: boolean };
+  | { type: "child"; id: string; parent: Session; child: Subagent; first: boolean; last: boolean }
+  | { type: "creation"; id: string; creation: CreationCard };
 
 export const ROW_HEIGHT = { header: 40, card: 94, child: 64, collapsedRow: 40 } as const;
 
@@ -23,6 +25,7 @@ export const ROW_HEIGHT = { header: 40, card: 94, child: 64, collapsedRow: 40 } 
 export function rowHeight(row: Row, strip = false): number {
   if (row.type === "header") return ROW_HEIGHT.header;
   if (row.type === "child") return ROW_HEIGHT.child;
+  if (row.type === "creation") return ROW_HEIGHT.card;
   if (row.compactRow && !strip) return ROW_HEIGHT.collapsedRow;
   return ROW_HEIGHT.card;
 }
@@ -117,10 +120,12 @@ export const listRows = createMemo<Row[]>(() => {
   const q = search().trim();
   const hosts = machineFilter();
   const visible = (s: Session) => matchesFilter(s, f) && (!hosts.length || hosts.includes(s.machine)) && sessionMatchesSearch(s, q);
-  return groupRows({
+  const scope = {
     grouping: grouping(), members: membersByGroup(), visible, projects: projectFilter(),
-    expanded: (k) => !!expandedChildren[k], compact: (k) => !!compactRows[k],
-  });
+    expanded: (k: string) => !!expandedChildren[k], compact: (k: string) => !!compactRows[k], filter: f, hosts, query: q,
+  };
+  const out = groupRows(scope);
+  return withCreations(out, scope);
 });
 
 export const shownSummary = createMemo(() => {

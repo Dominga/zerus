@@ -19,6 +19,8 @@ import { markAllEntry, markAllTip, markEntry, runMarkAll } from "./mark-entries"
 import { moveEntry, openDeleteProjectDialog, openRenameProjectDialog } from "./OrganizationDialogs";
 import { chipColor, headerEntries, projectColor, type FilterChip } from "./organization-ui";
 import { newSessionForProject, newSessionFromPanel } from "./newsession-view";
+import { CreationCard } from "./CreationCard";
+import { creationFooter, creationStatusMenu } from "../../store/creations";
 import {
   selectedKey, setSelectedKey, setExpandedChildren, expandedChildren,
   setCompactRows, compactRows, stateFilter, setStateFilter, counts, search, setSearch, stripMode, setStripMode,
@@ -451,9 +453,9 @@ export function SessionList() {
           </Show>
         <SelectionBar />
         <footer class="sp-foot">
-          <span class="tabular ell">{shownSummary().shown ? `${shownSummary().shown} shown, ${shownSummary().working} working, ${shownSummary().attention} attention` : catalog.order.length ? "No matching sessions" : ""}</span>
+          <span class="tabular ell">{shownSummary().shown ? `${shownSummary().shown} shown, ${shownSummary().working} working, ${shownSummary().attention} attention${creationFooter(true)}` : creationFooter(false) || (catalog.order.length ? "No matching sessions" : "")}</span>
           <span class="grow" />
-          <button class="icon-btn small" data-tip="Session creation status" disabled><Icon name="clock" size={16} /></button>
+          <button class="icon-btn small" data-tip="Session creation status" onClick={(e) => openMenu(e, creationStatusMenu())}><Icon name="clock" size={16} /></button>
           <button class="icon-btn small" title={markAllTip(markAllEntry())} disabled={markAllEntry().disabled} onClick={() => runMarkAll()}><Icon name="read-all" size={16} /></button>
           <button class="icon-btn small" data-tip="Saved drafts: recover local drafts, including those from ended sessions" disabled><Icon name="drafts" size={16} /></button>
         </footer>
@@ -543,6 +545,7 @@ function ListRow(props: { id: string; list: RowSource }) {
           </div>
         )}
       </Show>
+      <Show when={row()?.type === "creation" ? (row() as Extract<Row, { type: "creation" }>) : undefined}>{(v) => <CreationCard card={v().creation} />}</Show>
       <Show when={row()?.type === "card" ? (row() as Extract<Row, { type: "card" }>) : undefined}>
         {(v) => (
           <div class="rowhit" classList={{ "has-kids-open": v().expanded && !v().compactRow, multi: !!multi[v().session.key], dragged: dragItem()?.id === v().session.key }}

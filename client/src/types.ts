@@ -451,6 +451,33 @@ export interface RepositoryFields {
  * neither: its outcome is unknown, so the dialog stays submitted and nothing sends it again.
  */
 export type CreationAdmission = { admitted: string } | { refused: string };
+/**
+ * An admitted creation's card (Task 5's `creations.rs` `CreationCard`): the operation's fields, with the caption,
+ * `can_resume` and `can_edit` from the core (`creation::caption`, `can_resume`, `Creations::can_edit`).
+ */
+export interface CreationCard {
+  id: string; tag: string;
+  /** The operation's state (`saving` ... `failed`, `bound`). */
+  state: string;
+  caption: string; error: string;
+  /** Seconds since the Unix epoch. */
+  created: number;
+  /** The destination project's id. */
+  group: string;
+  /** "" for this computer, else the alias. */
+  host: string;
+  /** The computer's identity: its machine card's host, else the alias. */
+  machine: string;
+  cmd: string; account: string;
+  /** The folder the agent starts in. */
+  target: string;
+  show_pending: boolean; launch_dispatched: boolean; stop_requested: boolean; worktree_receipts: boolean;
+  can_resume: boolean; can_edit: boolean;
+}
+/** What a card's buttons ask of its exact operation (`creation_action`). */
+export type CreationAction = "resume" | "check" | "stop" | "hide" | "show";
+/** The `creations` event: a changed card, or an evicted operation. */
+export type CreationEvent = CreationCard | { id: string; removed: true };
 /** New session's account rows of the dialog's computer (`screens.rs`). */
 export interface LaunchAccounts {
   /** A catalog reply (good or failed) was filed since the dialog chose this computer. */

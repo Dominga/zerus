@@ -6,6 +6,8 @@ import { newSessionFromShortcut, newSessionOpened } from "./ui/sessions/newsessi
 import { OrganizationDialogs } from "./ui/sessions/OrganizationDialogs";
 import { SessionList } from "./ui/sessions/SessionList";
 import { SessionDetail } from "./ui/sessions/SessionDetail";
+import { CreationPanel } from "./ui/sessions/CreationPanel";
+import { selectedCreation } from "./store/creations";
 import { PerfHost } from "./ui/PerfHost";
 import { OverviewScreen } from "./ui/screens/Overview";
 import { MachinesScreen } from "./ui/screens/Machines";
@@ -98,7 +100,7 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
           <Match when={page() === "sessions"}>
             <div class="sessions-page" classList={{ "layout-right": skin().layout["sessions-pane"] === "right" }}>
               <SessionList />
-              <SessionDetail />
+              <Show when={selectedCreation() !== undefined} fallback={<SessionDetail />}><CreationPanel /></Show>
             </div>
           </Match>
           <Match when={page() === "dashboard"}><OverviewScreen /></Match>

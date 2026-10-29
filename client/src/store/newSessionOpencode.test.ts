@@ -8,6 +8,7 @@ import { settle, setup, type World } from "./newSessionFake";
 
 vi.mock("./ui", () => ({ selected: () => undefined, machineFilter: () => [], setPage: () => {} }));
 vi.mock("../bridge", () => ({}));
+vi.mock("./creations", () => ({ creationAdmitted: () => {} }));
 
 describe("OpenCode (NewSessionDialog.cpp 1145-1313)", () => {
   const opencode = (w: World) => { w.flags.add("opencode"); w.flags.add("opencode-models"); };

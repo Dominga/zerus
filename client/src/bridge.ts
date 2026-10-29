@@ -1,7 +1,7 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type Batch, type ComputerId, type Details, type EditOutcome, type Outcome, type ReadMark, type Target, type TerminalConnected, type TerminalFacts, type TerminalFinished, type TerminalStatus, type TerminalTarget, type ArchivePage, type ArchivedActivity } from "./types";
-import type { CreatedWorktree, CreationAdmission, FolderOut, LaunchAccounts, LaunchChoices, LaunchPlan, LaunchStart, MachineMeta, NewSessionContext, NewSessionFormInput, NewSessionFormView, PathStyle, RepositoryFields } from "./types";
+import type { CreatedWorktree, CreationAction, CreationAdmission, CreationCard, CreationEvent, FolderOut, LaunchAccounts, LaunchChoices, LaunchPlan, LaunchStart, MachineMeta, NewSessionContext, NewSessionFormInput, NewSessionFormView, PathStyle, RepositoryFields } from "./types";
 import type { ActivityPort, FollowRequest } from "./store/activity";
 import { documentVisibility, type PageVisibility } from "./store/visibility";
 
@@ -411,6 +411,20 @@ export const newSessionPlan = (input: NewSessionFormInput, choices: LaunchChoice
  * rejected call is a lost answer, an unknown outcome: never sent again.
  */
 export const creationSubmit = (plan: LaunchPlan) => desktop<CreationAdmission>("creation_submit", { plan });
+/** Every unbound creation's card, newest first, at most 128 (Task 5's `creations_view`); a read. */
+export const creationsView = () => desktop<CreationCard[]>("creations_view");
+/** The operation's details text (`creation::details` with Qt's stamps); null once it is gone. A read. */
+export const creationDetails = (id: string) => desktop<string | null>("creation_details", { id });
+/** One action on the exact operation; a rejection is the host's text (the operation is gone or bound). Never sent again. */
+export const creationAction = (id: string, action: CreationAction) => desktop<void>("creation_action", { id, action });
+/** Edit choices…: the operation while it can still be edited, else null. A read. */
+export const creationPlan = (id: string) => desktop<Record<string, unknown> | null>("creation_plan", { id });
+
+/**
+ * `creations`: each changed card, or `{ id, removed: true }` for an evicted operation; resolves with the stop
+ * once listening, so the cards read after it miss no change.
+ */
+export const onCreations = (listener: (event: CreationEvent) => void) => onEvent<CreationEvent>("creations", listener);
 /** The Windows-session warning's text when Start must ask first; `computer` is "" for this one. */
 export const launchWarning = (local: MachineMeta, computer: ComputerId) => desktop<string | null>("launch_warning", { local, computer });
 /** The repository fields; `fresh` (the old record's folder name, kept even when empty) starts them anew on another computer or style. */

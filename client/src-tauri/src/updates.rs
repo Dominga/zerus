@@ -1054,7 +1054,7 @@ pub fn restart_app(app: &AppHandle) -> Result<(), String> {
 #[cfg(target_os = "macos")]
 #[tauri::command]
 pub fn updates_restart(app: AppHandle) -> Result<(), String> {
-    restart_app(app)
+    restart_app(&app)
 }
 
 #[cfg(not(target_os = "macos"))]

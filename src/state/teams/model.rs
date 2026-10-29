@@ -129,6 +129,24 @@ pub(crate) struct Settings {
     /// phase; the result waits for that phase's approval.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub work_ahead: bool,
+    /// U48: the owner allows a pipeline's land stage, which may push; without
+    /// it a land stage holds the task for the lead.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub land_allowed: bool,
+    /// U48: each hand-out starts the task's own branch in the member's folder;
+    /// absent keeps one branch per member.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_per_task: Option<BranchPerTask>,
+    /// U48: the branch a task's branch starts from; empty is the lead's branch.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub base_branch: String,
+}
+
+/// U48: the name of a task's branch: `{id}`, `{member}` and `{team8}` are
+/// filled in, and the result is a valid Git branch name.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct BranchPerTask {
+    pub template: String,
 }
 
 fn default_max_members() -> usize {
@@ -205,6 +223,9 @@ impl Default for Settings {
             subteam_approval: SubteamApproval::default(),
             auto_accept: false,
             work_ahead: false,
+            land_allowed: false,
+            branch_per_task: None,
+            base_branch: String::new(),
         }
     }
 }
@@ -690,6 +711,8 @@ impl TaskStatus {
 pub(crate) enum Decider {
     Lead,
     Human,
+    /// U48: a pipeline's land stage accepted the task.
+    Zerus,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -940,6 +963,41 @@ pub(crate) struct Attempt {
     /// last, at most 20.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runs: Vec<RunRecord>,
+    /// Spec 1: the steps Zerus took for this hand-out before it was sent
+    /// (U48: the task's branch), oldest first, at most 20.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prepare: Vec<PrepareStep>,
+}
+
+/// Spec 1: one step before a hand-out: what changed from what to what.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct PrepareStep {
+    pub step: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub from: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub to: String,
+    pub at: f64,
+    /// done, skipped, refused or uncertain.
+    pub result: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
+}
+
+/// Spec 0: a task Zerus could not prepare for its hand-out waits here with its
+/// reason until the lead or the owner retries or reassigns it.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct TaskWaits {
+    #[serde(rename = "for")]
+    pub for_: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub on: Vec<String>,
+    pub reason: String,
+    #[serde(default)]
+    pub at: f64,
+    /// refused or uncertain.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub result: String,
 }
 
 impl Attempt {
@@ -1017,18 +1075,36 @@ pub(crate) struct Task {
     /// today's flow (an old team, "none", a check or the lead's own task).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pipeline_run: Option<PipelineRun>,
+    /// Spec 0: a step before its hand-out was refused or unconfirmed; the
+    /// dispatcher hands it out again only after a retry or a reassignment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waits: Option<TaskWaits>,
 }
 
 /// U36: one stage of a task's pipeline snapshot.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct PipelineStage {
-    /// review or test.
+    /// review, test, command (U47) or land (U48).
     pub kind: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub role: String,
     /// A pinned member; otherwise the first free member with `role`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub member: String,
+    /// U47/U48: what a command or land stage runs, from the owner's catalog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<Check>,
+    /// U48: a land stage's exit codes and their outcomes (accepted, returned,
+    /// held); empty reads as 0 accepted, any other held.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub exits: std::collections::BTreeMap<String, String>,
+}
+
+impl PipelineStage {
+    /// U47/U48: Zerus runs this stage itself, with no member.
+    pub(crate) fn runs_command(&self) -> bool {
+        matches!(self.kind.as_str(), "command" | "land")
+    }
 }
 
 /// U36: what became of one stage run.
@@ -1084,9 +1160,22 @@ pub(crate) struct StageRun {
     /// A return's findings, one per line.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub findings: Vec<String>,
-    /// Who ended it: the stage's role, Lead, You or Pipeline.
+    /// Who ended it: the stage's role, Lead, You, Pipeline or Zerus.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub by: String,
+    /// U47: a command stage's exit code and output tail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<CheckResult>,
+    /// U47: the folder's commit the command ran on.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub commit: String,
+    /// U47: the same tail on the same commit as the stage's previous run: it
+    /// went to the lead instead of the implementer.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub flaky: bool,
+    /// U48: what a land stage's exit code meant (accepted, returned, held).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub outcome: String,
 }
 
 /// U36: a task's pipeline snapshot and progress.

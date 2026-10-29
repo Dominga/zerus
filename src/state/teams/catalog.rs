@@ -152,12 +152,21 @@ pub(crate) struct Template {
 /// role (its first free member) or a pinned member.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Stage {
-    /// review or test.
+    /// review, test, command (U47) or land (U48).
     pub kind: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub role: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub member: String,
+    /// U47/U48: the command Zerus runs for a command or land stage, its
+    /// expected exit code and time limit. Only the owner's catalog has it: a
+    /// plan chooses the preset, never the command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<super::model::Check>,
+    /// U48: a land stage's exit codes and outcomes, `{"0":"accepted",
+    /// "2":"returned","3":"held"}`; empty is 0 accepted and any other held.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub exits: BTreeMap<String, String>,
 }
 
 /// U36: a named pipeline preset ("Code: review, test, lead"): its stages after
@@ -378,7 +387,7 @@ pub(crate) fn builtin() -> Catalog {
 /// U36: the built-in presets. No template names one yet, so a team keeps
 /// today's flow until the owner picks a default.
 pub(crate) fn builtin_pipelines() -> Vec<Pipeline> {
-    let stage = |kind: &str, role: &str| Stage { kind: kind.into(), role: role.into(), member: String::new() };
+    let stage = |kind: &str, role: &str| Stage { kind: kind.into(), role: role.into(), ..Default::default() };
     let preset = |id: &str, name: &str, stages: Vec<Stage>, accept: &str| Pipeline {
         id: id.into(),
         name: name.into(),
@@ -514,6 +523,29 @@ fn member_id_shape(id: &str) -> bool {
     !id.is_empty() && id.len() <= 40 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
+/// U47/U48: a stage Zerus runs itself: a command of 1 to 2000 characters, no
+/// member or role; a land stage is the preset's last and maps exit codes to
+/// accepted, returned or held.
+fn validate_command_stage(pipeline: &Pipeline, i: usize, stage: &Stage) -> anyhow::Result<()> {
+    let (id, n) = (&pipeline.id, i + 1);
+    ensure!(stage.role.is_empty() && stage.member.is_empty(), "Pipeline {id} stage {n}: Zerus runs a {} stage, with no role or member", stage.kind);
+    let command = stage.command.as_ref().with_context(|| format!("Pipeline {id} stage {n}: a {} stage needs its command", stage.kind))?;
+    let length = command.command.trim().chars().count();
+    ensure!((1..=2000).contains(&length), "Pipeline {id} stage {n}: the command has 1 to 2000 characters");
+    ensure!(!command.command.chars().any(|ch| ch == char::from(0)), "Pipeline {id} stage {n}: the command has no NUL");
+    ensure!((1..=240).contains(&command.timeout_minutes), "Pipeline {id} stage {n}: the time limit is 1 to 240 minutes");
+    if stage.kind == "land" {
+        ensure!(n == pipeline.stages.len(), "Pipeline {id}: a land stage is the last stage");
+        for (code, outcome) in &stage.exits {
+            ensure!(code.parse::<i32>().is_ok(), "Pipeline {id} stage {n}: exit {code} is not a number");
+            ensure!(matches!(outcome.as_str(), "accepted" | "returned" | "held"), "Pipeline {id} stage {n}: exit {code} is accepted, returned or held");
+        }
+    } else {
+        ensure!(stage.exits.is_empty(), "Pipeline {id} stage {n}: only a land stage maps exit codes");
+    }
+    Ok(())
+}
+
 /// Checks a whole catalog: unique ids, known roles and templates.
 pub(crate) fn validate(catalog: &Catalog) -> anyhow::Result<()> {
     let mut roles = BTreeMap::new();
@@ -572,7 +604,22 @@ pub(crate) fn validate(catalog: &Catalog) -> anyhow::Result<()> {
         ensure!(matches!(pipeline.folder.as_str(), "" | "hold" | "checkout"), "Pipeline {}: folder is hold or checkout", pipeline.id);
         ensure!(matches!(pipeline.accept.as_str(), "" | "lead" | "sub_lead" | "auto"), "Pipeline {}: accept is lead, sub_lead or auto", pipeline.id);
         for (i, stage) in pipeline.stages.iter().enumerate() {
-            ensure!(matches!(stage.kind.as_str(), "review" | "test"), "Pipeline {} stage {}: kind is review or test", pipeline.id, i + 1);
+            ensure!(
+                matches!(stage.kind.as_str(), "review" | "test" | "command" | "land"),
+                "Pipeline {} stage {}: kind is review or test, or a command or land stage that Zerus runs",
+                pipeline.id,
+                i + 1
+            );
+            if matches!(stage.kind.as_str(), "command" | "land") {
+                validate_command_stage(pipeline, i, stage)?;
+                continue;
+            }
+            ensure!(
+                stage.command.is_none() && stage.exits.is_empty(),
+                "Pipeline {} stage {}: only a command or land stage runs a command",
+                pipeline.id,
+                i + 1
+            );
             ensure!(stage.role.is_empty() != stage.member.is_empty(), "Pipeline {} stage {}: name a role or a member", pipeline.id, i + 1);
             ensure!(stage.role.is_empty() || roles.contains_key(&stage.role), "Pipeline {} stage {} names unknown role {}", pipeline.id, i + 1, stage.role);
             ensure!(stage.member.is_empty() || member_id_shape(&stage.member), "Pipeline {} stage {}: invalid member {}", pipeline.id, i + 1, stage.member);

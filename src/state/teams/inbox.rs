@@ -148,6 +148,22 @@ fn all_items(team: &Team) -> Vec<Item> {
             detail: member.error.clone(),
         });
     }
+    // Spec 0 (U48): a task Zerus could not prepare for its hand-out (its
+    // branch) waits with its reason until the lead retries or reassigns it.
+    for task in team.tasks.iter().filter(|_| active).filter(|task| !task.status.finished()) {
+        let Some(waits) = task.waits.as_ref() else { continue };
+        items.push(Item {
+            subagents: Value::Null,
+            kind: "task_waits",
+            key: format!("task_waits:{}:{}", task.id, waits.at),
+            task: Some(task.id),
+            member: team.role_of(&task.assignee),
+            since: waits.at,
+            summary: summary(&format!("#{} {} waits: {}", task.id, task.title, waits.reason)),
+            command: format!("{} | hgs team retry --json", json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id})),
+            detail: String::new(),
+        });
+    }
     // F8: each decided proposal reaches the lead with the decision and the
     // owner's reason, not only as a feed event; the latest few, by decision.
     let mut decided: Vec<&Value> = team

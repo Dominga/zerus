@@ -139,6 +139,12 @@ fn member_id(value: &str) -> anyhow::Result<String> {
 }
 
 /// The bounds on a team's settings, for the settings a request sets.
+/// U48: a task's branch from the team's template: `{id}`, `{member}` (as a
+/// branch-safe tag) and `{team8}`.
+pub(crate) fn branch_name(template: &str, id: u32, member: &str, team8: &str) -> String {
+    template.replace("{id}", &id.to_string()).replace("{member}", &super::dispatcher::tag(member)).replace("{team8}", team8)
+}
+
 fn validate_settings(settings: &Settings) -> anyhow::Result<()> {
     ensure!((1..=32).contains(&settings.max_members), "A team has 1 to 32 members");
     ensure!(
@@ -152,6 +158,13 @@ fn validate_settings(settings: &Settings) -> anyhow::Result<()> {
     // Section 9.2: the tree bounds are set on the master.
     ensure!((1..=8).contains(&settings.tree_depth), "A tree goes 1 to 8 levels below its master");
     ensure!((1..=200).contains(&settings.tree_sessions), "A tree runs 1 to 200 sessions");
+    // U48: the task branch's name template gives a valid branch for any task.
+    if let Some(branch) = &settings.branch_per_task {
+        let sample = branch_name(&branch.template, 12, "dev", "1234abcd");
+        ensure!(branch.template.contains("{id}"), "A task branch template names {{id}}, such as task/{{id}}");
+        super::templates::check_branch(&sample).context("The task branch template does not give a valid branch name")?;
+    }
+    ensure!(settings.base_branch.is_empty() || super::templates::check_branch(&settings.base_branch).is_ok(), "The base branch is not a valid branch name");
     // N19: a short list of folder paths; Zerus does not read them.
     ensure!(settings.evidence_folders.len() <= 20, "A team lists at most 20 evidence folders");
     for folder in &settings.evidence_folders {
@@ -251,6 +264,28 @@ fn parse_task(value: &Value) -> anyhow::Result<Task> {
     task.pipeline_run = None;
     check_pipeline(&task.pipeline)?;
     Ok(task)
+}
+
+/// U48: a task the plan, extend or edit-draft gives a preset with a land stage
+/// needs the owner's `land_allowed`, because landing may push: the request is
+/// refused before it changes anything.
+fn check_land_choices(team: &Team, input: &Value) -> anyhow::Result<()> {
+    let chosen: Vec<&str> = ["tasks", "tasks_update"]
+        .into_iter()
+        .flat_map(|key| input[key].as_array().into_iter().flatten())
+        .filter_map(|task| task["pipeline"].as_str())
+        .map(str::trim)
+        .filter(|choice| !choice.is_empty() && *choice != "none")
+        .collect();
+    if team.settings.land_allowed || chosen.is_empty() {
+        return Ok(());
+    }
+    let catalog = super::catalog::load().unwrap_or_else(|_| super::catalog::builtin());
+    for choice in chosen {
+        let lands = catalog.pipelines.iter().find(|pipeline| pipeline.id == choice).is_some_and(|pipeline| pipeline.stages.iter().any(|stage| stage.kind == "land"));
+        ensure!(!lands, "Pipeline {choice} lands the task, and the owner has not allowed landing in this team (land_allowed)");
+    }
+    Ok(())
 }
 
 /// U36: a task's pipeline choice names a preset of the team catalog.
@@ -694,7 +729,7 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
 /// C4: the settings that decide who approves, how far a team may grow and
 /// what runs without the owner stay the owner's; the lead changes the rest.
 /// Spec 6.1 lets the lead set resume_after_limits too.
-pub(crate) const OWNER_SETTINGS: [&str; 11] = [
+pub(crate) const OWNER_SETTINGS: [&str; 14] = [
     "approval",
     "phase_approval",
     "max_members",
@@ -707,6 +742,10 @@ pub(crate) const OWNER_SETTINGS: [&str; 11] = [
     "remind_owner_minutes",
     "remind_owner_permission_minutes",
     "work_ahead",
+    // U48: a land stage may push, and a branch per task moves members' folders.
+    "land_allowed",
+    "branch_per_task",
+    "base_branch",
 ];
 
 fn ensure_lead_settings(old: &Settings, new: &Settings, actor: &Actor, on_word: bool) -> anyhow::Result<()> {
@@ -1648,6 +1687,8 @@ fn revoke(task: &mut Task, why: &str) -> Option<u32> {
     close_questions(task);
     // U36: so does the stage that was reading its report.
     super::pipeline::revoke_runs(task, why);
+    // Spec 0: a retry, a reassignment or a decision ends a wait for Zerus.
+    task.waits = None;
     let attempt = task.open_attempt_mut()?;
     attempt.state = AttemptState::Revoked;
     attempt.error = why.to_owned();
@@ -3221,16 +3262,16 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
     let was_decided = all_decided(team);
     let done_before = phases_done(team);
     let result = match op {
-        "plan" => plan(team, input, actor, events),
+        "plan" => check_land_choices(team, input).and_then(|()| plan(team, input, actor, events)),
         "extend" => {
             // C15: an urgent phase comes only from the finding action.
             let mut plain = input.clone();
             if let Some(object) = plain.as_object_mut() {
                 object.remove("urgent");
             }
-            extend(team, &plain, actor, offline, events)
+            check_land_choices(team, &plain).and_then(|()| extend(team, &plain, actor, offline, events))
         }
-        "edit-draft" => edit_draft(team, input, actor, offline, events),
+        "edit-draft" => check_land_choices(team, input).and_then(|()| edit_draft(team, input, actor, offline, events)),
         "reports-to" | "sub-lead" => hierarchy(team, op, input, actor, events),
         "move-phase" => move_phase(team, input, actor, events),
         "add-to-phase" => add_to_phase(team, input, actor, offline, events),

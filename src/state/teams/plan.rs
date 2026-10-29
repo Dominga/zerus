@@ -232,6 +232,9 @@ pub(crate) fn ready(team: &Team) -> Vec<u32> {
         .filter(|task| task.status == TaskStatus::Pending && !cycles.contains(&task.id))
         // A held task is Pending but never ready: the lead returns it later (A5).
         .filter(|task| task.hold.is_none())
+        // Spec 0: a task Zerus could not prepare waits for a retry or a
+        // reassignment, never for the next tick.
+        .filter(|task| task.waits.is_none())
         .filter(|task| task.deps.iter().all(|dep| satisfied(team, dep.task, dep.kind)))
         .filter(|task| !barrier_holds(team, task))
         .map(|task| task.id)

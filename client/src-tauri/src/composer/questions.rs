@@ -2660,6 +2660,16 @@ pub(crate) mod tests {
             Some(&a),
             "A's entry stays A's"
         );
+        // A still owns the lane: another Skip stays refused and keeps B's
+        // definite notice instead of replacing A's in-flight entry.
+        assert_eq!(c.question_skip(&b), QuestionReply::Busy);
+        assert_eq!(c.lock().answers.drafts[&b].notice, ALREADY_ANSWERING);
+        assert_eq!(
+            tries.load(Ordering::SeqCst),
+            1,
+            "the third Skip made no call"
+        );
+        assert_eq!(c.lock().answers.in_flight.get(&key), Some(&a));
         release_call.send(()).unwrap();
         until(&c, |_| c.lock().answers.in_flight.is_empty());
         assert_eq!(tries.load(Ordering::SeqCst), 1, "B never reached the lane");

@@ -142,6 +142,23 @@ describe("composer store", () => {
     });
   });
 
+  it("a required card disables Send and ignores a toolbar chord without a hint", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers);
+      c.apply(view({ input_visible: false, text: "draft", status: "Answer the question to continue." }));
+      expect(c.sendEnabled()).toBe(false);
+      await c.send();
+      expect(f.calls).toEqual([]);
+      expect(c.hint()).toBeUndefined();
+      expect(c.text()).toBe("draft");
+      c.apply(view({ text: "draft" }));
+      expect(c.sendEnabled()).toBe(true);
+      await c.send();
+      expect(f.calls.filter((call) => call.startsWith("send "))).toHaveLength(1);
+    });
+  });
+
   it("over 64 KiB disables Send at once and shows Qt's text", async () => {
     const f = fakes();
     await createRoot(async () => {

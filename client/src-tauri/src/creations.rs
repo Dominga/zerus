@@ -171,7 +171,7 @@ enum Input {
     Action(String, CreationAction, SyncSender<Result<(), String>>),
     Catalog,
     Flush(SyncSender<()>),
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     Barrier(SyncSender<()>),
 }
 
@@ -375,7 +375,7 @@ impl CreationHost {
         answer.recv().map_err(|_| STOPPED.to_owned())?
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn flush_journal_for_test(&self) -> bool {
         let (send, answer) = mpsc::sync_channel(1);
         if self.0.input.send(Input::Barrier(send)).is_err() {
@@ -502,7 +502,7 @@ impl Worker {
                 self.effects(effects);
                 let _ = answer.send(Ok(()));
             }
-            #[cfg(test)]
+            #[cfg(all(test, unix))]
             Input::Barrier(answer) => {
                 let _ = self.writer.send(Write::Flush(answer));
             }

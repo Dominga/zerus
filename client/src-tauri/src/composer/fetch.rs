@@ -251,15 +251,17 @@ impl Fetcher {
     }
 
     fn run(self: &Arc<Self>, key: String, computer: ComputerId, file: AttachmentRef) {
-        // A read that panics still ends: its slot frees and its waiters hear.
-        let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            (self.fetch)(&computer, &file, self.cache.root())
+        // A read that panics anywhere (the read, its description or the
+        // prune it starts) still ends: its slot frees and its waiters hear.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let result = (self.fetch)(&computer, &file, self.cache.root())
+                .and_then(|cached| self.described(cached));
+            if result.is_ok() {
+                self.cache.prune_later(&self.spawn, Arc::new(HashSet::new));
+            }
+            result
         }))
         .unwrap_or_else(|_| Err("Could not read the attachment.".to_owned()));
-        let result = read.and_then(|cached| self.described(cached));
-        if result.is_ok() {
-            self.cache.prune_later(&self.spawn, Arc::new(HashSet::new));
-        }
         let (waiters, next) = {
             let mut queue = lock(&self.queue);
             queue.running -= 1;
@@ -298,7 +300,7 @@ impl Fetcher {
             _ => attachments::sniff(&head[..head.len().min(512)]),
         };
         let thumbnail = image_size(&head).is_some_and(|(width, height)| {
-            u64::from(width) * u64::from(height) <= THUMBNAIL_PIXELS
+            width > 0 && height > 0 && u64::from(width) * u64::from(height) <= THUMBNAIL_PIXELS
         });
         let name = match cached.metadata.get("name").and_then(|v| v.as_str()) {
             Some(name) if !name.is_empty() => name.to_owned(),
@@ -1172,5 +1174,57 @@ mod tests {
         let (works, asked) = opener(true);
         assert_eq!(open_draft(&c, &path, &works), Ok(None));
         assert!(asked.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_zero_by_zero_header_gets_no_thumbnail() {
+        let root = dir("fetch-empty-image");
+        const EMPTY: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\0\0\0\0\0";
+        let fetcher = Fetcher::new(
+            Cache::new(root.join("cache")),
+            storing("empty.png", EMPTY, &Arc::new(AtomicUsize::new(0))),
+            threads(),
+        );
+        assert!(
+            !get(&fetcher, "studio", file("req-1"), false)
+                .unwrap()
+                .thumbnail
+        );
+    }
+
+    #[test]
+    fn a_panic_after_the_read_ends_it_too() {
+        let root = dir("fetch-panic-prune");
+        // The pool runs the read, then refuses the prune the read starts.
+        let spawned = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&spawned);
+        let spawn: Spawn = Arc::new(move |job| {
+            if counted.fetch_add(1, Ordering::SeqCst) == 0 {
+                job();
+            } else {
+                panic!("the pool refused the prune");
+            }
+        });
+        let fetcher = Fetcher::new(
+            Cache::new(root.join("cache")),
+            storing("a.txt", b"a", &Arc::new(AtomicUsize::new(0))),
+            spawn,
+        );
+        let answer = Arc::new(Mutex::new(None));
+        let heard = Arc::clone(&answer);
+        fetcher.request(
+            "studio",
+            file("req-1"),
+            false,
+            Box::new(move |a| {
+                *heard.lock().unwrap() = Some(a.map(|(f, _)| f.name));
+            }),
+        );
+        assert_eq!(
+            *answer.lock().unwrap(),
+            Some(Err("Could not read the attachment.".to_owned()))
+        );
+        assert_eq!(lock(&fetcher.queue).running, 0, "the slot is free");
+        assert!(lock(&fetcher.queue).jobs.is_empty());
     }
 }

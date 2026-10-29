@@ -52,6 +52,8 @@ export interface ComposerPort {
   interrupted(handle: number): Promise<void>;
   clear(handle: number, run: string, conversation: string, dismiss: boolean): Promise<SendReply>;
   refresh(handle: number): Promise<void>;
+  /** Opens a draft attachment by its `zerus-file` path: null when it opened, else a notice; rejects with why not (Task 9). */
+  openAttachment(path: string): Promise<string | null>;
 }
 
 /** Image decoding for pastes that are not PNG; tests pass their own. */
@@ -447,6 +449,19 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
     async interrupted() { const h = handle(); if (h !== undefined) await port.interrupted(h).catch(() => {}); },
     /** The status line's Refresh (Qt's sessionRefreshRequested). */
     async refresh() { const h = handle(); if (h !== undefined && !operationLocked()) await port.refresh(h).catch(() => {}); },
+    /**
+     * Opens attachment `index` (MessageComposer::openAttachment, 1067-1085):
+     * nothing while the draft sends. A program shown in the file manager, or
+     * an open that failed, shows in the status line, as Qt's showError, while
+     * this composer is still the open one.
+     */
+    async openAttachment(index: number) {
+      const v = view(), a = v?.attachments[index];
+      if (!v || !a || v.sending) return;
+      let notice: string | null;
+      try { notice = await port.openAttachment(a.path); } catch (e) { notice = typeof e === "string" ? e : String(e); }
+      if (notice && handle() === v.handle) setError(notice);
+    },
   };
 }
 
@@ -456,7 +471,7 @@ export const composer = createRoot(() => createComposer({
   open: bridge.composerOpen, edit: bridge.composerEdit, pick: bridge.composerPick, pasteImage: bridge.composerPasteImage,
   send: bridge.sendMessage, answer: bridge.sendAnswer, remove: bridge.composerRemove, undo: bridge.composerUndoRemove,
   allowRetry: bridge.composerAllowRetry, cancelSend: bridge.sendCancel, interrupted: bridge.sendInterrupted, clear: bridge.clearContext,
-  refresh: bridge.composerRefresh,
+  refresh: bridge.composerRefresh, openAttachment: (path) => bridge.attachmentOpenDraft(path),
 }));
 
 /**

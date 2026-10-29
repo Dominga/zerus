@@ -11,7 +11,8 @@ import { keptItem } from "./composer-ui";
 // opens a list; hovering a row, or reaching it with an arrow key, shows a
 // larger preview beside the list; only the row's remove button (or Delete,
 // Backspace) removes it, and focus stays in the list. Undo restores the last
-// removal while Rust keeps it. Rows open their file with Task 9.
+// removal while Rust keeps it. A click, Enter or Space opens a row's file
+// (MessageComposer.cpp:1104-1117), closing the list first.
 
 const kib = (bytes: number) => `${Math.max(1, Math.ceil(bytes / 1024))} KiB`;
 /** The draft file's `zerus-file` URL (Task 3b); outside the app there is none. */
@@ -43,6 +44,8 @@ export function AttachmentsChip(props: { compact?: boolean }) {
   };
   const close = (returnFocus = false) => { setOpen(false); setPreview(undefined); if (returnFocus) chip.focus(); };
   const rows = () => [...(list?.querySelectorAll<HTMLElement>(".att-row") ?? [])];
+  /** Qt closes the popover, then opens the file (MessageComposer::openAttachment). */
+  const openFile = (index: number) => { close(); void composer.openAttachment(index); };
   const remove = (index: number) => {
     if (composer.locked()) return;
     setPreview(undefined);
@@ -92,11 +95,13 @@ export function AttachmentsChip(props: { compact?: boolean }) {
           <For each={references()}>{(reference, i) => {
             const a = keptItem(items, reference);
             return (
-              <div class="att-row" tabindex="0" aria-label={a().name}
+              <div class="att-row" tabindex="0" aria-label={a().name} title={`Open ${a().name}`}
                 onMouseEnter={() => setPreview(i())} onMouseLeave={() => setPreview(undefined)} onFocus={() => { if (arrowed) setPreview(i()); }}
+                onClick={(e) => { if (e.button === 0) openFile(i()); }}
                 onKeyDown={(e) => {
                   if (e.target !== e.currentTarget) return;
                   if (e.key === "Delete" || e.key === "Backspace") { e.preventDefault(); remove(i()); }
+                  if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openFile(i()); }
                 }}>
                 <span class="att-thumb" classList={{ file: !image(a()) }}>
                   <Show when={image(a())} fallback={<Icon name="file-text" size={16} />}><img src={src(a())} alt="" /></Show>

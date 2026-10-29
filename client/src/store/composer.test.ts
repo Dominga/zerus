@@ -28,6 +28,8 @@ function fakes(reply: SendReply = { kind: "sending" }, opened: ComposerView | nu
   let openDone: ((v: ComposerView | null) => void) | undefined;
   let answerReply: SendReply = { kind: "sending" };
   let holdOpen = false;
+  /** What opening a draft attachment answers next: null (opened), a notice, or a thrown error. */
+  let openReply: () => string | null = () => null;
   const port: ComposerPort = {
     open: (session) => {
       calls.push(`open ${session?.name ?? "none"}`);
@@ -45,6 +47,7 @@ function fakes(reply: SendReply = { kind: "sending" }, opened: ComposerView | nu
     interrupted: async () => { calls.push("interrupted"); },
     clear: async (_h, run, conversation, dismiss) => { calls.push(`clear ${run} ${conversation} ${dismiss}`); return { kind: "notice", text: "Context cleared. Your draft is ready to send.", error: false }; },
     refresh: async (h) => { calls.push(`refresh ${h}`); },
+    openAttachment: async (path) => { calls.push(`open file ${path}`); return openReply(); },
   };
   const notify: Notices = (tone, text, sticky) => { notices.push(`${tone} ${sticky ? "sticky" : "timed"} ${text}`); };
   let clock = 0;
@@ -58,6 +61,7 @@ function fakes(reply: SendReply = { kind: "sending" }, opened: ComposerView | nu
     holdOpens: () => { holdOpen = true; },
     finishOpen: (v: ComposerView | null) => openDone?.(v),
     answerWith: (r: SendReply) => { answerReply = r; },
+    openWith: (reply: () => string | null) => { openReply = reply; },
   };
 }
 
@@ -628,6 +632,62 @@ describe("composer store", () => {
       expect(c.operationLocked()).toBe(false);
       await c.refresh();
       expect(f.calls).toEqual(["refresh 1"]);
+    });
+  });
+});
+
+describe("opening a draft attachment (MessageComposer::openAttachment, 1067-1085)", () => {
+  const shot = { name: "shot.png", mime: "image/png", reference: "[Image #1]", bytes: 8, path: "draft/1/2/0", excerpt: null };
+
+  it("opens by the row's draft path and says nothing when it opened", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers);
+      c.apply(view({ attachments: [shot] }));
+      await c.openAttachment(0);
+      expect(f.calls).toContain("open file draft/1/2/0");
+      expect(c.status()).toEqual({ text: "", error: false });
+    });
+  });
+
+  it("shows a program shown in the file manager, or a failed open, in the status line", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers);
+      c.apply(view({ attachments: [shot] }));
+      f.openWith(() => "setup.exe can run programs, so it is shown in the file manager instead of being opened.");
+      await c.openAttachment(0);
+      expect(c.status()).toEqual({ text: "setup.exe can run programs, so it is shown in the file manager instead of being opened.", error: true });
+      f.openWith(() => { throw "Could not open the attachment with its default application."; });
+      await c.openAttachment(0);
+      expect(c.status().text).toBe("Could not open the attachment with its default application.");
+    });
+  });
+
+  it("opens nothing while the draft sends, or for a row that is gone", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers);
+      c.apply(view({ attachments: [shot], sending: true }));
+      await c.openAttachment(0);
+      c.apply(view({ attachments: [shot] }));
+      await c.openAttachment(3);
+      expect(f.calls.filter((call) => call.startsWith("open file"))).toEqual([]);
+    });
+  });
+
+  it("drops the notice when another composer is open by the time the open answers", async () => {
+    const f = fakes();
+    let finish!: (notice: string) => void;
+    const port: ComposerPort = { ...f.port, openAttachment: () => new Promise((resolve) => { finish = resolve; }) };
+    await createRoot(async () => {
+      const c = createComposer(port, f.timers);
+      c.apply(view({ attachments: [shot] }));
+      const opening = c.openAttachment(0);
+      c.apply(view({ handle: 2, key: "other" }));
+      finish("setup.exe can run programs, so it is shown in the file manager instead of being opened.");
+      await opening;
+      expect(c.status().text).toBe("");
     });
   });
 });

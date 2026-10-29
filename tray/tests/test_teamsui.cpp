@@ -50,6 +50,7 @@
 #include <QClipboard>
 #include "TeamController.h"
 #include "TeamDesignerPage.h"
+#include "TeamWaitingPage.h"
 #include "TeamConversation.h"
 #include "QuestionCard.h"
 #include "ActivityView.h"
@@ -733,6 +734,9 @@ private slots:
     void aNarrowToolbarKeepsOnlyItsIcons();
     void phaseScrollDecisions();
     void sideListsAndMemberTasks();
+    void waitingPageListsEveryKindAcrossTeams();
+    void waitingPagePagesStayStableWhileItemsArrive();
+    void waitingPageEmptyAndRefused();
 private:
     QString script() const { return m_dir.filePath("hgs"); }
     void setTeam(const QJsonObject &value) { QVERIFY(FakeCli::replace(script() + ".status", QJsonDocument(value).toJson(QJsonDocument::Compact))); }
@@ -777,6 +781,17 @@ elif a[:2]==['team','status']:
   time.sleep(.1)
  sys.stdout.write(open(__file__+'.status').read())
 elif a[:2]==['team','events']:sys.stdout.write(open(__file__+'.feed').read())
+elif a[:2]==['team','waiting']:
+ # U50: pages `.waiting` as hgs does: newest first, ties by id, after the cursor.
+ import os
+ if os.path.exists(__file__+'.waitingrefuse'):print(open(__file__+'.waitingrefuse').read(),file=sys.stderr);sys.exit(1)
+ items=json.load(open(__file__+'.waiting')) if os.path.exists(__file__+'.waiting') else []
+ items.sort(key=lambda i:(-i['since'],i['id']))
+ c=body.get('before');start=0
+ if c:start=next((n for n,i in enumerate(items) if i['since']<c['since'] or (i['since']==c['since'] and i['id']>c['id'])),len(items))
+ page=items[start:start+min(body.get('limit',50),200)]
+ nxt={'since':page[-1]['since'],'id':page[-1]['id']} if page and start+len(page)<len(items) else None
+ print(json.dumps({'items':page,'next':nxt,'total':len(items)}))
 elif a[:3]==['team','catalog','get']:sys.stdout.write(open(__file__+'.catalog').read())
 elif a[:2]==['team','add-to-phase']:
  # U29: the first call warns and keeps the addition pending; the second adds it.
@@ -849,6 +864,8 @@ void TestTeamsUi::init()
     QFile::remove(script() + ".statushold");
     QFile::remove(script() + ".refuse");
     QFile::remove(script() + ".refuseapply");
+    QFile::remove(script() + ".waiting");
+    QFile::remove(script() + ".waitingrefuse");
     // Decisions and Apply change the fake catalog: each test starts from the fixture.
     QVERIFY(FakeCli::replace(script() + ".catalog", QJsonDocument(catalog()).toJson(QJsonDocument::Compact)));
     setTeam(team());
@@ -3616,6 +3633,190 @@ void TestTeamsUi::aSessionRecordShowsTheUnconfirmableSubagentNote()
     QCOMPARE(parsed.size(), 1);
     QCOMPARE(parsed.first().subagentConfirm, QStringLiteral("subagent confirmation not supported by codex"));
 }
+
+namespace {
+// U50: one waiting item as `hgs team waiting` sends it.
+QJsonObject waitingItem(const QString &team, const QString &name, const QString &kind, const QString &key, const QString &title,
+                        double since, const QString &action, const QJsonObject &extra = {})
+{
+    QJsonObject item{{"id", team + "/" + kind + "/" + key}, {"team", team}, {"team_name", name}, {"kind", kind},
+                     {"title", title}, {"since", since}, {"action", action}};
+    for (auto it = extra.begin(); it != extra.end(); ++it) item.insert(it.key(), it.value());
+    return item;
+}
+
+// One item of each kind, from six teams.
+QJsonArray waitingKinds(double now)
+{
+    return QJsonArray{
+        waitingItem("team-plan", "Billing export", "plan_draft", "plan", "Plan of 6 tasks waits for Approve & Run", now - 60, "approve_plan"),
+        waitingItem("team-1", "Checkout", "phase_draft", "2", QString::fromUtf8("Phase 2 · Screens — draft waits for your Accept"), now - 300,
+                    "approve_phase", {{"phase", 2}}),
+        waitingItem("team-2", "Search index", "report_escalated", "4", "Report on #4 Ranking from Backend waits for your decision", now - 2400,
+                    "decide_report", {{"task", 4}, {"member", "Backend"}}),
+        waitingItem("team-3", "Mobile sync", "permission_escalated", "Tester", "Tester waits for your answer: Bash npm run e2e", now - 900,
+                    "answer_permission", {{"member", "Tester"}}),
+        waitingItem("team-2", "Search index", "owner_word_asked", "proposal-p3", QString::fromUtf8("The lead proposes: add member — a second reviewer"),
+                    now - 1200, "decide_proposal", {{"proposal", "p3"}}),
+        waitingItem("team-4", "Docs site", "task_waits_owner", "7", "#7 Publish the guide is held by you: after the release", now - 7200,
+                    "release_task", {{"task", 7}}),
+        waitingItem("team-5", "Release 0.43", "team_finished", "finish", "All 12 tasks decided: waits for you to finish", now - 86400, "finish"),
+    };
+}
+
+bool writeWaiting(const QString &path, const QJsonArray &items)
+{
+    return FakeCli::replace(path, QJsonDocument(items).toJson(QJsonDocument::Compact));
+}
+
+QStringList waitingRowIds(QWidget *page)
+{
+    QStringList ids;
+    for (auto *row : page->findChildren<QFrame *>("teamWaitingRow")) ids << row->property("itemId").toString();
+    return ids;
+}
+}
+
+// U50: the rail page lists every kind of item that waits for the owner, from
+// several teams, newest first, each with its kind's icon and label and its
+// team; a row (or its Open team) opens that team. Shots in both themes.
+void TestTeamsUi::waitingPageListsEveryKindAcrossTeams()
+{
+    QSettings().setValue("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([] { QSettings().remove("workspace/skin"); darkPalette(); });
+    const double now = double(QDateTime::currentSecsSinceEpoch());
+    QVERIFY(writeWaiting(script() + ".waiting", waitingKinds(now)));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamWaitingPage page(&controller);
+    QList<TeamWaitingPage::Item> opened;
+    page.openTeam = [&](const TeamWaitingPage::Item &item) { opened << item; };
+    int counted = -1;
+    page.countChanged = [&](int total) { counted = total; };
+    page.resize(980, 640); page.show();
+    WAIT_VERIFY(page.findChildren<QFrame *>("teamWaitingRow").size() == 7);
+    QCOMPARE(counted, 7);
+    QCOMPARE(waitingRowIds(&page), (QStringList{"team-plan/plan_draft/plan", "team-1/phase_draft/2", "team-3/permission_escalated/Tester",
+                                               "team-2/owner_word_asked/proposal-p3", "team-2/report_escalated/4", "team-4/task_waits_owner/7",
+                                               "team-5/team_finished/finish"}));
+    QStringList kinds; QSet<QString> teams;
+    for (auto *row : page.findChildren<QFrame *>("teamWaitingRow")) {
+        kinds << row->findChild<QLabel *>("teamWaitingKind")->text();
+        teams.insert(row->findChild<QLabel *>("teamWaitingTeam")->text());
+        QVERIFY(!row->findChild<QLabel *>("teamWaitingKindIcon")->pixmap().isNull());
+        QVERIFY(!row->findChild<QLabel *>("teamWaitingItemTitle")->text().isEmpty());
+    }
+    QCOMPARE(kinds, (QStringList{"Plan", "Phase draft", "Permission", "Your word", "Report", "Held task", "All decided"}));
+    QCOMPARE(teams.size(), 6);
+    const QString count = page.findChild<QLabel *>("teamWaitingCount")->text();
+    QVERIFY2(count.contains("7 items") && count.contains("6 teams"), qPrintable(count));
+    QVERIFY(!page.findChild<QPushButton *>("teamWaitingOlder"));
+    // Read only: the page sends its reads and nothing else.
+    const auto reads = calls(script(), "waiting");
+    QVERIFY(!reads.isEmpty());
+    for (const auto &input : reads) QVERIFY2(!input.contains("request_id"), qPrintable(QJsonDocument(input).toJson()));
+    QCOMPARE(calls(script(), "approve-phase").size(), 0);
+    shot(&page, "u50-waiting-dark");
+    page.setDark(false);
+    lightShot(&page, "u50-waiting-light");
+    // Open team on the phase draft names its team and phase; a click on the row
+    // itself opens the team as well.
+    QFrame *phaseRow = nullptr;
+    for (auto *row : page.findChildren<QFrame *>("teamWaitingRow")) if (row->property("kind") == "phase_draft") phaseRow = row;
+    QVERIFY(phaseRow);
+    phaseRow->findChild<QPushButton *>("teamWaitingOpen")->click();
+    QCOMPARE(opened.size(), 1);
+    QCOMPARE(opened[0].team, QString("team-1"));
+    QCOMPARE(opened[0].kind, QString("phase_draft"));
+    QCOMPARE(opened[0].phase, 2);
+    QFrame *finished = page.findChildren<QFrame *>("teamWaitingRow").last();
+    QTest::mouseClick(finished, Qt::LeftButton, {}, QPoint(40, finished->height() / 2));
+    QCOMPARE(opened.size(), 2);
+    QCOMPARE(opened[1].team, QString("team-5"));
+}
+
+// U50: 300 items arrive in pages of 50 with Show older; a poll while new items
+// arrive puts them on top, keeps every shown item in its order, each once, and
+// Show older goes on after them.
+void TestTeamsUi::waitingPagePagesStayStableWhileItemsArrive()
+{
+    const double now = double(QDateTime::currentSecsSinceEpoch());
+    QJsonArray items;
+    // Pairs share a time; their ids order them, as in hgs.
+    for (int n = 0; n < 300; ++n)
+        items << waitingItem(QStringLiteral("team-%1%2").arg(n / 2 % 9).arg(n % 2), QStringLiteral("Team %1").arg(n / 2 % 9), "task_waits_owner", QString::number(n),
+                             QStringLiteral("#%1 is held by you").arg(n), now - 1000 - (n / 2) * 10, "release_task", {{"task", n}});
+    QVERIFY(writeWaiting(script() + ".waiting", items));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamWaitingPage page(&controller);
+    page.resize(900, 700); page.show();
+    WAIT_VERIFY(page.findChildren<QFrame *>("teamWaitingRow").size() == TeamWaitingPage::PageSize);
+    QVERIFY(page.findChild<QLabel *>("teamWaitingCount")->text().contains("300 items"));
+    page.findChild<QPushButton *>("teamWaitingOlder")->click();
+    WAIT_VERIFY(page.findChildren<QFrame *>("teamWaitingRow").size() == 100);
+    const QStringList shown = waitingRowIds(&page);
+    QCOMPARE(QSet<QString>(shown.begin(), shown.end()).size(), 100);
+    // Two items arrive, newer than everything; the poll reads the newest page.
+    items.prepend(waitingItem("team-new", "Hotfix", "report_escalated", "1", "Report on #1 Patch waits for your decision", now - 5, "decide_report"));
+    items.prepend(waitingItem("team-new", "Hotfix", "permission_escalated", "Dev", "Dev waits for your answer", now - 2, "answer_permission"));
+    QVERIFY(writeWaiting(script() + ".waiting", items));
+    page.refresh();
+    WAIT_VERIFY(waitingRowIds(&page).value(0) == "team-new/permission_escalated/Dev");
+    // The poll read every shown item and a page more.
+    const auto polled = calls(script(), "waiting");
+    QVERIFY(!polled.isEmpty());
+    QCOMPARE(polled.last().value("limit").toInt(), 150);
+    const QStringList after = waitingRowIds(&page);
+    QCOMPARE(after.size(), 150);
+    QCOMPARE(after.mid(0, 2), (QStringList{"team-new/permission_escalated/Dev", "team-new/report_escalated/1"}));
+    QCOMPARE(QSet<QString>(after.begin(), after.end()).size(), after.size());
+    // Every item shown before is still shown, in the same order.
+    QStringList kept; for (const auto &id : after) if (shown.contains(id)) kept << id;
+    QCOMPARE(kept, shown);
+    // Show older goes on right after them: the list is the server's order.
+    page.findChild<QPushButton *>("teamWaitingOlder")->click();
+    WAIT_VERIFY(page.findChildren<QFrame *>("teamWaitingRow").size() == 200);
+    const QStringList all = waitingRowIds(&page);
+    QStringList expected;
+    for (const auto &value : items) expected << value.toObject()["id"].toString();
+    QCOMPARE(all, expected.mid(0, 200));
+    QVERIFY(page.findChild<QPushButton *>("teamWaitingOlder"));
+    for (const auto &input : calls(script(), "waiting")) QVERIFY(input.value("limit").toInt() <= 200);
+}
+
+// U50: an empty list says so, in both themes; a refused read is shown with its
+// reason and the next read clears it.
+void TestTeamsUi::waitingPageEmptyAndRefused()
+{
+    QSettings().setValue("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([] { QSettings().remove("workspace/skin"); darkPalette(); });
+    QVERIFY(writeWaiting(script() + ".waiting", {}));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamWaitingPage page(&controller);
+    int counted = -1;
+    page.countChanged = [&](int total) { counted = total; };
+    page.resize(980, 520); page.show();
+    WAIT_VERIFY(page.findChild<QWidget *>("teamWaitingEmpty"));
+    QCOMPARE(counted, 0);
+    QVERIFY(page.findChildren<QFrame *>("teamWaitingRow").isEmpty());
+    QCOMPARE(page.findChild<QLabel *>("teamWaitingCount")->text(), QString("Nothing waits for you"));
+    shot(&page, "u50-waiting-empty-dark");
+    page.setDark(false);
+    lightShot(&page, "u50-waiting-empty-light");
+    QVERIFY(FakeCli::replace(script() + ".waitingrefuse", "hgs: The team store is busy"));
+    page.refresh();
+    WAIT_VERIFY(page.findChild<QLabel *>("teamWaitingError"));
+    QVERIFY(page.findChild<QLabel *>("teamWaitingError")->text().contains("The team store is busy"));
+    QFile::remove(script() + ".waitingrefuse");
+    QVERIFY(writeWaiting(script() + ".waiting", QJsonArray{waitingKinds(double(QDateTime::currentSecsSinceEpoch())).first()}));
+    page.refresh();
+    WAIT_VERIFY(page.findChildren<QFrame *>("teamWaitingRow").size() == 1);
+    QVERIFY(!page.findChild<QLabel *>("teamWaitingError"));
+    QCOMPARE(counted, 1);
+}
+
 
 QTEST_MAIN(TestTeamsUi)
 void TestTeamsUi::emptyPanelOffersNewTeamAndDesigner()

@@ -576,6 +576,7 @@ private:
     // F7: a session named here is taken into the new team as its existing lead.
     void showNewTeam(const QString &host = {}, const QString &name = {});
     void showTeamDesigner();
+    void showTeamWaiting();
     void startTeamDesigner(const QString &folder,const QString &goal,const QJsonObject &agent);
     QString m_teamDesignerFolder,m_teamDesignerProject;
     QString teamDesignerSession() const;
@@ -595,6 +596,10 @@ private:
     class QLabel *m_branchIcon=nullptr,*m_branchText=nullptr;
     class QPushButton *m_teamDesignerNav=nullptr;
     int m_teamDesignerPageIndex=-1;
+    // U50: the rail's Waiting for you page, made on first use.
+    class TeamWaitingPage *m_teamWaitingPage=nullptr;
+    class QPushButton *m_teamWaitingNav=nullptr;
+    int m_teamWaitingPageIndex=-1;
     QWidget *m_teamNewTab=nullptr;
     class TeamNewTab *m_teamNewForm=nullptr;
     bool m_teamNewWaiting=false;

@@ -10,7 +10,7 @@ use super::store::{self, canonical_uuid, Event, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|add-to-phase|approve-phase|discard-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|current|report|ask|reply|hold|release|accept|reject|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|run|templates|safe-action|reports-to|sub-lead --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|add-to-phase|approve-phase|discard-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|current|report|ask|reply|hold|release|accept|reject|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|waiting|run|templates|safe-action|reports-to|sub-lead --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
 
 const MUTATIONS: &[&str] = &[
     "plan", "extend", "edit-draft", "move-phase", "add-to-phase", "approve-phase", "discard-phase", "reject-phase", "undo-reject-phase",
@@ -2772,6 +2772,16 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             let teams = store.teams(true, 1000)?;
             let sessions = live_sessions()?;
             Ok(json!({"items":leftovers(&teams, &sessions)}))
+        }
+        // U50: what waits for the owner across every team, read only.
+        "waiting" => {
+            if !store::path().exists() {
+                return Ok(super::owner_waiting::page(&[], None, None));
+            }
+            let teams = active_team_records(&Store::open(false)?)?;
+            let items = super::owner_waiting::items(&teams, super::super::now());
+            let before = Some(&input["before"]).filter(|cursor| !cursor.is_null());
+            Ok(super::owner_waiting::page(&items, before, input["limit"].as_u64()))
         }
         "list" => {
             let path = store::path();

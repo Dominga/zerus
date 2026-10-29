@@ -204,7 +204,7 @@ QJsonObject labelTeam()
   {"id":3,"title":"First try","assignee":"backend","status":"in_progress","attempts":[{"n":1,"id":"a3","member":"backend","state":"delivered","started_at":1300}]},
   {"id":4,"title":"Held back","assignee":"backend","status":"pending","hold":{"by":"Lead","at":1400,"reason":"ask first"}},
   {"id":5,"title":"Delegated","assignee":"backend","status":"in_progress","subteam":{"team":"team-2","done":1,"total":2},"attempts":[{"n":1,"id":"a5","member":"backend","state":"delivered","started_at":1500}]},
-  {"id":6,"title":"Queued","assignee":"backend","status":"pending"},
+  {"id":6,"title":"Queued","assignee":"backend","status":"pending","waits":{"for":"member","on":["Backend"],"unblock":"wait for Backend"},"attempts":[{"n":1,"id":"a6","member":"backend","state":"rejected"}]},
   {"id":7,"title":"Still a draft","assignee":"backend","status":"draft"},
   {"id":8,"title":"Done","assignee":"backend","status":"accepted"},
   {"id":9,"title":"Offline problem","assignee":"blocked","status":"in_progress","attempts":[{"n":2,"id":"a9","member":"blocked","state":"delivered","started_at":1600}]},
@@ -4930,7 +4930,7 @@ void TestTeamsUi::graphNodesCarryTheActivityLabel()
     QTRY_VERIFY(([&] { graph = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamPhaseGraph")); return graph && graph->nodeRect(1).width() > 0; })());
     const auto node = [&](int id) { for (const auto &n : graph->nodes) if (n.id == id) return n; return TeamUi::TaskView::Node{}; };
     // Each rule of the owner's addition: Submitted, attempt 2, Held, a
-    // sub-team, and nothing for Pending, Draft, Accepted. Owner, 2026-10-28:
+    // sub-team, and (below) words for Pending, Draft, Accepted. Owner, 2026-10-28:
     // work in progress says where it is - working, starting or idle.
     QCOMPARE(node(1).activity, QStringLiteral("review"));
     QCOMPARE(node(2).activity, QStringLiteral("attempt 2 · working"));
@@ -4940,9 +4940,11 @@ void TestTeamsUi::graphNodesCarryTheActivityLabel()
     QCOMPARE(node(12).activity, QStringLiteral("cancelled"));
     QCOMPARE(node(4).activity, QStringLiteral("held"));
     QCOMPARE(node(5).activity, QStringLiteral("sub-team 1/2"));
-    QVERIFY(node(6).activity.isEmpty());
-    QVERIFY(node(7).activity.isEmpty());
-    QVERIFY(node(8).activity.isEmpty());
+    // Owner, 2026-10-29: every task says its state in words: a returned task
+    // and what it waits for, a draft, an accepted one.
+    QCOMPARE(node(6).activity, QStringLiteral("returned · waits for Backend"));
+    QCOMPARE(node(7).activity, QStringLiteral("draft"));
+    QCOMPARE(node(8).activity, QStringLiteral("accepted"));
     // A problem text wins; the label stays empty.
     QVERIFY(node(9).problem);
     QVERIFY(!node(9).problemText.isEmpty());
@@ -4967,7 +4969,7 @@ void TestTeamsUi::graphNodesCarryTheActivityLabel()
     QCOMPARE(card(2), QStringLiteral("attempt 2 · working"));
     QCOMPARE(card(3), QStringLiteral("working"));
     QCOMPARE(card(4), QStringLiteral("held"));
-    QVERIFY(card(6).isEmpty());
+    QCOMPARE(card(6), QStringLiteral("returned · waits for Backend"));
     QVERIFY(card(9).isEmpty());
     // The same label on Layers rows: the list view carries it on its nodes.
     for (auto *b : workspace.findChild<QWidget *>("teamWorkspaceView")->findChildren<QPushButton *>())

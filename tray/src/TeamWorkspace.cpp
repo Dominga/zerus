@@ -1350,11 +1350,25 @@ QWidget *TeamWorkspace::canvas(const Team &team)
 
 // U25 part 5 (owner, 2026-10-27): the small activity label a graph node, board
 // card and layers row carry right of the role chip and model tile: what happens
-// now. A problem text wins over it (the callers check that first); Pending,
-// Draft and Accepted say nothing - their icon and border say it. Owner,
+// now. A problem text wins over it (the callers check that first). Owner,
 // 2026-10-28: a task in work always says where its work is - starting (handed
 // over, not begun), working (its agent runs) or idle (the turn ended and the
 // report has not come) - with "attempt N" first from the second attempt.
+// Owner, 2026-10-29: every task says its state in words, not only by its icon:
+// accepted, rejected, draft, and a waiting task what it waits for (after #N,
+// for a member, the lead or you), "returned" first when it came back.
+static QString waitLabel(const Teams::Task &task)
+{
+    if (!task.wait.known || task.wait.on.isEmpty()) return QString();
+    QStringList on = task.wait.on;
+    if (task.wait.for_ == QLatin1String("deps")) {
+        for (auto &item : on) if (!item.startsWith('#')) item.prepend('#');
+        return TeamWorkspace::tr("after %1").arg(on.join(QStringLiteral(", ")));
+    }
+    if (task.wait.for_ == QLatin1String("owner")) return TeamWorkspace::tr("waits for you");
+    return TeamWorkspace::tr("waits for %1").arg(on.join(QStringLiteral(", ")));
+}
+
 static QString activityLabel(const Teams::Task &task, const Teams::Live &live = {})
 {
     if (task.status == QLatin1String("submitted")) return TeamWorkspace::tr("review");
@@ -1362,16 +1376,24 @@ static QString activityLabel(const Teams::Task &task, const Teams::Live &live = 
     if (task.status == QLatin1String("cancelled")) return TeamWorkspace::tr("cancelled");
     if (task.subteam.known && !task.subteam.team.isEmpty())
         return TeamWorkspace::tr("sub-team %1/%2").arg(task.subteam.done).arg(task.subteam.total);
-    if (task.status == QLatin1String("in_progress")) {
+    if (task.status == QLatin1String("in_progress") || task.status == QLatin1String("assigned")) {
         const auto *attempt = task.last();
         const int n = attempt ? attempt->n : 0;
-        const QString state = !attempt ? QString()
+        const QString state = !attempt || task.status == QLatin1String("assigned") ? TeamWorkspace::tr("starting")
                             : attempt->startedAt <= 0 && attempt->turnEndedAt <= 0 && !live.working ? TeamWorkspace::tr("starting")
                             : live.working ? TeamWorkspace::tr("working") : TeamWorkspace::tr("idle");
-        if (n > 1) return state.isEmpty() ? TeamWorkspace::tr("attempt %1").arg(n) : TeamWorkspace::tr("attempt %1 · %2").arg(n).arg(state);
-        if (!state.isEmpty()) return state;
+        if (n > 1) return TeamWorkspace::tr("attempt %1 · %2").arg(n).arg(state);
+        return state;
     }
     if (task.held) return TeamWorkspace::tr("held");
+    if (task.status == QLatin1String("accepted")) return TeamWorkspace::tr("accepted");
+    if (task.status == QLatin1String("rejected")) return TeamWorkspace::tr("rejected");
+    if (task.status == QLatin1String("draft")) return TeamWorkspace::tr("draft");
+    if (task.status == QLatin1String("pending")) {
+        const QString wait = waitLabel(task);
+        if (!task.attempts.isEmpty()) return wait.isEmpty() ? TeamWorkspace::tr("returned") : TeamWorkspace::tr("returned · %1").arg(wait);
+        return wait.isEmpty() ? TeamWorkspace::tr("pending") : wait;
+    }
     return QString();
 }
 

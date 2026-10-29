@@ -27,6 +27,7 @@ function fakes(reply: SendReply = { kind: "sending" }, opened: ComposerView | nu
   let attachDone: (() => void) | undefined;
   let openDone: ((v: ComposerView | null) => void) | undefined;
   let answerReply: SendReply = { kind: "sending" };
+  let retryReply: SendReply = { kind: "sending" };
   let holdOpen = false;
   const port: ComposerPort = {
     open: (session) => {
@@ -45,6 +46,9 @@ function fakes(reply: SendReply = { kind: "sending" }, opened: ComposerView | nu
     interrupted: async () => { calls.push("interrupted"); },
     clear: async (_h, run, conversation, dismiss) => { calls.push(`clear ${run} ${conversation} ${dismiss}`); return { kind: "notice", text: "Context cleared. Your draft is ready to send.", error: false }; },
     refresh: async (h) => { calls.push(`refresh ${h}`); },
+    localRetry: async (h, id) => { calls.push(`retry ${h} ${id}`); return retryReply; },
+    localDelete: async (h, id) => { calls.push(`delete ${h} ${id}`); },
+    localInspect: async (h, id) => { calls.push(`inspect ${h} ${id}`); return { kind: "terminal" }; },
   };
   const notify: Notices = (tone, text, sticky) => { notices.push(`${tone} ${sticky ? "sticky" : "timed"} ${text}`); };
   let clock = 0;
@@ -58,6 +62,7 @@ function fakes(reply: SendReply = { kind: "sending" }, opened: ComposerView | nu
     holdOpens: () => { holdOpen = true; },
     finishOpen: (v: ComposerView | null) => openDone?.(v),
     answerWith: (r: SendReply) => { answerReply = r; },
+    retryWith: (r: SendReply) => { retryReply = r; },
   };
 }
 
@@ -656,5 +661,91 @@ describe("the batch envelope", () => {
     expect(isEmptyBatch(normalize({ composer: view() }))).toBe(false);
     expect(isEmptyBatch(normalize({ draft_keys: [] }))).toBe(false);
     expect(normalize({ draft_keys: [KEY] }).draft_keys).toEqual([KEY]);
+  });
+
+  describe("local rows (Task 7)", () => {
+    const failed = { id: "req-1", text: "hello", status: "error" as const, attachments: [], run_id: "run-1", conversation_id: "conv-1",
+      submitted_at: 1_793_000_000, error: "hgs: refused", uncertain: false, message_id: null, submitted_text: null, source: null, voice: null };
+
+    it("Retry flushes the editor first and its cold question opens for the same composer", async () => {
+      const f = fakes();
+      f.retryWith({ kind: "cold", token: 7, prompt: { title: "Continue with a cold cache?", text: "", informative: "", choices: [] } });
+      await createRoot(async () => {
+        const c = createComposer(f.port, f.timers, images(1, 1), f.notify);
+        c.apply(view({ local: [failed] }));
+        c.input("typed", 5, 5);
+        await c.localRetry("req-1");
+        // A failed row flushes every key at once; the Retry finds nothing left to flush.
+        expect(f.calls).toEqual(["edit 1 typed", "retry 1 req-1"]);
+        expect(c.dialog()).toMatchObject({ kind: "cold", token: 7 });
+        expect(c.locked()).toBe(true);
+      });
+    });
+
+    it("a Retry reply that arrives after another composer opened keeps only its notice, and its question answers Cancel", async () => {
+      const f = fakes();
+      const retry = held<SendReply>();
+      const port: ComposerPort = { ...f.port, localRetry: (h, id) => { f.calls.push(`retry ${h} ${id}`); return retry.call(); } };
+      await createRoot(async () => {
+        const c = createComposer(port, f.timers, images(1, 1), f.notify);
+        c.apply(view({ local: [failed] }));
+        const first = c.localRetry("req-1");
+        await tick();
+        c.apply(view({ handle: 2, key: "studio\nclaude/sample-project/other", text_epoch: 1 }));
+        retry.answer({ kind: "cold", token: 9, prompt: { title: "Continue with a cold cache?", text: "", informative: "", choices: [] } });
+        await first;
+        await tick();
+        expect(c.dialog()).toBeUndefined();
+        expect(f.calls).toContain('answer 9 {"kind":"cancel"}');
+        const second = c.localRetry("req-1");
+        await tick();
+        c.apply(view({ handle: 3, key: "studio\nclaude/sample-project/third", text_epoch: 1 }));
+        retry.answer({ kind: "notice", text: "The session changed. Your draft was kept without sending.", error: true });
+        await second;
+        expect(f.notices).toEqual(["error sticky The session changed. Your draft was kept without sending."]);
+      });
+    });
+
+    it("one Retry runs per row: a second click while it is on its way sends nothing", async () => {
+      const f = fakes();
+      const retry = held<SendReply>();
+      const port: ComposerPort = { ...f.port, localRetry: (h, id) => { f.calls.push(`retry ${h} ${id}`); return retry.call(); } };
+      await createRoot(async () => {
+        const c = createComposer(port, f.timers, images(1, 1), f.notify);
+        c.apply(view({ local: [failed] }));
+        const first = c.localRetry("req-1");
+        await tick();
+        await c.localRetry("req-1");
+        expect(f.calls.filter((x) => x.startsWith("retry"))).toEqual(["retry 1 req-1"]);
+        retry.answer({ kind: "busy" });
+        await first;
+        // A refused Retry hands nothing back: the editor is not locked by it.
+        expect(c.locked()).toBe(false);
+        const again = c.localRetry("req-1");
+        await tick();
+        expect(f.calls.filter((x) => x.startsWith("retry"))).toEqual(["retry 1 req-1", "retry 1 req-1"]);
+        retry.answer({ kind: "sending" });
+        await again;
+      });
+    });
+
+    it("Check answers where it leads only while its composer is still open", async () => {
+      const f = fakes();
+      let answer: (v: { kind: "terminal" } | null) => void = () => {};
+      const port: ComposerPort = { ...f.port, localInspect: () => new Promise((resolve) => { answer = resolve; }) };
+      await createRoot(async () => {
+        const c = createComposer(port, f.timers, images(1, 1), f.notify);
+        c.apply(view({ local: [{ ...failed, uncertain: true }] }));
+        const shown = c.localInspect("req-1");
+        answer({ kind: "terminal" });
+        expect(await shown).toEqual({ kind: "terminal" });
+        const late = c.localInspect("req-1");
+        c.apply(view({ handle: 2, key: "studio\nclaude/sample-project/other" }));
+        answer({ kind: "terminal" });
+        expect(await late).toBeUndefined();
+        await c.localDelete("req-1");
+        expect(f.calls).toContain("delete 2 req-1");
+      });
+    });
   });
 });

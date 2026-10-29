@@ -297,7 +297,7 @@ describe("after a successful restore (Qt 3281-3336)", () => {
       expect(a.selectedKey()).toBeUndefined();
       expect(a.texts().at(-1)).toBe(`error:${RESTORE_UNVERIFIED}`);
       expect(a.actions.notices().at(-1)?.sticky).toBe(true);
-      expect(RESTORE_UNVERIFIED).toBe("The restored conversation could not be verified.");
+      expect(RESTORE_UNVERIFIED).toBe("The restored conversation could not be verified. Your archived draft remains in Saved drafts.");
       dispose();
     });
   });

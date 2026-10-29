@@ -1,13 +1,18 @@
 import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import { Icon } from "../lib/icons";
-import { selected, toast, contentScale, subagentOpen, setSubagentOpen, setMenu, type MenuEntry } from "../../store/ui";
+import { selected, toast, contentScale, subagentOpen, setSubagentOpen, setMenu, setDetailTab, type MenuEntry } from "../../store/ui";
 import { activity } from "../../store/session";
 import { flag, num, setSetting } from "../../store/settings";
+import { composer, draftKey } from "../../store/composer";
+import { notify } from "../../store/actions";
+import { terminal } from "../../store/terminal";
 import type { ActivitySource } from "../../store/activitySource";
+import type { LocalMessage } from "../../types";
 import { buildTranscript, VOICE_STATE_LABEL, voiceStateDetail, voiceStateIssue } from "./transcript";
+import { DELETE_TEXT, DELETE_TITLE, routeInspect } from "./local-actions";
 import { statusOf } from "./SessionCard";
-import type { MediaMessage, Session, TranscriptItem } from "./types";
+import type { LocalItem, MediaMessage, Session, TranscriptItem } from "./types";
 
 // ---------------------------------------------------------------------------
 // Reading column (ActivityWidth.h): 900 px at 100% content scale, 480–2400,
@@ -305,6 +310,59 @@ function MediaCard(props: { item: MediaMessage }) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Local message rows: Retry, Check Terminal (or native UI) and Delete
+// (ActivityView.cpp:1059-1068, SessionsWindow.cpp messageAction 4470-4527).
+
+/** The row whose Delete waits for its confirmation. */
+const [deleting, setDeleting] = createSignal<string>();
+
+function LocalActions(props: { local: LocalItem }) {
+  const run = (action: LocalItem["actions"][number]) => {
+    const id = props.local.id;
+    if (action === "retry") void composer.localRetry(id);
+    else if (action === "delete") setDeleting(id);
+    else void composer.localInspect(id).then((routed) => routeInspect(routed, {
+      showTerminal: () => { terminal.opened(); setDetailTab("terminal"); },
+      notify: (tone, text) => { notify(tone, text); },
+    }));
+  };
+  const label = (action: LocalItem["actions"][number]) => (action === "retry" ? "Retry" : action === "delete" ? "Delete" : props.local.inspectLabel);
+  return (
+    <div class="act-local-actions">
+      <For each={props.local.actions}>{(action) => <button type="button" class="btn small" onClick={() => run(action)}>{label(action)}</button>}</For>
+    </div>
+  );
+}
+
+/** "Delete message?": Cancel has the focus and is the default; Escape is Cancel. */
+function LocalDeleteDialog() {
+  let el: HTMLDialogElement | undefined;
+  createEffect(() => {
+    if (!el) return;
+    if (!deleting()) { if (el.open) el.close(); return; }
+    if (!el.open) el.showModal();
+    queueMicrotask(() => el?.querySelector<HTMLElement>("[data-initial]")?.focus());
+  });
+  const confirm = () => {
+    const id = deleting();
+    setDeleting(undefined);
+    if (id) void composer.localDelete(id);
+  };
+  return (
+    <dialog class="dlg" ref={el} role="alertdialog" aria-labelledby="local-delete-title" aria-describedby="local-delete-body" style={{ width: "440px" }}
+      onCancel={(e) => { e.preventDefault(); setDeleting(undefined); }} onClose={() => { if (!el?.open) setDeleting(undefined); }}>
+      <div class="dlg-head"><Icon name="triangle-alert" size={18} class="accent" /><h2 id="local-delete-title">{DELETE_TITLE}</h2></div>
+      <div class="dlg-body"><div class="confirm-body" id="local-delete-body">{DELETE_TEXT}</div></div>
+      <div class="dlg-foot">
+        <span class="spacer" />
+        <button type="button" class="btn primary" data-initial onClick={() => setDeleting(undefined)}>Cancel</button>
+        <button type="button" class="btn solid-danger" onClick={confirm}>Delete</button>
+      </div>
+    </dialog>
+  );
+}
+
 function Item(props: { item: TranscriptItem }) {
   const [open, setOpen] = createSignal(false);
   const it = props.item;
@@ -337,24 +395,32 @@ function Item(props: { item: TranscriptItem }) {
       <article class={`act-msg k-${it.kind}`} id={`item-${it.id}`}>
         <header>
           <b>{it.label ?? (it.kind === "user" ? "You" : it.kind === "agent" ? "Agent" : it.sender ?? "Zerus")}</b>
-          <span class="act-time">{it.at}</span>
+          {/* A local row's stamp stands in for the time and the receipt (ActivityView.cpp:1053-1055). */}
+          <Show when={it.local} fallback={<span class="act-time">{it.at}</span>}>
+            {(l) => <span class="act-stamp" classList={{ failed: !!l().error || l().uncertain }}>{l().stamp}</span>}
+          </Show>
           <Show when={it.kind === "user" && it.receipt}><span class="act-receipt"><Icon name="check" size={11} />{it.receipt}</span></Show>
           <span class="grow" />
           <Show when={it.kind === "agent"}><button class="icon-btn small act-copy" title="Copy as Markdown" onClick={() => copyText(it.body ?? "", "The reply is on the clipboard")}><Icon name="copy" size={12} /></button></Show>
         </header>
         <div class="act-body">
           <Show when={it.kind === "user"} fallback={<Body text={it.body ?? ""} />}><p>{it.body}</p></Show>
+          <Show when={it.local?.error}><p class="act-error">{it.local!.error}</p></Show>
           <Show when={it.code}><pre class="act-code mono">{it.code}</pre></Show>
           <Show when={it.attachments}>
             <div class="act-attachments">
-              <For each={it.attachments}>{(a) => (
-                <span class="att-chip" title={a.name}>
-                  <Icon name={a.kind === "image" ? "image" : "file-text"} size={14} />
-                  <span>{a.name}</span><span class="dim">{a.size}</span>
-                </span>
+              <For each={it.attachments}>{(a, i) => (
+                // A local row's file without its request or cached copy only names itself (ActivityView.cpp:765, 780).
+                <Show when={!it.local || it.local.available[i()]} fallback={<span class="att-chip unavailable">Attachment: {a.name}</span>}>
+                  <span class="att-chip" title={a.name}>
+                    <Icon name={a.kind === "image" ? "image" : "file-text"} size={14} />
+                    <span>{a.name}</span><span class="dim">{a.size}</span>
+                  </span>
+                </Show>
               )}</For>
             </div>
           </Show>
+          <Show when={it.local?.actions.length}><LocalActions local={it.local!} /></Show>
         </div>
       </article>
     </Show>
@@ -393,8 +459,19 @@ export function jumpToLatest() {
   liveScroller?.scrollTo({ top: liveScroller.scrollHeight, behavior: "instant" });
 }
 
-/** The transcript items of a source. */
-export const transcriptOf = (source: ActivitySource) => buildTranscript(source.events(), source.summary());
+/** The transcript items of a source, with the open session's local rows. */
+export const transcriptOf = (source: ActivitySource, local: readonly LocalMessage[] = []) => buildTranscript(source.events(), source.summary(), local);
+
+/**
+ * The local rows of the selected session's composer: none for a read-only
+ * source, a subagent, or while the composer of another session still shows.
+ */
+export function localRows(source: ActivitySource, s: Session | undefined): readonly LocalMessage[] {
+  const v = composer.view();
+  if (!v || !s || source.readOnly || subagentOpen()) return [];
+  const key = draftKey({ computer: s.computer, key: s.catalogKey, name: s.name, archive_id: s.state === "archived" ? s.archiveId ?? null : null });
+  return v.key === key ? v.local : [];
+}
 
 /** Scrolling near the top reads the previous page, unless one is loading or none is left. */
 export const readsOlder = (source: ActivitySource) => !source.loadingOlder() && !source.olderDone() && source.events().length > 0;
@@ -429,7 +506,8 @@ export function ActivityView(props: { source?: ActivitySource }) {
   // Items keep their identity while events append: the list reconciles by id,
   // so a growing tool group updates in place and older pages only add nodes.
   const [view, setView] = createStore<{ items: TranscriptItem[] }>({ items: [] });
-  const built = createMemo(() => transcriptOf(source()));
+  const local = createMemo(() => localRows(source(), s()), undefined, { equals: (a, b) => a === b || (a.length === 0 && b.length === 0) });
+  const built = createMemo(() => transcriptOf(source(), local()));
   createEffect(() => setView("items", reconcile(built(), { key: "id" })));
 
   // Stay at the bottom while it is in view; keep the reading position when an older page lands above.
@@ -474,6 +552,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
   const states = createMemo(() => paneStates(source(), s()));
   return (
     <div class="activity">
+      <LocalDeleteDialog />
       <div class="act-scroll" ref={scroller} tabindex="-1" onContextMenu={activityMenu} onScroll={onScroll}>
         <div class="act-col">
           <Show when={!fullWidth()}><ColumnEdge /><ColumnEdge right /></Show>

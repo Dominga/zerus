@@ -1,6 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type Answer, type Batch, type ComposerTab, type ComposerView, type ComputerId, type Details, type EditOutcome, type Inspect, type Outcome, type ReadMark, type SendReply, type SessionRef, type Target, type TerminalConnected, type TerminalFacts, type TerminalFinished, type TerminalStatus, type TerminalTarget, type ArchivePage, type ArchivedActivity } from "./types";
+import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type Answer, type Batch, type ComposerTab, type ComposerView, type ConflictsPage, type DraftSource, type SavedDraftDetail, type SavedDraftsPage, type ComputerId, type Details, type EditOutcome, type Inspect, type Outcome, type ReadMark, type SendReply, type SessionRef, type Target, type TerminalConnected, type TerminalFacts, type TerminalFinished, type TerminalStatus, type TerminalTarget, type ArchivePage, type ArchivedActivity } from "./types";
 import type { ActivityPort, FollowRequest } from "./store/activity";
 import { documentVisibility, type PageVisibility } from "./store/visibility";
 
@@ -508,3 +508,16 @@ export const clearContext = (handle: number, run: string, conversation: string, 
 export const localRetry = (handle: number, id: string) => desktop<SendReply>("local_retry", { handle, id });
 export const localDelete = (handle: number, id: string) => desktop<void>("local_delete", { handle, id });
 export const localInspect = (handle: number, id: string) => desktop<Inspect | null>("local_inspect", { handle, id });
+
+// Saved drafts (src-tauri composer/saved.rs). Qt's and the dev app's stores
+// are only read; each page is one bounded read.
+/** One page of a section, newest first; `before` is the previous page's `next`. */
+export const savedDrafts = (source: DraftSource, limit: number, before: string | null) =>
+  desktop<SavedDraftsPage>("saved_drafts", { source, limit, before });
+/** One page of the switch import's conflicts, from `after`. */
+export const draftConflicts = (limit: number, after: number) => desktop<ConflictsPage>("draft_conflicts", { limit, after });
+export const savedDraft = (source: DraftSource, key: string) => desktop<SavedDraftDetail>("saved_draft", { source, key });
+/** Copies a Qt draft into this computer's store, never over a draft here; rejects with why not. */
+export const draftRecover = (key: string) => desktop<void>("draft_recover", { key });
+/** Replaces the open composer's draft with the selected one; rejects with why not. */
+export const draftRestore = (handle: number, source: DraftSource, key: string) => desktop<void>("draft_restore", { handle, source, key });

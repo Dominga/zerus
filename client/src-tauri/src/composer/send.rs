@@ -2805,6 +2805,8 @@ pub(crate) mod tests {
             Arc::clone(store),
             Config {
                 cache: store.root().with_file_name("cache"),
+                qt_drafts: None,
+                dev_drafts: Vec::new(),
             },
             Deps {
                 spawn,
@@ -3010,6 +3012,8 @@ pub(crate) mod tests {
             Arc::clone(&store),
             Config {
                 cache: root.join("cache"),
+                qt_drafts: None,
+                dev_drafts: Vec::new(),
             },
             Deps {
                 spawn: Arc::new(|job: Job| {
@@ -3045,6 +3049,8 @@ pub(crate) mod tests {
             Arc::clone(&store),
             Config {
                 cache: root.join("cache"),
+                qt_drafts: None,
+                dev_drafts: Vec::new(),
             },
             Deps {
                 spawn: Arc::new(|job: Job| {
@@ -3379,6 +3385,8 @@ pub(crate) mod tests {
             drafts(root),
             Config {
                 cache: root.join("cache"),
+                qt_drafts: None,
+                dev_drafts: Vec::new(),
             },
             Deps {
                 spawn: Arc::new(|job: Job| {
@@ -3469,6 +3477,8 @@ pub(crate) mod tests {
             Arc::clone(&store),
             Config {
                 cache: root.join("cache"),
+                qt_drafts: None,
+                dev_drafts: Vec::new(),
             },
             Deps {
                 spawn: Arc::new(|job: Job| {
@@ -3885,6 +3895,8 @@ pub(crate) mod tests {
             drafts(&root),
             Config {
                 cache: root.join("cache"),
+                qt_drafts: None,
+                dev_drafts: Vec::new(),
             },
             Deps {
                 spawn: Arc::new(|job: Job| {
@@ -4603,6 +4615,8 @@ pub(crate) mod tests {
             Arc::clone(store),
             Config {
                 cache: store.root().with_file_name("cache"),
+                qt_drafts: None,
+                dev_drafts: Vec::new(),
             },
             Deps {
                 spawn: Arc::new(|job: Job| {

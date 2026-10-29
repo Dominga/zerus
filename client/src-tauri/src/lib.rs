@@ -347,9 +347,24 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 let notify_pump = app.state::<commands::AppState>().pump();
                 // A replay never touches the real attachment cache either.
                 let cache = attachments_root(&cache_dir(app.handle()), replay);
+                // Saved drafts reads Qt's store and the dev app's, never
+                // writing to them; a replay lists neither.
+                let qt_drafts = composer::qt_store(
+                    drafts.root(),
+                    (!replay).then(zerus_client_core::drafts::qt_root).flatten(),
+                );
+                let dev_drafts = if replay {
+                    Vec::new()
+                } else {
+                    composer::dev_stores(drafts.root(), zerus_client_core::drafts::dev_roots())
+                };
                 app.manage(composer::Composers::new(
                     drafts,
-                    composer::Config { cache },
+                    composer::Config {
+                        cache,
+                        qt_drafts,
+                        dev_drafts,
+                    },
                     composer::Deps {
                         spawn: std::sync::Arc::new(|job: composer::Job| {
                             tauri::async_runtime::spawn_blocking(job);
@@ -835,6 +850,11 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         composer::composer_allow_retry,
         composer::composer_refresh,
         composer::composer_tab,
+        composer::saved::saved_drafts,
+        composer::saved::saved_draft,
+        composer::saved::draft_conflicts,
+        composer::saved::draft_recover,
+        composer::saved::draft_restore,
         composer::send::send_message,
         composer::send::send_answer,
         composer::send::local_retry,
@@ -965,6 +985,8 @@ mod tests {
             Arc::clone(&store),
             composer::Config {
                 cache: root.join("cache"),
+                qt_drafts: None,
+                dev_drafts: Vec::new(),
             },
             Deps {
                 spawn: Arc::new(|job: Job| {

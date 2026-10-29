@@ -42,10 +42,13 @@ vi.mock("../../bridge", () => ({
   composerOpen: vi.fn(async () => null), composerEdit: vi.fn(async () => {}), composerPick: vi.fn(async () => {}), composerPasteImage: vi.fn(async () => {}),
   composerRemove: vi.fn(async () => {}), composerUndoRemove: vi.fn(async () => {}), composerAllowRetry: vi.fn(async () => {}), composerRefresh: vi.fn(async () => {}),
   composerTab: vi.fn(async () => {}), sendMessage: vi.fn(), sendAnswer: vi.fn(), sendCancel: vi.fn(async () => {}), sendInterrupted: vi.fn(async () => {}), clearContext: vi.fn(),
+  localRetry: vi.fn(), localDelete: vi.fn(async () => {}), localInspect: vi.fn(async () => null),
 }));
 
 import * as bridge from "../../bridge";
-import { focusTranscript, paneStates, readsOlder, transcriptOf } from "./Activity";
+import { focusTranscript, localRows, paneStates, readsOlder, transcriptOf } from "./Activity";
+import { composer } from "../../store/composer";
+import type { ComposerView, LocalMessage } from "../../types";
 import { activitySourceFor, detailTabs } from "./SessionDetail";
 import { activity } from "../../store/session";
 import { archiveActivity } from "../../store/archiveActivity";
@@ -109,6 +112,36 @@ describe("the Activity view with a read-only source", () => {
     expect(paneStates(live, rows[2]).error).toBe(true);
     expect(paneStates(live, rows[4]).archived).toBe(true);
     expect(readsOlder(live)).toBe(true);
+  });
+});
+
+describe("Activity's local message rows (Task 7)", () => {
+  const failed: LocalMessage = { id: "req-1", text: "please retry", status: "error", attachments: [], run_id: "run-live", conversation_id: "conv-live",
+    submitted_at: 1_793_000_500, error: "hgs: refused", uncertain: false, message_id: null, submitted_text: null, source: null, voice: null };
+  const view = (key: string): ComposerView => ({
+    handle: 1, key, loaded: true, rev: 0, text_epoch: 1, text: "", position: 0, anchor: 0, attachments: [], removed: null, attaching: false,
+    sending: false, waiting: null, uncertain: false, status: "", status_error: false, can_send: true, send_label: "Send", available: true,
+    unavailable_reason: "", block_reason: null, attachments_available: true, attachments_reason: "", session_status: "", session_status_error: false,
+    session_blocks_input: false, inspect_error: false, cache: { visible: false, tone: "quiet", label: "", short_label: "" }, cache_warning: "", cache_details: "",
+    context: { visible: false, text: "", tooltip: "", warning: false, tone: "quiet", percent: null, accessible_name: "" }, local: [failed],
+    cancel_send: false, compacting: false,
+    clear: { enabled: false, dismiss: false, title: "", text: "", confirm: "", run: "", conversation: "", cache_enabled: false, running: false, reason: "", cache_reason: "" },
+  } as ComposerView);
+  afterEach(() => composer.apply(undefined));
+
+  it("shows the open composer's rows only for its own session and a live source", () => {
+    const live = liveRow("ready");
+    const source = readOnlySource({ readOnly: undefined });
+    composer.apply(view("\ncodex/example/live"));
+    expect(localRows(source, live)).toEqual([failed]);
+    const items = transcriptOf(source, localRows(source, live));
+    expect(items.at(-1)).toMatchObject({ id: "local-req-1", local: { stamp: "Not sent", actions: ["retry", "delete"] } });
+    // Another session's composer still shows, a read-only source, no selection.
+    expect(localRows(source, liveRow("ready", { name: "codex/example/other" }))).toEqual([]);
+    expect(localRows(readOnlySource(), live)).toEqual([]);
+    expect(localRows(source, undefined)).toEqual([]);
+    composer.apply(view("box\ncodex/example/live"));
+    expect(localRows(source, live), "another computer's session of that name").toEqual([]);
   });
 });
 

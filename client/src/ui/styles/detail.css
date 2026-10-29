@@ -76,6 +76,13 @@
   .act-msg.k-receipt header b { color: var(--z-color-violet); }
   .act-time { color: var(--z-color-dim); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; }
   .act-receipt { display: inline-flex; align-items: center; gap: 3px; color: var(--z-color-accent-muted); font-size: var(--fs-xs); }
+  /* Local message rows (ActivityView.cpp:1053-1068): the stamp in place of the
+     time, the error line in the warning colour and the row's buttons. */
+  .act-stamp { color: var(--z-color-dim); font-size: var(--fs-xs); }
+  .act-stamp.failed { color: var(--z-color-warn); }
+  .act-error { margin-top: 6px; font-size: var(--fs-xs); color: var(--z-color-warn); white-space: pre-wrap; }
+  .act-local-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; white-space: normal; }
+  .att-chip.unavailable { color: var(--z-color-dim); }
   .act-copy { opacity: 0; transition: opacity var(--z-motion-fast); }
   .act-msg:hover .act-copy { opacity: 1; }
   .act-body { line-height: 1.5; color: var(--z-color-text); }
@@ -359,6 +366,29 @@
   .sc-group { margin: 6px 0 12px; }
   .sc-group .kv { grid-template-columns: 1fr auto; }
   .draft-list { display: flex; flex-direction: column; gap: 2px; max-height: 330px; overflow-y: auto; }
+  /* Saved drafts (MessageComposer.cpp:1230-1387): sections of rows, the
+     selected draft's text and its detail line. */
+  /* Qt's 720 x 640: the list takes two parts of the height, the text one. */
+  dialog.saved-drafts[open] { height: min(640px, calc(100vh - 64px)); }
+  .saved-drafts-body { flex: 1 1 auto; display: flex; flex-direction: column; gap: 10px; min-height: 0; overflow: hidden; }
+  .saved-drafts .draft-list { flex: 2 1 0; max-height: none; min-height: 96px; padding: 2px; border: 1px solid var(--z-color-divider); border-radius: var(--z-radius-md); outline: none; }
+  .saved-drafts .draft-list:focus-visible { border-color: var(--z-color-accent-muted); }
+  .draft-section { display: flex; flex-direction: column; gap: 2px; }
+  .draft-section + .draft-section { margin-top: 8px; }
+  .draft-section-title { padding: 6px 8px 2px; }
+  .draft-section-note { padding: 0 8px 4px; }
+  .draft-row { display: flex; flex-direction: column; gap: 2px; padding: 6px 10px; border-radius: var(--z-radius-md); cursor: default; font-size: var(--fs-sm); min-width: 0; }
+  .draft-row:hover { background: var(--z-color-hover, var(--z-color-segment-on)); }
+  .draft-row.on { background: var(--z-color-segment-on); box-shadow: inset 2px 0 0 var(--z-color-accent); }
+  .draft-row-head, .draft-row-foot { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+  .draft-machine { color: var(--z-color-muted); font-size: var(--fs-xs); max-width: 40%; }
+  .draft-row-meta { color: var(--z-color-dim); font-size: var(--fs-xs); }
+  .draft-row-foot { color: var(--z-color-text-2); }
+  .draft-more { align-self: flex-start; margin: 4px 8px; }
+  .draft-preview { flex: 1 1 0; min-height: 56px; margin: 0; padding: 8px 10px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+    border: 1px solid var(--z-color-divider); border-radius: var(--z-radius-md); background: var(--z-color-code-bg); font-size: calc(var(--fs-base) * .9); }
+  .draft-message { font-size: var(--fs-xs); color: var(--z-color-text-2); }
+  .draft-message.error { color: var(--z-color-danger); }
   .confirm-body p { line-height: 1.5; }
 
   /* Status bar */

@@ -3,7 +3,7 @@ import * as bridge from "../bridge";
 import { notify } from "./actions";
 import { documentVisibility, type PageVisibility } from "./visibility";
 import type { Timers } from "./terminal";
-import type { Answer, ClearControl, ColdPrompt, ComposerView, SendReply, SessionRef, StartQuestion } from "../types";
+import type { Answer, ClearControl, ColdPrompt, ComposerView, Inspect, SendReply, SessionRef, StartQuestion } from "../types";
 
 // The open composer (Qt MessageComposer) over the Rust hub. The webview owns
 // the text while the user types: edits go to Rust 250 ms after the last key,
@@ -52,6 +52,10 @@ export interface ComposerPort {
   interrupted(handle: number): Promise<void>;
   clear(handle: number, run: string, conversation: string, dismiss: boolean): Promise<SendReply>;
   refresh(handle: number): Promise<void>;
+  /** A local row's Retry, Delete and Check (src-tauri `local_retry`, `local_delete`, `local_inspect`). */
+  localRetry(handle: number, id: string): Promise<SendReply>;
+  localDelete(handle: number, id: string): Promise<void>;
+  localInspect(handle: number, id: string): Promise<Inspect | null>;
 }
 
 /** Image decoding for pastes that are not PNG; tests pass their own. */
@@ -141,6 +145,8 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
   const [handBack, setHandBack] = createSignal<number | undefined>();
   /** The composers whose send or answer call is on its way. */
   const calling = handleSet();
+  /** The local rows whose Retry is on its way, by composer and row: one click sends one Retry. */
+  const retrying = new Set<string>();
   /** Opens under way: the editor stays read-only, so no key is typed into the composer being left. */
   const [opening, setOpening] = createSignal(0);
   /** A send started: locked until Rust's view shows it (sending, waiting) or hands the text back. */
@@ -447,6 +453,43 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
     async interrupted() { const h = handle(); if (h !== undefined) await port.interrupted(h).catch(() => {}); },
     /** The status line's Refresh (Qt's sessionRefreshRequested). */
     async refresh() { const h = handle(); if (h !== undefined && !operationLocked()) await port.refresh(h).catch(() => {}); },
+    /**
+     * Retry on a failed local row (Qt's messageAction "retry"): Rust sends a
+     * definite failure again as a new submission with a new request id, and
+     * never an uncertain one. Its reply keeps the composer it started on, as
+     * a send's: a cold question for a composer left meanwhile is answered
+     * Cancel, and only a notice still shows.
+     */
+    async localRetry(id: string) {
+      const h = handle();
+      if (h === undefined) return;
+      const mark = `${h}\n${id}`;
+      if (retrying.has(mark)) return;
+      retrying.add(mark);
+      let r: SendReply;
+      let at = epoch;
+      try {
+        await flush();
+        at = epoch;
+        r = await port.localRetry(h, id);
+      } catch (e) {
+        notices("error", typeof e === "string" ? e : e instanceof Error ? e.message : String(e), true);
+        return;
+      } finally {
+        retrying.delete(mark);
+      }
+      reply(r, h, at, false);
+    },
+    /** Delete on a failed local row (the view asked first). */
+    async localDelete(id: string) { const h = handle(); if (h !== undefined) await port.localDelete(h, id).catch(() => {}); },
+    /** Check Terminal or Check native UI on a failed row: where it leads, or nothing once another composer opened. */
+    async localInspect(id: string): Promise<Inspect | undefined> {
+      const h = handle();
+      if (h === undefined) return undefined;
+      let routed: Inspect | null = null;
+      try { routed = await port.localInspect(h, id); } catch { return undefined; }
+      return routed && h === handle() ? routed : undefined;
+    },
   };
 }
 
@@ -456,7 +499,7 @@ export const composer = createRoot(() => createComposer({
   open: bridge.composerOpen, edit: bridge.composerEdit, pick: bridge.composerPick, pasteImage: bridge.composerPasteImage,
   send: bridge.sendMessage, answer: bridge.sendAnswer, remove: bridge.composerRemove, undo: bridge.composerUndoRemove,
   allowRetry: bridge.composerAllowRetry, cancelSend: bridge.sendCancel, interrupted: bridge.sendInterrupted, clear: bridge.clearContext,
-  refresh: bridge.composerRefresh,
+  refresh: bridge.composerRefresh, localRetry: bridge.localRetry, localDelete: bridge.localDelete, localInspect: bridge.localInspect,
 }));
 
 /**

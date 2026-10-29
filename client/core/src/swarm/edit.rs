@@ -44,6 +44,7 @@ pub enum Intent {
     },
     /// A creation's source or cloned folder (SessionOrganization.cpp:258-269).
     AddFolder {
+        id: String,
         project: String,
         machine: String,
         path: String,
@@ -156,6 +157,7 @@ pub fn apply(organization: &Value, intent: &Intent) -> Result<Value, String> {
             }
         }
         Intent::AddFolder {
+            id,
             project,
             machine,
             path,
@@ -166,9 +168,11 @@ pub fn apply(organization: &Value, intent: &Intent) -> Result<Value, String> {
                 || !crate::paths::absolute(path, *style)
                 || path.contains('\n')
             {
-                return Err("The computer did not confirm this folder.".into());
+                return Ok(next);
             }
-            let at = position(&next, project).ok_or(GONE)?;
+            let Some(at) = position(&next, project) else {
+                return Ok(next);
+            };
             let clean = crate::paths::clean(path, *style);
             let project = &mut projects_mut(&mut next).ok_or(GONE)?[at];
             if !project["folders"].is_array() {
@@ -183,7 +187,7 @@ pub fn apply(organization: &Value, intent: &Intent) -> Result<Value, String> {
                         *style,
                     )
             }) {
-                folders.push(json!({"id": uuid::Uuid::new_v4().to_string(), "machine": machine,
+                folders.push(json!({"id": id, "machine": machine,
                     "path": clean, "name": name.trim().chars().take(NAME_CHARS).collect::<String>()}));
             }
         }

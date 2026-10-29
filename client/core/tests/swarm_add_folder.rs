@@ -9,6 +9,7 @@ fn organization() -> Value {
 
 fn intent(machine: &str, path: &str, style: Style) -> Intent {
     Intent::AddFolder {
+        id: "11111111-2222-4333-8444-555555555555".into(),
         project: "p".into(),
         machine: machine.into(),
         path: path.into(),
@@ -28,6 +29,16 @@ fn add_folder_cleans_the_path_and_keeps_an_existing_identity_and_name() {
     assert!(zerus_client_core::creation::canonical_uuid(
         folder["id"].as_str().unwrap()
     ));
+    assert_eq!(folder["id"], "11111111-2222-4333-8444-555555555555");
+    assert_eq!(
+        apply(
+            &organization(),
+            &intent("studio", "/srv/repo/../work/", Style::Posix)
+        )
+        .unwrap(),
+        first,
+        "the edit is deterministic"
+    );
     assert_eq!(folder["machine"], "studio");
     assert_eq!(folder["path"], "/srv/work");
     assert_eq!(folder["name"], "Work");
@@ -61,17 +72,23 @@ fn add_folder_uses_the_owning_computers_style_and_eighty_character_name() {
 }
 
 #[test]
-fn add_folder_refuses_blank_computers_relative_paths_line_breaks_and_gone_projects() {
+fn add_folder_keeps_qt_s_no_ops_for_blank_computers_bad_paths_and_gone_projects() {
     for (machine, path) in [
         ("  ", "/srv/repo"),
         ("studio", "repo"),
         ("studio", "/srv/repo\nother"),
     ] {
-        assert!(apply(&organization(), &intent(machine, path, Style::Posix)).is_err());
+        assert_eq!(
+            apply(&organization(), &intent(machine, path, Style::Posix)).unwrap(),
+            organization()
+        );
     }
-    assert!(apply(
-        &json!({"projects": []}),
-        &intent("studio", "/srv/repo", Style::Posix)
-    )
-    .is_err());
+    assert_eq!(
+        apply(
+            &json!({"projects": []}),
+            &intent("studio", "/srv/repo", Style::Posix)
+        )
+        .unwrap(),
+        json!({"projects": []})
+    );
 }

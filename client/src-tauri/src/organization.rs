@@ -421,8 +421,21 @@ impl Organization {
         self.submit_with(move |_| intent)
     }
 
-    /// Records a creation's edit and returns without waiting for swarm apply,
-    /// as Qt's resolvePlacement edits its local model (SessionsWindow.cpp:1539-1569).
+    /// The Controller's current refusal; after-bind edits only wait while
+    /// its first state has not arrived, never on a later apply.
+    pub(crate) fn creation_refusal(&self) -> Option<String> {
+        if !self.0.allowed {
+            return Some(REPLAY_NEEDS_HGS.into());
+        }
+        let hub = self.lock();
+        if hub.stopped {
+            return Some(STOPPED.into());
+        }
+        hub.sync.view().reason
+    }
+
+    /// Records a creation's edit without waiting for swarm apply, as Qt's
+    /// resolvePlacement edits its local model (SessionsWindow.cpp:1539-1569).
     /// A later sync failure belongs to the organization's status line.
     pub(crate) fn accept(&self, intent: impl FnOnce(&Pump) -> Intent) -> Result<(), String> {
         if !self.0.allowed {
@@ -433,6 +446,17 @@ impl Organization {
             return Err(STOPPED.into());
         }
         let intent = intent(&self.0.pump);
+        // Qt's addFolder returns without changed() for these no-ops.
+        // The Controller's readiness refusal still takes precedence.
+        if matches!(&intent, Intent::AddFolder { .. })
+            && hub.sync.ready()
+            && hub.sync.presented().is_some_and(|(current, _)| {
+                zerus_client_core::swarm::edit::apply(current, &intent)
+                    .is_ok_and(|next| next == *current)
+            })
+        {
+            return Ok(());
+        }
         hub.sync.edit(&intent, self.now())?;
         self.0.pump.edited(&intent);
         self.publish(&mut hub);
@@ -1192,6 +1216,7 @@ mod tests {
         for _ in 0..2 {
             organization
                 .accept(|_| Intent::AddFolder {
+                    id: "folder-id".into(),
                     project: "reserved".into(),
                     machine: "workstation".into(),
                     path: "/srv/repo".into(),

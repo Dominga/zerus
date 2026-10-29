@@ -2097,6 +2097,19 @@ impl Creations {
     }
 
     /// The session appeared: the operation is bound to it.
+    /// The host also keeps the exact session name for its bound card
+    /// (SessionsWindow.cpp:3038, 3253-3255).
+    pub fn complete_session(&mut self, id: &str, name: &str) -> Vec<Effect> {
+        if let Some(value) = self.operations.get_mut(id) {
+            if text(value, "state") == "bound" {
+                return Vec::new();
+            }
+            value["bound_session"] = Value::from(name);
+        }
+        self.complete(id)
+    }
+
+    /// The session appeared: the operation is bound to it.
     pub fn complete(&mut self, id: &str) -> Vec<Effect> {
         let Some(mut value) = self.operations.get(id).cloned() else {
             return Vec::new();

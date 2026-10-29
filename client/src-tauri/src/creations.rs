@@ -25,12 +25,36 @@ use zerus_client_core::{Change, ComputerId};
 const PARK: Duration = Duration::from_millis(100);
 const FLUSH: Duration = Duration::from_secs(2);
 const STOPPED: &str = "Session creation stopped.";
+fn interrupted(detail: &str) -> String {
+    format!("{}\n{detail}", creation::INTERRUPTED)
+}
+
 type Job = Box<dyn FnOnce() + Send>;
 type JournalWriter = Arc<dyn Fn(&Path, &[u8]) -> bool + Send + Sync>;
 type LaunchSession = Arc<dyn Fn(&Value) -> Result<(), String> + Send + Sync>;
 type ReadBinding = Arc<dyn Fn(&ComputerId) -> Result<BindingListing, String> + Send + Sync>;
 type Resolve = Arc<dyn Fn(&mut Value, &Value) -> Result<(), String> + Send + Sync>;
-type Bind = Arc<dyn Fn(&Value, &BindingSession) -> Result<bool, String> + Send + Sync>;
+type Bind =
+    Arc<dyn Fn(&Value, &BindingSession, &mut BoundEdits) -> Result<bool, String> + Send + Sync>;
+
+#[derive(Default)]
+struct BoundEdits {
+    folder_id: String,
+    folder_attempted: bool,
+    move_attempted: bool,
+}
+
+enum BindWait {
+    Member,
+    Readiness(Option<String>),
+}
+
+struct PendingBinding {
+    operation: Value,
+    session: BindingSession,
+    edits: BoundEdits,
+    waiting: Option<BindWait>,
+}
 
 fn lock<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
     value.lock().unwrap_or_else(PoisonError::into_inner)
@@ -88,6 +112,7 @@ pub struct CreationCard {
     worktree_receipts: bool,
     can_resume: bool,
     can_edit: bool,
+    bound_session: String,
 }
 
 impl CreationCard {
@@ -111,6 +136,7 @@ impl CreationCard {
             worktree_receipts: flag(operation, "worktree_receipts"),
             can_resume: creation::can_resume(operation),
             can_edit,
+            bound_session: text(operation, "bound_session").into(),
         }
     }
 }
@@ -128,6 +154,7 @@ struct Services {
     online: Arc<dyn Fn(&str) -> bool + Send + Sync>,
     resolve: Resolve,
     bind: Bind,
+    readiness: Arc<dyn Fn() -> Option<String> + Send + Sync>,
     remember: Arc<dyn Fn(&Remember) + Send + Sync>,
     emit: Arc<dyn Fn(Value) + Send + Sync>,
     spawn: Arc<dyn Fn(Job) + Send + Sync>,
@@ -144,12 +171,14 @@ enum Input {
     Action(String, CreationAction, SyncSender<Result<(), String>>),
     Catalog,
     Flush(SyncSender<()>),
+    #[cfg(test)]
+    Barrier(SyncSender<()>),
 }
 
 enum Done {
     Written(u64, bool),
     Called(u64, creation::Answer),
-    Launched(String, String, Result<(), String>),
+    Launched(String, String, bool, Result<(), String>),
     Binding(String, Result<BindingListing, String>),
 }
 
@@ -228,10 +257,20 @@ impl CreationHost {
                     cache,
                     catalog,
                     polls: BTreeMap::new(),
+                    pending: BTreeMap::new(),
                     shutdown: quitting,
                     quitting: false,
                 };
                 let effects = worker.queue.load(load(&file));
+                // Loaded bound records intentionally emit no Changed event,
+                // but remain readable by ID. Populate this cache once at load.
+                let loaded: Vec<_> = worker
+                    .queue
+                    .operations()
+                    .keys()
+                    .map(|id| Effect::Changed { id: id.clone() })
+                    .collect();
+                worker.refresh_cache(&loaded);
                 worker.effects(effects);
                 loop {
                     worker.stop_if_requested();
@@ -252,8 +291,8 @@ impl CreationHost {
                     if !worker.quitting {
                         // Catalog wakeups coalesce; reads and reconciliation are
                         // bounded by the 128-operation queue, never the full fleet.
-                        worker.catalog.swap(false, Ordering::AcqRel);
-                        worker.reconcile();
+                        let changed = worker.catalog.swap(false, Ordering::AcqRel);
+                        worker.reconcile_pending(changed);
                         worker.poll();
                     }
                 }
@@ -272,6 +311,7 @@ impl CreationHost {
                 | Change::Remove { .. }
                 | Change::Computer { .. }
                 | Change::Machine { .. }
+                | Change::Organization { .. }
         ) && !self.0.catalog.swap(true, Ordering::AcqRel)
         {
             let _ = self.0.input.try_send(Input::Catalog);
@@ -335,6 +375,15 @@ impl CreationHost {
         answer.recv().map_err(|_| STOPPED.to_owned())?
     }
 
+    #[cfg(test)]
+    fn flush_journal_for_test(&self) -> bool {
+        let (send, answer) = mpsc::sync_channel(1);
+        if self.0.input.send(Input::Barrier(send)).is_err() {
+            return false;
+        }
+        answer.recv_timeout(Duration::from_secs(2)).is_ok()
+    }
+
     fn flush(&self, limit: Duration) -> bool {
         self.0.quitting.store(true, Ordering::Release);
         let (send, answer) = mpsc::sync_channel(1);
@@ -365,7 +414,6 @@ struct Poll {
     running: bool,
     force: bool,
     last: Option<Instant>,
-    listing: Option<BindingListing>,
 }
 
 struct Worker {
@@ -376,6 +424,7 @@ struct Worker {
     cache: Arc<Mutex<Cache>>,
     catalog: Arc<AtomicBool>,
     polls: BTreeMap<String, Poll>,
+    pending: BTreeMap<String, PendingBinding>,
     shutdown: Arc<AtomicBool>,
     quitting: bool,
 }
@@ -384,7 +433,7 @@ struct Placement(Resolve);
 impl creation::Placement for Placement {
     fn resolve(&mut self, plan: &mut Value, evidence: &Value) -> Result<(), String> {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (self.0)(plan, evidence)))
-            .unwrap_or_else(|_| Err("Project placement stopped.".into()))
+            .unwrap_or_else(|_| Err(interrupted("The project placement worker panicked.")))
     }
 }
 
@@ -393,6 +442,7 @@ impl Worker {
         if self.shutdown.load(Ordering::Acquire) {
             self.quitting = true;
             self.queue.quit();
+            self.pending.clear();
         }
     }
 
@@ -426,7 +476,7 @@ impl Worker {
                         .operation(&id)
                         .is_none_or(|operation| text(operation, "state") == "bound")
                 {
-                    let _ = answer.send(Err("This creation is no longer listed.".into()));
+                    let _ = answer.send(Err("This creation has already been resolved.".into()));
                     return;
                 }
                 if !self.services.allowed
@@ -437,12 +487,10 @@ impl Worker {
                 }
                 if matches!(action, CreationAction::Check) {
                     let operation = self.queue.operation(&id).unwrap();
-                    if flag(operation, "launch_dispatched") {
-                        self.polls
-                            .entry(text(operation, "host").into())
-                            .or_default()
-                            .force = true;
-                    }
+                    self.polls
+                        .entry(text(operation, "host").into())
+                        .or_default()
+                        .force = true;
                 }
                 let effects = match action {
                     CreationAction::Resume => self.queue.resume(&id),
@@ -454,6 +502,10 @@ impl Worker {
                 self.effects(effects);
                 let _ = answer.send(Ok(()));
             }
+            #[cfg(test)]
+            Input::Barrier(answer) => {
+                let _ = self.writer.send(Write::Flush(answer));
+            }
             Input::Catalog => {}
             Input::Flush(answer) => {
                 self.quitting = true;
@@ -463,24 +515,29 @@ impl Worker {
         }
     }
 
-    fn refresh_cache(&self) {
+    fn refresh_cache(&self, effects: &[Effect]) {
         let mut cache = lock(&self.cache);
-        cache.operations = self.queue.operations().clone();
-        cache.cards = self
-            .queue
-            .operations()
+        for id in effects
             .iter()
-            .map(|(id, operation)| {
-                (
-                    id.clone(),
-                    CreationCard::of(id, operation, self.queue.can_edit(id)),
-                )
+            .filter_map(|effect| match effect {
+                Effect::Changed { id } => Some(id),
+                _ => None,
             })
-            .collect();
+            .collect::<BTreeSet<_>>()
+        {
+            if let Some(operation) = self.queue.operation(id) {
+                let card = CreationCard::of(id, operation, self.queue.can_edit(id));
+                cache.operations.insert(id.clone(), operation.clone());
+                cache.cards.insert(id.clone(), card);
+            }
+        }
     }
 
     fn effects(&mut self, effects: Vec<Effect>) {
-        self.refresh_cache();
+        if effects.is_empty() {
+            return;
+        }
+        self.refresh_cache(&effects);
         for effect in effects {
             match effect {
                 Effect::Write {
@@ -497,6 +554,11 @@ impl Worker {
                     }
                 }
                 Effect::Removed { id } => {
+                    self.pending.remove(&id);
+                    let mut cache = lock(&self.cache);
+                    cache.operations.remove(&id);
+                    cache.cards.remove(&id);
+                    drop(cache);
                     (self.services.emit)(json!({"id": id, "removed": true}));
                 }
                 Effect::Call { flight, call } => {
@@ -516,7 +578,7 @@ impl Worker {
                         .unwrap_or_else(|_| creation::Answer {
                             ok: false,
                             data: Value::Null,
-                            error: "The creation step stopped.".into(),
+                            error: interrupted("The creation worker panicked."),
                         });
                         let _ = done.send(Done::Called(flight, answer));
                     }));
@@ -535,10 +597,13 @@ impl Worker {
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             (services.launch)(&operation)
                         }))
-                        .unwrap_or_else(|_| Err("The session launch stopped.".into()));
+                        .unwrap_or_else(|_| {
+                            Err(interrupted("The session launch worker panicked."))
+                        });
                         let _ = done.send(Done::Launched(
                             text(&operation, "host").into(),
                             text(&operation, "launch_id").into(),
+                            flag(&operation, "terminal"),
                             result,
                         ));
                     }));
@@ -555,14 +620,20 @@ impl Worker {
                 answer,
                 &mut Placement(Arc::clone(&self.services.resolve)),
             ),
-            Done::Launched(host, launch, result) => {
+            Done::Launched(host, launch, terminal, result) => {
                 self.polls.entry(host).or_default().force = true;
-                self.queue.launch_finished(&launch, result)
+                if terminal && result.is_ok() {
+                    Vec::new()
+                } else {
+                    self.queue.launch_finished(&launch, result)
+                }
             }
             Done::Binding(host, result) => {
                 if let Some(poll) = self.polls.get_mut(&host) {
                     poll.running = false;
-                    poll.listing = result.ok();
+                }
+                if let Ok(listing) = result {
+                    self.reconcile(&host, listing);
                 }
                 Vec::new()
             }
@@ -574,7 +645,11 @@ impl Worker {
         self.queue
             .operations()
             .values()
-            .filter(|operation| matches!(text(operation, "state"), "launching" | "confirming"))
+            .filter(|operation| {
+                matches!(text(operation, "state"), "launching" | "confirming")
+                    || (text(operation, "state") == "unknown"
+                        && flag(operation, "launch_dispatched"))
+            })
             .map(|operation| text(operation, "host").to_owned())
             .collect()
     }
@@ -608,26 +683,17 @@ impl Worker {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     (services.binding)(&ComputerId(host.clone()))
                 }))
-                .unwrap_or_else(|_| Err("The session listing stopped.".into()));
+                .unwrap_or_else(|_| Err(interrupted("The session listing worker panicked.")));
                 let _ = done.send(Done::Binding(host, result));
             }));
         }
     }
 
-    fn reconcile(&mut self) {
-        let listings: Vec<_> = self
-            .polls
-            .iter()
-            .filter_map(|(host, poll)| {
-                poll.listing
-                    .as_ref()
-                    .map(|listing| (host.clone(), listing.clone()))
-            })
-            .collect();
-        for (host, listing) in listings {
-            if !listing.online || !(self.services.online)(&host) {
-                continue;
-            }
+    fn reconcile(&mut self, host: &str, listing: BindingListing) {
+        if !listing.online {
+            return;
+        }
+        if (self.services.online)(host) {
             for session in &listing.sessions {
                 if session.launch_id.is_empty() || session.state == "archived" {
                     continue;
@@ -647,47 +713,89 @@ impl Worker {
                 {
                     continue;
                 }
-                match (self.services.bind)(&operation, session) {
-                    Ok(true) => {
-                        let effects = self.queue.complete(&id);
-                        self.effects(effects);
-                    }
-                    Ok(false) => {}
-                    Err(error) => {
-                        let effects = self.queue.launch_finished(&session.launch_id, Err(error));
-                        self.effects(effects);
-                    }
-                }
-            }
-            for ended in listing.ended_launches {
-                if ended.launch_id.is_empty()
-                    || listing
-                        .sessions
-                        .iter()
-                        .any(|session| session.launch_id == ended.launch_id)
-                {
-                    continue;
-                }
-                let Some(id) = self.queue.for_launch(&ended.launch_id) else {
-                    continue;
-                };
-                let Some(operation) = self.queue.operation(&id) else {
-                    continue;
-                };
-                if text(operation, "host") != host {
-                    continue;
-                }
-                let tag = text(operation, "tag");
-                let reason = match ended.code {
-                    Some(code) => {
-                        format!("Session {tag} ended before it appeared (exit code {code}).")
-                    }
-                    None => format!("Session {tag} ended before it appeared."),
-                } + "\n"
-                    + &ended.output.chars().take(4000).collect::<String>();
-                let effects = self.queue.ended(&id, &ended.launch_id, &reason);
+                // Qt completes first (3038-3041). Organization edits cannot
+                // change a known running session back into an unknown creation.
+                let effects = self.queue.complete_session(&id, &session.name);
                 self.effects(effects);
+                self.pending.insert(
+                    id,
+                    PendingBinding {
+                        operation,
+                        session: session.clone(),
+                        edits: BoundEdits {
+                            folder_id: (self.services.ids)(),
+                            ..BoundEdits::default()
+                        },
+                        waiting: None,
+                    },
+                );
+                while self.pending.len() > creation::OPERATIONS {
+                    self.pending.pop_first();
+                }
             }
+        }
+        for ended in listing.ended_launches {
+            if ended.launch_id.is_empty()
+                || listing
+                    .sessions
+                    .iter()
+                    .any(|session| session.launch_id == ended.launch_id)
+            {
+                continue;
+            }
+            let Some(id) = self.queue.for_launch(&ended.launch_id) else {
+                continue;
+            };
+            let Some(operation) = self.queue.operation(&id) else {
+                continue;
+            };
+            if text(operation, "host") != host {
+                continue;
+            }
+            let tag = text(operation, "tag");
+            let reason = match ended.code {
+                Some(code) => format!("Session {tag} ended before it appeared (exit code {code})."),
+                None => format!("Session {tag} ended before it appeared."),
+            } + "\n"
+                + &ended.output.chars().take(4000).collect::<String>();
+            let effects = self.queue.ended(&id, &ended.launch_id, &reason);
+            self.effects(effects);
+        }
+        self.reconcile_pending(false);
+    }
+
+    fn reconcile_pending(&mut self, catalog_changed: bool) {
+        if self.pending.is_empty() || self.quitting {
+            return;
+        }
+        let readiness = (self.services.readiness)();
+        let ids: Vec<_> = self
+            .pending
+            .iter()
+            .filter_map(|(id, pending)| {
+                let attempt = match &pending.waiting {
+                    None => true,
+                    Some(BindWait::Member) => catalog_changed,
+                    Some(BindWait::Readiness(last)) => last != &readiness,
+                };
+                attempt.then(|| id.clone())
+            })
+            .collect();
+        for id in ids {
+            let mut pending = self.pending.remove(&id).unwrap();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                (self.services.bind)(&pending.operation, &pending.session, &mut pending.edits)
+            }))
+            .unwrap_or(Ok(true));
+            pending.waiting = match result {
+                Ok(true) => continue,
+                Ok(false) => Some(BindWait::Member),
+                Err(error) if error == swarm::STARTING => {
+                    Some(BindWait::Readiness(readiness.clone()))
+                }
+                Err(_) => continue,
+            };
+            self.pending.insert(id, pending);
         }
     }
 }
@@ -725,6 +833,7 @@ fn resolve(
         let machine = text(plan, "machine").to_owned();
         let style = style(&path);
         organization.accept(move |_| Intent::AddFolder {
+            id: uuid::Uuid::new_v4().to_string(),
             project,
             machine,
             path,
@@ -740,6 +849,7 @@ fn bind(
     pump: &crate::pump::Pump,
     operation: &Value,
     session: &BindingSession,
+    edits: &mut BoundEdits,
 ) -> Result<bool, String> {
     let host = text(operation, "host");
     if !pump.online(host) {
@@ -748,6 +858,13 @@ fn bind(
     let requested = text(operation, "group");
     if flag(operation, "implicit_inbox") && requested == swarm::INBOX {
         return Ok(true);
+    }
+    if let Some(detail) = organization.creation_refusal() {
+        return if detail == swarm::STARTING {
+            Err(detail)
+        } else {
+            Ok(true)
+        };
     }
     let Some(row) = pump.row_named(host, &session.name) else {
         return Ok(false);
@@ -764,10 +881,11 @@ fn bind(
     } else {
         pump.default_project()
     };
-    if flag(operation, "add_folder") {
+    if flag(operation, "add_folder") && !edits.folder_attempted {
         let path = operation
             .get("folder")
             .and_then(Value::as_str)
+            .filter(|folder| !folder.is_empty())
             .unwrap_or_else(|| text(operation, "target"))
             .to_owned();
         let style = paths::of(
@@ -776,25 +894,36 @@ fn bind(
                 .as_deref(),
             host.is_empty(),
         );
-        if paths::absolute(&path, style) {
-            let group = project.clone();
-            let machine = row.machine.clone();
-            organization.accept(move |_| Intent::AddFolder {
-                project: group,
-                machine,
-                path,
-                name: String::new(),
-                style,
-            })?;
+        let group = project.clone();
+        let machine = row.machine.clone();
+        let id = edits.folder_id.clone();
+        let result = organization.accept(move |_| Intent::AddFolder {
+            id,
+            project: group,
+            machine,
+            path,
+            name: String::new(),
+            style,
+        });
+        if result.as_ref().is_err_and(|error| error == swarm::STARTING) {
+            return Err(swarm::STARTING.into());
         }
+        // Any other refusal drops this edit; a known session stays bound.
+        edits.folder_attempted = true;
     }
-    let member = swarm::member(&row.machine, &row.name);
-    let group = project.clone();
-    organization.accept(move |_| Intent::Move {
-        members: vec![member],
-        project: group,
-        before: None,
-    })?;
+    if !edits.move_attempted {
+        let member = swarm::member(&row.machine, &row.name);
+        let group = project.clone();
+        let result = organization.accept(move |_| Intent::Move {
+            members: vec![member],
+            project: group,
+            before: None,
+        });
+        if result.as_ref().is_err_and(|error| error == swarm::STARTING) {
+            return Err(swarm::STARTING.into());
+        }
+        edits.move_attempted = true;
+    }
     pump.set_collapsed(&project, false);
     Ok(true)
 }
@@ -830,21 +959,19 @@ fn launch_invocation(operation: &Value) -> zerus_client_core::Invocation {
     let mut invocation =
         launch::launch_invocation(&computer, &launch, text(operation, "expected_machine"));
     if flag(operation, "terminal") {
-        // Remove only the option, even when a tag or account is also "-d".
-        let at = usize::from(!computer.is_local())
-            + if text(operation, "expected_machine").is_empty() {
-                0
-            } else {
-                2
+        // Remove the option by value, preserving option values named -d.
+        let mut value = false;
+        invocation.args.retain(|argument| {
+            if value {
+                value = false;
+                return true;
             }
-            + 7;
-        if invocation
-            .args
-            .get(at)
-            .is_some_and(|argument| argument == "-d")
-        {
-            invocation.args.remove(at);
-        }
+            value = matches!(
+                argument.as_str(),
+                "-n" | "--launch-id" | "--account" | "--model" | "--effort" | "--expect-machine"
+            );
+            argument != "-d"
+        });
     }
     invocation
 }
@@ -852,10 +979,10 @@ fn launch_invocation(operation: &Value) -> zerus_client_core::Invocation {
 fn detached(hgs: &Path, invocation: &zerus_client_core::Invocation) -> Result<(), String> {
     let exit = zerus_client_core::worktrees::run_guarded(hgs, invocation, |hgs, invocation| {
         zerus_client_core::run_limited(hgs, invocation, &[], zerus_client_core::reads::READ_LIMIT)
-            .unwrap_or(zerus_client_core::Exit::Code {
+            .unwrap_or_else(|error| zerus_client_core::Exit::Code {
                 code: 1,
                 stdout: Vec::new(),
-                stderr: "The launch response exceeded its limit.".into(),
+                stderr: interrupted(&format!("{error:?}")).into(),
             })
     })?;
     launch::launched(exit)
@@ -872,13 +999,12 @@ pub fn start(app: &AppHandle, dir: &Path, replay: bool, allowed: bool) -> Creati
         .inner()
         .clone();
     let placement = organization.clone();
+    let readiness = organization.clone();
     let pump = app.state::<crate::commands::AppState>().pump();
     let placement_pump = pump.clone();
     let remembered = app.state::<crate::settings::Store>().0.clone();
     let online_pump = pump.clone();
     let emit = app.clone();
-    let notices = app.clone();
-    let terminal_app = app.clone();
     let terminal_dir = dir.to_path_buf();
     let launcher = Arc::new(Mutex::new(
         zerus_client_core::terminal_launch::Launcher::new(Default::default()),
@@ -916,9 +1042,10 @@ pub fn start(app: &AppHandle, dir: &Path, replay: bool, allowed: bool) -> Creati
                     .unwrap_or_default();
                 resolve(&placement, &local, plan, evidence)
             }),
-            bind: Arc::new(move |operation, session| {
-                bind(&organization, &pump, operation, session)
+            bind: Arc::new(move |operation, session, edits| {
+                bind(&organization, &pump, operation, session, edits)
             }),
+            readiness: Arc::new(move || readiness.creation_refusal()),
             remember: Arc::new(move |choices| remember(&remembered, choices)),
             emit: Arc::new(move |value| {
                 let _ = emit.emit("creations", value);
@@ -959,13 +1086,15 @@ pub fn start(app: &AppHandle, dir: &Path, replay: bool, allowed: bool) -> Creati
                     match terminal.open_new_session(&hgs.to_string_lossy(), &invocation.args) {
                         Ok(advisory) => {
                             if let Some(advisory) = advisory {
-                                crate::desk::window_notice(&terminal_app, "Zerus", &advisory);
+                                crate::desk::tray_notify(
+                                    zerus_client_core::terminal_launch::ADVISORY_TITLE,
+                                    &advisory,
+                                );
                             }
                             Ok(())
                         }
                         Err(error) => {
-                            crate::desk::window_notice(
-                                &notices,
+                            crate::desk::tray_notify(
                                 "Zerus: the terminal did not open",
                                 &format!("{error}\n\n{command}"),
                             );
@@ -1174,10 +1303,11 @@ mod tests {
                     lock(&resolve.placements).push(placed);
                     Ok(())
                 }),
-                bind: Arc::new(move |_, session| {
+                bind: Arc::new(move |_, session, _| {
                     lock(&bind.bound).push(session.name.clone());
                     Ok(true)
                 }),
+                readiness: Arc::new(|| None),
                 remember: Arc::new(move |value| {
                     lock(&remember.remembered).push(value.clone());
                 }),
@@ -1625,7 +1755,7 @@ mod tests {
     }
 
     #[test]
-    fn admission_reports_refusals_and_a_computer_without_waiting_work_is_not_polled() {
+    fn admission_reports_refusals_at_the_unsettled_bound() {
         let fake = Fake::new();
         let mut services = fake.services();
         services.spawn = Arc::new(|_| {});
@@ -1752,22 +1882,567 @@ mod tests {
             operation["host"] = json!(host);
             operation["tag"] = json!("-d");
             operation["account"] = json!("-d");
-            operation["expected_machine"] = json!(MACHINE);
-            let invocation = launch_invocation(&operation);
-            assert_eq!(invocation.args.iter().filter(|arg| *arg == "-d").count(), 2);
-            assert!(invocation
-                .args
-                .windows(2)
-                .any(|pair| pair == ["--expect-machine", MACHINE]));
-            operation["terminal"] = json!(false);
+            for machine in ["", MACHINE] {
+                operation["expected_machine"] = json!(machine);
+                let invocation = launch_invocation(&operation);
+                assert_eq!(invocation.args.iter().filter(|arg| *arg == "-d").count(), 2);
+                assert_eq!(
+                    invocation
+                        .args
+                        .windows(2)
+                        .any(|pair| pair == ["--expect-machine", machine]),
+                    !machine.is_empty()
+                );
+                operation["terminal"] = json!(false);
+                assert_eq!(
+                    launch_invocation(&operation)
+                        .args
+                        .iter()
+                        .filter(|arg| *arg == "-d")
+                        .count(),
+                    3
+                );
+                operation["terminal"] = json!(true);
+            }
+        }
+    }
+
+    fn organization_fixture(
+        fake: &Fake,
+        pump: &crate::pump::Pump,
+        allowed: bool,
+    ) -> crate::organization::Organization {
+        crate::organization::Organization::new(
+            pump.clone(),
+            fake.hgs.clone(),
+            allowed,
+            fake.dir.join("layout.json"),
+            fake.dir.join("organization-draft.json"),
+        )
+    }
+
+    fn ready_organization(organization: &crate::organization::Organization) -> Change {
+        let catalog = json!({"version": 2, "default_project": "ungrouped", "projects": [
+            {"id": "p", "name": "Project", "sessions": [], "folders": []},
+            {"id": "ungrouped", "name": "Inbox", "sessions": [], "folders": []}
+        ]});
+        let snapshot = zerus_client_core::OrganizationSnapshot {
+            digest: "fixture-digest".into(),
+            base: catalog.clone(),
+            versions: json!({}),
+        };
+        organization.set_source(Arc::new(move || Some(snapshot.clone())));
+        let change = Change::Organization {
+            computer: ComputerId::local(),
+            update: zerus_client_core::OrganizationUpdate::State {
+                digest: "fixture-digest".into(),
+                value: Arc::new(
+                    json!({"schema": 1, "digest": "fixture-digest", "initialized": true,
+                    "organization": catalog}),
+                ),
+                membership: Arc::default(),
+            },
+        };
+        organization.observe(&change);
+        change
+    }
+
+    fn row_for_binding(pump: &crate::pump::Pump) -> Change {
+        let change = Change::Upsert {
+            computer: ComputerId::local(),
+            key: "run:bound-run".into(),
+            row: zerus_client_core::ViewRow {
+                machine: "workstation".into(),
+                name: "codex/repo/created".into(),
+                state: "running".into(),
+                ..Default::default()
+            },
+        };
+        pump.push(change.clone());
+        change
+    }
+
+    fn real_binding_services(
+        fake: &Fake,
+        organization: &crate::organization::Organization,
+        pump: &crate::pump::Pump,
+    ) -> Services {
+        let mut services = fake.services();
+        let org = organization.clone();
+        let catalog = pump.clone();
+        services.bind = Arc::new(move |operation, session, edits| {
+            bind(&org, &catalog, operation, session, edits)
+        });
+        let org = organization.clone();
+        services.readiness = Arc::new(move || org.creation_refusal());
+        services
+    }
+
+    #[test]
+    fn real_placement_creates_and_adds_the_reserved_folder_only_after_ready() {
+        let fake = Fake::new();
+        let pump = crate::pump::Pump::default();
+        let organization = organization_fixture(&fake, &pump, true);
+        let original = json!({"group": "", "new_project": true, "reserved_project": "reserved",
+            "project_name": "Repository", "machine": "workstation"});
+        let evidence = json!({"cloned": true, "path": "/srv/repo"});
+        assert_eq!(
+            resolve(
+                &organization,
+                "workstation",
+                &mut original.clone(),
+                &evidence
+            ),
+            Err(swarm::STARTING.into())
+        );
+        assert!(projects(&organization, "workstation").is_empty());
+        ready_organization(&organization);
+        let mut plan = original;
+        resolve(&organization, "workstation", &mut plan, &evidence).unwrap();
+        let catalog = projects(&organization, "workstation");
+        let created = catalog
+            .iter()
+            .find(|project| project.id == "reserved")
+            .unwrap();
+        assert_eq!(created.name, "Repository");
+        assert_eq!(created.folders.len(), 1);
+        assert_eq!(
+            created.folders[0].machine, "",
+            "local computer maps to the launch alias"
+        );
+        assert_eq!(created.folders[0].path, "/srv/repo");
+        resolve(&organization, "workstation", &mut plan, &evidence).unwrap();
+        assert_eq!(
+            projects(&organization, "workstation")
+                .iter()
+                .find(|p| p.id == "reserved")
+                .unwrap()
+                .folders
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn real_binding_keeps_implicit_inbox_and_uses_default_folder_fallback_and_exact_member() {
+        let fake = Fake::new();
+        let pump = crate::pump::Pump::default();
+        let organization = organization_fixture(&fake, &pump, true);
+        ready_organization(&organization);
+        let mut implicit = plan();
+        implicit["group"] = json!(swarm::INBOX);
+        implicit["implicit_inbox"] = json!(true);
+        assert!(bind(
+            &organization,
+            &pump,
+            &implicit,
+            &session("launch"),
+            &mut BoundEdits::default()
+        )
+        .unwrap());
+        assert!(
+            pump.members_of("p").is_empty(),
+            "an implicit Inbox needs no member yet and never moves"
+        );
+        row_for_binding(&pump);
+        let edits_seen = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&edits_seen);
+        organization.set_presented(Arc::new(move |_, _, _| {
+            observed.fetch_add(1, Ordering::SeqCst);
+        }));
+        for (folder, target, expected) in [
+            ("/srv/source", "/srv/target", "/srv/source"),
+            ("", "/srv/target", "/srv/target"),
+        ] {
+            let mut operation = plan();
+            operation["group"] = json!("deleted-project");
+            operation["implicit_inbox"] = json!(false);
+            operation["add_folder"] = json!(true);
+            operation["folder"] = json!(folder);
+            operation["target"] = json!(target);
+            let mut edits = BoundEdits {
+                folder_id: format!("folder-{expected}"),
+                ..Default::default()
+            };
+            assert!(bind(
+                &organization,
+                &pump,
+                &operation,
+                &session("launch"),
+                &mut edits
+            )
+            .unwrap());
+            let catalog = projects(&organization, "workstation");
+            let inbox = catalog.iter().find(|p| p.id == swarm::INBOX).unwrap();
+            assert!(inbox.folders.iter().any(|f| f.path == expected));
             assert_eq!(
-                launch_invocation(&operation)
-                    .args
+                pump.members_of(swarm::INBOX)
                     .iter()
-                    .filter(|arg| *arg == "-d")
-                    .count(),
-                3
+                    .map(|(id, _)| id.as_str())
+                    .collect::<Vec<_>>(),
+                ["workstation\ncodex/repo/created"]
+            );
+            assert!(edits.folder_attempted && edits.move_attempted);
+            let before = edits_seen.load(Ordering::SeqCst);
+            assert!(bind(
+                &organization,
+                &pump,
+                &operation,
+                &session("launch"),
+                &mut edits
+            )
+            .unwrap());
+            assert_eq!(
+                edits_seen.load(Ordering::SeqCst),
+                before,
+                "each accepted edit is sent only once"
             );
         }
+    }
+
+    #[test]
+    fn bound_edits_wait_once_for_readiness_then_once_for_the_member_without_journal_or_notice() {
+        let fake = Fake::new();
+        let pump = crate::pump::Pump::default();
+        let organization = organization_fixture(&fake, &pump, true);
+        let mut services = real_binding_services(&fake, &organization, &pump);
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&attempts);
+        let real = services.bind.clone();
+        services.bind = Arc::new(move |operation, session, edits| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            real(operation, session, edits)
+        });
+        let writes = Arc::new(AtomicUsize::new(0));
+        let written = Arc::clone(&writes);
+        let write = services.write.clone();
+        services.write = Arc::new(move |file, bytes| {
+            written.fetch_add(1, Ordering::SeqCst);
+            write(file, bytes)
+        });
+        let host = CreationHost::new(fake.dir.join("creations.json"), services);
+        let mut request = plan();
+        request["add_folder"] = json!(true);
+        request["folder"] = json!("/srv/source");
+        let id = admitted(&host, request);
+        state(&host, &id, "confirming");
+        let launch = text(&operation(&host, &id), "launch_id").to_owned();
+        check(
+            &host,
+            &fake,
+            &id,
+            BindingListing {
+                online: true,
+                sessions: vec![session(&launch)],
+                ..Default::default()
+            },
+        );
+        state(&host, &id, "bound");
+        assert!(host.flush_journal_for_test());
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        let before = writes.load(Ordering::SeqCst);
+        assert!(lock(&fake.probe.events).iter().any(
+            |event| event["state"] == "bound" && event["bound_session"] == "codex/repo/created"
+        ));
+        assert_eq!(text(&operation(&host, &id), "error"), "");
+        for _ in 0..20 {
+            host.observe(&Change::Remove {
+                computer: ComputerId::local(),
+                key: "unrelated".into(),
+                reason: None,
+            });
+        }
+        // Two worker messages prove a pass occurred while readiness was unchanged.
+        let _ = host.action(id.clone(), CreationAction::Show);
+        let _ = host.action(id.clone(), CreationAction::Show);
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        let change = ready_organization(&organization);
+        host.observe(&change);
+        wait("one attempt after ready", || {
+            attempts.load(Ordering::SeqCst) == 2
+        });
+        let change = row_for_binding(&pump);
+        host.observe(&change);
+        wait("the exact member moved", || {
+            !pump.members_of("p").is_empty()
+        });
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        assert_eq!(pump.members_of("p")[0].0, "workstation\ncodex/repo/created");
+        assert_eq!(
+            projects(&organization, "workstation")
+                .iter()
+                .find(|p| p.id == "p")
+                .unwrap()
+                .folders
+                .len(),
+            1
+        );
+        assert_eq!(
+            writes.load(Ordering::SeqCst),
+            before,
+            "placement writes no creation journal"
+        );
+        assert_eq!(text(&operation(&host, &id), "state"), "bound");
+        fake.stop(host);
+        let again = fake.host();
+        wait("the recovered bound identity", || {
+            operation(&again, &id)["bound_session"] == "codex/repo/created"
+        });
+        fake.stop(again);
+    }
+
+    #[test]
+    fn a_refused_after_bind_edit_leaves_a_bound_session_and_no_creation_notice() {
+        let fake = Fake::new();
+        let pump = crate::pump::Pump::default();
+        row_for_binding(&pump);
+        let organization = organization_fixture(&fake, &pump, false);
+        ready_organization(&organization);
+        let services = real_binding_services(&fake, &organization, &pump);
+        let host = CreationHost::new(fake.dir.join("creations.json"), services);
+        let mut request = plan();
+        request["add_folder"] = json!(true);
+        let id = admitted(&host, request);
+        state(&host, &id, "confirming");
+        let launch = text(&operation(&host, &id), "launch_id").to_owned();
+        check(
+            &host,
+            &fake,
+            &id,
+            BindingListing {
+                online: true,
+                sessions: vec![session(&launch)],
+                ..Default::default()
+            },
+        );
+        state(&host, &id, "bound");
+        assert_eq!(text(&operation(&host, &id), "error"), "");
+        assert!(lock(&fake.probe.events)
+            .iter()
+            .filter(|event| event["state"] == "bound")
+            .all(|event| event["error"] == ""));
+        assert!(projects(&organization, "workstation")
+            .iter()
+            .find(|p| p.id == "p")
+            .unwrap()
+            .folders
+            .is_empty());
+        fake.stop(host);
+    }
+
+    #[test]
+    fn a_real_placement_refusal_before_launch_fails_the_queue_with_its_detail() {
+        let fake = Fake::new();
+        let pump = crate::pump::Pump::default();
+        let organization = organization_fixture(&fake, &pump, false);
+        ready_organization(&organization);
+        let mut services = fake.services();
+        let org = organization.clone();
+        services.resolve =
+            Arc::new(move |plan, evidence| resolve(&org, "workstation", plan, evidence));
+        let host = CreationHost::new(fake.dir.join("creations.json"), services);
+        let mut c = choices();
+        c.project.clear();
+        c.repository = Some(launch::RepositoryChoice {
+            url: "https://example.com/repo.git".into(),
+            parent: "/srv".into(),
+            name: "repo".into(),
+            destination: "/srv/repo".into(),
+            new_project: true,
+            project_name: "Repository".into(),
+            ..Default::default()
+        });
+        let id = admitted(&host, serde_json::to_value(launch::plan(&c)).unwrap());
+        state(&host, &id, "failed");
+        assert_eq!(
+            operation(&host, &id)["error"],
+            crate::actions::REPLAY_NEEDS_HGS
+        );
+        assert!(!fake.log().iter().any(|args| args.contains(&"codex".into())));
+        fake.stop(host);
+    }
+
+    #[test]
+    fn a_terminal_success_keeps_starting_until_bound_but_detached_success_confirms() {
+        for (terminal, result, expected) in [
+            (true, Ok(()), "launching"),
+            (false, Ok(()), "confirming"),
+            (true, Err("Fixture terminal refused.".into()), "unknown"),
+        ] {
+            let fake = Fake::new();
+            let mut services = fake.services();
+            services.launch = Arc::new(move |_| result.clone());
+            let host = CreationHost::new(fake.dir.join("creations.json"), services);
+            let mut request = plan();
+            request["terminal"] = json!(terminal);
+            let id = admitted(&host, request);
+            wait("the launch completion forces a binding read", || {
+                fake.probe.reads.load(Ordering::SeqCst) > 0
+            });
+            state(&host, &id, expected);
+            fake.stop(host);
+        }
+    }
+
+    #[test]
+    fn an_unknown_dispatched_launch_is_polled_and_binds_without_check() {
+        let fake = Fake::new();
+        let mut services = fake.services();
+        services.launch = Arc::new(|_| Err("Fixture uncertain launch.".into()));
+        let host = CreationHost::new(fake.dir.join("creations.json"), services);
+        let id = admitted(&host, plan());
+        state(&host, &id, "unknown");
+        wait("the initial forced read", || {
+            fake.probe.reads.load(Ordering::SeqCst) > 0
+        });
+        for job in lock(&fake.probe.jobs).drain(..) {
+            job.join().unwrap();
+        }
+        let _ = host.action(id.clone(), CreationAction::Show);
+        let _ = host.action(id.clone(), CreationAction::Show);
+        let launch = text(&operation(&host, &id), "launch_id").to_owned();
+        *lock(&fake.probe.listing) = BindingListing {
+            online: true,
+            sessions: vec![session(&launch)],
+            ..Default::default()
+        };
+        state(&host, &id, "bound");
+        fake.stop(host);
+    }
+
+    #[test]
+    fn a_computer_without_waiting_work_is_not_polled_by_the_real_executor() {
+        let fake = Fake::new();
+        let host = fake.host();
+        host.observe(&Change::Remove {
+            computer: ComputerId::local(),
+            key: "unrelated".into(),
+            reason: None,
+        });
+        assert!(matches!(
+            host.submit(Value::Null).unwrap(),
+            Admission::Refused { .. }
+        ));
+        assert!(matches!(
+            host.submit(Value::Null).unwrap(),
+            Admission::Refused { .. }
+        ));
+        // flush is ordered after a complete worker pass, and joins every spawned job.
+        fake.stop(host);
+        assert_eq!(fake.probe.reads.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn every_check_reads_even_before_a_launch_was_dispatched() {
+        let fake = Fake::new();
+        let mut services = fake.services();
+        services.write = Arc::new(|_, _| false);
+        let host = CreationHost::new(fake.dir.join("creations.json"), services);
+        let id = admitted(&host, plan());
+        state(&host, &id, "storage_error");
+        assert!(!flag(&operation(&host, &id), "launch_dispatched"));
+        for _ in 0..2 {
+            check(&host, &fake, &id, BindingListing::default());
+        }
+        assert!(fake.probe.reads.load(Ordering::SeqCst) >= 2);
+        fake.stop(host);
+    }
+
+    #[test]
+    fn an_ended_launch_uses_box_ok_even_when_the_pump_is_offline() {
+        let fake = Fake::new();
+        let mut services = fake.services();
+        services.online = Arc::new(|_| false);
+        let host = CreationHost::new(fake.dir.join("creations.json"), services);
+        let id = admitted(&host, plan());
+        state(&host, &id, "confirming");
+        let launch = text(&operation(&host, &id), "launch_id").to_owned();
+        check(
+            &host,
+            &fake,
+            &id,
+            BindingListing {
+                online: true,
+                ended_launches: vec![creation::EndedLaunch {
+                    launch_id: launch,
+                    code: Some(2),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        );
+        state(&host, &id, "failed");
+        assert!(text(&operation(&host, &id), "error")
+            .starts_with("Session created ended before it appeared (exit code 2)."));
+        fake.stop(host);
+    }
+
+    #[test]
+    fn quitting_drops_held_bound_edits_without_waiting_for_readiness() {
+        let fake = Fake::new();
+        let pump = crate::pump::Pump::default();
+        row_for_binding(&pump);
+        let organization = organization_fixture(&fake, &pump, true);
+        let services = real_binding_services(&fake, &organization, &pump);
+        let host = CreationHost::new(fake.dir.join("creations.json"), services);
+        let mut request = plan();
+        request["add_folder"] = json!(true);
+        let id = admitted(&host, request);
+        state(&host, &id, "confirming");
+        let launch = text(&operation(&host, &id), "launch_id").to_owned();
+        check(
+            &host,
+            &fake,
+            &id,
+            BindingListing {
+                online: true,
+                sessions: vec![session(&launch)],
+                ..Default::default()
+            },
+        );
+        state(&host, &id, "bound");
+        fake.stop(host);
+        ready_organization(&organization);
+        assert!(pump.members_of("p").is_empty());
+        assert!(projects(&organization, "workstation")
+            .iter()
+            .find(|p| p.id == "p")
+            .unwrap()
+            .folders
+            .is_empty());
+    }
+
+    #[test]
+    fn real_no_op_folders_do_not_edit_the_controller_but_its_refusals_still_fail() {
+        let fake = Fake::new();
+        let pump = crate::pump::Pump::default();
+        let organization = organization_fixture(&fake, &pump, true);
+        let folder = || Intent::AddFolder {
+            id: "folder".into(),
+            project: "p".into(),
+            machine: "".into(),
+            path: "relative".into(),
+            name: "".into(),
+            style: Style::Posix,
+        };
+        assert_eq!(
+            organization.accept(|_| folder()),
+            Err(swarm::STARTING.into())
+        );
+        ready_organization(&organization);
+        let announced = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&announced);
+        organization.set_presented(Arc::new(move |_, _, _| {
+            count.fetch_add(1, Ordering::SeqCst);
+        }));
+        let before = announced.load(Ordering::SeqCst);
+        organization.accept(|_| folder()).unwrap();
+        assert_eq!(announced.load(Ordering::SeqCst), before);
+        assert!(projects(&organization, "workstation")
+            .iter()
+            .find(|p| p.id == "p")
+            .unwrap()
+            .folders
+            .is_empty());
     }
 }

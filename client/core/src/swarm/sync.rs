@@ -287,18 +287,18 @@ impl Controller {
         }
     }
 
-    /// The `swarm get` object of what the list shows, for the Projects
-    /// screen. While edits are pending it carries the desired organization,
-    /// whose `project_order` is the one the apply writes (`edit::shared`):
-    /// the edits order `projects` only, and the screen follows
-    /// `project_order` first, so a pending create, delete or reorder shows
-    /// where hgs will place it.
     /// The last `swarm get` as observed, without pending edits: shared, not
     /// rebuilt.
     pub fn observed_value(&self) -> Option<Arc<Value>> {
         self.value.clone()
     }
 
+    /// The `swarm get` object of what the list shows, for the Projects
+    /// screen. While edits are pending it carries the desired organization,
+    /// whose `project_order` is the one the apply writes (`edit::shared`):
+    /// the edits order `projects` only, and the screen follows
+    /// `project_order` first, so a pending create, delete or reorder shows
+    /// where hgs will place it.
     pub fn presented_value(&self) -> Option<Arc<Value>> {
         let value = self.value.as_ref()?;
         match &self.desired {

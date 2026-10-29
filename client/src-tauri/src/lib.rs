@@ -6,6 +6,10 @@
 
 #[cfg(feature = "live")]
 mod actions;
+#[cfg(feature = "live")]
+mod analytics;
+#[cfg(feature = "live")]
+mod approvals;
 mod cli;
 mod clipboard;
 mod commands;
@@ -21,6 +25,8 @@ mod identity;
 mod instance;
 mod lifecycle;
 mod metrics;
+#[cfg(feature = "live")]
+mod mobile;
 #[cfg(feature = "live")]
 mod newsession;
 #[cfg(feature = "live")]
@@ -52,6 +58,8 @@ mod voice;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod watchdog;
 mod window_visibility;
+#[cfg(feature = "live")]
+mod worktree_policy;
 
 use tauri::{AppHandle, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
@@ -63,16 +71,14 @@ pub struct Drafts(pub std::sync::Arc<zerus_client_core::drafts::DraftStore>);
 /// The label of the one window this phase opens.
 pub const MAIN_WINDOW: &str = "main";
 
-/// The root of the client's disposable files, the attachment cache:
-/// Tauri's `app_cache_dir`, which follows the identifier. As with
-/// `data_dir`, nothing else asks Tauri for it, so the Mac switch build can
-/// replace this body to follow the running bundle's identity.
+/// The root of the client's disposable files, the attachment cache: Tauri's
+/// `app_cache_dir` formula with the running bundle's identifier, as
+/// [`data_dir`]. Tauri's own names the compile-time identifier, which a
+/// switch build promotes at signing, so the client never calls it.
 #[cfg(feature = "live")]
 pub(crate) fn cache_dir(app: &AppHandle) -> std::path::PathBuf {
     use tauri::Manager;
-    app.path()
-        .app_cache_dir()
-        .expect("the platform has an app cache directory")
+    app.state::<identity::Identity>().cache_dir_now()
 }
 
 /// The client's attachment cache under its cache folder: `attachments`, or
@@ -282,6 +288,10 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(speech_settings::SpeechPage::default());
                 app.manage(recovery::start(app.handle()));
                 app.manage(files::start());
+                app.manage(analytics::start(app.handle()));
+                app.manage(approvals::start());
+                app.manage(worktree_policy::start(app.handle()));
+                app.manage(mobile::start(app.handle()));
                 // A replay never touches the real read or attention marks.
                 let replay = std::env::var_os("ZERUS_CLIENT_REPLAY").is_some_and(|list| !list.is_empty());
                 let actions = actions::Actions::new(dir.join(actions::marks_file(replay)));
@@ -663,6 +673,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::display_hz,
         commands::exit_app,
         commands::perf_away,
+        commands::build_info,
         renderer::renderer_frame,
         settings::settings_get,
         settings::settings_set,
@@ -674,6 +685,28 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         files::files_usage,
         files::files_apply_limit,
         files::files_open_folder,
+        analytics::analytics_view,
+        analytics::analytics_refresh,
+        analytics::analytics_rows,
+        analytics::analytics_age,
+        analytics::analytics_configure,
+        analytics::analytics_configure_answer,
+        analytics::analytics_purge_check,
+        analytics::analytics_purge,
+        analytics::analytics_review,
+        analytics::analytics_review_cancel,
+        analytics::analytics_save_review,
+        approvals::approvals_list,
+        approvals::approvals_detail,
+        worktree_policy::worktree_policy_view,
+        worktree_policy::worktree_policy_read,
+        worktree_policy::worktree_policy_choose,
+        worktree_policy::worktree_policy_apply,
+        mobile::mobile_view,
+        mobile::mobile_open,
+        mobile::mobile_refresh_workspace,
+        mobile::mobile_refresh_phones,
+        mobile::mobile_delivery_set,
         recovery::recovery_view,
         recovery::recovery_load,
         recovery::recovery_save,
@@ -781,6 +814,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::display_hz,
         commands::exit_app,
         commands::perf_away,
+        commands::build_info,
         renderer::renderer_frame,
         clipboard::copy_text,
         desk_take_pending,

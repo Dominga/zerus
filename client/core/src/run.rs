@@ -56,7 +56,7 @@ pub fn run_limited(
     parent_env: &[(&str, &str)],
     stdout_cap: usize,
 ) -> Result<Exit, TooLarge> {
-    match run_inner(hgs, inv, parent_env, stdout_cap, None) {
+    match run_inner(hgs, inv, parent_env, &[], stdout_cap, None) {
         Ok(exit) => Ok(exit),
         Err(Stopped::TooLarge(too_large)) => Err(too_large),
         // Nothing sets a flag when there is none.
@@ -83,13 +83,33 @@ pub fn run_cancellable(
     stdout_cap: usize,
     cancel: &AtomicBool,
 ) -> Result<Exit, Stopped> {
-    run_inner(hgs, inv, parent_env, stdout_cap, Some(cancel))
+    run_inner(hgs, inv, parent_env, &[], stdout_cap, Some(cancel))
+}
+
+/// [`run_limited`] of another program (a connector) that also leaves out
+/// the variables in `remove`, such as the terminal's, even when
+/// `parent_env` sets them.
+pub fn run_without(
+    program: &Path,
+    inv: &Invocation,
+    parent_env: &[(&str, &str)],
+    remove: &[&str],
+    stdout_cap: usize,
+) -> Result<Exit, TooLarge> {
+    match run_inner(program, inv, parent_env, remove, stdout_cap, None) {
+        Ok(exit) => Ok(exit),
+        Err(Stopped::TooLarge(too_large)) => Err(too_large),
+        Err(Stopped::Cancelled) => Ok(Exit::Abnormal {
+            stderr: "cancelled".into(),
+        }),
+    }
 }
 
 fn run_inner(
     hgs: &Path,
     inv: &Invocation,
     parent_env: &[(&str, &str)],
+    remove: &[&str],
     stdout_cap: usize,
     cancel: Option<&AtomicBool>,
 ) -> Result<Exit, Stopped> {
@@ -97,6 +117,9 @@ fn run_inner(
     command.args(&inv.args);
     for (key, value) in parent_env {
         command.env(key, value);
+    }
+    for key in remove {
+        command.env_remove(key);
     }
     command
         .env_remove("HGS_SESSION")

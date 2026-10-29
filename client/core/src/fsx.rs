@@ -1,6 +1,6 @@
 //! The core's whole-file writes: the read marks ([`crate::readmarks`]), the
-//! attention marks ([`crate::marks`]) and the organization's pending edits
-//! ([`crate::swarm::draft`]).
+//! attention marks ([`crate::marks`]), the organization's pending edits
+//! ([`crate::swarm::draft`]) and the files the app saves for its owner.
 use std::fs::{File, OpenOptions};
 use std::hash::{BuildHasher, Hasher};
 use std::io::{self, Write};
@@ -57,7 +57,7 @@ fn private_file(path: &Path) -> io::Result<(PathBuf, File)> {
 /// flushes the temporary file to disk before the rename, as Qt's `QSaveFile`
 /// commits its settings; the read and attention marks skip it, as they did
 /// before this writer.
-pub(crate) fn write_private_atomic(path: &Path, bytes: &[u8], durable: bool) -> io::Result<()> {
+pub fn write_private_atomic(path: &Path, bytes: &[u8], durable: bool) -> io::Result<()> {
     if let Some(folder) = path
         .parent()
         .filter(|folder| !folder.as_os_str().is_empty())

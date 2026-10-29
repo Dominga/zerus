@@ -89,9 +89,12 @@ export function RecoverySection() {
     if (!inTauri()) return;
     let stop: (() => void) | undefined;
     let gone = false;
-    listen<RecoveryView>("recovery-changed", (e) => apply(e.payload)).then((off) => { if (gone) off(); else stop = off; }, () => {});
+    const read = () => void invoke<RecoveryView>("recovery_view").then(apply, () => {});
+    // Read again once listening: a change in between would otherwise wait
+    // for the next one.
+    listen<RecoveryView>("recovery-changed", (e) => apply(e.payload)).then((off) => { if (gone) off(); else { stop = off; read(); } }, () => {});
     onCleanup(() => { gone = true; stop?.(); });
-    void invoke<RecoveryView>("recovery_view").then(apply, () => {});
+    read();
   });
 
   const usable = () => loaded() && !!view()?.has_machines;

@@ -256,12 +256,17 @@ pub fn this_machine() -> Machine {
                 .ok()
                 .map(|_| bytes)
         };
-        // The second path only when the first does not exist, as Qt reads.
-        let hostid = match fs::symlink_metadata("/var/lib/dbus/machine-id") {
+        // The second path only when opening the first finds nothing (a
+        // broken link included), as Qt reads.
+        let hostid = match File::open("/var/lib/dbus/machine-id") {
+            Ok(file) => {
+                let mut bytes = Vec::new();
+                file.take(32).read_to_end(&mut bytes).ok().map(|_| bytes)
+            }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 first("/usr/local/var/lib/dbus/machine-id", 32)
             }
-            _ => first("/var/lib/dbus/machine-id", 32),
+            Err(_) => None,
         }
         .unwrap_or_default();
         let bootid = first("/proc/sys/kernel/random/boot_id", 36)

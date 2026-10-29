@@ -16,12 +16,61 @@ export function SectionHead(props: { title: string; intro?: JSX.Element }) {
   );
 }
 
-export function Group(props: { title?: string; children: JSX.Element }) {
+export function Group(props: { title?: string; hint?: JSX.Element; aside?: JSX.Element; children: JSX.Element }) {
   return (
     <section class="set-group">
-      <Show when={props.title}><div class="set-group-head"><h3>{props.title}</h3></div></Show>
+      <Show when={props.title || props.aside}>
+        <div class="set-group-head">
+          <Show when={props.title}><h3>{props.title}</h3></Show>
+          <span class="grow" />
+          {props.aside}
+        </div>
+      </Show>
+      <Show when={props.hint}><p class="set-group-hint">{props.hint}</p></Show>
       {props.children}
     </section>
+  );
+}
+
+/** A row of buttons and short status lines. */
+export function Actions(props: { children: JSX.Element }) {
+  return <div class="set-actions">{props.children}</div>;
+}
+
+/** A read-only table with one selectable row (QTableWidget, rows selected whole). */
+export function Table<T>(props: {
+  columns: { key: string; label: string; class?: string; render: (row: T) => JSX.Element }[];
+  rows: T[];
+  rowKey: (row: T) => string;
+  selected?: string;
+  onSelect?: (key: string) => void;
+  label: string;
+  empty?: JSX.Element;
+  class?: string;
+}) {
+  return (
+    <div class={`set-table-wrap ${props.class ?? ""}`}>
+      <table class="set-table" aria-label={props.label}>
+        <thead>
+          <tr><For each={props.columns}>{(c) => <th class={c.class} scope="col">{c.label}</th>}</For></tr>
+        </thead>
+        <tbody>
+          <For each={props.rows} fallback={<tr class="set-table-empty"><td colspan={props.columns.length}>{props.empty}</td></tr>}>
+            {(row) => {
+              const key = props.rowKey(row);
+              return (
+                <tr classList={{ on: props.selected === key }} tabindex={props.onSelect ? 0 : undefined}
+                  aria-selected={props.onSelect ? props.selected === key : undefined}
+                  onClick={() => props.onSelect?.(key)}
+                  onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); props.onSelect?.(key); } }}>
+                  <For each={props.columns}>{(c) => <td class={c.class}>{c.render(row)}</td>}</For>
+                </tr>
+              );
+            }}
+          </For>
+        </tbody>
+      </table>
+    </div>
   );
 }
 
@@ -132,7 +181,12 @@ export function NumberField(props: {
     <span class="set-number" classList={{ disabled: props.disabled }}>
       <input id={props.id} class="field tabular" type="number" min={props.min} max={props.max} step={props.step ?? 1}
         value={props.value.toFixed(props.decimals ?? 0)} disabled={props.disabled} aria-label={props.label}
-        onChange={(e) => props.onChange(clamp(Number(e.currentTarget.value) || props.min))} />
+        onChange={(e) => {
+          const kept = clamp(Number(e.currentTarget.value) || props.min);
+          // Shown as kept even when the kept value did not change.
+          e.currentTarget.value = kept.toFixed(props.decimals ?? 0);
+          props.onChange(kept);
+        }} />
       <Show when={props.suffix}><span class="set-suffix">{props.suffix}</span></Show>
     </span>
   );

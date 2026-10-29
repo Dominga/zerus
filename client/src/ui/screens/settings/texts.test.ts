@@ -152,7 +152,188 @@ const FILES_CORE = [
   "Cannot find an unused name for the downloaded copy.",
 ];
 
+const analyticsQt = ["tray/src/AnalyticsSettings.cpp", "tray/src/AnalyticsClient.cpp"].map((file) => fs.readFileSync(new URL(file, repo), "utf8")).join("\n");
+const analyticsCore = ["client/core/src/analytics.rs", "client/core/src/analytics/page.rs", "client/src-tauri/src/analytics.rs"]
+  .map((file) => fs.readFileSync(new URL(file, repo), "utf8")).join("\n");
+const ANALYTICS = [
+  "Private analytics",
+  "Content-free daily counters stay on each computer. Reads do not enable collection. Unknown measures are unavailable, not zero. Dates are inclusive UTC days (up to 90).",
+  "Selected computers", "This computer", "All configured computers", "First 32 configured computers", "Apply and refresh",
+  "From", "Through", "From UTC day", "Through UTC day", "Choose a range and refresh to read analytics.",
+  "Daily agent work", "Provider", "All providers", "UTC day", "Computer", "Producer", "Completed turns", "Work",
+  "Approval wait", "Input wait", "Previous", "Next", " (last known)", "Reading…",
+  "Select a day to see all reported counts, token usage, typed failures and histogram means.",
+  "Voice on processing computers",
+  "Voice counts are separate from agent turns. Accepted audio and total queue/processing time have units; percentile latency is unavailable. Speech collection is managed independently on its processing host.",
+  "Collection on this computer", "Collect content-free agent analytics", "Daily aggregate retention", "Apply locally",
+  "Purge local history…",
+  "Disabling collection keeps existing history. Purge removes only this computer's agent analytics, not speech statistics or durable delivery receipts. Remote collection controls are read-only here.",
+  "Review aggregate diagnostics…", "Shorten local analytics history?", "Shorten retention", "Purge local agent analytics?",
+  "Permanently delete all retained agent analytics on this computer. Speech statistics, other computers and durable delivery receipts are unaffected. Collection keeps its current enabled/disabled setting.",
+  "Purge local history", "Review aggregate diagnostics",
+  "Review these aggregate fields before saving a local JSON file. Computer numbers are anonymous within this file. This export includes no logs, message content, account details or native identifiers, and is never uploaded automatically.",
+  "Save file…", "This view includes at most 32 configured computers. Additional configured routes are omitted.",
+];
+const ANALYTICS_CORE = [
+  "Reading…", "Read finished. Last-known or missing data is excluded from current totals.",
+  "Retired, older or ambiguous analytics source. Excluded from current totals.",
+  "Summary is stale or its clock is unconfirmed.", "No current read available.", "Applying local collection settings…",
+  "Local analytics epoch is stale or ambiguous. Refresh before purging.", "Choose an inclusive UTC range of at most 90 days.",
+  "Computer unavailable. No current analytics read.", "This computer does not support the requested analytics read.",
+  "Change was not confirmed. Refresh and review before another action.",
+  "Analytics read failed or exceeded its response limit.", "Computer returned invalid analytics data.",
+  "Aggregate diagnostics saved locally.", "Could not save aggregate diagnostics.",
+];
+
+const approvalsQt = ["tray/src/AutomaticApprovalSettings.cpp", "tray/src/HgsClient.cpp", "tray/src/SettingsPage.h"]
+  .map((file) => fs.readFileSync(new URL(file, repo), "utf8")).join("\n");
+const approvalsCore = fs.readFileSync(new URL("client/core/src/approvals.rs", repo), "utf8");
+const APPROVALS = [
+  "Automatic approvals", "Automatically approve tool requests (dangerous)", "Approval journal",
+  "Exact computer name (optional)", "Exact session name (optional)", "Refresh", "Time", "Computer", "Session", "Question",
+  "Result", "Newer", "Older", "Up to 50 entries per page", "Select a journal entry to read the question and its outcome.",
+  "Loading question…", "Loading approval journal…", "No automatic approvals recorded for this filter.",
+];
+const APPROVALS_CORE = [
+  "Approved once", "Failed", "Cancelled", "Unconfirmed", "Invalid approval journal page.",
+  "Invalid automatic approval journal response.",
+  "The automatic approval journal is unavailable. No new approval was authorized.",
+  "Update the local hgs CLI to use automatic approvals and its journal.",
+];
+// webui's wording for this client, where Qt has no text (approvals stay off here).
+const APPROVALS_CLIENT = [
+  "This client never approves tool requests automatically. Answer each request in its session.",
+  "Automatic approvals are turned on in the Qt client. They work only while the Qt client is running; this client does not approve tool requests.",
+];
+
+const worktreesQt = fs.readFileSync(new URL("tray/src/WorktreeSettings.h", repo), "utf8");
+const worktreesCore = ["client/core/src/worktree_policy.rs", "client/core/src/worktree_policy/page.rs"]
+  .map((path) => fs.readFileSync(new URL(path, repo), "utf8")).join("\n");
+const WORKTREES = [
+  "Worktrees", "This computer", "Refresh",
+  "Cleanup runs on the computer that owns each worktree, even when this window is closed. Rules are enabled by default and apply across its projects. Other computers keep their own settings.",
+  "Enable automatic worktree cleanup", "Clean integrated worktrees after the last session is archived or terminated",
+  "Periodically clean unused integrated worktrees", "Forget verified managed worktrees whose folders no longer exist",
+  "Minimum inactivity for periodic cleanup",
+  "Only verified Zerus-created worktrees qualify. Cleanup keeps branches and conversation history. Changed, untracked and ignored local files, sessions, running programs, locked folders and incomplete checks protect a worktree. Build folders and local configuration require review in Projects > Worktrees.",
+  "Refresh to read this computer's cleanup rules.", "Apply to this computer",
+];
+const WORKTREES_CORE = [
+  "Refresh to read this computer's cleanup rules.", "Reading cleanup settings…",
+  "Cleanup settings saved on the selected computer.", "Cleanup settings loaded. Uncertain removals stay for manual review.",
+  "This computer is unavailable or needs an updated hgs CLI for cleanup settings.",
+  "Save was not confirmed. Refresh before changing settings again.", "Could not read cleanup settings.",
+  "Computer returned invalid cleanup settings.", "worktree-maintenance-v1",
+];
+
+const mobileQt = ["tray/src/WorkspaceSettings.h", "tray/src/PhonePairing.cpp", "tray/src/MobileDeliverySettings.h", "tray/src/SettingsPage.h", "tray/src/HgsClient.cpp"]
+  .map((file) => fs.readFileSync(new URL(file, repo), "utf8")).join("\n");
+const mobileCore = ["client/core/src/mobile.rs", "client/core/src/mobile/page.rs"]
+  .map((path) => fs.readFileSync(new URL(path, repo), "utf8")).join("\n");
+const MOBILE = [
+  "Mobile connection", "Workspace",
+  "Connect your computers and phones to one workspace. Session content is encrypted between your devices; the relay keeps routing and delivery metadata.",
+  "Workspace: checking…", "Workspace status is unconfirmed", "Change workspace…", "Start connector", "Stop connector",
+  "Refresh status", "Give computer code", "Copy computer code", "Cancel code", "Create workspace",
+  "Advanced: legacy connector configuration",
+  "Phones",
+  "Phone", "Platform", "Paired", "Last active", "Added from", "Pair a phone…", "Revoke…", "Refresh", "Checking phones…",
+  "Verified device membership. Private device names are not stored by the relay.",
+  "Paired with an administrator invitation, or before Zerus recorded it",
+  "Phone notifications", "When I'm not at a computer, send notifications to my phone",
+  "Immediately, even if I'm at a computer", "As soon as I'm away", "After 5 minutes away", "After 10 minutes away",
+  "After 15 minutes away", "After 30 minutes away",
+  "You count as away after two minutes without keyboard or mouse input on every computer running Zerus, or while their screens are locked. Your computers and the phone share this choice.",
+];
+const MOBILE_CORE = [
+  "Private session content is encrypted.", "Connector: running", "Connector: draining its current request", "Connector: stopped",
+  "This computer was removed from its workspace.",
+  "The retired connector is draining. You can stop its current generation before changing workspace.",
+  "Choose Change workspace to create a workspace or join with a new invitation. Saved local content stays on this computer.",
+  "Legacy connection: session content is visible to this relay.", "Choose Change workspace to create or join an encrypted workspace.",
+  "Workspace activation is incomplete.", "Check the saved connection before continuing.", "No workspace connected",
+  "Create a workspace or use a computer invitation from an enrolled computer.",
+  "The new encrypted workspace is ready. The old relay has not confirmed retirement. You can explicitly disconnect its local configuration before switching.",
+  "A workspace connection is saved and waiting. Check its result before starting another connection.",
+  "Workspace operation was not confirmed. Refresh status before continuing. Verify that the matching computer connector is installed.",
+  "Open Settings → Mobile connection to create a workspace or join one by code, then start the connector and refresh Phones.",
+  "No computer here has a mobile connection. Set one up in Settings → Mobile connection on a computer with local sessions enabled, then refresh Phones.",
+  "1 phone", "this computer", "Invalid phone management response", "mobile phones|invite|revoke-phone",
+  "Check connection", "Continue connecting", "Disconnect legacy locally and switch…",
+  "Saving…", "Saved. Your other computers and the phone receive it with the next sync.",
+  "launchctl kickstart -k gui/$(id -u)/com.hgdev.hgs-swarm", "systemctl --user restart hgs-swarm.service",
+];
+
 describe("Settings texts", () => {
+  it.each(ANALYTICS)("Private analytics shows Qt's %s", (text) => {
+    expect(analyticsQt).toContain(`"${text}"`);
+    expect(source("Analytics.tsx") + source("analytics-text.ts")).toContain(text);
+  });
+  it.each(ANALYTICS_CORE)("the analytics core says Qt's %s", (text) => {
+    expect(analyticsQt).toContain(`"${text}"`);
+    expect(analyticsCore).toContain(`"${text}"`);
+  });
+  it("the analytics core counts the routes it reads as Qt does", () => {
+    expect(analyticsQt).toContain('"Reading %1 configured route(s)…"');
+    expect(analyticsCore).toContain('"Reading {} configured route(s)…"');
+  });
+  it.each(APPROVALS)("Automatic approvals shows Qt's %s", (text) => {
+    expect(approvalsQt).toContain(`"${text}"`);
+    expect(source("Approvals.tsx") + source("approvals-journal.ts")).toContain(text);
+  });
+  it.each(APPROVALS_CORE)("the approval journal says Qt's %s", (text) => {
+    expect(approvalsQt).toContain(`"${text}"`);
+    expect(approvalsCore).toContain(`"${text}"`);
+  });
+  it("the approval journal fills in Qt's counts and answers", () => {
+    expect(approvalsQt).toContain('"%1 entries. Unconfirmed attempts require checking Activity or Terminal; they are not retried."');
+    expect(source("approvals-journal.ts")).toContain("${page.entries.length} entries. Unconfirmed attempts require checking Activity or Terminal; they are not retried.");
+    expect(approvalsQt).toContain('"Selected answer: %1"');
+    expect(approvalsCore).toContain('"Selected answer: {}"');
+  });
+  it.each(APPROVALS_CLIENT)("Automatic approvals shows the client's %s", (text) => {
+    expect(source("Approvals.tsx")).toContain(text);
+  });
+  it.each(WORKTREES)("Worktrees shows Qt's %s", (text) => {
+    expect(worktreesQt).toContain(`"${text}"`);
+    expect(source("Worktrees.tsx")).toContain(text);
+  });
+  it.each(WORKTREES_CORE)("the cleanup policy says Qt's %s", (text) => {
+    expect(worktreesQt).toContain(`"${text}"`);
+    expect(worktreesCore).toContain(`"${text}"`);
+  });
+  it.each(MOBILE)("Mobile connection shows Qt's %s", (text) => {
+    expect(mobileQt).toContain(`"${text}"`);
+    expect(source("Mobile.tsx")).toContain(text);
+  });
+  it.each(MOBILE_CORE)("the mobile core says Qt's %s", (text) => {
+    expect(mobileQt.replaceAll("\\n", "\n")).toContain(text);
+    expect(mobileCore).toContain(text);
+  });
+  it("Mobile connection shows Qt's Phones introduction, which Qt writes in two pieces", () => {
+    expect(mobileQt).toContain('"Phones paired with your computers. A phone can control every computer of its workspace; "\n                                "revoke one you no longer use."');
+    expect(source("Mobile.tsx")).toContain("Phones paired with your computers. A phone can control every computer of its workspace; revoke one you no longer use.");
+  });
+  it("the mobile core fills in Qt's formats", () => {
+    expect(mobileQt).toContain('"Update Zerus on %1 to manage phones from here."');
+    expect(mobileCore).toContain('"Update Zerus on {computer} to manage phones from here."');
+    expect(mobileQt).toContain('"Could not read the machine list: %1"');
+    expect(mobileCore).toContain('"Could not read the machine list: {error}"');
+    expect(mobileQt).toContain('"%1 phones"');
+    expect(mobileCore).toContain('"{count} phones"');
+    expect(mobileQt).toContain('"%1 (via %2)"');
+    expect(source("Mobile.tsx")).toContain("(via ${list.host})");
+    expect(mobileQt).toContain('"Could not save: %1"');
+    expect(mobileCore).toContain('"Could not save: {}"');
+    expect(mobileQt).toContain('"Could not read the shared setting: %1"');
+    expect(mobileCore).toContain('"Could not read the shared setting: {}"');
+    expect(mobileQt).toContain('"Update Zerus on %1, a computer this one synchronizes with directly. Until then it keeps syncing projects but does not receive this choice."');
+    expect(mobileCore).toContain('"Update Zerus on {one}, a computer this one synchronizes with directly. Until then it keeps syncing projects but does not receive this choice."');
+    expect(mobileQt).toContain('"Update Zerus on these computers this one synchronizes with directly: %1. Until then they keep syncing projects but do not receive this choice."');
+    expect(mobileCore).toContain('"Update Zerus on these computers this one synchronizes with directly: {}. Until then they keep syncing projects but do not receive this choice."');
+    expect(mobileQt).toContain('"The sync service on this computer is outdated and must be restarted (%1, or sign out and back in). Until then this computer may stop syncing projects and this choice."');
+    expect(mobileCore).toContain('"The sync service on this computer is outdated and must be restarted ({}, or sign out and back in). Until then this computer may stop syncing projects and this choice."');
+  });
   it.each(FILES)("Files shows Qt's %s", (text) => {
     expect(filesQt).toContain(`"${text}"`);
     expect(source("Files.tsx")).toContain(text);
@@ -192,6 +373,13 @@ describe("Settings texts", () => {
   it.each(ABOUT_FILLED)("About fills in Qt's %s", (template, shown) => {
     expect(qt).toContain(`"${template}"`);
     expect(source("About.tsx")).toContain(shown);
+  });
+  it("About names the build as UpdateController::installedVersion does", () => {
+    const updates = fs.readFileSync(new URL("tray/src/UpdateController.cpp", repo), "utf8");
+    expect(updates).toContain('tr("%1 (local changes %2)")');
+    expect(source("about-version.ts")).toContain("`${version} (local changes ${source})`");
+    expect(updates).toContain('QString("%1 (%2)")');
+    expect(source("about-version.ts")).toContain("`${version} (${source})`");
   });
   it.each(KEYBOARD)("Keyboard shows Qt's %s", (text) => {
     expect(keyboard).toContain(`"${text}"`);

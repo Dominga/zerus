@@ -357,6 +357,30 @@ fn a_saved_copy_never_replaces_a_name_taken_meanwhile() {
     assert_eq!(fs::read(&to).unwrap(), b"new");
 }
 
+#[cfg(unix)]
+#[test]
+fn without_hard_links_a_copy_takes_an_empty_name_of_its_own() {
+    let folder = Folder::new("placeholder");
+    fs::create_dir_all(&folder.0).unwrap();
+    let (from, to) = (folder.0.join("from"), folder.0.join("to"));
+    fs::write(&from, b"new").unwrap();
+    fs::write(&to, b"someone else's").unwrap();
+    assert_eq!(
+        rename_onto_placeholder(&from, &to).unwrap_err().kind(),
+        std::io::ErrorKind::AlreadyExists
+    );
+    assert_eq!(fs::read(&to).unwrap(), b"someone else's");
+    fs::remove_file(&to).unwrap();
+    rename_onto_placeholder(&from, &to).unwrap();
+    assert!(!from.exists());
+    assert_eq!(fs::read(&to).unwrap(), b"new");
+    // A failed move takes its placeholder back.
+    let gone = folder.0.join("gone");
+    let target = folder.0.join("target");
+    assert!(rename_onto_placeholder(&gone, &target).is_err());
+    assert!(!target.exists());
+}
+
 /// Against the Qt client's own DownloadCache: with
 /// ZERUS_QT_DOWNLOAD_CACHE_CHECK naming client/scripts/qt-download-cache-check
 /// built with Qt 6, both apps read and change one folder.

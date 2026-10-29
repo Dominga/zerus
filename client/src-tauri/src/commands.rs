@@ -467,6 +467,13 @@ pub fn perf_log(line: String) {
     eprintln!("zerus-client perf: {line}");
 }
 
+/// This build's identity, as `--build-info` prints it (Qt's
+/// `UpdateController::buildInfo`): the About page shows it.
+#[tauri::command]
+pub fn build_info() -> Value {
+    crate::cli::build_info(&crate::cli::BUILD)
+}
+
 /// Ends the app after a measurement run; refused outside one.
 #[tauri::command]
 pub fn exit_app(app: tauri::AppHandle, code: i32) -> Result<(), String> {
@@ -530,5 +537,15 @@ pub fn metrics(window_ms: Option<u64>) -> Value {
             std::time::Duration::from_millis(ms.clamp(100, 60_000)),
         ),
         None => crate::metrics::process_tree_metrics(pid),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn build_info_answers_what_the_command_line_prints() {
+        let info = super::build_info();
+        assert_eq!(info, crate::cli::build_info(&crate::cli::BUILD));
+        assert_eq!(info["version"], env!("ZERUS_VERSION"));
     }
 }

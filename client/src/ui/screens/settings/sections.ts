@@ -6,6 +6,10 @@ import { KeyboardSection } from "./Keyboard";
 import { VoiceSection, refreshVoice } from "./Voice";
 import { RecoverySection, refreshRecovery } from "./Recovery";
 import { FilesSection } from "./Files";
+import { AnalyticsSection } from "./Analytics";
+import { ApprovalsSection } from "./Approvals";
+import { WorktreesSection, refreshWorktrees } from "./Worktrees";
+import { MobileSection } from "./Mobile";
 import { AboutSection, refreshAbout } from "./About";
 
 // Settings sections in Qt's order (tray/src/SettingsPage.h:43, Worktrees
@@ -31,13 +35,13 @@ export const SECTIONS: readonly Section[] = [
   { id: "recovery", label: "Automatic recovery", icon: "rotate-ccw", component: RecoverySection, refresh: refreshRecovery },
   { id: "processes", label: "Processes", icon: "activity" },
   { id: "updates", label: "Updates", icon: "download" },
-  { id: "mobile", label: "Mobile connection", icon: "smartphone" },
+  { id: "mobile", label: "Mobile connection", icon: "smartphone", component: MobileSection },
   { id: "files", label: "Files", icon: "hard-drive", component: FilesSection },
-  { id: "worktrees", label: "Worktrees", icon: "folder-git-2" },
-  { id: "approvals", label: "Automatic approvals", icon: "shield-check" },
+  { id: "worktrees", label: "Worktrees", icon: "folder-git-2", component: WorktreesSection, refresh: refreshWorktrees },
+  { id: "approvals", label: "Automatic approvals", icon: "shield-check", component: ApprovalsSection },
   { id: "voice", label: "Voice input", icon: "mic", component: VoiceSection, refresh: refreshVoice },
   { id: "keyboard", label: "Keyboard", icon: "keyboard", component: KeyboardSection },
-  { id: "analytics", label: "Private analytics", icon: "gauge" },
+  { id: "analytics", label: "Private analytics", icon: "gauge", component: AnalyticsSection },
   { id: "about", label: "About", icon: "info", component: AboutSection, refresh: refreshAbout },
 ];
 

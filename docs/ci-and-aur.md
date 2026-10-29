@@ -49,8 +49,15 @@ Windows run that stopped at the first core-test failure. To bound cold builds
 with registry-only caches, macOS and Windows disable dev/test debug info and use
 `client/src-tauri` clippy with all targets instead of a redundant cargo check
 with all targets. The separate media/video check remains because the app's
-default features do not include media. The macOS job's timeout is 90 minutes,
-because its first cold run passed 60; Linux keeps 45 and Windows 60.
+default features do not include media.
+
+Native macOS checks are split into two parallel standard-runner jobs with
+90-minute timeouts: `client-native-macos-core` runs core tests and the
+media/video check, while `client-native-macos-tauri` runs src-tauri tests and
+clippy. Every cargo command has its own named workflow step and calls
+`scripts/ci/client-native.sh macos` with its stage. Only the Tauri job saves the
+shared registry cache, so the two jobs cannot race to save one key. Linux keeps
+45 minutes and Windows 60.
 
 Quick checks and the full suites start together once the commit is resolved, so
 a quick-check failure no longer holds back the other suites. New PR/manual runs cancel

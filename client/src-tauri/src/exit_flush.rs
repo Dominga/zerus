@@ -206,7 +206,7 @@ pub(crate) const QUIT_ID: &str = "zerus.quit-with-flush";
 
 /// Tauri's own menu and item instances, with Cocoa's Show All and terminate: replaced.
 #[cfg(target_os = "macos")]
-pub(crate) fn app_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+pub(crate) fn app_menu<R: tauri::Runtime>(app: &AppHandle<R>) -> tauri::Result<tauri::menu::Menu<R>> {
     use tauri::menu::{Menu, MenuItem, MenuItemKind, PredefinedMenuItem};
     let menu = Menu::default(app)?;
     let before = menu_snapshot(&menu)?;
@@ -248,9 +248,9 @@ pub(crate) fn app_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri
 /// No accelerator getter exists in Tauri/muda. Unchanged ids are the same
 /// native item instances; their accelerators and predefined editing actions stay intact.
 #[cfg(target_os = "macos")]
-fn menu_snapshot(menu: &tauri::menu::Menu<tauri::Wry>) -> tauri::Result<serde_json::Value> {
+fn menu_snapshot<R: tauri::Runtime>(menu: &tauri::menu::Menu<R>) -> tauri::Result<serde_json::Value> {
     use tauri::menu::MenuItemKind;
-    fn entries(items: Vec<MenuItemKind<tauri::Wry>>) -> tauri::Result<serde_json::Value> {
+    fn entries<R: tauri::Runtime>(items: Vec<MenuItemKind<R>>) -> tauri::Result<serde_json::Value> {
         let mut out = Vec::new();
         for item in items {
             let (kind, caption, children) = match &item {

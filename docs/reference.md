@@ -352,6 +352,33 @@ launch options and model, like `/clear` in a live agent. The replaced conversati
 stays in native history and readable in Activity above a **Session cleared**
 boundary; a running agent uses **Clear session** instead.
 
+### Changing a session's account
+
+```sh
+hgs switch-account claude/sample-project/review --account work --request-id 8b1f6c2e-3d4a-4c5b-9e8f-7a6b5c4d3e2f
+```
+
+Only your explicit choice changes an account; a session nobody changes keeps the
+account it has. The target account must belong to the same agent and be signed in
+on that computer, and the session must be idle: no turn, tool call, question,
+held message, draft or build Zerus runs for it. A busy session, another agent's
+account, a signed-out account or a missing conversation file is refused with its
+reason and nothing changes.
+
+Otherwise Zerus copies the conversation into the target account's own native
+store (Claude's `projects/<project>/<conversation>.jsonl` and its folder, Codex's
+session file), stops the idle agent gracefully as **pause** does, and launches it
+resumed into the same conversation, folder and session name with the new account.
+The JSON receipt's status is `switched` once the resumed conversation is
+confirmed. A launch that fails puts the old account back and relaunches there
+(`rolled_back`); one that cannot be confirmed is reported `uncertain` and is
+never retried on its own. The copy stays in the target account and nothing is
+deleted from the old one. `inspect` and `ls` name the session's account, with its
+label, in `account_id` and `account_label`.
+
+A team member's account changes only through `hgs team swap-member`, on your
+word; `switch-account` refuses a member's session and names the team.
+
 You can also resume native history created outside `hgs`:
 
 ```sh

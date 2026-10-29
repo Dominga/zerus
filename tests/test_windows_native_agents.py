@@ -86,7 +86,9 @@ WAIT = 120
 CLEARED_PREFIXES = ("CLAUDE", "ANTHROPIC_", "CODEX_", "OPENAI_", "KIMI_", "VSCODE_", "TERM_", "WT_", "CONEMU",
                     "ACTIONS_")
 CLEARED = {"COLORTERM", "FORCE_COLOR", "NO_COLOR", "GITHUB_TOKEN", "GH_TOKEN", "HTTP_PROXY", "HTTPS_PROXY",
-           "ALL_PROXY", "NO_PROXY", "NODE_OPTIONS"}
+           "ALL_PROXY", "NO_PROXY", "NODE_OPTIONS",
+           # A runner inside a Zerus session must not lend it to the case.
+           "HGS_SESSION", "HGS_RUN_ID", "HGS_AGENT", "HGS_ACCOUNT_ID", "HGS_EXPECTED_ID", "HGS_REQUESTED_ID"}
 # Messages `hgs send` must deliver exactly: plain, non-ASCII, ending in a backslash
 # (which Claude reads as a line continuation before Enter), and multiline.
 MESSAGES = ("Plain fixture message.", "Привет, ünïcödé ✓ 漢字.", "Continue the fixture\\",
@@ -147,6 +149,8 @@ class NativeAgent:
     # The glyph that starts the agent's composer row.
     COMPOSER = None
     CLEARS_WITH_KEYS = False
+    # The flag that keeps an agent from asking to review the hooks hgs installs.
+    NO_HOOK_REVIEW = None
 
     def setUp(self):
         # Handles on the agents and supervisors this case saw running, by (PID, start), and
@@ -171,7 +175,7 @@ class NativeAgent:
                         HGS_SELF="test", HGS_PEERS="", HGS_TAB="0")
         self.api_url = f"http://127.0.0.1:{self.start_api()}"
         self.env.update(
-            ANTHROPIC_BASE_URL=self.api_url, ANTHROPIC_API_KEY=KEY, OPENAI_API_KEY=KEY,
+            ANTHROPIC_BASE_URL=self.api_url, ANTHROPIC_API_KEY=KEY, OPENAI_API_KEY=KEY, FIXTURE_API_KEY=KEY,
             CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1", DISABLE_AUTOUPDATER="1", DISABLE_UPDATES="1",
             DISABLE_INSTALLATION_CHECKS="1", CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL="1",
             DISABLE_TELEMETRY="1", DISABLE_ERROR_REPORTING="1",
@@ -228,6 +232,10 @@ class NativeAgent:
 
     def configure(self):
         """The agent's private home, as a user who has finished onboarding left it."""
+        raise NotImplementedError
+
+    def prepare_account(self, folder):
+        """A second, signed-in account of the same agent in its own profile folder (U53)."""
         raise NotImplementedError
 
     # hgs and what it reports.
@@ -604,6 +612,58 @@ class NativeAgent:
                          dict(state="archived", runtime_state="stopped", conversation_id=row["conversation_id"]))
         self.until("the terminated agent to exit", lambda: not self.alive(*process))
 
+    # Changing the account of a running session (U53).
+
+    def second_account(self):
+        """A second account of this agent, signed in on this computer, and its folder."""
+        self.hgs("account", "add", "second", "--provider", self.AGENT, "--label", "Second", "--json")
+        folder = self.home / ".config" / "hgs" / "accounts" / "second"
+        self.assertTrue(folder.is_dir(), "the account profile folder is missing")
+        self.prepare_account(folder)
+        return folder
+
+    def check_switch_account(self, tag):
+        """`hgs switch-account` moves the running session to another account of the same
+        agent: the same conversation, folder and name, copied into the new account's native
+        store, and the agent resumes it there; the old account keeps its own copy."""
+        name = self.launch(tag, *([self.NO_HOOK_REVIEW] if self.NO_HOOK_REVIEW else []))
+        row = self.ready(name)
+        conversation = row["conversation_id"]
+        before = self.record(name)
+        transcript = Path(before["transcript"])
+        original = transcript.read_bytes()
+        folder = self.second_account()
+        receipt = self.json("switch-account", name, "--account", "second",
+                            "--request-id", str(uuid.uuid4()))
+        self.assertEqual(receipt["status"], "switched", receipt)
+        self.assertEqual((receipt["conversation_id"], receipt["from"]["account_id"],
+                          receipt["to"]["account_id"]), (conversation, "native-" + self.AGENT, "second"))
+        # The same conversation, folder and name, on the new account.
+        switched = self.record(name)
+        self.assertEqual((switched["name"], switched["launch_dir"], switched["conversation_id"],
+                          switched["account_id"], switched["agent_home"]),
+                         (name, str(self.project), conversation, "second", str(folder)))
+        self.assertNotEqual(switched["run_id"], before["run_id"])
+        self.assertFalse(switched.get("expected_id"), switched.get("expected_id"))
+        # The copy is in the new account's store; the old account keeps its own.
+        copy = next(folder.rglob(f"*{conversation}.jsonl"))
+        self.assertEqual(copy.read_bytes(), original)
+        self.assertTrue(transcript.is_file())
+        # The listing and the inspection both name the account.
+        self.assertEqual((self.row(name)["account_id"], self.row(name)["account_label"]),
+                         ("second", "Second"))
+        inspected = self.inspect(name)
+        self.assertEqual((inspected["account_id"], inspected["account_label"]), ("second", "Second"))
+        # The resumed agent continues that exact conversation on the new account.
+        self.pin_session(name)
+        text = "After the account switch."
+        delivered = self.send(name, self.message(self.ready(name), text))
+        self.assertEqual((delivered["status"], delivered["conversation_id"]), ("submitted", conversation),
+                         delivered)
+        self.until("the turn after the switch", lambda: self.turn_ended(name, delivered["submitted_at"]))
+        self.until(f"{text!r} at the model", lambda: any(
+            text in json.dumps(request) for request in api.requests(self.api_root)))
+
 
 @unittest.skipUnless(CLAUDE and HGS_SET, "set HGS_TEST_BIN and HGS_CLAUDE_TEST_BIN to run real Claude Code")
 class NativeWindowsClaude(NativeAgent, host.HostCase):
@@ -623,6 +683,21 @@ class NativeWindowsClaude(NativeAgent, host.HostCase):
         (self.agent_home / "settings.json").write_text(json.dumps({"permissions": {"defaultMode": "default"}}),
                                                        encoding="utf-8")
         self.env["CLAUDE_CONFIG_DIR"] = str(self.agent_home)
+
+    def prepare_account(self, folder):
+        """A managed account's session blanks ANTHROPIC_* (accounts::select); its own
+        settings carry the fixture's base URL and key, as a signed-in account's
+        preferences carry its own configuration."""
+        projects = {form: {"hasTrustDialogAccepted": True, "allowedTools": []} for form in path_forms(self.project)}
+        (folder / ".claude.json").write_text(json.dumps({
+            "hasCompletedOnboarding": True, "theme": "dark", "autoUpdates": False,
+            "customApiKeyResponses": {"approved": [KEY[-20:]], "rejected": []},
+            "officialMarketplaceAutoInstallAttempted": True, "hasSeenAutoDefaultNudge": True,
+            "projects": projects}), encoding="utf-8")
+        (folder / "settings.json").write_text(json.dumps({
+            "permissions": {"defaultMode": "default"}, "theme": "dark",
+            "env": {"ANTHROPIC_BASE_URL": self.api_url, "ANTHROPIC_API_KEY": KEY,
+                    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}}), encoding="utf-8")
 
     def transcript_rows(self, conversation_id):
         paths = list((self.agent_home / "projects").glob(f"*/{conversation_id}.jsonl"))
@@ -862,6 +937,9 @@ class NativeWindowsClaude(NativeAgent, host.HostCase):
         name = self.launch("lifecycle")
         self.check_lifecycle(name)
 
+    def test_a_switch_to_another_account_keeps_the_conversation_folder_and_name(self):
+        self.check_switch_account("switch")
+
     def test_input_keys_reach_claude_through_the_host(self):
         self.check_keys(self.launch("keys"))
 
@@ -940,6 +1018,13 @@ class NativeWindowsCodex(NativeAgent, host.HostCase):
             'env_key = "OPENAI_API_KEY"', 'wire_api = "responses"', "request_max_retries = 0",
             "stream_max_retries = 0", "", *trusted]), encoding="utf-8")
         self.env["CODEX_HOME"] = str(self.agent_home)
+
+    def prepare_account(self, folder):
+        """A managed account's session drops OPENAI_API_KEY (accounts::select), so its
+        provider reads the fixture's key from a variable that is its own."""
+        config = (self.agent_home / "config.toml").read_text(encoding="utf-8")
+        (folder / "config.toml").write_text(
+            config.replace('env_key = "OPENAI_API_KEY"', 'env_key = "FIXTURE_API_KEY"'), encoding="utf-8")
 
     def transcript_rows(self, conversation_id):
         rows = []
@@ -1060,6 +1145,9 @@ class NativeWindowsCodex(NativeAgent, host.HostCase):
     def test_pause_resume_and_terminate(self):
         name = self.launch("lifecycle", self.NO_HOOK_REVIEW)
         self.check_lifecycle(name)
+
+    def test_a_switch_to_another_account_keeps_the_conversation_folder_and_name(self):
+        self.check_switch_account("switch")
 
     def test_input_keys_reach_codex_through_the_host(self):
         self.check_keys(self.launch("keys", self.NO_HOOK_REVIEW))

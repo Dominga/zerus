@@ -51,6 +51,8 @@ uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # The composer's continuations compare attachment digests (S3's `DraftMark`).
 sha2 = "0.10"
+# Verified update catalogs: rustls with the system trust store, no bundled-only roots.
+ureq = { version = "3.4", default-features = false, features = ["rustls", "platform-verifier"] }
 # The pure-Rust core (watch streams, catalog state, per-frame batches).
 zerus-client-core = { path = "../core", optional = true }
 zerus-client-media = { path = "../media", optional = true }

@@ -192,6 +192,7 @@ dependencies = [
  "base64 0.23.1",
  "indexmap",
  "quick-xml",
+ "serde",
  "time",
 ]
 
@@ -370,6 +371,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "time",
  "windows-sys",
  "zerus-watch-protocol",
 ]

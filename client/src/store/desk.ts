@@ -1,4 +1,4 @@
-import { deskPage, deskTakePending, onDeskNotice, onOpenSession, type OpenSession } from "../bridge";
+import { deskPage, deskTakePending, onDeskNotice, onOpenSession, onOpenUpdates, type OpenSession } from "../bridge";
 import { catalog, rowId } from "./catalog";
 import { groupOf, headerOf, setProjectCollapsed } from "./organization";
 import {
@@ -34,6 +34,13 @@ export function openSession(target: OpenSession): void {
   revealRow(id);
 }
 
+/** Opens Updates without putting the lazy Settings chunk in the main bundle. */
+export function openUpdates(): void {
+  void import("../ui/screens/settings/sections")
+    .then(({ openSettings }) => openSettings("updates"))
+    .catch((error) => toast("Updates", String(error)));
+}
+
 /**
  * Starts the wiring: it listens first and only then takes what waited, so
  * nothing falls between the two. Resolves with its stop once listening.
@@ -41,6 +48,7 @@ export function openSession(target: OpenSession): void {
 export async function startDesk(): Promise<() => void> {
   const stops = await Promise.all([
     onOpenSession(openSession),
+    onOpenUpdates(openUpdates),
     onDeskNotice((notice) => toast(notice.title, notice.text)),
   ]);
   void deskPage()
@@ -48,6 +56,7 @@ export async function startDesk(): Promise<() => void> {
     .then(
       (pending) => {
         if (pending.open) openSession(pending.open);
+        if (pending.updates) openUpdates();
         for (const notice of pending.notices) toast(notice.title, notice.text);
       },
       (error) => console.warn("Zerus Next: desk_take_pending failed", error),

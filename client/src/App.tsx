@@ -17,6 +17,9 @@ import { catalog } from "./store/catalog";
 import { contentScale, page, setContentScale, setPage, toast } from "./store/ui";
 import { num, setSetting } from "./store/settings";
 import { installShortcutRouter, onCommand } from "./store/shortcuts";
+import { updateCommands, updates } from "./store/updates";
+import { openUpdates } from "./store/desk";
+import { ZerusLogo } from "./ui/components/ZerusLogo";
 import type { BridgeMode } from "./bridge";
 
 // The client shell: the rail, the pages and the status bar.
@@ -56,6 +59,19 @@ function StatusBar(props: { mode: () => BridgeMode | "starting" }) {
         <span class="chip-accent" title="Synthetic data from the replay fixture; no hgs is running">Replay</span>
       </Show>
       <span class="grow" />
+      <Show when={!updates().quiet && updates().available}>
+        <button type="button" class="btn ghost small status-update" title={`Zerus ${updates().version} is available. Open Updates.`}
+          aria-label={`Zerus ${updates().version} is available. Open Updates.`} onClick={openUpdates}>
+          <ZerusLogo attention={false} motion="spin" size={14} />New version
+        </button>
+      </Show>
+      <Show when={!updates().quiet && updates().restart_required}>
+        <button type="button" class="btn ghost small status-restart" title="Zerus was updated on disk. Drafts are kept; sessions keep running."
+          aria-label="Zerus was updated on disk. Drafts are kept; sessions keep running."
+          onClick={() => { void updateCommands.restart().catch((error) => toast("Updates", String(error))); }}>
+          <ZerusLogo attention={false} motion="spin" size={14} />Restart to finish update
+        </button>
+      </Show>
     </footer>
   );
 }

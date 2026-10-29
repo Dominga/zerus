@@ -971,6 +971,10 @@ export function PerfHost() {
     }
     if (new URLSearchParams(location.search).get("background-smoke") === "1" && inTauri()) void backgroundSmoke(!!config().actions_smoke);
     if (new URLSearchParams(location.search).get("unread-smoke") === "1" && inTauri()) void unreadSmoke(!!config().actions_smoke);
+    if (new URLSearchParams(location.search).has("updates-smoke") && inTauri()) {
+      const { updatesSmoke } = await import("../perf/updatesSmoke");
+      void updatesSmoke(!!config().replay);
+    }
     if (config().mode === "auto") {
       setOpen(true);
       void autoRun(config());

@@ -16,6 +16,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { receive } from "./store/session";
 import { startDesk } from "./store/desk";
 import { startDrops } from "./store/drops";
+import { startUpdates } from "./store/updates";
 import { composer } from "./store/composer";
 import { exitFlush } from "./store/exitFlush";
 import { startMotion } from "./ui/motion";
@@ -29,6 +30,7 @@ startMotion();
 render(() => <App mode={mode} />, document.getElementById("root")!);
 // The menu bar and notifications open sessions and show notices in this window.
 startDesk().catch((error) => console.warn("Zerus Next: the menu bar wiring did not start", error));
+startUpdates().catch((error) => console.warn("Zerus Next: the updates wiring did not start", error));
 
 void startBridge(receive).then(setMode, (error) => console.error("Zerus Next: the data source did not start", error));
 // Files dropped on the session's panel go to its composer or its Terminal.

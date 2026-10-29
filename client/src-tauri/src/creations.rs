@@ -2039,6 +2039,115 @@ mod tests {
     }
 
     #[test]
+    fn a_late_cli_listing_yields_to_the_capable_watch_snapshot() {
+        let fake = Fake::new();
+        let held = Arc::new((Mutex::new(false), Condvar::new()));
+        let gate = Arc::clone(&held);
+        let entered = Arc::new(AtomicBool::new(false));
+        let reading = Arc::clone(&entered);
+        let mut services = fake.services();
+        let binding = services.binding.clone();
+        services.binding = Arc::new(move |computer| {
+            reading.store(true, Ordering::Release);
+            let (gate, wake) = &*gate;
+            let _guard = wake.wait_while(lock(gate), |released| !*released).unwrap();
+            binding(computer)
+        });
+        let host = CreationHost::new(fake.dir.join("creations.json"), services);
+        let id = admitted(&host, plan());
+        state(&host, &id, "confirming");
+        wait("the old binding read", || entered.load(Ordering::Acquire));
+        let launch = text(&operation(&host, &id), "launch_id").to_owned();
+        *lock(&fake.probe.listing) = BindingListing {
+            online: true,
+            sessions: vec![session(&launch)],
+            ..Default::default()
+        };
+        *lock(&fake.probe.watched) = Some(BindingListing {
+            online: true,
+            ..Default::default()
+        });
+        host.catalog_changed();
+        assert!(host.flush_journal_for_test());
+        *lock(&held.0) = true;
+        held.1.notify_all();
+        for job in std::mem::take(&mut *lock(&fake.probe.jobs)) {
+            job.join().unwrap();
+        }
+        assert!(host.flush_journal_for_test());
+        assert!(host.flush_journal_for_test());
+        assert_eq!(text(&operation(&host, &id), "state"), "confirming");
+        assert_eq!(fake.probe.reads.load(Ordering::SeqCst), 1);
+        lock(&fake.probe.watched)
+            .as_mut()
+            .unwrap()
+            .sessions
+            .push(session(&launch));
+        host.catalog_changed();
+        state(&host, &id, "bound");
+        fake.stop(host);
+    }
+
+    #[test]
+    fn a_capable_binding_requires_the_exact_launch_row_before_moving_it() {
+        let fake = Fake::new();
+        let pump = crate::pump::Pump::default();
+        let organization = organization_fixture(&fake, &pump, true);
+        ready_organization(&organization);
+        pump.push(Change::Computer {
+            computer: ComputerId::local(),
+            status: zerus_client_core::ComputerStatus::Live,
+        });
+        pump.push(Change::Machine {
+            computer: ComputerId::local(),
+            machine: zerus_client_core::MachineMeta::project(
+                &json!({"ok": true, "ended_launches": []}),
+            ),
+        });
+        let mut change = row_for_binding(&pump);
+        let mut edits = BoundEdits {
+            folder_id: "folder".into(),
+            ..Default::default()
+        };
+        assert!(!bind(
+            &organization,
+            &pump,
+            &plan(),
+            &session("launch"),
+            &mut edits
+        )
+        .unwrap());
+        if let Change::Upsert { row, .. } = &mut change {
+            row.launch_id = Some("another-launch".into());
+        }
+        pump.push(change.clone());
+        assert!(!bind(
+            &organization,
+            &pump,
+            &plan(),
+            &session("launch"),
+            &mut edits
+        )
+        .unwrap());
+        if let Change::Upsert { row, .. } = &mut change {
+            row.launch_id = Some("launch".into());
+        }
+        pump.push(change);
+        assert!(bind(
+            &organization,
+            &pump,
+            &plan(),
+            &session("launch"),
+            &mut edits
+        )
+        .unwrap());
+        assert!(pump
+            .members_of("p")
+            .iter()
+            .any(|(member, _)| member == "workstation\ncodex/repo/created"));
+    }
+
+    #[test]
     fn launch_bindings_use_only_live_watch_data_and_requested_launches() {
         let pump = crate::pump::Pump::default();
         let computer = ComputerId::local();

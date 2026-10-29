@@ -32,8 +32,9 @@ fn a_test_recording_becomes_a_round_video_message() {
         let _ = sender.send(event);
     });
     let wait = |found: &dyn Fn(&VideoEvent) -> bool| loop {
+        // Finishing the file may take up to FINISH_TIMEOUT (30 s) under load.
         let event = events
-            .recv_timeout(Duration::from_secs(20))
+            .recv_timeout(Duration::from_secs(40))
             .expect("an event");
         if let VideoEvent::Failed(error) = &event {
             panic!("the recording failed: {error}");

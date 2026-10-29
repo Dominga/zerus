@@ -123,7 +123,7 @@ function DatePicker() {
       {/* In the page's body: a transformed list panel (the strip's peek) would otherwise place a fixed panel. */}
       <Show when={open()}>
         <Portal>
-        <div class="archive-pop" ref={panel} role="dialog" aria-label="Archived date"
+        <div class="archive-pop" ref={panel} role="dialog" aria-label="Archived date" data-shortcut-context="none"
           style={{ left: `${place().left}px`, top: `${place().top}px`, width: `${place().width}px` }}
           onPointerDown={(e) => e.stopPropagation()}>
           <div class="archive-pop-title">Archived date</div>

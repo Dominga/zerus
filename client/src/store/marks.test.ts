@@ -4,6 +4,8 @@ import { createCatalog } from "./catalog";
 import { CAP, attentionKey, byCodePoint, createMarks, fallbackKey, replyKey, type AttentionSnapshot, type Mark, type MarksPort, type MigratedStorage, type RowsPort } from "./marks";
 import { snapshotOf } from "../ui/sessions/actions-ui";
 import { emptyBatch, type Batch, type ReadMark, type RowOut, type ViewRow } from "../types";
+import overlayFixture from "../../core/tests/fixtures/marks-overlay.json";
+import { attentionNeeded, needsAttention } from "./attention";
 
 // The marks store against Qt's FleetState (updateUnread, markSessionRead,
 // setReviewLater, unreadReplies, markRepliesRead, legacyReadMarks), with a
@@ -159,6 +161,54 @@ describe("overlay", () => {
   it("keeps the row's own values for a projection without the read fields", async () => {
     const old = rowOut({ unread_candidate: undefined, attention_fingerprint: undefined, acknowledged_status: undefined, acknowledged_caption: undefined, shared_read: false, reply_id: undefined, unread: true });
     expect((await setup([old])).row()).toMatchObject({ unread: true, status: "ready", caption: "Ready" });
+  });
+});
+
+describe("notification conflicts", () => {
+  it("shows the core's kept preferences over a conflicting listing as a conflict", async () => {
+    const a = await setup([rowOut({ muted: true, shared_notifications: true, notification_revision: 2, notification_error: "Conflicting shared notification preferences. Refresh the session." })]);
+    expect(a.row()).toMatchObject({ muted: true, notificationConflict: true });
+    a.receive(batchOf({ upserts: [rowOut({ muted: true, shared_notifications: true, notification_revision: 2 })] }));
+    expect(a.row().notificationConflict).toBe(false);
+  });
+});
+
+describe("the shared overlay fixture", () => {
+  // client/core's menu-bar overlay (menubar::read_state) reads the same cases:
+  // both apply this device's marks alike, and count with Qt's rules. The menu
+  // bar counts SessionInfo::needsAttention (`counts`, `counts_stale`); the
+  // window adds a subagent that asks, as Qt's SessionPresentation does (`window`).
+  interface OverlayCase {
+    case: string;
+    computer: string;
+    view: Partial<ViewRow>;
+    marks: Record<string, Mark>;
+    replies: Record<string, string>;
+    pending: ReadMark[];
+    expect: {
+      review_later: boolean; unread_reply: boolean; unread: boolean; acknowledged: boolean;
+      needs_attention: boolean; counts: boolean; counts_stale: boolean; window: boolean; window_stale: boolean;
+    };
+  }
+  const cases = (overlayFixture as unknown as { cases: OverlayCase[] }).cases;
+
+  it("has the cases", () => expect(cases.length).toBeGreaterThanOrEqual(30));
+
+  it.each(cases.map((c) => [c.case, c] as const))("%s", async (_, c) => {
+    // This computer's older marks were queued once already (see "legacy read marks").
+    const s = await setup([{ computer: c.computer, key: "k", row: c.view as ViewRow }], fakePort({ marks: c.marks, replies: c.replies }, c.pending), memoryStorage([c.computer]));
+    const row = s.row("k", c.computer);
+    expect(s.marks.readState(row)).toEqual({ reviewLater: c.expect.review_later, unreadReply: c.expect.unread_reply, unread: c.expect.unread, ack: c.expect.acknowledged });
+    expect({ reviewLater: row.reviewLater, unread: row.unread, attentionNeeded: attentionNeeded(row) })
+      .toEqual({ reviewLater: c.expect.review_later, unread: c.expect.unread, attentionNeeded: c.expect.needs_attention });
+    // A project header's request part (SessionsWindowRows.cpp:400-401): needsAction() && !attentionAcknowledged.
+    expect(row.actionNeeded).toBe(!!c.view.needs_action && !c.expect.acknowledged);
+    // FleetState::attentionSessions, as menubar::Desk::attention counts a row.
+    const counts = (current: boolean) => !row.muted && (!!row.reviewLater || (current && attentionNeeded(row)));
+    expect({ counts: counts(true), counts_stale: counts(false) }).toEqual({ counts: c.expect.counts, counts_stale: c.expect.counts_stale });
+    // The window: online, and on an unreachable computer only Review later.
+    expect({ window: needsAttention(row, true), window_stale: needsAttention(row, false) })
+      .toEqual({ window: c.expect.window, window_stale: c.expect.window_stale });
   });
 });
 

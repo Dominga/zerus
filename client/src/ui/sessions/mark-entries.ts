@@ -1,6 +1,8 @@
 import { GONE, notify, stillListed } from "../../store/actions";
 import { markAllRead, markNeedsAttention, markRead, unreadReplies } from "../../store/marks";
+import { computerFresh } from "../../store/catalog";
 import { needsAttention, type MenuEntry } from "../../store/ui";
+import type { AttentionFacts } from "../../store/attention";
 import { snapshotOf, type ActionRow } from "./actions-ui";
 import type { Session } from "./types";
 
@@ -14,8 +16,8 @@ const CHIP_REVIEW = "Marked for later. Mark as read to clear this reminder.";
 const CHIP_READ = "Mark this session's current notification as read. This does not answer a pending question.";
 
 /** The Mark read chip of the composer toolbar (phase 4 places it): active for a live row that needs attention. */
-export function markReadChip(s: Pick<Session, "state" | "status" | "unread" | "reviewLater">): { active: boolean; detail: string } {
-  const active = s.state !== "archived" && needsAttention(s as Session);
+export function markReadChip(s: AttentionFacts, online: boolean): { active: boolean; detail: string } {
+  const active = s.state !== "archived" && needsAttention(s, online);
   return { active, detail: s.reviewLater ? CHIP_REVIEW : CHIP_READ };
 }
 
@@ -39,7 +41,7 @@ export function runMarkNeedsAttention(row: ActionRow): boolean {
 export function markEntry(s: Session): Extract<MenuEntry, { label: string }> | undefined {
   if (s.state === "archived") return undefined;
   const row = snapshotOf(s);
-  return markReadChip(s).active
+  return markReadChip(s, computerFresh(s.computer)).active
     ? { label: "Mark as read", icon: "check-check", action: () => { runMarkRead(row); } }
     : { label: "Mark needs attention", icon: "bell", hint: REVIEW_HINT, action: () => { runMarkNeedsAttention(row); } };
 }

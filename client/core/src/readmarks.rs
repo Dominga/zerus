@@ -82,8 +82,8 @@ impl ReadMarks {
     /// Merges each mark that is not empty (`ReadMarkStore::add`); an empty
     /// field counts as unset, as in Qt. Only in memory: the delivery worker
     /// writes them ([`ReadMarks::flush`]) before it sends any, so the caller
-    /// does no file I/O.
-    pub fn add_all(&mut self, marks: impl IntoIterator<Item = ReadMark>) {
+    /// does no file I/O. Returns whether it merged any.
+    pub fn add_all(&mut self, marks: impl IntoIterator<Item = ReadMark>) -> bool {
         let mut added = false;
         for mut mark in marks.into_iter().filter(|mark| !mark.is_empty()) {
             mark.reply_id = mark.reply_id.filter(|id| !id.is_empty());
@@ -97,6 +97,7 @@ impl ReadMarks {
             added = true;
         }
         self.unsaved |= added;
+        added
     }
 
     /// Writes marks [`ReadMarks::add_all`] added since the last save.
@@ -369,13 +370,13 @@ mod tests {
         let mut marks = ReadMarks::load(temp.0.clone());
         let mut other = mark("run-2", Some("r2"), None);
         other.name = "claude/sample-project/other".into();
-        marks.add_all([
+        assert!(marks.add_all([
             mark("run-1", Some("r1"), None),
             // An empty field is no field, as in Qt: it keeps the older value.
             mark("run-1", Some(""), Some("s1")),
             mark("run-1", None, None),
             other.clone(),
-        ]);
+        ]));
         let expected = vec![other, mark("run-1", Some("r1"), Some("s1"))];
         assert_eq!(marks.pending(), expected);
         // Kept in memory until flushed: the caller does no file I/O.
@@ -385,7 +386,7 @@ mod tests {
         // Only empty marks: nothing changes, and nothing is written.
         let temp = Temp::new("add-all-empty");
         let mut empty = ReadMarks::load(temp.0.clone());
-        empty.add_all([mark("run-1", Some(""), None)]);
+        assert!(!empty.add_all([mark("run-1", Some(""), None)]));
         empty.flush();
         assert!(!temp.0.exists());
     }

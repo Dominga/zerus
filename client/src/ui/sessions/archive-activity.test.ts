@@ -29,6 +29,15 @@ vi.mock("../../bridge", () => ({
   setNotifications: vi.fn(),
   onScreensChanged: vi.fn(() => () => {}),
   screenVisible: vi.fn(async () => {}),
+  // The detail's Terminal (store/terminal), loaded with SessionDetail.
+  terminalStatus: vi.fn(() => new Promise(() => {})),
+  terminalConnect: vi.fn(async () => {}),
+  terminalWrite: vi.fn(async () => {}),
+  terminalResize: vi.fn(async () => {}),
+  terminalAck: vi.fn(async () => {}),
+  terminalDisconnect: vi.fn(async () => {}),
+  terminalRetarget: vi.fn(async () => {}),
+  windowVisibility: { hidden: () => false, onChange: () => () => {} },
 }));
 
 import * as bridge from "../../bridge";

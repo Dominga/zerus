@@ -5,6 +5,7 @@
 # Optional reverse peer: HGS_MAC_PEER (existing SSH alias), or also set
 # HGS_MAC_PEER_HOST to add a new SSH entry. HGS_MAC_PEER_USER, HGS_MAC_PEER_KEY
 # and HGS_MAC_PEER_COLOR are optional. No machine-specific defaults are supplied.
+# HGS_MAC_GUI=qt|client chooses the desktop GUI; by default the installed kind stays.
 set -euo pipefail
 host=""; with_tray=1
 for a in "$@"; do
@@ -125,9 +126,17 @@ REMOTE
 # там переживает build/, поэтому повторный прогон собирается инкрементально, а install.sh
 # по cdhash бандла видит, что ничего не изменилось, и не дёргает живой LaunchAgent.
 # DEV_VERSION sits beside tray/: its CMake reads the Dev base version from there.
-tar czf - -C "$here" --exclude='tray/build' --exclude='tray/.cache' tray DEV_VERSION \
-  | ssh -o BatchMode=yes "$host" 'mkdir -p ~/.local/src/hgs && tar xzf - -C ~/.local/src/hgs'
+# The Tauri client's sources travel too, so tray/install.sh can build it
+# (HGS_MAC_GUI=client, or a Mac whose installed Zerus is already the client), with
+# VERSION and crates/watch-protocol, which client/core and client/src-tauri take by
+# path. Source folders are replaced; their build caches stay. A numbered Dev build
+# needs a clean Git checkout on the Mac instead (docs/macos-distribution.md).
+tar czf - -C "$here" --exclude='tray/build' --exclude='tray/.cache' \
+  --exclude='client/node_modules' --exclude='client/dist' --exclude='client/*/target' \
+  --exclude='client/src-tauri/gen' \
+  tray client crates/watch-protocol/Cargo.toml crates/watch-protocol/src DEV_VERSION VERSION \
+  | ssh -o BatchMode=yes "$host" 'mkdir -p ~/.local/src/hgs && cd ~/.local/src/hgs && rm -rf client/src client/core/src client/media/src client/src-tauri/src client/src-tauri/capabilities crates/watch-protocol/src && tar xzf -'
 # PATH неинтерактивного ssh на маке — без Homebrew; cmake/brew tray/install.sh ищет сам
 # (find_tool в его маковской ветке). Signing uses the Mac's existing keychain;
 # an optional exact identity selector travels as one literal environment value.
-ssh -o BatchMode=yes "$host" "HGS_MACOS_SIGN_IDENTITY=$(shq "${HGS_MACOS_SIGN_IDENTITY:-}") bash ~/.local/src/hgs/tray/install.sh"
+ssh -o BatchMode=yes "$host" "HGS_MACOS_SIGN_IDENTITY=$(shq "${HGS_MACOS_SIGN_IDENTITY:-}") HGS_MAC_GUI=$(shq "${HGS_MAC_GUI:-}") bash ~/.local/src/hgs/tray/install.sh"

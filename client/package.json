@@ -15,6 +15,9 @@
   "dependencies": {
     "@tanstack/solid-virtual": "3.13.44",
     "@tauri-apps/api": "2.12.4",
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/addon-webgl": "0.19.0",
+    "@xterm/xterm": "6.0.0",
     "solid-js": "1.9.17"
   },
   "devDependencies": {

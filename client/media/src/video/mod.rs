@@ -27,6 +27,12 @@ pub const STOP_BYTES: u64 = MAX_BYTES - 128 * 1024;
 pub const STOP_MS: u64 = 59_000;
 /// The camera must start within this time.
 pub const START_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long stopping may take to finish the file before it is refused: a
+/// loaded machine may need a while to encode what is queued and write it,
+/// and the window shows Preparing meanwhile. Waits check Cancel every
+/// [`FINISH_POLL`].
+pub const FINISH_TIMEOUT: Duration = Duration::from_secs(30);
+pub const FINISH_POLL: Duration = Duration::from_millis(100);
 /// How often the length and size are checked.
 pub const TICK: Duration = Duration::from_millis(200);
 /// The poster's largest size.
@@ -42,6 +48,22 @@ pub const NO_DEVICES: &str = "A camera and microphone are required to record vid
 pub const NO_FORMAT: &str = "The camera has no supported recording format (up to 1920 pixels).";
 pub const NOT_STARTED: &str = "The camera did not start. Try recording again.";
 pub const INVALID: &str = "The video recording is invalid or exceeds 10 MiB.";
+
+/// A refused recording: the user sees Qt's one text, and the log says which
+/// check refused it (never a path or the recording's content).
+pub(crate) fn refused(why: impl std::fmt::Display) -> String {
+    eprintln!("zerus-client-media: video recording refused: {why}");
+    INVALID.to_owned()
+}
+
+/// [`finish`]'s error, logged when it is the recording's own check.
+pub(crate) fn finish_refused(error: &str, duration_ms: u64, width: u32, height: u32) -> String {
+    if error == INVALID {
+        refused(format!("{duration_ms} ms at {width}x{height}"))
+    } else {
+        error.to_owned()
+    }
+}
 pub const AUDIO_UNPREPARED: &str = "The video audio could not be prepared.";
 pub const NO_STORAGE: &str = "Private recording storage is unavailable.";
 /// Why video is unavailable in a build without a recorder for its platform.

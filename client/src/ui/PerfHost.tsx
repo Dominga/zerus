@@ -25,7 +25,7 @@ import { accountsPage } from "../store/accounts";
 import { machinesPage } from "../store/machines";
 import { projectsPage } from "../store/projects";
 import { createProject, deleteProject, grouping, moveProject, moveToProject, renameProject, sortProject } from "../store/organization";
-import type { ScenarioResult } from "../perf/scenarios";
+import { activityCandidates, activitySource, type ScenarioResult } from "../perf/scenarios";
 
 // The measurement panel (src/perf), loaded on demand: `?perf=1` in the window
 // URL (ZERUS_CLIENT_QUERY=perf=1) or Ctrl+Shift+D. It drives the live session
@@ -52,6 +52,8 @@ interface PerfConfig {
   preference?: string;
   display?: string | null;
   actions_smoke?: boolean;
+  /** ZERUS_CLIENT_REPLAY is set: the catalog and Activity come from a synthetic stream. */
+  replay?: boolean;
 }
 
 /** Resolves once `ready` holds; fails after `ms`. Timers, not frames: rAF stops while a window is hidden. */
@@ -198,7 +200,10 @@ async function autoRun(config: PerfConfig) {
     // Many sessions keep no journal events; move on until one has some (the
     // Activity scenarios need them). A chosen `?select=` session is tried first.
     const cards = listRows().filter((r) => r.type === "card").map((r) => r.id);
-    const candidates = [...new Set([selectedKey(), ...cards].filter((id): id is string => !!id))].slice(0, 16);
+    // A live run tries 16 at most; a replay run tries every card, so the fixture's
+    // long session is found whatever the list order and the run reaches SCROLLABLE_PX.
+    const replay = !!config.replay;
+    const candidates = activityCandidates(selectedKey(), cards, replay);
     // The Activity scenario needs a transcript that scrolls: read older pages
     // of a short one, and keep the session that scrolls furthest.
     const range = () => { const el = scrollActivity(); return el ? el.scrollHeight - el.clientHeight : 0; };
@@ -235,7 +240,9 @@ async function autoRun(config: PerfConfig) {
       await until(() => activity.target()?.id === chosen.id && activity.events().length > 0, 15_000).catch(() => {});
       await readOlder(chosen.pages, chosen.range);
     }
-    log(`activity events: ${activity.events().length}, scrolls ${range()} px after ${elapsed()} (${tried} sessions tried)`);
+    log(`activity events: ${activity.events().length}, scrolls ${range()} px after ${elapsed()} (${tried} sessions tried${replay ? ", replay" : ""})`);
+    const source = activitySource(replay, best && { events: activity.events().length, range: range(), pages: best.pages });
+    log(`activity source: ${replay ? "replay" : "live"}, ${source.events} events, ${source.scroll_px} px, ${source.older_pages} older pages`);
     // Without animation frames every pacing scenario would time out: say so at once.
     const frames = await countFrames(3000);
     log(`frames: ${frames} in 3 s (visibility ${document.visibilityState}, focus ${document.hasFocus()}, window ${innerWidth}x${innerHeight} at ${devicePixelRatio}x, display ${await displayHz() ?? "unknown"} Hz, cross-origin isolated ${crossOriginIsolated})`);
@@ -249,12 +256,12 @@ async function autoRun(config: PerfConfig) {
     // settings are tried without being stored.
     log(`running animations: ${runningAnimations()}`);
     const idle = await idleSample("idle");
-    setSetting("animateActivity", false, { persist: false });
+    void setSetting("workspace/animateActivity", false, { persist: false });
     await sleep(1000);
     log(`running animations with Animate working sessions off: ${runningAnimations()}`);
     const still = await idleSample("idle with Animate working sessions off");
     restoreSettings();
-    setSetting("reduceMotion", true, { persist: false });
+    void setSetting("workspace/reduceMotion", true, { persist: false });
     await sleep(1000);
     log(`running animations with Reduce motion: ${runningAnimations()}`);
     const calm = await idleSample("idle with Reduce motion");
@@ -280,7 +287,7 @@ async function autoRun(config: PerfConfig) {
     }
     report.resources = { ...(report.resources ?? {}), idle, idle_still_working: still, idle_reduced_motion: calm, idle_away: gone };
     clearTimeout(cutoff);
-    await finish(toJson({ ...report, preference: config.preference ?? null }), 0);
+    await finish(toJson({ ...report, preference: config.preference ?? null, activity_source: source }), 0);
   } catch (error) {
     clearTimeout(cutoff);
     log(`failed: ${String(error)}`);

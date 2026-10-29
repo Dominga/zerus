@@ -25,10 +25,34 @@ impl AppState {
         self.live.pump.clone()
     }
 
+    /// Starts the data source now, before any window loads: the menu bar and
+    /// notifications need the fleet while the window is closed. A later
+    /// `start` from the webview finds it running and resends the catalog.
+    pub fn start_source(&self) -> Result<String, String> {
+        self.live.start()
+    }
+
+    /// The peers this computer's listing names; None before a listing named
+    /// them, and for a replay.
+    pub fn peers(&self) -> Option<std::collections::BTreeSet<String>> {
+        self.live.peers()
+    }
+
     /// The organization hub: `start` gives it the snapshot source and the
     /// organization updates. Set once, before the webview starts the source.
     pub fn set_organization(&self, organization: crate::organization::Organization) {
         let _ = self.live.organization.set(organization);
+    }
+
+    /// Applies the preferences the host confirmed for a Mute or Unmute to the
+    /// session's row at once, for the window and the menu bar alike
+    /// (`FleetState::applyNotificationPreferences`). A replay has no hosts.
+    pub fn apply_notifications(
+        &self,
+        target: &zerus_client_core::actions::Target,
+        preferences: &Value,
+    ) {
+        self.live.apply_notifications(target, preferences);
     }
 }
 
@@ -179,6 +203,21 @@ mod live {
             Ok(())
         }
 
+        pub fn apply_notifications(
+            &self,
+            target: &zerus_client_core::actions::Target,
+            preferences: &serde_json::Value,
+        ) {
+            if let Some(Source::Fleet(fleet)) = self
+                .source
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+            {
+                fleet.apply_notifications(target, preferences.clone());
+            }
+        }
+
         pub fn unfollow(&self, computer: String, key: String) -> Result<(), String> {
             match self
                 .source
@@ -211,19 +250,38 @@ async fn blocking<T: Send + 'static>(
         .map_err(|error| error.to_string())?
 }
 
-/// Starts the data source; "live" (hgs watch) or "replay" (a fixture).
+/// Starts the data source; "live" (hgs watch) or "replay" (a fixture). A
+/// reloaded webview gets the catalog, the composer's view and the draft keys
+/// again.
+#[cfg(feature = "live")]
+#[tauri::command]
+pub async fn start(
+    state: State<'_, AppState>,
+    composers: State<'_, crate::composer::Composers>,
+) -> Result<String, String> {
+    let live = Arc::clone(&state.live);
+    composers.resend();
+    blocking(move || live.start()).await
+}
+
+#[cfg(not(feature = "live"))]
 #[tauri::command]
 pub async fn start(state: State<'_, AppState>) -> Result<String, String> {
-    #[cfg(feature = "live")]
-    {
-        let live = Arc::clone(&state.live);
-        blocking(move || live.start()).await
-    }
-    #[cfg(not(feature = "live"))]
-    {
-        let _ = &state;
-        Err(NO_LIVE.into())
-    }
+    let _ = &state;
+    Err(NO_LIVE.into())
+}
+
+/// What `next_batch` returns: the core's batch, plus the hubs' projected views
+/// when they changed (latest value wins).
+#[cfg(feature = "live")]
+#[derive(serde::Serialize)]
+struct Envelope<'a> {
+    #[serde(flatten)]
+    batch: &'a zerus_client_core::Batch,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    composer: Option<crate::composer::ComposerView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    draft_keys: Option<Vec<String>>,
 }
 
 /// Everything pending since the last call; parks up to 250 ms while nothing is.
@@ -235,18 +293,28 @@ pub async fn start(state: State<'_, AppState>) -> Result<String, String> {
 pub async fn next_batch(
     state: State<'_, AppState>,
     actions: State<'_, crate::actions::Actions>,
+    composers: State<'_, crate::composer::Composers>,
 ) -> Result<tauri::ipc::Response, String> {
     let live = Arc::clone(&state.live);
     let actions = actions.inner().clone();
+    let composers = composers.inner().clone();
     let bytes = blocking(move || {
         let batch = live.pump.take(crate::pump::PARK);
         // The host's rows settle pending read marks, whether they arrive as
         // single upserts or inside a computer's snapshot.
         actions.observe(&batch);
+        // The followed session's Activity state and its row feed the
+        // composer's block reason, before its view is taken.
+        composers.observe(&batch);
         // Marks for computers the local listing no longer names can never be
         // written (Qt's `publishReadMarks`).
         actions.drop_orphans(|| live.peers());
-        serde_json::to_vec(&batch).map_err(|error| error.to_string())
+        let envelope = Envelope {
+            batch: &batch,
+            composer: composers.take_view(),
+            draft_keys: composers.take_draft_keys(),
+        };
+        serde_json::to_vec(&envelope).map_err(|error| error.to_string())
     })
     .await?;
     Ok(tauri::ipc::Response::new(bytes))
@@ -322,7 +390,8 @@ pub async fn unfollow(
 /// `ZERUS_CLIENT_PERF_OUT` (where the report goes), `ZERUS_CLIENT_PERF_LABEL`
 /// (the platform label), `ZERUS_CLIENT_PERF_REPRESENTATIVE=0` (Xvfb and other
 /// non-representative runs) and `ZERUS_CLIENT_PERF_PREFERENCE` (`default`
-/// leaves the macOS and Linux WebKit frame-rate preference unchanged).
+/// leaves the macOS and Linux WebKit frame-rate preference unchanged). `replay`
+/// tells the page that `ZERUS_CLIENT_REPLAY` supplies the data.
 #[tauri::command]
 pub fn perf_config() -> Value {
     let var = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
@@ -337,6 +406,8 @@ pub fn perf_config() -> Value {
         "display": crate::display::display_name(),
         // The actions smoke runs only on a replay with an explicit fake hgs.
         "actions_smoke": actions_smoke_allowed(),
+        // A replay run measures a synthetic Activity (the auto run tries every session for it).
+        "replay": var("ZERUS_CLIENT_REPLAY").is_some(),
         // The Linux WebKit renderer decision (renderer, reason, nvidia, wayland, marker_state).
         "renderer": crate::renderer::diagnostics(),
     })
@@ -396,6 +467,13 @@ pub fn perf_log(line: String) {
     eprintln!("zerus-client perf: {line}");
 }
 
+/// This build's identity, as `--build-info` prints it (Qt's
+/// `UpdateController::buildInfo`): the About page shows it.
+#[tauri::command]
+pub fn build_info() -> Value {
+    crate::cli::build_info(&crate::cli::BUILD)
+}
+
 /// Ends the app after a measurement run; refused outside one.
 #[tauri::command]
 pub fn exit_app(app: tauri::AppHandle, code: i32) -> Result<(), String> {
@@ -426,6 +504,7 @@ pub fn perf_away(
         _ => return Err(format!("unknown way to take the window away: {how}")),
     }
     .map_err(|error| error.to_string())?;
+    crate::window_visibility::sync_webview(&window);
     // The page sees the change and its last frame ends before the sample starts.
     std::thread::sleep(std::time::Duration::from_millis(1500));
     let minimized = window.is_minimized().unwrap_or(false);
@@ -438,6 +517,7 @@ pub fn perf_away(
         "hide" => window.show(),
         _ => window.unminimize(),
     };
+    crate::window_visibility::sync_webview(&window);
     if let Err(error) = back.and_then(|()| window.set_focus()) {
         eprintln!("zerus-client perf: could not bring the window back: {error}");
     }
@@ -457,5 +537,15 @@ pub fn metrics(window_ms: Option<u64>) -> Value {
             std::time::Duration::from_millis(ms.clamp(100, 60_000)),
         ),
         None => crate::metrics::process_tree_metrics(pid),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn build_info_answers_what_the_command_line_prints() {
+        let info = super::build_info();
+        assert_eq!(info, crate::cli::build_info(&crate::cli::BUILD));
+        assert_eq!(info["version"], env!("ZERUS_VERSION"));
     }
 }

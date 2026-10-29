@@ -43,12 +43,26 @@ pub struct ViewRow {
     pub shared_notifications: bool,
     /// The revision of valid preferences.
     pub notification_revision: Option<i64>,
+    /// Qt's `notificationPreferencesError`: a listing named the confirmed
+    /// revision with other preferences (`FleetState.cpp:112-117`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notification_error: Option<String>,
     /// `created`, truncated to whole seconds.
     pub created: i64,
     /// The compact JSON the attention marks compare (`attentionFingerprint`).
     pub attention_fingerprint: String,
     /// The session needs the person's action (approval, input, error, recovery).
     pub needs_action: bool,
+    /// `SessionInfo::needsAttention` (`tray/src/HgsClient.h:107-108`) from
+    /// this listing's facts alone, before this device's marks: a request not
+    /// acknowledged by the host, or a finished unread reply. Children do not
+    /// count (Qt's tray and machine cards); `store/marks.ts` and the menu
+    /// bar's overlay apply the marks on top ([`attention_needed`]).
+    pub needs_attention: bool,
+    /// A subagent asks while the session runs (`SessionPresentation::needsAttention`,
+    /// `SessionPresentation.h:283-291`), before an acknowledgement: what
+    /// Qt's window adds to `needs_attention` for its lists and counts.
+    pub child_attention: bool,
     /// `status` and `caption` with the attention acknowledged.
     pub acknowledged_status: String,
     pub acknowledged_caption: String,
@@ -110,6 +124,104 @@ pub struct ViewRow {
     /// `opencode` (`HgsClient.cpp:218`).
     #[serde(default)]
     pub bulk_lifecycle_supported: bool,
+    /// What the menu bar and notifications read; never sent to the frontend.
+    #[serde(skip)]
+    pub notify: NotifyFacts,
+}
+
+/// What the menu bar and attention notifications read beyond the card,
+/// with Qt's field rules (`tray/src/HgsClient.cpp:155-260`). It is never
+/// serialized: the frontend does not receive it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct NotifyFacts {
+    /// `attached > 0`: a terminal client is attached (`TrayMenu.cpp:30` shows "● ").
+    pub attached: bool,
+    /// `SessionInfo::needsAction` (`tray/src/HgsClient.h:109-116`).
+    pub needs_action: bool,
+    /// The host's read mark names the current attention signature. The
+    /// menu bar's marks overlay replaces it with this device's answer
+    /// (`attentionAcknowledged`, `FleetState::updateUnread`).
+    pub acknowledged: bool,
+    /// The raw `cmd` (`dsh` stays `dsh`): conversation keys use it.
+    pub cmd: String,
+    pub created: i64,
+    pub attention_id: String,
+    /// `attention_started`, 0 when absent.
+    pub attention_started: f64,
+    /// `recovery.reason`.
+    pub recovery_reason: String,
+    pub activity_detail: String,
+    /// The unread reply before a reply in progress hides it (`unreadReply`).
+    /// The marks overlay replaces it with this device's answer.
+    pub unread_reply: bool,
+    /// This device's Review later mark (`reviewLater`); only the marks
+    /// overlay sets it.
+    pub review_later: bool,
+    pub reply_scheduled: bool,
+    /// `schedules.recurring`, -1 when unknown.
+    pub recurring_schedules: i64,
+    /// `process_work.count`, -1 when unknown.
+    pub background: i64,
+    pub subagents_active: i64,
+    /// A valid coordination wait of this run and conversation.
+    pub coordination_wait: bool,
+    pub conversation_state: String,
+    pub subagent_source: String,
+    /// Children in `approval`, `input` or `attention`, by ID.
+    pub children: Vec<ChildFacts>,
+    /// Host-confirmed notification preferences, when valid (`SessionNotifications::valid`).
+    pub preferences: Option<Preferences>,
+    /// The row has `optional_questions`.
+    pub optional_reported: bool,
+    /// Its whole non-negative count, -1 when unknown.
+    pub optional_count: i64,
+    pub optional_ids: Vec<String>,
+}
+
+/// A child that asks (`SessionNotifications::childPhase`, `childRequest`, `childStarted`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ChildFacts {
+    pub id: String,
+    pub label: String,
+    pub phase: String,
+    pub request: String,
+    pub started: Option<f64>,
+}
+
+/// Valid shared notification preferences: muted, and the suppressed baseline.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Preferences {
+    pub muted: bool,
+    pub suppressed: Value,
+}
+
+impl Preferences {
+    /// Equal as Qt compares preference objects (`QJsonObject ==`):
+    /// numbers by value, so a baseline's `12` equals `12.0`.
+    pub fn same(&self, other: &Preferences) -> bool {
+        self.muted == other.muted && json_equal(&self.suppressed, &other.suppressed)
+    }
+}
+
+/// Qt 6's `QJsonValue ==`: an integer and a double compare as doubles
+/// (`12 == 12.0`), two integers exactly; arrays and objects compare their
+/// members so.
+pub fn json_equal(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) => match (x.as_i64(), y.as_i64()) {
+            (Some(x), Some(y)) => x == y,
+            _ => x.as_f64() == y.as_f64(),
+        },
+        (Value::Array(x), Value::Array(y)) => {
+            x.len() == y.len() && x.iter().zip(y).all(|(x, y)| json_equal(x, y))
+        }
+        (Value::Object(x), Value::Object(y)) => {
+            x.len() == y.len()
+                && x.iter()
+                    .all(|(key, x)| y.get(key).is_some_and(|y| json_equal(x, y)))
+        }
+        _ => a == b,
+    }
 }
 
 fn text<'a>(row: &'a Value, field: &str) -> &'a str {
@@ -295,7 +407,8 @@ impl<'a> Session<'a> {
     }
 
     /// A computer whose `hgs` reports `attention_signature` shares read marks;
-    /// an older one keeps them per device, which this client does not have yet.
+    /// an older one keeps them per device (`store/marks.ts` and the menu
+    /// bar's overlay, `menubar::read_state`, apply them).
     fn shared_read(&self) -> bool {
         self.row.get("attention_signature").is_some()
     }
@@ -469,11 +582,12 @@ impl<'a> Session<'a> {
                 format!("{main}: {extra}")
             }
         };
-        let activity_detail = text(self.row, "activity_detail");
+        // The user's own answers read as "Your answer: ..." (QuestionReply).
+        let activity_detail = &crate::questions::activity_detail_preview(self.row);
         let tool_detail = text(self.row, "tool_detail");
-        let prompt = text(self.row, "prompt");
+        let prompt = &crate::questions::prompt_preview(self.row);
         if self.needs_action() {
-            return [activity_detail, tool_detail, prompt]
+            return [activity_detail.as_str(), tool_detail, prompt.as_str()]
                 .into_iter()
                 .find(|value| !value.is_empty())
                 .unwrap_or("")
@@ -846,6 +960,117 @@ fn simplified(text: &str) -> String {
     out
 }
 
+/// `SessionInfo::needsAttention` (`tray/src/HgsClient.h:107-108`): a request
+/// not acknowledged, or, unless archived, a finished unread reply
+/// (`visibleUnreadReply`) or a Review later mark. The one rule the view row,
+/// the menu bar's overlay and `store/marks.ts` apply.
+pub fn attention_needed(
+    needs_action: bool,
+    acknowledged: bool,
+    archived: bool,
+    unread: bool,
+    review_later: bool,
+) -> bool {
+    (needs_action && !acknowledged) || (!archived && (unread || review_later))
+}
+
+fn positive_time(value: Option<f64>) -> Option<f64> {
+    value.filter(|at| at.is_finite() && *at > 0.0)
+}
+
+/// The facts `AttentionTracker` and the menu bar read (`HgsClient.cpp:155-260`).
+fn notify_facts(value: &Value, session: &Session) -> NotifyFacts {
+    let preferences = session.notifications().map(|preferences| Preferences {
+        muted: preferences.get("muted").and_then(Value::as_bool) == Some(true),
+        suppressed: preferences
+            .get("suppressed")
+            .cloned()
+            .unwrap_or(Value::Null),
+    });
+    // Strict types: anything but a whole non-negative count is unknown, never 0.
+    let (optional_count, optional_ids) = object(value, "optional_questions")
+        .and_then(|summary| {
+            let count = summary
+                .get("count")
+                .and_then(Value::as_f64)
+                .filter(|c| *c >= 0.0 && *c <= 1e9 && c.fract() == 0.0)?;
+            let mut ids: Vec<String> = Vec::new();
+            let listed = summary.get("ids").and_then(Value::as_array);
+            for id in listed.into_iter().flatten().filter_map(Value::as_str) {
+                if !id.is_empty() && !ids.iter().any(|known| known == id) {
+                    ids.push(id.to_owned());
+                }
+            }
+            Some((count as i64, ids))
+        })
+        .unwrap_or((-1, Vec::new()));
+    let mut children: Vec<ChildFacts> = object(value, "subagents")
+        .into_iter()
+        .flatten()
+        .filter_map(|(id, child)| {
+            let phase = match text(child, "display_state") {
+                "" => text(child, "state"),
+                display => display,
+            };
+            if !matches!(phase, "approval" | "input" | "attention") {
+                return None;
+            }
+            let request = match text(child, "attention_id") {
+                "" => text(child, "question_id"),
+                request => request,
+            };
+            // `label`, else `name`, else the ID: only a missing or non-string
+            // value falls back (`QJsonValue::toString(default)`).
+            let label = child
+                .get("label")
+                .and_then(Value::as_str)
+                .or_else(|| child.get("name").and_then(Value::as_str))
+                .unwrap_or(id);
+            Some(ChildFacts {
+                id: id.clone(),
+                label: label.to_owned(),
+                phase: phase.to_owned(),
+                request: request.to_owned(),
+                started: positive_time(number(child, "attention_started"))
+                    .or_else(|| positive_time(number(child, "last_event_at"))),
+            })
+        })
+        .collect();
+    children.sort_by(|a, b| a.id.cmp(&b.id));
+    NotifyFacts {
+        attached: value.get("attached").and_then(Value::as_i64).unwrap_or(0) > 0,
+        needs_action: session.needs_action(),
+        acknowledged: session.attention_acknowledged(),
+        cmd: text(value, "cmd").to_owned(),
+        created: number(value, "created").map_or(0, |created| created as i64),
+        attention_id: text(value, "attention_id").to_owned(),
+        attention_started: number(value, "attention_started").unwrap_or(0.0),
+        recovery_reason: object(value, "recovery")
+            .and_then(|recovery| recovery.get("reason"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned(),
+        activity_detail: text(value, "activity_detail").to_owned(),
+        unread_reply: session.unread_reply(),
+        review_later: false,
+        reply_scheduled: value
+            .get("reply_scheduled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        recurring_schedules: count(value, "schedules", "recurring"),
+        background: session.background,
+        subagents_active: session.subagents_active,
+        coordination_wait: session.coordination_wait().is_some(),
+        conversation_state: session.conversation_state.to_owned(),
+        subagent_source: text(value, "subagent_source").to_owned(),
+        children,
+        preferences,
+        optional_reported: value.get("optional_questions").is_some(),
+        optional_count,
+        optional_ids,
+    }
+}
+
 /// The view row of one catalog row.
 pub fn row(value: &Value) -> ViewRow {
     let session = Session::new(value);
@@ -883,9 +1108,18 @@ pub fn row(value: &Value) -> ViewRow {
         shared_notifications: notifications.is_some(),
         notification_revision: notifications
             .and_then(|preferences| notifications::revision(preferences.get("revision"))),
+        notification_error: None,
         created: number(value, "created").unwrap_or(0.0) as i64,
         attention_fingerprint: session.attention_fingerprint(),
         needs_action: session.needs_action(),
+        needs_attention: attention_needed(
+            session.needs_action(),
+            session.attention_acknowledged(),
+            session.state == "archived",
+            session.unread_reply() && !session.reply_in_progress(),
+            false,
+        ),
+        child_attention: session.current_activity() && session.child_needs_input(),
         acknowledged_status: acknowledged_status.to_owned(),
         acknowledged_caption,
         unread_candidate: session.state != "archived"
@@ -940,6 +1174,7 @@ pub fn row(value: &Value) -> ViewRow {
         terminal_reported: flag("terminal_supported").is_some(),
         terminal_attach_supported: flag("terminal_attach_supported").unwrap_or(false),
         terminal_attach_reported: flag("terminal_attach_supported").is_some(),
+        notify: notify_facts(value, &session),
         bulk_lifecycle_supported: flag("bulk_lifecycle_supported").unwrap_or(cmd != "opencode"),
     }
 }
@@ -982,6 +1217,185 @@ mod tests {
     }
 
     #[test]
+    fn notify_facts_carry_what_the_attention_tracker_reads() {
+        let view = row(&json!({
+            "name": "claude/sample-project/review", "cmd": "dsh", "created": 1700000000.0, "tracked": true,
+            "state": "running", "phase": "idle", "activity": "idle", "run_id": "r", "conversation_id": "c",
+            "attention_id": "a-1", "attention_started": 1761600000.5,
+            "recovery": {"state": "blocked", "reason": "Provider\nfailed"}, "activity_detail": "waiting",
+            "reply_id": "rep-2", "attention_signature": "sig", "read": {"conversation_id": "c", "reply_id": "rep-1"},
+            "reply_scheduled": true, "schedules": {"count": 2, "recurring": 1}, "process_work": {"count": 0},
+            "subagent_active_count": 1, "conversation_state": "active", "subagent_source": "native",
+            "subagents": {
+                "b": {"state": "running"},
+                "a": {"display_state": "approval", "attention_id": "q-1", "label": "Reviewer", "attention_started": 5.0}
+            },
+            "optional_questions": {"count": 2, "ids": ["q2", "q1", "q2", ""]},
+            "notification_preferences": {"conversation_id": "c", "muted": true, "revision": 3, "suppressed": {
+                "reply_id": null, "attention_signature": null, "optional_question_ids": [],
+                "main_attention": null, "child_attention": {}}}
+        }));
+        let facts = &view.notify;
+        assert_eq!(facts.cmd, "dsh", "conversation keys use the raw cmd");
+        assert_eq!(facts.created, 1700000000);
+        assert_eq!(facts.attention_id, "a-1");
+        assert_eq!(facts.attention_started, 1761600000.5);
+        assert!(facts.needs_action, "a blocked recovery needs action");
+        assert_eq!(facts.recovery_reason, "Provider\nfailed");
+        assert!(facts.unread_reply);
+        assert!(facts.reply_scheduled);
+        assert_eq!(
+            (
+                facts.recurring_schedules,
+                facts.background,
+                facts.subagents_active
+            ),
+            (1, 0, 1)
+        );
+        assert_eq!(
+            facts.children,
+            vec![ChildFacts {
+                id: "a".into(),
+                label: "Reviewer".into(),
+                phase: "approval".into(),
+                request: "q-1".into(),
+                started: Some(5.0),
+            }]
+        );
+        assert!(facts.optional_reported);
+        assert_eq!(
+            (facts.optional_count, facts.optional_ids.clone()),
+            (2, vec!["q2".to_owned(), "q1".to_owned()])
+        );
+        assert!(facts
+            .preferences
+            .as_ref()
+            .is_some_and(|preferences| preferences.muted));
+        let other = row(
+            &json!({"name": "x", "conversation_id": "c", "notification_preferences": {
+            "conversation_id": "other", "muted": true, "revision": 0, "suppressed": {}}}),
+        );
+        assert_eq!(
+            other.notify.preferences, None,
+            "another conversation's preferences are not this row's"
+        );
+        let unknown = row(&json!({"name": "x", "optional_questions": {"count": null}}));
+        assert_eq!(
+            (
+                unknown.notify.optional_reported,
+                unknown.notify.optional_count
+            ),
+            (true, -1)
+        );
+    }
+
+    #[test]
+    fn notify_facts_follow_qt_fallbacks_and_strict_counts() {
+        let view = row(&json!({
+            "name": "codex/p/a", "conversation_id": "c", "subagents": {
+                "s": {"state": "input", "question_id": "q-s", "name": "Scout", "attention_started": 0, "last_event_at": 7.5},
+                "t": {"display_state": "", "state": "attention", "label": 3, "attention_id": ""},
+                "u": {"display_state": "working", "state": "approval"}
+            },
+            "notification_preferences": {"conversation_id": "c", "muted": false, "revision": 0, "suppressed": {
+                "reply_id": null, "attention_signature": null, "optional_question_ids": [],
+                "main_attention": null, "child_attention": {}}}
+        }));
+        assert_eq!(
+            view.notify.children,
+            vec![
+                ChildFacts {
+                    id: "s".into(),
+                    label: "Scout".into(),
+                    phase: "input".into(),
+                    request: "q-s".into(),
+                    started: Some(7.5)
+                },
+                ChildFacts {
+                    id: "t".into(),
+                    label: "t".into(),
+                    phase: "attention".into(),
+                    request: "".into(),
+                    started: None
+                },
+            ],
+            "state without display_state, question_id, name, then the ID; a display state wins"
+        );
+        assert_eq!(
+            view.notify.preferences,
+            Some(Preferences {
+                muted: false,
+                suppressed: json!({
+            "reply_id": null, "attention_signature": null, "optional_question_ids": [],
+            "main_attention": null, "child_attention": {}})
+            })
+        );
+        for count in [json!(1.5), json!(-1), json!(2e9), json!("2")] {
+            let facts =
+                row(&json!({"name": "x", "optional_questions": {"count": count, "ids": ["a"]}}))
+                    .notify;
+            assert_eq!(
+                (facts.optional_count, facts.optional_ids.len()),
+                (-1, 0),
+                "{count}"
+            );
+        }
+        let reported = row(&json!({"name": "x", "optional_questions": null})).notify;
+        assert_eq!(
+            (reported.optional_reported, reported.optional_count),
+            (true, -1),
+            "Qt's contains()"
+        );
+        let older = row(&json!({"name": "x"})).notify;
+        assert!(!older.optional_reported);
+    }
+
+    #[test]
+    fn json_equal_compares_numbers_as_qt_does() {
+        assert!(json_equal(
+            &json!({"a": [12, {"b": 1.0}]}),
+            &json!({"a": [12.0, {"b": 1}]})
+        ));
+        assert!(!json_equal(&json!({"a": 12}), &json!({"a": 12.5})));
+        assert!(!json_equal(&json!({"a": 12}), &json!({"a": 12, "b": null})));
+        assert!(!json_equal(&json!([1, 2]), &json!([1])));
+        assert!(!json_equal(&json!("12"), &json!(12)));
+        assert!(json_equal(
+            &json!(9_007_199_254_740_993_i64),
+            &json!(9_007_199_254_740_993_i64)
+        ));
+        assert!(
+            !json_equal(
+                &json!(9_007_199_254_740_993_i64),
+                &json!(9_007_199_254_740_992_i64)
+            ),
+            "integers exactly"
+        );
+    }
+
+    #[test]
+    fn needs_attention_is_qts_session_rule_and_children_are_apart() {
+        let asking = json!({"name": "codex/p/a", "run_id": "r", "conversation_id": "c", "tracked": true,
+            "state": "running", "activity": "idle", "phase": "idle", "subagent_source": "native",
+            "subagents": {"w": {"state": "approval"}}});
+        let running = row(&asking);
+        assert!(
+            running.child_attention && !running.needs_attention,
+            "a child asking is the window's, not Qt's tray's"
+        );
+        let mut paused = asking.clone();
+        paused["state"] = json!("paused");
+        assert!(!row(&paused).child_attention, "only while the session runs");
+        let mut error = asking.clone();
+        error["phase"] = json!("error");
+        assert!(
+            row(&error).needs_attention,
+            "an error without recovery needs attention"
+        );
+        assert_eq!(row(&error).status, "error", "while its status stays");
+    }
+
+    #[test]
     fn missing_fields_default_and_wrong_types_are_ignored() {
         let view =
             row(&json!({"name": "sh/sample-project", "phase": 7, "model": null, "read": "x"}));
@@ -1007,6 +1421,13 @@ mod tests {
                 state: "running".into(),
                 terminal_supported: true,
                 bulk_lifecycle_supported: true,
+                // Unknown counts are -1, never 0 (`HgsClient.cpp:169-174`, `:194-201`).
+                notify: NotifyFacts {
+                    recurring_schedules: -1,
+                    background: -1,
+                    optional_count: -1,
+                    ..NotifyFacts::default()
+                },
                 ..ViewRow::default()
             }
         );
@@ -1324,6 +1745,23 @@ mod tests {
         let attach = row(&json!({"terminal_attach_supported": true, "terminal_supported": "yes"}));
         assert!(attach.terminal_attach_supported && attach.terminal_attach_reported);
         assert!(!attach.terminal_reported);
+    }
+
+    #[test]
+    fn notify_facts_carry_attachment_action_and_acknowledgement() {
+        let busy = row(&json!({
+            "name": "claude/sample-project/review", "attached": 2, "tracked": true,
+            "phase": "approval", "conversation_id": "c", "attention_signature": "sig",
+            "read": {"conversation_id": "c", "attention_signature": "sig"}
+        }));
+        assert!(busy.notify.attached);
+        assert!(busy.notify.needs_action);
+        assert!(busy.notify.acknowledged);
+        let quiet =
+            row(&json!({"name": "codex/sample-project/docs", "attached": 0, "tracked": true}));
+        assert!(!quiet.notify.attached && !quiet.notify.needs_action && !quiet.notify.acknowledged);
+        // The frontend never receives the facts.
+        assert!(serde_json::to_value(&busy).unwrap().get("notify").is_none());
     }
 
     fn fingerprint_row() -> Value {

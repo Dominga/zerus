@@ -31,6 +31,12 @@ export interface ViewRow {
   attention_fingerprint?: string;
   /** The session needs the person's action (approval, input, error, recovery). */
   needs_action?: boolean;
+  /** Qt's SessionInfo::needsAttention from the listing alone, before this device's marks (no children). */
+  needs_attention?: boolean;
+  /** A subagent asks while the session runs, before an acknowledgement (Qt's window adds it). */
+  child_attention?: boolean;
+  /** The host's preferences conflict with the confirmed ones (Qt's notificationPreferencesError). */
+  notification_error?: string;
   /** `status` and `caption` with the attention acknowledged. */
   acknowledged_status?: string;
   acknowledged_caption?: string;
@@ -315,6 +321,22 @@ export const emptyMachines = (error: string | null = null): MachinesView => ({
 export const emptyProjects = (status = ""): ProjectsView => ({
   loaded: false, status, status_error: status !== "", conflicts: 0, unconnected: [], notice: null, projects: [],
 });
+
+// The Terminal tab (src-tauri/src/terminal.rs).
+export interface TerminalTarget { computer: ComputerId; name: string; run_id: string; machine: string }
+export interface TerminalConnected { generation: number; status: string; reused: boolean }
+export interface TerminalStatus { supported: boolean; available: boolean; reason: string; idle: string; connecting: string; disconnected: string }
+export interface TerminalFinished { kind: "finished"; code: number; status: string }
+/** The core's `TerminalFacts`: a row's terminal fields. */
+export interface TerminalFacts {
+  cmd: string;
+  terminal_supported: boolean;
+  terminal_reported: boolean;
+  terminal_attach_supported: boolean;
+  terminal_attach_reported: boolean;
+  terminal_reason: string;
+  terminal_attach_reason: string;
+}
 
 /** One checked page of a computer's archive (`archive_page`). */
 export interface ArchivePage {

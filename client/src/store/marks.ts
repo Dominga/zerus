@@ -28,7 +28,7 @@ export const OVERRIDE_CAP = 1000;
 export const CAP = 20_000;
 
 /** What the overlay decides; the rest of a row is the host's. */
-export type Overlay = Pick<Session, "status" | "caption" | "attention" | "unread" | "reviewLater" | "summary" | "muted" | "notificationConflict">;
+export type Overlay = Pick<Session, "status" | "caption" | "attention" | "unread" | "reviewLater" | "attentionNeeded" | "actionNeeded" | "childAttention" | "summary" | "muted" | "notificationConflict">;
 
 export interface MarksPort {
   attentionMarks(): Promise<AttentionSnapshot>;
@@ -254,6 +254,12 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
    * for a change, which an older listing must not roll back (Qt's
    * keepNotificationPreferences). Only the revision and `muted` are kept: the
    * row carries no more of the preferences.
+   *
+   * The core now applies the confirmed preferences to the row and keeps them
+   * across older listings itself (`CatalogState::apply_notification_preferences`
+   * and the keep step in `state.rs`), for the window and the menu bar alike,
+   * so these overrides are redundant there. They stay as a harmless second
+   * guard until the core's path has run in the field.
    */
   const overrides = new Map<string, { revision: number; muted: boolean }>();
   const overrideKey = (s: Pick<Session, "computer" | "cmd" | "conversationId">) => replyKey(s.computer, s.cmd, s.conversationId ?? "");
@@ -265,14 +271,15 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
    * revision with another value keeps the override and is a conflict.
    */
   function notificationOf(s: Session): { muted: boolean; conflict: boolean } {
-    const base = { muted: s.baseMuted, conflict: false };
+    const base = { muted: s.baseMuted, conflict: s.baseNotificationError };
     const kept = overrides.size && s.conversationId ? overrides.get(overrideKey(s)) : undefined;
     if (!kept) return base;
-    if (!s.sharedNotifications) return { muted: kept.muted, conflict: false };
+    // The core's conflict shows whatever the override says.
+    if (!s.sharedNotifications) return { muted: kept.muted, conflict: base.conflict };
     const incoming = s.notificationRevision ?? -1;
     if (incoming > kept.revision) return base;
     if (incoming === kept.revision) return s.baseMuted === kept.muted ? base : { muted: kept.muted, conflict: true };
-    return { muted: kept.muted, conflict: false };
+    return { muted: kept.muted, conflict: base.conflict };
   }
 
   const mutedOf = (s: Session) => notificationOf(s).muted;
@@ -286,6 +293,15 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
       attention: status === "attention" ? s.baseAttention : undefined,
       unread: r.unread,
       reviewLater: r.reviewLater,
+      // SessionInfo::needsAttention with these marks. The core's `needs_attention`
+      // is the listing's value before any device mark: an older host's reply is
+      // never unread there, so it must never be read without this overlay. A
+      // projection without the field keeps none.
+      attentionNeeded: s.baseAttentionNeeded === undefined ? undefined
+        : (s.needsAction && !r.ack) || (s.state !== "archived" && (r.unread || r.reviewLater)),
+      // The part a project header counts as needing a response (SessionsWindowRows.cpp:400-401).
+      actionNeeded: s.baseAttentionNeeded === undefined ? undefined : s.needsAction && !r.ack,
+      childAttention: s.baseChildAttention && !r.ack,
       // Qt's currentAction repeats the status for an unread reply unless the session needs action.
       summary: r.unread && !s.needsAction ? "" : s.baseSummary,
       muted: mutedOf(s),
@@ -557,13 +573,23 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
       }
     }
     if (overrides.size) {
-      // A listing with a higher revision ends the override (the overlay already shows the row's own value).
+      // A listing that reaches the override ends it: a higher revision, or the
+      // same revision with the same value (the overlay already shows the row's
+      // own value then). The core keeps the confirmed value from here on.
       for (const u of b.replaces.length ? [...b.upserts, ...b.replaces.flatMap((r) => r.rows)] : b.upserts) {
         const row = u.row;
-        const kept = row.conversation_id ? overrides.get(replyKey(u.computer, row.agent ?? "", row.conversation_id)) : undefined;
-        if (kept && row.shared_notifications && (row.notification_revision ?? -1) > kept.revision) {
-          overrides.delete(replyKey(u.computer, row.agent ?? "", row.conversation_id!));
+        const key = row.conversation_id ? replyKey(u.computer, row.agent ?? "", row.conversation_id) : undefined;
+        const kept = key ? overrides.get(key) : undefined;
+        const revision = row.notification_revision ?? -1;
+        if (kept && row.shared_notifications && (revision > kept.revision || (revision === kept.revision && !!row.muted === kept.muted))) {
+          overrides.delete(key!);
         }
+      }
+      // A conversation no longer listed takes its override with it, as Qt's
+      // preferences go with their rows. An empty replace is not a listing.
+      if (overrides.size && (b.removes.length || b.replaces.some((r) => r.rows.length))) {
+        const listedKeys = new Set(listed().filter((s) => s.conversationId).map((s) => overrideKey(s)));
+        for (const key of [...overrides.keys()]) if (!listedKeys.has(key)) overrides.delete(key);
       }
     }
     moveFallbacks(c);
@@ -713,6 +739,8 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
     reapply,
     /** The pending read marks the rows read (a copy). */
     pending: (): ReadMark[] => [...pending.values()],
+    /** FleetState::updateUnread for one row; the Rust overlay (menubar::read_state) reads the same fixture (tests). */
+    readState,
     /** Each map's keys, oldest written first (tests, diagnostics). */
     writeOrder: () => ({ marks: [...marks.keys()], replies: [...replies.keys()] }),
   };

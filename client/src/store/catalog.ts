@@ -4,6 +4,7 @@ import { createStore, produce, reconcile, unwrap } from "solid-js/store";
 import type { Batch, ComputerId, RowOut, ViewRow } from "../types";
 import type { AgentKind, Session, Status } from "../ui/sessions/types";
 import { marks as appMarks, type RowMarks } from "./marks";
+import { connectionOf } from "./overview";
 
 // The catalog: every live session row of every computer, keyed by
 // computer + "\n" + catalog key. A batch is one reactive transaction. An
@@ -126,6 +127,8 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow, marks: 
     backgroundJobs: undefined,
     subagents: undefined,
     reviewLater: false,
+    attentionNeeded: typeof v.needs_attention === "boolean" ? v.needs_attention : undefined,
+    childAttention: !!v.child_attention,
     optionalQuestions: undefined,
     updatedAt: typeof v.updated_at === "number" ? v.updated_at : undefined,
     turnStarted: typeof v.turn_started === "number" && v.turn_started > 0 ? v.turn_started : undefined,
@@ -159,6 +162,9 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow, marks: 
     ackStatus: v.acknowledged_status ? statusOf({ name: "", status: v.acknowledged_status }) : status,
     ackCaption: text(v.acknowledged_caption) || caption,
     unreadCandidate: typeof v.unread_candidate === "boolean" ? v.unread_candidate : undefined,
+    baseAttentionNeeded: typeof v.needs_attention === "boolean" ? v.needs_attention : undefined,
+    baseChildAttention: !!v.child_attention,
+    baseNotificationError: !!v.notification_error,
     baseStatus: status,
     baseCaption: caption,
     baseAttention: attention,
@@ -266,6 +272,17 @@ export const orderedRows = () => catalog.order.map((id) => catalog.rows[id]).fil
 export function computerOffline(computer: ComputerId): boolean {
   const status = catalog.computers[computer]?.status;
   return status === "reconnecting" || status === "ended";
+}
+
+/**
+ * The window's online state of a computer's rows, as the Overview's: its
+ * stream is live or polled. Qt decides both alike: the Sessions list's
+ * `entry.online` (SessionsWindow.cpp:3207-3213) is the Dashboard's
+ * `machine.fresh` (DashboardPage.cpp:411-412), so a computer still
+ * connecting, probing or unsupported is not online.
+ */
+export function computerFresh(computer: ComputerId): boolean {
+  return connectionOf(catalog.computers[computer]?.status).fresh;
 }
 
 export type { RowOut };

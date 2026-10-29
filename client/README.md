@@ -13,9 +13,32 @@ reference is `design/webui`; its components moved here and are bound to live dat
 | `media/` | `zerus-client-media`: microphone and round video capture for the `media` and `video` features (see its README) |
 | `fixtures/` | Synthetic replay streams (`scripts/make-fixture.py` writes them) |
 
-The app is a separate application (`dev.zerus.next`, "Zerus Next (dev)"). It only
-runs `hgs [@host] watch --json`, which is read-only; it never starts, stops or
-replaces the installed Zerus GUI, CLI, agents or services.
+The dev app is a separate application (`dev.zerus.next`, "Zerus Next (dev)"): it
+never claims Qt's single-instance socket, never posts notifications and runs no
+main-thread watchdog unless asked (`ZERUS_CLIENT_SINGLE_INSTANCE=1`,
+`ZERUS_CLIENT_NOTIFICATIONS=1`, `ZERUS_CLIENT_WATCHDOG=1`), and it never starts,
+stops or replaces the installed Zerus GUI, CLI, agents or services.
+On the Mac the client also builds as Zerus itself, the switch bundle that takes
+over `com.hgdev.hgs-tray`; see `docs/macos-distribution.md#tauri-client-switch`.
+
+## Menu bar, single instance and notifications (macOS)
+
+| Piece | Where | Qt source it follows |
+| --- | --- | --- |
+| Command line (`--hgs`, `--sessions`, `--background`, `--version`, `--build-info`) | `src-tauri/src/cli.rs`, `build.rs` | `AppConfig.cpp`, `UpdateController::buildInfo` |
+| Identity and data directory | `src-tauri/src/identity.rs` | owner decision of 2026-10-28 |
+| Single instance (lock, socket `hgs-tray`, `show`/`sessions`) | `src-tauri/src/instance.rs` | `SingleInstance.cpp`, `main.cpp` |
+| Hidden start, close hides, Dock icon only with a window, signals | `src-tauri/src/lifecycle.rs`, `signals.rs` | `main.cpp`, `MacAppVisibility.mm`, `TerminationSignals.h` |
+| Tile, tooltip, menu, "Open in" | `core/src/menubar.rs`, `core/src/trayicon.rs`, `src-tauri/src/desk.rs`, `src-tauri/src/platform/macos_menubar.rs` | `IconFactory.cpp`, `FleetState.cpp`, `TrayMenu.cpp`, `QuietTrayIcon.h`, `MacBackend.cpp` |
+| Attention notifications | `core/src/attention.rs`, `src-tauri/src/platform/macos_notify.rs` | `AttentionTracker.cpp`, `MacAttentionNotifier.mm` |
+| Main-thread watchdog and its sleep hold | `src-tauri/src/watchdog.rs`, `src-tauri/src/platform/macos_power.rs` | `MainThreadWatchdog.cpp`, `MacSystemPower.cpp` |
+
+The data directory is Tauri's `app_data_dir` formula with the running bundle's
+identifier: `~/Library/Application Support/dev.zerus.next/` for the dev app,
+`~/Library/Application Support/com.hgdev.hgs-tray/` for the switch bundle. The
+switch bundle does not see what the dev app saved there. The attachment cache
+follows the same rule with Tauri's `app_cache_dir` formula
+(`Identity::cache_dir_now`): `~/Library/Caches/<identifier>/` on the Mac.
 
 ## Build and run
 
@@ -25,8 +48,14 @@ npm ci
 npm run check                  # TypeScript
 npm test                       # Vitest: stores, transcript, screens
 cargo +1.99.1 test --manifest-path src-tauri/Cargo.toml
+scripts/check-licenses.sh      # a license notice for every shipped crate (Linux, macOS, Windows)
 RUSTUP_TOOLCHAIN=1.99.1 npx tauri dev
 ```
+
+`scripts/check-licenses.sh` needs the crates in Cargo's cache (`cargo +1.99.1 fetch
+--locked --manifest-path src-tauri/Cargo.toml`). When it stops at a crate without a
+notice, add the upstream text under `packaging/rust-licenses` as its README there
+describes.
 
 `npm run dev` alone serves the frontend in a browser; without Tauri it replays
 `fixtures/replay-batches.json`, so the UI works without the app.

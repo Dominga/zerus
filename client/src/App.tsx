@@ -1,4 +1,4 @@
-import { For, Match, Show, Switch, createEffect, createMemo, onCleanup, onMount } from "solid-js";
+import { For, Match, Show, Suspense, Switch, createEffect, createMemo, lazy, onCleanup, onMount } from "solid-js";
 import { Rail } from "./ui/components/Rail";
 import { MenuLayer, Toasts } from "./ui/components/Overlays";
 import { ActionDialogs, ActionNotices } from "./ui/sessions/ActionDialogs";
@@ -10,13 +10,18 @@ import { OverviewScreen } from "./ui/screens/Overview";
 import { MachinesScreen } from "./ui/screens/Machines";
 import { AccountsScreen } from "./ui/screens/Accounts";
 import { ProjectsScreen } from "./ui/screens/Projects";
-import { SettingsScreen } from "./ui/components/SettingsScreen";
 import { applySkin, skin } from "./skin/runtime";
 import { catalog } from "./store/catalog";
 import { contentScale, page, setContentScale, setPage, toast } from "./store/ui";
+import { num, setSetting } from "./store/settings";
+import { installShortcutRouter, onCommand } from "./store/shortcuts";
 import type { BridgeMode } from "./bridge";
 
 // The client shell: the rail, the pages and the status bar.
+
+// Settings and its sections load the first time Settings opens; their
+// state lives in their modules, so it stays once loaded.
+const SettingsScreen = lazy(() => import("./ui/screens/Settings").then((m) => ({ default: m.SettingsScreen })));
 
 const STATE_TEXT: Record<string, string> = {
   probing: "checking",
@@ -49,19 +54,36 @@ function StatusBar(props: { mode: () => BridgeMode | "starting" }) {
   );
 }
 
+/** Keyboard zoom changes Settings > Appearance > Content scale (Qt's syncContentScale). */
+function zoom(scale: number) {
+  setContentScale(scale);
+  void setSetting("workspace/contentScale", scale);
+}
+
 export function App(props: { mode: () => BridgeMode | "starting" }) {
   createEffect(() => applySkin(skin()));
-  const keys = (e: KeyboardEvent) => {
-    const mod = e.ctrlKey || e.metaKey;
-    if (!mod) return;
-    if (/^[1-5]$/.test(e.key)) { e.preventDefault(); setPage((["dashboard", "sessions", "projects", "machines", "accounts"] as const)[Number(e.key) - 1]); }
-    else if (e.key === ",") { e.preventDefault(); setPage("settings"); }
-    else if (e.key === "=" || e.key === "+") { e.preventDefault(); setContentScale(Math.min(2, +(contentScale() + 0.1).toFixed(2))); toast("Content scale", `${Math.round(contentScale() * 100)}%`); }
-    else if (e.key === "-") { e.preventDefault(); setContentScale(Math.max(0.75, +(contentScale() - 0.1).toFixed(2))); toast("Content scale", `${Math.round(contentScale() * 100)}%`); }
-    else if (e.key === "0") { e.preventDefault(); setContentScale(1); }
+  createEffect(() => setContentScale(num("workspace/contentScale")));
+  // Window commands through the shortcut router (store/shortcuts.ts), with the
+  // chords of Settings > Keyboard.
+  const zoomBy = (step: number) => {
+    zoom(Math.max(0.75, Math.min(2, +(contentScale() + step).toFixed(2))));
+    toast("Content scale", `${Math.round(contentScale() * 100)}%`);
   };
-  onMount(() => addEventListener("keydown", keys));
-  onCleanup(() => removeEventListener("keydown", keys));
+  const commands: [string, () => void][] = [
+    ["go.overview", () => setPage("dashboard")],
+    ["go.sessions", () => setPage("sessions")],
+    ["go.projects", () => setPage("projects")],
+    ["go.machines", () => setPage("machines")],
+    ["go.accounts", () => setPage("accounts")],
+    ["go.settings", () => setPage("settings")],
+    ["zoom.in", () => zoomBy(0.1)],
+    ["zoom.out", () => zoomBy(-0.1)],
+    ["zoom.reset", () => zoom(1)],
+  ];
+  onMount(() => {
+    const off = [installShortcutRouter(), ...commands.map(([id, run]) => onCommand(id, run))];
+    onCleanup(() => off.forEach((undo) => undo()));
+  });
   return (
     <div class="app" classList={{ "rail-labeled": skin().layout.rail === "labeled" }}>
       <Rail />
@@ -77,7 +99,7 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
           <Match when={page() === "machines"}><MachinesScreen /></Match>
           <Match when={page() === "accounts"}><AccountsScreen /></Match>
           <Match when={page() === "projects"}><ProjectsScreen /></Match>
-          <Match when={page() === "settings"}><SettingsScreen /></Match>
+          <Match when={page() === "settings"}><Suspense><SettingsScreen /></Suspense></Match>
         </Switch>
       </main>
       <StatusBar mode={props.mode} />

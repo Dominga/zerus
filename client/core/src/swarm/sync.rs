@@ -287,6 +287,12 @@ impl Controller {
         }
     }
 
+    /// The last `swarm get` as observed, without pending edits: shared, not
+    /// rebuilt.
+    pub fn observed_value(&self) -> Option<Arc<Value>> {
+        self.value.clone()
+    }
+
     /// The `swarm get` object of what the list shows, for the Projects
     /// screen. While edits are pending it carries the desired organization,
     /// whose `project_order` is the one the apply writes (`edit::shared`):

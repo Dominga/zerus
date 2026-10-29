@@ -25,14 +25,18 @@ beforeEach(() => { vi.clearAllMocks(); m.markRead.mockReturnValue(true); m.markN
 
 describe("markReadChip", () => {
   it("is active for a live row that needs attention", () => {
-    expect(markReadChip(session(unread)).active).toBe(true);
-    expect(markReadChip(session({}, true)).active).toBe(true);
-    expect(markReadChip(session()).active).toBe(false);
-    expect(markReadChip(session({ ...unread, state: "archived" })).active).toBe(false);
+    expect(markReadChip(session(unread), true).active).toBe(true);
+    expect(markReadChip(session({}, true), true).active).toBe(true);
+    expect(markReadChip(session(), true).active).toBe(false);
+    expect(markReadChip(session({ ...unread, state: "archived" }), true).active).toBe(false);
+  });
+  it("is active offline only for a Review later mark (SessionPresentation.h:281)", () => {
+    expect(markReadChip(session(unread), false).active).toBe(false);
+    expect(markReadChip(session({}, true), false).active).toBe(true);
   });
   it("describes a review mark and a notification", () => {
-    expect(markReadChip(session({}, true)).detail).toBe("Marked for later. Mark as read to clear this reminder.");
-    expect(markReadChip(session(unread)).detail).toBe("Mark this session's current notification as read. This does not answer a pending question.");
+    expect(markReadChip(session({}, true), true).detail).toBe("Marked for later. Mark as read to clear this reminder.");
+    expect(markReadChip(session(unread), true).detail).toBe("Mark this session's current notification as read. This does not answer a pending question.");
   });
 });
 

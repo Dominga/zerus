@@ -1,8 +1,12 @@
-import { For, Show, createMemo } from "solid-js";
+import { For, Match, Show, Switch, createEffect, createMemo, createRoot, createSignal, on } from "solid-js";
+import * as bridge from "../../bridge";
+import { terminal } from "../../store/terminal";
+import { TerminalTab } from "./Terminal";
+import type { TerminalStatus } from "../../types";
 import { Icon } from "../lib/icons";
 import { ActivityView, columnStyle } from "./Activity";
 import { AgentBadge, MachineBadge, statusOf, folderOf } from "./SessionCard";
-import { selected, setMenu, subagentOpen, type MenuEntry } from "../../store/ui";
+import { detailTab, page, selected, setDetailTab, setMenu, subagentOpen, type MenuEntry } from "../../store/ui";
 import { activity } from "../../store/session";
 import { activityReadOnly, type ActivitySource } from "../../store/activitySource";
 import { archiveActivity } from "../../store/archiveActivity";
@@ -97,14 +101,62 @@ function Header() {
 }
 
 type Tab = { id: string; label: string };
-const TABS: readonly Tab[] = [{ id: "activity", label: "Activity" }];
+const TABS: readonly Tab[] = [{ id: "activity", label: "Activity" }, { id: "terminal", label: "Terminal" }];
 
 /** The Activity of a row: an archived row's recorded one, read-only and never streamed, else the live follow. */
 export const activitySourceFor = (key: string): ActivitySource => (activityReadOnly(key) ? archiveActivity : activity);
 
 /** The tabs of a row: an archived row has no Terminal (Qt hides only that one; terminal_status answers unsupported). */
-export const detailTabs = (key: string, tabs: readonly Tab[] = TABS): readonly Tab[] =>
-  (activityReadOnly(key) ? tabs.filter((t) => t.id !== "terminal") : tabs);
+export function detailTabs(key: string): readonly Tab[];
+export function detailTabs<T extends Tab>(key: string, tabs: readonly T[]): readonly T[];
+export function detailTabs(key: string, tabs: readonly Tab[] = TABS): readonly Tab[] {
+  return activityReadOnly(key) ? tabs.filter((t) => t.id !== "terminal") : tabs;
+}
+
+/** The selected session's terminal status (terminal_status), refreshed when its inputs change. */
+const [terminalTexts, setTerminalTexts] = createSignal<TerminalStatus | undefined>();
+createRoot(() => {
+  // The inputs of terminal_status as one string: a row change that leaves them alone calls nothing.
+  const inputs = createMemo(() => {
+    const s = selected();
+    if (!s) return undefined;
+    const followed = followedFor(s.key);
+    const details = detailsFor(s, !computerOffline(s.computer), followed);
+    return JSON.stringify([s.key, s.name, s.runId, s.cmd, s.state, s.terminalSupported, s.terminalReported, s.terminalAttachSupported,
+      s.terminalAttachReported, !computerOffline(s.computer), followed.value ?? details ?? null]);
+  });
+  // Another selection: input stops reaching the previous session before anything is awaited.
+  createEffect(on(() => selected()?.key, () => { terminal.leaveSession(); }, { defer: true }));
+  createEffect(on(inputs, (input) => {
+    const s = selected();
+    if (!input || !s) { setTerminalTexts(undefined); void terminal.setTarget(undefined, undefined); return; }
+    const followed = followedFor(s.key);
+    void bridge.terminalStatus({
+      facts: { cmd: s.cmd, terminal_supported: s.terminalSupported, terminal_reported: s.terminalReported, terminal_attach_supported: s.terminalAttachSupported,
+        terminal_attach_reported: s.terminalAttachReported, terminal_reason: "", terminal_attach_reason: "" },
+      details: followed.value ?? detailsFor(s, !computerOffline(s.computer), followed) ?? {},
+      state: s.state, online: !computerOffline(s.computer), restored_pending: false, name: s.name, machine: s.machine,
+    }).then((status) => {
+      if (selected()?.key !== s.key) return;
+      setTerminalTexts(status);
+      void terminal.setTarget({ computer: s.computer, name: s.name, run_id: s.runId ?? "", machine: s.machine }, status);
+    });
+  }));
+  // Leaving the Sessions page disconnects, and coming back does not connect (SessionsWindow.cpp:1637, QStackedWidget::currentChanged).
+  createEffect(on(page, (p) => { if (p !== "sessions") void terminal.leavePage(); }, { defer: true }));
+});
+
+const tabs = () => {
+  const all = [
+    { id: "activity" as const, label: "Activity", show: true },
+    { id: "terminal" as const, label: "Terminal", show: !!terminalTexts()?.supported && !subagentOpen() },
+  ];
+  const s = selected();
+  return s ? detailTabs(s.key, all) : all;
+};
+
+// A tab that disappears returns to Activity (SessionsWindow.cpp:4019-4020).
+createRoot(() => createEffect(() => { if (!tabs().find((t) => t.id === detailTab())?.show) setDetailTab("activity"); }));
 
 export function SessionDetail() {
   return (
@@ -114,15 +166,16 @@ export function SessionDetail() {
         <div class="work">
           <div class="work-main">
             <div class="detail-tabs tabs" role="tablist">
-              <For each={detailTabs(selected()!.key)}>{(t) => (
-                <button class="tab on" role="tab" aria-selected="true">{t.label}</button>
+              <For each={tabs().filter((t) => t.show)}>{(t) => (
+                <button class="tab" role="tab" classList={{ on: detailTab() === t.id }} aria-selected={detailTab() === t.id} onClick={() => { if (t.id === "terminal") terminal.opened(); setDetailTab(t.id); }}>{t.label}</button>
               )}</For>
               <span class="grow" />
             </div>
             <div class="tab-body">
-              <div class="activity-wrap" style={columnStyle()}>
-                <ActivityView source={activitySourceFor(selected()!.key)} />
-              </div>
+              <Switch>
+                <Match when={detailTab() === "activity"}><div class="activity-wrap" style={columnStyle()}><ActivityView source={activitySourceFor(selected()!.key)} /></div></Match>
+                <Match when={detailTab() === "terminal"}><TerminalTab /></Match>
+              </Switch>
             </div>
           </div>
         </div>

@@ -64,6 +64,20 @@ export interface Session {
   backgroundJobs?: number;
   subagents?: Subagent[];
   reviewLater?: boolean;
+  /**
+   * Qt's SessionInfo::needsAttention with this device's marks: a request not
+   * acknowledged, an unread reply or Review later (no children). Undefined for
+   * a projection without `needs_attention`.
+   */
+  attentionNeeded?: boolean;
+  /**
+   * Qt's `needsAction() && !attentionAcknowledged` with this device's marks:
+   * what a project header counts as needing a response, beside Review later
+   * and children. Undefined for a projection without `needs_attention`.
+   */
+  actionNeeded?: boolean;
+  /** A subagent asks while the session runs and the attention is not acknowledged. */
+  childAttention?: boolean;
   optionalQuestions?: number;
   /** Seconds since the Unix epoch of the row's last change, when known. */
   updatedAt?: number;
@@ -116,6 +130,11 @@ export interface Session {
   ackCaption: string;
   /** A finished reply of a live conversation; undefined for a projection without it. */
   unreadCandidate?: boolean;
+  /** The listing's `needs_attention`; undefined for a projection without it. */
+  baseAttentionNeeded?: boolean;
+  baseChildAttention: boolean;
+  /** The core kept the confirmed preferences over a conflicting listing. */
+  baseNotificationError: boolean;
   baseStatus: Status;
   baseCaption: string;
   baseAttention?: "question" | "approval" | "reply";

@@ -1,6 +1,6 @@
 import { createMemo, type Accessor } from "solid-js";
 import type { ComputerState } from "./catalog";
-import { isActive, needsAttention } from "./attention";
+import { attentionNeeded, isActive, needsAttention } from "./attention";
 import type { ComputerId, MachineMeta } from "../types";
 import type { Session } from "../ui/sessions/types";
 import type { MachineState } from "../ui/components/MachineTile";
@@ -65,23 +65,40 @@ export interface OverviewStats {
   per: Record<ComputerId, { sessions: number; attention: number }>;
 }
 
+/** A computer's rows are current: its stream is live or polled (Qt's `machine.fresh`). */
+const fresh = (computers: Record<ComputerId, ComputerState>, computer: ComputerId) =>
+  connectionOf(computers[computer]?.status).fresh;
+
+/**
+ * The total follows the window's rule on current machines
+ * (`SessionPresentation::needsAttention(session, machine.fresh)`,
+ * DashboardPage.cpp:426-427); a machine card counts Qt's
+ * `session.needsAttention()` (DashboardPage.cpp:133), without subagents
+ * and whatever its freshness.
+ */
 export function overviewStats(rows: readonly Session[], computers: Record<ComputerId, ComputerState>): OverviewStats {
   const stats: OverviewStats = { all: 0, active: 0, attention: 0, offline: 0, per: {} };
   for (const s of rows) {
     const per = (stats.per[s.computer] ??= { sessions: 0, attention: 0 });
+    const current = fresh(computers, s.computer);
     stats.all++;
     per.sessions++;
-    if (!s.muted && needsAttention(s)) { stats.attention++; per.attention++; }
-    if (isActive(s)) stats.active++;
-    if (computers[s.computer]?.status !== "live" && computers[s.computer]?.status !== "polled") stats.offline++;
+    if (!s.muted && needsAttention(s, current)) stats.attention++;
+    if (!s.muted && attentionNeeded(s)) per.attention++;
+    if (isActive(s, current)) stats.active++;
+    if (!current) stats.offline++;
   }
   return stats;
 }
 
-/** Working, attention and draft sessions: attention first, then the latest event, then the key (DashboardPage.cpp:452-456). */
-export function liveSessions(rows: readonly Session[]): Session[] {
-  return rows.filter(isActive).sort((a, b) =>
-    Number(needsAttention(b)) - Number(needsAttention(a))
+/**
+ * Working, attention and draft sessions of current machines' activity:
+ * `session.needsAttention()` first (DashboardPage.cpp:453), then the latest
+ * event, then the key (DashboardPage.cpp:452-456).
+ */
+export function liveSessions(rows: readonly Session[], computers: Record<ComputerId, ComputerState>): Session[] {
+  return rows.filter((s) => isActive(s, fresh(computers, s.computer))).sort((a, b) =>
+    Number(attentionNeeded(b)) - Number(attentionNeeded(a))
     || (b.updatedAt ?? 0) - (a.updatedAt ?? 0)
     || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
 }
@@ -94,7 +111,7 @@ export function createOverview(
 ) {
   return {
     stats: createMemo(() => compute(rows(), computers())),
-    live: createMemo(() => liveSessions(rows())),
+    live: createMemo(() => liveSessions(rows(), computers())),
     cards: createMemo(() => fleetCards(computers(), cards())),
   };
 }

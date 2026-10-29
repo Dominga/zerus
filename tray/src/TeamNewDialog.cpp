@@ -14,6 +14,7 @@
 #include <QScrollArea>
 #include <QSpinBox>
 #include <QStandardItemModel>
+#include <QStyle>
 #include <QToolButton>
 #include <QVBoxLayout>
 
@@ -55,6 +56,9 @@ TeamNewDialog::TeamNewDialog(TeamController *teams, HgsClient *client, const QLi
     setObjectName("teamNewDialog");
     setWindowTitle(tr("New team"));
     resize(780, 760);
+    // Set once: a member row with an error only flips its property (validate).
+    setStyleSheet(QStringLiteral("QFrame#teamNewMemberRow[error=\"true\"]{background:%1;border-radius:6px;}")
+                      .arg(alpha(colorsFor(palette().color(QPalette::Window).lightness() < 128).danger, .08).name(QColor::HexArgb)));
     auto *outer = new QVBoxLayout(this);
     auto *form = new QFormLayout; form->setLabelAlignment(Qt::AlignRight);
     m_name = new QLineEdit; m_name->setObjectName("teamNewName"); m_name->setPlaceholderText(tr("Checkout redesign"));
@@ -246,6 +250,7 @@ TeamNewDialog::Row *TeamNewDialog::addRow(const Role *role, const QString &roleN
         h->addWidget(w);
     v->addLayout(h);
     row->error = new QLabel; row->error->setObjectName("teamNewRowError"); row->error->setWordWrap(true); row->error->hide();
+    row->error->setStyleSheet(QStringLiteral("color:%1;").arg(colorsFor(palette().color(QPalette::Window).lightness() < 128).danger.name()));
     v->addWidget(row->error);
     m_rows->insertWidget(m_rows->count() - 1, row->box);
     row->box->show();   // rows come and go while the dialog shows
@@ -358,8 +363,15 @@ void TeamNewDialog::validate()
         if (r->role->currentText().trimmed().isEmpty()) error = tr("The member needs a role");
         r->error->setText(QStringLiteral("⚠ ") + error);
         r->error->setVisible(!error.isEmpty());
-        r->error->setStyleSheet(QStringLiteral("color:%1;").arg(c.danger.name()));
-        r->box->setStyleSheet(error.isEmpty() ? QString() : QStringLiteral("QFrame#teamNewMemberRow{background:%1;border-radius:6px;}").arg(alpha(c.danger, .08).name(QColor::HexArgb)));
+        // A style sheet set on the row (even an unchanged or empty one)
+        // re-styles every combo in it, popup included, and the Windows 11
+        // style closes an open list when it unpolishes its popup. validate
+        // runs on every role edit and account reply, also while a list is
+        // open, so the row only flips a property and repolishes itself.
+        if (r->box->property("error").toBool() != !error.isEmpty()) {
+            r->box->setProperty("error", !error.isEmpty());
+            r->box->style()->unpolish(r->box); r->box->style()->polish(r->box); r->box->update();
+        }
         bad += !error.isEmpty();
     }
     QStringList problems;

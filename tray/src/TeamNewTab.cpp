@@ -4,6 +4,7 @@
 #include "TeamConversation.h"
 #include "TeamTemplateList.h"
 #include "TeamWidgets.h"
+#include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDir>
@@ -486,6 +487,18 @@ void TeamNewTab::hideEvent(QHideEvent *event)
     if (!m_dirty.isEmpty()) flush();
 }
 
+bool TeamNewTab::eventFilter(QObject *watched, QEvent *event)
+{
+    if (watched == m_membersPopup && event->type() == QEvent::Hide) {
+        watched->removeEventFilter(this);
+        m_membersPopup = nullptr;
+        // The list hides while its combo still handles the pick: the held
+        // back rebuild runs after that.
+        QTimer::singleShot(0, this, [this] { renderMembers(); });
+    }
+    return QWidget::eventFilter(watched, event);
+}
+
 void TeamNewTab::showLeadPage(const QString &page)
 {
     m_leadPage = page;
@@ -575,6 +588,18 @@ QStringList TeamNewTab::rowErrors(const Member &m) const
 void TeamNewTab::renderMembers()
 {
     if (!m_membersLayout) return;
+    // Rebuilding deletes the combo whose list is open and so closes the list
+    // under the pointer. A draft read, an account reply, a folder policy or a
+    // role edit can ask for the rows meanwhile: they are rebuilt once it closes.
+    if (QWidget *popup = QApplication::activePopupWidget(); popup && popup->parentWidget() && m_membersBox->isAncestorOf(popup->parentWidget())) {
+        if (m_membersPopup != popup) {
+            if (m_membersPopup) m_membersPopup->removeEventFilter(this);
+            m_membersPopup = popup;
+            popup->installEventFilter(this);
+        }
+        validate();
+        return;
+    }
     const Colors c = colorsFor(m_dark);
     while (auto *item = m_membersLayout->takeAt(0)) { if (auto *w = item->widget()) retire(w); delete item; }
     const bool git = QDir(m_folder->text().trimmed()).exists(QStringLiteral(".git"));
@@ -837,7 +862,14 @@ void TeamNewTab::validate()
     else if (bad) reason = bad == 1 ? tr("Fix 1 member row") : tr("Fix %1 member rows").arg(bad);
     else if (m_members.size() + 1 > m_max->value()) reason = tr("More members than the limit");
     else if (!m_preflightErrors.isEmpty()) reason = m_preflightErrors.size() == 1 ? tr("Fix 1 preflight error") : tr("Fix %1 preflight errors").arg(m_preflightErrors.size());
-    else if (m_sending || !m_dirty.isEmpty()) reason = tr("Saving the draft…");
+    // Owner, 2026-10-29: saving never blocks Create team (it saves first); a
+    // blocker shows red in its own field.
+    const QString redBorder = QStringLiteral("border:1px solid %1;").arg(c.danger.name());
+    // Only on a change: setting a style sheet repolishes the widget (#11).
+    const auto mark = [](QWidget *field, const QString &style) { if (field->styleSheet() != style) field->setStyleSheet(style); };
+    mark(m_goal, drafting && m_goal->toPlainText().trimmed().isEmpty() ? redBorder : QString());
+    mark(m_name, drafting && name.isEmpty() ? redBorder : QString());
+    mark(m_folder, drafting && !folderOk ? redBorder : QString());
     m_reason->setText(reason);
     m_reason->setStyleSheet(QStringLiteral("color:%1;").arg((drafting ? c.danger : c.muted).name()));
     m_reason->setVisible(!reason.isEmpty() && !m_creating);
@@ -999,7 +1031,11 @@ void TeamNewTab::flush()
             const auto match = stale.match(error);
             if (match.hasMatch() && !m_retried) { m_retried = true; m_revision = match.captured(1).toLongLong(); flush(); return; }
             m_retried = false; m_saveError = error;
+            if (m_createAfterSave) { m_createAfterSave = false; m_create->setText(tr("Create team")); }
             validate();
+            // The edits stay to be sent: try again later rather than leave
+            // Create team waiting on a save nothing retries.
+            QTimer::singleShot(5000, this, [this, draft] { if (draft == m_draft) flush(); });
             return;
         }
         m_retried = false; m_saveError.clear();
@@ -1010,6 +1046,7 @@ void TeamNewTab::flush()
         m_savedAt = QDateTime::currentDateTime();
         renderUnseen(); validate();
         if (!m_dirty.isEmpty()) m_flushTimer.start();
+        else if (m_createAfterSave) createTeam();
     });
 }
 
@@ -1101,6 +1138,14 @@ void TeamNewTab::createTeam()
 {
     validate();
     if (!m_create->isEnabled()) return;
+    // Unsaved edits go out first; the create follows the save that clears them.
+    if (m_sending || !m_dirty.isEmpty()) {
+        m_createAfterSave = true;
+        m_create->setText(tr("Saving…"));
+        flush();
+        return;
+    }
+    m_createAfterSave = false;
     m_creating = true;
     m_create->setText(tr("Creating…")); m_progress->show();
     m_summary->setText(QStringLiteral("<span style='color:%1;'>%2</span>").arg(colorsFor(m_dark).muted.name(),

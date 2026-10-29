@@ -2,6 +2,7 @@
 #include <QDateTime>
 #include <QJsonObject>
 #include <QMap>
+#include <QPointer>
 #include <QSet>
 #include <QTimer>
 #include <QWidget>
@@ -76,6 +77,7 @@ protected:
     void resizeEvent(QResizeEvent *event) override;
     void showEvent(QShowEvent *event) override;
     void hideEvent(QHideEvent *event) override;
+    bool eventFilter(QObject *watched, QEvent *event) override;
 private:
     QWidget *buildSettings();
     QWidget *buildLead();
@@ -126,6 +128,8 @@ private:
     QWidget *m_templateCard = nullptr, *m_membersBox = nullptr;
     QLabel *m_gitNote = nullptr;
     QVBoxLayout *m_templateCardLayout = nullptr, *m_membersLayout = nullptr;
+    // The open list of a member's combo that holds back a rebuild of the rows.
+    QPointer<QWidget> m_membersPopup;
     QLabel *m_busy = nullptr, *m_membersCount = nullptr, *m_summary = nullptr, *m_reason = nullptr, *m_branch = nullptr, *m_preflight = nullptr;
     QLineEdit *m_name = nullptr, *m_folder = nullptr;
     QCheckBox *m_worktrees = nullptr, *m_review = nullptr;
@@ -167,6 +171,7 @@ private:
     QDateTime m_savedAt;
     QString m_saveError;       // the last refused draft call, until one succeeds
     bool m_starting = false, m_sending = false, m_applying = false, m_creating = false, m_retried = false;
+    bool m_createAfterSave = false; // Create team pressed while edits were unsaved
     QTimer m_flushTimer, m_pollTimer;
     static int s_pollInterval;
 };

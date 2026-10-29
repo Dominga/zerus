@@ -7,6 +7,7 @@
 #include "TeamModel.h"
 #include "WorkspaceIcons.h"
 #include "WorkspaceSkin.h"
+#include "WorkspaceStyle.h"
 #include <QCoreApplication>
 #include <QCursor>
 #include <QDateTime>
@@ -2061,7 +2062,8 @@ inline QString teamSheet(const Colors &c)
         "QLineEdit:focus,QComboBox:focus,QPlainTextEdit:focus,QSpinBox:focus{border-color:%6;}"
         "QLineEdit:disabled,QComboBox:disabled,QPlainTextEdit:disabled{color:%4;}")
         .arg(c.fg.name(), c.border.name(), a(c.fg, .06), c.dim.name(), a(c.border, .6), c.accent.name(), accentText, accentHover,
-             a(c.accent, .35), a(QColor(accentText), .7), c.danger.name(), c.text2.name(), c.tile.name(), segmentOn, c.card.name());
+             a(c.accent, .35), a(QColor(accentText), .7), c.danger.name(), c.text2.name(), c.tile.name(), segmentOn, c.card.name())
+        + workspaceSpinButtons(a(c.fg, .08));
 }
 
 // Items that keep their width and wrap onto the next line.

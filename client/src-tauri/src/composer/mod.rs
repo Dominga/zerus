@@ -78,6 +78,24 @@ const EVENTS: usize = 500;
 /// Sessions whose draft key the hub remembers by catalog key, as S4 keeps
 /// the local rows of at most 512 sessions.
 const OPENED: usize = 512;
+/// At most this many composer events wait for the next batch; older ones go
+/// first.
+const COMPOSER_EVENTS: usize = 16;
+
+/// What Rust tells the webview besides the views: a notice (Qt's
+/// `showNotice`), or the Terminal tab to open. Drained with each batch.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ComposerEvent {
+    Notice {
+        text: String,
+        error: bool,
+        transient: bool,
+    },
+    OpenTerminal {
+        key: String,
+    },
+}
 
 pub struct Deps {
     pub spawn: Spawn,
@@ -384,6 +402,8 @@ pub(crate) struct Hub {
     pub(crate) clearing: Option<String>,
     /// The agent's question cards: their answer drafts and the shown card.
     pub(crate) answers: questions::Answers,
+    /// Events for the next batch (`composer_events`), at most 16.
+    pub(crate) events: VecDeque<ComposerEvent>,
 }
 
 impl Hub {
@@ -1260,15 +1280,32 @@ impl Composers {
         self.changed();
     }
 
-    /// A reloaded webview gets the view and the draft keys again.
+    /// A reloaded webview gets the view and the draft keys again. Its
+    /// cold-cache question for an answer is gone with it, so nothing waits
+    /// for that answer any more.
     pub fn resend(&self) {
         let mut hub = self.lock();
         hub.last_view = None;
         hub.sent_keys = None;
         hub.view_taken = None;
         hub.keys_taken = None;
+        hub.answers.cold = None;
         drop(hub);
         self.changed();
+    }
+
+    /// Queues an event; the caller wakes the pump (`changed`) after it
+    /// drops the hub.
+    pub(crate) fn event(&self, hub: &mut Hub, event: ComposerEvent) {
+        hub.events.push_back(event);
+        while hub.events.len() > COMPOSER_EVENTS {
+            hub.events.pop_front();
+        }
+    }
+
+    /// The events since the last batch.
+    pub fn take_events(&self) -> Vec<ComposerEvent> {
+        self.lock().events.drain(..).collect()
     }
 
     /// The app quits (`exit` in lib.rs, before the store's own flush): no

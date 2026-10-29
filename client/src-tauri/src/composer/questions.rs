@@ -3,7 +3,10 @@
 //! (`tray/src/QuestionCard.cpp`, `tray/src/SessionsWindow.cpp:5003-5068`).
 //! The rules are the core's (`questions`, R7). This module holds the answer
 //! drafts, loads and saves them through the app's one store under Qt's keys,
-//! and projects the shown card into the composer view. A2-2 adds the delivery.
+//! and projects the shown card into the composer view. It delivers the answer
+//! through the guarded `hgs answer` (A2-2): the durable "sending" save comes
+//! first, its callback checks everything again, one request id goes with the
+//! one call, and an unknown outcome waits for Allow retry.
 //!
 //! The card's fields follow the composer's text epoch rules: the webview owns
 //! what the user types and sends it with the epoch its fields are based on;
@@ -12,16 +15,20 @@
 //! refused edit) bumps the epoch, so the webview takes Rust's answers again.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::MutexGuard;
 
 use serde::Serialize;
 use serde_json::Value;
+use zerus_client_core::actions::ALREADY_ANSWERING;
 use zerus_client_core::drafts::Loaded;
 use zerus_client_core::questions::{
-    self as rules, AnswerDraft, AnswerFacts, CardContext, CardView, Edit, Question, Selection,
+    self as rules, Actionable, AnswerDraft, AnswerFacts, AnswerItem, CardContext, CardView,
+    ColdAnswer, Edit, Question, Selection, Snapshot,
 };
+use zerus_client_core::{Action, Outcome, Target};
 
-use super::send::Context;
-use super::{Composers, Hub};
+use super::send::{outcome_of, Context};
+use super::{ComposerEvent, Composers, Hub, SessionRef};
 
 /// At most this many answer drafts stay in memory; Qt keeps every one.
 const HELD: usize = 64;
@@ -80,6 +87,12 @@ pub(crate) struct Answers {
     /// The listed cards' "Asked" texts by `created_at` (its bits), formatted
     /// before the hub lock is taken: local time may read the time zone files.
     asked: Vec<(u64, (String, String))>,
+    /// The answer waiting for the cold-cache question (Qt's modal dialog):
+    /// one at a time across the app.
+    pub(crate) cold: Option<ColdAsk>,
+    /// The answer under way per session key, by card (`m_answersInFlight`).
+    pub(crate) in_flight: HashMap<String, String>,
+    next_token: u64,
 }
 
 impl Answers {
@@ -481,7 +494,7 @@ impl Composers {
             available: reason.is_none(),
             unavailable_reason: reason.unwrap_or_default().to_owned(),
             loading: hub.answers.loading.contains(&key) || !hub.answers.drafts.contains_key(&key),
-            in_flight: false,
+            in_flight: hub.answers.in_flight.values().any(|card| *card == key),
             pending: selection.pending,
             queue_index: selection.index,
             queue_count: selection.optional.len(),
@@ -589,6 +602,419 @@ impl Composers {
     }
 }
 
+/// What Submit, Approve once, Deny, Skip and the cold question answer.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum QuestionReply {
+    /// The answer is on its way; its end arrives with the card.
+    Sending,
+    /// Nothing happened: the card is not ready, changed quietly, or another
+    /// answer runs.
+    Busy,
+    /// Ask "Submit with a cold cache?" and answer with `question_cold(token, …)`.
+    Cold { token: u64, prompt: ColdAnswer },
+    /// A sticky error notice.
+    Notice { text: String },
+}
+
+/// One answer from the click to its end, with everything it was asked under.
+#[derive(Clone)]
+pub(crate) struct Answering {
+    card: String,
+    key: String,
+    session: SessionRef,
+    created: i64,
+    row_run: String,
+    row_conversation: String,
+    question: Question,
+    answers: Vec<AnswerItem>,
+    /// The card's consent identity at the click.
+    pinned: Value,
+    /// The details at the click (`sendEvidence`, `SessionsWindow.cpp:138-145`).
+    captured: Value,
+    skipping: bool,
+    consent: bool,
+}
+
+/// An answer waiting for the cold-cache consent (`answerQuestion` 5111-5142).
+pub(crate) struct ColdAsk {
+    token: u64,
+    answering: Answering,
+    snapshot: Snapshot,
+}
+
+impl Composers {
+    fn button_ready(
+        &self,
+        hub: &Hub,
+        card: &str,
+        pick: fn(&CardView) -> &rules::ButtonView,
+    ) -> bool {
+        self.question_part(hub)
+            .0
+            .filter(|q| q.card == card)
+            .is_some_and(|q| pick(&q.view).visible && pick(&q.view).enabled)
+    }
+
+    /// Submit on the card (`QuestionCard::submit`, 916-929): the shown
+    /// values, after a broader option's second Confirm. The review delay is
+    /// the webview's.
+    pub fn question_submit(&self, card: &str) -> QuestionReply {
+        let mut hub = self.lock();
+        let Some((ctx, question)) = self.shown_question(&hub, card) else {
+            return QuestionReply::Busy;
+        };
+        if !self.button_ready(&hub, card, |v| &v.submit) {
+            return QuestionReply::Busy;
+        }
+        let Some(draft) = hub.answers.drafts.get_mut(card) else {
+            return QuestionReply::Busy;
+        };
+        let (answers, valid) = rules::answers(&question, draft);
+        if !valid {
+            return QuestionReply::Busy;
+        }
+        if draft.confirm_step(&question) {
+            self.save_answer(&mut hub, card, false, None);
+            drop(hub);
+            self.changed();
+            return QuestionReply::Busy;
+        }
+        self.request_answer(hub, ctx, question, card, answers, false)
+    }
+
+    /// Approve once or Deny on an approval without native choices (222-236).
+    pub fn question_decide(&self, card: &str, allow: bool) -> QuestionReply {
+        let hub = self.lock();
+        let Some((ctx, question)) = self.shown_question(&hub, card) else {
+            return QuestionReply::Busy;
+        };
+        let pick: fn(&CardView) -> &rules::ButtonView =
+            if allow { |v| &v.approve } else { |v| &v.deny };
+        if !self.button_ready(&hub, card, pick) {
+            return QuestionReply::Busy;
+        }
+        let Some(answers) = rules::decision(&question, allow) else {
+            return QuestionReply::Busy;
+        };
+        self.request_answer(hub, ctx, question, card, answers, false)
+    }
+
+    /// Skip on an optional Codex card.
+    pub fn question_skip(&self, card: &str) -> QuestionReply {
+        let hub = self.lock();
+        let Some((ctx, question)) = self.shown_question(&hub, card) else {
+            return QuestionReply::Busy;
+        };
+        if !self.button_ready(&hub, card, |v| &v.skip) {
+            return QuestionReply::Busy;
+        }
+        let answers = rules::skip_answers(&question);
+        self.request_answer(hub, ctx, question, card, answers, true)
+    }
+
+    /// `answerQuestion` (5070-5142): the quiet checks, the changed card, the
+    /// cold cache.
+    fn request_answer(
+        &self,
+        mut hub: MutexGuard<'_, Hub>,
+        ctx: Context,
+        question: Question,
+        card: &str,
+        answers: Vec<AnswerItem>,
+        skipping: bool,
+    ) -> QuestionReply {
+        if hub.closed || hub.answers.cold.is_some() || hub.answers.in_flight.contains_key(&ctx.key)
+        {
+            return QuestionReply::Busy;
+        }
+        let Some(details) = ctx.details.clone() else {
+            return QuestionReply::Busy;
+        };
+        if question.source == "codex_async"
+            && question.optional
+            && hub.answers.drafts.get(card).is_some_and(|d| d.submitted)
+        {
+            return QuestionReply::Busy;
+        }
+        let question = match rules::actionable(&details, &facts(&ctx), &question.id, skipping) {
+            Actionable::Ready(question) => *question,
+            Actionable::Silent => return QuestionReply::Busy,
+            Actionable::Changed => {
+                if let Some(draft) = hub.answers.drafts.get_mut(card) {
+                    draft.set_error(rules::CHANGED, false);
+                }
+                self.save_answer(&mut hub, card, false, None);
+                drop(hub);
+                self.changed();
+                return QuestionReply::Busy;
+            }
+        };
+        let answering = Answering {
+            card: card.to_owned(),
+            key: ctx.key.clone(),
+            session: ctx.session.clone(),
+            created: ctx.row.created,
+            row_run: ctx.row.run_id.clone().unwrap_or_default(),
+            row_conversation: ctx.row.conversation_id.clone().unwrap_or_default(),
+            pinned: rules::consent_identity(&question.raw),
+            captured: (*details).clone(),
+            question,
+            answers,
+            skipping,
+            consent: false,
+        };
+        if let Some(prompt) = rules::cold_answer(&details, &answering.question, self.now()) {
+            let Some(draft) = hub.answers.drafts.get(card) else {
+                return QuestionReply::Busy;
+            };
+            if draft.sending
+                || draft.submitted
+                || draft.answered
+                || draft.uncertain
+                || !draft.storage_error.is_empty()
+            {
+                return QuestionReply::Busy;
+            }
+            let snapshot = draft.snapshot();
+            hub.answers.next_token += 1;
+            let token = hub.answers.next_token;
+            hub.answers.cold = Some(ColdAsk {
+                token,
+                answering,
+                snapshot,
+            });
+            return QuestionReply::Cold { token, prompt };
+        }
+        self.prepare_answer(hub, answering)
+    }
+
+    /// The cold question's answer. Anything that changed behind it keeps the
+    /// draft and sends nothing (`answerQuestion` 5131-5142).
+    pub fn question_cold(&self, token: u64, proceed: bool) -> QuestionReply {
+        let mut hub = self.lock();
+        let Some(ask) = hub.answers.cold.take_if(|ask| ask.token == token) else {
+            return QuestionReply::Busy;
+        };
+        if !proceed {
+            return QuestionReply::Busy;
+        }
+        let a = &ask.answering;
+        let same = self.context(&hub).is_some_and(|ctx| {
+            let details = ctx.details.as_deref().cloned().unwrap_or_default();
+            let identity =
+                match rules::actionable(&details, &facts(&ctx), &a.question.id, a.skipping) {
+                    Actionable::Ready(question) => rules::consent_identity(&question.raw),
+                    _ => Value::Null,
+                };
+            ctx.key == a.key
+                && ctx.session.computer == a.session.computer
+                && ctx.session.name == a.session.name
+                && ctx.row.created == a.created
+                && ctx.row.run_id.clone().unwrap_or_default() == a.row_run
+                && ctx.row.conversation_id.clone().unwrap_or_default() == a.row_conversation
+                && text(&details, "run_id") == text(&a.captured, "run_id")
+                && text(&details, "conversation_id") == text(&a.captured, "conversation_id")
+                && identity == a.pinned
+        }) && hub
+            .answers
+            .drafts
+            .get(&a.card)
+            .is_some_and(|d| d.snapshot() == ask.snapshot);
+        if !same {
+            return QuestionReply::Notice {
+                text: rules::CONSENT_CHANGED.to_owned(),
+            };
+        }
+        let mut answering = ask.answering;
+        answering.consent = true;
+        self.prepare_answer(hub, answering)
+    }
+
+    /// `prepareSendingAsync` (428-445): the draft is saved durably as
+    /// sending before anything runs, and only that save's answer can continue.
+    fn prepare_answer(&self, mut hub: MutexGuard<'_, Hub>, answering: Answering) -> QuestionReply {
+        let card = answering.card.clone();
+        if hub.answers.loading.contains(&card) {
+            return QuestionReply::Busy;
+        }
+        let Some(draft) = hub.answers.drafts.get_mut(&card) else {
+            return QuestionReply::Busy;
+        };
+        if draft.sending || draft.submitted || draft.answered || draft.uncertain {
+            return QuestionReply::Busy;
+        }
+        draft.begin_sending();
+        let me = self.clone();
+        self.save_answer(
+            &mut hub,
+            &card,
+            true,
+            Some(Box::new(move |saved| me.answer_prepared(answering, saved))),
+        );
+        drop(hub);
+        self.changed();
+        QuestionReply::Sending
+    }
+
+    /// The durable save answered: check everything again, then call `hgs
+    /// answer` once.
+    fn answer_prepared(&self, answering: Answering, saved: bool) {
+        let mut hub = self.lock();
+        let card = answering.card.clone();
+        if !saved {
+            if let Some(draft) = hub.answers.drafts.get_mut(&card) {
+                draft.sending_failed();
+            }
+            drop(hub);
+            self.changed();
+            return;
+        }
+        // The app quits: the draft is on disk as sending and reloads uncertain.
+        if hub.closed {
+            return;
+        }
+        if !self.still_answerable(&hub, &answering) {
+            if let Some(draft) = hub.answers.drafts.get_mut(&card) {
+                draft.set_error(rules::CHANGED_KEPT, false);
+            }
+            self.save_answer(&mut hub, &card, false, None);
+            drop(hub);
+            self.changed();
+            return;
+        }
+        hub.answers.in_flight.insert(answering.key.clone(), card);
+        drop(hub);
+        self.changed();
+        let me = self.clone();
+        (self.0.deps.spawn)(Box::new(move || me.answer_now(answering)));
+    }
+
+    /// The callback's re-check (5153-5170), on the open session's details or,
+    /// after a switch, on the details captured at the click.
+    fn still_answerable(&self, hub: &Hub, a: &Answering) -> bool {
+        let Some((row, online)) =
+            (self.0.deps.rows)(&a.session.computer, &a.session.key, &a.session.name)
+        else {
+            return false;
+        };
+        let ctx = (hub.open_key.as_deref() == Some(a.key.as_str()))
+            .then(|| self.context(hub))
+            .flatten();
+        let evidence = ctx
+            .as_ref()
+            .and_then(|c| c.details.as_deref().cloned())
+            .unwrap_or_else(|| a.captured.clone());
+        let facts = AnswerFacts {
+            online,
+            state: row.state.clone(),
+            updating: (self.0.deps.facts)(&a.session.computer, &a.session.name).is_some(),
+            inspect_error: ctx.as_ref().is_some_and(|c| c.facts.inspect_error),
+        };
+        let (run, conversation) = (
+            row.run_id.clone().unwrap_or_default(),
+            row.conversation_id.clone().unwrap_or_default(),
+        );
+        rules::still_answerable(&rules::Recheck {
+            pinned: &a.pinned,
+            question: &a.question,
+            evidence: &evidence,
+            captured: &a.captured,
+            row_same: row.name == a.session.name && row.created == a.created,
+            row_identity: (run == a.row_run && conversation == a.row_conversation)
+                || (run == a.question.run_id && conversation == a.question.conversation_id),
+            facts: &facts,
+            skipping: a.skipping,
+            consent: a.consent,
+            submitted: hub.answers.drafts.get(&a.card).is_some_and(|d| d.submitted),
+            now: self.now(),
+        })
+    }
+
+    /// The one `hgs answer` call of this attempt, with its own request id. A
+    /// taken lane refused before anything ran is a definite failure with
+    /// Qt's text (`HgsClient.cpp:1905`); any other `Err` or a panic means the
+    /// call's thread died, so it may have run: uncertain.
+    fn answer_now(&self, answering: Answering) {
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let target = Target {
+            computer: answering.session.computer.clone(),
+            name: answering.session.name.clone(),
+            run_id: answering.question.run_id.clone(),
+            conversation_id: answering.question.conversation_id.clone(),
+        };
+        let action = Action::Answer {
+            question: answering.question.raw.clone(),
+            answers: answering.answers.clone(),
+        };
+        let dispatch = &self.0.deps.dispatch;
+        let called = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            dispatch(target, action, request_id)
+        }));
+        self.answer_finished(&answering, outcome_of(called, ALREADY_ANSWERING));
+    }
+
+    /// `finishQuestion` (5177-5186) and the receipt's follow-ups (1156-1186):
+    /// the card says how it ended. Nothing is sent again by itself.
+    fn answer_finished(&self, a: &Answering, outcome: Outcome) {
+        let mut hub = self.lock();
+        hub.answers.in_flight.remove(&a.key);
+        let open = hub.open_key.as_deref() == Some(a.key.as_str());
+        let open_run = open
+            .then(|| {
+                hub.followed
+                    .details
+                    .as_deref()
+                    .map(|d| text(d, "run_id").to_owned())
+            })
+            .flatten();
+        let mut follow = None;
+        if let Some(draft) = hub.answers.drafts.get_mut(&a.card) {
+            match &outcome {
+                Outcome::Done { receipt, .. } if receipt["status"] == "submitted" => {
+                    draft.set_submitted()
+                }
+                Outcome::Done { receipt, .. } => {
+                    draft.set_answered(a.question.optional);
+                    let target =
+                        (self.0.deps.rows)(&a.session.computer, &a.session.key, &a.session.name)
+                            .map(|(row, _)| format!("{} ({})", a.session.name, row.machine))
+                            .unwrap_or_else(|| a.session.name.clone());
+                    follow = Some(rules::answered_follow_up(
+                        &a.question,
+                        receipt,
+                        open_run.as_deref(),
+                        &target,
+                    ));
+                }
+                Outcome::Failed { detail } => draft.set_error(detail, false),
+                Outcome::Uncertain { detail } => draft.set_error(detail, true),
+            }
+        }
+        self.save_answer(&mut hub, &a.card, false, None);
+        if let Some(follow) = follow {
+            if follow.open_terminal {
+                self.event(&mut hub, ComposerEvent::OpenTerminal { key: a.key.clone() });
+            }
+            if let Some(text) = follow.notice {
+                self.event(
+                    &mut hub,
+                    ComposerEvent::Notice {
+                        text,
+                        error: false,
+                        transient: false,
+                    },
+                );
+            }
+        }
+        drop(hub);
+        self.changed();
+        if open {
+            self.refresh_details();
+        }
+    }
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub fn question_edit(state: tauri::State<'_, Composers>, card: String, epoch: u64, edit: Edit) {
     state.question_edit(&card, epoch, edit);
@@ -609,17 +1035,49 @@ pub fn question_allow_retry(state: tauri::State<'_, Composers>, card: String) {
     state.question_allow_retry(&card);
 }
 
+#[tauri::command(rename_all = "snake_case")]
+pub fn question_submit(state: tauri::State<'_, Composers>, card: String) -> QuestionReply {
+    state.question_submit(&card)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn question_decide(
+    state: tauri::State<'_, Composers>,
+    card: String,
+    allow: bool,
+) -> QuestionReply {
+    state.question_decide(&card, allow)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn question_skip(state: tauri::State<'_, Composers>, card: String) -> QuestionReply {
+    state.question_skip(&card)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn question_cold(
+    state: tauri::State<'_, Composers>,
+    token: u64,
+    proceed: bool,
+) -> QuestionReply {
+    state.question_cold(token, proceed)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::composer::send::tests::sent;
     use crate::composer::send::tests::{
         opened, other_session, ready, send_hub, send_hub_on, state,
     };
     use crate::composer::tests::{dir, drafts, hold, session, until};
-    use crate::composer::{lock, ComposerView};
+    use crate::composer::{lock, ComposerEvent, ComposerView};
     use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use zerus_client_core::actions::ALREADY_ANSWERING;
     use zerus_client_core::drafts::{read_draft, DraftStore, StoredDraft};
+    use zerus_client_core::{Action, Outcome};
 
     pub(crate) const HASH: &str =
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -1400,6 +1858,511 @@ pub(crate) mod tests {
         assert!(
             c.lock().answers.drafts[&key].submitted,
             "L2 read the submitted save; L1's older read never landed"
+        );
+    }
+
+    // A2-2: the guarded answer.
+
+    fn answered(_: &Action, id: &str) -> Outcome {
+        Outcome::Done {
+            receipt: json!({"status": "answered", "request_id": id}),
+            cleanup: None,
+        }
+    }
+
+    /// Chooses Unit on the shown card and returns its key once Submit is enabled.
+    fn chosen(c: &Composers) -> String {
+        let (card, epoch) = shown(c);
+        c.question_edit(
+            &card,
+            epoch,
+            Edit::Option {
+                item: "q_0".into(),
+                option: "opt_0_0".into(),
+                checked: true,
+            },
+        );
+        until(c, |v| {
+            v.question.as_ref().is_some_and(|q| q.view.submit.enabled)
+        });
+        card
+    }
+
+    fn status_is(c: &Composers, status: &str) -> QuestionView {
+        until(c, |v| {
+            v.question.as_ref().is_some_and(|q| q.view.status == status)
+        })
+        .question
+        .unwrap()
+    }
+
+    /// The card's answers as the CLI gets them.
+    fn answers_of(action: &Action) -> Value {
+        let Action::Answer { answers, .. } = action else {
+            panic!("not an answer")
+        };
+        serde_json::to_value(answers).unwrap()
+    }
+
+    #[test]
+    fn an_answer_goes_out_once_with_the_cards_identity() {
+        let root = dir("q-answer");
+        let (c, fake) = send_hub(&root);
+        *lock(&fake.outcome) = Box::new(answered);
+        opened(&c, asking(vec![card_json("tool:t1")]));
+        let card = chosen(&c);
+        assert_eq!(c.question_submit(&card), QuestionReply::Sending);
+        let q = status_is(&c, "Answer sent. Waiting for the agent…");
+        assert!(q.view.locked && !q.view.submit.enabled);
+        let calls = sent(&fake);
+        assert_eq!(calls.len(), 1);
+        let (target, action, _) = &calls[0];
+        assert_eq!(
+            (
+                target.name.as_str(),
+                target.run_id.as_str(),
+                target.conversation_id.as_str()
+            ),
+            ("claude/sample-project/review", "run-1", "conv-1")
+        );
+        let Action::Answer { question, .. } = action else {
+            panic!("not an answer")
+        };
+        assert_eq!(
+            (
+                question["question_id"].as_str(),
+                question["question_hash"].as_str()
+            ),
+            (Some("tool:t1"), Some(HASH))
+        );
+        assert_eq!(
+            answers_of(action),
+            json!([{"question_id": "q_0", "selected_option_ids": ["opt_0_0"], "text": ""}])
+        );
+        assert_eq!(
+            c.question_submit(&card),
+            QuestionReply::Busy,
+            "an answered card sends nothing again"
+        );
+        assert_eq!(sent(&fake).len(), 1);
+    }
+
+    #[test]
+    fn a_card_changed_during_the_save_is_never_sent() {
+        let root = dir("q-changed");
+        let store = drafts(&root);
+        let (c, fake) = send_hub_on(&store);
+        opened(&c, asking(vec![card_json("tool:t1")]));
+        let card = chosen(&c);
+        // Hold the writer, so the durable save waits while the card changes.
+        let release = hold(&store);
+        assert_eq!(c.question_submit(&card), QuestionReply::Sending);
+        let mut changed = card_json("tool:t1");
+        changed["question_hash"] = json!("b".repeat(64));
+        c.observe(&state(asking(vec![changed])));
+        release.send(()).unwrap();
+        store.flush();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while c
+            .lock()
+            .answers
+            .drafts
+            .get(&card)
+            .is_some_and(|d| d.sending)
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the callback never ran"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(c.lock().answers.drafts[&card].notice, rules::CHANGED_KEPT);
+        assert!(sent(&fake).is_empty(), "a changed card is never answered");
+    }
+
+    #[test]
+    fn an_uncertain_answer_waits_for_allow_retry() {
+        let root = dir("q-uncertain");
+        let (c, fake) = send_hub(&root);
+        *lock(&fake.outcome) = Box::new(|_, _| Outcome::Uncertain {
+            detail: "Answer delivery timed out. Check Terminal before retrying.".into(),
+        });
+        opened(&c, asking(vec![card_json("tool:t1")]));
+        let card = chosen(&c);
+        c.question_submit(&card);
+        let q = until(&c, |v| v.question.as_ref().is_some_and(|q| q.view.retry))
+            .question
+            .unwrap();
+        assert_eq!(q.view.status, "Delivery is not confirmed. Check Terminal before retrying. Answer delivery timed out. Check Terminal before retrying.");
+        assert!(q.view.status_error && !q.view.submit.enabled);
+        assert_eq!(c.question_submit(&card), QuestionReply::Busy);
+        c.observe(&state(asking(vec![card_json("tool:t1")])));
+        assert_eq!(
+            c.question_submit(&card),
+            QuestionReply::Busy,
+            "a new state never resends"
+        );
+        assert_eq!(sent(&fake).len(), 1);
+        c.question_allow_retry(&card);
+        until(&c, |v| {
+            v.question.as_ref().is_some_and(|q| q.view.submit.enabled)
+        });
+        *lock(&fake.outcome) = Box::new(answered);
+        assert_eq!(c.question_submit(&card), QuestionReply::Sending);
+        status_is(&c, "Answer sent. Waiting for the agent…");
+        let calls = sent(&fake);
+        assert_ne!(calls[0].2, calls[1].2, "a retry is a new request");
+    }
+
+    #[test]
+    fn a_taken_answer_lane_is_a_definite_failure() {
+        let root = dir("q-taken");
+        let (c, fake) = send_hub(&root);
+        *lock(&fake.taken) = Box::new(|action| matches!(action, Action::Answer { .. }));
+        opened(&c, asking(vec![card_json("tool:t1")]));
+        let card = chosen(&c);
+        assert_eq!(c.question_submit(&card), QuestionReply::Sending);
+        // Qt's own text (HgsClient.cpp:1905), never "busy" and never uncertain.
+        let q = status_is(&c, ALREADY_ANSWERING);
+        assert!(q.view.status_error && !q.view.retry);
+        assert!(
+            q.view.submit.enabled,
+            "a definite failure may be submitted again"
+        );
+    }
+
+    #[test]
+    fn a_call_that_dies_is_uncertain_and_never_retried() {
+        let root = dir("q-died");
+        let (c, fake) = send_hub(&root);
+        let tries = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&tries);
+        *lock(&fake.outcome) = Box::new(move |_, _| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            panic!("the call's thread died")
+        });
+        opened(&c, asking(vec![card_json("tool:t1")]));
+        let card = chosen(&c);
+        assert_eq!(c.question_submit(&card), QuestionReply::Sending);
+        let q = until(&c, |v| v.question.as_ref().is_some_and(|q| q.view.retry))
+            .question
+            .unwrap();
+        assert!(q
+            .view
+            .status
+            .starts_with("Delivery is not confirmed. Check Terminal before retrying."));
+        assert_eq!(c.question_submit(&card), QuestionReply::Busy);
+        assert_eq!(tries.load(Ordering::SeqCst), 1, "one call, no replay");
+        assert!(
+            c.lock().answers.in_flight.is_empty(),
+            "the session takes answers again"
+        );
+    }
+
+    #[test]
+    fn one_answer_per_session_at_a_time() {
+        let root = dir("q-one");
+        let (c, fake) = send_hub(&root);
+        // The first call waits until the test lets it end.
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let gate = std::sync::Mutex::new(gate);
+        *lock(&fake.outcome) = Box::new(move |action, id| {
+            let _ = lock(&gate).recv_timeout(std::time::Duration::from_secs(5));
+            answered(action, id)
+        });
+        let optional = |id: &str, at: f64| {
+            let mut card = card_json(id);
+            card["source"] = json!("codex_async");
+            card["optional"] = json!(true);
+            card["can_skip"] = json!(true);
+            card["created_at"] = json!(at);
+            card
+        };
+        let mut details = ready();
+        details["pending_questions"] =
+            json!([optional("codex:old", 10.0), optional("codex:new", 20.0)]);
+        opened(&c, details);
+        let first = with_card(&c).question.unwrap().card;
+        assert_eq!(c.question_skip(&first), QuestionReply::Sending);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while c.lock().answers.in_flight.is_empty() {
+            assert!(std::time::Instant::now() < deadline, "never dispatched");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        c.question_navigate(1);
+        let second = until(&c, |v| {
+            v.question
+                .as_ref()
+                .is_some_and(|q| q.card == store_key("codex:old"))
+        })
+        .question
+        .unwrap()
+        .card;
+        // Qt's quiet refusal while an answer of this session is in flight (5072).
+        assert_eq!(c.question_skip(&second), QuestionReply::Busy);
+        release.send(()).unwrap();
+        until(&c, |_| c.lock().answers.in_flight.is_empty());
+        assert_eq!(sent(&fake).len(), 1);
+    }
+
+    #[test]
+    fn nothing_is_answered_once_the_app_quits() {
+        let root = dir("q-quit-click");
+        let (c, fake) = send_hub(&root);
+        *lock(&fake.outcome) = Box::new(answered);
+        opened(&c, asking(vec![card_json("tool:t1")]));
+        let card = chosen(&c);
+        c.flush();
+        assert_eq!(c.question_submit(&card), QuestionReply::Busy);
+        assert!(!c.lock().answers.drafts[&card].sending, "no save starts");
+        assert!(sent(&fake).is_empty());
+    }
+
+    #[test]
+    fn an_answer_saved_as_the_app_quits_is_never_sent() {
+        let root = dir("q-quit");
+        let store = drafts(&root);
+        let (c, fake) = send_hub_on(&store);
+        *lock(&fake.outcome) = Box::new(answered);
+        opened(&c, asking(vec![card_json("tool:t1")]));
+        let card = chosen(&c);
+        let release = hold(&store);
+        assert_eq!(c.question_submit(&card), QuestionReply::Sending);
+        c.flush();
+        release.send(()).unwrap();
+        store.flush();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(
+            sent(&fake).is_empty(),
+            "the draft reloads uncertain instead"
+        );
+        let saved = read_draft(&root.join("drafts"), &store_key("tool:t1"));
+        assert!(saved.draft.sending);
+    }
+
+    #[test]
+    fn a_broader_choice_sends_only_after_confirm() {
+        let root = dir("q-broader");
+        let (c, fake) = send_hub(&root);
+        *lock(&fake.outcome) = Box::new(answered);
+        let mut card = card_json("claude-approval:1");
+        card["source"] = json!("claude_tool_approval");
+        card["answer_transport"] = json!("claude_tui");
+        card["approval"] = json!(true);
+        card["approval_choices"] = json!(true);
+        card["questions"] = json!([{"id": "approval", "question": "Run cargo test?", "header": "Bash", "body": "cargo test", "allow_other": false,
+            "options": [{"id": "1", "label": "Yes", "scope": "once"}, {"id": "2", "label": "Yes, and don't ask again", "scope": "broader"}, {"id": "3", "label": "No", "scope": "once"}]}]);
+        let mut details = asking(vec![card]);
+        details["phase"] = json!("approval");
+        opened(&c, details);
+        let (key, epoch) = shown(&c);
+        c.question_edit(
+            &key,
+            epoch,
+            Edit::Option {
+                item: "approval".into(),
+                option: "2".into(),
+                checked: true,
+            },
+        );
+        until(&c, |v| {
+            v.question.as_ref().is_some_and(|q| q.view.submit.enabled)
+        });
+        assert_eq!(
+            c.question_submit(&key),
+            QuestionReply::Busy,
+            "the first click only arms Confirm"
+        );
+        let q = status_is(&c, "“Yes, and don't ask again” changes the agent's permissions beyond this request. Select Confirm to send it.");
+        assert_eq!(q.view.submit.label, "Confirm");
+        assert!(sent(&fake).is_empty());
+        assert_eq!(c.question_submit(&key), QuestionReply::Sending);
+        status_is(&c, "Answer sent. Waiting for the agent…");
+        assert_eq!(
+            answers_of(&sent(&fake)[0].1),
+            json!([{"question_id": "approval", "selected_option_ids": ["2"], "text": ""}])
+        );
+    }
+
+    #[test]
+    fn approve_and_deny_send_the_decision() {
+        let root = dir("q-decide");
+        let (c, fake) = send_hub(&root);
+        *lock(&fake.outcome) = Box::new(answered);
+        let mut card = card_json("kimi-approval:1");
+        card["source"] = json!("kimi_tool_approval");
+        card["answer_transport"] = json!("kimi_tui");
+        card["approval"] = json!(true);
+        card["questions"] = json!([{"id": "approval", "question": "Run rm -rf build?", "body": "rm -rf build", "allow_other": false,
+            "options": [{"id": "allow", "label": "Approve"}, {"id": "deny", "label": "Deny"}]}]);
+        opened(&c, asking(vec![card]));
+        let q = with_card(&c).question.unwrap();
+        assert!(q.view.approve.visible && q.view.deny.visible && !q.view.submit.visible);
+        assert_eq!(q.view.approve.review_label.as_deref(), Some("Approve once"));
+        assert_eq!(c.question_decide(&q.card, false), QuestionReply::Sending);
+        status_is(&c, "Answer sent. Waiting for the agent…");
+        assert_eq!(
+            answers_of(&sent(&fake)[0].1),
+            json!([{"question_id": "approval", "selected_option_ids": ["deny"], "text": ""}])
+        );
+    }
+
+    #[test]
+    fn a_cold_cache_asks_first_and_cancel_sends_nothing() {
+        let root = dir("q-cold");
+        let (c, fake) = send_hub(&root);
+        *lock(&fake.outcome) = Box::new(answered);
+        let mut details = asking(vec![card_json("tool:t1")]);
+        details["session_usage"] =
+            json!({"prompt_cache": {"status": "warm", "expires_at": 1_793_000_000.0}});
+        opened(&c, details);
+        let card = chosen(&c);
+        let QuestionReply::Cold { token, prompt } = c.question_submit(&card) else {
+            panic!("no cold question")
+        };
+        assert_eq!(
+            (prompt.title.as_str(), prompt.proceed.as_str()),
+            ("Submit with a cold cache?", "Submit with full context")
+        );
+        assert_eq!(
+            c.question_submit(&card),
+            QuestionReply::Busy,
+            "one cold question at a time"
+        );
+        assert_eq!(c.question_cold(token, false), QuestionReply::Busy);
+        assert!(sent(&fake).is_empty());
+        let QuestionReply::Cold { token, .. } = c.question_submit(&card) else {
+            panic!("no cold question")
+        };
+        assert_eq!(c.question_cold(token, true), QuestionReply::Sending);
+        status_is(&c, "Answer sent. Waiting for the agent…");
+        assert_eq!(sent(&fake).len(), 1);
+    }
+
+    #[test]
+    fn a_reload_drops_the_cold_question() {
+        let root = dir("q-cold-reload");
+        let (c, fake) = send_hub(&root);
+        *lock(&fake.outcome) = Box::new(answered);
+        let mut details = asking(vec![card_json("tool:t1")]);
+        details["session_usage"] =
+            json!({"prompt_cache": {"status": "warm", "expires_at": 1_793_000_000.0}});
+        opened(&c, details);
+        let card = chosen(&c);
+        let QuestionReply::Cold { token, .. } = c.question_submit(&card) else {
+            panic!("no cold question")
+        };
+        // The reloaded webview has no dialog: nothing may wait for its answer.
+        c.resend();
+        assert_eq!(c.question_cold(token, true), QuestionReply::Busy);
+        assert!(sent(&fake).is_empty());
+        assert!(matches!(
+            c.question_submit(&card),
+            QuestionReply::Cold { .. }
+        ));
+    }
+
+    #[test]
+    fn answers_changed_behind_the_cold_question_are_kept() {
+        let root = dir("q-cold-changed");
+        let (c, fake) = send_hub(&root);
+        let mut details = asking(vec![card_json("tool:t1")]);
+        details["session_usage"] =
+            json!({"prompt_cache": {"status": "warm", "expires_at": 1_793_000_000.0}});
+        opened(&c, details);
+        let card = chosen(&c);
+        let QuestionReply::Cold { token, .. } = c.question_submit(&card) else {
+            panic!("no cold question")
+        };
+        let (_, epoch) = shown(&c);
+        c.question_edit(
+            &card,
+            epoch,
+            Edit::Option {
+                item: "q_0".into(),
+                option: "opt_0_1".into(),
+                checked: true,
+            },
+        );
+        assert_eq!(
+            c.question_cold(token, true),
+            QuestionReply::Notice {
+                text: rules::CONSENT_CHANGED.into()
+            }
+        );
+        assert!(sent(&fake).is_empty());
+    }
+
+    #[test]
+    fn skip_sends_skips_and_codex_update_opens_terminal() {
+        let root = dir("q-skip");
+        let (c, fake) = send_hub(&root);
+        lock(&fake.row).machine = "studio".into();
+        *lock(&fake.outcome) = Box::new(answered);
+        let mut optional = card_json("codex:q1");
+        optional["source"] = json!("codex_async");
+        optional["optional"] = json!(true);
+        optional["can_skip"] = json!(true);
+        let mut details = ready();
+        details["pending_questions"] = json!([optional]);
+        opened(&c, details);
+        let card = with_card(&c).question.unwrap().card;
+        assert_eq!(c.question_skip(&card), QuestionReply::Sending);
+        status_is(&c, "Response recorded.");
+        assert_eq!(
+            answers_of(&sent(&fake)[0].1),
+            json!([{"question_id": "q_0", "skip": true}])
+        );
+
+        let id = format!("codex-update:{HASH}");
+        let mut update = card_json(&id);
+        update["source"] = json!("codex_update");
+        update["answer_transport"] = json!("codex_tui");
+        update["questions"] = json!([{"id": "update", "question": "Update Codex?", "allow_other": false,
+            "options": [{"id": "update_now", "label": "Update now"}, {"id": "skip", "label": "Skip"}]}]);
+        *lock(&fake.outcome) = Box::new(|_, id| Outcome::Done {
+            receipt: json!({"status": "answered", "request_id": id, "question_hash": HASH,
+            "run_id": "run-1", "open_terminal": true, "codex_update": "installing"}),
+            cleanup: None,
+        });
+        c.observe(&state(asking(vec![update])));
+        let card = until(&c, |v| {
+            v.question.as_ref().is_some_and(|q| {
+                q.card.contains("codex-update:")
+                    && !q.view.forms.is_empty()
+                    && q.view.status != "Loading your saved answer…"
+            })
+        })
+        .question
+        .unwrap()
+        .card;
+        let (_, epoch) = shown(&c);
+        c.question_edit(
+            &card,
+            epoch,
+            Edit::Option {
+                item: "update".into(),
+                option: "update_now".into(),
+                checked: true,
+            },
+        );
+        until(&c, |v| {
+            v.question.as_ref().is_some_and(|q| q.view.submit.enabled)
+        });
+        assert_eq!(c.question_submit(&card), QuestionReply::Sending);
+        status_is(&c, "Answer sent. Waiting for the agent…");
+        assert_eq!(
+            c.take_events(),
+            vec![
+                ComposerEvent::OpenTerminal {
+                    key: crate::composer::tests::KEY.into()
+                },
+                ComposerEvent::Notice {
+                    text: "Codex in claude/sample-project/review (studio) is installing its update in Terminal. Resume the session after Codex exits.".into(),
+                    error: false,
+                    transient: false
+                },
+            ]
         );
     }
 }

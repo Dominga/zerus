@@ -8535,6 +8535,14 @@ git commit -m "feat(client): question cards in the composer hub, with Qt's answe
 
 ### Task A2-2: The guarded answer: Submit, Approve once, Deny, Skip and the cold cache
 
+**As built** (this task's commit and its review rounds). Where the steps below differ, the code and this list win (Qt wins over the brief):
+- **The call's end** (ruling, 2026-10-29). `answer_now` runs the dispatch inside `catch_unwind` and maps it through Task 5's `send::outcome_of` with Qt's `ALREADY_ANSWERING` (`HgsClient.cpp:1905`). A taken lane is a definite failure with that text, never "busy" and never uncertain. Any other `Err`, or a panic, means the call's thread died, so it is uncertain. `in_flight` is always released. Tests: `a_taken_answer_lane_is_a_definite_failure`, `a_call_that_dies_is_uncertain_and_never_retried`.
+- **A reload drops the cold question.** `Composers::resend` (the reloaded webview) clears `Answers.cold`: the dialog is gone with the old page, and a held ask would refuse every later answer of the app. Test: `a_reload_drops_the_cold_question`.
+- **More pinned guards:** `one_answer_per_session_at_a_time` (Qt's quiet refusal while an answer of the session is in flight, 5072), `nothing_is_answered_once_the_app_quits`, and `an_answer_saved_as_the_app_quits_is_never_sent` (the draft stays on disk as sending and reloads uncertain).
+- **Names.** The events cap is `COMPOSER_EVENTS` (16), since `EVENTS` is Task 4b's 500 followed events. The core's `Actionable::Ready` holds a `Box<Question>`. Tests take the card and its epoch from A2-1's `tests::shown`, and the changed-card test holds the store with Task 3a's `hold`.
+- **Run the tests** with `cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml -- composer:: actions::`: cargo takes one filter before `--`.
+- **A2-4 binds to this:** `ComposerEvent`, `Composers::{event, take_events}`, the envelope's `composer_events`, and `Answers.cold` (an answer's cold question is open).
+
 **Depends on:**
 - A2-1;
 - R7 (`questions::{answers, skip_answers, decision, actionable, Actionable, consent_identity, Recheck, still_answerable, cold_answer, ColdAnswer, answered_follow_up, Snapshot, AnswerItem, CHANGED, CHANGED_KEPT, CONSENT_CHANGED}`, `Action::Answer`, `Lane::Answer`);

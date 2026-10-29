@@ -87,6 +87,15 @@ fn decide_command(team: &Team, task: &Task, accept: bool) -> String {
     )
 }
 
+/// A7: what a captured report means for its member, for the reviewer.
+pub(crate) fn captured_hold_note(team: &Team, member: &str) -> String {
+    let role = team.role_of(member);
+    format!(
+        "Captured from {role}'s last reply, which may only acknowledge the task. {role} gets no new work until you \
+         accept, reject, retry, reassign or cancel this task, or {role} replaces the report with hgs team report."
+    )
+}
+
 /// How many decided proposals the lead's inbox lists (C9), the latest first.
 const DECIDED_PROPOSALS: usize = 5;
 
@@ -222,7 +231,13 @@ fn all_items(team: &Team) -> Vec<Item> {
                             summary(&report.text)
                         },
                         command: decide_command(team, task, true),
-                        detail: String::new(),
+                        // A7: a captured reply may be only an acknowledgement;
+                        // its member waits for this decision.
+                        detail: if report.captured && attempt.member != team.lead {
+                            captured_hold_note(team, &attempt.member)
+                        } else {
+                            String::new()
+                        },
                     });
                 }
             }

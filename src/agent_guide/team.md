@@ -36,6 +36,6 @@ Member: the task message names your task and attempt. Do it, then report once:
     {"request_id":"UUID","team":"ID","attempt":"ATTEMPT","text":"..."} |
     hgs team ask --json
   Your task again: {"attempt":"ATTEMPT"} | hgs team current --json
-  A progress line is not a report.
+  A progress line is not a report; captured, it holds new work.
 Say what changed and how you checked it. A report for a task taken from you
 is refused. Sub-teams: hgs guide team-tree.

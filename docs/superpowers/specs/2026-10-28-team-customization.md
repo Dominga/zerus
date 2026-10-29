@@ -254,7 +254,10 @@ From the 2026-10-29 move of team 528aebfe off an account near its limit.
   for another agent.
 - **The old session never blocks.** Before launching a member's new session
   of the same name, Zerus pauses the old one once idle (`hgs pause`: the
-  conversation stays under Saved; never kill). A busy old session makes the
+  conversation stays under Saved; never kill) and renames it to
+  `<name>-<old account label>`: a paused session keeps its account binding,
+  and a launch with an explicit account refuses a name that has one
+  (`src/cli.rs`, "This session already has an account"). A busy old session makes the
   member wait "waiting for the old session to finish its turn"; it is never
   interrupted without the owner's choice.
 - **Retry after a failed launch.** A failed post-swap launch keeps

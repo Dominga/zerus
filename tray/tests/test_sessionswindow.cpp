@@ -2434,7 +2434,7 @@ void TestSessionsWindow::readmeScreenshots()
     window.showSession({}, "claude/orbit/checkout");
     QTRY_VERIFY(tabNamed("Team") >= 0);
     tabs->setCurrentIndex(tabNamed("Team"));
-    QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QWidget *>("teamWorkspaceGraph"), 10000);
+    QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QWidget *>("teamPhaseGraph"), 10000);
     window.findChild<QPushButton *>("railSessionsToggle")->click();
     QTRY_VERIFY(!listPanel->isVisible());
     QVERIFY(save("team-graph", {1440, 900}, [&] {
@@ -2630,7 +2630,7 @@ void TestSessionsWindow::leadSessionHeaderCarriesTheTeam()
         int teamTab = -1; for (int i = 0; i < tabs->count(); ++i) if (tabs->tabText(i) == "Team") teamTab = i;
         QVERIFY(teamTab >= 0);
         tabs->setCurrentIndex(teamTab);
-        QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QWidget *>("teamWorkspaceGraph"), 10000);
+        QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QWidget *>("teamPhaseGraph"), 10000);
         QVERIFY(!window.findChild<QWidget *>("teamWorkspaceBar"));
         QVERIFY(!window.findChild<QWidget *>("teamWorkspaceHeader")->isVisible());
         // The header keeps the team whichever tab is open (it is rebuilt on a refresh).

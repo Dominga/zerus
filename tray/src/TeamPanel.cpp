@@ -1080,7 +1080,11 @@ bool TeamPanel::phaseOpen(const Team &team, const PhaseGroup &group) const
         const auto it = teamIt->constFind(group.n);
         if (it != teamIt->constEnd()) return it.value();
     }
-    return !group.finished();   // a finished phase starts collapsed, the rest open
+    // A finished phase starts collapsed, the rest open; the last phase stays
+    // open, so a finished one-phase plan still shows its tasks.
+    if (!group.finished()) return true;
+    for (const auto &task : team.tasks) if (task.phase > group.n) return false;
+    return true;
 }
 
 void TeamPanel::togglePhase(const Team &team, int phase)

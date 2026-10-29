@@ -1331,6 +1331,28 @@ impl Team {
         }
     }
 
+    /// A7: the lowest task whose undecided report Zerus captured from the
+    /// member's last reply (A2). A captured reply may be only an
+    /// acknowledgement ("queued, I'll do it after X"), so the member gets no new
+    /// task, rebalance or work ahead until its reviewer decides that task or
+    /// the member replaces the report with its own (A6). The lead's own tasks
+    /// never hold it (C1).
+    pub(crate) fn captured_hold(&self, member: &str) -> Option<u32> {
+        if member == self.lead {
+            return None;
+        }
+        self.tasks
+            .iter()
+            .filter(|task| task.status == TaskStatus::Submitted)
+            .filter(|task| {
+                task.attempts.iter().rev().find(|attempt| attempt.state == AttemptState::Reported).is_some_and(|attempt| {
+                    attempt.member == member && attempt.report.as_ref().is_some_and(|report| report.captured)
+                })
+            })
+            .map(|task| task.id)
+            .min()
+    }
+
     /// The members that report directly to `member` (spec 5.6), in roster
     /// order; the lead's are those without a sub-lead parent.
     pub(crate) fn reports_of(&self, member: &str) -> Vec<&Member> {

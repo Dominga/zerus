@@ -1,5 +1,5 @@
-import { createSignal } from "solid-js";
-import { openFolderSession, openNewSession, selectedHostTarget } from "../../store/newSession";
+import { createMemo, createRoot, createSignal } from "solid-js";
+import { newSession, openFolderSession, openNewSession, selectedHostTarget } from "../../store/newSession";
 import { notify } from "../../store/actions";
 import { composing } from "../lib/keys";
 import type { AccountRow, ComputerRow, FolderRow, LaunchFolder, ProjectRow } from "./newsession-ui";
@@ -9,6 +9,15 @@ import type { AccountRow, ComputerRow, FolderRow, LaunchFolder, ProjectRow } fro
 // `session.new` shortcut, the Projects entries' texts, the local
 // Windows-session warning, the dialog's keys and the keys that keep list
 // rows in place. The dialog's rules stay in the store and the core.
+
+// Loading: the dialog and its child dialogs are a chunk of their own (App.tsx's
+// lazy import), loaded the first time New session opens, never at start-up.
+
+/** Whether `open` has been true once; it never turns false again (and stops tracking `open` then). */
+export const openedOnce = (open: () => boolean): (() => boolean) => createMemo<boolean>((was) => was || open(), false);
+
+/** New session has opened once: App.tsx mounts the dialog from then on and keeps it mounted. */
+export const newSessionOpened = createRoot(() => openedOnce(() => newSession() !== undefined));
 
 // Entry points: each is Qt's showNewSession call.
 

@@ -2,8 +2,7 @@ import { For, Match, Show, Suspense, Switch, createEffect, createMemo, lazy, onC
 import { Rail } from "./ui/components/Rail";
 import { MenuLayer, Toasts } from "./ui/components/Overlays";
 import { ActionDialogs, ActionNotices } from "./ui/sessions/ActionDialogs";
-import { NewSessionDialog } from "./ui/sessions/NewSessionDialog";
-import { newSessionFromShortcut } from "./ui/sessions/newsession-view";
+import { newSessionFromShortcut, newSessionOpened } from "./ui/sessions/newsession-view";
 import { OrganizationDialogs } from "./ui/sessions/OrganizationDialogs";
 import { SessionList } from "./ui/sessions/SessionList";
 import { SessionDetail } from "./ui/sessions/SessionDetail";
@@ -24,6 +23,9 @@ import type { BridgeMode } from "./bridge";
 // Settings and its sections load the first time Settings opens; their
 // state lives in their modules, so it stays once loaded.
 const SettingsScreen = lazy(() => import("./ui/screens/Settings").then((m) => ({ default: m.SettingsScreen })));
+// New session and its child dialogs load the first time it opens
+// (`newSessionOpened`), and stay mounted from then on.
+const NewSessionDialog = lazy(() => import("./ui/sessions/NewSessionDialog").then((m) => ({ default: m.NewSessionDialog })));
 
 const STATE_TEXT: Record<string, string> = {
   probing: "checking",
@@ -110,7 +112,7 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
       <MenuLayer />
       <Toasts />
       <ActionDialogs />
-      <NewSessionDialog />
+      <Show when={newSessionOpened()}><Suspense><NewSessionDialog /></Suspense></Show>
       <OrganizationDialogs />
       <ActionNotices />
       <PerfHost />

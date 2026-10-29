@@ -19,6 +19,7 @@ const store = vi.hoisted(() => ({
 const notices = vi.hoisted(() => [] as { tone: string; text: string }[]);
 
 vi.mock("../../store/newSession", () => ({
+  newSession: () => undefined,
   openNewSession: store.openNewSession,
   openFolderSession: async (project: string, folder: unknown) => { await store.openFolderSession(project, folder); return store.folderProblem; },
   selectedHostTarget: () => store.host,
@@ -60,6 +61,23 @@ describe("the entry points (each Qt's showNewSession call)", () => {
     await view.newSessionInFolder("work", f);
     expect(notices).toEqual([{ tone: "warn", text: "This project folder changed. Select it again." }]);
     expect(store.openNewSession).not.toHaveBeenCalled();
+  });
+});
+
+describe("loading the dialog (App.tsx's lazy import)", () => {
+  it("mounts New session only once it has opened, and keeps it mounted after it closes", () => {
+    createRoot((dispose) => {
+      const [open, setOpen] = createSignal(false);
+      const opened = view.openedOnce(open);
+      expect(opened()).toBe(false);
+      setOpen(true);
+      expect(opened()).toBe(true);
+      setOpen(false);
+      expect(opened()).toBe(true);
+      dispose();
+    });
+    // The app's own latch: nothing has opened in this test.
+    expect(view.newSessionOpened()).toBe(false);
   });
 });
 

@@ -93,6 +93,11 @@ struct Member {
     // hgs gets the same list derived from the tasks.
     QList<int> queue;
     bool queueKnown = false;   // `queue` was in the JSON, even when empty
+    // U36 (#532): the stage it has (delivered) first, then the waiting stages
+    // it may take; derived from the tasks when hgs sends none.
+    struct StageEntry { int task = 0, round = 0; QString stage, state; double since = 0; };
+    QList<StageEntry> stageQueue;
+    bool stageQueueKnown = false;
     // G7: the MCP servers and services this member's session runs; they outlive
     // the session and are not Background work.
     struct Service { QString name, command; double since = 0; };
@@ -201,6 +206,34 @@ struct Attempt {
 
 struct Dep { int task = 0; bool soft = false; };
 
+// U36: a task's pipeline as hgs snapshots it at the first hand-out
+// (`pipeline_run`): its stages after the implementer's report, the returned
+// rounds before the lead decides, where a test works (`hold` the task's folder
+// or a detached `checkout`), the final acceptance (lead, sub_lead or auto) and
+// every stage run, oldest first. A run checks one attempt (`attempt` is its n)
+// and is waiting (for a member), delivered, passed, returned, skipped or
+// revoked; #532 adds its folder, checkout, hold and what changed.
+struct StageSpec { QString kind, role, member; };
+struct StageRun {
+    QString id, kind, member, state, by, text, folder, checkout;
+    int stage = 0, round = 0, attempt = 0;
+    double at = 0, deliveredAt = 0, endedAt = 0;
+    QStringList findings;
+    bool holds = false;
+    QJsonArray changed;   // {commit, files} or {path, size, deleted}
+    bool open() const { return state == QLatin1String("waiting") || state == QLatin1String("delivered"); }
+};
+struct PipelineRun {
+    QString id, name, folder, accept;
+    int maxRounds = 0, round = 0;
+    QList<StageSpec> stages;
+    QList<StageRun> runs;
+    bool known = false;
+    int rounds() const { return maxRounds > 0 ? maxRounds : 3; }
+    const StageRun *openRun() const;
+    int returned() const;   // the stage returns so far (the rounds used)
+};
+
 // G1: the sub-team a task was delegated to (status children[] and
 // tasks[].subteam), and the parent task a team came from.
 struct Subteam {
@@ -275,6 +308,13 @@ struct Task {
     struct AddedLate { QString by, request, confirm; double at = 0; bool known = false; };
     AddedLate addedLate;
     Timing timing;
+    // U36: the pipeline the plan chose ("" the default, "none", or a preset
+    // id), its snapshot once handed out, and the members that may take its
+    // open stage.
+    QString pipeline;
+    PipelineRun pipelineRun;
+    QStringList stageCandidates;
+    bool inStage() const { return status == QLatin1String("in_review") || status == QLatin1String("in_test"); }
     bool isCheck() const { return kind == "check" || !check.command.isEmpty(); }
     const Attempt *last() const { return attempts.isEmpty() ? nullptr : &attempts.last(); }
     bool workedAhead() const { const auto *a = last(); return a && a->workedAhead; }
@@ -645,6 +685,15 @@ const Question *question(const Task &task, const QString &id);
 // The member queue (A5): its open task, then the tasks returned to it
 // (pending, with attempts). Nothing else.
 QList<int> memberQueue(const Team &team, const QString &member);
+// U36: who implemented the attempt a stage run checks (its assignee when the
+// attempt is unknown); the task whose test holds `member`'s folder (0: none),
+// as hgs's stages::held; a member's stage queue; a waiting stage's place among
+// the waiting stages (1 first, 0 when it does not wait); "Review" or "Test".
+QString implementerOf(const Task &task, const StageRun &run);
+int folderHeldBy(const Team &team, const QString &member);
+QList<Member::StageEntry> stageQueue(const Team &team, const QString &member);
+int stageQueuePlace(const Team &team, int task);
+QString stageName(const QString &kind);
 
 // The team catalog (`hgs team catalog get`): roles, templates, routing rules
 // and the designer's draft of proposed changes.

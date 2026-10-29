@@ -380,7 +380,7 @@ fn attempt_end(attempt: &Attempt) -> f64 {
 }
 
 /// The team with its live members when the caller listed sessions (F7).
-fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::Seen]>) -> Value {    let mut value = serde_json::to_value(team).unwrap_or_default();
+pub(super) fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::Seen]>) -> Value {    let mut value = serde_json::to_value(team).unwrap_or_default();
     // C7: the plan-health block, with the members starving on the plan now.
     let now = super::super::now();
     let mut validation = plan::validate(team, &BTreeSet::new());

@@ -360,20 +360,9 @@ bool routeMatch(const QString &when, const QString &goal)
     return false;
 }
 
-// U36: a stage's kind, and a preset's final acceptance, as the mock-up names
-// and colors them.
-QString stageName(const QString &kind)
-{
-    if (kind == "review") return tr("Review");
-    if (kind == "test") return tr("Test");
-    if (kind == "command") return tr("Command");
-    if (kind == "land") return tr("Land");
-    if (kind == "sub_lead") return tr("Sub-lead");
-    if (kind == "auto") return tr("Auto");
-    if (kind == "implement") return tr("Implement");
-    return tr("Lead");
-}
-
+// U36: a stage's kind and a preset's final acceptance are named by
+// Teams::stageName, as the desktop's chips name them; colored here as the
+// mock-up colors them.
 QColor stageColor(const QString &kind, const Colors &c)
 {
     if (kind == "review") return c.violet;

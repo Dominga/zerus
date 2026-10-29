@@ -3,6 +3,7 @@ import { refreshUpdates, updateCommands, updates } from "../../../store/updates"
 import { toast } from "../../../store/ui";
 import type { UpdateChannel } from "../../../types";
 import { Actions, Group, Lines, Row, SectionHead, Select, Status, ToggleRow } from "./ui";
+import { lastCheckedText } from "./updates-time";
 
 function failed(error: unknown) {
   toast("Updates", String(error));
@@ -24,7 +25,7 @@ export function UpdatesSection() {
           <Show when={!updates().busy && updates().comparison}>
             <p class="set-group-hint selectable updates-comparison">{updates().comparison}</p>
           </Show>
-          <p class="set-group-hint selectable">Last successful check: {updates().last_checked}</p>
+          <p class="set-group-hint selectable">Last successful check: {lastCheckedText(updates().last_checked)}</p>
           <Show when={updates().cached}><p class="set-group-hint">Showing the last verified catalog.</p></Show>
           <Show when={updates().error}><Status kind="error">{updates().error}</Status></Show>
           <Actions>

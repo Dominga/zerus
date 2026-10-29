@@ -75,9 +75,9 @@ TeamConversation::TeamConversation(HgsClient *client, QWidget *parent) : QWidget
     // A dialog or draft in the agent's terminal: the owner finishes it there.
     m_openTerminal = button(tr("Open terminal"), "teamConversationOpenTerminal"); m_openTerminal->hide();
     QObject::connect(m_openTerminal, &QPushButton::clicked, this, [this] { if (openTerminal) openTerminal(m_host, m_name); });
-    auto *statusRow = new QHBoxLayout; statusRow->setSpacing(8);
-    statusRow->addWidget(m_status, 1); statusRow->addWidget(m_openTerminal, 0, Qt::AlignTop);
-    bv->addLayout(statusRow);
+    m_statusRow = new QHBoxLayout; m_statusRow->setSpacing(8);
+    m_statusRow->addWidget(m_status, 1); m_statusRow->addWidget(m_openTerminal, 0, Qt::AlignTop);
+    bv->addLayout(m_statusRow);
     m_composerRow = new QWidget;
     auto *row = new QHBoxLayout(m_composerRow); row->setContentsMargins(0, 0, 0, 0); row->setSpacing(6);
     m_input = new QPlainTextEdit; m_input->setObjectName("teamConversationInput"); m_input->setFixedHeight(56);
@@ -118,7 +118,7 @@ TeamConversation::TeamConversation(HgsClient *client, QWidget *parent) : QWidget
         if (!ok) {
             m_held->cancelFinished(receipt.value("request_id").toString());
             m_status->setText(error); m_status->setStyleSheet(QStringLiteral("color:%1;").arg(colorsFor(m_dark).danger.name())); m_status->show();
-            poll(); return;
+            fitDesigner(); poll(); return;
         }
         // The cancelled text comes back to an empty composer.
         if (m_input->toPlainText().trimmed().isEmpty()) m_input->setPlainText(text);
@@ -208,7 +208,10 @@ void TeamConversation::useDesignerLayout(QWidget *intro, QWidget *above)
     auto *bv = new QVBoxLayout(m_bottom); bv->setContentsMargins(16, 6, 16, 4); bv->setSpacing(6);
     m_filesRow = new QWidget; m_filesRow->setObjectName("teamConversationFiles"); m_filesRow->setLayout(new FlowLayout(6)); m_filesRow->hide();
     bv->addWidget(m_filesRow);
-    bv->addWidget(m_status);
+    // #521: the held messages, the status and Open terminal sit above the card.
+    v->removeWidget(m_held); bv->addWidget(m_held);
+    if (oldBottom) oldBottom->layout()->removeItem(m_statusRow);
+    m_statusRow->setParent(nullptr); bv->addLayout(m_statusRow);
     m_card = new QFrame; m_card->setObjectName("teamDesignerComposerCard");
     auto *ch = new QHBoxLayout(m_card); ch->setContentsMargins(14, 8, 8, 8); ch->setSpacing(8);
     m_input->setParent(m_card); m_send->setParent(m_card);
@@ -622,6 +625,7 @@ void TeamConversation::renderHeld()
     const QString agent = !m_agentName.isEmpty() ? m_agentName
         : m_details.value("agent").toString().isEmpty() ? tr("the agent") : m_details.value("agent").toString();
     m_held->setHeld(m_name.isEmpty() ? QJsonArray() : held, agent);
+    fitDesigner();
 }
 
 // A refusal names what holds the message. At a dialog, draft or unknown prompt
@@ -644,4 +648,5 @@ void TeamConversation::showRefusal(const QString &error, bool uncertain)
     m_status->setStyleSheet(QStringLiteral("color:%1;").arg(colorsFor(m_dark).danger.name()));
     m_status->show();
     m_openTerminal->setVisible(terminal && openTerminal);
+    fitDesigner();
 }

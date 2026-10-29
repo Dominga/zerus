@@ -698,6 +698,7 @@ private slots:
     void planningRulesAreEditedSavedResetAndProposed();
     void draftIsDecidedWithoutADesignerSession();
     void designerQuestionIsAnsweredInTheWindow();
+    void coordinatorQueuesASecondMessageWithCancel_data();
     void coordinatorQueuesASecondMessageWithCancel();
     void catalogEditorMarksManualEdits();
     void boardScrollsInsteadOfSqueezingColumns();
@@ -5672,8 +5673,17 @@ void TestTeamsUi::planningRulesAreEditedSavedResetAndProposed()
 // until the lead takes your previous message" with Cancel; Cancel sends
 // send-cancel with its request ID and returns the text; once hgs delivers it,
 // the line goes. A dialog in the lead's terminal is refused with Open terminal.
+// #511 N6: the designer's layout keeps both in its composer, under the messages.
+void TestTeamsUi::coordinatorQueuesASecondMessageWithCancel_data()
+{
+    QTest::addColumn<bool>("designer");
+    QTest::newRow("coordinator") << false;
+    QTest::newRow("designer") << true;
+}
+
 void TestTeamsUi::coordinatorQueuesASecondMessageWithCancel()
 {
+    QFETCH(bool, designer);
     QTemporaryDir dir; QVERIFY(dir.isValid());
     const QString program = dir.filePath("hgs");
     QVERIFY(FakeCli::install(program, R"PY(#!/usr/bin/env python3
@@ -5685,6 +5695,7 @@ held=json.load(open(here+'.held')) if os.path.exists(here+'.held') else []
 if a[:1]==['inspect']:
  print(json.dumps({'name':a[1],'run_id':'run-1','conversation_id':'conv-1','runtime_state':'live','process_state':'running',
   'activity':'busy','phase':'working','cursor':0,'events':[],'input_hold_supported':True,'held_inputs':held}))
+ open(here+'.inspected','a').close()
 elif a[:1]==['send']:
  body=json.load(sys.stdin)
  open(here+'.sends','a').write(json.dumps(body)+'\n')
@@ -5706,11 +5717,27 @@ else:print('{}')
     const auto restore = qScopeGuard([] { TeamConversation::setPollInterval(2000); });
     HgsClient client(FakeCli::program(program));
     TeamConversation conversation(&client);
-    conversation.setAgentName("the lead");
+    const QString agent = designer ? QStringLiteral("the designer") : QStringLiteral("the lead");
+    conversation.setAgentName(agent);
     QString opened;
     conversation.openTerminal = [&](const QString &host, const QString &name) { opened = host + '|' + name; };
+    if (designer) conversation.useDesignerLayout(new QLabel("Describe the team"), nullptr);
     conversation.setSession({}, "claude/checkout/lead");
     conversation.resize(560, 420); conversation.show();
+    const QString suffix = designer ? QStringLiteral("-designer") : QString();
+    // The designer's held line and Open terminal: in its composer, above the
+    // field, never in the hidden coordinator row or at the top of the column.
+    const auto inComposer = [&](QWidget *w) {
+        if (!designer) return true;
+        auto *composer = conversation.findChild<QWidget *>("teamDesignerComposer");
+        auto *card = conversation.findChild<QWidget *>("teamDesignerComposerCard");
+        auto *view = conversation.findChild<QWidget *>("teamConversationActivity");
+        const int top = w->mapTo(&conversation, QPoint()).y(), bottom = top + w->height();
+        return composer->isAncestorOf(w) && view->isVisible()
+            && top >= view->mapTo(&conversation, QPoint()).y() + view->height()
+            && bottom <= card->mapTo(&conversation, QPoint()).y()
+            && composer->mapTo(&conversation, QPoint()).y() + composer->height() <= conversation.height();
+    };
     auto *input = conversation.findChild<QPlainTextEdit *>("teamConversationInput");
     auto *sendButton = conversation.findChild<QPushButton *>("teamConversationSend");
     auto *held = conversation.findChild<QFrame *>("teamConversationHeld");
@@ -5722,18 +5749,21 @@ else:print('{}')
     const auto rows = [&] { return held->findChildren<QWidget *>("heldInput"); };
     // The send asks hgs to hold it: this hgs reads input_hold_supported.
     QTRY_VERIFY(sendButton->isEnabled());
+    // Sent only once the session is read: a slow first read must not refuse it.
+    QTRY_VERIFY(QFile::exists(program + ".inspected"));
     QTest::qWait(300);
     input->setPlainText("Also re-run the migrations"); sendButton->click();
     QTRY_COMPARE(sends().size(), 1);
     QVERIFY(sends().first()["queue_when_unconfirmed"].toBool());
     QTRY_COMPARE(rows().size(), 1);
     QVERIFY(held->isVisible());
-    QCOMPARE(held->findChild<QLabel *>("heldInputText")->text(), QStringLiteral("Queued until the lead takes your previous message"));
+    QCOMPARE(held->findChild<QLabel *>("heldInputText")->text(), QStringLiteral("Queued until %1 takes your previous message").arg(agent));
     QCOMPARE(input->toPlainText(), QString());
+    QTRY_VERIFY(inComposer(held));
     // No quick-ask chips here either.
     QVERIFY(conversation.findChildren<QPushButton *>("teamConversationAsk").isEmpty());
-    shot(&conversation, "u35-coordinator-queued-dark");
-    lightPalette(); conversation.setTheme(false); lightShot(&conversation, "u35-coordinator-queued-light"); darkPalette(); conversation.setTheme(true);
+    shot(&conversation, "u35-coordinator-queued" + suffix + "-dark");
+    lightPalette(); conversation.setTheme(false); lightShot(&conversation, "u35-coordinator-queued" + suffix + "-light"); darkPalette(); conversation.setTheme(true);
     // Cancel: hgs is told its request ID; the line goes and the text comes back.
     held->findChild<QPushButton *>("heldInputCancel")->click();
     QTRY_VERIFY(QFile::exists(program + ".cancels"));
@@ -5756,8 +5786,10 @@ else:print('{}')
     QVERIFY2(status->text().startsWith("Terminal has a draft, dialog, or unrecognized prompt") && !status->text().contains("open Terminal"), qPrintable(status->text()));
     auto *open = conversation.findChild<QPushButton *>("teamConversationOpenTerminal");
     QVERIFY(open->isVisible());
+    QTRY_VERIFY(inComposer(open) && inComposer(status));
     QCOMPARE(input->toPlainText(), QStringLiteral("One more thing"));
     QVERIFY(rows().isEmpty());
+    shot(&conversation, "u35-coordinator-refused" + suffix + "-dark");
     open->click();
     QCOMPARE(opened, QStringLiteral("|claude/checkout/lead"));
 }

@@ -297,11 +297,28 @@ qint64 ForkUpdater::installedBuild()
 #endif
 }
 
+ForkUpdater::Offer ForkUpdater::offerFor(qint64 installed, const QString &runningCommit, qint64 build, const QString &commit)
+{
+    if (!runningCommit.isEmpty() && commit == runningCommit) return Offer::Current;
+    if (installed > 0) return build > installed ? Offer::Newer : Offer::Current;
+    return Offer::Replacement;
+}
+
+QString ForkUpdater::sourceCommit(const QString &folder)
+{
+    QFile file(QDir(folder).filePath(QStringLiteral("build-info.json")));
+    if (!file.open(QIODevice::ReadOnly)) return {};
+    const QString commit = QJsonDocument::fromJson(file.read(feedLimit)).object().value("source_commit").toString();
+    static const QRegularExpression full(QStringLiteral("\\A[0-9a-f]{40}\\z"));
+    return full.match(commit).hasMatch() ? commit : QString();
+}
+
 ForkUpdater::ForkUpdater(QObject *parent) : QObject(parent)
 {
     m_layout = layoutFor(QCoreApplication::applicationFilePath());
     m_install = m_layout.install;
     m_stage = m_layout.stage;
+    m_runningCommit = m_install.isEmpty() ? QString() : sourceCommit(m_install);
 #ifdef Q_OS_WIN
     // Only the portable zip carries build-info.json next to hgs-tray.exe.
     m_portable = !m_install.isEmpty() && QFileInfo::exists(m_install + QStringLiteral("/build-info.json")) && !m_layout.superseded;
@@ -347,6 +364,7 @@ void ForkUpdater::fetch()
 {
     if (m_busy) return;
     m_busy = true;
+    m_offeredBuild = 0;
     m_status = tr("Checking the fork's releases…");
     emit changed();
     const QString feed = m_enabled ? QString::fromLatin1(feedUrl) : QString::fromLatin1(latestFeed);
@@ -374,9 +392,28 @@ void ForkUpdater::feedFinished(QNetworkReply *reply)
         || m_url.scheme() != QLatin1String("https") || !m_url.toString().startsWith(QLatin1String(releasePrefix))
         || m_size <= 0 || m_size > zipLimit || m_sha256.size() != 32)
         return finish(tr("The fork update feed is not valid."));
-    if (m_build <= installedBuild())
-        return finish(tr("Fork build %1 is the newest.").arg(installedBuild()));
+    switch (offerFor(installedBuild(), m_runningCommit, m_build, m_commit)) {
+    case Offer::Current:
+        return finish(installedBuild() > 0 ? tr("Fork build %1 is the newest.").arg(installedBuild())
+                                           : tr("This build is the commit of fork build %1, the newest.").arg(m_build));
+    case Offer::Replacement:
+        if (m_build <= m_readyBuild) return finish(readyStatus());
+        // No build number: the feed's build may be older; it is offered, never fetched.
+        m_offeredBuild = m_build;
+        return finish(tr("This build has no fork build number (commit %1). Fork build %2 (commit %3) can replace it; it is not known to be newer.")
+                          .arg(m_runningCommit.isEmpty() ? tr("unknown") : m_runningCommit.left(10), QString::number(m_build), m_commit.left(10)));
+    case Offer::Newer:
+        break;
+    }
     if (m_build <= m_readyBuild) return finish(readyStatus());
+    download();
+}
+
+void ForkUpdater::confirmReplacement()
+{
+    if (m_busy || m_offeredBuild <= 0 || m_offeredBuild != m_build) return;
+    m_offeredBuild = 0;
+    m_busy = true;
     download();
 }
 
@@ -470,7 +507,8 @@ void ForkUpdater::extracted()
 
 QString ForkUpdater::readyStatus() const
 {
-    return tr("Fork build %1 is ready. Restart Zerus to finish the update.").arg(m_readyBuild);
+    return installedBuild() > 0 ? tr("Fork build %1 is ready. Restart Zerus to finish the update.").arg(m_readyBuild)
+                                : tr("Fork build %1 is ready to replace this build. Restart Zerus to replace it.").arg(m_readyBuild);
 }
 
 bool ForkUpdater::startInstall()

@@ -322,8 +322,13 @@ public:
         auto *updater=ForkUpdater::instance();
         forkStatus=new QLabel;forkStatus->setObjectName("aboutForkStatus");forkStatus->setWordWrap(true);
         forkUpdate=new QPushButton;forkUpdate->setObjectName("aboutForkUpdate");forkUpdate->setAutoDefault(false);
-        connect(forkUpdate,&QPushButton::clicked,this,[updater]{
+        connect(forkUpdate,&QPushButton::clicked,this,[this,updater]{
             if(updater->ready()){if(updater->startInstall())QCoreApplication::quit();return;}
+            // #511 N10: a build without a fork number is replaced only once confirmed.
+            if(const qint64 build=updater->offeredBuild();build>0){
+                if(confirmForkReplacement(build,updater->runningCommit(),updater->offeredCommit()))updater->confirmReplacement();
+                return;
+            }
             updater->checkNow();
         });
         auto *updateRow=new QHBoxLayout;updateRow->setSpacing(10);updateRow->addWidget(forkUpdate);updateRow->addWidget(forkStatus,1);
@@ -338,11 +343,25 @@ public:
     void refreshForkUpdate(){
         auto *updater=ForkUpdater::instance();
         const bool ready=updater->ready();
-        forkUpdate->setText(ready?tr("Restart to install fork build %1").arg(updater->readyBuild()):tr("Check for updates from WhiteWh/zerus"));
+        const qint64 offered=updater->offeredBuild();
+        forkUpdate->setText(ready?tr("Restart to install fork build %1").arg(updater->readyBuild())
+                            :offered>0?tr("Replace this build with fork build %1…").arg(offered):tr("Check for updates from WhiteWh/zerus"));
         forkUpdate->setEnabled(updater->manualAvailable());
         forkUpdate->setToolTip(updater->manualAvailable()?QString():tr("Updates from the fork run in its portable Windows build"));
         forkStatus->setText(updater->status());
     }
+    // The running build has no fork number: the feed's build is not known to be newer.
+    std::function<bool(qint64,const QString&,const QString&)> confirmForkReplacement=[this](qint64 build,const QString &running,const QString &offered){
+        QMessageBox box(QMessageBox::Warning,tr("Replace this build"),
+            tr("This build has no fork build number, so Zerus cannot tell whether fork build %1 is newer.").arg(build),
+            QMessageBox::NoButton,this);
+        box.setInformativeText(tr("This build: commit %1.\nFork build %2: commit %3.\n\nFork build %2 downloads now and replaces this build when Zerus restarts; this build stays as the rollback copy.")
+            .arg(running.isEmpty()?tr("unknown"):running,QString::number(build),offered));
+        auto *replace=box.addButton(tr("Replace with build %1").arg(build),QMessageBox::DestructiveRole);
+        box.setDefaultButton(box.addButton(QMessageBox::Cancel));
+        box.exec();
+        return box.clickedButton()==replace;
+    };
     void setPeers(const QStringList &peers){sync->setPeers(peers);speech->setPeers(peers);analytics->setPeers(peers);worktrees->setPeers(peers);}
     // A control-only computer keeps no recovery policy of its own.
     void setLocalSessions(bool enabled,bool offered=false){sync->setLocalSessions(enabled);sync->setLocalSessionsOffered(offered);}

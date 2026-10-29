@@ -6262,60 +6262,140 @@ mod tests {
         // stage member, run_step gives it the stage and sends the hand-off, and
         // the member's verdict moves the task on; the implementer is never one.
         let dir = tempfile::tempdir().unwrap();
-        let folder = dir.path().join("proj");
-        std::fs::create_dir_all(&folder).unwrap();
-        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
-        let t = staged(&folder.display().to_string());
-        store.create("11111111-1111-4111-8111-111111111594", &json!({}), t.clone(), vec![]).unwrap();
-        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
-        let record = sent.clone();
-        set_fake_hgs(Some(Box::new(move |_, args: &[&str], _: Option<&Value>| {
-            assert_eq!(args.first().copied(), Some("send"));
-            record.borrow_mut().push(args.get(1).copied().unwrap_or_default().to_owned());
-            Ok(fake_output(0, r#"{"status":"submitted"}"#, ""))
-        })));
-        let tick = |store: &mut Store| -> anyhow::Result<Vec<Step>> {
-            let team = store.load(&t.id)?.context("unknown team")?;
-            let planned: Vec<Step> = steps(&team, &free_sessions(), now()).into_iter().filter(|step| matches!(step, Step::StageOut { .. })).collect();
-            for step in &planned {
-                run_step(store, &team, step, "")?;
+        crate::state::with_test_state_root(dir.path(), || {
+            let folder = dir.path().join("proj");
+            std::fs::create_dir_all(&folder).unwrap();
+            let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+            let t = staged(&folder.display().to_string());
+            store.create("11111111-1111-4111-8111-111111111594", &json!({}), t.clone(), vec![]).unwrap();
+            let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+            let record = sent.clone();
+            set_fake_hgs(Some(Box::new(move |_, args: &[&str], _: Option<&Value>| {
+                assert_eq!(args.first().copied(), Some("send"));
+                record.borrow_mut().push(args.get(1).copied().unwrap_or_default().to_owned());
+                Ok(fake_output(0, r#"{"status":"submitted"}"#, ""))
+            })));
+            let tick = |store: &mut Store| -> anyhow::Result<Vec<Step>> {
+                let team = store.load(&t.id)?.context("unknown team")?;
+                let planned: Vec<Step> = steps(&team, &free_sessions(), now()).into_iter().filter(|step| matches!(step, Step::StageOut { .. })).collect();
+                for step in &planned {
+                    run_step(store, &team, step, "")?;
+                }
+                Ok(planned)
+            };
+            let verdict = |store: &mut Store, member: &str| -> anyhow::Result<()> {
+                let team = store.load(&t.id)?.context("unknown team")?;
+                let current = super::super::commands::current_view(&team, member)?;
+                let attempt = current["attempt"].as_str().context("no stage attempt")?.to_owned();
+                store.mutate(None, &t.id, None, |team, events| {
+                    ops::apply(team, "report", &json!({"task":1,"attempt":attempt,"verdict":"pass","text":"Fine"}), &Actor::Member(member.into()), &BTreeSet::new(), events)
+                })?;
+                Ok(())
+            };
+            let review = tick(&mut store);
+            let reviewed = verdict(&mut store, "rev");
+            let after_review = store.load(&t.id).unwrap().unwrap();
+            let test = tick(&mut store);
+            let tested = verdict(&mut store, "qa");
+            let again = tick(&mut store);
+            set_fake_hgs(None);
+            assert_eq!(review.unwrap(), [Step::StageOut { task: 1, member: "rev".into() }]);
+            reviewed.unwrap();
+            assert_eq!(after_review.task(1).unwrap().status, TaskStatus::InTest, "the review passed");
+            assert_eq!(test.unwrap(), [Step::StageOut { task: 1, member: "qa".into() }]);
+            tested.unwrap();
+            assert!(again.unwrap().is_empty(), "no stage is left to give out");
+            let saved = store.load(&t.id).unwrap().unwrap();
+            let task = saved.task(1).unwrap();
+            assert_eq!(task.status, TaskStatus::Submitted, "after its stages the task is the lead's");
+            let runs = &task.pipeline_run.as_ref().unwrap().runs;
+            assert_eq!(
+                runs.iter().map(|run| (run.kind.as_str(), run.member.as_str(), run.state)).collect::<Vec<_>>(),
+                [("review", "rev", StageState::Passed), ("test", "qa", StageState::Passed)]
+            );
+            assert!(runs.iter().all(|run| run.delivered_at.is_some()));
+            assert_eq!(*sent.borrow(), ["claude/x/rev", "kimi/x/qa"], "each stage member got its own hand-off, the implementer none");
+            let kinds: Vec<String> = store.events(&t.id, None, 200).unwrap()["items"].as_array().unwrap().iter().map(|item| item["kind"].as_str().unwrap().to_owned()).collect();
+            assert_eq!(kinds.iter().filter(|kind| *kind == "stage_delivered").count(), 2, "{kinds:?}");
+        });
+    }
+
+    /// U36: what the desktop and Android read about a delivered stage, as
+    /// `hgs team status` writes it after a real hand-out: each member's
+    /// stage_queue and the run's folder and hold. With ZERUS_WRITE_FIXTURES=1
+    /// the test writes tests/fixtures/team-stage-delivery.json.
+    #[test]
+    fn the_shared_stage_delivery_fixture_is_what_status_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let folder = dir.path().join("proj");
+            std::fs::create_dir_all(&folder).unwrap();
+            let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+            let t = staged(&folder.display().to_string());
+            store.create("11111111-1111-4111-8111-111111111537", &json!({}), t.clone(), vec![]).unwrap();
+            set_fake_hgs(Some(Box::new(|_, _: &[&str], _: Option<&Value>| Ok(fake_output(0, r#"{"status":"submitted"}"#, "")))));
+            let handed = (|| -> anyhow::Result<Team> {
+                let team = store.load(&t.id)?.context("unknown team")?;
+                run_step(&mut store, &team, &Step::StageOut { task: 1, member: "rev".into() }, "")?;
+                let team = store.load(&t.id)?.context("unknown team")?;
+                let review = super::super::commands::current_view(&team, "rev")?["attempt"].as_str().unwrap_or_default().to_owned();
+                store.mutate(None, &t.id, None, |team, events| {
+                    ops::apply(team, "report", &json!({"task":1,"attempt":review,"verdict":"pass","text":"Read it"}), &Actor::Member("rev".into()), &BTreeSet::new(), events)
+                })?;
+                let team = store.load(&t.id)?.context("unknown team")?;
+                run_step(&mut store, &team, &Step::StageOut { task: 1, member: "qa".into() }, "")?;
+                store.load(&t.id)?.context("unknown team")
+            })();
+            set_fake_hgs(None);
+            let team = handed.unwrap();
+            let view = super::super::commands::view_with(&team, &[], None);
+            // Only what the stage views read, with a synthetic folder and fixed
+            // times, so the fixture is the same on every computer.
+            let real = dir.path().display().to_string();
+            let mut shared = json!({
+                "members": view["members"].as_array().unwrap().iter()
+                    .map(|member| json!({"id":member["id"],"role":member["role"],"stage_queue":member["stage_queue"]}))
+                    .collect::<Vec<_>>(),
+                "tasks": view["tasks"].as_array().unwrap().iter().filter(|task| task["id"] == 1)
+                    .map(|task| json!({"id":task["id"],"title":task["title"],"status":task["status"],"assignee":task["assignee"],
+                        "pipeline":task["pipeline"],"pipeline_run":task["pipeline_run"]}))
+                    .collect::<Vec<_>>(),
+            });
+            fn normalize(value: &mut Value, real: &str) {
+                match value {
+                    Value::Object(map) => {
+                        for (key, item) in map.iter_mut() {
+                            let time = key == "at" || key == "since" || key.ends_with("_at");
+                            if time && item.is_number() {
+                                *item = json!(1800000000.0);
+                            } else if key == "temp" && item.as_str().is_some_and(|temp| !temp.is_empty()) {
+                                // Named after the run; only that the test has one counts.
+                                *item = json!("/srv/example/stage-temp");
+                            } else if key == "id" && item.as_str().is_some_and(|id| id.starts_with("stage-") || id.len() == 36) {
+                                *item = json!("stage-run");
+                            } else {
+                                normalize(item, real);
+                            }
+                        }
+                    }
+                    Value::Array(items) => items.iter_mut().for_each(|item| normalize(item, real)),
+                    Value::String(text) if text.starts_with(real) => *text = format!("/srv/example{}", text[real.len()..].replace('\\', "/")),
+                    _ => {}
+                }
             }
-            Ok(planned)
-        };
-        let verdict = |store: &mut Store, member: &str| -> anyhow::Result<()> {
-            let team = store.load(&t.id)?.context("unknown team")?;
-            let current = super::super::commands::current_view(&team, member)?;
-            let attempt = current["attempt"].as_str().context("no stage attempt")?.to_owned();
-            store.mutate(None, &t.id, None, |team, events| {
-                ops::apply(team, "report", &json!({"task":1,"attempt":attempt,"verdict":"pass","text":"Fine"}), &Actor::Member(member.into()), &BTreeSet::new(), events)
-            })?;
-            Ok(())
-        };
-        let review = tick(&mut store);
-        let reviewed = verdict(&mut store, "rev");
-        let after_review = store.load(&t.id).unwrap().unwrap();
-        let test = tick(&mut store);
-        let tested = verdict(&mut store, "qa");
-        let again = tick(&mut store);
-        set_fake_hgs(None);
-        assert_eq!(review.unwrap(), [Step::StageOut { task: 1, member: "rev".into() }]);
-        reviewed.unwrap();
-        assert_eq!(after_review.task(1).unwrap().status, TaskStatus::InTest, "the review passed");
-        assert_eq!(test.unwrap(), [Step::StageOut { task: 1, member: "qa".into() }]);
-        tested.unwrap();
-        assert!(again.unwrap().is_empty(), "no stage is left to give out");
-        let saved = store.load(&t.id).unwrap().unwrap();
-        let task = saved.task(1).unwrap();
-        assert_eq!(task.status, TaskStatus::Submitted, "after its stages the task is the lead's");
-        let runs = &task.pipeline_run.as_ref().unwrap().runs;
-        assert_eq!(
-            runs.iter().map(|run| (run.kind.as_str(), run.member.as_str(), run.state)).collect::<Vec<_>>(),
-            [("review", "rev", StageState::Passed), ("test", "qa", StageState::Passed)]
-        );
-        assert!(runs.iter().all(|run| run.delivered_at.is_some()));
-        assert_eq!(*sent.borrow(), ["claude/x/rev", "kimi/x/qa"], "each stage member got its own hand-off, the implementer none");
-        let kinds: Vec<String> = store.events(&t.id, None, 200).unwrap()["items"].as_array().unwrap().iter().map(|item| item["kind"].as_str().unwrap().to_owned()).collect();
-        assert_eq!(kinds.iter().filter(|kind| *kind == "stage_delivered").count(), 2, "{kinds:?}");
+            normalize(&mut shared, &real);
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/team-stage-delivery.json");
+            if std::env::var("ZERUS_WRITE_FIXTURES").as_deref() == Ok("1") {
+                std::fs::write(&path, serde_json::to_string_pretty(&shared).unwrap() + "\n").unwrap();
+            }
+            let qa = shared["members"].as_array().unwrap().iter().find(|member| member["id"] == "qa").unwrap();
+            assert_eq!(qa["stage_queue"][0], json!({"task":1,"stage":"test","round":1,"state":"delivered","since":1800000000.0}));
+            let run = &shared["tasks"][0]["pipeline_run"]["runs"][1];
+            assert_eq!((run["kind"].as_str(), run["state"].as_str(), run["folder"].as_str(), run["holds"].as_bool()),
+                (Some("test"), Some("delivered"), Some("/srv/example/proj"), Some(true)), "{run}");
+            let stored: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(shared, stored, "the fixture is what status writes; rewrite it with ZERUS_WRITE_FIXTURES=1");
+        });
     }
 
     #[test]

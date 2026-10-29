@@ -187,6 +187,83 @@ QList<int> memberQueue(const Team &team, const QString &member)
     return open + returned;
 }
 
+const StageRun *PipelineRun::openRun() const
+{
+    return !runs.isEmpty() && runs.last().open() ? &runs.last() : nullptr;
+}
+
+int PipelineRun::returned() const
+{
+    return int(std::count_if(runs.cbegin(), runs.cend(), [](const StageRun &run) { return run.state == QLatin1String("returned"); }));
+}
+
+QString implementerOf(const Task &task, const StageRun &run)
+{
+    for (const auto &attempt : task.attempts) if (attempt.n == run.attempt && !attempt.member.isEmpty()) return attempt.member;
+    return task.assignee;
+}
+
+int folderHeldBy(const Team &team, const QString &member)
+{
+    // As hgs's stages::held: a test waiting for its member holds the folder
+    // under the hold rule; a delivered one when its hand-off said so (#532),
+    // or under the hold rule when hgs sent no folder for it yet.
+    for (const auto &task : team.tasks) {
+        const auto *run = task.pipelineRun.openRun();
+        if (!run || run->kind != "test") continue;
+        const bool hold = task.pipelineRun.folder != "checkout";
+        const bool holds = run->state == "waiting" ? hold : (run->holds || (hold && run->folder.isEmpty()));
+        if (holds && implementerOf(task, *run) == member) return task.id;
+    }
+    return 0;
+}
+
+QList<Member::StageEntry> stageQueue(const Team &team, const QString &member)
+{
+    if (const auto *m = team.member(member); m && m->stageQueueKnown) return m->stageQueue;
+    // An hgs without #532's queue: the stage it has, then the waiting stages
+    // it may take, oldest first.
+    QList<Member::StageEntry> current, waiting;
+    QList<std::pair<double, Member::StageEntry>> order;
+    for (const auto &task : team.tasks) {
+        const auto *run = task.pipelineRun.openRun();
+        if (!run || !task.inStage()) continue;
+        const Member::StageEntry entry{task.id, run->round, run->kind, run->state, run->deliveredAt > 0 ? run->deliveredAt : run->at};
+        if (run->state == "delivered" && run->member == member) current.append(entry);
+        else if (run->state == "waiting" && task.stageCandidates.contains(member)) order.append({run->at, entry});
+    }
+    std::stable_sort(order.begin(), order.end(), [](const auto &a, const auto &b) { return a.first < b.first || (a.first == b.first && a.second.task < b.second.task); });
+    for (const auto &[at, entry] : order) waiting.append(entry);
+    return current + waiting;
+}
+
+int stageQueuePlace(const Team &team, int task)
+{
+    const auto *mine = team.task(task);
+    const auto *own = mine ? mine->pipelineRun.openRun() : nullptr;
+    if (!own || own->state != "waiting") return 0;
+    int place = 1;
+    for (const auto &other : team.tasks) {
+        const auto *run = other.inStage() ? other.pipelineRun.openRun() : nullptr;
+        if (!run || other.id == task || run->state != "waiting" || run->kind != own->kind) continue;
+        if (run->at < own->at || (run->at == own->at && other.id < task)) ++place;
+    }
+    return place;
+}
+
+QString stageName(const QString &kind)
+{
+    if (kind == "review") return tr("Review");
+    if (kind == "test") return tr("Test");
+    if (kind == "command") return tr("Command");
+    if (kind == "land") return tr("Land");
+    if (kind == "implement") return tr("Implement");
+    if (kind == "auto") return tr("Auto");
+    if (kind == "sub_lead") return tr("Sub-lead");
+    if (kind == "lead") return tr("Lead");
+    return kind.isEmpty() ? QString() : kind.left(1).toUpper() + kind.mid(1);
+}
+
 QString attemptPhase(const Task &task, const Attempt &attempt)
 {
     // hgs derives the phase and sends null on purpose when the task or the
@@ -329,6 +406,14 @@ Team parse(const QJsonObject &v)
                 if (id > 0) member.queue.append(id);
             }
         }
+        // U36 (#532): the stage it has, then the waiting stages it may take.
+        if (m.value("stage_queue").isArray()) {
+            member.stageQueueKnown = true;
+            for (const auto &item : m.value("stage_queue").toArray()) {
+                const auto e = item.toObject();
+                member.stageQueue.append({e.value("task").toInt(), e.value("round").toInt(), str(e, "stage"), str(e, "state"), e.value("since").toDouble()});
+            }
+        }
         // G7: the services the member's session runs (MCP servers and the like).
         for (const auto &value : m.value("services").toArray()) {
             const auto service = value.toObject();
@@ -453,6 +538,32 @@ Team parse(const QJsonObject &v)
                 const auto s = v.toObject();
                 timing.attempts.append({s.value("n").toInt(), str(s, "member"), str(s, "state"), s.value("from").toDouble(), s.value("to").toDouble(),
                                         qint64(s.value("worked_s").toDouble()), qint64(s.value("member_s").toDouble()), qint64(s.value("lead_s").toDouble())});
+            }
+        }
+        // U36: the pipeline chosen in the plan and its snapshot.
+        task.pipeline = str(t, "pipeline");
+        for (const auto &value : t.value("stage_candidates").toArray()) task.stageCandidates.append(value.toString());
+        if (t.value("pipeline_run").isObject()) {
+            const auto o = t.value("pipeline_run").toObject();
+            auto &run = task.pipelineRun;
+            run.known = true;
+            run.id = str(o, "id"); run.name = str(o, "name"); run.folder = str(o, "folder"); run.accept = str(o, "accept");
+            run.maxRounds = o.value("max_rounds").toInt(); run.round = o.value("round").toInt();
+            for (const auto &v : o.value("stages").toArray()) {
+                const auto st = v.toObject();
+                run.stages.append({str(st, "kind"), str(st, "role"), str(st, "member")});
+            }
+            for (const auto &v : o.value("runs").toArray()) {
+                const auto r = v.toObject();
+                StageRun stage;
+                stage.id = str(r, "id"); stage.kind = str(r, "kind"); stage.member = str(r, "member"); stage.state = str(r, "state");
+                stage.by = str(r, "by"); stage.text = str(r, "text"); stage.folder = str(r, "folder"); stage.checkout = str(r, "checkout");
+                stage.stage = r.value("stage").toInt(); stage.round = r.value("round").toInt(); stage.attempt = r.value("attempt").toInt();
+                stage.at = r.value("at").toDouble(); stage.deliveredAt = r.value("delivered_at").toDouble(); stage.endedAt = r.value("ended_at").toDouble();
+                for (const auto &f : r.value("findings").toArray()) stage.findings.append(f.toString());
+                stage.holds = r.value("holds").toBool();
+                stage.changed = r.value("changed").toArray();
+                run.runs.append(stage);
             }
         }
         // G1: the sub-team this task delegated to, with its rolled-up counts.
@@ -846,6 +957,8 @@ QJsonObject Task::json() const
     // U45: only a task that names them; a plan without them is as before.
     if (!models.isEmpty()) value.insert("models", QJsonArray::fromStringList(models));
     if (!role.isEmpty()) value.insert("role", role);
+    // U36: the plan's pipeline choice; a plan without it keeps the default.
+    if (!pipeline.isEmpty()) value.insert("pipeline", pipeline);
     return value;
 }
 
@@ -897,7 +1010,7 @@ bool ready(const Team &team, const Task &task)
         const auto *d = team.task(dep.task);
         if (!d) return false;
         const bool soft = dep.soft && !team.allHard;
-        const bool ok = d->status == "accepted" || (soft && (d->status == "in_progress" || d->status == "submitted"));
+        const bool ok = d->status == "accepted" || (soft && (d->status == "in_progress" || d->status == "submitted" || d->inStage()));
         if (!ok) return false;
     }
     return true;
@@ -936,6 +1049,19 @@ Status memberStatus(const Team &team, const Member &member, const Live &live)
         return make("sent", tr("Sending #%1 %2").arg(current->id).arg(current->title), QStringLiteral("Sending"), Tone::Assigned, current->id);
     if (attempt)
         return make("working", tr("Working on #%1 %2").arg(current->id).arg(current->title), QStringLiteral("#%1").arg(current->id), Tone::Active, current->id);
+    // U36: a stage it was given: "Reviewing #3 Card form UI · round 1".
+    for (const auto &task : team.tasks) {
+        const auto *run = task.inStage() ? task.pipelineRun.openRun() : nullptr;
+        if (!run || run->state != "delivered" || run->member != member.id) continue;
+        const QString what = run->kind == "test" ? tr("Testing #%1 %2 · round %3") : tr("Reviewing #%1 %2 · round %3");
+        return make(run->kind == "test" ? "stage_test" : "stage_review", what.arg(task.id).arg(task.title).arg(run->round),
+                    QStringLiteral("#%1").arg(task.id), Tone::Active, task.id);
+    }
+    // U36: its folder is held by the test of one of its tasks; its next task waits.
+    if (const int held = folderHeldBy(team, member.id); held && (team.status == "running" || team.status == "paused"))
+        for (const auto &task : team.tasks)
+            if (task.assignee == member.id && task.status == "pending" && !task.held && task.id != held)
+                return make("folder_held", tr("Waits: its folder is held by the test of #%1").arg(held), tr("Folder held"), Tone::Warn, task.id);
     // Spec 5.6: a sub-lead reviews its reports' work, or coordinates them.
     if (member.sub && (team.status == "running" || team.status == "paused")) {
         for (const auto &task : team.tasks)
@@ -945,6 +1071,11 @@ Status memberStatus(const Team &team, const Member &member, const Live &live)
     for (const auto &task : team.tasks)
         if (task.status == "submitted" && task.last() && task.last()->member == member.id)
             return make("submitted", tr("Submitted"), tr("Submitted"), Tone::Done, task.id);
+    // U36: its report is in a stage.
+    for (const auto &task : team.tasks)
+        if (task.inStage() && task.last() && task.last()->member == member.id)
+            return make(task.status, task.status == "in_test" ? tr("In test") : tr("In review"),
+                        task.status == "in_test" ? tr("In test") : tr("In review"), Tone::Done, task.id);
     if (member.sub && (team.status == "running" || team.status == "paused")) {
         const qsizetype n = team.reportsOf(member.id).size();
         const QString text = n == 1 ? tr("Coordinating 1 report") : tr("Coordinating %1 reports").arg(n);
@@ -973,6 +1104,9 @@ Status taskStatus(const Task &task)
     else if (task.status == "assigned") { s.text = tr("Assigned"); s.tone = Tone::Assigned; }
     else if (task.status == "in_progress") { s.text = tr("In progress"); s.tone = Tone::Active; }
     else if (task.status == "submitted") { s.text = tr("Submitted"); s.tone = Tone::Done; }
+    // U36: the stages between the report and the lead.
+    else if (task.status == "in_review") { s.text = tr("In review"); s.tone = Tone::Active; }
+    else if (task.status == "in_test") { s.text = tr("In test"); s.tone = Tone::Active; }
     else if (task.status == "accepted") { s.text = tr("Accepted"); s.tone = Tone::Done; }
     else if (task.status == "rejected") { s.text = tr("Rejected"); s.tone = Tone::Danger; }
     else if (task.status == "cancelled") { s.text = tr("Cancelled"); s.tone = Tone::Dim; }
@@ -1009,6 +1143,7 @@ QString displayStatus(const Team &team, const LiveLookup &live)
         if (!scope.isEmpty() && !scope.contains(task.id)) continue;
         open = true;
         if (task.status == "submitted") return team.status;   // the lead decides
+        if (task.inStage()) return team.status;               // U36: a stage works on it
         const Member *assignee = team.member(task.assignee);
         const Live state = assignee && live ? live(*assignee) : Live{};
         const auto *attempt = openOf(task);
@@ -1502,7 +1637,37 @@ FeedLine feedLine(const Team &team, const QJsonObject &event)
     else if (k == "released") t = tr("Released %1%2").arg(ref, attempt);
     else if (k == "member_adopted") t = tr("Adopted the existing session · %1").arg(d.value("session").toString());
     else if (k == "stale_report") { t = tr("Late report refused · %1%2").arg(ref, attempt); line.tone = Tone::Warn; }
-    else if (k == "accepted") { t = tr("Accepted %1").arg(ref); line.tone = Tone::Done; }
+    // U36: the pipeline's stages and the overrides, each with who and why.
+    else if (k == "stage_started") {
+        const QString who = d.value("who").toString();
+        const int rounds = d.value("max_rounds").toInt() > 0 ? d.value("max_rounds").toInt() : 3;
+        t = tr("%1 round %2 of %3 started · %4").arg(stageName(d.value("stage").toString())).arg(d.value("round").toInt()).arg(rounds).arg(ref);
+        if (!who.isEmpty()) t += QStringLiteral(" · ") + who;
+    }
+    else if (k == "stage_passed") { t = tr("%1 passed %2 · round %3").arg(stageName(d.value("stage").toString()), ref).arg(d.value("round").toInt()); line.tone = Tone::Done; }
+    else if (k == "stage_returned") {
+        const int n = int(d.value("findings").toArray().size());
+        t = tr("%1 returned %2 · round %3").arg(stageName(d.value("stage").toString()), ref).arg(d.value("round").toInt())
+            + QStringLiteral(" · ") + (n == 1 ? tr("1 finding") : tr("%1 findings").arg(n));
+        line.tone = Tone::Warn;
+    }
+    else if (k == "round_limit") { t = tr("Out of rounds · %1 goes to the lead after %2 returns").arg(ref).arg(d.value("rounds").toInt()); line.tone = Tone::Warn; }
+    else if (k == "stages_passed") t = tr("Every stage passed · %1 waits for %2").arg(ref, d.value("to").toString(tr("Lead")));
+    else if (k == "stage_skipped") {
+        t = tr("Skipped %1 on %2 at round %3: “%4”").arg(stageName(d.value("stage").toString()), ref).arg(d.value("round").toInt()).arg(d.value("reason").toString());
+        line.tone = Tone::Muted;
+    }
+    else if (k == "sent_back") {
+        const QString stage = d.value("stage").toString();
+        t = stage.isEmpty() ? tr("Sent %1 back: “%2”").arg(ref, d.value("reason").toString())
+                            : tr("Sent %1 back from %2: “%3”").arg(ref, stageName(stage), d.value("reason").toString());
+        line.tone = Tone::Warn;
+    }
+    else if (k == "accepted") {
+        const QString reason = d.value("reason").toString();
+        t = line.by == "Pipeline" || reason.isEmpty() ? tr("Accepted %1").arg(ref) : tr("Accepted %1: “%2”").arg(ref, reason);
+        line.tone = Tone::Done;
+    }
     else if (k == "rejected") { t = tr("Rejected %1%2: “%3”").arg(ref, attempt, d.value("reason").toString()); line.tone = Tone::Danger; }
     else if (k == "reassigned") t = tr("Reassigned %1 to %2").arg(ref, d.value("to").toString());
     else if (k == "retried") t = tr("Retried %1").arg(ref);
@@ -1549,6 +1714,7 @@ Role parseRole(const QJsonObject &v)
     r.danger = v.value("danger").toObject();
     r.models = parseModelChoices(v.value("models"));
     r.contextBeforeTask = str(v, "context_before_task");
+    r.pipeline = str(v, "pipeline");
     const auto notes = v.value("notes").toObject();
     for (auto it = notes.begin(); it != notes.end(); ++it) r.notes.insert(it.key(), it.value().toString());
     r.raw = v;
@@ -1590,6 +1756,8 @@ QJsonObject Role::json() const
     // U45/U46: written only when set or when the role came with them.
     put("models", modelChoicesJson(models), models.isEmpty());
     put("context_before_task", contextBeforeTask, contextBeforeTask.isEmpty());
+    // U36: the server skips an empty pipeline; an older catalog gains none.
+    if (pipeline.isEmpty()) o.remove("pipeline"); else o.insert("pipeline", pipeline);
     return o;
 }
 
@@ -1620,7 +1788,7 @@ Template parseTemplate(const QJsonObject &v)
     t.id = str(v, "id"); t.name = str(v, "name"); t.description = str(v, "description"); t.leadProtocol = str(v, "lead_protocol");
     t.planning = str(v, "planning"); t.approval = str(v, "approval"); t.phaseApproval = str(v, "phase_approval");
     t.maxMembers = v.value("max_members").toInt(6);
-    t.work = str(v, "work"); t.phases = str(v, "phases");
+    t.work = str(v, "work"); t.phases = str(v, "phases"); t.pipeline = str(v, "pipeline");
     for (const auto &seat : v.value("roster").toArray()) {
         const auto o = seat.toObject();
         t.roster.append({str(o, "role"), o.value("count").toInt(1), o.value("optional").toBool(), o});
@@ -1648,6 +1816,65 @@ QJsonObject Template::json() const
             {"max_members", maxMembers}});
     if (!work.isEmpty() || raw.contains("work")) o.insert("work", work);
     if (!phases.isEmpty() || raw.contains("phases")) o.insert("phases", phases);
+    if (pipeline.isEmpty()) o.remove("pipeline"); else o.insert("pipeline", pipeline);
+    return o;
+}
+
+PipelineStage parsePipelineStage(const QJsonObject &v)
+{
+    PipelineStage s;
+    s.kind = str(v, "kind"); s.role = str(v, "role"); s.member = str(v, "member");
+    // U47: {command, expect_exit (0), timeout_minutes (30)}, as model.rs Check reads it.
+    if (const auto command = v.value("command").toObject(); v.value("command").isObject()) {
+        s.hasCommand = true;
+        s.command = str(command, "command");
+        s.expectExit = command.value("expect_exit").toInt(0);
+        s.timeoutMinutes = command.value("timeout_minutes").toInt(30);
+    }
+    const auto exits = v.value("exits").toObject();
+    for (auto it = exits.begin(); it != exits.end(); ++it) s.exits.insert(it.key(), it.value().toString());
+    s.raw = v;
+    return s;
+}
+
+// A review or test stage names a role or a member and nothing to run; a
+// command or land stage only its command (catalog.rs validate).
+QJsonObject PipelineStage::json() const
+{
+    auto o = over(raw, {{"kind", kind}});
+    for (const auto &key : {"role", "member", "command", "exits"}) o.remove(QLatin1String(key));
+    if (runByZerus()) {
+        auto check = raw.value("command").toObject();
+        check.insert("command", command); check.insert("expect_exit", expectExit); check.insert("timeout_minutes", timeoutMinutes);
+        o.insert("command", check);
+        if (kind == QLatin1String("land") && !exits.isEmpty()) {
+            QJsonObject codes; for (auto it = exits.cbegin(); it != exits.cend(); ++it) codes.insert(it.key(), it.value());
+            o.insert("exits", codes);
+        }
+    } else if (!member.isEmpty()) o.insert("member", member);
+    else o.insert("role", role);
+    return o;
+}
+
+Pipeline parsePipeline(const QJsonObject &v)
+{
+    Pipeline p;
+    p.id = str(v, "id"); p.name = str(v, "name");
+    for (const auto &stage : v.value("stages").toArray()) p.stages.append(parsePipelineStage(stage.toObject()));
+    p.maxRounds = v.value("max_rounds").toInt(0);
+    p.folder = str(v, "folder"); p.accept = str(v, "accept");
+    p.raw = v;
+    return p;
+}
+
+// Skipped when empty, as the server writes a preset.
+QJsonObject Pipeline::json() const
+{
+    QJsonArray list; for (const auto &stage : stages) list.append(stage.json());
+    auto o = over(raw, {{"id", id}, {"name", name}, {"stages", list}});
+    const auto put = [&o](const char *key, const QJsonValue &value, bool empty) { if (empty) o.remove(QLatin1String(key)); else o.insert(QLatin1String(key), value); };
+    put("max_rounds", maxRounds, maxRounds <= 0);
+    put("folder", folder, folder.isEmpty()); put("accept", accept, accept.isEmpty());
     return o;
 }
 
@@ -1689,6 +1916,12 @@ const Template *Catalog::templ(const QString &id) const
     return nullptr;
 }
 
+const Pipeline *Catalog::pipeline(const QString &id) const
+{
+    for (const auto &p : pipelines) if (p.id == id) return &p;
+    return nullptr;
+}
+
 QJsonObject Catalog::json() const
 {
     QJsonArray r, t, u;
@@ -1698,6 +1931,12 @@ QJsonObject Catalog::json() const
     QJsonObject out{{"version", version}, {"roles", r}, {"templates", t}, {"routing", u}};
     // U28: a save keeps the rules; leaving them out would reset them.
     if (planningRulesKnown) out.insert("planning_rules", planningRules);
+    // U36: the presets go back whole; a catalog that came without them gains
+    // the field only once one is added.
+    if (pipelinesKnown || !pipelines.isEmpty()) {
+        QJsonArray p; for (const auto &x : pipelines) p.append(x.json());
+        out.insert("pipelines", p);
+    }
     return out;
 }
 
@@ -1736,6 +1975,8 @@ Catalog parseCatalog(const QJsonObject &get)
     for (const auto &v : catalog.value("routing").toArray()) c.routing.append(parseRule(v.toObject()));
     c.planningRulesKnown = catalog.value("planning_rules").isString();
     c.planningRules = catalog.value("planning_rules").toString();
+    c.pipelinesKnown = catalog.value("pipelines").isArray();
+    for (const auto &v : catalog.value("pipelines").toArray()) c.pipelines.append(parsePipeline(v.toObject()));
     const auto draft = get.value("draft").toObject();
     c.draftBase = draft.value("base").toInteger();
     for (const auto &v : draft.value("proposals").toArray()) {
@@ -1763,6 +2004,7 @@ Catalog withProposals(const Catalog &catalog, bool includeUndecided)
         if (p.kind == "role") apply(c.roles, parseRole(p.value));
         else if (p.kind == "template") apply(c.templates, parseTemplate(p.value));
         else if (p.kind == "rule") apply(c.routing, parseRule(p.value));
+        else if (p.kind == "pipeline") apply(c.pipelines, parsePipeline(p.value));
         else if (p.kind == "planning_rules" && !remove) { c.planningRules = p.text; c.planningRulesKnown = true; }
     }
     return c;

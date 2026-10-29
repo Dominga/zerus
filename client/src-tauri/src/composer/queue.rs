@@ -12,6 +12,9 @@ use zerus_client_core::{Action, Outcome, Target};
 use super::send::{outcome_of, SendReply};
 use super::{ComposerEvent, Composers, Hub, SessionRef};
 
+#[cfg(test)]
+type BeforeSend = Box<dyn FnOnce(&mut Hub) + Send>;
+
 #[derive(Default)]
 pub(crate) struct Queue {
     pub(crate) pusher: Pusher,
@@ -21,7 +24,7 @@ pub(crate) struct Queue {
     #[cfg(test)]
     after_release: Option<super::Job>,
     #[cfg(test)]
-    before_send: Option<Box<dyn FnOnce(&mut Hub) + Send>>,
+    before_send: Option<BeforeSend>,
 }
 
 /// Captured under the hub lock, so a selection change cannot redirect a push

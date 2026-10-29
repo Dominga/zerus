@@ -518,6 +518,9 @@ impl Composers {
             hub.open = None;
             hub.open_key = None;
             hub.followed = Followed::default();
+            // Qt clears the details with the selection (SessionsWindow.cpp:451):
+            // the card shown on a later selection is built again.
+            hub.answers.deselect();
             drop(hub);
             self.changed();
             return None;

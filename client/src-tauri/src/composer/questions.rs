@@ -61,6 +61,13 @@ pub(crate) struct Answers {
     pub(crate) loading: HashSet<String>,
     /// The newest save per key (`m_saveRevision`): an older save's answer is ignored.
     saves: HashMap<String, u64>,
+    /// Keys whose newest save has not answered yet: never evicted, so an edit
+    /// whose save then fails is still here to be saved again.
+    unsaved: HashSet<String>,
+    /// The ticket of each key's load under way: only that load's answer
+    /// counts, so a read an older ensure started never replaces a newer one.
+    loads: HashMap<String, u64>,
+    next_load: u64,
     /// Keys whose last save failed (`m_failedSaves`).
     failed: HashSet<String>,
     /// The chosen optional card per (session, run, conversation) (`m_questionSelections`).
@@ -91,6 +98,11 @@ impl Answers {
                 self.choices.pop_front();
             }
         }
+    }
+
+    /// The selection changed: the card shown next is built again.
+    pub(crate) fn deselect(&mut self) {
+        self.shown = None;
     }
 
     /// The card is built again: the review restarts and the fields reset.
@@ -186,21 +198,36 @@ impl Composers {
             self.context(&hub).and_then(|ctx| ctx.details)
         };
         let asked: Vec<_> = listed
-            .map(|details| rules::pending(&details))
+            .as_deref()
+            .map(rules::pending)
             .unwrap_or_default()
             .iter()
             .map(|q| (q.created_at.to_bits(), asked(q.created_at)))
             .collect();
         let mut hub = self.lock();
-        hub.answers.asked = asked;
+        // Only the details the times were formatted from: newer ones format
+        // their own on the sync they set off.
+        let current = self.context(&hub).and_then(|ctx| ctx.details);
+        if let (Some(listed), Some(current)) = (&listed, &current) {
+            if std::sync::Arc::ptr_eq(listed, current) {
+                hub.answers.asked = asked;
+            }
+        }
         let Some(ctx) = self.context(&hub) else {
             hub.answers.shown = None;
             return;
         };
         let Some(details) = ctx.details.clone() else {
+            // Qt clears its details on a selection change (SessionsWindow.cpp:451),
+            // so the card shown next is a new one for setQuestion.
+            hub.answers.shown = None;
             return;
         };
         let label = rules::label(&ctx.key);
+        let listed: HashSet<String> = rules::pending(&details)
+            .iter()
+            .filter_map(|q| rules::store_key(&ctx.key, q))
+            .collect();
         let mut restored = HashSet::new();
         for q in rules::pending(&details)
             .into_iter()
@@ -259,6 +286,7 @@ impl Composers {
             hub.answers.epoch += 1;
         }
         hub.answers.shown = Some((key, question));
+        Self::trim_answers(&mut hub, &listed);
         drop(hub);
         self.changed();
     }
@@ -267,7 +295,8 @@ impl Composers {
     fn ensure_answer(&self, hub: &mut Hub, key: &str, label: &str) {
         hub.answers.order.retain(|k| k != key);
         hub.answers.order.push_back(key.to_owned());
-        if hub.answers.drafts.contains_key(key) {
+        // The app quits: the store takes no more work (`exit`, lib.rs).
+        if hub.closed || hub.answers.drafts.contains_key(key) {
             return;
         }
         hub.answers.drafts.insert(
@@ -278,25 +307,27 @@ impl Composers {
             },
         );
         hub.answers.loading.insert(key.to_owned());
-        let save = hub.answers.saves.get(key).copied().unwrap_or(0);
-        self.trim_answers(hub);
+        hub.answers.next_load += 1;
+        let ticket = hub.answers.next_load;
+        hub.answers.loads.insert(key.to_owned(), ticket);
         let me = self.clone();
         let (owned, label) = (key.to_owned(), label.to_owned());
         self.0.store.load(key, move |loaded| {
-            me.answer_loaded(&owned, save, &label, &loaded)
+            me.answer_loaded(&owned, ticket, &label, &loaded)
         });
     }
 
     /// The draft loaded: the shown card takes its answers. Qt rebuilds the
     /// form without restarting the review (289-301), so only the epoch moves.
-    fn answer_loaded(&self, key: &str, save: u64, label: &str, loaded: &Loaded) {
+    fn answer_loaded(&self, key: &str, ticket: u64, label: &str, loaded: &Loaded) {
         let mut hub = self.lock();
-        if !hub.answers.loading.contains(key)
-            || hub.answers.saves.get(key).copied().unwrap_or(0) != save
-        {
+        // A load whose mark a restore cleared, or that a later ensure of the
+        // same key replaced, read an older store: it counts for nothing.
+        if !hub.answers.loading.contains(key) || hub.answers.loads.get(key) != Some(&ticket) {
             return;
         }
         hub.answers.loading.remove(key);
+        hub.answers.loads.remove(key);
         hub.answers
             .drafts
             .insert(key.to_owned(), AnswerDraft::from_loaded(loaded, label));
@@ -312,17 +343,20 @@ impl Composers {
         self.sync_questions();
     }
 
-    /// Keeps at most `HELD` drafts, never the shown one, one loading, one
-    /// sending or one whose save failed.
-    fn trim_answers(&self, hub: &mut Hub) {
+    /// Keeps at most `HELD` drafts, never one the open session lists now,
+    /// the shown one, one loading, one sending, one whose save has not
+    /// answered yet or one whose save failed (Task 3a's composer trim).
+    fn trim_answers(hub: &mut Hub, listed: &HashSet<String>) {
         let shown = hub.answers.shown.as_ref().map(|(key, _)| key.clone());
         let answers = &mut hub.answers;
         let mut i = 0;
         while answers.drafts.len() > HELD && i < answers.order.len() {
             let key = answers.order[i].clone();
-            let keep = shown.as_deref() == Some(key.as_str())
+            let keep = listed.contains(&key)
+                || shown.as_deref() == Some(key.as_str())
                 || answers.loading.contains(&key)
                 || answers.failed.contains(&key)
+                || answers.unsaved.contains(&key)
                 || answers.drafts.get(&key).is_some_and(|d| d.sending);
             if keep {
                 i += 1;
@@ -350,7 +384,7 @@ impl Composers {
             }
             false
         };
-        if hub.answers.loading.contains(key) {
+        if hub.closed || hub.answers.loading.contains(key) {
             return refuse(done);
         }
         let Some(draft) = hub.answers.drafts.get(key) else {
@@ -365,6 +399,7 @@ impl Composers {
             *n += 1;
             *n
         };
+        hub.answers.unsaved.insert(key.to_owned());
         let me = self.clone();
         let owned = key.to_owned();
         let finished =
@@ -379,6 +414,9 @@ impl Composers {
 
     fn answer_saved(&self, key: &str, save: u64, result: Result<(), String>, done: Option<Done>) {
         let mut hub = self.lock();
+        if hub.answers.saves.get(key) == Some(&save) {
+            hub.answers.unsaved.remove(key);
+        }
         if hub.answers.saves.get(key) != Some(&save) || !hub.answers.drafts.contains_key(key) {
             drop(hub);
             if let Some(done) = done {
@@ -406,7 +444,8 @@ impl Composers {
     pub(crate) fn retry_answer_saves(&self) {
         let now = self.now();
         let mut hub = self.lock();
-        if hub.answers.failed.is_empty() || now - hub.answers.last_retry < RETRY_SAVE {
+        if hub.closed || hub.answers.failed.is_empty() || now - hub.answers.last_retry < RETRY_SAVE
+        {
             return;
         }
         hub.answers.last_retry = now;
@@ -536,7 +575,8 @@ impl Composers {
     /// Allow retry on the card (256-259), after the user checked Terminal.
     pub fn question_allow_retry(&self, card: &str) {
         let mut hub = self.lock();
-        if hub.closed {
+        // Qt's Allow retry acts on the shown card (`m_key`, 256-259).
+        if hub.closed || self.shown_question(&hub, card).is_none() {
             return;
         }
         let Some(draft) = hub.answers.drafts.get_mut(card) else {
@@ -572,10 +612,13 @@ pub fn question_allow_retry(state: tauri::State<'_, Composers>, card: String) {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::composer::send::tests::{opened, ready, send_hub, send_hub_on, state};
+    use crate::composer::send::tests::{
+        opened, other_session, ready, send_hub, send_hub_on, state,
+    };
     use crate::composer::tests::{dir, drafts, hold, session, until};
     use crate::composer::{lock, ComposerView};
     use serde_json::json;
+    use std::sync::Arc;
     use zerus_client_core::drafts::{read_draft, DraftStore, StoredDraft};
 
     pub(crate) const HASH: &str =
@@ -623,13 +666,37 @@ pub(crate) mod tests {
 
     /// An answer draft with `option` chosen, saved before the hub opens it.
     fn saved_choice(store: &DraftStore, option: &str) {
+        saved_choice_for(store, "tool:t1", option);
+    }
+
+    fn saved_choice_for(store: &DraftStore, id: &str, option: &str) {
         let mut stored = StoredDraft::default();
         stored.form_state.insert(
             "answers".into(),
             json!([{"id": "q_0", "text": "", "other": false, "options": [option]}]),
         );
-        store.save_durable(&store_key("tool:t1"), stored, |_| {});
+        store.save_durable(&store_key(id), stored, |_| {});
         store.flush();
+    }
+
+    /// An optional Codex card, asked at `at`.
+    fn optional_card(id: &str, at: f64) -> Value {
+        let mut card = card_json(id);
+        card["source"] = json!("codex_async");
+        card["optional"] = json!(true);
+        card["can_skip"] = json!(true);
+        card["created_at"] = json!(at);
+        card
+    }
+
+    /// The answer Codex recorded for `id`: UI chosen.
+    fn delivered(id: &str) -> Value {
+        json!({"status": "submitted", "question_id": id, "question_hash": HASH, "run_id": "run-1",
+               "conversation_id": "conv-1", "answers": [{"question_id": "q_0", "selected_option_ids": ["opt_0_1"], "text": ""}]})
+    }
+
+    fn loaded_all(c: &Composers) {
+        until(c, |_| c.lock().answers.loading.is_empty());
     }
 
     #[test]
@@ -999,6 +1066,340 @@ pub(crate) mod tests {
         assert_eq!(
             view.session_status,
             "Could not load agent questions: timed out. Check Terminal."
+        );
+    }
+
+    // Review round 1 of A2-1.
+
+    #[test]
+    fn a_failed_save_is_tried_again_every_two_seconds() {
+        let root = dir("q-retry-save");
+        let blocker = root.join("blocked");
+        std::fs::write(&blocker, "a file where the store's folder belongs").unwrap();
+        let store = Arc::new(DraftStore::open(blocker.join("drafts")));
+        let (c, fake) = send_hub_on(&store);
+        opened(&c, asking(vec![card_json("tool:t1")]));
+        let (card, epoch) = shown(&c);
+        c.question_edit(
+            &card,
+            epoch,
+            Edit::Option {
+                item: "q_0".into(),
+                option: "opt_0_0".into(),
+                checked: true,
+            },
+        );
+        let q = until(&c, |v| {
+            v.question
+                .as_ref()
+                .is_some_and(|q| q.view.status.starts_with("Draft not saved"))
+        })
+        .question
+        .unwrap();
+        assert!(q.view.status_error);
+        // The 2 s timer fires while the store still fails.
+        *lock(&fake.now) += 2.0;
+        c.tick();
+        store.flush();
+        assert!(c.lock().answers.failed.contains(&card));
+        std::fs::remove_file(&blocker).unwrap();
+        // Nothing is tried within the next 2 s (Qt's timer, 261-265).
+        *lock(&fake.now) += 1.0;
+        c.tick();
+        store.flush();
+        assert!(c.lock().answers.failed.contains(&card), "not before 2 s");
+        *lock(&fake.now) += 1.0;
+        c.tick();
+        until(&c, |v| {
+            v.question.as_ref().is_some_and(|q| !q.view.status_error)
+        });
+        store.flush();
+        assert_eq!(
+            read_draft(&blocker.join("drafts"), &card).draft.form_state["answers"][0]["options"],
+            json!(["opt_0_0"])
+        );
+    }
+
+    #[test]
+    fn past_64_drafts_the_oldest_go_but_no_listed_shown_loading_failed_or_unsaved_one() {
+        let root = dir("q-evict");
+        let (c, _) = send_hub(&root);
+        let mut details = ready();
+        details["pending_questions"] = json!((0..70)
+            .map(|i| optional_card(&format!("codex:{i}"), f64::from(i)))
+            .collect::<Vec<_>>());
+        opened(&c, details);
+        with_card(&c);
+        loaded_all(&c);
+        assert_eq!(
+            c.lock().answers.drafts.len(),
+            70,
+            "every card the session lists keeps its draft"
+        );
+        {
+            let mut hub = c.lock();
+            hub.answers.failed.insert(store_key("codex:1"));
+            hub.answers.loading.insert(store_key("codex:2"));
+            hub.answers.unsaved.insert(store_key("codex:3"));
+        }
+        c.observe(&state(asking(vec![card_json("tool:t1")])));
+        until(&c, |v| {
+            v.question
+                .as_ref()
+                .is_some_and(|q| q.card == store_key("tool:t1"))
+        });
+        let hub = c.lock();
+        assert_eq!(hub.answers.drafts.len(), HELD);
+        for kept in ["codex:1", "codex:2", "codex:3", "tool:t1"] {
+            assert!(hub.answers.drafts.contains_key(&store_key(kept)), "{kept}");
+        }
+        assert!(
+            !hub.answers.drafts.contains_key(&store_key("codex:0")),
+            "the oldest goes first"
+        );
+    }
+
+    #[test]
+    fn at_most_64_choices_are_remembered() {
+        let mut answers = Answers::default();
+        for i in 0..65 {
+            answers.remember(format!("scope-{i}"), Some(format!("codex:{i}")));
+        }
+        assert_eq!(answers.choices.len(), CHOICES);
+        assert_eq!(answers.choice("scope-0"), None, "the oldest goes first");
+        assert_eq!(answers.choice("scope-64"), Some("codex:64"));
+        answers.remember("scope-64".into(), None);
+        assert_eq!(answers.choice("scope-64"), None);
+    }
+
+    #[test]
+    fn a_submitted_codex_answer_is_skipped_and_saved_as_submitted() {
+        let root = dir("q-submitted");
+        let store = drafts(&root);
+        let (c, _) = send_hub_on(&store);
+        let mut done = optional_card("codex:done", 20.0);
+        done["answer_delivery"] = delivered("codex:done");
+        let mut details = ready();
+        details["pending_questions"] = json!([done, optional_card("codex:open", 10.0)]);
+        opened(&c, details);
+        let q = with_card(&c).question.unwrap();
+        assert_eq!(
+            q.card,
+            store_key("codex:open"),
+            "an answer Codex recorded is not offered again"
+        );
+        store.flush();
+        let saved = read_draft(&root.join("drafts"), &store_key("codex:done"));
+        assert_eq!(saved.draft.form_state["submitted"], json!(true));
+        assert_eq!(
+            saved.draft.form_state["answers"],
+            json!([{"id": "q_0", "text": "", "other": false, "options": ["opt_0_1"]}])
+        );
+    }
+
+    #[test]
+    fn an_opencode_default_is_seeded_but_not_saved() {
+        let root = dir("q-seed");
+        let store = drafts(&root);
+        let release = hold(&store);
+        let (c, _) = send_hub_on(&store);
+        let mut card = card_json("opencode:q1");
+        card["source"] = json!("opencode_native");
+        card["answer_transport"] = json!("opencode_native");
+        card["questions"][0]["default_option_ids"] = json!(["opt_0_1"]);
+        c.open(Some(session()));
+        c.observe(&state(asking(vec![card])));
+        let loading = until(&c, |v| {
+            v.question
+                .as_ref()
+                .is_some_and(|q| q.view.status == "Loading your saved answer…")
+        })
+        .question
+        .unwrap();
+        release.send(()).unwrap();
+        let seeded = until(&c, |v| {
+            v.question
+                .as_ref()
+                .is_some_and(|q| q.view.forms[0].options[1].checked)
+        })
+        .question
+        .unwrap();
+        assert!(
+            seeded.epoch >= loading.epoch + 2,
+            "the load and the seed each hand Rust's answers over"
+        );
+        assert_eq!(seeded.revision, loading.revision);
+        store.flush();
+        let saved = read_draft(&root.join("drafts"), &store_key("opencode:q1"));
+        assert!(
+            saved.draft.form_state.get("answers").is_none(),
+            "a seeded default is never saved"
+        );
+    }
+
+    #[test]
+    fn a_new_run_forgets_the_choice_among_optional_cards() {
+        let root = dir("q-new-run");
+        let (c, _) = send_hub(&root);
+        let mut details = ready();
+        details["pending_questions"] = json!([
+            optional_card("codex:old", 10.0),
+            optional_card("codex:new", 20.0)
+        ]);
+        opened(&c, details.clone());
+        with_card(&c);
+        c.question_navigate(1);
+        until(&c, |v| {
+            v.question
+                .as_ref()
+                .is_some_and(|q| q.card == store_key("codex:old"))
+        });
+        let mut next = details;
+        next["run_id"] = json!("run-2");
+        for card in next["pending_questions"].as_array_mut().unwrap() {
+            card["run_id"] = json!("run-2");
+        }
+        c.observe(&state(next));
+        let q = until(&c, |v| {
+            v.question
+                .as_ref()
+                .is_some_and(|q| q.card.ends_with("\nrun-2\nconv-1"))
+        })
+        .question
+        .unwrap();
+        assert!(q.card.contains("\"codex:new\""), "the newest card again");
+    }
+
+    #[test]
+    fn the_page_is_kept_with_the_draft() {
+        let root = dir("q-page");
+        let store = drafts(&root);
+        let (c, _) = send_hub_on(&store);
+        let mut card = card_json("tool:t1");
+        card["questions"].as_array_mut().unwrap().push(
+            json!({"id": "q_1", "question": "Which platform?",
+            "header": "Platform", "body": "", "multi_select": false, "allow_other": true,
+            "options": [{"id": "opt_1_0", "label": "Linux", "description": ""}]}),
+        );
+        opened(&c, asking(vec![card]));
+        let (key, _) = shown(&c);
+        c.question_page(&key, 1);
+        until(&c, |v| {
+            v.question.as_ref().is_some_and(|q| q.view.page == 1)
+        });
+        store.flush();
+        assert_eq!(
+            read_draft(&root.join("drafts"), &key).draft.form_state["page"],
+            json!(1)
+        );
+    }
+
+    #[test]
+    fn selecting_the_session_again_builds_its_card_again() {
+        let root = dir("q-reselect");
+        let (c, _) = send_hub(&root);
+        let details = asking(vec![card_json("tool:t1")]);
+        opened(&c, details.clone());
+        let first = with_card(&c).question.unwrap();
+        // Another session without details yet, then this one again.
+        c.open(Some(other_session()));
+        c.open(Some(session()));
+        c.observe(&state(details));
+        let again = until(&c, |v| v.question.is_some()).question.unwrap();
+        assert!(
+            again.revision > first.revision,
+            "a new selection restarts the review (SessionsWindow.cpp:451)"
+        );
+    }
+
+    #[test]
+    fn no_store_work_once_the_app_quits() {
+        let root = dir("q-quit-store");
+        let (c, _) = send_hub(&root);
+        opened(&c, asking(vec![card_json("tool:t1")]));
+        let (card, _) = shown(&c);
+        c.flush();
+        c.observe(&state(asking(vec![card_json("tool:t2")])));
+        c.lock().answers.failed.insert(card.clone());
+        c.tick();
+        let hub = c.lock();
+        assert!(
+            !hub.answers.drafts.contains_key(&store_key("tool:t2"))
+                && hub.answers.loading.is_empty(),
+            "no load starts"
+        );
+        assert!(!hub.answers.unsaved.contains(&card), "no save starts");
+    }
+
+    #[test]
+    fn allow_retry_acts_on_the_shown_card_only() {
+        let root = dir("q-retry-shown");
+        let store = drafts(&root);
+        let mut stored = StoredDraft {
+            sending: true,
+            ..StoredDraft::default()
+        };
+        stored.form_state.insert(
+            "answers".into(),
+            json!([{"id": "q_0", "text": "", "other": false, "options": ["opt_0_0"]}]),
+        );
+        store.save_durable(&store_key("codex:hidden"), stored, |_| {});
+        store.flush();
+        let (c, _) = send_hub_on(&store);
+        let mut details = asking(vec![card_json("tool:t1")]);
+        details["pending_questions"]
+            .as_array_mut()
+            .unwrap()
+            .push(optional_card("codex:hidden", 10.0));
+        opened(&c, details);
+        with_card(&c);
+        loaded_all(&c);
+        let hidden = store_key("codex:hidden");
+        assert!(c.lock().answers.drafts[&hidden].uncertain);
+        c.question_allow_retry(&hidden);
+        assert!(
+            c.lock().answers.drafts[&hidden].uncertain,
+            "only the shown card (Qt's m_key)"
+        );
+    }
+
+    #[test]
+    fn a_load_an_older_ensure_started_never_lands() {
+        let root = dir("q-ticket");
+        let store = drafts(&root);
+        // The store holds an older answer: Unit chosen, nothing submitted.
+        saved_choice_for(&store, "codex:k", "opt_0_0");
+        let release = hold(&store);
+        let (c, _) = send_hub_on(&store);
+        let key = store_key("codex:k");
+        c.open(Some(session()));
+        // L1 starts; Codex's record clears its mark and saves the submitted
+        // answer behind it.
+        let mut recorded = optional_card("codex:k", 10.0);
+        recorded["answer_delivery"] = delivered("codex:k");
+        let mut details = ready();
+        details["pending_questions"] = json!([recorded]);
+        c.observe(&state(details));
+        assert!(c.lock().answers.drafts[&key].submitted);
+        // The draft leaves memory, as an eviction does once its save answered ...
+        {
+            let mut hub = c.lock();
+            hub.answers.drafts.remove(&key);
+            hub.answers.order.retain(|k| *k != key);
+            hub.answers.saves.remove(&key);
+            hub.answers.unsaved.remove(&key);
+        }
+        // ... and comes back without the record: L2 starts.
+        let mut details = ready();
+        details["pending_questions"] = json!([optional_card("codex:k", 10.0)]);
+        c.observe(&state(details));
+        assert!(c.lock().answers.loading.contains(&key));
+        release.send(()).unwrap();
+        store.flush();
+        until(&c, |_| !c.lock().answers.loading.contains(&key));
+        assert!(
+            c.lock().answers.drafts[&key].submitted,
+            "L2 read the submitted save; L1's older read never landed"
         );
     }
 }

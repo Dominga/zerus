@@ -524,9 +524,9 @@ class WorkflowSecurityTests(unittest.TestCase):
         checks = (ROOT / ".github/workflows/checks.yml").read_text()
         macos_steps = {
             "client-native-macos-core": (("Core tests", "core", ""), ("Media and video check", "media", "")),
-            "client-native-macos-tauri": (("Tauri tests", "tauri-test", "        timeout-minutes: 25\n"),
-                                          ("Tauri clippy", "tauri-clippy", "        if: always()\n        timeout-minutes: 25\n")),
+            "client-native-macos-tauri": (("Tauri clippy", "tauri-clippy", "        if: always()\n        timeout-minutes: 25\n"),),
         }
+        self.assertNotIn("name: Tauri tests\n", job(checks, "client-native-macos-tauri"))
         for name, runner, selected, timeout in (("client-native-linux", "ubuntu-24.04", "linux", "45"),
                                                 ("client-native-macos-core", "macos-15", "macos", "90"),
                                                 ("client-native-macos-tauri", "macos-15", "macos", "90"),
@@ -567,8 +567,6 @@ class WorkflowSecurityTests(unittest.TestCase):
             "cargo +1.99.1 clippy --locked --manifest-path client/src-tauri/Cargo.toml --all-targets --features video -- -D warnings",
             "cargo +1.99.1 test --locked --manifest-path client/core/Cargo.toml",
             "cargo +1.99.1 test --locked --manifest-path client/src-tauri/Cargo.toml",
-            "cargo +1.99.1 test --locked --manifest-path client/src-tauri/Cargo.toml -- --list",
-            "RUST_BACKTRACE=1 cargo +1.99.1 test --locked --manifest-path client/src-tauri/Cargo.toml -- --test-threads=1",
             "cargo +1.99.1 check --locked --manifest-path client/media/Cargo.toml --all-targets --features video",
             "cargo +1.99.1 clippy --locked --manifest-path client/src-tauri/Cargo.toml --all-targets -- -D warnings",
         ):

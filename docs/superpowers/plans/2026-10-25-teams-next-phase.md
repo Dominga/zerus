@@ -69,6 +69,9 @@ member; work continues outside any attempt.
 - **A6. Replace a captured report.** While a captured report is undecided, the
   member may send the real report for the same attempt; it replaces the
   captured text and is marked as such. Owner: yes.
+- **A7. A captured report holds its member.** Until a captured report is
+  decided or replaced, its member gets no new task, rebalance or work ahead
+  and does not starve. Owner: yes (2026-10-29). Spec: team delivery 7a.
 
 ## B. Sandbox, permissions and permission requests
 

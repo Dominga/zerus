@@ -798,12 +798,16 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             steps.push(Step::Rebalanced { tasks });
         }
     }
-    // Members busy with an open attempt, or handed one in this tick.
+    // Members busy with an open attempt, or handed one in this tick. A7: a
+    // member whose undecided report was captured from its last reply counts as
+    // busy too - no hand-out, rebalance or work ahead, and it has work, so it
+    // does not starve (C7) - until that report is decided or replaced (A6).
     let mut busy: BTreeSet<&str> = team
         .tasks
         .iter()
         .filter_map(|task| task.open_attempt())
         .map(|attempt| attempt.member.as_str())
+        .chain(team.members.iter().filter(|member| team.captured_hold(&member.id).is_some()).map(|member| member.id.as_str()))
         .collect();
     // C7: a member idle without a ready task while tasks are open starves the
     // plan. The lead hears once after 20 minutes; the episode ends with work.
@@ -2901,10 +2905,16 @@ fn remind_report(store: &mut Store, team: &Team, task_id: u32) -> anyhow::Result
     let report = attempt.report.as_ref().context("the attempt has no report")?;
     let minutes = (((now() - report.at) / 60.0).round() as u64).max(1);
     let lead = team.member(&team.lead).and_then(|m| m.session.clone()).context("the lead has no session")?;
+    // A7: a captured report holds its member back from new work.
+    let held = if report.captured && attempt.member != team.lead {
+        format!("{}\n", inbox::captured_hold_note(team, &attempt.member))
+    } else {
+        String::new()
+    };
     let text = format!(
         "[Zerus team \u{b7} from: Zerus \u{b7} task: #{} \u{b7} report waiting {minutes} min]\n\
          {}'s report on #{} {} has waited {minutes} min for your decision.\n\
-         Decide with hgs team accept --json or reject --json, or look at the whole inbox:\n  \
+         {held}Decide with hgs team accept --json or reject --json, or look at the whole inbox:\n  \
          {} | hgs team inbox --json",
         task.id,
         team.role_of(&attempt.member),
@@ -6997,6 +7007,149 @@ mod tests {
         // dev is busy with #1, but #2 stays with its member: no peer takes it.
         assert!(!now.iter().any(|s| matches!(s, Step::Rebalance { .. })), "{now:?}");
         assert!(!now.iter().any(|s| matches!(s, Step::HandOut { task: 2, .. })), "{now:?}");
+    }
+
+    /// A7: `member`'s report on `task`, Submitted and undecided; `captured`
+    /// when Zerus took it from the member's last reply (A2).
+    fn submit(team: &mut Team, task: u32, member: &str, captured: bool) {
+        let task = team.task_mut(task).unwrap();
+        task.status = TaskStatus::Submitted;
+        task.attempts.push(Attempt {
+            n: task.attempts.len() as u32 + 1,
+            id: format!("A{}", task.id),
+            member: member.into(),
+            state: AttemptState::Reported,
+            report: Some(Report {
+                text: "(From Backend's last reply; it ran no hgs team report.)\n\nQueued, after FU-trees".into(),
+                at: 1.0,
+                captured,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+    }
+
+    #[test]
+    fn a_captured_report_holds_its_member_from_new_work() {
+        let (mut team, seen) = team_with_two_backends();
+        // dev's acknowledgement on #1 was captured as its report: #2, also
+        // dev's, goes to the free dev2 and never to dev.
+        submit(&mut team, 1, "dev", true);
+        assert_eq!(team.captured_hold("dev"), Some(1));
+        let now = steps(&team, &seen, 1.0);
+        assert!(now.contains(&Step::Rebalance { task: 2, from: "dev".into(), to: "dev2".into() }), "{now:?}");
+        assert!(!now.iter().any(|s| matches!(s, Step::HandOut { member, .. } if member == "dev")), "{now:?}");
+        // A pinned task waits for its held member.
+        team.task_mut(2).unwrap().pinned = true;
+        let now = steps(&team, &seen, 1.0);
+        assert!(!now.iter().any(|s| matches!(s, Step::HandOut { task: 2, .. } | Step::Rebalance { task: 2, .. })), "{now:?}");
+        // An explicit report keeps today's behaviour: dev takes #2.
+        team.task_mut(1).unwrap().attempts.last_mut().unwrap().report.as_mut().unwrap().captured = false;
+        assert_eq!(team.captured_hold("dev"), None);
+        assert!(steps(&team, &seen, 1.0).contains(&Step::HandOut { task: 2, member: "dev".into() }));
+    }
+
+    #[test]
+    fn a_held_member_is_no_rebalance_target() {
+        let (mut team, mut seen) = team_with_two_backends();
+        // dev2's report on #1 was captured; dev is in a turn of its own.
+        submit(&mut team, 1, "dev2", true);
+        seen[1].free = false;
+        let now = steps(&team, &seen, 1.0);
+        assert!(!now.iter().any(|s| matches!(s, Step::Rebalance { .. } | Step::HandOut { .. })), "{now:?}");
+        // Its explicit report (A6) releases it.
+        let mut events = Vec::new();
+        let replaced = ops::apply(
+            &mut team,
+            "report",
+            &json!({"task":1,"attempt":"A1","text":"Done: the API is paged."}),
+            &Actor::Member("dev2".into()),
+            &BTreeSet::new(),
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(replaced["status"], "submitted");
+        let now = steps(&team, &seen, 1.0);
+        assert!(now.contains(&Step::Rebalance { task: 2, from: "dev".into(), to: "dev2".into() }), "{now:?}");
+    }
+
+    #[test]
+    fn deciding_a_captured_report_releases_its_member() {
+        for decision in ["accept", "reject", "retry", "reassign", "cancel"] {
+            let mut team = team();
+            submit(&mut team, 1, "dev", true);
+            let seen = [session("claude/x/lead", "r0", false), session("codex/x/dev", "r1", true)];
+            let held = steps(&team, &seen, 1.0);
+            assert!(!held.iter().any(|s| matches!(s, Step::HandOut { member, .. } if member == "dev")), "{decision}: {held:?}");
+            let input = match decision {
+                "reject" => json!({"task":1,"reason":"Only an acknowledgement"}),
+                "reassign" => json!({"task":1,"member":"qa"}),
+                _ => json!({"task":1}),
+            };
+            ops::apply(&mut team, decision, &input, &Actor::Member("lead".into()), &BTreeSet::new(), &mut Vec::new()).unwrap();
+            assert_eq!(team.captured_hold("dev"), None, "{decision}");
+            let now = steps(&team, &seen, 1.0);
+            assert!(now.iter().any(|s| matches!(s, Step::HandOut { member, .. } if member == "dev")), "{decision}: {now:?}");
+        }
+    }
+
+    #[test]
+    fn a_captured_report_holds_work_ahead_and_the_lead_is_never_held() {
+        let mut t = team();
+        t.settings.work_ahead = true;
+        for task in &mut t.tasks {
+            if task.phase == 1 {
+                task.status = TaskStatus::Submitted;
+                task.attempts.push(Attempt { n: 1, state: AttemptState::Reported, member: "dev".into(), ..Default::default() });
+            }
+        }
+        let mut events = Vec::new();
+        ops::apply(&mut t, "extend", &json!({"phase_title":"Next","tasks":[{"id":4,"title":"Independent docs","assignee":"dev"}]}),
+            &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        let seen = vec![session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", true)];
+        assert!(steps(&t, &seen, 100.0).contains(&Step::WorkAhead { task: 4, member: "dev".into() }));
+        // A captured report on #2 holds dev back from working ahead.
+        t.task_mut(2).unwrap().attempts.last_mut().unwrap().report =
+            Some(Report { text: "Queued".into(), at: 1.0, captured: true, ..Default::default() });
+        let found = steps(&t, &seen, 100.0);
+        assert!(!found.iter().any(|step| matches!(step, Step::WorkAhead { .. })), "{found:?}");
+        // C1: the lead's own tasks never hold it.
+        let lead = t.lead.clone();
+        submit(&mut t, 3, &lead, true);
+        assert_eq!(t.captured_hold(&lead), None);
+    }
+
+    #[test]
+    fn a_held_member_does_not_starve_the_plan() {
+        let mut team = team();
+        // dev's only work, #1, waits on a captured report; #2 belongs to qa.
+        team.task_mut(2).unwrap().assignee = "qa".into();
+        submit(&mut team, 1, "dev", true);
+        let seen = [session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", true), session("kimi/x/qa", "r2", true)];
+        let now = steps(&team, &seen, 10.0);
+        assert!(!now.iter().any(|step| matches!(step, Step::Starving { member } if member == "dev")), "{now:?}");
+        // An episode that was open ends, and no plan_starved is told.
+        let dev = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
+        dev.starved_since = Some(10.0);
+        let late = steps(&team, &seen, 10.0 + 30.0 * 60.0);
+        assert!(late.contains(&Step::StarvedEnded { member: "dev".into() }), "{late:?}");
+        assert!(!late.iter().any(|step| matches!(step, Step::PlanStarved { .. })), "{late:?}");
+        // Once the report is decided, the idle member starves as before.
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().starved_since = None;
+        ops::apply(&mut team, "accept", &json!({"task":1}), &Actor::Human, &BTreeSet::new(), &mut Vec::new()).unwrap();
+        assert!(steps(&team, &seen, 10.0).contains(&Step::Starving { member: "dev".into() }));
+    }
+
+    #[test]
+    fn the_lead_hears_that_a_captured_report_holds_its_member() {
+        let mut team = team();
+        submit(&mut team, 1, "dev", true);
+        let item = inbox::items(&team).into_iter().find(|item| item.kind == "report").unwrap();
+        assert!(item.detail.contains("Backend gets no new work until you accept, reject, retry, reassign or cancel"), "{}", item.detail);
+        // An explicit report carries no such note.
+        team.task_mut(1).unwrap().attempts.last_mut().unwrap().report.as_mut().unwrap().captured = false;
+        let item = inbox::items(&team).into_iter().find(|item| item.kind == "report").unwrap();
+        assert!(item.detail.is_empty(), "{}", item.detail);
     }
 
     #[test]

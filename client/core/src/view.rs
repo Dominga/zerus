@@ -89,6 +89,8 @@ pub struct ViewRow {
     /// When the current turn, compaction or background job started, for the
     /// Working clock.
     pub turn_started: Option<f64>,
+    /// The creation that launched this session (HgsClient.cpp:184).
+    pub launch_id: Option<String>,
     pub run_id: Option<String>,
     pub conversation_id: Option<String>,
     /// The raw `state` (`running`, `paused`, `stopped`, `archived`, ...);
@@ -1142,6 +1144,7 @@ pub fn row(value: &Value) -> ViewRow {
         updated_at: number(value, "last_event_at").filter(|at| *at > 0.0),
         archived_at: number(value, "archived_at"),
         turn_started: session.turn_started(),
+        launch_id: some(text(value, "launch_id")),
         run_id: some(session.run_id),
         conversation_id: some(session.conversation_id),
         // A live row lists no state; Qt reads it as running (`HgsClient.cpp`).

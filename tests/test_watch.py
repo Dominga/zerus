@@ -160,13 +160,24 @@ class WatchStream(unittest.TestCase):
         expected = next(row for row in listing['sessions'] if row['name'] == self.name)
         self.assertEqual(steady(rows[self.key()]), steady(expected))
         self.assertNotIn('sessions', meta['value'])
-        self.assertEqual(set(meta['value']), set(listing) - {'sessions'})
+        self.assertEqual(set(meta['value']), (set(listing) - {'sessions'}) | {'ended_launches'})
+        self.assertEqual(meta['value']['ended_launches'], listing.get('ended_launches', []))
         self.assertEqual(meta['value']['host'], 'test')
         self.assertTrue(all(len(line.encode()) <= 1 << 20 for line in stream.raw))
         started = time.monotonic()
         self.assertEqual(stream.close(), 0)
         self.assertLess(time.monotonic() - started, 3)
         self.assertEqual(stream.process.stderr.read(), '')
+
+    def test_launch_identity_is_additive_and_empty_results_advertise_support(self):
+        launch = str(uuid.uuid4())
+        self.record['launch_id'] = launch
+        self.write_record()
+        stream, _, snapshot, meta = self.start()
+        row = next(item['row'] for item in snapshot['items'] if item['key'] == self.key())
+        self.assertEqual(row['launch_id'], launch)
+        self.assertEqual(meta['value']['ended_launches'], [])
+        self.assertEqual(stream.close(), 0)
 
     def test_binding_changes_and_a_rename_are_upserts_on_the_run_key(self):
         stream, *_ = self.start()

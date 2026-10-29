@@ -698,7 +698,8 @@ pub struct BindingSession {
 }
 
 /// A launch that ended before it acquired a listed session (HgsClient.cpp:279).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct EndedLaunch {
     pub launch_id: String,
     pub name: String,
@@ -768,21 +769,25 @@ pub fn binding_listing(exit: Exit) -> Result<BindingListing, String> {
                     .into(),
             })
             .collect(),
-        ended_launches: value
-            .get("ended_launches")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter(|row| row.is_object())
-            .take(32)
-            .map(|row| EndedLaunch {
-                launch_id: text(row, "launch_id").into(),
-                name: text(row, "name").into(),
-                code: row.get("code").and_then(Value::as_i64),
-                output: text(row, "output").into(),
-            })
-            .collect(),
+        ended_launches: ended_launches(&value["ended_launches"]),
     })
+}
+
+/// The newest 32 launch results, shared by bounded listings and watch metadata.
+pub(crate) fn ended_launches(value: &Value) -> Vec<EndedLaunch> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|row| row.is_object())
+        .take(32)
+        .map(|row| EndedLaunch {
+            launch_id: text(row, "launch_id").into(),
+            name: text(row, "name").into(),
+            code: row.get("code").and_then(Value::as_i64),
+            output: text(row, "output").into(),
+        })
+        .collect()
 }
 
 fn help(hgs: &Path, computer: &ComputerId) -> Result<String, String> {

@@ -196,6 +196,8 @@ struct Open {
     pipe: Arc<Pipe>,
     size: (u16, u16),
     resizes: usize,
+    /// A hidden Terminal tab keeps its attach but cannot accept file drops.
+    shown: bool,
 }
 
 struct Inner {
@@ -333,6 +335,7 @@ impl Terminals {
                 pipe,
                 size: (cols, rows),
                 resizes: 0,
+                shown: true,
             },
         );
         Ok(Connected {
@@ -415,12 +418,24 @@ impl Terminals {
         lock(&self.0.views).get(view).map(|open| open.generation)
     }
 
+    /// The tab's current visibility; an older attach's callback changes nothing.
+    pub fn set_shown(&self, view: &str, generation: u64, shown: bool) {
+        if let Some(open) = lock(&self.0.views)
+            .get_mut(view)
+            .filter(|open| open.generation == generation)
+        {
+            open.shown = shown;
+        }
+    }
+
     /// Dropped paths go only to the attach the drop named. Checking and
     /// queuing the paste share the views lock, so a reconnect cannot slip
     /// between them. No Enter is added (`pasteTerminalPaths`, 2625-2642).
     pub fn paste(&self, view: &str, generation: u64, text: &str) -> Result<(), String> {
         match lock(&self.0.views).get(view) {
-            Some(open) if open.generation == generation => open.attach.write(text.as_bytes()),
+            Some(open) if open.generation == generation && open.shown => {
+                open.attach.write(text.as_bytes())
+            }
             _ => Err(DROP_CHANGED.into()),
         }
     }
@@ -474,6 +489,9 @@ impl Terminals {
         .await;
         let receipt = match staged {
             Ok(zerus_client_core::Outcome::Done { receipt, .. }) => receipt,
+            Err(detail) if detail == crate::actions::BUSY => {
+                return Ok(Some("Wait for the session update to finish.".into()));
+            }
             Ok(
                 zerus_client_core::Outcome::Failed { detail }
                 | zerus_client_core::Outcome::Uncertain { detail },
@@ -654,6 +672,19 @@ fn drop_origin(origin: &str, view: &str) -> Result<(), String> {
 }
 
 #[tauri::command(rename_all = "snake_case")]
+pub fn terminal_shown(
+    webview: tauri::Webview,
+    state: State<'_, Terminals>,
+    view: String,
+    generation: u64,
+    shown: bool,
+) -> Result<(), String> {
+    drop_origin(webview.label(), &view)?;
+    state.set_shown(&view, generation, shown);
+    Ok(())
+}
+
+#[tauri::command(rename_all = "snake_case")]
 pub async fn terminal_connect(
     state: State<'_, Terminals>,
     view: String,
@@ -828,6 +859,7 @@ mod tests {
             "relative.txt",
             "C:relative.txt",
             "/home/example/a\nb",
+            "/home/example/a\u{1f}b",
             "/home/example/a\u{7f}b",
             "/home/example/a\0b",
         ] {
@@ -1274,6 +1306,144 @@ mod tests {
         }
         t.write("main", c.generation, b"echo probe\r").unwrap();
         until(&t, c.generation, &sink, |s| s.text().contains("echo probe"));
+        t.disconnect("main");
+    }
+
+    #[test]
+    fn a_tracked_drop_keeps_a_no_saved_binding_failure_unchanged() {
+        let _tree = crate::PROCESS_TREE.read().unwrap();
+        let t = terminals();
+        let c = t
+            .connect(
+                "main",
+                target("run-1"),
+                80,
+                24,
+                Arc::new(Collect::default()),
+            )
+            .unwrap();
+        assert_eq!(
+            drop_with(&t, c.generation, drop_target(), |_, _| Ok(
+                zerus_client_core::Outcome::Failed {
+                    detail: "no saved binding".into()
+                }
+            )),
+            Err("no saved binding".into())
+        );
+        t.disconnect("main");
+    }
+
+    #[test]
+    fn a_reconnect_is_reported_before_an_invalid_receipt() {
+        let _tree = crate::PROCESS_TREE.read().unwrap();
+        let t = terminals();
+        let c = t
+            .connect(
+                "main",
+                target("run-1"),
+                80,
+                24,
+                Arc::new(Collect::default()),
+            )
+            .unwrap();
+        assert_eq!(
+            drop_with(&t, c.generation, drop_target(), |_, _| {
+                t.connect(
+                    "main",
+                    target("run-2"),
+                    80,
+                    24,
+                    Arc::new(Collect::default()),
+                )
+                .unwrap();
+                Ok(zerus_client_core::Outcome::Done {
+                    receipt: json!({"files": [{"path": "relative.txt"}]}),
+                    cleanup: None,
+                })
+            }),
+            Err(DROP_CHANGED.into())
+        );
+        t.disconnect("main");
+    }
+
+    #[test]
+    fn a_taken_write_lane_is_an_info_notice_and_is_never_replayed() {
+        let _tree = crate::PROCESS_TREE.read().unwrap();
+        let t = terminals();
+        let c = t
+            .connect(
+                "main",
+                target("run-1"),
+                80,
+                24,
+                Arc::new(Collect::default()),
+            )
+            .unwrap();
+        let mut calls = 0;
+        assert_eq!(
+            drop_with(&t, c.generation, drop_target(), |_, _| {
+                calls += 1;
+                Err(crate::actions::BUSY.into())
+            }),
+            Ok(Some("Wait for the session update to finish.".into()))
+        );
+        assert_eq!(calls, 1);
+        assert!(!t.0.dropping.load(Ordering::SeqCst));
+        t.disconnect("main");
+    }
+
+    #[test]
+    fn a_stage_finishing_while_the_terminal_tab_is_hidden_pastes_nothing() {
+        let _tree = crate::PROCESS_TREE.read().unwrap();
+        let t = terminals();
+        let sink = Arc::new(Collect::default());
+        let c = t
+            .connect("main", target("run-1"), 80, 24, sink.clone())
+            .unwrap();
+        hello(&t, c.generation, &sink);
+        assert_eq!(
+            drop_with(&t, c.generation, drop_target(), |_, _| {
+                t.set_shown("main", c.generation, false);
+                Ok(stage_done())
+            }),
+            Err(DROP_CHANGED.into())
+        );
+        assert_eq!(
+            t.paste("main", c.generation, "hidden"),
+            Err(DROP_CHANGED.into())
+        );
+        t.set_shown("main", c.generation, true);
+        t.write("main", c.generation, b"echo probe\r").unwrap();
+        until(&t, c.generation, &sink, |s| s.text().contains("echo probe"));
+        assert!(!sink.text().contains("staged") && !sink.text().contains("hidden"));
+        t.disconnect("main");
+    }
+
+    #[test]
+    fn a_stale_tab_visibility_update_never_changes_the_current_attach() {
+        let _tree = crate::PROCESS_TREE.read().unwrap();
+        let t = terminals();
+        let sink = Arc::new(Collect::default());
+        let first = t
+            .connect(
+                "main",
+                target("run-1"),
+                80,
+                24,
+                Arc::new(Collect::default()),
+            )
+            .unwrap();
+        let current = t
+            .connect("main", target("run-2"), 80, 24, sink.clone())
+            .unwrap();
+        hello(&t, current.generation, &sink);
+        t.set_shown("main", first.generation, false);
+        t.write("main", current.generation, b"echo ").unwrap();
+        t.paste("main", current.generation, "shown").unwrap();
+        t.write("main", current.generation, b"\r").unwrap();
+        until(&t, current.generation, &sink, |s| {
+            s.text().contains("echo shown")
+        });
         t.disconnect("main");
     }
 

@@ -1,0 +1,114 @@
+{
+  "help": "usage: hgs ... guarded-create-v1 repository-clone-v1",
+  "stamp": true,
+  "replies": {
+    "account ls": {
+      "stdout": {
+        "profiles": [
+          {
+            "id": "claude",
+            "provider": "claude",
+            "label": "Smoke account",
+            "home": "/profiles/claude",
+            "installed": true,
+            "is_default": true,
+            "account_status": {
+              "status": "ok",
+              "checked_at": 100,
+              "identity": {"email": "smoke@example.invalid"}
+            }
+          }
+        ],
+        "revision": "r1"
+      }
+    },
+    "account inspect claude --refresh": {
+      "stdout": {
+        "id": "claude",
+        "provider": "claude",
+        "home": "/profiles/claude",
+        "status": "ok",
+        "checked_at": 200,
+        "identity": {"email": "smoke@example.invalid"},
+        "windows": [],
+        "balances": []
+      }
+    },
+    "worktrees --path": {
+      "stdout": {
+        "state": "ok",
+        "common_dir": "/srv/smoke/.git",
+        "selected_root": "/srv/smoke",
+        "path": "/srv/smoke",
+        "worktrees": [{"path": "/srv/smoke", "kind": "main", "available": true}]
+      }
+    },
+    "worktrees --creation": {
+      "stdout": {
+        "state": "ok",
+        "common_dir": "/srv/smoke/.git",
+        "selected_root": "/srv/smoke",
+        "path": "/srv/smoke",
+        "creation_receipts_v1": true,
+        "worktrees": [{"path": "/srv/smoke", "kind": "main", "available": true}]
+      },
+      "echo": {
+        "selected_root": "--last-worktree-path",
+        "selected_branch": "--last-worktree-branch"
+      }
+    },
+    "worktrees create": {
+      "stdout": {"status": "created", "common_dir": "/srv/smoke/.git"},
+      "echo": {
+        "request_id": "--request-id",
+        "branch": "--branch",
+        "path": "--destination"
+      }
+    },
+    "worktrees status": {
+      "stdout": {
+        "schema": 1,
+        "status": "created",
+        "path": "/srv/smoke-work",
+        "branch": "work-smoke",
+        "common_dir": "/srv/smoke/.git"
+      },
+      "echo": {"request_id": "--request-id"}
+    },
+    "dirs": {
+      "stdout": {
+        "path": "/srv/smoke",
+        "directories": [],
+        "creation_identity_v1": true,
+        "computer_id": "00000000-0000-4000-8000-000000000001"
+      },
+      "echo": {"path": "--creation"}
+    },
+    "claude": {
+      "stdout": {},
+      "echo": {"launch_id": "--launch-id"}
+    },
+    "ls": {
+      "stdout": {
+        "ok": true,
+        "sessions": [
+          {
+            "name": "claude/p-sample-project/newsession-smoke-2",
+            "cmd": "claude",
+            "state": "running"
+          },
+          {
+            "name": "claude/p-sample-project/newsession-smoke-3",
+            "cmd": "claude",
+            "state": "running"
+          }
+        ],
+        "ended_launches": []
+      },
+      "echo": {
+        "sessions.0.launch_id": "--launch-id",
+        "sessions.1.launch_id": "--launch-id"
+      }
+    }
+  }
+}

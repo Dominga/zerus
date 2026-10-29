@@ -20,7 +20,7 @@ const store = vi.hoisted(() => ({
   openNewSession: vi.fn(async (_options?: unknown) => {}),
   openFolderSession: vi.fn(async (_project: string, _folder: unknown) => ""),
 }));
-const notices = vi.hoisted(() => [] as { tone: string; text: string }[]);
+const notices = vi.hoisted(() => [] as { tone: string; text: string; sticky?: boolean }[]);
 
 vi.mock("../../store/newSession", async () => {
   const { createSignal } = await import("solid-js");
@@ -34,7 +34,7 @@ vi.mock("../../store/newSession", async () => {
     selectedHostTarget: () => store.host,
   };
 });
-vi.mock("../../store/actions", () => ({ notify: (tone: string, text: string) => notices.push({ tone, text }) }));
+vi.mock("../../store/actions", () => ({ errorText: (error: unknown) => String(error), notify: (tone: string, text: string, sticky?: boolean) => notices.push({ tone, text, sticky }) }));
 
 const view = await import("./newsession-view");
 
@@ -61,6 +61,11 @@ describe("loading the store (its own chunk)", () => {
     await view.newSessionFromPanel();
     expect(store.loads).toBe(1);
     expect(store.openNewSession).toHaveBeenCalledTimes(2);
+  });
+  it("shows a notice when the on-demand opening fails instead of rejecting unhandled", async () => {
+    store.openNewSession.mockRejectedValueOnce("chunk load failed");
+    await view.newSessionFromRail();
+    expect(notices).toEqual([{ tone: "error", text: "chunk load failed", sticky: true }]);
   });
 });
 

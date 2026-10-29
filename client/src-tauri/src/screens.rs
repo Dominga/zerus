@@ -1956,6 +1956,27 @@ mod tests {
         );
     }
 
+    // Two waiters of the same Refresh consume its force once, not once each.
+    #[test]
+    fn concurrent_launch_callers_take_the_refresh_force_once() {
+        let h = harness(launch_replies(false), true);
+        let here = ComputerId::local();
+        let runs = h.screens.launch_start(&here, true, None);
+        h.screens.run(runs);
+        assert!(
+            h.screens.launch_start(&here, true, None).is_empty(),
+            "the second caller shares the read"
+        );
+        h.drain();
+        let first = h.screens.launch_waited(&here);
+        h.screens.run(first);
+        h.drain();
+        let second = h.screens.launch_waited(&here);
+        h.screens.run(second);
+        h.drain();
+        assert_eq!(launch_inspects(&h), 4, "only the first waiter forces");
+    }
+
     // Qt's dialog takes only its own request's reply (`m_accountRequest`,
     // 385, 394): a later catalog of its computer, such as the page's poll,
     // updates the shared store and is heard, but it is not the dialog's

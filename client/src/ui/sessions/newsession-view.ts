@@ -1,7 +1,7 @@
 import { createMemo, createRoot, createSignal } from "solid-js";
 import * as bridge from "../../bridge";
 import type { NewSessionOptions } from "../../store/newSession";
-import { notify } from "../../store/actions";
+import { errorText, notify } from "../../store/actions";
 import { computerOffline } from "../../store/catalog";
 import { machineCards } from "../../store/machines";
 import type { ComputerId } from "../../types";
@@ -38,8 +38,12 @@ export const newSessionOpened = createRoot(() => openedOnce(() => store()?.newSe
 
 /** Opens New session with the options for the loaded store (`showNewSession`). */
 const open = async (options: (loaded: Store) => NewSessionOptions): Promise<void> => {
-  const loaded = await loadNewSession();
-  await loaded.openNewSession(options(loaded));
+  try {
+    const loaded = await loadNewSession();
+    await loaded.openNewSession(options(loaded));
+  } catch (error) {
+    notify("error", errorText(error), true);
+  }
 };
 
 // Entry points: each is Qt's showNewSession call.

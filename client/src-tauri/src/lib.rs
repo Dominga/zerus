@@ -316,6 +316,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(actions::ActivityReads::default());
                 app.manage(actions::Attention::new(dir.join(actions::attention_file(replay))));
                 let pump = app.state::<commands::AppState>().pump();
+                app.state::<actions::Actions>().set_termination_pump(pump.clone());
                 let allowed = actions::actions_allowed(
                     std::env::var("ZERUS_CLIENT_REPLAY").ok().as_deref(),
                     std::env::var("ZERUS_CLIENT_HGS").ok().as_deref(),

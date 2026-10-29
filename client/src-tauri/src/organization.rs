@@ -551,6 +551,7 @@ impl Organization {
         let mut writer = self.writer();
         let mut hub = self.lock();
         self.renames(&mut hub);
+        self.archive_moves(&mut hub);
         hub = self.save_draft(hub, &mut writer);
         match hub.sync.due(self.now()) {
             Due::Apply(invocation) => {
@@ -654,6 +655,23 @@ impl Organization {
         }
     }
 
+    fn archive_moves(&self, hub: &mut Hub) {
+        if !self.0.allowed || hub.stopped || !hub.sync.ready() {
+            return;
+        }
+        let mut edited = false;
+        for (id, intent) in self.0.pump.archive_moves() {
+            if hub.sync.edit(&intent, self.now()).is_ok() {
+                self.0.pump.archive_move_submitted(id);
+                self.0.pump.edited(&intent);
+                edited = true;
+            }
+        }
+        if edited {
+            self.publish(hub);
+        }
+    }
+
     /// Writes the draft file while it lags the pending edits, under the
     /// writer's lock and without the hub's: an edit is on disk before the
     /// apply that carries it, and the file goes once the edits settled
@@ -665,6 +683,7 @@ impl Organization {
         writer: &mut Writer,
     ) -> MutexGuard<'a, Hub> {
         while let Some((change, write)) = hub.sync.take_draft() {
+            let archive_acks = self.0.pump.submitted_termination_ids();
             self.release(hub);
             let written = writer.store_draft(&self.0.draft, &write);
             hub = self.lock();
@@ -672,6 +691,9 @@ impl Organization {
                 return hub;
             }
             hub.sync.draft_written(change);
+            for id in archive_acks {
+                self.0.pump.archive_move_saved(id);
+            }
         }
         // No draft changes lag disk. This also releases a no-op queued behind
         // an already durable pending draft without waiting for another edit.
@@ -680,6 +702,7 @@ impl Organization {
         }
         hub
     }
+
 }
 
 /// The draft of the last run, as `new` takes it up.
@@ -1537,6 +1560,168 @@ mod tests {
                 versions: json!({}),
             })
         })
+    }
+
+    fn finished_archive(pump: &Pump) -> uuid::Uuid {
+        let computer = ComputerId::local();
+        let target = zerus_client_core::Target {
+            computer: String::new(),
+            name: "claude/sample-project/review".into(),
+            run_id: "run-1".into(),
+            conversation_id: "conversation-1".into(),
+        };
+        let row = ViewRow {
+            machine: "workstation".into(),
+            name: target.name.clone(),
+            run_id: Some(target.run_id.clone()),
+            created: 7,
+            state: "running".into(),
+            ..Default::default()
+        };
+        pump.push(Change::Computer {
+            computer: computer.clone(),
+            status: zerus_client_core::ComputerStatus::Live,
+        });
+        pump.push(Change::Upsert {
+            computer: computer.clone(),
+            key: "run:run-1".into(),
+            row: row.clone(),
+        });
+        pump.termination_succeeded(pump.capture_termination(&target).unwrap());
+        let ids = pump.archive_termination_ids(&computer);
+        let archived = ViewRow {
+            state: "archived".into(),
+            archive_id: Some("00000000-0000-4000-8000-000000000001".into()),
+            ..row
+        };
+        pump.observe_archive_terminations(&computer, &ids, &[archived]);
+        pump.push(Change::Remove {
+            computer,
+            key: "run:run-1".into(),
+            reason: Some("archived".into()),
+        });
+        ids[0]
+    }
+
+    #[test]
+    fn a_verified_archive_placement_reaches_one_real_controller_apply() {
+        let mut reply = full("d2");
+        reply["organization"]["projects"][0]["sessions"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!(
+                "workstation\narchive\n00000000-0000-4000-8000-000000000001"
+            ));
+        let fake = Fake::new(json!([{"stdout":reply}]));
+        let pump = Pump::default();
+        let organization = fake.organization(&pump, true);
+        organization.set_source(snapshot("d1"));
+        organization.observe(&state("d1"));
+        finished_archive(&pump);
+        organization.0.wake.notify_all();
+        wait_until("the archive placement apply", || fake.settled_after(1));
+        assert_eq!(fake.applies().len(), 1);
+        let sent = input(&fake.applies()[0]);
+        let members = zerus_client_core::swarm::members(&sent["desired"]);
+        assert_eq!(
+            members
+                .get("workstation\narchive\n00000000-0000-4000-8000-000000000001")
+                .map(String::as_str),
+            Some("alpha")
+        );
+        assert_eq!(
+            pump.termination_count(),
+            0,
+            "the edit was checkpointed before its apply"
+        );
+        assert!(pump.archive_moves().is_empty());
+        assert_eq!(
+            organization
+                .lock()
+                .sync
+                .presented()
+                .unwrap()
+                .1
+                .get("workstation\narchive\n00000000-0000-4000-8000-000000000001")
+                .map(String::as_str),
+            Some("alpha")
+        );
+        fake.finish(organization);
+    }
+
+    #[test]
+    fn an_archive_placement_waits_for_readiness_and_a_durable_pending_draft() {
+        let fake = Fake::landing();
+        let pump = Pump::default();
+        let organization = fake.organization(&pump, true);
+        let mut writer = organization.writer();
+        finished_archive(&pump);
+        {
+            let mut hub = organization.lock();
+            organization.archive_moves(&mut hub);
+            assert!(
+                pump.submitted_termination_ids().is_empty(),
+                "not-ready placement is held"
+            );
+        }
+        organization.set_source(snapshot("d1"));
+        organization.observe(&state("d1"));
+        std::fs::create_dir(fake.draft()).unwrap();
+        let mut hub = organization.lock();
+        organization.archive_moves(&mut hub);
+        assert_eq!(pump.submitted_termination_ids().len(), 1);
+        assert!(
+            pump.archive_moves().is_empty(),
+            "submitted once while its draft is pending"
+        );
+        let mut hub = organization.save_draft(hub, &mut writer);
+        assert_eq!(
+            pump.submitted_termination_ids().len(),
+            1,
+            "a failed checkpoint retains the acknowledgement"
+        );
+        assert_eq!(pump.termination_count(), 1);
+        organization.archive_moves(&mut hub);
+        assert_eq!(
+            pump.submitted_termination_ids().len(),
+            1,
+            "the failed save never resubmits the edit"
+        );
+        std::fs::remove_dir(fake.draft()).unwrap();
+        let hub = organization.save_draft(hub, &mut writer);
+        assert!(pump.submitted_termination_ids().is_empty());
+        assert_eq!(pump.termination_count(), 0);
+        drop(hub);
+        drop(writer);
+        fake.finish(organization);
+    }
+
+    #[test]
+    fn archive_placement_never_edits_a_blocked_replay_or_stopped_hub() {
+        for allowed in [false, true] {
+            let fake = Fake::landing();
+            let pump = Pump::default();
+            let organization = fake.organization(&pump, allowed);
+            let writer = organization.writer();
+            organization.set_source(snapshot("d1"));
+            organization.observe(&state("d1"));
+            finished_archive(&pump);
+            let mut hub = organization.lock();
+            assert!(hub.sync.ready());
+            hub.stopped = allowed;
+            assert_eq!(
+                pump.archive_moves().len(),
+                1,
+                "the placement is otherwise ready"
+            );
+            organization.archive_moves(&mut hub);
+            assert!(!hub.sync.pending());
+            assert!(pump.submitted_termination_ids().is_empty());
+            assert!(fake.applies().is_empty());
+            drop(hub);
+            drop(writer);
+            fake.finish(organization);
+        }
     }
 
     fn row(key: &str, name: &str) -> Change {

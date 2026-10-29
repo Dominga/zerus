@@ -169,7 +169,8 @@ impl Grouping {
         }
     }
 
-    fn group_of(&self, member: &str) -> String {
+    /// The current project of an identity, including one whose live row left.
+    pub fn group_for(&self, member: &str) -> String {
         self.membership
             .get(member)
             .filter(|project| self.listed.contains(project.as_str()))
@@ -178,7 +179,7 @@ impl Grouping {
     }
 
     fn place(&mut self, at: At, member: String, run: Option<String>, title: String, seq: u64) {
-        let group = self.group_of(&member);
+        let group = self.group_for(&member);
         // Qt's run_groups is distinct from the rename token map. Unchanged
         // observations do not refresh the written age (SessionOrganization.cpp:239-243).
         if let Some((machine, run)) = member

@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::mpsc::Receiver;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -19,6 +19,9 @@ use zerus_client_core::views::FleetEntry;
 use zerus_client_core::{
     Batch, Change, Coalescer, ComputerId, ComputerStatus, MachineMeta, ViewRow,
 };
+
+mod terminations;
+pub(crate) use terminations::{Termination, MAX_TERMINATIONS};
 
 /// The longest `next_batch` waits for a change before it returns an empty batch.
 pub const PARK: Duration = Duration::from_millis(250);
@@ -34,6 +37,7 @@ struct Inner {
     mirror: Mirror,
     grouping: Grouping,
     tap: Option<Tap>,
+    terminations: terminations::Terminations,
 }
 
 /// Shared by the drain thread and the commands.
@@ -45,7 +49,32 @@ pub struct Pump(
     Arc<std::sync::atomic::AtomicUsize>,
 );
 
+/// Action callbacks must not keep the catalog (and its tap/desk) alive.
+#[derive(Clone)]
+pub(crate) struct WeakPump(
+    Weak<(Mutex<Inner>, Condvar)>,
+    #[cfg(test)] Weak<std::sync::atomic::AtomicUsize>,
+);
+
+impl WeakPump {
+    pub(crate) fn upgrade(&self) -> Option<Pump> {
+        Some(Pump(
+            self.0.upgrade()?,
+            #[cfg(test)]
+            self.1.upgrade()?,
+        ))
+    }
+}
+
 impl Pump {
+    pub(crate) fn downgrade(&self) -> WeakPump {
+        WeakPump(
+            Arc::downgrade(&self.0),
+            #[cfg(test)]
+            Arc::downgrade(&self.1),
+        )
+    }
+
     fn lock(&self) -> MutexGuard<'_, Inner> {
         self.0 .0.lock().unwrap_or_else(PoisonError::into_inner)
     }

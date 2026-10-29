@@ -210,7 +210,7 @@ fn blocks_messages(action: &Action) -> bool {
 /// Terminations that succeeded, kept as Qt keeps `m_terminating` after the
 /// call (`SessionsWindow.cpp:1932-1934`) until the listing no longer shows
 /// that run running (`reconcileTerminations`, 3106-3115). At most this many.
-const TERMINATED: usize = 64;
+const TERMINATED: usize = crate::pump::MAX_TERMINATIONS;
 
 /// The managed state of the action commands; clones share it.
 #[derive(Clone)]
@@ -225,6 +225,8 @@ pub struct Actions {
     /// Computer, session name and the run each succeeded termination ended,
     /// oldest first.
     terminated: Arc<Mutex<VecDeque<(String, String, String)>>>,
+    /// The archive placement capture, set once before the source starts.
+    termination_pump: Arc<OnceLock<crate::pump::WeakPump>>,
     /// Hears every change of the pending marks.
     pub(crate) listener: MarksListener,
 }
@@ -239,6 +241,7 @@ impl Actions {
             writes: Arc::default(),
             hook: Arc::default(),
             terminated: Arc::default(),
+            termination_pump: Arc::default(),
             listener: MarksListener::default(),
         }
     }
@@ -248,6 +251,10 @@ impl Actions {
     /// write starts and in `writeDone`). Later calls change nothing.
     pub fn on_writes(&self, hook: WritesHook) {
         let _ = self.hook.set(hook);
+    }
+
+    pub fn set_termination_pump(&self, pump: crate::pump::Pump) {
+        let _ = self.termination_pump.set(pump.downgrade());
     }
 
     /// The running write as the send rules see it from the session
@@ -883,6 +890,16 @@ async fn dispatch_with(
     // workers with the call itself.
     let hgs = default_hgs();
     let (call_target, call_action) = (target.clone(), action.clone());
+    let termination: Option<crate::pump::Termination> = (WriteKind::of(&action)
+        == WriteKind::Terminate)
+        .then(|| {
+            state
+                .termination_pump
+                .get()?
+                .upgrade()?
+                .capture_termination(&target)
+        })
+        .flatten();
     let ran = tauri::async_runtime::spawn_blocking(move || {
         let inv = invocation(&call_target, &call_action, &request_id)?;
         let exit = runner(&hgs, &inv);
@@ -894,6 +911,17 @@ async fn dispatch_with(
         Ok((inv, exit)) => {
             let outcome = classify(&target, &action, &inv, exit);
             state.finished(&target, &action, &outcome);
+            if matches!(outcome, Outcome::Done { .. }) {
+                if let (Some(pump), Some(capture)) = (
+                    state
+                        .termination_pump
+                        .get()
+                        .and_then(crate::pump::WeakPump::upgrade),
+                    termination,
+                ) {
+                    pump.termination_succeeded(capture);
+                }
+            }
             Ok(outcome)
         }
         Err(refusal) => Ok(failed(refusal)),
@@ -1104,12 +1132,14 @@ pub async fn archive_page(
     let job = Arc::clone(&flag);
     let pump = app.pump();
     let result = tauri::async_runtime::spawn_blocking(move || {
+        let eligible = pump.archive_termination_ids(&id);
         reads::archive_page_cancellable(&hgs, &id, from, until, &cursor, &query, &job)
             .map_err(|error| error.to_string())
             .and_then(|page| {
                 if job.load(Ordering::Relaxed) {
                     return Err("superseded".into());
                 }
+                pump.observe_archive_terminations(&id, &eligible, &page.rows);
                 grouped_archive_page(&pump, &id, page)
             })
     })
@@ -1596,6 +1626,89 @@ mod tests {
         );
         let (_, during) = call(Action::Interrupt { turn_started: 1.0 }, 0);
         assert_eq!(during, None, "an interrupt is no write");
+    }
+
+    #[test]
+    fn an_uncertain_or_failed_termination_never_registers_archive_placement() {
+        use zerus_client_core::{Change, ComputerStatus, Exit};
+        let actions =
+            Actions::new(std::env::temp_dir().join("zerus-archive-termination-marks.json"));
+        let pump = crate::pump::Pump::default();
+        let computer = ComputerId::from("studio");
+        let target = review();
+        pump.push(Change::Computer {
+            computer: computer.clone(),
+            status: ComputerStatus::Live,
+        });
+        pump.push(Change::Upsert {
+            computer: computer.clone(),
+            key: "run:run-1".into(),
+            row: ViewRow {
+                name: target.name.clone(),
+                run_id: Some(target.run_id.clone()),
+                machine: "studio".into(),
+                created: 7,
+                state: "running".into(),
+                ..Default::default()
+            },
+        });
+        actions.set_termination_pump(pump.clone());
+        for (action, exit) in [
+            (Action::Terminate, Exit::TimedOut),
+            (
+                Action::Terminate,
+                Exit::Code {
+                    code: 1,
+                    stdout: Vec::new(),
+                    stderr: "synthetic refusal".into(),
+                },
+            ),
+            (
+                Action::Pause,
+                Exit::Code {
+                    code: 0,
+                    stdout: Vec::new(),
+                    stderr: String::new(),
+                },
+            ),
+        ] {
+            tauri::async_runtime::block_on(dispatch_with(
+                &actions,
+                target.clone(),
+                action,
+                uuid::Uuid::new_v4().to_string(),
+                move |_, _| exit,
+            ))
+            .unwrap();
+            assert!(pump.archive_termination_ids(&computer).is_empty());
+        }
+        let outcome = tauri::async_runtime::block_on(dispatch_with(
+            &actions,
+            target,
+            Action::Terminate,
+            uuid::Uuid::new_v4().to_string(),
+            |_, _| Exit::Code {
+                code: 0,
+                stdout: Vec::new(),
+                stderr: String::new(),
+            },
+        ))
+        .unwrap();
+        assert!(matches!(outcome, Outcome::Done { .. }));
+        assert_eq!(
+            pump.archive_termination_ids(&computer).len(),
+            1,
+            "only the successful guarded termination is eligible"
+        );
+    }
+
+    #[test]
+    fn the_termination_hook_does_not_keep_the_catalog_or_its_desk_alive() {
+        let actions = Actions::new(std::env::temp_dir().join("zerus-archive-weak-marks.json"));
+        let pump = crate::pump::Pump::default();
+        let weak = pump.downgrade();
+        actions.set_termination_pump(pump);
+        assert!(weak.upgrade().is_none());
     }
 
     #[test]

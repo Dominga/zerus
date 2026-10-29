@@ -18,7 +18,7 @@ const SUMMARY_CHARS: usize = 300;
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Item {
     /// `report`, `question`, `permission`, `lead_task`, `stalled`, `budget`
-    /// or `task_waits` (U45).
+    /// or `task_waits` (spec 0: U45, U46, U48).
     pub kind: &'static str,
     pub key: String,
     pub task: Option<u32>,
@@ -339,6 +339,29 @@ fn all_items(team: &Team) -> Vec<Item> {
             });
         }
     }
+    // U46: a hand-out Zerus could not prepare is one item for the lead, with
+    // the reason and the retry that starts the preparation again.
+    for task in &team.tasks {
+        let Some(wait) = &task.prepare_wait else { continue };
+        if wait.state == "waiting" {
+            continue;
+        }
+        let attempt = task.attempts.iter().rev().find(|attempt| attempt.n == wait.attempt);
+        items.push(Item {
+            subagents: Value::Null,
+            kind: "prepare_failed",
+            key: format!("prepare_failed:{}:{}", task.id, wait.attempt),
+            task: Some(task.id),
+            member: attempt.map(|attempt| team.role_of(&attempt.member)).unwrap_or_default(),
+            since: wait.at,
+            summary: summary(&format!("Zerus could not prepare #{} {}: {}", task.id, task.title, wait.reason)),
+            command: format!(
+                "{} | hgs team retry --json",
+                json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id})
+            ),
+            detail: wait.reason.clone(),
+        });
+    }
     // The permission requests the dispatcher read from the members' sessions
     // (C2): each is answerable by its own question id and hash.
     for member in &team.members {
@@ -527,8 +550,12 @@ pub(crate) fn waits(team: &Team, task: &Task, ready: bool) -> Option<Value> {
     if let Some(hold) = &task.hold {
         return Some(json!({"for":"hold","on":[hold.by],"unblock":format!("release #{}", task.id)}));
     }
-    // Spec 0: a step before the hand-out was refused or never confirmed.
+    // Spec 0: a step before the hand-out was refused or never confirmed; U46:
+    // while Zerus still prepares the context it waits for nobody.
     if let Some(wait) = task.waits.as_ref().filter(|_| task.status == TaskStatus::Pending) {
+        if wait.state == "waiting" {
+            return Some(json!({"for":wait.waits_for,"on":wait.on,"reason":"Zerus is preparing the context","unblock":"wait"}));
+        }
         return Some(json!({"for":wait.waits_for,"on":wait.on,"reason":wait.reason,"unblock":format!("retry or reassign #{}", task.id)}));
     }
     // U36: a test holds the assignee's folder; its next task waits for it.

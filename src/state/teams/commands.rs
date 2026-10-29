@@ -1836,20 +1836,28 @@ fn no_attempt_text(team: &Team, member: &str) -> String {
         let kind = if task.status == TaskStatus::InTest { "test" } else { "review" };
         return format!("#{} has a report in its {kind} stage", task.id);
     }
-    let state = match attempt.map(|attempt| attempt.state) {
-        Some(AttemptState::Rejected) if task.hold.is_some() => "was rejected and is held by the lead",
-        Some(AttemptState::Rejected) => "was rejected and waits for another hand-out",
-        Some(AttemptState::Reported) => "has a report waiting for the lead's decision",
-        Some(AttemptState::Revoked) => "was returned to the lead",
-        Some(AttemptState::Refused) => "was not delivered; Zerus tries it again",
-        Some(AttemptState::Delivering | AttemptState::Delivered | AttemptState::Unconfirmed) => "is open to another attempt",
-        None => match task.status {
-            TaskStatus::Accepted => "was accepted",
-            TaskStatus::Cancelled => "was cancelled",
-            TaskStatus::Submitted => "has a report waiting for the lead's decision",
-            TaskStatus::Draft => "is a draft",
-            _ => "is waiting for a hand-out",
-        },
+    // U46: a hand-out Zerus could not prepare is no delivery the member waits
+    // for; the lead or the owner retries it.
+    let state = if task.waits.as_ref().is_some_and(|wait| wait.state == "waiting") {
+        "is being prepared by Zerus for its next hand-out"
+    } else if task.waits.is_some() {
+        "could not be prepared by Zerus; the lead or you retry it"
+    } else {
+        match attempt.map(|attempt| attempt.state) {
+            Some(AttemptState::Rejected) if task.hold.is_some() => "was rejected and is held by the lead",
+            Some(AttemptState::Rejected) => "was rejected and waits for another hand-out",
+            Some(AttemptState::Reported) => "has a report waiting for the lead's decision",
+            Some(AttemptState::Revoked) => "was returned to the lead",
+            Some(AttemptState::Refused) => "was not delivered; Zerus tries it again",
+            Some(AttemptState::Delivering | AttemptState::Delivered | AttemptState::Unconfirmed) => "is open to another attempt",
+            None => match task.status {
+                TaskStatus::Accepted => "was accepted",
+                TaskStatus::Cancelled => "was cancelled",
+                TaskStatus::Submitted => "has a report waiting for the lead's decision",
+                TaskStatus::Draft => "is a draft",
+                _ => "is waiting for a hand-out",
+            },
+        }
     };
     format!("#{} {state}", task.id)
 }
@@ -4842,6 +4850,9 @@ mod tests {
             let warned = request(json!({"phase":1,"tasks":task,"owner_word":{"text":"Please add a task to the current phase"}})).unwrap();
             assert_eq!(warned["status"], "warning", "{warned}");
             assert!(warned["warning"].as_str().unwrap().contains("load balance of the lanes"), "{warned}");
+            // #511 C1: the warning names the queued task titles, so the owner
+            // confirms what joins.
+            assert!(warned["warning"].as_str().unwrap().contains("\"Fix the login crash\""), "{warned}");
             let pending = warned["pending"].as_str().unwrap().to_owned();
             let team = stored();
             assert_eq!(team.tasks.len(), 1);
@@ -4858,6 +4869,16 @@ mod tests {
             let error = request(confirm("Confirmed, add it now", 2)).unwrap_err().to_string();
             assert!(error.contains("for phase 1, not phase 2") || error.contains("not running"), "{error}");
             assert_eq!(stored().tasks.len(), 1);
+            // C1: a refusal never confirms, an unrelated sentence with "ok" is
+            // not the answer, and a fragment is not the owner's whole sentence.
+            for said in ["No, don't add it", "не добавляй", "ok, what's the status"] {
+                say(crate::state::now() + 0.2, said);
+                let error = request(confirm(said, 1)).unwrap_err().to_string();
+                assert!(error.contains("has not confirmed"), "{said}: {error}");
+            }
+            let error = request(confirm("add it", 1)).unwrap_err().to_string();
+            assert!(error.contains("has not confirmed"), "{error}");
+            assert_eq!(stored().tasks.len(), 1, "no refusal added a task");
             // 5. The confirmed addition adds the task with added_late.
             let added = request(confirm("Confirmed, add it now", 1)).unwrap();
             assert_eq!(added["status"], "added", "{added}");
@@ -4879,6 +4900,7 @@ mod tests {
             super::set_test_caller_identities(Some((None, None, None)));
             let human = |value: Value| { let mut value = value; value["by"] = json!("human"); value };
             let warned = request(human(json!({"phase":1,"tasks":[{"id":3,"title":"Docs","assignee":"dev"}]}))).unwrap();
+            assert!(warned["warning"].as_str().unwrap().contains("\"Docs\""), "{warned}");
             let pending = warned["pending"].as_str().unwrap().to_owned();
             let error = request(human(json!({"phase":1,"confirm":pending,"confirmation":"sure"}))).unwrap_err().to_string();
             assert!(error.contains("Type \"add\" or \"1\""), "{error}");

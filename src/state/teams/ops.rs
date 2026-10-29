@@ -175,6 +175,11 @@ fn parse_member(value: &Value) -> anyhow::Result<Member> {
         member.permissions_profile.is_empty() || ["read", "write", "build", "commit", "network"].contains(&member.permissions_profile.as_str()),
         "A permissions profile is read, write, build, commit or network"
     );
+    // U46: opt-in; empty inherits the role, "none" overrides it with none.
+    ensure!(
+        matches!(member.context_before_task.as_str(), "" | "none" | "compact" | "clear"),
+        "A context before a task is none, compact or clear"
+    );
     member.launch_id.clear();
     member.error.clear();
     member.inbox = Inbox::default();
@@ -679,7 +684,17 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
         let id = text(update, "id").to_owned();
         ensure!(!id.is_empty(), "A member update names its member");
         let member = team.members.iter_mut().find(|member| member.id == id).with_context(|| format!("Unknown member {id}"))?;
-        ensure!(planning || member.session.is_none(), "A running team changes only members without a session");
+        // U46: the context before a task only changes the next hand-out, so the
+        // owner may set it on a running member that has a session too; every
+        // other field still changes only on a member without one.
+        let context_only = update.as_object().is_some_and(|fields| {
+            fields.contains_key("context_before_task")
+                && fields.keys().all(|key| key == "id" || key == "context_before_task")
+        });
+        ensure!(
+            planning || member.session.is_none() || context_only,
+            "A running team changes only members without a session"
+        );
         if let Some(folder) = update.get("folder") {
             member.folder = serde_json::from_value(folder.clone()).context("A folder is shared, worktree or clone")?;
         }
@@ -704,6 +719,14 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
                 widen.push(json!({"member":id,"from":member.permissions_profile,"to":profile}));
             }
             member.permissions_profile = profile;
+        }
+        // U46: the owner sets what Zerus does to a member's context; the lead
+        // never does (spec 0). Empty inherits the role, "none" overrides it.
+        if let Some(context) = update.get("context_before_task") {
+            ensure!(matches!(actor, Actor::Human), "Only you set a member's context before a task");
+            let context = context.as_str().unwrap_or_default().to_owned();
+            ensure!(matches!(context.as_str(), "" | "none" | "compact" | "clear"), "A context before a task is none, compact or clear");
+            member.context_before_task = context;
         }
         changed.push(json!(id));
     }
@@ -932,10 +955,27 @@ const PENDING_ADDITIONS: usize = 8;
 const ADDED_TASKS: usize = 20;
 
 /// U29: what the lead shows the owner (and the desktop asks) before a task
-/// joins a running phase.
-pub(crate) fn addition_warning(phase: u32) -> String {
+/// joins a running phase. #511 C1: it names the queued task titles, so the
+/// owner confirms what joins, not a blind "add"; titles are cut and the text
+/// stays bounded.
+pub(crate) fn addition_warning(phase: u32, titles: &[String]) -> String {
+    let listed: Vec<String> = titles
+        .iter()
+        .map(|title| {
+            let mut short: String = title.chars().take(100).collect();
+            if short.chars().count() < title.chars().count() {
+                short.push('…');
+            }
+            format!("\"{short}\"")
+        })
+        .collect();
+    let what = if listed.len() == 1 {
+        format!("the task {}", listed.first().map(String::as_str).unwrap_or_default())
+    } else {
+        format!("{} tasks {}", listed.len(), listed.join(", "))
+    };
     format!(
-        "Adding tasks to running phase {phase} changes its scope after you approved it. The load balance of the lanes \
+        "Adding {what} to running phase {phase} changes its scope after you approved it. The load balance of the lanes \
          shifts and members may sit idle: members do not work ahead and later phases are not approved. \
          Confirm in a new message to add them (type \"add\" or \"{phase}\" on the desktop)."
     )
@@ -990,10 +1030,13 @@ fn add_to_phase(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSe
         team.pending_additions.retain(|pending| pending.phase != n);
         ensure!(team.pending_additions.len() < PENDING_ADDITIONS, "{PENDING_ADDITIONS} additions already wait for your confirmation");
         let ids: Vec<u32> = tasks.iter().map(|task| task.id).collect();
+        // #511 C1: the warning names what will join, so the owner confirms the
+        // titles, not a blind "add".
+        let titles: Vec<String> = tasks.iter().map(|task| task.title.clone()).collect();
         let id = uuid::Uuid::new_v4().to_string();
         team.pending_additions.push(PendingAddition { id: id.clone(), phase: n, tasks, by: by.clone(), request: quote.clone(), warned_at: at });
         events.push(Event::new("phase_addition_warned", json!({"by":by,"phase":n,"tasks":ids,"request":quote})));
-        return Ok(json!({"status":"warning","phase":n,"pending":id,"tasks":ids,"warning":addition_warning(n),
+        return Ok(json!({"status":"warning","phase":n,"pending":id,"tasks":ids,"warning":addition_warning(n, &titles),
             "expires_at":at + PENDING_ADDITION_SECONDS}));
     };
     let found = team.pending_additions.iter().position(|pending| pending.id == confirm).context("That addition is unknown or expired; ask again")?;
@@ -1788,6 +1831,9 @@ fn close_questions(task: &mut Task) {
 /// The task's open attempt must be revoked before another starts. The
 /// dispatcher interrupts the old worker separately.
 fn revoke(task: &mut Task, why: &str) -> Option<u32> {
+    // U46: retry, reassign, take-over and cancel end a preparation that
+    // refused: the next hand-out prepares its member again.
+    task.prepare_wait = None;
     // The attempt is over: its questions close with it (N5).
     close_questions(task);
     // U36: so does the stage that was reading its report.
@@ -6124,6 +6170,51 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("without a session"), "{error}");
+    }
+
+    #[test]
+    fn only_the_owner_sets_a_members_context_before_a_task() {
+        let (mut team, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
+        let mut events = Vec::new();
+        plan(
+            &mut team,
+            &json!({"members":[{"id":"dev","role":"Backend","agent":"claude"}],"tasks":[{"id":1,"title":"A","assignee":"dev"}]}),
+            &Actor::Human,
+            &mut events,
+        )
+        .unwrap();
+        let set = |team: &mut Team, actor: &Actor, value: &str| {
+            let mut events = Vec::new();
+            apply(team, "settings", &json!({"members_update":[{"id":"dev","context_before_task":value}]}), actor, &BTreeSet::new(), &mut events)
+        };
+        set(&mut team, &Actor::Human, "compact").unwrap();
+        assert_eq!(team.member("dev").unwrap().context_before_task, "compact");
+        // The lead never sets it (U46), and an unknown action is refused.
+        let error = set(&mut team, &Actor::Member("lead".into()), "clear").unwrap_err().to_string();
+        assert_eq!(error, "Only you set a member's context before a task");
+        let error = set(&mut team, &Actor::Human, "sometimes").unwrap_err().to_string();
+        assert_eq!(error, "A context before a task is none, compact or clear");
+        // Empty inherits the role again; "none" overrides a role's action.
+        set(&mut team, &Actor::Human, "").unwrap();
+        assert_eq!(team.member("dev").unwrap().context_before_task, "");
+        set(&mut team, &Actor::Human, "none").unwrap();
+        assert_eq!(team.member("dev").unwrap().context_before_task, "none");
+        // U46: a running member that already has a session takes this one field
+        // (it only changes the next hand-out); other fields still need a member
+        // without a session.
+        let mut running = running_team();
+        running.members.iter_mut().find(|member| member.id == "dev").unwrap().session =
+            Some(SessionRef { name: "codex/x/dev".into(), run_id: "r1".into(), ..Default::default() });
+        let set_running = |team: &mut Team, update: Value| {
+            let mut events = Vec::new();
+            apply(team, "settings", &json!({"members_update":[update]}), &Actor::Human, &BTreeSet::new(), &mut events)
+        };
+        set_running(&mut running, json!({"id":"dev","context_before_task":"clear"})).unwrap();
+        assert_eq!(running.member("dev").unwrap().context_before_task, "clear");
+        let error = set_running(&mut running, json!({"id":"dev","role":"API","context_before_task":"compact"})).unwrap_err().to_string();
+        assert_eq!(error, "A running team changes only members without a session");
+        let error = set_running(&mut running, json!({"id":"dev","role":"API"})).unwrap_err().to_string();
+        assert_eq!(error, "A running team changes only members without a session");
     }
 
     #[test]

@@ -611,6 +611,37 @@
    }
   },
   {
+   "name": "a-team-members-default-mute-is-not-a-reply-of-yours",
+   "raw": {
+    "activity": "idle",
+    "phase": "idle",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 999940.0,
+    "process_work": {
+     "count": 0
+    },
+    "reply_id": "7:999990",
+    "read": {
+     "reply_id": "6:999000"
+    },
+    "notification_preferences": {
+     "conversation_id": "c",
+     "muted": true,
+     "revision": 0
+    }
+   },
+   "expect": {
+    "session_state": "cooling"
+   }
+  },
+  {
    "name": "read-reply",
    "raw": {
     "activity": "idle",

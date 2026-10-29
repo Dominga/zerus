@@ -256,6 +256,10 @@ pub(crate) struct PromptSnapshot {
     pub task_template: String,
     #[serde(default)]
     pub notes: std::collections::BTreeMap<String, String>,
+    /// U46: the role's `context_before_task` when the member joined, so a later
+    /// catalog edit changes no running team.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub context_before_task: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -268,6 +272,14 @@ pub(crate) struct Member {
     /// catalog edit never changes a running team mid-phase.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_snapshot: Option<PromptSnapshot>,
+    /// U46: compact or clear the agent's context before each hand-out. Empty
+    /// inherits the role's setting; "none" overrides it with none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub context_before_task: String,
+    /// U46: the member already got the feed note that its agent has no native
+    /// context action; it is written once per member.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub context_noted: bool,
     pub agent: String,
     #[serde(default)]
     pub account: String,
@@ -506,6 +518,10 @@ fn is_zero(value: &i64) -> bool {
 }
 
 fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
+}
+
+fn is_zero_u32(value: &u32) -> bool {
     *value == 0
 }
 
@@ -918,6 +934,55 @@ pub(crate) struct Hold {
     pub reason: String,
 }
 
+/// U46: one step Zerus runs for a member before a hand-out. `result` is `done`,
+/// `skipped`, `refused` or `uncertain`; `reason` names the refusal or why the
+/// step was skipped.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct PrepareStep {
+    pub step: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub from: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub to: String,
+    #[serde(default)]
+    pub at: f64,
+    pub result: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
+}
+
+/// U46: a hand-out Zerus prepares before it goes out. `state` is `waiting`
+/// while the native context action runs, then `refused` or `uncertain`; the
+/// request fields let a later tick (or a restarted worker) read the same
+/// request instead of running the action again. A failed wait leaves the task
+/// pending with this reason; the lead or the owner retries it (spec 0).
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct PrepareWait {
+    pub step: String,
+    #[serde(default)]
+    pub state: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
+    #[serde(default)]
+    pub at: f64,
+    /// The attempt whose preparation failed (0 while it waits).
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub attempt: u32,
+    /// compact or clear, while it waits.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub action: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub request_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub run_id: String,
+    /// The conversation before the action: a clear shows a new one.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub conversation: String,
+    /// When the action started; the 60 s confirmation bound counts from here.
+    #[serde(default)]
+    pub started_at: f64,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Attempt {
     pub n: u32,
@@ -926,6 +991,11 @@ pub(crate) struct Attempt {
     pub member: String,
     #[serde(default)]
     pub state: AttemptState,
+    /// U46: what Zerus did to the member before this hand-out - the context
+    /// action today - and whether it finished, was skipped, refused or stayed
+    /// unconfirmed (spec 1).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prepare: Vec<PrepareStep>,
     /// U31: this attempt worked a task of a draft phase before its approval.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub worked_ahead: bool,
@@ -958,6 +1028,12 @@ pub(crate) struct Attempt {
     /// The member's turn ended long enough ago without a report.
     #[serde(default)]
     pub no_report: bool,
+    /// The newest session event the dispatcher read for this attempt when the
+    /// listing's `last_event_at` did not advance (a DeepSeek session's native
+    /// tool events, #628). It keeps the silent check from reading the session
+    /// on every tick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_at: Option<f64>,
     /// The lead was reminded once that this report still waits for a decision
     /// (C4); absent until it was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1041,6 +1117,11 @@ pub(crate) struct Task {
     pub hold: Option<Hold>,
     #[serde(default)]
     pub attempts: Vec<Attempt>,
+    /// U46: a hand-out whose preparation refused or stayed unconfirmed. The
+    /// task waits for Zerus and is not handed out again until the lead or the
+    /// owner retries or reassigns it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepare_wait: Option<PrepareWait>,
     #[serde(default)]
     pub decided_by: Option<Decider>,
     #[serde(default)]

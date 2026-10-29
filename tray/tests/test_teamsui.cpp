@@ -640,6 +640,7 @@ private slots:
     void newTeamStartsTheLeadWithTheTemplate();
     void newTeamRowErrorsKeepAnOpenListOpen();
     void newTeamTabKeepsAMemberListOpenUntilItCloses();
+    void newTeamMaxMembersStepsUpAndDown();
     void catalogEditorSavesTheNextVersion();
     void catalogEditorKeepsTheFieldsItDoesNotEdit();
     void ownerActionsCarryNoAgentMarkers();
@@ -1594,6 +1595,48 @@ void TestTeamsUi::newTeamTabKeepsAMemberListOpenUntilItCloses()
     QTRY_VERIFY(!role);
     QTRY_COMPARE(tab.findChildren<QFrame *>("teamNewMemberRow").size(), 2);
     for (auto *worktree : tab.findChildren<QCheckBox *>("teamNewWorktree")) QVERIFY(!worktree->isChecked());
+}
+
+// The team style sheet gives the spin box a border; its buttons must come
+// from the style sheet too. Windows 11 places them side by side, and the
+// editor, sized for one stacked button, covered the up button: a click there
+// started editing the number instead of stepping it.
+void TestTeamsUi::newTeamMaxMembersStepsUpAndDown()
+{
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    controller.refreshCatalog();
+    QTRY_VERIFY(controller.catalogReady());
+    QTemporaryDir folder;
+    // Outlives the tab: the spin box uses it until it is destroyed.
+    std::unique_ptr<QStyle> windows11(QStyleFactory::create("windows11"));
+    TeamNewTab tab(&controller, &client, {{QString(), "this computer", true}},
+                   TeamNewTab::Coordinator{"claude/checkout/coord", "claude", "Opus", "", QDir::toNativeSeparators(folder.path()), "msi", "Ready", false}, "Checkout");
+    auto *max = tab.findChild<QSpinBox *>("teamNewMaxMembers");
+    QVERIFY(max);
+    if (windows11) max->setStyle(windows11.get());
+    tab.resize(1300, 860); tab.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&tab));
+    QTRY_VERIFY(max->isVisible());
+    QStyleOptionSpinBox option;
+    option.initFrom(max);
+    option.frame = max->hasFrame();
+    option.buttonSymbols = max->buttonSymbols();
+    option.stepEnabled = QAbstractSpinBox::StepUpEnabled | QAbstractSpinBox::StepDownEnabled;
+    option.subControls = QStyle::SC_SpinBoxFrame | QStyle::SC_SpinBoxEditField | QStyle::SC_SpinBoxUp | QStyle::SC_SpinBoxDown;
+    const QRect up = max->style()->subControlRect(QStyle::CC_SpinBox, &option, QStyle::SC_SpinBoxUp, max);
+    const QRect down = max->style()->subControlRect(QStyle::CC_SpinBox, &option, QStyle::SC_SpinBoxDown, max);
+    auto *editor = max->findChild<QLineEdit *>();
+    QVERIFY(editor && up.isValid() && down.isValid());
+    QVERIFY2(!up.intersects(editor->geometry()), qPrintable(QStringLiteral("up %1,%2 %3x%4 under the editor").arg(up.x()).arg(up.y()).arg(up.width()).arg(up.height())));
+    QVERIFY(!down.intersects(editor->geometry()));
+    QCOMPARE(max->style()->hitTestComplexControl(QStyle::CC_SpinBox, &option, up.center(), max), QStyle::SC_SpinBoxUp);
+    QCOMPARE(max->style()->hitTestComplexControl(QStyle::CC_SpinBox, &option, down.center(), max), QStyle::SC_SpinBoxDown);
+    QCOMPARE(max->value(), 6);
+    QTest::mouseClick(max, Qt::LeftButton, {}, up.center());
+    QCOMPARE(max->value(), 7);
+    QTest::mouseClick(max, Qt::LeftButton, {}, down.center());
+    QCOMPARE(max->value(), 6);
 }
 
 void TestTeamsUi::catalogEditorSavesTheNextVersion()

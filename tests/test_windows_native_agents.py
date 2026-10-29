@@ -988,6 +988,35 @@ class NativeWindowsClaude(NativeAgent, host.HostCase):
     def test_a_switch_to_another_account_keeps_the_conversation_folder_and_name(self):
         self.check_switch_account("switch")
 
+    def test_a_team_swap_moves_the_lead_through_u53(self):
+        """U54: one owner action moves a team's lead to another account through the
+        same U53 switch, keeping its session, conversation and name."""
+        name = self.launch("swap")
+        self.deliver(name, MESSAGES[0])
+        conversation = self.ready(name)["conversation_id"]
+        self.second_account()
+        team = self.json("team", "create", input=json.dumps({
+            "request_id": str(uuid.uuid4()), "name": "Swap", "by": "human",
+            "lead": {"id": "lead", "role": "Lead", "agent": "claude",
+                     "session": {"name": name, "host": ""}}}))
+        receipt = self.json("team", "swap-member", input=json.dumps({
+            "request_id": str(uuid.uuid4()), "team": team["team"], "by": "human",
+            "from_account": "native-claude", "to_account": "second", "provider": "claude"}))
+        self.assertEqual(receipt["status"], "swapped", receipt)
+        self.assertEqual([entry["member"] for entry in receipt["members"]], ["lead"], receipt)
+        # The same session, conversation and name, now on the second account.
+        switched = self.record(name)
+        self.assertEqual((switched["name"], switched["conversation_id"], switched["account_id"]),
+                         (name, conversation, "second"))
+        # The roster reads the real account from the session.
+        status = self.json("team", "status", input=json.dumps({"team": team["team"], "by": "human"}))
+        lead = next(member for member in status["members"] if member["id"] == "lead")
+        self.assertEqual(lead["session_account"], "second", lead)
+        # The moved lead still answers in that conversation.
+        text = "After the team swap."
+        self.deliver(name, text)
+        self.assertEqual(self.accepted(name, text, conversation), 1, self.describe())
+
     def test_input_keys_reach_claude_through_the_host(self):
         self.check_keys(self.launch("keys"))
 

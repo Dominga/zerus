@@ -2689,7 +2689,17 @@ fn swap_one(team: &mut Team, input: &Value, id: &str, keep_session: bool, actor:
     }
     let agent = team.member(id).map(|member| member.agent.clone()).unwrap_or_default();
     let to = team.member(id).and_then(|member| member.session.as_ref()).map(|session| session.name.clone()).unwrap_or_default();
-    team.swapped.push(json!({"member":role,"old":from,"at":at,"by":"You"}));
+    // U54: the new lead's brief names the previous lead's conversation and
+    // transcript; the old session's own record has them, when it can be read.
+    let previous = if lead && !keep_session {
+        crate::state::storage::read(&from).ok()
+    } else {
+        None
+    };
+    let conversation = previous.as_ref().and_then(|record| record["conversation_id"].as_str()).unwrap_or_default().to_owned();
+    let transcript = previous.as_ref().and_then(|record| record["transcript"].as_str()).unwrap_or_default().to_owned();
+    team.swapped.push(json!({"member":role,"old":from,"at":at,"by":"You",
+        "conversation":conversation,"transcript":transcript}));
     let excess = team.swapped.len().saturating_sub(20);
     team.swapped.drain(..excess);
     // The lead's open task stays in its inbox and the new lead session gets

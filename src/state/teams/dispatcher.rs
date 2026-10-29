@@ -1757,7 +1757,7 @@ pub(crate) fn brief_text(team: &Team) -> String {
         );
     }
     if matches!(team.status, TeamStatus::Running | TeamStatus::Paused) {
-        return format!(
+        let mut text = format!(
             "[Zerus team \u{b7} from: Zerus \u{b7} brief]\nYou are now the lead of the team {} ({}). \
              Its reports, questions, permission requests and your own tasks wait in one inbox: \
              {{\"team\":\"{}\"}} | hgs team inbox --json. The team state is in hgs team status --json; \
@@ -1766,6 +1766,21 @@ pub(crate) fn brief_text(team: &Team) -> String {
             if team.status == TeamStatus::Running { "running" } else { "paused" },
             team.id
         );
+        // U54: a lead swapped to another conversation gets the previous lead's
+        // context, bounded: its session, conversation and transcript path.
+        let lead = team.role_of(&team.lead);
+        if let Some(previous) = team.swapped.iter().rev().find(|swap| {
+            swap["member"] == lead && !swap["conversation"].as_str().unwrap_or_default().is_empty()
+        }) {
+            let bounded = |value: &Value| value.as_str().unwrap_or_default().chars().take(500).collect::<String>();
+            text += &format!(
+                "Previous lead: {} (conversation {}), transcript {}. Its latest compact summary is the last summary in that transcript; read it before you plan anew.\n",
+                bounded(&previous["old"]),
+                bounded(&previous["conversation"]),
+                bounded(&previous["transcript"]),
+            );
+        }
+        return text;
     }
     let members: Vec<Value> = team
         .members
@@ -2721,6 +2736,66 @@ fn launch(team: &Team, member: &Member) -> anyhow::Result<()> {
     let output = hgs(&member.computer, &args, None, Duration::from_secs(120))?;
     anyhow::ensure!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr).trim());
     Ok(())
+}
+
+/// U54: a member's folder may be left on one of its task branches (a worktree
+/// the member tested on). When the folder is clean and that branch is already
+/// merged into the member's branch or the lead's, it is switched back to the
+/// member's branch; the task branch is kept and the caller records the note.
+/// Otherwise the error offers that checkout as the review action - never a
+/// reset. A shared folder, a remote member and a detached HEAD are left to the
+/// launch.
+fn prepare_member_branch(team: &Team, member: &Member) -> anyhow::Result<Option<String>> {
+    if !member.computer.is_empty() || member.folder == MemberFolder::Shared || team.folder.is_empty() {
+        return Ok(None);
+    }
+    let folder = member_folder(team, member)?;
+    check_folder_branch(team, member, &folder)
+}
+
+fn check_folder_branch(team: &Team, member: &Member, folder: &str) -> anyhow::Result<Option<String>> {
+    let (_, current) = folder_facts(folder);
+    if current.is_empty() || current == "HEAD" {
+        return Ok(None);
+    }
+    let own = format!("team/{}/{}", &team.id[..8.min(team.id.len())], tag(&member.id));
+    if current == own {
+        return Ok(None);
+    }
+    let lead = lead_branch(team).unwrap_or_default();
+    if !lead.is_empty() && current == lead {
+        return Ok(None);
+    }
+    // Only a task branch this member has worked on is a leftover to undo.
+    let task_branch = team.tasks.iter().rev().find_map(|task| {
+        let branch = task_branch(team, task.id, &member.id)?;
+        (branch == current && task.attempts.iter().any(|attempt| attempt.member == member.id)).then_some(branch)
+    });
+    if task_branch.is_none() {
+        return Ok(None);
+    }
+    let git = |args: &[&str]| {
+        super::super::worktrees::git(Path::new(folder), args, Instant::now() + Duration::from_secs(20))
+    };
+    let merged_into = |branch: &str| {
+        !branch.is_empty() && git(&["merge-base", "--is-ancestor", &current, branch]).is_ok()
+    };
+    let clean = git(&["status", "--porcelain"]).is_ok_and(|output| output.iter().all(u8::is_ascii_whitespace));
+    if !clean {
+        anyhow::bail!(
+            "{folder} is on {current}, not {own}; it has uncommitted changes, so Zerus did not switch it. \
+             Check out {own} in the folder when its work is committed."
+        );
+    }
+    if !merged_into(&own) && !merged_into(&lead) {
+        anyhow::bail!(
+            "{folder} is on {current}, not {own}; {current} is not merged into {own}. Merge it, then check out {own} in the folder."
+        );
+    }
+    git(&["switch", &own]).map_err(|error| {
+        anyhow::anyhow!("{folder} is on {current}, not {own}, and Zerus could not switch it: {}", error.detail)
+    })?;
+    Ok(Some(format!("the folder was on {current} (merged) and is back on {own}; {current} is kept")))
 }
 
 /// One change to a team outside any request: the dispatcher's own record.
@@ -5075,7 +5150,23 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             })?;
             let (team, found) = planned.unwrap();
             let swapped = found.launch_after_swap;
-            if let Err(error) = launch(&team, &found) {
+            let prepared = prepare_member_branch(&team, &found);
+            let launched = match prepared {
+                Ok(note) => {
+                    if let Some(note) = note {
+                        change(store, &team.id, |team, events| {
+                            events.push(Event::new(
+                                "folder_checked_out",
+                                json!({"member":team.role_of(&found.id),"note":note}),
+                            ));
+                            Ok(())
+                        })?;
+                    }
+                    launch(&team, &found)
+                }
+                Err(error) => Err(error),
+            };
+            if let Err(error) = launched {
                 // U54: a failed post-swap launch keeps `launch_after_swap`, so a
                 // relaunch starts it at once; the error names its fix.
                 let error = error.to_string();
@@ -10919,6 +11010,85 @@ mod tests {
         team.members.push(Member { id: "lead".into(), role: "Lead".into(), agent: "claude".into(), ..Default::default() });
         team.members.push(member);
         team
+    }
+
+    #[test]
+    fn a_member_folder_left_on_a_merged_task_branch_returns_to_the_member_branch() {
+        use crate::state::teams::model::{Attempt, BranchPerTask, Member, MemberFolder, Task};
+        let dir = tempfile::tempdir().unwrap();
+        set_git_ceiling(&dir.path().display().to_string());
+        let repo = folder_repo(dir.path(), "project");
+        let worktree = dir.path().join("dev");
+        let git = |at: &Path, args: &[&str]| {
+            let status = std::process::Command::new("git").arg("-C").arg(at).args(args).status().unwrap();
+            assert!(status.success(), "{args:?}");
+        };
+        let branch = |at: &Path| {
+            String::from_utf8(std::process::Command::new("git").arg("-C").arg(at).args(["rev-parse", "--abbrev-ref", "HEAD"]).output().unwrap().stdout)
+                .unwrap()
+                .trim()
+                .to_owned()
+        };
+        git(&repo, &["worktree", "add", "-q", "-b", "team/abcdef12/dev", &worktree.display().to_string(), "HEAD"]);
+        // The task branch is merged into the member branch, then left checked out.
+        git(&worktree, &["switch", "-q", "-c", "team/abcdef12/dev-1"]);
+        std::fs::write(worktree.join("task.txt"), "task").unwrap();
+        git(&worktree, &["add", "."]);
+        git(&worktree, &["commit", "-qm", "task"]);
+        git(&worktree, &["switch", "-q", "team/abcdef12/dev"]);
+        git(&worktree, &["merge", "-q", "--no-ff", "-m", "merge", "team/abcdef12/dev-1"]);
+        git(&worktree, &["switch", "-q", "team/abcdef12/dev-1"]);
+        let mut team = folder_team(
+            &repo,
+            Member {
+                id: "dev".into(),
+                role: "Backend".into(),
+                agent: "codex".into(),
+                folder: MemberFolder::Worktree,
+                directory: worktree.display().to_string(),
+                ..Default::default()
+            },
+        );
+        team.settings.branch_per_task = Some(BranchPerTask { template: "team/{team8}/{member}-{id}".into() });
+        team.tasks.push(Task {
+            id: 1,
+            title: "A".into(),
+            assignee: "dev".into(),
+            attempts: vec![Attempt { n: 1, id: "a1".into(), member: "dev".into(), ..Default::default() }],
+            ..Default::default()
+        });
+        let note = check_folder_branch(&team, team.member("dev").unwrap(), &worktree.display().to_string()).unwrap();
+        assert!(note.unwrap().contains("back on team/abcdef12/dev"), "the note names the checkout");
+        assert_eq!(branch(&worktree), "team/abcdef12/dev");
+        // The task branch is kept.
+        assert!(std::process::Command::new("git")
+            .arg("-C")
+            .arg(&worktree)
+            .args(["rev-parse", "--verify", "team/abcdef12/dev-1"])
+            .output()
+            .unwrap()
+            .status
+            .success());
+        // A dirty folder is never switched.
+        git(&worktree, &["switch", "-q", "team/abcdef12/dev-1"]);
+        std::fs::write(worktree.join("task.txt"), "dirty").unwrap();
+        let error = check_folder_branch(&team, team.member("dev").unwrap(), &worktree.display().to_string()).unwrap_err().to_string();
+        assert!(error.contains("uncommitted changes"), "{error}");
+        assert_eq!(branch(&worktree), "team/abcdef12/dev-1");
+    }
+
+    #[test]
+    fn a_swapped_leads_brief_names_the_previous_conversation_and_transcript() {
+        let mut team = Team { id: "abcdef12-0000-4000-8000-000000000000".into(), name: "T".into(), lead: "lead".into(), status: TeamStatus::Running, ..Default::default() };
+        team.members.push(Member { id: "lead".into(), role: "Lead".into(), agent: "claude".into(), ..Default::default() });
+        team.swapped.push(json!({"member":"Lead","old":"claude/x/old","at":1.0,"by":"You",
+            "conversation":"c-old","transcript":"C:/state/old.jsonl"}));
+        let brief = brief_text(&team);
+        assert!(brief.contains("claude/x/old") && brief.contains("c-old") && brief.contains("old.jsonl"), "{brief}");
+        // Another member's swap is not the lead's history.
+        team.swapped.clear();
+        team.swapped.push(json!({"member":"Backend","old":"claude/x/dev","conversation":"c-dev"}));
+        assert!(!brief_text(&team).contains("c-dev"));
     }
 
     #[test]

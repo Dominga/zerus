@@ -1218,6 +1218,18 @@ sets them in the catalog, the team settings or the plan; members never do.
   name; a failed launch returns to the old account, an unconfirmed one is
   reported uncertain and never retried. Nothing changes until the owner
   chooses; a team member's account changes only through swap-member.
+- **U55. What waits for the owner is shown where the owner looks (owner,
+  2026-10-29).** Mock-up #530 waited a day for the owner, who never knew. An
+  item that waits for the owner (the kinds of U50's `hgs team waiting`: a
+  draft phase or plan, an escalated report or permission, the owner's word
+  asked, a task the owner holds or a report marked for the owner, a finished
+  team) shows as a banner at the top of the session's chat and Activity, and
+  under Activity in the team view: what waits, for how long, and its action
+  (Open, Approve, Accept). Several fold into one line with a count. The first
+  time an item starts waiting, one desktop notification says so; it never
+  repeats for the same item. A member's report that names the owner ("ready
+  for the owner") is the lead's to decide unless the lead escalates it; the
+  lead protocol says so.
 - **U54. Move a team to another account (owner, 2026-10-29).** Moving team
   528aebfe's Claude members and its lead off an account near its weekly limit
   took two owner scripts in an outside PowerShell, a manual pause of six old

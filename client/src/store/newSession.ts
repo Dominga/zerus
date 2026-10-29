@@ -6,14 +6,16 @@ import type {
 } from "../types";
 import type { Session } from "../ui/sessions/types";
 import {
-  accountRows, computerChoice, computerRows, folderLaunchProblem, folderRows, projectChoice, projectRows, refreshRows,
-  type AccountChoice, type AccountRow, type ComputerRow, type Fleet, type FolderRow, type LaunchFolder, type ProjectRow,
+  accountRows, computerChoice, computerRows, folderRows, projectChoice, projectRows, refreshRows,
+  type AccountChoice, type AccountRow, type ComputerRow, type Fleet, type FolderRow, type ProjectRow,
 } from "../ui/sessions/newsession-ui";
+import { createFolderLaunch, type FolderLaunchState, type LaunchFolder } from "../ui/sessions/folder-launch";
+import { folderLaunches, onlineOf } from "../ui/sessions/newsession-view";
 import { markFavorite } from "../ui/sessions/opencode-models";
 import { array, object, string, type Json } from "../ui/lib/json";
 import { createOpenCode, type OpenCodeView } from "./newSessionOpencode";
 import { absolute, clean, matchingProjectFolder, native, of, prefillTarget, restoredFolder } from "../ui/sessions/paths";
-import { catalog, computerOffline } from "./catalog";
+import { catalog } from "./catalog";
 import { machineCards, requestMachine } from "./machines";
 import { defaultProject as organizationDefault, groupOf, grouping, setProjectToShow } from "./organization";
 import { detailsFor, followedFor, notify } from "./actions";
@@ -1080,14 +1082,16 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
 
 type Dialog = ReturnType<typeof createDialog>;
 
-/** The New session store over its dependencies; the app's instance is below. */
-export function createNewSessionStore(deps: NewSessionDeps) {
+/**
+ * The New session store over its dependencies; the app's instance is below.
+ * `launches` is the Projects entries' state (folder-launch.ts): the app's
+ * store shares the start-up chunk's, so a build style learned by either
+ * serves both.
+ */
+export function createNewSessionStore(deps: NewSessionDeps, launches: FolderLaunchState = createFolderLaunch(deps)) {
   const [version, setVersion] = createSignal(0);
   let dialog: Dialog | undefined;
   let opening = false;
-  // The platform this client was built for: this computer's folder style before it reports one.
-  const [buildStyle, setBuildStyle] = createSignal<PathStyle>();
-  let styleAsked = false;
   const admittedListeners = new Set<(id: string, plan: LaunchPlan) => void>();
   const emit = () => setVersion((v) => v + 1);
   const view = createRoot(() => createMemo(() => { version(); return dialog && !dialog.closed() ? dialog.state() : undefined; }));
@@ -1123,7 +1127,7 @@ export function createNewSessionStore(deps: NewSessionDeps) {
       const context = generic ? selection : undefined;
       const computer = context ? context.row.computer : options.computer ?? selectedHostTarget();
       const started = await deps.bridge.newSessionContext();
-      setBuildStyle(started.build_style);
+      launches.setBuildStyle(started.build_style);
       const open = createDialog(deps, started, { host: computer, agent: options.agent ?? "", project: launchProject }, emit, {
         folders: (project) => { closeNewSession(); deps.openProjects(project); },
         machines: () => { closeNewSession(); deps.openMachines(); },
@@ -1161,37 +1165,7 @@ export function createNewSessionStore(deps: NewSessionDeps) {
     }
   }
 
-  /** The build style, asked once when this computer has not reported its platform. */
-  async function ensureBuildStyle() {
-    if (deps.cards()[""]?.platform || buildStyle() !== undefined || styleAsked) return;
-    styleAsked = true;
-    try { setBuildStyle((await deps.bridge.newSessionContext()).build_style); } catch { setBuildStyle("posix"); }
-  }
-
-  /**
-   * The Projects entries' state for a folder (ProjectsDialog.cpp 515-532,
-   * 552-560): why it cannot start a session, "" when it can; its path in its
-   * computer's form; whether it is this computer's. `exists` is whether this
-   * computer's folder exists, left out while unread. Reactive; reads nothing.
-   */
-  function folderLaunch(folder: LaunchFolder, exists?: boolean): { problem: string; shown: string; local: boolean } {
-    const local = deps.cards()[""];
-    const localHost = local?.host ?? "";
-    const style = (machine: string) => of(local?.platform, !!machine && machine === localHost, buildStyle() ?? "posix");
-    const env = { localHost, online: deps.online, style };
-    return { problem: folderLaunchProblem(folder, env, exists), shown: native(folder.path, style(folder.machine)), local: !!localHost && folder.machine === localHost };
-  }
-
-  /**
-   * Whether this computer's folder exists (`local_folder_exists`, a read);
-   * undefined for another computer's. It first asks the build style once, so
-   * `folderLaunch` follows this computer's style before its card reports one.
-   */
-  async function folderExists(folder: LaunchFolder): Promise<boolean | undefined> {
-    await ensureBuildStyle();
-    if (!folderLaunch(folder).local) return undefined;
-    try { return await deps.bridge.localFolderExists(folder.path); } catch { return false; }
-  }
+  const { folderLaunch, folderExists } = launches;
 
   /** ProjectsDialog::newFolderSession (533-541): "" when the dialog opens, else why it cannot. */
   async function openFolderSession(projectId: string, folder: LaunchFolder): Promise<string> {
@@ -1199,7 +1173,7 @@ export function createNewSessionStore(deps: NewSessionDeps) {
     let listed: FolderOut[];
     try { listed = await deps.bridge.projectFolders(projectId); } catch (failure) { return errorText(failure); }
     if (!listed.some((f) => f.key === folder.key && f.machine === folder.machine && f.path === folder.path)) return FOLDER_CHANGED;
-    await ensureBuildStyle();
+    await launches.ensureBuildStyle();
     const first = folderLaunch(folder);
     const problem = !first.problem && first.local ? folderLaunch(folder, await folderExists(folder)).problem : first.problem;
     if (problem) return problem;
@@ -1260,7 +1234,6 @@ const peersOf = () => {
   ids.delete("");
   return [...ids].sort();
 };
-const onlineOf = (computer: ComputerId) => machineCards[computer]?.ok === true && !computerOffline(computer);
 
 const app = createNewSessionStore({
   bridge,
@@ -1285,7 +1258,7 @@ const app = createNewSessionStore({
   openMachines: () => { setPage("machines"); requestMachine(""); },
   every: (ms, run) => { const timer = setInterval(run, ms); return () => clearInterval(timer); },
   now: () => Date.now() / 1000,
-});
+}, folderLaunches);
 
 // Each admitted creation's card is selected and revealed (SessionsWindow 2914-2919).
 app.onCreationAdmitted(creationAdmitted);

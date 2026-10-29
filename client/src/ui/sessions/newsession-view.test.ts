@@ -13,17 +13,27 @@ import { command, handlerFor, onCommand, portableDefaults, route, sequenceState,
 const store = vi.hoisted(() => ({
   host: "mac",
   folderProblem: "",
+  /** How often the store's module was loaded. */
+  loads: 0,
+  /** Opens or closes the store's dialog, once it is loaded. */
+  setOpen: (_open: boolean) => {},
   openNewSession: vi.fn(async (_options?: unknown) => {}),
   openFolderSession: vi.fn(async (_project: string, _folder: unknown) => ""),
 }));
 const notices = vi.hoisted(() => [] as { tone: string; text: string }[]);
 
-vi.mock("../../store/newSession", () => ({
-  newSession: () => undefined,
-  openNewSession: store.openNewSession,
-  openFolderSession: async (project: string, folder: unknown) => { await store.openFolderSession(project, folder); return store.folderProblem; },
-  selectedHostTarget: () => store.host,
-}));
+vi.mock("../../store/newSession", async () => {
+  const { createSignal } = await import("solid-js");
+  const [open, setOpen] = createSignal(false);
+  store.loads += 1;
+  store.setOpen = setOpen;
+  return {
+    newSession: () => (open() ? {} : undefined),
+    openNewSession: store.openNewSession,
+    openFolderSession: async (project: string, folder: unknown) => { await store.openFolderSession(project, folder); return store.folderProblem; },
+    selectedHostTarget: () => store.host,
+  };
+});
 vi.mock("../../store/actions", () => ({ notify: (tone: string, text: string) => notices.push({ tone, text }) }));
 
 const view = await import("./newsession-view");
@@ -39,16 +49,31 @@ beforeEach(() => {
   notices.length = 0;
 });
 
+// First: nothing of the store loads with this module (the start-up chunk).
+describe("loading the store (its own chunk)", () => {
+  it("loads the store with the first opening, never before, and once", async () => {
+    expect(store.loads).toBe(0);
+    expect(view.newSessionOpened()).toBe(false);
+    view.folderMenuEntry(view.folderLaunch(folder("f1", "pc", "/srv/a")));
+    expect(store.loads).toBe(0);
+    await view.newSessionFromRail();
+    expect(store.loads).toBe(1);
+    await view.newSessionFromPanel();
+    expect(store.loads).toBe(1);
+    expect(store.openNewSession).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("the entry points (each Qt's showNewSession call)", () => {
-  it("opens from the rail and the Sessions header with the selected computer filter", () => {
-    view.newSessionFromRail();
-    view.newSessionFromPanel();
+  it("opens from the rail and the Sessions header with the selected computer filter", async () => {
+    await view.newSessionFromRail();
+    await view.newSessionFromPanel();
     expect(store.openNewSession.mock.calls).toEqual([[{ computer: "mac" }], [{ computer: "mac" }]]);
   });
 
-  it("opens from a project header's menu for that project", () => {
+  it("opens from a project header's menu for that project", async () => {
     store.host = "";
-    view.newSessionForProject("Work");
+    await view.newSessionForProject("Work");
     expect(store.openNewSession.mock.calls).toEqual([[{ project: "Work", computer: "" }]]);
   });
 
@@ -76,8 +101,13 @@ describe("loading the dialog (App.tsx's lazy import)", () => {
       expect(opened()).toBe(true);
       dispose();
     });
-    // The app's own latch: nothing has opened in this test.
+    // The app's own latch follows the loaded store's dialog: closed so far,
+    // then open once, and it stays.
     expect(view.newSessionOpened()).toBe(false);
+    store.setOpen(true);
+    expect(view.newSessionOpened()).toBe(true);
+    store.setOpen(false);
+    expect(view.newSessionOpened()).toBe(true);
   });
 });
 
@@ -110,11 +140,11 @@ describe("session.new (Shortcuts.cpp:29, 58, a Window shortcut)", () => {
     expect(store.openNewSession).not.toHaveBeenCalled();
   });
 
-  it("opens the dialog with the selected computer filter", () => {
+  it("opens the dialog with the selected computer filter", async () => {
     const off = onCommand("session.new", view.newSessionFromShortcut);
     handlerFor("session.new", null)?.();
     off();
-    expect(store.openNewSession.mock.calls).toEqual([[{ computer: "mac" }]]);
+    await vi.waitFor(() => expect(store.openNewSession.mock.calls).toEqual([[{ computer: "mac" }]]));
   });
 
   it("does nothing under another modal dialog, or for another key", () => {

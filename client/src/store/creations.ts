@@ -13,6 +13,7 @@ import {
 } from "../ui/sessions/creations-ui";
 import type { CreationAction, CreationCard, CreationEvent, GroupingOut, LaunchPlan } from "../types";
 import type { Row } from "../ui/sessions/model";
+import { loadNewSession } from "../ui/sessions/newsession-view";
 import type { Session } from "../ui/sessions/types";
 
 // The creation cards: every admitted, unbound background creation as Qt's
@@ -301,8 +302,8 @@ export type Creations = ReturnType<typeof createCreations>;
 const app = createRoot(() => createCreations({
   bridge,
   notify: (tone, text, sticky) => notify(tone, text, sticky),
-  // New session and its store load on demand.
-  openNewSession: (options) => import("./newSession").then((m) => m.openNewSession(options)),
+  // New session and its store load on demand, through the entry points' loader (App.tsx then mounts the dialog).
+  openNewSession: (options) => loadNewSession().then((m) => m.openNewSession(options)),
   selectedKey,
   setSelectedKey,
   closeSubagent: () => setSubagentOpen(undefined),

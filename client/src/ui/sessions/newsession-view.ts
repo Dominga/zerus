@@ -1,8 +1,13 @@
 import { createMemo, createRoot, createSignal } from "solid-js";
-import { newSession, openFolderSession, openNewSession, selectedHostTarget } from "../../store/newSession";
+import * as bridge from "../../bridge";
+import type { NewSessionOptions } from "../../store/newSession";
 import { notify } from "../../store/actions";
+import { computerOffline } from "../../store/catalog";
+import { machineCards } from "../../store/machines";
+import type { ComputerId } from "../../types";
 import { composing } from "../lib/keys";
-import type { AccountRow, ComputerRow, FolderRow, LaunchFolder, ProjectRow } from "./newsession-ui";
+import { createFolderLaunch, type LaunchFolder } from "./folder-launch";
+import type { AccountRow, ComputerRow, FolderRow, ProjectRow } from "./newsession-ui";
 
 // The New session dialog's entry points and the logic its view keeps
 // (NewSessionDialog.tsx renders it): every place Qt opens the dialog, the
@@ -10,23 +15,41 @@ import type { AccountRow, ComputerRow, FolderRow, LaunchFolder, ProjectRow } fro
 // Windows-session warning, the dialog's keys and the keys that keep list
 // rows in place. The dialog's rules stay in the store and the core.
 
-// Loading: the dialog and its child dialogs are a chunk of their own (App.tsx's
-// lazy import), loaded the first time New session opens, never at start-up.
+// Loading: the store and its helpers (store/newSession.ts with the OpenCode
+// part, the folder paths and the dialog's rows) are a chunk of their own,
+// loaded by the first entry point that opens New session; the dialog and its
+// child dialogs are another (App.tsx's lazy import), loaded once it has
+// opened. Neither loads at start-up, so this module imports the store's
+// types only. The Projects entries' state it needs at once is folder-launch.ts's.
+
+type Store = typeof import("../../store/newSession");
+
+const [store, setStore] = createSignal<Store>();
+
+/** The New session store, loaded on its first use; every opening goes through here. */
+export const loadNewSession = (): Promise<Store> =>
+  import("../../store/newSession").then((loaded) => { setStore(() => loaded); return loaded; });
 
 /** Whether `open` has been true once; it never turns false again (and stops tracking `open` then). */
 export const openedOnce = (open: () => boolean): (() => boolean) => createMemo<boolean>((was) => was || open(), false);
 
 /** New session has opened once: App.tsx mounts the dialog from then on and keeps it mounted. */
-export const newSessionOpened = createRoot(() => openedOnce(() => newSession() !== undefined));
+export const newSessionOpened = createRoot(() => openedOnce(() => store()?.newSession() !== undefined));
+
+/** Opens New session with the options for the loaded store (`showNewSession`). */
+const open = async (options: (loaded: Store) => NewSessionOptions): Promise<void> => {
+  const loaded = await loadNewSession();
+  await loaded.openNewSession(options(loaded));
+};
 
 // Entry points: each is Qt's showNewSession call.
 
 /** The rail's New session button (SessionsWindow.cpp 295-297). */
-export const newSessionFromRail = () => { void openNewSession({ computer: selectedHostTarget() }); };
+export const newSessionFromRail = () => open((loaded) => ({ computer: loaded.selectedHostTarget() }));
 /** The Sessions header's New session button (377-378). */
-export const newSessionFromPanel = () => { void openNewSession({ computer: selectedHostTarget() }); };
+export const newSessionFromPanel = () => open((loaded) => ({ computer: loaded.selectedHostTarget() }));
 /** A project header's "New session…" (showGroupMenu 2572-2573); `project` is its id or name. */
-export const newSessionForProject = (project: string) => { void openNewSession({ project, computer: selectedHostTarget() }); };
+export const newSessionForProject = (project: string) => open((loaded) => ({ project, computer: loaded.selectedHostTarget() }));
 
 /**
  * Projects' "New session…" for a folder (ProjectsDialog::newFolderSession
@@ -34,9 +57,20 @@ export const newSessionForProject = (project: string) => { void openNewSession({
  * that text is a notice.
  */
 export async function newSessionInFolder(project: string, folder: LaunchFolder): Promise<void> {
-  const problem = await openFolderSession(project, folder);
+  const problem = await (await loadNewSession()).openFolderSession(project, folder);
   if (problem) notify("warn", problem);
 }
+
+// The Projects entries' state (folder-launch.ts), which the store shares.
+
+/** A computer's card is ok and its stream connected. */
+export const onlineOf = (computer: ComputerId) => machineCards[computer]?.ok === true && !computerOffline(computer);
+
+export const folderLaunches = createFolderLaunch({ bridge, cards: () => machineCards, online: onlineOf });
+/** The Projects entries' state for a folder: its problem ("" when it can start a session) and its path as shown. Reactive; reads nothing. */
+export const folderLaunch = folderLaunches.folderLaunch;
+/** Whether this computer's folder exists; undefined for another computer's (no read). */
+export const folderExists = folderLaunches.folderExists;
 
 /** What a Projects entry shows of `folderLaunch`. */
 export interface FolderLaunch { problem: string; shown: string }
@@ -57,7 +91,7 @@ export const folderButton = (state: FolderLaunch, machine: string) =>
  * page (SessionsWindowShortcuts.cpp:222). The router gives no command to a
  * modal dialog, as a Qt modal dialog blocks the window's shortcuts.
  */
-export const newSessionFromShortcut = () => { void openNewSession({ computer: selectedHostTarget() }); };
+export const newSessionFromShortcut = () => open((loaded) => ({ computer: loaded.selectedHostTarget() }));
 
 // The local Windows-session warning (LocalLaunchWarning.h 18-28).
 

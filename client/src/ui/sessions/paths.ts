@@ -1,11 +1,17 @@
-import type { LaunchProject, PathStyle } from "../../types";
+import type { LaunchProject } from "../../types";
 import { array, object, string, type Json } from "../lib/json";
+import { absolute, chars, drive, server, share, slashes, type Style } from "./path-forms";
+
+export { absolute, native, of, type Style } from "./path-forms";
 
 // Folder paths in the form of the computer they belong to, and New session's
 // folder helpers: a line-for-line port of client/core/src/paths.rs (`of`,
 // `absolute`, `clean`, `same`, `within`, `leaf`, `native`, `split`, `join`) and of
 // client/core/src/launch.rs `matching_project_folder`, `prefill_target` and
-// `restored_folder`, with the same names where JavaScript allows.
+// `restored_folder`, with the same names where JavaScript allows. `of`,
+// `absolute`, `native` and the root helpers they share live in path-forms.ts,
+// which the start-up chunk loads for the Projects entries (folder-launch.ts);
+// this module re-exports them and loads with New session.
 //
 // A scoped exception to "rules the core already has are called, never
 // rewritten in TypeScript" (plan 2026-10-28-tauri-client-new-session-dialog,
@@ -16,59 +22,6 @@ import { array, object, string, type Json } from "../lib/json";
 //
 // Rust walks `char`s (Unicode scalar values); this walks code points
 // (`Array.from`), so a character outside the BMP counts once in both.
-
-export type Style = PathStyle;
-
-/**
- * A peer is POSIX. The local computer follows its `metrics.platform`
- * (`windows`, `linux`, `macos`); before it reports one it is the platform
- * this client was built for (`build`, `paths::build` from the dialog's context).
- */
-export function of(platform: string | null | undefined, local: boolean, build: Style): Style {
-  if (!local) return "posix";
-  if (platform === null || platform === undefined || platform === "") return build;
-  return platform === "windows" ? "windows" : "posix";
-}
-
-const separator = (c: string | undefined) => c === "/" || c === "\\";
-
-/** "X:\" or "X:/". */
-const drive = (path: string[]) => path.length >= 3 && path[1] === ":" && separator(path[2]) && /^[A-Za-z]$/.test(path[0]);
-
-/** The end of "\\server" (two separators, then a name), or 0. */
-function server(path: string[]): number {
-  if (path.length < 3 || !separator(path[0]) || !separator(path[1]) || separator(path[2])) return 0;
-  let end = 3;
-  while (end < path.length && !separator(path[end])) end += 1;
-  return end;
-}
-
-/** The end of "\\server\share", or 0 without a share name. */
-function share(path: string[]): number {
-  const from = server(path) + 1;
-  if (from === 1 || from >= path.length || separator(path[from])) return 0;
-  let end = from;
-  while (end < path.length && !separator(path[end])) end += 1;
-  return end;
-}
-
-/** "\\?\" and "\\.\" name verbatim paths and devices, not a share. */
-const device = (path: string[]) => server(path) === 3 && (path[2] === "?" || path[2] === ".");
-
-const chars = (path: string) => Array.from(path);
-
-const slashes = (path: string) => path.replaceAll("\\", "/");
-
-/**
- * POSIX: a leading '/'. Windows: a drive root ("C:\", "c:/") or a share
- * ("\\server\share", "//server/share"); "\work", "C:work" and "\\?\" paths
- * are not folders of a computer.
- */
-export function absolute(path: string, style: Style): boolean {
-  if (style === "posix") return path.startsWith("/");
-  const text = chars(path);
-  return drive(text) || (share(text) > 0 && !device(text));
-}
 
 /** Resolves `.` and `..` by names. A `..` beyond the start is kept when `keepParents`, or dropped (a Windows root). */
 function names(text: string[], keepParents: boolean): string[] {
@@ -159,11 +112,6 @@ export function leaf(path: string, style: Style): string {
     if (end > 0 && end === chars(text).length) return "";
   }
   return text.slice(text.lastIndexOf("/") + 1);
-}
-
-/** The form shown to the user: backslashes on Windows, whatever the client's platform. */
-export function native(path: string, style: Style): string {
-  return style === "posix" ? path : path.replaceAll("/", "\\");
 }
 
 /**

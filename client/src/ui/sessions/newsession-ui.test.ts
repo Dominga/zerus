@@ -2,9 +2,10 @@ import { describe, expect, it } from "vitest";
 import { machineMeta, NOW, usageOf } from "../../store/testing";
 import type { Account, FolderOut, Profile, ProjectedWindow, Usage } from "../../types";
 import {
-  accountRows, computerChoice, computerRows, folderLaunchProblem, folderRows, launchSummary, launchWindows, projectChoice, projectRows, type AccountChoice, type Fleet,
+  accountRows, computerChoice, computerRows, folderRows, launchSummary, launchWindows, projectChoice, projectRows, type AccountChoice, type Fleet,
   type ListedProject, type ProjectFolders,
 } from "./newsession-ui";
+import { folderLaunchProblem } from "./folder-launch";
 
 // The New session dialog's view rules (tray/src/NewSessionDialog.cpp:
 // loadMachines 487-510, setGroups 512-521, loadFolders 536-580,

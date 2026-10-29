@@ -953,4 +953,21 @@ describe("what the dialog view reads (Task 3)", () => {
     expect(t.store.newSession()).toBeUndefined();
     expect(t.world.creating()).toEqual([]);
   });
+
+  // The entries' state (folder-launch.ts) is the store's too: before this
+  // computer's card reports a platform, its folders take the build style the
+  // dialog's open learned, and the entries never ask it again.
+  it("shows this computer's folders in the build style its open learned", async () => {
+    const f1 = folder("f1", "pc", "C:/src/app");
+    const t = setup((w) => {
+      w.cards[""] = machineMeta("pc", {}, { platform: null });
+      w.context = { branch: "work-1a2b3c4d", own_windows_session: null, build_style: "windows", remembered: { agent: "", accounts: {}, open_terminal: false }, swarm: "" };
+      w.projects = [project("work", "Work", [f1], { is_default: true })];
+    });
+    expect(t.store.folderLaunch(f1).shown).toBe("C:/src/app");
+    await t.open();
+    expect(t.store.folderLaunch(f1)).toEqual({ problem: "", shown: "C:\\src\\app", local: true });
+    expect(await t.store.folderExists(f1)).toBe(true);
+    expect(t.world.count("newSessionContext")).toBe(1);
+  });
 });

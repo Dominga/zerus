@@ -1,14 +1,14 @@
-import type { Account, Folder, FolderOut, HeaderOut, MachineMeta, PathStyle, Profile, Usage } from "../../types";
+import type { Account, FolderOut, HeaderOut, MachineMeta, PathStyle, Profile, Usage } from "../../types";
 import { current, fromProjected, period, providerName, severest, windowsAt, type Tone, type UsageWindow } from "../lib/usage";
-import { absolute, clean, leaf, native, same } from "./paths";
+import { clean, leaf, native, same } from "./paths";
 
 // The New session dialog's rows, as Qt keeps them in its views
 // (tray/src/NewSessionDialog.cpp): computers (loadMachines 487-510),
 // projects (setGroups 512-521), folders (loadFolders 536-580), account rows
 // with their ranking, labels and limits (updateAccounts 876-952,
-// updateUsage 1002-1023, AccountUsage::launchSummary) and the Projects
-// entries' launch problem (ProjectsDialog.cpp 523-532). Everything the core
-// decides (the form, Start, the plan) goes through its commands instead.
+// updateUsage 1002-1023, AccountUsage::launchSummary); the Projects
+// entries' launch problem is folder-launch.ts's. Everything the core decides
+// (the form, Start, the plan) goes through its commands instead.
 
 /** The computers the dialog knows: this computer's card, the configured peers and whose card is ok. */
 export interface Fleet {
@@ -275,32 +275,4 @@ export function refreshRows(rows: AccountRow[], groups: Account[], choice: Accou
     const profile = group.members.find((m) => m.provider === row.provider && m.id === row.id) ?? row.profile;
     return { ...row, profile, members: group.members, usage: group.usage, ...texts(profile, group.usage, choice) };
   });
-}
-
-// The Projects entries.
-
-/** A folder a Projects entry starts from: the screen's `Folder` or the organization's `FolderOut`. */
-export type LaunchFolder = Pick<Folder | FolderOut, "key" | "machine" | "path">;
-
-export interface LaunchEnvironment {
-  /** This computer's host name, "" before it reports one. */
-  localHost: string;
-  online(computer: string): boolean;
-  /** A folder's computer style by its machine name. */
-  style(machine: string): PathStyle;
-}
-
-/**
- * Why a project folder cannot start a session (`folderLaunchProblem`), ""
- * when it can. `localExists` is whether this computer's folder exists
- * (`local_folder_exists`); it is asked only for a folder here. Qt's empty
- * id is no folder selected: every listed folder has a key.
- */
-export function folderLaunchProblem(folder: LaunchFolder, env: LaunchEnvironment, localExists: boolean | undefined): string {
-  if (!folder.key) return "Select a folder for the new session.";
-  if (!folder.machine || !env.localHost) return "Waiting for this computer's identity.";
-  const local = folder.machine === env.localHost;
-  if (!env.online(local ? "" : folder.machine)) return `Reconnect ${folder.machine} to start a session in this folder.`;
-  if (!absolute(folder.path, env.style(folder.machine)) || (local && localExists === false)) return "This folder is unavailable on this computer.";
-  return "";
 }

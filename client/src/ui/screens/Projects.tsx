@@ -6,9 +6,8 @@ import { projectToShow, setProjectToShow } from "../../store/organization";
 import { projectsPage } from "../../store/projects";
 import { setMenu, type MenuEntry } from "../../store/ui";
 import { PROJECT_EDITING, WORKTREE_FLOWS } from "./reasons";
-import { folderExists, folderLaunch } from "../../store/newSession";
 import { machineCards } from "../../store/machines";
-import { folderButton, folderMenuEntry, newSessionInFolder } from "../sessions/newsession-view";
+import { folderButton, folderExists, folderLaunch, folderMenuEntry, newSessionInFolder } from "../sessions/newsession-view";
 import { copy } from "../../store/actions";
 import { nextSort, projectColor, showAskedProject, shownProjects, sortFolders, type Sort, type SortColumn } from "./projects-ui";
 

@@ -702,7 +702,6 @@ impl Organization {
         }
         hub
     }
-
 }
 
 /// The draft of the last run, as `new` takes it up.

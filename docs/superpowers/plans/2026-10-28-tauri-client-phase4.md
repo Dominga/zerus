@@ -11012,7 +11012,7 @@ git commit -m "feat(client): dropped files attach to the composer or paste into 
 - **The card** (759-782) reads `{reference }{name}`, `{n} KiB` or "File", and "Open →"; a file without `request_id` reads "Attachment: {name}" and opens nothing. Each Activity source gives its `attachmentScope()`: the live follow's conversation is its inspection's, else the row's; the archived row's is the one its last read named, with its archive ID. The main Activity's messages are the session's own (`agent_id` null).
 - **The cache** keeps `limit`, counted pins by canonical path (at most 1024; `clear_pins` in `start`) and the composers' `retry_files` as its set extra. `attachment_pin` pins only a copy the cache holds.
 - **The opener** is `tauri-plugin-opener`, used from Rust only: no capability gives the webview its commands.
-- **The session-file dialog** (`SessionsWindow.cpp:700-800`: Download…, Download and open, Open local copy, Show file, through `HgsClient::requestFile` and the DownloadCache) is part of Task 9, as a second commit after the attachments.
+- **The session-file dialog** (`SessionsWindow.cpp:709-877`: Download…, Download and open, Open local copy, Show file, through `HgsClient::downloadFileToCache` and the DownloadCache) is not in Task 9. Nothing in the client opens it yet: it needs Activity's Markdown links, and file references stay after the switch (ruling of 2026-10-28). It is the follow-up `zerus-5wmh.60`, whose description holds its surface: R9 and `session_files.rs` for the core owner, the dialog and the file-link activation for the UI. The composer's "Arrives with file references." control keeps its place.
 
 **Depends on:**
 - A3 `zerus-5wmh.9.5` (#410): `reads::{AttachmentRef, fetch_attachment, CachedAttachment, attachment_message}`;

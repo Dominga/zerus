@@ -1265,23 +1265,34 @@ pub(super) fn hook() -> Result<i32> {
     };
     let event = stdin_json()?;
     let mut started = false;
-    let code = track(name, token, event, &mut started)?;
+    let mut hint = None;
+    let code = track(name, token, event, &mut started, &mut hint)?;
     // The project's task commands, in the agent's context from its first turn on
     // (docs/superpowers/specs/2026-10-13-project-task-queue-design.md); only a
     // start this run recorded as its own conversation's, never a nested CLI's.
-    if code == 0 && started {
-        if let Some(context) =
-            nonempty_env("HGS_AGENT").and_then(|agent| crate::tasks::session_context(&agent))
-        {
-            println!("{context}");
-        }
+    let tasks = (code == 0 && started)
+        .then(|| nonempty_env("HGS_AGENT").and_then(|agent| crate::tasks::session_context(&agent)))
+        .flatten();
+    if let Some(context) = start_context(hint, tasks) {
+        let stdout = io::stdout();
+        agent_hint::output(&mut stdout.lock(), &context)?;
     }
     Ok(code)
 }
 
+/// Claude Code 2.1.312 refuses a hook output of two JSON objects: the agent
+/// hint and the task commands go out as one SessionStart additionalContext.
+fn start_context(hint: Option<String>, tasks: Option<Value>) -> Option<String> {
+    let tasks = tasks.and_then(|context| context["hookSpecificOutput"]["additionalContext"].as_str().map(str::to_owned));
+    let parts: Vec<String> = hint.into_iter().chain(tasks).collect();
+    (!parts.is_empty()).then(|| parts.join("
+
+"))
+}
+
 /// Records one hook event of the session `name`'s run `token`; `started` says
 /// that it was the start of the run's own conversation.
-fn track(name: String, token: String, mut event: Value, started: &mut bool) -> Result<i32> {
+fn track(name: String, token: String, mut event: Value, started: &mut bool, hint_out: &mut Option<String>) -> Result<i32> {
     if nonempty_env("HGS_AGENT").as_deref() == Some("claude") {
         if let std::borrow::Cow::Owned(prompt) = journal::pasted_text(string(&event, "prompt")) {
             event["prompt"] = json!(prompt);
@@ -1477,10 +1488,8 @@ fn track(name: String, token: String, mut event: Value, started: &mut bool) -> R
         archive::confirm_restore(&mut record)?;
         *started = true;
     }
-    if let Some(hint) = hint {
-        let stdout = io::stdout();
-        agent_hint::output(&mut stdout.lock(), hint)?;
-    }
+    // The caller writes it, with the task commands, as one JSON object.
+    *hint_out = hint.map(str::to_owned);
     Ok(0)
 }
 
@@ -1488,6 +1497,21 @@ fn track(name: String, token: String, mut event: Value, started: &mut bool) -> R
 mod tests {
     use super::windows::{self as forms, CLAUDE_EXEC_FORM};
     use super::*;
+
+    #[test]
+    fn session_start_writes_one_json_object_with_the_hint_and_the_task_commands() {
+        let tasks = crate::tasks::session_context("claude");
+        let context = start_context(Some("Hint for this agent.".into()), tasks).unwrap();
+        let mut out = Vec::new();
+        agent_hint::output(&mut out, &context).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        // One object, parseable as a whole, as Claude Code 2.1.312 requires.
+        let value: Value = serde_json::from_str(text.trim()).unwrap();
+        let joined = value["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        assert!(joined.starts_with("Hint for this agent.") && joined.contains("Zerus tasks are this project's shared task list"));
+        assert_eq!(start_context(None, None), None);
+        assert_eq!(start_context(Some("Only a hint.".into()), None).as_deref(), Some("Only a hint."));
+    }
 
     #[test]
     fn health_registration_preserves_personal_and_legacy_hooks_and_never_grants_trust() {

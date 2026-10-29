@@ -1179,7 +1179,7 @@ impl<'a> Watch<'a> {
 
     // ---- Processes ---------------------------------------------------------
 
-    fn subscribe_processes(&mut self, session: Option<protocol::SessionRef>) {
+    fn subscribe_processes(&mut self, session: Option<protocol::SessionRef>, interval_ms: Option<u64>, refresh: bool) {
         let Some(session) = session
             .filter(|session| !session.name.is_empty() && session.name.len() <= 1024 && !session.name.chars().any(char::is_control))
         else {
@@ -1196,11 +1196,19 @@ impl<'a> Watch<'a> {
             );
             return;
         }
+        // Additive options change scheduling without dropping the inventory
+        // or cancelling its read. An older client's plain resubscribe still
+        // replaces the subscription and sends its first state as before.
+        let now = Instant::now();
+        if (interval_ms.is_some() || refresh) && self.processes.configure(&key, interval_ms, refresh, now) {
+            return;
+        }
         // A renamed session keeps its run key; follow its current name.
         let row = self.rows.iter().position(|(row_key, _)| *row_key == key);
         let name = row.and_then(|index| self.rows[index].1["name"].as_str()).unwrap_or(&session.name).to_owned();
         let digest = row.map(|index| self.digests[index]);
-        let job = self.processes.subscribe(&key, &name, session.run_id.filter(|run| !run.is_empty()), digest, Instant::now());
+        let job = self.processes.subscribe(&key, &name, session.run_id.filter(|run| !run.is_empty()), digest, now);
+        self.processes.configure(&key, interval_ms, false, now);
         self.run_processes([job]);
     }
 
@@ -1429,7 +1437,7 @@ impl<'a> Watch<'a> {
         match request.topic.as_str() {
             topic::CATALOG | topic::CATALOG_META => return,
             topic::GIT => return self.subscribe_git(request.path.as_deref()),
-            topic::PROCESSES => return self.subscribe_processes(request.session),
+            topic::PROCESSES => return self.subscribe_processes(request.session, request.interval_ms, request.refresh == Some(true)),
             topic::TASKS => return self.subscribe_tasks(request.project.as_deref()),
             topic::ORGANIZATION => return self.subscribe_organization(),
             topic::ACTIVITY => {}

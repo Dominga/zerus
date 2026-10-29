@@ -570,6 +570,8 @@ fn processes_hub(app: &AppHandle, allowed: bool) -> processes::ProcessHub {
     let start = std::time::Instant::now();
     let follows = app.clone();
     let unfollows = app.clone();
+    let intervals = app.clone();
+    let refreshes = app.clone();
     let actions = app.state::<actions::Actions>().inner().clone();
     let hgs = zerus_client_core::default_hgs();
     let hub = processes::ProcessHub::new(
@@ -593,6 +595,16 @@ fn processes_hub(app: &AppHandle, allowed: bool) -> processes::ProcessHub {
                 unfollows
                     .state::<commands::AppState>()
                     .unfollow_processes(target)
+            }),
+            set_interval: Arc::new(move |target, ms| {
+                let _ = intervals
+                    .state::<commands::AppState>()
+                    .set_processes_interval(target, ms);
+            }),
+            refresh: Arc::new(move |target| {
+                let _ = refreshes
+                    .state::<commands::AppState>()
+                    .refresh_processes(target);
             }),
             read: Arc::new(
                 move |computer: &zerus_client_core::ComputerId, read: &zerus_client_core::Read| {

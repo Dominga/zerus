@@ -308,6 +308,17 @@ class WatchStream(unittest.TestCase):
             return {key: {k: v for k, v in value[key].items() if k != 'sampled_at'} for key in ('processes', 'process_work')}
         self.assertEqual(set(state['value']), {'processes', 'process_work'})
         self.assertEqual(steady_value(state['value']), steady_value(inspection))
+        # A pre-extension client can still resubscribe to recover its first state.
+        stream.send(op='subscribe', topic='processes', session=self.session())
+        again = stream.next(lambda f: f['t'] == 'state' and f['topic'] == 'processes', timeout=10)
+        self.assertEqual(again['rev'], 1)
+        # Reconfigure and refresh this subscription without dropping the last
+        # inventory or resetting its revision. Older servers reset and resend 1.
+        stream.send(op='subscribe', topic='processes', session=self.session(),
+                    interval_ms=2500, refresh=True)
+        stream.send(op='ping', id='processes-configured')
+        stream.next(lambda f: f['t'] == 'pong' and f['id'] == 'processes-configured')
+        stream.quiet(lambda f: f['t'] == 'state' and f['topic'] == 'processes' and f['rev'] == 1, .25)
         # A recorded background job in the binding is read again and sent.
         self.record['shell_jobs'] = {'job-1': dict(id='job-1', status='running', background=True, observed=True,
                                                    run_id=self.run_id, command='sleep 600', started_at=time.time(), source='hooks')}

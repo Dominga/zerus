@@ -3,7 +3,8 @@ import * as bridge from "../bridge";
 import * as ui from "./ui";
 import * as organization from "./organization";
 import * as settingsSections from "../ui/screens/settings/sections";
-import { startDesk } from "./desk";
+import { openSession, startDesk } from "./desk";
+import { listedSessionIgnoringCollapse } from "../ui/sessions/model";
 
 vi.mock("../ui/screens/settings/sections", () => ({ openSettings: vi.fn() }));
 vi.mock("../bridge", async (importOriginal) => ({
@@ -17,16 +18,26 @@ vi.mock("../bridge", async (importOriginal) => ({
 // One catalog row, in a project the list shows collapsed.
 vi.mock("./catalog", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./catalog")>()),
-  catalog: { rows: { "mac\nrun:folded": { project: "sample-project" } }, order: [] },
+  catalog: { rows: { "mac\nrun:folded": { project: "sample-project" } }, order: [], computers: {} },
 }));
 // The organization groups that row under a collapsed project; the Rust side keeps the collapse.
-vi.mock("./organization", () => ({
+vi.mock("./organization", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./organization")>()),
   groupOf: vi.fn((id: string) => (id === "mac\nrun:folded" ? "folded-project" : "ungrouped")),
+  groups: { "mac\nrun:folded": { group: "folded-project", rank: 0 } },
+  defaultProject: vi.fn(() => "ungrouped"),
+  grouping: vi.fn(() => ({ loaded: true, headers: [{ id: "folded-project", collapsed: true }] })),
   headerOf: vi.fn((project: string) => (project === "folded-project" ? { id: project, collapsed: true } : undefined)),
   setProjectCollapsed: vi.fn(),
 }));
 // store/ui reads the page URL when it loads; the wiring needs only its setters.
-vi.mock("./ui", () => ({
+vi.hoisted(() => { vi.stubGlobal("location", new URL("http://localhost/")); });
+vi.mock("./ui", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./ui")>()),
+  stateFilter: vi.fn(() => "all"),
+  machineFilter: vi.fn(() => []),
+  projectFilter: vi.fn(() => ["folded-project"]),
+  search: vi.fn(() => ""),
   setPage: vi.fn(),
   setSelectedKey: vi.fn(),
   setSubagentOpen: vi.fn(),
@@ -55,7 +66,11 @@ async function opener(): Promise<(target: bridge.OpenSession) => void> {
 }
 
 describe("desk wiring", () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(ui.search).mockReturnValue("");
+    vi.mocked(ui.projectFilter).mockReturnValue(["folded-project"]);
+  });
 
   it("opens the session the menu bar or a notification names", async () => {
     const stop = vi.fn();
@@ -93,6 +108,37 @@ describe("desk wiring", () => {
     expect(shown.setProjectFilter).toHaveBeenCalledWith([]);
     expect(shown.setSearch).toHaveBeenCalledWith("");
     expect(shown.setSubagentOpen).toHaveBeenCalledWith(undefined);
+  });
+
+  it("keeps an active filter while revealing an owner in its collapsed project", () => {
+    expect(listedSessionIgnoringCollapse("mac\nrun:folded")).toBe(true);
+    openSession(
+      { computer: "mac", key: "run:folded", preserveFilters: true },
+      { keepFiltersIf: listedSessionIgnoringCollapse },
+    );
+    expect(projects.setProjectCollapsed).toHaveBeenCalledWith("folded-project", false);
+    expect(shown.setStateFilter).not.toHaveBeenCalled();
+    expect(shown.setMachineFilter).not.toHaveBeenCalled();
+    expect(shown.setProjectFilter).not.toHaveBeenCalled();
+    expect(shown.setSearch).not.toHaveBeenCalled();
+    vi.clearAllMocks();
+    vi.mocked(ui.projectFilter).mockReturnValue(["another-project"]);
+    expect(listedSessionIgnoringCollapse("mac\nrun:folded")).toBe(false);
+    openSession(
+      { computer: "mac", key: "run:folded", preserveFilters: true },
+      { keepFiltersIf: listedSessionIgnoringCollapse },
+    );
+    expect(shown.setStateFilter).toHaveBeenCalledWith("all");
+    expect(shown.setMachineFilter).toHaveBeenCalledWith([]);
+    expect(shown.setProjectFilter).toHaveBeenCalledWith([]);
+    expect(shown.setSearch).toHaveBeenCalledWith("");
+    vi.clearAllMocks();
+    vi.mocked(ui.search).mockReturnValue("draft");
+    const listed = vi.fn(() => true);
+    openSession({ computer: "mac", key: "run:folded", preserveFilters: true }, { keepFiltersIf: listed });
+    expect(listed).not.toHaveBeenCalled();
+    expect(shown.setStateFilter).toHaveBeenCalledWith("all");
+    expect(shown.setSearch).toHaveBeenCalledWith("");
   });
 
   it("expands the collapsed project of the session it opens", async () => {

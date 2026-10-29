@@ -2,6 +2,8 @@ import { batch, createSignal } from "solid-js";
 import { createStore, produce } from "solid-js/store";
 import type { ConflictsPage, DraftSource, SavedDraftDetail, SavedDraftItem, SavedDraftsPage } from "../types";
 import type { Session } from "../ui/sessions/types";
+import { folderOf } from "../ui/sessions/SessionCard";
+import { composer } from "./composer";
 
 // Saved drafts (Qt's MessageComposer::showSavedDrafts, MessageComposer.cpp
 // 1230-1387) over src-tauri's composer/saved.rs. Three sections: this
@@ -116,6 +118,42 @@ export function draftOwnerRow(item: SavedDraftItem, rows: Iterable<Session>): Se
     if (item.computer && s.rawMachine === item.computer) named = s;
   }
   return named;
+}
+
+/** A subagent to open only while it is in the draft's conversation (Qt's childKey check). */
+export function draftSubagent(item: SavedDraftItem, owner: Session): string | undefined {
+  if (item.kind !== "subagent") return undefined;
+  const parts = item.key.split("\n");
+  const conversation = parts[2] ?? "";
+  const child = parts[3] ?? "";
+  if (!child || owner.conversationId !== conversation || !owner.subagents?.some((agent) => agent.id === child)) return undefined;
+  return child;
+}
+
+export async function focusMessageEditor(key: string): Promise<void> {
+  const deadline = performance.now() + 2000;
+  for (;;) {
+    const view = composer.view();
+    if (view?.loaded && view.key === key) {
+      if (view.input_visible !== false) document.querySelector<HTMLTextAreaElement>(".cmp-editor")?.focus();
+      return;
+    }
+    const left = deadline - performance.now();
+    if (left <= 0) return;
+    await new Promise((resolve) => setTimeout(resolve, Math.min(25, left)));
+  }
+}
+
+/** The catalog roles a Saved drafts row takes when its owner is listed. */
+export function draftPresentation(item: SavedDraftItem, owner: Session | undefined) {
+  return {
+    title: owner?.title ?? item.caption,
+    machine: owner?.machine ?? item.machine,
+    agent: owner?.agent,
+    computer: owner?.computer,
+    checkout: owner ? [folderOf(owner), owner.branch].filter(Boolean).join(" / ") : item.meta,
+    model: owner && item.kind !== "subagent" ? [owner.model, owner.effort].filter(Boolean).join(" ") : "",
+  };
 }
 
 /** "d MMM HH:mm" in local time. */

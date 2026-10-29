@@ -2978,11 +2978,12 @@ SSH launches; an `opencode` found earlier on PATH keeps precedence.
 
 ## Official DeepSeek Harness
 
-The native adapter is pinned to `@deepseek-ai/dsh@0.2.1-rc.2`. Install it on the
-agent host, sign in and choose **DeepSeek Harness** in New session:
+The native adapter accepts exactly the reviewed `@deepseek-ai/dsh` releases
+`0.2.1-rc.2` and `0.2.1-rc.5`. Install a reviewed release on the agent host,
+sign in and choose **DeepSeek Harness** in New session:
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.2.1-rc.2
+npm install -g @deepseek-ai/dsh@0.2.1-rc.5
 hgs account login native-dsh
 hgs dsh /path/to/project --new -n work
 ```
@@ -2992,6 +2993,39 @@ A versioned adapter connects its Session Controller through a private Unix socke
 The official web host uses a separate `hgs` profile through `--patch`; sign-in and
 secrets stay in `DSH_HOME`. The web endpoint is loopback-only; remote access uses
 SSH. `~/.npm-global/bin` is discoverable from service and SSH launches.
+
+Reviewed adoption of `0.2.1-rc.5` (2026-10-29, `zerus-r7d4`): the rc.2-only
+startup gate rejected rc.5 before starting the host. Comparison of the official
+npm packages found the launcher's code, boot/profile handling, web listener,
+browser authentication and Session Controller runtime unchanged. In particular,
+`--profile hgs`, `--from-default-profile web`, `--patch`, `--no-open`,
+`--host 127.0.0.1` and `--port 0` retain their meanings. The web host still
+exchanges its loopback launch token for an authority-bound cookie with HTTP 303.
+The adapter's private socket, protocol 1, per-host random generation and native
+methods are unchanged. Its ping version remains `0.2.1-rc.2`: that identifies
+the resident adapter, independently of the installed harness. Existing rc.2
+hosts remain accepted without a restart or extension reload.
+
+rc.5 adds a UI entry-customization plugin and changes conversation, settings,
+analytics and model-list UI. It shares model-listing/cache code between account
+and API-key providers; the default official API-key route now follows `/models`,
+and the bundled official models advertise a 1,048,576-token context window. MCP
+resource listing returns an empty list when the server has no resource
+capability. These changes preserve the controller operations used by Zerus;
+isolated contracts exercise both reviewed releases with a local keyless model,
+including native startup, browser authentication and account-key handling.
+Package URLs and SHA-512 integrities are recorded under `dsh` in
+`scripts/ci/agent-compatibility.json`. That is review history: CI still resolves
+one official latest release, with no fallback. An unknown version still refuses
+startup pending review.
+
+rc.5 does not resolve the remaining dependency advisories in `zerus-s7nn`:
+its dependency tree still contains `@modelcontextprotocol/client` 2.2.0
+([GHSA-6prh-2h8m-c8cw](https://github.com/advisories/GHSA-6prh-2h8m-c8cw),
+fixed in 2.3.0) and `fflate` 0.8.2 nested under `@deepseek-ai/libreoffice-kit`
+([GHSA-px8p-9vwx-vf98](https://github.com/advisories/GHSA-px8p-9vwx-vf98),
+fixed in 0.8.3). The separate top-level `fflate` 0.8.3 does not replace that
+nested copy. This adoption introduces no dependency overrides.
 
 A new session waits for its first message. API-key `deepseek-official` connections
 work independently of account sign-in. If `deepseek-account` needs login, Activity
@@ -3054,7 +3088,7 @@ older adapter or a host that does not answer within 7 seconds reports that
 history as unavailable.
 
 The official Schedule plugin (**Automation tasks** in Native UI Plugins) is
-listed and managed per exact session. The web bundle of 0.2.1-rc.2 includes it,
+listed and managed per exact session. Both reviewed web bundles include it,
 and the profile Zerus creates layers that bundle, so it is on unless the
 profile's own patch disables it:
 

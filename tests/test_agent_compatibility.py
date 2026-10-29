@@ -128,6 +128,13 @@ class AgentCompatibility(unittest.TestCase):
         policies = {row['name']: row.get('policy') for row in manifest['upstream']}
         self.assertEqual(policies['OpenCode'], 'minimum')
         self.assertEqual({name for name, policy in policies.items() if policy}, {'OpenCode'})
+        # DeepSeek's separate latest-only fixture does not execute this history.
+        self.assertEqual([row['version'] for row in manifest['dsh']], reviewed['DeepSeek Harness'])
+        for package in manifest['dsh']:
+            self.assertEqual(package['target'], 'npm')
+            self.assertEqual(package['url'], 'https://registry.npmjs.org/@deepseek-ai/dsh/-/dsh-'
+                             + package['version'] + '.tgz')
+            self.assertEqual(len(base64.b64decode(package['integrity'].removeprefix('sha512-'))), 64)
 
     def test_only_an_older_retained_version_may_skip_a_target(self):
         def pin(version, target, **extra):

@@ -473,6 +473,8 @@ export interface CreationCard {
   target: string;
   show_pending: boolean; launch_dispatched: boolean; stop_requested: boolean; worktree_receipts: boolean;
   can_resume: boolean; can_edit: boolean;
+  /** The exact bound session's full name, empty until bound or on an older host. */
+  bound_session: string;
 }
 /** What a card's buttons ask of its exact operation (`creation_action`). */
 export type CreationAction = "resume" | "check" | "stop" | "hide" | "show";

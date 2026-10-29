@@ -537,6 +537,22 @@ describe("opening (SessionsWindow::showNewSession 2895-2928)", () => {
     expect(t.choices()).toMatchObject({ project: "docs", implicit_inbox: false });
   });
 
+  it("takes the selected creation's project without making it explicit", async () => {
+    const t = setup((w) => {
+      w.projects = [project("ungrouped", "Inbox", [], { is_default: true }), project("work", "Work")];
+      w.creationProject = "work";
+    });
+    await t.open({ path: "/workspace/example" });
+    expect(t.state().projects[t.state().project].id).toBe("work");
+    t.store.closeNewSession();
+    // An Inbox card still uses native folder inference, as Qt's non-explicit project does.
+    t.world.creationProject = "ungrouped";
+    await t.open({ path: "/workspace/example" });
+    expect(t.state().projects[t.state().project].id).toBe("ungrouped");
+    await t.start();
+    expect(t.choices()).toMatchObject({ project: "ungrouped", implicit_inbox: true });
+  });
+
   it("uses the selected session as context only for a generic open", async () => {
     const t = setup((w) => {
       w.projects = [project("work", "Work", [folder("f1", "mac", "/srv")], { is_default: true })];

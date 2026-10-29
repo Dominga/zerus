@@ -66,6 +66,8 @@ export class World {
   swarm = "";
   extraModel: Json | undefined;
   selection: { row: Session; details?: Details } | undefined;
+  /** The selected creation row's destination project, if a card is selected. */
+  creationProject: string | undefined;
   filters: string[] = [];
   listeners = new Set<(computer: string) => void>();
   ticks: (() => void)[] = [];
@@ -279,6 +281,7 @@ export function setup(configure: (world: World) => void = () => {}) {
     organization: () => ({ headers: world.projects.map(({ folders: _folders, ...header }) => header), defaultProject: defaultOf(world) }),
     groupOf: (rowId) => world.groups[rowId] ?? defaultOf(world),
     selection: () => world.selection,
+    creationProject: () => world.creationProject,
     hostFilters: () => world.filters,
     notify: (tone, text, sticky = false) => world.notices.push({ tone, text, sticky }),
     openProjects: (id) => world.opened.push(`projects:${id}`),

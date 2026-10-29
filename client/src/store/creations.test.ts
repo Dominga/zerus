@@ -17,7 +17,7 @@ vi.hoisted(() => { vi.stubGlobal("location", new URL("http://localhost/")); });
 const card = (id: string, extra: Partial<CreationCard> = {}): CreationCard => ({
   id, tag: `tag-${id}`, state: "queued", caption: "Queued", error: "", created: 1_793_000_000, group: "alpha", host: "",
   machine: "workstation", cmd: "claude", account: "", target: "/workspace/example", show_pending: true, launch_dispatched: false,
-  stop_requested: false, worktree_receipts: false, can_resume: false, can_edit: false, ...extra,
+  stop_requested: false, worktree_receipts: false, can_resume: false, can_edit: false, bound_session: "", ...extra,
 });
 const header = (id: string, collapsed = false) => ({ id, name: id.toUpperCase(), color: null, accessible: true, collapsed, is_default: id === "ungrouped", palette: 0 });
 const grouping = (headers: ReturnType<typeof header>[]): GroupingOut => ({
@@ -53,6 +53,7 @@ function setup(view: CreationCard[] = [], options: { grouping?: GroupingOut; pla
     const [group] = createSignal(options.grouping ?? grouping([header("alpha"), header("ungrouped")]));
     const [scope, setScope] = createSignal<Omit<CardScope, "grouping">>({ filter: "all", hosts: [], query: "", projects: [] });
     const [order, setOrder] = createSignal<string[]>([]);
+    const [online, setOnline] = createSignal(true);
     const rows: Record<string, Session> = {};
     const notices: { tone: string; text: string; sticky?: boolean }[] = [];
     const opened: unknown[] = [];
@@ -72,6 +73,7 @@ function setup(view: CreationCard[] = [], options: { grouping?: GroupingOut; pla
       setProjectCollapsed: (p, c) => collapsed.push([p, c]),
       session: (key) => rows[key],
       sessionKeys: order,
+      online,
       scope: () => ({ grouping: group(), ...scope() }),
       filterKey: () => JSON.stringify(scope()),
     });
@@ -82,7 +84,7 @@ function setup(view: CreationCard[] = [], options: { grouping?: GroupingOut; pla
       return s;
     };
     return {
-      store, calls, notices, opened, revealed, collapsed, selectedKey, setSelectedKey, subagent, setScope, list, dispose,
+      store, calls, notices, opened, revealed, collapsed, selectedKey, setSelectedKey, subagent, setScope, list, setOnline, dispose,
       page: () => page,
       emit: (e: CreationEvent) => listener!(e),
       started: store.start(),
@@ -142,14 +144,15 @@ describe("selection (3434-3442, 3717-3728)", () => {
     t.dispose();
   });
 
-  it("a bound card hands its selection to its session, which shows through the filters until they change", async () => {
+  it("a bound card hands its selection to its exact session, which shows through the filters until they change", async () => {
     const t = setup([card("a", { tag: "s7", host: "studio", cmd: "codex" })]);
     await t.started;
-    t.list(7, { agent: "claude" }, "studio");
+    // The same tag in another project is not the host's bound full name.
+    t.list(6, { name: "codex/other-project/s7", agent: "codex" }, "studio");
     const session = t.list(7, { name: "codex/sample-project/s7", agent: "codex" }, "studio");
     t.list(8, { name: "codex/sample-project/s7", agent: "codex" });
     t.store.selectCreation("a");
-    t.emit(card("a", { tag: "s7", host: "studio", cmd: "codex", state: "bound", show_pending: false }));
+    t.emit(card("a", { tag: "s7", host: "studio", cmd: "codex", state: "bound", show_pending: false, bound_session: "codex/sample-project/s7" }));
     expect(t.selectedKey()).toBe(session.key);
     expect(t.store.adopted()).toBe(session.key);
     expect(t.revealed).toContain(session.key);
@@ -166,24 +169,68 @@ describe("selection (3434-3442, 3717-3728)", () => {
     const t = setup([card("a", { tag: "s9" }), card("b", { tag: "s10" })]);
     await t.started;
     t.store.selectCreation("a");
-    t.emit(card("a", { tag: "s9", state: "bound", show_pending: false }));
+    t.emit(card("a", { tag: "s9", state: "bound", show_pending: false, bound_session: "claude/sample-project/s9" }));
     expect(t.selectedKey()).toBeUndefined();
     const session = t.list(9);
     expect(t.selectedKey()).toBe(session.key);
     expect(t.store.adopted()).toBe(session.key);
     t.store.selectCreation("b");
-    t.emit(card("b", { tag: "s10", state: "bound", show_pending: false }));
+    t.emit(card("b", { tag: "s10", state: "bound", show_pending: false, bound_session: "claude/sample-project/s10" }));
     t.setSelectedKey("\nrun:1");
     t.list(10);
     expect(t.selectedKey()).toBe("\nrun:1");
     t.dispose();
   });
 
+  it("waits for the exact bound row to be online before adopting it", async () => {
+    const t = setup([card("a")]);
+    await t.started;
+    const session = t.list(9);
+    t.setOnline(false);
+    t.store.selectCreation("a");
+    t.emit(card("a", { state: "bound", show_pending: false, bound_session: session.name }));
+    expect(t.selectedKey()).toBeUndefined();
+    expect(t.store.adopted()).toBeUndefined();
+    t.setOnline(true);
+    expect(t.selectedKey()).toBe(session.key);
+    expect(t.store.adopted()).toBe(session.key);
+    t.dispose();
+  });
+
+  it("an older host's empty bound name adopts nothing", async () => {
+    const t = setup([card("a")]);
+    await t.started;
+    t.list(9);
+    t.store.selectCreation("a");
+    t.emit(card("a", { state: "bound", show_pending: false }));
+    expect(t.selectedKey()).toBeUndefined();
+    expect(t.store.adopted()).toBeUndefined();
+    t.dispose();
+  });
+
+  for (const end of ["another card", "another session", "a filter", "a search", "Return to filters"] as const) {
+    it(`a pending adoption ends on ${end}`, async () => {
+      const t = setup([card("a"), card("b")]);
+      await t.started;
+      t.store.selectCreation("a");
+      t.emit(card("a", { state: "bound", show_pending: false, bound_session: "claude/sample-project/s9" }));
+      if (end === "another card") t.store.selectCreation("b");
+      if (end === "another session") t.setSelectedKey("\nrun:1");
+      if (end === "a filter") t.setScope({ filter: "active", hosts: [], query: "", projects: [] });
+      if (end === "a search") t.setScope({ filter: "all", hosts: [], query: "x", projects: [] });
+      if (end === "Return to filters") t.store.returnToFilters();
+      const arrived = t.list(9);
+      expect(t.selectedKey()).not.toBe(arrived.key);
+      expect(t.store.adopted()).toBeUndefined();
+      t.dispose();
+    });
+  }
+
   it("an unselected bound card selects nothing", async () => {
     const t = setup([card("a", { tag: "s3" })]);
     await t.started;
     t.list(3);
-    t.emit(card("a", { tag: "s3", state: "bound", show_pending: false }));
+    t.emit(card("a", { tag: "s3", state: "bound", show_pending: false, bound_session: "claude/sample-project/s3" }));
     expect(t.selectedKey()).toBeUndefined();
     expect(t.store.adopted()).toBeUndefined();
     t.dispose();
@@ -194,7 +241,7 @@ describe("selection (3434-3442, 3717-3728)", () => {
     await t.started;
     const s4 = t.list(4);
     t.store.selectCreation("a");
-    t.emit(card("a", { tag: "s4", state: "bound", show_pending: false }));
+    t.emit(card("a", { tag: "s4", state: "bound", show_pending: false, bound_session: "claude/sample-project/s4" }));
     expect(t.store.adopted()).toBe(s4.key);
     // A card's selection keeps it (selectSession returns before 3442).
     t.store.selectCreation("b");
@@ -376,7 +423,7 @@ describe("a card never opens a composer or touches drafts", () => {
     t.dispose();
   });
 
-  it("shows a refused or lost action, and sends it once", async () => {
+  it("shows a lost action, and sends it once", async () => {
     const t = setup([card("a")], { refuse: "This creation is no longer pending." });
     await t.started;
     await t.store.act("a", "check");

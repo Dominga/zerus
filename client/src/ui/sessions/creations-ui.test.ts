@@ -20,7 +20,7 @@ vi.mock("./model", () => ({ listRows: () => [] }));
 const card = (id: string, extra: Partial<CreationCard> = {}): CreationCard => ({
   id, tag: `tag-${id}`, state: "queued", caption: "Queued", error: "", created: 1_793_000_000, group: "alpha", host: "",
   machine: "workstation", cmd: "claude", account: "", target: "/workspace/example", show_pending: true, launch_dispatched: false,
-  stop_requested: false, worktree_receipts: false, can_resume: false, can_edit: false, ...extra,
+  stop_requested: false, worktree_receipts: false, can_resume: false, can_edit: false, bound_session: "", ...extra,
 });
 const session = (n: number, extra: Partial<ViewRow> = {}): Session =>
   toSession("", `run:${n}`, { name: `claude/sample-project/s${n}`, machine: "workstation", status: "ready", ...extra });

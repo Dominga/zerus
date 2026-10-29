@@ -742,6 +742,7 @@ pub struct CreationCard {
     group: String, host: String, machine: String, cmd: String, account: String, target: String,
     show_pending: bool, launch_dispatched: bool, stop_requested: bool, worktree_receipts: bool,
     can_resume: bool, can_edit: bool,
+    bound_session: String, // the exact bound session's full name, empty until bound or on an older host
 }
 // event "creations": the changed card, or { id, removed: true }, per Effect::Changed / Removed
 ```

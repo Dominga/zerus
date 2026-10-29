@@ -20,7 +20,7 @@ import { moveEntry, openDeleteProjectDialog, openRenameProjectDialog } from "./O
 import { chipColor, headerEntries, projectColor, type FilterChip } from "./organization-ui";
 import { newSessionForProject, newSessionFromPanel } from "./newsession-view";
 import { CreationCard, CreationTile } from "./CreationCard";
-import { creationFooter, creationStatusMenu } from "../../store/creations";
+import { creationCount, creationFooter, creationStatusMenu } from "../../store/creations";
 import {
   selectedKey, setSelectedKey, setExpandedChildren, expandedChildren,
   setCompactRows, compactRows, stateFilter, setStateFilter, counts, search, setSearch, stripMode, setStripMode,
@@ -439,7 +439,7 @@ export function SessionList() {
         <FilterChips />
 
         <Show when={stateFilter() === "archived"}><ArchiveBar /></Show>
-          <Show when={catalog.order.length > 0 || stateFilter() === "archived"} fallback={<ListPlaceholder />}>
+          <Show when={catalog.order.length > 0 || creationCount() > 0 || stateFilter() === "archived"} fallback={<ListPlaceholder />}>
             <div class="sp-scroll" classList={{ morphing: morphing(), organizing: !!dragItem() }} ref={list.ref} tabindex="0" onKeyDown={onKey} role="tree"
               onDragOver={(e) => organizeOver(e, list)} onDrop={(e) => organizeDrop(e)} onDragLeave={(e) => { if (!(e.currentTarget as Element).contains(e.relatedTarget as Node)) setDrop(undefined); }}
               aria-label="Agent sessions; Ctrl-click to select several; drag to organize, left/right to collapse or expand a group">
@@ -644,7 +644,7 @@ function Strip(props: { onEnter: () => void; onToggle: () => void }) {
           <For each={list.keys()}>{(id) => <StripRow id={id} list={list} />}</For>
         </div>
       </div>
-      <div class="strip-count tabular">{shownSummary().shown}</div>
+      <div class="strip-count tabular">{shownSummary().shown + creationCount()}</div>
     </div>
   );
 }

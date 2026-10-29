@@ -1,7 +1,7 @@
 import { batch, createEffect, createMemo, createRoot, createSignal, on, untrack } from "solid-js";
 import { createStore, produce, reconcile } from "solid-js/store";
 import * as bridge from "../bridge";
-import { catalog } from "./catalog";
+import { catalog, computerFresh } from "./catalog";
 import { errorText, notify } from "./actions";
 import { groupOf, grouping, setProjectCollapsed } from "./organization";
 import {
@@ -55,18 +55,20 @@ export interface CreationsDeps {
   session(key: string): Session | undefined;
   /** The listed session rows' keys in arrival order (a bound creation's session). */
   sessionKeys(): readonly string[];
+  /** Whether the computer's rows are online, as Qt's binding requires. */
+  online(computer: string): boolean;
   /** The list's filters, as `listRows` reads them. */
   scope(): CardScope;
   /** Changes when a filter or the search changes (385, 408, 416-419). */
   filterKey(): string;
 }
 
-/** A bound creation's session: a live row of its computer with its agent and tag (placeLaunchedSessions 3031-3034, without the launch ID the watch rows lack). */
-function findSession(deps: CreationsDeps, want: { host: string; cmd: string; tag: string }): string | undefined {
+/** A bound creation's exact session: an online, live row of its computer with the host's full bound name. */
+function findSession(deps: CreationsDeps, want: { host: string; bound_session: string }): string | undefined {
   const keys = deps.sessionKeys();
   for (let i = keys.length - 1; i >= 0; i--) {
     const s = deps.session(keys[i]);
-    if (s && s.computer === want.host && s.cmd === want.cmd && s.state !== "archived" && s.name.split("/").slice(2).join("/") === want.tag) return s.key;
+    if (s && s.computer === want.host && s.name === want.bound_session && s.state !== "archived" && deps.online(s.computer)) return s.key;
   }
   return undefined;
 }
@@ -81,7 +83,7 @@ export function createCreations(deps: CreationsDeps) {
   /** m_creationSessionToSelect: the adopted session's row key. */
   const [adopted, setAdopted] = createSignal<string>();
   /** A bound creation whose session is not listed yet: it is adopted once it is. */
-  const [waiting, setWaiting] = createSignal<{ host: string; cmd: string; tag: string }>();
+  const [waiting, setWaiting] = createSignal<{ host: string; bound_session: string }>();
   const notices = new Map<string, string>();
   /** Show requests in flight: a hidden card's older answers do not end its reveal. */
   const showing = new Set<string>();
@@ -138,12 +140,14 @@ export function createCreations(deps: CreationsDeps) {
     notice(c);
   }
 
-  /** Bound: its card goes; a selected one hands the selection to its session (3036-3039, 3253-3255). */
+  /** Bound: its card goes; a selected one hands the selection to its exact session (3036-3039, 3253-3255). */
   function bound(c: CreationCard) {
     const selectedNow = selectedCreation() === c.id;
     forget(c.id);
     if (!selectedNow) return;
-    const want = { host: c.host, cmd: c.cmd, tag: c.tag };
+    setWaiting(undefined);
+    if (!c.bound_session) return;
+    const want = { host: c.host, bound_session: c.bound_session };
     const key = findSession(deps, want);
     if (key) adopt(key);
     else setWaiting(want);
@@ -255,7 +259,11 @@ export function createCreations(deps: CreationsDeps) {
   // A session selection ends the adoption unless it is the adopted row; a card's selection closes the subagent (3441-3442, 3720-3721).
   createEffect(on(deps.selectedKey, (key) => {
     if (key === undefined) return;
-    if (creationOfRow(key) !== undefined) { deps.closeSubagent(); return; }
+    if (creationOfRow(key) !== undefined) {
+      setWaiting(undefined);
+      deps.closeSubagent();
+      return;
+    }
     batch(() => {
       setWaiting(undefined);
       if (key !== untrack(adopted)) setAdopted(undefined);
@@ -270,6 +278,7 @@ export function createCreations(deps: CreationsDeps) {
     const want = waiting();
     if (!want) return;
     deps.sessionKeys().length;
+    deps.online(want.host);
     const key = untrack(() => findSession(deps, want));
     if (key && untrack(deps.selectedKey) === undefined) adopt(key);
   });
@@ -291,7 +300,7 @@ export function createCreations(deps: CreationsDeps) {
   return {
     creations, selectedCreation, selectedCard, revealed, adopted, cardVersion: (id: string) => versions[id] ?? 0,
     start, apply, selectCreation, choose, act, editChoices, returnToFilters, admitted,
-    withCreations, creationFooter, creationStatusMenu,
+    withCreations, creationCount: shownCount, creationFooter, creationStatusMenu,
     hideCreation: (id: string) => act(id, "hide"),
     details: (id: string) => deps.bridge.creationDetails(id),
   };
@@ -314,6 +323,7 @@ const app = createRoot(() => createCreations({
   setProjectCollapsed,
   session: (key) => catalog.rows[key],
   sessionKeys: () => catalog.order,
+  online: computerFresh,
   scope: () => ({ grouping: grouping(), filter: stateFilter(), hosts: machineFilter(), query: search().trim(), projects: projectFilter() }),
   filterKey: () => `${stateFilter()}\n${machineFilter().join("\t")}\n${projectFilter().join("\t")}\n${search()}`,
 }));
@@ -331,6 +341,8 @@ export const selectCreation = app.selectCreation;
 export const creationStatusMenu = app.creationStatusMenu;
 /** ", 1 creation" after the sessions' text, or "1 creation" alone (474-479). */
 export const creationFooter = app.creationFooter;
+/** The shown creation rows, also when sessions are absent or a project is collapsed. */
+export const creationCount = app.creationCount;
 export const withCreations = app.withCreations;
 export const runCreationAction = app.act;
 export const hideCreation = app.hideCreation;

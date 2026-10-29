@@ -20,7 +20,8 @@ import { machineCards, requestMachine } from "./machines";
 import { defaultProject as organizationDefault, groupOf, grouping, setProjectToShow } from "./organization";
 import { detailsFor, followedFor, notify } from "./actions";
 import { machineFilter, selected, setPage } from "./ui";
-import { creationAdmitted } from "./creations";
+import { creationAdmitted, selectedCard } from "./creations";
+import { projectOf } from "../ui/sessions/creations-ui";
 import { snapshotOf } from "../ui/sessions/actions-ui";
 
 // The one open New session dialog (tray/src/NewSessionDialog.cpp with
@@ -71,6 +72,8 @@ export interface NewSessionDeps {
   groupOf(rowId: string): string;
   /** The selected session row and its details (Qt's m_details), for a generic open. */
   selection(): { row: Session; details?: Details } | undefined;
+  /** The selected creation row's destination project (Qt's currentItem Group), without making it explicit. */
+  creationProject(): string | undefined;
   /** The Sessions computer filters as computers ("" is this computer). */
   hostFilters(): ComputerId[];
   notify(tone: "error" | "warn" | "info", text: string, sticky?: boolean): void;
@@ -1119,8 +1122,8 @@ export function createNewSessionStore(deps: NewSessionDeps, launches: FolderLaun
       const headers = organization.headers;
       const selection = deps.selection();
       const named = (text: string) => headers.find((p) => p.id === text || p.name === text)?.id;
-      // The selected row's project, else the default; a project option matching an id or name wins (2896-2900).
-      let launchProject = selection ? deps.groupOf(selection.row.key) : organization.defaultProject;
+      // The selected session or creation row's project, else the default; an explicit project option wins (2896-2900).
+      let launchProject = selection ? deps.groupOf(selection.row.key) : deps.creationProject() ?? organization.defaultProject;
       if (options.project) launchProject = named(options.project) ?? launchProject;
       // Only generic creation inherits the selected session; other entries carry their own target.
       const generic = !options.project && !options.folder && !options.path && options.account == null;
@@ -1247,6 +1250,10 @@ const app = createNewSessionStore({
     if (!row) return undefined;
     const snapshot = snapshotOf(row);
     return { row, details: detailsFor(snapshot, onlineOf(row.computer), followedFor(row.key)) };
+  },
+  creationProject: () => {
+    const card = selectedCard();
+    return card ? projectOf(card, grouping()) : undefined;
   },
   hostFilters: () => machineFilter().map((name) => {
     const row = Object.values(catalog.rows).find((s) => s.machine === name);

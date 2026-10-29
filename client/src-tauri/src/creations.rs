@@ -2513,9 +2513,16 @@ mod tests {
             !pump.members_of("p").is_empty()
         });
         let settled = attempts.load(Ordering::SeqCst);
-        assert!(matches!(settled, 2 | 3), "readiness and member arrival may share one wake");
+        assert!(
+            matches!(settled, 2 | 3),
+            "readiness and member arrival may share one wake"
+        );
         assert!(host.flush_journal_for_test());
-        assert_eq!(attempts.load(Ordering::SeqCst), settled, "no retry after the held edits settle");
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            settled,
+            "no retry after the held edits settle"
+        );
         assert_eq!(pump.members_of("p")[0].0, "workstation\ncodex/repo/created");
         assert_eq!(
             projects(&organization, "workstation")

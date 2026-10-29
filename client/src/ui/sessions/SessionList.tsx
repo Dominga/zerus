@@ -1,4 +1,4 @@
-import { For, Show, createMemo, createEffect, createSignal, on, onCleanup } from "solid-js";
+import { For, Show, Suspense, createMemo, createEffect, createSignal, lazy, on, onCleanup } from "solid-js";
 import { createVirtualizer } from "@tanstack/solid-virtual";
 import { Icon } from "../lib/icons";
 import { listRows, rowHeight, shownSummary, machineChoices, projectChoices, type Row } from "./model";
@@ -6,17 +6,21 @@ import {
   SessionCard, ChildCard, CompactCard, AgentBadge, StatusBadge, badgeKind, statusCaption, stripCaption,
   emphasis, childStatus, gitTooltip, paletteIndex, folderOf,
 } from "./SessionCard";
-import { catalog, computerOffline } from "../../store/catalog";
+import { catalog, computerFresh, computerOffline } from "../../store/catalog";
+import { runningCommandsEntry } from "../../store/processes";
+import { flag } from "../../store/settings";
 import { archiveCount, archiveTip } from "../../store/archive";
 import { ArchiveBar, datePanelOpen } from "./ArchiveBar";
-import { detailsFor, followedFor, updating } from "../../store/actions";
+import { detailsFor, followedFor, notify, updating } from "../../store/actions";
+import { STATE_CHANGED } from "./actions-ui";
 import { running } from "../../store/batch";
 import { grouping, headerOf, moveProject, setProjectCollapsed, setProjectToShow, sortProject } from "../../store/organization";
 import { TOOL_WIDTH, clearArchiveMenuEntry, machineMenu, runSelection, selectedRows, selectionContextMenu, selectionCount } from "./selection-live";
 import { barTools, splitTools, toolEntry } from "./selection-ui";
 import { actionEntries, copyEntries, freshActionEntry, muteEntry } from "./ActionDialogs";
 import { markAllEntry, markAllTip, markEntry, runMarkAll } from "./mark-entries";
-import { moveEntry, openDeleteProjectDialog, openRenameProjectDialog } from "./OrganizationDialogs";
+import { moveEntry, openCreateProjectDialog, openDeleteProjectDialog, openRenameProjectDialog } from "./OrganizationDialogs";
+import { backgroundEntries } from "./background-menu";
 import { chipColor, headerEntries, projectColor, type FilterChip } from "./organization-ui";
 import { newSessionForProject, newSessionFromPanel } from "./newsession-view";
 import { CreationCard, CreationTile } from "./CreationCard";
@@ -26,12 +30,15 @@ import {
   setCompactRows, compactRows, stateFilter, setStateFilter, counts, search, setSearch, stripMode, setStripMode,
   setMenu, machineFilter, setMachineFilter, projectFilter, setProjectFilter, setPage,
   multi, setMulti, peek, setPeek, setSubagentOpen, sessionsWidth, setSessionsWidth, menu, subagentOpen,
-  revealing, setRevealing,
+  revealing, setRevealing, setDetailTab,
   type StateFilter, type MenuEntry,
 } from "../../store/ui";
 import type { Session } from "./types";
 import { motionReduced } from "../motion";
+import { composer } from "../../store/composer";
 import { bulkSelect, clearMulti, multiCount, setAnchor, dragItem, setDragItem, drop, setDrop, endDrag, placement, applyDrop, SESSION_MIME, type DragItem } from "./organize";
+
+const SavedDraftsDialog = lazy(() => import("./SavedDrafts").then((m) => ({ default: m.SavedDraftsDialog })));
 
 /** Actions that go through guarded `hgs` calls arrive in phase 2; their menu entries show disabled. */
 const LATER = true;
@@ -102,6 +109,23 @@ function setRowCompact(key: string, compact: boolean) {
   morphTimer = window.setTimeout(() => setMorphing(false), MORPH.duration + 40);
 }
 
+/**
+ * The menu's Clear session (Qt's SessionMenuAction::Clear, SessionsWindow.cpp
+ * 5339-5340 and 5485-5490): only for the selected row, with the header's
+ * state and reason, and through the composer's Clear dialog. A row whose
+ * state changed since the menu opened asks to open its actions again.
+ */
+function clearEntry(s: Session): MenuEntry {
+  const control = s.key === selectedKey() && !subagentOpen() ? composer.view()?.clear : undefined;
+  return {
+    label: "Clear session…", icon: "clear", disabled: !control?.enabled, hint: control?.reason || undefined,
+    action: () => {
+      if (catalog.rows[s.key]?.state !== s.state) { notify("error", STATE_CHANGED, true); return; }
+      composer.openClear();
+    },
+  };
+}
+
 export function sessionMenu(s: Session): MenuEntry[] {
   // The selected row's menu reads the same details as the header (Qt's m_details).
   const details = s.key === selectedKey() && !subagentOpen() ? detailsFor(s, !computerOffline(s.computer), followedFor(s.key)) : undefined;
@@ -111,19 +135,21 @@ export function sessionMenu(s: Session): MenuEntry[] {
   const mark = markEntry(s);
   const fresh = freshActionEntry(s);
   const archived = s.state === "archived";
+  const commands = runningCommandsEntry(s, () => computerFresh(s.computer), () => flag("processes/enabled"), () => { setSelectedKey(s.key); setDetailTab("processes"); });
   return [
     { label: compactRows[s.key] ? "Expand session row" : "Compact session row", icon: compactRows[s.key] ? "expand-row" : "compact-row", action: () => setRowCompact(s.key, !compactRows[s.key]) },
     { label: "Expand all collapsed", icon: "expand-row", disabled: !Object.values(compactRows).some(Boolean), action: () => Object.keys(compactRows).forEach((k) => setCompactRows(k, false)) },
     { separator: true },
     // An archived row has no terminal, and no Mute or Mark group (Qt's `if (!archived)`).
     ...(archived ? [] : [s.agent === "deepseek" ? { label: "Open native DeepSeek UI", icon: "external-link", disabled: LATER } : { label: "Open terminal", icon: "square-terminal", disabled: LATER }]),
+    ...(commands ? [commands] : []),
     { label: "Open folder", icon: "folder-open", disabled: LATER },
     { label: "Open shell in session folder", icon: "terminal", disabled: LATER },
     cp.command,
     ...(archived ? [] : [{ separator: true } as const, ...(mute ? [mute] : []), ...(mark ? [mark] : [])]),
     { separator: true },
     act.change,
-    ...(fresh ? [fresh] : archived ? [] : [{ label: "Clear session…", icon: "clear", disabled: LATER }]),
+    ...(fresh ? [fresh] : archived ? [] : [clearEntry(s)]),
     act.rename,
     { label: "Fork session…", icon: "git-fork", disabled: LATER },
     ...(act.archive ? [act.archive] : []),
@@ -332,6 +358,13 @@ export function SessionList() {
   let section: HTMLElement | undefined;
   const [panelVisible, setPanelVisible] = createSignal(!stripMode());
   const [searchFocused, setSearchFocused] = createSignal(false);
+  const [savedOpen, setSavedOpen] = createSignal(false);
+  const showSavedDrafts = async (from: HTMLElement) => {
+    const handle = subagentOpen() ? undefined : composer.view()?.handle;
+    setSavedOpen(true);
+    const { openSavedDrafts } = await import("./SavedDrafts");
+    openSavedDrafts(from, handle);
+  };
 
   // Docked <-> strip: the conversation resizes once; the panel animates above it.
   const toggleDock = () => {
@@ -410,7 +443,8 @@ export function SessionList() {
       style={{ "--pane-w": stripMode() ? `${STRIP_WIDTH}px` : `${sessionsWidth()}px`, "--panel-w": `${sessionsWidth()}px` }}
       onPointerEnter={onSectionEnter} onPointerLeave={onSectionLeave}>
       <Show when={stripMode()}><Strip onEnter={onStripEnter} onToggle={toggleDock} /></Show>
-      <div class="sp-panel" ref={panel} classList={{ overlay: stripMode() }} hidden={!panelVisible()}>
+      <div class="sp-panel" ref={panel} classList={{ overlay: stripMode() }} hidden={!panelVisible()}
+        onContextMenu={(e) => { if ((e.target as Element).closest("input,textarea")) return; openMenu(e, backgroundEntries({ newProject: openCreateProjectDialog })); }}>
         <header class="sp-head">
           <h1>{stateFilter() === "archived" ? "Archive" : "Sessions"}</h1>
           <span class="grow" />
@@ -457,10 +491,13 @@ export function SessionList() {
           <span class="grow" />
           <button class="icon-btn small" data-tip="Session creation status" onClick={(e) => openMenu(e, creationStatusMenu())}><Icon name="clock" size={16} /></button>
           <button class="icon-btn small" title={markAllTip(markAllEntry())} disabled={markAllEntry().disabled} onClick={() => runMarkAll()}><Icon name="read-all" size={16} /></button>
-          <button class="icon-btn small" data-tip="Saved drafts: recover local drafts, including those from ended sessions" disabled><Icon name="drafts" size={16} /></button>
+          {/* The open composer is the dialog's target, none while a subagent shows (SessionsWindow.cpp:485-489). */}
+          <button class="icon-btn small" data-tip="Saved drafts: recover local drafts, including those from ended sessions" aria-label="Saved drafts"
+            onClick={(e) => { void showSavedDrafts(e.currentTarget); }}><Icon name="drafts" size={16} /></button>
         </footer>
       </div>
       <Show when={!stripMode()}><ResizeHandle /></Show>
+      <Show when={savedOpen()}><Suspense><SavedDraftsDialog /></Suspense></Show>
     </section>
   );
 }

@@ -6,10 +6,12 @@ vi.hoisted(() => {
   vi.stubGlobal("location", { search: "", hash: "", href: "http://localhost/" });
   vi.stubGlobal("localStorage", { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => { store.set(k, v); }, removeItem: (k: string) => { store.delete(k); } });
   // The list module registers Solid's delegated events when it loads; nothing renders here.
-  vi.stubGlobal("window", { document: { addEventListener: () => {} } });
+  // The composer it loads with Saved drafts listens for the page going.
+  vi.stubGlobal("window", { document: { addEventListener: () => {} }, addEventListener: () => {} });
 });
 vi.mock("../../bridge", () => ({
   archivePage: vi.fn(() => new Promise(() => {})),
+  resetArchivePages: vi.fn(async () => {}),
   cancelArchivePages: vi.fn(async () => {}),
   runAction: vi.fn(),
   inspectSession: vi.fn(async () => null),
@@ -21,13 +23,21 @@ vi.mock("../../bridge", () => ({
   copyCommand: vi.fn(),
   copyText: vi.fn(),
   setNotifications: vi.fn(),
+  // The composer and Saved drafts, loaded with the list's Saved drafts button.
+  windowVisibility: { hidden: () => false, onChange: () => () => {} },
+  composerOpen: vi.fn(async () => null), composerEdit: vi.fn(async () => {}), composerPick: vi.fn(async () => {}), composerPasteImage: vi.fn(async () => {}),
+  composerRemove: vi.fn(async () => {}), composerUndoRemove: vi.fn(async () => {}), composerAllowRetry: vi.fn(async () => {}), composerRefresh: vi.fn(async () => {}),
+  composerTab: vi.fn(async () => {}), sendMessage: vi.fn(), sendAnswer: vi.fn(), sendCancel: vi.fn(async () => {}), sendInterrupted: vi.fn(async () => {}), clearContext: vi.fn(),
+  localRetry: vi.fn(), localDelete: vi.fn(async () => {}), localInspect: vi.fn(async () => null),
+  savedDrafts: vi.fn(), draftConflicts: vi.fn(), savedDraft: vi.fn(), draftRecover: vi.fn(), draftRestore: vi.fn(),
 }));
 
 import { sessionMenu } from "./SessionList";
 import { archivedSession } from "../../store/archive";
-import { toSession } from "../../store/catalog";
-import type { MenuEntry } from "../../store/ui";
-import type { ViewRow } from "../../types";
+import { applyBatch, toSession } from "../../store/catalog";
+import { composer } from "../../store/composer";
+import { setSelectedKey, type MenuEntry } from "../../store/ui";
+import { emptyBatch, type ComposerView, type ViewRow } from "../../types";
 
 const labels = (entries: MenuEntry[]) => entries.map((e) => ("separator" in e ? "---" : "heading" in e ? `# ${e.heading}` : e.label));
 const archived = (agent: string): ViewRow => ({
@@ -58,5 +68,31 @@ describe("the session menu (Qt showSessionMenu 5266-5382)", () => {
       "Copy session name", "Copy session reference", "Copy folder path", "---",
       "Terminate session…",
     ]);
+  });
+
+  it("Clear session opens the composer's Clear dialog, for the selected row only (Qt 5339-5340, 5485-5490)", () => {
+    const row: ViewRow = { name: "codex/example/live", agent: "codex", state: "running", status: "ready", run_id: "run-live", conversation_id: "conv-live" };
+    applyBatch({ ...emptyBatch(), computers: [{ computer: "", status: "live", attempt: 0 }], upserts: [{ computer: "", key: "run:run-live", row }] });
+    const live = toSession("", "run:run-live", row);
+    const clear = { enabled: true, dismiss: false, title: "Clear session?", text: "", confirm: "Clear session", run: "run-live", conversation: "conv-live",
+      cache_enabled: true, running: false, reason: "", cache_reason: "" };
+    composer.apply({ handle: 1, key: "\ncodex/example/live", loaded: true, text_epoch: 1, text: "", attachments: [], local: [], clear } as unknown as ComposerView);
+    const entry = (s = live) => sessionMenu(s).find((e) => "label" in e && e.label === "Clear session…") as Extract<MenuEntry, { label: string }>;
+    expect(entry().disabled, "not the selected row").toBe(true);
+    setSelectedKey(live.key);
+    expect(entry().disabled).toBe(false);
+    entry().action?.();
+    expect(composer.dialog()).toMatchObject({ kind: "clear", control: { run: "run-live" } });
+    composer.closeDialog();
+    // The row paused since the menu opened: nothing opens.
+    const stale = entry();
+    applyBatch({ ...emptyBatch(), upserts: [{ computer: "", key: "run:run-live", row: { ...row, state: "paused", status: "paused" } }] });
+    stale.action?.();
+    expect(composer.dialog()).toBeUndefined();
+    composer.apply({ handle: 1, key: "\ncodex/example/live", loaded: true, text_epoch: 1, text: "", attachments: [], local: [], clear: { ...clear, enabled: false, reason: "Wait for the session update to finish." } } as unknown as ComposerView);
+    setSelectedKey(live.key);
+    expect(entry()).toMatchObject({ disabled: true, hint: "Wait for the session update to finish." });
+    composer.apply(undefined);
+    setSelectedKey(undefined);
   });
 });

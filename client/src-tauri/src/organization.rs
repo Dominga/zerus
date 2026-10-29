@@ -11,7 +11,7 @@
 //! state, as Qt does (SessionsWindow.cpp:2496, 1661; SwarmController.cpp:76-89).
 //! A draft file that cannot be used is never applied: it is moved aside
 //! before any new draft is written, and the list shows why until the first
-//! state. [`Organization::flush`] writes both files as the app quits. The
+//! state. [`Organization::flush`] checkpoints the files as the app quits. The
 //! webview never receives the organization itself.
 //!
 //! Locks: the writer's, then the hub's, then the pump's (a publish hands the
@@ -25,9 +25,14 @@
 //! the hub's lock, in an idle pass and in `flush` still run under it. So the
 //! callback must never block on the main thread, which takes the writer's
 //! lock in `flush` as the app quits, and must never take the writer's lock.
+//! Run-token I/O has a dedicated worker and RunsWriter lock. Copy the worker's
+//! handle under Shared.writer and release that lock before requesting a pass;
+//! only the token thread takes RunsWriter. Its coalescing mailbox never holds
+//! the I/O lock. Startup reads and all token checkpoints run off main. The exit
+//! path waits at most 500 ms before independently flushing draft and layout.
 
-use std::collections::HashMap;
-use std::io;
+use std::collections::{HashMap, VecDeque};
+use std::io::{self, Read as _};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{sync_channel, SyncSender};
@@ -40,6 +45,7 @@ use zerus_client_core::reads::{Read, ReadError};
 use zerus_client_core::swarm::draft::{self, Draft, DraftWrite, Load};
 use zerus_client_core::swarm::edit::Intent;
 use zerus_client_core::swarm::grouping::{by_name, SyncView};
+use zerus_client_core::swarm::runs;
 use zerus_client_core::swarm::sync::{Controller, Due, EditOutcome, Observation, Ticket, STOPPED};
 use zerus_client_core::swarm::{self, Folder};
 use zerus_client_core::{run_limited, Change, Exit, OrganizationSnapshot, OrganizationUpdate};
@@ -51,6 +57,8 @@ use crate::pump::Pump;
 const SAVE_EVERY: Duration = Duration::from_secs(1);
 /// The longest the worker waits, in milliseconds, when nothing is due sooner.
 const IDLE_MS: u64 = 1_000;
+/// An explicit exit waits at most this long for the token checkpoint.
+const RUNS_EXIT_WAIT: Duration = Duration::from_millis(500);
 /// A failing write logs at most one line in this long.
 const LOG_EVERY: Duration = Duration::from_secs(60);
 
@@ -92,6 +100,17 @@ pub fn draft_file(replay: bool) -> &'static str {
     }
 }
 
+/// The switch seeds run_groups from the same read-only store as Settings.
+/// Replays and development identities never read Qt for organization data.
+pub fn run_seed_source(
+    identifier: &str,
+    replay: bool,
+) -> Option<zerus_client_core::settings::QtStore> {
+    (!replay)
+        .then(|| crate::settings::seed_source(identifier))
+        .flatten()
+}
+
 #[derive(Default)]
 struct Hub {
     sync: Controller,
@@ -109,6 +128,20 @@ struct Hub {
     notice: Option<String>,
     /// The worker is gone: the list says so, and edits answer `Kept(STOPPED)`.
     stopped: bool,
+    /// Renames included in the next pending-draft checkpoint. Never acknowledge
+    /// tokens before that checkpoint is durable, even if sync.edit succeeded.
+    run_acks: VecDeque<(String, String)>,
+}
+
+impl Hub {
+    fn acknowledge_after_draft(&mut self, from: String, to: String) {
+        // A failed draft can outlive arbitrarily many observations. Dropping
+        // an old acknowledgement is conservative: its saved token stays old.
+        if self.run_acks.len() >= runs::MAX_RUNS {
+            self.run_acks.pop_front();
+        }
+        self.run_acks.push_back((from, to));
+    }
 }
 
 struct Shared {
@@ -124,6 +157,8 @@ struct Shared {
     layout: PathBuf,
     draft: PathBuf,
     clock: Instant,
+    /// One Qt seed read at a time; failed reads leave the persisted mark unset.
+    seed_started: std::sync::atomic::AtomicBool,
     /// Passes the worker started, so a test can tell when it acted.
     #[cfg(test)]
     passes: std::sync::atomic::AtomicUsize,
@@ -147,6 +182,7 @@ impl Organization {
         allowed: bool,
         layout: PathBuf,
         draft_path: PathBuf,
+        replay: bool,
     ) -> Self {
         // Read with the draft's size limit; a layout that cannot be read is
         // started afresh, and the next save replaces it.
@@ -165,13 +201,22 @@ impl Organization {
             hub: Mutex::default(),
             wake: Condvar::new(),
             announced: Mutex::new(0),
-            writer: Mutex::new(Writer::new(saved.aside)),
+            writer: Mutex::new(Writer::new(
+                saved.aside,
+                pump.clone(),
+                layout.with_file_name(if replay {
+                    runs::REPLAY_FILE
+                } else {
+                    runs::FILE
+                }),
+            )),
             pump,
             hgs,
             allowed,
             layout,
             draft: draft_path,
             clock: Instant::now(),
+            seed_started: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             passes: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
@@ -194,12 +239,64 @@ impl Organization {
         organization
     }
 
+    pub fn seed_runs(&self, source: Option<zerus_client_core::settings::QtStore>) {
+        if let Some(source) = source {
+            let _ = self
+                .seed_runs_with(move || zerus_client_core::swarm::layout::qt_run_groups(&source));
+        }
+    }
+
+    fn seed_runs_with(
+        &self,
+        read: impl FnOnce() -> Result<serde_json::Map<String, Value>, String> + Send + 'static,
+    ) -> Option<std::thread::JoinHandle<()>> {
+        use std::sync::atomic::Ordering::SeqCst;
+        if self.0.pump.runs_seeded() || self.0.seed_started.swap(true, SeqCst) {
+            return None;
+        }
+        let shared = Arc::downgrade(&self.0);
+        let started = std::thread::Builder::new()
+            .name("zerus-run-seed".into())
+            .spawn(move || {
+                // Neither the pump nor the hub, writer or a strong organization
+                // reference is held across Qt's file/cfprefsd I/O and JSON parsing.
+                let groups = read();
+                let Some(shared) = shared.upgrade() else {
+                    return;
+                };
+                match groups {
+                    Ok(groups) => {
+                        shared.pump.seed_runs(&groups);
+                        shared.wake.notify_all();
+                    }
+                    Err(error) => {
+                        shared.seed_started.store(false, SeqCst);
+                        eprintln!("zerus-client: the archive project seed was not loaded: {error}");
+                    }
+                }
+            });
+        match started {
+            Ok(worker) => Some(worker),
+            Err(error) => {
+                self.0.seed_started.store(false, SeqCst);
+                eprintln!("zerus-client: the archive project seed worker did not start: {error}");
+                None
+            }
+        }
+    }
+
     fn lock(&self) -> MutexGuard<'_, Hub> {
         self.0.hub.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn writer(&self) -> MutexGuard<'_, Writer> {
         self.0.writer.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Copy the handle under Shared.writer, then release it before taking
+    /// RunsWriter. No code holds both locks, including the exit path.
+    fn runs_writer(&self) -> Arc<RunsWorker> {
+        Arc::clone(&self.writer().runs)
     }
 
     fn now(&self) -> u64 {
@@ -509,6 +606,9 @@ impl Organization {
     /// which the next start sends. It runs on the main thread, and so does
     /// a Projects call it makes ([`Presented`]).
     pub fn flush(&self) {
+        // No token serialization or I/O on main. A slow token write must
+        // never hold up the independent draft/layout checkpoint after 500 ms.
+        self.runs_writer().flush(RUNS_EXIT_WAIT);
         let mut writer = self.writer();
         let hub = self.save_draft(self.lock(), &mut writer);
         self.release(hub);
@@ -550,9 +650,11 @@ impl Organization {
                 panic!("a test stops the organization worker");
             }
         }
+        self.runs_writer().request(false);
         let mut writer = self.writer();
         let mut hub = self.lock();
         self.renames(&mut hub);
+        self.archive_moves(&mut hub);
         hub = self.save_draft(hub, &mut writer);
         match hub.sync.due(self.now()) {
             Due::Apply(invocation) => {
@@ -632,15 +734,43 @@ impl Organization {
                 .presented()
                 .is_some_and(|(_, membership)| membership.contains_key(&from));
             if !member {
+                if hub.sync.pending() {
+                    // An old member can be absent because of our own unsaved
+                    // rename. A duplicate/late-load candidate must not commit
+                    // its token before that pending draft is recoverable.
+                    hub.acknowledge_after_draft(from, to);
+                } else {
+                    self.0.pump.acknowledge_rename(&from, &to);
+                }
                 continue;
             }
             let intent = Intent::Renamed { from, to };
             if hub.sync.edit(&intent, self.now()).is_ok() {
                 self.0.pump.edited(&intent);
+                if let Intent::Renamed { from, to } = intent {
+                    hub.acknowledge_after_draft(from, to);
+                }
                 renamed = true;
             }
         }
         if renamed {
+            self.publish(hub);
+        }
+    }
+
+    fn archive_moves(&self, hub: &mut Hub) {
+        if !self.0.allowed || hub.stopped || !hub.sync.ready() {
+            return;
+        }
+        let mut edited = false;
+        for (id, intent) in self.0.pump.archive_moves() {
+            if hub.sync.edit(&intent, self.now()).is_ok() {
+                self.0.pump.archive_move_submitted(id);
+                self.0.pump.edited(&intent);
+                edited = true;
+            }
+        }
+        if edited {
             self.publish(hub);
         }
     }
@@ -656,13 +786,22 @@ impl Organization {
         writer: &mut Writer,
     ) -> MutexGuard<'a, Hub> {
         while let Some((change, write)) = hub.sync.take_draft() {
+            let archive_acks = self.0.pump.submitted_termination_ids();
             self.release(hub);
             let written = writer.store_draft(&self.0.draft, &write);
             hub = self.lock();
             if !written {
-                break;
+                return hub;
             }
             hub.sync.draft_written(change);
+            for id in archive_acks {
+                self.0.pump.archive_move_saved(id);
+            }
+        }
+        // No draft changes lag disk. This also releases a no-op queued behind
+        // an already durable pending draft without waiting for another edit.
+        for (from, to) in std::mem::take(&mut hub.run_acks) {
+            self.0.pump.acknowledge_rename(&from, &to);
         }
         hub
     }
@@ -740,8 +879,11 @@ impl Throttle {
     }
 }
 
-/// What the draft and layout writes keep between them, behind the writer's lock.
+/// Draft/layout state and the independent token worker's handle. Copy that
+/// handle briefly under Shared.writer; never wait for token I/O with this lock.
 struct Writer {
+    /// Separate lock: stuck token I/O never blocks the draft/layout writer.
+    runs: Arc<RunsWorker>,
     /// An unusable draft is still in place; no draft is written before it moved.
     aside: bool,
     saved: Instant,
@@ -755,8 +897,9 @@ struct Writer {
 }
 
 impl Writer {
-    fn new(aside: bool) -> Self {
+    fn new(aside: bool, pump: Pump, path: PathBuf) -> Self {
         Self {
+            runs: Arc::new(RunsWorker::new(pump, path)),
             aside,
             saved: Instant::now(),
             layout: None,
@@ -811,6 +954,229 @@ impl Writer {
         #[cfg(test)]
         {
             self.saves += 1;
+        }
+    }
+}
+
+/// A coalescing mailbox, independent of the file writer's state/lock. A slow
+/// token write cannot delay an organization pass or accumulate worker threads.
+#[derive(Default)]
+struct RunsRequests {
+    tick: bool,
+    force: bool,
+    requested: u64,
+    completed: u64,
+    stop: bool,
+    stopped: bool,
+}
+
+struct RunsWorker {
+    requests: Arc<(Mutex<RunsRequests>, Condvar)>,
+    #[cfg(all(test, unix))]
+    state: Arc<Mutex<RunsWriter>>,
+}
+
+impl RunsWorker {
+    fn new(pump: Pump, path: PathBuf) -> Self {
+        let requests = Arc::new((
+            Mutex::new(RunsRequests {
+                tick: true,
+                ..RunsRequests::default()
+            }),
+            Condvar::new(),
+        ));
+        let state = Arc::new(Mutex::new(RunsWriter::default()));
+        let queue = requests.clone();
+        let writer = state.clone();
+        std::thread::Builder::new()
+            .name("zerus-run-identities".into())
+            .spawn(move || {
+                let (lock, wake) = &*queue;
+                loop {
+                    let mut request = lock.lock().unwrap_or_else(PoisonError::into_inner);
+                    while !request.tick && !request.force && !request.stop {
+                        request = wake.wait(request).unwrap_or_else(PoisonError::into_inner);
+                    }
+                    if request.stop {
+                        request.stopped = true;
+                        wake.notify_all();
+                        break;
+                    }
+                    let force = std::mem::take(&mut request.force);
+                    request.tick = false;
+                    let checkpoint = request.requested;
+                    drop(request);
+                    writer
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .save(&pump, &path, force);
+                    let mut request = lock.lock().unwrap_or_else(PoisonError::into_inner);
+                    request.completed = checkpoint;
+                    wake.notify_all();
+                }
+            })
+            .expect("the run identities thread starts");
+        Self {
+            requests,
+            #[cfg(all(test, unix))]
+            state,
+        }
+    }
+
+    fn request(&self, force: bool) -> u64 {
+        let (lock, wake) = &*self.requests;
+        let mut request = lock.lock().unwrap_or_else(PoisonError::into_inner);
+        request.tick = true;
+        if force {
+            request.force = true;
+            request.requested += 1;
+        }
+        let checkpoint = request.requested;
+        wake.notify_all();
+        checkpoint
+    }
+
+    fn flush(&self, bound: Duration) {
+        let checkpoint = self.request(true);
+        let (lock, wake) = &*self.requests;
+        let request = lock.lock().unwrap_or_else(PoisonError::into_inner);
+        drop(
+            wake.wait_timeout_while(request, bound, |request| request.completed < checkpoint)
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+    }
+
+    #[cfg(all(test, unix))]
+    fn stop(&self) {
+        let (lock, wake) = &*self.requests;
+        let mut request = lock.lock().unwrap();
+        request.stop = true;
+        wake.notify_all();
+        let (request, _) = wake
+            .wait_timeout_while(request, Duration::from_secs(5), |request| !request.stopped)
+            .unwrap();
+        assert!(request.stopped, "run identities worker did not stop");
+    }
+}
+
+impl Drop for RunsWorker {
+    fn drop(&mut self) {
+        let (lock, wake) = &*self.requests;
+        lock.lock().unwrap_or_else(PoisonError::into_inner).stop = true;
+        wake.notify_all();
+    }
+}
+
+enum RunsFile {
+    Missing,
+    Oversize,
+    Bytes(Vec<u8>),
+}
+
+fn read_runs(path: &Path) -> io::Result<RunsFile> {
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(RunsFile::Missing),
+        Err(error) => return Err(error),
+    };
+    let mut bytes = Vec::new();
+    file.take(runs::MAX_BYTES + 1).read_to_end(&mut bytes)?;
+    // The size bound takes precedence over version protection. An oversized
+    // file is never prefix-parsed, even when it claims a newer version.
+    Ok(if bytes.len() as u64 > runs::MAX_BYTES {
+        RunsFile::Oversize
+    } else {
+        RunsFile::Bytes(bytes)
+    })
+}
+
+/// Only the dedicated thread takes this lock. Snapshot copying is bounded;
+/// serialization and file I/O run without the pump, hub or Shared.writer.
+struct RunsWriter {
+    loaded: bool,
+    /// A newer file stays untouched throughout this run, including exit.
+    read_only: bool,
+    saved: Instant,
+    pending: Option<runs::Snapshot>,
+    log: Throttle,
+    #[cfg(test)]
+    stuck: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
+    #[cfg(test)]
+    thread: Option<std::thread::ThreadId>,
+}
+
+impl Default for RunsWriter {
+    fn default() -> Self {
+        Self {
+            loaded: false,
+            read_only: false,
+            saved: Instant::now(),
+            pending: None,
+            log: Throttle::default(),
+            #[cfg(test)]
+            stuck: None,
+            #[cfg(test)]
+            thread: None,
+        }
+    }
+}
+
+impl RunsWriter {
+    fn save(&mut self, pump: &Pump, path: &Path, force: bool) {
+        if self.read_only {
+            return;
+        }
+        if !self.loaded {
+            match read_runs(path) {
+                Ok(RunsFile::Missing) => {}
+                Ok(RunsFile::Oversize) => {
+                    eprintln!(
+                        "zerus-client: run identities exceed the size limit; starting afresh"
+                    );
+                }
+                Ok(RunsFile::Bytes(bytes)) => match pump.load_runs(&bytes) {
+                    Ok(()) => {}
+                    Err(runs::DecodeError::Newer(version)) => {
+                        eprintln!("zerus-client: run identities use newer version {version}; leaving the file untouched");
+                        self.read_only = true;
+                        return;
+                    }
+                    Err(runs::DecodeError::Invalid(_)) => {
+                        eprintln!("zerus-client: invalid run identities; starting afresh");
+                    }
+                },
+                Err(error) => {
+                    if self.log.allow() {
+                        eprintln!("zerus-client: the run identities were not loaded: {error}");
+                    }
+                    // Transient I/O errors retry without replacing the history.
+                    return;
+                }
+            }
+            self.loaded = true;
+        }
+        if !force && self.saved.elapsed() < SAVE_EVERY {
+            return;
+        }
+        self.saved = Instant::now();
+        let snapshot = pump.take_runs().or_else(|| self.pending.take());
+        let Some(snapshot) = snapshot else { return };
+        // A new snapshot supersedes the bytes of any failed write.
+        self.pending = None;
+        #[cfg(test)]
+        {
+            self.thread = Some(std::thread::current().id());
+            if let Some((entered, release)) = self.stuck.take() {
+                let _ = entered.send(());
+                let _ = release.recv();
+            }
+        }
+        let bytes = snapshot.to_json();
+        if let Err(error) = draft::write(path, &bytes) {
+            if self.log.allow() {
+                eprintln!("zerus-client: the run identities were not saved: {error}");
+            }
+            self.pending = Some(snapshot);
         }
     }
 }
@@ -1033,6 +1399,10 @@ mod tests {
             self.dir.join("draft.json")
         }
 
+        fn runs(&self) -> PathBuf {
+            self.dir.join(zerus_client_core::swarm::runs::FILE)
+        }
+
         fn organization(&self, pump: &Pump, allowed: bool) -> Organization {
             Organization::new(
                 pump.clone(),
@@ -1040,6 +1410,7 @@ mod tests {
                 allowed,
                 self.layout(),
                 self.draft(),
+                false,
             )
         }
 
@@ -1062,9 +1433,11 @@ mod tests {
         /// Drops the hub and waits for its worker to end, so nothing writes
         /// into the folder or runs the fake once it is removed.
         fn finish(self, organization: Organization) {
+            let runs = organization.runs_writer();
             let shared = Arc::downgrade(&organization.0);
             drop(organization);
             wait_until("the worker to end", || shared.strong_count() == 0);
+            runs.stop();
             let _ = std::fs::remove_dir_all(&self.dir);
         }
     }
@@ -1086,6 +1459,171 @@ mod tests {
     /// The passes the worker started.
     fn passes(organization: &Organization) -> usize {
         organization.0.passes.load(Ordering::SeqCst)
+    }
+
+    #[test]
+    fn only_a_live_switch_identity_reads_qt_for_the_run_seed() {
+        assert!(run_seed_source("dev.zerus.next", false).is_none());
+        assert!(run_seed_source("dev.zerus.next.phase2", false).is_none());
+        assert!(run_seed_source(crate::settings::SWITCH_IDENTITY, true).is_none());
+        assert_eq!(
+            run_seed_source(crate::settings::SWITCH_IDENTITY, false),
+            crate::settings::seed_source(crate::settings::SWITCH_IDENTITY)
+        );
+    }
+
+    #[test]
+    fn a_blocked_run_seed_does_not_stall_catalog_changes_and_merges_the_current_layout() {
+        let fake = Fake::landing();
+        let pump = Pump::default();
+        let organization = fake.organization(&pump, true);
+        let org = full("d1")["organization"].clone();
+        pump.present(
+            &org,
+            Arc::new(zerus_client_core::swarm::members(&org)),
+            1,
+            SyncView::default(),
+        );
+        let (entered, started) = std::sync::mpsc::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        let seed = organization
+            .seed_runs_with(move || {
+                entered.send(()).unwrap();
+                held.recv().unwrap();
+                Ok(
+                    json!({"workstation\nlive":"alpha", "workstation\nold":"alpha"})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                )
+            })
+            .unwrap();
+        started.recv_timeout(Duration::from_secs(2)).unwrap();
+        // A duplicate startup callback neither reads again nor blocks.
+        let duplicate = organization.seed_runs_with(|| panic!("the seed is already being read"));
+        let changed = pump.clone();
+        let (flowed, flow) = std::sync::mpsc::channel();
+        let drain = std::thread::spawn(move || {
+            changed.push(Change::Upsert {
+                computer: ComputerId::local(),
+                key: "run:live".into(),
+                row: ViewRow {
+                    machine: "workstation".into(),
+                    name: "codex/sample-project/implicit".into(),
+                    state: "running".into(),
+                    run_id: Some("live".into()),
+                    ..ViewRow::default()
+                },
+            });
+            changed.set_collapsed("alpha", true);
+            flowed.send(()).unwrap();
+        });
+        let result = flow.recv_timeout(Duration::from_secs(2));
+        release.send(()).unwrap();
+        drain.join().unwrap();
+        seed.join().unwrap();
+        assert!(duplicate.is_none(), "the second call starts no reader");
+        assert!(
+            result.is_ok(),
+            "the catalog flowed before the Qt read finished"
+        );
+        wait_until("the run seed to merge", || pump.runs_seeded());
+        organization.flush();
+        let saved = zerus_client_core::swarm::layout::Layout::from_json(
+            &std::fs::read(fake.layout()).unwrap(),
+        );
+        assert!(saved.collapsed("alpha"));
+        assert_eq!(
+            saved.run_project("workstation", "live"),
+            None,
+            "live implicit membership clears the stale seed"
+        );
+        assert_eq!(saved.run_project("workstation", "old"), Some("alpha"));
+        assert!(organization
+            .seed_runs_with(|| panic!("a saved seed never reads Qt again"))
+            .is_none());
+        fake.finish(organization);
+    }
+
+    #[test]
+    fn a_run_seed_read_error_leaves_the_mark_pending_and_can_be_retried() {
+        let fake = Fake::landing();
+        let pump = Pump::default();
+        let organization = fake.organization(&pump, true);
+        organization
+            .seed_runs_with(|| Err("synthetic seed read error".into()))
+            .unwrap()
+            .join()
+            .unwrap();
+        wait_until("the seed read to fail", || {
+            !organization.0.seed_started.load(Ordering::SeqCst)
+        });
+        assert!(!pump.runs_seeded());
+        organization
+            .seed_runs_with(|| {
+                Ok(json!({"workstation\nold":"alpha"})
+                    .as_object()
+                    .unwrap()
+                    .clone())
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        wait_until("the retry to seed", || pump.runs_seeded());
+        organization.flush();
+        let saved = zerus_client_core::swarm::layout::Layout::from_json(
+            &std::fs::read(fake.layout()).unwrap(),
+        );
+        assert_eq!(saved.run_project("workstation", "old"), Some("alpha"));
+        fake.finish(organization);
+    }
+
+    #[test]
+    fn a_persisted_run_seed_mark_skips_qt_on_the_next_start() {
+        let fake = Fake::landing();
+        let mut layout = zerus_client_core::swarm::layout::Layout::default();
+        layout.seed_runs(&serde_json::Map::new());
+        std::fs::write(fake.layout(), layout.to_json()).unwrap();
+        let pump = Pump::default();
+        let organization = fake.organization(&pump, true);
+        assert!(pump.runs_seeded());
+        assert!(!organization.0.seed_started.load(Ordering::SeqCst));
+        let reader = organization.seed_runs_with(|| panic!("a persisted seed never reads Qt"));
+        let skipped = reader.is_none();
+        if let Some(reader) = reader {
+            let _ = reader.join();
+        }
+        fake.finish(organization);
+        assert!(skipped);
+    }
+
+    #[test]
+    fn a_blocked_run_seed_never_keeps_the_organization_alive_during_quit() {
+        let fake = Fake::landing();
+        let pump = Pump::default();
+        let organization = fake.organization(&pump, true);
+        let weak = Arc::downgrade(&organization.0);
+        let (entered, started) = std::sync::mpsc::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        let seed = organization
+            .seed_runs_with(move || {
+                entered.send(()).unwrap();
+                held.recv().unwrap();
+                Ok(serde_json::Map::new())
+            })
+            .unwrap();
+        started.recv_timeout(Duration::from_secs(2)).unwrap();
+        drop(organization);
+        let until = Instant::now() + Duration::from_secs(2);
+        while weak.strong_count() != 0 && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let ended = weak.strong_count() == 0;
+        release.send(()).unwrap();
+        seed.join().unwrap();
+        wait_until("the organization to end", || weak.strong_count() == 0);
+        std::fs::remove_dir_all(fake.dir).unwrap();
+        assert!(ended, "quit did not wait for the seed read");
     }
 
     /// The layout saves done; taken under the writer's lock, so a save in
@@ -1132,6 +1670,220 @@ mod tests {
                 versions: json!({}),
             })
         })
+    }
+
+    fn finished_archive(pump: &Pump) -> uuid::Uuid {
+        let computer = ComputerId::local();
+        let target = zerus_client_core::Target {
+            computer: String::new(),
+            name: "claude/sample-project/review".into(),
+            run_id: "run-1".into(),
+            conversation_id: "conversation-1".into(),
+        };
+        let row = ViewRow {
+            machine: "workstation".into(),
+            name: target.name.clone(),
+            run_id: Some(target.run_id.clone()),
+            created: 7,
+            state: "running".into(),
+            ..Default::default()
+        };
+        pump.push(Change::Computer {
+            computer: computer.clone(),
+            status: zerus_client_core::ComputerStatus::Live,
+        });
+        pump.push(Change::Upsert {
+            computer: computer.clone(),
+            key: "run:run-1".into(),
+            row: row.clone(),
+        });
+        pump.termination_succeeded(pump.capture_termination(&target).unwrap());
+        let ids = pump.archive_termination_ids(&computer);
+        let archived = ViewRow {
+            state: "archived".into(),
+            archive_id: Some("00000000-0000-4000-8000-000000000001".into()),
+            ..row
+        };
+        pump.observe_archive_terminations(&computer, &ids, &[archived]);
+        pump.push(Change::Remove {
+            computer,
+            key: "run:run-1".into(),
+            reason: Some("archived".into()),
+        });
+        ids[0]
+    }
+
+    #[test]
+    fn a_verified_archive_placement_reaches_one_real_controller_apply() {
+        let mut reply = full("d2");
+        reply["organization"]["projects"][0]["sessions"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!(
+                "workstation\narchive\n00000000-0000-4000-8000-000000000001"
+            ));
+        let fake = Fake::new(json!([{"stdout":reply}]));
+        let pump = Pump::default();
+        let organization = fake.organization(&pump, true);
+        let writer = organization.writer();
+        let mut initial = full("d1");
+        initial["organization"]["projects"][1]["sessions"] =
+            json!(["workstation\narchive\n00000000-0000-4000-8000-000000000001"]);
+        let base = initial["organization"].clone();
+        organization.set_source(Arc::new(move || {
+            Some(OrganizationSnapshot {
+                digest: "d1".into(),
+                base: base.clone(),
+                versions: json!({}),
+            })
+        }));
+        let membership = Arc::new(zerus_client_core::swarm::members(&initial["organization"]));
+        initial.as_object_mut().unwrap().remove("versions");
+        organization.observe(&Change::Organization {
+            computer: ComputerId::local(),
+            update: OrganizationUpdate::State {
+                value: Arc::new(initial),
+                digest: "d1".into(),
+                membership,
+            },
+        });
+        finished_archive(&pump);
+        pump.push(Change::Machine {
+            computer: ComputerId::local(),
+            machine: zerus_client_core::MachineMeta {
+                host: Some("workstation".into()),
+                ..Default::default()
+            },
+        });
+        let mut page = [ViewRow {
+            state: "archived".into(),
+            archive_id: Some("00000000-0000-4000-8000-000000000001".into()),
+            run_id: Some("run-1".into()),
+            ..Default::default()
+        }];
+        let snapshot = pump
+            .place_archived(&ComputerId::local(), 37, 0, &mut page)
+            .unwrap();
+        assert_eq!(
+            snapshot[0].group, "ungrouped",
+            "explicit archive membership precedes remembered live placement"
+        );
+        pump.take(Duration::ZERO);
+        drop(writer);
+        organization.0.wake.notify_all();
+        wait_until("the archive placement apply", || fake.settled_after(1));
+        let delta = pump.take(Duration::ZERO).groups;
+        let archived = delta
+            .iter()
+            .find(|place| place.key.starts_with("archive:"))
+            .unwrap();
+        assert_eq!(
+            (archived.group.as_str(), archived.archive_request),
+            ("alpha", Some(37))
+        );
+        assert_eq!(snapshot[0].group, "ungrouped");
+        assert_eq!(fake.applies().len(), 1);
+        let sent = input(&fake.applies()[0]);
+        let members = zerus_client_core::swarm::members(&sent["desired"]);
+        assert_eq!(
+            members
+                .get("workstation\narchive\n00000000-0000-4000-8000-000000000001")
+                .map(String::as_str),
+            Some("alpha")
+        );
+        assert_eq!(
+            pump.termination_count(),
+            0,
+            "the edit was checkpointed before its apply"
+        );
+        assert!(pump.archive_moves().is_empty());
+        assert_eq!(
+            organization
+                .lock()
+                .sync
+                .presented()
+                .unwrap()
+                .1
+                .get("workstation\narchive\n00000000-0000-4000-8000-000000000001")
+                .map(String::as_str),
+            Some("alpha")
+        );
+        fake.finish(organization);
+    }
+
+    #[test]
+    fn an_archive_placement_waits_for_readiness_and_a_durable_pending_draft() {
+        let fake = Fake::landing();
+        let pump = Pump::default();
+        let organization = fake.organization(&pump, true);
+        let mut writer = organization.writer();
+        finished_archive(&pump);
+        {
+            let mut hub = organization.lock();
+            organization.archive_moves(&mut hub);
+            assert!(
+                pump.submitted_termination_ids().is_empty(),
+                "not-ready placement is held"
+            );
+        }
+        organization.set_source(snapshot("d1"));
+        organization.observe(&state("d1"));
+        std::fs::create_dir(fake.draft()).unwrap();
+        let mut hub = organization.lock();
+        organization.archive_moves(&mut hub);
+        assert_eq!(pump.submitted_termination_ids().len(), 1);
+        assert!(
+            pump.archive_moves().is_empty(),
+            "submitted once while its draft is pending"
+        );
+        let mut hub = organization.save_draft(hub, &mut writer);
+        assert_eq!(
+            pump.submitted_termination_ids().len(),
+            1,
+            "a failed checkpoint retains the acknowledgement"
+        );
+        assert_eq!(pump.termination_count(), 1);
+        organization.archive_moves(&mut hub);
+        assert_eq!(
+            pump.submitted_termination_ids().len(),
+            1,
+            "the failed save never resubmits the edit"
+        );
+        std::fs::remove_dir(fake.draft()).unwrap();
+        let hub = organization.save_draft(hub, &mut writer);
+        assert!(pump.submitted_termination_ids().is_empty());
+        assert_eq!(pump.termination_count(), 0);
+        drop(hub);
+        drop(writer);
+        fake.finish(organization);
+    }
+
+    #[test]
+    fn archive_placement_never_edits_a_blocked_replay_or_stopped_hub() {
+        for allowed in [false, true] {
+            let fake = Fake::landing();
+            let pump = Pump::default();
+            let organization = fake.organization(&pump, allowed);
+            let writer = organization.writer();
+            organization.set_source(snapshot("d1"));
+            organization.observe(&state("d1"));
+            finished_archive(&pump);
+            let mut hub = organization.lock();
+            assert!(hub.sync.ready());
+            hub.stopped = allowed;
+            assert_eq!(
+                pump.archive_moves().len(),
+                1,
+                "the placement is otherwise ready"
+            );
+            organization.archive_moves(&mut hub);
+            assert!(!hub.sync.pending());
+            assert!(pump.submitted_termination_ids().is_empty());
+            assert!(fake.applies().is_empty());
+            drop(hub);
+            drop(writer);
+            fake.finish(organization);
+        }
     }
 
     fn row(key: &str, name: &str) -> Change {
@@ -1723,6 +2475,539 @@ mod tests {
         assert_eq!(sent["base"]["projects"][0]["sessions"], json!([R]));
         assert_eq!(sent["desired"]["projects"][0]["sessions"], json!([R2]));
         fake.finish(organization);
+    }
+
+    /// Qt's persisted m_runs discovers a rename even without an old-name
+    /// upsert this time. Rows may arrive before the background file load.
+    #[test]
+    fn a_saved_run_migrates_a_rename_made_while_closed_with_one_apply() {
+        for rows_first in [false, true] {
+            let fake = Fake::landing();
+            let previous = Pump::default();
+            previous.push(row("run:1", "claude/sample-project/review"));
+            draft::write(&fake.runs(), &previous.take_runs().unwrap().to_json()).unwrap();
+            let pump = Pump::default();
+            if rows_first {
+                pump.push(row("run:1", "claude/sample-project/review-2"));
+            }
+            let organization = fake.organization(&pump, true);
+            organization.set_source(snapshot("d1"));
+            organization.observe(&state("d1"));
+            if !rows_first {
+                pump.push(row("run:1", "claude/sample-project/review-2"));
+            }
+            wait_until("the persisted rename to land", || fake.settled_after(1));
+            let log = fake.applies();
+            assert_eq!(log.len(), 1);
+            assert_eq!(
+                input(&log[0])["base"]["projects"][0]["sessions"],
+                json!([R])
+            );
+            assert_eq!(
+                input(&log[0])["desired"]["projects"][0]["sessions"],
+                json!([R2])
+            );
+            fake.finish(organization);
+        }
+    }
+
+    #[test]
+    fn a_rename_seen_before_readiness_is_recovered_after_a_second_start() {
+        let fake = Fake::landing();
+        let previous = Pump::default();
+        previous.push(row("run:1", "claude/sample-project/review"));
+        draft::write(&fake.runs(), &previous.take_runs().unwrap().to_json()).unwrap();
+        let pump = Pump::default();
+        pump.push(row("run:1", "claude/sample-project/review-2"));
+        let organization = fake.organization(&pump, true);
+        wait_until("startup without a usable catalog", || {
+            parked(&organization) >= 1
+        });
+        assert!(!organization.lock().sync.ready());
+        flush_with_deadline(&organization);
+        assert!(fake.applies().is_empty());
+        let weak = Arc::downgrade(&organization.0);
+        drop(organization);
+        wait_until("the first worker to end", || weak.strong_count() == 0);
+
+        let pump = Pump::default();
+        pump.push(row("run:1", "claude/sample-project/review-2"));
+        let organization = fake.organization(&pump, true);
+        organization.set_source(snapshot("d1"));
+        organization.observe(&state("d1"));
+        wait_until("the rename recovered on the next start", || {
+            fake.settled_after(1)
+        });
+        assert_eq!(fake.applies().len(), 1);
+        assert_eq!(
+            input(&fake.applies()[0])["desired"]["projects"][0]["sessions"],
+            json!([R2])
+        );
+        fake.finish(organization);
+    }
+
+    /// A blocked exit must fail an assertion instead of hanging the suite.
+    fn flush_with_deadline(organization: &Organization) {
+        let organization = organization.clone();
+        let (done, finished) = sync_channel(1);
+        std::thread::spawn(move || {
+            organization.flush();
+            let _ = done.send(());
+        });
+        finished
+            .recv_timeout(Duration::from_secs(2))
+            .expect("exit flush exceeded its deadline");
+    }
+
+    #[test]
+    fn the_token_checkpoint_cannot_overtake_a_failed_rename_draft() {
+        let fake = Fake::landing();
+        let previous = Pump::default();
+        previous.push(row("run:1", "claude/sample-project/review"));
+        draft::write(&fake.runs(), &previous.take_runs().unwrap().to_json()).unwrap();
+        let pump = Pump::default();
+        let organization = fake.organization(&pump, true);
+        wait_until("startup load", || {
+            organization.runs_writer().state.lock().unwrap().loaded
+        });
+        // Stop the apply worker deterministically; exercise its rename/draft
+        // path directly while the independent token writer remains live.
+        organization.0.fail.store(true, Ordering::SeqCst);
+        organization.0.wake.notify_all();
+        wait_until("the apply worker to stop", || organization.lock().stopped);
+        organization.set_source(snapshot("d1"));
+        organization.observe(&state("d1"));
+        std::fs::create_dir(fake.draft()).unwrap();
+        pump.push(row("run:1", "claude/sample-project/review-2"));
+        {
+            let mut writer = organization.writer();
+            let mut hub = organization.lock();
+            organization.renames(&mut hub);
+            assert_eq!(hub.run_acks.len(), 1);
+            let hub = organization.save_draft(hub, &mut writer);
+            assert_eq!(
+                hub.run_acks.len(),
+                1,
+                "failed draft retains the acknowledgement"
+            );
+        }
+        // Pin the crash gap before any later load could hide an early ack:
+        // the token writer gets a full turn while the draft is still failed.
+        organization.runs_writer().flush(RUNS_EXIT_WAIT);
+        let mut saved = runs::Runs::from_json(&std::fs::read(fake.runs()).unwrap()).unwrap();
+        assert_eq!(saved.observe("workstation", "1", "probe"), Some(R.into()));
+        // A load retry can reobserve the same rename behind the unsaved
+        // desired catalog. Its local absence is not proof of a durable move.
+        pump.load_runs(&std::fs::read(fake.runs()).unwrap())
+            .unwrap();
+        {
+            let mut hub = organization.lock();
+            organization.renames(&mut hub);
+            assert!(hub.run_acks.len() >= 2);
+        }
+        flush_with_deadline(&organization);
+        let mut saved = runs::Runs::from_json(&std::fs::read(fake.runs()).unwrap()).unwrap();
+        assert_eq!(saved.observe("workstation", "1", "probe"), Some(R.into()));
+        let runs = organization.runs_writer();
+        let weak = Arc::downgrade(&organization.0);
+        drop(organization);
+        wait_until("the first hub to go", || weak.strong_count() == 0);
+        runs.stop();
+        std::fs::remove_dir(fake.draft()).unwrap();
+
+        let pump = Pump::default();
+        pump.push(row("run:1", "claude/sample-project/review-2"));
+        let organization = fake.organization(&pump, true);
+        organization.set_source(snapshot("d1"));
+        organization.observe(&state("d1"));
+        wait_until("the rename after the failed save and restart", || {
+            fake.settled_after(1)
+        });
+        assert_eq!(fake.applies().len(), 1);
+        fake.finish(organization);
+    }
+
+    #[test]
+    fn a_successful_rename_draft_releases_its_token_checkpoint() {
+        let fake = Fake::landing();
+        let previous = Pump::default();
+        previous.push(row("run:1", "claude/sample-project/review"));
+        draft::write(&fake.runs(), &previous.take_runs().unwrap().to_json()).unwrap();
+        let pump = Pump::default();
+        let organization = fake.organization(&pump, true);
+        wait_until("startup load", || {
+            organization.runs_writer().state.lock().unwrap().loaded
+        });
+        organization.0.fail.store(true, Ordering::SeqCst);
+        organization.0.wake.notify_all();
+        wait_until("the apply worker to stop", || organization.lock().stopped);
+        organization.set_source(snapshot("d1"));
+        organization.observe(&state("d1"));
+        pump.push(row("run:1", "claude/sample-project/review-2"));
+        {
+            let mut writer = organization.writer();
+            let mut hub = organization.lock();
+            organization.renames(&mut hub);
+            assert_eq!(hub.run_acks.len(), 1);
+            let hub = organization.save_draft(hub, &mut writer);
+            assert!(hub.run_acks.is_empty());
+        }
+        let Load::Loaded(saved) = draft::load(&fake.draft()) else {
+            panic!("the rename draft was not saved")
+        };
+        assert_eq!(saved.desired["projects"][0]["sessions"], json!([R2]));
+        // Reobserve behind an already durable pending draft. No second file
+        // write is needed before this candidate's token is safe to commit.
+        pump.load_runs(&std::fs::read(fake.runs()).unwrap())
+            .unwrap();
+        {
+            let mut writer = organization.writer();
+            let mut hub = organization.lock();
+            organization.renames(&mut hub);
+            assert_eq!(hub.run_acks.len(), 1);
+            assert!(hub.sync.take_draft().is_none());
+            let hub = organization.save_draft(hub, &mut writer);
+            assert!(hub.run_acks.is_empty());
+        }
+        organization.runs_writer().flush(RUNS_EXIT_WAIT);
+        let mut saved = runs::Runs::from_json(&std::fs::read(fake.runs()).unwrap()).unwrap();
+        assert_eq!(saved.observe("workstation", "1", "probe"), Some(R2.into()));
+        fake.finish(organization);
+    }
+
+    #[test]
+    fn a_persisted_rename_already_migrated_by_the_other_writer_needs_no_apply() {
+        let fake = Fake::landing();
+        let previous = Pump::default();
+        previous.push(row("run:1", "claude/sample-project/review"));
+        draft::write(&fake.runs(), &previous.take_runs().unwrap().to_json()).unwrap();
+        let pump = Pump::default();
+        pump.push(row("run:1", "claude/sample-project/review-2"));
+        let organization = fake.organization(&pump, true);
+        organization.set_source(snapshot("d2"));
+        let mut migrated = state("d2");
+        let Change::Organization {
+            update: OrganizationUpdate::State {
+                value, membership, ..
+            },
+            ..
+        } = &mut migrated
+        else {
+            unreachable!()
+        };
+        Arc::make_mut(value)["organization"]["projects"][0]["sessions"] = json!([R2]);
+        *membership = Arc::new(zerus_client_core::swarm::members(&value["organization"]));
+        organization.observe(&migrated);
+        let first = parked(&organization);
+        organization.0.wake.notify_all();
+        wait_until("startup token processing", || {
+            parked(&organization) > first + 1
+        });
+        assert!(fake.applies().is_empty());
+        assert!(!fake.draft().exists());
+        fake.finish(organization);
+    }
+
+    #[test]
+    fn a_layout_only_change_does_not_rewrite_the_runs_file() {
+        let fake = Fake::landing();
+        let pump = Pump::default();
+        let organization = fake.organization(&pump, true);
+        organization.set_source(snapshot("d1"));
+        organization.observe(&state("d1"));
+        pump.push(row("run:1", "claude/sample-project/review"));
+        wait_until("the first run save", || fake.runs().is_file());
+        let before = std::fs::read(fake.runs()).unwrap();
+        let modified = std::fs::metadata(fake.runs()).unwrap().modified().unwrap();
+        pump.set_collapsed("alpha", true);
+        let first = saves(&organization);
+        wait_until("a layout-only save", || saves(&organization) > first);
+        assert_eq!(std::fs::read(fake.runs()).unwrap(), before);
+        assert_eq!(
+            std::fs::metadata(fake.runs()).unwrap().modified().unwrap(),
+            modified
+        );
+        fake.finish(organization);
+    }
+
+    #[test]
+    fn exit_checkpoints_a_run_observed_inside_the_debounce_off_main() {
+        let fake = Fake::landing();
+        let pump = Pump::default();
+        let organization = fake.organization(&pump, true);
+        pump.push(row("run:exit", "claude/sample-project/review"));
+        flush_with_deadline(&organization);
+        assert!(fake.runs().is_file());
+        let runs = organization.runs_writer();
+        assert_ne!(
+            runs.state.lock().unwrap().thread,
+            Some(std::thread::current().id())
+        );
+        let mut saved = runs::Runs::from_json(&std::fs::read(fake.runs()).unwrap()).unwrap();
+        assert_eq!(
+            saved.observe("workstation", "exit", "renamed"),
+            Some(R.into())
+        );
+        fake.finish(organization);
+    }
+
+    #[test]
+    fn an_immediate_exit_loads_old_tokens_before_writing_new_ones() {
+        let fake = Fake::landing();
+        let old = Pump::default();
+        old.push(row("run:previous", "claude/sample-project/previous"));
+        draft::write(&fake.runs(), &old.take_runs().unwrap().to_json()).unwrap();
+        let pump = Pump::default();
+        let organization = fake.organization(&pump, true);
+        pump.push(row("run:new", "claude/sample-project/new"));
+        flush_with_deadline(&organization);
+        let mut saved = runs::Runs::from_json(&std::fs::read(fake.runs()).unwrap()).unwrap();
+        assert_eq!(
+            saved.observe("workstation", "previous", "next"),
+            Some("workstation\nclaude/sample-project/previous".into())
+        );
+        assert_eq!(
+            saved.observe("workstation", "new", "next"),
+            Some("workstation\nclaude/sample-project/new".into())
+        );
+        fake.finish(organization);
+    }
+
+    #[test]
+    fn a_stuck_runs_write_bounds_exit_and_does_not_block_the_draft_or_layout() {
+        let fake = Fake::landing();
+        let pump = Pump::default();
+        let organization = fake.organization(&pump, true);
+        organization.set_source(snapshot("d1"));
+        organization.observe(&state("d1"));
+        wait_until("startup", || parked(&organization) >= 1);
+        let (entered, writing) = std::sync::mpsc::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let runs = organization.runs_writer();
+        {
+            let mut writer = runs.state.lock().unwrap();
+            writer.stuck = Some((entered, blocked));
+            writer.saved = Instant::now() - SAVE_EVERY;
+        }
+        pump.push(row("run:stuck", "claude/sample-project/review"));
+        organization.0.wake.notify_all();
+        writing.recv_timeout(Duration::from_secs(5)).unwrap();
+        // The normal background run save is now held in I/O. Its independent
+        // lock leaves both the shared writer and the pump available.
+        assert!(organization.0.writer.try_lock().is_ok());
+        let answer = submitted(&organization, move_to_inbox());
+        assert!(matches!(
+            answer.recv_timeout(Duration::from_secs(5)),
+            Ok(EditOutcome::Done { .. })
+        ));
+        let normal = saves(&organization);
+        pump.set_collapsed("alpha", true);
+        wait_until("normal layout progress during token serialization", || {
+            saves(&organization) > normal
+        });
+        {
+            let mut hub = organization.lock();
+            hub.sync.edit(&move_to_inbox(), organization.now()).unwrap();
+        }
+        pump.set_collapsed("alpha", true);
+        let before = saves(&organization);
+        let started = Instant::now();
+        flush_with_deadline(&organization);
+        assert!(started.elapsed() >= RUNS_EXIT_WAIT);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(
+            saves(&organization) > before,
+            "layout save ran concurrently with runs I/O"
+        );
+        assert!(fake.layout().is_file());
+        assert!(
+            fake.draft().is_file(),
+            "pending edits were flushed despite the stuck token write"
+        );
+        release.send(()).unwrap();
+        // The detached exit checkpoint also finishes before the fake is removed.
+        wait_until("the held run write", || fake.runs().is_file());
+        drop(runs.state.lock().unwrap());
+        fake.finish(organization);
+    }
+
+    #[test]
+    fn replay_run_tokens_never_touch_the_live_file() {
+        let fake = Fake::landing();
+        let pump = Pump::default();
+        let organization = Organization::new(
+            pump.clone(),
+            fake.hgs.clone(),
+            false,
+            fake.dir.join("custom-layout.json"),
+            fake.dir.join(draft_file(true)),
+            true,
+        );
+        pump.push(row("run:replay", "claude/sample-project/review"));
+        flush_with_deadline(&organization);
+        assert!(fake.dir.join(runs::REPLAY_FILE).is_file());
+        assert!(!fake.runs().exists());
+        fake.finish(organization);
+    }
+
+    #[test]
+    fn pending_token_acknowledgements_are_bounded_oldest_first() {
+        let mut hub = Hub::default();
+        for n in 0..=runs::MAX_RUNS {
+            hub.acknowledge_after_draft(n.to_string(), format!("new-{n}"));
+        }
+        assert_eq!(hub.run_acks.len(), runs::MAX_RUNS);
+        assert_eq!(hub.run_acks.front().unwrap().0, "1");
+        assert_eq!(hub.run_acks.back().unwrap().0, runs::MAX_RUNS.to_string());
+    }
+
+    #[test]
+    fn token_writes_debounce_for_one_second() {
+        assert_eq!(SAVE_EVERY, Duration::from_secs(1));
+        let fake = Fake::landing();
+        let pump = Pump::default();
+        let mut writer = RunsWriter::default();
+        pump.push(row("run:1", "claude/sample-project/review"));
+        writer.saved = Instant::now() + Duration::from_secs(60);
+        writer.save(&pump, &fake.runs(), false);
+        assert!(!fake.runs().exists(), "early ticks do not write");
+        writer.saved = Instant::now() - SAVE_EVERY;
+        writer.save(&pump, &fake.runs(), false);
+        assert!(fake.runs().is_file());
+    }
+
+    #[test]
+    fn an_io_error_leaves_the_history_and_retries_loading() {
+        let fake = Fake::landing();
+        std::fs::create_dir(fake.runs()).unwrap();
+        let pump = Pump::default();
+        let mut writer = RunsWriter::default();
+        pump.push(row("run:new", "claude/sample-project/new"));
+        for _ in 0..2 {
+            writer.save(&pump, &fake.runs(), true);
+            assert!(!writer.loaded && !writer.read_only);
+            assert!(fake.runs().is_dir());
+        }
+        std::fs::remove_dir(fake.runs()).unwrap();
+        pump.push(Change::Remove {
+            computer: ComputerId::local(),
+            key: "run:new".into(),
+            reason: None,
+        });
+        let old = Pump::default();
+        old.push(row("run:old", "claude/sample-project/old"));
+        draft::write(&fake.runs(), &old.take_runs().unwrap().to_json()).unwrap();
+        writer.save(&pump, &fake.runs(), true);
+        assert!(writer.loaded);
+        let json: Value = serde_json::from_slice(&std::fs::read(fake.runs()).unwrap()).unwrap();
+        assert_eq!(
+            json["runs"].as_array().unwrap().len(),
+            2,
+            "old history plus observations whose rows left"
+        );
+    }
+
+    #[test]
+    fn malformed_supported_history_is_replaced_from_current_observations() {
+        for bytes in [
+            b"{broken".as_slice(),
+            br#"{"version":1,"runs":{}}"#,
+            br#"{"runs":false}"#,
+            b"[]",
+        ] {
+            let fake = Fake::landing();
+            std::fs::write(fake.runs(), bytes).unwrap();
+            let pump = Pump::default();
+            let mut writer = RunsWriter::default();
+            pump.push(row("run:new", "claude/sample-project/new"));
+            writer.save(&pump, &fake.runs(), true);
+            assert!(writer.loaded && !writer.read_only);
+            let json: Value = serde_json::from_slice(&std::fs::read(fake.runs()).unwrap()).unwrap();
+            assert_eq!(
+                json["runs"],
+                json!([["workstation\nnew", "workstation\nclaude/sample-project/new"]])
+            );
+        }
+    }
+
+    #[test]
+    fn oversize_history_is_replaced_without_truncate_parsing() {
+        use std::io::Write;
+        for version in [1, 2] {
+            let fake = Fake::landing();
+            let mut file = std::fs::File::create(fake.runs()).unwrap();
+            write!(file, "{{\"version\":{version},\"runs\":[],\"unused\":\"").unwrap();
+            let block = [b'x'; 4096];
+            for _ in 0..=runs::MAX_BYTES / block.len() as u64 {
+                file.write_all(&block).unwrap();
+            }
+            file.write_all(br#""}"#).unwrap();
+            drop(file);
+            assert!(matches!(
+                read_runs(&fake.runs()).unwrap(),
+                RunsFile::Oversize
+            ));
+            let pump = Pump::default();
+            let mut writer = RunsWriter::default();
+            pump.push(row("run:new", "claude/sample-project/new"));
+            writer.save(&pump, &fake.runs(), true);
+            assert!(writer.loaded && !writer.read_only);
+            let json: Value = serde_json::from_slice(&std::fs::read(fake.runs()).unwrap()).unwrap();
+            assert_eq!(json["runs"].as_array().unwrap().len(), 1);
+            assert!(std::fs::metadata(fake.runs()).unwrap().len() < runs::MAX_BYTES);
+        }
+    }
+
+    #[test]
+    fn newer_history_is_untouched_across_saves_and_exit() {
+        for bytes in [
+            br#"{"version":2,"runs":[]}"#.as_slice(),
+            br#"{"version":3,"runs":{"new":"shape"}}"#,
+        ] {
+            let fake = Fake::landing();
+            std::fs::write(fake.runs(), bytes).unwrap();
+            let pump = Pump::default();
+            pump.push(row("run:new", "claude/sample-project/new"));
+            let organization = fake.organization(&pump, true);
+            wait_until("the newer version to become read-only", || {
+                organization.runs_writer().state.lock().unwrap().read_only
+            });
+            for n in 0..3 {
+                pump.push(row(&format!("run:{n}"), "claude/sample-project/new"));
+                organization.runs_writer().request(false);
+                flush_with_deadline(&organization);
+                assert_eq!(std::fs::read(fake.runs()).unwrap(), bytes);
+            }
+            // A newer file makes this whole run read-only, even if another
+            // writer replaces it with a supported version before a later quit.
+            let replacement = br#"{"version":1,"runs":[]}"#;
+            std::fs::write(fake.runs(), replacement).unwrap();
+            flush_with_deadline(&organization);
+            assert_eq!(std::fs::read(fake.runs()).unwrap(), replacement);
+            assert!(pump.take_runs().is_some(), "observations stay in memory");
+            fake.finish(organization);
+        }
+    }
+
+    #[test]
+    fn a_failed_runs_save_is_replaced_by_the_newer_tokens() {
+        let fake = Fake::landing();
+        let pump = Pump::default();
+        let mut writer = RunsWriter {
+            loaded: true,
+            ..RunsWriter::default()
+        };
+        std::fs::create_dir(fake.runs()).unwrap();
+        pump.push(row("run:1", "claude/sample-project/review"));
+        writer.save(&pump, &fake.runs(), true);
+        assert!(writer.pending.is_some());
+        std::fs::remove_dir(fake.runs()).unwrap();
+        pump.push(row("run:1", "claude/sample-project/review-2"));
+        pump.acknowledge_rename(R, R2);
+        writer.save(&pump, &fake.runs(), true);
+        assert!(writer.pending.is_none());
+        let mut runs = runs::Runs::from_json(&std::fs::read(fake.runs()).unwrap()).unwrap();
+        assert_eq!(runs.observe("workstation", "1", "again"), Some(R2.into()));
     }
 
     /// Runs `submit` on a thread; its answer comes back on the receiver.

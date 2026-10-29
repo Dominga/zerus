@@ -41,7 +41,7 @@ function sessionRows(g: GroupingOut, members: Map<string, Session[]>): Row[] {
   return out;
 }
 const scopeOf = (g: GroupingOut, members: Map<string, Session[]>, extra: Partial<ListScope> = {}): ListScope => ({
-  grouping: g, members, visible: () => true, projects: [], expanded: () => false, compact: () => false, filter: "all", hosts: [], query: "", ...extra,
+  grouping: g, members, visible: () => true, online: () => true, projects: [], expanded: () => false, compact: () => false, filter: "all", hosts: [], query: "", ...extra,
 });
 const stateOf = (cards: CreationCard[], extra: Partial<Placement> = {}): Placement => ({
   cards, groupOf: () => "ungrouped", details: () => undefined, ...extra,

@@ -8,7 +8,6 @@ import { SessionList } from "./ui/sessions/SessionList";
 import { SessionDetail } from "./ui/sessions/SessionDetail";
 import { CreationPanel } from "./ui/sessions/CreationPanel";
 import { selectedCreation } from "./store/creations";
-import { PerfHost } from "./ui/PerfHost";
 import { OverviewScreen } from "./ui/screens/Overview";
 import { MachinesScreen } from "./ui/screens/Machines";
 import { AccountsScreen } from "./ui/screens/Accounts";
@@ -28,6 +27,7 @@ const SettingsScreen = lazy(() => import("./ui/screens/Settings").then((m) => ({
 // New session and its child dialogs load the first time it opens
 // (`newSessionOpened`), and stay mounted from then on.
 const NewSessionDialog = lazy(() => import("./ui/sessions/NewSessionDialog").then((m) => ({ default: m.NewSessionDialog })));
+const PerfHost = lazy(() => import("./ui/PerfHost").then((m) => ({ default: m.PerfHost })));
 
 const STATE_TEXT: Record<string, string> = {
   probing: "checking",
@@ -117,7 +117,7 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
       <Show when={newSessionOpened()}><Suspense><NewSessionDialog /></Suspense></Show>
       <OrganizationDialogs />
       <ActionNotices />
-      <PerfHost />
+      <Suspense><PerfHost /></Suspense>
     </div>
   );
 }

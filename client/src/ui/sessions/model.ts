@@ -1,23 +1,20 @@
+import { groupRows, type Row } from "./group-rows";
+export { groupRows, type Row, type ListInput } from "./group-rows";
 import { createMemo } from "solid-js";
-import { archiveRows } from "../../store/archive";
-import { catalog, orderedRows } from "../../store/catalog";
+import { archive, archiveRows, fleetComputers } from "../../store/archive";
+import { catalog, computerFresh, orderedRows } from "../../store/catalog";
+import { machineCards } from "../../store/machines";
+import { archiveFilterCounts, archiveMachineChoices, archiveProjectChoices } from "./archive-filters";
 import { defaultProject, grouping, groups } from "../../store/organization";
 import { stateFilter, matchesFilter, search, machineFilter, projectFilter, expandedChildren, compactRows } from "../../store/ui";
 import { withCreations } from "../../store/creations";
-import type { CreationCard, GroupingOut } from "../../types";
-import type { Session, Subagent } from "./types";
+import { isWorking, needsAttention } from "../../store/attention";
+import type { Session } from "./types";
 
 // Flattened list model. Heights match tray/src/SessionCardDelegate.h
 // sizeHint at the compact density, the only one in the web client: group
 // header 40, card 94, native child 64, collapsed row 40. Fixed heights per row
 // type let the virtualizer place rows without measuring the DOM.
-
-export type Row =
-  /** `project` is the project's id; `name` and the colour come from the organization's header. */
-  | { type: "header"; id: string; project: string; name: string; color: string | null; palette: number; collapsed: boolean; total: number; attention: number; unread: number; working: number }
-  | { type: "card"; id: string; session: Session; expandable: boolean; expanded: boolean; compactRow: boolean }
-  | { type: "child"; id: string; parent: Session; child: Subagent; first: boolean; last: boolean }
-  | { type: "creation"; id: string; creation: CreationCard };
 
 export const ROW_HEIGHT = { header: 40, card: 94, child: 64, collapsedRow: 40 } as const;
 
@@ -60,56 +57,8 @@ export function groupMembers(order: readonly string[], rows: Record<string, Sess
   return map;
 }
 
-export interface ListInput {
-  grouping: GroupingOut;
-  /** Each project's rows in list order (groupMembers). */
-  members: Map<string, Session[]>;
-  /** The state, machine and search filters. */
-  visible: (s: Session) => boolean;
-  /** The project filter's project ids; empty is every project. */
-  projects: readonly string[];
-  expanded: (key: string) => boolean;
-  compact: (key: string) => boolean;
-}
-
-/** Qt's grouped rows (SessionsWindowRows.cpp:289-338, header counts 393-411). */
-export function groupRows(input: ListInput): Row[] {
-  const out: Row[] = [];
-  const cards = (list: readonly Session[]) => {
-    for (const s of list) {
-      const kids = s.subagents ?? [];
-      const expanded = kids.length > 0 && input.expanded(s.key);
-      out.push({ type: "card", id: s.key, session: s, expandable: kids.length > 0, expanded, compactRow: input.compact(s.key) });
-      if (expanded) kids.forEach((child, i) => out.push({ type: "child", id: `${s.key}/${child.id}`, parent: s, child, first: i === 0, last: i === kids.length - 1 }));
-    }
-  };
-  const wanted = (id: string) => !input.projects.length || input.projects.includes(id);
-  const headers = input.grouping.loaded ? input.grouping.headers : [];
-  if (headers.length <= 1) {
-    // One project, or none presented yet: no header, and nothing collapses (293, 324, 326).
-    for (const [id, list] of input.members) if (wanted(id)) cards(list.filter(input.visible));
-    return out;
-  }
-  for (const h of headers) {
-    if (!wanted(h.id)) continue;
-    const all = input.members.get(h.id) ?? [];
-    const list = all.filter(input.visible);
-    // A project without visible members stays hidden (323; "Hide projects without active sessions" defaults on, 109).
-    if (!list.length) continue;
-    // The counters cover members the filters hide; muted members never count as attention or unread (398-404).
-    let attention = 0, unread = 0, working = 0;
-    for (const s of all) {
-      if (!s.muted && (s.reviewLater || s.status === "attention")) attention++;
-      // An offline computer's unread replies count too (visibleUnreadReply, HgsClient.h:104-105).
-      if (!s.muted && s.unread) unread++;
-      if (s.status === "working" || s.status === "background") working++;
-    }
-    out.push({ type: "header", id: `h:${h.id}`, project: h.id, name: h.name, color: h.color, palette: h.palette,
-               collapsed: h.collapsed, total: list.length, attention, unread, working });
-    if (!h.collapsed) cards(list);
-  }
-  return out;
-}
+/** The window's online state of a row (Qt's `entry.online`). */
+const online = (s: Session) => computerFresh(s.computer);
 
 /** The list's rows by project, from the row ids and the assignments only. */
 export const membersByGroup = createMemo(() => groupMembers(catalog.order, catalog.rows, groups, defaultProject()));
@@ -121,26 +70,33 @@ export const listRows = createMemo<Row[]>(() => {
   const hosts = machineFilter();
   const visible = (s: Session) => matchesFilter(s, f) && (!hosts.length || hosts.includes(s.machine)) && sessionMatchesSearch(s, q);
   const scope = {
-    grouping: grouping(), members: membersByGroup(), visible, projects: projectFilter(),
+    grouping: grouping(), members: membersByGroup(), visible, online, projects: projectFilter(),
     expanded: (k: string) => !!expandedChildren[k], compact: (k: string) => !!compactRows[k], filter: f, hosts, query: q,
   };
   const out = groupRows(scope);
   return withCreations(out, scope);
 });
 
-export const shownSummary = createMemo(() => {
+/** The list footer's counts of the cards shown (SessionsWindowRows.cpp:468-474). */
+export function summarize(rows: readonly Row[], up: (s: Session) => boolean) {
   let shown = 0, working = 0, attention = 0;
-  for (const r of listRows()) {
+  for (const r of rows) {
     if (r.type !== "card") continue;
     shown++;
-    if (r.session.status === "working") working++;
-    if (r.session.status === "attention") attention++;
+    const s = r.session;
+    if (isWorking(s, up(s))) working++;
+    if (!s.muted && needsAttention(s, up(s))) attention++;
   }
   return { shown, working, attention };
-});
+}
+
+export const shownSummary = createMemo(() => summarize(listRows(), online));
+
+const archivedCounts = createMemo(() => archiveFilterCounts(archive.rows(), archive.includes, machineFilter(), projectFilter()));
 
 /** Machines with their session counts, in first-seen order (the machine filter's choices). */
 export const machineChoices = createMemo(() => {
+  if (stateFilter() === "archived") return archiveMachineChoices(fleetComputers(catalog.computers, orderedRows(), machineCards), archivedCounts().machine);
   const seen = new Map<string, { id: string; label: string; count: number; computer: string }>();
   for (const s of orderedRows()) {
     const m = seen.get(s.machine) ?? { id: s.machine, label: s.computer === "" ? `${s.machine} (this machine)` : s.machine, count: 0, computer: s.computer };
@@ -153,6 +109,7 @@ export const machineChoices = createMemo(() => {
 /** Projects with members and their member counts, in the organization's order (the project filter's choices, by id). */
 export const projectChoices = createMemo(() => {
   const g = grouping();
+  if (stateFilter() === "archived") return archiveProjectChoices(g, archivedCounts().project, projectFilter());
   const members = membersByGroup();
   if (!g.loaded) return [];
   return g.headers.filter((h) => members.get(h.id)?.length).map((h) => ({ id: h.id, label: h.name, count: members.get(h.id)!.length }));

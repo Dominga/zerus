@@ -1,10 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
 import { createComputed, createRoot } from "solid-js";
+import * as bridge from "../bridge";
+import { archive } from "./archive";
 import { receive } from "./session";
+import { composer } from "./composer";
+import { questions } from "./questions";
+import { notices } from "./actions";
+import { detailTab, setDetailTab, setStateFilter } from "./ui";
 import { catalog } from "./catalog";
-import { grouping, groupOf } from "./organization";
+import { grouping, groupOf, groups } from "./organization";
 import { rowOut } from "./testing";
-import { emptyBatch, type GroupingOut } from "../types";
+import { emptyBatch, type GroupingOut, type ArchivePage } from "../types";
 
 // The wiring reads the page's query (`?select=`, store/ui.ts); the tests run without a page.
 vi.hoisted(() => { vi.stubGlobal("location", new URL("http://localhost/")); });
@@ -27,4 +33,67 @@ describe("receive", () => {
     expect(seen).toEqual(["1 true alpha"]);
     dispose();
   }));
+});
+
+describe("composer events and the question card", () => {
+  const view = (key: string, question: unknown = null) => ({
+    handle: 1, key, loaded: true, rev: 0, text_epoch: 1, text: "", position: 0, anchor: 0, question, input_visible: question === null,
+    attachments: [], removed: null, attaching: false, sending: false, waiting: null, uncertain: false, status: "", status_error: false,
+    can_send: false, send_label: "Send", available: true, unavailable_reason: "", block_reason: null, attachments_available: true,
+    attachments_reason: "", session_status: "", session_status_error: false, session_blocks_input: false, inspect_error: false,
+    cache: { visible: false, tone: "quiet", label: "", short_label: "" }, cache_warning: "", cache_details: "",
+    context: { visible: false, text: "", tooltip: "", warning: false, tone: "quiet", percent: null, accessible_name: "" }, local: [],
+    cancel_send: false, compacting: false,
+    clear: { enabled: false, dismiss: false, title: "", text: "", confirm: "", run: "", conversation: "", cache_enabled: false, running: false, reason: "", cache_reason: "" },
+  }) as never;
+
+  it("a notice is Qt's showNotice: an error stays unless it is transient", () => {
+    receive({ ...emptyBatch(), composer_events: [
+      { kind: "notice", text: "Codex is installing its update in Terminal.", error: false, transient: false },
+      { kind: "notice", text: "Answer delivery timed out.", error: true, transient: false },
+      { kind: "notice", text: "The native queue is no longer visible.", error: true, transient: true },
+    ] });
+    const shown = notices().slice(-3).map((n) => [n.tone, n.text, n.sticky]);
+    expect(shown).toEqual([
+      ["info", "Codex is installing its update in Terminal.", false],
+      ["error", "Answer delivery timed out.", true],
+      ["error", "The native queue is no longer visible.", false],
+    ]);
+  });
+
+  it("an open-Terminal request shows the Terminal tab of its own composer only", () => {
+    setDetailTab("activity");
+    composer.apply(view("studio\nclaude/sample-project/review"));
+    receive({ ...emptyBatch(), composer_events: [{ kind: "open_terminal", key: "studio\nclaude/sample-project/other" }] });
+    expect(detailTab()).toBe("activity");
+    receive({ ...emptyBatch(), composer_events: [{ kind: "open_terminal", key: "studio\nclaude/sample-project/review" }] });
+    expect(detailTab()).toBe("terminal");
+    setDetailTab("activity");
+  });
+
+  it("the card follows the composer's view", () => {
+    const card = { card: "question\nk", revision: 1, epoch: 1, asked: "", asked_tip: "", terminal_label: "Open Terminal", view: {} };
+    composer.apply(view("studio\nclaude/sample-project/review", card));
+    expect(questions.view()?.card).toBe("question\nk");
+    composer.apply(view("studio\nclaude/sample-project/review"));
+    expect(questions.view()).toBeUndefined();
+  });
+});
+
+it("routes archived placement through receive without retaining it in live groups", async () => {
+  let answer!: (p: ArchivePage) => void;
+  const read = vi.spyOn(bridge, "archivePage").mockImplementation(() => new Promise((resolve) => { answer = resolve; }));
+  receive({ ...emptyBatch(), computers: [{ computer: "", status: "live", attempt: 0 }] });
+  setStateFilter("archived");
+  archive.refresh();
+  const request = read.mock.calls.at(-1)![5];
+  const key = "archive:10000000-0000-4000-8000-000000000001";
+  receive({ ...emptyBatch(), groups: [{ computer: "", key, group: "alpha", rank: 30, archive_request: request }] });
+  answer({ rows: [{ name: "codex/sample-project/review", state: "archived", archive_id: key.slice(8), group: "ungrouped", rank: 0 }], total: 1, position: 0, next_cursor: "", previous_cursor: null });
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  expect(archive.row(`\n${key}`)).toMatchObject({ group: "alpha", rank: 30 });
+  expect(groups[`\n${key}`]).toBeUndefined();
+  expect(groupOf(`\n${key}`)).toBe("alpha");
+  setStateFilter("all");
+  read.mockRestore();
 });

@@ -549,7 +549,7 @@ live catalog.
   drops the pages and loads the first. Pages load only while the Archive filter
   shows the Sessions list and are kept when it is left, as Qt keeps them.
   Leaving the filter, a change of the computers or their names, a change of
-  the search text, a change of the date range and Refresh archive cancel the
+  the search text, a change of the project filter or date range and Refresh archive cancel the
   reads that are running, also one sent before the cancel that has not started
   yet; an answer that arrives afterwards is dropped. Each read carries the
   store's request number, so a late older read never cancels a newer one.
@@ -569,8 +569,12 @@ live catalog.
   count chip of the filter shows "…" while some computer's total is unknown and
   no archived row is counted, otherwise the count with a "+" while more can be
   loaded; its tooltip says how many are loaded.
-- The list shows the loaded archived rows as flat cards, newest archived first
-  (Qt groups them by project: `zerus-5wmh.40`). Selecting one shows its header
+- The list groups loaded archive identities by project, in organization order,
+  newest archived first inside each project (SessionsWindow.cpp:3238-3242).
+  Machine and project choices count the loaded archive rows inside the date
+  range before their corresponding filter applies (SessionsWindowRows.cpp:266-284).
+  Machine choices come from the fleet, including machines with no loaded rows.
+  Selecting an archived row shows its header
   and its details, read with `inspect --archive ID`, and its recorded Activity
   (below). Restore session, Forget archived session, the copy entries and
   Rename work on a loaded archived row (see Actions).
@@ -718,6 +722,169 @@ run with `ZERUS_CLIENT_QUERY=actions-smoke=marks` (same command, the same
 session and logs `actions-smoke marks-after-restart: review true` (exit 0) or
 `review false` (exit 1) once the stored marks have applied. Give both runs one
 scratch `XDG_DATA_HOME` so a smoke run never touches the real marks files.
+
+## Terminal
+
+The Terminal tab follows Qt's `TerminalView` and `PtyProcess` lifecycle. Showing
+it connects one attach per view. Selecting another session retargets it, leaving
+the Sessions page or hiding the window disconnects it, and hiding only the tab
+keeps the attach alive for an exact redraw. A rename of the same run keeps the
+attach. Rust retains at most 1 MiB of delivered output per view, delivers raw
+bytes over the attach channel, and allows at most two unacknowledged messages;
+the webview acknowledges after xterm parses each one. Resizes are coalesced to
+one per 100 ms plus the trailing size, and unchanged sizes never reach the PTY.
+Input is bounded to 4 MiB and Terminal output messages to 1 MiB plus one read
+batch. Paste is cleaned as Qt's `TerminalScreen::pasteText` does.
+
+File drops follow `SessionFileDrop` and `SessionsWindow.cpp:2618-2659`. A local
+session gets quoted paths pasted without an automatic Enter. A peer's files are
+staged first with `Action::StageFiles`; the paste still names the attach
+generation and is refused if that attach changed or the Terminal is hidden.
+Other tabs attach dropped files to the main composer, except a subagent's
+Activity. The drop must stay over the detail panel, retain its entering target
+and contain only regular files. Windows keeps the T1b refusal text until native
+Terminal support lands.
+
+## Processes
+
+Processes is off by default, as in Qt. Settings > Processes stores
+`processes/enabled`, `activeSeconds`, `backgroundSeconds`, `unknownSeconds` and
+`loadingSeconds` in the app's ordinary settings store. When enabled, the tab
+follows only the selected session's bounded `processes` topic. It never follows
+an archived row, an offline or paused session, an exited process or a failed
+inspection. Output is read only while the tab shows, at Qt's state-dependent
+cadence (2.5 s for active work and 10 s for unknown work). Durations and busy
+state tick four times a second, and up to 30 session views are retained.
+
+Stop requests run sequentially and are never retried. Selection and stop calls
+name the view, selected ids and session identity, so a late click cannot stop a
+process in a newer view. The stop queue is cancelled by a changed session,
+conversation or host generation. These paths follow `ProcessView.cpp` and the
+core's `process_view` rules.
+
+## Composer and Send
+
+The composer keeps the text protocol in Rust and the webview in sync: edits
+carry a growing revision and the current text epoch after a 250 ms coalescing
+window, on blur and before attach, paste, remove, Undo or Send. Rust applies
+only newer revisions of that epoch. Its own text changes advance the epoch and
+hand text and selection back to the webview. Window hiding and page exit flush
+pending edits too. `next_batch` adds the open composer view, optional process
+view, bounded draft keys and at most 16 composer events. Rust recomputes block
+reasons when details or action facts change and refreshes the cache chip once a
+second. The hub keeps at most 64 composers and 128 MiB of their attachments,
+500 followed events, 50 local rows for each of at most 512 sessions, and draft
+marks from the 200 newest drafts plus the composers in memory.
+
+Send follows `MessageComposer.cpp` and `SessionsWindow.cpp`: session and global
+write blocks, attachment locks, a cold-cache choice, resume or start fresh,
+compact then send, and local submitted or failed rows. A continuation's waiting
+draft is saved before its start or compaction call, and every step checks the
+same session, run, conversation and draft revision. Each delivery gets one new
+request id immediately before its one dispatch. Message bytes go only to the
+standard input of `hgs send --json`, never argv. An uncertain delivery keeps the
+draft and its warning and is never sent again automatically, including after a
+reload, restart or another question's answer. Allow retry is explicit, and a
+definite failure's retry uses a new request id.
+
+Drafts live in the app's one store at `<app data>/drafts`, or `drafts-replay`
+in replay mode, shared with voice. The previous Qt store is read but never
+written, including recovery. The one exit hook closes voice and the composers,
+then flushes this store on quit and termination signals. A send whose durable
+save has not started cannot dispatch during shutdown.
+
+## Attachments
+
+A message can have up to eight nonempty attachments, at most 10 MiB each and
+20 MiB together. Pasted images must be below 32 megapixels. Attachment bytes
+never cross the IPC as JSON: reads and pasted images use raw bodies, and views
+open files through the `zerus-file` scheme. The scheme serves only canonical
+regular files in the private cache or bytes of an open draft, to the main
+webview, with HTTP Range support for seeking.
+
+Activity reads share one job per file, with at most three reads at once and Open
+ahead of thumbnails. The last 256 read paths can answer from their copies. The
+cache is bounded to 512 MiB, least recently used first; visible previews,
+playing media and files needed by a failed Retry are pinned. Image thumbnails
+need a known size of at most 64 million pixels. A vanished preview is fetched
+once more before showing its failure.
+
+Activity Open marks the cached file as downloaded from another machine. Draft
+Open keeps this computer's origin and refuses while the draft sends. A file
+whose type runs programs is revealed in the file manager instead of opened.
+These rules follow `AttachmentViewer.h`, `MessageComposer.cpp` and
+`ExternalFile.cpp`.
+
+## Questions and the native queue
+
+Question cards keep the native question id, hash, run, conversation, schema and
+form revision. Their drafts use Qt's `question\n…` keys in the same store as
+message drafts. A required card replaces the editor; an optional one leaves the
+ordinary composer available. Submit saves first, then sends once through the
+guarded answer path. A changed card never submits the old answers. A broader
+approval needs its second Confirm, and Approve once waits out its three-second
+review while the card is active. Cold-cache consent names the exact card.
+Uncertain answers remain marked and never replay automatically.
+
+The native queue panel offers Send now only for the current queue id and an
+online, answerable session. It reports the requested send and then refreshes
+the queue. Send and push now uses the composer chord, Ctrl+X Ctrl+S, or
+Command+X Command+S on macOS. It sends the message once, then only the queue
+snapshot that contains it; it never sends the text again. Another selection,
+20 seconds, failure or an uncertain outcome ends the push. OpenCode's inbox and
+its guarded Remove action arrive with A2-6.
+
+## Phase 4 smoke run
+
+`scripts/make-fixture.py` deterministically generates the replay, including the
+warm and cold cache states, a paused resumable session, JSON and one-pixel PNG
+attachments, a question, an approval and a native queue. The six driven
+sessions do not participate in the replay's ordinary delta loop.
+`src-tauri/tests/support/fake_hgs_phase4.py` answers only synthetic calls,
+writes `log.ndjson` beside the fake, and advances the paused inspection after
+Resume. The guarded `smoke_resume` command then advances the replay's catalog
+and Activity to the same fresh run. `scripts/test_phase4_smoke.py` checks those
+fixtures, receipts and state transitions.
+
+Build and test from `client/`:
+
+```sh
+npm ci
+npm run check
+npm test
+python3 -m unittest scripts/test_phase4_smoke.py
+cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml
+cargo +1.99.1 clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+npm run build && RUSTUP_TOOLCHAIN=1.99.1 npx tauri build --no-bundle
+```
+
+Run the smoke with a new scratch directory (choose another name on a rerun):
+
+```sh
+python3 scripts/phase4-smoke.py --scratch "$PWD/target/phase4-smoke-run"
+```
+
+The runner supplies the release binary, replay and fake, isolates `HOME`,
+`XDG_DATA_HOME` and `XDG_CACHE_HOME`, and forces the safe headless environment:
+no `DISPLAY`, a nonexistent `WAYLAND_DISPLAY`, `GDK_BACKEND=x11`,
+`WEBKIT_DISABLE_DMABUF_RENDERER=1` and Xvfb. It keeps `app.log`, `log.ndjson`,
+the fake configuration and the synthetic dropped file in that directory. Its
+guard also allows the frontend's `smoke_log` command only in this measurement
+setup, never against a real `hgs` directory. The same guard pins the composer
+clock to fixture time, so the deterministic warm cache has not expired;
+production always uses the real clock.
+
+The Part A steps are Terminal output, Saved drafts first-open focus and focus
+return, draft navigation, attach, one Send, cold-cache full-context Send,
+Resume and send, process groups and output, and
+attachment fetch plus a decoded `convertFileSrc` thumbnail. The A2 steps answer
+the question, Approve once after its review delay and Send now, checking exact
+ids and receipts in `log.ndjson`. Additional WebKitGTK checks paste a PNG and
+decode its draft thumbnail and prove that the Clear dialog closes before its
+delayed command finishes. Every step logs `phase4-smoke <step>: done`; a failure
+logs the step and exits 1. Message and answer text appears only in the fake's
+standard input records, never in argv. Keep the raw logs, their SHA-256 and the
+executed test counts with the review.
 
 ## Screens
 
@@ -897,16 +1064,24 @@ Deviations from Qt (the plan's Decisions):
 3. No `swarm initialize`: a computer without the Qt GUI's import keeps edits
    disabled.
 4. Edits made before the first ready catalog are refused, not queued.
-5. Renames made while the client was closed are not followed yet (Qt follows
-   them by persisted run tokens).
-6. Archived sessions are not placed in projects yet: Qt keys them by their
-   archive identity, `machine\narchive\n<archive id>`, which `zerus-5wmh.40`
-   ports. Until then, the Archive view and its
-   count ignore the project filter (it holds project IDs), Clear archive takes
-   no row while a project filter is set, and Move to project is disabled for an
-   archived row ("Archived sessions keep their project until the Archive view
-   groups by project."), so the client never writes the live-name member
-   `host\nname` for an archived session.
+5. Persisted live-run identities follow closed-client renames (`zerus-5wmh.47`);
+   their separate file is bounded at 100,000 tokens and 24 MiB.
+
+Archive placement follows Qt's archive identity, `machine\narchive\n<archive id>`.
+The page reply carries its group and rank; later `Batch.groups` deltas carry
+`archive_request`, so the archive store applies shown-request deltas immediately,
+holds at most 50 for the in-flight request (newest per key), and merges those
+after its reply. Other request tags are discarded. The live assignment store
+never retains archive identities. Project edits, default-project changes and
+verified post-Terminate placement keep the loaded window current.
+
+Leaving Archive only cancels in-flight reads and keeps loaded placements live.
+Scope changes and Refresh use `reset_archive_pages` to clear both sides. An empty
+next page raises "Archive changed. Refresh to start a new view." while keeping
+the shown rows and their placement updates, as ArchiveBrowser.cpp:37 does.
+Clear archive respects the project filter and resets after the confirmed batch;
+Move to project and drag-and-drop use archive identities, including a destination
+row's archive identity, so a live session with the same name stays in place.
 
 ### Organization smoke run
 
@@ -1058,6 +1233,9 @@ A blank window is not detected. Known gap: on the GL path a minimised window kee
 
 ## Rules
 
+- Part B adds voice and round video, DeepSeek's Native UI and the external
+  terminal, shell and folder entries; their current disabled slots stay in Qt's
+  places until then.
 - The UI never separates values with dots (U+00B7, U+2022, U+2219, U+22C5,
   U+2027, U+2981, U+30FB): use layout, commas or line breaks.
 - Motion uses transform and opacity only and honours Reduce motion, Animate

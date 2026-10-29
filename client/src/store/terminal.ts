@@ -26,6 +26,8 @@ export interface TerminalPort {
   ack(view: string, generation: number): void;
   disconnect(view: string): Promise<string | null>;
   retarget(view: string, target: TerminalTarget): Promise<boolean>;
+  /** The tab of attach `generation` shows or hides (a dropped file's paste refuses while it hides). */
+  shown(view: string, generation: number, shown: boolean): void;
 }
 
 export interface Screen {
@@ -195,12 +197,16 @@ export function createTerminal(port: TerminalPort, timers: Timers = realTimers, 
   // again connects nothing (Qt's showEvent does not): the Terminal connects by
   // a tab change, a selection change with the tab current, or the user.
   visibility.onChange(() => {
-    if (visibility.hidden()) void disconnect();
+    if (!visibility.hidden()) return;
+    if (generation !== 0) port.shown(VIEW, generation, false);
+    void disconnect();
   });
 
   return {
     phase, status, ready,
     connected: () => phase() === "connected",
+    /** The current attach's generation, 0 without one (Qt's connectionGeneration). */
+    generation: () => generation,
     /** The selected session's target and texts (on every change of either). */
     async setTarget(next: TerminalTarget | undefined, nextTexts: TerminalStatus | undefined) {
       setTexts(nextTexts);
@@ -227,7 +233,11 @@ export function createTerminal(port: TerminalPort, timers: Timers = realTimers, 
       if (screen && phase() === "idle" && (changed || dropped || rustHolds)) void connect();
     },
     /** The tab shows `s`: connect (Qt's currentChanged), or redraw a running attach. */
-    show(s: Screen) { screen = s; if (!held) void connect(); },
+    show(s: Screen) {
+      screen = s;
+      if (phase() === "connected" && generation !== 0) port.shown(VIEW, generation, true);
+      if (!held) void connect();
+    },
     /** The user opened the Terminal tab: showing it connects (Qt's currentChanged). */
     opened() { held = false; },
     /** The Sessions page was left: disconnect, and coming back does not connect (Qt's page switch). */
@@ -235,7 +245,10 @@ export function createTerminal(port: TerminalPort, timers: Timers = realTimers, 
     leaveSession,
     texts,
     /** The tab hides; the attach keeps running. */
-    hide() { screen = undefined; },
+    hide() {
+      screen = undefined;
+      if (generation !== 0) port.shown(VIEW, generation, false);
+    },
     connect, disconnect,
     async reconnect() { await disconnect(); await connect(); },
     async toggle() { if (phase() === "idle") await connect(); else await disconnect(); },
@@ -259,5 +272,5 @@ export type TerminalStore = ReturnType<typeof createTerminal>;
 /** The app's Terminal, on the bridge. */
 export const terminal = createTerminal({
   connect: bridge.terminalConnect, write: bridge.terminalWrite, resize: bridge.terminalResize,
-  ack: bridge.terminalAck, disconnect: bridge.terminalDisconnect, retarget: bridge.terminalRetarget,
+  ack: bridge.terminalAck, disconnect: bridge.terminalDisconnect, retarget: bridge.terminalRetarget, shown: (view, generation, shown) => bridge.terminalShown(view, generation, shown),
 });

@@ -99,7 +99,7 @@ export interface ActivityOut { computer: ComputerId; key: string; kind: Activity
 // the webview gets each row's project and rank, and the ordered headers.
 
 /** One row's place: its project and its rank inside it. */
-export interface GroupOut { computer: ComputerId; key: string; group: string; rank: number }
+export interface GroupOut { computer: ComputerId; key: string; group: string; rank: number; archive_request?: number }
 export interface HeaderOut {
   id: string;
   name: string;
@@ -143,13 +143,71 @@ export interface Batch {
   groups?: GroupOut[];
   /** The headers and the edit state, when they changed. */
   grouping?: GroupingOut;
+  /** The open composer's view, when it changed (src-tauri `next_batch` envelope). */
+  composer?: ComposerView;
+  /** The draft keys (`computer + "\n" + name`, plus `"\n" + archive id`) of the nonempty drafts, when they changed. */
+  draft_keys?: string[];
+  /** The Processes tab's view (src-tauri processes.rs), when it changed. */
+  processes_view?: ProcessesView;
+  /** Notices and Terminal requests that arrived after their call, at most 16. */
+  composer_events?: ComposerEvent[];
+}
+
+/** A row of the Processes tab (processes.rs `RowView`). */
+export interface ProcessRow {
+  id: string;
+  /** The command as the row shows it; `command_full` is its tooltip and what Copy command copies. */
+  command: string;
+  command_full: string;
+  owner: string;
+  status: string;
+  tooltip: string;
+  tone: "danger" | "muted" | "warning" | "success";
+  duration: string;
+}
+
+/** The Processes tab (processes.rs `ProcessesView`), Qt's ProcessView. */
+export interface ProcessesView {
+  /** Qt's view key: another one resets the tab's scroll. Empty without a session. */
+  key: string;
+  summary: string;
+  summary_tooltip: string;
+  notes: string;
+  groups: { group: "live" | "recorded" | "finished"; title: string; rows: ProcessRow[] }[];
+  selected: string[];
+  current: string | null;
+  stop: { label: string; enabled: boolean; tooltip: string };
+  stop_notice: string;
+  busy: boolean;
+  failed: string | null;
+  /** The current process; `output` is null until a read answered for this selection. */
+  detail: { id: string; command: string; details: string; output: string | null; notice: string } | null;
+  /** The tab's count; 0 for a recorded session. */
+  count: number;
+}
+
+/** The session the Processes tab follows (processes.rs `ProcessTarget`). */
+export interface ProcessTarget {
+  computer: string;
+  key: string;
+  name: string;
+  run_id: string;
+  conversation_id: string;
+  archive_id: string | null;
+  machine: string;
+  online: boolean;
+  /** Qt's `!recorded`: online, not archived or paused, a running process and no inspect error. */
+  live: boolean;
+  /** The session's `host_generation` from its Activity details. */
+  generation: string | null;
 }
 
 export const emptyBatch = (): Batch => ({ upserts: [], removes: [], replaces: [], computers: [], machines: [], activity: [] });
 
+/** A batch with nothing to apply. A composer view or a draft key set is content: Rust sends each once. */
 export const isEmptyBatch = (b: Batch) =>
   !b.upserts.length && !b.removes.length && !b.replaces.length && !b.computers.length && !b.machines?.length && !b.activity.length
-  && !b.groups?.length && !b.grouping;
+  && !b.groups?.length && !b.grouping && !b.processes_view && !b.composer && !b.draft_keys && !b.composer_events?.length;
 
 /** One Activity event as `inspect` returns it; unknown fields are kept. */
 export interface ActivityEvent {
@@ -165,8 +223,10 @@ export interface ActivityEvent {
   sender?: string;
   activity_key?: string;
   message_id?: string;
-  attachments?: { name?: string; path?: string; size?: number; kind?: string; mime?: string }[];
+  attachments?: EventAttachment[];
   voice?: Record<string, unknown>;
+  /** Codex's question replies of a user event, parsed in Rust (R7's annotate_replies). */
+  question_replies?: Reply[];
   [field: string]: unknown;
 }
 
@@ -508,8 +568,9 @@ export interface TerminalFacts {
 }
 
 /** One checked page of a computer's archive (`archive_page`). */
+export interface ArchiveRow extends ViewRow { group: string; rank: number }
 export interface ArchivePage {
-  rows: ViewRow[];
+  rows: ArchiveRow[];
   next_cursor: string;
   previous_cursor: string | null;
   total: number;
@@ -529,3 +590,142 @@ export interface ArchivedActivity {
   /** The other top-level fields, what `buildTranscript` reads as the summary. */
   summary: Record<string, unknown>;
 }
+
+// The composer (src-tauri/src/composer): the mirrors of its serde shapes.
+
+/** One attachment of the open draft; `path` is its `zerus-file` path. */
+export interface AttachmentView { name: string; mime: string; reference: string; bytes: number; path: string; excerpt: string | null }
+export type ChipTone = "quiet" | "danger" | "warning" | "success";
+/** The cache chip (core `cache::Chip`); hidden when not `visible`. */
+export interface Chip { visible: boolean; tone: ChipTone; label: string; short_label: string }
+/** The Context chip (core `session_usage::ContextChip`); hidden when not `visible`. */
+export interface ContextChip { visible: boolean; text: string; tooltip: string; warning: boolean; tone: ChipTone; percent: number | null; accessible_name: string }
+/** Clear session and the cache popover's Clear context, with the dialog the confirmation shows. */
+export interface ClearControl {
+  enabled: boolean; dismiss: boolean; title: string; text: string; confirm: string; run: string; conversation: string;
+  /** The cache popover's Clear context (Qt 3792). */
+  cache_enabled: boolean;
+  /** A context reset runs: "Clearing…". */
+  running: boolean;
+  /** The tooltips' reason sentences, empty for the usual tooltip. */
+  reason: string; cache_reason: string;
+}
+/** One local message row (core `local_messages::LocalMessage`). */
+export interface LocalMessage {
+  id: string; text: string; status: "sending" | "sent" | "error"; attachments: Record<string, unknown>[]; run_id: string; conversation_id: string;
+  submitted_at: number; error: string; uncertain: boolean; message_id: string | null; submitted_text: string | null; source: string | null; voice: Record<string, unknown> | null;
+}
+/** The native queue (core input_queue::QueueView), kept separate from local messages. */
+export interface QueueView { id: string; text: string; hint: string; can_send_now: boolean; enabled: boolean; label: string }
+export interface ComposerView {
+  handle: number; key: string; loaded: boolean; rev: number; text_epoch: number; text: string; position: number; anchor: number;
+  attachments: AttachmentView[]; removed: string | null; attaching: boolean; sending: boolean; waiting: string | null; uncertain: boolean;
+  status: string; status_error: boolean; can_send: boolean; send_label: string; available: boolean; unavailable_reason: string; block_reason: string | null;
+  attachments_available: boolean; attachments_reason: string; session_status: string; session_status_error: boolean; session_blocks_input: boolean;
+  /** The open session's last read failed (Qt's m_inspectError). */
+  inspect_error: boolean;
+  cache: Chip; cache_warning: string; cache_details: string; context: ContextChip; local: LocalMessage[];
+  cancel_send: boolean; compacting: boolean; clear: ClearControl;
+  /** The agent's question card shown in the composer (A2). */
+  question: QuestionView | null;
+  /** False while a required card stands in for the editor and the action row (Qt's setInputVisible). */
+  input_visible: boolean;
+  queue: QueueView | null;
+}
+
+// The question card (src-tauri composer/questions.rs, core questions.rs).
+export interface ButtonView { visible: boolean; enabled: boolean; label: string; review_label: string | null }
+export interface OptionView { id: string; label: string; description: string; markdown: boolean; checked: boolean; enabled: boolean; visible: boolean }
+export interface TextView { visible: boolean; enabled: boolean; value: string; placeholder: string; accessible_name: string; max_units: number; max_chars: number }
+export interface FormView { id: string; tab: string; prompt: string; body: string; markdown: boolean; monospace_body: boolean; multi: boolean;
+  mode: string; mode_visible: boolean; options: OptionView[]; other: OptionView | null; text: TextView | null }
+export interface QueueNav { previous: boolean; next: boolean; previous_tip: string; next_tip: string }
+export interface CardView { heading: string; progress: string; pending: string; pending_tip: string; nav: QueueNav | null; tabs_visible: boolean;
+  page: number; forms: FormView[]; status: string; status_error: boolean; available: boolean; locked: boolean; review: boolean; created_at: number;
+  submit: ButtonView; approve: ButtonView; deny: ButtonView; skip: ButtonView; previous: ButtonView; next: ButtonView; retry: boolean; skip_tip: string; retry_tip: string }
+/**
+ * `revision` grows when the card is built again (a new card, a changed form,
+ * a restored answer): the review starts again and the fields reset. `epoch`
+ * grows with every change of the answers from Rust, each revision's included:
+ * the fields take Rust's values again, and an edit names the epoch it is based on.
+ */
+export interface QuestionView { card: string; revision: number; epoch: number; asked: string; asked_tip: string; terminal_label: string; view: CardView }
+export type QuestionEdit = { kind: "option"; item: string; option: string; checked: boolean } | { kind: "other"; item: string; checked: boolean } | { kind: "text"; item: string; text: string };
+export interface ColdAnswer { title: string; text: string; proceed: string }
+export type QuestionReply = { kind: "sending" } | { kind: "busy" } | { kind: "cold"; token: number; prompt: ColdAnswer } | { kind: "notice"; text: string };
+/** Notices and Terminal requests that arrive after their call (`next_batch`'s `composer_events`). */
+export type ComposerEvent = { kind: "notice"; text: string; error: boolean; transient: boolean } | { kind: "open_terminal"; key: string };
+/** A Codex question reply, parsed in Rust (`question_replies`, `prompt_replies`). */
+export interface Reply { question: string; answer: string }
+export type ColdAction = "send" | "compact" | "clear";
+export interface ColdChoice { action: ColdAction; label: string; enabled: boolean; tooltip: string }
+export interface ColdPrompt { title: string; text: string; informative: string; choices: ColdChoice[] }
+export type StartChoice = "resume" | "resume_compact" | "fresh";
+export interface StartOption { choice: StartChoice; label: string; enabled: boolean; tooltip: string }
+export interface StartQuestion { title: string; text: string; informative: string; options: StartOption[] }
+export type SendReply =
+  | { kind: "sending" } | { kind: "busy" } | { kind: "blocked"; reason: string } | { kind: "notice"; text: string; error: boolean }
+  | { kind: "cold"; token: number; prompt: ColdPrompt } | { kind: "clear_context"; token: number } | { kind: "start"; token: number; question: StartQuestion };
+export type Answer = { kind: "cold"; action: ColdAction } | { kind: "start"; choice: StartChoice } | { kind: "cancel" };
+/** Where Inspect on a failed local row leads. */
+export type Inspect = { kind: "native_ui" } | { kind: "terminal" } | { kind: "refresh"; notice: string };
+/** The session a composer belongs to (src-tauri `SessionRef`): `key` is the catalog key. */
+export interface SessionRef { computer: ComputerId; key: string; name: string; archive_id: string | null }
+/** The detail tab that shows, for the composer's inspect retry (Qt's poll interval). */
+export type ComposerTab = "activity" | "terminal" | "native" | "processes";
+/** A file of an Activity message, as the journal lists it. */
+export interface EventAttachment {
+  name?: string;
+  mime?: string;
+  bytes?: number;
+  /** `[Image #n]` or `[File #n]` in the message text. */
+  reference?: string;
+  /** The message's request, which `hgs attachment` reads the file by; none when it saved no reference. */
+  request_id?: string;
+  /** The file's place in the message, -1 when it has none. */
+  index?: number;
+  path?: string;
+  size?: number;
+  kind?: string;
+}
+
+/** One attachment of an Activity message, as `hgs attachment` reads it (core `reads::AttachmentRef`). */
+export interface AttachmentRef {
+  /** The session's name. */
+  name: string;
+  request_id: string;
+  index: number;
+  conversation_id: string;
+  archive_id: string | null;
+  /** A subagent's ID for a subagent's message. */
+  agent_id: string | null;
+}
+
+/** An attachment in the private cache: `path` is its `zerus-file` path (`cache/{digest}/{name}`). */
+export interface Fetched {
+  path: string; name: string; mime: string; bytes: number;
+  /** An image whose header gives its size, at most Qt's 64M pixels: a card may show its thumbnail. */
+  thumbnail: boolean;
+}
+
+// Saved drafts (src-tauri `composer/saved.rs`).
+/** Which store a Saved drafts row comes from: this computer's, Qt's, or the dev app's (only the import's conflicts). */
+export type DraftSource = "client" | "qt" | "dev";
+/** Whose conversation a draft key names (core `drafts::OwnerKind`). */
+export type DraftOwnerKind = "unknown" | "message" | "subagent" | "question" | "voice" | "task" | "task_description" | "task_comment";
+export interface SavedDraftItem {
+  key: string; kind: DraftOwnerKind;
+  /** The key's machine: a host alias, "" for this computer; a subagent key names the machine. */
+  computer: string; session: string;
+  /** The owner's parts joined by " / " (the row's accessible text). */
+  title: string;
+  /** What the row shows as its title. */
+  caption: string; machine: string; meta: string; detail: string;
+  /** Seconds since the epoch; 0 when unknown. */
+  modified: number; attachments: number; source: DraftSource; archived: boolean;
+}
+/** `next` is an opaque token for the following page. */
+export interface SavedDraftsPage { items: SavedDraftItem[]; next: string | null }
+/** The import's conflicts; `next` is the following page's offset. */
+export interface ConflictsPage { items: SavedDraftItem[]; next: number | null }
+export interface SavedDraftDetail { text: string; attachments: number; detail: string; restorable: boolean }

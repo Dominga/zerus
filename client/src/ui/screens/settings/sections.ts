@@ -10,6 +10,7 @@ import { AnalyticsSection } from "./Analytics";
 import { ApprovalsSection } from "./Approvals";
 import { WorktreesSection, refreshWorktrees } from "./Worktrees";
 import { MobileSection } from "./Mobile";
+import { ProcessesSection } from "./Processes";
 import { AboutSection, refreshAbout } from "./About";
 
 // Settings sections in Qt's order (tray/src/SettingsPage.h:43, Worktrees
@@ -33,7 +34,7 @@ export const SECTIONS: readonly Section[] = [
   { id: "appearance", label: "Appearance", icon: "palette", component: AppearanceSection },
   { id: "sessions", label: "Sessions", icon: "rows-3", component: SessionsSection },
   { id: "recovery", label: "Automatic recovery", icon: "rotate-ccw", component: RecoverySection, refresh: refreshRecovery },
-  { id: "processes", label: "Processes", icon: "activity" },
+  { id: "processes", label: "Processes", icon: "activity", component: ProcessesSection },
   { id: "updates", label: "Updates", icon: "download" },
   { id: "mobile", label: "Mobile connection", icon: "smartphone", component: MobileSection },
   { id: "files", label: "Files", icon: "hard-drive", component: FilesSection },

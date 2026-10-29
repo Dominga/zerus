@@ -315,7 +315,7 @@ export function conflicts(id: string, sequence: Sequence, on: Platform = platfor
 }
 export { overlaps };
 
-/** The first chord in native text, for the Keyboard page only. */
+/** The first chord in native text, for keyboard settings and command hints. */
 export function chord(id: string, on: Platform = platform): string {
   const current = keys(id, on);
   return current.length ? nativeText(current[0], on) : "";

@@ -1,8 +1,8 @@
 //! The `organization` topic: the shared project catalog as `hgs swarm get`
 //! shows it, as keyed rows a client applies like the catalog's. A worker
-//! thread reads the stored catalog without its lock, never saving it and never
-//! supervising the catalog worker, so following the organization changes
-//! nothing. The catalog is read again when a stat of its files changes and at
+//! thread may bootstrap a missing catalog only when Qt settings are definitely
+//! absent. Initialized reads stay lock-free, never saving or supervising the
+//! catalog worker. The catalog is read again when a stat of its files changes and at
 //! least every 30 s, at most once a second. The first rows go out as a paged
 //! `snapshot`; later changes as one `delta` of the changed rows, or a new
 //! snapshot when they would not fit one frame.
@@ -34,6 +34,8 @@ pub(super) const CHUNK: usize = 1000;
 /// One read for the worker.
 pub(super) struct Job {
     pub token: u64,
+    /// Only an explicit subscription may try a first-use bootstrap.
+    bootstrap: bool,
     cancelled: Arc<AtomicBool>,
 }
 
@@ -47,7 +49,7 @@ pub(super) struct Done {
 
 /// Runs one read with `snapshot` (the catalog as `swarm get` shows it).
 pub(super) fn read(job: Job, snapshot: impl Fn() -> Result<Value, String>) -> Done {
-    let Job { token, cancelled } = job;
+    let Job { token, cancelled, .. } = job;
     if cancelled.load(Ordering::SeqCst) {
         return Done { token, value: None };
     }
@@ -68,12 +70,13 @@ impl Pool {
             .name("hgs-watch-organization".into())
             .spawn(move || {
                 let config = crate::config::Config::load().map_err(|error| error.to_string());
-                let snapshot = || match &config {
-                    Ok(config) => crate::swarm::organization(config).map_err(|error| format!("{error:#}")),
+                let snapshot = |first| match &config {
+                    Ok(config) => crate::swarm::organization(config, first).map_err(|error| format!("{error:#}")),
                     Err(error) => Err(error.clone()),
                 };
                 while let Ok(job) = queue.recv() {
-                    finished(read(job, snapshot));
+                    let first = job.bootstrap;
+                    finished(read(job, || snapshot(first)));
                 }
             })
             .expect("start the organization worker");
@@ -166,13 +169,13 @@ impl Organization {
         }
     }
 
-    fn job(&mut self, now: Instant) -> Job {
+    fn job(&mut self, now: Instant, bootstrap: bool) -> Job {
         self.token += 1;
         self.running = true;
         self.again = false;
         self.started = now;
         self.due = None;
-        Job { token: self.token, cancelled: Arc::clone(&self.cancelled) }
+        Job { token: self.token, bootstrap, cancelled: Arc::clone(&self.cancelled) }
     }
 
     /// Follows the organization, watching `files`; following it again sends
@@ -183,7 +186,7 @@ impl Organization {
         self.cancelled = Arc::new(AtomicBool::new(false));
         self.files = files;
         self.stamp = Some(stamp);
-        self.job(now)
+        self.job(now, true)
     }
 
     pub(super) fn unsubscribe(&mut self) -> bool {
@@ -210,7 +213,7 @@ impl Organization {
             }
         }
         let due = self.due.is_some_and(|at| now >= at) || now >= self.started + SAFETY;
-        (!self.running && due).then(|| self.job(now))
+        (!self.running && due).then(|| self.job(now, false))
     }
 
     /// Takes a finished read; an error is returned for the client.
@@ -354,6 +357,22 @@ mod tests {
         assert_eq!(rebuild(&rows), without_written(original));
         let empty = json!({"schema": 1, "initialized": false, "organization": {"version": 2, "default_project": "ungrouped", "projects": []}, "versions": {}});
         assert_eq!(rebuild(&super::rows(&empty)), empty);
+    }
+
+    #[test]
+    fn only_a_new_subscription_may_attempt_bootstrap() {
+        let start = Instant::now();
+        let mut organization = Organization::new();
+        let first = organization.subscribe(vec![], 1, start);
+        assert!(first.bootstrap);
+        organization.done(Done { token: first.token, value: Some(Err("uncertain Qt presence".into())) });
+        let changed = organization.pulse(start + GAP, |_| 2).unwrap();
+        assert!(!changed.bootstrap, "a refresh must not retry an undecidable probe");
+        organization.done(Done { token: changed.token, value: Some(Err("still unavailable".into())) });
+        let safety = organization.pulse(start + SAFETY * 2, |_| 2).unwrap();
+        assert!(!safety.bootstrap);
+        let retried = organization.subscribe(vec![], 2, start + SAFETY * 3);
+        assert!(retried.bootstrap, "an explicit subscription may try again");
     }
 
     #[test]

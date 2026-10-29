@@ -204,6 +204,12 @@ impl Store {
         if self.imported {
             return Ok(());
         }
+        self.import_missing(organization)
+    }
+
+    /// A node-bound pending GUI import can fill absent fields after a CLI
+    /// bootstrap. Existing values, tombstones and concurrent heads stay intact.
+    pub fn import_missing(&mut self, organization: &Value) -> Result<()> {
         let fields = self.flatten(organization)?;
         let existing = self.catalog.values();
         for (key, value) in fields {
@@ -403,6 +409,36 @@ mod tests {
             assert!(!wire.contains(private));
         }
     }
+    #[test]
+    fn a_pending_gui_import_fills_only_missing_fields_and_keeps_causal_heads() {
+        let mut a = store();
+        a.initialize(&org("Initial")).unwrap();
+        let mut b = a.clone();
+        b.node_id = new_id();
+        a.catalog.set(&a.node_id, Key::project("project", "name"), json!("Local choice")).unwrap();
+        b.catalog.set(&b.node_id, Key::project("project", "name"), json!("Peer choice")).unwrap();
+        a.catalog.merge(&b.catalog.swarm_id, b.catalog.operations.into_values().collect()).unwrap();
+        a.catalog.set(&a.node_id, Key::Folder { id: "retained-deletion".into() }, Value::Null).unwrap();
+        let heads: BTreeMap<_, Vec<String>> = a.catalog.heads().into_iter().map(|(key, ops)| (key, ops.into_iter().map(|op| op.id.clone()).collect())).collect();
+        assert_eq!(heads[&Key::project("project", "name")].len(), 2);
+        let values = a.catalog.values();
+        let mut gui = org("Stale cached name");
+        gui["projects"][0]["folders"] = json!([{"id":"retained-deletion","machine":"local","path":"/example/project","name":""}]);
+        gui["projects"].as_array_mut().unwrap().push(json!({"id":"extra","name":"Imported later","color":"#654321","sessions":[],"folders":[]}));
+        assert!(a.imported, "the CLI bootstrap retains the legacy flag");
+        a.import_missing(&gui).unwrap();
+        for (key, prior) in heads {
+            assert_eq!(a.catalog.heads()[&key].iter().map(|op| op.id.clone()).collect::<Vec<_>>(), prior, "an import must preserve causal heads");
+            assert_eq!(a.catalog.values()[&key], values[&key]);
+        }
+        assert_eq!(a.catalog.values()[&Key::project("extra", "name")], json!("Imported later"));
+        let imported = a.catalog.digest();
+        a.import_missing(&gui).unwrap();
+        assert_eq!(a.catalog.digest(), imported, "a crash before marker removal is idempotent");
+        a.initialize(&org("An old caller remains a no-op")).unwrap();
+        assert_eq!(a.catalog.digest(), imported);
+    }
+
     #[test]
     fn fallback_markers_never_become_shared_assignments_even_on_import() {
         let mut a = store();

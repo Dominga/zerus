@@ -1,18 +1,24 @@
-import { batch, createEffect, createRoot, on } from "solid-js";
-import { activityPort } from "../bridge";
-import { applyBatch, onReplaced, orderedRows } from "./catalog";
-import { bindActivity, bindSelection } from "./actions";
+import { batch, createEffect, createRoot, createSignal, on } from "solid-js";
+import { activityPort, composerTab, processesFollow, processesShown, windowVisibility } from "../bridge";
+import { applyBatch, computerFresh, onReplaced, orderedRows, setDraftKeys } from "./catalog";
+import { composer } from "./composer";
+import { terminal } from "./terminal";
+import { flag, num } from "./settings";
+import { bindActivity, bindSelection, followedFor, notify } from "./actions";
 import { observeMarks } from "./marks";
 import { createActivity } from "./activity";
+import { archive } from "./archive";
 import { applyGrouping } from "./organization";
 import { activityReadOnly } from "./activitySource";
-import { compactRows, page, selected, selectedKey, setCompactRows, setSelectedKey, subagentOpen } from "./ui";
+import { compactRows, detailTab, page, selected, selectedKey, setCompactRows, setDetailTab, setSelectedKey, subagentOpen } from "./ui";
 import { startScreens } from "./screens";
 import { documentVisibility } from "./visibility";
-import type { Batch } from "../types";
+import { processes, trackFollow, trackShown } from "./processes";
+import type { Batch, ComposerEvent } from "../types";
 
-// Wires the stores together: batches go to the catalog, the grouping and
-// the followed Activity, the selected session is the followed one, and a
+// Wires the stores together: batches go to the catalog, the grouping, the
+// followed Activity and the open composer, the selected session is the
+// followed one and has the open composer, and a
 // `replaced` run hands its selection and row layout to the new run of the
 // same name. An archived row is never followed (Qt streams only rows
 // without an archive id); store/archiveActivity.ts reads its recorded
@@ -27,9 +33,22 @@ export function receive(b: Batch) {
   batch(() => {
     applyBatch(b);
     applyGrouping(b);
+    archive.applyGroups(b.groups ?? []);
   });
   observeMarks(b);
   if (b.activity.length) activity.applyActivity(b.activity);
+  if (b.processes_view) processes.apply(b.processes_view);
+  if (b.composer) composer.receive(b.composer);
+  if (b.draft_keys) setDraftKeys(b.draft_keys);
+  for (const e of b.composer_events ?? []) composerEvent(e);
+}
+
+/** What Rust says after a call ended: Qt's showNotice, or the Terminal tab its receipt asks for. */
+function composerEvent(e: ComposerEvent) {
+  // An error stays until dismissed unless it is transient (showNotice, SessionsWindow.cpp:5210).
+  if (e.kind === "notice") notify(e.error ? "error" : "info", e.text, e.error && !e.transient);
+  // Codex's hooks review and Update now continue in Terminal (1157-1178); showing the tab connects it.
+  else if (composer.view()?.key === e.key) { terminal.opened(); setDetailTab("terminal"); }
 }
 
 createRoot(() => {
@@ -40,6 +59,43 @@ createRoot(() => {
     const s = selected();
     activity.follow(s && !activityReadOnly(s.key) ? { id: s.key, computer: s.computer, key: s.catalogKey, name: s.name, runId: s.runId, conversationId: s.conversationId } : undefined);
   }));
+  // The selected session's composer. A rename keeps the catalog key, so Rust
+  // moves its draft to the new name. An archived row opens its own editable
+  // draft too; only its recorded Activity stays read-only (Qt selectSession).
+  createEffect(on(() => {
+    const s = selected();
+    return s ? `${s.computer}\n${s.catalogKey}\n${s.name}\n${s.state === "archived" ? s.archiveId ?? "" : ""}` : undefined;
+  }, (identity) => {
+    const s = selected();
+    void composer.open(identity && s ? { computer: s.computer, key: s.catalogKey, name: s.name, archive_id: s.state === "archived" ? s.archiveId ?? null : null } : undefined);
+  }));
+  // The detail tab that shows: behind Terminal a failed read waits Qt's
+  // background interval (Settings > Processes), which Rust reads when told.
+  createEffect(on(() => [detailTab(), num("processes/backgroundSeconds"), num("processes/activeSeconds")] as const, ([tab]) => {
+    void composerTab(tab).catch(() => {});
+  }));
+});
+
+// The Processes tab follows the selected session while Settings > Processes
+// is on (Qt polls nothing while it is off); output reads and the busy
+// indicator run only while the tab shows in a shown window.
+const [windowHidden, setWindowHidden] = createSignal(windowVisibility.hidden());
+windowVisibility.onChange(() => setWindowHidden(windowVisibility.hidden()));
+createRoot(() => {
+  const enabled = () => flag("processes/enabled");
+  trackFollow({
+    enabled, selected,
+    facts: (s) => {
+      const host = followedFor(s.key).value?.host_generation;
+      return {
+        online: computerFresh(s.computer),
+        generation: typeof host === "string" && host ? host : null,
+        inspectFailed: activity.target()?.id === s.key && !!activity.error(),
+      };
+    },
+    follow: processesFollow,
+  });
+  trackShown({ enabled, selected: () => !!selected(), page, tab: detailTab, hidden: windowHidden, shown: processesShown });
 });
 
 // `?select=<session name>` opens that session once it is listed (screenshots, scripted measurements).

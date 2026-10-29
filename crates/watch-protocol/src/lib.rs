@@ -291,6 +291,13 @@ pub struct Subscription {
     pub path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
+    /// Processes polling interval, clamped by the server to 1–600 seconds.
+    /// Older watch-v1 servers ignore this additive field and keep their default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_ms: Option<u64>,
+    /// Request one processes read after its minimum gap, without dropping state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh: Option<bool>,
     /// Resume Activity after this journal `seq`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after: Option<i64>,
@@ -521,6 +528,23 @@ mod tests {
             }),
             Body::Pong(Pong { id: Some(json!(7)) }),
         ]
+    }
+
+    #[test]
+    fn processes_options_are_additive_and_absent_on_older_controls() {
+        let Control::Subscribe(old) = decode_control(
+            r#"{"op":"subscribe","topic":"processes","session":{"name":"codex/p/t"}}"#,
+        )
+        .unwrap() else {
+            panic!()
+        };
+        assert_eq!(old.interval_ms, None);
+        assert_eq!(old.refresh, None);
+        let value = serde_json::to_value(Control::Subscribe(old)).unwrap();
+        assert!(value.get("interval_ms").is_none() && value.get("refresh").is_none());
+        let Control::Subscribe(new) = decode_control(r#"{"op":"subscribe","topic":"processes","session":{"name":"codex/p/t"},"interval_ms":2500,"refresh":true}"#).unwrap() else { panic!() };
+        assert_eq!(new.interval_ms, Some(2500));
+        assert_eq!(new.refresh, Some(true));
     }
 
     #[test]

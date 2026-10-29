@@ -1,5 +1,6 @@
 import { batch, createSignal } from "solid-js";
 import { listRows, type Row } from "./model";
+import { archive } from "../../store/archive";
 import { catalog } from "../../store/catalog";
 import { grouping, groupOf, headerOf, INBOX, moveProject, moveToProject } from "../../store/organization";
 import { multi, setMulti, selectedKey } from "../../store/ui";
@@ -91,8 +92,8 @@ export function placement(rows: Row[], offsets: number[], heights: number[], ove
 export function applyDrop(item: DragItem, d: Drop) {
   if (d.before === item.id) return;
   if (item.kind === "group") { void moveProject(item.id, d.before); return; }
-  const moving = catalog.rows[item.id];
+  const moving = catalog.rows[item.id] ?? archive.row(item.id);
   // Qt's moveSession ignores a project that is not listed (SessionOrganization.cpp:188-189), such as the Inbox once it is deleted.
   if (!moving || (grouping().loaded && !headerOf(d.group))) return;
-  void moveToProject([moving], d.group, d.before ? catalog.rows[d.before] : undefined);
+  void moveToProject([moving], d.group, d.before ? catalog.rows[d.before] ?? archive.row(d.before) : undefined);
 }

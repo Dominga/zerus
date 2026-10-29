@@ -8,6 +8,8 @@
 //! the last frame the part after the first heartbeat loops. Activity frames are
 //! held per session and served on follow, as the stream does after a subscribe:
 //! the newest `tail` events, or the events after `after` in reads of 200.
+//! A `processes` state is held per session the same way and served when the
+//! Processes hub follows it; a replay never runs `hgs` for it.
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -18,7 +20,9 @@ use std::time::Duration;
 
 use serde_json::Value;
 use zerus_client_core::{CatalogState, Change, ComputerId};
-use zerus_watch_protocol::{decode, topic, Body, Events, Frame, State, VERSION};
+use zerus_watch_protocol::{
+    decode, key_for, topic, Body, CatalogItem, Delta, Events, Frame, Removal, State, VERSION,
+};
 
 /// One Activity read of the stream.
 const READ: usize = 200;
@@ -34,12 +38,24 @@ struct Log {
 struct Computer {
     id: ComputerId,
     catalog: Mutex<(CatalogState, u64)>,
-    logs: HashMap<String, Log>,
+    /// Raw catalog rows, retained for the smoke's resume transition.
+    rows: Mutex<HashMap<String, Value>>,
+    logs: Mutex<HashMap<String, Log>>,
+    /// The last `processes` state of each session, with its `rev`.
+    processes: HashMap<String, (Value, u64)>,
 }
 
 impl Computer {
     fn catalog(&self) -> MutexGuard<'_, (CatalogState, u64)> {
         self.catalog.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn rows(&self) -> MutexGuard<'_, HashMap<String, Value>> {
+        self.rows.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn logs(&self) -> MutexGuard<'_, HashMap<String, Log>> {
+        self.logs.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Marks a session followed (or not); the core emits Activity only for followed sessions.
@@ -87,11 +103,22 @@ fn is_activity(body: &Body) -> bool {
     }
 }
 
-/// Reads one replay file: the frames to play, and the Activity logs to serve.
-fn load(path: &Path) -> std::io::Result<(Vec<Body>, HashMap<String, Log>)> {
+/// What one replay file holds: the frames to play, the Activity logs and the
+/// processes states to serve.
+type Loaded = (
+    Vec<Body>,
+    HashMap<String, Value>,
+    HashMap<String, Log>,
+    HashMap<String, (Value, u64)>,
+);
+
+/// Reads one replay file.
+fn load(path: &Path) -> std::io::Result<Loaded> {
     let text = std::fs::read_to_string(path)?;
     let mut script = Vec::new();
+    let mut rows = HashMap::new();
     let mut logs: HashMap<String, Log> = HashMap::new();
+    let mut processes: HashMap<String, (Value, u64)> = HashMap::new();
     for (number, line) in text
         .lines()
         .enumerate()
@@ -108,6 +135,23 @@ fn load(path: &Path) -> std::io::Result<(Vec<Body>, HashMap<String, Log>)> {
                 continue;
             }
         };
+        if let Body::Snapshot(s) = &body {
+            if s.topic == topic::CATALOG {
+                for item in s.items.iter().flatten() {
+                    if let (Some(key), Some(row)) =
+                        (item.get("key").and_then(Value::as_str), item.get("row"))
+                    {
+                        rows.insert(key.to_owned(), row.clone());
+                    }
+                }
+            }
+        }
+        if let Body::State(s) = &body {
+            if s.topic == topic::PROCESSES {
+                processes.insert(s.key.clone(), (s.value.clone(), s.rev));
+                continue;
+            }
+        }
         if !is_activity(&body) {
             script.push(body);
             continue;
@@ -126,7 +170,7 @@ fn load(path: &Path) -> std::io::Result<(Vec<Body>, HashMap<String, Log>)> {
     for log in logs.values_mut() {
         log.events.sort_by_key(seq_of);
     }
-    Ok((script, logs))
+    Ok((script, rows, logs, processes))
 }
 
 impl Replay {
@@ -151,11 +195,13 @@ impl Replay {
                     entry.clone(),
                 ),
             };
-            let (script, logs) = load(&path)?;
+            let (script, rows, logs, processes) = load(&path)?;
             let computer = Arc::new(Computer {
                 id: ComputerId(alias),
                 catalog: Mutex::new((CatalogState::default(), 0)),
-                logs,
+                rows: Mutex::new(rows),
+                logs: Mutex::new(logs),
+                processes,
             });
             if index == 0 {
                 computer.catalog().0.organization_mut().follow();
@@ -190,7 +236,8 @@ impl Replay {
         };
         c.set_followed(key, true);
         let empty = Log::default();
-        let log = c.logs.get(key).unwrap_or(&empty);
+        let logs = c.logs();
+        let log = logs.get(key).unwrap_or(&empty);
         let events: Vec<Value> = match after {
             None => {
                 let tail = (tail as usize).min(TAIL);
@@ -234,9 +281,100 @@ impl Replay {
 }
 
 impl Replay {
+    /// Advances a paused row and its Activity to the fresh run after a smoke resume.
+    pub fn resume(&self, computer: &str, key: &str, ready: Value) -> Result<(), String> {
+        let c = self.computer(computer).ok_or("unknown replay computer")?;
+        let original = c.rows().get(key).cloned().ok_or("unknown replay session")?;
+        let name = original["name"]
+            .as_str()
+            .ok_or("replay session has no name")?;
+        let details = ready.get(name).cloned().ok_or("no resumed inspection")?;
+        let run = details["run_id"]
+            .as_str()
+            .ok_or("resumed inspection has no run")?;
+        if run.is_empty() || run == original["run_id"].as_str().unwrap_or("") {
+            return Err("the resumed run did not change".into());
+        }
+        let conversation = details["conversation_id"]
+            .as_str()
+            .ok_or("resumed inspection has no conversation")?;
+        let new_key = key_for(Some(run), name);
+        let mut row = original;
+        row["run_id"] = Value::from(run);
+        row["conversation_id"] = Value::from(conversation);
+        row["state"] = Value::from("running");
+        row["runtime_state"] = Value::from("live");
+        row["process_state"] = Value::from("running");
+        row["phase"] = details["phase"].clone();
+        row["activity"] = details["activity"].clone();
+
+        let mut log = c.logs().remove(key).unwrap_or_default();
+        let mut summary = details;
+        if let Some(fields) = summary.as_object_mut() {
+            fields.remove("events");
+            fields.remove("cursor");
+        }
+        log.state = Some((summary.clone(), 2));
+        c.rows().remove(key);
+        c.rows().insert(new_key.clone(), row.clone());
+        c.logs().insert(new_key.clone(), log);
+        c.set_followed(&new_key, true);
+        c.apply(
+            Body::Delta(Delta {
+                topic: topic::CATALOG.into(),
+                upsert: vec![CatalogItem {
+                    key: new_key.clone(),
+                    row,
+                }],
+                remove: vec![Removal {
+                    key: key.into(),
+                    reason: Some("replaced".into()),
+                }],
+                cursor: 0,
+            }),
+            &self.sink,
+        );
+        c.apply(
+            Body::State(State {
+                topic: topic::ACTIVITY.into(),
+                key: new_key,
+                value: summary,
+                rev: 2,
+            }),
+            &self.sink,
+        );
+        Ok(())
+    }
+
     pub fn unfollow(&self, computer: &str, key: &str) {
         if let Some(c) = self.computer(computer) {
             c.set_followed(key, false);
+        }
+    }
+
+    /// Serves a session's processes state, when the fixture has one, as the
+    /// stream does after a subscribe.
+    pub fn follow_processes(&self, computer: &str, key: &str) {
+        let Some(c) = self.computer(computer) else {
+            return;
+        };
+        c.catalog().0.processes_mut().follow(key);
+        if let Some((value, rev)) = c.processes.get(key) {
+            c.apply(
+                Body::State(State {
+                    topic: topic::PROCESSES.into(),
+                    key: key.into(),
+                    value: value.clone(),
+                    rev: *rev,
+                }),
+                &self.sink,
+            );
+        }
+    }
+
+    pub fn unfollow_processes(&self, computer: &str, key: &str) {
+        if let Some(c) = self.computer(computer) {
+            c.catalog().0.processes_mut().unfollow(key);
         }
     }
 }
@@ -268,7 +406,7 @@ fn play(computer: &Computer, script: Vec<Body>, interval: Duration, sink: &Sende
 mod tests {
     use super::*;
     use std::sync::mpsc::channel;
-    use zerus_client_core::ActivityUpdate;
+    use zerus_client_core::{ActivityUpdate, ProcessesUpdate};
 
     fn fixture() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/replay.ndjson")
@@ -297,14 +435,17 @@ mod tests {
         }
         assert!(replaced > 20, "snapshot rows: {replaced}");
 
-        let (key, log) = replay.computers[0]
-            .logs
-            .iter()
-            .max_by_key(|(_, log)| log.events.len())
-            .unwrap();
-        assert!(log.events.len() >= 1000);
-        let newest = seq_of(log.events.last().unwrap());
-        replay.follow("", key, None, 100);
+        let (key, newest, after) = {
+            let logs = replay.computers[0].logs();
+            let (key, log) = logs.iter().max_by_key(|(_, log)| log.events.len()).unwrap();
+            assert!(log.events.len() >= 1000);
+            (
+                key.clone(),
+                seq_of(log.events.last().unwrap()),
+                seq_of(&log.events[log.events.len() - 450]),
+            )
+        };
+        replay.follow("", &key, None, 100);
         let got = activity(&rx);
         let ActivityUpdate::Events { events, cursor } = &got[0].1 else {
             panic!("events first")
@@ -317,8 +458,7 @@ mod tests {
         ));
 
         // An older read: everything after `after`, in reads of 200.
-        let after = seq_of(&log.events[log.events.len() - 450]);
-        replay.follow("", key, Some(after), 100);
+        replay.follow("", &key, Some(after), 100);
         let reads: Vec<usize> = activity(&rx)
             .iter()
             .filter_map(|(_, u)| match u {
@@ -327,5 +467,129 @@ mod tests {
             })
             .collect();
         assert_eq!(reads, [200, 200, 49]);
+    }
+
+    #[test]
+    fn resume_advances_the_catalog_and_activity_together() {
+        let (tx, rx) = channel();
+        let replay = Replay::start(fixture().as_os_str(), Duration::from_secs(3600), tx).unwrap();
+        let old = "run:000000-run";
+        let new = "run:000000-run-resumed";
+        let ready = serde_json::json!({"claude/sample-project/review": {
+            "run_id": "000000-run-resumed", "conversation_id": "conv-000000-run", "state": "running",
+            "runtime_state": "live", "process_state": "running", "phase": "idle", "activity": "idle",
+            "events": [], "cursor": 0
+        }});
+        replay.resume("", old, ready).unwrap();
+        let (mut upserted, mut removed, mut state) = (false, false, false);
+        while let Ok(change) = rx.recv_timeout(Duration::from_millis(500)) {
+            match change {
+                Change::Upsert { key, row, .. } if key == new => {
+                    upserted = row.state == "running"
+                        && row.run_id.as_deref() == Some(new.strip_prefix("run:").unwrap());
+                }
+                Change::Remove { key, reason, .. } if key == old => {
+                    removed = reason.as_deref() == Some("replaced")
+                }
+                Change::Activity {
+                    key,
+                    update: ActivityUpdate::State { value, rev },
+                    ..
+                } if key == new => {
+                    state = value["runtime_state"] == "live"
+                        && value["run_id"] == "000000-run-resumed"
+                        && rev == 2;
+                }
+                _ => {}
+            }
+            if upserted && removed && state {
+                break;
+            }
+        }
+        assert!(
+            upserted && removed && state,
+            "upsert {upserted}, removed {removed}, state {state}"
+        );
+        replay.follow("", new, None, 100);
+        let states: Vec<_> = activity(&rx)
+            .into_iter()
+            .filter(|(key, update)| key == new && matches!(update, ActivityUpdate::State { .. }))
+            .collect();
+        assert_eq!(states.len(), 1);
+    }
+
+    fn processes(rx: &std::sync::mpsc::Receiver<Change>) -> Vec<(String, ProcessesUpdate)> {
+        let mut out = Vec::new();
+        while let Ok(change) = rx.recv_timeout(Duration::from_millis(300)) {
+            if let Change::Processes { key, update, .. } = change {
+                out.push((key, update));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_processes_state_is_served_once_on_follow() {
+        let dir =
+            std::env::temp_dir().join(format!("zerus-replay-processes-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("replay.ndjson");
+        std::fs::write(
+            &file,
+            r#"{"v":1,"seq":9,"t":"state","topic":"processes","key":"run:a","value":{"processes":{"items":[]}},"rev":1}"#,
+        )
+        .unwrap();
+        let (tx, rx) = channel();
+        let replay = Replay::start(file.as_os_str(), Duration::from_secs(3600), tx).unwrap();
+        assert!(processes(&rx).is_empty(), "nothing before a follow");
+        replay.follow_processes("", "run:b");
+        assert!(processes(&rx).is_empty(), "no state for another session");
+        replay.follow_processes("", "run:a");
+        assert_eq!(
+            processes(&rx),
+            [(
+                "run:a".to_owned(),
+                ProcessesUpdate::State {
+                    value: serde_json::json!({"processes": {"items": []}}),
+                    rev: 1
+                }
+            )]
+        );
+        replay.unfollow_processes("", "run:a");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_fixture_has_processes_for_one_session() {
+        let (tx, rx) = channel();
+        let replay = Replay::start(fixture().as_os_str(), Duration::from_secs(3600), tx).unwrap();
+        while let Ok(change) = rx.recv_timeout(Duration::from_secs(2)) {
+            if matches!(change, Change::Replace { .. }) {
+                break;
+            }
+        }
+        let keys: Vec<&String> = replay.computers[0].processes.keys().collect();
+        assert_eq!(keys, ["run:000001-run"]);
+        replay.follow_processes("", "run:000001-run");
+        let served = processes(&rx);
+        let [(_, ProcessesUpdate::State { value, .. })] = served.as_slice() else {
+            panic!("one state: {served:?}")
+        };
+        let commands: Vec<&str> = value["processes"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["command"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            commands,
+            ["cargo test --workspace", "npm run build", "git fetch"]
+        );
+        // As the topic sends it: no run ID, and an OS tree's output is not captured.
+        assert!(value.get("run_id").is_none());
+        assert_eq!(
+            value["processes"]["items"][0]["capabilities"]["output"],
+            serde_json::json!(false)
+        );
     }
 }

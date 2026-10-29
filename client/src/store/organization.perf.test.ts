@@ -69,7 +69,7 @@ describe.skipIf(node.process.env.ZERUS_CLIENT_MEASURE !== "1")("20,000 sessions"
     started = performance.now();
     organization.applyGrouping(batchOf({ grouping, groups }));
     const members = groupMembers(catalog.catalog.order, catalog.catalog.rows, organization.groups, organization.defaultProject());
-    const list = groupRows({ grouping: organization.grouping(), members, visible: () => true, projects: [], expanded: () => false, compact: () => false });
+    const list = groupRows({ grouping: organization.grouping(), members, visible: () => true, online: () => true, projects: [], expanded: () => false, compact: () => false });
     report("grouping", performance.now() - started, heap() - before);
     expect(list.length).toBe(ROWS + PROJECTS);
 

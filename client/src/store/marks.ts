@@ -28,7 +28,7 @@ export const OVERRIDE_CAP = 1000;
 export const CAP = 20_000;
 
 /** What the overlay decides; the rest of a row is the host's. */
-export type Overlay = Pick<Session, "status" | "caption" | "attention" | "unread" | "reviewLater" | "attentionNeeded" | "childAttention" | "summary" | "muted" | "notificationConflict">;
+export type Overlay = Pick<Session, "status" | "caption" | "attention" | "unread" | "reviewLater" | "attentionNeeded" | "actionNeeded" | "childAttention" | "summary" | "muted" | "notificationConflict">;
 
 export interface MarksPort {
   attentionMarks(): Promise<AttentionSnapshot>;
@@ -299,6 +299,8 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
       // projection without the field keeps none.
       attentionNeeded: s.baseAttentionNeeded === undefined ? undefined
         : (s.needsAction && !r.ack) || (s.state !== "archived" && (r.unread || r.reviewLater)),
+      // The part a project header counts as needing a response (SessionsWindowRows.cpp:400-401).
+      actionNeeded: s.baseAttentionNeeded === undefined ? undefined : s.needsAction && !r.ack,
       childAttention: s.baseChildAttention && !r.ack,
       // Qt's currentAction repeats the status for an unread reply unless the session needs action.
       summary: r.unread && !s.needsAction ? "" : s.baseSummary,

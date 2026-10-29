@@ -1,6 +1,7 @@
 //! Shared metadata only. Transport credentials and per-device presentation stay
-//! local; the swarm-wide phone delivery choice is shared. All commands use one
-//! locked, atomically replaced store.
+//! local; the swarm-wide phone delivery choice is shared. Writes use one
+//! locked, atomically replaced store; initialized snapshots read it lock-free.
+mod bootstrap;
 mod catalog;
 mod launch_project;
 mod infer_project;
@@ -79,10 +80,11 @@ pub(crate) fn worker_status(config: &Config) -> Value {
     service::status(config).json()
 }
 
-/// The catalog as `swarm get` shows it, with `worker`, read without the
-/// catalog lock, without saving and without supervising the worker.
-pub(crate) fn organization(config: &Config) -> Result<Value> {
-    let mut snapshot = store::read_snapshot(config)?;
+/// The catalog as `swarm get` shows it, with `worker`. Only a first read on a
+/// computer without Qt settings may bootstrap; initialized reads remain
+/// lock-free, without saving or supervising the worker.
+pub(crate) fn organization(config: &Config, first: bool) -> Result<Value> {
+    let mut snapshot = if first { bootstrap::read_snapshot(config)? } else { store::read_snapshot(config)? };
     snapshot["worker"] = service::status(config).json();
     Ok(snapshot)
 }
@@ -225,9 +227,9 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
             let mut store = LockedStore::load(config)?;
             let previous: std::collections::BTreeSet<_> = store.data.catalog.operations.keys().cloned().collect();
             match action {
+                "get" => { bootstrap::maybe(&mut store, config)?; }
                 "initialize" => {
-                    if !store.data.imported { store.backup("before-import")?; }
-                    store.data.initialize(&request)?;
+                    bootstrap::initialize(&mut store, &request)?;
                 }
                 "apply" => { ensure!(store.data.imported,"initialize the local project catalog first"); store.data.apply(serde_json::from_value(request)?)?; }
                 "resolve" => {
@@ -239,7 +241,7 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
                 "disconnect" => { store.data.peers.remove(alias()?); }
                 _ => {}
             }
-            store.save()?;
+            if action != "initialize" { store.save()?; }
             if action == "export" { return Ok(json!({"schema":1,"node_id":store.data.node_id,"initialized":store.data.imported,"catalog":store.data.catalog})); }
             let mut snapshot = store.snapshot(config);
             snapshot["worker"] = worker.unwrap_or_else(|| service::status(config)).json();

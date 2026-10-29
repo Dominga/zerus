@@ -1955,6 +1955,49 @@ local transport bindings. `hgs swarm export` exports only shared fields. Origina
 Zerus settings stay in `workspace/organizationBeforeSwarm`; import/merge backups
 use `~/.config/hgs/swarm/backup-*.json`.
 
+On a computer without a Qt settings store, the first `hgs swarm get` or initial
+`organization` watch subscription may initialize an empty catalog. It derives
+no projects, folder links or session assignments from names. The client still
+sends only explicit edits; placement and concurrent field versions stay in hgs
+and the replica. An existing uninitialized catalog may also bootstrap; every
+existing operation, peer, binding and machine-name entry is preserved. Steady-state
+organization watch reads remain lock-free and do not save. Only the first read
+of an explicit organization subscription may try the bootstrap; a present or
+undecidable Qt probe is retried only on a new subscription.
+
+The presence check is conservative and never parses Qt settings. Any existing,
+malformed, unreadable or unexpected store counts as possibly holding an
+organization, as does a probe error. The locations are
+`$XDG_CONFIG_HOME/hgdev/hgs-tray.conf` (default `~/.config`) on Linux,
+`%APPDATA%/hgdev/hgs-tray.ini` on Windows, and
+`~/Library/Preferences/com.hgdev.hgs-tray.plist` on macOS. Zerus.app retains that
+macOS preferences domain after switching clients. A computer with such a store
+keeps the existing Qt import path; neither trigger bootstraps it or writes a
+pending-import marker. Watch hello still obtains its stable machine identity
+and may create an uninitialized catalog before the organization subscription.
+
+`hgs swarm get` keeps its ordinary locked load and save, including self bindings,
+the machine-name refresh and a stable persisted node identity even when a Qt
+store exists and the catalog is still uninitialized. The bootstrap is the only
+new behavior, evaluated under that same lock when `imported` is false and Qt
+settings are definitely absent. Get and the initial organization subscription
+share this idempotent operation, so concurrent first reads initialize once.
+
+An automatic bootstrap writes a node-bound `gui-import-pending.json` beside the
+catalog before saving the legacy `imported` flag. A later Qt first start, using
+the current hgs, can still call `swarm initialize` to import its local
+organization. While that marker is pending, initialize fills only missing
+fields, preserving existing values, deletions and concurrent versions. It saves
+the catalog before clearing the marker, so a crash can safely retry that
+missing-field import. An already imported catalog without a matching marker
+keeps the existing initialize no-op. The catalog and peer wire formats are
+unchanged; older hgs versions can read the catalog but do not perform the pending
+GUI import. Qt's settings store is never changed by the bootstrap or import.
+An unreadable, malformed or unsupported pending marker prevents bootstrap but
+does not fail get or the initial organization read: they return the existing
+uninitialized state and leave the marker untouched. A stderr note is emitted
+once per process. Explicit initialize still refuses that unknown import state.
+
 The independent `hgs-swarm` service (`com.hgdev.hgs-swarm` on macOS) makes no network
 requests without members. Local changes normally trigger exchange within three
 seconds; unchanged peers are checked every 30 seconds, backing off to five minutes
@@ -3418,7 +3461,9 @@ for a GUI that is not running, by its signature and its own `--build-info`) and
 only then becomes the one rollback copy in `~/.local/share/hgs/desktop-previous`;
 a new GUI that does not start is replaced by it again. A replaced bundle without
 its identity, executable or valid signature never becomes the rollback copy, and
-a Zerus process started during the update stops the change. Those cases and an
+a Zerus process started during the update stops the change. After the Mac switch,
+Qt stays the rollback copy; if it cannot be verified as complete, including when
+its signature check times out, the replaced client is kept too. Those cases and an
 interrupted update keep the replaced GUI in a `.hgs-tray-kept-*` folder beside
 the installed one and print where; later updates list such folders and never
 remove them. Links at the
@@ -4121,8 +4166,18 @@ catalog key. Its `state` value is `{processes, process_work}` exactly as
 `hgs inspect NAME` reports them. The first follows the subscription; later ones
 only when the value changed apart from both `sampled_at` fields. Two worker
 threads run the inspection, so a slow `ps` or native host delays no other frame.
-A session is read again when its catalog row changes and at least every 10 s;
-reads of one session start at least 2 s apart. A session that leaves the
+A session is read again when its catalog row changes and every 10 s by default;
+reads of one session start at least 1 s apart. A processes subscription may
+include `interval_ms` (clamped to 1,000–600,000 ms). Repeating the subscription with `interval_ms`
+changes its interval while keeping the current inventory, revision and running
+read. Adding `"refresh":true` requests one read as soon as the minimum gap
+allows; repeated refreshes while a read runs coalesce into one follow-up read.
+Both fields are additive watch-v1 options. Older servers ignore them: each
+interval change or refresh becomes a plain resubscription, which reads again
+at once without the minimum gap, resends the state as revision 1, then keeps
+the 10 s default. Plain resubscriptions without either option retain the
+original behavior: replace the subscription and resend its first state.
+A session that leaves the
 catalog ends with `subscription_ended`, and an inspection that fails sends a
 non-fatal `inspect_failed`. A stream follows the processes of at most 16
 sessions (`limits.processes_subscriptions`).

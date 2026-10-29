@@ -5,6 +5,7 @@ import { page, setPage, counts, setMenu, toast, logoMotion, type Page } from "..
 import { markAllEntry } from "../sessions/mark-entries";
 import { expandAllCollapsedEntry } from "../sessions/background-menu";
 import { skin } from "../../skin/runtime";
+import { newSessionFromRail } from "../sessions/newsession-view";
 
 // The side screen switcher stays on the side (owner decision 2026-10-27).
 // Order follows SessionsWindow: brand -> Overview, New session, Sessions,
@@ -31,7 +32,7 @@ export function Rail() {
         <ZerusLogo attention={counts().attention > 0} motion={logoMotion()} size={28} />
         <Show when={labeled()}><span>Overview</span></Show>
       </button>
-      <button class="rail-new" data-tip="New session" data-tip-pos="right" onClick={() => toast("New session", "Starting sessions arrives with the session flows; use the Zerus app meanwhile.")}>
+      <button class="rail-new" data-tip="New session" data-tip-pos="right" onClick={newSessionFromRail}>
         <Icon name="add" size={24} />
         <Show when={labeled()}><span>New</span></Show>
       </button>

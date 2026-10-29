@@ -117,6 +117,12 @@ pub const KEYS: &[Key] = &[
     key("workspace/showCompletedSubagents", Kind::Flag(false)),
     key("workspace/reduceMotion", Kind::Flag(false)),
     key("notifications/optionalQuestions", Kind::Flag(false)),
+    // New session's remembered choices (NewSessionDialog.cpp:845-851,
+    // SessionCreationController.cpp:244-249). launchAccounts is compact JSON
+    // stored by Qt as a QByteArray, read as text by the single Qt seed.
+    key("workspace/launchAgent", Kind::Text("")),
+    key("workspace/launchOpenTerminal", Kind::Flag(false)),
+    key("workspace/launchAccounts", Kind::Text("")),
     // Processes (ProcessSettings.h), web client phase 4 Task 11.
     key("processes/enabled", Kind::Flag(false)),
     key(

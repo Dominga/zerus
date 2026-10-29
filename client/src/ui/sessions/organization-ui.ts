@@ -41,6 +41,8 @@ export function headerMenuState(g: GroupingOut, project: string): HeaderMenuStat
 
 /** What the header menu's entries do; `collapse` gets the new state, `move` the project to go before. */
 export interface HeaderActions {
+  /** New session on this project (showGroupMenu 2572-2573). */
+  newSession: () => void;
   filter: () => void;
   collapse: (collapsed: boolean) => void;
   rename: () => void;
@@ -56,8 +58,7 @@ export function headerEntries(g: GroupingOut, project: string, act: HeaderAction
   if (!m) return [];
   const hint = (e: Entry) => (e.enabled ? undefined : e.reason);
   return [
-    // Phase 5 brings New session.
-    { label: "New session…", icon: "plus", disabled: true },
+    { label: "New session…", icon: "plus", action: act.newSession },
     { separator: true },
     { label: "Filter this project", icon: "funnel", action: act.filter },
     { separator: true },

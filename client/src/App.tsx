@@ -2,9 +2,12 @@ import { For, Match, Show, Suspense, Switch, createEffect, createMemo, lazy, onC
 import { Rail } from "./ui/components/Rail";
 import { MenuLayer, Toasts } from "./ui/components/Overlays";
 import { ActionDialogs, ActionNotices } from "./ui/sessions/ActionDialogs";
+import { newSessionFromShortcut, newSessionOpened } from "./ui/sessions/newsession-view";
 import { OrganizationDialogs } from "./ui/sessions/OrganizationDialogs";
 import { SessionList } from "./ui/sessions/SessionList";
 import { SessionDetail } from "./ui/sessions/SessionDetail";
+import { CreationPanel } from "./ui/sessions/CreationPanel";
+import { selectedCreation } from "./store/creations";
 import { OverviewScreen } from "./ui/screens/Overview";
 import { MachinesScreen } from "./ui/screens/Machines";
 import { AccountsScreen } from "./ui/screens/Accounts";
@@ -21,6 +24,9 @@ import type { BridgeMode } from "./bridge";
 // Settings and its sections load the first time Settings opens; their
 // state lives in their modules, so it stays once loaded.
 const SettingsScreen = lazy(() => import("./ui/screens/Settings").then((m) => ({ default: m.SettingsScreen })));
+// New session and its child dialogs load the first time it opens
+// (`newSessionOpened`), and stay mounted from then on.
+const NewSessionDialog = lazy(() => import("./ui/sessions/NewSessionDialog").then((m) => ({ default: m.NewSessionDialog })));
 const PerfHost = lazy(() => import("./ui/PerfHost").then((m) => ({ default: m.PerfHost })));
 
 const STATE_TEXT: Record<string, string> = {
@@ -76,6 +82,8 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
     ["go.machines", () => setPage("machines")],
     ["go.accounts", () => setPage("accounts")],
     ["go.settings", () => setPage("settings")],
+    // session.new (Shortcuts.cpp:29, 58): New session from every page.
+    ["session.new", newSessionFromShortcut],
     ["zoom.in", () => zoomBy(0.1)],
     ["zoom.out", () => zoomBy(-0.1)],
     ["zoom.reset", () => zoom(1)],
@@ -92,7 +100,7 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
           <Match when={page() === "sessions"}>
             <div class="sessions-page" classList={{ "layout-right": skin().layout["sessions-pane"] === "right" }}>
               <SessionList />
-              <SessionDetail />
+              <Show when={selectedCreation() !== undefined} fallback={<SessionDetail />}><CreationPanel /></Show>
             </div>
           </Match>
           <Match when={page() === "dashboard"}><OverviewScreen /></Match>
@@ -106,6 +114,7 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
       <MenuLayer />
       <Toasts />
       <ActionDialogs />
+      <Show when={newSessionOpened()}><Suspense><NewSessionDialog /></Suspense></Show>
       <OrganizationDialogs />
       <ActionNotices />
       <Suspense><PerfHost /></Suspense>

@@ -23,6 +23,9 @@ import { markAllEntry, markAllTip, markEntry, runMarkAll } from "./mark-entries"
 import { moveEntry, openCreateProjectDialog, openDeleteProjectDialog, openRenameProjectDialog } from "./OrganizationDialogs";
 import { backgroundEntries } from "./background-menu";
 import { chipColor, headerEntries, projectColor, type FilterChip } from "./organization-ui";
+import { newSessionForProject, newSessionFromPanel } from "./newsession-view";
+import { CreationCard, CreationTile } from "./CreationCard";
+import { creationCount, creationFooter, creationStatusMenu } from "../../store/creations";
 import {
   selectedKey, setSelectedKey, setExpandedChildren, expandedChildren,
   setCompactRows, compactRows, stateFilter, setStateFilter, counts, search, setSearch, stripMode, setStripMode,
@@ -164,6 +167,7 @@ export function sessionMenu(s: Session): MenuEntry[] {
 /** The project header's menu (SessionsWindow.cpp:2568-2616); its rules are organization-ui.ts's. */
 function headerMenu(project: string): MenuEntry[] {
   return headerEntries(grouping(), project, {
+    newSession: () => newSessionForProject(project),
     filter: () => setProjectFilter([project]),
     collapse: (collapsed) => setProjectCollapsed(project, collapsed),
     rename: () => openRenameProjectDialog(project),
@@ -445,7 +449,7 @@ export function SessionList() {
         <header class="sp-head">
           <h1>{stateFilter() === "archived" ? "Archive" : "Sessions"}</h1>
           <span class="grow" />
-          <button class="icon-btn hd" data-tip="New session" disabled><Icon name="add" size={18} /></button>
+          <button class="icon-btn hd" data-tip="New session" aria-label="New session" onClick={newSessionFromPanel}><Icon name="add" size={18} /></button>
           <button class="icon-btn hd" data-tip={toggleCaption()} onClick={toggleDock}><Icon name={toggleGlyph()} size={18} /></button>
           <button class="icon-btn hd" data-tip="Session and machine actions" onClick={(e) => openMenu(e, batchMenu())}><Icon name="more" size={18} /></button>
         </header>
@@ -470,7 +474,7 @@ export function SessionList() {
         <FilterChips />
 
         <Show when={stateFilter() === "archived"}><ArchiveBar /></Show>
-          <Show when={catalog.order.length > 0 || stateFilter() === "archived"} fallback={<ListPlaceholder />}>
+          <Show when={catalog.order.length > 0 || creationCount() > 0 || stateFilter() === "archived"} fallback={<ListPlaceholder />}>
             <div class="sp-scroll" classList={{ morphing: morphing(), organizing: !!dragItem() }} ref={list.ref} tabindex="0" onKeyDown={onKey} role="tree"
               onDragOver={(e) => organizeOver(e, list)} onDrop={(e) => organizeDrop(e)} onDragLeave={(e) => { if (!(e.currentTarget as Element).contains(e.relatedTarget as Node)) setDrop(undefined); }}
               aria-label="Agent sessions; Ctrl-click to select several; drag to organize, left/right to collapse or expand a group">
@@ -484,9 +488,9 @@ export function SessionList() {
           </Show>
         <SelectionBar />
         <footer class="sp-foot">
-          <span class="tabular ell">{shownSummary().shown ? `${shownSummary().shown} shown, ${shownSummary().working} working, ${shownSummary().attention} attention` : catalog.order.length ? "No matching sessions" : ""}</span>
+          <span class="tabular ell">{shownSummary().shown ? `${shownSummary().shown} shown, ${shownSummary().working} working, ${shownSummary().attention} attention${creationFooter(true)}` : creationFooter(false) || (catalog.order.length ? "No matching sessions" : "")}</span>
           <span class="grow" />
-          <button class="icon-btn small" data-tip="Session creation status" disabled><Icon name="clock" size={16} /></button>
+          <button class="icon-btn small" data-tip="Session creation status" onClick={(e) => openMenu(e, creationStatusMenu())}><Icon name="clock" size={16} /></button>
           <button class="icon-btn small" title={markAllTip(markAllEntry())} disabled={markAllEntry().disabled} onClick={() => runMarkAll()}><Icon name="read-all" size={16} /></button>
           {/* The open composer is the dialog's target, none while a subagent shows (SessionsWindow.cpp:485-489). */}
           <button class="icon-btn small" data-tip="Saved drafts: recover local drafts, including those from ended sessions" aria-label="Saved drafts"
@@ -579,6 +583,7 @@ function ListRow(props: { id: string; list: RowSource }) {
           </div>
         )}
       </Show>
+      <Show when={row()?.type === "creation" ? (row() as Extract<Row, { type: "creation" }>) : undefined}>{(v) => <CreationCard card={v().creation} />}</Show>
       <Show when={row()?.type === "card" ? (row() as Extract<Row, { type: "card" }>) : undefined}>
         {(v) => (
           <div class="rowhit" classList={{ "has-kids-open": v().expanded && !v().compactRow, multi: !!multi[v().session.key], dragged: dragItem()?.id === v().session.key }}
@@ -677,7 +682,7 @@ function Strip(props: { onEnter: () => void; onToggle: () => void }) {
           <For each={list.keys()}>{(id) => <StripRow id={id} list={list} />}</For>
         </div>
       </div>
-      <div class="strip-count tabular">{shownSummary().shown}</div>
+      <div class="strip-count tabular">{shownSummary().shown + creationCount()}</div>
     </div>
   );
 }
@@ -698,6 +703,7 @@ function StripRow(props: { id: string; list: RowSource }) {
         )}
       </Show>
       <Show when={row()?.type === "card" ? (row() as Extract<Row, { type: "card" }>) : undefined}>{(v) => <StripTile row={v()} />}</Show>
+      <Show when={row()?.type === "creation" ? (row() as Extract<Row, { type: "creation" }>) : undefined}>{(v) => <CreationTile card={v().creation} />}</Show>
     </div>
   );
 }

@@ -16,6 +16,8 @@ mod commands;
 #[cfg(feature = "live")]
 mod composer;
 #[cfg(feature = "live")]
+mod creations;
+#[cfg(feature = "live")]
 mod desk;
 mod display;
 #[cfg(feature = "live")]
@@ -30,6 +32,8 @@ mod lifecycle;
 mod metrics;
 #[cfg(feature = "live")]
 mod mobile;
+#[cfg(feature = "live")]
+mod newsession;
 #[cfg(feature = "live")]
 mod notifier;
 #[cfg(feature = "live")]
@@ -214,6 +218,9 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
     };
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
+        // Opened from Rust only (the composer's `composer_pick` and New
+        // session's `pick_local_folder`): the capabilities grant the webview
+        // none of its permissions.
         .plugin(tauri_plugin_dialog::init())
         // Rust opens attachments; the webview's links stay its own (no injected click handler).
         .plugin(
@@ -352,6 +359,12 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 }));
                 app.manage(organization);
                 app.manage(screens);
+                app.manage(newsession::NewSession::tauri(Some(dir.join(if replay {
+                    "worktree-snapshots-replay.json"
+                } else { "worktree-snapshots.json" }))));
+                let creations = creations::start(app.handle(), &dir, replay, allowed);
+                app.state::<commands::AppState>().set_creations(creations.clone());
+                app.manage(creations);
                 app.manage(terminal::Terminals::new(zerus_client_core::default_hgs(), allowed));
                 // A replay never touches the real drafts either.
                 let drafts = std::sync::Arc::new(zerus_client_core::drafts::DraftStore::open(
@@ -781,6 +794,7 @@ pub(crate) fn exit_work(app: &AppHandle) {
             drafts.0.flush();
         }
     });
+    creations::flush_on_exit(app);
     actions::flush_on_exit(app);
 }
 
@@ -924,12 +938,37 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         organization::move_project,
         organization::sort_project,
         organization::set_project_collapsed,
+        organization::project_folders,
         screens::screen_visible,
         screens::accounts_view,
         screens::machines_view,
         screens::machine_resolve,
         screens::machine_check,
         screens::projects_view,
+        screens::launch_accounts,
+        screens::launch_account_rows,
+        screens::launch_accounts_close,
+        newsession::new_session_context,
+        creations::creation_submit,
+        creations::creations_view,
+        creations::creation_details,
+        creations::creation_action,
+        creations::creation_plan,
+        newsession::new_session_form,
+        newsession::new_session_start,
+        newsession::new_session_plan,
+        newsession::launch_warning,
+        newsession::repository_fields,
+        newsession::worktree_snapshot,
+        newsession::worktree_catalog,
+        newsession::create_worktree,
+        newsession::list_directories,
+        newsession::create_directory,
+        newsession::pick_local_folder,
+        newsession::local_folder_exists,
+        newsession::opencode_models,
+        newsession::opencode_favorite,
+        newsession::opencode_start,
         terminal::terminal_connect,
         terminal::terminal_write,
         terminal::terminal_resize,

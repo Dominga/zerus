@@ -34,7 +34,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # The clipboard is written from Rust only (copy_text): the webview loses the user activation navigator.clipboard needs while hgs runs.
 tauri-plugin-clipboard-manager = "2"
-# The composer's Attach files picker (`composer_pick`), called from Rust only.
+# Called from Rust only, for the composer's Attach files picker
+# (`composer_pick`) and New session's local folder picker
+# (`pick_local_folder`): the webview gets none of the plugin's permissions.
 tauri-plugin-dialog = "2"
 # Opening and revealing attachments (`composer/fetch.rs`), called from Rust only:
 # no capability lets the webview reach it.

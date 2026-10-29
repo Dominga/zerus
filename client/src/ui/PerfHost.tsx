@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listRows } from "./sessions/model";
 import { applyBatch, orderedRows } from "../store/catalog";
 import { multi, peek, selectedKey, setMulti, setPeek, setSearch, setSelectedKey, setStateFilter, setStripMode, stateFilter, stripMode } from "../store/ui";
+import { handlerFor, route, sequenceState } from "../store/shortcuts";
 import { clearMulti } from "./sessions/organize";
 import { archive, archiveRows } from "../store/archive";
 import { activity } from "../store/session";
@@ -17,8 +18,8 @@ import { clearArchiveMenuEntry } from "./sessions/selection-live";
 import { computerOffline } from "../store/catalog";
 import { selectionSnapshot } from "./sessions/selection";
 import { snapshotOf, terminateCopy, type ActionRow } from "./sessions/actions-ui";
-import type { Action, EditOutcome, Outcome } from "../types";
-import { inTauri, metrics, pumpStats } from "../bridge";
+import type { Action, CreationCard, EditOutcome, Outcome } from "../types";
+import { inTauri, metrics, onCreations, pumpStats } from "../bridge";
 import { restoreSettings, setSetting } from "../store/settings";
 import { setPage, type Page } from "../store/ui";
 import { accountsPage } from "../store/accounts";
@@ -605,6 +606,121 @@ async function actionsSmoke(allowed: boolean) {
   }
 }
 
+// `?newsession-smoke=1` runs New session over the replay's project folder and
+// the fake creation hgs: read-only open/Cancel, None through Ctrl+N and Enter,
+// and Auto on a verified Git catalog. Bound events prove exact-row adoption.
+async function newSessionSmoke(allowed: boolean) {
+  const exit = (code: number) => invoke("exit_app", { code }).catch(() => {});
+  if (!allowed) {
+    log("newsession-smoke not started: it needs ZERUS_CLIENT_REPLAY, ZERUS_CLIENT_HGS and ZERUS_CLIENT_PERF");
+    return;
+  }
+  let stopAdmit = () => {}, stopEvents = () => {};
+  try {
+    const view = await import("./sessions/newsession-view");
+    const loaded = await view.loadNewSession();
+    await until(() => grouping().ready, 15_000, "the replay organization was not ready");
+    const seen = new Map<string, CreationCard>();
+    let admitted = "", pass = 0;
+    stopEvents = await onCreations((event) => {
+      if ("removed" in event) return;
+      seen.set(event.id, event);
+      log(`newsession-smoke ${pass} card ${event.id} ${event.state} ${event.caption}`);
+    });
+    stopAdmit = loaded.onCreationAdmitted((id) => { admitted = id; });
+    const openDialog = async (shortcut: boolean) => {
+      if (shortcut) {
+        const first = orderedRows()[0];
+        if (!first) throw new Error("the replay has no project session");
+        setSelectedKey(first.key);
+        await until(() => handlerFor("session.new", document) !== undefined, 5000, "session.new was not registered");
+        const pressed = new KeyboardEvent("keydown", { key: "n", code: "KeyN", ctrlKey: true, bubbles: true, cancelable: true });
+        log(`newsession-smoke ${pass} Ctrl+N route ${JSON.stringify(route(pressed, sequenceState()))}`);
+        (document.activeElement ?? document.body).dispatchEvent(pressed);
+      } else {
+        await loaded.openNewSession({ project: "p-sample-project", folder: "folder-smoke" });
+      }
+      await until(() => loaded.newSession() !== undefined, 15_000, `New session did not open: ${notices().at(-1)?.text ?? "no notice"}`);
+      await until(() => loaded.newSession() !== undefined && !!document.querySelector(".ns-form"), 15_000, "New session did not render");
+      const actions = loaded.newSessionActions;
+      if (loaded.newSession()!.folders.length > 0) actions.chooseFolder(0);
+      await until(() => loaded.newSession()?.accounts.some((row) => row.provider === "claude") === true, 15_000, "the account catalog did not load");
+      const account = loaded.newSession()!.accounts.findIndex((row) => row.provider === "claude");
+      if (account < 0) throw new Error("the fake Claude account is missing");
+      actions.chooseAccount(account);
+      await until(() => loaded.newSession()?.form !== undefined, 15_000, "the form did not settle");
+    };
+    const start = async (keyboard: boolean) => {
+      admitted = "";
+      const actions = loaded.newSessionActions;
+      actions.setAuto(!keyboard);
+      actions.setName(`newsession-smoke-${pass}`);
+      await until(() => loaded.newSession()?.form?.start_enabled === true, 20_000, "Start stayed disabled");
+      log(`newsession-smoke ${pass} start ${Date.now()}`);
+      if (keyboard) {
+        const name = document.querySelector<HTMLElement>("#ns-name");
+        if (!name) throw new Error("the session name field is missing");
+        name.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      } else {
+        await loaded.startNewSession(async () => true);
+      }
+      await until(() => admitted !== "", 20_000, "the creation was not admitted");
+      await until(() => seen.get(admitted)?.state === "bound", 45_000, "the creation did not bind");
+      const card = seen.get(admitted)!;
+      const row = orderedRows().find((s) => s.computer === card.host && s.name === card.bound_session);
+      if (!row) throw new Error("the bound session row is missing");
+      if (row.machine !== card.machine) throw new Error(`machine mismatch ${row.machine} != ${card.machine}`);
+      if (selectedKey() !== row.key) throw new Error("the exact bound row was not adopted");
+      log(`newsession-smoke ${pass} bound row-present true adopted true machine ${card.machine}`);
+      log(`newsession-smoke ${pass} end ${Date.now()}`);
+    };
+
+    pass = 1;
+    log(`newsession-smoke ${pass} begin ${Date.now()}`);
+    await openDialog(false);
+    await until(() => loaded.newSession()?.form?.choose_existing_enabled === true, 15_000, "Choose existing did not become enabled");
+    const options = document.querySelector<HTMLButtonElement>("#ns-worktree-options");
+    if (!options) throw new Error("the worktree options button is missing");
+    options.click();
+    await until(() => {
+      const choose = [...document.querySelectorAll<HTMLButtonElement>(".menu-item")].find((button) => button.textContent === "Choose existing…");
+      if (!choose) return false;
+      choose.click();
+      return true;
+    }, 5000, "Choose existing is missing");
+    await until(() => [...document.querySelectorAll("dialog[open]")].some((dialog) => dialog.textContent?.includes("Choose an existing worktree")), 10_000, "Choose existing did not open");
+    const child = [...document.querySelectorAll<HTMLDialogElement>("dialog[open]")].find((dialog) => dialog.textContent?.includes("Choose an existing worktree"));
+    const cancel = child ? [...child.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Cancel") : undefined;
+    if (!cancel) throw new Error("Choose existing has no Cancel");
+    cancel.click();
+    loaded.newSessionActions.setSource(true);
+    await until(() => loaded.newSession()?.repository === true, 5000, "the repository source did not open");
+    loaded.newSessionActions.setSource(false);
+    await until(() => loaded.newSession()?.repository === false, 5000, "the folder source did not return");
+    loaded.closeNewSession();
+    await until(() => !document.querySelector("dialog[open]"), 5000, "New session did not close");
+    log(`newsession-smoke ${pass} end ${Date.now()}`);
+
+    pass = 2;
+    log(`newsession-smoke ${pass} begin ${Date.now()}`);
+    await openDialog(true);
+    await start(true);
+
+    pass = 3;
+    log(`newsession-smoke ${pass} begin ${Date.now()}`);
+    await openDialog(false);
+    await start(false);
+    stopAdmit();
+    stopEvents();
+    await exit(0);
+  } catch (error) {
+    stopAdmit();
+    stopEvents();
+    log(`newsession-smoke failed: ${String(error)}`);
+    await exit(1);
+  }
+}
+
 // `?screens-smoke=1` (ZERUS_CLIENT_QUERY=screens-smoke=1, in the environment
 // the actions smoke needs) shows Overview, Machines, Accounts and Projects in
 // turn on the replay catalog with a fake hgs answering the reads. It waits
@@ -836,6 +952,7 @@ export function PerfHost() {
     if (smoke === "marks" && inTauri()) void marksAfterRestart(!!config().actions_smoke);
     if (new URLSearchParams(location.search).get("screens-smoke") === "1" && inTauri()) void screensSmoke(!!config().actions_smoke);
     if (new URLSearchParams(location.search).get("organization-smoke") === "1" && inTauri()) void organizationSmoke(!!config().actions_smoke);
+    if (new URLSearchParams(location.search).get("newsession-smoke") === "1" && inTauri()) void newSessionSmoke(!!config().actions_smoke);
     if (new URLSearchParams(location.search).get("phase4-smoke") === "1" && inTauri()) {
       const { phase4Smoke } = await import("../perf/phase4Smoke");
       void phase4Smoke(!!config().actions_smoke, config().smoke_file ?? undefined);

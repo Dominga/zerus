@@ -113,6 +113,10 @@ export interface Session {
   forgetReason?: string;
   /** The raw working directory (`cwd` is the folder name). */
   cwdPath: string;
+  /** The canonical working directory, "" when the row has none (New session's prefill). */
+  cwdCanonical: string;
+  /** The checkout's root, "" outside Git (the worktree picker's session counts). */
+  gitRoot: string;
   /** The row's terminal support, and whether the host reported it (NativeSessionCapabilities::terminal). */
   terminalSupported: boolean;
   terminalReported: boolean;

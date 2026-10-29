@@ -4,6 +4,7 @@ import { archive } from "../../store/archive";
 import { catalog } from "../../store/catalog";
 import { grouping, groupOf, headerOf, INBOX, moveProject, moveToProject } from "../../store/organization";
 import { multi, setMulti, selectedKey } from "../../store/ui";
+import { projectOf } from "./creations-ui";
 
 // Bulk selection and drag-and-drop organisation of the session list, after
 // tray/src/SessionList.cpp (mousePressEvent, selectRange, placement, dropEvent).
@@ -61,7 +62,8 @@ export function placement(rows: Row[], offsets: number[], heights: number[], ove
   // A subagent row is not a target of its own: the whole family is one session.
   while (i > 0 && rows[i].type === "child") i--;
   const over = rows[i];
-  const group = over.type === "header" ? over.project : over.type === "card" ? groupOf(over.session.key) : groupOf(over.parent.key);
+  const group = over.type === "header" ? over.project : over.type === "card" ? groupOf(over.session.key)
+    : over.type === "creation" ? projectOf(over.creation, grouping()) : groupOf(over.parent.key);
   const top = offsets[i];
   let bottom = top + heights[i];
   if (item.kind === "session") for (let n = i + 1; n < rows.length && rows[n].type === "child"; n++) bottom = offsets[n] + heights[n];

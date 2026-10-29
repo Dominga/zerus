@@ -1,0 +1,24 @@
+/* The creation cards (CreationCard.tsx) and their progress view
+   (CreationPanel.tsx). A card is drawn with the session card's styles
+   (sessions.css), as Qt paints a creation row with the session delegate.
+   The panel follows Qt's creation panel (SessionsWindow.cpp 1509-1524,
+   renderCreation 3735-3739): an 18 px semibold title that wraps, a
+   read-only 13 px text with a 1 px border, radius 6 and padding 10, and the
+   buttons in two columns. In the main chunk, apart from the New session
+   dialog's lazy styles. Skin tokens only. */
+@layer components {
+  /* The row's accessible text (SessionsWindowRows.cpp:390), for the list item's name. */
+  .cr-a11y { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+  .cr-detail { padding: 12px; gap: 8px; }
+  .cr-head { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .cr-title { font-size: calc(var(--fs-base) * 1.38); font-weight: 600; overflow-wrap: anywhere; }
+  .cr-status { font-size: var(--fs-sm); color: var(--z-color-muted); }
+  textarea.field.cr-text { flex: 1 1 auto; min-height: 0; height: auto; resize: none; padding: 10px; border-radius: 6px;
+    font-size: calc(13px * var(--content-scale, 1)); line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
+  /* Qt's grid: Continue setup and Check result, Stop, Edit choices… and Hide status, Return to filters. */
+  .cr-actions { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 6px; }
+  .cr-actions .c1 { grid-column: 1; }
+  .cr-actions .c2 { grid-column: 2; }
+  .cr-actions .wide { grid-column: 1 / -1; }
+}

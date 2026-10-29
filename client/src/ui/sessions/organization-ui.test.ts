@@ -67,19 +67,22 @@ type Item = Extract<MenuEntry, { label: string }>;
 const labels = (entries: MenuEntry[]) => entries.map((e) => ("separator" in e ? "-" : "label" in e ? e.label : e.heading));
 const entry = (entries: MenuEntry[], label: string) => entries.find((e): e is Item => "label" in e && e.label === label)!;
 const actions = () => ({
-  filter: vi.fn<() => void>(), collapse: vi.fn<(collapsed: boolean) => void>(), rename: vi.fn<() => void>(), settings: vi.fn<() => void>(),
+  newSession: vi.fn<() => void>(), filter: vi.fn<() => void>(), collapse: vi.fn<(collapsed: boolean) => void>(), rename: vi.fn<() => void>(), settings: vi.fn<() => void>(),
   move: vi.fn<(before: string | undefined) => void>(), sort: vi.fn<() => void>(), remove: vi.fn<() => void>(),
 }) satisfies HeaderActions;
 const WAITING = "Project sync is starting.";
 
 describe("the project header menu", () => {
-  it("lists Qt's entries in Qt's order, with New session for phase 5", () => {
-    const entries = headerEntries(g(), "alpha", actions());
+  it("lists Qt's entries in Qt's order, New session first (2572-2573)", () => {
+    const act = actions();
+    const entries = headerEntries(g(), "alpha", act);
     expect(labels(entries)).toEqual([
       "New session…", "-", "Filter this project", "-", "Collapse project", "Rename project…", "Project settings…", "-",
       "Move project up", "Move project down", "Sort sessions by name", "-", "Delete project…",
     ]);
-    expect(entry(entries, "New session…").disabled).toBe(true);
+    expect(entry(entries, "New session…").disabled).toBeFalsy();
+    entry(entries, "New session…").action!();
+    expect(act.newSession).toHaveBeenCalledTimes(1);
     expect(entry(entries, "Delete project…").danger).toBe(true);
     expect(headerEntries(g(), "gone", actions())).toEqual([]);
   });
@@ -87,10 +90,11 @@ describe("the project header menu", () => {
   it("filters to this project and toggles its collapse locally, also while sync waits (2575-2581)", () => {
     const act = actions();
     const waiting = headerEntries(g({ ready: false, reason: WAITING }), "alpha", act);
-    for (const label of ["Filter this project", "Collapse project", "Project settings…"]) {
+    for (const label of ["New session…", "Filter this project", "Collapse project", "Project settings…"]) {
       expect(entry(waiting, label).disabled).toBeFalsy();
       entry(waiting, label).action!();
     }
+    expect(act.newSession).toHaveBeenCalledTimes(1);
     expect(act.filter).toHaveBeenCalledTimes(1);
     expect(act.collapse).toHaveBeenCalledWith(true);
     expect(act.settings).toHaveBeenCalledTimes(1);

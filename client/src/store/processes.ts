@@ -119,7 +119,7 @@ export function createOutputFollow() {
 }
 
 /** A key on the tree, as the keyboard event gives it. */
-export interface TreeKey { key: string; shift: boolean; toggle: boolean }
+export interface TreeKey { key: string; shift: boolean; toggle: boolean; alt?: boolean }
 
 /** How long a right click on an unselected row waits for the hub to show that selection. */
 const MENU_WAIT_MS = 1000;
@@ -198,7 +198,8 @@ export function createProcesses(port: ProcessesPort, now: () => number = () => D
      */
     key(k: TreeKey, menu: (id: string) => void): boolean {
       const v = view(), all = items(), at = focus();
-      if (!v || !at) return false;
+      // An Alt chord is the browser's (history, menus).
+      if (!v || !at || k.alt) return false;
       const index = all.findIndex((i) => i.id === at.id);
       const moveTo = (target: ProcessItem | undefined) => {
         if (!target) return;
@@ -210,8 +211,9 @@ export function createProcesses(port: ProcessesPort, now: () => number = () => D
       switch (k.key) {
         case "ArrowDown": moveTo(all[index + 1]); return true;
         case "ArrowUp": moveTo(all[index - 1]); return true;
-        case "Home": moveTo(all[0]); return true;
-        case "End": moveTo(all[all.length - 1]); return true;
+        // Shift extends through the first or last row that shows, as Qt's tree does, even when a header is first or last.
+        case "Home": moveTo(k.shift ? all.find((i) => i.kind === "row") : all[0]); return true;
+        case "End": moveTo(k.shift ? all.findLast((i) => i.kind === "row") : all[all.length - 1]); return true;
         case " ":
           if (at.kind === "row") select(v, at.id, { toggle: k.toggle, range: false });
           return true;

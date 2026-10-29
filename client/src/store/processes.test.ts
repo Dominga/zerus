@@ -180,6 +180,25 @@ describe("the tree's keyboard (QTreeView ExtendedSelection)", () => {
     expect(h.store.focus()?.id).toBe("p1");
   });
 
+  it("extends with Shift+Home and Shift+End through the first and last rows that show", () => {
+    const h = harness();
+    h.store.apply(view());
+    // Finished is collapsed, so the last item is its header and the last row that shows is p3.
+    h.store.key(key("End", { shift: true }), () => {});
+    expect(h.calls.at(-1)).toBe(select("host\nname", ["p1", "p2", "p3"], "p3"));
+    h.store.apply(view({ selected: ["p3"], current: "p3" }));
+    h.store.key(key("Home", { shift: true }), () => {});
+    expect(h.calls.at(-1)).toBe(select("host\nname", ["p1", "p2", "p3"], "p1"));
+  });
+
+  it("leaves any Alt chord to the browser", () => {
+    const h = harness();
+    h.store.apply(view());
+    for (const k of ["ArrowLeft", "ArrowRight", "ArrowDown", " "]) expect(h.store.key(key(k, { alt: true }), () => {})).toBe(false);
+    expect(h.calls).toEqual([]);
+    expect(h.store.collapsed().live).toBeFalsy();
+  });
+
   it("opens a row's menu with the Menu key or Shift+F10, and leaves F10 alone", () => {
     const h = harness();
     h.store.apply(view());

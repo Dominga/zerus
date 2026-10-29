@@ -62,7 +62,7 @@ export function ProcessesTab() {
     rowMenu(v, at ?? { x: (r?.left ?? 0) + 24, y: r?.bottom ?? 0 });
   });
   const onKey = (e: KeyboardEvent) => {
-    if (processes.key({ key: e.key, shift: e.shiftKey, toggle: e.ctrlKey || e.metaKey }, (id) => menuAt(id))) e.preventDefault();
+    if (processes.key({ key: e.key, shift: e.shiftKey, toggle: e.ctrlKey || e.metaKey, alt: e.altKey }, (id) => menuAt(id))) e.preventDefault();
   };
 
   return (

@@ -264,7 +264,38 @@ const MOBILE_CORE = [
   "launchctl kickstart -k gui/$(id -u)/com.hgdev.hgs-swarm", "systemctl --user restart hgs-swarm.service",
 ];
 
+const PROCESSES = [
+  "Processes", "Enable Processes tab", "Open Processes tab", "Background process count", "Unconfirmed process output", "Show loading indicator after",
+  "Off by default. When disabled, the tab is hidden and processes are not polled. Enable it to inspect running shells and background commands, read recorded output and stop selected processes. Only the selected session is inspected; opening Processes refreshes immediately. Output is read only while the tab is visible. Timings apply to this Zerus. Background refresh also controls session inspection while Terminal or Native UI is open; session overview and account limits refresh separately.",
+];
+// The Processes tab and its session menu entry (ProcessView.cpp, SessionsWindow.cpp).
+const processView = fs.readFileSync(new URL("tray/src/ProcessView.cpp", repo), "utf8");
+const sessionsWindow = fs.readFileSync(new URL("tray/src/SessionsWindow.cpp", repo), "utf8");
+const sessionsUi = (file: string) => fs.readFileSync(new URL(`../../sessions/${file}`, here), "utf8");
+const processStore = fs.readFileSync(new URL("../../../store/processes.ts", here), "utf8");
+const PROCESS_TAB = ["Command", "Agent", "State", "Duration", "Terminate", "Copy command", "Select a command to view its output."];
+const PROCESS_MENU = ["Show running commands", "Follow this session's background work in Processes", "Enable Settings > Processes to inspect running commands"];
+
 describe("Settings texts", () => {
+  it.each(PROCESSES)("Processes shows Qt's %s", (text) => {
+    expect(qt).toContain(`tr("${text}")`);
+    expect(source("Processes.tsx")).toContain(text);
+  });
+  it.each(PROCESS_TAB)("the Processes tab shows Qt's %s", (text) => {
+    expect(processView).toContain(`tr("${text}`);
+    expect(sessionsUi("Processes.tsx")).toContain(text);
+  });
+  it("the Processes tab fills in Qt's counts", () => {
+    expect(processView).toContain('tr("Terminate selected (%1)")');
+    expect(sessionsUi("Processes.tsx")).toContain("`Terminate selected (${ids.length})`");
+    expect(sessionsWindow).toContain('tr("Processes (%1)")');
+    expect(sessionsUi("SessionDetail.tsx")).toContain("`Processes (${count})`");
+  });
+  it.each(PROCESS_MENU)("the session menu shows Qt's %s", (text) => {
+    expect(sessionsWindow).toContain(`tr("${text}")`);
+    expect(processStore).toContain(text);
+  });
+
   it.each(ANALYTICS)("Private analytics shows Qt's %s", (text) => {
     expect(analyticsQt).toContain(`"${text}"`);
     expect(source("Analytics.tsx") + source("analytics-text.ts")).toContain(text);

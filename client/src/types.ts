@@ -139,13 +139,64 @@ export interface Batch {
   groups?: GroupOut[];
   /** The headers and the edit state, when they changed. */
   grouping?: GroupingOut;
+  /** The Processes tab's view (src-tauri processes.rs), when it changed. */
+  processes_view?: ProcessesView;
+}
+
+/** A row of the Processes tab (processes.rs `RowView`). */
+export interface ProcessRow {
+  id: string;
+  /** The command as the row shows it; `command_full` is its tooltip and what Copy command copies. */
+  command: string;
+  command_full: string;
+  owner: string;
+  status: string;
+  tooltip: string;
+  tone: "danger" | "muted" | "warning" | "success";
+  duration: string;
+}
+
+/** The Processes tab (processes.rs `ProcessesView`), Qt's ProcessView. */
+export interface ProcessesView {
+  /** Qt's view key: another one resets the tab's scroll. Empty without a session. */
+  key: string;
+  summary: string;
+  summary_tooltip: string;
+  notes: string;
+  groups: { group: "live" | "recorded" | "finished"; title: string; rows: ProcessRow[] }[];
+  selected: string[];
+  current: string | null;
+  stop: { label: string; enabled: boolean; tooltip: string };
+  stop_notice: string;
+  busy: boolean;
+  failed: string | null;
+  /** The current process; `output` is null until a read answered for this selection. */
+  detail: { id: string; command: string; details: string; output: string | null; notice: string } | null;
+  /** The tab's count; 0 for a recorded session. */
+  count: number;
+}
+
+/** The session the Processes tab follows (processes.rs `ProcessTarget`). */
+export interface ProcessTarget {
+  computer: string;
+  key: string;
+  name: string;
+  run_id: string;
+  conversation_id: string;
+  archive_id: string | null;
+  machine: string;
+  online: boolean;
+  /** Qt's `!recorded`: online, not archived or paused, a running process and no inspect error. */
+  live: boolean;
+  /** The session's `host_generation` from its Activity details. */
+  generation: string | null;
 }
 
 export const emptyBatch = (): Batch => ({ upserts: [], removes: [], replaces: [], computers: [], machines: [], activity: [] });
 
 export const isEmptyBatch = (b: Batch) =>
   !b.upserts.length && !b.removes.length && !b.replaces.length && !b.computers.length && !b.machines?.length && !b.activity.length
-  && !b.groups?.length && !b.grouping;
+  && !b.groups?.length && !b.grouping && !b.processes_view;
 
 /** One Activity event as `inspect` returns it; unknown fields are kept. */
 export interface ActivityEvent {

@@ -37,6 +37,9 @@ vi.mock("../../bridge", () => ({
   terminalAck: vi.fn(async () => {}),
   terminalDisconnect: vi.fn(async () => {}),
   terminalRetarget: vi.fn(async () => {}),
+  // The Processes tab's follow (store/session).
+  processesFollow: vi.fn(),
+  processesShown: vi.fn(),
   windowVisibility: { hidden: () => false, onChange: () => () => {} },
 }));
 

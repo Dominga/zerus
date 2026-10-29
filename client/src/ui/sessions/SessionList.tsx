@@ -6,7 +6,9 @@ import {
   SessionCard, ChildCard, CompactCard, AgentBadge, StatusBadge, badgeKind, statusCaption, stripCaption,
   emphasis, childStatus, gitTooltip, paletteIndex, folderOf,
 } from "./SessionCard";
-import { catalog, computerOffline } from "../../store/catalog";
+import { catalog, computerFresh, computerOffline } from "../../store/catalog";
+import { runningCommandsEntry } from "../../store/processes";
+import { flag } from "../../store/settings";
 import { archiveCount, archiveTip } from "../../store/archive";
 import { ArchiveBar, datePanelOpen } from "./ArchiveBar";
 import { detailsFor, followedFor, updating } from "../../store/actions";
@@ -23,7 +25,7 @@ import {
   setCompactRows, compactRows, stateFilter, setStateFilter, counts, search, setSearch, stripMode, setStripMode,
   setMenu, machineFilter, setMachineFilter, projectFilter, setProjectFilter, setPage,
   multi, setMulti, peek, setPeek, setSubagentOpen, sessionsWidth, setSessionsWidth, menu, subagentOpen,
-  revealing, setRevealing,
+  revealing, setRevealing, setDetailTab,
   type StateFilter, type MenuEntry,
 } from "../../store/ui";
 import type { Session } from "./types";
@@ -108,12 +110,14 @@ export function sessionMenu(s: Session): MenuEntry[] {
   const mark = markEntry(s);
   const fresh = freshActionEntry(s);
   const archived = s.state === "archived";
+  const commands = runningCommandsEntry(s, computerFresh(s.computer), flag("processes/enabled"), () => { setSelectedKey(s.key); setDetailTab("processes"); });
   return [
     { label: compactRows[s.key] ? "Expand session row" : "Compact session row", icon: compactRows[s.key] ? "expand-row" : "compact-row", action: () => setRowCompact(s.key, !compactRows[s.key]) },
     { label: "Expand all collapsed", icon: "expand-row", disabled: !Object.values(compactRows).some(Boolean), action: () => Object.keys(compactRows).forEach((k) => setCompactRows(k, false)) },
     { separator: true },
     // An archived row has no terminal, and no Mute or Mark group (Qt's `if (!archived)`).
     ...(archived ? [] : [s.agent === "deepseek" ? { label: "Open native DeepSeek UI", icon: "external-link", disabled: LATER } : { label: "Open terminal", icon: "square-terminal", disabled: LATER }]),
+    ...(commands ? [commands] : []),
     { label: "Open folder", icon: "folder-open", disabled: LATER },
     { label: "Open shell in session folder", icon: "terminal", disabled: LATER },
     cp.command,

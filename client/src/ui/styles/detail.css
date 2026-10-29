@@ -319,7 +319,24 @@
   .proc-table td { padding: 5px 8px; border-bottom: 1px solid color-mix(in srgb, var(--z-color-divider) 60%, transparent); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .proc-table tr.grp td { color: var(--z-color-dim); font-size: var(--fs-2xs); text-transform: uppercase; letter-spacing: .4px; font-weight: 600; padding-top: 10px; }
   .proc-table tr.sel td { background: var(--z-color-row-selected); }
-  .proc-detail { margin: 10px 12px; padding: 10px; border: 1px solid var(--z-color-divider); border-radius: var(--z-radius-lg); display: flex; flex-direction: column; gap: 6px; }
+  .proc-detail { margin: 10px 12px; padding: 10px; border: 1px solid var(--z-color-divider); border-radius: var(--z-radius-lg); display: flex; flex-direction: column; gap: 6px; flex: none; max-height: 45%; min-height: 0; }
+  /* Qt's summary keeps its four-space gaps. */
+  .proc-summary-text { white-space: pre; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .proc-note { padding: 0 12px 6px; overflow-wrap: anywhere; }
+  .proc-note.warn { color: var(--z-color-warn); }
+  .proc-list { flex: 1; min-height: 0; overflow: auto; }
+  .proc-table tr:not(.grp) { cursor: default; }
+  .proc-table tr.grp { cursor: pointer; }
+  .proc-chevron { display: inline-block; width: 14px; }
+  .proc-table tr.current td:first-child { box-shadow: inset 2px 0 0 var(--z-color-accent); }
+  /* Qt's state colours (ProcessView.cpp:224). */
+  .proc-state.danger { color: light-dark(#b42332, #ff8c93); }
+  .proc-state.muted { color: light-dark(#657582, #9aabb8); }
+  .proc-state.warning { color: light-dark(#9b6b00, #e9b949); }
+  .proc-state.success { color: light-dark(#237d67, #81d8bf); }
+  .proc-command { overflow-wrap: anywhere; }
+  .proc-details { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .proc-output { margin: 0; flex: 1; min-height: 60px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
   .native-frame { flex: 1; margin: 0 10px 10px; border-radius: var(--z-radius-lg); border: 1px dashed var(--z-color-border); display: grid; place-items: center; }
 
   /* Go to */

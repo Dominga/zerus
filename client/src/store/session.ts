@@ -1,14 +1,16 @@
 import { batch, createEffect, createRoot, on } from "solid-js";
-import { activityPort } from "../bridge";
-import { applyBatch, onReplaced, orderedRows } from "./catalog";
-import { bindActivity, bindSelection } from "./actions";
+import { activityPort, processesFollow, processesShown } from "../bridge";
+import { applyBatch, computerFresh, onReplaced, orderedRows } from "./catalog";
+import { bindActivity, bindSelection, followedFor } from "./actions";
 import { observeMarks } from "./marks";
 import { createActivity } from "./activity";
 import { applyGrouping } from "./organization";
 import { activityReadOnly } from "./activitySource";
-import { compactRows, page, selected, selectedKey, setCompactRows, setSelectedKey, subagentOpen } from "./ui";
+import { compactRows, detailTab, page, selected, selectedKey, setCompactRows, setSelectedKey, subagentOpen } from "./ui";
 import { startScreens } from "./screens";
-import { documentVisibility } from "./visibility";
+import { documentVisibility, pageHidden } from "./visibility";
+import { flag } from "./settings";
+import { processes, processTarget } from "./processes";
 import type { Batch } from "../types";
 
 // Wires the stores together: batches go to the catalog, the grouping and
@@ -30,6 +32,7 @@ export function receive(b: Batch) {
   });
   observeMarks(b);
   if (b.activity.length) activity.applyActivity(b.activity);
+  if (b.processes_view) processes.apply(b.processes_view);
 }
 
 createRoot(() => {
@@ -40,6 +43,25 @@ createRoot(() => {
     const s = selected();
     activity.follow(s && !activityReadOnly(s.key) ? { id: s.key, computer: s.computer, key: s.catalogKey, name: s.name, runId: s.runId, conversationId: s.conversationId } : undefined);
   }));
+});
+
+// The Processes tab follows the selected session while Settings > Processes
+// is on (Qt polls nothing while it is off). Every change of the row sends the
+// target again: the hub follows again after a failed follow, even of the
+// same target, and ignores an unchanged one otherwise.
+createRoot(() => {
+  createEffect(() => {
+    const s = selected();
+    if (!flag("processes/enabled") || !s) { processesFollow(null); return; }
+    const host = followedFor(s.key).value?.host_generation;
+    processesFollow(processTarget(s, {
+      online: computerFresh(s.computer),
+      generation: typeof host === "string" && host ? host : null,
+      inspectFailed: activity.target()?.id === s.key && !!activity.error(),
+    }));
+  });
+  // Output reads and the busy indicator run only while the tab shows.
+  createEffect(() => processesShown(flag("processes/enabled") && !!selected() && page() === "sessions" && detailTab() === "processes" && !pageHidden()));
 });
 
 // `?select=<session name>` opens that session once it is listed (screenshots, scripted measurements).

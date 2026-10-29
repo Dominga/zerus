@@ -1,6 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type Batch, type ComputerId, type Details, type EditOutcome, type Outcome, type ReadMark, type Target, type TerminalConnected, type TerminalFacts, type TerminalFinished, type TerminalStatus, type TerminalTarget, type ArchivePage, type ArchivedActivity } from "./types";
+import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type Batch, type ComputerId, type Details, type EditOutcome, type Outcome, type ReadMark, type Target, type TerminalConnected, type TerminalFacts, type TerminalFinished, type TerminalStatus, type TerminalTarget, type ArchivePage, type ArchivedActivity, type ProcessTarget } from "./types";
 import type { ActivityPort, FollowRequest } from "./store/activity";
 import { documentVisibility, type PageVisibility } from "./store/visibility";
 
@@ -141,6 +141,7 @@ function normalize(b: Partial<Batch>): Batch {
   return {
     upserts: b.upserts ?? e.upserts, removes: b.removes ?? e.removes, replaces: b.replaces ?? e.replaces, computers: b.computers ?? e.computers,
     machines: b.machines ?? [], activity: b.activity ?? e.activity, groups: b.groups ?? [], grouping: b.grouping ?? undefined,
+    processes_view: b.processes_view ?? undefined,
   };
 }
 
@@ -463,4 +464,24 @@ export function deskPage(): Promise<number> {
 export async function deskTakePending(page: number): Promise<DeskPending> {
   if (!inTauri()) return { open: null, notices: [] };
   return invoke<DeskPending>("desk_take_pending", { page });
+}
+
+/** The session the Processes tab follows, or none (Settings > Processes off, or no selection). */
+export function processesFollow(target: ProcessTarget | null) {
+  if (inTauri()) void invoke("processes_follow", { target }).catch(() => {});
+}
+
+/** The tab shows: output reads and the busy indicator run only then. */
+export function processesShown(shown: boolean) {
+  if (inTauri()) void invoke("processes_shown", { shown }).catch(() => {});
+}
+
+/** A selection in the view `key` names; the hub refuses one for another view (ProcessView.cpp:74). */
+export function processesSelect(key: string, ids: string[], current: string | null) {
+  if (inTauri()) void invoke("processes_select", { key, ids, current }).catch(() => {});
+}
+
+/** Stop selected, through the hub's sequential queue: the processes `ids` of the view `key` shows. */
+export function processesStop(key: string, ids: string[]) {
+  if (inTauri()) void invoke("processes_stop", { key, ids }).catch(() => {});
 }

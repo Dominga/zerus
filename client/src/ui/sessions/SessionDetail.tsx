@@ -2,6 +2,9 @@ import { For, Match, Show, Switch, createEffect, createMemo, createRoot, createS
 import * as bridge from "../../bridge";
 import { terminal } from "../../store/terminal";
 import { TerminalTab } from "./Terminal";
+import { ProcessesTab } from "./Processes";
+import { processes } from "../../store/processes";
+import { flag } from "../../store/settings";
 import type { TerminalStatus } from "../../types";
 import { Icon } from "../lib/icons";
 import { ActivityView, columnStyle } from "./Activity";
@@ -147,9 +150,12 @@ createRoot(() => {
 });
 
 const tabs = () => {
+  const count = processes.view()?.count ?? 0;
   const all = [
     { id: "activity" as const, label: "Activity", show: true },
     { id: "terminal" as const, label: "Terminal", show: !!terminalTexts()?.supported && !subagentOpen() },
+    // Settings > Processes shows the tab; its count is the hub's (SessionsWindow.cpp:1330, 3786-3787).
+    { id: "processes" as const, label: count > 0 ? `Processes (${count})` : "Processes", show: flag("processes/enabled") },
   ];
   const s = selected();
   return s ? detailTabs(s.key, all) : all;
@@ -175,6 +181,7 @@ export function SessionDetail() {
               <Switch>
                 <Match when={detailTab() === "activity"}><div class="activity-wrap" style={columnStyle()}><ActivityView source={activitySourceFor(selected()!.key)} /></div></Match>
                 <Match when={detailTab() === "terminal"}><TerminalTab /></Match>
+                <Match when={detailTab() === "processes"}><ProcessesTab /></Match>
               </Switch>
             </div>
           </div>

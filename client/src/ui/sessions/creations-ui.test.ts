@@ -70,6 +70,8 @@ describe("the creation rows (SessionsWindowRows.cpp 300-341)", () => {
     expect(shape(out)).toEqual(["#alpha:2", "s1", "s2", "#ungrouped:1", "s3", "#beta:1", "+b"]);
     const beta = out[5];
     expect(beta.type === "header" && [beta.name, beta.working]).toEqual(["BETA", 1]);
+    const offline = placeCreations(sessionRows(g, members), scopeOf(g, busy, { online: () => false }), stateOf([card("b", { group: "beta" })]));
+    expect(offline[5].type === "header" && offline[5].working).toBe(0);
   });
 
   it("hide in a collapsed project, whose total still counts them", () => {

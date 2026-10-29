@@ -1,4 +1,5 @@
 import type { MenuEntry, StateFilter } from "../../store/ui";
+import { headerAttention, isWorking } from "../../store/attention";
 import type { CreationCard, GroupingOut, HeaderOut } from "../../types";
 import type { ListInput, Row } from "./model";
 import type { Session } from "./types";
@@ -205,12 +206,13 @@ export function shownCards(scope: CardScope, state: Pick<Placement, "cards" | "r
 type HeaderRow = Extract<Row, { type: "header" }>;
 
 /** A header for a project the sessions' rows left out: its counters copy `model.ts` `groupRows`' loop over every member (100-106; Qt 398-404). */
-function headerRow(h: HeaderOut, all: readonly Session[]): HeaderRow {
+function headerRow(h: HeaderOut, all: readonly Session[], online: (s: Session) => boolean): HeaderRow {
   let attention = 0, unread = 0, working = 0;
   for (const s of all) {
-    if (!s.muted && (s.reviewLater || s.status === "attention")) attention++;
+    const up = online(s);
+    if (!s.muted && headerAttention(s, up)) attention++;
     if (!s.muted && s.unread) unread++;
-    if (s.status === "working" || s.status === "background") working++;
+    if (isWorking(s, up)) working++;
   }
   return { type: "header", id: `h:${h.id}`, project: h.id, name: h.name, color: h.color, palette: h.palette, collapsed: h.collapsed, total: 0, attention, unread, working };
 }
@@ -265,7 +267,7 @@ export function placeCreations(rows: Row[], scope: ListScope, state: Placement):
     // Only a collapsed header can already count an adopted member whose card row is absent.
     const counted = h.collapsed && adds && scope.visible(adds) && (!scope.projects.length || scope.projects.includes(h.id));
     if (!segment && !cards.length && !adds) continue;
-    const header = segment?.header ?? headerRow(h, scope.members.get(h.id) ?? []);
+    const header = segment?.header ?? headerRow(h, scope.members.get(h.id) ?? [], scope.online);
     out.push({ ...header, total: header.total + cards.length + (adds && !counted ? 1 : 0) });
     if (h.collapsed) continue;
     const members = segment?.rows ?? [];

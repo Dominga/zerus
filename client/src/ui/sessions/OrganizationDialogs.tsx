@@ -13,6 +13,7 @@ const dialogs = createOrgDialogs(organization);
 const { dialog, close } = dialogs;
 
 export const openMoveDialog = (rows: readonly Session[]): void => dialogs.openMove(rows);
+export const openCreateProjectDialog = (): void => dialogs.openNew();
 export const openRenameProjectDialog = (project: string): void => dialogs.openRename(project);
 export const openDeleteProjectDialog = (project: string): void => dialogs.openDelete(project);
 /** The session menu's Move to project entry. */

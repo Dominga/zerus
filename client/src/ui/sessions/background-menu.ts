@@ -25,6 +25,13 @@ export function collapseAllProjects(headers: readonly { id: string }[], collapse
   for (const header of headers) set(header.id, collapsed);
 }
 
+export function expandAllCollapsedEntry(expandRows: () => void = defaults.expandRows): MenuEntry {
+  return {
+    label: "Expand all collapsed", icon: "expand-row", disabled: !Object.values(compactRows).some(Boolean),
+    hint: "Restore full session rows, including sessions hidden by filters", action: expandRows,
+  };
+}
+
 /** Qt's list background menu (SessionsWindow.cpp:340-373). */
 export function backgroundEntries(overrides: Partial<BackgroundDeps> = {}): MenuEntry[] {
   const deps = { ...defaults, ...overrides };
@@ -34,7 +41,7 @@ export function backgroundEntries(overrides: Partial<BackgroundDeps> = {}): Menu
     { separator: true },
     { label: "Expand all projects", icon: "expand-row", action: () => collapseAllProjects(deps.headers(), false, deps.collapse) },
     { label: "Collapse all projects", icon: "collapse-row", action: () => collapseAllProjects(deps.headers(), true, deps.collapse) },
-    { label: "Expand all collapsed", icon: "expand-row", disabled: !Object.values(compactRows).some(Boolean), action: deps.expandRows },
+    expandAllCollapsedEntry(deps.expandRows),
     { separator: true },
     deps.markAll(),
     deps.clearArchive(),

@@ -716,6 +716,26 @@ async function backgroundSmoke(allowed: boolean) {
     await until(() => grouping().headers.every((header) => header.collapsed), 3000, "Collapse all projects did not apply");
     await collapse("Expand all projects");
     await until(() => grouping().headers.every((header) => !header.collapsed), 3000, "Expand all projects did not apply");
+    const row = document.querySelector<HTMLElement>(".sp-scroll .rowhit");
+    if (!row) throw new Error("no session row");
+    row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 320, clientY: 240 }));
+    await until(() => !!document.querySelector(".menu"), 3000, "the session menu did not open");
+    const compact = [...document.querySelectorAll<HTMLButtonElement>(".menu button")].find((button) => button.textContent?.trim() === "Compact session row");
+    if (!compact) throw new Error("Compact session row is missing");
+    compact.click();
+    await until(() => !!document.querySelector(".scard.compact"), 3000, "the session row did not compact");
+    const rail = document.querySelector<HTMLElement>(".rail-btn");
+    if (!rail) throw new Error("no Sessions rail button");
+    rail.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 40, clientY: 240 }));
+    let expand: HTMLButtonElement | undefined;
+    await until(() => {
+      expand = [...document.querySelectorAll<HTMLButtonElement>(".menu button")].find((button) => button.textContent?.trim() === "Expand all collapsed");
+      return expand?.getAttribute("aria-disabled") === "false";
+    }, 3000, "the rail's Expand all collapsed did not enable");
+    if (expand!.title !== "Restore full session rows, including sessions hidden by filters") throw new Error("the rail entry has the wrong hint");
+    expand!.click();
+    await until(() => !document.querySelector(".scard.compact"), 3000, "the rail entry did not expand the row");
+    log("background-smoke rail-expand: done");
     log("background-smoke menu: done");
     await exit(0);
   } catch (error) {

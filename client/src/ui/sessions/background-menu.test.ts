@@ -6,7 +6,7 @@ vi.hoisted(() => {
   vi.stubGlobal("localStorage", { getItem: (key: string) => store.get(key) ?? null, setItem: (key: string, value: string) => { store.set(key, value); }, removeItem: (key: string) => { store.delete(key); } });
 });
 
-import { backgroundEntries, collapseAllProjects, type BackgroundDeps } from "./background-menu";
+import { backgroundEntries, collapseAllProjects, expandAllCollapsedEntry, type BackgroundDeps } from "./background-menu";
 
 function harness() {
   const calls: string[] = [];
@@ -48,9 +48,22 @@ describe("the Sessions list background menu (SessionsWindow.cpp:340-373)", () =>
   it("wires Expand all collapsed, Mark all as read and Clear archive", () => {
     const { deps, calls } = harness();
     const entries = backgroundEntries(deps);
+    expect(entries[5]).toEqual(expandAllCollapsedEntry(deps.expandRows));
+    expect(entries[5]).toMatchObject({
+      disabled: true,
+      hint: "Restore full session rows, including sessions hidden by filters",
+    });
     if ("action" in entries[5]) entries[5].action?.();
     if ("action" in entries[7]) entries[7].action?.();
     if ("action" in entries[8]) entries[8].action?.();
     expect(calls).toEqual(["expand-rows", "mark-all", "clear-archive"]);
+  });
+
+  it("collapses projects hidden by the empty-project and scope filters", () => {
+    const { deps, calls } = harness();
+    deps.headers = () => [{ id: "p-visible" }, { id: "p-empty-hidden" }, { id: "p-outside-filter" }];
+    const entries = backgroundEntries(deps);
+    if ("action" in entries[4]) entries[4].action?.();
+    expect(calls).toEqual(["p-visible:true", "p-empty-hidden:true", "p-outside-filter:true"]);
   });
 });

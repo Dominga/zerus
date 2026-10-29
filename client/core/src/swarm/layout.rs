@@ -12,6 +12,9 @@ use std::path::Path;
 pub const GAP: u64 = 1 << 20;
 /// The most members the layout remembers.
 pub const MAX_MEMBERS: usize = 100_000;
+/// Run-to-project memory (Qt's `run_groups`, SessionOrganization.cpp:234-243).
+/// Qt has no eviction; the client keeps the newest 20,000 writes.
+pub const MAX_RUNS: usize = 20_000;
 /// The most bytes read from the layout file, as from the draft
 /// (`super::draft::MAX_BYTES`): far above what [`MAX_MEMBERS`] members take.
 pub const MAX_BYTES: u64 = super::draft::MAX_BYTES;
@@ -40,6 +43,37 @@ fn read_at_most(path: &Path, limit: u64) -> io::Result<Option<Vec<u8>>> {
     Ok(Some(bytes))
 }
 
+/// Seeds only Qt's run-to-project memory, never its session-name tokens or
+/// shared catalog (SessionOrganization.cpp:60,336). Call on a startup worker
+/// for the switch identity only. An unreadable store or malformed JSON leaves
+/// the seed pending; neither this function nor QtStore writes Qt's settings.
+pub fn seed_runs_from_qt(
+    layout: &mut Layout,
+    store: &crate::settings::QtStore,
+) -> Result<usize, String> {
+    if layout.runs_seeded() {
+        return Ok(0);
+    }
+    let values = store.read()?;
+    let organization = values.and_then(|(mut values, _)| values.remove("workspace/organization"));
+    let organization: serde_json::Map<String, serde_json::Value> = match organization {
+        Some(value) => {
+            let bytes = match value {
+                crate::settings::qt::QtValue::Bytes(bytes) => bytes,
+                value => value.to_text().into_bytes(),
+            };
+            serde_json::from_slice(&bytes).map_err(|error| error.to_string())?
+        }
+        None => serde_json::Map::new(),
+    };
+    let empty = serde_json::Map::new();
+    let groups = organization
+        .get("run_groups")
+        .and_then(serde_json::Value::as_object)
+        .unwrap_or(&empty);
+    Ok(layout.seed_runs(groups))
+}
+
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
 struct Saved {
@@ -48,6 +82,9 @@ struct Saved {
     default_project: Option<String>,
     /// Each project's members in list order.
     order: BTreeMap<String, Vec<String>>,
+    /// Oldest written first, so eviction order survives a restart.
+    run_groups: Vec<(String, String)>,
+    runs_seeded: bool,
 }
 
 #[derive(Debug, Default)]
@@ -59,6 +96,10 @@ pub struct Layout {
     dirty: bool,
     /// Counts renumberings, so `place` can tell a no-op from a move.
     renumbers: u64,
+    runs: HashMap<String, (String, u64)>,
+    run_order: BTreeMap<u64, String>,
+    run_written: u64,
+    runs_seeded: bool,
 }
 
 impl Layout {
@@ -71,6 +112,7 @@ impl Layout {
                 .take(super::MAX_PROJECTS)
                 .collect(),
             default_project: saved.default_project,
+            runs_seeded: saved.runs_seeded,
             ..Self::default()
         };
         'load: for (project, members) in saved.order {
@@ -79,6 +121,11 @@ impl Layout {
                     break 'load;
                 }
                 layout.append(&project, &member);
+            }
+        }
+        for (token, project) in saved.run_groups {
+            if let Some((machine, run)) = token.split_once('\n') {
+                layout.remember_run(machine, run, Some(&project));
             }
         }
         layout.dirty = false;
@@ -96,6 +143,15 @@ impl Layout {
             collapsed: self.collapsed.iter().cloned().collect(),
             default_project: self.default_project.clone(),
             order,
+            run_groups: self
+                .run_order
+                .values()
+                .filter_map(|token| {
+                    let (project, _) = self.runs.get(token)?;
+                    Some((token.clone(), project.clone()))
+                })
+                .collect(),
+            runs_seeded: self.runs_seeded,
         };
         serde_json::to_vec(&saved).expect("the layout serializes")
     }
@@ -103,6 +159,98 @@ impl Layout {
     /// The layout to save, once after each change.
     pub fn take_dirty(&mut self) -> Option<Vec<u8>> {
         std::mem::take(&mut self.dirty).then(|| self.to_json())
+    }
+
+    /// The last explicit project of this run (SessionOrganization.cpp:234).
+    pub fn run_project(&self, machine: &str, run: &str) -> Option<&str> {
+        self.runs
+            .get(&format!("{machine}\n{run}"))
+            .map(|(project, _)| project.as_str())
+    }
+
+    /// Some records an explicit assignment as the newest write; None forgets
+    /// an implicit assignment (Qt 239-243). Observers compare the old project
+    /// first, as Qt does, so unchanged live rows do not refresh its age.
+    pub fn remember_run(&mut self, machine: &str, run: &str, project: Option<&str>) -> bool {
+        let valid = |part: &str| !part.trim().is_empty() && !part.chars().any(char::is_control);
+        if !valid(machine) || !valid(run) || project.is_some_and(|project| !valid(project)) {
+            return false;
+        }
+        let token = format!("{machine}\n{run}");
+        if let Some(project) = project {
+            if self.run_project(machine, run) == Some(project)
+                && self
+                    .run_order
+                    .last_key_value()
+                    .is_some_and(|(_, last)| last == &token)
+            {
+                return false;
+            }
+            if let Some((_, written)) = self.runs.remove(&token) {
+                self.run_order.remove(&written);
+            }
+            if self.run_written == u64::MAX {
+                // A renumber keeps the bounded map's relative write order.
+                let tokens = std::mem::take(&mut self.run_order).into_values();
+                for (at, token) in tokens.enumerate() {
+                    let written = at as u64 + 1;
+                    self.runs.get_mut(&token).unwrap().1 = written;
+                    self.run_order.insert(written, token);
+                }
+                self.run_written = self.run_order.len() as u64;
+            }
+            self.run_written += 1;
+            self.run_order.insert(self.run_written, token.clone());
+            self.runs.insert(token, (project.into(), self.run_written));
+            while self.runs.len() > MAX_RUNS {
+                let (_, oldest) = self.run_order.pop_first().unwrap();
+                self.runs.remove(&oldest);
+            }
+        } else if let Some((_, written)) = self.runs.remove(&token) {
+            self.run_order.remove(&written);
+        } else {
+            return false;
+        }
+        self.dirty = true;
+        true
+    }
+
+    pub fn runs_seeded(&self) -> bool {
+        self.runs_seeded
+    }
+
+    /// Imports Qt's machine\nrun -> project object once, read-only (Qt 60,
+    /// 336). Qt has no write timestamps: later object entries are imported
+    /// last. Native writes already made by this client remain newer and win.
+    /// Returns the number of imported entries retained after the fixed cap.
+    pub fn seed_runs(
+        &mut self,
+        qt_run_groups: &serde_json::Map<String, serde_json::Value>,
+    ) -> usize {
+        if self.runs_seeded {
+            return 0;
+        }
+        let native = std::mem::take(&mut self.runs);
+        let order = std::mem::take(&mut self.run_order);
+        self.run_written = 0;
+        for (token, project) in qt_run_groups {
+            if let Some((machine, run)) = token.split_once('\n') {
+                if let Some(project) = project.as_str() {
+                    self.remember_run(machine, run, Some(project));
+                }
+            }
+        }
+        for token in order.into_values() {
+            let (project, _) = &native[&token];
+            let (machine, run) = token.split_once('\n').unwrap();
+            self.remember_run(machine, run, Some(project));
+        }
+        self.runs_seeded = true;
+        self.dirty = true;
+        self.runs
+            .keys()
+            .filter(|token| !native.contains_key(*token))
+            .count()
     }
 
     pub fn collapsed(&self, project: &str) -> bool {

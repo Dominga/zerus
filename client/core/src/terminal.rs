@@ -141,6 +141,28 @@ pub fn kept_run(old: &Target, new: &Target) -> String {
     }
 }
 
+/// Qt's SessionCommands::powerShellQuote (SessionCommands.h:40-51).
+fn powershell_quote(path: &str) -> String {
+    let native = path.replace('/', "\\");
+    if !native.is_empty()
+        && native
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_./\\:=+-".contains(c))
+    {
+        return native;
+    }
+    let mut escaped = String::with_capacity(native.len() + 2);
+    escaped.push('\'');
+    for c in native.chars() {
+        escaped.push(c);
+        if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}') {
+            escaped.push(c);
+        }
+    }
+    escaped.push('\'');
+    escaped
+}
+
 /// Dropped file paths as Terminal input: each quoted for the session's shell
 /// (POSIX single quotes, or PowerShell on Windows with native separators),
 /// joined by spaces with a trailing space.
@@ -153,7 +175,7 @@ pub fn paste_paths(paths: &[String], windows: bool) -> Result<String, String> {
             );
         }
         quoted.push(if windows {
-            format!("'{}'", path.replace('/', "\\").replace('\'', "''"))
+            powershell_quote(path)
         } else {
             format!("'{}'", path.replace('\'', "'\\''"))
         });
@@ -471,6 +493,51 @@ mod tests {
             paste_paths(&["/home/example/a\nb".to_owned()], false).unwrap_err(),
             "File names containing control characters cannot be pasted into Terminal."
         );
+    }
+
+    #[test]
+    fn powershell_paths_follow_qt_literals() {
+        let cases = [
+            ("plain.txt", "plain.txt "),
+            (
+                "C:/Users/example/plain.txt",
+                "C:\\Users\\example\\plain.txt ",
+            ),
+            ("report's draft.pdf", "'report''s draft.pdf' "),
+            ("a&b.txt", "'a&b.txt' "),
+            ("cost $5's `q`.txt", "'cost $5''s `q`.txt' "),
+            (
+                "left\u{2018}$probe`n.txt",
+                "'left\u{2018}\u{2018}$probe`n.txt' ",
+            ),
+            (
+                "right\u{2019}$probe`n.txt",
+                "'right\u{2019}\u{2019}$probe`n.txt' ",
+            ),
+            (
+                "low\u{201a}$probe`n.txt",
+                "'low\u{201a}\u{201a}$probe`n.txt' ",
+            ),
+            (
+                "reversed\u{201b}$probe`n.txt",
+                "'reversed\u{201b}\u{201b}$probe`n.txt' ",
+            ),
+            ("left\u{201c}quote.txt", "'left\u{201c}quote.txt' "),
+            ("right\u{201d}quote.txt", "'right\u{201d}quote.txt' "),
+            ("путь пример.txt", "'путь пример.txt' "),
+            ("a,b.txt", "'a,b.txt' "),
+            ("(group).txt", "'(group).txt' "),
+            ("{brace}.txt", "'{brace}.txt' "),
+            ("@sigil.txt", "'@sigil.txt' "),
+            ("", "'' "),
+        ];
+        for (path, expected) in cases {
+            assert_eq!(
+                paste_paths(&[path.to_owned()], true).unwrap(),
+                expected,
+                "{path}"
+            );
+        }
     }
 
     #[test]

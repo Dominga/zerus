@@ -9,6 +9,7 @@ pub(crate) mod model;
 pub(crate) mod models;
 pub(crate) mod ops;
 pub(crate) mod outbox;
+pub(crate) mod owner_waiting;
 pub(crate) mod owner_word;
 pub(crate) mod pipeline;
 pub(crate) mod plan;
@@ -16,6 +17,7 @@ pub(crate) mod safe_actions;
 pub(crate) mod stages;
 pub(crate) mod store;
 pub(crate) mod templates;
+pub(crate) mod timing;
 pub(crate) mod waiting;
 
 use std::collections::BTreeSet;

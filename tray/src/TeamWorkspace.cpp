@@ -1430,6 +1430,7 @@ void TeamWorkspace::graphNodes(TaskView *view, const Team &team, const QList<int
     // The short problem a node shows on its second line, as Board and Layers name it.
     const auto problemText = problemTexts(team);
     const bool grouped = !phase.isEmpty();
+    const double now = workedClock()();
     for (int id : order) {
         const auto *task = team.task(id);
         if (!task) continue;
@@ -1463,6 +1464,8 @@ void TeamWorkspace::graphNodes(TaskView *view, const Team &team, const QList<int
         else if (node.problem) node.problemText = problemText.value(id);
         // The owner's activity label; a problem text wins over it.
         if (!unassigned && !node.problem) node.activity = activityLabel(*task, assignee ? live(*assignee) : Live{});
+        // U37: the working time after it; the tooltip breaks it down.
+        node.worked = workedLabel(*task, now); node.runningSince = task->timing.runningSince;
         // Spec 1.4: the dots under the model tile while its agent really runs
         // this task.
         node.working = assignee && task->status == "in_progress" && !node.problem && assignee->state != "paused"
@@ -1475,6 +1478,7 @@ void TeamWorkspace::graphNodes(TaskView *view, const Team &team, const QList<int
         const auto mark = phaseMark(team, *task);
         if (!mark.tooltip.isEmpty() && mark.tooltip != status.text) tip += QLatin1Char('\n') + mark.tooltip;
         if (node.late) tip += QLatin1Char('\n') + addedLateTip(*task);
+        if (const QString worked = workedTip(*task, now); !worked.isEmpty()) tip += QLatin1Char('\n') + worked;
         node.tooltip = tip;
         if (!grouped) {
             QStringList deps;
@@ -1512,6 +1516,20 @@ void TeamWorkspace::keepGraphEdit(TaskView *view, const QString &team)
     };
 }
 
+// U37: the board's running times tick on the shared minute timer; only their
+// labels change, nothing is rebuilt.
+static QWidget *tickingBoard(QWidget *board)
+{
+    QObject::connect(&workedTicker(), &QTimer::timeout, board, [board] {
+        const double now = workedClock()();
+        for (auto *label : board->findChildren<QLabel *>(QStringLiteral("teamBoardWorked"))) {
+            const double since = label->property("runningSince").toDouble();
+            if (since > 0) label->setText(workedText(qint64(qMax(0.0, now - since))));
+        }
+    });
+    return board;
+}
+
 QWidget *TeamWorkspace::board(const Team &team)
 {
     const Colors c = colorsFor(m_dark);
@@ -1520,6 +1538,7 @@ QWidget *TeamWorkspace::board(const Team &team)
     for (const auto &p : problems(team, live)) if (p.task) problemTasks.insert(p.task);
     for (const auto &task : team.tasks) if (taskStatus(task).problem) problemTasks.insert(task.id);
     const auto groups = phaseGroups(team);
+    const double now = workedClock()();
     // One status column over `ids`; `phase` only keeps each phase's scroll.
     const auto makeColumn = [&](const QString &key, const QString &name, const QList<int> &ids, int phase) -> QWidget * {
         auto *col = new QWidget; auto *cv = new QVBoxLayout(col); cv->setContentsMargins(0, 0, 0, 0); cv->setSpacing(6);
@@ -1557,6 +1576,15 @@ QWidget *TeamWorkspace::board(const Team &team)
                 if (!activity.isEmpty()) {
                     auto *a = label(activity, c.text3, 11); a->setObjectName("teamBoardActivity"); r->addWidget(a);
                 }
+            }
+            // U37: the working time right after it, in the same color and size;
+            // a running one keeps the room it grows to and ticks with the board.
+            if (const QString worked = workedLabel(task, now); !worked.isEmpty()) {
+                auto *w = label(worked, c.text3, 11, false, "teamBoardWorked");
+                w->setProperty("runningSince", task.timing.runningSince);
+                if (task.timing.runningSince > 0) w->setMinimumWidth(workedRoom(w->fontMetrics(), task.timing.runningSince));
+                w->setToolTip(workedTip(task, now));
+                r->addWidget(w);
             }
             const auto mark = phaseMark(team, task);
             auto *state = new StatusMark(s.text, toneColor(c, mark.tone != Tone::Neutral ? mark.tone : s.tone),
@@ -1616,7 +1644,7 @@ QWidget *TeamWorkspace::board(const Team &team)
         area->setWidget(row);
         new SideBarFit(area, row);
         keepScroll(area, QStringLiteral("board/row/") + m_focus);
-        return area;
+        return tickingBoard(area);
     }
     // Phases stack: a header each, its board columns under an open one and
     // nothing but the header under a collapsed one.
@@ -1695,7 +1723,7 @@ QWidget *TeamWorkspace::board(const Team &team)
     v->addStretch();
     scroll->setWidget(content);
     keepScroll(scroll, QStringLiteral("board/phases/") + m_focus);
-    return scroll;
+    return tickingBoard(scroll);
 }
 
 // U25: the tasks with a problem (the team's problems and each task's own

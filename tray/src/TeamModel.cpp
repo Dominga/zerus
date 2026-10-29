@@ -437,6 +437,24 @@ Team parse(const QJsonObject &v)
             const auto a = t.value("added_late").toObject();
             task.addedLate = {str(a, "by"), str(a, "request"), str(a, "confirm"), a.value("at").toDouble(), true};
         }
+        if (t.value("timing").isObject()) {
+            // U37: the working time and the waits, computed by hgs.
+            const auto o = t.value("timing").toObject();
+            const auto w = o.value("waits").toObject();
+            auto &timing = task.timing;
+            timing.known = true;
+            timing.worked = qint64(o.value("worked_s").toDouble());
+            timing.runningSince = o.value("running_since").toDouble();
+            timing.deps = qint64(w.value("deps_s").toDouble());
+            timing.member = qint64(w.value("member_s").toDouble());
+            timing.lead = qint64(w.value("lead_s").toDouble());
+            for (const auto &u : o.value("unknown").toArray()) timing.unknown.append(u.toString());
+            for (const auto &v : o.value("attempts").toArray()) {
+                const auto s = v.toObject();
+                timing.attempts.append({s.value("n").toInt(), str(s, "member"), str(s, "state"), s.value("from").toDouble(), s.value("to").toDouble(),
+                                        qint64(s.value("worked_s").toDouble()), qint64(s.value("member_s").toDouble()), qint64(s.value("lead_s").toDouble())});
+            }
+        }
         // G1: the sub-team this task delegated to, with its rolled-up counts.
         if (t.value("subteam").isObject()) {
             const auto s = t.value("subteam").toObject();

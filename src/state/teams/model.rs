@@ -1060,6 +1060,10 @@ pub(crate) struct Attempt {
     /// (C4); absent until it was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reminded_at: Option<f64>,
+    /// U37: when the lead or the owner accepted or rejected this attempt;
+    /// absent on an old record and while undecided.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_at: Option<f64>,
     /// The check this attempt ran, when its task is a check task (C5).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check: Option<CheckResult>,
@@ -1580,6 +1584,10 @@ pub(crate) struct Team {
     /// Who approved the plan: "You", or "Lead" on the owner's word (F13).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub approved_by: String,
+    /// U37: when the plan was approved: phase 1 opens here. Absent on an old
+    /// team.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_at: Option<f64>,
     /// The owner's sentence the lead approved the plan on (F13).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_word: Option<OwnerWord>,
@@ -1928,7 +1936,7 @@ mod tests {
         assert_eq!(team.settings.background_red_minutes, 30);
         assert!(team.inbox.told.is_empty() && team.inbox.told_at == 0.0);
         assert!(team.members.iter().all(|member| member.pending.is_none()));
-        assert!(team.approved_by.is_empty() && team.owner_word.is_none());
+        assert!(team.approved_by.is_empty() && team.owner_word.is_none() && team.approved_at.is_none());
         let attempt = &team.tasks[0].attempts[0];
         assert_eq!((attempt.started_at, attempt.start_warned), (None, false));
         assert!(attempt.reminded_at.is_none());
@@ -1952,7 +1960,8 @@ mod tests {
         assert!(value.get("approved_by").is_none() && value.get("owner_word").is_none());
         assert!(value["tasks"][0].get("kind").is_none() && value["tasks"][0].get("check").is_none());
         let attempt = &value["tasks"][0]["attempts"][0];
-        for key in ["started_at", "start_warned", "turn_reply", "questions", "reminded_at"] {
+        assert!(value.get("approved_at").is_none());
+        for key in ["started_at", "start_warned", "turn_reply", "questions", "reminded_at", "decided_at"] {
             assert!(attempt.get(key).is_none(), "{key} should be skipped when empty");
         }
         assert!(value["members"][1].get("pending").is_none());

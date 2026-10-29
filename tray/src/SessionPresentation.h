@@ -337,11 +337,26 @@ inline QString activityDetailPreview(const SessionInfo &s)
     return s.activityDetail;
 }
 
+// U42 (#590, handoff Status/12-user-approval): an approval's line asks what
+// the agent waits to do: "Run command? <command>" for a shell tool, "Allow
+// <tool>? <detail>" for any other; empty when the agent named neither.
+inline QString approvalQuestion(const SessionInfo &s, const QString &detail)
+{
+    static const QStringList shells{"bash", "shell", "local_shell", "exec_command", "run_shell_command", "powershell", "command"};
+    if (shells.contains(s.currentTool.toLower()))
+        return detail.isEmpty() ? QObject::tr("Run command?") : QObject::tr("Run command? %1").arg(detail);
+    if (!s.currentTool.isEmpty()) return detail.isEmpty() ? QObject::tr("Allow %1?").arg(s.currentTool) : QObject::tr("Allow %1? %2").arg(s.currentTool, detail);
+    return detail;
+}
+
 inline QString currentAction(const SessionInfo &s, bool online = true)
 {
     // A tool excerpt must not hide the fact that the agent is waiting for us.
     if (online && s.needsAction()) {
-        const QString detail = !s.activityDetail.isEmpty() ? activityDetailPreview(s) : !s.toolDetail.isEmpty() ? s.toolDetail : promptPreview(s);
+        QString detail = !s.activityDetail.isEmpty() ? activityDetailPreview(s) : !s.toolDetail.isEmpty() ? s.toolDetail : promptPreview(s);
+        // The host's own words for the approval stay as they are.
+        if (s.phase == QLatin1String("approval") && s.activityDetail.isEmpty())
+            if (const QString asked = approvalQuestion(s, s.toolDetail); !asked.isEmpty()) detail = asked;
         return status(s) + (detail.isEmpty() ? QString() : QStringLiteral(": ") + detail);
     }
     if (s.visibleUnreadReply(online) && !s.needsAction()) return status(s, online);

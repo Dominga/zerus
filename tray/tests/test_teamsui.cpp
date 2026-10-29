@@ -53,6 +53,7 @@
 #include <QClipboard>
 #include "TeamController.h"
 #include "TeamDesignerPage.h"
+#include "TeamWaitingPage.h"
 #include "TeamConversation.h"
 #include "QuestionCard.h"
 #include "ActivityView.h"
@@ -708,6 +709,7 @@ private slots:
     void boardPhaseHeaderKeepsItsActionsInView();
     void workAheadSwitchAndBadge();
     void graphNodesCarryTheActivityLabel();
+    void workingTimeFollowsTheActivityLabel();
     void subLeadsAreATreeInMembersAndTheInspector();
     void aPollUnderTheMemberMenuKeepsItsButtonAndTheSwapDialog();
     void designerPageStartsOrOpensTheDesigner();
@@ -750,6 +752,9 @@ private slots:
     void aNarrowToolbarKeepsOnlyItsIcons();
     void phaseScrollDecisions();
     void sideListsAndMemberTasks();
+    void waitingPageListsEveryKindAcrossTeams();
+    void waitingPagePagesStayStableWhileItemsArrive();
+    void waitingPageEmptyAndRefused();
 private:
     QString script() const { return m_dir.filePath("hgs"); }
     void setTeam(const QJsonObject &value) { QVERIFY(FakeCli::replace(script() + ".status", QJsonDocument(value).toJson(QJsonDocument::Compact))); }
@@ -794,6 +799,17 @@ elif a[:2]==['team','status']:
   time.sleep(.1)
  sys.stdout.write(open(__file__+'.status').read())
 elif a[:2]==['team','events']:sys.stdout.write(open(__file__+'.feed').read())
+elif a[:2]==['team','waiting']:
+ # U50: pages `.waiting` as hgs does: newest first, ties by id, after the cursor.
+ import os
+ if os.path.exists(__file__+'.waitingrefuse'):print(open(__file__+'.waitingrefuse').read(),file=sys.stderr);sys.exit(1)
+ items=json.load(open(__file__+'.waiting')) if os.path.exists(__file__+'.waiting') else []
+ items.sort(key=lambda i:(-i['since'],i['id']))
+ c=body.get('before');start=0
+ if c:start=next((n for n,i in enumerate(items) if i['since']<c['since'] or (i['since']==c['since'] and i['id']>c['id'])),len(items))
+ page=items[start:start+min(body.get('limit',50),200)]
+ nxt={'since':page[-1]['since'],'id':page[-1]['id']} if page and start+len(page)<len(items) else None
+ print(json.dumps({'items':page,'next':nxt,'total':len(items)}))
 elif a[:3]==['team','catalog','get']:sys.stdout.write(open(__file__+'.catalog').read())
 elif a[:2]==['team','add-to-phase']:
  # U29: the first call warns and keeps the addition pending; the second adds it.
@@ -870,6 +886,8 @@ void TestTeamsUi::init()
     QFile::remove(script() + ".statushold");
     QFile::remove(script() + ".refuse");
     QFile::remove(script() + ".refuseapply");
+    QFile::remove(script() + ".waiting");
+    QFile::remove(script() + ".waitingrefuse");
     // Decisions and Apply change the fake catalog: each test starts from the fixture.
     QVERIFY(FakeCli::replace(script() + ".catalog", QJsonDocument(catalog()).toJson(QJsonDocument::Compact)));
     setTeam(team());
@@ -3826,6 +3844,190 @@ void TestTeamsUi::aSessionRecordShowsTheUnconfirmableSubagentNote()
     QCOMPARE(parsed.first().subagentConfirm, QStringLiteral("subagent confirmation not supported by codex"));
 }
 
+namespace {
+// U50: one waiting item as `hgs team waiting` sends it.
+QJsonObject waitingItem(const QString &team, const QString &name, const QString &kind, const QString &key, const QString &title,
+                        double since, const QString &action, const QJsonObject &extra = {})
+{
+    QJsonObject item{{"id", team + "/" + kind + "/" + key}, {"team", team}, {"team_name", name}, {"kind", kind},
+                     {"title", title}, {"since", since}, {"action", action}};
+    for (auto it = extra.begin(); it != extra.end(); ++it) item.insert(it.key(), it.value());
+    return item;
+}
+
+// One item of each kind, from six teams.
+QJsonArray waitingKinds(double now)
+{
+    return QJsonArray{
+        waitingItem("team-plan", "Billing export", "plan_draft", "plan", "Plan of 6 tasks waits for Approve & Run", now - 60, "approve_plan"),
+        waitingItem("team-1", "Checkout", "phase_draft", "2", QString::fromUtf8("Phase 2 · Screens — draft waits for your Accept"), now - 300,
+                    "approve_phase", {{"phase", 2}}),
+        waitingItem("team-2", "Search index", "report_escalated", "4", "Report on #4 Ranking from Backend waits for your decision", now - 2400,
+                    "decide_report", {{"task", 4}, {"member", "Backend"}}),
+        waitingItem("team-3", "Mobile sync", "permission_escalated", "Tester", "Tester waits for your answer: Bash npm run e2e", now - 900,
+                    "answer_permission", {{"member", "Tester"}}),
+        waitingItem("team-2", "Search index", "owner_word_asked", "proposal-p3", QString::fromUtf8("The lead proposes: add member — a second reviewer"),
+                    now - 1200, "decide_proposal", {{"proposal", "p3"}}),
+        waitingItem("team-4", "Docs site", "task_waits_owner", "7", "#7 Publish the guide is held by you: after the release", now - 7200,
+                    "release_task", {{"task", 7}}),
+        waitingItem("team-5", "Release 0.43", "team_finished", "finish", "All 12 tasks decided: waits for you to finish", now - 86400, "finish"),
+    };
+}
+
+bool writeWaiting(const QString &path, const QJsonArray &items)
+{
+    return FakeCli::replace(path, QJsonDocument(items).toJson(QJsonDocument::Compact));
+}
+
+QStringList waitingRowIds(QWidget *page)
+{
+    QStringList ids;
+    for (auto *row : page->findChildren<QFrame *>("teamWaitingRow")) ids << row->property("itemId").toString();
+    return ids;
+}
+}
+
+// U50: the rail page lists every kind of item that waits for the owner, from
+// several teams, newest first, each with its kind's icon and label and its
+// team; a row (or its Open team) opens that team. Shots in both themes.
+void TestTeamsUi::waitingPageListsEveryKindAcrossTeams()
+{
+    QSettings().setValue("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([] { QSettings().remove("workspace/skin"); darkPalette(); });
+    const double now = double(QDateTime::currentSecsSinceEpoch());
+    QVERIFY(writeWaiting(script() + ".waiting", waitingKinds(now)));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamWaitingPage page(&controller);
+    QList<TeamWaitingPage::Item> opened;
+    page.openTeam = [&](const TeamWaitingPage::Item &item) { opened << item; };
+    int counted = -1;
+    page.countChanged = [&](int total) { counted = total; };
+    page.resize(980, 640); page.show();
+    WAIT_VERIFY(page.findChildren<QFrame *>("teamWaitingRow").size() == 7);
+    QCOMPARE(counted, 7);
+    QCOMPARE(waitingRowIds(&page), (QStringList{"team-plan/plan_draft/plan", "team-1/phase_draft/2", "team-3/permission_escalated/Tester",
+                                               "team-2/owner_word_asked/proposal-p3", "team-2/report_escalated/4", "team-4/task_waits_owner/7",
+                                               "team-5/team_finished/finish"}));
+    QStringList kinds; QSet<QString> teams;
+    for (auto *row : page.findChildren<QFrame *>("teamWaitingRow")) {
+        kinds << row->findChild<QLabel *>("teamWaitingKind")->text();
+        teams.insert(row->findChild<QLabel *>("teamWaitingTeam")->text());
+        QVERIFY(!row->findChild<QLabel *>("teamWaitingKindIcon")->pixmap().isNull());
+        QVERIFY(!row->findChild<QLabel *>("teamWaitingItemTitle")->text().isEmpty());
+    }
+    QCOMPARE(kinds, (QStringList{"Plan", "Phase draft", "Permission", "Your word", "Report", "Held task", "All decided"}));
+    QCOMPARE(teams.size(), 6);
+    const QString count = page.findChild<QLabel *>("teamWaitingCount")->text();
+    QVERIFY2(count.contains("7 items") && count.contains("6 teams"), qPrintable(count));
+    QVERIFY(!page.findChild<QPushButton *>("teamWaitingOlder"));
+    // Read only: the page sends its reads and nothing else.
+    const auto reads = calls(script(), "waiting");
+    QVERIFY(!reads.isEmpty());
+    for (const auto &input : reads) QVERIFY2(!input.contains("request_id"), qPrintable(QJsonDocument(input).toJson()));
+    QCOMPARE(calls(script(), "approve-phase").size(), 0);
+    shot(&page, "u50-waiting-dark");
+    page.setDark(false);
+    lightShot(&page, "u50-waiting-light");
+    // Open team on the phase draft names its team and phase; a click on the row
+    // itself opens the team as well.
+    QFrame *phaseRow = nullptr;
+    for (auto *row : page.findChildren<QFrame *>("teamWaitingRow")) if (row->property("kind") == "phase_draft") phaseRow = row;
+    QVERIFY(phaseRow);
+    phaseRow->findChild<QPushButton *>("teamWaitingOpen")->click();
+    QCOMPARE(opened.size(), 1);
+    QCOMPARE(opened[0].team, QString("team-1"));
+    QCOMPARE(opened[0].kind, QString("phase_draft"));
+    QCOMPARE(opened[0].phase, 2);
+    QFrame *finished = page.findChildren<QFrame *>("teamWaitingRow").last();
+    QTest::mouseClick(finished, Qt::LeftButton, {}, QPoint(40, finished->height() / 2));
+    QCOMPARE(opened.size(), 2);
+    QCOMPARE(opened[1].team, QString("team-5"));
+}
+
+// U50: 300 items arrive in pages of 50 with Show older; a poll while new items
+// arrive puts them on top, keeps every shown item in its order, each once, and
+// Show older goes on after them.
+void TestTeamsUi::waitingPagePagesStayStableWhileItemsArrive()
+{
+    const double now = double(QDateTime::currentSecsSinceEpoch());
+    QJsonArray items;
+    // Pairs share a time; their ids order them, as in hgs.
+    for (int n = 0; n < 300; ++n)
+        items << waitingItem(QStringLiteral("team-%1%2").arg(n / 2 % 9).arg(n % 2), QStringLiteral("Team %1").arg(n / 2 % 9), "task_waits_owner", QString::number(n),
+                             QStringLiteral("#%1 is held by you").arg(n), now - 1000 - (n / 2) * 10, "release_task", {{"task", n}});
+    QVERIFY(writeWaiting(script() + ".waiting", items));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamWaitingPage page(&controller);
+    page.resize(900, 700); page.show();
+    WAIT_VERIFY(page.findChildren<QFrame *>("teamWaitingRow").size() == TeamWaitingPage::PageSize);
+    QVERIFY(page.findChild<QLabel *>("teamWaitingCount")->text().contains("300 items"));
+    page.findChild<QPushButton *>("teamWaitingOlder")->click();
+    WAIT_VERIFY(page.findChildren<QFrame *>("teamWaitingRow").size() == 100);
+    const QStringList shown = waitingRowIds(&page);
+    QCOMPARE(QSet<QString>(shown.begin(), shown.end()).size(), 100);
+    // Two items arrive, newer than everything; the poll reads the newest page.
+    items.prepend(waitingItem("team-new", "Hotfix", "report_escalated", "1", "Report on #1 Patch waits for your decision", now - 5, "decide_report"));
+    items.prepend(waitingItem("team-new", "Hotfix", "permission_escalated", "Dev", "Dev waits for your answer", now - 2, "answer_permission"));
+    QVERIFY(writeWaiting(script() + ".waiting", items));
+    page.refresh();
+    WAIT_VERIFY(waitingRowIds(&page).value(0) == "team-new/permission_escalated/Dev");
+    // The poll read every shown item and a page more.
+    const auto polled = calls(script(), "waiting");
+    QVERIFY(!polled.isEmpty());
+    QCOMPARE(polled.last().value("limit").toInt(), 150);
+    const QStringList after = waitingRowIds(&page);
+    QCOMPARE(after.size(), 150);
+    QCOMPARE(after.mid(0, 2), (QStringList{"team-new/permission_escalated/Dev", "team-new/report_escalated/1"}));
+    QCOMPARE(QSet<QString>(after.begin(), after.end()).size(), after.size());
+    // Every item shown before is still shown, in the same order.
+    QStringList kept; for (const auto &id : after) if (shown.contains(id)) kept << id;
+    QCOMPARE(kept, shown);
+    // Show older goes on right after them: the list is the server's order.
+    page.findChild<QPushButton *>("teamWaitingOlder")->click();
+    WAIT_VERIFY(page.findChildren<QFrame *>("teamWaitingRow").size() == 200);
+    const QStringList all = waitingRowIds(&page);
+    QStringList expected;
+    for (const auto &value : items) expected << value.toObject()["id"].toString();
+    QCOMPARE(all, expected.mid(0, 200));
+    QVERIFY(page.findChild<QPushButton *>("teamWaitingOlder"));
+    for (const auto &input : calls(script(), "waiting")) QVERIFY(input.value("limit").toInt() <= 200);
+}
+
+// U50: an empty list says so, in both themes; a refused read is shown with its
+// reason and the next read clears it.
+void TestTeamsUi::waitingPageEmptyAndRefused()
+{
+    QSettings().setValue("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([] { QSettings().remove("workspace/skin"); darkPalette(); });
+    QVERIFY(writeWaiting(script() + ".waiting", {}));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamWaitingPage page(&controller);
+    int counted = -1;
+    page.countChanged = [&](int total) { counted = total; };
+    page.resize(980, 520); page.show();
+    WAIT_VERIFY(page.findChild<QWidget *>("teamWaitingEmpty"));
+    QCOMPARE(counted, 0);
+    QVERIFY(page.findChildren<QFrame *>("teamWaitingRow").isEmpty());
+    QCOMPARE(page.findChild<QLabel *>("teamWaitingCount")->text(), QString("Nothing waits for you"));
+    shot(&page, "u50-waiting-empty-dark");
+    page.setDark(false);
+    lightShot(&page, "u50-waiting-empty-light");
+    QVERIFY(FakeCli::replace(script() + ".waitingrefuse", "hgs: The team store is busy"));
+    page.refresh();
+    WAIT_VERIFY(page.findChild<QLabel *>("teamWaitingError"));
+    QVERIFY(page.findChild<QLabel *>("teamWaitingError")->text().contains("The team store is busy"));
+    QFile::remove(script() + ".waitingrefuse");
+    QVERIFY(writeWaiting(script() + ".waiting", QJsonArray{waitingKinds(double(QDateTime::currentSecsSinceEpoch())).first()}));
+    page.refresh();
+    WAIT_VERIFY(page.findChildren<QFrame *>("teamWaitingRow").size() == 1);
+    QVERIFY(!page.findChild<QLabel *>("teamWaitingError"));
+    QCOMPARE(counted, 1);
+}
+
+
 QTEST_MAIN(TestTeamsUi)
 void TestTeamsUi::emptyPanelOffersNewTeamAndDesigner()
 {
@@ -5003,6 +5205,169 @@ void TestTeamsUi::graphNodesCarryTheActivityLabel()
     QCOMPARE(layerLabel(4), QStringLiteral("held"));
 }
 
+// U37: the labels' team with each task's timing as hgs status computes it:
+// #2 runs its second attempt, #3 its first, #8 is done (its decision was not
+// recorded), #9 runs behind a problem, #11's turn ended. The clock is 9000.
+static QJsonObject timingTeam()
+{
+    auto t = labelTeam();
+    const auto span = [](int n, const char *state, double from, double to, int worked, int member, int lead) {
+        return QJsonObject{{"n", n}, {"member", "backend"}, {"state", state}, {"from", from}, {"to", to > 0 ? QJsonValue(to) : QJsonValue()},
+                           {"worked_s", worked}, {"member_s", member}, {"lead_s", lead}};
+    };
+    const auto timing = [](int worked, double since, int deps, int member, int lead, const QJsonArray &attempts, const QJsonArray &unknown = {}) {
+        QJsonObject o{{"worked_s", worked}, {"running_since", since > 0 ? QJsonValue(since) : QJsonValue()},
+                      {"waits", QJsonObject{{"deps_s", deps}, {"member_s", member}, {"lead_s", lead}}}, {"attempts", attempts}};
+        if (!unknown.isEmpty()) o["unknown"] = unknown;
+        return o;
+    };
+    const QHash<int, QJsonObject> timings{
+        {1, timing(600, 0, 0, 60, 300, {span(1, "reported", 1000, 1600, 600, 60, 300)})},
+        {2, timing(5400, 5100, 2400, 180, 600, {span(1, "rejected", 2000, 3500, 1500, 120, 600), span(2, "delivered", 5100, 0, 3900, 60, 0)})},
+        {3, timing(720, 8280, 0, 30, 0, {span(1, "delivered", 8280, 0, 720, 30, 0)})},
+        {4, timing(0, 0, 0, 0, 300, {})},
+        {8, timing(4500, 0, 0, 0, 0, {span(1, "reported", 1000, 5500, 4500, 0, 0)}, {"lead"})},
+        {9, timing(30, 8970, 0, 0, 0, {span(2, "delivered", 8970, 0, 30, 0, 0)})},
+        {11, timing(100, 0, 0, 0, 0, {span(1, "delivered", 1800, 1900, 100, 0, 0)})},
+    };
+    auto tasks = t["tasks"].toArray();
+    for (int i = 0; i < tasks.size(); ++i) {
+        auto task = tasks[i].toObject();
+        if (timings.contains(task["id"].toInt())) task["timing"] = timings.value(task["id"].toInt());
+        tasks[i] = task;
+    }
+    t["tasks"] = tasks;
+    return t;
+}
+
+void TestTeamsUi::workingTimeFollowsTheActivityLabel()
+{
+    // The test owns the clock; the minute ticks come by hand.
+    double now = 9000;
+    TeamUi::workedClock() = [&now] { return now; };
+    const auto restore = qScopeGuard([] { TeamUi::workedClock() = [] { return double(QDateTime::currentSecsSinceEpoch()); }; });
+    const auto tick = [] { QVERIFY(QMetaObject::invokeMethod(&TeamUi::workedTicker(), "timeout")); };
+    QCOMPARE(TeamUi::workedTicker().interval(), 60 * 1000);
+    setTeam(timingTeam());
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    const LiveLookup live = [](const Member &m) { Live l; l.known = true; if (m.id == "blocked") l.offline = true; l.working = m.id == "backend"; return l; };
+    panel.setLive(live); workspace.setLive(live);
+    darkPalette(); workspace.setTheme(true);
+    // Wide enough that the shots show the done task's layer and column.
+    workspace.resize(1900, 820); workspace.show();
+    controller.refresh();
+    QTRY_VERIFY(controller.team("team-1"));
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    // The text itself: minutes, then hours with two-digit minutes.
+    QCOMPARE(TeamUi::workedText(0), QStringLiteral("<1m"));
+    QCOMPARE(TeamUi::workedText(12 * 60 + 59), QStringLiteral("12m"));
+    QCOMPARE(TeamUi::workedText(3600 + 5 * 60), QStringLiteral("1h 05m"));
+    QCOMPARE(TeamUi::workedText(26 * 3600 + 40 * 60), QStringLiteral("26h 40m"));
+    const auto graph = [&] { return dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph")); };
+    QTRY_VERIFY(graph() && graph()->nodeRect(1).width() > 0);
+    const auto node = [&](TeamUi::TaskView *view, int id) { for (const auto &n : view->nodes) if (n.id == id) return n; return TeamUi::TaskView::Node{}; };
+    // Running: since the current attempt started; done: the sum; never
+    // worked: nothing. A problem text keeps the time beside it.
+    QCOMPARE(node(graph(), 2).worked, QStringLiteral("1h 05m"));
+    QCOMPARE(node(graph(), 2).activity, QStringLiteral("attempt 2 · working"));
+    QCOMPARE(node(graph(), 3).worked, QStringLiteral("12m"));
+    QCOMPARE(node(graph(), 1).worked, QStringLiteral("10m"));
+    QCOMPARE(node(graph(), 8).worked, QStringLiteral("1h 15m"));
+    QCOMPARE(node(graph(), 11).worked, QStringLiteral("1m"));
+    QCOMPARE(node(graph(), 9).worked, QStringLiteral("<1m"));
+    QVERIFY(node(graph(), 9).problem);
+    QVERIFY(node(graph(), 4).worked.isEmpty());
+    QVERIFY(node(graph(), 6).worked.isEmpty());
+    QVERIFY(node(graph(), 7).worked.isEmpty());
+    // The tooltip: each attempt with its waits, the task's waits named apart.
+    const QString retried = node(graph(), 2).tooltip;
+    QVERIFY2(retried.contains("Working 1h 05m, since "), qPrintable(retried));
+    QVERIFY2(retried.contains("Attempt 1 (backend, rejected): worked 25m · waited 2m for a free member · 10m for the lead"), qPrintable(retried));
+    QVERIFY2(retried.contains("Attempt 2 (backend): working since "), qPrintable(retried));
+    QVERIFY2(retried.contains("Waited 40m for dependencies · 3m for a free member · 10m for the lead, not counted"), qPrintable(retried));
+    QVERIFY2(node(graph(), 8).tooltip.contains("Worked 1h 15m\n"), qPrintable(node(graph(), 8).tooltip));
+    QVERIFY(node(graph(), 8).tooltip.contains("Not recorded: the lead's decision"));
+    QVERIFY(!node(graph(), 6).tooltip.contains("Worked"));
+    const auto shoot = [&](const QString &name) {
+        shot(&workspace, name + "-dark");
+        lightPalette(); workspace.setTheme(false); workspace.render(); QTest::qWait(200);
+        lightShot(&workspace, name + "-light");
+        darkPalette(); workspace.setTheme(true); workspace.render(); QTest::qWait(150);
+    };
+    shoot("ux-u37-graph");
+    // One tick a minute: the view keeps its nodes and only the running times
+    // change.
+    QPointer<TeamUi::TaskView> ticked = graph();
+    now = 12000;
+    tick();
+    QVERIFY(ticked);
+    QCOMPARE(node(ticked, 3).worked, QStringLiteral("1h 02m"));
+    QCOMPARE(node(ticked, 2).worked, QStringLiteral("1h 55m"));
+    QCOMPARE(node(ticked, 9).worked, QStringLiteral("50m"));
+    QCOMPARE(node(ticked, 8).worked, QStringLiteral("1h 15m"));
+    QCOMPARE(node(ticked, 1).worked, QStringLiteral("10m"));
+    now = 9000; tick();
+    const auto view = [&](const char *segment) {
+        for (auto *b : workspace.findChild<QWidget *>("teamWorkspaceView")->findChildren<QPushButton *>())
+            if (b->property("segment") == segment) { b->click(); break; }
+    };
+    // The Board card: right after the activity label, in its color and size.
+    view("board");
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceBoard"));
+    const auto card = [&](int id) -> QFrame * {
+        for (auto *frame : workspace.findChildren<QFrame *>("teamBoardCard")) if (frame->property("task").toInt() == id) return frame;
+        return nullptr;
+    };
+    const auto worked = [&](int id) -> QLabel * { auto *frame = card(id); return frame ? frame->findChild<QLabel *>("teamBoardWorked") : nullptr; };
+    QTRY_VERIFY(worked(3));
+    QCOMPARE(worked(3)->text(), QStringLiteral("12m"));
+    QCOMPARE(worked(2)->text(), QStringLiteral("1h 05m"));
+    QCOMPARE(worked(8)->text(), QStringLiteral("1h 15m"));
+    QVERIFY(!worked(6));
+    auto *activity = card(3)->findChild<QLabel *>("teamBoardActivity");
+    QCOMPARE(activity->text(), QStringLiteral("working"));
+    QCOMPARE(worked(3)->font().pixelSize(), activity->font().pixelSize());
+    QCOMPARE(worked(3)->palette().color(QPalette::WindowText), activity->palette().color(QPalette::WindowText));
+    QVERIFY(worked(3)->geometry().left() > activity->geometry().right());
+    QVERIFY(worked(2)->toolTip().contains("Attempt 1 (backend, rejected): worked 25m"));
+    // A running time keeps the room it grows to: "12m" becoming "1h 02m"
+    // moves nothing after it.
+    QVERIFY(worked(3)->minimumWidth() >= worked(3)->fontMetrics().horizontalAdvance(QStringLiteral("1h 02m")));
+    auto *state = card(3)->findChild<QWidget *>("teamBoardState");
+    TestWait::settle();
+    const int stateLeft = state->geometry().left();
+    QPointer<QLabel> label = worked(3);
+    now = 12000;
+    tick();
+    QVERIFY(label);
+    QCOMPARE(label->text(), QStringLiteral("1h 02m"));
+    QCOMPARE(worked(8)->text(), QStringLiteral("1h 15m"));
+    TestWait::settle();
+    QCOMPARE(state->geometry().left(), stateLeft);
+    now = 9000; tick();
+    shoot("ux-u37-board");
+    // The Layers row: the same text after the activity label.
+    view("layers");
+    TeamUi::TaskView *layers = nullptr;
+    QTRY_VERIFY(([&] { layers = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceLayers")); return layers != nullptr; })());
+    QCOMPARE(node(layers, 2).worked, QStringLiteral("1h 05m"));
+    QCOMPARE(node(layers, 8).worked, QStringLiteral("1h 15m"));
+    QCOMPARE(node(layers, 11).worked, QStringLiteral("1m"));
+    now = 12000; tick();
+    QCOMPARE(node(layers, 3).worked, QStringLiteral("1h 02m"));
+    now = 9000; tick();
+    shoot("ux-u37-layers");
+    // An older hgs sends no timing: nothing is shown.
+    const auto old = parse(labelTeam());
+    QVERIFY(!old.task(2)->timing.known);
+    QVERIFY(TeamUi::workedLabel(*old.task(2), now).isEmpty());
+    QVERIFY(TeamUi::workedTip(*old.task(2), now).isEmpty());
+}
+
 // #380 attempt 2: the member's "…" menu and the swap dialog run their own
 // event loops. A poll that changes the team arrives under each: the menu, the
 // button that opened it and the open dialog stay alive, and the views catch
@@ -6057,8 +6422,9 @@ void TestTeamsUi::planningRulesAreEditedSavedResetAndProposed()
     QVERIFY(!status().contains("unsaved") && !save->isEnabled());
     text = editor.findChild<QPlainTextEdit *>("teamPlanningRules");
     text->setPlainText(rules + "\n(4) QA never implements tasks.");
-    QTRY_VERIFY(!editor.findChild<QPushButton *>("teamPlanningRulesReset") || !editor.findChild<QPushButton *>("teamPlanningRulesReset")->isEnabled()
-                || status().contains("unsaved"));
+    // Unsaved edits disable Reset at once: a click would drop them.
+    QTRY_VERIFY(status().contains("unsaved"));
+    QVERIFY(!editor.findChild<QPushButton *>("teamPlanningRulesReset")->isEnabled());
     save->click();
     QTRY_COMPARE(calls(script(), "catalog set").size(), 1);
     const auto saved = calls(script(), "catalog set").first();

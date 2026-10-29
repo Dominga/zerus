@@ -10,7 +10,7 @@ use super::store::{self, canonical_uuid, Event, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|add-to-phase|approve-phase|discard-phase|return-to-draft|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|run|templates|safe-action|reports-to|sub-lead --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|add-to-phase|approve-phase|discard-phase|return-to-draft|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|waiting|run|templates|safe-action|reports-to|sub-lead --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
 
 const MUTATIONS: &[&str] = &[
     "plan", "extend", "edit-draft", "move-phase", "add-to-phase", "approve-phase", "discard-phase", "return-to-draft", "reject-phase", "undo-reject-phase",
@@ -435,7 +435,11 @@ fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::
     // derived here without a listing of status's own (L3).
     if let Some(tasks) = value["tasks"].as_array_mut() {
         let ready: BTreeSet<u32> = plan::ready(team).into_iter().collect();
+        let now = super::super::now();
         for (task, value) in team.tasks.iter().zip(tasks) {
+            // U37: the task's working time and its waits, one number for every
+            // client.
+            value["timing"] = super::timing::timing(team, task, now);
             if let Some(phase) = ops::attempt_phase(task, stopped(team, task)) {
                 if let Some(attempt) = value["attempts"].as_array_mut().and_then(|attempts| attempts.last_mut()) {
                     attempt["phase"] = json!(phase);
@@ -2969,6 +2973,16 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             let teams = store.teams(true, 1000)?;
             let sessions = live_sessions()?;
             Ok(json!({"items":leftovers(&teams, &sessions)}))
+        }
+        // U50: what waits for the owner across every team, read only.
+        "waiting" => {
+            if !store::path().exists() {
+                return Ok(super::owner_waiting::page(&[], None, None));
+            }
+            let teams = active_team_records(&Store::open(false)?)?;
+            let items = super::owner_waiting::items(&teams, super::super::now());
+            let before = Some(&input["before"]).filter(|cursor| !cursor.is_null());
+            Ok(super::owner_waiting::page(&items, before, input["limit"].as_u64()))
         }
         "list" => {
             let path = store::path();
@@ -6245,6 +6259,9 @@ mod tests {
         assert_eq!(attempt["permissions"].as_array().unwrap().len(), 1, "{attempt}");
         assert_eq!(attempt["permissions"][0]["command"], "rm -rf build");
         assert_eq!(attempt["permissions"][0]["at"], 25.0);
+        // U37: every task carries its timing, computed by status.
+        let timing = &value["tasks"][0]["timing"];
+        assert!(timing["worked_s"].is_i64() && timing["waits"]["member_s"].is_i64(), "{timing}");
         // N31: the answers belong to the member the attempt ran for, not to the
         // task's current assignee after a reassignment.
         team.task_mut(1).unwrap().assignee = "qa".into();

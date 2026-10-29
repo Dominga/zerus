@@ -196,6 +196,26 @@ phases); it stores nothing. The phone follows with the team status API (U44).
 Tests: one fixture per kind; paging stable while items arrive; an empty list
 (tests, shots in both themes).
 
+Built (#578): the read is `hgs team waiting --json`, beside the other
+cross-team reads (`list`, `leftovers`), over the 1000 most recently changed
+Planning, Running and Paused teams. Input `{limit, before}`: `limit` 1-200
+(default 50), `before` the `next` cursor `{since, id}` of the previous page.
+Answer `{items, next, total}`, newest first, ties by `id`
+(`<team>/<kind>/<key>`); items may add `phase`, `task`, `member`,
+`proposal` or `finding`. Each kind comes from a record the team keeps:
+`phase_draft` the attention list's next draft phase; `plan_draft` a Planning
+team with tasks whose approval is `review`; `report_escalated` and
+`permission_escalated` the attention list's `report` and `permission`, past
+`remind_owner_minutes` and `remind_owner_permission_minutes`;
+`owner_word_asked` an open lead proposal (F8), an addition to a running
+phase waiting for its confirmation (U29) and a paused replan (N17);
+`task_waits_owner` a task the owner holds (A5); `team_finished` a Running or
+Paused team with every task decided and no draft phase. `task.waits` (U45)
+joins `task_waits_owner` once it exists. The desktop page is the rail's
+Waiting for you, after the Team designer: pages of 50 with Show older; a
+poll reads every shown item and a page more, so an arrival never pushes a
+shown item out; a row opens its team's Team tab, a draft phase unfolded.
+
 ## 8. U51: an intake for urgent tasks
 
 `hgs team intake-key --json {request_id, team, label}` (owner only) creates a

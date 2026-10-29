@@ -229,6 +229,20 @@ struct Lane {
     bool known() const { return n > 0; }
 };
 
+// U37: the task's working time as hgs status computes it (tasks[].timing):
+// the worked seconds (a running attempt up to the status time), when the
+// running attempt started (0 while none runs), the waits for dependencies,
+// a free member and the lead, each attempt's span, and the waits an older
+// team never recorded.
+struct Timing {
+    struct Span { int n = 0; QString member, state; double from = 0, to = 0; qint64 worked = 0, memberWait = 0, leadWait = 0; };
+    qint64 worked = 0, deps = 0, member = 0, lead = 0;
+    double runningSince = 0;
+    QList<Span> attempts;
+    QStringList unknown;
+    bool known = false;
+};
+
 struct Task {
     int id = 0;
     int phase = 1;             // the approved initial plan is phase 1
@@ -260,6 +274,7 @@ struct Task {
     // twice: who added it, when, and the owner's two sentences.
     struct AddedLate { QString by, request, confirm; double at = 0; bool known = false; };
     AddedLate addedLate;
+    Timing timing;
     bool isCheck() const { return kind == "check" || !check.command.isEmpty(); }
     const Attempt *last() const { return attempts.isEmpty() ? nullptr : &attempts.last(); }
     bool workedAhead() const { const auto *a = last(); return a && a->workedAhead; }

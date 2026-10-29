@@ -150,6 +150,7 @@ private slots:
     void attemptPhasesAreDerivedForAnOlderHgs();
     void finishedRevokedAndRefusedAttemptsHaveNoPhase();
     void oldStatusJsonStillParses();
+    void modelReadsEachTasksTiming();
     void aDraftTeamReadsItsRevisionUnseenFieldsAndGoal();
     void proposalsSwapsLimitsAndHostsRead();
     void feedLinesSpeakOfStartsQuestionsAndHolds();
@@ -1148,6 +1149,45 @@ void TestTeams::oldStatusJsonStillParses()
     QCOMPARE(team.member("tester")->queue, (QList<int>{6}));
     QCOMPARE(team.member("frontend")->queue, (QList<int>{}));
     QVERIFY(team.member("backend")->queueKnown == false);
+}
+
+// U37: tasks[].timing as hgs status computes it; an older hgs sends none.
+void TestTeams::modelReadsEachTasksTiming()
+{
+    QVERIFY(!parse(checkout()).task(3)->timing.known);
+    auto t = checkout();
+    auto tasks = t["tasks"].toArray();
+    for (int i = 0; i < tasks.size(); ++i) {
+        auto task = tasks[i].toObject();
+        if (task["id"].toInt() != 3) continue;
+        task["timing"] = QJsonObject{
+            {"worked_s", 5400}, {"running_since", 5100.0},
+            {"waits", QJsonObject{{"deps_s", 2400}, {"member_s", 180}, {"lead_s", 600}}},
+            {"attempts", QJsonArray{
+                QJsonObject{{"n", 1}, {"member", "backend"}, {"state", "rejected"}, {"from", 2000.0}, {"to", 3500.0},
+                            {"worked_s", 1500}, {"member_s", 120}, {"lead_s", 600}},
+                QJsonObject{{"n", 2}, {"member", "backend"}, {"state", "delivered"}, {"from", 5100.0}, {"to", QJsonValue()},
+                            {"worked_s", 3900}, {"member_s", 60}, {"lead_s", 0}}}},
+            {"unknown", QJsonArray{"deps"}}};
+        tasks[i] = task;
+    }
+    t["tasks"] = tasks;
+    const auto timing = parse(t).task(3)->timing;
+    QVERIFY(timing.known);
+    QCOMPARE(timing.worked, 5400);
+    QCOMPARE(timing.runningSince, 5100.0);
+    QCOMPARE((QList<qint64>{timing.deps, timing.member, timing.lead}), (QList<qint64>{2400, 180, 600}));
+    QCOMPARE(timing.unknown, QStringList{"deps"});
+    QCOMPARE(timing.attempts.size(), 2);
+    const auto &first = timing.attempts[0];
+    QCOMPARE(first.n, 1);
+    QCOMPARE(first.member, QStringLiteral("backend"));
+    QCOMPARE(first.state, QStringLiteral("rejected"));
+    QCOMPARE((QList<double>{first.from, first.to}), (QList<double>{2000, 3500}));
+    QCOMPARE((QList<qint64>{first.worked, first.memberWait, first.leadWait}), (QList<qint64>{1500, 120, 600}));
+    // The running attempt has no end yet.
+    QCOMPARE(timing.attempts[1].to, 0.0);
+    QVERIFY(!parse(t).task(2)->timing.known);
 }
 
 void TestTeams::feedLinesSpeakOfStartsQuestionsAndHolds()

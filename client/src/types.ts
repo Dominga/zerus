@@ -359,6 +359,8 @@ export interface Account {
 }
 export interface AccountHost { computer: ComputerId; name: string; label: string; online: boolean }
 export interface AccountsView {
+  /** Computation order from the screens hub; absent on older snapshots. */
+  revision?: number;
   hosts: AccountHost[]; accounts: Account[]; overview: Account[]; snapshot: boolean; loading: boolean;
   pending: number; loaded_machines: number; busy: boolean; notices: string[]; no_hosts: string | null;
   /** Accounts left out by the per-view bound. */
@@ -368,6 +370,8 @@ export interface MachineRow { alias: string; enabled: boolean; source: string; i
 export interface Effective { alias: string; pending: boolean; error: boolean; text: string; hostname: string; user: string; port: string; key: string }
 export interface CheckResult { alias: string; pending: boolean; error: boolean; text: string }
 export interface MachinesView {
+  /** Computation order from the screens hub; absent on older snapshots. */
+  revision?: number;
   loaded: boolean; refreshing: boolean; error: string | null; local: string; environment_override: boolean;
   machines: MachineRow[]; effective: Effective | null; check: CheckResult | null; busy: boolean;
 }
@@ -382,6 +386,8 @@ export interface Folder {
 }
 export interface Project { id: string; name: string; color: string | null; accessible: boolean; is_default: boolean; palette: number; folders: Folder[] }
 export interface ProjectsView {
+  /** Computation order from the screens hub; absent on older snapshots. */
+  revision?: number;
   loaded: boolean; status: string; status_error: boolean; conflicts: number;
   unconnected: string[]; notice: string | null; projects: Project[];
   /** The catalog's swarm, "" before one arrives (New session's project inference). */

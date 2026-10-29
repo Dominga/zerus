@@ -59,6 +59,23 @@ pub const REPLAY_NEEDS_HGS: &str = "Reads in replay mode need ZERUS_CLIENT_HGS."
 const ACCOUNT_SCREENS: [Screen; 2] = [Screen::Overview, Screen::Accounts];
 /// The screens whose view follows the fleet.
 const FLEET_SCREENS: [Screen; 3] = [Screen::Overview, Screen::Projects, Screen::Accounts];
+const PROJECTION_FAILED: &str = "Could not update this screen.";
+const READ_FAILED: &str = "Could not refresh this screen.";
+
+/// Existing view fields plus their computation order under the hub lock.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Revisioned<T> {
+    #[serde(flatten)]
+    pub value: T,
+    pub revision: u64,
+}
+
+impl<T> std::ops::Deref for Revisioned<T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
+}
 
 /// One read, run off the UI thread.
 pub type Job = Box<dyn FnOnce() + Send>;
@@ -196,6 +213,8 @@ struct Hub {
     swarm: SwarmState,
     /// The view each visible screen last showed, so a change emits once.
     shown: BTreeMap<Screen, Value>,
+    /// Computation order, independent of which IPC request finishes last.
+    view_revision: u64,
     /// Screens a reply, the fleet or starting account reads touched since the
     /// last publish.
     dirty: BTreeSet<Screen>,
@@ -267,6 +286,10 @@ struct Shared {
     /// Woken whenever an `account ls` reply is filed.
     catalog_done: Condvar,
     launch_notify: OnceLock<LaunchNotify>,
+    #[cfg(test)]
+    panic_projection: std::sync::atomic::AtomicU8,
+    #[cfg(test)]
+    panic_read: std::sync::atomic::AtomicBool,
 }
 
 /// The managed state of the screen commands; clones share it.
@@ -274,6 +297,7 @@ struct Shared {
 pub struct Screens(Arc<Shared>);
 
 /// A read the hub decided to start.
+#[derive(Clone)]
 enum Run {
     Catalog(ComputerId),
     Usage(UsageRef),
@@ -296,7 +320,7 @@ fn message(reply: Result<Value, ReadError>) -> Result<Value, String> {
 }
 
 /// Records a view the webview now holds for the visible screens that show it.
-fn remember<T: Serialize>(hub: &mut Hub, screens: &[Screen], view: &T) {
+fn remember<T: Serialize>(hub: &mut Hub, screens: &[Screen], view: &T) -> u64 {
     if let Ok(value) = serde_json::to_value(view) {
         for screen in screens {
             if hub.visible.contains(screen) {
@@ -304,6 +328,8 @@ fn remember<T: Serialize>(hub: &mut Hub, screens: &[Screen], view: &T) {
             }
         }
     }
+    hub.view_revision += 1;
+    hub.view_revision
 }
 
 impl Screens {
@@ -325,6 +351,10 @@ impl Screens {
             clock,
             catalog_done: Condvar::new(),
             launch_notify: OnceLock::new(),
+            #[cfg(test)]
+            panic_projection: std::sync::atomic::AtomicU8::new(0),
+            #[cfg(test)]
+            panic_read: std::sync::atomic::AtomicBool::new(false),
         }))
     }
 
@@ -394,6 +424,12 @@ impl Screens {
     /// the visible screens' reads due, report changed views. With nothing
     /// changed and nothing due it costs a fleet comparison.
     pub fn tick(&self) {
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.tick_once())).is_err() {
+            eprintln!("zerus-client: screens tick panicked");
+        }
+    }
+
+    fn tick_once(&self) {
         let runs = {
             let now = self.now();
             let mut hub = self.current();
@@ -458,13 +494,38 @@ impl Screens {
     fn run(&self, runs: impl IntoIterator<Item = Run>) {
         for job in runs {
             let screens = self.clone();
-            (self.0.spawn)(Box::new(move || screens.read(job)));
+            (self.0.spawn)(Box::new(move || screens.read_guarded(job)));
         }
     }
 
     /// Runs one read (blocking, off the UI thread), files its reply and
     /// starts what it made due.
-    fn read(&self, job: Run) {
+    fn read_guarded(&self, job: Run) {
+        let recovery = job.clone();
+        let mut settled = false;
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.read(job, &mut settled, false)
+        }))
+        .is_err()
+        {
+            eprintln!("zerus-client: screen read worker panicked");
+            // A notification can panic after the reply was filed and a newer
+            // read started. Never clear that newer read's slot.
+            if !settled {
+                self.read_failed(recovery);
+            }
+        }
+    }
+
+    fn read(&self, job: Run, settled: &mut bool, failed: bool) {
+        #[cfg(test)]
+        if self
+            .0
+            .panic_read
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            panic!("injected read panic");
+        }
         let hgs = &self.0.hgs;
         let local = ComputerId::local();
         let mut heard: Option<ComputerId> = None;
@@ -472,9 +533,18 @@ impl Screens {
         let runs = match job {
             Run::Catalog(host) => {
                 // Qt's requestAccounts texts, for the Accounts page as for New session.
-                let reply = launch::read_accounts(hgs, &host);
+                let reply = if failed {
+                    Err(READ_FAILED.into())
+                } else {
+                    launch::read_accounts(hgs, &host)
+                };
                 let failure = reply.as_ref().err().cloned();
-                let now = self.now();
+                let now = if failed {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.now()))
+                        .unwrap_or(0)
+                } else {
+                    self.now()
+                };
                 let mut hub = self.lock();
                 // A queued follow-up is the page's (its forced poll), for a host it lists.
                 let listed = account_hosts(&hub.fleet);
@@ -534,8 +604,11 @@ impl Screens {
                 runs
             }
             Run::Usage(r) => {
-                let reply =
-                    reads::read(hgs, &r.host, &Read::AccountUsage { id: r.id.clone() }).ok();
+                let reply = if failed {
+                    None
+                } else {
+                    reads::read(hgs, &r.host, &Read::AccountUsage { id: r.id.clone() }).ok()
+                };
                 let mut hub = self.lock();
                 hub.accounts.finish_usage(&r, reply);
                 if hub
@@ -559,7 +632,11 @@ impl Screens {
                 hub.dispatch()
             }
             Run::Machines => {
-                let reply = message(reads::read(hgs, &local, &Read::Machines));
+                let reply = if failed {
+                    Err(READ_FAILED.into())
+                } else {
+                    message(reads::read(hgs, &local, &Read::Machines))
+                };
                 let mut hub = self.lock();
                 hub.machines.finish_list(reply);
                 hub.dirty.insert(Screen::Machines);
@@ -569,7 +646,11 @@ impl Screens {
                 let read = Read::MachineResolve {
                     alias: alias.clone(),
                 };
-                let reply = message(reads::read(hgs, &local, &read));
+                let reply = if failed {
+                    Err(READ_FAILED.into())
+                } else {
+                    message(reads::read(hgs, &local, &read))
+                };
                 let mut hub = self.lock();
                 hub.machines.finish_resolve(&alias, reply);
                 hub.dirty.insert(Screen::Machines);
@@ -579,18 +660,30 @@ impl Screens {
                 let read = Read::MachineCheck {
                     alias: alias.clone(),
                 };
-                let reply = message(reads::read(hgs, &local, &read));
+                let reply = if failed {
+                    Err(READ_FAILED.into())
+                } else {
+                    message(reads::read(hgs, &local, &read))
+                };
                 let mut hub = self.lock();
                 hub.machines.finish_check(&alias, reply);
                 hub.dirty.insert(Screen::Machines);
                 Vec::new()
             }
         };
+        *settled = true;
         self.run(runs);
         self.publish();
         if let (Some(computer), Some(notify)) = (heard, self.0.launch_notify.get()) {
             notify(&computer);
         }
+    }
+
+    /// A panic files a failed reply through the existing completion path,
+    /// including New session's catalog wake and usage notifications. No CLI
+    /// call is made on this path.
+    fn read_failed(&self, job: Run) {
+        self.read(job, &mut false, true);
     }
 
     /// One `screens-changed` per visible screen whose view changed since the
@@ -630,8 +723,40 @@ impl Screens {
         .unwrap_or(Value::Null)
     }
 
+    fn project_or<T>(
+        &self,
+        screen: Screen,
+        project: impl FnOnce() -> T,
+        failed: impl FnOnce() -> T,
+    ) -> T {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            #[cfg(test)]
+            if self
+                .0
+                .panic_projection
+                .load(std::sync::atomic::Ordering::Relaxed)
+                == screen as u8 + 1
+            {
+                panic!("injected projection panic");
+            }
+            project()
+        }))
+        .unwrap_or_else(|_| {
+            eprintln!("zerus-client: {:?} screen projection panicked", screen);
+            failed()
+        })
+    }
+
     fn accounts_of(&self, hub: &mut Hub) -> AccountsView {
-        let mut view = accounts::project(&hub.fleet, &hub.accounts, &mut hub.display);
+        let mut view = self.project_or(
+            Screen::Accounts,
+            || accounts::project(&hub.fleet, &hub.accounts, &mut hub.display),
+            || AccountsView {
+                snapshot: true,
+                notices: vec![PROJECTION_FAILED.into()],
+                ..Default::default()
+            },
+        );
         if !self.0.allowed {
             view.notices.insert(0, REPLAY_NEEDS_HGS.into());
             view.pending = 0;
@@ -642,7 +767,14 @@ impl Screens {
     }
 
     fn machines_of(&self, hub: &Hub) -> MachinesView {
-        let mut view = hub.machines.view();
+        let mut view = self.project_or(
+            Screen::Machines,
+            || hub.machines.view(),
+            || MachinesView {
+                error: Some(PROJECTION_FAILED.into()),
+                ..Default::default()
+            },
+        );
         if !self.0.allowed {
             view.error = Some(REPLAY_NEEDS_HGS.into());
         }
@@ -657,7 +789,15 @@ impl Screens {
             .collect();
         // A blocked replay keeps the controller's line: Projects reads
         // nothing, and the organization's own `ready` blocks its edits.
-        hub.swarm.view(&peers)
+        self.project_or(
+            Screen::Projects,
+            || hub.swarm.view(&peers),
+            || ProjectsView {
+                status: PROJECTION_FAILED.into(),
+                status_error: true,
+                ..Default::default()
+            },
+        )
     }
 
     /// A screen shown or hidden. Showing Machines reads the list; Overview
@@ -698,7 +838,7 @@ impl Screens {
     /// The accounts view. `force` is Refresh: forced `ls` and inspects,
     /// ignored while account reads run (Qt's `reload`). A pull while neither
     /// Overview nor Accounts shows starts nothing.
-    pub fn accounts(&self, force: bool) -> AccountsView {
+    pub fn accounts(&self, force: bool) -> Revisioned<AccountsView> {
         let runs = {
             let now = self.now();
             let mut hub = self.current();
@@ -713,20 +853,26 @@ impl Screens {
         self.run(runs);
         let mut hub = self.lock();
         let view = self.accounts_of(&mut hub);
-        remember(&mut hub, &ACCOUNT_SCREENS, &view);
-        view
+        let revision = remember(&mut hub, &ACCOUNT_SCREENS, &view);
+        Revisioned {
+            value: view,
+            revision,
+        }
     }
 
-    fn machines_answer(&self) -> MachinesView {
+    fn machines_answer(&self) -> Revisioned<MachinesView> {
         let mut hub = self.lock();
         let view = self.machines_of(&hub);
-        remember(&mut hub, &[Screen::Machines], &view);
-        view
+        let revision = remember(&mut hub, &[Screen::Machines], &view);
+        Revisioned {
+            value: view,
+            revision,
+        }
     }
 
     /// The Machines view; `force` is Refresh (skipped while a list read or a
     /// check runs). The list has no poll, so a plain pull starts nothing.
-    pub fn machines(&self, force: bool) -> MachinesView {
+    pub fn machines(&self, force: bool) -> Revisioned<MachinesView> {
         let start = force && self.0.allowed && {
             let now = self.now();
             self.lock().machines.start_list(now)
@@ -738,7 +884,7 @@ impl Screens {
     }
 
     /// The selected peer's effective connection, read on selection.
-    pub fn resolve(&self, alias: String) -> MachinesView {
+    pub fn resolve(&self, alias: String) -> Revisioned<MachinesView> {
         let start = self.0.allowed && self.lock().machines.start_resolve(&alias);
         if start {
             self.run([Run::Resolve(alias)]);
@@ -748,7 +894,7 @@ impl Screens {
 
     /// "Test connection" (`machine check`, up to 25 s): never while the list
     /// reads or another check runs.
-    pub fn check(&self, alias: String) -> MachinesView {
+    pub fn check(&self, alias: String) -> Revisioned<MachinesView> {
         let start = self.0.allowed && self.lock().machines.start_check(&alias);
         if start {
             self.run([Run::Check(alias)]);
@@ -974,11 +1120,14 @@ impl Screens {
 
     /// The Projects view. It follows the fleet (its unconnected computers)
     /// and starts no read.
-    pub fn projects(&self) -> ProjectsView {
+    pub fn projects(&self) -> Revisioned<ProjectsView> {
         let mut hub = self.current();
         let view = self.projects_of(&hub);
-        remember(&mut hub, &[Screen::Projects], &view);
-        view
+        let revision = remember(&mut hub, &[Screen::Projects], &view);
+        Revisioned {
+            value: view,
+            revision,
+        }
     }
 
     /// The organization the Sessions list groups by, from the organization
@@ -1027,27 +1176,39 @@ pub fn screen_visible(
 }
 
 #[tauri::command(async)]
-pub fn accounts_view(state: State<'_, Screens>, force: bool) -> Result<AccountsView, String> {
+pub fn accounts_view(
+    state: State<'_, Screens>,
+    force: bool,
+) -> Result<Revisioned<AccountsView>, String> {
     Ok(state.accounts(force))
 }
 
 #[tauri::command(async)]
-pub fn machines_view(state: State<'_, Screens>, force: bool) -> Result<MachinesView, String> {
+pub fn machines_view(
+    state: State<'_, Screens>,
+    force: bool,
+) -> Result<Revisioned<MachinesView>, String> {
     Ok(state.machines(force))
 }
 
 #[tauri::command(async)]
-pub fn machine_resolve(state: State<'_, Screens>, alias: String) -> Result<MachinesView, String> {
+pub fn machine_resolve(
+    state: State<'_, Screens>,
+    alias: String,
+) -> Result<Revisioned<MachinesView>, String> {
     Ok(state.resolve(alias))
 }
 
 #[tauri::command(async)]
-pub fn machine_check(state: State<'_, Screens>, alias: String) -> Result<MachinesView, String> {
+pub fn machine_check(
+    state: State<'_, Screens>,
+    alias: String,
+) -> Result<Revisioned<MachinesView>, String> {
     Ok(state.check(alias))
 }
 
 #[tauri::command(async)]
-pub fn projects_view(state: State<'_, Screens>) -> Result<ProjectsView, String> {
+pub fn projects_view(state: State<'_, Screens>) -> Result<Revisioned<ProjectsView>, String> {
     Ok(state.projects())
 }
 
@@ -1080,6 +1241,118 @@ pub fn launch_accounts_close(state: State<'_, Screens>) {
 #[tauri::command(async)]
 pub fn launch_account_rows(state: State<'_, Screens>, computer: String) -> LaunchAccounts {
     state.launch_rows(&ComputerId(computer))
+}
+
+#[cfg(test)]
+mod view_tests {
+    use super::*;
+    use serde_json::json;
+    use std::sync::atomic::Ordering;
+
+    fn screens() -> Screens {
+        Screens::new(
+            PathBuf::from("unused-hgs"),
+            true,
+            Arc::new(|_| panic!("a view-only test started a read")),
+            Arc::new(|_| {}),
+            Arc::new(Vec::new),
+            Arc::new(|| 0),
+        )
+    }
+
+    #[test]
+    fn returned_views_are_stamped_in_computation_order_without_changing_content_comparisons() {
+        let screens = screens();
+        screens
+            .lock()
+            .visible
+            .extend([Screen::Accounts, Screen::Overview]);
+        let first = screens.accounts(false);
+        let second = screens.accounts(false);
+        let projects = screens.projects();
+        assert!(first.revision < second.revision && second.revision < projects.revision);
+        let serialized = serde_json::to_value(&second).unwrap();
+        assert_eq!(serialized["revision"], second.revision);
+        for (key, value) in serde_json::to_value(&second.value)
+            .unwrap()
+            .as_object()
+            .unwrap()
+        {
+            assert_eq!(&serialized[key], value, "existing field {key}");
+        }
+        let mut hub = screens.lock();
+        assert_eq!(hub.shown[&Screen::Accounts], hub.shown[&Screen::Overview]);
+        assert!(hub.shown[&Screen::Accounts].get("revision").is_none());
+        hub.dirty.insert(Screen::Accounts);
+        drop(hub);
+        // Revisions do not turn identical content into a changed notification.
+        screens.publish();
+        assert_eq!(
+            screens.lock().shown[&Screen::Accounts],
+            serde_json::to_value(second.value).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_projection_panic_returns_a_clear_screen_error_and_the_next_projection_recovers() {
+        for screen in [Screen::Accounts, Screen::Machines, Screen::Projects] {
+            let screens = screens();
+            screens
+                .0
+                .panic_projection
+                .store(screen as u8 + 1, Ordering::Relaxed);
+            let view = match screen {
+                Screen::Accounts => serde_json::to_value(screens.accounts(false)).unwrap(),
+                Screen::Machines => serde_json::to_value(screens.machines(false)).unwrap(),
+                _ => serde_json::to_value(screens.projects()).unwrap(),
+            };
+            match screen {
+                Screen::Accounts => {
+                    assert_eq!(view["notices"], json!([PROJECTION_FAILED]));
+                    assert_eq!(view["busy"], false);
+                    assert_eq!(view["pending"], 0);
+                }
+                Screen::Machines => {
+                    assert_eq!(view["error"], PROJECTION_FAILED);
+                    assert_eq!(view["busy"], false);
+                }
+                _ => {
+                    assert_eq!(view["status"], PROJECTION_FAILED);
+                    assert_eq!(view["status_error"], true);
+                }
+            }
+            screens.0.panic_projection.store(0, Ordering::Relaxed);
+            let recovered = match screen {
+                Screen::Accounts => serde_json::to_value(screens.accounts(false)).unwrap(),
+                Screen::Machines => serde_json::to_value(screens.machines(false)).unwrap(),
+                _ => serde_json::to_value(screens.projects()).unwrap(),
+            };
+            assert!(!recovered.to_string().contains(PROJECTION_FAILED));
+            assert!(recovered["revision"].as_u64().unwrap() > view["revision"].as_u64().unwrap());
+        }
+    }
+
+    #[test]
+    fn a_panicking_tick_does_not_stop_the_next_tick() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let fleet = Arc::clone(&calls);
+        let screens = Screens::new(
+            PathBuf::from("unused-hgs"),
+            true,
+            Arc::new(|_| panic!("a tick-only test started a read")),
+            Arc::new(|_| {}),
+            Arc::new(move || {
+                if fleet.fetch_add(1, Ordering::Relaxed) == 0 {
+                    panic!("injected fleet projection panic");
+                }
+                Vec::new()
+            }),
+            Arc::new(|| 0),
+        );
+        screens.tick();
+        screens.tick();
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -1320,6 +1593,195 @@ mod tests {
             "account inspect native-claude --refresh": {"stderr": "hgs: inspect failed\n", "exit": 1},
             "account inspect native-codex --refresh": {"file": "inspect-native-codex.json"},
         })
+    }
+
+    #[test]
+    fn a_catalog_panic_wakes_new_session_and_notifies_without_replaying_the_read() {
+        let h = harness(launch_replies(false), true);
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let heard_by_callback = Arc::clone(&heard);
+        h.screens.on_launch_change(Arc::new(move |computer| {
+            heard_by_callback.lock().unwrap().push(computer.clone());
+        }));
+        let here = ComputerId::local();
+        let runs = h.screens.launch_start(&here, false, None);
+        h.screens.run(runs);
+        let waiting = h.screens.clone();
+        let (ready, started) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            let hub = waiting.lock();
+            assert!(!hub.launch.as_ref().unwrap().answered);
+            ready.send(()).unwrap();
+            let mut hub = hub;
+            loop {
+                let (next, timeout) = waiting
+                    .0
+                    .catalog_done
+                    .wait_timeout(hub, Duration::from_secs(2))
+                    .unwrap();
+                hub = next;
+                assert!(
+                    !timeout.timed_out(),
+                    "the catalog completion must wake the waiter"
+                );
+                if hub.launch.as_ref().unwrap().answered {
+                    break;
+                }
+            }
+        });
+        started.recv_timeout(Duration::from_secs(2)).unwrap();
+        h.screens.0.panic_read.store(true, Ordering::Relaxed);
+        h.run(0);
+        waiter.join().unwrap();
+        let view = h.screens.launch_rows(&here);
+        assert!(view.loaded);
+        assert_eq!(
+            view.error.as_deref(),
+            Some("Could not load accounts: Could not refresh this screen.")
+        );
+        assert_eq!(
+            heard.lock().unwrap().as_slice(),
+            std::slice::from_ref(&here)
+        );
+        assert_eq!(
+            h.count("account ls"),
+            0,
+            "panic recovery must not replay the CLI read"
+        );
+        assert!(!h.screens.lock().accounts.reading());
+        let runs = h.screens.launch_waited(&here);
+        assert!(runs.is_empty());
+        launch_ask(&h, &here, true);
+        assert!(h.screens.launch_rows(&here).error.is_none());
+        assert_eq!(h.count("account ls"), 1, "only the explicit Refresh reads");
+    }
+
+    #[test]
+    fn panicking_catalog_and_usage_jobs_release_their_slots_and_allow_refresh() {
+        let h = harness(local_accounts(), true);
+        h.screens.set_visible(Screen::Accounts, true);
+        h.screens.0.panic_read.store(true, Ordering::Relaxed);
+        h.run(0);
+        {
+            let hub = h.screens.lock();
+            assert!(!hub.accounts.reading());
+            assert_eq!(
+                hub.accounts.catalogs[&ComputerId::local()].error.as_deref(),
+                Some(READ_FAILED)
+            );
+        }
+        h.screens.accounts(true);
+        h.run(0);
+        assert_eq!(h.queued(), 2);
+        h.screens.0.panic_read.store(true, Ordering::Relaxed);
+        h.run(0);
+        h.drain();
+        let view = h.screens.accounts(false);
+        assert_eq!(view.pending, 0);
+        assert!(!view.busy && !h.screens.lock().accounts.reading());
+        assert!(member(&view, "claude-work").usage.refresh_error);
+        h.screens.accounts(true);
+        h.drain();
+        assert!(
+            !member(&h.screens.accounts(false), "claude-work")
+                .usage
+                .refresh_error
+        );
+    }
+
+    #[test]
+    fn panicking_machine_list_resolve_and_check_jobs_release_the_exact_slot() {
+        let h = harness(
+            json!({
+                "machine ls": {"file": "machines.json"},
+                "machine resolve studio": {"file": "resolve-studio.json"},
+                "machine check studio": {"file": "check-studio.json"}
+            }),
+            true,
+        );
+        h.screens.machines(true);
+        h.screens.0.panic_read.store(true, Ordering::Relaxed);
+        h.run(0);
+        let view = h.screens.machines(false);
+        assert!(!view.busy && !view.refreshing);
+        assert_eq!(view.error.as_deref(), Some(READ_FAILED));
+        h.screens.machines(true);
+        h.drain();
+        assert!(h.screens.machines(false).error.is_none());
+        h.screens.resolve("studio".into());
+        h.screens.0.panic_read.store(true, Ordering::Relaxed);
+        h.run(0);
+        assert!(h
+            .screens
+            .machines(false)
+            .effective
+            .as_ref()
+            .is_some_and(|view| !view.pending && view.error));
+        h.screens.resolve("studio".into());
+        h.drain();
+        assert!(h
+            .screens
+            .machines(false)
+            .effective
+            .as_ref()
+            .is_some_and(|view| !view.pending && !view.error));
+        h.screens.check("studio".into());
+        h.screens.0.panic_read.store(true, Ordering::Relaxed);
+        h.run(0);
+        let view = h.screens.machines(false);
+        assert!(!view.busy);
+        assert!(view
+            .check
+            .as_ref()
+            .is_some_and(|view| !view.pending && view.error));
+        h.screens.check("studio".into());
+        h.drain();
+        assert!(h
+            .screens
+            .machines(false)
+            .check
+            .as_ref()
+            .is_some_and(|view| !view.pending && view.text.starts_with("SSH connected:")));
+    }
+
+    #[test]
+    fn a_late_notification_panic_does_not_clear_a_newer_read() {
+        let _tree = crate::PROCESS_TREE
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
+        let fake = Fake::new(json!({"machine ls": {"file": "machines.json"}}));
+        let jobs = Arc::new(Mutex::new(VecDeque::<Job>::new()));
+        let queued = Arc::clone(&jobs);
+        let owner = Arc::new(std::sync::OnceLock::<std::sync::Weak<Shared>>::new());
+        let notifying = Arc::clone(&owner);
+        let panic_next = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let panicking = Arc::clone(&panic_next);
+        let screens = Screens::new(
+            fake.hgs.clone(),
+            true,
+            Arc::new(move |job| queued.lock().unwrap().push_back(job)),
+            Arc::new(move |screen| {
+                if screen == Screen::Machines && panicking.swap(false, Ordering::Relaxed) {
+                    Screens(notifying.get().unwrap().upgrade().unwrap()).machines(true);
+                    panic!("injected notification panic after a new read started");
+                }
+            }),
+            Arc::new(Vec::new),
+            Arc::new(|| 0),
+        );
+        assert!(owner.set(Arc::downgrade(&screens.0)).is_ok());
+        screens.set_visible(Screen::Machines, true);
+        panic_next.store(true, Ordering::Relaxed);
+        let job = jobs.lock().unwrap().pop_front().unwrap();
+        job();
+        assert_eq!(jobs.lock().unwrap().len(), 1);
+        assert!(
+            screens.machines(false).busy,
+            "the old job must not clear the new read"
+        );
+        let job = jobs.lock().unwrap().pop_front().unwrap();
+        job();
+        assert!(!screens.machines(false).busy);
     }
 
     // Projects never reads the catalog: the organization hub hands it over.
@@ -1564,6 +2026,7 @@ mod tests {
             .screens
             .machines(false)
             .effective
+            .as_ref()
             .is_some_and(|e| !e.pending));
         assert_eq!(
             h.count("machine check studio"),
@@ -1579,7 +2042,12 @@ mod tests {
             "one check at a time, and no list read meanwhile"
         );
         h.drain();
-        assert!(h.screens.machines(false).check.is_some_and(|c| !c.pending));
+        assert!(h
+            .screens
+            .machines(false)
+            .check
+            .as_ref()
+            .is_some_and(|c| !c.pending));
         h.screens.machines(true);
         h.screens.check("studio".into());
         assert_eq!(h.queued(), 1, "no check while the list reads");

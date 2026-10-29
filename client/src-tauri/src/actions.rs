@@ -2364,6 +2364,77 @@ mod tests {
             .unwrap_err(),
             "superseded"
         );
+        let peer = ComputerId::from("studio");
+        pump.push(zerus_client_core::Change::Computer {
+            computer: peer.clone(),
+            status: zerus_client_core::ComputerStatus::Live,
+        });
+        pump.push(zerus_client_core::Change::Computer {
+            computer: peer.clone(),
+            status: zerus_client_core::ComputerStatus::Ended,
+        });
+        let ended = ArchiveContext {
+            request: 4,
+            generation: pump.archive_generation(&peer),
+            eligible: Vec::new(),
+        };
+        assert_eq!(
+            grouped_archive_page(&pump, &peer, &ended, archive_fixture()).unwrap_err(),
+            "superseded"
+        );
+    }
+
+    #[test]
+    fn an_unprojectable_archive_reply_never_supplies_termination_placement() {
+        let pump = crate::pump::Pump::default();
+        let computer = ComputerId::local();
+        let row = ViewRow {
+            machine: "workstation".into(),
+            name: "codex/sample-project/review".into(),
+            run_id: Some("run-1".into()),
+            state: "running".into(),
+            ..Default::default()
+        };
+        let target = Target {
+            computer: String::new(),
+            name: row.name.clone(),
+            run_id: "run-1".into(),
+            conversation_id: String::new(),
+        };
+        pump.push(zerus_client_core::Change::Computer {
+            computer: computer.clone(),
+            status: zerus_client_core::ComputerStatus::Live,
+        });
+        pump.push(zerus_client_core::Change::Upsert {
+            computer: computer.clone(),
+            key: "run:run-1".into(),
+            row,
+        });
+        pump.termination_succeeded(pump.capture_termination(&target).unwrap());
+        pump.push(zerus_client_core::Change::Remove {
+            computer: computer.clone(),
+            key: "run:run-1".into(),
+            reason: None,
+        });
+        let context = ArchiveContext {
+            request: 1,
+            generation: 0,
+            eligible: pump.archive_termination_ids(&computer),
+        };
+        // The live row named the machine, but no hello/meta card has verified it
+        // for this archive reply. A failed projection must not supply an edit.
+        assert_eq!(
+            finish_archive_page(
+                &pump,
+                &computer,
+                &context,
+                &AtomicBool::new(false),
+                archive_fixture()
+            )
+            .unwrap_err(),
+            reads::ARCHIVE_IDENTITY_INVALID
+        );
+        assert!(pump.archive_moves().is_empty());
     }
 
     #[test]

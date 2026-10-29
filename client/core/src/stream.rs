@@ -20,8 +20,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -318,6 +318,7 @@ pub(crate) fn read_line(
 }
 
 enum Input {
+    Reconnect,
     Line {
         generation: u64,
         line: String,
@@ -369,6 +370,52 @@ enum Input {
 /// The organization edit snapshot the supervisor keeps current.
 type OrganizationShared = Arc<Mutex<Option<crate::OrganizationSnapshot>>>;
 
+/// One coalesced wake of the existing offline supervisor. A full input queue
+/// already wakes the receiver, which checks this state before waiting again.
+#[derive(Default)]
+struct Retry(AtomicU8);
+
+impl Retry {
+    const WAITING: u8 = 1;
+    const REQUESTED: u8 = 2;
+
+    fn request(&self, tx: &SyncSender<Input>) -> bool {
+        if self
+            .0
+            .compare_exchange(
+                Self::WAITING,
+                Self::REQUESTED,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .is_err()
+        {
+            return false;
+        }
+        match tx.try_send(Input::Reconnect) {
+            Ok(()) | Err(TrySendError::Full(_)) => true,
+            Err(TrySendError::Disconnected(_)) => {
+                self.begin();
+                false
+            }
+        }
+    }
+
+    fn waiting(&self) {
+        let _ = self
+            .0
+            .compare_exchange(0, Self::WAITING, Ordering::SeqCst, Ordering::SeqCst);
+    }
+
+    fn begin(&self) {
+        self.0.store(0, Ordering::SeqCst);
+    }
+
+    fn requested(&self) -> bool {
+        self.0.load(Ordering::SeqCst) == Self::REQUESTED
+    }
+}
+
 /// Polls `hgs swarm get` on its own thread until dropped.
 struct Poller {
     stop: Arc<AtomicBool>,
@@ -419,10 +466,17 @@ pub struct StreamHandle {
     organization: Arc<AtomicBool>,
     organization_snapshot: OrganizationShared,
     stop: Arc<AtomicBool>,
+    retry: Arc<Retry>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl StreamHandle {
+    /// Requests one immediate offline retry without replacing this supervisor,
+    /// its catalog or subscriptions. False online, stopped or already pending.
+    pub fn reconnect(&self) -> bool {
+        !self.stopped() && self.retry.request(&self.tx)
+    }
+
     pub fn computer(&self) -> &ComputerId {
         &self.computer
     }
@@ -705,6 +759,7 @@ pub fn spawn(
     let organization = Arc::new(AtomicBool::new(false));
     let organization_snapshot = OrganizationShared::default();
     let stop = Arc::new(AtomicBool::new(false));
+    let retry = Arc::new(Retry::default());
     let supervisor = Supervisor {
         hgs: hgs.to_owned(),
         computer: computer.clone(),
@@ -723,6 +778,7 @@ pub fn spawn(
         legacy: None,
         legacy_windows: BTreeSet::new(),
         stop: stop.clone(),
+        retry: retry.clone(),
         state: CatalogState::new(),
         generation: 0,
         child: None,
@@ -749,6 +805,7 @@ pub fn spawn(
         organization,
         organization_snapshot,
         stop,
+        retry,
         thread: Some(thread),
     }
 }
@@ -782,6 +839,7 @@ struct Supervisor {
     /// Followed sessions whose first window the polling sent.
     legacy_windows: BTreeSet<String>,
     stop: Arc<AtomicBool>,
+    retry: Arc<Retry>,
     state: CatalogState,
     generation: u64,
     child: Option<Child>,
@@ -798,6 +856,8 @@ impl Supervisor {
             if self.stop.load(Ordering::Relaxed) {
                 break;
             }
+            // A retry is in flight now; extra Refresh presses coalesce with it.
+            self.retry.begin();
             self.state.begin();
             let timeout = self.timing.probe_timeout(&self.computer);
             match probe_until(&self.hgs, &self.computer, timeout, &self.stop) {
@@ -863,6 +923,13 @@ impl Supervisor {
     }
 
     fn emit(&self, change: Change) {
+        if let Change::Computer { status, .. } = &change {
+            if matches!(status, ComputerStatus::Reconnecting { .. }) {
+                self.retry.waiting();
+            } else {
+                self.retry.begin();
+            }
+        }
         let _ = self.sink.send(StreamEvent::Change(change));
     }
 
@@ -888,6 +955,9 @@ impl Supervisor {
         self.sync_poller();
         let deadline = Instant::now() + time;
         loop {
+            if self.retry.requested() {
+                return true;
+            }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 return true;
@@ -925,6 +995,12 @@ impl Supervisor {
             if now >= deadline {
                 return true;
             }
+            if self.retry.requested() {
+                self.retry.begin();
+                if let Some(legacy) = &mut self.legacy {
+                    legacy.refresh_listing(now);
+                }
+            }
             let activity: Vec<(String, String, Option<i64>)> = lock(&self.follows)
                 .iter()
                 .filter(|(key, _)| self.state.is_followed(key))
@@ -950,6 +1026,13 @@ impl Supervisor {
                 .legacy
                 .get_or_insert_with(|| crate::legacy::Schedule::new(every));
             let reads = legacy.due(now, &follows);
+            // A capability re-probe temporarily disabled Refresh. Restore it
+            // from the listing's outcome, unless a scheduled read owns it now.
+            if legacy.listing_retryable() {
+                self.retry.waiting();
+            } else {
+                self.retry.begin();
+            }
             for read in reads {
                 self.spawn_legacy(read);
             }
@@ -1186,6 +1269,9 @@ impl Supervisor {
                     self.unsubscribe_tasks(&key);
                 }
                 Ok(Input::Control(control)) => self.write(&control),
+                // A queued wake from an older attempt must never restart a
+                // source that is online now, or a later offline attempt.
+                Ok(Input::Reconnect) => {}
                 Ok(Input::Notifications {
                     target,
                     preferences,
@@ -1565,6 +1651,44 @@ fn read_stream(stdout: impl io::Read, generation: u64, tx: SyncSender<Input>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_reconnect_is_coalesced_and_still_pending_when_the_input_queue_is_full() {
+        let retry = Retry::default();
+        let (tx, rx) = mpsc::sync_channel(1);
+        tx.send(Input::Reconnect).unwrap();
+        retry.waiting();
+        assert!(retry.request(&tx));
+        for _ in 0..1000 {
+            assert!(!retry.request(&tx));
+        }
+        assert!(
+            retry.requested(),
+            "the existing queued input wakes the waiter"
+        );
+        assert!(rx.try_recv().is_ok());
+        assert!(rx.try_recv().is_err(), "no unbounded wake messages");
+        retry.begin();
+        assert!(
+            !retry.request(&tx),
+            "an in-flight/online source is unchanged"
+        );
+        retry.waiting();
+        assert!(
+            !retry.requested(),
+            "an old queued wake never retries a later failure"
+        );
+    }
+
+    #[test]
+    fn a_reconnect_after_the_receiver_ends_is_not_left_pending() {
+        let retry = Retry::default();
+        let (tx, rx) = mpsc::sync_channel(1);
+        drop(rx);
+        retry.waiting();
+        assert!(!retry.request(&tx));
+        assert!(!retry.requested());
+    }
 
     #[test]
     fn restart_delays_are_5_15_60_then_300_seconds() {

@@ -402,16 +402,29 @@ impl Composers {
 
     /// Refresh in the composer's status line: one read of the open session
     /// while `handle` is still its composer (Qt's `sessionRefreshRequested`,
-    /// `SessionsWindow.cpp:1031-1034`, which calls `inspect()`).
+    /// `SessionsWindow.cpp:1031-1034`, which refreshes the listing and inspects).
+    /// Offline, wake only this computer's existing source outside its back-off.
     pub fn refresh(&self, handle: u64) {
-        let open = {
+        let reconnect = {
             let hub = self.lock();
-            hub.open_key
-                .as_ref()
-                .and_then(|key| hub.composers.get(key))
-                .is_some_and(|composer| composer.handle == handle)
+            if hub.closed
+                || !hub
+                    .open_key
+                    .as_ref()
+                    .and_then(|key| hub.composers.get(key))
+                    .is_some_and(|composer| composer.handle == handle)
+            {
+                return;
+            }
+            self.context(&hub)
+                .filter(|ctx| !ctx.online)
+                .map(|ctx| ctx.session.computer)
         };
-        if open {
+        if let Some(computer) = reconnect {
+            // Source callbacks run without the hub lock and keep the captured
+            // computer even if another session opens meanwhile.
+            (self.0.deps.reconnect)(&computer);
+        } else {
             self.refresh_details();
         }
     }
@@ -2801,6 +2814,7 @@ pub(crate) mod tests {
         pub(crate) now: Mutex<f64>,
         pub(crate) inspected: Mutex<Option<Value>>,
         pub(crate) inspects: AtomicUsize,
+        reconnects: Mutex<Vec<String>>,
         pub(crate) online: Mutex<bool>,
         pub(crate) write: Mutex<Option<WriteKind>>,
         pub(crate) calls: Mutex<Vec<(Target, Action, String)>>,
@@ -2833,11 +2847,20 @@ pub(crate) mod tests {
 
     /// `send_hub_on` with the test's own `spawn`.
     pub(crate) fn send_hub_with(store: &Arc<DraftStore>, spawn: Spawn) -> (Composers, Arc<Fake>) {
+        send_hub_reconnecting(store, spawn, None)
+    }
+
+    fn send_hub_reconnecting(
+        store: &Arc<DraftStore>,
+        spawn: Spawn,
+        reconnect: Option<super::super::Reconnect>,
+    ) -> (Composers, Arc<Fake>) {
         let fake = Arc::new(Fake {
             row: Mutex::new(row("claude/sample-project/review")),
             now: Mutex::new(1_793_000_100.0),
             inspected: Mutex::new(None),
             inspects: AtomicUsize::new(0),
+            reconnects: Mutex::new(Vec::new()),
             online: Mutex::new(true),
             write: Mutex::new(None),
             calls: Mutex::new(Vec::new()),
@@ -2846,6 +2869,7 @@ pub(crate) mod tests {
         });
         let (f1, f2, f3, f4) = (fake.clone(), fake.clone(), fake.clone(), fake.clone());
         let f5 = fake.clone();
+        let f6 = fake.clone();
         let composers = Composers::new(
             Arc::clone(store),
             Config {
@@ -2859,6 +2883,11 @@ pub(crate) mod tests {
                 clock: Arc::new(move || *lock(&f1.now)),
                 rows: Arc::new(move |_, _, _| Some((lock(&f2.row).clone(), *lock(&f2.online)))),
                 facts: Arc::new(move |_, _| *lock(&f4.write)),
+                reconnect: reconnect.unwrap_or_else(|| {
+                    Arc::new(move |computer| {
+                        lock(&f6.reconnects).push(computer.to_owned());
+                    })
+                }),
                 inspect: Arc::new(move |_, _| {
                     f3.inspects.fetch_add(1, Ordering::SeqCst);
                     lock(&f3.inspected)
@@ -3064,6 +3093,7 @@ pub(crate) mod tests {
                     crate::composer::archived_row(key, name).map(|row| (row, true))
                 }),
                 facts: Arc::new(|_, _| None),
+                reconnect: Arc::new(|_| {}),
                 inspect: Arc::new(|_, _| panic!("archived composer must not inspect")),
                 dispatch: Arc::new(|_, _, _| panic!("archived composer must not dispatch")),
             },
@@ -3252,6 +3282,7 @@ pub(crate) mod tests {
                 clock: Arc::new(move || *lock(&clock)),
                 rows: Arc::new(|_, _, _| Some((row("claude/sample-project/review"), true))),
                 facts: Arc::new(|_, _| None),
+                reconnect: Arc::new(|_| {}),
                 inspect: Arc::new(|_, _| panic!("nothing is open to inspect")),
                 dispatch: Arc::new(|_, _, _| Err("no call in these tests".into())),
             },
@@ -3290,6 +3321,7 @@ pub(crate) mod tests {
                 }),
                 rows: Arc::new(|_, _, _| None),
                 facts: Arc::new(|_, _| None),
+                reconnect: Arc::new(|_| {}),
                 inspect: Arc::new(|_, _| Err("timed out".into())),
                 dispatch: Arc::new(|_, _, _| Err("no call in these tests".into())),
             },
@@ -3469,6 +3501,70 @@ pub(crate) mod tests {
 
     /// Refresh reads the open session, and only for its own composer.
     #[test]
+    fn offline_refresh_nudges_only_its_own_computer_without_inspecting() {
+        let root = dir("refresh-offline");
+        let (c, fake) = send_hub(&root);
+        *lock(&fake.online) = false;
+        c.open(Some(session()));
+        let view = until(&c, |v| v.loaded);
+        c.refresh(view.handle + 1);
+        assert!(lock(&fake.reconnects).is_empty());
+        c.refresh(view.handle);
+        assert_eq!(*lock(&fake.reconnects), ["studio"]);
+        assert_eq!(fake.inspects.load(Ordering::SeqCst), 0);
+        c.open(None);
+        c.refresh(view.handle);
+        assert_eq!(*lock(&fake.reconnects), ["studio"]);
+    }
+
+    #[test]
+    fn offline_refresh_after_the_composer_closes_does_nothing() {
+        let root = dir("refresh-closed");
+        let (c, fake) = send_hub(&root);
+        *lock(&fake.online) = false;
+        c.open(Some(session()));
+        let view = until(&c, |v| v.loaded);
+        c.flush();
+        c.refresh(view.handle);
+        assert!(lock(&fake.reconnects).is_empty());
+        assert_eq!(fake.inspects.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn offline_refresh_keeps_its_computer_after_unlocking_and_a_selection_change() {
+        let root = dir("refresh-captured");
+        let (entered, received) = std::sync::mpsc::sync_channel(1);
+        let (release, held) = std::sync::mpsc::sync_channel(1);
+        let held = Mutex::new(held);
+        let (c, fake) = send_hub_reconnecting(
+            &drafts(&root),
+            Arc::new(|job| {
+                std::thread::spawn(job);
+            }),
+            Some(Arc::new(move |computer| {
+                entered.send(computer.to_owned()).unwrap();
+                lock(&held).recv_timeout(Duration::from_secs(2)).unwrap();
+            })),
+        );
+        *lock(&fake.online) = false;
+        c.open(Some(session()));
+        let view = until(&c, |v| v.loaded);
+        let refreshing = c.clone();
+        let thread = std::thread::spawn(move || refreshing.refresh(view.handle));
+        assert_eq!(
+            received.recv_timeout(Duration::from_secs(2)).unwrap(),
+            "studio"
+        );
+        c.open(Some(SessionRef {
+            computer: "other".into(),
+            ..session()
+        }));
+        release.send(()).unwrap();
+        thread.join().unwrap();
+        assert_eq!(fake.inspects.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
     fn refresh_reads_the_open_session_for_its_composer_only() {
         let root = dir("refresh");
         let (c, fake) = send_hub(&root);
@@ -3494,6 +3590,10 @@ pub(crate) mod tests {
         c.refresh(view.handle);
         std::thread::sleep(Duration::from_millis(50));
         assert_eq!(fake.inspects.load(Ordering::SeqCst), 2, "streamed");
+        assert!(
+            lock(&fake.reconnects).is_empty(),
+            "online behavior unchanged"
+        );
     }
 
     /// R1's Context chip: the reported context size as a share of its window.
@@ -3623,6 +3723,7 @@ pub(crate) mod tests {
                 clock: Arc::new(move || *lock(&clock)),
                 rows: Arc::new(|_, _, name| Some((row(name), true))),
                 facts: Arc::new(|_, _| None),
+                reconnect: Arc::new(|_| {}),
                 inspect: Arc::new(move |_, _| {
                     let _ = lock(&gate).recv_timeout(Duration::from_secs(5));
                     Ok(answer(counted.fetch_add(1, Ordering::SeqCst) + 1))
@@ -3719,6 +3820,7 @@ pub(crate) mod tests {
                     Some((row, true))
                 }),
                 facts: Arc::new(|_, _| None),
+                reconnect: Arc::new(|_| {}),
                 inspect: Arc::new(move |target, _| {
                     // The first inspect waits until the test lets it answer.
                     if counted.fetch_add(1, Ordering::SeqCst) == 0 {
@@ -4135,6 +4237,7 @@ pub(crate) mod tests {
                 facts: Arc::new(move |computer, name| {
                     facts.session_write(computer, name, || (None, true))
                 }),
+                reconnect: Arc::new(|_| {}),
                 inspect: Arc::new(|_, _| Err("timed out".into())),
                 dispatch: Arc::new(|_, _, _| Err("no call in these tests".into())),
             },
@@ -4853,6 +4956,7 @@ pub(crate) mod tests {
                 clock: Arc::new(|| 1_793_000_100.0),
                 rows: Arc::new(|_, _, name| Some((row(name), true))),
                 facts: Arc::new(|_, _| None),
+                reconnect: Arc::new(|_| {}),
                 inspect: Arc::new(|_, _| Err("timed out".into())),
                 dispatch,
             },

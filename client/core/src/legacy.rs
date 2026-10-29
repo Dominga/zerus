@@ -166,6 +166,18 @@ pub struct Follows<'a> {
 }
 
 impl Schedule {
+    /// Retry an offline listing through its existing single-flight schedule.
+    pub(crate) fn refresh_listing(&mut self, now: Instant) {
+        if !self.running.contains_key(&Slot::Listing) {
+            self.due.insert(Slot::Listing, now);
+        }
+    }
+
+    /// The last listing failed and no scheduled/manual retry owns its slot.
+    pub(crate) fn listing_retryable(&self) -> bool {
+        self.failures > 0 && !self.running.contains_key(&Slot::Listing)
+    }
+
     pub fn new(every: Intervals) -> Self {
         Self {
             every,
@@ -277,6 +289,40 @@ impl Schedule {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_offline_listing_retry_uses_the_existing_single_flight_slot() {
+        let now = Instant::now();
+        let mut schedule = Schedule::default();
+        let follows = Follows {
+            activity: &[],
+            processes: &[],
+        };
+        assert_eq!(schedule.due(now, &follows), [Read::Listing]);
+        schedule.listed(false);
+        assert!(
+            !schedule.listing_retryable(),
+            "a running listing owns its retry"
+        );
+        schedule.refresh_listing(now);
+        schedule.done(&Read::Listing, now);
+        assert!(schedule.listing_retryable());
+        assert!(
+            schedule.due(now, &follows).is_empty(),
+            "no extra read while pending"
+        );
+        schedule.refresh_listing(now);
+        schedule.refresh_listing(now);
+        assert_eq!(schedule.due(now, &follows), [Read::Listing]);
+        assert!(!schedule.listing_retryable());
+        assert!(schedule.due(now, &follows).is_empty());
+        schedule.done(&Read::Listing, now);
+        schedule.listed(true);
+        assert!(
+            !schedule.listing_retryable(),
+            "a healthy source needs no retry"
+        );
+    }
 
     const SECOND: Duration = Duration::from_secs(1);
 

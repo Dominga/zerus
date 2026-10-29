@@ -12671,3 +12671,31 @@ git commit -m "feat(client): open terminal, folder shell, folder and externally"
 - **Review Focus:** each line names its owning test above.
 - **Not in this plan:** the composer parts listed in Decisions, filed by Task 12; automatic tool approvals (a separate opt-in, off by default; nothing in A2 answers without a click); Windows ConPTY (T1b, `zerus-5wmh.9.16`); macOS microphone and camera entitlements (M1 and M2, with the coordinator); the voice driver itself (M1c, the events session's).
 - **Review of 2026-10-28** (the coordinator's amendments and a review pass): one draft store and one exit hook shared with M1c and the organization branch; R3 and R4 delivered and Task 13 rebound to them; Qt's stores read-only with a byte-for-byte test; the unknown-delivery rules made explicit and tested (stale questions, exit while saving); no digests per view; rename collisions keep both drafts; Tasks 3 and 4 split; each task adds only what it uses.
+
+
+## As built: offline composer Refresh (`zerus-5wmh.9.31`)
+
+The current Qt connection is `SessionsWindow.cpp:1031-1034`: the selected
+composer's `sessionRefreshRequested` refreshes the listing and calls `inspect()`.
+The earlier 905-912 reference is the OpenCode-start completion, not this signal.
+The client's offline equivalent nudges that computer's existing source outside
+its retry delay; it adds no poller. Online Refresh keeps its existing inspect
+behavior.
+
+`Composers::refresh` validates the open handle, captures the offline computer
+under the hub lock, then calls `Deps::reconnect` after unlocking.
+`AppState::reconnect` routes only to an existing Fleet; replay and a source not
+yet started do nothing. `Fleet::reconnect` reaches only that computer's existing
+`StreamHandle`. One bounded atomic wake coalesces pending requests, also when
+the input queue is full. Online or in-flight sources, absent/ended computers
+and stale wake inputs do nothing. Catalog state and every subscription remain
+owned by the same supervisor. For older CLIs, the wake makes the existing
+single-flight listing slot due now instead of starting a second read loop.
+Its retry eligibility comes from the last listing outcome and whether that slot
+is in flight, including after a periodic capability re-probe.
+
+Fake-source regressions cover immediate retry outside a 30-second back-off,
+repeated requests, unchanged other computers, retained rows/follows, online and
+absent/ended refusals, queue saturation and old-CLI listing retry. Composer
+regressions cover stale handles, closed/deselected views, unchanged online
+inspection and a selection change while the captured callback is held.

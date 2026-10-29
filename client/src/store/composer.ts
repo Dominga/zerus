@@ -155,6 +155,10 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
   const retrying = new Set<string>();
   /** Opens under way: the editor stays read-only, so no key is typed into the composer being left. */
   const [opening, setOpening] = createSignal(0);
+  /** Quit has asked for the last text: freeze typing while its bounded handshake runs. */
+  const [closing, setClosing] = createSignal(false);
+  /** Edits already handed to IPC, including a composer left meanwhile. */
+  const edits = new Set<Promise<void>>();
   /** A send started: locked until Rust's view shows it (sending, waiting) or hands the text back. */
   const [starting, setStarting] = createSignal(false);
   /** The disabled Send's hint (Qt shows the status as a tooltip at the editor). */
@@ -184,7 +188,7 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
   const operationLocked = () => {
     const v = view();
     const h = v?.handle;
-    return opening() > 0 || (h !== undefined && (pending.has(h) || calling.has(h))) || handBack() !== undefined || starting() || question()
+    return closing() || opening() > 0 || (h !== undefined && (pending.has(h) || calling.has(h))) || handBack() !== undefined || starting() || question()
       || !v?.loaded || v.attaching || v.sending || !!v.waiting;
   };
   const locked = () => operationLocked() || !!view()?.session_blocks_input;
@@ -200,7 +204,7 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
     return !(v.attachments.length > 0 && !v.attachments_available);
   };
   /** Qt adds the push action to this message field only (MessageComposer.cpp:841-853). */
-  const pushEnabled = () => opening() === 0 && !!view() && view()?.input_visible !== false;
+  const pushEnabled = () => !closing() && opening() === 0 && !!view() && view()?.input_visible !== false;
   /** The old session's queue must not remain actionable while its successor opens. */
   const queue = () => opening() > 0 ? null : view()?.queue ?? null;
 
@@ -264,7 +268,20 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
     if (!dirty || h === undefined) return;
     dirty = false;
     const s = selection();
-    try { await port.edit(h, rev, epoch, text(), s.end, s.start); } catch { /* outside the app: nothing to keep */ }
+    let write: Promise<void> | undefined;
+    try {
+      write = port.edit(h, rev, epoch, text(), s.end, s.start);
+      edits.add(write);
+      await write;
+    } catch { /* outside the app: nothing to keep */ }
+    finally { if (write) edits.delete(write); }
+  }
+
+  /** The page acknowledges quit only after its last edit has reached Rust. */
+  async function flushForExit() {
+    setClosing(true);
+    await flush();
+    await Promise.allSettled([...edits]);
   }
 
   function changed() {
@@ -337,6 +354,7 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
 
   /** Panel and window shortcut use this hub command; a push keeps its own handle. */
   async function sendNow(queueId?: string): Promise<boolean> {
+    if (closing()) return false;
     if (opening() > 0) {
       notices("info", "Nothing queued can be sent now", false);
       return false;
@@ -392,6 +410,7 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
     status: (): StatusLine => statusLine(view(), error(), tooLong()),
     apply, receive,
     async open(session: SessionRef | undefined) {
+      if (closing()) return;
       setOpening((n) => n + 1);
       try {
         // The composer being left keeps what was typed: its edit goes first.
@@ -422,7 +441,7 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
       setSelection({ start, end });
       if (!locked() && view()) changed();
     },
-    flush,
+    flush, flushForExit,
     attachFiles: () => exclusive((h) => { const s = ordered(); return port.pick(h, s.start, s.end); }),
     /** Qt's canAttachFiles: the session takes attachments and nothing locks the composer. */
     canAttach: () => !!view()?.attachments_available && !locked(),

@@ -233,7 +233,7 @@ pub fn menu_event(app: &AppHandle, id: &str) {
             }
             crate::desk::set_mode(app, mode);
         }
-        Some(MenuAction::Quit) => app.exit(0),
+        Some(MenuAction::Quit) => crate::exit_flush::quit_with_flush(app, 0),
         None => {}
     }
 }

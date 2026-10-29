@@ -16,11 +16,15 @@ import { invoke } from "@tauri-apps/api/core";
 import { receive } from "./store/session";
 import { startDesk } from "./store/desk";
 import { startDrops } from "./store/drops";
+import { composer } from "./store/composer";
+import { exitFlush } from "./store/exitFlush";
 import { startMotion } from "./ui/motion";
 
 const [mode, setMode] = createSignal<BridgeMode | "starting">("starting");
 
 // The motion attributes are on the root before the first frame.
+exitFlush.register(composer.flushForExit);
+void exitFlush.start().catch((error) => console.warn("Zerus Next: exit flush listener did not start", error));
 startMotion();
 render(() => <App mode={mode} />, document.getElementById("root")!);
 // The menu bar and notifications open sessions and show notices in this window.

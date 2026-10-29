@@ -479,6 +479,10 @@ export const onOpenSession = (listener: (target: OpenSession) => void) => onEven
 /** `desk-notice`: a notice for the window; resolves with the stop once listening. */
 export const onDeskNotice = (listener: (notice: DeskNotice) => void) => onEvent<DeskNotice>("desk-notice", listener);
 
+/** Rust asks every mounted composer to flush before its bounded quit. */
+export const onExitFlush = (listener: (nonce: string) => void) => onEvent<string>("exit-flush", listener);
+export const acknowledgeExitFlush = (nonce: string) => invoke<void>("exit_flush_ack", { nonce });
+
 type DeskWindow = { __zerusDeskPage?: number; __zerusDeskPageReady?: (page: number) => void };
 
 /** This page load's number, which the native side tells the page once it has loaded (`desk::page_loaded`). */

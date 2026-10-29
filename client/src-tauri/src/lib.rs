@@ -60,6 +60,8 @@ mod signals;
 mod speech_settings;
 #[cfg(feature = "live")]
 mod terminal;
+#[cfg(feature = "live")]
+mod updates;
 #[cfg(feature = "media")]
 mod voice;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -575,6 +577,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                         }
                     }
                 }
+                app.manage(updates::start(app.handle()));
                 if menu_bar {
                     lifecycle::start_fleet(|| app.state::<commands::AppState>().start_source());
                 }
@@ -1021,6 +1024,13 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         composer::questions::question_decide,
         composer::questions::question_skip,
         composer::questions::question_cold,
+        updates::updates_view,
+        updates::updates_check,
+        updates::updates_set_channel,
+        updates::updates_set_automatic,
+        updates::updates_open,
+        updates::updates_copy_command,
+        updates::updates_restart,
         #[cfg(feature = "media")]
         voice::voice_open,
         #[cfg(feature = "media")]

@@ -58,6 +58,10 @@ pub enum DeskInput {
     /// This device's attention marks or its pending read marks changed: the
     /// desk reads them again (`FleetState::setReadState`).
     Marks,
+    Updates {
+        version: Option<String>,
+        restart: bool,
+    },
     /// A notification's default action (`MacAttentionNotifier.mm:20-28`).
     Clicked(String),
     /// A delivery failed (`AttentionNotifier::failed`).
@@ -87,6 +91,8 @@ pub struct Notice {
 pub struct Pending {
     pub open: Option<OpenSession>,
     pub notices: Vec<Notice>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub updates: bool,
 }
 
 impl Pending {
@@ -120,6 +126,14 @@ impl Inbox {
             send(target);
         } else {
             self.pending.open = Some(target);
+        }
+    }
+
+    pub fn open_updates(&mut self, send: impl FnOnce()) {
+        if self.ready {
+            send();
+        } else {
+            self.pending.updates = true;
         }
     }
 
@@ -531,6 +545,11 @@ impl DeskLoop {
                     outcome.publish = true;
                 }
                 DeskInput::Marks => marks = true,
+                DeskInput::Updates { version, restart } => {
+                    if self.desk.set_updates(version, restart) {
+                        outcome.publish = true;
+                    }
+                }
                 DeskInput::Clicked(token) => {
                     // A token that does not decode opens nothing (`TrayAgent.cpp:176-179`).
                     if let Some(target) = attention::target(&token) {
@@ -799,6 +818,19 @@ pub fn open_session(app: &AppHandle, computer: &ComputerId, key: &str) {
     );
 }
 
+pub fn open_updates(app: &AppHandle) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let send = || {
+            let _ = handle.emit("open-updates", ());
+        };
+        match handle.try_state::<DeskState>() {
+            Some(state) => lock(&state.inbox).open_updates(send),
+            None => send(),
+        }
+    });
+}
+
 fn open(app: &AppHandle, target: OpenSession) {
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
@@ -980,6 +1012,8 @@ fn store_mode(app: &AppHandle, mode: OpenMode) {
 pub enum MenuAction {
     /// "Open Zerus" (`sessionsRequested`).
     Open,
+    Updates,
+    Restart,
     /// A running session opens or is copied; a saved one opens its row.
     Session {
         computer: ComputerId,
@@ -1106,6 +1140,11 @@ impl Bar {
             };
             items.push(match entry {
                 Entry::Open => chosen_by("Open Zerus", MenuAction::Open),
+                Entry::Update(version) => chosen_by(
+                    &format!("Update available: Zerus {version}"),
+                    MenuAction::Updates,
+                ),
+                Entry::Restart => chosen_by("Restart to finish update", MenuAction::Restart),
                 Entry::Separator => Item::Separator,
                 Entry::Label(text) => Item::Label {
                     id: id.clone(),

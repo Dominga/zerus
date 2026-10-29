@@ -1614,11 +1614,63 @@ mod tests {
         let fake = Fake::new(json!([{"stdout":reply}]));
         let pump = Pump::default();
         let organization = fake.organization(&pump, true);
-        organization.set_source(snapshot("d1"));
-        organization.observe(&state("d1"));
+        let writer = organization.writer();
+        let mut initial = full("d1");
+        initial["organization"]["projects"][1]["sessions"] =
+            json!(["workstation\narchive\n00000000-0000-4000-8000-000000000001"]);
+        let base = initial["organization"].clone();
+        organization.set_source(Arc::new(move || {
+            Some(OrganizationSnapshot {
+                digest: "d1".into(),
+                base: base.clone(),
+                versions: json!({}),
+            })
+        }));
+        let membership = Arc::new(zerus_client_core::swarm::members(&initial["organization"]));
+        initial.as_object_mut().unwrap().remove("versions");
+        organization.observe(&Change::Organization {
+            computer: ComputerId::local(),
+            update: OrganizationUpdate::State {
+                value: Arc::new(initial),
+                digest: "d1".into(),
+                membership,
+            },
+        });
         finished_archive(&pump);
+        pump.push(Change::Machine {
+            computer: ComputerId::local(),
+            machine: zerus_client_core::MachineMeta {
+                host: Some("workstation".into()),
+                ..Default::default()
+            },
+        });
+        let mut page = [ViewRow {
+            state: "archived".into(),
+            archive_id: Some("00000000-0000-4000-8000-000000000001".into()),
+            run_id: Some("run-1".into()),
+            ..Default::default()
+        }];
+        let snapshot = pump
+            .place_archived(&ComputerId::local(), 37, 0, &mut page)
+            .unwrap();
+        assert_eq!(
+            snapshot[0].group, "ungrouped",
+            "explicit archive membership precedes remembered live placement"
+        );
+        pump.take(Duration::ZERO);
+        drop(writer);
         organization.0.wake.notify_all();
         wait_until("the archive placement apply", || fake.settled_after(1));
+        let delta = pump.take(Duration::ZERO).groups;
+        let archived = delta
+            .iter()
+            .find(|place| place.key.starts_with("archive:"))
+            .unwrap();
+        assert_eq!(
+            (archived.group.as_str(), archived.archive_request),
+            ("alpha", Some(37))
+        );
+        assert_eq!(snapshot[0].group, "ungrouped");
         assert_eq!(fake.applies().len(), 1);
         let sent = input(&fake.applies()[0]);
         let members = zerus_client_core::swarm::members(&sent["desired"]);

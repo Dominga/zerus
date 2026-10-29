@@ -895,6 +895,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         actions::archive_page,
         actions::archived_activity,
         actions::cancel_archive_pages,
+        actions::reset_archive_pages,
         clipboard::copy_text,
         clipboard::copy_verbatim,
         organization::move_to_project,

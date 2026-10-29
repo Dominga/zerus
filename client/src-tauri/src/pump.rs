@@ -237,12 +237,25 @@ impl Pump {
     pub fn place_archived(
         &self,
         computer: &ComputerId,
+        request: u64,
+        generation: u64,
         rows: &mut [ViewRow],
     ) -> Result<Vec<GroupOut>, &'static str> {
         if rows.len() > zerus_client_core::reads::ARCHIVE_PAGE_ROWS {
             return Err(zerus_client_core::reads::ARCHIVE_PAGE_INVALID);
         }
         let mut inner = self.lock();
+        if !inner
+            .mirror
+            .computers
+            .get(&computer.0)
+            .is_some_and(|source| {
+                source.status != Some(ComputerStatus::Ended)
+                    && source.archive_generation == generation
+            })
+        {
+            return Err("superseded");
+        }
         let machine = computer
             .alias()
             .map(str::to_owned)
@@ -279,9 +292,28 @@ impl Pump {
                 })
             })
             .collect::<Result<_, &'static str>>()?;
-        let out = inner.grouping.place_archived(&identities);
+        let out = inner
+            .grouping
+            .retain_archive_page(computer, request, &identities)
+            .ok_or("superseded")?;
         self.wake(inner);
         Ok(out)
+    }
+
+    /// Pin the source before archive I/O; an ended/restarted source invalidates it.
+    pub fn archive_generation(&self, computer: &ComputerId) -> u64 {
+        self.lock()
+            .mirror
+            .computers
+            .get(&computer.0)
+            .map_or(0, |rows| rows.archive_generation)
+    }
+
+    /// Reset loaded placement identities without conflating it with hiding Archive.
+    pub fn reset_archive_pages(&self, through: u64) {
+        let mut inner = self.lock();
+        inner.grouping.reset_archive_pages(through);
+        self.wake(inner);
     }
 
     /// A computer's machine card, once its listing named one.
@@ -393,6 +425,7 @@ struct Mirror {
 
 #[derive(Default)]
 struct Rows {
+    archive_generation: u64,
     status: Option<ComputerStatus>,
     /// The latest card data; an `ended` status drops it.
     machine: Option<MachineMeta>,
@@ -435,6 +468,7 @@ impl Mirror {
                 let entry = self.computers.entry(computer.0.clone()).or_default();
                 entry.status = Some(*status);
                 if *status == ComputerStatus::Ended {
+                    entry.archive_generation = entry.archive_generation.saturating_add(1);
                     entry.machine = None;
                 }
             }

@@ -89,11 +89,11 @@ impl Pump {
             .collect()
     }
 
-    pub(crate) fn observe_archive_terminations(
+    pub(crate) fn observe_archive_terminations<'a>(
         &self,
         computer: &ComputerId,
         eligible: &[Uuid],
-        rows: &[ViewRow],
+        rows: impl IntoIterator<Item = &'a ViewRow> + Clone,
     ) {
         let mut inner = self.lock();
         for pending in &mut inner.terminations.0 {
@@ -106,7 +106,8 @@ impl Pump {
                 continue;
             }
             pending.members = rows
-                .iter()
+                .clone()
+                .into_iter()
                 .take(zerus_client_core::reads::ARCHIVE_PAGE_ROWS)
                 .filter(|row| {
                     row.state == "archived"

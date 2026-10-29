@@ -313,3 +313,256 @@ fn pruning_archive_ranks_keeps_live_and_explicit_members_as_well_as_the_page() {
     );
     assert_eq!(grouping.members_of(INBOX).len(), 1);
 }
+
+#[test]
+fn loaded_archive_pages_follow_project_and_order_edits_without_repeating_unchanged_rows() {
+    use zerus_client_core::swarm::edit::Intent;
+    let computer = ComputerId::local();
+    let a = archive_member("workstation", "a");
+    let b = archive_member("workstation", "b");
+    let mut grouping = Grouping::default();
+    present(&mut grouping, &[&a, &b], &[], 1);
+    grouping.take();
+    let reply = grouping
+        .retain_archive_page(
+            &computer,
+            17,
+            &[
+                archived("workstation", "a", ""),
+                archived("workstation", "b", ""),
+            ],
+        )
+        .unwrap();
+    assert!(
+        grouping.take().0.is_empty(),
+        "the reply itself is not a delta"
+    );
+    present(&mut grouping, &[&b], &[&a], 2);
+    let delta = grouping.take().0;
+    assert_eq!(delta.len(), 1);
+    assert_eq!(
+        (&*delta[0].key, &*delta[0].group, delta[0].archive_request),
+        ("archive:a", "beta", Some(17))
+    );
+    let a_rank = delta[0].rank;
+    assert_eq!(
+        reply[0].group, "alpha",
+        "the earlier reply snapshot remains immutable"
+    );
+    grouping.edited(&Intent::Move {
+        members: vec![b.clone()],
+        project: "beta".into(),
+        before: Some(a.clone()),
+    });
+    present(&mut grouping, &[], &[&a, &b], 3);
+    assert!(grouping
+        .take()
+        .0
+        .iter()
+        .any(|place| place.key == "archive:b" && place.group == "beta"));
+    grouping.edited(&Intent::Sort {
+        project: "beta".into(),
+        members: vec![a.clone(), b.clone()],
+    });
+    present(&mut grouping, &[], &[&a, &b], 4);
+    let delta = grouping.take().0;
+    assert_eq!(
+        delta.len(),
+        1,
+        "the first member already had its sorted rank"
+    );
+    assert_eq!(delta[0].key, "archive:b");
+    assert_eq!(delta[0].archive_request, Some(17));
+    assert!(delta[0].rank > a_rank);
+    present(&mut grouping, &[], &[&a, &b], 5);
+    assert!(grouping.take().0.is_empty());
+    assert!(
+        grouping.members_of("beta").is_empty(),
+        "identities never become live sessions"
+    );
+}
+
+#[test]
+fn loaded_archive_pages_follow_default_and_delayed_run_memory_changes() {
+    let computer = ComputerId::local();
+    let mut grouping = Grouping::default();
+    present(&mut grouping, &[], &[], 1);
+    grouping.take();
+    let reply = grouping
+        .retain_archive_page(&computer, 1, &[archived("workstation", "a", "run")])
+        .unwrap();
+    assert_eq!(reply[0].group, INBOX);
+    let org =
+        json!({"default_project":"beta", "projects":[{"id":"alpha"},{"id":"beta"},{"id":INBOX}]});
+    grouping.present(&org, Arc::new(members(&org)), 2);
+    assert_eq!(grouping.take().0[0].group, "beta");
+    grouping.seed_runs(json!({"workstation\nrun":"alpha"}).as_object().unwrap());
+    assert_eq!(grouping.take().0[0].group, "alpha");
+    // A newly observed implicit live assignment forgets the remembered project.
+    grouping.observe(&live("workstation", "codex/sample-project/review", "run"));
+    let delta = grouping.take().0;
+    assert_eq!(
+        delta.iter().find(|p| p.key == "archive:a").unwrap().group,
+        "beta"
+    );
+    assert!(delta
+        .iter()
+        .find(|p| p.key == "run:run")
+        .unwrap()
+        .archive_request
+        .is_none());
+}
+
+#[test]
+fn archive_reply_replacement_and_reset_reject_stale_requests_and_old_dirty_deltas() {
+    let computer = ComputerId::local();
+    let mut grouping = Grouping::default();
+    present(&mut grouping, &[], &[], 1);
+    grouping.take();
+    grouping
+        .retain_archive_page(&computer, 8, &[archived("workstation", "old", "")])
+        .unwrap();
+    let old = archive_member("workstation", "old");
+    present(&mut grouping, &[&old], &[], 2);
+    grouping
+        .retain_archive_page(&computer, 10, &[archived("workstation", "new", "")])
+        .unwrap();
+    assert!(grouping
+        .retain_archive_page(&computer, 9, &[archived("workstation", "stale", "")])
+        .is_none());
+    assert!(
+        grouping.take().0.is_empty(),
+        "a replaced page's unsent delta is discarded"
+    );
+    let new = archive_member("workstation", "new");
+    present(&mut grouping, &[], &[&new], 3);
+    let delta = grouping.take().0;
+    assert_eq!(delta.len(), 1);
+    assert_eq!(
+        (&*delta[0].key, delta[0].archive_request),
+        ("archive:new", Some(10))
+    );
+    grouping.reset_archive_pages(9);
+    present(&mut grouping, &[&new], &[], 4);
+    assert_eq!(
+        grouping.take().0[0].archive_request,
+        Some(10),
+        "an older reset preserves a newer reply"
+    );
+    grouping.reset_archive_pages(10);
+    present(&mut grouping, &[], &[&new], 5);
+    assert!(grouping.take().0.is_empty());
+    assert!(grouping.retain_archive_page(&computer, 10, &[]).is_none());
+    assert!(grouping.retain_archive_page(&computer, 11, &[]).is_some());
+}
+
+#[test]
+fn archive_identity_memory_is_one_fifty_row_page_per_computer_and_ends_with_its_source() {
+    let mut grouping = Grouping::default();
+    present(&mut grouping, &[], &[], 1);
+    grouping.take();
+    let rows: Vec<_> = (0..60)
+        .map(|n| archived("workstation", &format!("a{n}"), ""))
+        .collect();
+    assert_eq!(
+        grouping
+            .retain_archive_page(&ComputerId::local(), 1, &rows)
+            .unwrap()
+            .len(),
+        50
+    );
+    let peer = ComputerId::from("studio");
+    let mut peer_row = archived("studio", "peer", "");
+    peer_row.computer = peer.clone();
+    grouping.retain_archive_page(&peer, 2, &[peer_row]).unwrap();
+    let org = json!({"default_project":"alpha","projects":[{"id":"alpha"},{"id":INBOX}]});
+    grouping.present(&org, Arc::new(members(&org)), 2);
+    grouping.observe(&Change::Computer {
+        computer: ComputerId::local(),
+        status: zerus_client_core::ComputerStatus::Ended,
+    });
+    let delta = grouping.take().0;
+    assert_eq!(
+        delta.len(),
+        1,
+        "an ended computer loses even its pending deltas"
+    );
+    assert_eq!(delta[0].computer, peer);
+    let org = json!({"default_project":INBOX,"projects":[{"id":"alpha"},{"id":INBOX}]});
+    grouping.present(&org, Arc::new(members(&org)), 3);
+    assert_eq!(grouping.take().0.len(), 1);
+    // Replacing a page with an empty reply forgets its old identities too.
+    grouping.retain_archive_page(&peer, 3, &[]).unwrap();
+    grouping.present(&json!({"projects":[{"id":"alpha"}]}), Arc::default(), 4);
+    assert!(grouping.take().0.is_empty());
+}
+
+#[test]
+fn archive_request_is_additive_and_live_group_json_stays_unchanged() {
+    let old = json!({"computer":"", "key":"run:r", "group":"alpha", "rank":5});
+    let place: zerus_client_core::GroupOut = serde_json::from_value(old.clone()).unwrap();
+    assert_eq!(place.archive_request, None);
+    assert_eq!(serde_json::to_value(place).unwrap(), old);
+}
+
+#[test]
+fn evicting_another_computers_oldest_run_replaces_its_loaded_archive_placement() {
+    let mut layout = Layout::default();
+    layout.remember_run("workstation", "old", Some("alpha"));
+    for n in 1..zerus_client_core::swarm::layout::MAX_RUNS {
+        layout.remember_run("workstation", &format!("run-{n}"), Some("alpha"));
+    }
+    let mut grouping = Grouping::new(layout);
+    let member = "studio\ncodex/sample-project/new";
+    present(&mut grouping, &[], &[member], 1);
+    grouping.take();
+    assert_eq!(
+        grouping
+            .retain_archive_page(
+                &ComputerId::local(),
+                1,
+                &[archived("workstation", "a", "old")]
+            )
+            .unwrap()[0]
+            .group,
+        "alpha"
+    );
+    let mut change = live("studio", "codex/sample-project/new", "new");
+    if let Change::Upsert { computer, .. } = &mut change {
+        *computer = ComputerId::from("studio");
+    }
+    grouping.observe(&change);
+    let delta = grouping.take().0;
+    assert_eq!(
+        delta.iter().find(|p| p.key == "archive:a").unwrap().group,
+        INBOX
+    );
+}
+
+#[test]
+fn pruning_on_a_quiet_catalog_protects_every_retained_computers_page() {
+    let mut grouping = Grouping::default();
+    present(&mut grouping, &[], &[], 1);
+    grouping.take();
+    grouping
+        .retain_archive_page(&ComputerId::local(), 1, &[archived("workstation", "a", "")])
+        .unwrap();
+    let peer = ComputerId::from("studio");
+    let mut row = archived("studio", "b", "");
+    row.computer = peer.clone();
+    grouping.retain_archive_page(&peer, 2, &[row]).unwrap();
+    let mut layout = saved(&mut grouping);
+    for n in 0..MAX_MEMBERS + 1024 {
+        layout.rank(INBOX, &format!("workstation\narchive\nold-{n}"));
+    }
+    grouping.replace_layout(layout);
+    grouping.place_archived(&[archived("workstation", "temporary", "")]);
+    assert_eq!(saved(&mut grouping).len(), 3);
+    let org = json!({"default_project":"alpha", "projects":[{"id":"alpha"},{"id":INBOX}]});
+    grouping.present(&org, Arc::new(members(&org)), 2);
+    let delta = grouping.take().0;
+    assert_eq!(delta.len(), 2);
+    assert!(delta
+        .iter()
+        .any(|p| p.computer == peer && p.key == "archive:b"));
+}

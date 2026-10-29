@@ -1370,8 +1370,8 @@ the task waiting with `waits`
 (`{"for":"zerus","on":["model"],"reason":"...","at":...}`) and one inbox item;
 `hgs team retry` or a reassignment clears it, and a waiting task is never
 retried on its own. The steps Zerus took are recorded on the attempt's
-`prepare` (`[{step, member, from, to, at, result, reason}]`, `result` is
-`done`, `skipped`, `refused` or `uncertain`).
+`prepare` (`[{step, from, to, at, result, reason}]` in the order branch, model,
+context; `result` is `done`, `skipped`, `refused` or `uncertain`).
 
 `context_before_task` on a role (copied into the member when it joins, and
 overridable per member in the team settings) is `none` (default), `compact` or
@@ -1381,6 +1381,10 @@ waits for its confirmation; a clear starts a new conversation and the member's
 `SessionRef` follows it, so the task text must not say "as before". An agent
 without the action (OpenCode) gets `none` with one feed note; a refused action
 leaves the task waiting, an unconfirmed one is `uncertain` and is never retried.
+While the action runs the task's `waits` is `{"for":"zerus","on":["context"],
+"state":"waiting",...}` with the action's request, so a restarted worker reads
+the same request instead of running it again; it is not an inbox item until it
+fails.
 
 ### Stages Zerus runs itself: a command, a land, a branch per task
 

@@ -6256,6 +6256,84 @@ mod tests {
         assert!(stage_hand_out(&mut store, &t.id, 1, "dev", "").is_err());
     }
 
+    #[test]
+    fn a_review_and_a_test_stage_reach_their_members_through_the_dispatcher() {
+        // U36 stage delivery, end to end through a tick: the planner names the
+        // stage member, run_step gives it the stage and sends the hand-off, and
+        // the member's verdict moves the task on; the implementer is never one.
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("proj");
+        std::fs::create_dir_all(&folder).unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let t = staged(&folder.display().to_string());
+        store.create("11111111-1111-4111-8111-111111111594", &json!({}), t.clone(), vec![]).unwrap();
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        let record = sent.clone();
+        set_fake_hgs(Some(Box::new(move |_, args: &[&str], _: Option<&Value>| {
+            assert_eq!(args.first().copied(), Some("send"));
+            record.borrow_mut().push(args.get(1).copied().unwrap_or_default().to_owned());
+            Ok(fake_output(0, r#"{"status":"submitted"}"#, ""))
+        })));
+        let tick = |store: &mut Store| -> anyhow::Result<Vec<Step>> {
+            let team = store.load(&t.id)?.context("unknown team")?;
+            let planned: Vec<Step> = steps(&team, &free_sessions(), now()).into_iter().filter(|step| matches!(step, Step::StageOut { .. })).collect();
+            for step in &planned {
+                run_step(store, &team, step, "")?;
+            }
+            Ok(planned)
+        };
+        let verdict = |store: &mut Store, member: &str| -> anyhow::Result<()> {
+            let team = store.load(&t.id)?.context("unknown team")?;
+            let current = super::super::commands::current_view(&team, member)?;
+            let attempt = current["attempt"].as_str().context("no stage attempt")?.to_owned();
+            store.mutate(None, &t.id, None, |team, events| {
+                ops::apply(team, "report", &json!({"task":1,"attempt":attempt,"verdict":"pass","text":"Fine"}), &Actor::Member(member.into()), &BTreeSet::new(), events)
+            })?;
+            Ok(())
+        };
+        let review = tick(&mut store);
+        let reviewed = verdict(&mut store, "rev");
+        let after_review = store.load(&t.id).unwrap().unwrap();
+        let test = tick(&mut store);
+        let tested = verdict(&mut store, "qa");
+        let again = tick(&mut store);
+        set_fake_hgs(None);
+        assert_eq!(review.unwrap(), [Step::StageOut { task: 1, member: "rev".into() }]);
+        reviewed.unwrap();
+        assert_eq!(after_review.task(1).unwrap().status, TaskStatus::InTest, "the review passed");
+        assert_eq!(test.unwrap(), [Step::StageOut { task: 1, member: "qa".into() }]);
+        tested.unwrap();
+        assert!(again.unwrap().is_empty(), "no stage is left to give out");
+        let saved = store.load(&t.id).unwrap().unwrap();
+        let task = saved.task(1).unwrap();
+        assert_eq!(task.status, TaskStatus::Submitted, "after its stages the task is the lead's");
+        let runs = &task.pipeline_run.as_ref().unwrap().runs;
+        assert_eq!(
+            runs.iter().map(|run| (run.kind.as_str(), run.member.as_str(), run.state)).collect::<Vec<_>>(),
+            [("review", "rev", StageState::Passed), ("test", "qa", StageState::Passed)]
+        );
+        assert!(runs.iter().all(|run| run.delivered_at.is_some()));
+        assert_eq!(*sent.borrow(), ["claude/x/rev", "kimi/x/qa"], "each stage member got its own hand-off, the implementer none");
+        let kinds: Vec<String> = store.events(&t.id, None, 200).unwrap()["items"].as_array().unwrap().iter().map(|item| item["kind"].as_str().unwrap().to_owned()).collect();
+        assert_eq!(kinds.iter().filter(|kind| *kind == "stage_delivered").count(), 2, "{kinds:?}");
+    }
+
+    #[test]
+    fn a_command_stage_is_never_given_to_a_member() {
+        // U47 with U36 delivery: a stage Zerus runs itself has no candidates,
+        // so the dispatcher starts its command instead of a member hand-off.
+        let mut t = staged("C:\\proj");
+        let pipeline = t.task_mut(1).unwrap().pipeline_run.as_mut().unwrap();
+        pipeline.stages[0] = PipelineStage {
+            kind: "command".into(),
+            command: Some(Check { command: "cargo test --locked".into(), expect_exit: 0, timeout_minutes: 5 }),
+            ..Default::default()
+        };
+        let found = steps(&t, &free_sessions(), 100.0);
+        assert!(!found.iter().any(|step| matches!(step, Step::StageOut { .. })), "{found:?}");
+        assert!(found.iter().any(|step| matches!(step, Step::StageCommand { task: 1, .. })), "{found:?}");
+    }
+
     fn session(name: &str, run: &str, free: bool) -> Seen {
         Seen { name: name.into(), run_id: run.into(), conversation_id: "c".into(), free, idle: free, live: true, ..Default::default() }
     }
@@ -7782,7 +7860,7 @@ mod tests {
             assert!(!plan::ready(&saved).contains(&1));
             assert_eq!(super::inbox::waits(&saved, task, false).unwrap()["for"], "zerus");
             let items = super::inbox::items(&saved);
-            assert!(items.iter().any(|item| item.kind == "prepare_failed" && item.task == Some(1)), "{items:?}");
+            assert!(items.iter().any(|item| item.kind == "task_waits" && item.task == Some(1)), "{items:?}");
             // A retry (the lead or the owner) starts the preparation again.
             let mut cleared = saved.clone();
             let mut events = Vec::new();

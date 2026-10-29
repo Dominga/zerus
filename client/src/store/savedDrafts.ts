@@ -3,6 +3,8 @@ import { createStore, produce } from "solid-js/store";
 import type { ConflictsPage, DraftSource, SavedDraftDetail, SavedDraftItem, SavedDraftsPage } from "../types";
 import type { Session } from "../ui/sessions/types";
 
+const folderName = (s: Session) => s.cwd.split(/[\\/]/).filter(Boolean).pop() ?? "";
+
 // Saved drafts (Qt's MessageComposer::showSavedDrafts, MessageComposer.cpp
 // 1230-1387) over src-tauri's composer/saved.rs. Three sections: this
 // computer's drafts, Qt's ("From the previous Zerus app") and the copies the
@@ -116,6 +118,28 @@ export function draftOwnerRow(item: SavedDraftItem, rows: Iterable<Session>): Se
     if (item.computer && s.rawMachine === item.computer) named = s;
   }
   return named;
+}
+
+/** A subagent to open only while it is in the draft's conversation (Qt's childKey check). */
+export function draftSubagent(item: SavedDraftItem, owner: Session): string | undefined {
+  if (item.kind !== "subagent") return undefined;
+  const parts = item.key.split("\n");
+  const conversation = parts[2] ?? "";
+  const child = parts[3] ?? "";
+  if (!child || owner.conversationId !== conversation || !owner.subagents?.some((agent) => agent.id === child)) return undefined;
+  return child;
+}
+
+/** The catalog roles a Saved drafts row takes when its owner is listed. */
+export function draftPresentation(item: SavedDraftItem, owner: Session | undefined) {
+  return {
+    title: owner?.title ?? item.caption,
+    machine: owner?.machine ?? item.machine,
+    agent: owner?.agent,
+    computer: owner?.computer,
+    checkout: owner ? [folderName(owner), owner.branch].filter(Boolean).join(" / ") : item.meta,
+    model: owner && item.kind !== "subagent" ? [owner.model, owner.effort].filter(Boolean).join(" ") : "",
+  };
 }
 
 /** "d MMM HH:mm" in local time. */

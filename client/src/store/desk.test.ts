@@ -3,9 +3,11 @@ import * as bridge from "../bridge";
 import * as ui from "./ui";
 import * as organization from "./organization";
 import * as settingsSections from "../ui/screens/settings/sections";
+import { listRows } from "../ui/sessions/model";
 import { startDesk } from "./desk";
 
 vi.mock("../ui/screens/settings/sections", () => ({ openSettings: vi.fn() }));
+vi.mock("../ui/sessions/model", () => ({ listRows: vi.fn() }));
 vi.mock("../bridge", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../bridge")>()),
   onOpenSession: vi.fn(async () => () => {}),
@@ -93,6 +95,23 @@ describe("desk wiring", () => {
     expect(shown.setProjectFilter).toHaveBeenCalledWith([]);
     expect(shown.setSearch).toHaveBeenCalledWith("");
     expect(shown.setSubagentOpen).toHaveBeenCalledWith(undefined);
+  });
+
+  it("preserves filters only while the draft's owner is listed", async () => {
+    const open = await opener();
+    vi.mocked(listRows).mockReturnValue([{ type: "card", id: "mac\nrun:folded" } as never]);
+    open({ computer: "mac", key: "run:folded", preserveFilters: true });
+    expect(shown.setStateFilter).not.toHaveBeenCalled();
+    expect(shown.setMachineFilter).not.toHaveBeenCalled();
+    expect(shown.setProjectFilter).not.toHaveBeenCalled();
+    expect(shown.setSearch).not.toHaveBeenCalled();
+    vi.clearAllMocks();
+    vi.mocked(listRows).mockReturnValue([]);
+    open({ computer: "mac", key: "run:folded", preserveFilters: true });
+    expect(shown.setStateFilter).toHaveBeenCalledWith("all");
+    expect(shown.setMachineFilter).toHaveBeenCalledWith([]);
+    expect(shown.setProjectFilter).toHaveBeenCalledWith([]);
+    expect(shown.setSearch).toHaveBeenCalledWith("");
   });
 
   it("expands the collapsed project of the session it opens", async () => {

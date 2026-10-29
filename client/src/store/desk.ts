@@ -1,5 +1,6 @@
 import { deskPage, deskTakePending, onDeskNotice, onOpenSession, onOpenUpdates, type OpenSession } from "../bridge";
 import { catalog, rowId } from "./catalog";
+import { listRows } from "../ui/sessions/model";
 import { groupOf, headerOf, setProjectCollapsed } from "./organization";
 import {
   revealRow, setDetailTab, setMachineFilter, setPage, setProjectFilter, setSearch, setSelectedKey,
@@ -18,10 +19,14 @@ import {
 export function openSession(target: OpenSession): void {
   if (target.attention) setDetailTab("activity");
   const id = rowId(target.computer, target.key);
-  setStateFilter("all");
-  setMachineFilter([]);
-  setProjectFilter([]);
-  setSearch("");
+  // Saved drafts keeps the current filter only when its owner is listed.
+  const keep = target.preserveFilters && listRows().some((row) => row.type === "card" && row.id === id);
+  if (!keep) {
+    setStateFilter("all");
+    setMachineFilter([]);
+    setProjectFilter([]);
+    setSearch("");
+  }
   setPage("sessions");
   // The project the list groups the row under; this device's layout keeps
   // the collapse (the Rust side), and the next batch shows it expanded.

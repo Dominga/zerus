@@ -4,9 +4,10 @@ import { Icon } from "../lib/icons";
 import { composer } from "../../store/composer";
 import { orderedRows } from "../../store/catalog";
 import { openSession } from "../../store/desk";
-import { toast } from "../../store/ui";
+import { setSubagentOpen, toast } from "../../store/ui";
+import { AgentBadge, MachineBadge } from "./SessionCard";
 import {
-  createSavedDrafts, draftOwnerRow, listStep, modifiedText, replaceText, SECTIONS, TEXTS,
+  createSavedDrafts, draftOwnerRow, draftPresentation, draftSubagent, listStep, modifiedText, replaceText, SECTIONS, TEXTS,
   type RestoreTarget, type SavedDrafts,
 } from "../../store/savedDrafts";
 import type { SavedDraftItem } from "../../types";
@@ -72,18 +73,23 @@ function Action(props: { reason: string; onClick: () => void; ref?: (el: HTMLBut
 
 function Row(props: { item: SavedDraftItem; onOpen: () => void }) {
   const on = () => savedDrafts.selected() === props.item;
+  const presentation = () => draftPresentation(props.item, draftOwnerRow(props.item, orderedRows()));
   return (
-    <div class="draft-row" classList={{ on: on() }} role="option" aria-selected={on()} aria-label={props.item.title}
+    <div class="draft-row" classList={{ on: on() }} role="option" aria-selected={on()} aria-label={presentation().title}
       id={rowId(props.item)}
       onClick={() => { if (!on()) savedDrafts.select(props.item); }} onDblClick={() => props.onOpen()}>
       <div class="draft-row-head">
-        <b class="ell">{props.item.caption}</b>
+        <b class="ell">{presentation().title}</b>
+        <Show when={presentation().agent}>{(agent) => <AgentBadge agent={agent()} narrow />}</Show>
         <span class="grow" />
-        <span class="draft-machine ell">{props.item.machine}</span>
+        <Show when={presentation().computer !== undefined} fallback={<span class="draft-machine ell">{presentation().machine}</span>}>
+          <MachineBadge alias={presentation().machine} computer={presentation().computer!} />
+        </Show>
       </div>
-      <Show when={props.item.meta}><div class="draft-row-meta ell">{props.item.meta}</div></Show>
+      <Show when={presentation().checkout}><div class="draft-row-meta ell">{presentation().checkout}</div></Show>
       <div class="draft-row-foot">
         <span class="ell">{props.item.detail}</span>
+        <Show when={presentation().model}><span class="draft-model ell">{presentation().model}</span></Show>
         <span class="grow" />
         <Show when={props.item.modified > 0}><span class="act-time">{modifiedText(props.item.modified)}</span></Show>
       </div>
@@ -166,7 +172,17 @@ export function SavedDraftsDialog() {
     if (!row) return;
     opener = undefined;
     savedDrafts.close();
-    openSession({ computer: row.computer, key: row.catalogKey });
+    openSession({ computer: row.computer, key: row.catalogKey, preserveFilters: true });
+    if (item.kind === "subagent") {
+      const child = draftSubagent(item, row);
+      if (child) setSubagentOpen(child);
+      return;
+    }
+    if (item.kind === "message") {
+      queueMicrotask(() => {
+        if (composer.view()?.input_visible !== false) document.querySelector<HTMLTextAreaElement>(".cmp-editor")?.focus();
+      });
+    }
   };
   const restore = async (confirmed = false) => {
     const target = restoreTarget();

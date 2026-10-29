@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createRoot } from "solid-js";
-import { createSavedDrafts, draftOwnerRow, listStep, modifiedText, PAGE, REASONS, replaceText, TEXTS, type RestoreTarget, type SavedDraftsPort } from "./savedDrafts";
+import { createSavedDrafts, draftOwnerRow, draftPresentation, draftSubagent, listStep, modifiedText, PAGE, REASONS, replaceText, TEXTS, type RestoreTarget, type SavedDraftsPort } from "./savedDrafts";
 import type { DraftSource, SavedDraftDetail, SavedDraftItem } from "../types";
 import type { Session } from "../ui/sessions/types";
 
@@ -41,6 +41,7 @@ function fakes() {
 }
 
 const target = (extra: Partial<RestoreTarget> = {}): RestoreTarget => ({ handle: 4, key: "\nclaude/p/open", hasDraft: false, idle: true, ...extra });
+const ownerRow = (extra: Partial<Session>) => ({ name: "claude/p/a", computer: "", rawMachine: "studio", state: "running", catalogKey: "run:1", ...extra }) as Session;
 
 describe("Saved drafts (MessageComposer.cpp:1230-1387)", () => {
   it("opens with one bounded page per section and selects the first draft, its preview loading first", async () => {
@@ -234,6 +235,25 @@ describe("Saved drafts (MessageComposer.cpp:1230-1387)", () => {
     expect(draftOwnerRow(subagent, [row({ computer: "", catalogKey: "run:machine" })])?.catalogKey).toBe("run:machine");
     expect(draftOwnerRow(subagent, [row({ computer: "", catalogKey: "run:machine" }), row({ computer: "studio", catalogKey: "run:alias" })])?.catalogKey).toBe("run:alias");
     expect(TEXTS.unreachable).toBe("This session is not in the session list now.");
+  });
+
+  it("opens a subagent only while its conversation and child id match", () => {
+    const owner = ownerRow({ conversationId: "conv", subagents: [{ id: "agent", name: "Agent", state: "working", summary: "" }] });
+    const draft = item("studio\nclaude/p/a\nconv\nagent", "client", { kind: "subagent", computer: "studio", session: "claude/p/a" });
+    expect(draftSubagent(draft, owner)).toBe("agent");
+    expect(draftSubagent(draft, ownerRow({ conversationId: "other", subagents: [{ id: "agent", name: "Agent", state: "working", summary: "" }] }))).toBeUndefined();
+    expect(draftSubagent(draft, ownerRow({ conversationId: "conv", subagents: [] }))).toBeUndefined();
+    expect(draftSubagent(item("\nclaude/p/a"), owner)).toBeUndefined();
+  });
+
+  it("takes Saved drafts roles from the catalog without adding the subagent's model", () => {
+    const owner = ownerRow({ title: "Custom title", machine: "studio", agent: "claude", computer: "", cwd: "/work/zerus", branch: "main", model: "model-1", effort: "high" });
+    const presentation = draftPresentation(item("\nclaude/p/a"), owner);
+    expect(presentation).toMatchObject({ title: "Custom title", machine: "studio", agent: "claude", computer: "", checkout: "zerus / main", model: "model-1 high" });
+    const subagent = draftPresentation(item("studio\nclaude/p/a\nconv\nagent", "client", { kind: "subagent", computer: "studio", session: "claude/p/a" }), owner);
+    expect(subagent.model).toBe("");
+    const fallback = draftPresentation(item("\nclaude/p/a"), undefined);
+    expect(fallback).toMatchObject({ title: "\nclaude/p/a", machine: "this computer", checkout: "", model: "" });
   });
 
   it("shows the modified time as d MMM HH:mm, and nothing when unknown", () => {

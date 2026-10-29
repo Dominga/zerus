@@ -11,8 +11,9 @@
 //! and a type that runs programs is shown in the file manager instead.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use zerus_client_core::attachments;
@@ -47,12 +48,20 @@ pub struct Fetched {
     pub name: String,
     pub mime: String,
     pub bytes: u64,
+    /// An image a card may show a thumbnail of: its header gives its size,
+    /// at most `THUMBNAIL_PIXELS` (`AttachmentLoader::thumbnail`).
+    pub thumbnail: bool,
 }
 
 /// Reads at once (`AttachmentLoader::pump`).
 const RUNNING: usize = 3;
 /// Files read whose copies answer again without a read (`m_paths`).
 const REMEMBERED: usize = 256;
+/// Qt draws no thumbnail of a larger image (`AttachmentLoader::thumbnail`).
+const THUMBNAIL_PIXELS: u64 = 64_000_000;
+/// How much of a copy the size check reads: a JPEG's frame header can
+/// follow long metadata.
+const HEADER_BYTES: u64 = 256 * 1024;
 
 /// `AttachmentLoader::fetch` for a file its message saved no reference to.
 pub const NO_REFERENCE: &str = "This attachment has no saved file reference.";
@@ -65,10 +74,13 @@ pub const DRAFT_OPEN_FAILED: &str = "Could not open the attachment with its defa
 
 type Answer = Result<(Fetched, PathBuf), String>;
 
+/// Gets one read's answer, once: no thread waits for it.
+type Waiter = Box<dyn FnOnce(Answer) + Send>;
+
 struct Job {
     computer: ComputerId,
     file: AttachmentRef,
-    waiters: Vec<mpsc::Sender<Answer>>,
+    waiters: Vec<Waiter>,
 }
 
 #[derive(Default)]
@@ -147,21 +159,51 @@ impl Fetcher {
         &self.cache
     }
 
-    /// Blocks until the file is in the cache. A caller for a file being read
-    /// waits for that read; `priority` moves it ahead of the reads waiting.
-    pub fn fetch(
+    /// The file in the cache. A caller for a file being read joins that
+    /// read; `priority` moves it ahead of the reads waiting. Nothing waits on
+    /// a thread: only the reads, at most `RUNNING`, use the blocking pool.
+    pub async fn fetch(
         self: &Arc<Self>,
         computer: &str,
         file: AttachmentRef,
         priority: bool,
     ) -> Result<Fetched, String> {
         self.local(computer, file, priority)
+            .await
             .map(|(fetched, _)| fetched)
     }
 
-    fn local(self: &Arc<Self>, computer: &str, file: AttachmentRef, priority: bool) -> Answer {
+    async fn local(
+        self: &Arc<Self>,
+        computer: &str,
+        file: AttachmentRef,
+        priority: bool,
+    ) -> Answer {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        self.request(
+            computer,
+            file,
+            priority,
+            Box::new(move |answer| {
+                let _ = sender.send(answer);
+            }),
+        );
+        receiver
+            .await
+            .map_err(|_| "Could not read the attachment.".to_owned())?
+    }
+
+    /// Asks for the file; `done` gets the answer once: at once for a file
+    /// without a reference or a copy read before, else from the read.
+    fn request(
+        self: &Arc<Self>,
+        computer: &str,
+        file: AttachmentRef,
+        priority: bool,
+        done: Waiter,
+    ) {
         if file.request_id.is_empty() {
-            return Err(NO_REFERENCE.to_owned());
+            return done(Err(NO_REFERENCE.to_owned()));
         }
         let key = key_of(computer, &file);
         // A file read before answers from its copy while the copy lasts.
@@ -169,14 +211,13 @@ impl Fetcher {
         if let Some((fetched, path)) = known {
             if attachments::cached_at(self.cache.root(), &path).is_some() {
                 attachments::touch(&path);
-                return Ok((fetched, path));
+                return done(Ok((fetched, path)));
             }
         }
-        let (sender, receiver) = mpsc::channel();
         let start = {
             let mut queue = lock(&self.queue);
             if let Some(job) = queue.jobs.get_mut(&key) {
-                job.waiters.push(sender);
+                job.waiters.push(done);
                 let waiting = queue.waiting.iter().position(|k| *k == key);
                 if let (true, Some(at)) = (priority, waiting) {
                     queue.waiting.remove(at);
@@ -188,7 +229,7 @@ impl Fetcher {
                     Job {
                         computer: ComputerId(computer.to_owned()),
                         file,
-                        waiters: vec![sender],
+                        waiters: vec![done],
                     },
                 );
                 if priority {
@@ -200,9 +241,6 @@ impl Fetcher {
             queue.next()
         };
         self.start(start);
-        receiver
-            .recv()
-            .map_err(|_| "Could not read the attachment.".to_owned())?
     }
 
     fn start(self: &Arc<Self>, jobs: Vec<(String, ComputerId, AttachmentRef)>) {
@@ -213,8 +251,12 @@ impl Fetcher {
     }
 
     fn run(self: &Arc<Self>, key: String, computer: ComputerId, file: AttachmentRef) {
-        let result = (self.fetch)(&computer, &file, self.cache.root())
-            .and_then(|cached| self.described(cached));
+        // A read that panics still ends: its slot frees and its waiters hear.
+        let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            (self.fetch)(&computer, &file, self.cache.root())
+        }))
+        .unwrap_or_else(|_| Err("Could not read the attachment.".to_owned()));
+        let result = read.and_then(|cached| self.described(cached));
         if result.is_ok() {
             self.cache.prune_later(&self.spawn, Arc::new(HashSet::new));
         }
@@ -232,7 +274,7 @@ impl Fetcher {
             (waiters, queue.next())
         };
         for waiter in waiters {
-            let _ = waiter.send(result.clone());
+            waiter(result.clone());
         }
         self.start(next);
     }
@@ -247,17 +289,17 @@ impl Fetcher {
             .to_string_lossy()
             .replace('\\', "/");
         let bytes = std::fs::metadata(&path).map_or(0, |m| m.len());
+        let mut head = Vec::new();
+        if let Ok(copy) = std::fs::File::open(&path) {
+            let _ = copy.take(HEADER_BYTES).read_to_end(&mut head);
+        }
         let mime = match cached.metadata.get("mime").and_then(|v| v.as_str()) {
             Some(mime) if !mime.is_empty() => mime.to_owned(),
-            _ => {
-                let mut head = Vec::new();
-                if let Ok(copy) = std::fs::File::open(&path) {
-                    let _ =
-                        std::io::Read::read_to_end(&mut std::io::Read::take(copy, 512), &mut head);
-                }
-                attachments::sniff(&head)
-            }
+            _ => attachments::sniff(&head[..head.len().min(512)]),
         };
+        let thumbnail = image_size(&head).is_some_and(|(width, height)| {
+            u64::from(width) * u64::from(height) <= THUMBNAIL_PIXELS
+        });
         let name = match cached.metadata.get("name").and_then(|v| v.as_str()) {
             Some(name) if !name.is_empty() => name.to_owned(),
             _ => "attachment".to_owned(),
@@ -268,30 +310,100 @@ impl Fetcher {
                 name,
                 mime,
                 bytes,
+                thumbnail,
             },
             path,
         ))
     }
 
     /// Opens an Activity attachment (`AttachmentLoader::open`): a read ahead
-    /// of the others, then the copy as another machine's file.
-    pub fn open(
+    /// of the others, then the copy as another machine's file, on the
+    /// blocking pool.
+    pub async fn open(
         self: &Arc<Self>,
         computer: &str,
         file: AttachmentRef,
-        opener: &Opener,
+        opener: Opener,
     ) -> Result<Option<String>, String> {
-        let (_, path) = self.local(computer, file, true)?;
-        told(
-            opened(&path, Origin::OtherMachine, opener),
-            &path,
-            OPEN_FAILED,
-        )
+        let (_, path) = self.local(computer, file, true).await?;
+        tauri::async_runtime::spawn_blocking(move || {
+            opened(&path, Origin::OtherMachine, &opener, OPEN_FAILED)
+        })
+        .await
+        .map_err(|error| error.to_string())?
     }
 }
 
-fn opened(path: &Path, origin: Origin, opener: &Opener) -> Outcome {
-    external_file::open(path, origin, |p| (opener.open)(p), |p| (opener.reveal)(p))
+/// Opens or reveals a copy and says what happened. The path loses
+/// Windows's `\\?\` prefix first, which canonical paths carry and which
+/// neither a notice nor an opener should see.
+fn opened(
+    path: &Path,
+    origin: Origin,
+    opener: &Opener,
+    failed: &str,
+) -> Result<Option<String>, String> {
+    let path = dunce::simplified(path);
+    let outcome = external_file::open(path, origin, |p| (opener.open)(p), |p| (opener.reveal)(p));
+    told(outcome, path, failed)
+}
+
+/// The width and height an image's header gives: PNG, GIF, BMP, WebP and
+/// JPEG, the types a card shows. Anything else has no thumbnail, as Qt's
+/// reader gives no size for it.
+fn image_size(head: &[u8]) -> Option<(u32, u32)> {
+    let be16 = |at: usize| Some(u16::from_be_bytes(head.get(at..at + 2)?.try_into().ok()?));
+    let le16 = |at: usize| Some(u16::from_le_bytes(head.get(at..at + 2)?.try_into().ok()?));
+    let le24 = |at: usize| {
+        let b = head.get(at..at + 3)?;
+        Some(u32::from(b[0]) | u32::from(b[1]) << 8 | u32::from(b[2]) << 16)
+    };
+    let le32 = |at: usize| Some(u32::from_le_bytes(head.get(at..at + 4)?.try_into().ok()?));
+    let be32 = |at: usize| Some(u32::from_be_bytes(head.get(at..at + 4)?.try_into().ok()?));
+    if head.starts_with(b"\x89PNG\r\n\x1a\n") && head.get(12..16) == Some(b"IHDR") {
+        return Some((be32(16)?, be32(20)?));
+    }
+    if head.starts_with(b"GIF87a") || head.starts_with(b"GIF89a") {
+        return Some((u32::from(le16(6)?), u32::from(le16(8)?)));
+    }
+    if head.starts_with(b"BM") {
+        let width = le32(18)? as i32;
+        let height = le32(22)? as i32;
+        return Some((width.unsigned_abs(), height.unsigned_abs()));
+    }
+    if head.starts_with(b"RIFF") && head.get(8..12) == Some(b"WEBP") {
+        return match head.get(12..16)? {
+            b"VP8 " => Some((u32::from(le16(26)? & 0x3fff), u32::from(le16(28)? & 0x3fff))),
+            b"VP8L" => {
+                let bits = le32(21)?;
+                Some(((bits & 0x3fff) + 1, ((bits >> 14) & 0x3fff) + 1))
+            }
+            b"VP8X" => Some((le24(24)? + 1, le24(27)? + 1)),
+            _ => None,
+        };
+    }
+    if head.starts_with(&[0xff, 0xd8]) {
+        // Walk the segments to the first frame header.
+        let mut at = 2;
+        loop {
+            while head.get(at) == Some(&0xff) && head.get(at + 1) == Some(&0xff) {
+                at += 1;
+            }
+            if head.get(at) != Some(&0xff) {
+                return None;
+            }
+            let marker = *head.get(at + 1)?;
+            match marker {
+                0xd8 | 0x01 | 0xd0..=0xd7 => at += 2,
+                0xc0..=0xcf if !matches!(marker, 0xc4 | 0xc8 | 0xcc) => {
+                    return Some((u32::from(be16(at + 7)?), u32::from(be16(at + 5)?)));
+                }
+                0xd9 | 0xda => return None,
+                _ => at += 2 + usize::from(be16(at + 2)?),
+            }
+        }
+    }
+    None
 }
 
 /// What an open tells the person: nothing when it opened, a notice when the
@@ -340,11 +452,7 @@ pub fn open_draft(
         .map(|file| file.local_path)
         .ok_or_else(|| DRAFT_UNAVAILABLE.to_owned())?;
     cache.prune_later(&composers.0.deps.spawn, Arc::new(HashSet::new));
-    told(
-        opened(&path, Origin::ThisComputer, opener),
-        &path,
-        DRAFT_OPEN_FAILED,
-    )
+    opened(&path, Origin::ThisComputer, opener, DRAFT_OPEN_FAILED)
 }
 
 /// Reads an Activity attachment into the cache for a view, after the reads
@@ -355,10 +463,9 @@ pub async fn attachment_fetch(
     computer: String,
     file: AttachmentRef,
 ) -> Result<Fetched, String> {
+    // Awaited, not waited for: a queued read holds no thread.
     let fetcher = Arc::clone(fetcher.inner());
-    tauri::async_runtime::spawn_blocking(move || fetcher.fetch(&computer, file, false))
-        .await
-        .map_err(|error| error.to_string())?
+    fetcher.fetch(&computer, file, false).await
 }
 
 /// A view shows the copy at `path` (`cache/{digest}/{name}`).
@@ -387,9 +494,7 @@ pub async fn attachment_open(
     file: AttachmentRef,
 ) -> Result<Option<String>, String> {
     let (fetcher, opener) = (Arc::clone(fetcher.inner()), opener.inner().clone());
-    tauri::async_runtime::spawn_blocking(move || fetcher.open(&computer, file, &opener))
-        .await
-        .map_err(|error| error.to_string())?
+    fetcher.open(&computer, file, opener).await
 }
 
 /// Opens the composer attachment the view lists at `path`
@@ -426,6 +531,26 @@ mod tests {
             archive_id: None,
             agent_id: None,
         }
+    }
+
+    /// `fetch`, waited for on a test thread.
+    fn get(
+        f: &Arc<Fetcher>,
+        computer: &str,
+        file: AttachmentRef,
+        priority: bool,
+    ) -> Result<Fetched, String> {
+        tauri::async_runtime::block_on(f.fetch(computer, file, priority))
+    }
+
+    /// `open`, waited for on a test thread.
+    fn open_on(
+        f: &Arc<Fetcher>,
+        computer: &str,
+        file: AttachmentRef,
+        opener: &Opener,
+    ) -> Result<Option<String>, String> {
+        tauri::async_runtime::block_on(f.open(computer, file, opener.clone()))
     }
 
     fn threads() -> Spawn {
@@ -466,8 +591,8 @@ mod tests {
         });
         let fetcher = Fetcher::new(Cache::new(root.join("cache")), fetch, threads());
         let (a, b) = (Arc::clone(&fetcher), Arc::clone(&fetcher));
-        let one = std::thread::spawn(move || a.fetch("studio", file("req-1"), false));
-        let two = std::thread::spawn(move || b.fetch("studio", file("req-1"), true));
+        let one = std::thread::spawn(move || get(&a, "studio", file("req-1"), false));
+        let two = std::thread::spawn(move || get(&b, "studio", file("req-1"), true));
         let (one, two) = (one.join().unwrap().unwrap(), two.join().unwrap().unwrap());
         assert_eq!(one, two);
         assert!(one.path.starts_with("cache/") && one.path.ends_with("/shot.png"));
@@ -522,7 +647,7 @@ mod tests {
         let fetcher = Fetcher::new(Cache::new(root.join("cache")), fetch, threads());
         let ask = |request: &str, priority: bool| {
             let (me, request) = (Arc::clone(&fetcher), request.to_owned());
-            std::thread::spawn(move || me.fetch("studio", file(&request), priority))
+            std::thread::spawn(move || get(&me, "studio", file(&request), priority))
         };
         let mut asked: Vec<_> = (1..=5).map(|n| ask(&format!("req-{n}"), false)).collect();
         wait_for("three reads and two waiting", || {
@@ -566,22 +691,22 @@ mod tests {
             storing("notes.txt", b"plain words", &calls),
             threads(),
         );
-        let first = fetcher.fetch("studio", file("req-1"), false).unwrap();
+        let first = get(&fetcher, "studio", file("req-1"), false).unwrap();
         assert_eq!(
             first.mime, "text/plain",
             "sniffed when the reply names no type"
         );
         assert_eq!(
-            fetcher.fetch("studio", file("req-1"), false).unwrap(),
+            get(&fetcher, "studio", file("req-1"), false).unwrap(),
             first
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1, "answered from the copy");
         // Another computer's file of the same name is another file.
-        fetcher.fetch("mini", file("req-1"), false).unwrap();
+        get(&fetcher, "mini", file("req-1"), false).unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         std::fs::remove_file(fetcher.cache().shown(&first.path).unwrap()).unwrap();
         assert_eq!(
-            fetcher.fetch("studio", file("req-1"), false).unwrap(),
+            get(&fetcher, "studio", file("req-1"), false).unwrap(),
             first
         );
         assert_eq!(
@@ -601,9 +726,7 @@ mod tests {
             Arc::new(|job| job()),
         );
         for n in 0..REMEMBERED + 4 {
-            fetcher
-                .fetch("studio", file(&format!("req-{n}")), false)
-                .unwrap();
+            get(&fetcher, "studio", file(&format!("req-{n}")), false).unwrap();
         }
         let queue = lock(&fetcher.queue);
         assert_eq!(
@@ -626,7 +749,7 @@ mod tests {
             threads(),
         );
         assert_eq!(
-            fetcher.fetch("studio", file(""), false),
+            get(&fetcher, "studio", file(""), false),
             Err(NO_REFERENCE.to_owned())
         );
         assert_eq!(calls.load(Ordering::SeqCst), 0);
@@ -644,11 +767,11 @@ mod tests {
         });
         let fetcher = Fetcher::new(Cache::new(root.join("cache")), fetch, threads());
         let other = Arc::clone(&fetcher);
-        let second = std::thread::spawn(move || other.fetch("studio", file("req-1"), false));
-        let first = fetcher.fetch("studio", file("req-1"), false);
+        let second = std::thread::spawn(move || get(&other, "studio", file("req-1"), false));
+        let first = get(&fetcher, "studio", file("req-1"), false);
         assert_eq!(first, Err("Attachment response is too large.".to_owned()));
         assert_eq!(second.join().unwrap(), first);
-        let _ = fetcher.fetch("studio", file("req-1"), false);
+        let _ = get(&fetcher, "studio", file("req-1"), false);
         assert!(
             calls.load(Ordering::SeqCst) >= 2,
             "nothing failed is remembered"
@@ -693,14 +816,14 @@ mod tests {
             threads(),
         );
         let (works, asked) = opener(true);
-        assert_eq!(fetcher.open("studio", file("req-1"), &works), Ok(None));
+        assert_eq!(open_on(&fetcher, "studio", file("req-1"), &works), Ok(None));
         let (what, path) = asked.lock().unwrap()[0].clone();
         assert_eq!(what, "open");
         assert!(path.starts_with(fetcher.cache().root()));
         assert_eq!(std::fs::read(&path).unwrap(), PNG);
         let (fails, _) = opener(false);
         assert_eq!(
-            fetcher.open("studio", file("req-1"), &fails),
+            open_on(&fetcher, "studio", file("req-1"), &fails),
             Err(OPEN_FAILED.to_owned())
         );
         assert_eq!(
@@ -709,7 +832,7 @@ mod tests {
             "Open and the thumbnail share the read"
         );
         assert_eq!(
-            fetcher.open("studio", file(""), &works),
+            open_on(&fetcher, "studio", file(""), &works),
             Err(NO_REFERENCE.to_owned())
         );
     }
@@ -724,14 +847,13 @@ mod tests {
             threads(),
         );
         let (works, asked) = opener(true);
-        let shown = fetcher
-            .open("studio", file("req-1"), &works)
+        let shown = open_on(&fetcher, "studio", file("req-1"), &works)
             .unwrap()
             .unwrap();
         assert_eq!(shown, "setup.exe can run programs, so it is shown in the file manager instead of being opened.");
         assert_eq!(asked.lock().unwrap()[0].0, "reveal");
         let (fails, _) = opener(false);
-        let error = fetcher.open("studio", file("req-1"), &fails).unwrap_err();
+        let error = open_on(&fetcher, "studio", file("req-1"), &fails).unwrap_err();
         assert!(error.starts_with("setup.exe can run programs, and the file manager could not show it. Its copy is at "), "{error}");
     }
 
@@ -777,5 +899,278 @@ mod tests {
             assert_eq!(open_draft(&c, gone, &quiet), Ok(None), "{gone}");
         }
         assert!(untouched.lock().unwrap().is_empty());
+    }
+
+    /// A read that stores `name` with `bytes` and names `mime` in its reply.
+    fn storing_typed(name: &'static str, bytes: &'static [u8], mime: &'static str) -> FetchFn {
+        Arc::new(move |_, file, root| {
+            let local_path = attachments::store_at(root, name, bytes).unwrap();
+            Ok(CachedAttachment {
+                metadata: serde_json::json!({"name": name, "mime": mime, "request_id": file.request_id}),
+                local_path,
+            })
+        })
+    }
+
+    #[test]
+    fn queued_reads_hold_no_thread() {
+        let root = dir("fetch-threads");
+        // The jobs the Fetcher hands the blocking pool, held here unrun.
+        let jobs: Arc<Mutex<Vec<crate::composer::Job>>> = Arc::default();
+        let queue = Arc::clone(&jobs);
+        let spawn: Spawn = Arc::new(move |job| queue.lock().unwrap().push(job));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let fetcher = Fetcher::new(
+            Cache::new(root.join("cache")),
+            storing("a.txt", b"a", &calls),
+            spawn,
+        );
+        let answered = Arc::new(AtomicUsize::new(0));
+        for n in 0..40 {
+            let answered = Arc::clone(&answered);
+            fetcher.request(
+                "studio",
+                file(&format!("req-{n}")),
+                false,
+                Box::new(move |answer| {
+                    assert!(answer.is_ok());
+                    answered.fetch_add(1, Ordering::SeqCst);
+                }),
+            );
+        }
+        assert_eq!(
+            jobs.lock().unwrap().len(),
+            RUNNING,
+            "only the reads take the pool; 37 waiters hold nothing"
+        );
+        assert_eq!(answered.load(Ordering::SeqCst), 0);
+        // Each read that ends starts the next one (prunes share the pool too).
+        loop {
+            let next = jobs.lock().unwrap().pop();
+            let Some(job) = next else { break };
+            job();
+            assert!(lock(&fetcher.queue).running <= RUNNING);
+        }
+        assert_eq!(answered.load(Ordering::SeqCst), 40);
+        assert_eq!(calls.load(Ordering::SeqCst), 40);
+    }
+
+    #[test]
+    fn a_read_that_panics_frees_its_slot_and_tells_its_views() {
+        let root = dir("fetch-panic");
+        let fetch: FetchFn = Arc::new(|_, file, root| {
+            if file.request_id == "req-bad" {
+                panic!("a broken read");
+            }
+            let local_path = attachments::store_at(root, "a.txt", b"a").unwrap();
+            Ok(CachedAttachment {
+                metadata: serde_json::json!({}),
+                local_path,
+            })
+        });
+        let fetcher = Fetcher::new(Cache::new(root.join("cache")), fetch, Arc::new(|job| job()));
+        assert_eq!(
+            get(&fetcher, "studio", file("req-bad"), false),
+            Err("Could not read the attachment.".to_owned())
+        );
+        assert_eq!(lock(&fetcher.queue).running, 0);
+        assert!(
+            get(&fetcher, "studio", file("req-good"), false).is_ok(),
+            "the queue still runs"
+        );
+    }
+
+    #[test]
+    fn a_waiting_read_asked_again_with_priority_goes_next() {
+        let root = dir("fetch-requeue");
+        let jobs: Arc<Mutex<Vec<crate::composer::Job>>> = Arc::default();
+        let queue = Arc::clone(&jobs);
+        let spawn: Spawn = Arc::new(move |job| queue.lock().unwrap().push(job));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let fetcher = Fetcher::new(
+            Cache::new(root.join("cache")),
+            storing("a.txt", b"a", &calls),
+            spawn,
+        );
+        for n in 1..=5 {
+            fetcher.request("studio", file(&format!("req-{n}")), false, Box::new(|_| {}));
+        }
+        assert_eq!(
+            lock(&fetcher.queue).waiting,
+            [
+                key_of("studio", &file("req-4")),
+                key_of("studio", &file("req-5"))
+            ]
+        );
+        fetcher.request("studio", file("req-5"), true, Box::new(|_| {}));
+        assert_eq!(
+            lock(&fetcher.queue).waiting,
+            [
+                key_of("studio", &file("req-5")),
+                key_of("studio", &file("req-4"))
+            ]
+        );
+        assert_eq!(
+            lock(&fetcher.queue).jobs[&key_of("studio", &file("req-5"))]
+                .waiters
+                .len(),
+            2,
+            "one read for both"
+        );
+    }
+
+    #[test]
+    fn the_replys_type_wins_over_the_sniffed_one() {
+        let root = dir("fetch-mime");
+        let fetcher = Fetcher::new(
+            Cache::new(root.join("cache")),
+            storing_typed("notes.md", b"plain words", "text/markdown"),
+            threads(),
+        );
+        let read = get(&fetcher, "studio", file("req-1"), false).unwrap();
+        assert_eq!(
+            (read.mime.as_str(), read.thumbnail),
+            ("text/markdown", false)
+        );
+    }
+
+    #[test]
+    fn image_headers_give_their_size() {
+        let png = |w: u32, h: u32| {
+            [
+                b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".as_slice(),
+                &w.to_be_bytes(),
+                &h.to_be_bytes(),
+            ]
+            .concat()
+        };
+        assert_eq!(image_size(&png(160, 100)), Some((160, 100)));
+        assert_eq!(image_size(b"GIF89a\xa0\x00\x64\x00rest"), Some((160, 100)));
+        let mut bmp = vec![0u8; 26];
+        bmp[..2].copy_from_slice(b"BM");
+        bmp[18..22].copy_from_slice(&160i32.to_le_bytes());
+        bmp[22..26].copy_from_slice(&(-100i32).to_le_bytes());
+        assert_eq!(image_size(&bmp), Some((160, 100)));
+        let webp = |kind: &[u8], body: &[u8]| [b"RIFF\0\0\0\0WEBP".as_slice(), kind, body].concat();
+        let mut lossy = vec![0u8; 14];
+        lossy[10..12].copy_from_slice(&160u16.to_le_bytes());
+        lossy[12..14].copy_from_slice(&100u16.to_le_bytes());
+        assert_eq!(image_size(&webp(b"VP8 ", &lossy)), Some((160, 100)));
+        let bits: u32 = (160 - 1) | ((100 - 1) << 14);
+        let lossless = [&[0u8; 5][..], &bits.to_le_bytes()].concat();
+        assert_eq!(image_size(&webp(b"VP8L", &lossless)), Some((160, 100)));
+        let extended = [&[0u8; 8][..], &[159, 0, 0], &[99, 0, 0]].concat();
+        assert_eq!(image_size(&webp(b"VP8X", &extended)), Some((160, 100)));
+        // A JPEG's frame header after an EXIF segment.
+        let jpeg = [
+            &[0xff, 0xd8, 0xff, 0xe1, 0x00, 0x06][..],
+            b"Exif",
+            &[0xff, 0xc0, 0x00, 0x11, 0x08, 0x00, 0x64, 0x00, 0xa0, 0x03],
+        ]
+        .concat();
+        assert_eq!(image_size(&jpeg), Some((160, 100)));
+        assert_eq!(
+            image_size(&[0xff, 0xd8, 0xff, 0xda, 0x00, 0x02]),
+            None,
+            "no frame before the scan"
+        );
+        assert_eq!(
+            image_size(b"<svg xmlns='http://www.w3.org/2000/svg'/>"),
+            None
+        );
+        assert_eq!(image_size(b"plain words"), None);
+        assert_eq!(
+            image_size(&png(160, 100)[..20]),
+            None,
+            "a cut header gives nothing"
+        );
+    }
+
+    #[test]
+    fn only_an_image_within_qts_bound_gets_a_thumbnail() {
+        let root = dir("fetch-thumbnail");
+        let fetcher = Fetcher::new(
+            Cache::new(root.join("cache")),
+            storing("shot.png", PNG, &Arc::new(AtomicUsize::new(0))),
+            threads(),
+        );
+        // PNG is a cut header ("rest"): no size, so no thumbnail, as Qt's reader.
+        assert!(
+            !get(&fetcher, "studio", file("req-1"), false)
+                .unwrap()
+                .thumbnail
+        );
+        const SMALL: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\xa0\0\0\0\x64";
+        const HUGE: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\x23\x28\0\0\x23\x28";
+        let small = Fetcher::new(
+            Cache::new(root.join("small")),
+            storing("small.png", SMALL, &Arc::new(AtomicUsize::new(0))),
+            threads(),
+        );
+        assert!(
+            get(&small, "studio", file("req-1"), false)
+                .unwrap()
+                .thumbnail
+        );
+        let huge = Fetcher::new(
+            Cache::new(root.join("huge")),
+            storing("huge.png", HUGE, &Arc::new(AtomicUsize::new(0))),
+            threads(),
+        );
+        assert!(
+            !get(&huge, "studio", file("req-1"), false)
+                .unwrap()
+                .thumbnail,
+            "9000x9000 is past 64M pixels"
+        );
+    }
+
+    #[test]
+    fn only_another_machines_file_is_marked_as_downloaded() {
+        let root = dir("open-marker");
+        let fetcher = Fetcher::new(
+            Cache::new(root.join("cache")),
+            storing("notes.txt", b"notes", &Arc::new(AtomicUsize::new(0))),
+            threads(),
+        );
+        let (works, asked) = opener(true);
+        open_on(&fetcher, "studio", file("req-1"), &works).unwrap();
+        let activity = asked.lock().unwrap()[0].1.clone();
+        // Linux has no downloaded-file marker; macOS and Windows carry one.
+        let marks = cfg!(any(target_os = "macos", windows));
+        assert_eq!(!external_file::download_marker(&activity).is_empty(), marks);
+        let original = root.join("draft.txt");
+        std::fs::write(&original, b"draft").unwrap();
+        let (c, _) = hub(&root);
+        c.open(Some(session()));
+        let view = until(&c, |v| v.loaded);
+        c.attach_paths(view.handle, vec![original], Selection::default());
+        let view = until(&c, |v| v.attachments.len() == 1 && !v.attaching);
+        let (draft_opener, draft_asked) = opener(true);
+        open_draft(&c, &view.attachments[0].path, &draft_opener).unwrap();
+        let draft = draft_asked.lock().unwrap()[0].1.clone();
+        assert!(
+            external_file::download_marker(&draft).is_empty(),
+            "this computer's file is never marked"
+        );
+    }
+
+    #[test]
+    fn a_draft_that_sends_opens_nothing() {
+        let root = dir("open-sending");
+        let original = root.join("notes.txt");
+        std::fs::write(&original, b"draft notes").unwrap();
+        let (c, _) = hub(&root);
+        c.open(Some(session()));
+        let view = until(&c, |v| v.loaded);
+        c.attach_paths(view.handle, vec![original], Selection::default());
+        let view = until(&c, |v| v.attachments.len() == 1 && !v.attaching);
+        let path = view.attachments[0].path.clone();
+        for composer in c.lock().composers.values_mut() {
+            composer.sending = true;
+        }
+        let (works, asked) = opener(true);
+        assert_eq!(open_draft(&c, &path, &works), Ok(None));
+        assert!(asked.lock().unwrap().is_empty());
     }
 }

@@ -210,7 +210,12 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init())
+        // Rust opens attachments; the webview's links stay its own (no injected click handler).
+        .plugin(
+            tauri_plugin_opener::Builder::new()
+                .open_js_links_on_click(false)
+                .build(),
+        )
         .manage(commands::AppState::default())
         .manage(window_visibility::Visibility::default())
         .manage(lifecycle::Lifecycle { menu_bar });

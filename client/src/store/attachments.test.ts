@@ -4,7 +4,7 @@ import { createPreviews, type PreviewPort } from "./attachments";
 import type { AttachmentRef, Fetched } from "../types";
 
 const ref: AttachmentRef = { name: "claude/sample-project/review", request_id: "req-1", index: 0, conversation_id: "conv-1", archive_id: null, agent_id: null };
-const fetched = (path: string): Fetched => ({ path, name: "shot.png", mime: "image/png", bytes: 8 });
+const fetched = (path: string): Fetched => ({ path, name: "shot.png", mime: "image/png", bytes: 8, thumbnail: true });
 
 function deferred<T>() {
   let resolve!: (value: T) => void, reject!: (reason: unknown) => void;
@@ -76,6 +76,23 @@ describe("Activity attachment thumbnails", () => {
       await tick();
       expect(p.state("studio", ref)).toEqual({ kind: "failed" });
       expect(f.calls).toEqual(["fetch studio"]);
+      dispose();
+    });
+  });
+
+  it("pin nothing and show no thumbnail for an image past Qt's bound", async () => {
+    const calls: string[] = [];
+    const port: PreviewPort = {
+      fetch: async () => ({ ...fetched("cache/abc/huge.png"), thumbnail: false }),
+      pin: (path) => calls.push(`pin ${path}`), unpin: (path) => calls.push(`unpin ${path}`), url: (path) => path,
+    };
+    await createRoot(async (dispose) => {
+      const p = createPreviews(port);
+      p.show("studio", ref);
+      await tick();
+      expect(p.state("studio", ref)).toEqual({ kind: "failed" });
+      p.hide("studio", ref);
+      expect(calls).toEqual([]);
       dispose();
     });
   });

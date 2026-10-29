@@ -5677,6 +5677,7 @@ version = "0.1.0"
 dependencies = [
  "block2",
  "chrono",
+ "dunce",
  "gtk",
  "libc",
  "objc2",
@@ -5692,6 +5693,7 @@ dependencies = [
  "tauri-plugin-clipboard-manager",
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
+ "tokio",
  "uuid",
  "webkit2gtk",
  "zerus-client-core",

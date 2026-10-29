@@ -331,7 +331,7 @@ function AttachmentCard(props: { file: ItemAttachment; scope?: AttachmentScope }
     const now = target();
     if (!now || !props.file.image) return undefined;
     const state = previews.state(now.computer, now.ref);
-    return state.kind === "ready" ? state.url : undefined;
+    return state.kind === "ready" && state.fetched.thumbnail ? state.url : undefined;
   };
   return (
     <Show when={target()} fallback={<span class="att-card">Attachment: {props.file.name}</span>}>

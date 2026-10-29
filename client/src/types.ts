@@ -390,4 +390,8 @@ export interface AttachmentRef {
 }
 
 /** An attachment in the private cache: `path` is its `zerus-file` path (`cache/{digest}/{name}`). */
-export interface Fetched { path: string; name: string; mime: string; bytes: number }
+export interface Fetched {
+  path: string; name: string; mime: string; bytes: number;
+  /** An image whose header gives its size, at most Qt's 64M pixels: a card may show its thumbnail. */
+  thumbnail: boolean;
+}

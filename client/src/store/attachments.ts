@@ -43,6 +43,8 @@ export function createPreviews(port: PreviewPort) {
     }
     // Hidden meanwhile: nothing to pin.
     if (shown.get(key) !== entry) return;
+    // An image past Qt's bound, or one whose size its header does not give, shows no thumbnail (and pins nothing).
+    if (!fetched.thumbnail) { put(key, { kind: "failed" }); return; }
     if (entry.path !== fetched.path) {
       port.pin(fetched.path);
       if (entry.path) port.unpin(entry.path);

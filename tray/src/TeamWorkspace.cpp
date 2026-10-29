@@ -844,6 +844,21 @@ bool TeamWorkspace::discardPhase(const QString &id, int phase)
     return true;
 }
 
+bool TeamWorkspace::returnPhaseToDraft(const QString &id, int phase)
+{
+    const auto *team = currentTeam(id);
+    if (!team || m_phaseAct || phaseDecided(*team, phase)) return false;
+    if (!m_panel->confirm("teamReturnPhaseConfirm", tr("Return phase to draft?"),
+                          tr("Phase %1 goes back to a draft: its tasks are not handed out until you approve it again. Only a phase whose work has not started can return.").arg(phase),
+                          tr("Return to draft")))
+        return false;
+    team = currentTeam(id);
+    if (!team || m_phaseAct || phaseDecided(*team, phase)) return false;
+    const QString key = markPhaseDecided(*team, phase);
+    m_panel->act("return-to-draft", {{"team", id}, {"phase", phase}}, [this, key](bool ok, const QString &message) { phaseSent(key, ok, message); });
+    return true;
+}
+
 void TeamWorkspace::movePhase(const Team &team, int phase, int to, const QString &position)
 {
     if (to <= 0) return;
@@ -1944,13 +1959,17 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
         auto *waits = label(text, c.dim, 11, false, "teamPhaseQueued"); waits->setAttribute(Qt::WA_TransparentForMouseEvents);
         h->addWidget(waits);
     }
-    // U39 (owner, 2026-10-28): an accepted phase can be discarded too, while
-    // its work has not started; hgs refuses it otherwise and names the tasks.
+    // U39 (owner, 2026-10-28): an accepted phase can be discarded, or (U42)
+    // returned to a draft, while its work has not started; hgs refuses it
+    // otherwise and names the tasks.
     if ((state == "queued" || state == "running") && team.status != "planning") {
         auto *more = new QToolButton; more->setObjectName("teamPhaseMore"); more->setProperty("phase", group.n);
         more->setIcon(workspaceIcon("more", c.muted)); more->setAutoRaise(true); more->setToolTip(tr("Phase actions"));
         QObject::connect(more, &QToolButton::clicked, this, [this, id = team.id, phase = group.n, more] {
             auto *menu = new QMenu(this); menu->setObjectName("teamPhaseMenu"); menu->setAttribute(Qt::WA_DeleteOnClose);
+            // U42: back to a draft that waits for your approval again.
+            auto *redraft = menu->addAction(tr("Return to draft…")); redraft->setObjectName("teamPhaseReturnToDraft");
+            QObject::connect(redraft, &QAction::triggered, this, [this, id, phase] { returnPhaseToDraft(id, phase); });
             auto *discard = menu->addAction(tr("Discard phase…")); discard->setObjectName("teamPhaseDiscard");
             QObject::connect(discard, &QAction::triggered, this, [this, id, phase] { discardPhase(id, phase); });
             menu->popup(more->mapToGlobal(QPoint(0, more->height())));

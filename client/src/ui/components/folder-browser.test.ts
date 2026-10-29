@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  AVAILABLE, CREATED, EMPTY, FolderBrowser, LISTED, LOADING, TRUNCATED, TYPED, USE_SELECTED, USE_THIS, childPath, validFolderName,
-  type FolderBrowserCalls,
+  AVAILABLE, CREATED, EMPTY, FolderBrowser, LISTED, LOADING, TRUNCATED, TYPED, USE_SELECTED, USE_THIS, browserEnter, childPath, listMenu, promptEnter,
+  validFolderName, type BrowserPlace, type FolderBrowserCalls, type PromptPlace,
 } from "./folder-browser";
 
 // The peer folder browser (tray/src/DirectoryDialog.cpp 46-326) over a
@@ -224,5 +224,120 @@ describe("the folder browser (DirectoryDialog.cpp)", () => {
     browser.cancelInline();
     expect(browser.view()).toMatchObject({ inline: undefined, chooseEnabled: true, chooseText: USE_THIS });
     expect(f.calls.filter((c) => c.kind === "create")).toEqual([]);
+  });
+});
+
+describe("the folder browser's keys and menu (DirectoryDialog.cpp 83-85, 92-99, 162, 303-311)", () => {
+  const press = (key: string, extra: Partial<KeyboardEvent> = {}) => ({ key, altKey: false, ctrlKey: false, metaKey: false, shiftKey: false, ...extra });
+  const enter = (browser: FolderBrowser, place: BrowserPlace, extra: Partial<KeyboardEvent> = {}) => browserEnter(place, press("Enter", extra), browser.view());
+  // What FolderBrowser.tsx does with the prompt's answer.
+  const prompt = (browser: FolderBrowser, place: PromptPlace, extra: Partial<KeyboardEvent> = {}) => {
+    const action = promptEnter(place, press("Enter", extra));
+    if (action === "create") browser.confirmPrompt();
+    else if (action === "cancel") browser.cancelPrompt();
+    return action;
+  };
+  const creates = (f: ReturnType<typeof fake>) => f.calls.filter((c) => c.kind === "create").map((c) => c.path);
+
+  it("presses Use this folder from every other control while it is enabled, and nothing while it is not", async () => {
+    const f = fake();
+    const browser = new FolderBrowser(f.bridge, "mac", "/srv");
+    // Loading: Use this folder is off, so Enter on Up, Home, Go, the filter or Show hidden folders does nothing.
+    expect(enter(browser, "other")).toBe("ignore");
+    await f.answer(f.listing("/srv", ["a", "b"]));
+    expect(enter(browser, "other")).toBe("choose");
+    browser.select("/srv/b");
+    expect(browser.view().chooseText).toBe(USE_SELECTED);
+    expect(enter(browser, "other")).toBe("choose");
+    expect(browser.chosen()).toBe("/srv/b");
+    // Qt's dialog takes Enter only without modifiers; an input method keeps its Enter, and other keys are the controls'.
+    for (const extra of [{ shiftKey: true }, { ctrlKey: true }, { altKey: true }, { metaKey: true }]) expect(enter(browser, "other", extra)).toBe("ignore");
+    expect(enter(browser, "other", { isComposing: true })).toBe("native");
+    expect(enter(browser, "other", { keyCode: 229 })).toBe("native");
+    expect(browserEnter("other", press(" "), browser.view())).toBe("native");
+    expect(browserEnter("other", press("Escape"), browser.view())).toBe("native");
+    // The path field presses Go, the list opens its folder, the context menu triggers its entry.
+    expect(enter(browser, "path")).toBe("go");
+    expect(enter(browser, "list")).toBe("native");
+    expect(enter(browser, "menu")).toBe("native");
+    // An edited path turns Use this folder off: Enter in the path still presses Go.
+    browser.editPath("/srv/b");
+    expect(enter(browser, "other")).toBe("ignore");
+    expect(enter(browser, "path")).toBe("go");
+    browser.go();
+    await f.answer(f.listing("/srv/b", []));
+    // The inline row: its name presses Create, its buttons take nothing, and Use this folder is off meanwhile.
+    browser.newFolder();
+    expect(enter(browser, "inline-name")).toBe("create");
+    expect(enter(browser, "inline")).toBe("ignore");
+    expect(enter(browser, "other")).toBe("ignore");
+    browser.setInlineName("new");
+    browser.createInline();
+    // While the folder is being created nothing presses anything.
+    expect(enter(browser, "other")).toBe("ignore");
+    expect(enter(browser, "path")).toBe("ignore");
+    expect(creates(f)).toEqual(["/srv/b/new"]);
+  });
+
+  it("creates once from Enter on Create folder, and cancels from Enter on Cancel without a call", async () => {
+    const f = fake();
+    const browser = new FolderBrowser(f.bridge, "mac", "/srv");
+    await f.answer(f.listing("/srv", []));
+    // Cancel: as its click, the prompt closes and nothing is sent (Qt's default button would create: a listed deviation).
+    browser.newFolderDialog();
+    browser.setPromptName("kept-out");
+    expect(prompt(browser, "cancel")).toBe("cancel");
+    expect(browser.view().prompt).toBeUndefined();
+    expect(creates(f)).toEqual([]);
+    // Modifiers stop the buttons' Enter; an input method keeps it.
+    browser.newFolderDialog();
+    browser.setPromptName("new");
+    expect(prompt(browser, "cancel", { shiftKey: true })).toBe("ignore");
+    expect(prompt(browser, "create", { ctrlKey: true })).toBe("ignore");
+    expect(prompt(browser, "create", { isComposing: true })).toBe("native");
+    expect(prompt(browser, "name", { keyCode: 229 })).toBe("native");
+    expect(browser.view().prompt).toMatchObject({ name: "new", createEnabled: true });
+    expect(creates(f)).toEqual([]);
+    // Create folder, the default button: one creation, however often Enter comes.
+    expect(prompt(browser, "create")).toBe("create");
+    expect(prompt(browser, "create")).toBe("create");
+    expect(creates(f)).toEqual(["/srv/new"]);
+    expect(browser.view()).toMatchObject({ prompt: undefined, creating: true });
+    // No second prompt opens while it is being created.
+    browser.newFolderDialog();
+    expect(browser.view().prompt).toBeUndefined();
+    await f.answer({ status: "created", path: "/srv/new", parent: "/srv" }, f.last("create"));
+    await f.answer(f.listing("/srv/new", []));
+    // Enter in the name creates too, but only a valid name.
+    browser.newFolderDialog();
+    browser.setPromptName("..");
+    expect(prompt(browser, "name")).toBe("create");
+    expect(browser.view().prompt).toMatchObject({ name: "..", createEnabled: false });
+    browser.setPromptName("deeper");
+    expect(prompt(browser, "name")).toBe("create");
+    expect(creates(f)).toEqual(["/srv/new", "/srv/new/deeper"]);
+  });
+
+  it("opens the list's context menu only while the list is enabled", async () => {
+    const f = fake();
+    const browser = new FolderBrowser(f.bridge, "mac", "/srv");
+    // A disabled QListWidget never asks for its menu: while loading, after an edit and while creating.
+    expect(listMenu(browser.view())).toBeUndefined();
+    await f.answer(f.listing("/srv", ["a"]));
+    expect(listMenu(browser.view())).toEqual([
+      { label: "New folder", enabled: true, action: "new" }, { label: "New folder dialog…", enabled: true, action: "dialog" },
+    ]);
+    browser.editPath("/srv/a");
+    expect(listMenu(browser.view())).toBeUndefined();
+    browser.go();
+    await f.fail("No such folder", f.last("list"));
+    expect(listMenu(browser.view())?.map((e) => e.enabled)).toEqual([true, true]);
+    browser.newFolderDialog();
+    browser.setPromptName("new");
+    browser.confirmPrompt();
+    expect(browser.view().creating).toBe(true);
+    expect(listMenu(browser.view())).toBeUndefined();
+    // New folder follows its button; New folder dialog… is always on.
+    expect(listMenu({ listEnabled: true, newFolderEnabled: false })?.map((e) => e.enabled)).toEqual([false, true]);
   });
 });

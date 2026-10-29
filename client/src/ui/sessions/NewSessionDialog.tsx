@@ -18,7 +18,7 @@ import { WARNING_BUTTONS, WARNING_TITLE, accountKey, computerKey, createConfirm,
 import { ModelPopover, type ModelPickerActions } from "./ModelPicker";
 import { ChooseWorktreeDialog } from "./WorktreePicker";
 import { NewWorktreeDialog } from "./NewWorktreeDialog";
-import type { PickerSession } from "./worktree-dialogs";
+import { sameSessions, type PickerSession } from "./worktree-dialogs";
 import type { Json } from "../lib/json";
 import "../styles/newsession.css";
 
@@ -645,9 +645,12 @@ function NewSessionChildren() {
     setNewSessionChild(undefined);
     queueMicrotask(() => document.getElementById(OPENER[kind])?.focus());
   };
-  // The computer's listed sessions, for the worktree picker's counts (G1).
+  // The computer's listed sessions, for the worktree picker's counts (G1). The memo reads only
+  // the rows' computer and paths, and an equal list keeps its identity, so the picker counts
+  // again only when that computer's sessions or their paths change.
   const sessionsOn = (target: string) => createMemo((): PickerSession[] =>
-    Object.values(catalog.rows).filter((row) => row.computer === target).map((row) => ({ gitRoot: row.gitRoot, cwdCanonical: row.cwdCanonical })));
+    Object.values(catalog.rows).filter((row) => row.computer === target).map((row) => ({ gitRoot: row.gitRoot, cwdCanonical: row.cwdCanonical })),
+  [], { equals: sameSessions });
   const onlineOf = (target: string) => newSession()?.computers.find((row) => row.target === target)?.online ?? false;
   return (
     <Switch>

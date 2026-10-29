@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { CreatedWorktree } from "../../types";
-import { NewWorktree, WorktreePicker, branchFolder, snapshotTime, worktreeLabel, type PickerSession } from "./worktree-dialogs";
+import { NewWorktree, WorktreePicker, baseKey, branchFolder, sameSessions, snapshotTime, worktreeLabel, type PickerSession } from "./worktree-dialogs";
 
 // Choose existing… (tray/src/WorktreePanel.h, picker mode) and Create
 // manually… (tray/src/NewWorktreeDialog.h) over recorded calls that answer
@@ -129,6 +129,56 @@ describe("Choose existing… (WorktreePanel in picker mode)", () => {
     expect(picker("C:/Work").panel.view(true, [{ gitRoot: "", cwdCanonical: "c:\\work" }], "windows").rows[0].label).toBe("Folder (unavailable) (1 session)");
   });
 
+  it("counts sessions once per new data, never on a selection change (WorktreePanel::render)", async () => {
+    const { panel, reads } = picker();
+    panel.show(true);
+    reads.calls[0].answer(catalog());
+    await settle();
+    // Each session's paths count their reads: one pass over the list per count.
+    let reads_ = 0;
+    const counted = (gitRoot: string, cwdCanonical: string): PickerSession => ({
+      get gitRoot() { reads_++; return gitRoot; },
+      get cwdCanonical() { reads_++; return cwdCanonical; },
+    });
+    const many = [...Array.from({ length: 500 }, (_, i) => counted("/srv/repo", `/srv/repo/s${i}`)), counted("/srv/repo-fix", "/srv/repo-fix")];
+    const first = panel.view(true, many, "posix");
+    expect(first.rows.map((r) => r.label)).toEqual([
+      "Main checkout / main (500 sessions)", "Linked worktree / fix (locked) (1 session)",
+      "Linked worktree / detached 01234567 (prunable) (unavailable) (0 sessions)", "Bare repository (0 sessions)",
+    ]);
+    expect(reads_).toBe(2 * many.length);
+    // Selecting, and viewing again with the same data and sessions, reads no session and keeps the rows.
+    panel.select("/srv/repo-fix");
+    panel.select("/srv/repo");
+    const again = panel.view(true, many, "posix");
+    expect(reads_).toBe(2 * many.length);
+    expect(again.rows).toBe(first.rows);
+    expect(again.selected).toBe("/srv/repo");
+    // An offline computer marks the rows unusable without counting again.
+    expect(panel.view(false, many, "posix").rows.every((r) => !r.usable)).toBe(true);
+    expect(reads_).toBe(2 * many.length);
+    // New sessions count again, once.
+    const fewer = many.slice(0, 10);
+    expect(panel.view(true, fewer, "posix").rows[0].label).toBe("Main checkout / main (10 sessions)");
+    expect(reads_).toBe(2 * many.length + 2 * fewer.length);
+    panel.view(true, fewer, "posix");
+    expect(reads_).toBe(2 * many.length + 2 * fewer.length);
+    // New data builds the rows again from the same counts.
+    panel.refresh(true);
+    reads.calls[1].answer(catalog({ worktrees: [{ path: "/srv/repo", kind: "main", branch: "main", available: true }] }));
+    await settle();
+    expect(panel.view(true, fewer, "posix").rows.map((r) => r.label)).toEqual(["Main checkout / main (10 sessions)"]);
+    expect(reads_).toBe(2 * many.length + 2 * fewer.length);
+  });
+
+  it("keeps an equal session list as it is, so the picker keeps its counts", () => {
+    const one = [{ gitRoot: "/srv/repo", cwdCanonical: "/srv/repo/src" }];
+    expect(sameSessions(one, [{ gitRoot: "/srv/repo", cwdCanonical: "/srv/repo/src" }])).toBe(true);
+    expect(sameSessions(one, [{ gitRoot: "/srv/repo", cwdCanonical: "/srv/repo" }])).toBe(false);
+    expect(sameSessions(one, [...one, ...one])).toBe(false);
+    expect(sameSessions([], [])).toBe(true);
+  });
+
   it("never reads an offline computer's catalog, and drops a closed picker's answers", async () => {
     const { panel, reads } = picker();
     panel.show(false);
@@ -191,12 +241,70 @@ describe("Create manually… (NewWorktreeDialog)", () => {
     expect(windows.view()).toMatchObject({ destination: "C:/work/app-work-1a2b3c4d", createEnabled: true });
     windows.browsed("D:/");
     expect(windows.view().destination).toBe("D:/app-work-1a2b3c4d");
+    // A browsed folder in the computer's own form (this computer's folder dialog on Windows) keeps one separator.
+    windows.browsed("C:\\data\\");
+    expect(windows.view().destination).toBe("C:/data/app-work-1a2b3c4d");
+    windows.browsed("D:\\");
+    expect(windows.view().destination).toBe("D:/app-work-1a2b3c4d");
+    windows.browsed("\\\\server\\share\\work");
+    expect(windows.view().destination).toBe("//server/share/work/app-work-1a2b3c4d");
+    expect(windows.browseStart()).toBe("//server/share/work");
     // A POSIX path is not a Windows computer's folder, and the reverse.
     windows.setDestination("/srv/app");
     expect(windows.view().createEnabled).toBe(false);
     const posix = dialog().form;
     posix.setDestination("C:\\work\\app");
     expect(posix.view().createEnabled).toBe(false);
+  });
+
+  it("steps Start from as QComboBox does: from the current item, with the arrows and Page keys", () => {
+    const press = (key: string, extra: Partial<KeyboardEvent> = {}) => ({ key, altKey: false, ctrlKey: false, metaKey: false, shiftKey: false, ...extra });
+    expect(baseKey(press("ArrowDown", { altKey: true }))).toBe("open");
+    expect(baseKey(press("F4"))).toBe("open");
+    expect(baseKey(press("F4", { shiftKey: true }))).toBe("text");
+    expect(baseKey(press("ArrowUp"))).toBe("previous");
+    expect(baseKey(press("ArrowUp", { altKey: true }))).toBe("previous");
+    expect(baseKey(press("PageUp"))).toBe("previous");
+    expect(baseKey(press("ArrowDown"))).toBe("next");
+    expect(baseKey(press("PageDown"))).toBe("next");
+    expect(baseKey(press("PageDown", { ctrlKey: true }))).toBe("next");
+    // Control (Command on macOS) with an arrow goes to the text, as do Home, End and letters.
+    for (const extra of [{ ctrlKey: true }, { metaKey: true }]) {
+      expect(baseKey(press("ArrowUp", extra))).toBe("text");
+      expect(baseKey(press("ArrowDown", extra))).toBe("text");
+    }
+    expect(baseKey(press("Home"))).toBe("text");
+    expect(baseKey(press("End"))).toBe("text");
+    expect(baseKey(press("a"))).toBe("text");
+    expect(baseKey(press("ArrowDown", { keyCode: 229 }))).toBe("text");
+
+    const { form } = dialog();
+    expect(form.view()).toMatchObject({ base: "HEAD", bases: ["HEAD", "main", "fix"], baseIndex: 0 });
+    form.stepBase(-1);
+    expect(form.view()).toMatchObject({ base: "HEAD", baseIndex: 0 });
+    form.stepBase(1);
+    form.stepBase(1);
+    expect(form.view()).toMatchObject({ base: "fix", baseIndex: 2 });
+    form.stepBase(1);
+    expect(form.view()).toMatchObject({ base: "fix", baseIndex: 2 });
+    // Typed text that names an item is the current one.
+    form.setBase("main");
+    expect(form.view().baseIndex).toBe(1);
+    form.stepBase(-1);
+    expect(form.view()).toMatchObject({ base: "HEAD", baseIndex: 0 });
+    // Typed text that names none keeps the last chosen item current: the step starts there, not at the first.
+    form.chooseBase(2);
+    form.setBase("origin/feature");
+    expect(form.view()).toMatchObject({ base: "origin/feature", baseIndex: 2 });
+    form.stepBase(-1);
+    expect(form.view()).toMatchObject({ base: "main", baseIndex: 1 });
+    form.setBase("origin/feature");
+    form.stepBase(1);
+    expect(form.view()).toMatchObject({ base: "fix", baseIndex: 2 });
+    // At the end the text stays as typed.
+    form.setBase("tag-1");
+    form.stepBase(1);
+    expect(form.view()).toMatchObject({ base: "tag-1", baseIndex: 2 });
   });
 
   it("needs a branch, a base and an absolute folder", () => {

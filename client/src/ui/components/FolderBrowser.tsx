@@ -1,32 +1,40 @@
-import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
+import { For, Index, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
 import { Icon } from "../lib/icons";
 import { composing } from "../lib/keys";
 import { platform } from "../../store/shortcuts";
-import { FolderBrowser, type FolderBrowserCalls, type FolderPrompt } from "./folder-browser";
+import { FolderBrowser, browserEnter, listMenu, promptEnter, type BrowserPlace, type FolderBrowserCalls, type FolderPrompt, type PromptPlace } from "./folder-browser";
 import "../styles/folder-browser.css";
 
 // The folder browser of another computer (tray/src/DirectoryDialog.cpp, the
 // peer branch), from the prototype's layout (design/webui/src/dialogs/setup/
 // Clone.tsx, DirectoryBrowser) where Qt does not differ. Its rules and calls
 // are folder-browser.ts's. It opens as its own modal over the dialog that
-// asked for it. Its buttons are Qt's non-default ones: Enter on them does
-// nothing; Enter in the path opens it, in the list opens the folder.
+// asked for it. Its keys are Qt's (`browserEnter`, `promptEnter`): Use this
+// folder and Create folder are the default buttons, so Enter on any other
+// control presses them when they are enabled; the path field, the list, the
+// inline row and the context menu keep their own Enter.
 
 /** New folder — {computer}: the folder's name, Create folder and Cancel (286-318). */
 function PromptDialog(props: { prompt: () => FolderPrompt; onName(name: string): void; onCreate(): void; onCancel(): void }) {
   let el!: HTMLDialogElement;
   let name!: HTMLInputElement;
+  let create!: HTMLButtonElement;
+  let cancel!: HTMLButtonElement;
   let gone = false;
   onMount(() => {
     el.showModal();
     queueMicrotask(() => { name.focus(); name.select(); });
   });
   onCleanup(() => { gone = true; if (el.open) el.close(); });
+  // Create folder is the default button; Enter on Cancel cancels (`promptEnter`).
   const keys = (e: KeyboardEvent) => {
-    if (e.key !== "Enter" || composing(e)) return;
-    // No default button: Enter in the name creates, on a button it does nothing.
-    e.preventDefault();
-    if (e.target === name) props.onCreate();
+    const place: PromptPlace | undefined = e.target === name ? "name" : e.target === create ? "create" : e.target === cancel ? "cancel" : undefined;
+    if (!place) return;
+    switch (promptEnter(place, e)) {
+      case "create": e.preventDefault(); props.onCreate(); return;
+      case "cancel": e.preventDefault(); props.onCancel(); return;
+      case "ignore": e.preventDefault(); return;
+    }
   };
   return (
     <dialog class="dlg fb-prompt" ref={el} aria-labelledby="fb-prompt-title" onKeyDown={keys}
@@ -41,8 +49,8 @@ function PromptDialog(props: { prompt: () => FolderPrompt; onName(name: string):
       </div>
       <div class="dlg-foot">
         <span class="spacer" />
-        <button type="button" class="btn" onClick={() => props.onCancel()}>Cancel</button>
-        <button type="button" class="btn primary" disabled={!props.prompt().createEnabled} onClick={() => props.onCreate()}>Create folder</button>
+        <button type="button" ref={cancel} class="btn" onClick={() => props.onCancel()}>Cancel</button>
+        <button type="button" ref={create} class="btn primary" disabled={!props.prompt().createEnabled} onClick={() => props.onCreate()}>Create folder</button>
       </div>
     </dialog>
   );
@@ -114,8 +122,14 @@ export function FolderBrowserDialog(props: { computer: string; start: string; ca
     }
   };
 
+  const place = (target: HTMLElement): BrowserPlace =>
+    target.dataset.role === "path" ? "path"
+      : target === list ? "list"
+        : target === inline ? "inline-name"
+          : target.closest(".fb-inline") ? "inline"
+            : target.closest(".fb-menu") ? "menu"
+              : "other";
   const keys = (e: KeyboardEvent) => {
-    const target = e.target as HTMLElement;
     // Ctrl+Shift+N presses New folder (92-93), Command on macOS as Qt maps Ctrl.
     const command = platform === "macos" ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
     if (command && e.shiftKey && !e.altKey && e.code === "KeyN") {
@@ -123,17 +137,23 @@ export function FolderBrowserDialog(props: { computer: string; start: string; ca
       if (v().newFolderEnabled) newFolder();
       return;
     }
-    if (e.key !== "Enter" || composing(e)) return;
-    if (target.tagName === "BUTTON") { e.preventDefault(); return; }
-    if (target.dataset.role === "path") { e.preventDefault(); if (v().controlsEnabled) model.go(); }
-    else if (target === inline) { e.preventDefault(); model.createInline(); }
+    switch (browserEnter(place(e.target as HTMLElement), e, v())) {
+      case "go": e.preventDefault(); model.go(); return;
+      case "create": e.preventDefault(); model.createInline(); return;
+      case "choose": e.preventDefault(); choose(); return;
+      case "ignore": e.preventDefault(); return;
+    }
   };
 
+  const entries = () => listMenu(v());
   const contextMenu = (e: MouseEvent) => {
     e.preventDefault();
+    if (!entries()) return;
     const box = el.getBoundingClientRect();
     setMenu({ left: e.clientX - box.left, top: e.clientY - box.top });
   };
+  // A list that turns disabled has no menu.
+  createEffect(() => { if (!entries()) setMenu(undefined); });
   createEffect(() => {
     if (!menu()) return;
     const away = (e: PointerEvent) => { if (!(e.target as HTMLElement).closest?.(".fb-menu")) setMenu(undefined); };
@@ -152,7 +172,14 @@ export function FolderBrowserDialog(props: { computer: string; start: string; ca
           if (inline && document.activeElement === inline) { cancelInline(); return; }
           close();
         }}
-        onClose={() => { if (!gone) props.onClose(); }}>
+        onClose={() => {
+          if (gone) return;
+          // A close that `cancel` could not refuse (WebView2's close watcher closes a modal on a
+          // second Escape without user activation): while a folder is being created the browser
+          // shows again and keeps its place, so the creation's answer still arrives.
+          if (!model.canClose()) { el.showModal(); return; }
+          props.onClose();
+        }}>
         <div class="dlg-head"><h2 id="fb-title">{v().title}</h2></div>
         <div class="dlg-body fb-body">
           <h3 class="section-title">Choose a folder</h3>
@@ -215,9 +242,16 @@ export function FolderBrowserDialog(props: { computer: string; start: string; ca
               const i = items.indexOf(document.activeElement as HTMLElement);
               items[(i + (e.key === "ArrowDown" ? 1 : -1) + items.length) % items.length]?.focus();
             }}>
-            <button type="button" class="menu-item" role="menuitem" aria-disabled={!v().newFolderEnabled}
-              onClick={() => { if (!v().newFolderEnabled) return; setMenu(undefined); newFolder(); }}>New folder</button>
-            <button type="button" class="menu-item" role="menuitem" onClick={() => { setMenu(undefined); model.newFolderDialog(); }}>New folder dialog…</button>
+            <Index each={entries() ?? []}>{(entry) => (
+              <button type="button" class="menu-item" role="menuitem" aria-disabled={!entry().enabled}
+                onClick={() => {
+                  // A click on a disabled entry does nothing and keeps the menu open, as Qt's QMenu.
+                  if (!entry().enabled) return;
+                  setMenu(undefined);
+                  if (entry().action === "new") newFolder();
+                  else model.newFolderDialog();
+                }}>{entry().label}</button>
+            )}</Index>
           </div>
         )}</Show>
       </dialog>

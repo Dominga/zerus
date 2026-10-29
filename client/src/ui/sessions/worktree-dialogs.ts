@@ -1,6 +1,7 @@
 import type { CreatedWorktree } from "../../types";
 import { array, object, string, type Json } from "../lib/json";
-import { absolute, join, same, split, type Style } from "./paths";
+import { composing } from "../lib/keys";
+import { absolute, clean, join, sameKey, split, type Style } from "./paths";
 
 // New session's two worktree dialogs, as Qt keeps them in their views:
 // Choose existing… is WorktreePanel in picker mode (tray/src/WorktreePanel.h)
@@ -17,6 +18,13 @@ const flag = (value: Json, key: string) => value[key] === true;
 
 /** A listed session of the computer, as the picker counts it (G1). */
 export interface PickerSession { gitRoot: string; cwdCanonical: string }
+
+/** Whether two session lists hold the same paths in the same order (the picker then keeps its counts). */
+export const sameSessions = (a: readonly PickerSession[], b: readonly PickerSession[]) =>
+  a.length === b.length && a.every((session, i) => session.gitRoot === b[i].gitRoot && session.cwdCanonical === b[i].cwdCanonical);
+
+/** The computer's sessions per checkout (`gitRoot`) and per folder (`cwdCanonical`), keyed as `same` compares. */
+interface Counts { sessions: readonly PickerSession[]; style: Style; roots: Map<string, number>; folders: Map<string, number> }
 
 /** One checkout or folder the picker lists. */
 export interface WorktreeRow {
@@ -78,6 +86,8 @@ export class WorktreePicker {
   private answered = false;
   private selection: string | undefined;
   private closed = false;
+  private counted: Counts | undefined;
+  private listed: { data: Json; stale: boolean; counts: Counts; rows: WorktreeRow[] } | undefined;
 
   constructor(
     private readonly calls: { snapshot(): Promise<Json>; catalog(refresh: boolean): Promise<Json> },
@@ -140,20 +150,7 @@ export class WorktreePicker {
     const sampled = typeof data.sampled_at === "number" ? data.sampled_at : 0;
     if (sampled > 0) status += `\nSnapshot: ${snapshotTime(sampled)}${stale ? " (outdated)" : ""}`;
 
-    let roots = array(data.worktrees).slice(0, MAX_WORKTREES).map(object);
-    if (!roots.length && this.path !== "") {
-      roots = [{ path: typeof data.path === "string" ? data.path : this.path, kind: "folder", available: state !== "folder_unavailable" && Object.keys(data).length > 0 }];
-    }
-    const rows = roots.map((row): WorktreeRow => {
-      const path = string(row.path);
-      const checkout = row.kind !== "folder";
-      const count = sessions.filter((s) => same(checkout ? s.gitRoot : s.cwdCanonical, path, style)).length;
-      return {
-        path, label: worktreeLabel(row, count),
-        tooltip: `${path}\n${string(row.locked_reason)}\n${string(row.prunable_reason)}`,
-        usable: flag(row, "available") && row.kind !== "bare" && !stale,
-      };
-    });
+    const rows = this.rows(data, stale, this.counts(sessions, style));
     // The kept choice, else the opened folder or its root (the last such row), else the first.
     let selected = rows.find((r) => r.path === this.selection);
     if (!selected && this.selection === undefined) {
@@ -169,10 +166,66 @@ export class WorktreePicker {
     };
   }
 
+  /**
+   * The sessions per checkout and folder, counted in one pass when the
+   * computer's sessions or its style change, never on a selection change.
+   */
+  private counts(sessions: readonly PickerSession[], style: Style): Counts {
+    const known = this.counted;
+    if (known && known.sessions === sessions && known.style === style) return known;
+    const roots = new Map<string, number>();
+    const folders = new Map<string, number>();
+    const add = (map: Map<string, number>, path: string) => { const key = sameKey(path, style); map.set(key, (map.get(key) ?? 0) + 1); };
+    for (const session of sessions) {
+      add(roots, session.gitRoot);
+      add(folders, session.cwdCanonical);
+    }
+    this.counted = { sessions, style, roots, folders };
+    return this.counted;
+  }
+
+  /** The rows (WorktreePanel::render): built again only for new data, counts or staleness. */
+  private rows(data: Json, stale: boolean, counts: Counts): WorktreeRow[] {
+    const known = this.listed;
+    if (known && known.data === data && known.stale === stale && known.counts === counts) return known.rows;
+    let roots = array(data.worktrees).slice(0, MAX_WORKTREES).map(object);
+    if (!roots.length && this.path !== "") {
+      roots = [{ path: typeof data.path === "string" ? data.path : this.path, kind: "folder", available: string(data.state) !== "folder_unavailable" && Object.keys(data).length > 0 }];
+    }
+    const rows = roots.map((row): WorktreeRow => {
+      const path = string(row.path);
+      const count = (row.kind !== "folder" ? counts.roots : counts.folders).get(sameKey(path, counts.style)) ?? 0;
+      return {
+        path, label: worktreeLabel(row, count),
+        tooltip: `${path}\n${string(row.locked_reason)}\n${string(row.prunable_reason)}`,
+        usable: flag(row, "available") && row.kind !== "bare" && !stale,
+      };
+    });
+    this.listed = { data, stale, counts, rows };
+    return rows;
+  }
+
   private changed() { if (!this.closed) this.onChange?.(); }
 }
 
 // Create manually… (NewWorktreeDialog).
+
+type KeyPress = Pick<KeyboardEvent, "key" | "altKey" | "ctrlKey" | "metaKey" | "shiftKey"> & Partial<Pick<KeyboardEvent, "isComposing" | "keyCode">>;
+
+/**
+ * Start from's keys with its list closed (QComboBox::keyPressEvent, Qt 6.12,
+ * on an editable combo box): Alt+Down and a plain F4 open the list; Up and
+ * PageUp step up, Down and PageDown step down, one item each; Control
+ * (Command on macOS) with an arrow and every other key go to the text.
+ */
+export function baseKey(e: KeyPress): "open" | "previous" | "next" | "text" {
+  if (composing(e)) return "text";
+  const command = e.ctrlKey || e.metaKey;
+  if ((e.key === "ArrowDown" && e.altKey) || (e.key === "F4" && !e.altKey && !command && !e.shiftKey)) return "open";
+  if ((e.key === "ArrowUp" && !command) || e.key === "PageUp") return "previous";
+  if ((e.key === "ArrowDown" && !command) || e.key === "PageDown") return "next";
+  return "text";
+}
 
 /** The branch as a folder name: runs of anything but letters, digits, '.', '_' and '-' become '-'. */
 export const branchFolder = (branch: string) => branch.trim().replace(/[^\p{L}\p{N}._-]+/gu, "-");
@@ -183,6 +236,8 @@ export interface NewWorktreeView {
   base: string;
   /** Start from's list: HEAD, then the catalog's branches. */
   bases: string[];
+  /** Start from's current item (QComboBox's currentIndex): the typed text's item, else the last one chosen. */
+  baseIndex: number;
   destination: string;
   /** "", "Creating worktree…" or the failure. */
   error: string;
@@ -202,6 +257,7 @@ export class NewWorktree {
 
   private branch: string;
   private base = "HEAD";
+  private chosenBase = 0;
   private destination = "";
   private custom = false;
   private parent: string;
@@ -234,7 +290,7 @@ export class NewWorktree {
     const busy = this.request !== 0;
     return {
       context: `Computer: ${this.machine}\nRepository: ${this.source}`,
-      branch: this.branch, base: this.base, bases: this.bases, destination: this.destination, error: this.error, busy,
+      branch: this.branch, base: this.base, bases: this.bases, baseIndex: this.baseIndex(), destination: this.destination, error: this.error, busy,
       createEnabled: !busy && this.branch.trim() !== "" && this.base.trim() !== "" && absolute(this.destination, this.style),
     };
   }
@@ -249,10 +305,29 @@ export class NewWorktree {
     this.changed();
   }
 
+  /** Start from typed: the current item stays the last one chosen unless the text names another. */
   setBase(text: string) {
     if (this.request) return;
     this.base = text;
     this.changed();
+  }
+
+  /** Start from's list chose item `index`. */
+  chooseBase(index: number) {
+    if (this.request || index < 0 || index >= this.bases.length) return;
+    this.chosenBase = index;
+    this.base = this.bases[index];
+    this.changed();
+  }
+
+  /**
+   * Up or PageUp (-1), Down or PageDown (+1) with the list closed
+   * (QComboBox::keyPressEvent): one item from the current one, none past
+   * either end.
+   */
+  stepBase(by: 1 | -1) {
+    const to = this.baseIndex() + by;
+    if (to >= 0 && to < this.bases.length) this.chooseBase(to);
   }
 
   /** The folder edited by hand: the suggestion stops following the branch. */
@@ -266,10 +341,14 @@ export class NewWorktree {
   /** Where Parent folder… starts: the folder's parent. */
   browseStart() { return split(this.destination, this.style)[0]; }
 
-  /** Parent folder… chose `folder`: the suggestion follows the branch again under it. */
+  /**
+   * Parent folder… chose `folder`: the suggestion follows the branch again
+   * under it. The folder takes the computer's stored form first ('/' on
+   * Windows too, as `QDir::filePath` gives), so the suggestion has one form.
+   */
   browsed(folder: string) {
     if (!folder || this.request) return;
-    this.parent = folder;
+    this.parent = clean(folder, this.style);
     this.custom = false;
     this.suggest();
     this.changed();
@@ -293,6 +372,11 @@ export class NewWorktree {
       this.changed();
     });
     this.changed();
+  }
+
+  private baseIndex() {
+    const at = this.bases.indexOf(this.base);
+    return at >= 0 ? at : this.chosenBase;
   }
 
   private suggest() {

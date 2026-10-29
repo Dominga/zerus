@@ -6,7 +6,7 @@ import type { Json } from "../lib/json";
 import { FolderBrowserDialog } from "../components/FolderBrowser";
 import type { FolderBrowserCalls } from "../components/folder-browser";
 import type { Style } from "./paths";
-import { NewWorktree } from "./worktree-dialogs";
+import { NewWorktree, baseKey } from "./worktree-dialogs";
 
 // Create manually… (NewSessionDialog::createWorktree 1125-1143): Qt's
 // NewWorktreeDialog, from the prototype's layout (design/webui/src/dialogs/
@@ -17,16 +17,20 @@ import { NewWorktree } from "./worktree-dialogs";
 
 /**
  * Start from: Qt's editable combo box. Typing edits the base; with the list
- * closed the arrows step through it, Alt+Down and F4 open it; with the list
- * open the arrows move, Enter picks and Escape closes the list only.
+ * closed the arrows and Page keys step from the current item (`baseKey`),
+ * Alt+Down and F4 open it; with the list open the arrows move, Enter picks
+ * and Escape closes the list only.
  */
-function BaseField(props: { value: string; options: string[]; disabled: boolean; open: boolean; onOpen(open: boolean): void; onInput(text: string): void }) {
+function BaseField(props: {
+  value: string; options: string[]; current: number; disabled: boolean; open: boolean;
+  onOpen(open: boolean): void; onInput(text: string): void; onPick(index: number): void; onStep(by: 1 | -1): void;
+}) {
   let root!: HTMLDivElement;
   const [active, setActive] = createSignal<number>(-1);
-  const show = () => { setActive(props.options.indexOf(props.value)); props.onOpen(true); };
+  const show = () => { setActive(props.current); props.onOpen(true); };
   const pick = (index: number) => {
     props.onOpen(false);
-    if (index >= 0 && index < props.options.length) props.onInput(props.options[index]);
+    if (index >= 0 && index < props.options.length) props.onPick(index);
   };
   const keys = (e: KeyboardEvent) => {
     if (props.disabled || composing(e)) return;
@@ -40,12 +44,10 @@ function BaseField(props: { value: string; options: string[]; disabled: boolean;
       else if (e.key === "Tab") props.onOpen(false);
       return;
     }
-    if ((e.key === "ArrowDown" && e.altKey) || (e.key === "F4" && !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey)) { e.preventDefault(); show(); return; }
-    if ((e.key === "ArrowDown" || e.key === "ArrowUp") && !e.altKey && !e.ctrlKey && !e.metaKey && count) {
-      e.preventDefault();
-      const at = props.options.indexOf(props.value);
-      const to = at < 0 ? 0 : Math.max(0, Math.min(count - 1, at + (e.key === "ArrowDown" ? 1 : -1)));
-      props.onInput(props.options[to]);
+    switch (baseKey(e)) {
+      case "open": e.preventDefault(); show(); return;
+      case "previous": e.preventDefault(); props.onStep(-1); return;
+      case "next": e.preventDefault(); props.onStep(1); return;
     }
   };
   createEffect(() => {
@@ -143,7 +145,14 @@ export function NewWorktreeDialog(props: {
           if (baseOpen()) { setBaseOpen(false); return; }
           close();
         }}
-        onClose={() => { if (!gone) props.onClose(); }}>
+        onClose={() => {
+          if (gone) return;
+          // A close that `cancel` could not refuse (WebView2's close watcher closes a modal on a
+          // second Escape without user activation): while the worktree is being created the
+          // dialog shows again and keeps its place, so the answer still arrives.
+          if (!form.canClose()) { el.showModal(); return; }
+          props.onClose();
+        }}>
         <div class="dlg-head"><h2 id="nw-title">New worktree</h2></div>
         <div class="dlg-body nw-body">
           <p class="nw-context">{v().context}</p>
@@ -154,7 +163,8 @@ export function NewWorktreeDialog(props: {
           </div>
           <div class="form-row">
             <label for="nw-base">Start from</label>
-            <BaseField value={v().base} options={v().bases} disabled={v().busy} open={baseOpen()} onOpen={setBaseOpen} onInput={(text) => form.setBase(text)} />
+            <BaseField value={v().base} options={v().bases} current={v().baseIndex} disabled={v().busy} open={baseOpen()} onOpen={setBaseOpen}
+              onInput={(text) => form.setBase(text)} onPick={(index) => form.chooseBase(index)} onStep={(by) => form.stepBase(by)} />
           </div>
           <div class="form-row">
             <label for="nw-destination">New folder</label>

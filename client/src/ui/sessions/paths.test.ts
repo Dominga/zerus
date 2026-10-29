@@ -35,6 +35,20 @@ describe("folder paths (paths.rs)", () => {
     }
   });
 
+  it("keys paths as `same` compares them", () => {
+    const all = [...fixture.paths.map((entry) => entry.path), ...fixture.pairs.flatMap((entry) => [entry.path, entry.folder]),
+      "C:\\Work\\App", "c:/work/app", "C:/WORK/APP", "/Work/App", "/work/app", "\u00C5ngstr\u00F6m", "\u00E5NGSTR\u00D6M", "stra\u00DFe", "STRASSE"];
+    for (const style of STYLES) {
+      for (const a of all) {
+        for (const b of all) {
+          expect(paths.sameKey(a, style) === paths.sameKey(b, style), `${style} ${JSON.stringify(a)} ${JSON.stringify(b)}`).toBe(paths.same(a, b, style));
+        }
+      }
+    }
+    expect(paths.sameKey("C:\\Work\\App", "windows")).toBe(paths.sameKey("c:/work/app", "windows"));
+    expect(paths.sameKey("/Work/App", "posix")).not.toBe(paths.sameKey("/work/app", "posix"));
+  });
+
   it("takes this computer's style from its platform, else from the build", () => {
     for (const entry of fixture.styles) {
       for (const build of STYLES) {

@@ -129,6 +129,14 @@ export function same(a: string, b: string, style: Style): boolean {
   return style === "posix" ? a === b : equalFolded(slashes(a), slashes(b));
 }
 
+/**
+ * The key `same` compares by: two paths are the same exactly when their keys
+ * are equal, so counts by path can use a map instead of a scan per path.
+ */
+export function sameKey(path: string, style: Style): string {
+  return style === "posix" ? path : chars(slashes(path)).map(fold).join("");
+}
+
 /** Whether `path` is `folder` or inside it, by whole names: C:/workshop is not in C:/work. */
 export function within(path: string, folder: string, style: Style): boolean {
   if (style === "posix") {

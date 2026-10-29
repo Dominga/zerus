@@ -1,4 +1,5 @@
 import { array, object, string, type Json } from "../lib/json";
+import { composing } from "../lib/keys";
 
 // The folder browser of another computer: a port of the peer branch of
 // tray/src/DirectoryDialog.cpp (46-326). This computer's folders use the
@@ -64,6 +65,87 @@ export const LISTED = "Double-click to open a folder, or select it and press Use
 export const EMPTY = "No subfolders. You can use this folder.";
 /** `hgs dirs` lists at most this many folders; a longer reply keeps its first ones. */
 export const MAX_ENTRIES = 2000;
+
+// Enter (DirectoryDialog.cpp 83-85, 95, 162, 175-181, 303-311). The
+// dialog's QDialogButtonBox makes its first AcceptRole button the default
+// when it shows, although the code turns default and auto-default off: Use
+// this folder in the browser, Create folder in the New folder prompt. Every
+// other button has auto-default off, so Enter goes past it to the dialog,
+// which presses the default button when it is enabled, and only without
+// modifiers. The path field presses Go, the list opens its current folder,
+// the inline name presses Create, and the list swallows Enter on the inline
+// row's buttons. The context menu (a QMenu) triggers its active entry.
+
+/** A key press as the mappings read it. */
+export type EnterPress = Pick<KeyboardEvent, "key" | "altKey" | "ctrlKey" | "metaKey" | "shiftKey"> & Partial<Pick<KeyboardEvent, "isComposing" | "keyCode">>;
+
+/** Where Enter lands in the browser. */
+export type BrowserPlace =
+  /** The path field. */
+  | "path"
+  /** The list itself (its own handler opens the current folder). */
+  | "list"
+  /** The inline New folder row's name. */
+  | "inline-name"
+  /** The inline row's Create and Cancel buttons. */
+  | "inline"
+  /** The list's context menu. */
+  | "menu"
+  /** Up, Home, Go, the filter, Show hidden folders and the other buttons. */
+  | "other";
+
+/**
+ * What Enter does in the browser:
+ * - "go": Go (the path field);
+ * - "create": Create (the inline name, which checks the name);
+ * - "choose": the default button, Use this folder or Use selected folder;
+ * - "ignore": nothing, not even the focused button's own press;
+ * - "native": the control's own handling (the list, the context menu's entry, an input method).
+ */
+export type BrowserEnter = "go" | "create" | "choose" | "ignore" | "native";
+
+const plain = (e: EnterPress) => !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey;
+
+/** One entry of the list's context menu. */
+export interface MenuEntry { label: string; enabled: boolean; action: "new" | "dialog" }
+
+/**
+ * The list's context menu (92-99): New folder as its button is, and the
+ * always enabled New folder dialog…. None while the list is disabled: a
+ * disabled QListWidget never asks for its menu.
+ */
+export function listMenu(view: Pick<FolderBrowserView, "listEnabled" | "newFolderEnabled">): MenuEntry[] | undefined {
+  if (!view.listEnabled) return undefined;
+  return [{ label: "New folder", enabled: view.newFolderEnabled, action: "new" }, { label: "New folder dialog…", enabled: true, action: "dialog" }];
+}
+
+/** Enter in the browser; `chooseEnabled` is the default button's state. */
+export function browserEnter(place: BrowserPlace, e: EnterPress, view: Pick<FolderBrowserView, "chooseEnabled" | "controlsEnabled">): BrowserEnter {
+  if (e.key !== "Enter" || composing(e)) return "native";
+  switch (place) {
+    case "path": return view.controlsEnabled ? "go" : "ignore";
+    case "list": case "menu": return "native";
+    case "inline-name": return "create";
+    case "inline": return "ignore";
+    case "other": return plain(e) && view.chooseEnabled ? "choose" : "ignore";
+  }
+}
+
+/** Where Enter lands in the New folder prompt. */
+export type PromptPlace = "name" | "create" | "cancel";
+
+/**
+ * Enter in the New folder prompt: in the name and on Create folder it
+ * creates (the prompt checks the name). On Cancel it cancels, as a click
+ * does; Qt's default button would take that Enter and create the folder
+ * (a listed deviation, ruled 2026-10-29). Modifiers stop the buttons' Enter.
+ */
+export function promptEnter(place: PromptPlace, e: EnterPress): "create" | "cancel" | "ignore" | "native" {
+  if (e.key !== "Enter" || composing(e)) return "native";
+  if (place === "name") return "create";
+  if (!plain(e)) return "ignore";
+  return place === "cancel" ? "cancel" : "create";
+}
 
 const utf8Length = (text: string) => new TextEncoder().encode(text).length;
 const errorText = (error: unknown) => (typeof error === "string" ? error : error instanceof Error ? error.message : String(error));

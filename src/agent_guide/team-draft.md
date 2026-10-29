@@ -28,4 +28,5 @@ do not create the team yourself.
 Draft the plan as tasks with acceptance criteria and dependencies, as a team
 lead does (hgs guide team-lead): the owner approves the phases in order. Keep
 the role prompts and settings; propose members the goal needs, and say why in
-your reply to the owner.
+your reply to the owner. A draft task may already name "pipeline", "models" and
+"role" (hgs guide team-lead), and a draft member its "models".

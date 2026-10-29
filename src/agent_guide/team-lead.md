@@ -1,38 +1,40 @@
-Lead a running team: phases, pipelines and finish (hgs guide team-lead)
+Lead a team: phases, pipelines, customization (hgs guide team-lead)
 
-The plan is phase 1; new work is a new phase (extend: phase_title, tasks; ids
-continue, 50 tasks/phase, 500/team). barrier holds its tasks until every
-earlier phase is finished; pinned keeps its member. A "review" draft waits for
-you; "auto" starts once no draft is ahead; edit it with extend "phase":N,
-edit-draft or move-phase, and rework-phase {phase, note?} returns a sent-back
-phase. A running phase takes work on your word: add-to-phase {phase, tasks,
-owner_word} warns, then {phase, confirm: pending, owner_word}.
-A check task runs its command in the member's folder; exit decides.
+The plan is phase 1; new work is a phase (extend: phase_title, tasks).
+barrier holds its tasks behind earlier phases; pinned keeps its member. A
+"review" draft waits for you, "auto" starts once none is ahead: extend
+"phase":N, edit-draft, move-phase, rework-phase. A running phase takes work on
+your word: add-to-phase {phase, tasks, owner_word}, then confirm. A check's
+exit decides.
 
-Pipelines (U36): a task passes review and test stages before you.
-- Per task "pipeline":"code" (review, test), "docs" (review), "check" (none)
-  or "none" in plan, extend or edit-draft; else the role's or template's
-  default; the task keeps the preset it started with.
-- A stage member reports a verdict with hgs team report --json: pass moves on,
-  return sends the findings straight to the implementer; after the preset's
-  rounds (3) you decide with every round's findings. Override with hgs team
-  skip-stage {task, reason} or send-back {task, reason}; accept and reject stay
-  yours after the last stage.
-- Review reads the attempt's change; test runs only the changed files' suites
-  and the criteria's shots; neither edits the task's files; a test holds the
-  folder, so the implementer's next task waits.
+Pipelines (U36): per task "pipeline":"code" (review, test), "docs" (review),
+"check" (none) or "none", else the role's or template's default. A stage
+member's verdict (hgs team report --json) passes it on or returns it with
+findings; after the rounds (3) you decide. Override with skip-stage or
+send-back; a test holds the folder for the next task.
 
-Members:
-- Routine: hgs guide team-run; shapes: hgs guide team-safe. A question is not a
-  report: answer it with hgs team reply; reject with "hold":true, release gives
-  a held task out; a report may be replaced; roster: owner_word or propose.
-- Budgets: hgs team expect {"label":"x","minutes":15}; red says once.
-- A permission: allow what the task needs in the member's folder; ask the owner
-  for anything outside or destructive.
-- Approve a plan or phase only on the owner's sentence in your session (<30
-  min): {"owner_word":{"text":"plan approved"}} with approve/approve-phase.
-- Sub-lead: hgs team sub-lead {"member":"qalead","sub":true}; reports-to
-  {member, parent} sets who it reviews.
-- Cancel empty tasks first; when all are decided, extend or finish: hgs team
-  finish --json. The owner may finish too; the owner's stop is final.
+Customization (U45-U52), opt-in; the owner sets roles, settings, catalog:
+- Task "models" (default any) and "role" with no assignee (never both or
+  pinned; a member's models default to its launch model): Zerus takes a free
+  member of the role whose models allow one, switches model and effort and
+  waits; a refused or unconfirmed one leaves the task waiting, never on the
+  wrong model.
+- context_before_task none|compact|clear (role, then member; default none):
+  Zerus compacts or clears and waits before each hand-out; clear needs
+  self-contained task text.
+- Command stages (expect_exit 0, timeout 30) have no member; a last land
+  stage maps exits to accepted, returned or held; needs land_allowed.
+  branch_per_task {template} and base_branch are owner settings (default one
+  branch per member).
+- scale {role, agent, count, model?, effort?, account?} adds members; drain
+  {member} finishes it, pauses it and removes it; both on the owner's word.
+- Owner's intake key: 5 tasks as one urgent phase; restart_crashed off:
+  3 restarts/hour, then stopped.
+
+Members: hgs guide team-run, team-safe. A question is not a report:
+answer with hgs team reply; reject with "hold":true, release gives it out; a
+report may be replaced; roster: owner_word or propose. Approve a plan or phase
+only on the owner's sentence (<30 min): owner_word. Sub-lead: hgs team
+sub-lead {"member":"qalead","sub":true}; reports-to {member, parent}. When all
+are decided, extend or finish (hgs team finish); the owner's stop is final.
 Sub-teams: hgs guide team-tree.

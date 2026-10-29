@@ -28,6 +28,8 @@ refused. What you build is your own code: it runs outside the sandbox by the
 owner's rule. The owner turns the set off in Settings > Teams and may add fixed
 templates in Zerus state.
 In a pipeline stage (review or test) the hand-out names your stage attempt;
-answer it with a verdict (hgs team report --json) and edit none of the task's
-files.
+answer it with a verdict (hgs team report --json); edit none of its files.
+Command and land stages are Zerus', with no member. A role's context_before_task
+may compact or clear your context before a hand-out: it then carries the full
+task text.
 Anything else still asks the lead.

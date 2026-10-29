@@ -2365,7 +2365,291 @@ fn team_override(session: &SessionRef, on: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// U46: the context action a member asks for before a hand-out. A member's own
+/// setting overrides the role snapshot copied when it joined; an old member
+/// without a snapshot follows the role's live setting, as it follows the role's
+/// prompt text. Empty means none; "none" overrides a role's action with none.
+pub(crate) fn context_before_task(team: &Team, member: &Member) -> String {
+    let from_role = member
+        .prompt_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.context_before_task.clone())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            super::catalog::load().ok().and_then(|catalog| {
+                let role_name = team.role_of(&member.id);
+                catalog
+                    .roles
+                    .iter()
+                    .find(|role| role.id == role_name || role.name == role_name)
+                    .map(|role| role.context_before_task.clone())
+            })
+        })
+        .unwrap_or_default();
+    let wanted = if member.context_before_task.is_empty() { from_role } else { member.context_before_task.clone() };
+    match wanted.as_str() {
+        "compact" | "clear" => wanted,
+        _ => String::new(),
+    }
+}
+
+/// U46: whether this agent has the native context action. DeepSeek compacts but
+/// has no native clear; OpenCode has neither yet.
+fn native_context(agent: &str, action: &str) -> bool {
+    match action {
+        "compact" => matches!(agent, "claude" | "codex" | "kimi" | "dsh"),
+        "clear" => matches!(agent, "claude" | "codex" | "kimi"),
+        _ => false,
+    }
+}
+
+fn agent_label(agent: &str) -> &str {
+    match agent {
+        "claude" => "Claude",
+        "codex" => "Codex",
+        "kimi" => "Kimi",
+        "dsh" => "DeepSeek",
+        "opencode" => "OpenCode",
+        other => other,
+    }
+}
+
+/// U46: what Zerus did to the member before a hand-out.
+enum Prepared {
+    Done { step: PrepareStep, conversation: Option<(String, String)> },
+    Skipped(PrepareStep),
+    Waiting { step: PrepareStep, wait: PrepareWait },
+}
+
+/// U46: the confirmation timeout. Tests shorten it; a native compaction or
+/// clear reports back in seconds.
+fn context_confirm() -> Duration {
+    #[cfg(test)]
+    if let Some(ms) = CONTEXT_CONFIRM.with(|value| *value.borrow()) {
+        return Duration::from_millis(ms);
+    }
+    Duration::from_secs(60)
+}
+
+#[cfg(test)]
+thread_local! {
+    static CONTEXT_CONFIRM: std::cell::RefCell<Option<u64>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_context_confirm(ms: Option<u64>) {
+    CONTEXT_CONFIRM.with(|value| *value.borrow_mut() = ms);
+}
+
+/// What the native context action's confirmation shows.
+enum Waited {
+    Done(Option<String>),
+    Refused(String),
+    Uncertain(String),
+}
+
+/// U46: waits for the action's confirmation in the session record: the compact
+/// request recorded as `completed`, or the clear's new conversation id.
+fn wait_for_context(session: &SessionRef, action: &str, request_id: &str) -> Waited {
+    let deadline = Instant::now() + context_confirm();
+    let mut last;
+    loop {
+        match inspect_reply(session) {
+            Ok(record) => {
+                if record["run_id"].as_str().unwrap_or_default() != session.run_id {
+                    return Waited::Uncertain("The member's session changed while preparing the hand-out".into());
+                }
+                match action {
+                    "compact" => {
+                        let request = &record["compact_context_request"];
+                        if request["request_id"].as_str() == Some(request_id) {
+                            match request["status"].as_str().unwrap_or_default() {
+                                "completed" => return Waited::Done(None),
+                                // Nothing to compact: the context is as short as it gets.
+                                "unchanged" => return Waited::Done(None),
+                                "cancelled" => return Waited::Refused("The compaction was cancelled before it finished".into()),
+                                "failed" => return Waited::Refused("The compaction failed".into()),
+                                status => last = format!("the compaction is {status}"),
+                            }
+                        } else {
+                            last = "the compaction request is not recorded yet".into();
+                        }
+                    }
+                    "clear" => {
+                        let new = record["conversation_id"].as_str().unwrap_or_default();
+                        if !new.is_empty() && new != session.conversation_id {
+                            return Waited::Done(Some(new.to_owned()));
+                        }
+                        last = "the cleared conversation has not appeared yet".into();
+                    }
+                    _ => return Waited::Refused("Unknown context action".into()),
+                }
+            }
+            Err(error) => last = error.to_string(),
+        }
+        if Instant::now() >= deadline {
+            return Waited::Uncertain(format!(
+                "The {action} was not confirmed within {} s ({last})",
+                context_confirm().as_secs()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// U46: the context step itself for any hand-out. It runs `hgs compact-context`
+/// or `hgs clear-context` on the idle member session and waits for the command's
+/// confirmation in the session record. It returns the recorded step (`done`,
+/// `skipped`, `refused` or `uncertain`) and, after a clear, the conversation the
+/// member's session must follow. A U36 stage hand-out calls this too; the lead
+/// wires it when #537 and this land together.
+pub(crate) struct ContextConfirmation {
+    pub step: PrepareStep,
+    pub conversation: Option<String>,
+}
+
+fn skipped_context(member: &Member, action: &str, at: f64) -> PrepareStep {
+    PrepareStep {
+        step: "context".into(),
+        from: "none".into(),
+        to: "none".into(),
+        at,
+        result: "skipped".into(),
+        reason: format!("{} has no {action}; the task continues the conversation", agent_label(&member.agent)),
+    }
+}
+
+fn context_failure(mut step: PrepareStep, result: &str, reason: String) -> ContextConfirmation {
+    step.result = result.into();
+    step.reason = reason;
+    ContextConfirmation { step, conversation: None }
+}
+
+pub(crate) fn run_context(member: &Member, session: &SessionRef, action: &str) -> ContextConfirmation {
+    let at = now();
+    let step = PrepareStep {
+        step: "context".into(),
+        from: "none".into(),
+        to: action.to_owned(),
+        at,
+        result: "done".into(),
+        reason: String::new(),
+    };
+    if !native_context(&member.agent, action) {
+        return ContextConfirmation { step: skipped_context(member, action, at), conversation: None };
+    }
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let input = json!({"request_id":request_id,"expected_run_id":session.run_id,
+        "expected_conversation_id":session.conversation_id});
+    let args = [format!("{action}-context"), session.name.clone(), "--json".to_owned()];
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = match hgs(&session.host, &args, Some(&input), Duration::from_secs(120)) {
+        Ok(output) => output,
+        Err(error) => return context_failure(step, "uncertain", error.to_string()),
+    };
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        let reason = stderr.lines().next().unwrap_or_default().trim().to_owned();
+        let reason = if reason.is_empty() { format!("The {action} was refused") } else { reason };
+        return context_failure(step, "refused", reason);
+    }
+    let receipt: Value = match serde_json::from_slice(&output.stdout) {
+        Ok(receipt) => receipt,
+        Err(error) => return context_failure(step, "uncertain", format!("Unexpected {action} receipt: {error}")),
+    };
+    let status = receipt["status"].as_str().unwrap_or_default();
+    if action == "clear" && status == "confirmed" {
+        // The command proved the clear; the record may already name the new
+        // conversation, which the member's session follows (spec 3).
+        let conversation = inspect_reply(session).ok().and_then(|record| {
+            let new = record["conversation_id"].as_str().unwrap_or_default();
+            (!new.is_empty() && new != session.conversation_id).then(|| new.to_owned())
+        });
+        return ContextConfirmation { step, conversation };
+    }
+    if !matches!(status, "submitted" | "in_progress" | "compacting") {
+        return context_failure(
+            step,
+            "uncertain",
+            format!("Unexpected {action} receipt: {}", String::from_utf8_lossy(&output.stdout).trim()),
+        );
+    }
+    match wait_for_context(session, action, &request_id) {
+        Waited::Done(conversation) => ContextConfirmation { step, conversation },
+        Waited::Refused(reason) => context_failure(step, "refused", reason),
+        Waited::Uncertain(reason) => context_failure(step, "uncertain", reason),
+    }
+}
+
+/// U46: runs the context step for a hand-out that is about to go out, turning
+/// its result into what the dispatcher records or waits for.
+fn prepare_context(member: &Member, action: &str) -> Prepared {
+    let at = now();
+    if !native_context(&member.agent, action) {
+        return Prepared::Skipped(skipped_context(member, action, at));
+    }
+    let Some(session) = member.session.clone() else {
+        let step = PrepareStep {
+            step: "context".into(),
+            from: "none".into(),
+            to: action.to_owned(),
+            at,
+            result: "refused".into(),
+            reason: "The member's session is not started".into(),
+        };
+        return Prepared::Waiting {
+            wait: PrepareWait { step: "context".into(), reason: step.reason.clone(), at, attempt: 0 },
+            step,
+        };
+    };
+    let confirmation = run_context(member, &session, action);
+    let conversation = confirmation.conversation.map(|new| (session.run_id.clone(), new));
+    match confirmation.step.result.as_str() {
+        "done" => Prepared::Done { step: confirmation.step, conversation },
+        "skipped" => Prepared::Skipped(confirmation.step),
+        _ => {
+            let step = confirmation.step;
+            let wait = PrepareWait { step: "context".into(), reason: step.reason.clone(), at, attempt: 0 };
+            Prepared::Waiting { step, wait }
+        }
+    }
+}
+
+/// U46: what a successful preparation leaves for the hand-out: its steps and,
+/// after a clear, the conversation the member's session follows.
+#[derive(Clone, Default)]
+struct Preparation {
+    steps: Vec<PrepareStep>,
+    conversation: Option<(String, String)>,
+}
+
 fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, from: Option<&str>, host: &str) -> anyhow::Result<()> {
+    // U46: prepare the member before the hand-out. A team that sets no context
+    // action takes today's path with no extra call and no extra event.
+    let team = store.load(team_id)?.with_context(|| format!("Unknown team {team_id}"))?;
+    let member = team.member(member_id).cloned().with_context(|| format!("Unknown member {member_id}"))?;
+    let action = context_before_task(&team, &member);
+    let prepared = if action.is_empty() { None } else { Some(prepare_context(&member, &action)) };
+    match prepared {
+        None => hand_out_now(store, team_id, task_id, member_id, from, host, Preparation::default()),
+        Some(Prepared::Skipped(step)) => hand_out_now(store, team_id, task_id, member_id, from, host, Preparation { steps: vec![step], ..Default::default() }),
+        Some(Prepared::Done { step, conversation }) => {
+            hand_out_now(store, team_id, task_id, member_id, from, host, Preparation { steps: vec![step], conversation })
+        }
+        Some(Prepared::Waiting { step, wait }) => record_prepare_wait(store, team_id, task_id, member_id, from, step, wait),
+    }
+}
+
+fn hand_out_now(
+    store: &mut Store,
+    team_id: &str,
+    task_id: u32,
+    member_id: &str,
+    from: Option<&str>,
+    host: &str,
+    preparation: Preparation,
+) -> anyhow::Result<()> {
+    let Preparation { steps: prepare, conversation } = preparation;
     // Record the attempt before sending; a crash leaves it Unconfirmed.
     let attempt_id = uuid::Uuid::new_v4().to_string();
     let mut message = None;
@@ -2375,6 +2659,29 @@ fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, fro
     let mut git_job: Option<(String, f64)> = None;
     change(store, team_id, |team, events| {
         anyhow::ensure!(team.status == TeamStatus::Running && plan::ready(team).contains(&task_id), "no longer ready");
+        let role = team.role_of(member_id);
+        // U46: a clear may name a new conversation; the member follows it before
+        // the hand-out so its identity checks keep the member (spec 3).
+        if let Some((run, new)) = &conversation {
+            if let Some(found) = team.members.iter_mut().find(|member| member.id == member_id) {
+                if let Some(session) = found.session.as_mut().filter(|session| &session.run_id == run) {
+                    session.conversation_id = new.clone();
+                }
+            }
+        }
+        // U46: the first hand-out that finds no native action tells the lead
+        // once; every later one stays silent.
+        if let Some(step) = prepare.iter().find(|step| step.result == "skipped") {
+            if let Some(found) = team.members.iter_mut().find(|member| member.id == member_id) {
+                if !found.context_noted {
+                    found.context_noted = true;
+                    events.push(Event::new("context_skipped", json!({"member":role,"task":task_id,"reason":step.reason})));
+                }
+            }
+        }
+        if let Some(step) = prepare.iter().find(|step| step.result == "done") {
+            events.push(Event::new("context_prepared", json!({"member":role,"task":task_id,"action":step.to})));
+        }
         let session = team.member(member_id).and_then(|m| m.session.clone()).context("no session")?;
         let member_host = team.member(member_id).map(|m| m.computer.clone()).unwrap_or_default();
         let roles = from.map(|from| (team.role_of(from), team.role_of(member_id)));
@@ -2396,6 +2703,7 @@ fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, fro
             member: member_id.to_owned(),
             sent_at: now(),
             rebalanced_from: rebalanced.clone(),
+            prepare: prepare.clone(),
             ..Default::default()
         });
         if let (false, Some((from_role, to_role))) = (rebalanced.is_empty(), roles) {
@@ -2459,6 +2767,54 @@ fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, fro
                 events.push(Event::new("unconfirmed", json!({"task":task_id,"attempt":n,"error":error})));
             }
         }
+        Ok(())
+    })
+}
+
+/// U46: records a hand-out Zerus could not prepare. The attempt is kept for
+/// the feed and the task waits for Zerus: `plan::ready` skips it and the lead's
+/// inbox names the retry.
+fn record_prepare_wait(
+    store: &mut Store,
+    team_id: &str,
+    task_id: u32,
+    member_id: &str,
+    from: Option<&str>,
+    step: PrepareStep,
+    wait: PrepareWait,
+) -> anyhow::Result<()> {
+    change(store, team_id, |team, events| {
+        anyhow::ensure!(team.status == TeamStatus::Running && plan::ready(team).contains(&task_id), "no longer ready");
+        let roles = from.map(|from| (team.role_of(from), team.role_of(member_id)));
+        let task = team.task_mut(task_id).context("unknown task")?;
+        let rebalanced = match from {
+            Some(from) if task.assignee == from && !task.pinned => {
+                task.assignee = member_id.to_owned();
+                from.to_owned()
+            }
+            _ => String::new(),
+        };
+        anyhow::ensure!(task.assignee == member_id, "reassigned");
+        let n = task.attempts.len() as u32 + 1;
+        task.attempts.push(Attempt {
+            n,
+            id: uuid::Uuid::new_v4().to_string(),
+            member: member_id.to_owned(),
+            state: AttemptState::Refused,
+            sent_at: now(),
+            rebalanced_from: rebalanced.clone(),
+            error: wait.reason.clone(),
+            prepare: vec![step.clone()],
+            ..Default::default()
+        });
+        task.prepare_wait = Some(PrepareWait { attempt: n, ..wait.clone() });
+        if let (false, Some((from_role, to_role))) = (rebalanced.is_empty(), roles) {
+            events.push(Event::new("rebalanced", json!({"task":task_id,"from":from_role,"to":to_role,"from_member":rebalanced,"to_member":member_id})));
+        }
+        events.push(Event::new(
+            "prepare_failed",
+            json!({"member":team.role_of(member_id),"task":task_id,"step":step.step,"result":step.result,"reason":step.reason}),
+        ));
         Ok(())
     })
 }
@@ -2783,9 +3139,48 @@ fn allow_safe(store: &mut Store, team: &Team, member_id: &str, pending: &Pending
 /// Hands the lead its own task without a message (C1): the attempt exists, so
 /// `hgs team current` names it and the inbox lists it to report and accept.
 fn lead_hand_out(store: &mut Store, team_id: &str, task_id: u32) -> anyhow::Result<()> {
+    // U46: the lead's own hand-out is a hand-out too; a team that sets no
+    // context action keeps today's path.
+    let team = store.load(team_id)?.with_context(|| format!("Unknown team {team_id}"))?;
+    let lead = team.member(&team.lead).cloned().context("the team has no lead")?;
+    let action = context_before_task(&team, &lead);
+    let prepared = if action.is_empty() { None } else { Some(prepare_context(&lead, &action)) };
+    match prepared {
+        None => lead_hand_out_now(store, team_id, task_id, Vec::new(), None),
+        Some(Prepared::Skipped(step)) => lead_hand_out_now(store, team_id, task_id, vec![step], None),
+        Some(Prepared::Done { step, conversation }) => lead_hand_out_now(store, team_id, task_id, vec![step], conversation),
+        Some(Prepared::Waiting { step, wait }) => record_prepare_wait(store, team_id, task_id, &lead.id, None, step, wait),
+    }
+}
+
+fn lead_hand_out_now(
+    store: &mut Store,
+    team_id: &str,
+    task_id: u32,
+    prepare: Vec<PrepareStep>,
+    conversation: Option<(String, String)>,
+) -> anyhow::Result<()> {
     change(store, team_id, |team, events| {
         anyhow::ensure!(team.status == TeamStatus::Running && plan::ready(team).contains(&task_id), "no longer ready");
         let lead = team.lead.clone();
+        if let Some((run, new)) = &conversation {
+            if let Some(found) = team.members.iter_mut().find(|member| member.id == lead) {
+                if let Some(session) = found.session.as_mut().filter(|session| &session.run_id == run) {
+                    session.conversation_id = new.clone();
+                }
+            }
+        }
+        if let Some(step) = prepare.iter().find(|step| step.result == "skipped") {
+            if let Some(found) = team.members.iter_mut().find(|member| member.id == lead) {
+                if !found.context_noted {
+                    found.context_noted = true;
+                    events.push(Event::new("context_skipped", json!({"member":"Lead","task":task_id,"reason":step.reason})));
+                }
+            }
+        }
+        if let Some(step) = prepare.iter().find(|step| step.result == "done") {
+            events.push(Event::new("context_prepared", json!({"member":"Lead","task":task_id,"action":step.to})));
+        }
         let attempt_id = uuid::Uuid::new_v4().to_string();
         let task = team.task_mut(task_id).context("unknown task")?;
         anyhow::ensure!(task.assignee == lead, "not the lead's task");
@@ -2799,6 +3194,7 @@ fn lead_hand_out(store: &mut Store, team_id: &str, task_id: u32) -> anyhow::Resu
             delivered_at: Some(now()),
             // The lead works when it suits: no start warning for its own task.
             started_at: Some(now()),
+            prepare,
             ..Default::default()
         });
         task.status = TaskStatus::InProgress;
@@ -5293,6 +5689,314 @@ mod tests {
         let saved = store.load(&t.id).unwrap().unwrap();
         assert_eq!(saved.task(1).unwrap().attempts.last().unwrap().state, AttemptState::Delivered);
         assert!(saved.task(1).unwrap().reopen_note.is_empty());
+    }
+
+    /// U46: a stored team for the context tests, in a state root of its own.
+    fn stored(store: &mut Store, team: &Team) {
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), team.clone(), vec![]).unwrap();
+    }
+
+    fn event_kinds(store: &Store, team: &str) -> Vec<String> {
+        let page = store.events(team, None, 50).unwrap();
+        let mut items: Vec<String> = page["items"].as_array().unwrap().iter().map(|event| event["kind"].as_str().unwrap_or_default().to_owned()).collect();
+        items.reverse();
+        items
+    }
+
+    /// U46: the member the hand-out prepares, with a session and a setting.
+    fn with_context(team: &mut Team, member: &str, setting: &str) {
+        let found = team.members.iter_mut().find(|found| found.id == member).unwrap();
+        found.session = Some(SessionRef { name: format!("codex/x/{member}"), run_id: "r1".into(), conversation_id: "c1".into(), ..Default::default() });
+        found.state = MemberState::Active;
+        found.context_before_task = setting.into();
+    }
+
+    #[test]
+    fn a_members_context_setting_overrides_its_role() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let t = team();
+            let dev = t.member("dev").unwrap().clone();
+            assert_eq!(context_before_task(&t, &dev), "", "no fields keeps today's none");
+            let mut role = dev.clone();
+            role.prompt_snapshot = Some(PromptSnapshot { context_before_task: "clear".into(), ..Default::default() });
+            assert_eq!(context_before_task(&t, &role), "clear");
+            // A member's own setting wins, and "none" overrides the role.
+            role.context_before_task = "compact".into();
+            assert_eq!(context_before_task(&t, &role), "compact");
+            role.context_before_task = "none".into();
+            assert_eq!(context_before_task(&t, &role), "");
+        });
+    }
+
+    #[test]
+    fn a_team_without_a_context_action_hands_out_and_decides_as_today() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+            let t = team();
+            // A team with none of U46's fields loads and serializes as today.
+            let value = serde_json::to_value(&t).unwrap();
+            assert!(value["members"][1].get("context_before_task").is_none(), "{value}");
+            assert!(value["tasks"][0].get("prepare_wait").is_none(), "{value}");
+            stored(&mut store, &t);
+            let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+            let record = calls.clone();
+            set_fake_hgs(Some(Box::new(move |_, args: &[&str], _| {
+                record.borrow_mut().push(args.first().copied().unwrap_or_default().to_owned());
+                Ok(fake_output(0, r#"{"status":"submitted"}"#, ""))
+            })));
+            hand_out(&mut store, &t.id, 1, "dev", None, "").unwrap();
+            let saved = store.load(&t.id).unwrap().unwrap();
+            let attempt = saved.task(1).unwrap().attempts.last().unwrap();
+            assert!(attempt.prepare.is_empty(), "{attempt:?}");
+            assert_eq!(attempt.state, AttemptState::Delivered);
+            assert_eq!(*calls.borrow(), ["send"], "a team that sets none gets today's hand-out, with no context call");
+            // A report and an accept keep today's events too.
+            let attempt_id = attempt.id.clone();
+            store
+                .mutate(Some(("22222222-2222-4222-8222-222222222222", &json!({}))), &t.id, None, |team, events| {
+                    ops::apply(
+                        team,
+                        "report",
+                        &json!({"task":1,"attempt":attempt_id,"text":"Done"}),
+                        &Actor::Member("dev".into()),
+                        &BTreeSet::new(),
+                        events,
+                    )?;
+                    Ok(Value::Null)
+                })
+                .unwrap();
+            store
+                .mutate(Some(("33333333-3333-4333-8333-333333333333", &json!({}))), &t.id, None, |team, events| {
+                    ops::apply(team, "accept", &json!({"task":1}), &Actor::Human, &BTreeSet::new(), events)?;
+                    Ok(Value::Null)
+                })
+                .unwrap();
+            assert_eq!(event_kinds(&store, &t.id), ["handed_out", "delivered", "reported", "accepted"]);
+            set_fake_hgs(None);
+        });
+    }
+
+    #[test]
+    fn a_compact_waits_for_its_confirmation_before_the_hand_out() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            set_context_confirm(Some(2000));
+            let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+            let mut t = team();
+            with_context(&mut t, "dev", "compact");
+            // The member overrides the role snapshot, which asks for clear.
+            t.members.iter_mut().find(|member| member.id == "dev").unwrap().prompt_snapshot = Some(PromptSnapshot {
+                context_before_task: "clear".into(),
+                ..Default::default()
+            });
+            stored(&mut store, &t);
+            let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+            let request = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+            let inspects = std::rc::Rc::new(std::cell::Cell::new(0));
+            let (seen, seen_request, seen_inspects) = (calls.clone(), request.clone(), inspects.clone());
+            set_fake_hgs(Some(Box::new(move |_, args: &[&str], input: Option<&Value>| {
+                let call = args.first().copied().unwrap_or_default().to_owned();
+                seen.borrow_mut().push(call.clone());
+                match call.as_str() {
+                    "compact-context" => {
+                        let input = input.unwrap();
+                        let id = input["request_id"].as_str().unwrap().to_owned();
+                        assert_eq!(input["expected_run_id"], "r1");
+                        assert_eq!(input["expected_conversation_id"], "c1");
+                        *seen_request.borrow_mut() = id.clone();
+                        Ok(fake_output(0, &json!({"request_id":id,"status":"submitted"}).to_string(), ""))
+                    }
+                    // The first look shows it still compacting: the hand-out waits.
+                    "inspect" => {
+                        seen_inspects.set(seen_inspects.get() + 1);
+                        let status = if seen_inspects.get() == 1 { "compacting" } else { "completed" };
+                        Ok(fake_output(0, &json!({"run_id":"r1","conversation_id":"c1","activity":"idle","phase":"idle",
+                            "compact_context_request":{"request_id":seen_request.borrow().clone(),"run_id":"r1",
+                                "conversation_id":"c1","status":status}}).to_string(), ""))
+                    }
+                    "send" => Ok(fake_output(0, r#"{"status":"submitted"}"#, "")),
+                    other => panic!("unexpected hgs {other}"),
+                }
+            })));
+            hand_out(&mut store, &t.id, 1, "dev", None, "").unwrap();
+            set_fake_hgs(None);
+            set_context_confirm(None);
+            let saved = store.load(&t.id).unwrap().unwrap();
+            let attempt = saved.task(1).unwrap().attempts.last().unwrap();
+            assert_eq!(attempt.prepare.len(), 1);
+            assert_eq!((attempt.prepare[0].step.as_str(), attempt.prepare[0].to.as_str(), attempt.prepare[0].result.as_str()), ("context", "compact", "done"));
+            assert_eq!(attempt.state, AttemptState::Delivered);
+            assert_eq!(*calls.borrow(), ["compact-context", "inspect", "inspect", "send"], "the send waits for the confirmation");
+            assert_eq!(inspects.get(), 2);
+            let kinds = event_kinds(&store, &t.id);
+            assert_eq!(kinds, ["context_prepared", "handed_out", "delivered"]);
+        });
+    }
+
+    #[test]
+    fn a_clear_waits_for_the_new_conversation_before_the_hand_out() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            set_context_confirm(Some(2000));
+            let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+            let mut t = team();
+            t.task_mut(1).unwrap().description = "Build the cards API".into();
+            t.task_mut(1).unwrap().criteria = vec!["Paged list".into()];
+            // The role snapshot asks for a clear; the member adds no override.
+            let dev = t.members.iter_mut().find(|member| member.id == "dev").unwrap();
+            dev.session = Some(SessionRef { name: "codex/x/dev".into(), run_id: "r1".into(), conversation_id: "c1".into(), ..Default::default() });
+            dev.state = MemberState::Active;
+            dev.prompt_snapshot = Some(PromptSnapshot { context_before_task: "clear".into(), ..Default::default() });
+            stored(&mut store, &t);
+            let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+            let inspects = std::rc::Rc::new(std::cell::Cell::new(0));
+            let sent = std::rc::Rc::new(std::cell::RefCell::new(Value::Null));
+            let (seen, seen_inspects, seen_sent) = (calls.clone(), inspects.clone(), sent.clone());
+            set_fake_hgs(Some(Box::new(move |_, args: &[&str], input: Option<&Value>| {
+                let call = args.first().copied().unwrap_or_default().to_owned();
+                seen.borrow_mut().push(call.clone());
+                match call.as_str() {
+                    "clear-context" => Ok(fake_output(0, &json!({"request_id":input.unwrap()["request_id"],
+                        "name":"codex/x/dev","run_id":"r1","conversation_id":"c1","status":"submitted"}).to_string(), "")),
+                    "inspect" => {
+                        seen_inspects.set(seen_inspects.get() + 1);
+                        let conversation = if seen_inspects.get() == 1 { "c1" } else { "c2" };
+                        Ok(fake_output(0, &json!({"run_id":"r1","conversation_id":conversation,"activity":"idle","phase":"idle"}).to_string(), ""))
+                    }
+                    "send" => {
+                        *seen_sent.borrow_mut() = input.cloned().unwrap_or_default();
+                        Ok(fake_output(0, r#"{"status":"submitted"}"#, ""))
+                    }
+                    other => panic!("unexpected hgs {other}"),
+                }
+            })));
+            hand_out(&mut store, &t.id, 1, "dev", None, "").unwrap();
+            set_fake_hgs(None);
+            set_context_confirm(None);
+            let saved = store.load(&t.id).unwrap().unwrap();
+            let attempt = saved.task(1).unwrap().attempts.last().unwrap();
+            assert_eq!((attempt.prepare[0].to.as_str(), attempt.prepare[0].result.as_str()), ("clear", "done"));
+            assert_eq!(attempt.state, AttemptState::Delivered);
+            assert_eq!(*calls.borrow(), ["clear-context", "inspect", "inspect", "send"]);
+            // The member's session follows the new conversation, and the send names it.
+            assert_eq!(saved.member("dev").unwrap().session.as_ref().unwrap().conversation_id, "c2");
+            assert_eq!(sent.borrow()["expected_conversation_id"], "c2");
+            // A cleared context gets the task's own input, never "as before".
+            let text = sent.borrow()["text"].as_str().unwrap_or_default().to_owned();
+            assert!(text.contains("Build the cards API"), "{text}");
+            assert!(text.contains("Paged list"), "{text}");
+            assert!(!text.to_lowercase().contains("as before"), "{text}");
+        });
+    }
+
+    #[test]
+    fn an_unconfirmed_context_leaves_the_task_waiting_and_never_retries_by_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            set_context_confirm(Some(250));
+            let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+            let mut t = team();
+            with_context(&mut t, "dev", "compact");
+            stored(&mut store, &t);
+            let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+            let request = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+            let (seen, seen_request) = (calls.clone(), request.clone());
+            set_fake_hgs(Some(Box::new(move |_, args: &[&str], input: Option<&Value>| {
+                let call = args.first().copied().unwrap_or_default().to_owned();
+                seen.borrow_mut().push(call.clone());
+                match call.as_str() {
+                    "compact-context" => {
+                        let id = input.unwrap()["request_id"].as_str().unwrap().to_owned();
+                        *seen_request.borrow_mut() = id.clone();
+                        Ok(fake_output(0, &json!({"request_id":id,"status":"submitted"}).to_string(), ""))
+                    }
+                    // It never finishes; the hand-out must not go out on a guess.
+                    "inspect" => Ok(fake_output(0, &json!({"run_id":"r1","conversation_id":"c1","activity":"idle","phase":"idle",
+                        "compact_context_request":{"request_id":seen_request.borrow().clone(),"run_id":"r1",
+                            "conversation_id":"c1","status":"compacting"}}).to_string(), "")),
+                    "send" => panic!("an unconfirmed compaction never hands out"),
+                    other => panic!("unexpected hgs {other}"),
+                }
+            })));
+            hand_out(&mut store, &t.id, 1, "dev", None, "").unwrap();
+            set_fake_hgs(None);
+            set_context_confirm(None);
+            let saved = store.load(&t.id).unwrap().unwrap();
+            let task = saved.task(1).unwrap();
+            assert_eq!(task.status, TaskStatus::Pending);
+            let attempt = task.attempts.last().unwrap();
+            assert_eq!((attempt.prepare[0].result.as_str(), attempt.state), ("uncertain", AttemptState::Refused));
+            let wait = task.prepare_wait.as_ref().expect("the task waits for Zerus");
+            assert_eq!(wait.step, "context");
+            assert!(wait.reason.contains("not confirmed"), "{wait:?}");
+            // It is not ready again, and status names Zerus, not the member.
+            assert!(!plan::ready(&saved).contains(&1));
+            assert_eq!(super::inbox::waits(&saved, task, false).unwrap()["for"], "zerus");
+            let items = super::inbox::items(&saved);
+            assert!(items.iter().any(|item| item.kind == "prepare_failed" && item.task == Some(1)), "{items:?}");
+            // A retry (the lead or the owner) starts the preparation again.
+            let mut cleared = saved.clone();
+            let mut events = Vec::new();
+            ops::apply(&mut cleared, "retry", &json!({"task":1}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+            assert!(cleared.task(1).unwrap().prepare_wait.is_none());
+        });
+    }
+
+    #[test]
+    fn a_refused_context_leaves_the_task_waiting_with_its_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+            let mut t = team();
+            with_context(&mut t, "dev", "clear");
+            stored(&mut store, &t);
+            set_fake_hgs(Some(Box::new(|_, args: &[&str], _| match args.first().copied() {
+                Some("clear-context") => Ok(fake_output(1, "", "hgs: Wait for the agent to become idle before clearing context")),
+                Some("send") => panic!("a refused clear never hands out"),
+                other => panic!("unexpected hgs {other:?}"),
+            })));
+            hand_out(&mut store, &t.id, 1, "dev", None, "").unwrap();
+            set_fake_hgs(None);
+            let saved = store.load(&t.id).unwrap().unwrap();
+            let task = saved.task(1).unwrap();
+            let attempt = task.attempts.last().unwrap();
+            assert_eq!((attempt.prepare[0].result.as_str(), attempt.state), ("refused", AttemptState::Refused));
+            let wait = task.prepare_wait.as_ref().expect("the task waits for Zerus");
+            assert!(wait.reason.contains("Wait for the agent to become idle"), "{wait:?}");
+            assert_eq!(event_kinds(&store, &t.id), ["prepare_failed"]);
+        });
+    }
+
+    #[test]
+    fn an_agent_without_context_actions_gets_none_with_one_feed_note() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+            let mut t = team();
+            // OpenCode has no native clear: the task continues the conversation.
+            t.members.iter_mut().find(|member| member.id == "dev").unwrap().agent = "opencode".into();
+            with_context(&mut t, "dev", "clear");
+            stored(&mut store, &t);
+            set_fake_hgs(Some(Box::new(|_, args: &[&str], _| match args.first().copied() {
+                Some("send") => Ok(fake_output(0, r#"{"status":"submitted"}"#, "")),
+                other => panic!("a skipped context calls no native action: {other:?}"),
+            })));
+            hand_out(&mut store, &t.id, 1, "dev", None, "").unwrap();
+            hand_out(&mut store, &t.id, 2, "dev", None, "").unwrap();
+            set_fake_hgs(None);
+            let saved = store.load(&t.id).unwrap().unwrap();
+            for id in [1, 2] {
+                let attempt = saved.task(id).unwrap().attempts.last().unwrap();
+                assert_eq!(attempt.prepare[0].result, "skipped", "{attempt:?}");
+                assert_eq!(attempt.prepare[0].to, "none");
+                assert_eq!(attempt.prepare[0].reason, "OpenCode has no clear; the task continues the conversation");
+            }
+            assert!(saved.member("dev").unwrap().context_noted);
+            let noted = event_kinds(&store, &t.id).into_iter().filter(|kind| kind == "context_skipped").count();
+            assert_eq!(noted, 1, "one feed note per member");
+        });
     }
 
     /// The sessions the local recovery service is asked to wait for.

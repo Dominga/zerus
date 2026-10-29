@@ -172,6 +172,11 @@ fn parse_member(value: &Value) -> anyhow::Result<Member> {
         member.permissions_profile.is_empty() || ["read", "write", "build", "commit", "network"].contains(&member.permissions_profile.as_str()),
         "A permissions profile is read, write, build, commit or network"
     );
+    // U46: opt-in; empty inherits the role, "none" overrides it with none.
+    ensure!(
+        matches!(member.context_before_task.as_str(), "" | "none" | "compact" | "clear"),
+        "A context before a task is none, compact or clear"
+    );
     member.launch_id.clear();
     member.error.clear();
     member.inbox = Inbox::default();
@@ -633,6 +638,14 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
                 widen.push(json!({"member":id,"from":member.permissions_profile,"to":profile}));
             }
             member.permissions_profile = profile;
+        }
+        // U46: the owner sets what Zerus does to a member's context; the lead
+        // never does (spec 0). Empty inherits the role, "none" overrides it.
+        if let Some(context) = update.get("context_before_task") {
+            ensure!(matches!(actor, Actor::Human), "Only you set a member's context before a task");
+            let context = context.as_str().unwrap_or_default().to_owned();
+            ensure!(matches!(context.as_str(), "" | "none" | "compact" | "clear"), "A context before a task is none, compact or clear");
+            member.context_before_task = context;
         }
         changed.push(json!(id));
     }
@@ -1618,6 +1631,9 @@ fn close_questions(task: &mut Task) {
 /// The task's open attempt must be revoked before another starts. The
 /// dispatcher interrupts the old worker separately.
 fn revoke(task: &mut Task, why: &str) -> Option<u32> {
+    // U46: retry, reassign, take-over and cancel end a preparation that
+    // refused: the next hand-out prepares its member again.
+    task.prepare_wait = None;
     // The attempt is over: its questions close with it (N5).
     close_questions(task);
     let attempt = task.open_attempt_mut()?;
@@ -5581,6 +5597,35 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("without a session"), "{error}");
+    }
+
+    #[test]
+    fn only_the_owner_sets_a_members_context_before_a_task() {
+        let (mut team, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
+        let mut events = Vec::new();
+        plan(
+            &mut team,
+            &json!({"members":[{"id":"dev","role":"Backend","agent":"claude"}],"tasks":[{"id":1,"title":"A","assignee":"dev"}]}),
+            &Actor::Human,
+            &mut events,
+        )
+        .unwrap();
+        let set = |team: &mut Team, actor: &Actor, value: &str| {
+            let mut events = Vec::new();
+            apply(team, "settings", &json!({"members_update":[{"id":"dev","context_before_task":value}]}), actor, &BTreeSet::new(), &mut events)
+        };
+        set(&mut team, &Actor::Human, "compact").unwrap();
+        assert_eq!(team.member("dev").unwrap().context_before_task, "compact");
+        // The lead never sets it (U46), and an unknown action is refused.
+        let error = set(&mut team, &Actor::Member("lead".into()), "clear").unwrap_err().to_string();
+        assert_eq!(error, "Only you set a member's context before a task");
+        let error = set(&mut team, &Actor::Human, "sometimes").unwrap_err().to_string();
+        assert_eq!(error, "A context before a task is none, compact or clear");
+        // Empty inherits the role again; "none" overrides a role's action.
+        set(&mut team, &Actor::Human, "").unwrap();
+        assert_eq!(team.member("dev").unwrap().context_before_task, "");
+        set(&mut team, &Actor::Human, "none").unwrap();
+        assert_eq!(team.member("dev").unwrap().context_before_task, "none");
     }
 
     #[test]

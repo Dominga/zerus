@@ -17,7 +17,8 @@ const SUMMARY_CHARS: usize = 300;
 /// message never names it twice.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Item {
-    /// `report`, `question`, `permission`, `lead_task`, `stalled` or `budget`.
+    /// `report`, `question`, `permission`, `lead_task`, `stalled`, `budget` or
+    /// `prepare_failed`.
     pub kind: &'static str,
     pub key: String,
     pub task: Option<u32>,
@@ -299,6 +300,26 @@ fn all_items(team: &Team) -> Vec<Item> {
             });
         }
     }
+    // U46: a hand-out Zerus could not prepare is one item for the lead, with
+    // the reason and the retry that starts the preparation again.
+    for task in &team.tasks {
+        let Some(wait) = &task.prepare_wait else { continue };
+        let attempt = task.attempts.iter().rev().find(|attempt| attempt.n == wait.attempt);
+        items.push(Item {
+            subagents: Value::Null,
+            kind: "prepare_failed",
+            key: format!("prepare_failed:{}:{}", task.id, wait.attempt),
+            task: Some(task.id),
+            member: attempt.map(|attempt| team.role_of(&attempt.member)).unwrap_or_default(),
+            since: wait.at,
+            summary: summary(&format!("Zerus could not prepare #{} {}: {}", task.id, task.title, wait.reason)),
+            command: format!(
+                "{} | hgs team retry --json",
+                json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id})
+            ),
+            detail: wait.reason.clone(),
+        });
+    }
     // The permission requests the dispatcher read from the members' sessions
     // (C2): each is answerable by its own question id and hash.
     for member in &team.members {
@@ -486,6 +507,12 @@ pub(crate) fn waits(team: &Team, task: &Task, ready: bool) -> Option<Value> {
     }
     if let Some(hold) = &task.hold {
         return Some(json!({"for":"hold","on":[hold.by],"unblock":format!("release #{}", task.id)}));
+    }
+    // U46: Zerus could not prepare the hand-out; it waits for the lead or the
+    // owner to retry or reassign, never for the member.
+    if let Some(wait) = &task.prepare_wait {
+        return Some(json!({"for":"zerus","on":[wait.step],"reason":wait.reason,
+            "unblock":format!("retry #{}", task.id)}));
     }
     if task.status == TaskStatus::Submitted {
         return Some(json!({

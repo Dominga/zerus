@@ -1728,20 +1728,26 @@ fn no_attempt_text(team: &Team, member: &str) -> String {
         .max_by_key(|task| task.id);
     let Some(task) = last else { return "You have no open attempt".into() };
     let attempt = task.attempts.iter().rev().find(|attempt| attempt.member == member);
-    let state = match attempt.map(|attempt| attempt.state) {
-        Some(AttemptState::Rejected) if task.hold.is_some() => "was rejected and is held by the lead",
-        Some(AttemptState::Rejected) => "was rejected and waits for another hand-out",
-        Some(AttemptState::Reported) => "has a report waiting for the lead's decision",
-        Some(AttemptState::Revoked) => "was returned to the lead",
-        Some(AttemptState::Refused) => "was not delivered; Zerus tries it again",
-        Some(AttemptState::Delivering | AttemptState::Delivered | AttemptState::Unconfirmed) => "is open to another attempt",
-        None => match task.status {
-            TaskStatus::Accepted => "was accepted",
-            TaskStatus::Cancelled => "was cancelled",
-            TaskStatus::Submitted => "has a report waiting for the lead's decision",
-            TaskStatus::Draft => "is a draft",
-            _ => "is waiting for a hand-out",
-        },
+    // U46: a hand-out Zerus could not prepare is no delivery the member waits
+    // for; the lead or the owner retries it.
+    let state = if task.prepare_wait.is_some() {
+        "could not be prepared by Zerus; the lead or you retry it"
+    } else {
+        match attempt.map(|attempt| attempt.state) {
+            Some(AttemptState::Rejected) if task.hold.is_some() => "was rejected and is held by the lead",
+            Some(AttemptState::Rejected) => "was rejected and waits for another hand-out",
+            Some(AttemptState::Reported) => "has a report waiting for the lead's decision",
+            Some(AttemptState::Revoked) => "was returned to the lead",
+            Some(AttemptState::Refused) => "was not delivered; Zerus tries it again",
+            Some(AttemptState::Delivering | AttemptState::Delivered | AttemptState::Unconfirmed) => "is open to another attempt",
+            None => match task.status {
+                TaskStatus::Accepted => "was accepted",
+                TaskStatus::Cancelled => "was cancelled",
+                TaskStatus::Submitted => "has a report waiting for the lead's decision",
+                TaskStatus::Draft => "is a draft",
+                _ => "is waiting for a hand-out",
+            },
+        }
     };
     format!("#{} {state}", task.id)
 }

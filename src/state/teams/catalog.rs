@@ -77,6 +77,10 @@ pub(crate) struct Role {
     pub prompt_off: Vec<String>,
     #[serde(default)]
     pub notes: BTreeMap<String, String>,
+    /// U46: what Zerus does to this role's context before each hand-out:
+    /// empty or "none", "compact" or "clear". Copied onto a member that joins.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub context_before_task: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -361,6 +365,7 @@ pub(crate) fn snapshot_for(role_name: &str) -> Option<super::model::PromptSnapsh
         protocol_extra: role.protocol_extra.clone(),
         task_template: role.task_template.clone(),
         notes: role.notes.clone(),
+        context_before_task: role.context_before_task.clone(),
     })
 }
 
@@ -448,6 +453,12 @@ pub(crate) fn validate(catalog: &Catalog) -> anyhow::Result<()> {
         ensure!(!role.name.trim().is_empty(), "Role {} needs a name", role.id);
         ensure!(roles.insert(role.id.clone(), ()).is_none(), "Role {} is listed twice", role.id);
         ensure!(role.prompt.len() <= 8000, "The prompt of role {} is too long", role.id);
+        // U46: opt-in; an old catalog keeps the default none.
+        ensure!(
+            matches!(role.context_before_task.as_str(), "" | "none" | "compact" | "clear"),
+            "Role {}: context before a task is none, compact or clear",
+            role.id
+        );
         // U25: the role's editable prompt order and notes.
         ensure!(role.about.chars().count() <= 500, "The about of role {} is too long", role.id);
         ensure!(role.skills.len() <= 20, "Role {} has at most 20 skills", role.id);

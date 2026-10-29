@@ -82,6 +82,36 @@ function held<T>() {
 }
 const images = (width: number, height: number): Images => ({ size: async () => ({ width, height }), png: async () => new Uint8Array([1, 2, 3]) });
 
+describe("composer exit flush", () => {
+  it("flushes pending debounce and waits for the edit before returning", async () => {
+    const f = fakes(); const writing = held<void>();
+    await createRoot(async () => {
+      const c = createComposer({ ...f.port, edit: () => writing.call() }, f.timers);
+      c.apply(view()); c.input("last keystroke", 14, 14);
+      let done = false; const flushing = c.flushForExit().then(() => { done = true; });
+      await tick(); expect(writing.count()).toBe(1); expect(done).toBe(false);
+      expect(c.locked()).toBe(true); expect(c.pushEnabled()).toBe(false);
+      c.input("too late", 8, 8); await c.push(); await c.sendNow();
+      expect(c.text()).toBe("last keystroke"); expect(f.calls).toEqual([]);
+      writing.answer(); await flushing; expect(done).toBe(true);
+      f.advance(EDIT_MS); await tick(); expect(writing.count()).toBe(0);
+    });
+  });
+
+  it("waits for an edit already sent by blur, including one from the previous composer", async () => {
+    const f = fakes(); const writing = held<void>();
+    await createRoot(async () => {
+      const c = createComposer({ ...f.port, edit: () => writing.call() }, f.timers);
+      c.apply(view()); c.input("draft A", 7, 7);
+      const blurred = c.flush(); await tick();
+      c.apply(view({handle:2,key:"studio\nclaude/example/other",text:"draft B"}));
+      let done=false; const flushing=c.flushForExit().then(()=>{done=true;});
+      await tick(); expect(done).toBe(false);
+      writing.answer(); await blurred; await flushing; expect(done).toBe(true);
+    });
+  });
+});
+
 describe("composer store", () => {
   it("push flushes the field and cursor once through the captured composer", async () => {
     const f = fakes();

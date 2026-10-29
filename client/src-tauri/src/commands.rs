@@ -620,7 +620,7 @@ pub fn exit_app(app: tauri::AppHandle, code: i32) -> Result<(), String> {
     if !perf_mode() {
         return Err("not a measurement run (ZERUS_CLIENT_PERF is not set)".into());
     }
-    app.exit(code);
+    crate::exit_flush::quit_with_flush(&app, code);
     Ok(())
 }
 

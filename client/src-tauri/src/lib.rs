@@ -20,6 +20,7 @@ mod desk;
 mod display;
 #[cfg(feature = "live")]
 mod drops;
+mod exit_flush;
 #[cfg(feature = "live")]
 mod files;
 mod identity;
@@ -222,7 +223,16 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
         )
         .manage(commands::AppState::default())
         .manage(window_visibility::Visibility::default())
-        .manage(lifecycle::Lifecycle { menu_bar });
+        .manage(lifecycle::Lifecycle { menu_bar })
+        .manage(exit_flush::ExitFlush::default());
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .menu(exit_flush::app_menu)
+        .on_menu_event(|app, event| {
+            if event.id().as_ref() == exit_flush::QUIT_ID {
+                exit_flush::quit_with_flush(app, 0);
+            }
+        });
     // tao activates the app when it finishes launching, taking the focus from
     // the app in front; a menu-bar build activates only to show its window.
     #[cfg(target_os = "macos")]
@@ -763,8 +773,8 @@ fn close_drafts(composers: Option<&composer::Composers>, flush_store: impl FnOnc
 }
 
 /// SIGTERM, SIGINT or SIGHUP (`signals.rs`, Qt's `TerminationSignals`):
-/// the app quits as Qt's posted quit does. `app.exit` ends in
-/// `RunEvent::Exit`, where the one exit hook runs once, on the main thread.
+/// the app quits as Qt's posted quit does, through the page flush helper
+/// before `RunEvent::Exit` runs the one final exit hook.
 /// Should the process not end within five seconds, the fallback ends it.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn exit_on_signals(app: AppHandle) {
@@ -777,7 +787,7 @@ fn exit_on_signals(app: AppHandle) {
                 || std::process::exit(0),
             )
         });
-        app.exit(0);
+        exit_flush::quit_with_flush(&app, 0);
     });
     if let Err(error) = installed {
         eprintln!("zerus-client: termination signals keep their default action: {error}");
@@ -827,6 +837,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::perf_log,
         commands::display_hz,
         commands::exit_app,
+        exit_flush::exit_flush_ack,
         commands::perf_away,
         commands::build_info,
         renderer::renderer_frame,
@@ -978,6 +989,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::perf_log,
         commands::display_hz,
         commands::exit_app,
+        exit_flush::exit_flush_ack,
         commands::perf_away,
         commands::build_info,
         renderer::renderer_frame,

@@ -72,17 +72,30 @@ fn menu_bar(app: &AppHandle) -> bool {
 /// The run loop's events this module handles.
 pub fn on_event(app: &AppHandle, event: &RunEvent) {
     match event {
-        // The last window went away: the app keeps its menu-bar item.
-        RunEvent::ExitRequested {
-            code: None, api, ..
-        } if menu_bar(app) => api.prevent_exit(),
+        RunEvent::ExitRequested { code, api, .. } => {
+            match app
+                .state::<crate::exit_flush::ExitFlush>()
+                .decision(menu_bar(app), *code)
+            {
+                crate::exit_flush::Decision::Allow => {}
+                crate::exit_flush::Decision::Prevent => api.prevent_exit(),
+                crate::exit_flush::Decision::Flush(code) => {
+                    api.prevent_exit();
+                    crate::exit_flush::quit_with_flush(app, code);
+                }
+            }
+        }
         RunEvent::WindowEvent {
             label,
             event: WindowEvent::CloseRequested { api, .. },
             ..
-        } if label == MAIN_WINDOW && close_hides(menu_bar(app)) => {
+        } if label == MAIN_WINDOW => {
             api.prevent_close();
-            hide_main(app);
+            if close_hides(menu_bar(app)) {
+                hide_main(app);
+            } else {
+                crate::exit_flush::quit_with_flush(app, 0);
+            }
         }
         #[cfg(target_os = "macos")]
         RunEvent::Reopen { .. } => reopen(app),

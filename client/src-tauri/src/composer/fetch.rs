@@ -760,9 +760,18 @@ mod tests {
             open_draft(&c, &path, &fails),
             Err(DRAFT_OPEN_FAILED.to_owned())
         );
-        // A list that changed, or no such address, opens nothing.
+        // A list that changed opens nothing, even where its old index now
+        // holds another file; nor does an address that names no attachment.
+        let other = root.join("other.txt");
+        std::fs::write(&other, b"other notes").unwrap();
+        c.attach_paths(view.handle, vec![other], Selection::default());
+        until(&c, |v| v.attachments.len() == 2 && !v.attaching);
         c.remove(view.handle, 0);
-        until(&c, |v| v.attachments.is_empty());
+        let moved = until(&c, |v| v.attachments.len() == 1);
+        assert_eq!(
+            moved.attachments[0].name, "other.txt",
+            "index 0 now holds another file"
+        );
         let (quiet, untouched) = opener(true);
         for gone in [path.as_str(), "draft/x/1/0", "cache/abc/notes.txt", ""] {
             assert_eq!(open_draft(&c, gone, &quiet), Ok(None), "{gone}");

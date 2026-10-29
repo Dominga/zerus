@@ -662,6 +662,10 @@ pub(crate) enum TaskStatus {
     Assigned,
     InProgress,
     Submitted,
+    /// U36: a review stage of the task's pipeline reads the report.
+    InReview,
+    /// U36: a test stage of the task's pipeline runs its checks.
+    InTest,
     Accepted,
     Rejected,
     Cancelled,
@@ -670,6 +674,14 @@ pub(crate) enum TaskStatus {
 impl TaskStatus {
     pub(crate) fn finished(self) -> bool {
         matches!(self, Self::Accepted | Self::Rejected | Self::Cancelled)
+    }
+    /// U36: reported and in one of its pipeline's stages.
+    pub(crate) fn in_stage(self) -> bool {
+        matches!(self, Self::InReview | Self::InTest)
+    }
+    /// Reported and not decided: Submitted, or in a stage of its pipeline.
+    pub(crate) fn reported(self) -> bool {
+        self == Self::Submitted || self.in_stage()
     }
 }
 
@@ -1000,6 +1012,124 @@ pub(crate) struct Task {
     /// word twice; outside the phase's original scope.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub added_late: Option<AddedLate>,
+    /// U36: the pipeline preset the plan chose: empty takes the role's or the
+    /// template's default, "none" takes none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub pipeline: String,
+    /// U36: the preset as it was when the task was assigned, with its rounds
+    /// and stage runs; a later catalog edit does not change it. None keeps
+    /// today's flow (an old team, "none", a check or the lead's own task).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline_run: Option<PipelineRun>,
+}
+
+/// U36: one stage of a task's pipeline snapshot.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct PipelineStage {
+    /// review or test.
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub role: String,
+    /// A pinned member; otherwise the first free member with `role`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub member: String,
+}
+
+/// U36: what became of one stage run.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum StageState {
+    /// Waits for a stage member (stage delivery gives it out).
+    #[default]
+    Waiting,
+    /// Given to its member, who reports a verdict.
+    Delivered,
+    Passed,
+    Returned,
+    /// The lead or the owner skipped it.
+    Skipped,
+    /// Ended without a verdict: the task was accepted, rejected or sent back.
+    Revoked,
+}
+
+impl StageState {
+    pub(crate) fn open(self) -> bool {
+        matches!(self, Self::Waiting | Self::Delivered)
+    }
+}
+
+/// U36: one stage of one round: who did it, when, and its verdict. Its span
+/// (`delivered_at` or `at` to `ended_at`) joins the task's working time (U37).
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct StageRun {
+    /// The request id its member reports with, as an attempt id.
+    pub id: String,
+    /// Index into the pipeline's stages.
+    pub stage: usize,
+    pub kind: String,
+    pub round: u32,
+    /// The implementer's attempt this run checks.
+    pub attempt: u32,
+    /// Empty until stage delivery gives it to a member.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub member: String,
+    #[serde(default)]
+    pub state: StageState,
+    /// When the stage began waiting for its member.
+    #[serde(default)]
+    pub at: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivered_at: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<f64>,
+    /// The stage member's report, or the lead's or owner's reason.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub text: String,
+    /// A return's findings, one per line.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub findings: Vec<String>,
+    /// Who ended it: the stage's role, Lead, You or Pipeline.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub by: String,
+}
+
+/// U36: a task's pipeline snapshot and progress.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct PipelineRun {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub stages: Vec<PipelineStage>,
+    pub max_rounds: u32,
+    /// hold or checkout.
+    pub folder: String,
+    /// lead, sub_lead or auto.
+    pub accept: String,
+    /// The round of the report being checked: 1 for the first report, one
+    /// more after each return or send-back.
+    #[serde(default = "first_round")]
+    pub round: u32,
+    /// Every stage run, oldest first, at most 64.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<StageRun>,
+}
+
+fn first_round() -> u32 {
+    1
+}
+
+impl PipelineRun {
+    /// The open stage run, if the task is in a stage.
+    pub(crate) fn open_run(&self) -> Option<&StageRun> {
+        self.runs.iter().rev().find(|run| run.state.open())
+    }
+    pub(crate) fn open_run_mut(&mut self) -> Option<&mut StageRun> {
+        self.runs.iter_mut().rev().find(|run| run.state.open())
+    }
+    /// The rounds stage members returned; the round limit counts these.
+    pub(crate) fn returned(&self) -> u32 {
+        self.runs.iter().filter(|run| run.state == StageState::Returned).count() as u32
+    }
 }
 
 /// U29: who added a task to a running phase, when, and the owner's two

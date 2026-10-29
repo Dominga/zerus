@@ -1,0 +1,360 @@
+{
+  "tasks": [
+    {
+      "assignee": "dev",
+      "attempts": [
+        {
+          "delivered_at": null,
+          "error": "",
+          "id": "00000000-0000-4000-8000-000000001001",
+          "member": "dev",
+          "n": 1,
+          "no_report": false,
+          "notice": "none",
+          "notice_id": "",
+          "report": {
+            "at": 1800000100.0,
+            "text": "Done",
+            "unstructured": true
+          },
+          "sent_at": 0.0,
+          "state": "reported",
+          "turn_ended_at": null
+        }
+      ],
+      "criteria": [
+        "Paged"
+      ],
+      "decided_by": null,
+      "decision_reason": "",
+      "deps": [],
+      "description": "Paged list of saved cards",
+      "id": 1,
+      "phase": 1,
+      "pipeline": "code",
+      "pipeline_run": {
+        "accept": "lead",
+        "folder": "hold",
+        "id": "code",
+        "max_rounds": 3,
+        "name": "Code: review, test, lead",
+        "round": 1,
+        "runs": [
+          {
+            "at": 1800000200.0,
+            "attempt": 1,
+            "id": "00000000-0000-4000-9000-000000001001",
+            "kind": "review",
+            "round": 1,
+            "stage": 0,
+            "state": "waiting"
+          }
+        ],
+        "stages": [
+          {
+            "kind": "review",
+            "role": "reviewer"
+          },
+          {
+            "kind": "test",
+            "role": "tester"
+          }
+        ]
+      },
+      "status": "in_review",
+      "title": "API"
+    },
+    {
+      "assignee": "dev",
+      "attempts": [
+        {
+          "delivered_at": null,
+          "error": "",
+          "id": "00000000-0000-4000-8000-000000002001",
+          "member": "dev",
+          "n": 1,
+          "no_report": false,
+          "notice": "none",
+          "notice_id": "",
+          "report": {
+            "at": 1800000100.0,
+            "text": "Done",
+            "unstructured": true
+          },
+          "sent_at": 0.0,
+          "state": "reported",
+          "turn_ended_at": null
+        }
+      ],
+      "criteria": [
+        "Paged"
+      ],
+      "decided_by": null,
+      "decision_reason": "",
+      "deps": [],
+      "description": "Paged list of saved cards",
+      "id": 2,
+      "phase": 1,
+      "pipeline": "code",
+      "pipeline_run": {
+        "accept": "lead",
+        "folder": "hold",
+        "id": "code",
+        "max_rounds": 3,
+        "name": "Code: review, test, lead",
+        "round": 1,
+        "runs": [
+          {
+            "at": 1800000200.0,
+            "attempt": 1,
+            "by": "Reviewer",
+            "delivered_at": 1800000260.0,
+            "ended_at": 1800000800.0,
+            "id": "00000000-0000-4000-9000-000000002001",
+            "kind": "review",
+            "member": "rev",
+            "round": 1,
+            "stage": 0,
+            "state": "passed",
+            "text": "Read it"
+          },
+          {
+            "at": 1800001200.0,
+            "attempt": 1,
+            "id": "00000000-0000-4000-9000-000000002002",
+            "kind": "test",
+            "round": 1,
+            "stage": 1,
+            "state": "waiting"
+          }
+        ],
+        "stages": [
+          {
+            "kind": "review",
+            "role": "reviewer"
+          },
+          {
+            "kind": "test",
+            "role": "tester"
+          }
+        ]
+      },
+      "status": "in_test",
+      "title": "API"
+    },
+    {
+      "assignee": "dev",
+      "attempts": [
+        {
+          "delivered_at": null,
+          "error": "",
+          "id": "00000000-0000-4000-8000-000000003001",
+          "member": "dev",
+          "n": 1,
+          "no_report": false,
+          "notice": "none",
+          "notice_id": "",
+          "report": {
+            "at": 1800000100.0,
+            "text": "Done",
+            "unstructured": true
+          },
+          "sent_at": 0.0,
+          "state": "rejected",
+          "turn_ended_at": null
+        }
+      ],
+      "criteria": [
+        "Paged"
+      ],
+      "decided_by": null,
+      "decision_reason": "",
+      "deps": [],
+      "description": "Paged list of saved cards",
+      "id": 3,
+      "phase": 1,
+      "pipeline": "code",
+      "pipeline_run": {
+        "accept": "lead",
+        "folder": "hold",
+        "id": "code",
+        "max_rounds": 3,
+        "name": "Code: review, test, lead",
+        "round": 1,
+        "runs": [
+          {
+            "at": 1800000200.0,
+            "attempt": 1,
+            "by": "Reviewer",
+            "delivered_at": 1800000260.0,
+            "ended_at": 1800000800.0,
+            "findings": [
+              "Page size is unbounded"
+            ],
+            "id": "00000000-0000-4000-9000-000000003001",
+            "kind": "review",
+            "member": "rev",
+            "round": 1,
+            "stage": 0,
+            "state": "returned",
+            "text": "Read it"
+          }
+        ],
+        "stages": [
+          {
+            "kind": "review",
+            "role": "reviewer"
+          },
+          {
+            "kind": "test",
+            "role": "tester"
+          }
+        ]
+      },
+      "status": "pending",
+      "title": "API"
+    },
+    {
+      "assignee": "dev",
+      "attempts": [
+        {
+          "delivered_at": null,
+          "error": "",
+          "id": "00000000-0000-4000-8000-000000004001",
+          "member": "dev",
+          "n": 1,
+          "no_report": false,
+          "notice": "none",
+          "notice_id": "",
+          "report": {
+            "at": 1800000100.0,
+            "text": "Done",
+            "unstructured": true
+          },
+          "sent_at": 0.0,
+          "state": "rejected",
+          "turn_ended_at": null
+        },
+        {
+          "delivered_at": null,
+          "error": "",
+          "id": "00000000-0000-4000-8000-000000004002",
+          "member": "dev",
+          "n": 2,
+          "no_report": false,
+          "notice": "none",
+          "notice_id": "",
+          "report": {
+            "at": 1800001100.0,
+            "text": "Done",
+            "unstructured": true
+          },
+          "sent_at": 0.0,
+          "state": "rejected",
+          "turn_ended_at": null
+        },
+        {
+          "delivered_at": null,
+          "error": "",
+          "id": "00000000-0000-4000-8000-000000004003",
+          "member": "dev",
+          "n": 3,
+          "no_report": false,
+          "notice": "pending",
+          "notice_id": "",
+          "report": {
+            "at": 1800002100.0,
+            "text": "Done",
+            "unstructured": true
+          },
+          "sent_at": 0.0,
+          "state": "reported",
+          "turn_ended_at": null
+        }
+      ],
+      "criteria": [
+        "Paged"
+      ],
+      "decided_by": null,
+      "decision_reason": "",
+      "deps": [],
+      "description": "Paged list of saved cards",
+      "id": 4,
+      "phase": 1,
+      "pipeline": "code",
+      "pipeline_run": {
+        "accept": "lead",
+        "folder": "hold",
+        "id": "code",
+        "max_rounds": 3,
+        "name": "Code: review, test, lead",
+        "round": 3,
+        "runs": [
+          {
+            "at": 1800000200.0,
+            "attempt": 1,
+            "by": "Reviewer",
+            "delivered_at": 1800000260.0,
+            "ended_at": 1800000800.0,
+            "findings": [
+              "Page size is unbounded"
+            ],
+            "id": "00000000-0000-4000-9000-000000004001",
+            "kind": "review",
+            "member": "rev",
+            "round": 1,
+            "stage": 0,
+            "state": "returned",
+            "text": "Read it"
+          },
+          {
+            "at": 1800001200.0,
+            "attempt": 2,
+            "by": "Reviewer",
+            "delivered_at": 1800001260.0,
+            "ended_at": 1800001800.0,
+            "findings": [
+              "Page size is unbounded"
+            ],
+            "id": "00000000-0000-4000-9000-000000004002",
+            "kind": "review",
+            "member": "rev",
+            "round": 2,
+            "stage": 0,
+            "state": "returned",
+            "text": "Read it"
+          },
+          {
+            "at": 1800002200.0,
+            "attempt": 3,
+            "by": "Reviewer",
+            "delivered_at": 1800002260.0,
+            "ended_at": 1800002800.0,
+            "findings": [
+              "Page size is unbounded"
+            ],
+            "id": "00000000-0000-4000-9000-000000004003",
+            "kind": "review",
+            "member": "rev",
+            "round": 3,
+            "stage": 0,
+            "state": "returned",
+            "text": "Read it"
+          }
+        ],
+        "stages": [
+          {
+            "kind": "review",
+            "role": "reviewer"
+          },
+          {
+            "kind": "test",
+            "role": "tester"
+          }
+        ]
+      },
+      "status": "submitted",
+      "title": "API"
+    }
+  ]
+}

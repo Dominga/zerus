@@ -1284,6 +1284,44 @@ member. `remove-member` and `swap-member` still need the member's id in the
 sentence, and a separate lead `settings` cap change still names the new cap.
 The team's roster and feed say "Added by Lead on your word" with the quote.
 
+### Task pipelines and stage verdicts
+
+A task may pass its team's pipeline before it reaches the lead: an ordered list
+of `review` and `test` stages, each done by a member the stage names (a role, or
+a pinned member; the implementer never takes its own task's stage). While a
+stage runs the task is `in_review` or `in_test`, between `submitted` and
+`accepted`.
+
+The team catalog keeps named presets: `code` (review by the reviewer, test by
+the tester, then the lead), `docs` (review, then the pipeline accepts) and
+`check` (no stages; the lead decides), each with its maximum rounds (3 by
+default), folder rule (`hold` or `checkout`) and final acceptance (`lead`,
+`sub_lead` or `auto`). A template or a role may name a default preset; a task
+names its own with `"pipeline":"code"`, `"docs"`, `"check"` or `"none"` in
+`plan`, `extend` or `edit-draft`. Zerus snapshots the preset when the task is
+first handed out, so a later catalog edit never changes a running task.
+
+A stage member reports with `hgs team report --json` and a verdict, naming the
+stage's attempt id: `{"task":7,"attempt":"STAGE-ATTEMPT","verdict":"pass",
+"findings":[],"text":"..."}`, or `"verdict":"return"` with the findings (at most
+50, each naming file and line). `pass` moves the task to its next stage;
+`return` sends the findings to the implementer as a new attempt, without the
+lead, and each such round counts. After the preset's maximum rounds the task
+returns to the lead with every round's findings. The lead and the owner can
+still skip a stage (`hgs team skip-stage {"task":7,"reason":"..."}`), send the
+task back from any stage (`hgs team send-back`), accept or reject, each with a
+reason; the feed names who did it.
+
+A stage works in the task's own folder: the implementer's worktree or clone, or
+the team's shared folder. Review reads the attempt's change against the task's
+criteria; test runs only the suites of the files the change touched and takes
+the criteria's shots. Neither edits the task's files: a stage writes only build
+output and its own temporary folder. What changed is the attempt's commits in a
+Git checkout, otherwise the changed files its report names. A `hold` preset
+(the default) holds the folder while the task is in its test stage, so the
+implementer's next task in that folder waits; a `checkout` preset tests a
+detached checkout of the attempt's commits instead and frees it.
+
 <a id="activity"></a>
 
 ## Activity, messages and native controls

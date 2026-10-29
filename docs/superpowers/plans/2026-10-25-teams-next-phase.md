@@ -1215,6 +1215,52 @@ sets them in the catalog, the team settings or the plan; members never do.
   name; a failed launch returns to the old account, an unconfirmed one is
   reported uncertain and never retried. Nothing changes until the owner
   chooses; a team member's account changes only through swap-member.
+- **U54. Move a team to another account (owner, 2026-10-29).** Moving team
+  528aebfe's Claude members and its lead off an account near its weekly limit
+  took two owner scripts in an outside PowerShell, a manual pause of six old
+  sessions and a folder fix. Zerus handles it as one ordinary owner action:
+  - *One action for a team.* "Move members on account X to account Y" (the
+    team's members menu; `swap-member` takes a list) swaps every member of
+    that provider whose session runs on X, the lead included, after one
+    confirmation that names them. The roster shows each member's real
+    account, read from its session, not only the configured one: an empty
+    `account` used to hide that the lead and reviewer ran on Additional.
+  - *Keep the conversation where it can.* With U53, a same-provider account
+    change resumes the member's own conversation on the new account (same
+    name, folder and attempt) instead of a fresh session with a continuation.
+    A fresh session stays the fallback, and the owner's choice for another
+    agent.
+  - *The old session never blocks the new one.* A fresh member session
+    reuses the member's session name, and `hgs` refused the launch ("This
+    session already has an account") while the old session lived. The swap
+    pauses the old session once it is idle (never a kill; its conversation
+    stays under Saved) before launching, or waits for idle with that reason.
+    A busy old session is never interrupted without the owner's choice.
+  - *A failed launch after a swap is retried.* The failed first launch cleared
+    `launch_after_swap`, so after the owner's relaunch the member stayed Not
+    created until work was ready. A relaunch of a swapped member launches it
+    at once, and the error names its fix.
+  - *A member folder left on a task branch.* frontend2's worktree was on
+    `team/528aebfe/frontend2-570`, so its launch failed ("is not this member's
+    folder"). When the folder is clean and the task branch is already merged
+    into the member's or the lead's branch, Zerus checks out the member's
+    branch again (the task branch is kept) and records it in the feed;
+    otherwise the error offers that checkout as a review action, never a
+    reset.
+  - *The lead on the owner's word.* The lead may swap, relaunch and pause the
+    old sessions of its own team on the owner's word in its session (the U26
+    roster rule), so the owner does not need an outside shell. A swap to an
+    existing session (the lead moving to a new session) stays owner-confirmed.
+  - *A renamed member session stays the member.* After the new lead's session
+    was renamed (work-e1f3aa6e to Zerus_Iterations), every team command from
+    it was refused ("This session is not a member"): the caller is matched by
+    the stored session name only. A rename keeps the member: the caller is
+    matched by its run and conversation, and the team record follows the
+    session's rename, as `hgs inspect` already does.
+  - *The new lead gets the old lead's context.* A lead swapped to another
+    conversation gets, in its brief, the previous lead's session name and
+    conversation, the path of its transcript and its latest compact summary
+    (bounded), and the old lead stays paused, not stopped.
 
 ## Phases 37-40 (replanned 2026-10-27)
 

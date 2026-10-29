@@ -1,8 +1,8 @@
 import { Show, Suspense, createSignal, lazy, onCleanup, onMount } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { listRows } from "./sessions/model";
-import { orderedRows } from "../store/catalog";
-import { multi, peek, selectedKey, setMulti, setPeek, setSelectedKey, setStateFilter, setStripMode, stateFilter, stripMode } from "../store/ui";
+import { applyBatch, orderedRows } from "../store/catalog";
+import { multi, peek, selectedKey, setMulti, setPeek, setSearch, setSelectedKey, setStateFilter, setStripMode, stateFilter, stripMode } from "../store/ui";
 import { clearMulti } from "./sessions/organize";
 import { archive, archiveRows } from "../store/archive";
 import { activity } from "../store/session";
@@ -24,7 +24,7 @@ import { setPage, type Page } from "../store/ui";
 import { accountsPage } from "../store/accounts";
 import { machinesPage } from "../store/machines";
 import { projectsPage } from "../store/projects";
-import { createProject, deleteProject, grouping, moveProject, moveToProject, renameProject, sortProject } from "../store/organization";
+import { createProject, defaultProject, deleteProject, grouping, moveProject, moveToProject, renameProject, sortProject } from "../store/organization";
 import { activityCandidates, activitySource, type ScenarioResult } from "../perf/scenarios";
 
 // The measurement panel (src/perf), loaded on demand: `?perf=1` in the window
@@ -745,6 +745,70 @@ async function backgroundSmoke(allowed: boolean) {
   }
 }
 
+// `?unread-smoke=1`: an unread reply hidden online appears when its computer goes offline.
+async function unreadSmoke(allowed: boolean) {
+  const exit = (code: number) => invoke("exit_app", { code }).catch(() => {});
+  if (!allowed) {
+    log("unread-smoke not started: it needs ZERUS_CLIENT_REPLAY, ZERUS_CLIENT_HGS and ZERUS_CLIENT_PERF");
+    return;
+  }
+  try {
+    await until(() => grouping().ready && orderedRows().length > 0, 30_000, "the replay organization was not ready");
+    await sleep(500);
+    setStateFilter("all");
+    const projectUnread = () => {
+      const header = listRows().find((row) => row.type === "header" && row.project === defaultProject());
+      return header?.type === "header" ? header.unread : -1;
+    };
+    const computerStatus = (status: string) => applyBatch({ upserts: [], removes: [], replaces: [], computers: [{ computer: "", status, attempt: 1 }], activity: [] });
+    const onlineOthers = projectUnread();
+    computerStatus("reconnecting");
+    await until(() => projectUnread() !== onlineOthers, 5000, "the replay's offline unread replies did not appear");
+    const otherDelta = projectUnread() - onlineOthers;
+    computerStatus("live");
+    await until(() => projectUnread() === onlineOthers, 5000, "the replay did not return online");
+    setSearch("offline-unread-smoke");
+    const key = "\nrun:offline-unread-smoke";
+    applyBatch({
+      upserts: [{ computer: "", key: "run:offline-unread-smoke", row: {
+        name: "claude/sample-project/offline-unread-smoke", machine: "workstation", agent: "claude",
+        state: "running", status: "working", caption: "Working", phase: "working", activity: "busy", process_state: "running",
+        tracked: true, created: 1793000000, run_id: "offline-unread-smoke", conversation_id: "conv-offline-unread-smoke",
+        reply_id: "reply-offline-unread-smoke", shared_read: true, read_reply_id: null, needs_action: false, needs_attention: false,
+        unread: false, unread_candidate: false, summary: "Working",
+      } }],
+      removes: [], replaces: [], computers: [], activity: [],
+    });
+    const card = () => document.querySelector<HTMLElement>(`.vrow[data-key="${CSS.escape(key)}"] .scard`);
+    await until(() => !!card() && !card()!.querySelector(".sc-extra") && !card()!.hasAttribute("data-emphasis") && projectUnread() >= 0,
+      10_000, "the online reply did not stay hidden");
+    const before = projectUnread();
+    log("unread-smoke online-hidden: done");
+    computerStatus("reconnecting");
+    await until(() => card()?.dataset.emphasis === "unread" && !!card()?.querySelector(".sc-extra") && projectUnread() === before + otherDelta + 1,
+      5000, "the offline card and header did not show the reply").catch(() => {
+        const row = orderedRows().find((s) => s.key === key);
+        throw new Error(`offline unread state: ${JSON.stringify({ before, otherDelta, after: projectUnread(), status: document.querySelector(".statusbar")?.textContent,
+          unread: row?.unread, unreadReply: row?.unreadReply, unreadCandidate: row?.unreadCandidate, card: card()?.outerHTML.slice(0, 600) })}`);
+      });
+    log("unread-smoke offline-card-header: done");
+    const row = document.querySelector<HTMLElement>(`.vrow[data-key="${CSS.escape(key)}"] .rowhit`);
+    if (!row) throw new Error("the unread session row is missing");
+    row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 320, clientY: 240 }));
+    await until(() => !!document.querySelector(".menu"), 3000, "the session menu did not open");
+    const compact = [...document.querySelectorAll<HTMLButtonElement>(".menu button")].find((button) => button.textContent?.trim() === "Compact session row");
+    if (!compact) throw new Error("Compact session row is missing");
+    compact.click();
+    await until(() => !!card()?.classList.contains("compact") && card()?.dataset.emphasis === "unread" && !!card()?.querySelector(".sbadge.k-unread"),
+      3000, "the compact row did not show the offline reply");
+    log("unread-smoke offline-compact: done");
+    await exit(0);
+  } catch (error) {
+    log(`unread-smoke failed: ${String(error)}`);
+    await exit(1);
+  }
+}
+
 const onScenarioStart = (id: string, index: number, total: number) => log(`scenario ${index + 1}/${total} ${id} start`);
 const onScenarioEnd = (id: string, index: number, total: number, ms: number, result: ScenarioResult) => {
   finished.push(result);
@@ -777,6 +841,7 @@ export function PerfHost() {
       void phase4Smoke(!!config().actions_smoke, config().smoke_file ?? undefined);
     }
     if (new URLSearchParams(location.search).get("background-smoke") === "1" && inTauri()) void backgroundSmoke(!!config().actions_smoke);
+    if (new URLSearchParams(location.search).get("unread-smoke") === "1" && inTauri()) void unreadSmoke(!!config().actions_smoke);
     if (config().mode === "auto") {
       setOpen(true);
       void autoRun(config());

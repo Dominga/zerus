@@ -7,6 +7,7 @@ import {
   emphasis, childStatus, gitTooltip, paletteIndex, folderOf,
 } from "./SessionCard";
 import { catalog, computerFresh, computerOffline } from "../../store/catalog";
+import { visibleUnreadReply } from "../../store/attention";
 import { runningCommandsEntry } from "../../store/processes";
 import { flag } from "../../store/settings";
 import { archiveCount, archiveTip } from "../../store/archive";
@@ -728,7 +729,7 @@ function StripTile(props: { row: Extract<Row, { type: "card" }> }) {
         <span class="st-top">
           <span class="st-status">
             <StatusBadge kind={kind()} caption="" iconOnly />
-            <Show when={s().unread && (s().status === "working" || s().status === "attention" || s().draft)}><i class="st-unread" classList={{ muted: !!s().muted }} /></Show>
+            <Show when={visibleUnreadReply(s(), computerFresh(s().computer)) && (s().status === "working" || s().status === "attention" || s().draft)}><i class="st-unread" classList={{ muted: !!s().muted }} /></Show>
           </span>
           <Show when={s().muted}><Icon name="mute" size={14} class="st-mute" /></Show>
           <span class="st-provider">

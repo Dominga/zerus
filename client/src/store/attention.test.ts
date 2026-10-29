@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { actionNeeded, headerAttention, isActive, isWorking, needsAttention } from "./attention";
+import { actionNeeded, headerAttention, isActive, isWorking, needsAttention, visibleUnreadReply } from "./attention";
 import type { Session } from "../ui/sessions/types";
 
 const row = (extra: Partial<Session> = {}): Session =>
@@ -41,5 +41,26 @@ describe("the window's online rule (SessionPresentation.h)", () => {
     expect(actionNeeded(row({ status: "ready", actionNeeded: false }))).toBe(false);
     expect(actionNeeded(row({ status: "attention" }))).toBe(true);
     expect(actionNeeded(row({ status: "error" }))).toBe(false);
+  });
+});
+
+describe("visibleUnreadReply (HgsClient.h:104-105)", () => {
+  it("shows a finished unread reply online and offline", () => {
+    const reply = row({ unread: true, unreadReply: true, unreadCandidate: true });
+    expect(visibleUnreadReply(reply, true)).toBe(true);
+    expect(visibleUnreadReply(reply, false)).toBe(true);
+  });
+
+  it("hides a reply in progress only while its computer is online", () => {
+    const reply = row({ unread: false, unreadReply: true, unreadCandidate: false });
+    expect(visibleUnreadReply(reply, true)).toBe(false);
+    expect(visibleUnreadReply(reply, false)).toBe(true);
+  });
+
+  it("keeps archived rows and older projections' rules", () => {
+    expect(visibleUnreadReply(row({ state: "archived", unread: true, unreadReply: true, unreadCandidate: true }), false)).toBe(false);
+    expect(visibleUnreadReply(row({ unread: true, unreadReply: true }), true)).toBe(true);
+    expect(visibleUnreadReply(row({ unread: true, unreadCandidate: false }), true)).toBe(true);
+    expect(visibleUnreadReply(row({ state: "archived", unread: true }), false)).toBe(false);
   });
 });

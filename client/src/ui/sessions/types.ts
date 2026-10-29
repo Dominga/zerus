@@ -56,6 +56,8 @@ export interface Session {
   phase?: string;
   summary: string;
   unread: boolean;
+  /** The reply before a reply in progress hides it; undefined for an older projection. */
+  unreadReply?: boolean;
   draft: boolean;
   muted?: boolean;
   /** The host's preferences conflict with the confirmed override (Qt's notificationPreferencesError). */

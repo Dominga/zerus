@@ -501,3 +501,25 @@ export interface Fetched {
   /** An image whose header gives its size, at most Qt's 64M pixels: a card may show its thumbnail. */
   thumbnail: boolean;
 }
+
+// Saved drafts (src-tauri `composer/saved.rs`).
+/** Which store a Saved drafts row comes from: this computer's, Qt's, or the dev app's (only the import's conflicts). */
+export type DraftSource = "client" | "qt" | "dev";
+/** Whose conversation a draft key names (core `drafts::OwnerKind`). */
+export type DraftOwnerKind = "unknown" | "message" | "subagent" | "question" | "voice" | "task" | "task_description" | "task_comment";
+export interface SavedDraftItem {
+  key: string; kind: DraftOwnerKind;
+  /** The key's machine: a host alias, "" for this computer; a subagent key names the machine. */
+  computer: string; session: string;
+  /** The owner's parts joined by " / " (the row's accessible text). */
+  title: string;
+  /** What the row shows as its title. */
+  caption: string; machine: string; meta: string; detail: string;
+  /** Seconds since the epoch; 0 when unknown. */
+  modified: number; attachments: number; source: DraftSource; archived: boolean;
+}
+/** `next` is an opaque token for the following page. */
+export interface SavedDraftsPage { items: SavedDraftItem[]; next: string | null }
+/** The import's conflicts; `next` is the following page's offset. */
+export interface ConflictsPage { items: SavedDraftItem[]; next: number | null }
+export interface SavedDraftDetail { text: string; attachments: number; detail: string; restorable: boolean }

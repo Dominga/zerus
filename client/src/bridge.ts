@@ -1,6 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type Batch, type ComputerId, type Details, type EditOutcome, type Outcome, type ReadMark, type Target, type TerminalConnected, type TerminalFacts, type TerminalFinished, type TerminalStatus, type TerminalTarget, type ArchivePage, type ArchivedActivity, type ProcessTarget, type Answer, type ComposerTab, type ComposerView, type Inspect, type SendReply, type SessionRef, type AttachmentRef, type Fetched } from "./types";
+import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type Batch, type ComputerId, type Details, type EditOutcome, type Outcome, type ReadMark, type Target, type TerminalConnected, type TerminalFacts, type TerminalFinished, type TerminalStatus, type TerminalTarget, type ArchivePage, type ArchivedActivity, type ProcessTarget, type Answer, type ComposerTab, type ComposerView, type Inspect, type SendReply, type SessionRef, type AttachmentRef, type Fetched, type ConflictsPage, type DraftSource, type SavedDraftDetail, type SavedDraftsPage } from "./types";
 import type { ActivityPort, FollowRequest } from "./store/activity";
 import { documentVisibility, type PageVisibility } from "./store/visibility";
 
@@ -579,3 +579,16 @@ export async function attachmentOpenDraft(path: string): Promise<string | null> 
   if (!inTauri()) throw "Opening attachments needs the desktop app.";
   return invoke<string | null>("attachment_open_draft", { path });
 }
+
+// Saved drafts (src-tauri composer/saved.rs). Qt's and the dev app's stores
+// are only read; each page is one bounded read.
+/** One page of a section, newest first; `before` is the previous page's `next`. */
+export const savedDrafts = (source: DraftSource, limit: number, before: string | null) =>
+  desktop<SavedDraftsPage>("saved_drafts", { source, limit, before });
+/** One page of the switch import's conflicts, from `after`. */
+export const draftConflicts = (limit: number, after: number) => desktop<ConflictsPage>("draft_conflicts", { limit, after });
+export const savedDraft = (source: DraftSource, key: string) => desktop<SavedDraftDetail>("saved_draft", { source, key });
+/** Copies a Qt draft into this computer's store, never over a draft here; rejects with why not. */
+export const draftRecover = (key: string) => desktop<void>("draft_recover", { key });
+/** Replaces the open composer's draft with the selected one; rejects with why not. */
+export const draftRestore = (handle: number, source: DraftSource, key: string) => desktop<void>("draft_restore", { handle, source, key });

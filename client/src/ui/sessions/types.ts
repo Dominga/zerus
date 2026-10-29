@@ -164,6 +164,22 @@ export interface ItemAttachment {
   image: boolean;
 }
 
+/** A local message row's state (ActivityView.cpp:1053-1068). */
+export interface LocalItem {
+  /** The row's id (its request id). */
+  id: string;
+  /** "Sending…", "Not sent", "Delivery not confirmed" or "Submitted to terminal". */
+  stamp: string;
+  /** A failed row's error line. */
+  error: string;
+  uncertain: boolean;
+  /** Retry and Delete for a definite failure; Check and Delete for an uncertain one. */
+  actions: ("retry" | "inspect" | "delete")[];
+  inspectLabel: string;
+  /** Per file: whether it can be opened (Qt's request_id or local_path rule). */
+  available: boolean[];
+}
+
 export interface ActivityItem {
   id: string;
   kind: "user" | "agent" | "tool" | "tools" | "question" | "approval" | "system" | "receipt" | "thinking" | "report" | "voice" | "cleared" | "context";
@@ -180,6 +196,8 @@ export interface ActivityItem {
   warn?: boolean;
   /** A header other than "You" or "Agent" (recorded context). */
   label?: string;
+  /** A local message row (this app's send) and its buttons. */
+  local?: LocalItem;
 }
 
 export type VoiceState =

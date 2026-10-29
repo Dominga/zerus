@@ -1,6 +1,6 @@
-import type { ActivityEvent } from "../../types";
+import type { ActivityEvent, LocalMessage } from "../../types";
 import { eventKey } from "../../store/activity";
-import type { ActivityItem, MediaMessage, TranscriptItem, VoiceState } from "./types";
+import type { ActivityItem, LocalItem, MediaMessage, TranscriptItem, VoiceState } from "./types";
 
 // Journal events as the Activity items of the approved design, after the
 // rules of tray/src/ActivityView.cpp: messages by role, thinking, cleared
@@ -130,10 +130,121 @@ function recordedContext(summary: Record<string, unknown> | undefined): Transcri
   return items;
 }
 
-/** The items of a transcript, oldest first; ids are stable while events only append. */
-export function buildTranscript(events: readonly ActivityEvent[], summary?: Record<string, unknown>): TranscriptItem[] {
-  if (!events.length) return recordedContext(summary);
-  const items: TranscriptItem[] = [];
+// ---------------------------------------------------------------------------
+// Local message rows (Qt's m_localMessages): what this app sent until the
+// agent's own history shows it, and what failed (ActivityView.cpp:665-720,
+// 1053-1068).
+
+const PROMPTS = new Set(["UserPromptSubmit", "UserPromptQueued", "TurnStarted"]);
+const LOCAL_STAMP: Record<LocalMessage["status"], string> = { sending: "Sending…", error: "Not sent", sent: "Submitted to terminal" };
+/** How far a sent row's own prompt event may be from it, in seconds (ActivityView.cpp:684). */
+const NEAREST = 10;
+
+/** The text the agent received (the receipt's, else the row's), trimmed. */
+const submittedOf = (row: LocalMessage) => (row.submitted_text ?? row.text).trim();
+
+/**
+ * Whether a local row's file can be opened: it has its receipt's request or
+ * its cached copy (Qt's rule, ActivityView.cpp:765). Activity's journal cards
+ * read a file by its request only (attachment-card.ts `cardTarget`).
+ */
+export const localFileAvailable = (file: Record<string, unknown>) =>
+  (typeof file.request_id === "string" && file.request_id !== "") || (typeof file.local_path === "string" && file.local_path !== "");
+
+/** A failed or pending row's stamp, error line and buttons (ActivityView.cpp:1053-1068). */
+export function localItem(row: LocalMessage, summary?: Record<string, unknown>): LocalItem {
+  const failed = row.status === "error";
+  return {
+    id: row.id,
+    stamp: failed && row.uncertain ? "Delivery not confirmed" : LOCAL_STAMP[row.status] ?? LOCAL_STAMP.sent,
+    error: failed ? row.error : "",
+    uncertain: failed && row.uncertain,
+    // A delivery that may have happened is never retried from here: Check, then Allow retry in the composer.
+    actions: failed && row.id ? (row.uncertain ? ["inspect", "delete"] : ["retry", "delete"]) : [],
+    inspectLabel: summary?.native_ui_available === true ? "Check native UI" : "Check Terminal",
+    available: row.attachments.map(localFileAvailable),
+  };
+}
+
+/** A local row as a timeline event (Qt's `type: LocalMessage`). */
+function localEvent(row: LocalMessage): ActivityEvent {
+  return {
+    type: "LocalMessage", detail: row.text, at: row.submitted_at, attachments: row.attachments as ActivityEvent["attachments"],
+    source: row.source ?? undefined, voice: row.voice ?? undefined, message_id: row.message_id ?? undefined, local: row,
+  };
+}
+
+/**
+ * The events with the session's local rows merged in (ActivityView.cpp:665-720).
+ * A voice row the journal already holds is left out. A sent row takes over its
+ * own prompt event, which then shows its text and files: the one event with
+ * exactly its text when it has files and no other sent row competes, else the
+ * nearest prompt within 10 s that starts like it. Every other row is placed by
+ * its time, after the events of the same time.
+ */
+export function mergeLocal(events: readonly ActivityEvent[], local: readonly LocalMessage[]): ActivityEvent[] {
+  const source = events.slice();
+  const appended: ActivityEvent[] = [];
+  for (const row of local) {
+    if (row.source === "hgs_voice") {
+      if (!source.some((e) => e.source === "hgs_voice" && e.message_id === row.message_id)) appended.push(localEvent(row));
+      continue;
+    }
+    const submitted = submittedOf(row);
+    const sent = row.status === "sent";
+    let match = -1;
+    const exact: number[] = [];
+    if (sent && row.attachments.length) {
+      source.forEach((e, i) => {
+        if (e.source !== "hgs_voice" && !e.agent_id && !e.attachments?.length && PROMPTS.has(e.type ?? "")
+          && submitted && (e.detail ?? "").trim() === submitted) exact.push(i);
+      });
+      const competing = local.filter((other) => other.status === "sent" && other.attachments.length && submittedOf(other) === submitted).length;
+      // Qt also remembers which of several exact events a row was bound to; with one it is that one.
+      if (competing === 1 && exact.length === 1) match = exact[0];
+    }
+    if (sent && match < 0 && !exact.length) {
+      let nearest = NEAREST;
+      const head = submitted.slice(0, 1000);
+      source.forEach((e, i) => {
+        if (e.agent_id || !PROMPTS.has(e.type ?? "")) return;
+        const body = (e.detail ?? "").trim();
+        const distance = Math.abs((e.at ?? NaN) - row.submitted_at);
+        if (e.source !== "hgs_voice" && !e.attachments?.length && distance <= nearest && submitted && body
+          && (body.startsWith(head) || submitted.startsWith(body.slice(0, 1000)))) { match = i; nearest = distance; }
+      });
+    }
+    if (match >= 0) {
+      source[match] = {
+        ...source[match], activity_key: `local-${row.id}`, detail: row.text,
+        attachments: row.attachments as ActivityEvent["attachments"], attachment_submitted_text: row.submitted_text,
+      };
+      continue;
+    }
+    appended.push(localEvent(row));
+  }
+  if (!appended.length) return source;
+  // Placed by time, after the events of the same time (Qt's stable sort by `at`).
+  const placed = appended.map((e, i) => ({ e, i })).sort((a, b) => (a.e.at ?? 0) - (b.e.at ?? 0) || a.i - b.i).map((p) => p.e);
+  const merged: ActivityEvent[] = [];
+  let next = 0;
+  for (const e of source) {
+    const at = typeof e.at === "number" ? e.at : 0;
+    while (next < placed.length && at > 0 && (placed[next].at ?? 0) < at) merged.push(placed[next++]);
+    merged.push(e);
+  }
+  while (next < placed.length) merged.push(placed[next++]);
+  return merged;
+}
+
+/**
+ * The items of a transcript, oldest first; ids are stable while events only
+ * append. `local` are the open session's local rows (the composer view's).
+ */
+export function buildTranscript(given: readonly ActivityEvent[], summary?: Record<string, unknown>, local: readonly LocalMessage[] = []): TranscriptItem[] {
+  if (!given.length && !local.length) return recordedContext(summary);
+  const items: TranscriptItem[] = given.length ? [] : recordedContext(summary);
+  const events = local.length ? mergeLocal(given, local) : given;
   for (let i = 0; i < events.length;) {
     const e = events[i];
     const id = eventKey(e);
@@ -155,6 +266,12 @@ export function buildTranscript(events: readonly ActivityEvent[], summary?: Reco
     }
     if (role === "user" && e.source === "hgs_voice") {
       items.push(media(e, id));
+      i++; continue;
+    }
+    if (e.type === "LocalMessage" && role === "user") {
+      // The stamp stands in for the time and the receipt (ActivityView.cpp:1053-1055).
+      const row = e.local as LocalMessage;
+      items.push({ id: `local-${row.id}`, kind: "user", at: "", body: row.text, attachments: attachments(e), local: localItem(row, summary) });
       i++; continue;
     }
     if (role) {

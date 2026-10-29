@@ -315,7 +315,14 @@ mod tests {
         let computer = ComputerId::from("studio");
         pump.termination_succeeded(pump.capture_termination(&target).unwrap());
         let ids = pump.archive_termination_ids(&computer);
-        pump.observe_archive_terminations(&computer, &ids, &[row.clone()]);
+        pump.observe_archive_terminations(
+            &computer,
+            &ids,
+            &[ViewRow {
+                state: "running".into(),
+                ..archived(&row)
+            }],
+        );
         let mut wrong = archived(&row);
         wrong.name.push_str("-other");
         pump.observe_archive_terminations(&computer, &ids, &[wrong]);

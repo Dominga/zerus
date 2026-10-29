@@ -1,6 +1,6 @@
 # Qt retirement inventory: hgs and Zerus Next
 
-**Status:** Review draft, 2026-10-29
+**Status:** Approved inventory, 2026-10-29; G1 topology resolved, 2026-10-29
 **Source baseline:** `251ff068071604bc2478d740c687ff591b018c59` (`integrate/client-webui` at final UI-parity review)
 **Epic:** `zerus-5wmh.66`; inventory task `zerus-5wmh.66.1`
 
@@ -346,9 +346,9 @@ G5 package removal is therefore per platform, not one global flag day. A platfor
 | winget portable manifest and zip layout | `scripts/winget_manifest.py:35-81`; `docs/public-distribution.md:382-401` | Preserve `ufna.Zerus`, immutable stable-only publication and `zerus-windows-x86_64/hgs-tray.exe` unless a separately reviewed migration changes the launcher contract. PATH dependence remains while resources are app-local |
 | Update catalog metadata and client feed parser | `tray/src/UpdateController.cpp:30-202`; `scripts/dev_updates.py:41-190`; `scripts/update_feed.py:212-296` | `qt_version` currently participates in macOS provenance validation. Introduce runtime-neutral metadata compatibly at producer and consumer before dropping it; never publish a catalog old clients misread |
 
-## Proposed gap beads
+## Gap beads
 
-G7 has been filed as `zerus-5wmh.66.2`; G1-G6 remain proposed work packages pending the coordinator's confirmation. Existing beads named in the tables remain necessary; this list covers responsibilities for which no merged implementation or existing scoped bead was found. The parent is `zerus-5wmh.66`. The proposed dependencies are **G3 before G5 and G6**, and **G1 and G2 before G6**; G4 and G7 must also satisfy the platform acceptance they affect before removal. Proposed owners follow the owner's split of UI/design to Claude and technical work to Codex/Kimi; they are not assignments, and G1-G6 stay unassigned until the owner decides the G1 architecture.
+G7 is `zerus-5wmh.66.2`; G1-G6 are `zerus-5wmh.66.3` through `zerus-5wmh.66.8` respectively. Existing beads named in the tables remain necessary; this list covers responsibilities for which no merged implementation or existing scoped bead was found. The parent is `zerus-5wmh.66`. The dependencies are **G3 before G5 and G6**, and **G1 and G2 before G6**; G4 and G7 must also satisfy the platform acceptance they affect before removal. Proposed owners follow the owner's split of UI/design to Claude and technical work to Codex/Kimi; they are not assignments, and G1-G6 currently remain unassigned.
 
 ### G1: Durable fleet, presence and notification services in `hgs`
 

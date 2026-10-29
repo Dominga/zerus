@@ -2029,6 +2029,17 @@ mod windows_tests {
         assert!(error.contains("unavailable"), "{error}");
     }
 
+    /// The test's Node server, killed however the test ends: a failed exchange
+    /// (a sandbox that cannot open the pipe) used to leave it listening forever.
+    struct Server(std::process::Child);
+
+    impl Drop for Server {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
     // The bridge answers one request line with one response line, as Node serves it.
     #[test]
     fn a_request_line_gets_the_bridge_response_line() {
@@ -2036,22 +2047,19 @@ mod windows_tests {
             return;
         }
         let pipe = endpoint(Path::new(&format!(r"C:\zerus-test\{}", uuid::Uuid::new_v4())));
+        // The server also exits on its own after 30 s, should the test process die.
         let script = format!(
-            "const net=require('net');const s=net.createServer(c=>c.on('data',d=>{{c.end(JSON.stringify({{ok:true,value:JSON.parse(d)}})+'\\n');s.close();}}));s.listen({:?},()=>console.log('ready'));",
+            "setTimeout(()=>process.exit(2),30000).unref();const net=require('net');const s=net.createServer(c=>c.on('data',d=>{{c.end(JSON.stringify({{ok:true,value:JSON.parse(d)}})+'\\n');s.close();}}));s.listen({:?},()=>console.log('ready'));",
             pipe.to_string_lossy()
         );
-        let mut node = Command::new("node")
-            .args(["-e", &script])
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
+        let mut node = Server(Command::new("node").args(["-e", &script]).stdout(Stdio::piped()).spawn().unwrap());
         let mut ready = String::new();
-        BufReader::new(node.stdout.take().unwrap()).read_line(&mut ready).unwrap();
+        BufReader::new(node.0.stdout.take().unwrap()).read_line(&mut ready).unwrap();
         assert_eq!(ready.trim(), "ready");
         let response = exchange(&pipe, r#"{"method":"ping"}"#, Duration::from_secs(10)).unwrap();
         let value: Value = serde_json::from_str(&response).unwrap();
         assert_eq!(value["value"]["method"], "ping");
-        assert!(node.wait().unwrap().success());
+        assert!(node.0.wait().unwrap().success());
     }
 }
 

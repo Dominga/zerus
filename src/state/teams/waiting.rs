@@ -155,6 +155,11 @@ fn member_reason(team: &Team, member: &Member) -> Option<Value> {
         return None;
     }
     let parent = if member.parent.is_empty() { team.lead.as_str() } else { member.parent.as_str() };
+    // U36: a report in a stage of its pipeline waits for that stage.
+    if let Some(task) = team.tasks.iter().filter(mine).filter(|task| task.status.in_stage()).max_by_key(|task| task.id) {
+        let kind = if task.status == TaskStatus::InTest { "test" } else { "review" };
+        return reason(team, "team_review", format!("Waiting for the {kind} of #{}", task.id), json!({"task":task.id,"stage":kind}));
+    }
     if let Some(task) = team.tasks.iter().filter(mine).filter(|task| task.status == TaskStatus::Submitted).max_by_key(|task| task.id) {
         return reason(team, "team_review", format!("Waiting for {} to review #{}", role_of(team, parent), task.id),
             json!({"task":task.id,"by":parent}));

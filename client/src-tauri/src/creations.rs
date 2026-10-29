@@ -1990,6 +1990,33 @@ mod tests {
     }
 
     #[test]
+    fn an_idle_creation_worker_does_not_copy_the_watch_snapshot() {
+        let fake = Fake::new();
+        *lock(&fake.probe.watched) = Some(BindingListing {
+            online: true,
+            ..Default::default()
+        });
+        let host = fake.host();
+        let id = admitted(&host, plan());
+        state(&host, &id, "confirming");
+        for job in std::mem::take(&mut *lock(&fake.probe.jobs)) {
+            job.join().unwrap();
+        }
+        assert!(host.flush_journal_for_test());
+        assert!(host.flush_journal_for_test());
+        let reads = fake.probe.watch_reads.load(Ordering::SeqCst);
+        for _ in 0..4 {
+            assert!(host.flush_journal_for_test());
+        }
+        assert_eq!(fake.probe.watch_reads.load(Ordering::SeqCst), reads);
+        assert_eq!(fake.probe.reads.load(Ordering::SeqCst), 0);
+        host.action(id, CreationAction::Check).unwrap();
+        assert!(host.flush_journal_for_test());
+        assert!(fake.probe.watch_reads.load(Ordering::SeqCst) > reads);
+        fake.stop(host);
+    }
+
+    #[test]
     fn a_downgraded_peer_resumes_the_binding_poll() {
         let fake = Fake::new();
         *lock(&fake.probe.watched) = Some(BindingListing {

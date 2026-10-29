@@ -58,7 +58,7 @@
      The scroll bar stays at the pane edge; the margins scroll with the content. */
   .activity-wrap { --col: calc(900px * var(--content-scale, 1)); flex: 1; min-height: 0; display: flex; flex-direction: column; }
   .activity { flex: 1; min-height: 0; display: flex; }
-  .act-scroll { flex: 1; overflow-y: auto; overflow-x: hidden; scroll-behavior: smooth; }
+  .act-scroll { flex: 1; overflow-y: auto; overflow-x: hidden; scroll-behavior: smooth; will-change: transform; }
   /* It takes the focus only from code (a toolbar chip that hides), as Qt's browser does; no ring. */
   .act-scroll:focus { outline: none; }
   .act-col { position: relative; container: act-col / inline-size; box-sizing: border-box; min-height: 100%; width: min(var(--col), calc(100% - 32px)); margin: 0 auto; padding: 10px 0 18px; display: flex; flex-direction: column; gap: 10px; font-size: calc(var(--fs-base) * var(--content-scale, 1)); }

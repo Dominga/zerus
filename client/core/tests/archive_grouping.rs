@@ -159,6 +159,18 @@ fn run_memory_follows_live_rows_on_observe_and_present_and_forgets_implicit_ones
         "alpha",
         "leaving the live list keeps the last assignment"
     );
+    present(&mut grouping, &[], &[], 5);
+    let layout = saved(&mut grouping);
+    assert_eq!(
+        layout.run_project("workstation", "run"),
+        None,
+        "token startup reload kept the live slot run for later membership changes"
+    );
+    assert_eq!(
+        layout.run_project("workstation", "next"),
+        Some("alpha"),
+        "the completed run retains its historical assignment"
+    );
 }
 
 #[test]

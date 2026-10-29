@@ -680,12 +680,15 @@ class NativeAgent:
         else:
             self.assertFalse(expected, expected)
         # The copy is in the new account's store and starts with the conversation's
-        # records: the resumed agent may append to it. The old account keeps its own
-        # file unchanged.
+        # records: the resumed agent may append to it. The old account's file is
+        # final only after its agent stops: it may grow past the snapshot taken
+        # before the switch (Claude appends its cost-state record while stopping),
+        # and the copy holds those final bytes.
         copy = next(folder.rglob(f"*{conversation}.jsonl"))
         copied = copy.read_bytes()
-        self.assertEqual(copied[:len(original)], original, "the copy does not start with the conversation")
-        self.assertEqual(transcript.read_bytes(), original, "the old account's file changed")
+        old_final = transcript.read_bytes()
+        self.assertTrue(old_final.startswith(original), "the old account's records were rewritten")
+        self.assertTrue(copied.startswith(old_final), "the copy does not hold the old file's final records")
         self.assertTrue(transcript.is_file())
         # The listing and the inspection both name the account.
         self.assertEqual((self.row(name)["account_id"], self.row(name)["account_label"]),

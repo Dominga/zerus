@@ -982,7 +982,7 @@ fn detached(hgs: &Path, invocation: &zerus_client_core::Invocation) -> Result<()
             .unwrap_or_else(|error| zerus_client_core::Exit::Code {
                 code: 1,
                 stdout: Vec::new(),
-                stderr: interrupted(&format!("{error:?}")).into(),
+                stderr: interrupted(&format!("{error:?}")),
             })
     })?;
     launch::launched(exit)
@@ -2271,15 +2271,25 @@ mod tests {
         ] {
             let fake = Fake::new();
             let mut services = fake.services();
-            services.launch = Arc::new(move |_| result.clone());
+            let launched = Arc::new(AtomicBool::new(false));
+            let completed = Arc::clone(&launched);
+            services.launch = Arc::new(move |_| {
+                completed.store(true, Ordering::Release);
+                result.clone()
+            });
             let host = CreationHost::new(fake.dir.join("creations.json"), services);
             let mut request = plan();
             request["terminal"] = json!(terminal);
             let id = admitted(&host, request);
-            wait("the launch completion forces a binding read", || {
-                fake.probe.reads.load(Ordering::SeqCst) > 0
-            });
-            state(&host, &id, expected);
+            wait("the launch job", || launched.load(Ordering::Acquire));
+            for job in lock(&fake.probe.jobs).drain(..) {
+                job.join().unwrap();
+            }
+            // The result is queued. Two actor inputs bracket its drain, so a
+            // transient launching state before Done::Launched cannot pass.
+            let _ = host.action(id.clone(), CreationAction::Show);
+            let _ = host.action(id.clone(), CreationAction::Show);
+            assert_eq!(text(&operation(&host, &id), "state"), expected);
             fake.stop(host);
         }
     }

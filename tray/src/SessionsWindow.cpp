@@ -2758,7 +2758,7 @@ void SessionsWindow::applyTheme()
         QFrame#sessionInspectorPanel { background:transparent; border:0; }
     )").arg(bg, m_fg, m_surface, m_border, m_accent, m_muted, hover,
               colors.accentText, colors.accentHover, selected,
-              colors.inset, tone("Error", m_dark).name()) + workspaceScrollbars(m_dark) + skin.stylesheet);
+              colors.inset, tone("Error", m_dark).name()) + workspaceSpinButtons(hover) + workspaceScrollbars(m_dark) + skin.stylesheet);
     if (textSelection != selected)
         setStyleSheet(styleSheet().replace(QStringLiteral("selection-background-color:") + selected + ';',
             QStringLiteral("selection-background-color:") + textSelection + QStringLiteral("; selection-color:") + m_fg + ';'));

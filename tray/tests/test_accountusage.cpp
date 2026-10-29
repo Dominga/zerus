@@ -220,6 +220,12 @@ private slots:
         const auto before=button.grab().toImage();QTRY_VERIFY(button.grab().toImage()!=before);QVERIFY(button.isRefreshing());
         button.setRefreshing(false);QVERIFY(!button.isRefreshing());QVERIFY(!button.icon().isNull());QVERIFY(button.toolTip().contains("Refresh"));
     }
+    void compactDeepSeekBalanceIncludesEveryCurrency() {
+        const QJsonObject data{{"provider","dsh"},{"status","ok"},{"balances",QJsonArray{
+            QJsonObject{{"kind","API"},{"balance","149.40"},{"currency","CNY"}},
+            QJsonObject{{"kind","API"},{"balance","18.40"},{"currency","USD"}}}}};
+        QCOMPARE(AccountUsage::balanceSummary(data),QString("149.40 CNY  18.40 USD"));
+    }
     void footerExpandsOnlyForExtraText() {
         AccountUsage::Button button;button.show();
         QJsonObject first{{"used_percent",69},{"window_minutes",300},{"resets_at",QDateTime::currentSecsSinceEpoch()+3600}};

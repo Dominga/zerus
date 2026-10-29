@@ -1148,7 +1148,9 @@ QMap<int, QList<int>> layered(const Team &team)
 QList<PhaseGroup> phaseGroups(const Team &team)
 {
     QList<PhaseGroup> groups;
-    if (!team.phased()) return groups;
+    // Owner, 2026-10-29: a plan of one phase gets its phase section too, in
+    // Graph, Board and Layers alike, so the controls never move between a
+    // one-phase and a many-phase plan.
     QMap<int, PhaseGroup> byPhase;
     for (const auto &task : team.tasks) {
         PhaseGroup &group = byPhase[task.phase];
@@ -1156,11 +1158,6 @@ QList<PhaseGroup> phaseGroups(const Team &team)
         group.tasks.append(task.id);
         group.done += task.finished();
     }
-    // A team whose remaining tasks are all phase 1 looks as it did before:
-    // grouping starts with the first task appended after the plan.
-    bool appended = false;
-    for (auto it = byPhase.cbegin(); it != byPhase.cend(); ++it) appended = appended || it.key() > 1;
-    if (!appended) return groups;
     for (auto it = byPhase.cbegin(); it != byPhase.cend(); ++it) {
         PhaseGroup group = it.value();
         if (const auto *record = team.phase(it.key())) {

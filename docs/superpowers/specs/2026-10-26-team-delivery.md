@@ -134,6 +134,27 @@ the notice to Pending, so the lead hears again. Event `report_replaced`. A
 report that was not captured is never replaced; a decided task refuses as
 before.
 
+## 7a. A captured report holds its member (A7)
+
+A captured reply may be only an acknowledgement ("#123 is queued, I'll do it
+after X"); handing that member the next task at once turned four tasks in a
+row into acknowledgement-only reports (owner, 2026-10-29). So while a
+member's task is Submitted, its last Reported attempt is the member's and that
+report is `captured`, the member counts as busy: no hand-out, it is no
+rebalance target, no work ahead, and it is not starving (C7, no
+`plan_starved`). Its other ready tasks go to a free member with the same role
+as for any busy member; a pinned one waits for it. It is free again once its
+reviewer (the lead, a sub-lead or the owner) accepts, rejects, retries,
+reassigns or cancels that task, or the member replaces the report with its own
+`hgs team report` (section 7). An explicit report holds nothing, and the
+lead's own tasks never hold the lead (C1).
+
+The report's inbox item and its reminder say that the member gets no new work
+until the report is decided or replaced (inbox `detail`). `hgs team status` and
+`hgs team list` add `"captured_hold":{"task":N,"text":"No new work: the
+captured report on #N awaits a decision"}` to that member; the field is absent
+otherwise.
+
 ## 8. The hand-out text (H5)
 
 Every hand-out ends with, filled in:

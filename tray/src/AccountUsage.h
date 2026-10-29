@@ -149,6 +149,14 @@ inline QString launchSummary(const QJsonObject &data) {
         return QObject::tr("Local model %1").arg(data["identity"].toObject()["plan"].toString());
     return QObject::tr("limits n/a");
 }
+inline QString balanceSummary(const QJsonObject &data) {
+    QStringList balances;
+    for(const auto &value:data.value("balances").toArray()) {
+        const auto balance=value.toObject();
+        balances.append((balance.value("balance").toString()+" "+balance.value("currency").toString()).trimmed());
+    }
+    return balances.join("  ");
+}
 inline double highest(const QJsonObject &data) {
     double used=-1;for(const auto &value:data.value("windows").toArray()){const auto w=value.toObject();if(current(w)&&w.value("used_percent").isDouble())used=qMax(used,w.value("used_percent").toDouble());}return used;
 }
@@ -359,8 +367,8 @@ private:
         return m_compact?text:qMax(text,compactTextWidth(period(window)+" 100%"));
     }
     QString summaryText() const {
-        const auto balances=m_data.value("balances").toArray();const auto b=balances.isEmpty()?QJsonObject():balances.first().toObject();
-        return !b.isEmpty()?b.value("balance").toString()+" "+b.value("currency").toString():m_data.value("status")=="configured"?(m_data.value("provider")=="opencode"?tr("Configured"):m_data.value("identity").toObject().value("auth_method")=="Ollama"?tr("Ollama"):tr("API key")):m_data.value("status")=="signed_out"?tr("Sign in required"):m_data.value("status")=="expired"?tr("Sign-in expired"):tr("Unavailable");
+        const auto balances=balanceSummary(m_data);
+        return !balances.isEmpty()?balances:m_data.value("status")=="configured"?(m_data.value("provider")=="opencode"?tr("Configured"):m_data.value("identity").toObject().value("auth_method")=="Ollama"?tr("Ollama"):tr("API key")):m_data.value("status")=="signed_out"?tr("Sign in required"):m_data.value("status")=="expired"?tr("Sign-in expired"):tr("Unavailable");
     }
     int contentWidth() const {
         const auto windows=m_data.value("windows").toArray();const bool loading=m_data.isEmpty() || m_data.value("status")=="loading";

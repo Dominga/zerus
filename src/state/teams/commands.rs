@@ -235,6 +235,13 @@ fn member_queue(team: &Team, member: &str) -> Vec<Value> {
     queue
 }
 
+/// A7: the task whose captured report holds the member back from new work,
+/// shown on the member in status and list; absent when nothing holds it.
+fn captured_hold(team: &Team, member: &str) -> Option<Value> {
+    let task = team.captured_hold(member)?;
+    Some(json!({"task":task,"text":format!("No new work: the captured report on #{task} awaits a decision")}))
+}
+
 /// The members of a finished team whose sessions still run, from the live
 /// listing (F7). The team's lead and any session that is the lead or a member
 /// of a team still active are left out, so the owner cannot stop a working
@@ -560,6 +567,9 @@ fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::
         for (member, value) in team.members.iter().zip(members) {
             value["host_shared"] = json!(shared.contains(&member.id));
             value["queue"] = json!(member_queue(team, &member.id));
+            if let Some(held) = captured_hold(team, &member.id) {
+                value["captured_hold"] = held;
+            }
             // U32: how the member joined on the owner's word, with the quote.
             if let Some(added) = &member.added {
                 value["added"] = added.clone();
@@ -675,9 +685,13 @@ fn summary(team: &Team) -> Value {
         .iter()
         .filter(|m| m.state != MemberState::Removed)
         .map(|m| {
-            json!({"id":m.id,"role":team.role_of(&m.id),"agent":m.agent,"model":m.model,"computer":m.computer,
+            let mut value = json!({"id":m.id,"role":team.role_of(&m.id),"agent":m.agent,"model":m.model,"computer":m.computer,
                 "session":m.session,"state":m.state,"error":m.error,"queue":member_queue(team, &m.id),
-                "services":m.services,"question":m.permission})
+                "services":m.services,"question":m.permission});
+            if let Some(held) = captured_hold(team, &m.id) {
+                value["captured_hold"] = held;
+            }
+            value
         })
         .collect();
     let tasks: Vec<Value> = team
@@ -5785,6 +5799,27 @@ mod tests {
         // The session list carries the same queue.
         let listed = summary(&team);
         assert_eq!(listed["members"].as_array().unwrap().iter().find(|member| member["id"] == "dev").unwrap()["queue"], expected);
+    }
+
+    #[test]
+    fn status_shows_the_captured_report_that_holds_a_member() {
+        let mut team = running_team();
+        let dev = |value: &Value| value["members"].as_array().unwrap().iter().find(|member| member["id"] == "dev").unwrap().clone();
+        // Nothing holds dev: the field is absent, so the JSON is unchanged.
+        assert!(dev(&view_with(&team, &[], None)).get("captured_hold").is_none());
+        assert!(dev(&summary(&team)).get("captured_hold").is_none());
+        // A7: its report on #1 was captured from its last reply.
+        let task = team.task_mut(1).unwrap();
+        task.status = TaskStatus::Submitted;
+        let attempt = task.attempts.last_mut().unwrap();
+        attempt.state = AttemptState::Reported;
+        attempt.report = Some(Report { text: "Queued, after FU-trees".into(), at: 20.0, captured: true, ..Default::default() });
+        let expected = json!({"task":1,"text":"No new work: the captured report on #1 awaits a decision"});
+        assert_eq!(dev(&view_with(&team, &[], None))["captured_hold"], expected);
+        assert_eq!(dev(&summary(&team))["captured_hold"], expected);
+        // An explicit report holds nothing.
+        team.task_mut(1).unwrap().attempts.last_mut().unwrap().report.as_mut().unwrap().captured = false;
+        assert!(dev(&view_with(&team, &[], None)).get("captured_hold").is_none());
     }
 
     fn found_session(name: &str, run: &str, live: bool, cwd: &str) -> Seen {

@@ -861,11 +861,10 @@ quint64 HgsClient::requestTerminalDraft(const QString &host, const QString &name
     if (!submitHash.isEmpty()) input["draft_hash"] = submitHash;
     QStringList args{QStringLiteral("terminal"), name, QStringLiteral("--json")};
     if (!host.isEmpty()) args.prepend('@' + host);
-    runHgs(m_hgs, args, host.isEmpty() ? 15000 : 45000, this,
-        [this, request](const QByteArray &bytes) {
-            const auto data = QJsonDocument::fromJson(bytes);
-            if (!data.isObject()) return emit terminalDraftFailed(request, tr("Invalid Terminal response"));
-            const auto result = data.object();
+    runHgsParsed(m_hgs, args, host.isEmpty() ? 15000 : 45000, this, parseObject,
+        [this, request](const ObjectReply &data) {
+            if (!data.ok()) return emit terminalDraftFailed(request, tr("Invalid Terminal response"));
+            const auto &result = data.object;
             // A refused Enter is a receipt; an uncertain one may have arrived.
             const QString status = result.value("status").toString();
             if (status == QLatin1String("failed")) return emit terminalDraftFailed(request, result.value("error").toString(tr("Not sent")));

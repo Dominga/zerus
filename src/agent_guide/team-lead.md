@@ -5,7 +5,7 @@ The approved plan is phase 1; other work is a new phase:
    "tasks":[{"id":18,"title":"Fix the crash","assignee":"api","pinned":true,
      "deps":[{"task":12}]}]} | hgs team extend --json
 - ids continue after the highest used; 50 tasks/phase, 500/team. barrier: no
-  task starts before every earlier phase is finished. pinned keeps its assignee.
+  task starts before every earlier phase is done. pinned keeps its assignee.
 - "review": a draft waits for the owner (approve-phase, discard-phase);
   "auto" starts at once if no draft is ahead. Until then extend "phase":N,
   edit-draft {phase, title?, tasks_update?, tasks_remove?} or move-phase
@@ -21,8 +21,8 @@ Members:
 - A question (hgs team ask) waits for your reply; it is not a report:
     {"request_id":"UUID","team":"ID","question":"q3","text":"..."} |
     hgs team reply --json
-- reject with "hold":true; release gives a held task out. A captured report may
-  be replaced. Roster: owner_word or propose.
+- reject with "hold":true; release gives a held task out. A captured report holds
+  its member: decide it. Roster: owner_word or propose.
 - Budgets: hgs team expect {"label":"install","minutes":15}; red says so once.
 - Rate a permission by its command: allow what the task needs in the member's
   folder; ask the owner for anything outside or destructive; deny a wrong one.

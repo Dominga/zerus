@@ -163,6 +163,8 @@ class NativeAgent:
         self.project_parent = Path(tempfile.mkdtemp(prefix="hgs-native-", dir=project_parent())).resolve()
         self.project = self.project_parent / "project"
         self.agent_home = self.root / f"{self.AGENT}-home"
+        # The account a switch moved the session to, once the case made it.
+        self.second_home = None
         self.api_root = self.root / "api"
         for folder in (self.project, self.agent_home, self.api_root, *(self.root / name for name in
                                                                          ("appdata", "localappdata", "temp"))):
@@ -620,6 +622,7 @@ class NativeAgent:
         folder = self.home / ".config" / "hgs" / "accounts" / "second"
         self.assertTrue(folder.is_dir(), "the account profile folder is missing")
         self.prepare_account(folder)
+        self.second_home = folder
         return folder
 
     def check_switch_account(self, tag):
@@ -627,10 +630,14 @@ class NativeAgent:
         agent: the same conversation, folder and name, copied into the new account's native
         store, and the agent resumes it there; the old account keeps its own copy."""
         name = self.launch(tag, *([self.NO_HOOK_REVIEW] if self.NO_HOOK_REVIEW else []))
+        # A real turn first: Claude writes its transcript only after the first prompt, and
+        # Codex names it in the record only then.
+        self.deliver(name, MESSAGES[0])
         row = self.ready(name)
         conversation = row["conversation_id"]
         before = self.record(name)
         transcript = Path(before["transcript"])
+        self.assertTrue(transcript.is_file(), before)
         original = transcript.read_bytes()
         folder = self.second_account()
         receipt = self.json("switch-account", name, "--account", "second",
@@ -654,13 +661,13 @@ class NativeAgent:
                          ("second", "Second"))
         inspected = self.inspect(name)
         self.assertEqual((inspected["account_id"], inspected["account_label"]), ("second", "Second"))
-        # The resumed agent continues that exact conversation on the new account.
+        # The resumed agent answers a second prompt in that exact conversation.
         self.pin_session(name)
         text = "After the account switch."
-        delivered = self.send(name, self.message(self.ready(name), text))
-        self.assertEqual((delivered["status"], delivered["conversation_id"]), ("submitted", conversation),
-                         delivered)
-        self.until("the turn after the switch", lambda: self.turn_ended(name, delivered["submitted_at"]))
+        self.deliver(name, text)
+        self.assertEqual(self.row(name)["conversation_id"], conversation)
+        self.assertEqual(self.accepted(name, text, conversation), 1, self.describe())
+        self.assertEqual(self.accepted(name, MESSAGES[0], conversation), 1, self.describe())
         self.until(f"{text!r} at the model", lambda: any(
             text in json.dumps(request) for request in api.requests(self.api_root)))
 
@@ -700,7 +707,14 @@ class NativeWindowsClaude(NativeAgent, host.HostCase):
                     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}}), encoding="utf-8")
 
     def transcript_rows(self, conversation_id):
-        paths = list((self.agent_home / "projects").glob(f"*/{conversation_id}.jsonl"))
+        # After a switch the conversation lives in the new account's store; the
+        # old account keeps only its own copy of the same rows.
+        homes = ([self.second_home] if self.second_home else []) + [self.agent_home]
+        paths = []
+        for home in homes:
+            paths = list((home / "projects").glob(f"*/{conversation_id}.jsonl"))
+            if paths:
+                break
         rows = []
         for path in paths:
             for line in path.read_text(encoding="utf-8").splitlines():
@@ -1027,8 +1041,16 @@ class NativeWindowsCodex(NativeAgent, host.HostCase):
             config.replace('env_key = "OPENAI_API_KEY"', 'env_key = "FIXTURE_API_KEY"'), encoding="utf-8")
 
     def transcript_rows(self, conversation_id):
+        # After a switch the conversation lives in the new account's store; the
+        # old account keeps only its own copy of the same rows.
+        homes = ([self.second_home] if self.second_home else []) + [self.agent_home]
+        paths = []
+        for home in homes:
+            paths = sorted((home / "sessions").rglob(f"rollout-*{conversation_id}.jsonl"))
+            if paths:
+                break
         rows = []
-        for path in sorted((self.agent_home / "sessions").rglob(f"rollout-*{conversation_id}.jsonl")):
+        for path in paths:
             for line in path.read_text(encoding="utf-8").splitlines():
                 try:
                     rows.append(json.loads(line))

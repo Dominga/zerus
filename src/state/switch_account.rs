@@ -675,6 +675,25 @@ mod switch_tests {
     }
 
     #[test]
+    fn a_switch_refuses_a_conversation_with_no_transcript_yet() {
+        // A session that has not had a turn yet has no native transcript to
+        // copy: the refusal names it instead of failing inside the copy.
+        for agent in ["claude", "codex"] {
+            run_test(agent, false, "88888888-8888-4888-8888-888888888888", |config, record| {
+                let path = PathBuf::from(record["transcript"].as_str().unwrap());
+                fs::remove_file(&path).unwrap();
+                let error = switch(config, "claude/project/account", "second", &request(), false).unwrap_err();
+                assert!(error.contains("missing"), "{agent}: {error}");
+                let saved = read("claude/project/account").unwrap();
+                assert_eq!(saved["account_id"], json!("work"), "{agent}");
+                assert_eq!(saved["run_id"], record["run_id"], "{agent}");
+                assert!(!home(config, "second").join("projects").exists(), "{agent}");
+                assert!(!home(config, "second").join("sessions").exists(), "{agent}");
+            });
+        }
+    }
+
+    #[test]
     fn a_switch_keeps_the_conversation_folder_and_name_and_leaves_the_old_copy() {
         run_test("claude", false, "11111111-1111-4111-8111-111111111111", |config, record| {
             // A subagent transcript in the conversation's own folder.

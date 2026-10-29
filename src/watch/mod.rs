@@ -1207,8 +1207,8 @@ impl<'a> Watch<'a> {
         let row = self.rows.iter().position(|(row_key, _)| *row_key == key);
         let name = row.and_then(|index| self.rows[index].1["name"].as_str()).unwrap_or(&session.name).to_owned();
         let digest = row.map(|index| self.digests[index]);
-        let job = self.processes.subscribe(&key, &name, session.run_id.filter(|run| !run.is_empty()), digest, now);
-        self.processes.configure(&key, interval_ms, false, now);
+        let job = initial_process_subscription(&mut self.processes, &key, &name,
+            session.run_id.filter(|run| !run.is_empty()), digest, interval_ms, now);
         self.run_processes([job]);
     }
 
@@ -1623,9 +1623,33 @@ fn send_state(out: &Out, sub: &mut Subscription, inspection: &Value) {
     }
 }
 
+/// The first subscription and every reconnect apply the requested cadence
+/// before starting their read. Kept separate from worker dispatch for tests.
+fn initial_process_subscription(processes: &mut processes::Processes, key: &str, name: &str,
+    run: Option<String>, digest: Option<Digest32>, interval_ms: Option<u64>, now: Instant) -> processes::Job {
+    let job = processes.subscribe(key, name, run, digest, now);
+    processes.configure(key, interval_ms, false, now);
+    job
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_first_process_subscription_and_reconnect_apply_the_interval() {
+        let mut processes = processes::Processes::new();
+        for millis in [1_000, 2_500, 600_000] {
+            let now = Instant::now();
+            let job = initial_process_subscription(&mut processes, "run:r", "codex/p/t",
+                Some("r".into()), None, Some(millis), now);
+            processes.done(processes::Done { token: job.token, key: job.key, value: Some(Ok(
+                json!({"run_id":"r", "processes":{}, "process_work":{}}))) });
+            assert!(processes.pulse(now + Duration::from_millis(millis - 1)).is_empty());
+            assert_eq!(processes.pulse(now + Duration::from_millis(millis)).len(), 1);
+            assert!(processes.unsubscribe("run:r"));
+        }
+    }
 
     fn read(input: &[u8], pending: usize) -> Vec<String> {
         let (sender, receiver) = mpsc::channel();

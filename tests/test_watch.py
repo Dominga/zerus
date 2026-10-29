@@ -318,7 +318,7 @@ class WatchStream(unittest.TestCase):
                     interval_ms=2500, refresh=True)
         stream.send(op='ping', id='processes-configured')
         stream.next(lambda f: f['t'] == 'pong' and f['id'] == 'processes-configured')
-        stream.quiet(lambda f: f['t'] == 'state' and f['topic'] == 'processes' and f['rev'] == 1, .25)
+        stream.quiet(lambda f: f['t'] == 'state' and f['topic'] == 'processes' and f['rev'] == 1, 1.25)
         # A recorded background job in the binding is read again and sent.
         self.record['shell_jobs'] = {'job-1': dict(id='job-1', status='running', background=True, observed=True,
                                                    run_id=self.run_id, command='sleep 600', started_at=time.time(), source='hooks')}

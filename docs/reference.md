@@ -4124,8 +4124,10 @@ include `interval_ms` (clamped to 1,000–600,000 ms). Repeating the subscriptio
 changes its interval while keeping the current inventory, revision and running
 read. Adding `"refresh":true` requests one read as soon as the minimum gap
 allows; repeated refreshes while a read runs coalesce into one follow-up read.
-Both fields are additive watch-v1 options: older servers ignore them and keep
-their 10 s default. Plain resubscriptions without either option retain the
+Both fields are additive watch-v1 options. Older servers ignore them: each
+interval change or refresh becomes a plain resubscription, which reads again
+at once without the minimum gap, resends the state as revision 1, then keeps
+the 10 s default. Plain resubscriptions without either option retain the
 original behavior: replace the subscription and resend its first state.
 A session that leaves the
 catalog ends with `subscription_ended`, and an inspection that fails sends a

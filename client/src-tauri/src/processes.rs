@@ -1137,7 +1137,6 @@ impl ProcessHub {
         }));
     }
 
-    /// The output reply (`ProcessView.cpp:89-96`).
     fn refresh_inventory(&self, hub: &Hub) {
         if self.0.hgs_allowed && !hub.closed {
             if let Some(target) = &hub.subscribed {
@@ -1146,6 +1145,7 @@ impl ProcessHub {
         }
     }
 
+    /// The output reply (`ProcessView.cpp:89-96`).
     fn output_read(&self, call: OutputCall, result: Result<Value, String>) {
         let now = self.now();
         let mut hub = self.lock();

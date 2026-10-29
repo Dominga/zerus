@@ -15,7 +15,7 @@
 //! refused edit) bumps the epoch, so the webview takes Rust's answers again.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::MutexGuard;
+use std::sync::{Arc, MutexGuard};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -116,9 +116,25 @@ impl Answers {
         }
     }
 
-    /// The selection changed: the card shown next is built again.
+    /// The selection changed: the card shown next is built again, and an
+    /// open cold question is dropped.
     pub(crate) fn deselect(&mut self) {
         self.shown = None;
+        self.drop_stale_cold();
+    }
+
+    /// A cold question whose card is no longer shown (another session, a
+    /// changed or answered card) is dropped as cancelled: nothing was sent,
+    /// and it would leave every later answer Busy.
+    fn drop_stale_cold(&mut self) {
+        let shown = self.shown.as_ref().map(|(key, _)| key);
+        if self
+            .cold
+            .as_ref()
+            .is_some_and(|ask| Some(&ask.answering.card) != shown)
+        {
+            self.cold = None;
+        }
     }
 
     /// The card is built again: the review restarts and the fields reset.
@@ -241,6 +257,7 @@ impl Composers {
         // Every way out trims, with the cards the open session lists now.
         let mut listed = HashSet::new();
         let wake = self.place(&mut hub, navigation, &mut listed);
+        hub.answers.drop_stale_cold();
         Self::trim_answers(&mut hub, &listed);
         drop(hub);
         if wake {
@@ -656,8 +673,9 @@ pub(crate) struct Answering {
     answers: Vec<AnswerItem>,
     /// The card's consent identity at the click.
     pinned: Value,
-    /// The details at the click (`sendEvidence`, `SessionsWindow.cpp:138-145`).
-    captured: Value,
+    /// The details at the click (`sendEvidence`, `SessionsWindow.cpp:138-145`),
+    /// shared, never copied under the hub lock.
+    captured: Arc<Value>,
     skipping: bool,
     consent: bool,
 }
@@ -784,7 +802,7 @@ impl Composers {
             row_run: ctx.row.run_id.clone().unwrap_or_default(),
             row_conversation: ctx.row.conversation_id.clone().unwrap_or_default(),
             pinned: rules::consent_identity(&question.raw),
-            captured: (*details).clone(),
+            captured: Arc::clone(&details),
             question,
             answers,
             skipping,
@@ -822,12 +840,14 @@ impl Composers {
         let Some(ask) = hub.answers.cold.take_if(|ask| ask.token == token) else {
             return QuestionReply::Busy;
         };
-        if !proceed {
+        // An answer of this session that started meanwhile wins (Qt's
+        // m_answersInFlight): the asked one is dropped, nothing sent.
+        if !proceed || hub.answers.in_flight.contains_key(&ask.answering.key) {
             return QuestionReply::Busy;
         }
         let a = &ask.answering;
         let same = self.context(&hub).is_some_and(|ctx| {
-            let details = ctx.details.as_deref().cloned().unwrap_or_default();
+            let details = ctx.details.clone().unwrap_or_default();
             let identity =
                 match rules::actionable(&details, &facts(&ctx), &a.question.id, a.skipping) {
                     Actionable::Ready(question) => rules::consent_identity(&question.raw),
@@ -909,6 +929,17 @@ impl Composers {
             self.changed();
             return;
         }
+        // Another answer of this session is under way: this one ends as the
+        // busy lane would, definitely and without a call (HgsClient.cpp:1905).
+        if hub.answers.in_flight.contains_key(&answering.key) {
+            if let Some(draft) = hub.answers.drafts.get_mut(&card) {
+                draft.set_error(ALREADY_ANSWERING, false);
+            }
+            self.save_answer(&mut hub, &card, false, None);
+            drop(hub);
+            self.changed();
+            return;
+        }
         hub.answers.in_flight.insert(answering.key.clone(), card);
         drop(hub);
         self.changed();
@@ -929,8 +960,8 @@ impl Composers {
             .flatten();
         let evidence = ctx
             .as_ref()
-            .and_then(|c| c.details.as_deref().cloned())
-            .unwrap_or_else(|| a.captured.clone());
+            .and_then(|c| c.details.clone())
+            .unwrap_or_else(|| Arc::clone(&a.captured));
         let facts = AnswerFacts {
             online,
             state: row.state.clone(),
@@ -984,7 +1015,10 @@ impl Composers {
     /// the card says how it ended. Nothing is sent again by itself.
     fn answer_finished(&self, a: &Answering, outcome: Outcome) {
         let mut hub = self.lock();
-        hub.answers.in_flight.remove(&a.key);
+        // Only this answer's own entry: another card's of the session stays.
+        if hub.answers.in_flight.get(&a.key) == Some(&a.card) {
+            hub.answers.in_flight.remove(&a.key);
+        }
         let open = hub.open_key.as_deref() == Some(a.key.as_str());
         let open_run = open
             .then(|| {
@@ -1094,7 +1128,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::composer::send::tests::sent;
     use crate::composer::send::tests::{
-        opened, other_session, ready, send_hub, send_hub_on, state,
+        opened, other_session, ready, send_hub, send_hub_on, state, Fake,
     };
     use crate::composer::tests::{dir, drafts, hold, session, until};
     use crate::composer::{lock, ComposerEvent, ComposerView};
@@ -2442,23 +2476,306 @@ pub(crate) mod tests {
     #[test]
     fn the_asked_times_come_only_from_the_details_they_were_formatted_from() {
         let root = dir("q-asked");
-        let (c, _) = send_hub(&root);
+        let store = drafts(&root);
+        let (c, _) = send_hub_on(&store);
         let mut old = card_json("tool:t1");
         old["created_at"] = json!(1_700_000_000.0);
         opened(&c, asking(vec![old]));
         with_card(&c);
+        // Nothing the newer card sets off may answer before the check.
+        let release = hold(&store);
         // A newer card arrives while a sync formats the older details' times.
         let newer = asking(vec![card_json("tool:t2")]);
         let other = c.clone();
         c.lock().answers.between = Some(Box::new(move || other.observe(&state(newer))));
         c.sync_questions();
-        let q = until(&c, |v| {
-            v.question
-                .as_ref()
-                .is_some_and(|q| q.card == store_key("tool:t2"))
+        let bits = 1_793_000_000.0f64.to_bits();
+        assert!(
+            c.lock().answers.asked.iter().any(|(at, _)| *at == bits),
+            "the inner sync's times stand; the outer one formatted older details"
+        );
+        release.send(()).unwrap();
+    }
+
+    // Review round 1 of A2-2.
+
+    /// Submits Unit with the store held, applies `change` while the durable
+    /// save waits, then lets it answer: the re-check keeps the draft, sends
+    /// nothing and says so (SessionsWindow.cpp:5153-5170).
+    fn changed_during_the_save(name: &str, details: Value, change: impl FnOnce(&Fake)) {
+        let root = dir(name);
+        let store = drafts(&root);
+        let (c, fake) = send_hub_on(&store);
+        *lock(&fake.outcome) = Box::new(answered);
+        opened(&c, details);
+        let card = chosen(&c);
+        let release = hold(&store);
+        assert_eq!(c.question_submit(&card), QuestionReply::Sending);
+        change(&fake);
+        release.send(()).unwrap();
+        store.flush();
+        until(&c, |_| {
+            c.lock()
+                .answers
+                .drafts
+                .get(&card)
+                .is_some_and(|d| !d.sending)
+        });
+        assert_eq!(
+            c.lock().answers.drafts[&card].notice,
+            rules::CHANGED_KEPT,
+            "{name}"
+        );
+        assert!(sent(&fake).is_empty(), "{name}: nothing is sent");
+    }
+
+    #[test]
+    fn a_cache_that_expires_during_the_save_sends_nothing() {
+        let mut details = asking(vec![card_json("tool:t1")]);
+        details["session_usage"] =
+            json!({"prompt_cache": {"status": "warm", "expires_at": 1_793_000_200.0}});
+        changed_during_the_save("q-recheck-cache", details, |fake| {
+            *lock(&fake.now) = 1_793_000_300.0;
+        });
+    }
+
+    #[test]
+    fn a_new_run_during_the_save_sends_nothing() {
+        changed_during_the_save(
+            "q-recheck-run",
+            asking(vec![card_json("tool:t1")]),
+            |fake| {
+                let mut row = lock(&fake.row);
+                row.run_id = Some("run-2".into());
+                row.conversation_id = Some("conv-2".into());
+            },
+        );
+    }
+
+    #[test]
+    fn going_offline_during_the_save_sends_nothing() {
+        changed_during_the_save(
+            "q-recheck-offline",
+            asking(vec![card_json("tool:t1")]),
+            |fake| {
+                *lock(&fake.online) = false;
+            },
+        );
+    }
+
+    #[test]
+    fn a_session_that_stops_during_the_save_gets_nothing() {
+        changed_during_the_save(
+            "q-recheck-stopped",
+            asking(vec![card_json("tool:t1")]),
+            |fake| {
+                lock(&fake.row).state = "stopped".into();
+            },
+        );
+    }
+
+    #[test]
+    fn a_terminate_during_the_save_sends_nothing() {
+        changed_during_the_save(
+            "q-recheck-terminate",
+            asking(vec![card_json("tool:t1")]),
+            |fake| {
+                *lock(&fake.write) = Some(crate::actions::WriteKind::Terminate);
+            },
+        );
+    }
+
+    #[test]
+    fn a_session_recreated_under_its_name_during_the_save_gets_nothing() {
+        changed_during_the_save(
+            "q-recheck-created",
+            asking(vec![card_json("tool:t1")]),
+            |fake| {
+                lock(&fake.row).created = 1_793_000_050;
+            },
+        );
+    }
+
+    #[test]
+    fn approve_and_deny_are_refused_on_a_card_with_native_choices() {
+        let root = dir("q-decide-choices");
+        let (c, fake) = send_hub(&root);
+        *lock(&fake.outcome) = Box::new(answered);
+        let mut card = card_json("claude-approval:1");
+        card["source"] = json!("claude_tool_approval");
+        card["answer_transport"] = json!("claude_tui");
+        card["approval"] = json!(true);
+        card["approval_choices"] = json!(true);
+        card["questions"] = json!([{"id": "approval", "question": "Run cargo test?", "allow_other": false,
+            "options": [{"id": "1", "label": "Yes", "scope": "once"}, {"id": "2", "label": "Yes, and don't ask again", "scope": "broader"}]}]);
+        opened(&c, asking(vec![card]));
+        let q = with_card(&c).question.unwrap();
+        assert!(!q.view.approve.visible && !q.view.deny.visible);
+        assert_eq!(c.question_decide(&q.card, true), QuestionReply::Busy);
+        assert_eq!(c.question_decide(&q.card, false), QuestionReply::Busy);
+        assert!(sent(&fake).is_empty());
+    }
+
+    #[test]
+    fn a_second_answer_of_the_session_never_reaches_the_lane() {
+        let root = dir("q-two-skips");
+        let store = drafts(&root);
+        let (c, fake) = send_hub_on(&store);
+        let tries = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&tries);
+        let (release_call, gate) = std::sync::mpsc::channel::<()>();
+        let gate = std::sync::Mutex::new(gate);
+        *lock(&fake.outcome) = Box::new(move |action, id| {
+            if counted.fetch_add(1, Ordering::SeqCst) == 0 {
+                let _ = lock(&gate).recv_timeout(std::time::Duration::from_secs(5));
+            }
+            answered(action, id)
+        });
+        let mut details = ready();
+        details["pending_questions"] = json!([
+            optional_card("codex:b", 10.0),
+            optional_card("codex:a", 20.0)
+        ]);
+        opened(&c, details);
+        let a = with_card(&c).question.unwrap().card;
+        loaded_all(&c);
+        let (key, b) = (c.lock().open_key.clone().unwrap(), store_key("codex:b"));
+        // Both Skips are saved before either is sent.
+        let release = hold(&store);
+        assert_eq!(c.question_skip(&a), QuestionReply::Sending);
+        c.question_navigate(1);
+        until(&c, |v| v.question.as_ref().is_some_and(|q| q.card == b));
+        assert_eq!(c.question_skip(&b), QuestionReply::Sending);
+        release.send(()).unwrap();
+        store.flush();
+        until(&c, |_| {
+            c.lock()
+                .answers
+                .drafts
+                .get(&b)
+                .is_some_and(|d| d.notice == ALREADY_ANSWERING)
+        });
+        assert_eq!(
+            c.lock().answers.in_flight.get(&key),
+            Some(&a),
+            "A's entry stays A's"
+        );
+        release_call.send(()).unwrap();
+        until(&c, |_| c.lock().answers.in_flight.is_empty());
+        assert_eq!(tries.load(Ordering::SeqCst), 1, "B never reached the lane");
+        // Once A ended, B's Skip goes again.
+        assert_eq!(c.question_skip(&b), QuestionReply::Sending);
+        until(&c, |_| tries.load(Ordering::SeqCst) == 2);
+    }
+
+    #[test]
+    fn a_cold_question_yields_to_an_answer_already_under_way() {
+        let root = dir("q-cold-flight");
+        let (c, fake) = send_hub(&root);
+        let mut details = asking(vec![card_json("tool:t1")]);
+        details["session_usage"] =
+            json!({"prompt_cache": {"status": "warm", "expires_at": 1_793_000_000.0}});
+        opened(&c, details);
+        let card = chosen(&c);
+        let QuestionReply::Cold { token, .. } = c.question_submit(&card) else {
+            panic!("no cold question")
+        };
+        // Another answer of this session started while the question was open.
+        let key = c.lock().open_key.clone().unwrap();
+        c.lock()
+            .answers
+            .in_flight
+            .insert(key, store_key("tool:other"));
+        assert_eq!(c.question_cold(token, true), QuestionReply::Busy);
+        assert!(sent(&fake).is_empty());
+    }
+
+    #[test]
+    fn a_consent_change_behind_the_cold_question_is_refused() {
+        let root = dir("q-cold-consent");
+        let (c, fake) = send_hub(&root);
+        let cold = |card: Value| {
+            let mut details = asking(vec![card]);
+            details["session_usage"] =
+                json!({"prompt_cache": {"status": "warm", "expires_at": 1_793_000_000.0}});
+            details
+        };
+        opened(&c, cold(card_json("tool:t1")));
+        let card = chosen(&c);
+        let QuestionReply::Cold { token, .. } = c.question_submit(&card) else {
+            panic!("no cold question")
+        };
+        // The same card, with another field of its consent identity.
+        let mut changed = card_json("tool:t1");
+        changed["tool_call_id"] = json!("call-2");
+        c.observe(&state(cold(changed)));
+        assert_eq!(
+            c.question_cold(token, true),
+            QuestionReply::Notice {
+                text: rules::CONSENT_CHANGED.into()
+            }
+        );
+        assert!(sent(&fake).is_empty());
+    }
+
+    #[test]
+    fn a_cold_question_goes_with_its_card_or_session() {
+        let root = dir("q-cold-stale");
+        let (c, fake) = send_hub(&root);
+        *lock(&fake.outcome) = Box::new(answered);
+        let cold = |card: Value| {
+            let mut details = asking(vec![card]);
+            details["session_usage"] =
+                json!({"prompt_cache": {"status": "warm", "expires_at": 1_793_000_000.0}});
+            details
+        };
+        opened(&c, cold(card_json("tool:t1")));
+        let card = chosen(&c);
+        // Another session opens: the question is dropped, nothing sent.
+        let QuestionReply::Cold { token, .. } = c.question_submit(&card) else {
+            panic!("no cold question")
+        };
+        c.open(Some(other_session()));
+        assert!(c.lock().answers.cold.is_none());
+        assert_eq!(c.question_cold(token, true), QuestionReply::Busy);
+        // Back again, a changed card (a new hash) drops its question too.
+        c.open(Some(session()));
+        c.observe(&state(cold(card_json("tool:t1"))));
+        let card = until(&c, |v| {
+            v.question.as_ref().is_some_and(|q| q.view.submit.enabled)
         })
         .question
-        .unwrap();
-        assert!(q.asked.starts_with("Asked "), "{q:?}");
+        .unwrap()
+        .card;
+        let QuestionReply::Cold { token, .. } = c.question_submit(&card) else {
+            panic!("no cold question")
+        };
+        let mut changed = card_json("tool:t1");
+        changed["question_hash"] = json!("b".repeat(64));
+        c.observe(&state(cold(changed)));
+        assert!(
+            c.lock().answers.cold.is_none(),
+            "its card is no longer shown"
+        );
+        assert_eq!(c.question_cold(token, true), QuestionReply::Busy);
+        assert!(sent(&fake).is_empty());
+    }
+
+    #[test]
+    fn closing_the_selection_drops_the_cold_question() {
+        let root = dir("q-cold-close");
+        let (c, fake) = send_hub(&root);
+        let mut details = asking(vec![card_json("tool:t1")]);
+        details["session_usage"] =
+            json!({"prompt_cache": {"status": "warm", "expires_at": 1_793_000_000.0}});
+        opened(&c, details);
+        let card = chosen(&c);
+        let QuestionReply::Cold { token, .. } = c.question_submit(&card) else {
+            panic!("no cold question")
+        };
+        c.open(None);
+        assert!(c.lock().answers.cold.is_none());
+        assert_eq!(c.question_cold(token, true), QuestionReply::Busy);
+        assert!(sent(&fake).is_empty());
     }
 }

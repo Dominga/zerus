@@ -8541,6 +8541,11 @@ git commit -m "feat(client): question cards in the composer hub, with Qt's answe
 - **A reload drops the cold question.** `Composers::resend` (the reloaded webview) clears `Answers.cold`: the dialog is gone with the old page, and a held ask would refuse every later answer of the app. Test: `a_reload_drops_the_cold_question`.
 - **More pinned guards:** `one_answer_per_session_at_a_time` (Qt's quiet refusal while an answer of the session is in flight, 5072), `nothing_is_answered_once_the_app_quits`, and `an_answer_saved_as_the_app_quits_is_never_sent` (the draft stays on disk as sending and reloads uncertain).
 - **Names.** The events cap is `COMPOSER_EVENTS` (16), since `EVENTS` is Task 4b's 500 followed events. The core's `Actionable::Ready` holds a `Box<Question>`. Tests take the card and its epoch from A2-1's `tests::shown`, and the changed-card test holds the store with Task 3a's `hold`.
+- **Review round 1.**
+  - One answer per session: a second answer whose save answers while another of its session is under way ends with Qt's `ALREADY_ANSWERING`, definitely and without a call. An answer's end removes only its own `in_flight` entry. The cold question yields to an answer already under way.
+  - A cold question goes with its card: the hub drops it, as cancelled with nothing sent, once its card is no longer shown (another session, a changed or answered card) or the selection closes. A2-3 also answers `question_cold(token, false)` when its dialog goes unanswered.
+  - The captured details stay an `Arc`, never deep-copied under the hub lock.
+  - Tests pin each input of the post-save re-check (a cache that expires, a new run, offline, stopped, a terminate, a recreated row, each ending in `CHANGED_KEPT` with nothing sent), Approve once and Deny refused on a card with native choices, a consent change behind the cold question (`CONSENT_CHANGED`), and the dropped cold question.
 - **Run the tests** with `cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml -- composer:: actions::`: cargo takes one filter before `--`.
 - **A2-4 binds to this:** `ComposerEvent`, `Composers::{event, take_events}`, the envelope's `composer_events`, and `Answers.cold` (an answer's cold question is open).
 

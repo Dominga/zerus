@@ -671,6 +671,9 @@ struct Role {
     // member when it joins.
     QList<ModelChoice> models;
     QString contextBeforeTask;
+    // U36: the pipeline this role's tasks use unless the plan names one;
+    // empty falls back to the template's.
+    QString pipeline;
     QJsonObject raw;
     QJsonObject json() const;
 };
@@ -684,6 +687,7 @@ struct Template {
     int maxMembers = 6;
     QString work;      // U25: worktree, clone, same or cloud ("" = worktree)
     QString phases;    // U25: same, owner or lead (new phases)
+    QString pipeline;  // U36: the default pipeline of its tasks ("" = none, today's flow)
     QJsonObject raw;
     QJsonObject json() const;
 };
@@ -692,6 +696,36 @@ struct Template {
 struct Rule { QString id, when, templateId, approval; QJsonObject raw; QString use; QJsonObject json() const; };
 // U28: a proposal on the planning rules ("planning_rules") carries its text
 // in `text`; the others carry an object in `value`.
+// U36: one stage of a pipeline preset after the implementer's report: review
+// or test by a role (its first free member) or a pinned member; U47/U48: a
+// command or land stage Zerus runs itself, with no role or member: its
+// command, expected exit and time limit, and a land stage's exit codes mapped
+// to accepted, returned or held (empty: 0 accepted, any other held).
+struct PipelineStage {
+    QString kind, role, member;
+    bool hasCommand = false;
+    QString command;
+    int expectExit = 0, timeoutMinutes = 30;
+    QMap<QString, QString> exits;
+    QJsonObject raw;
+    bool runByZerus() const { return kind == QLatin1String("command") || kind == QLatin1String("land"); }
+    QJsonObject json() const;
+};
+// U36: a named preset ("Code: review, test, lead"): its stages, the returned
+// rounds before the lead decides (0 reads as 3), where a test works (hold the
+// task's folder or a detached checkout) and the final acceptance (lead,
+// sub_lead or auto; empty is lead).
+struct Pipeline {
+    QString id, name;
+    QList<PipelineStage> stages;
+    int maxRounds = 0;
+    QString folder, accept;
+    QJsonObject raw;
+    int rounds() const { return maxRounds > 0 ? maxRounds : 3; }
+    QJsonObject json() const;
+};
+PipelineStage parsePipelineStage(const QJsonObject &value);
+Pipeline parsePipeline(const QJsonObject &value);
 struct Proposal { QString id, kind, action, target, title, reason, state; QJsonObject value; double at = 0; QString text; };
 struct Catalog {
     qint64 version = 0;
@@ -703,12 +737,17 @@ struct Catalog {
     // when hgs sent them: a catalog saved without them gets the built-in ones.
     QString planningRules;
     bool planningRulesKnown = false;
+    // U36: the pipeline presets; an older hgs sends none and a save then
+    // writes none.
+    QList<Pipeline> pipelines;
+    bool pipelinesKnown = false;
     qint64 draftBase = 0;
     QList<Proposal> proposals;
     const Role *role(const QString &id) const;
     // A role by id or by its name, as members name it.
     const Role *roleNamed(const QString &name) const;
     const Template *templ(const QString &id) const;
+    const Pipeline *pipeline(const QString &id) const;
     QJsonObject json() const;
 };
 Role parseRole(const QJsonObject &value);

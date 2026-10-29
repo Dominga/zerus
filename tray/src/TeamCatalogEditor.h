@@ -62,13 +62,20 @@ public:
     // The template a goal would use, as Try it shows it (the server's route).
     struct Route { int rule = -1; QString templateId; QStringList added; QString approval; };
     static Route route(const Teams::Catalog &catalog, const QString &goal);
+    // U36: Try it on the Pipelines tab: a sample task walked through a preset
+    // with the team's members today (who takes each stage, where it works,
+    // what holds the folder) and the warnings, such as a single Tester. Nothing
+    // is sent.
+    struct Step { QString kind, title, role, member, agent, detail, where; };
+    struct Walk { QList<Step> steps; QStringList warnings; };
+    static Walk walk(const Teams::Catalog &catalog, const Teams::Pipeline &pipeline, const Teams::Team &team, const Teams::Task &task);
 private:
     struct Account { QString id, provider, label; bool signedIn = true; };
     void fillAccounts(QComboBox *box, const Teams::Role &role) const;
     QString modelKey(const Teams::Role &role) const;
     void fillModels(QComboBox *box, const Teams::Role &role) const;
     void requestModels(const Teams::Role &role);
-    enum class Tab { Roles, Templates, Routing, Rules };
+    enum class Tab { Roles, Templates, Routing, Rules, Pipelines };
     bool draftMode() const;
     void load();
     void rebuildLists();
@@ -84,6 +91,14 @@ private:
     QWidget *roleEditor(int index);
     QWidget *templateEditor(int index);
     QWidget *routingEditor();
+    // U36: the Pipelines tab: a preset's stages and rules, the defaults per
+    // template and role, and Try it; "none" explains a task without one.
+    QWidget *pipelineEditor(int index);
+    QWidget *pipelineStageDetails(int index, int stage);
+    QWidget *pipelineDefaults(const Teams::Pipeline &pipeline);
+    QWidget *pipelineTry(const Teams::Pipeline &pipeline);
+    QWidget *pipelineDiff(const Teams::Pipeline &mine, const Teams::Proposal &proposal);
+    QStringList pipelineUsers(const QString &id) const;
     QWidget *proposalPlate(const Teams::Proposal &proposal);
     QWidget *promptOrder(int index);
     QWidget *listRow(const QString &kind, int index, const Teams::Proposal *proposal, bool dirty);
@@ -112,7 +127,9 @@ private:
     QFrame *m_banner;
     QPushButton *m_bannerAction, *m_bannerDiscard;
     QWidget *m_tabs;
-    QListWidget *m_roles, *m_templates;
+    QListWidget *m_roles, *m_templates, *m_pipelines;
+    // U36: the stage whose details show, per preset.
+    QHash<QString, int> m_openStage;
     QWidget *m_left;
     QPushButton *m_add;
     QVBoxLayout *m_editorHost;

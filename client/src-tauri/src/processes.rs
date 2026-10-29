@@ -7,8 +7,8 @@
 //!
 //! Selections and stops name the view they were made in (its key and, for a
 //! stop, its selection), so a late click never acts on another view. An
-//! archived session is shown without a follow: the topic has no archived
-//! sessions (`ARCHIVED`).
+//! archived session's inventory comes from one bounded details read, never a
+//! live topic follow.
 //!
 //! The five settings come from the app's one settings store
 //! ([`ProcessHub::settings_from`], `processes/*` in `<data dir>/settings.json`).
@@ -39,12 +39,6 @@ pub const TICK: Duration = Duration::from_millis(250);
 const VIEWS: usize = 30;
 /// Qt's notice while stop requests go out (`stopSelected`, 196).
 const SENDING: &str = "Sending stop requests…";
-/// An archived session is never followed: its catalog key (`archive:ID`)
-/// is no live session's, and its recorded processes need the archive
-/// inventory read (core request zerus-5wmh.63).
-pub const ARCHIVED: &str =
-    "Recorded processes of archived sessions arrive with the archive inventory read.";
-
 /// The session the tab follows, as the webview names it. `live` is Qt's
 /// `!recorded` (`SessionsWindow.cpp:3783`): online, not archived or paused,
 /// a running process and no inspect error.
@@ -234,6 +228,8 @@ struct Hub {
     identity: String,
     value: Option<Value>,
     failed: Option<String>,
+    /// The one archive inventory read in flight, by token and view identity.
+    archive_read: Option<(u64, String)>,
     /// Normalized records, one per ID in first-seen order (`m_jobs`).
     records: Vec<Value>,
     index: HashMap<String, usize>,
@@ -280,6 +276,14 @@ struct OutputCall {
     computer: ComputerId,
     read: Read,
     process: String,
+}
+
+/// One archive inventory read to start, off the hub's lock.
+struct ArchiveCall {
+    token: u64,
+    computer: ComputerId,
+    read: Read,
+    identity: String,
 }
 
 /// A stop under way, by its token, and its lane in `actions` (one stop per
@@ -407,6 +411,7 @@ impl Hub {
             }
         }
         self.output = OutputState::default();
+        self.archive_read = None;
         self.queue.reset();
         // A stop that went out still holds its lane until it answers; a held
         // one never went out.
@@ -427,6 +432,34 @@ impl Hub {
         self.identity = identity;
         self.update_busy(now);
         self.changed = true;
+    }
+
+    fn archive_call(&mut self) -> Option<ArchiveCall> {
+        let target = self.target().cloned().filter(|target| target.archived())?;
+        if self.value.is_some() || self.archive_read.is_some() {
+            return None;
+        }
+        let archive_id = target
+            .archive_id
+            .clone()
+            .filter(|id| !id.is_empty())
+            .or_else(|| target.key.strip_prefix("archive:").map(str::to_owned))?;
+        if archive_id.is_empty() {
+            return None;
+        }
+        self.tokens += 1;
+        let token = self.tokens;
+        let identity = self.identity.clone();
+        self.archive_read = Some((token, identity.clone()));
+        Some(ArchiveCall {
+            token,
+            computer: ComputerId(target.computer.clone()),
+            read: Read::ArchivedProcesses {
+                name: target.name.clone(),
+                archive_id,
+            },
+            identity,
+        })
     }
 
     /// Follows what the webview selected while Processes is enabled, and
@@ -756,11 +789,7 @@ impl Hub {
             .value
             .as_ref()
             .map_or(&Value::Null, |value| &value["processes"]);
-        let (notes, summary_tooltip) = if self.target().is_some_and(ProcessTarget::archived) {
-            (ARCHIVED.to_owned(), ARCHIVED.to_owned())
-        } else {
-            rules::notes(processes)
-        };
+        let (notes, summary_tooltip) = rules::notes(processes);
         let host = self.target().map_or("", ProcessTarget::host);
         let detail = self.current.as_ref().and_then(|id| {
             let record = self.record(id)?;
@@ -885,7 +914,11 @@ impl ProcessHub {
         hub.wanted = target;
         let moved = hub.retarget(&self.0.deps, now);
         let read = hub.output_call(now, moved, self.0.hgs_allowed);
+        let archive = hub.archive_call();
         self.finish(hub, read, None);
+        if let Some(call) = archive {
+            self.run_archive(call);
+        }
     }
 
     /// Settings > Processes (`applyPreferences`, 101-105, and
@@ -900,7 +933,11 @@ impl ProcessHub {
         hub.settings = settings;
         let moved = hub.retarget(&self.0.deps, now);
         let read = hub.output_call(now, moved, self.0.hgs_allowed);
+        let archive = hub.archive_call();
         self.finish(hub, read, None);
+        if let Some(call) = archive {
+            self.run_archive(call);
+        }
     }
 
     /// Reads the five settings from the app's store and applies them; reads
@@ -1137,6 +1174,33 @@ impl ProcessHub {
         }));
     }
 
+    fn run_archive(&self, call: ArchiveCall) {
+        let me = self.clone();
+        (self.0.deps.spawn)(Box::new(move || {
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                (me.0.deps.read)(&call.computer, &call.read)
+            }))
+            .unwrap_or_else(|_| Err("The archive inventory read failed.".into()));
+            let now = me.now();
+            let mut hub = me.lock();
+            if hub.closed || hub.archive_read != Some((call.token, call.identity)) {
+                return;
+            }
+            hub.archive_read = None;
+            match result {
+                Ok(value) => {
+                    hub.value = Some(value);
+                    hub.failed = None;
+                }
+                Err(error) => hub.failed = Some(error),
+            }
+            hub.changed = true;
+            let moved = hub.place(now);
+            let read = hub.output_call(now, moved, me.0.hgs_allowed);
+            me.finish(hub, read, None);
+        }));
+    }
+
     fn refresh_inventory(&self, hub: &Hub) {
         if self.0.hgs_allowed && !hub.closed {
             if let Some(target) = &hub.subscribed {
@@ -1288,6 +1352,7 @@ mod tests {
         held: Mutex<Vec<Job>>,
         hold: Mutex<bool>,
         output: Mutex<Value>,
+        archive_reply: Mutex<Result<Value, String>>,
         /// Every read and stop as the hub asked for it.
         calls: Mutex<Vec<String>>,
         /// The conversation an output reply names.
@@ -1312,6 +1377,7 @@ mod tests {
             held: Mutex::new(vec![]),
             hold: Mutex::new(false),
             output: Mutex::new(json!("running 42 tests")),
+            archive_reply: Mutex::new(Ok(json!({"processes": {"items": [], "complete": true}}))),
             calls: Mutex::new(vec![]),
             reply_conversation: Mutex::new("conv-1".into()),
             lanes: Mutex::new(HashSet::new()),
@@ -1352,18 +1418,20 @@ mod tests {
                 }),
                 read: Arc::new(move |computer, read| {
                     lock(&b.calls).push(format!("{computer:?} {read:?}"));
-                    let Read::ProcessOutput {
-                        process_id, run_id, ..
-                    } = read
-                    else {
-                        panic!()
-                    };
-                    lock(&b.reads).push(process_id.clone());
-                    let conversation = lock(&b.reply_conversation).clone();
-                    Ok(
-                        json!({"id": process_id, "run_id": run_id, "conversation_id": conversation,
-                               "output": lock(&b.output).clone(), "truncated": false}),
-                    )
+                    match read {
+                        Read::ProcessOutput {
+                            process_id, run_id, ..
+                        } => {
+                            lock(&b.reads).push(process_id.clone());
+                            let conversation = lock(&b.reply_conversation).clone();
+                            Ok(
+                                json!({"id": process_id, "run_id": run_id, "conversation_id": conversation,
+                                       "output": lock(&b.output).clone(), "truncated": false}),
+                            )
+                        }
+                        Read::ArchivedProcesses { .. } => lock(&b.archive_reply).clone(),
+                        _ => panic!(),
+                    }
                 }),
                 stop: Arc::new(move |target, action| {
                     lock(&c.calls).push(format!("{target:?} {action:?}"));
@@ -1444,6 +1512,15 @@ mod tests {
             online: true,
             live: true,
             generation: None,
+        }
+    }
+
+    fn archived_target() -> ProcessTarget {
+        ProcessTarget {
+            key: "archive:a1".into(),
+            archive_id: Some("a1".into()),
+            live: false,
+            ..target()
         }
     }
 
@@ -2271,26 +2348,80 @@ mod tests {
     #[test]
     fn an_archived_session_is_never_followed() {
         let (hub, fake) = hub();
+        *lock(&fake.archive_reply) = Ok(json!({"processes": {
+            "items": [process("p1", "finished", "hook")], "complete": true, "notes": []
+        }}));
         hub.settings(Settings {
             enabled: true,
             ..Settings::default()
         });
-        let archived = ProcessTarget {
-            key: "archive:a1".into(),
-            archive_id: Some("a1".into()),
-            live: false,
-            ..target()
-        };
+        let archived = archived_target();
         hub.follow(Some(target()));
         hub.follow(Some(archived.clone()));
         assert_eq!(*lock(&fake.follows), ["+run:run-1", "-run:run-1"]);
         hub.follow(Some(archived));
         assert_eq!(lock(&fake.follows).len(), 2, "never followed");
+        assert_eq!(
+            lock(&fake.calls)
+                .iter()
+                .filter(|call| call.contains("ArchivedProcesses"))
+                .count(),
+            1
+        );
         let view = snapshot(&hub);
-        assert!(view.groups.is_empty() && view.failed.is_none());
-        assert_eq!(view.notes, ARCHIVED);
-        assert_eq!(view.summary, "No shell commands recorded yet");
+        assert_eq!(view.groups.len(), 1);
+        assert_eq!(view.groups[0].group, Group::Finished);
+        assert_eq!(view.current.as_deref(), Some("p1"));
+        assert_eq!(view.selected, ["p1"]);
+        assert_eq!(view.summary, "0 active    0 unconfirmed    1 recorded");
+        assert!(view.notes.is_empty() && view.failed.is_none() && !view.stop.enabled);
         assert_eq!(view.count, 0);
+    }
+
+    #[test]
+    fn a_failed_archive_inventory_can_be_read_again() {
+        let (hub, fake) = hub();
+        enabled(&hub);
+        let archived = archived_target();
+        *lock(&fake.archive_reply) = Err("archive unavailable".into());
+        hub.follow(Some(archived.clone()));
+        let view = snapshot(&hub);
+        assert_eq!(view.failed.as_deref(), Some("archive unavailable"));
+        assert!(view.groups.is_empty());
+        *lock(&fake.archive_reply) = Ok(json!({"processes": {
+            "items": [process("p1", "finished", "hook")], "complete": true, "notes": []
+        }}));
+        hub.follow(Some(archived));
+        let view = snapshot(&hub);
+        assert!(view.failed.is_none());
+        assert_eq!(view.current.as_deref(), Some("p1"));
+    }
+
+    #[test]
+    fn an_archive_inventory_reply_cannot_replace_a_newer_selection() {
+        let (hub, fake) = hub();
+        enabled(&hub);
+        *lock(&fake.hold) = true;
+        let archived = archived_target();
+        hub.follow(Some(archived.clone()));
+        hub.follow(Some(archived));
+        assert_eq!(lock(&fake.held).len(), 1);
+        hub.follow(Some(target()));
+        assert_eq!(run_held(&fake), 1);
+        assert!(lock(&hub.0.hub).value.is_none());
+        assert!(snapshot(&hub).groups.is_empty());
+    }
+
+    #[test]
+    fn an_archive_inventory_reply_after_close_changes_nothing() {
+        let (hub, fake) = hub();
+        enabled(&hub);
+        *lock(&fake.hold) = true;
+        hub.follow(Some(archived_target()));
+        hub.close();
+        assert_eq!(run_held(&fake), 1);
+        assert!(lock(&hub.0.hub).closed);
+        assert!(lock(&hub.0.hub).value.is_none());
     }
 
     #[test]

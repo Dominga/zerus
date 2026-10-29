@@ -209,6 +209,9 @@ pub(crate) enum Step {
     Adopt { member: String, session: SessionRef },
     Launch { member: String },
     HandOut { task: u32, member: String },
+    /// U46: a hand-out waits for its context action's confirmation: one look
+    /// per tick, then the hand-out itself or the waiting reason.
+    PrepareContext { task: u32, member: String },
     /// U31: an idle member takes an independent task of the next draft phase.
     WorkAhead { task: u32, member: String },
     /// The member's first turn after the hand-off began (A1).
@@ -805,6 +808,16 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         .filter_map(|task| task.open_attempt())
         .map(|attempt| attempt.member.as_str())
         .collect();
+    // U46: a hand-out whose context action waits for its confirmation owns its
+    // member: one look per tick, and no other task goes to that member until
+    // the hand-out itself or its waiting reason is recorded.
+    let mut preparing: BTreeSet<&str> = BTreeSet::new();
+    for task in team.tasks.iter().filter(|task| task.prepare_wait.as_ref().is_some_and(|wait| wait.state == "waiting")) {
+        busy.insert(task.assignee.as_str());
+        if preparing.insert(task.assignee.as_str()) {
+            steps.push(Step::PrepareContext { task: task.id, member: task.assignee.clone() });
+        }
+    }
     // C7: a member idle without a ready task while tasks are open starves the
     // plan. The lead hears once after 20 minutes; the episode ends with work.
     let ready_ids = plan::ready(team);
@@ -2414,98 +2427,48 @@ fn agent_label(agent: &str) -> &str {
     }
 }
 
-/// U46: what Zerus did to the member before a hand-out.
-enum Prepared {
-    Done { step: PrepareStep, conversation: Option<(String, String)> },
-    Skipped(PrepareStep),
-    Waiting { step: PrepareStep, wait: PrepareWait },
+/// U46: a native context action that a hand-out started, recorded on the task
+/// while its confirmation is pending. The request identity lets a later tick -
+/// or a restarted worker - read the same action instead of running it again.
+pub(crate) struct ContextRequest {
+    pub action: String,
+    pub request_id: String,
+    pub run_id: String,
+    pub conversation: String,
+    pub started_at: f64,
 }
 
-/// U46: the confirmation timeout. Tests shorten it; a native compaction or
-/// clear reports back in seconds.
-fn context_confirm() -> Duration {
-    #[cfg(test)]
-    if let Some(ms) = CONTEXT_CONFIRM.with(|value| *value.borrow()) {
-        return Duration::from_millis(ms);
-    }
-    Duration::from_secs(60)
+/// What starting the context action leaves to the hand-out.
+pub(crate) enum ContextStart {
+    /// The action is submitted; the caller records it and looks again each tick.
+    Started(ContextRequest),
+    /// It finished at once: the agent has no native action (skipped), or a
+    /// clear the command itself confirmed.
+    Done { step: PrepareStep, conversation: Option<String> },
+    /// Nothing is left to wait for.
+    Failed { step: PrepareStep },
 }
 
-#[cfg(test)]
-thread_local! {
-    static CONTEXT_CONFIRM: std::cell::RefCell<Option<u64>> = const { std::cell::RefCell::new(None) };
-}
-
-#[cfg(test)]
-pub(crate) fn set_context_confirm(ms: Option<u64>) {
-    CONTEXT_CONFIRM.with(|value| *value.borrow_mut() = ms);
-}
-
-/// What the native context action's confirmation shows.
-enum Waited {
-    Done(Option<String>),
+/// What one look at the session record shows for a started action.
+pub(crate) enum ContextCheck {
+    Done { conversation: Option<String> },
+    Waiting,
     Refused(String),
     Uncertain(String),
 }
 
-/// U46: waits for the action's confirmation in the session record: the compact
-/// request recorded as `completed`, or the clear's new conversation id.
-fn wait_for_context(session: &SessionRef, action: &str, request_id: &str) -> Waited {
-    let deadline = Instant::now() + context_confirm();
-    let mut last;
-    loop {
-        match inspect_reply(session) {
-            Ok(record) => {
-                if record["run_id"].as_str().unwrap_or_default() != session.run_id {
-                    return Waited::Uncertain("The member's session changed while preparing the hand-out".into());
-                }
-                match action {
-                    "compact" => {
-                        let request = &record["compact_context_request"];
-                        if request["request_id"].as_str() == Some(request_id) {
-                            match request["status"].as_str().unwrap_or_default() {
-                                "completed" => return Waited::Done(None),
-                                // Nothing to compact: the context is as short as it gets.
-                                "unchanged" => return Waited::Done(None),
-                                "cancelled" => return Waited::Refused("The compaction was cancelled before it finished".into()),
-                                "failed" => return Waited::Refused("The compaction failed".into()),
-                                status => last = format!("the compaction is {status}"),
-                            }
-                        } else {
-                            last = "the compaction request is not recorded yet".into();
-                        }
-                    }
-                    "clear" => {
-                        let new = record["conversation_id"].as_str().unwrap_or_default();
-                        if !new.is_empty() && new != session.conversation_id {
-                            return Waited::Done(Some(new.to_owned()));
-                        }
-                        last = "the cleared conversation has not appeared yet".into();
-                    }
-                    _ => return Waited::Refused("Unknown context action".into()),
-                }
-            }
-            Err(error) => last = error.to_string(),
-        }
-        if Instant::now() >= deadline {
-            return Waited::Uncertain(format!(
-                "The {action} was not confirmed within {} s ({last})",
-                context_confirm().as_secs()
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(200));
-    }
-}
+/// The bound on the native action's confirmation (spec 3).
+const CONTEXT_TIMEOUT_SECS: f64 = 60.0;
 
-/// U46: the context step itself for any hand-out. It runs `hgs compact-context`
-/// or `hgs clear-context` on the idle member session and waits for the command's
-/// confirmation in the session record. It returns the recorded step (`done`,
-/// `skipped`, `refused` or `uncertain`) and, after a clear, the conversation the
-/// member's session must follow. A U36 stage hand-out calls this too; the lead
-/// wires it when #537 and this land together.
-pub(crate) struct ContextConfirmation {
-    pub step: PrepareStep,
-    pub conversation: Option<String>,
+fn context_step(action: &str, at: f64) -> PrepareStep {
+    PrepareStep {
+        step: "context".into(),
+        from: "none".into(),
+        to: action.to_owned(),
+        at,
+        result: "done".into(),
+        reason: String::new(),
+    }
 }
 
 fn skipped_context(member: &Member, action: &str, at: f64) -> PrepareStep {
@@ -2519,24 +2482,23 @@ fn skipped_context(member: &Member, action: &str, at: f64) -> PrepareStep {
     }
 }
 
-fn context_failure(mut step: PrepareStep, result: &str, reason: String) -> ContextConfirmation {
+fn context_failure(mut step: PrepareStep, result: &str, reason: String) -> PrepareStep {
     step.result = result.into();
     step.reason = reason;
-    ContextConfirmation { step, conversation: None }
+    step
 }
 
-pub(crate) fn run_context(member: &Member, session: &SessionRef, action: &str) -> ContextConfirmation {
+/// U46: starts the context step for a hand-out: `hgs compact-context` or
+/// `hgs clear-context` on the idle member session. It returns at once - the
+/// caller records the request on the task and checks it each tick - except when
+/// there is nothing to wait for (a skipped agent, or a clear the command itself
+/// confirmed). A U36 stage hand-out calls this and `check_context` too; the lead
+/// wires it when #537 and this land together.
+pub(crate) fn run_context(member: &Member, session: &SessionRef, action: &str) -> ContextStart {
     let at = now();
-    let step = PrepareStep {
-        step: "context".into(),
-        from: "none".into(),
-        to: action.to_owned(),
-        at,
-        result: "done".into(),
-        reason: String::new(),
-    };
+    let step = context_step(action, at);
     if !native_context(&member.agent, action) {
-        return ContextConfirmation { step: skipped_context(member, action, at), conversation: None };
+        return ContextStart::Done { step: skipped_context(member, action, at), conversation: None };
     }
     let request_id = uuid::Uuid::new_v4().to_string();
     let input = json!({"request_id":request_id,"expected_run_id":session.run_id,
@@ -2545,17 +2507,19 @@ pub(crate) fn run_context(member: &Member, session: &SessionRef, action: &str) -
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let output = match hgs(&session.host, &args, Some(&input), Duration::from_secs(120)) {
         Ok(output) => output,
-        Err(error) => return context_failure(step, "uncertain", error.to_string()),
+        Err(error) => return ContextStart::Failed { step: context_failure(step, "uncertain", error.to_string()) },
     };
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
         let reason = stderr.lines().next().unwrap_or_default().trim().to_owned();
         let reason = if reason.is_empty() { format!("The {action} was refused") } else { reason };
-        return context_failure(step, "refused", reason);
+        return ContextStart::Failed { step: context_failure(step, "refused", reason) };
     }
     let receipt: Value = match serde_json::from_slice(&output.stdout) {
         Ok(receipt) => receipt,
-        Err(error) => return context_failure(step, "uncertain", format!("Unexpected {action} receipt: {error}")),
+        Err(error) => {
+            return ContextStart::Failed { step: context_failure(step, "uncertain", format!("Unexpected {action} receipt: {error}")) }
+        }
     };
     let status = receipt["status"].as_str().unwrap_or_default();
     if action == "clear" && status == "confirmed" {
@@ -2565,62 +2529,77 @@ pub(crate) fn run_context(member: &Member, session: &SessionRef, action: &str) -
             let new = record["conversation_id"].as_str().unwrap_or_default();
             (!new.is_empty() && new != session.conversation_id).then(|| new.to_owned())
         });
-        return ContextConfirmation { step, conversation };
+        return ContextStart::Done { step, conversation };
     }
     if !matches!(status, "submitted" | "in_progress" | "compacting") {
-        return context_failure(
-            step,
-            "uncertain",
-            format!("Unexpected {action} receipt: {}", String::from_utf8_lossy(&output.stdout).trim()),
-        );
+        let reason = format!("Unexpected {action} receipt: {}", String::from_utf8_lossy(&output.stdout).trim());
+        return ContextStart::Failed { step: context_failure(step, "uncertain", reason) };
     }
-    match wait_for_context(session, action, &request_id) {
-        Waited::Done(conversation) => ContextConfirmation { step, conversation },
-        Waited::Refused(reason) => context_failure(step, "refused", reason),
-        Waited::Uncertain(reason) => context_failure(step, "uncertain", reason),
-    }
+    ContextStart::Started(ContextRequest {
+        action: action.to_owned(),
+        request_id,
+        run_id: session.run_id.clone(),
+        conversation: session.conversation_id.clone(),
+        started_at: at,
+    })
 }
 
-/// U46: runs the context step for a hand-out that is about to go out, turning
-/// its result into what the dispatcher records or waits for.
-fn prepare_context(member: &Member, action: &str) -> Prepared {
-    let at = now();
-    if !native_context(&member.agent, action) {
-        return Prepared::Skipped(skipped_context(member, action, at));
+/// U46: one look at the session record for a started action - the compact
+/// request by its id, or the cleared conversation - and the 60 s bound. Never
+/// sleeps: the tick that called it goes on.
+pub(crate) fn check_context(session: &SessionRef, request: &ContextRequest) -> ContextCheck {
+    if now() - request.started_at > CONTEXT_TIMEOUT_SECS {
+        return ContextCheck::Uncertain(format!(
+            "The {} was not confirmed within {} s",
+            request.action, CONTEXT_TIMEOUT_SECS as u64
+        ));
     }
-    let Some(session) = member.session.clone() else {
-        let step = PrepareStep {
-            step: "context".into(),
-            from: "none".into(),
-            to: action.to_owned(),
-            at,
-            result: "refused".into(),
-            reason: "The member's session is not started".into(),
-        };
-        return Prepared::Waiting {
-            wait: PrepareWait { step: "context".into(), reason: step.reason.clone(), at, attempt: 0 },
-            step,
-        };
+    let record = match inspect_reply(session) {
+        Ok(record) => record,
+        // A transient read failure is not a refusal; the bound ends the wait.
+        Err(_) => return ContextCheck::Waiting,
     };
-    let confirmation = run_context(member, &session, action);
-    let conversation = confirmation.conversation.map(|new| (session.run_id.clone(), new));
-    match confirmation.step.result.as_str() {
-        "done" => Prepared::Done { step: confirmation.step, conversation },
-        "skipped" => Prepared::Skipped(confirmation.step),
-        _ => {
-            let step = confirmation.step;
-            let wait = PrepareWait { step: "context".into(), reason: step.reason.clone(), at, attempt: 0 };
-            Prepared::Waiting { step, wait }
+    if record["run_id"].as_str().unwrap_or_default() != request.run_id {
+        return ContextCheck::Uncertain("The member's session changed while preparing the hand-out".into());
+    }
+    match request.action.as_str() {
+        "compact" => {
+            let found = &record["compact_context_request"];
+            if found["request_id"].as_str() != Some(request.request_id.as_str()) {
+                return ContextCheck::Waiting;
+            }
+            match found["status"].as_str().unwrap_or_default() {
+                "completed" | "unchanged" => {
+                    // A compaction can follow a new transcript; the hand-out's
+                    // session must name it before the send.
+                    let new = record["conversation_id"].as_str().unwrap_or_default();
+                    let conversation = (!new.is_empty() && new != session.conversation_id).then(|| new.to_owned());
+                    ContextCheck::Done { conversation }
+                }
+                "cancelled" => ContextCheck::Refused("The compaction was cancelled before it finished".into()),
+                "failed" => ContextCheck::Refused("The compaction failed".into()),
+                _ => ContextCheck::Waiting,
+            }
         }
+        "clear" => {
+            let new = record["conversation_id"].as_str().unwrap_or_default();
+            if !new.is_empty() && new != request.conversation {
+                ContextCheck::Done { conversation: Some(new.to_owned()) }
+            } else {
+                ContextCheck::Waiting
+            }
+        }
+        _ => ContextCheck::Refused("Unknown context action".into()),
     }
 }
 
-/// U46: what a successful preparation leaves for the hand-out: its steps and,
-/// after a clear, the conversation the member's session follows.
+/// U46: what a hand-out leaves for itself: its prepare steps, the conversation
+/// a clear produced, and whether it resumes a wait already recorded on the task.
 #[derive(Clone, Default)]
 struct Preparation {
     steps: Vec<PrepareStep>,
     conversation: Option<(String, String)>,
+    resume: bool,
 }
 
 fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, from: Option<&str>, host: &str) -> anyhow::Result<()> {
@@ -2629,14 +2608,21 @@ fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, fro
     let team = store.load(team_id)?.with_context(|| format!("Unknown team {team_id}"))?;
     let member = team.member(member_id).cloned().with_context(|| format!("Unknown member {member_id}"))?;
     let action = context_before_task(&team, &member);
-    let prepared = if action.is_empty() { None } else { Some(prepare_context(&member, &action)) };
-    match prepared {
-        None => hand_out_now(store, team_id, task_id, member_id, from, host, Preparation::default()),
-        Some(Prepared::Skipped(step)) => hand_out_now(store, team_id, task_id, member_id, from, host, Preparation { steps: vec![step], ..Default::default() }),
-        Some(Prepared::Done { step, conversation }) => {
-            hand_out_now(store, team_id, task_id, member_id, from, host, Preparation { steps: vec![step], conversation })
+    if action.is_empty() {
+        return hand_out_now(store, team_id, task_id, member_id, from, host, Preparation::default());
+    }
+    let Some(session) = member.session.clone() else {
+        let step = context_failure(context_step(&action, now()), "refused", "The member's session is not started".into());
+        return record_prepare_wait(store, team_id, task_id, member_id, from, step);
+    };
+    match run_context(&member, &session, &action) {
+        // The action is submitted: record it and look again on the next tick.
+        ContextStart::Started(request) => record_context_start(store, team_id, task_id, member_id, from, request),
+        ContextStart::Done { step, conversation } => {
+            let conversation = conversation.map(|new| (session.run_id.clone(), new));
+            hand_out_now(store, team_id, task_id, member_id, from, host, Preparation { steps: vec![step], conversation, resume: false })
         }
-        Some(Prepared::Waiting { step, wait }) => record_prepare_wait(store, team_id, task_id, member_id, from, step, wait),
+        ContextStart::Failed { step } => record_prepare_wait(store, team_id, task_id, member_id, from, step),
     }
 }
 
@@ -2649,7 +2635,7 @@ fn hand_out_now(
     host: &str,
     preparation: Preparation,
 ) -> anyhow::Result<()> {
-    let Preparation { steps: prepare, conversation } = preparation;
+    let Preparation { steps: prepare, conversation, resume } = preparation;
     // Record the attempt before sending; a crash leaves it Unconfirmed.
     let attempt_id = uuid::Uuid::new_v4().to_string();
     let mut message = None;
@@ -2658,6 +2644,12 @@ fn hand_out_now(
     let mut extra = String::new();
     let mut git_job: Option<(String, f64)> = None;
     change(store, team_id, |team, events| {
+        // U46: the confirmed wait is done; this hand-out replaces it.
+        if resume {
+            if let Some(task) = team.task_mut(task_id) {
+                task.prepare_wait = None;
+            }
+        }
         anyhow::ensure!(team.status == TeamStatus::Running && plan::ready(team).contains(&task_id), "no longer ready");
         let role = team.role_of(member_id);
         // U46: a clear may name a new conversation; the member follows it before
@@ -2771,9 +2763,51 @@ fn hand_out_now(
     })
 }
 
-/// U46: records a hand-out Zerus could not prepare. The attempt is kept for
-/// the feed and the task waits for Zerus: `plan::ready` skips it and the lead's
-/// inbox names the retry.
+/// U46: records a prepared hand-out that waits for its context action. The
+/// task's `prepare_wait` names the request, so the next tick - or a restarted
+/// worker - only reads the session record; the action is not run again.
+fn record_context_start(
+    store: &mut Store,
+    team_id: &str,
+    task_id: u32,
+    member_id: &str,
+    from: Option<&str>,
+    request: ContextRequest,
+) -> anyhow::Result<()> {
+    change(store, team_id, |team, events| {
+        anyhow::ensure!(team.status == TeamStatus::Running && plan::ready(team).contains(&task_id), "no longer ready");
+        let roles = from.map(|from| (team.role_of(from), team.role_of(member_id)));
+        let task = team.task_mut(task_id).context("unknown task")?;
+        let rebalanced = match from {
+            Some(from) if task.assignee == from && !task.pinned => {
+                task.assignee = member_id.to_owned();
+                from.to_owned()
+            }
+            _ => String::new(),
+        };
+        anyhow::ensure!(task.assignee == member_id, "reassigned");
+        task.prepare_wait = Some(PrepareWait {
+            step: "context".into(),
+            state: "waiting".into(),
+            reason: String::new(),
+            at: now(),
+            attempt: 0,
+            action: request.action,
+            request_id: request.request_id,
+            run_id: request.run_id,
+            conversation: request.conversation,
+            started_at: request.started_at,
+        });
+        if let (false, Some((from_role, to_role))) = (rebalanced.is_empty(), roles) {
+            events.push(Event::new("rebalanced", json!({"task":task_id,"from":from_role,"to":to_role,"from_member":rebalanced,"to_member":member_id})));
+        }
+        Ok(())
+    })
+}
+
+/// U46: records a context action that refused or stayed unconfirmed before the
+/// hand-out. The attempt is kept for the feed and the task waits for Zerus:
+/// `plan::ready` skips it and the lead's inbox names the retry.
 fn record_prepare_wait(
     store: &mut Store,
     team_id: &str,
@@ -2781,7 +2815,6 @@ fn record_prepare_wait(
     member_id: &str,
     from: Option<&str>,
     step: PrepareStep,
-    wait: PrepareWait,
 ) -> anyhow::Result<()> {
     change(store, team_id, |team, events| {
         anyhow::ensure!(team.status == TeamStatus::Running && plan::ready(team).contains(&task_id), "no longer ready");
@@ -2803,11 +2836,18 @@ fn record_prepare_wait(
             state: AttemptState::Refused,
             sent_at: now(),
             rebalanced_from: rebalanced.clone(),
-            error: wait.reason.clone(),
+            error: step.reason.clone(),
             prepare: vec![step.clone()],
             ..Default::default()
         });
-        task.prepare_wait = Some(PrepareWait { attempt: n, ..wait.clone() });
+        task.prepare_wait = Some(PrepareWait {
+            step: "context".into(),
+            state: if step.result == "uncertain" { "uncertain".into() } else { "refused".into() },
+            reason: step.reason.clone(),
+            at: step.at,
+            attempt: n,
+            ..Default::default()
+        });
         if let (false, Some((from_role, to_role))) = (rebalanced.is_empty(), roles) {
             events.push(Event::new("rebalanced", json!({"task":task_id,"from":from_role,"to":to_role,"from_member":rebalanced,"to_member":member_id})));
         }
@@ -2817,6 +2857,76 @@ fn record_prepare_wait(
         ));
         Ok(())
     })
+}
+
+/// U46: a started context action that refused or stayed unconfirmed. The wait
+/// already recorded on the task becomes the reason it waits, with its attempt.
+fn fail_context(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, step: PrepareStep) -> anyhow::Result<()> {
+    change(store, team_id, |team, events| {
+        let Some(task) = team.task_mut(task_id) else { return Ok(()) };
+        let Some(wait) = task.prepare_wait.as_mut().filter(|wait| wait.state == "waiting") else { return Ok(()) };
+        let n = task.attempts.len() as u32 + 1;
+        wait.state = if step.result == "uncertain" { "uncertain".into() } else { "refused".into() };
+        wait.reason = step.reason.clone();
+        wait.at = now();
+        wait.attempt = n;
+        task.attempts.push(Attempt {
+            n,
+            id: uuid::Uuid::new_v4().to_string(),
+            member: member_id.to_owned(),
+            state: AttemptState::Refused,
+            sent_at: now(),
+            error: step.reason.clone(),
+            prepare: vec![step.clone()],
+            ..Default::default()
+        });
+        events.push(Event::new(
+            "prepare_failed",
+            json!({"member":team.role_of(member_id),"task":task_id,"step":step.step,"result":step.result,"reason":step.reason}),
+        ));
+        Ok(())
+    })
+}
+
+/// U46: one tick's look at a hand-out that waits for its context action. It
+/// reads the session record once: the hand-out itself when the action is
+/// confirmed, or the waiting reason when it failed or passed its bound.
+fn check_context_step(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, host: &str) -> anyhow::Result<()> {
+    let team = store.load(team_id)?.with_context(|| format!("Unknown team {team_id}"))?;
+    let Some(wait) = team.task(task_id).and_then(|task| task.prepare_wait.clone()).filter(|wait| wait.state == "waiting") else {
+        return Ok(());
+    };
+    let Some(session) = team.member(member_id).and_then(|member| member.session.clone()) else { return Ok(()) };
+    let request = ContextRequest {
+        action: wait.action,
+        request_id: wait.request_id,
+        run_id: wait.run_id,
+        conversation: wait.conversation,
+        started_at: wait.started_at,
+    };
+    match check_context(&session, &request) {
+        ContextCheck::Waiting => Ok(()),
+        ContextCheck::Done { conversation } => {
+            let preparation = Preparation {
+                steps: vec![context_step(&request.action, now())],
+                conversation: conversation.map(|new| (request.run_id.clone(), new)),
+                resume: true,
+            };
+            if member_id == team.lead {
+                lead_hand_out_now(store, team_id, task_id, preparation)
+            } else {
+                hand_out_now(store, team_id, task_id, member_id, None, host, preparation)
+            }
+        }
+        ContextCheck::Refused(reason) => {
+            let step = context_failure(context_step(&request.action, now()), "refused", reason);
+            fail_context(store, team_id, task_id, member_id, step)
+        }
+        ContextCheck::Uncertain(reason) => {
+            let step = context_failure(context_step(&request.action, now()), "uncertain", reason);
+            fail_context(store, team_id, task_id, member_id, step)
+        }
+    }
 }
 
 /// The message that tells the lead a hand-out never started (A1). Zerus never
@@ -3144,23 +3254,31 @@ fn lead_hand_out(store: &mut Store, team_id: &str, task_id: u32) -> anyhow::Resu
     let team = store.load(team_id)?.with_context(|| format!("Unknown team {team_id}"))?;
     let lead = team.member(&team.lead).cloned().context("the team has no lead")?;
     let action = context_before_task(&team, &lead);
-    let prepared = if action.is_empty() { None } else { Some(prepare_context(&lead, &action)) };
-    match prepared {
-        None => lead_hand_out_now(store, team_id, task_id, Vec::new(), None),
-        Some(Prepared::Skipped(step)) => lead_hand_out_now(store, team_id, task_id, vec![step], None),
-        Some(Prepared::Done { step, conversation }) => lead_hand_out_now(store, team_id, task_id, vec![step], conversation),
-        Some(Prepared::Waiting { step, wait }) => record_prepare_wait(store, team_id, task_id, &lead.id, None, step, wait),
+    if action.is_empty() {
+        return lead_hand_out_now(store, team_id, task_id, Preparation::default());
+    }
+    let Some(session) = lead.session.clone() else {
+        let step = context_failure(context_step(&action, now()), "refused", "The lead's session is not started".into());
+        return record_prepare_wait(store, team_id, task_id, &lead.id, None, step);
+    };
+    match run_context(&lead, &session, &action) {
+        ContextStart::Started(request) => record_context_start(store, team_id, task_id, &lead.id, None, request),
+        ContextStart::Done { step, conversation } => {
+            let conversation = conversation.map(|new| (session.run_id.clone(), new));
+            lead_hand_out_now(store, team_id, task_id, Preparation { steps: vec![step], conversation, resume: false })
+        }
+        ContextStart::Failed { step } => record_prepare_wait(store, team_id, task_id, &lead.id, None, step),
     }
 }
 
-fn lead_hand_out_now(
-    store: &mut Store,
-    team_id: &str,
-    task_id: u32,
-    prepare: Vec<PrepareStep>,
-    conversation: Option<(String, String)>,
-) -> anyhow::Result<()> {
+fn lead_hand_out_now(store: &mut Store, team_id: &str, task_id: u32, preparation: Preparation) -> anyhow::Result<()> {
+    let Preparation { steps: prepare, conversation, resume } = preparation;
     change(store, team_id, |team, events| {
+        if resume {
+            if let Some(task) = team.task_mut(task_id) {
+                task.prepare_wait = None;
+            }
+        }
         anyhow::ensure!(team.status == TeamStatus::Running && plan::ready(team).contains(&task_id), "no longer ready");
         let lead = team.lead.clone();
         if let Some((run, new)) = &conversation {
@@ -4028,9 +4146,9 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
                 hand_out(store, &team.id, *task, member, None, host)
             }
         }
+        Step::PrepareContext { task, member } => check_context_step(store, &team.id, *task, member, host),
         Step::WorkAhead { task, member } => {
-            hand_out(store, &team.id, *task, member, None, host)?;
-            change(store, &team.id, |team, _| {
+            hand_out(store, &team.id, *task, member, None, host)?;            change(store, &team.id, |team, _| {
                 if let Some(attempt) = team.task_mut(*task).and_then(|task| task.attempts.last_mut()) {
                     attempt.worked_ahead = true;
                 }
@@ -5778,11 +5896,21 @@ mod tests {
         });
     }
 
+    /// U46: one dispatcher tick for a waiting hand-out, as the worker runs it.
+    fn prepare_tick(store: &mut Store, team_id: &str) -> bool {
+        let team = store.load(team_id).unwrap().unwrap();
+        let found = steps(&team, &[], crate::state::now());
+        let step = found.iter().find(|step| matches!(step, Step::PrepareContext { .. })).cloned();
+        if let Some(step) = &step {
+            run_step(store, &team, step, "").unwrap();
+        }
+        step.is_some()
+    }
+
     #[test]
     fn a_compact_waits_for_its_confirmation_before_the_hand_out() {
         let dir = tempfile::tempdir().unwrap();
         crate::state::with_test_state_root(dir.path(), || {
-            set_context_confirm(Some(2000));
             let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
             let mut t = team();
             with_context(&mut t, "dev", "compact");
@@ -5821,17 +5949,34 @@ mod tests {
                 }
             })));
             hand_out(&mut store, &t.id, 1, "dev", None, "").unwrap();
-            set_fake_hgs(None);
-            set_context_confirm(None);
+            // The action is started and recorded; nothing is sent yet.
+            assert_eq!(*calls.borrow(), ["compact-context"]);
             let saved = store.load(&t.id).unwrap().unwrap();
-            let attempt = saved.task(1).unwrap().attempts.last().unwrap();
-            assert_eq!(attempt.prepare.len(), 1);
-            assert_eq!((attempt.prepare[0].step.as_str(), attempt.prepare[0].to.as_str(), attempt.prepare[0].result.as_str()), ("context", "compact", "done"));
+            let wait = saved.task(1).unwrap().prepare_wait.as_ref().expect("the wait is recorded");
+            assert_eq!((wait.state.as_str(), wait.action.as_str(), wait.conversation.as_str()), ("waiting", "compact", "c1"));
+            assert!(!wait.request_id.is_empty());
+            assert!(saved.task(1).unwrap().attempts.is_empty());
+            // A tick while it waits reads the record once and runs no action again.
+            assert!(prepare_tick(&mut store, &t.id));
+            assert_eq!(*calls.borrow(), ["compact-context", "inspect"]);
+            let saved = store.load(&t.id).unwrap().unwrap();
+            assert_eq!(saved.task(1).unwrap().prepare_wait.as_ref().unwrap().state, "waiting");
+            assert!(saved.task(1).unwrap().attempts.is_empty());
+            // The confirmation arrives: the next tick hands out.
+            assert!(prepare_tick(&mut store, &t.id));
+            set_fake_hgs(None);
+            let saved = store.load(&t.id).unwrap().unwrap();
+            let task = saved.task(1).unwrap();
+            assert!(task.prepare_wait.is_none(), "the confirmed wait is gone");
+            let attempt = task.attempts.last().unwrap();
+            assert_eq!(
+                (attempt.prepare[0].step.as_str(), attempt.prepare[0].to.as_str(), attempt.prepare[0].result.as_str()),
+                ("context", "compact", "done")
+            );
             assert_eq!(attempt.state, AttemptState::Delivered);
             assert_eq!(*calls.borrow(), ["compact-context", "inspect", "inspect", "send"], "the send waits for the confirmation");
             assert_eq!(inspects.get(), 2);
-            let kinds = event_kinds(&store, &t.id);
-            assert_eq!(kinds, ["context_prepared", "handed_out", "delivered"]);
+            assert_eq!(event_kinds(&store, &t.id), ["context_prepared", "handed_out", "delivered"]);
         });
     }
 
@@ -5839,7 +5984,6 @@ mod tests {
     fn a_clear_waits_for_the_new_conversation_before_the_hand_out() {
         let dir = tempfile::tempdir().unwrap();
         crate::state::with_test_state_root(dir.path(), || {
-            set_context_confirm(Some(2000));
             let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
             let mut t = team();
             t.task_mut(1).unwrap().description = "Build the cards API".into();
@@ -5873,9 +6017,19 @@ mod tests {
                 }
             })));
             hand_out(&mut store, &t.id, 1, "dev", None, "").unwrap();
-            set_fake_hgs(None);
-            set_context_confirm(None);
+            assert_eq!(*calls.borrow(), ["clear-context"]);
             let saved = store.load(&t.id).unwrap().unwrap();
+            let wait = saved.task(1).unwrap().prepare_wait.as_ref().expect("the wait is recorded");
+            assert_eq!((wait.state.as_str(), wait.action.as_str(), wait.conversation.as_str()), ("waiting", "clear", "c1"));
+            assert!(saved.task(1).unwrap().attempts.is_empty());
+            // The old conversation is still there: the hand-out waits.
+            assert!(prepare_tick(&mut store, &t.id));
+            assert_eq!(*calls.borrow(), ["clear-context", "inspect"]);
+            // The new conversation appears: the next tick hands out naming it.
+            assert!(prepare_tick(&mut store, &t.id));
+            set_fake_hgs(None);
+            let saved = store.load(&t.id).unwrap().unwrap();
+            assert!(saved.task(1).unwrap().prepare_wait.is_none());
             let attempt = saved.task(1).unwrap().attempts.last().unwrap();
             assert_eq!((attempt.prepare[0].to.as_str(), attempt.prepare[0].result.as_str()), ("clear", "done"));
             assert_eq!(attempt.state, AttemptState::Delivered);
@@ -5892,10 +6046,9 @@ mod tests {
     }
 
     #[test]
-    fn an_unconfirmed_context_leaves_the_task_waiting_and_never_retries_by_itself() {
+    fn a_tick_while_the_context_waits_does_not_run_the_action_again() {
         let dir = tempfile::tempdir().unwrap();
         crate::state::with_test_state_root(dir.path(), || {
-            set_context_confirm(Some(250));
             let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
             let mut t = team();
             with_context(&mut t, "dev", "compact");
@@ -5912,25 +6065,111 @@ mod tests {
                         *seen_request.borrow_mut() = id.clone();
                         Ok(fake_output(0, &json!({"request_id":id,"status":"submitted"}).to_string(), ""))
                     }
-                    // It never finishes; the hand-out must not go out on a guess.
                     "inspect" => Ok(fake_output(0, &json!({"run_id":"r1","conversation_id":"c1","activity":"idle","phase":"idle",
                         "compact_context_request":{"request_id":seen_request.borrow().clone(),"run_id":"r1",
                             "conversation_id":"c1","status":"compacting"}}).to_string(), "")),
-                    "send" => panic!("an unconfirmed compaction never hands out"),
+                    "send" => panic!("a waiting context never hands out"),
                     other => panic!("unexpected hgs {other}"),
                 }
             })));
             hand_out(&mut store, &t.id, 1, "dev", None, "").unwrap();
+            let recorded = store.load(&t.id).unwrap().unwrap().task(1).unwrap().prepare_wait.clone().unwrap();
+            assert!(prepare_tick(&mut store, &t.id));
+            assert!(prepare_tick(&mut store, &t.id));
             set_fake_hgs(None);
-            set_context_confirm(None);
+            assert_eq!(*calls.borrow(), ["compact-context", "inspect", "inspect"], "only looks, never the action again");
+            let saved = store.load(&t.id).unwrap().unwrap();
+            let wait = saved.task(1).unwrap().prepare_wait.as_ref().unwrap();
+            assert_eq!((wait.state.as_str(), wait.request_id.as_str()), ("waiting", recorded.request_id.as_str()));
+            assert!(saved.task(1).unwrap().attempts.is_empty());
+        });
+    }
+
+    #[test]
+    fn a_restart_resumes_the_context_request_recorded_on_the_task() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let path = dir.path().join("teams/teams.sqlite3");
+            let mut store = Store::open_at(&path, true).unwrap();
+            let mut t = team();
+            with_context(&mut t, "dev", "compact");
+            stored(&mut store, &t);
+            let started = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+            let calls = started.clone();
+            set_fake_hgs(Some(Box::new(move |_, args: &[&str], input: Option<&Value>| {
+                calls.borrow_mut().push(args[0].to_owned());
+                match args[0] {
+                    "compact-context" => Ok(fake_output(0, &json!({"request_id":input.unwrap()["request_id"],
+                        "status":"submitted"}).to_string(), "")),
+                    other => panic!("the start runs the action only: {other}"),
+                }
+            })));
+            hand_out(&mut store, &t.id, 1, "dev", None, "").unwrap();
+            set_fake_hgs(None);
+            let recorded = store.load(&t.id).unwrap().unwrap().task(1).unwrap().prepare_wait.clone().unwrap();
+            assert_eq!((recorded.state.as_str(), recorded.request_id.is_empty()), ("waiting", false));
+            assert_eq!(*started.borrow(), ["compact-context"]);
+            // A restarted worker opens the same store and resumes from the record.
+            drop(store);
+            let mut store = Store::open_at(&path, true).unwrap();
+            let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+            let resumed = calls.clone();
+            let request_id = recorded.request_id.clone();
+            set_fake_hgs(Some(Box::new(move |_, args: &[&str], _| {
+                resumed.borrow_mut().push(args[0].to_owned());
+                match args[0] {
+                    "inspect" => Ok(fake_output(0, &json!({"run_id":"r1","conversation_id":"c1","activity":"idle","phase":"idle",
+                        "compact_context_request":{"request_id":request_id,"run_id":"r1","conversation_id":"c1","status":"completed"}}).to_string(), "")),
+                    "send" => Ok(fake_output(0, r#"{"status":"submitted"}"#, "")),
+                    other => panic!("the restart runs no action again: {other}"),
+                }
+            })));
+            assert!(prepare_tick(&mut store, &t.id));
+            set_fake_hgs(None);
+            assert_eq!(*calls.borrow(), ["inspect", "send"], "no compact again after the restart");
+            let saved = store.load(&t.id).unwrap().unwrap();
+            assert!(saved.task(1).unwrap().prepare_wait.is_none());
+            assert_eq!(saved.task(1).unwrap().attempts.last().unwrap().state, AttemptState::Delivered);
+        });
+    }
+
+    #[test]
+    fn an_unconfirmed_context_leaves_the_task_waiting_and_never_retries_by_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+            let mut t = team();
+            with_context(&mut t, "dev", "compact");
+            stored(&mut store, &t);
+            let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+            let seen = calls.clone();
+            set_fake_hgs(Some(Box::new(move |_, args: &[&str], input: Option<&Value>| {
+                seen.borrow_mut().push(args[0].to_owned());
+                match args[0] {
+                    "compact-context" => Ok(fake_output(0, &json!({"request_id":input.unwrap()["request_id"],
+                        "status":"submitted"}).to_string(), "")),
+                    other => panic!("a timed-out wait only looks at the clock: {other}"),
+                }
+            })));
+            hand_out(&mut store, &t.id, 1, "dev", None, "").unwrap();
+            // The action is still running; a later tick finds it past the bound.
+            store
+                .mutate(None, &t.id, None, |team, _| {
+                    team.task_mut(1).unwrap().prepare_wait.as_mut().unwrap().started_at = crate::state::now() - 61.0;
+                    Ok(Value::Null)
+                })
+                .unwrap();
+            assert!(prepare_tick(&mut store, &t.id));
+            set_fake_hgs(None);
+            assert_eq!(*calls.borrow(), ["compact-context"], "the bound is checked before any read");
             let saved = store.load(&t.id).unwrap().unwrap();
             let task = saved.task(1).unwrap();
             assert_eq!(task.status, TaskStatus::Pending);
             let attempt = task.attempts.last().unwrap();
             assert_eq!((attempt.prepare[0].result.as_str(), attempt.state), ("uncertain", AttemptState::Refused));
             let wait = task.prepare_wait.as_ref().expect("the task waits for Zerus");
-            assert_eq!(wait.step, "context");
-            assert!(wait.reason.contains("not confirmed"), "{wait:?}");
+            assert_eq!(wait.state, "uncertain");
+            assert!(wait.reason.contains("not confirmed within 60 s"), "{wait:?}");
             // It is not ready again, and status names Zerus, not the member.
             assert!(!plan::ready(&saved).contains(&1));
             assert_eq!(super::inbox::waits(&saved, task, false).unwrap()["for"], "zerus");

@@ -613,7 +613,17 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
         let id = text(update, "id").to_owned();
         ensure!(!id.is_empty(), "A member update names its member");
         let member = team.members.iter_mut().find(|member| member.id == id).with_context(|| format!("Unknown member {id}"))?;
-        ensure!(planning || member.session.is_none(), "A running team changes only members without a session");
+        // U46: the context before a task only changes the next hand-out, so the
+        // owner may set it on a running member that has a session too; every
+        // other field still changes only on a member without one.
+        let context_only = update.as_object().is_some_and(|fields| {
+            fields.contains_key("context_before_task")
+                && fields.keys().all(|key| key == "id" || key == "context_before_task")
+        });
+        ensure!(
+            planning || member.session.is_none() || context_only,
+            "A running team changes only members without a session"
+        );
         if let Some(folder) = update.get("folder") {
             member.folder = serde_json::from_value(folder.clone()).context("A folder is shared, worktree or clone")?;
         }
@@ -5626,6 +5636,22 @@ mod tests {
         assert_eq!(team.member("dev").unwrap().context_before_task, "");
         set(&mut team, &Actor::Human, "none").unwrap();
         assert_eq!(team.member("dev").unwrap().context_before_task, "none");
+        // U46: a running member that already has a session takes this one field
+        // (it only changes the next hand-out); other fields still need a member
+        // without a session.
+        let mut running = running_team();
+        running.members.iter_mut().find(|member| member.id == "dev").unwrap().session =
+            Some(SessionRef { name: "codex/x/dev".into(), run_id: "r1".into(), ..Default::default() });
+        let set_running = |team: &mut Team, update: Value| {
+            let mut events = Vec::new();
+            apply(team, "settings", &json!({"members_update":[update]}), &Actor::Human, &BTreeSet::new(), &mut events)
+        };
+        set_running(&mut running, json!({"id":"dev","context_before_task":"clear"})).unwrap();
+        assert_eq!(running.member("dev").unwrap().context_before_task, "clear");
+        let error = set_running(&mut running, json!({"id":"dev","role":"API","context_before_task":"compact"})).unwrap_err().to_string();
+        assert_eq!(error, "A running team changes only members without a session");
+        let error = set_running(&mut running, json!({"id":"dev","role":"API"})).unwrap_err().to_string();
+        assert_eq!(error, "A running team changes only members without a session");
     }
 
     #[test]

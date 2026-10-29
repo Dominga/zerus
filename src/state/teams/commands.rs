@@ -1730,7 +1730,9 @@ fn no_attempt_text(team: &Team, member: &str) -> String {
     let attempt = task.attempts.iter().rev().find(|attempt| attempt.member == member);
     // U46: a hand-out Zerus could not prepare is no delivery the member waits
     // for; the lead or the owner retries it.
-    let state = if task.prepare_wait.is_some() {
+    let state = if task.prepare_wait.as_ref().is_some_and(|wait| wait.state == "waiting") {
+        "is being prepared by Zerus for its next hand-out"
+    } else if task.prepare_wait.is_some() {
         "could not be prepared by Zerus; the lead or you retry it"
     } else {
         match attempt.map(|attempt| attempt.state) {

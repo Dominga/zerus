@@ -887,18 +887,36 @@ pub(crate) struct PrepareStep {
     pub reason: String,
 }
 
-/// U46: a hand-out Zerus could not prepare. The task stays pending, waits for
-/// Zerus with this reason and is not retried on its own: the lead or the owner
-/// retries it, or reassigns it (spec 0).
+/// U46: a hand-out Zerus prepares before it goes out. `state` is `waiting`
+/// while the native context action runs, then `refused` or `uncertain`; the
+/// request fields let a later tick (or a restarted worker) read the same
+/// request instead of running the action again. A failed wait leaves the task
+/// pending with this reason; the lead or the owner retries it (spec 0).
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct PrepareWait {
     pub step: String,
+    #[serde(default)]
+    pub state: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub reason: String,
     #[serde(default)]
     pub at: f64,
-    /// The attempt whose preparation failed.
+    /// The attempt whose preparation failed (0 while it waits).
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub attempt: u32,
+    /// compact or clear, while it waits.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub action: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub request_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub run_id: String,
+    /// The conversation before the action: a clear shows a new one.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub conversation: String,
+    /// When the action started; the 60 s confirmation bound counts from here.
+    #[serde(default)]
+    pub started_at: f64,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]

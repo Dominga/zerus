@@ -304,6 +304,9 @@ fn all_items(team: &Team) -> Vec<Item> {
     // the reason and the retry that starts the preparation again.
     for task in &team.tasks {
         let Some(wait) = &task.prepare_wait else { continue };
+        if wait.state == "waiting" {
+            continue;
+        }
         let attempt = task.attempts.iter().rev().find(|attempt| attempt.n == wait.attempt);
         items.push(Item {
             subagents: Value::Null,
@@ -511,6 +514,10 @@ pub(crate) fn waits(team: &Team, task: &Task, ready: bool) -> Option<Value> {
     // U46: Zerus could not prepare the hand-out; it waits for the lead or the
     // owner to retry or reassign, never for the member.
     if let Some(wait) = &task.prepare_wait {
+        if wait.state == "waiting" {
+            return Some(json!({"for":"zerus","on":[wait.step],"reason":"Zerus is preparing the context",
+                "unblock":"wait"}));
+        }
         return Some(json!({"for":"zerus","on":[wait.step],"reason":wait.reason,
             "unblock":format!("retry #{}", task.id)}));
     }

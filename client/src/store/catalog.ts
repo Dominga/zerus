@@ -150,6 +150,8 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow, marks: 
     terminateReason: optional(v.action_reasons?.terminate),
     forgetReason: optional(v.action_reasons?.forget),
     cwdPath: text(v.cwd),
+    cwdCanonical: text(v.cwd_canonical),
+    gitRoot: text(v.git_root),
     terminalSupported: v.terminal_supported ?? !["deepseek", "dsh", "opencode"].includes(text(v.agent)),
     terminalReported: !!v.terminal_reported,
     terminalAttachSupported: !!v.terminal_attach_supported,

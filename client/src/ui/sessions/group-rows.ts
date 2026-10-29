@@ -1,12 +1,13 @@
-import { headerAttention, isWorking } from "../../store/attention";
-import type { GroupingOut } from "../../types";
+import { headerAttention, isWorking, visibleUnreadReply } from "../../store/attention";
+import type { CreationCard, GroupingOut } from "../../types";
 import type { Session, Subagent } from "./types";
 
 export type Row =
   /** `project` is the project's id; `name` and the colour come from the organization's header. */
   | { type: "header"; id: string; project: string; name: string; color: string | null; palette: number; collapsed: boolean; total: number; attention: number; unread: number; working: number }
   | { type: "card"; id: string; session: Session; expandable: boolean; expanded: boolean; compactRow: boolean }
-  | { type: "child"; id: string; parent: Session; child: Subagent; first: boolean; last: boolean };
+  | { type: "child"; id: string; parent: Session; child: Subagent; first: boolean; last: boolean }
+  | { type: "creation"; id: string; creation: CreationCard };
 
 export interface ListInput {
   grouping: GroupingOut;
@@ -55,7 +56,7 @@ export function groupRows(input: ListInput): Row[] {
       const up = input.online(s);
       if (!s.muted && headerAttention(s, up)) attention++;
       // An offline computer's unread replies count too (visibleUnreadReply, HgsClient.h:104-105).
-      if (!s.muted && s.unread) unread++;
+      if (!s.muted && visibleUnreadReply(s, up)) unread++;
       if (isWorking(s, up)) working++;
     }
     out.push({ type: "header", id: `h:${h.id}`, project: h.id, name: h.name, color: h.color, palette: h.palette,
@@ -64,4 +65,3 @@ export function groupRows(input: ListInput): Row[] {
   }
   return out;
 }
-

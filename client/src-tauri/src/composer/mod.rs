@@ -60,6 +60,8 @@ pub type Facts = Arc<dyn Fn(&str, &str) -> Option<WriteKind> + Send + Sync>;
 /// One `hgs inspect` of the session (with its archive id); blocking. The
 /// error is Qt's detail for "Could not refresh activity: %1" (`send::inspection`).
 pub type Inspect = Arc<dyn Fn(&Target, Option<&str>) -> Result<Value, String> + Send + Sync>;
+/// Nudges the existing source's offline retry for one computer; nonblocking.
+pub type Reconnect = Arc<dyn Fn(&str) + Send + Sync>;
 /// One guarded call (`actions::dispatch_as`); blocking. The String is the
 /// request id the delivery made for it.
 pub type Dispatch = Arc<dyn Fn(Target, Action, String) -> Result<Outcome, String> + Send + Sync>;
@@ -108,6 +110,7 @@ pub struct Deps {
     pub rows: Rows,
     pub facts: Facts,
     pub inspect: Inspect,
+    pub reconnect: Reconnect,
     pub dispatch: Dispatch,
 }
 
@@ -1777,6 +1780,7 @@ pub(crate) mod tests {
                 clock: Arc::new(|| 1_793_000_100.0),
                 rows: Arc::new(|_, _, _| None),
                 facts: Arc::new(|_, _| None),
+                reconnect: Arc::new(|_| {}),
                 inspect: Arc::new(|_, _| Err("timed out".into())),
                 dispatch: Arc::new(|_, _, _| Err("no call in these tests".into())),
             },

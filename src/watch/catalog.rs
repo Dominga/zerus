@@ -1,6 +1,6 @@
 //! Catalog rows: keys, change detection with volatile observation fields
 //! masked, removal reasons and paging.
-use serde_json::Value;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use zerus_watch_protocol::{self as protocol, reason};
@@ -68,6 +68,11 @@ pub(super) fn split(mut listing: Value) -> (Vec<(String, Value)>, Value) {
         }
         seen.insert(key.clone());
         rows.push((key, row));
+    }
+    // Empty is explicit: clients distinguish launch-capable watch metadata
+    // from older peers, which omitted this field when nobody had launched.
+    if let Some(meta) = listing.as_object_mut() {
+        meta.entry("ended_launches").or_insert_with(|| json!([]));
     }
     (rows, listing)
 }
@@ -190,7 +195,7 @@ mod tests {
         let (rows, meta) = split(listing);
         let keys: Vec<_> = rows.iter().map(|(key, _)| key.as_str()).collect();
         assert_eq!(keys, ["run:r1", "name:sh/p", "name:codex/p/b", "name:sh/p#3"]);
-        assert_eq!(meta, json!({"host":"h","ok":true}));
+        assert_eq!(meta, json!({"host":"h","ok":true,"ended_launches":[]}));
         assert_eq!(split(json!({"ok":false})).0, vec![]);
     }
 

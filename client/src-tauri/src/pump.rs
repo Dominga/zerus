@@ -379,6 +379,46 @@ impl Pump {
             .cloned()
     }
 
+    /// A current live row for one launch, using the catalog's bounded
+    /// per-computer index rather than scanning the fleet for every creation.
+    pub fn row_for_launch(&self, computer: &str, launch: &str) -> Option<ViewRow> {
+        let inner = self.lock();
+        let rows = inner.mirror.computers.get(computer)?;
+        rows.rows.get(rows.launches.get(launch)?).cloned()
+    }
+
+    /// Only a live watch source can replace creation's poll. Inspect at most
+    /// the supplied launch IDs under one catalog lock; legacy listings keep
+    /// polling even when they contain a nonempty ended-launch list.
+    pub fn launch_bindings(
+        &self,
+        computer: &str,
+        launches: &[String],
+    ) -> Option<zerus_client_core::creation::BindingListing> {
+        let inner = self.lock();
+        let rows = inner.mirror.computers.get(computer)?;
+        if rows.status != Some(ComputerStatus::Live) {
+            return None;
+        }
+        let machine = rows.machine.as_ref()?;
+        let ended_launches = machine.ended_launches.clone()?;
+        let sessions = launches
+            .iter()
+            .filter_map(|launch| rows.rows.get(rows.launches.get(launch)?))
+            .map(|row| zerus_client_core::creation::BindingSession {
+                launch_id: row.launch_id.clone().unwrap_or_default(),
+                cmd: row.notify.cmd.clone(),
+                name: row.name.clone(),
+                state: row.state.clone(),
+            })
+            .collect();
+        Some(zerus_client_core::creation::BindingListing {
+            online: machine.ok == Some(true),
+            sessions,
+            ended_launches,
+        })
+    }
+
     /// Whether the computer counts as online, as the frontend's
     /// `computerOffline` reads it: neither reconnecting nor ended.
     pub fn online(&self, computer: &str) -> bool {
@@ -397,6 +437,13 @@ impl Pump {
 
     /// Drains a change sink on its own thread until every sender is gone,
     /// running `observe` on each change just before it is queued.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Retained for observers that need only the pre-push callback"
+        )
+    )]
     pub fn drain_with(
         &self,
         changes: Receiver<Change>,
@@ -409,6 +456,29 @@ impl Pump {
                 for change in changes {
                     observe(&change);
                     pump.push(change);
+                }
+            })
+            .expect("the pump thread starts");
+    }
+    /// Runs the existing observer before queuing, then signals an interested
+    /// consumer after the mirror is current. Neither callback holds the pump
+    /// lock, and the change is moved without copying its rows.
+    pub fn drain_with_after(
+        &self,
+        changes: Receiver<Change>,
+        before: impl Fn(&Change) -> bool + Send + 'static,
+        after: impl Fn() + Send + 'static,
+    ) {
+        let pump = self.clone();
+        std::thread::Builder::new()
+            .name("zerus-client-pump".into())
+            .spawn(move || {
+                for change in changes {
+                    let interested = before(&change);
+                    pump.push(change);
+                    if interested {
+                        after();
+                    }
                 }
             })
             .expect("the pump thread starts");
@@ -431,12 +501,39 @@ struct Rows {
     machine: Option<MachineMeta>,
     order: Vec<String>,
     rows: HashMap<String, ViewRow>,
+    launches: HashMap<String, String>,
 }
 
 impl Rows {
+    fn forget_launch(&mut self, key: &str, row: &ViewRow) {
+        if let Some(launch) = &row.launch_id {
+            if self
+                .launches
+                .get(launch)
+                .is_some_and(|indexed| indexed == key)
+            {
+                self.launches.remove(launch);
+            }
+        }
+    }
+
     fn upsert(&mut self, key: &str, row: &ViewRow) {
-        if self.rows.insert(key.to_owned(), row.clone()).is_none() {
+        if let Some(previous) = self.rows.insert(key.to_owned(), row.clone()) {
+            self.forget_launch(key, &previous);
+        } else {
             self.order.push(key.to_owned());
+        }
+        if row.state != "archived" {
+            if let Some(launch) = row.launch_id.as_ref().filter(|launch| !launch.is_empty()) {
+                self.launches.insert(launch.clone(), key.into());
+            }
+        }
+    }
+
+    fn remove(&mut self, key: &str) {
+        if let Some(row) = self.rows.remove(key) {
+            self.forget_launch(key, &row);
+            self.order.retain(|known| known != key);
         }
     }
 }
@@ -451,15 +548,14 @@ impl Mirror {
                 .upsert(key, row),
             Change::Remove { computer, key, .. } => {
                 if let Some(rows) = self.computers.get_mut(&computer.0) {
-                    if rows.rows.remove(key).is_some() {
-                        rows.order.retain(|k| k != key);
-                    }
+                    rows.remove(key);
                 }
             }
             Change::Replace { computer, rows } => {
                 let entry = self.computers.entry(computer.0.clone()).or_default();
                 entry.order.clear();
                 entry.rows.clear();
+                entry.launches.clear();
                 for (key, row) in rows {
                     entry.upsert(key, row);
                 }
@@ -569,6 +665,109 @@ mod tests {
         assert!(
             pump.online("unknown"),
             "as the frontend reads it: only reconnecting or ended is offline"
+        );
+    }
+
+    #[test]
+    fn a_consumed_after_wake_reads_the_applied_mirror() {
+        let pump = Pump::default();
+        let reader = pump.clone();
+        let (changes, input) = std::sync::mpsc::channel();
+        let (wake, wakes) = std::sync::mpsc::sync_channel(1);
+        let (consumed, consumes) = std::sync::mpsc::sync_channel(1);
+        let (seen, snapshots) = std::sync::mpsc::channel();
+        let consumer = std::thread::spawn(move || {
+            while wakes.recv().is_ok() {
+                seen.send(reader.row("", "run:a")).unwrap();
+                consumed.send(()).unwrap();
+            }
+        });
+        pump.drain_with_after(
+            input,
+            |change| matches!(change, Change::Upsert { .. } | Change::Remove { .. }),
+            move || {
+                wake.send(()).unwrap();
+                // Only this test callback waits: force consumption before the
+                // drain proceeds, so an early wake fails deterministically.
+                consumes.recv_timeout(Duration::from_secs(2)).unwrap();
+            },
+        );
+        changes
+            .send(Change::Upsert {
+                computer: ComputerId::local(),
+                key: "run:a".into(),
+                row: row("codex/p/a"),
+            })
+            .unwrap();
+        changes
+            .send(Change::Machine {
+                computer: ComputerId::local(),
+                machine: MachineMeta::default(),
+            })
+            .unwrap();
+        changes
+            .send(Change::Remove {
+                computer: ComputerId::local(),
+                key: "run:a".into(),
+                reason: None,
+            })
+            .unwrap();
+        let first = snapshots.recv_timeout(Duration::from_secs(2)).unwrap();
+        let second = snapshots.recv_timeout(Duration::from_secs(2)).unwrap();
+        drop(changes);
+        consumer.join().unwrap();
+        assert_eq!(first.unwrap().name, "codex/p/a");
+        assert!(second.is_none(), "the remove is current too");
+        assert!(
+            snapshots.try_recv().is_err(),
+            "uninterested changes do not wake"
+        );
+    }
+
+    #[test]
+    fn launch_lookup_tracks_upserts_replacements_removals_and_computers() {
+        let pump = Pump::default();
+        let mut launched = row("codex/p/tag");
+        launched.launch_id = Some("old".into());
+        let push = |computer: &str, key: &str, row: ViewRow| {
+            pump.push(Change::Upsert {
+                computer: ComputerId(computer.into()),
+                key: key.into(),
+                row,
+            })
+        };
+        push("", "run:a", launched.clone());
+        push("studio", "run:a", launched.clone());
+        assert!(pump.row_for_launch("", "old").is_some());
+        launched.launch_id = Some("new".into());
+        push("", "run:a", launched.clone());
+        assert!(pump.row_for_launch("", "old").is_none());
+        assert!(pump.row_for_launch("studio", "old").is_some());
+        assert!(pump.row_for_launch("", "new").is_some());
+        launched.state = "archived".into();
+        push("", "run:a", launched);
+        assert!(pump.row_for_launch("", "new").is_none());
+        pump.push(Change::Replace {
+            computer: ComputerId("studio".into()),
+            rows: Vec::new(),
+        });
+        assert!(pump.row_for_launch("studio", "old").is_none());
+        assert!(
+            pump.lock().mirror.computers["studio"].launches.is_empty(),
+            "a replacement cannot retain historical launch keys"
+        );
+        let mut launched = row("codex/p/tag");
+        launched.launch_id = Some("removed".into());
+        push("", "run:b", launched);
+        pump.push(Change::Remove {
+            computer: ComputerId::local(),
+            key: "run:b".into(),
+            reason: None,
+        });
+        assert!(pump.row_for_launch("", "removed").is_none());
+        assert!(
+            pump.lock().mirror.computers[""].launches.is_empty(),
+            "removed rows cannot grow an index of past launches"
         );
     }
 

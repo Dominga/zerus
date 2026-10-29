@@ -16,6 +16,13 @@ export type AttentionFacts = Pick<Session, "state" | "status" | "unread" | "revi
 export const attentionNeeded = (s: Pick<Session, "status" | "unread" | "attentionNeeded">) =>
   s.attentionNeeded ?? (s.status === "attention" || s.unread);
 
+/** Qt's visibleUnreadReply (HgsClient.h:104-105), with older projections kept as they were. */
+export const visibleUnreadReply = (s: Pick<Session, "state" | "unread" | "unreadReply" | "unreadCandidate">, online: boolean) => {
+  if (s.state === "archived") return false;
+  if (s.unreadReply === undefined || s.unreadCandidate === undefined) return s.unread;
+  return s.unreadReply && (!online || s.unreadCandidate);
+};
+
 /**
  * Needs attention in the window's lists and counts: Qt's
  * SessionPresentation::needsAttention (SessionPresentation.h:279-293), that is

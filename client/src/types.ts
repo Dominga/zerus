@@ -75,6 +75,10 @@ export interface ViewRow {
   action_reasons?: Record<string, string>;
   /** The raw working directory (`folder` is the name people know the checkout by). */
   cwd?: string;
+  /** The canonical working directory (New session's prefill); absent when the row has none. */
+  cwd_canonical?: string;
+  /** The checkout's root, "" outside Git (the worktree picker's session counts). */
+  git_root?: string;
   terminal_supported?: boolean;
   terminal_reported?: boolean;
   terminal_attach_supported?: boolean;
@@ -270,6 +274,8 @@ export interface Details {
   phase: string;
   /** The session's working directory; null when the inspection does not report one (an empty string stays empty). */
   cwd?: string | null;
+  /** The canonical working directory; null when it is not a string (the row's then applies). */
+  cwd_canonical?: string | null;
   /** Null when the inspection does not report it. */
   terminal_supported?: boolean | null;
   terminal_attach_supported?: boolean | null;
@@ -353,6 +359,8 @@ export interface Account {
 }
 export interface AccountHost { computer: ComputerId; name: string; label: string; online: boolean }
 export interface AccountsView {
+  /** Computation order from the screens hub; absent on older snapshots. */
+  revision?: number;
   hosts: AccountHost[]; accounts: Account[]; overview: Account[]; snapshot: boolean; loading: boolean;
   pending: number; loaded_machines: number; busy: boolean; notices: string[]; no_hosts: string | null;
   /** Accounts left out by the per-view bound. */
@@ -362,14 +370,28 @@ export interface MachineRow { alias: string; enabled: boolean; source: string; i
 export interface Effective { alias: string; pending: boolean; error: boolean; text: string; hostname: string; user: string; port: string; key: string }
 export interface CheckResult { alias: string; pending: boolean; error: boolean; text: string }
 export interface MachinesView {
+  /** Computation order from the screens hub; absent on older snapshots. */
+  revision?: number;
   loaded: boolean; refreshing: boolean; error: string | null; local: string; environment_override: boolean;
   machines: MachineRow[]; effective: Effective | null; check: CheckResult | null; busy: boolean;
 }
-export interface Folder { id: string; name: string; path: string; computer: string; machine: string }
+export interface Folder {
+  /** The catalog's id, "" when it has none. */
+  id: string;
+  /** New session's identity of the folder (`FolderOut.key`). */
+  key: string;
+  name: string; path: string; computer: string; machine: string;
+  /** The computer's identity, "" for none (New session lists an identified folder's computer only when it is configured). */
+  machine_id?: string;
+}
 export interface Project { id: string; name: string; color: string | null; accessible: boolean; is_default: boolean; palette: number; folders: Folder[] }
 export interface ProjectsView {
+  /** Computation order from the screens hub; absent on older snapshots. */
+  revision?: number;
   loaded: boolean; status: string; status_error: boolean; conflicts: number;
   unconnected: string[]; notice: string | null; projects: Project[];
+  /** The catalog's swarm, "" before one arrives (New session's project inference). */
+  swarm_id: string;
 }
 
 export const emptyAccounts = (notices: string[] = []): AccountsView => ({
@@ -379,8 +401,161 @@ export const emptyMachines = (error: string | null = null): MachinesView => ({
   loaded: false, refreshing: false, error, local: "", environment_override: false, machines: [], effective: null, check: null, busy: false,
 });
 export const emptyProjects = (status = ""): ProjectsView => ({
-  loaded: false, status, status_error: status !== "", conflicts: 0, unconnected: [], notice: null, projects: [],
+  loaded: false, status, status_error: status !== "", conflicts: 0, unconnected: [], notice: null, projects: [], swarm_id: "",
 });
+
+// New session (client/src-tauri `newsession.rs` over client/core `launch.rs`,
+// `repository.rs` and `worktrees.rs`; the accounts from `screens.rs`).
+
+/** A computer's folder form. */
+export type PathStyle = "posix" | "windows";
+/** What Start is doing. */
+export type LaunchStage = "idle" | "checking_folder" | "creating_worktree";
+/** A repository clone's state, as the form shows it (core `launch::Repository`). */
+export interface LaunchRepository {
+  busy: boolean; cloning: boolean; can_submit: boolean; created: boolean; uncertain: boolean; fields_locked: boolean;
+  new_project: boolean; new_project_name: string; destination: string;
+}
+/** The form's state (core `launch::Form`); the three derived fields may be left out. */
+export interface LaunchForm {
+  no_machine: boolean; can_enable_local_sessions: boolean; online: boolean; agent: string; name: string;
+  account_count: number; account_selected: boolean; account_loading: boolean; account_preset: boolean;
+  path: string; listed_folder: boolean; folder_online: boolean; prefill_pending: boolean;
+  /** Qt's `m_catalogRequest`. */
+  catalog_pending: boolean;
+  catalog_worktrees: boolean; auto_preferred: boolean;
+  automatic_available?: boolean; creation_failed: boolean; project_worktree?: boolean;
+  implicit_inbox: boolean; branch: string; automatic_path?: string; style: PathStyle; stage: LaunchStage;
+  repository: LaunchRepository | null; clone_launch_pending: boolean;
+}
+/** What the form shows (core `launch::Shown`). */
+export interface LaunchShown {
+  start_enabled: boolean; start_text: string; preview: string; outside_project: boolean; name_problem: string | null;
+  notice: string | null; automatic: boolean; auto_enabled: boolean; none_enabled: boolean;
+  worktree_target: string; worktree_tooltip: string; choose_existing_enabled: boolean; create_manually_enabled: boolean;
+  worktree_options_enabled: boolean; fields_enabled: boolean; browse_enabled: boolean; cancel_enabled: boolean;
+  open_terminal_enabled: boolean; open_terminal_tooltip: string; clone_launch_due: boolean;
+}
+/** A saved project with its folders on each computer ("" is this computer). */
+export interface LaunchProject { id: string; name?: string; folders: { machine: string; path: string }[] }
+export interface NewSessionFormInput {
+  form: LaunchForm;
+  /** The folder's catalog (`m_worktreeCatalog`). */
+  catalog: unknown;
+  /** The verified catalog of this computer and folder, or null. */
+  verified: unknown;
+  project: LaunchProject | null;
+  /** This computer "" or the alias, as the project's folders name it. */
+  host: string;
+  /** This computer's machine card: the core derives `can_enable_local_sessions` from it. */
+  local?: MachineMeta | null;
+}
+export interface NewSessionFormView { shown: LaunchShown; automatic_available: boolean; automatic_path: string; project_worktree: boolean }
+/** What Start does (core `launch::Start`). */
+export type LaunchStart = "nothing" | "background" | "clone" | { check_folder: { with_worktree: boolean } };
+export interface LaunchRepositoryChoice {
+  url: string; parent: string; name: string; destination: string; created_path: string; new_project: boolean; project_name: string;
+}
+/** The form's choices for background creation (core `launch::Choices`). */
+export interface LaunchChoices {
+  host: string; machine: string; agent: string; account: string; name: string; project: string; project_name: string;
+  implicit_inbox: boolean; swarm: string; path: string; auto_preferred: boolean; automatic_available: boolean;
+  branch: string; catalog: unknown; automatic_path: string; listed_folder: boolean; project_worktree: boolean;
+  model: string; effort: string; open_terminal: boolean; repository: LaunchRepositoryChoice | null; predecessor: string;
+}
+/** Background creation's plan (core `launch::Plan`, Qt's `creationRequested` object). */
+export interface LaunchPlan {
+  host: string; machine: string; cmd: string; account: string; tag: string; group: string; group_name: string;
+  implicit_inbox: boolean; swarm: string; target: string; source: string; auto: boolean; branch: string; catalog: unknown;
+  add_folder: boolean; model: string; effort: string; terminal: boolean; repository: boolean;
+  destination?: string; url?: string; parent?: string; repository_name?: string; new_project?: boolean;
+  project_name?: string; clone_done?: boolean; acquisition_confirmed?: boolean; predecessor?: string;
+}
+/** What a new dialog starts with. `remembered` stays empty until the settings store arrives. */
+export interface NewSessionContext {
+  branch: string;
+  own_windows_session: number | null;
+  /** The platform this client was built for: this computer's folder style before it reports a platform. */
+  build_style: PathStyle;
+  remembered: { agent: string; accounts: Record<string, Record<string, string>>; open_terminal: boolean };
+  /** The catalog's swarm, "" before one arrives: a folder's project inference counts only from it. */
+  swarm: string;
+}
+/**
+ * A project folder as the organization holds it (client/core `swarm::Folder`, Qt's
+ * SessionOrganization::Folder): `project_folders` answers at most 200 of them.
+ */
+export interface FolderOut {
+  /** The catalog's id, "" when it has none; never made up. */
+  id: string;
+  /** The folder's identity here: `id`, else `machine` + "\n" + `path`. Never sent to hgs as a folder id. */
+  key: string;
+  machine: string;
+  path: string;
+  /** "" when the catalog names none. */
+  name: string;
+  /** The computer's identity, "" for none. */
+  machine_id: string;
+  machine_name: string;
+}
+/** What Create manually… created (`newsession.rs` `CreatedWorktree`). */
+export interface CreatedWorktree {
+  path: string;
+  /** The catalog the dialog opened with, listing the new checkout as verified (`launch::created_catalog`). */
+  catalog: Record<string, unknown>;
+}
+export interface RepositoryFields {
+  url: string; parent: string; name: string;
+  /** The Clone to field's text. */
+  field: string;
+  /** `PARENT/NAME`, as Start and the plan take it. */
+  destination: string;
+  suggested: string; can_submit: boolean;
+}
+/**
+ * `creation_submit`'s answer (Task 5): the admitted creation's id, or the refusal's text. A rejected call is
+ * neither: its outcome is unknown, so the dialog stays submitted and nothing sends it again.
+ */
+export type CreationAdmission = { admitted: string } | { refused: string };
+/**
+ * An admitted creation's card (Task 5's `creations.rs` `CreationCard`): the operation's fields, with the caption,
+ * `can_resume` and `can_edit` from the core (`creation::caption`, `can_resume`, `Creations::can_edit`).
+ */
+export interface CreationCard {
+  id: string; tag: string;
+  /** The operation's state (`saving` ... `failed`, `bound`). */
+  state: string;
+  caption: string; error: string;
+  /** Seconds since the Unix epoch. */
+  created: number;
+  /** The destination project's id. */
+  group: string;
+  /** "" for this computer, else the alias. */
+  host: string;
+  /** The computer's identity: its machine card's host, else the alias. */
+  machine: string;
+  cmd: string; account: string;
+  /** The folder the agent starts in. */
+  target: string;
+  show_pending: boolean; launch_dispatched: boolean; stop_requested: boolean; worktree_receipts: boolean;
+  can_resume: boolean; can_edit: boolean;
+  /** The exact bound session's full name, empty until bound or on an older host. */
+  bound_session: string;
+}
+/** What a card's buttons ask of its exact operation (`creation_action`). */
+export type CreationAction = "resume" | "check" | "stop" | "hide" | "show";
+/** The `creations` event: a changed card, or an evicted operation. */
+export type CreationEvent = CreationCard | { id: string; removed: true };
+/** New session's account rows of the dialog's computer (`screens.rs`). */
+export interface LaunchAccounts {
+  /** A catalog reply (good or failed) was filed since the dialog chose this computer. */
+  loaded: boolean;
+  /** "Could not load accounts: %1" for the last reply's failure; the rows stay the last good catalog's since then. */
+  error: string | null;
+  /** The catalog's raw rows, at most 256, for the OpenCode fields. */
+  profiles: Record<string, unknown>[];
+  groups: Account[];
+}
 
 // The Terminal tab (src-tauri/src/terminal.rs).
 export interface TerminalTarget { computer: ComputerId; name: string; run_id: string; machine: string }

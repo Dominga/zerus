@@ -47,6 +47,7 @@ use zerus_client_core::swarm::edit::Intent;
 use zerus_client_core::swarm::grouping::{by_name, SyncView};
 use zerus_client_core::swarm::runs;
 use zerus_client_core::swarm::sync::{Controller, Due, EditOutcome, Observation, Ticket, STOPPED};
+use zerus_client_core::swarm::{self, Folder};
 use zerus_client_core::{run_limited, Change, Exit, OrganizationSnapshot, OrganizationUpdate};
 
 use crate::actions::REPLAY_NEEDS_HGS;
@@ -453,11 +454,113 @@ impl Organization {
         }
     }
 
+    /// A project's folders in the organization the list shows (Qt's
+    /// `m_organization`, which New session copies, SessionsWindow.cpp:2923):
+    /// at most [`swarm::FOLDERS`], read under the hub's lock without `hgs`.
+    /// An unknown project, or no state yet, has none.
+    pub fn project_folders(&self, project: &str) -> Vec<Folder> {
+        let hub = self.lock();
+        hub.sync
+            .presented()
+            .and_then(|(organization, _)| {
+                swarm::projects(organization)
+                    .iter()
+                    .find(|listed| swarm::project_id(listed) == project)
+                    .map(swarm::folders)
+            })
+            .unwrap_or_default()
+    }
+
+    /// Creation placement reads the same presented model as the Sessions
+    /// list, including edits accepted but not yet synchronized.
+    pub(crate) fn creation_projects(&self, local: &str) -> Vec<zerus_client_core::launch::Project> {
+        let hub = self.lock();
+        hub.sync
+            .presented()
+            .map(|(organization, _)| {
+                swarm::projects(organization)
+                    .iter()
+                    .take(swarm::MAX_PROJECTS)
+                    .map(|project| zerus_client_core::launch::Project {
+                        id: swarm::project_id(project).into(),
+                        name: project["name"].as_str().unwrap_or_default().into(),
+                        folders: swarm::folders(project)
+                            .into_iter()
+                            .map(|folder| zerus_client_core::launch::ProjectFolder {
+                                machine: if folder.machine == local {
+                                    String::new()
+                                } else {
+                                    folder.machine
+                                },
+                                path: folder.path,
+                            })
+                            .collect(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The observed catalog's `swarm_id`, empty before the first state: New
+    /// session infers a folder's project only from this swarm
+    /// (SessionsWindow.cpp:2922). It is top-level, so pending edits never
+    /// change it and the organization is not rebuilt for it.
+    pub fn swarm_id(&self) -> String {
+        let value = self.lock().sync.observed_value();
+        value
+            .and_then(|value| value["swarm_id"].as_str().map(str::to_owned))
+            .unwrap_or_default()
+    }
+
     /// [`Organization::submit_with`] for an intent built beforehand (the
     /// tests, which run on Unix).
     #[cfg(all(test, unix))]
     pub fn submit(&self, intent: Intent) -> EditOutcome {
         self.submit_with(move |_| intent)
+    }
+
+    /// The Controller's current refusal; after-bind edits only wait while
+    /// its first state has not arrived, never on a later apply.
+    pub(crate) fn creation_refusal(&self) -> Option<String> {
+        if !self.0.allowed {
+            return Some(REPLAY_NEEDS_HGS.into());
+        }
+        let hub = self.lock();
+        if hub.stopped {
+            return Some(STOPPED.into());
+        }
+        hub.sync.view().reason
+    }
+
+    /// Records a creation's edit without waiting for swarm apply, as Qt's
+    /// resolvePlacement edits its local model (SessionsWindow.cpp:1539-1569).
+    /// A later sync failure belongs to the organization's status line.
+    pub(crate) fn accept(&self, intent: impl FnOnce(&Pump) -> Intent) -> Result<(), String> {
+        if !self.0.allowed {
+            return Err(REPLAY_NEEDS_HGS.into());
+        }
+        let mut hub = self.lock();
+        if hub.stopped {
+            return Err(STOPPED.into());
+        }
+        let intent = intent(&self.0.pump);
+        // Qt's addFolder returns without changed() for these no-ops.
+        // The Controller's readiness refusal still takes precedence.
+        if matches!(&intent, Intent::AddFolder { .. })
+            && hub.sync.ready()
+            && hub.sync.presented().is_some_and(|(current, _)| {
+                zerus_client_core::swarm::edit::apply(current, &intent)
+                    .is_ok_and(|next| next == *current)
+            })
+        {
+            return Ok(());
+        }
+        hub.sync.edit(&intent, self.now())?;
+        self.0.pump.edited(&intent);
+        self.publish(&mut hub);
+        self.release(hub);
+        self.0.wake.notify_all();
+        Ok(())
     }
 
     /// Runs one edit; answers once the first apply that carries it ended.
@@ -1203,6 +1306,14 @@ pub async fn sort_project(
     .await
 }
 
+/// New session's copy of a project's folders (SessionsWindow.cpp:2923,
+/// NewSessionDialog.cpp:651): [`Organization::project_folders`], off the
+/// main thread. It never runs `hgs`.
+#[tauri::command(async)]
+pub fn project_folders(state: State<'_, Organization>, project: String) -> Vec<Folder> {
+    state.project_folders(&project)
+}
+
 /// Expand or collapse a project: this device's layout, no `hgs`. Off the
 /// main thread, as every command that takes a lock: the pump's lock may be
 /// held by a grouping pass over every row.
@@ -1793,6 +1904,95 @@ mod tests {
             project: "ungrouped".into(),
             before: None,
         }
+    }
+
+    #[test]
+    fn creation_placement_returns_while_swarm_apply_is_held() {
+        let fake = Fake::new(json!([{"stdout": full("d2"), "gate": "go"}]));
+        let organization = fake.organization(&Pump::default(), true);
+        organization.set_source(snapshot("d1"));
+        organization.observe(&state("d1"));
+        let accepting = organization.clone();
+        let (send, answer) = sync_channel(1);
+        let edit = std::thread::spawn(move || {
+            let _ = send.send(accepting.accept(|_| move_to_inbox()));
+        });
+        let accepted = answer.recv_timeout(Duration::from_secs(2));
+        wait_until("the held apply", || !fake.applies().is_empty());
+        let no_waiter = organization.lock().waiting.is_empty();
+        std::fs::write(fake.dir.join("go"), b"").unwrap();
+        edit.join().unwrap();
+        assert!(no_waiter, "accept registers no apply waiter");
+        assert_eq!(accepted, Ok(Ok(())), "placement waited for swarm apply");
+        fake.finish(organization);
+    }
+
+    #[test]
+    fn creation_placement_refuses_not_ready_replay_and_stopped_with_their_details() {
+        let fake = Fake::landing();
+        let organization = fake.organization(&Pump::default(), true);
+        let detail = organization
+            .lock()
+            .sync
+            .edit(&move_to_inbox(), organization.now())
+            .unwrap_err();
+        assert_eq!(organization.accept(|_| move_to_inbox()), Err(detail));
+        organization.lock().stopped = true;
+        assert_eq!(
+            organization.accept(|_| move_to_inbox()),
+            Err(STOPPED.into())
+        );
+        fake.finish(organization);
+        let fake = Fake::landing();
+        let organization = fake.organization(&Pump::default(), false);
+        assert_eq!(
+            organization.accept(|_| move_to_inbox()),
+            Err(REPLAY_NEEDS_HGS.into())
+        );
+        assert!(fake.applies().is_empty());
+        fake.finish(organization);
+    }
+
+    #[test]
+    fn creation_placement_reads_the_accepted_project_and_folder_before_apply() {
+        let fake = Fake::new(json!([{"stdout": full("d2"), "gate": "go"}]));
+        let organization = fake.organization(&Pump::default(), true);
+        organization.set_source(snapshot("d1"));
+        organization.observe(&state("d1"));
+        organization
+            .accept(|_| Intent::Create {
+                id: "reserved".into(),
+                name: "Repository".into(),
+                members: Vec::new(),
+            })
+            .unwrap();
+        for _ in 0..2 {
+            organization
+                .accept(|_| Intent::AddFolder {
+                    id: "folder-id".into(),
+                    project: "reserved".into(),
+                    machine: "workstation".into(),
+                    path: "/srv/repo".into(),
+                    name: String::new(),
+                    style: zerus_client_core::paths::Style::Posix,
+                })
+                .unwrap();
+        }
+        let projects = organization.creation_projects("workstation");
+        let created = projects
+            .iter()
+            .find(|project| project.id == "reserved")
+            .unwrap();
+        assert_eq!(created.name, "Repository");
+        assert_eq!(
+            created.folders.len(),
+            1,
+            "Continue setup adds the same folder idempotently"
+        );
+        assert_eq!(created.folders[0].machine, "");
+        assert_eq!(created.folders[0].path, "/srv/repo");
+        std::fs::write(fake.dir.join("go"), b"").unwrap();
+        fake.finish(organization);
     }
 
     #[test]
@@ -2977,6 +3177,102 @@ mod tests {
         );
         assert!(fake.applies().is_empty());
         assert!(!fake.draft().exists());
+        fake.finish(organization);
+    }
+
+    /// The topic's rows for a `swarm get` object, as the server sends them
+    /// (src/watch/organization.rs): the summary, a row per project and its
+    /// members, and the versions.
+    fn topic_rows(full: &Value) -> std::collections::BTreeMap<String, Value> {
+        let mut rows = std::collections::BTreeMap::new();
+        let mut summary = full.clone();
+        summary.as_object_mut().unwrap().remove("versions");
+        let projects = full["organization"]["projects"].as_array().unwrap();
+        summary["organization"]["projects"] =
+            json!(projects.iter().map(|p| p["id"].clone()).collect::<Vec<_>>());
+        rows.insert("organization".to_owned(), summary);
+        for project in projects {
+            let id = project["id"].as_str().unwrap();
+            let mut row = project.clone();
+            let sessions = row.as_object_mut().unwrap().remove("sessions").unwrap();
+            row["session_chunks"] = json!(1);
+            rows.insert(format!("project:{id}"), row);
+            rows.insert(format!("members:{id}:0"), json!({ "sessions": sessions }));
+        }
+        rows
+    }
+
+    /// The state the core reports for `full` (`OrganizationState::take`).
+    fn state_of(full: &Value) -> Change {
+        let mut value = full.clone();
+        value.as_object_mut().unwrap().remove("versions");
+        Change::Organization {
+            computer: ComputerId::local(),
+            update: OrganizationUpdate::State {
+                membership: Arc::new(zerus_client_core::swarm::members(&value["organization"])),
+                digest: value["digest"].as_str().unwrap().to_owned(),
+                value: Arc::new(value),
+            },
+        }
+    }
+
+    /// New session's copy of a project's folders (SessionsWindow.cpp:2923):
+    /// the same from the topic's rows and from `swarm get`, read without hgs.
+    #[test]
+    fn project_folders_are_the_same_from_the_topic_and_from_swarm_get() {
+        let mut catalog = full("d1");
+        catalog["swarm_id"] = json!("swarm-1");
+        catalog["organization"]["projects"][0]["folders"] = json!([
+            {"id": "f1", "machine": "workstation", "machine_id": "m-1", "path": "/home/example/src/sample-project", "name": ""},
+            {"machine": "studio", "path": "/srv/docs", "name": "Docs", "machine_name": "Studio"},
+            {"id": "f3", "machine": "", "path": "/srv/no-computer"},
+            {"id": "f4", "machine": "workstation", "path": "relative"},
+            {"id": "f5", "machine": "workstation", "path": "/home/example/src/sample-project"}]);
+        let rebuilt = zerus_client_core::organization::rebuild(&topic_rows(&catalog)).unwrap();
+        let mut answers = Vec::new();
+        for value in [rebuilt, catalog.clone()] {
+            let fake = Fake::landing();
+            let organization = fake.organization(&Pump::default(), true);
+            assert!(
+                organization.project_folders("alpha").is_empty(),
+                "no state yet"
+            );
+            assert_eq!(organization.swarm_id(), "");
+            organization.set_source(snapshot("d1"));
+            organization.observe(&state_of(&value));
+            answers.push(organization.project_folders("alpha"));
+            assert!(organization.project_folders("gone").is_empty());
+            assert!(organization.project_folders("ungrouped").is_empty());
+            assert_eq!(organization.swarm_id(), "swarm-1");
+            fake.finish(organization);
+        }
+        assert_eq!(answers[0], answers[1]);
+        let keys: Vec<&str> = answers[0].iter().map(|f| f.key.as_str()).collect();
+        assert_eq!(keys, ["f1", "studio\n/srv/docs"]);
+        assert_eq!(answers[0][1].id, "", "a missing id stays empty");
+        assert_eq!(
+            serde_json::to_value(&answers[0][1]).unwrap(),
+            json!({"id": "", "key": "studio\n/srv/docs", "machine": "studio", "path": "/srv/docs", "name": "Docs", "machine_id": "", "machine_name": "Studio"})
+        );
+    }
+
+    #[test]
+    fn project_folders_answer_at_most_folders() {
+        let mut catalog = full("d1");
+        let many: Vec<Value> = (0..swarm::FOLDERS + 5)
+            .map(|n| json!({"id": format!("f{n}"), "machine": "workstation", "path": format!("/srv/{n}")}))
+            .collect();
+        catalog["organization"]["projects"][0]["folders"] = json!(many);
+        let fake = Fake::landing();
+        let organization = fake.organization(&Pump::default(), true);
+        organization.set_source(snapshot("d1"));
+        organization.observe(&state_of(&catalog));
+        let folders = organization.project_folders("alpha");
+        assert_eq!(folders.len(), swarm::FOLDERS);
+        assert_eq!(
+            folders[swarm::FOLDERS - 1].key,
+            format!("f{}", swarm::FOLDERS - 1)
+        );
         fake.finish(organization);
     }
 }

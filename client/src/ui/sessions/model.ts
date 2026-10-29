@@ -7,6 +7,7 @@ import { machineCards } from "../../store/machines";
 import { archiveFilterCounts, archiveMachineChoices, archiveProjectChoices } from "./archive-filters";
 import { defaultProject, grouping, groups } from "../../store/organization";
 import { stateFilter, matchesFilter, search, machineFilter, projectFilter, expandedChildren, compactRows } from "../../store/ui";
+import { withCreations } from "../../store/creations";
 import { isWorking, needsAttention } from "../../store/attention";
 import type { Session } from "./types";
 
@@ -21,6 +22,7 @@ export const ROW_HEIGHT = { header: 40, card: 94, child: 64, collapsedRow: 40 } 
 export function rowHeight(row: Row, strip = false): number {
   if (row.type === "header") return ROW_HEIGHT.header;
   if (row.type === "child") return ROW_HEIGHT.child;
+  if (row.type === "creation") return ROW_HEIGHT.card;
   if (row.compactRow && !strip) return ROW_HEIGHT.collapsedRow;
   return ROW_HEIGHT.card;
 }
@@ -67,10 +69,12 @@ export const listRows = createMemo<Row[]>(() => {
   const q = search().trim();
   const hosts = machineFilter();
   const visible = (s: Session) => matchesFilter(s, f) && (!hosts.length || hosts.includes(s.machine)) && sessionMatchesSearch(s, q);
-  return groupRows({
+  const scope = {
     grouping: grouping(), members: membersByGroup(), visible, online, projects: projectFilter(),
-    expanded: (k) => !!expandedChildren[k], compact: (k) => !!compactRows[k],
-  });
+    expanded: (k: string) => !!expandedChildren[k], compact: (k: string) => !!compactRows[k], filter: f, hosts, query: q,
+  };
+  const out = groupRows(scope);
+  return withCreations(out, scope);
 });
 
 /** The list footer's counts of the cards shown (SessionsWindowRows.cpp:468-474). */

@@ -126,6 +126,34 @@ impl AccountsState {
         self.start_catalogs(hosts, now, force)
     }
 
+    /// [`Self::ensure_catalogs`] without forgetting a host: the hub prunes
+    /// with its full host list in [`Self::warm`], which keeps New session's
+    /// computer, and polls only the hosts the Accounts page lists.
+    pub fn poll_catalogs(
+        &mut self,
+        hosts: &[ComputerId],
+        now: u64,
+        force: bool,
+    ) -> Vec<ComputerId> {
+        self.start_catalogs(hosts, now, force)
+    }
+
+    /// One host's `account ls` for New session, which reads on every open,
+    /// computer change and Refresh (`NewSessionDialog::loadAccounts`): it
+    /// starts now (marked running) unless one runs, which is shared without a
+    /// follow-up. No other host changes. True when it starts. A host read
+    /// this way needs no warm-up read of its own.
+    pub fn ensure_catalog(&mut self, host: &ComputerId, now: u64) -> bool {
+        self.warmed.insert(host.clone());
+        let slot = self.catalogs.entry(host.clone()).or_default();
+        if slot.pending {
+            return false;
+        }
+        slot.requested = Some(now);
+        slot.pending = true;
+        true
+    }
+
     /// Each newly listed host once, even before Accounts is opened. `hosts`
     /// is the current host list: others are forgotten.
     pub fn warm(&mut self, hosts: &[ComputerId], now: u64) -> Vec<ComputerId> {
@@ -367,6 +395,78 @@ mod tests {
             "all are past thirty seconds"
         );
         assert!(s.reading());
+    }
+
+    // G3: New session reads one computer's catalog on every open, computer
+    // change and Refresh (NewSessionDialog::loadAccounts 865-874), on the hub:
+    // a running one is shared without a follow-up, and no other host changes.
+    #[test]
+    fn one_computers_catalog_starts_unless_one_runs_and_leaves_the_others() {
+        let (local, studio) = (ComputerId::local(), ComputerId::from("studio"));
+        let mut s = AccountsState::default();
+        s.warm(&[local.clone(), studio.clone()], 0);
+        s.finish_catalog(
+            &local,
+            Ok(json!({"profiles": []})),
+            1,
+            std::slice::from_ref(&local),
+        );
+        assert!(!s.ensure_catalog(&studio, 5), "studio's warm-up still runs");
+        assert!(!s.catalogs[&studio].queued, "shared, not queued again");
+        assert!(
+            s.ensure_catalog(&local, 10),
+            "read a moment ago, read again"
+        );
+        assert!(s.catalogs[&local].pending && !s.catalogs[&local].queued);
+        assert_eq!(s.catalogs[&local].requested, Some(10));
+        assert!(!s.ensure_catalog(&local, 50), "a running read is shared");
+        assert!(!s.catalogs[&local].queued);
+        s.finish_catalog(
+            &local,
+            Ok(json!({"profiles": []})),
+            51,
+            std::slice::from_ref(&local),
+        );
+        assert!(s.ensure_catalog(&local, 52));
+        let mac = ComputerId::from("mac");
+        assert!(s.ensure_catalog(&mac, 0), "never read");
+        assert!(s.catalogs.contains_key(&studio), "the others are kept");
+        s.finish_catalog(
+            &mac,
+            Ok(json!({"profiles": []})),
+            1,
+            std::slice::from_ref(&mac),
+        );
+        assert!(
+            s.warm(std::slice::from_ref(&mac), 2).is_empty(),
+            "read for New session: no warm-up read again"
+        );
+    }
+
+    // The page polls the hosts it lists; New session's computer outside them
+    // keeps its catalog until the warm-up's full list drops it.
+    #[test]
+    fn polling_the_listed_hosts_forgets_no_other_host() {
+        let (local, lab) = (ComputerId::local(), ComputerId::from("lab"));
+        let mut s = AccountsState::default();
+        assert!(s.ensure_catalog(&lab, 0));
+        s.finish_catalog(&lab, Ok(json!({"profiles": []})), 1, &[]);
+        let listed = std::slice::from_ref(&local);
+        assert_eq!(s.poll_catalogs(listed, 40_000, false), listed);
+        assert!(
+            s.poll_catalogs(listed, 41_000, true).is_empty(),
+            "one in flight"
+        );
+        assert!(
+            s.catalogs[&local].queued,
+            "a forced poll queues its follow-up"
+        );
+        assert!(
+            s.catalogs.contains_key(&lab) && !s.catalogs[&lab].pending,
+            "the unlisted host is kept and not read"
+        );
+        s.warm(listed, 42_000);
+        assert!(!s.catalogs.contains_key(&lab), "the full list forgets it");
     }
 
     #[test]

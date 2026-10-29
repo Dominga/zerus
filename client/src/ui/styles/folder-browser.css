@@ -1,0 +1,24 @@
+/* The folder browser of another computer (components/FolderBrowser.tsx),
+   from design/webui/src/dialogs/setup/Clone.tsx where Qt does not differ:
+   Qt's 660 x 540 dialog, at least 500 x 400 (DirectoryDialog.cpp:55), and
+   its New folder dialog, at least 440 wide (298). Skin tokens only. */
+@layer components {
+  dialog.fb-dlg { width: min(660px, calc(100vw - 48px)); min-width: min(500px, calc(100vw - 48px)); height: min(540px, calc(100vh - 64px)); min-height: min(400px, calc(100vh - 64px)); }
+  .fb-body { display: flex; flex-direction: column; gap: 10px; flex: 1 1 auto; }
+  .fb-machine { margin-top: -6px; font-size: var(--fs-sm); }
+  .fb-nav .field { min-width: 0; }
+  .fb-list { flex: 1 1 auto; min-height: 120px; overflow: auto; padding: 4px; border: 1px solid var(--z-color-border); border-radius: var(--z-radius-md); background: var(--z-color-field); }
+  .fb-list:focus-visible { outline: 2px solid var(--z-color-focus); outline-offset: 1px; }
+  .fb-list[aria-disabled="true"] > li:not(.fb-inline) { opacity: .55; }
+  .fb-list li { display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-radius: var(--z-radius-sm); font-size: var(--fs-sm); cursor: default; }
+  .fb-list li[role="option"]:hover { background: var(--z-color-hover); }
+  .fb-list li.on { background: var(--z-color-row-selected); }
+  .fb-inline { padding: 4px 6px; }
+  .fb-icon { flex: none; color: var(--z-color-dim); }
+  .fb-status { min-height: 1.4em; font-size: var(--fs-sm); color: var(--z-color-muted); white-space: pre-line; overflow-wrap: anywhere; }
+  .menu.fb-menu { position: absolute; }
+  .menu.fb-menu .menu-item { font-size: var(--fs-sm); }
+  dialog.fb-prompt { width: min(480px, calc(100vw - 48px)); min-width: min(440px, calc(100vw - 48px)); }
+  .fb-prompt .form-row { grid-template-columns: 110px minmax(0, 1fr); }
+  .fb-text { font-size: var(--fs-sm); color: var(--z-color-text-2); overflow-wrap: anywhere; }
+}

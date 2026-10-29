@@ -22,6 +22,12 @@ pub struct AppState {
 
 #[cfg(feature = "live")]
 impl AppState {
+    /// A manual offline Refresh nudges only its existing source; never starts
+    /// another fleet or changes an online source.
+    pub fn reconnect(&self, computer: &str) -> bool {
+        self.live.reconnect(computer)
+    }
+
     /// The change pump, whose mirror is the screens hub's view of the fleet.
     pub fn pump(&self) -> crate::pump::Pump {
         self.live.pump.clone()
@@ -44,6 +50,12 @@ impl AppState {
     /// organization updates. Set once, before the webview starts the source.
     pub fn set_organization(&self, organization: crate::organization::Organization) {
         let _ = self.live.organization.set(organization);
+    }
+
+    /// Set once before the source starts. The host's observer never blocks
+    /// the source drain or takes the pump/organization locks.
+    pub fn set_creations(&self, host: crate::creations::CreationHost) {
+        let _ = self.live.creations.set(host);
     }
 
     /// Applies the preferences the host confirmed for a Mute or Unmute to the
@@ -112,6 +124,7 @@ mod live {
         pub pump: Pump,
         source: Mutex<Option<Source>>,
         pub organization: OnceLock<Organization>,
+        pub creations: OnceLock<crate::creations::CreationHost>,
     }
 
     /// Follows this computer's organization: the catalog is shared, so its
@@ -132,6 +145,18 @@ mod live {
     }
 
     impl Live {
+        pub fn reconnect(&self, computer: &str) -> bool {
+            match self
+                .source
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+            {
+                Some(Source::Fleet(fleet)) => fleet.reconnect(&ComputerId::from(computer)),
+                Some(Source::Replay(_)) | None => false,
+            }
+        }
+
         /// Starts the data source once; a later call (a reloaded webview)
         /// queues the last-known catalog again. Returns "live" or "replay".
         /// This computer's organization goes to the hub, which reads its
@@ -140,6 +165,7 @@ mod live {
         /// here before `source` is taken, so the two locks never nest.
         pub fn start(self: &Arc<Self>) -> Result<String, String> {
             let organization = self.organization.get().cloned();
+            let creations = self.creations.get().cloned();
             if let Some(organization) = &organization {
                 let live = Arc::downgrade(self);
                 organization.set_source(Arc::new(move || live.upgrade()?.organization_snapshot()));
@@ -169,11 +195,21 @@ mod live {
                         (Source::Fleet(fleet), "live")
                     }
                 };
-            self.pump.drain_with(changes, move |change| {
-                if let Some(organization) = &organization {
-                    organization.observe(change);
-                }
-            });
+            let after = creations.clone();
+            self.pump.drain_with_after(
+                changes,
+                move |change| {
+                    if let Some(organization) = &organization {
+                        organization.observe(change);
+                    }
+                    creations.is_some() && crate::creations::CreationHost::observes(change)
+                },
+                move || {
+                    if let Some(creations) = &after {
+                        creations.catalog_changed();
+                    }
+                },
+            );
             *source = Some(started);
             Ok(mode.into())
         }

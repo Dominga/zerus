@@ -4079,7 +4079,12 @@ gives `replaced` (the name lists under a new run), `archived`, `forgotten` or
 `ended`. The listing's other fields arrive as one `catalog.meta` snapshot: at
 once when a lasting field changes, and at most every 10 s when only `metrics` or
 `desktop_presence` changed. Archives stay outside the stream; page them with
-`archives --json`.
+`archives --json`. A row retains its `launch_id` when it has one. For launch
+binding, `catalog.meta` always includes `ended_launches`, including an empty
+array when no launch has ended; its newest-first, 32-entry shape is the same as
+`ls --json`. This is additive watch-v1 data. A client treats a missing field on
+an older peer as a reason to retain its bounded `ls --json` binding poll, and an
+explicit empty array as supported with no results.
 
 ```json
 {"op":"subscribe","topic":"activity","session":{"name":"claude/sample-project/review","run_id":"RUN","conversation_id":"CONVERSATION"},"after":123,"tail":50}

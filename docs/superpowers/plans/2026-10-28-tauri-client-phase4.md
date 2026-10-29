@@ -6089,6 +6089,45 @@ git commit -m "feat(client): resume-then-send, compact-to-send and Clear context
 
 ### Task 6: The composer view
 
+**As built** (`c5e94b2a`). Where the steps below differ, the code and this list win (Qt wins over the brief; `MessageComposer.cpp`, `SessionsWindow.cpp` and `ActivityView.cpp` lines). Task 7 binds to this list:
+- **The store** is `createComposer(port, timers?, images?, notices?)`; `notices` defaults to the app's `notify`. `ComposerPort` gains `refresh(handle)`. It exports `EDIT_MS`, `MAX_TEXT_BYTES`, `MAX_PIXELS`, `TOO_LONG`, `draftKey`, `statusLine`, and the `Dialog`, `Images`, `Notices` and `ComposerPort` types.
+  - Its API: `view`, `text`, `selection` (`start` is Qt's anchor, `end` its position), `dialog`, `locked`, `operationLocked`, `sendEnabled`, `hint`, `status`, `apply`, `receive`, `open`, `input`, `select`, `flush`, `attachFiles`, `pasteImage`, `remove`, `undo`, `send`, `answer`, `closeDialog`, `openClear`, `confirmClear`, `cancelSend`, `allowRetry`, `interrupted` and `refresh`.
+- **The locks** follow Qt's `locked` (1148-1149). `operationLocked` covers an attach or paste, a remove or Undo until a higher epoch, a send or answer call, a started send until the view shows `sending`/`waiting` or a higher epoch, an open cold cache or start question, and Rust's `!loaded`/`attaching`/`sending`/`waiting`. `locked` adds `session_blocks_input`.
+  - A refused Send (`busy`, `blocked`) stays locked until Rust hands the text back. An answer's refusal changes nothing.
+  - A question keeps the epoch, so closing it unlocks the editor. The store flushes before answering.
+  - A question still open when the composer changes or goes answers Cancel.
+- **`sendEnabled`** is Qt's Send rule (1185), computed from the view's facts and the text being typed, so it does not wait for an edit's round trip. A disabled Send pressed with content shows the status at the editor for 5 s (`hint`, 814-818).
+- **Edits.** A cursor move counts as an edit (`rememberCursor`). Every key flushes at once while the view has `status_error`, an uncertain mark or a failed local row.
+- **Envelope views** go through `receive`. It drops a view of another composer (by draft key, or by the open handle). It holds views that arrive while an `open` runs and applies them after the open's answer.
+- **The status line** is `statusLine(view, ownError, tooLong)`. Its order: waiting, the store's own error, then Rust's status unless that is the session status, the block reason or the stale length text, then the length.
+- **Qt over the brief:**
+  - The store's own error (a refused paste) survives typing, as Qt's `showError` notice (textChanged, 366-376).
+  - A paste is refused above 32 000 000 pixels, not at it (394; the core's `pasted_image`).
+  - Notices are sticky only in the error tone (`showNotice`, `SessionsWindow.cpp:5210`).
+  - The placeholder is always "Message this agent…" (`updatePlaceholder`, 569); the unavailable reason is in the status line.
+- **`Dialog`** is `cold | start | clear`. `clear` holds only its `control` snapshot: the `clear_context` reply's token is already spent in Rust. `openClear()` opens only while `clear.enabled`, as Qt's `clearContext()` returns early. `ComposerDialogs` is mounted once in `SessionDetail`, so the header's Clear works on any tab.
+- **The toolbar** keeps Qt's slot order (`ComposerToolbar.h:105`, `leading` at `ComposerToolbar.cpp:242`): Attachments, the voice slot (Task 13), Latest, Mark as read, the compaction indicator, Cancel send, the grip, the cache chip and the Context chip. Below 600 px (times the content scale) the chips shorten: "{n}", the cache's `short_label`, an icon-only Mark as read.
+  - Mark as read uses `markReadChip(s, online)` (this base's signature) with Qt's `read-all` icon (982).
+  - The compaction indicator needs the row `tracked`, online and `running`, and the followed state's `phase` `compacting`, `runtime_state` `live`, `process_state` `running` and a `state` other than `archived` (1899-1901; `SessionsWindow.cpp:3974-3975`).
+  - The cache chip shows the warning glyph except when warm (`CacheStatus.h`). Its popover's Clear context shows only with a warning (3791), is enabled by `clear.cache_enabled`, and its tooltip is `cache_reason` or Qt's.
+  - The Context chip is R1's `ComposerView.context` (`session_usage::ContextChip`, 3788). It is not clickable until the side panel exists.
+- **The action row** follows Qt's order (364): Attach, Reference file (disabled), the status line, Refresh, Allow retry, the model button (disabled), Stop and Send.
+  - Refresh shows while the session status is an error and is enabled while `!operationLocked` (1194-1195). It calls `composer_refresh`.
+  - Allow retry needs `uncertain && !operationLocked` (1193).
+  - Send's tooltip is only the waiting text, since no tooltip names a chord.
+  - The status line takes the warning colour while a send waits (1224-1226).
+- **Stop.** Every Stop (the composer's, the header icon, the header menu) calls `composer.interrupted()` before phase 2's `actionEntries(...).stop.action()`, since every Qt Stop is the composer's `interruptRequested` (1187-1191).
+- **Clear session** in the header (button and menu entry) uses `composer.view()?.clear`: `enabled`, `reason` as the hint and "Clearing…" while `running`. It calls `composer.openClear()`.
+- **Placement.** The composer is hidden while a subagent is open and for an archived row's recorded Activity (`activityReadOnly`). `store/session.ts` opens no composer for such a row.
+- **Keyboard.** The composer root has `data-shortcut-context="composer"`. `message.send` is registered with `onCommand(id, handler, editor)` while mounted. `message.push` is not registered: push is not enabled before A2 (Qt's `setPushEnabled`, 841-847). The attachments list and the cache popover are `data-shortcut-context="none"`.
+- **src-tauri:**
+  - `composer_refresh(handle)` runs `Composers::refresh`, which calls `refresh_details` for the open composer's handle only.
+  - `composer_tab(tab)` sets `Hub.poll` through `Composers::set_poll(send::poll_seconds(tab, settings))`. Terminal and Native UI take `processes/backgroundSeconds`, Processes takes `processes/activeSeconds`, and any other tab keeps 2.5 s for a failed read's retry (2013-2016).
+  - `ComposerView` and `SessionView` gain `context: ContextChip`.
+- **Envelope and catalog.** `bridge.normalize` is exported and keeps `composer` and `draft_keys`; `isEmptyBatch` counts both. `session.receive` calls `composer.receive` and `setDraftKeys`. `setDraftKeys(keys)` marks rows by `computer + "\n" + name` and keeps the mark through later upserts.
+- **Activity** exports `following`, `unseen` (events whose `seq` follows the newest one seen, while not following) and `jumpToLatest()`.
+- **For Task 7:** the bridge already has `localRetry`, `localDelete` and `localInspect`, and `ComposerView.local` is typed as `LocalMessage[]`.
+
 **Depends on:**
 - Tasks 3a-5;
 - for the Mark as read chip, `markReadChip(session)` and `runMarkRead(row)` from the menu-parity Piece B (`zerus-5wmh.16`, PR #406, `ui/sessions/mark-entries.ts`): until it merges, the chip stays hidden;

@@ -13,7 +13,10 @@ catalog snapshot in pages, then deltas separated by heartbeats (the replay
 pauses one interval per heartbeat and loops the deltas). Activity frames are
 held by the replay and served on follow, as the stream does after a subscribe.
 This computer's stream also offers the `organization` topic: one snapshot of
-the organization's rows follows `catalog.meta`.
+the organization's rows follows `catalog.meta`. Every stream offers the
+`processes` topic; this computer's holds one `processes` state, for
+claude/sample-project/api-refactor, which the replay serves when the
+Processes tab follows that session.
 """
 import json
 import pathlib
@@ -68,6 +71,8 @@ CHUNK = 1000
 # The rank step of the Rust grouping (client/core/src/swarm/layout.rs GAP).
 RANK_GAP = 1 << 20
 NEEDS_APP = "Project changes need the desktop app."
+# The session whose processes the replay serves.
+PROCESS_SESSION = "claude/sample-project/api-refactor"
 THOUGHTS = ["The test builds the cursor from the last row, so an empty page needs its own branch.", "Checking whether the retry cap is configurable before changing it."]
 
 
@@ -153,6 +158,35 @@ def state_for(row):
 
 
 CAPTIONS = {"attention": None, "error": "Rate limit reached", "paused": "Paused", "ready": "Ready"}
+
+
+def processes_for(row):
+    """The `processes` topic's value for one session: `processes` and `process_work`
+    as `hgs inspect` reports them, without the `run_id` the topic strips
+    (src/watch/processes.rs). A live `cargo test` tree (an OS tree's output stays in
+    the recorded command or Terminal), a recorded build with no live confirmation
+    and a finished fetch, whose output both can be read."""
+    at = row["last_event_at"]
+
+    def item(id, **fields):
+        return {"id": id, "owner": "main", "provider": row["agent"], "run_id": row["run_id"],
+                "conversation_id": row["conversation_id"], "cwd": row["cwd"], **fields}
+
+    items = [
+        item("tree-cargo-test", source="process_tree", command="cargo test --workspace", status="running",
+             started_at=at - 95, updated_at=at, observed=True, background=True, os_pid=48211, child_count=3,
+             description="PID 48211 (3 child processes)", capabilities={"output": False, "stop": True, "stdin": False}),
+        item("call-npm-build", call_id="toolu_build", source="hooks", command="npm run build", status="unknown",
+             last_status="running", started_at=at - 300, updated_at=at - 240, observed=False, background=True,
+             capabilities={"output": True, "stop": False, "stdin": False}),
+        item("call-git-fetch", call_id="toolu_fetch", source="hooks", command="git fetch", status="finished",
+             started_at=at - 600, updated_at=at - 598, ended_at=at - 598, exit_code=0, output_at=at - 598,
+             observed=True, background=False, capabilities={"output": True, "stop": False, "stdin": False}),
+    ]
+    processes = {"items": items, "active_count": 0, "live_count": 1, "unknown_count": 1, "complete": True,
+                 "sampled_at": at, "notes": []}
+    return {"processes": processes,
+            "process_work": {"count": 1, "started_at": at - 95, "command": "cargo test --workspace", "sampled_at": at}}
 
 
 def view_row(row, machine):
@@ -318,9 +352,9 @@ def stream(host, rows, long_key, topic_rows=None):
 
     frame("hello", machine_id="00000000-0000-4000-8000-0000000000" + ("01" if host == "workstation" else "02"), host=host, hgs_version="1.56.0",
           stream=f"stream-{host}", heartbeat_ms=10000, max_frame_bytes=1 << 20,
-          topics=["catalog", "catalog.meta", "activity", "git"] + (["organization"] if topic_rows is not None else []),
+          topics=["catalog", "catalog.meta", "activity", "git", "processes"] + (["organization"] if topic_rows is not None else []),
           limits={"activity_subscriptions": 16, "page_bytes": 524288, "queue_bytes": 4194304, "activity_tail": 100, "activity_read": 200,
-                  "control_line_bytes": 65536, "git_subscriptions": 64})
+                  "control_line_bytes": 65536, "git_subscriptions": 64, "processes_subscriptions": 16})
     half = len(rows) // 2
     pages = [rows[:half], rows[half:]]
     for page, chunk in enumerate(pages):
@@ -340,6 +374,10 @@ def stream(host, rows, long_key, topic_rows=None):
             chunk = events[start:start + 200]
             frame("events", topic="activity", key=key, events=chunk, cursor=chunk[-1]["seq"])
         frame("state", topic="activity", key=key, value=state, rev=1)
+    # Held by the replay like Activity, and served when the Processes tab follows the session.
+    for r in rows:
+        if r["name"] == PROCESS_SESSION:
+            frame("state", topic="processes", key=key_of(r), value=processes_for(r), rev=1)
     for n, step in enumerate(deltas_for(rows)):
         frame("heartbeat", at=BASE_AT + n)
         frame("delta", topic="catalog", upsert=[{"key": key_of(r), "row": r} for r in step["upsert"]], remove=step["remove"], cursor=2 + n)

@@ -8,6 +8,8 @@
 //! the last frame the part after the first heartbeat loops. Activity frames are
 //! held per session and served on follow, as the stream does after a subscribe:
 //! the newest `tail` events, or the events after `after` in reads of 200.
+//! A `processes` state is held per session the same way and served when the
+//! Processes hub follows it; a replay never runs `hgs` for it.
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -35,6 +37,8 @@ struct Computer {
     id: ComputerId,
     catalog: Mutex<(CatalogState, u64)>,
     logs: HashMap<String, Log>,
+    /// The last `processes` state of each session, with its `rev`.
+    processes: HashMap<String, (Value, u64)>,
 }
 
 impl Computer {
@@ -87,11 +91,20 @@ fn is_activity(body: &Body) -> bool {
     }
 }
 
-/// Reads one replay file: the frames to play, and the Activity logs to serve.
-fn load(path: &Path) -> std::io::Result<(Vec<Body>, HashMap<String, Log>)> {
+/// What one replay file holds: the frames to play, the Activity logs and the
+/// processes states to serve.
+type Loaded = (
+    Vec<Body>,
+    HashMap<String, Log>,
+    HashMap<String, (Value, u64)>,
+);
+
+/// Reads one replay file.
+fn load(path: &Path) -> std::io::Result<Loaded> {
     let text = std::fs::read_to_string(path)?;
     let mut script = Vec::new();
     let mut logs: HashMap<String, Log> = HashMap::new();
+    let mut processes: HashMap<String, (Value, u64)> = HashMap::new();
     for (number, line) in text
         .lines()
         .enumerate()
@@ -108,6 +121,12 @@ fn load(path: &Path) -> std::io::Result<(Vec<Body>, HashMap<String, Log>)> {
                 continue;
             }
         };
+        if let Body::State(s) = &body {
+            if s.topic == topic::PROCESSES {
+                processes.insert(s.key.clone(), (s.value.clone(), s.rev));
+                continue;
+            }
+        }
         if !is_activity(&body) {
             script.push(body);
             continue;
@@ -126,7 +145,7 @@ fn load(path: &Path) -> std::io::Result<(Vec<Body>, HashMap<String, Log>)> {
     for log in logs.values_mut() {
         log.events.sort_by_key(seq_of);
     }
-    Ok((script, logs))
+    Ok((script, logs, processes))
 }
 
 impl Replay {
@@ -151,11 +170,12 @@ impl Replay {
                     entry.clone(),
                 ),
             };
-            let (script, logs) = load(&path)?;
+            let (script, logs, processes) = load(&path)?;
             let computer = Arc::new(Computer {
                 id: ComputerId(alias),
                 catalog: Mutex::new((CatalogState::default(), 0)),
                 logs,
+                processes,
             });
             if index == 0 {
                 computer.catalog().0.organization_mut().follow();
@@ -239,6 +259,32 @@ impl Replay {
             c.set_followed(key, false);
         }
     }
+
+    /// Serves a session's processes state, when the fixture has one, as the
+    /// stream does after a subscribe.
+    pub fn follow_processes(&self, computer: &str, key: &str) {
+        let Some(c) = self.computer(computer) else {
+            return;
+        };
+        c.catalog().0.processes_mut().follow(key);
+        if let Some((value, rev)) = c.processes.get(key) {
+            c.apply(
+                Body::State(State {
+                    topic: topic::PROCESSES.into(),
+                    key: key.into(),
+                    value: value.clone(),
+                    rev: *rev,
+                }),
+                &self.sink,
+            );
+        }
+    }
+
+    pub fn unfollow_processes(&self, computer: &str, key: &str) {
+        if let Some(c) = self.computer(computer) {
+            c.catalog().0.processes_mut().unfollow(key);
+        }
+    }
 }
 
 fn play(computer: &Computer, script: Vec<Body>, interval: Duration, sink: &Sender<Change>) {
@@ -268,7 +314,7 @@ fn play(computer: &Computer, script: Vec<Body>, interval: Duration, sink: &Sende
 mod tests {
     use super::*;
     use std::sync::mpsc::channel;
-    use zerus_client_core::ActivityUpdate;
+    use zerus_client_core::{ActivityUpdate, ProcessesUpdate};
 
     fn fixture() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/replay.ndjson")
@@ -327,5 +373,80 @@ mod tests {
             })
             .collect();
         assert_eq!(reads, [200, 200, 49]);
+    }
+
+    fn processes(rx: &std::sync::mpsc::Receiver<Change>) -> Vec<(String, ProcessesUpdate)> {
+        let mut out = Vec::new();
+        while let Ok(change) = rx.recv_timeout(Duration::from_millis(300)) {
+            if let Change::Processes { key, update, .. } = change {
+                out.push((key, update));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_processes_state_is_served_once_on_follow() {
+        let dir =
+            std::env::temp_dir().join(format!("zerus-replay-processes-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("replay.ndjson");
+        std::fs::write(
+            &file,
+            r#"{"v":1,"seq":9,"t":"state","topic":"processes","key":"run:a","value":{"processes":{"items":[]}},"rev":1}"#,
+        )
+        .unwrap();
+        let (tx, rx) = channel();
+        let replay = Replay::start(file.as_os_str(), Duration::from_secs(3600), tx).unwrap();
+        assert!(processes(&rx).is_empty(), "nothing before a follow");
+        replay.follow_processes("", "run:b");
+        assert!(processes(&rx).is_empty(), "no state for another session");
+        replay.follow_processes("", "run:a");
+        assert_eq!(
+            processes(&rx),
+            [(
+                "run:a".to_owned(),
+                ProcessesUpdate::State {
+                    value: serde_json::json!({"processes": {"items": []}}),
+                    rev: 1
+                }
+            )]
+        );
+        replay.unfollow_processes("", "run:a");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_fixture_has_processes_for_one_session() {
+        let (tx, rx) = channel();
+        let replay = Replay::start(fixture().as_os_str(), Duration::from_secs(3600), tx).unwrap();
+        while let Ok(change) = rx.recv_timeout(Duration::from_secs(2)) {
+            if matches!(change, Change::Replace { .. }) {
+                break;
+            }
+        }
+        let keys: Vec<&String> = replay.computers[0].processes.keys().collect();
+        assert_eq!(keys, ["run:000001-run"]);
+        replay.follow_processes("", "run:000001-run");
+        let served = processes(&rx);
+        let [(_, ProcessesUpdate::State { value, .. })] = served.as_slice() else {
+            panic!("one state: {served:?}")
+        };
+        let commands: Vec<&str> = value["processes"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["command"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            commands,
+            ["cargo test --workspace", "npm run build", "git fetch"]
+        );
+        // As the topic sends it: no run ID, and an OS tree's output is not captured.
+        assert!(value.get("run_id").is_none());
+        assert_eq!(
+            value["processes"]["items"][0]["capabilities"]["output"],
+            serde_json::json!(false)
+        );
     }
 }

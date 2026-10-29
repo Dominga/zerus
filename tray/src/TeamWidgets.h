@@ -197,6 +197,43 @@ inline void glyph(QPainter &p, const QRectF &r, const QColor &color, const QStri
         p.drawPath(back);
         p.drawLine(QPointF(c.left() + s * .2, m.y()), QPointF(c.left() + s * .5, m.y() - s * .35));
         p.drawLine(QPointF(c.left() + s * .2, m.y()), QPointF(c.left() + s * .5, m.y() + s * .35));
+    } else if (kind == "in_review" || kind == "stage_review") {
+        // U36: a review stage - a magnifier.
+        p.drawEllipse(QRectF(c.left(), c.top(), s * 1.25, s * 1.25));
+        p.drawLine(QPointF(c.left() + s * 1.1, c.top() + s * 1.1), QPointF(c.right(), c.bottom()));
+    } else if (kind == "in_test" || kind == "stage_test") {
+        // U36: a test stage - a flask.
+        QPainterPath flask;
+        flask.moveTo(m.x() - s * .3, c.top()); flask.lineTo(m.x() - s * .3, c.top() + s * .6);
+        flask.lineTo(c.left() + s * .05, c.bottom()); flask.lineTo(c.right() - s * .05, c.bottom());
+        flask.lineTo(m.x() + s * .3, c.top() + s * .6); flask.lineTo(m.x() + s * .3, c.top());
+        p.drawPath(flask);
+        p.drawLine(QPointF(m.x() - s * .45, c.top()), QPointF(m.x() + s * .45, c.top()));
+        p.drawLine(QPointF(c.left() + s * .4, c.bottom() - s * .5), QPointF(c.right() - s * .4, c.bottom() - s * .5));
+    } else if (kind == "stage_lead") {
+        // U36: the lead's final acceptance - a crown.
+        QPolygonF crown{QPointF(c.left(), c.top() + s * .4), QPointF(c.left() + s * .5, m.y()), QPointF(m.x(), c.top() + s * .2),
+                        QPointF(c.right() - s * .5, m.y()), QPointF(c.right(), c.top() + s * .4), QPointF(c.right() - s * .2, c.bottom() - s * .3),
+                        QPointF(c.left() + s * .2, c.bottom() - s * .3)};
+        p.drawPolygon(crown);
+    } else if (kind == "stage_auto") {
+        // U36: accepted by the pipeline itself - a bolt.
+        QPolygonF bolt{QPointF(m.x() + s * .2, c.top()), QPointF(c.left() + s * .3, m.y() + s * .15), QPointF(m.x(), m.y() + s * .15),
+                       QPointF(m.x() - s * .2, c.bottom()), QPointF(c.right() - s * .3, m.y() - s * .15), QPointF(m.x(), m.y() - s * .15)};
+        p.drawPolygon(bolt);
+    } else if (kind == "folder_held") {
+        // U36: a folder held by a test - a padlock.
+        p.drawRoundedRect(QRectF(c.left() + s * .15, m.y() - s * .1, c.width() - s * .3, s * 1.1), 1.5, 1.5);
+        QPainterPath shackle;
+        shackle.moveTo(m.x() - s * .45, m.y() - s * .1);
+        shackle.lineTo(m.x() - s * .45, c.top() + s * .45);
+        shackle.arcTo(QRectF(m.x() - s * .45, c.top(), s * .9, s * .9), 180, -180);
+        shackle.lineTo(m.x() + s * .45, m.y() - s * .1);
+        p.drawPath(shackle);
+    } else if (kind == "stage_skip") {
+        // U36: a skipped stage - fast forward.
+        p.drawPolygon(QPolygonF{QPointF(c.left(), c.top() + s * .2), QPointF(m.x(), m.y()), QPointF(c.left(), c.bottom() - s * .2)});
+        p.drawPolygon(QPolygonF{QPointF(m.x(), c.top() + s * .2), QPointF(c.right(), m.y()), QPointF(m.x(), c.bottom() - s * .2)});
     } else if (kind == "offline" || kind == "unconfirmed" || kind == "failed") {
         p.drawEllipse(c); p.drawLine(m + QPointF(-s * .4, -s * .4), m + QPointF(s * .4, s * .4)); p.drawLine(m + QPointF(-s * .4, s * .4), m + QPointF(s * .4, -s * .4));
     } else {
@@ -362,6 +399,12 @@ inline PhaseMark phaseMark(const Team &team, const Task &task, double now = 0)
         mark.tooltip = task.hold.by.isEmpty() ? tr("Held: waiting for the owner")
                       : task.hold.reason.isEmpty() ? tr("Held by %1: waiting for the owner").arg(task.hold.by)
                                                    : tr("Held by %1: %2").arg(task.hold.by, task.hold.reason);
+    } else if (mark.phase == "reported" && task.inStage()) {
+        // U36: the report is in a stage: its glyph and round.
+        const auto *stage = task.pipelineRun.openRun();
+        mark.kind = task.status; mark.tone = Tone::Active;
+        mark.tooltip = stage ? tr("%1 round %2 of %3, after %4's report").arg(stageName(stage->kind)).arg(stage->round).arg(task.pipelineRun.rounds()).arg(role)
+                             : tr("Report from %1 in its pipeline").arg(role);
     } else if (mark.phase == "reported") {
         mark.tone = Tone::Done;
         mark.tooltip = !attempt || attempt->reportAt <= 0 ? tr("Report from %1").arg(role)
@@ -429,6 +472,8 @@ inline QString kindOfTask(const Task &task, const Status &status)
     // A finished task keeps its own mark (accepted, cancelled or rejected): hgs
     // sends no attempt phase for one on purpose (N4).
     if (task.finished()) return task.status;
+    // U36: a task in a stage shows the stage (a magnifier or a flask).
+    if (task.inStage()) return task.status;
     // A live task shows the attempt's phase; one hgs did not send is derived
     // (Teams::lastPhase).
     const QString phase = lastPhase(task);

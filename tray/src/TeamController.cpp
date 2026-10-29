@@ -166,12 +166,14 @@ void TeamController::refreshCatalog()
         m_catalogInFlight = false;
         if (!ok) return;
         const auto next = Teams::parseCatalog(result);
-        if (m_catalogReady && next.json() == m_catalog.json() && next.proposals.size() == m_catalog.proposals.size()) {
+        const auto pipelines = result.value("catalog").toObject().value("pipelines").toArray();
+        if (m_catalogReady && next.json() == m_catalog.json() && next.proposals.size() == m_catalog.proposals.size() && pipelines == m_catalogPipelines) {
             bool same = true;
             for (int i = 0; i < next.proposals.size(); ++i) same = same && next.proposals[i].id == m_catalog.proposals[i].id && next.proposals[i].state == m_catalog.proposals[i].state;
             if (same) return;
         }
         m_catalog = Teams::parseCatalog(result);
+        m_catalogPipelines = pipelines;
         Teams::rememberRoleColors(m_catalog);
         m_catalogReady = true;
         emit catalogChanged();

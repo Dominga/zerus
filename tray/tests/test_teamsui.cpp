@@ -66,6 +66,7 @@
 #include "TeamWidgets.h"
 #include "TeamWorkspace.h"
 #include "TeamPhaseScroll.h"
+#include "TeamStages.h"
 #include "WorkspaceStyle.h"
 #include <QScopeGuard>
 #include <QElapsedTimer>
@@ -745,6 +746,10 @@ private slots:
     void waitingPageListsEveryKindAcrossTeams();
     void waitingPagePagesStayStableWhileItemsArrive();
     void waitingPageEmptyAndRefused();
+    void stageColumnsAndChipsOnTheBoard();
+    void inspectorShowsThePipelineAndOverridesAskForAReason();
+    void stageOverridesReachHgsWithTheirReason();
+    void planEditorPicksATasksPipeline();
 private:
     QString script() const { return m_dir.filePath("hgs"); }
     void setTeam(const QJsonObject &value) { QVERIFY(FakeCli::replace(script() + ".status", QJsonDocument(value).toJson(QJsonDocument::Compact))); }
@@ -9013,6 +9018,508 @@ void TestTeamsUi::boardPhaseHeaderKeepsItsActionsInView()
     for (int place : {0, 1, 2})
         for (const char *name : {"teamPhaseAutoAccept", "teamPhaseReject", "teamPhaseAccept", "teamPhaseMore"})
             QTRY_VERIFY2(inView(name, place), qPrintable(QStringLiteral("%1 at %2/2 of the sideways range").arg(name).arg(place)));
+}
+
+namespace {
+// U36: the mock-up's Orbit checkout team (design/agent-teams/pipelines) in
+// phase 2 with every stage state, shaped like `hgs team status` with #531's
+// pipeline_run and #532's stage queue and folders. Times count from 1800000000;
+// the tests set the views' clock to 1800004000.
+QJsonObject pipelineTeam()
+{
+    return QJsonDocument::fromJson(R"JSON({
+ "id":"team-1","name":"Checkout","status":"running","project":"Orbit platform","folder":"/work/orbit","lead":"lead",
+ "revision":30,"created":1000,"updated":5000,"settings":{},
+ "members":[
+  {"id":"lead","role":"Lead","agent":"claude","model":"claude-opus-4-6","state":"active","session":{"host":"","name":"claude/orbit/checkout"}},
+  {"id":"backend","role":"Backend","agent":"dsh","model":"deepseek-v4-pro","state":"active","directory":"/work/orbit-team/backend","session":{"host":"","name":"dsh/orbit/api"}},
+  {"id":"frontend","role":"Frontend","agent":"codex","model":"gpt-6.1-sol","state":"active","directory":"/work/orbit-team/frontend","session":{"host":"","name":"codex/orbit/ui"}},
+  {"id":"reviewer","role":"Reviewer","agent":"claude","model":"claude-sonnet-4-6","state":"active","session":{"host":"","name":"claude/orbit/review"},
+   "stage_queue":[{"task":3,"stage":"review","round":1,"state":"delivered","since":1800003000},{"task":10,"stage":"review","round":1,"state":"waiting","since":1800003760}]},
+  {"id":"reviewer2","role":"Reviewer 2","agent":"codex","model":"gpt-5.5-codex","state":"active","session":{"host":"","name":"codex/orbit/review2"},
+   "stage_queue":[{"task":11,"stage":"review","round":2,"state":"delivered","since":1800003500},{"task":10,"stage":"review","round":1,"state":"waiting","since":1800003760}]},
+  {"id":"tester","role":"Tester","agent":"kimi","model":"kimi-k2.5","computer":"build-01","state":"active","session":{"host":"","name":"kimi/orbit/tests"},
+   "stage_queue":[{"task":4,"stage":"test","round":1,"state":"delivered","since":1800003280}]},
+  {"id":"tester2","role":"Tester 2","agent":"kimi","model":"kimi-k2.5","state":"active","session":{"host":"","name":"kimi/orbit/tests2"},
+   "stage_queue":[{"task":17,"stage":"test","round":1,"state":"delivered","since":1800003600}]},
+  {"id":"tester3","role":"Tester 3","agent":"opencode","model":"qwen3-coder","state":"active","session":{"host":"","name":"opencode/orbit/tests3"},
+   "stage_queue":[{"task":18,"stage":"test","round":1,"state":"delivered","since":1800003900}]},
+  {"id":"secretary","role":"Secretary","agent":"claude","model":"claude-haiku-4-5","state":"active","session":{"host":"","name":"claude/orbit/docs"}}],
+ "phases":[
+  {"n":1,"title":"Analysis","state":"approved","tasks":[1],"added_by":"Lead","added_at":1000},
+  {"n":2,"title":"Build","state":"approved","tasks":[9,6,2,8,5,16,3,11,10,4,17,18,12,13],"added_by":"Lead","added_at":1000}],
+ "tasks":[
+  {"id":1,"phase":1,"title":"Requirements and acceptance","assignee":"lead","status":"accepted"},
+  {"id":9,"phase":2,"title":"Card form keyboard order","assignee":"frontend","status":"pending","deps":[{"task":1}],
+   "waits":{"for":"member","on":["Frontend"],"unblock":"folder held by the test of #4"}},
+  {"id":6,"phase":2,"title":"E2E checkout flow","assignee":"tester","status":"pending","deps":[{"task":3},{"task":5}]},
+  {"id":2,"phase":2,"title":"Saved cards API","assignee":"backend","status":"in_progress","deps":[{"task":1}],"pipeline":"code",
+   "attempts":[{"n":1,"id":"a2","member":"backend","state":"rejected","sent_at":1800000400,"report":{"text":"Cards API with cursor paging","at":1800001000}},
+               {"n":2,"id":"a2b","member":"backend","state":"delivered","sent_at":1800002000,"started_at":1800002010}],
+   "pipeline_run":{"id":"code","name":"Code: review, test, lead","max_rounds":3,"folder":"hold","accept":"lead","round":2,
+    "stages":[{"kind":"review","role":"reviewer"},{"kind":"test","role":"tester"}],
+    "runs":[{"id":"r2a","stage":0,"kind":"review","round":1,"attempt":1,"member":"reviewer","state":"returned","by":"Reviewer","at":1800001000,"delivered_at":1800001100,"ended_at":1800001900,
+             "text":"Three findings","findings":["major: cursor ids leak the row id","minor: no test for an empty page","nit: rename next_cursor"]}]}},
+  {"id":8,"phase":2,"title":"Rate limits on /v1/cards","assignee":"backend","status":"pending","deps":[{"task":2}],"pipeline":"code"},
+  {"id":5,"phase":2,"title":"Contract tests","assignee":"tester","status":"submitted","deps":[{"task":2,"kind":"soft"}],
+   "attempts":[{"n":1,"id":"a5","member":"tester","state":"rejected","report":{"text":"Contract suite","at":1800000500}},
+               {"n":2,"id":"a5b","member":"tester","state":"rejected","report":{"text":"Fixed the fixtures","at":1800001500}},
+               {"n":3,"id":"a5c","member":"tester","state":"reported","report":{"text":"Sandbox port fixed","at":1800002500}}],
+   "pipeline_run":{"id":"code","name":"Code: review, test, lead","max_rounds":3,"folder":"hold","accept":"lead","round":3,
+    "stages":[{"kind":"test","role":"tester2"}],
+    "runs":[{"id":"r5a","stage":0,"kind":"test","round":1,"attempt":1,"member":"tester2","state":"returned","by":"Tester 2","at":1800000600,"ended_at":1800000900,"findings":["e2e flake","port in use","fixture drift"]},
+            {"id":"r5b","stage":0,"kind":"test","round":2,"attempt":2,"member":"tester2","state":"returned","by":"Tester 2","at":1800001600,"ended_at":1800001900,"findings":["port in use","sandbox timeout"]},
+            {"id":"r5c","stage":0,"kind":"test","round":3,"attempt":3,"member":"tester2","state":"returned","by":"Tester 2","at":1800002600,"ended_at":1800002900,"findings":["sandbox timeout","teardown leaks"]}]}},
+  {"id":16,"phase":2,"title":"Postal code table","assignee":"backend","status":"submitted","deps":[{"task":1}],
+   "attempts":[{"n":1,"id":"a16","member":"backend","state":"reported","report":{"text":"Table loaded","at":1800002000}}],
+   "pipeline_run":{"id":"check-review","name":"Review, lead","max_rounds":3,"folder":"hold","accept":"lead","round":1,
+    "stages":[{"kind":"review","role":"reviewer"}],
+    "runs":[{"id":"r16","stage":0,"kind":"review","round":1,"attempt":1,"state":"skipped","by":"Lead","at":1800002050,"ended_at":1800002100,"text":"Generated data, no logic"}]}},
+  {"id":3,"phase":2,"title":"Card form UI","assignee":"frontend","status":"in_review","deps":[{"task":1}],
+   "attempts":[{"n":1,"id":"a3","member":"frontend","state":"reported","sent_at":1800001000,"report":{"text":"Card form with masks","at":1800002900}}],
+   "pipeline_run":{"id":"code","name":"Code: review, test, lead","max_rounds":3,"folder":"hold","accept":"lead","round":1,
+    "stages":[{"kind":"review","role":"reviewer"},{"kind":"test","role":"tester"}],
+    "runs":[{"id":"r3","stage":0,"kind":"review","round":1,"attempt":1,"member":"reviewer","state":"delivered","at":1800002950,"delivered_at":1800003000,"folder":"/work/orbit-team/frontend"}]}},
+  {"id":11,"phase":2,"title":"Ledger cursor index","assignee":"backend","status":"in_review","deps":[{"task":1}],
+   "attempts":[{"n":1,"id":"a11","member":"backend","state":"rejected","report":{"text":"Index added","at":1800001500}},
+               {"n":2,"id":"a11b","member":"backend","state":"reported","report":{"text":"Index on (ledger, cursor)","at":1800003400}}],
+   "pipeline_run":{"id":"code","name":"Code: review, test, lead","max_rounds":3,"folder":"hold","accept":"lead","round":2,
+    "stages":[{"kind":"review","role":"reviewer"},{"kind":"test","role":"tester"}],
+    "runs":[{"id":"r11a","stage":0,"kind":"review","round":1,"attempt":1,"member":"reviewer2","state":"returned","by":"Reviewer 2","at":1800001600,"ended_at":1800002000,"findings":["missing down migration"]},
+            {"id":"r11b","stage":0,"kind":"review","round":2,"attempt":2,"member":"reviewer2","state":"delivered","at":1800003450,"delivered_at":1800003500,"folder":"/work/orbit-team/backend"}]}},
+  {"id":10,"phase":2,"title":"Saved cards API docs","assignee":"secretary","status":"in_review","deps":[{"task":1}],"stage_candidates":["reviewer","reviewer2"],
+   "attempts":[{"n":1,"id":"a10","member":"secretary","state":"reported","report":{"text":"Docs page","at":1800003700}}],
+   "pipeline_run":{"id":"docs","name":"Docs: review, auto","max_rounds":2,"folder":"hold","accept":"auto","round":1,
+    "stages":[{"kind":"review","role":"reviewer"}],
+    "runs":[{"id":"r10","stage":0,"kind":"review","round":1,"attempt":1,"state":"waiting","at":1800003760}]}},
+  {"id":4,"phase":2,"title":"Address validation","assignee":"frontend","status":"in_test","deps":[{"task":1}],
+   "criteria":["Postal codes are checked per country","Street, city, postal code keep keyboard order","The error shows under the field on blur"],
+   "attempts":[{"n":1,"id":"a4","member":"frontend","state":"rejected","sent_at":1800000840,"report":{"text":"Reported: postal codes per country, message under the field. 14 tests passed.","at":1800002760}},
+               {"n":2,"id":"a4b","member":"frontend","state":"reported","sent_at":1800003120,"report":{"text":"Fixed all 3; normalization in normalizePostal(). 17 tests passed.","at":1800004200}}],
+   "pipeline_run":{"id":"code","name":"Code: review, test, lead","max_rounds":3,"folder":"hold","accept":"lead","round":2,
+    "stages":[{"kind":"review","role":"reviewer"},{"kind":"test","role":"tester"}],
+    "runs":[{"id":"r4a","stage":0,"kind":"review","round":1,"attempt":1,"member":"reviewer","state":"returned","by":"Reviewer","at":1800002800,"delivered_at":1800002850,"ended_at":1800003480,
+             "text":"3 findings, sent to Frontend as attempt 2",
+             "findings":["MAJOR: Canadian codes pass in lower case but are stored unnormalized. web/checkout/address/validate.ts:41",
+                         "MINOR: Criterion 3: the error is announced only on submit, not on blur. AddressForm.tsx:88",
+                         "NIT: Test name repeats \"should\". validate.test.ts:12"]},
+            {"id":"r4b","stage":0,"kind":"review","round":2,"attempt":2,"member":"reviewer","state":"passed","by":"Reviewer","at":1800004210,"delivered_at":1800004220,"ended_at":1800004020,
+             "text":"The three findings are fixed; criteria 1-3 met."},
+            {"id":"r4c","stage":1,"kind":"test","round":2,"attempt":2,"member":"tester","state":"delivered","at":1800003270,"delivered_at":1800003280,
+             "folder":"/work/orbit-team/frontend","holds":true,"changed":[{"commit":"e41b2a0","files":2},{"commit":"a3f9c1e","files":2}]}]}},
+  {"id":17,"phase":2,"title":"Shipping copy","assignee":"secretary","status":"in_test","deps":[{"task":1}],
+   "attempts":[{"n":1,"id":"a17","member":"secretary","state":"reported","report":{"text":"Copy updated","at":1800003500}}],
+   "pipeline_run":{"id":"copy","name":"Copy: test, lead","max_rounds":3,"folder":"hold","accept":"lead","round":1,
+    "stages":[{"kind":"test","role":"tester"}],
+    "runs":[{"id":"r17","stage":0,"kind":"test","round":1,"attempt":1,"member":"tester2","state":"delivered","at":1800003590,"delivered_at":1800003600,"folder":"/work/orbit","holds":false,
+             "changed":[{"path":"copy/shipping.md","size":10},{"path":"copy/fees.md","size":10},{"path":"copy/eta.md","size":10},{"path":"copy/old.md","deleted":true}]}]}},
+  {"id":18,"phase":2,"title":"Ledger export","assignee":"backend","status":"in_test","deps":[{"task":1}],
+   "attempts":[{"n":1,"id":"a18","member":"backend","state":"reported","report":{"text":"CSV export","at":1800003000}}],
+   "pipeline_run":{"id":"code-detached","name":"Code, detached test","max_rounds":3,"folder":"checkout","accept":"lead","round":1,
+    "stages":[{"kind":"test","role":"tester"}],
+    "runs":[{"id":"r18","stage":0,"kind":"test","round":1,"attempt":1,"member":"tester3","state":"delivered","at":1800003890,"delivered_at":1800003900,
+             "folder":"/tmp/zerus-checkout-18","checkout":"/tmp/zerus-checkout-18","holds":false,"changed":[{"commit":"9c0ffee","files":3}]}]}},
+  {"id":12,"phase":2,"title":"Provider token vault","assignee":"backend","status":"accepted","deps":[{"task":1}],"decided_by":"lead",
+   "attempts":[{"n":1,"id":"a12","member":"backend","state":"reported","report":{"text":"Vault","at":1800001000}}],
+   "pipeline_run":{"id":"code","name":"Code: review, test, lead","max_rounds":3,"folder":"hold","accept":"lead","round":1,
+    "stages":[{"kind":"review","role":"reviewer"},{"kind":"test","role":"tester"}],
+    "runs":[{"id":"r12a","stage":0,"kind":"review","round":1,"attempt":1,"member":"reviewer","state":"passed","at":1800001100,"ended_at":1800001300},
+            {"id":"r12b","stage":1,"kind":"test","round":1,"attempt":1,"member":"tester","state":"passed","at":1800001300,"ended_at":1800001700}]}},
+  {"id":13,"phase":2,"title":"Checkout copy review","assignee":"secretary","status":"accepted","deps":[{"task":1}],
+   "attempts":[{"n":1,"id":"a13","member":"secretary","state":"reported","report":{"text":"Copy","at":1800001000}}],
+   "pipeline_run":{"id":"docs","name":"Docs: review, auto","max_rounds":2,"folder":"hold","accept":"auto","round":1,
+    "stages":[{"kind":"review","role":"reviewer"}],
+    "runs":[{"id":"r13","stage":0,"kind":"review","round":1,"attempt":1,"member":"reviewer","state":"passed","at":1800001100,"ended_at":1800001300}]}}],
+ "layers":{"1":0,"9":1,"6":2,"2":1,"8":2,"5":2,"16":1,"3":1,"11":1,"10":1,"4":1,"17":1,"18":1,"12":1,"13":1},"cycle":[],"ready":[],
+ "validation":{"errors":[],"warnings":[]}})JSON").object();
+}
+
+double stageNow() { return 1800004000; }
+
+// Every chip of the open phase's Board: task id -> the chip texts.
+QMap<int, QStringList> boardChips(QWidget *root)
+{
+    QMap<int, QStringList> chips;
+    for (auto *line : root->findChildren<QWidget *>("teamStageLine")) {
+        if (!line->isVisibleTo(root)) continue;
+        QStringList texts;
+        for (auto *chip : line->findChildren<QWidget *>("teamStageChip")) texts << chip->property("text").toString();
+        chips[line->property("task").toInt()] = texts;
+    }
+    return chips;
+}
+
+QFrame *boardCard(QWidget *root, int task)
+{
+    for (auto *card : root->findChildren<QFrame *>("teamBoardCard")) if (card->property("task").toInt() == task) return card;
+    return nullptr;
+}
+
+QString columnOf(QWidget *root, int task)
+{
+    for (auto *col : root->findChildren<QFrame *>("teamBoardColumn"))
+        for (auto *card : col->findChildren<QFrame *>("teamBoardCard")) if (card->property("task").toInt() == task) return col->property("column").toString();
+    return {};
+}
+}
+
+// U36: the Board's In review and In test columns sit between Submitted and
+// Accepted at U33's widths with the shared sideways scroll; each card's stage
+// chip says its state (in review, in test, waiting for a stage member, returned,
+// out of rounds, a held folder, detached, shared folder, skipped, accepted,
+// auto) with the stage member's agent and the track; members show their stage
+// and stage queue. Shots of the wide and the narrow Board in both themes.
+void TestTeamsUi::stageColumnsAndChipsOnTheBoard()
+{
+    QSettings().setValue("workspace/skin", "whitewh");
+    TeamUi::workedClock() = &stageNow;
+    const auto restore = qScopeGuard([] {
+        QSettings().remove("workspace/skin"); darkPalette();
+        TeamUi::workedClock() = [] { return double(QDateTime::currentSecsSinceEpoch()); };
+    });
+    setTeam(pipelineTeam());
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    darkPalette(); workspace.setTheme(true);
+    workspace.resize(2000, 960); workspace.show();
+    controller.refresh(); panel.showTeam("team-1"); workspace.showTeam("team-1");
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceView"));
+    for (auto *b : workspace.findChild<QWidget *>("teamWorkspaceView")->findChildren<QPushButton *>()) if (b->property("segment") == "board") b->click();
+    const auto area = [&] { return workspace.findChild<QScrollArea *>("teamWorkspaceBoard"); };
+    QTRY_VERIFY(area() && boardCard(area(), 4));
+    // The columns, in order, for phase 2: In review and In test between
+    // Submitted and Accepted.
+    QStringList order;
+    QList<QFrame *> phase2;
+    for (auto *col : area()->findChildren<QFrame *>("teamBoardColumn")) if (col->property("phase").toInt() == 2) phase2 << col;
+    std::sort(phase2.begin(), phase2.end(), [&](QFrame *a, QFrame *b) { return a->mapTo(area()->widget(), QPoint()).x() < b->mapTo(area()->widget(), QPoint()).x(); });
+    for (auto *col : phase2) order << col->property("column").toString();
+    QCOMPARE(order, (QStringList{"pending", "active", "problems", "submitted", "in_review", "in_test", "accepted"}));
+    for (auto *col : phase2) QVERIFY2(col->width() >= 200, qPrintable(col->property("column").toString()));   // U33: BoardColumnWidth
+    QCOMPARE(columnOf(area(), 3), QString("in_review")); QCOMPARE(columnOf(area(), 11), QString("in_review")); QCOMPARE(columnOf(area(), 10), QString("in_review"));
+    QCOMPARE(columnOf(area(), 4), QString("in_test")); QCOMPARE(columnOf(area(), 17), QString("in_test")); QCOMPARE(columnOf(area(), 18), QString("in_test"));
+    QCOMPARE(columnOf(area(), 5), QString("submitted")); QCOMPARE(columnOf(area(), 2), QString("active")); QCOMPARE(columnOf(area(), 9), QString("pending"));
+    // In review says one stage waits for a member (#10).
+    QStringList waiting;
+    for (auto *note : area()->findChildren<QLabel *>("teamBoardColumnWaiting")) waiting << note->text();
+    QCOMPARE(waiting, (QStringList{QStringLiteral("· 1 waiting")}));
+    // Every state's chip.
+    const auto chips = boardChips(area());
+    QCOMPARE(chips.value(3), QStringList{"Review r1/3"});
+    QCOMPARE(chips.value(11), QStringList{"Review r2/3"});
+    QCOMPARE(chips.value(10), QStringList{QStringLiteral("Review waits · 1st in queue")});
+    QCOMPARE(chips.value(4), QStringList{"Test r2/3"});
+    QCOMPARE(chips.value(17), QStringList{QStringLiteral("Test r1/3 · 4 files")});
+    QCOMPARE(chips.value(18), QStringList{QStringLiteral("Test r1/3 · detached")});
+    QCOMPARE(chips.value(9), QStringList{"Folder held by the test of #4"});
+    QCOMPARE(chips.value(2), QStringList{"Review returned r1"});
+    QCOMPARE(chips.value(5), QStringList{QStringLiteral("Lead decides · 7 findings")});
+    QCOMPARE(chips.value(16), (QStringList{"Review skipped", "Lead"}));
+    QCOMPARE(chips.value(12), (QStringList{QStringLiteral("Review ✓"), QStringLiteral("Test ✓")}));
+    QCOMPARE(chips.value(13), (QStringList{QStringLiteral("Review ✓"), "Auto"}));
+    QVERIFY(!chips.contains(8) && !chips.contains(6));   // not reported yet: no line
+    // The stage member's agent beside a running stage; the skipped chip is struck.
+    QVERIFY(boardCard(area(), 3)->findChild<QLabel *>("teamStageAgent"));
+    QVERIFY(!boardCard(area(), 10)->findChild<QLabel *>("teamStageAgent"));
+    for (auto *chip : boardCard(area(), 16)->findChildren<QWidget *>("teamStageChip"))
+        QCOMPARE(chip->font().strikeOut(), chip->property("state") == "skipped");
+    QCOMPARE(boardCard(area(), 4)->findChild<QWidget *>("teamStageTrack")->property("segments").toInt(), 4);
+    // The returned task names its new attempt and findings; the round limit
+    // its rounds; both warn, as does the held folder's border.
+    QCOMPARE(boardCard(area(), 2)->findChild<QLabel *>("teamBoardActivity")->text(), QStringLiteral("Attempt 2 · 3 findings"));
+    QCOMPARE(boardCard(area(), 5)->findChild<QLabel *>("teamBoardActivity")->text(), QStringLiteral("3 test rounds used"));
+    const auto warnEdge = [&](int task) { return boardCard(area(), task)->styleSheet().contains(TeamUi::colorsFor(true).warn.name()); };
+    QVERIFY(warnEdge(5) && warnEdge(9) && !warnEdge(3) && !warnEdge(4));
+    // The test's tooltip names its member, where it works and what is next.
+    QString tip;
+    for (auto *chip : boardCard(area(), 4)->findChildren<QWidget *>("teamStageChip")) tip = chip->toolTip();
+    QVERIFY2(tip.contains("Test round 2 of 3") && tip.contains("Tester · kimi-k2.5") && tip.contains("/work/orbit-team/frontend")
+             && tip.contains("Holds Frontend's folder") && tip.contains("Next: Lead accepts"), qPrintable(tip));
+    // Members: the stage each has and its queue; the implementer's folder waits.
+    const auto memberCard = [&](const QString &id) -> QWidget * {
+        for (auto *card : workspace.findChildren<QFrame *>("teamWorkspaceMember")) if (card->property("teamMember") == id) return card;
+        return nullptr;
+    };
+    const auto queueTitle = [&](const QString &id) {
+        auto *queue = memberCard(id) ? memberCard(id)->findChild<QFrame *>("teamMemberStageQueue") : nullptr;
+        return queue ? queue->findChild<QLabel *>("teamMemberStageQueueTitle")->text() : QString();
+    };
+    QCOMPARE(queueTitle("reviewer"), QString("Stage queue 1"));
+    QCOMPARE(queueTitle("reviewer2"), QString("Stage queue 1"));
+    QCOMPARE(queueTitle("tester"), QStringLiteral("Stage queue empty · 12 min in this stage"));
+    QVERIFY(queueTitle("frontend").isEmpty() && queueTitle("backend").isEmpty());
+    auto *row = memberCard("reviewer")->findChild<QPushButton *>("teamMemberStageQueueRow");
+    QVERIFY(row && row->property("task").toInt() == 10);
+    QCOMPARE(memberStatus(*controller.team("team-1"), *controller.team("team-1")->member("reviewer"), Live{}).text, QStringLiteral("Reviewing #3 Card form UI · round 1"));
+    QCOMPARE(memberStatus(*controller.team("team-1"), *controller.team("team-1")->member("tester"), Live{}).text, QStringLiteral("Testing #4 Address validation · round 2"));
+    QCOMPARE(memberStatus(*controller.team("team-1"), *controller.team("team-1")->member("frontend"), Live{}).text, QStringLiteral("Waits: its folder is held by the test of #4"));
+    // A queued stage opens its task.
+    row->click();
+    QTRY_VERIFY(static_cast<TeamTaskCard *>(workspace.findChild<QWidget *>("teamWorkspaceDrawer"))->isVisible());
+    QCOMPARE(static_cast<TeamTaskCard *>(workspace.findChild<QWidget *>("teamWorkspaceDrawer"))->task(), 10);
+    static_cast<TeamTaskCard *>(workspace.findChild<QWidget *>("teamWorkspaceDrawer"))->back();
+    QTRY_VERIFY(!static_cast<TeamTaskCard *>(workspace.findChild<QWidget *>("teamWorkspaceDrawer"))->isVisible());
+    if (auto *all = workspace.findChild<QPushButton *>("teamWorkspaceExpandAll"); all && all->text() == QStringLiteral("Expand all")) all->click();
+    shot(&workspace, "u36-boardwide-dark");
+    workspace.setTheme(false);
+    lightShot(&workspace, "u36-boardwide-light");
+    // Narrow: the whole Board scrolls sideways to the new columns.
+    darkPalette(); workspace.setTheme(true);
+    workspace.resize(1180, 960);
+    QTRY_VERIFY(area() && area()->horizontalScrollBar()->isVisible() && area()->horizontalScrollBar()->maximum() > 0);
+    area()->horizontalScrollBar()->setValue(area()->horizontalScrollBar()->maximum());
+    QTRY_VERIFY(area()->horizontalScrollBar()->value() > 0);
+    QVERIFY(boardCard(area(), 4)->visibleRegion().boundingRect().width() > 100);
+    shot(&workspace, "u36-board-dark");
+    workspace.setTheme(false);
+    QTRY_VERIFY(area() && area()->horizontalScrollBar()->maximum() > 0);
+    area()->horizontalScrollBar()->setValue(area()->horizontalScrollBar()->maximum());
+    lightShot(&workspace, "u36-board-light");
+    // The Layers rows carry the same chips.
+    darkPalette(); workspace.setTheme(true);
+    for (auto *b : workspace.findChild<QWidget *>("teamWorkspaceView")->findChildren<QPushButton *>()) if (b->property("segment") == "layers") b->click();
+    QTRY_VERIFY(workspace.findChild<QScrollArea *>("teamWorkspaceLayers"));
+    QTRY_VERIFY(!boardChips(workspace.findChild<QScrollArea *>("teamWorkspaceLayers")).isEmpty());
+    QCOMPARE(boardChips(workspace.findChild<QScrollArea *>("teamWorkspaceLayers")).value(4), QStringList{"Test r2/3"});
+    shot(&workspace, "u36-layers-dark");
+    workspace.setTheme(false);
+    lightShot(&workspace, "u36-layers-light");
+}
+
+// U36: the inspector's Pipeline section: the flow, where the test works, what
+// changed and what it holds, every attempt and round with its verdict and
+// findings (fixed ones dimmed), and what comes next; the overrides each ask
+// with what they do, wait for a reason and send it, and Cancel sends nothing.
+// Shots in both themes, with the Skip form open.
+void TestTeamsUi::inspectorShowsThePipelineAndOverridesAskForAReason()
+{
+    QSettings().setValue("workspace/skin", "whitewh");
+    TeamUi::workedClock() = &stageNow;
+    const auto restore = qScopeGuard([] {
+        QSettings().remove("workspace/skin"); darkPalette();
+        TeamUi::workedClock() = [] { return double(QDateTime::currentSecsSinceEpoch()); };
+    });
+    darkPalette();
+    const Team team = parse(pipelineTeam());
+    TeamTaskCard card;
+    QList<std::pair<QString, QJsonObject>> acts;
+    card.act = [&](const QString &operation, const QJsonObject &input) { acts.append({operation, input}); };
+    card.resize(560, 1500); card.show();
+    card.setTask(team, 4, live, true);
+    auto *pipeline = card.findChild<QWidget *>("teamTaskPipeline");
+    QVERIFY(pipeline);
+    QCOMPARE(card.findChild<QLabel *>("teamTaskStageRound")->text(), QString("round 2 of 3"));
+    QCOMPARE(pipeline->findChild<QLabel *>("teamTaskPipelineName")->text(), QString("Code: review, test, lead"));
+    QStringList flow;
+    for (auto *chip : pipeline->findChild<QWidget *>("teamTaskPipelineFlow")->findChildren<QWidget *>("teamStageChip")) flow << chip->property("text").toString();
+    QCOMPARE(flow, (QStringList{QStringLiteral("Implement ✓ 2 attempts"), QStringLiteral("Review ✓ r2"), "Test r2/3", "Lead"}));
+    QCOMPARE(pipeline->findChild<QLabel *>("teamTaskPipelineWhere")->text(), QStringLiteral("/work/orbit-team/frontend · Frontend's folder"));
+    QCOMPARE(pipeline->findChild<QLabel *>("teamTaskPipelineChanges")->text(), QStringLiteral("e41b2a0..a3f9c1e · 2 commits · 4 files"));
+    QCOMPARE(pipeline->findChild<QLabel *>("teamTaskPipelineHolds")->text(), QStringLiteral("the folder: #9 Card form keyboard order waits"));
+    QVERIFY(pipeline->findChild<QLabel *>("teamTaskPipelineMay")->text().contains("build"));
+    // The rounds: attempt 1, its review returned with 3 findings (fixed by the
+    // second review's pass, so dimmed), attempt 2, its review passed and the
+    // test running, then the lead.
+    QStringList rounds;
+    for (auto *w : pipeline->findChild<QWidget *>("teamTaskRounds")->findChildren<QWidget *>(QString(), Qt::FindDirectChildrenOnly)) {
+        const QString name = w->objectName();
+        if (name == "teamRoundAttempt") rounds << QStringLiteral("attempt %1").arg(w->property("attempt").toInt());
+        else if (name == "teamRoundStage") rounds << QStringLiteral("%1 %2 %3").arg(w->property("stage").toString()).arg(w->property("round").toInt()).arg(w->property("state").toString());
+        else if (name == "teamRoundNext" || name == "teamRoundAccept") rounds << name;
+    }
+    QCOMPARE(rounds, (QStringList{"attempt 1", "review 1 returned", "attempt 2", "review 2 passed", "test 2 delivered", "teamRoundAccept"}));
+    const auto findings = pipeline->findChildren<QFrame *>("teamRoundFinding");
+    QCOMPARE(findings.size(), 3);
+    for (auto *finding : findings) QVERIFY(finding->property("fixed").toBool());
+    QStringList severities;
+    for (auto *label : pipeline->findChildren<QLabel *>("teamRoundSeverity")) severities << label->text();
+    QCOMPARE(severities, (QStringList{"MAJOR", "MINOR", "NIT"}));
+    QStringList verdicts;
+    for (auto *label : pipeline->findChildren<QLabel *>("teamRoundVerdict")) verdicts << label->text();
+    QCOMPARE(verdicts, (QStringList{"RETURN", "PASS", "RUNNING 12 min", "NEXT"}));
+    // The footer of a task in a stage: Accept now, Skip test, Send back, Reject.
+    QStringList footer;
+    for (auto *b : card.findChild<QWidget *>("teamTaskCardFooter")->findChildren<QPushButton *>()) footer << b->objectName();
+    QCOMPARE(footer, (QStringList{"teamTaskAcceptNow", "teamTaskSkipStage", "teamTaskSendBack", "teamTaskReject"}));
+    QCOMPARE(card.findChild<QPushButton *>("teamTaskSkipStage")->text(), QStringLiteral("Skip test…"));
+    shot(&card, "u36-inspector-dark");
+    lightPalette(); card.setTask(team, 4, live, false);
+    lightShot(&card, "u36-inspector-light");
+    darkPalette(); card.setTask(team, 4, live, true);
+    // Skip asks first: what it does, a reason; the button waits for the reason.
+    card.findChild<QPushButton *>("teamTaskSkipStage")->click();
+    auto *form = card.findChild<QFrame *>("teamStageOverrideForm");
+    QVERIFY(form);
+    QCOMPARE(form->findChild<QLabel *>("teamStageOverrideTitle")->text(), QStringLiteral("Skip Test on #4 Address validation?"));
+    QCOMPARE(form->findChild<QLabel *>("teamStageOverrideText")->text(), QStringLiteral("Tester stops; #4 goes to Lead to accept. The feed records that you skipped it and why."));
+    auto *submit = form->findChild<QPushButton *>("teamTaskFormSubmit");
+    QCOMPARE(submit->text(), QString("Skip Test"));
+    QVERIFY(!submit->isEnabled());
+    submit->click();
+    QVERIFY(acts.isEmpty());
+    form->findChild<QPlainTextEdit *>("teamTaskFormText")->setPlainText("   ");
+    QVERIFY(!submit->isEnabled());
+    // Cancel sends nothing and closes the form.
+    form->findChild<QPushButton *>("teamTaskFormCancel")->click();
+    QVERIFY(acts.isEmpty());
+    QVERIFY(!card.findChild<QFrame *>("teamStageOverrideForm"));
+    card.findChild<QPushButton *>("teamTaskSkipStage")->click();
+    form = card.findChild<QFrame *>("teamStageOverrideForm");
+    form->findChild<QPlainTextEdit *>("teamTaskFormText")->setPlainText("Storybook already reviewed by the owner");
+    shot(&card, "u36-override-skip-dark");
+    lightPalette(); card.setTask(team, 4, live, false);
+    form = card.findChild<QFrame *>("teamStageOverrideForm");
+    QVERIFY2(form, "the open form survives a theme change");
+    form->findChild<QPlainTextEdit *>("teamTaskFormText")->setPlainText("Storybook already reviewed by the owner");
+    lightShot(&card, "u36-override-skip-light");
+    darkPalette(); card.setTask(team, 4, live, true);
+    form = card.findChild<QFrame *>("teamStageOverrideForm");
+    form->findChild<QPlainTextEdit *>("teamTaskFormText")->setPlainText("Storybook already reviewed by the owner");
+    submit = form->findChild<QPushButton *>("teamTaskFormSubmit");
+    QVERIFY(submit->isEnabled());
+    submit->click();
+    QCOMPARE(acts.size(), 1);
+    QCOMPARE(acts[0].first, QString("skip-stage"));
+    QCOMPARE(acts[0].second, (QJsonObject{{"task", 4}, {"reason", "Storybook already reviewed by the owner"}}));
+    QVERIFY(!card.findChild<QFrame *>("teamStageOverrideForm"));
+    // Accept now names the stages it ends; Send back names the implementer.
+    card.findChild<QPushButton *>("teamTaskAcceptNow")->click();
+    form = card.findChild<QFrame *>("teamStageOverrideForm");
+    QCOMPARE(form->findChild<QLabel *>("teamStageOverrideTitle")->text(), QStringLiteral("Accept #4 Address validation now?"));
+    QCOMPARE(form->findChild<QLabel *>("teamStageOverrideText")->text(), QStringLiteral("Ends the pipeline here; the Test stage does not run. The feed records that you accepted it and why."));
+    form->findChild<QPlainTextEdit *>("teamTaskFormText")->setPlainText("sandbox flake, tracked in #14");
+    form->findChild<QPushButton *>("teamTaskFormSubmit")->click();
+    QCOMPARE(acts.last().first, QString("accept"));
+    QCOMPARE(acts.last().second, (QJsonObject{{"task", 4}, {"reason", "sandbox flake, tracked in #14"}}));
+    card.findChild<QPushButton *>("teamTaskSendBack")->click();
+    form = card.findChild<QFrame *>("teamStageOverrideForm");
+    QCOMPARE(form->findChild<QLabel *>("teamStageOverrideTitle")->text(), QStringLiteral("Send #4 Address validation back to Frontend?"));
+    form->findChild<QPlainTextEdit *>("teamTaskFormText")->setPlainText("keep cursor ids opaque");
+    form->findChild<QPushButton *>("teamTaskFormSubmit")->click();
+    QCOMPARE(acts.last().first, QString("send-back"));
+    QCOMPARE(acts.last().second, (QJsonObject{{"task", 4}, {"reason", "keep cursor ids opaque"}}));
+    QCOMPARE(acts.size(), 3);
+    // The round limit: the lead decides, and may still send it back.
+    card.setTask(team, 5, live, true);
+    footer.clear();
+    // Retired buttons lose their names until they are deleted.
+    for (auto *b : card.findChild<QWidget *>("teamTaskCardFooter")->findChildren<QPushButton *>()) if (!b->objectName().isEmpty()) footer << b->objectName();
+    QCOMPARE(footer, (QStringList{"teamTaskAccept", "teamTaskReject", "teamTaskSendBack", "teamTaskReassign"}));
+    QVERIFY(card.findChild<QWidget *>("teamRoundAccept")->findChild<QLabel *>("teamRoundVerdict")->text() == "NOW");
+    // A task without a pipeline has no section and no overrides.
+    card.setTask(team, 9, live, true);
+    QVERIFY(!card.findChild<QWidget *>("teamTaskPipeline"));
+    QVERIFY(!card.findChild<QPushButton *>("teamTaskSkipStage"));
+}
+
+// U36: the override reaches hgs from the workspace's inspector with its reason:
+// `hgs team skip-stage` and `send-back` carry the task and the reason once.
+void TestTeamsUi::stageOverridesReachHgsWithTheirReason()
+{
+    TeamUi::workedClock() = &stageNow;
+    const auto restore = qScopeGuard([] { TeamUi::workedClock() = [] { return double(QDateTime::currentSecsSinceEpoch()); }; });
+    setTeam(pipelineTeam());
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(1600, 900); workspace.show();
+    controller.refresh(); panel.showTeam("team-1"); workspace.showTeam("team-1");
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceView"));
+    for (auto *b : workspace.findChild<QWidget *>("teamWorkspaceView")->findChildren<QPushButton *>()) if (b->property("segment") == "board") b->click();
+    QTRY_VERIFY(boardCard(&workspace, 3));
+    QTest::mouseClick(boardCard(&workspace, 3), Qt::LeftButton, {}, QPoint(20, 10));
+    auto *drawer = static_cast<TeamTaskCard *>(workspace.findChild<QWidget *>("teamWorkspaceDrawer"));
+    QTRY_VERIFY(drawer->isVisible() && drawer->task() == 3);
+    QTRY_VERIFY(drawer->findChild<QPushButton *>("teamTaskSkipStage"));
+    drawer->findChild<QPushButton *>("teamTaskSkipStage")->click();
+    QTRY_VERIFY(drawer->findChild<QFrame *>("teamStageOverrideForm"));
+    QCOMPARE(drawer->findChild<QLabel *>("teamStageOverrideTitle")->text(), QStringLiteral("Skip Review on #3 Card form UI?"));
+    QCOMPARE(drawer->findChild<QLabel *>("teamStageOverrideText")->text(), QStringLiteral("Reviewer stops; #3 moves to Test. The feed records that you skipped it and why."));
+    drawer->findChild<QPlainTextEdit *>("teamTaskFormText")->setPlainText("Storybook already reviewed by the owner");
+    drawer->findChild<QPushButton *>("teamTaskFormSubmit")->click();
+    QTRY_COMPARE(calls(script(), "skip-stage").size(), 1);
+    const auto skip = calls(script(), "skip-stage").first();
+    QCOMPARE(skip["task"].toInt(), 3);
+    QCOMPARE(skip["reason"].toString(), QString("Storybook already reviewed by the owner"));
+    QCOMPARE(skip["team"].toString(), QString("team-1"));
+    QTRY_VERIFY(drawer->findChild<QPushButton *>("teamTaskSendBack"));
+    drawer->findChild<QPushButton *>("teamTaskSendBack")->click();
+    QTRY_VERIFY(drawer->findChild<QFrame *>("teamStageOverrideForm"));
+    drawer->findChild<QPlainTextEdit *>("teamTaskFormText")->setPlainText("Split the masks out");
+    drawer->findChild<QPushButton *>("teamTaskFormSubmit")->click();
+    QTRY_COMPARE(calls(script(), "send-back").size(), 1);
+    QCOMPARE(calls(script(), "send-back").first()["reason"].toString(), QString("Split the masks out"));
+    QCOMPARE(calls(script(), "skip-stage").size(), 1);
+}
+
+// U36: the plan editor's Pipeline picker lists the role's default, the
+// catalog's presets and None; the choice goes out with the plan.
+void TestTeamsUi::planEditorPicksATasksPipeline()
+{
+    auto c = catalog();
+    auto inner = c["catalog"].toObject();
+    inner["pipelines"] = QJsonArray{
+        QJsonObject{{"id", "code"}, {"name", "Code: review, test, lead"}, {"max_rounds", 3}, {"folder", "hold"}, {"accept", "lead"},
+                    {"stages", QJsonArray{QJsonObject{{"kind", "review"}, {"role", "reviewer"}}, QJsonObject{{"kind", "test"}, {"role", "tester"}}}}},
+        QJsonObject{{"id", "docs"}, {"name", "Docs: review, auto"}, {"max_rounds", 2}, {"accept", "auto"}, {"stages", QJsonArray{QJsonObject{{"kind", "review"}, {"role", "reviewer"}}}}},
+        QJsonObject{{"id", "check"}, {"name", "Check: lead"}, {"stages", QJsonArray{}}}};
+    auto roles = inner["roles"].toArray();
+    auto backend = roles[1].toObject(); backend["pipeline"] = "code"; roles[1] = backend; inner["roles"] = roles;
+    c["catalog"] = inner;
+    QVERIFY(FakeCli::replace(script() + ".catalog", QJsonDocument(c).toJson(QJsonDocument::Compact)));
+    const auto restoreCatalog = qScopeGuard([this] { FakeCli::replace(script() + ".catalog", QJsonDocument(catalog()).toJson(QJsonDocument::Compact)); });
+    setTeam(team("planning"));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    panel.setLive(live);
+    panel.resize(420, 1200); panel.show();
+    controller.refresh();
+    panel.showTeam("team-1");
+    QTRY_VERIFY(panel.findChild<QWidget *>("teamPlanFooter"));
+    QTRY_VERIFY(panel.findChild<QFrame *>("teamPlanErrorsBox"));   // the full plan
+    controller.refreshCatalog();
+    QTRY_VERIFY(controller.catalogReady() && controller.catalogPipelines().size() == 3);
+    QVERIFY(controller.watched() && controller.watched()->full);
+    QStringList items, tips;
+    bool done = false;
+    QTimer::singleShot(50, qApp, [&] {
+        auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+        QVERIFY(dialog && dialog->objectName() == "teamTaskEditor");
+        const auto close = qScopeGuard([dialog] { if (dialog->isVisible()) dialog->reject(); });
+        auto *picker = dialog->findChild<QComboBox *>("teamTaskEditPipeline");
+        QVERIFY(picker);
+        for (int i = 0; i < picker->count(); ++i) { items << picker->itemText(i); tips << picker->itemData(i, Qt::ToolTipRole).toString(); }
+        QCOMPARE(picker->currentIndex(), 0);
+        picker->setCurrentIndex(picker->findData("docs"));
+        QVERIFY(dialog->findChild<QLabel *>("teamTaskEditPipelineNote")->text().startsWith(QStringLiteral("Review › Auto · 2 rounds")));
+        shot(dialog, "u36-plan-picker-dark");
+        lightPalette();
+        lightShot(dialog, "u36-plan-picker-light");
+        darkPalette();
+        for (auto *b : dialog->findChildren<QPushButton *>()) if (dialog->findChild<QDialogButtonBox *>()->buttonRole(b) == QDialogButtonBox::AcceptRole) { b->click(); break; }
+        done = true;
+    });
+    panel.editTask(*controller.watched(), 2);
+    QVERIFY(done);
+    QCOMPARE(items, (QStringList{QStringLiteral("Default: Code: review, test, lead (Backend's default)"), "Code: review, test, lead", "Docs: review, auto",
+                                 "Check: lead", "None: the report goes to the lead"}));
+    QCOMPARE(tips[1], QStringLiteral("Review › Test › Lead · 3 rounds"));
+    QCOMPARE(tips[3], QStringLiteral("Lead"));
+    QTRY_COMPARE(calls(script(), "plan").size(), 1);
+    QString chosen; bool others = false;
+    for (const auto &value : calls(script(), "plan").first()["tasks"].toArray()) {
+        const auto task = value.toObject();
+        if (task["id"].toInt() == 2) chosen = task["pipeline"].toString();
+        else others = others || task.contains("pipeline");
+    }
+    QCOMPARE(chosen, QString("docs"));
+    QVERIFY2(!others, "the other tasks keep their default");
 }
 
 #include "test_teamsui.moc"

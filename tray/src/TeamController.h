@@ -58,6 +58,9 @@ public:
     void call(const QString &operation, QJsonObject input, const Reply &done, bool change = true);
     // The catalog, read on request and again after each change through call().
     const Teams::Catalog &catalog() const { return m_catalog; }
+    // U36: the catalog's pipeline presets as hgs sends them ({id, name,
+    // stages, max_rounds, folder, accept}); the plan editor's picker lists them.
+    const QJsonArray &catalogPipelines() const { return m_catalogPipelines; }
     bool catalogReady() const { return m_catalogReady; }
     void refreshCatalog();
     // The catalog is read with every poll while its draft is on screen.
@@ -106,6 +109,7 @@ private:
     QHash<QString, QString> m_retryIds;
     QMap<quint64, Reply> m_calls;
     Teams::Catalog m_catalog;
+    QJsonArray m_catalogPipelines;
     bool m_catalogReady = false, m_watchCatalog = false, m_watchCatalogPage = false, m_catalogInFlight = false;
     // Only the newest catalog read is shown: an older one may land after it.
     quint64 m_catalogRead = 0;

@@ -810,6 +810,8 @@ mod tests {
             store,
             crate::composer::Config {
                 cache: root.join("cache"),
+                qt_drafts: None,
+                dev_drafts: Vec::new(),
             },
             crate::composer::Deps {
                 spawn: Arc::new(|job| {

@@ -73,6 +73,8 @@ pub struct UpdatesView {
     pub details: InstallationGuide,
     pub restart_required: bool,
     pub version: String,
+    /// A source or unknown dev-app installation keeps its status in Settings only.
+    pub quiet: bool,
 }
 
 #[derive(Clone)]
@@ -134,6 +136,7 @@ struct Hooks {
 
 struct Shared {
     state: Mutex<UpdateState>,
+    replay_view: Mutex<Option<UpdatesView>>,
     settings: Settings,
     build: Build,
     executable: PathBuf,
@@ -141,6 +144,7 @@ struct Shared {
     generation: AtomicU64,
     sender: Sender<Request>,
     hooks: Hooks,
+    dev_identity: bool,
 }
 
 #[derive(Clone)]
@@ -152,8 +156,12 @@ enum Request {
     Automatic(bool),
 }
 
-fn lock(state: &Mutex<UpdateState>) -> MutexGuard<'_, UpdateState> {
+fn lock<T>(state: &Mutex<T>) -> MutexGuard<'_, T> {
     state.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn quiet_prompts(dev_identity: bool, installation: &Installation) -> bool {
+    dev_identity && matches!(installation.kind.as_str(), "source" | "unknown")
 }
 
 fn catalog_key(kind: &str, channel: Channel) -> String {
@@ -231,6 +239,7 @@ impl UpdatesView {
             ),
             restart_required: state.restart_required,
             version: state.feed.version.clone(),
+            quiet: false,
         }
     }
 }
@@ -240,6 +249,7 @@ impl Updates {
         settings: Settings,
         build: Build,
         executable: PathBuf,
+        dev_identity: bool,
         hooks: Hooks,
     ) -> (Self, Receiver<Request>) {
         let (sender, receiver) = mpsc::channel();
@@ -257,6 +267,7 @@ impl Updates {
         (
             Self(Arc::new(Shared {
                 state: Mutex::new(state),
+                replay_view: Mutex::new(None),
                 settings,
                 build,
                 executable,
@@ -264,13 +275,20 @@ impl Updates {
                 generation: AtomicU64::new(0),
                 sender,
                 hooks,
+                dev_identity,
             })),
             receiver,
         )
     }
 
     fn view(&self) -> UpdatesView {
-        UpdatesView::from(&lock(&self.0.state), &self.0.build)
+        if let Some(view) = lock(&self.0.replay_view).clone() {
+            return view;
+        }
+        let state = lock(&self.0.state);
+        let mut view = UpdatesView::from(&state, &self.0.build);
+        view.quiet = quiet_prompts(self.0.dev_identity, &state.installation);
+        view
     }
 
     fn send(&self, request: Request) {
@@ -527,7 +545,8 @@ impl Updates {
             );
             current.fresh_for_notification = false;
             let fresh = state.fresh_for_notification;
-            update_token(current.channel, &current.feed, newer && fresh)
+            let quiet = quiet_prompts(self.0.dev_identity, &current.installation);
+            update_token(current.channel, &current.feed, newer && fresh && !quiet)
         };
         self.changed();
         if !token.is_empty() && self.claim_notification(&token) {
@@ -643,17 +662,34 @@ fn spawn(service: Updates, receiver: Receiver<Request>) {
     }
 }
 
+const REPLAY_VIEW_LIMIT: u64 = 64 * 1024;
+
+fn read_replay_view(path: &Path) -> Result<UpdatesView, String> {
+    use std::io::Read;
+    let mut raw = Vec::new();
+    std::fs::File::open(path)
+        .map_err(|error| error.to_string())?
+        .take(REPLAY_VIEW_LIMIT + 1)
+        .read_to_end(&mut raw)
+        .map_err(|error| error.to_string())?;
+    if raw.len() as u64 > REPLAY_VIEW_LIMIT {
+        return Err("the replay update view exceeds 64 KiB".into());
+    }
+    serde_json::from_slice(&raw).map_err(|error| error.to_string())
+}
+
 pub fn start(app: &AppHandle) -> Updates {
     let settings = app.state::<crate::settings::Store>().0.clone();
     let replay = std::env::var_os("ZERUS_CLIENT_REPLAY").is_some_and(|value| !value.is_empty());
+    let dev_identity = app.state::<crate::identity::Identity>().bundle_id == "dev.zerus.next";
     let executable = std::env::current_exe().unwrap_or_default();
     let changed: Changed = {
         let app = app.clone();
         Arc::new(move |view| {
             if let Some(desk) = crate::desk::sender(&app) {
                 let _ = desk.send(crate::desk::DeskInput::Updates {
-                    version: view.available.then_some(view.version.clone()),
-                    restart: view.restart_required,
+                    version: (view.available && !view.quiet).then_some(view.version.clone()),
+                    restart: view.restart_required && !view.quiet,
                 });
             }
             let _ = app.emit("updates-changed", view);
@@ -676,8 +712,19 @@ pub fn start(app: &AppHandle) -> Updates {
         notify,
         now: Arc::new(unix_now),
     };
-    let (service, receiver) = Updates::new(settings, Build::current(), executable, hooks);
-    if !replay {
+    let (service, receiver) =
+        Updates::new(settings, Build::current(), executable, dev_identity, hooks);
+    if replay {
+        if let Some(path) = std::env::var_os("ZERUS_CLIENT_UPDATES_FIXTURE") {
+            match read_replay_view(Path::new(&path)) {
+                Ok(view) => {
+                    *lock(&service.0.replay_view) = Some(view);
+                    service.changed();
+                }
+                Err(error) => eprintln!("zerus-client: replay update view: {error}"),
+            }
+        }
+    } else {
         spawn(service.clone(), receiver);
     }
     service
@@ -956,13 +1003,16 @@ pub fn updates_copy_command(
     crate::clipboard::copy_text(app, command)
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const RESTART_SCRIPT: &str = "SECONDS=0; while kill -0 \"$1\" 2>/dev/null; do if [ \"$SECONDS\" -ge 120 ]; then exit 0; fi; sleep 0.2; done; exec /usr/bin/open -a \"$2\" --args --sessions";
+
 #[cfg(target_os = "macos")]
 fn restart_helper(bundle: &Path, pid: u32) -> std::io::Result<()> {
     use std::process::{Command, Stdio};
     Command::new("/bin/sh")
         .args([
             "-c",
-            "while kill -0 \"$1\" 2>/dev/null; do sleep 0.2; done; exec /usr/bin/open -a \"$2\" --args --sessions",
+            RESTART_SCRIPT,
             "zerus-restart",
             &pid.to_string(),
             &bundle.to_string_lossy(),
@@ -974,14 +1024,12 @@ fn restart_helper(bundle: &Path, pid: u32) -> std::io::Result<()> {
         .map(|_| ())
 }
 
-#[cfg(target_os = "macos")]
-pub fn restart_app(app: &AppHandle) -> Result<(), String> {
-    let updates = app.state::<Updates>();
-    if !updates.view().restart_required {
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn restart_bundle(executable: &Path, ready: bool) -> Result<PathBuf, String> {
+    if !ready {
         return Err("No replacement bundle is ready.".into());
     }
-    let executable = &updates.0.executable;
-    let bundle = executable
+    executable
         .parent()
         .and_then(Path::parent)
         .and_then(Path::parent)
@@ -990,8 +1038,15 @@ pub fn restart_app(app: &AppHandle) -> Result<(), String> {
                 .extension()
                 .is_some_and(|extension| extension == "app")
         })
-        .ok_or_else(|| "The running app bundle could not be found.".to_owned())?;
-    restart_helper(bundle, std::process::id()).map_err(|error| error.to_string())?;
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "The running app bundle could not be found.".to_owned())
+}
+
+#[cfg(target_os = "macos")]
+pub fn restart_app(app: &AppHandle) -> Result<(), String> {
+    let updates = app.state::<Updates>();
+    let bundle = restart_bundle(&updates.0.executable, updates.view().restart_required)?;
+    restart_helper(&bundle, std::process::id()).map_err(|error| error.to_string())?;
     crate::exit_flush::quit_with_flush(app, 0);
     Ok(())
 }
@@ -1088,6 +1143,14 @@ mod tests {
 
     impl Fixture {
         fn new(fetch: Fetch, configure: impl FnOnce(&Settings)) -> Self {
+            Self::with_identity(fetch, configure, false)
+        }
+
+        fn with_identity(
+            fetch: Fetch,
+            configure: impl FnOnce(&Settings),
+            dev_identity: bool,
+        ) -> Self {
             let root = std::env::temp_dir().join(format!(
                 "zerus-native-updates-{}-{}",
                 std::process::id(),
@@ -1121,8 +1184,13 @@ mod tests {
                 dev_number: 0,
                 source_commit: String::new(),
             };
-            let (service, receiver) =
-                Updates::new(settings.clone(), build, root.join("hgs-tray"), hooks);
+            let (service, receiver) = Updates::new(
+                settings.clone(),
+                build,
+                root.join("hgs-tray"),
+                dev_identity,
+                hooks,
+            );
             Self {
                 service,
                 receiver: Some(receiver),
@@ -1265,6 +1333,101 @@ mod tests {
         assert_eq!(
             fixture.notices.lock().unwrap()[0].token,
             "zerus-update:v2:dev:12345"
+        );
+    }
+
+    #[test]
+    fn a_source_dev_identity_stays_out_of_notices_and_workspace_prompts() {
+        let fixture = Fixture::with_identity(Arc::new(|_| Ok(stable())), |_| {}, true);
+        fixture.service.detect();
+        fixture.service.check(false);
+        let view = fixture.service.view();
+        assert!(view.available && view.quiet);
+        assert!(fixture.notices.lock().unwrap().is_empty());
+        assert!(!fixture
+            .settings
+            .flag("updates/notified/zerus-update:v1:stable:1234"));
+        assert!(quiet_prompts(
+            true,
+            &Installation {
+                kind: "unknown".into(),
+                ..Installation::default()
+            }
+        ));
+        assert!(!quiet_prompts(
+            true,
+            &Installation {
+                kind: "package".into(),
+                ..Installation::default()
+            }
+        ));
+        assert!(!quiet_prompts(
+            false,
+            &Installation {
+                kind: "source".into(),
+                ..Installation::default()
+            }
+        ));
+    }
+
+    #[test]
+    fn restart_waits_for_a_real_ready_bundle_and_the_helper_times_out() {
+        let executable = Path::new("/tmp/Zerus.app/Contents/MacOS/zerus-client");
+        assert_eq!(
+            restart_bundle(executable, true).unwrap(),
+            Path::new("/tmp/Zerus.app")
+        );
+        assert_eq!(
+            restart_bundle(executable, false).unwrap_err(),
+            "No replacement bundle is ready."
+        );
+        assert!(restart_bundle(Path::new("/tmp/zerus-client"), true).is_err());
+        assert!(RESTART_SCRIPT.starts_with("SECONDS=0; while kill -0"));
+        assert!(RESTART_SCRIPT.contains("[ \"$SECONDS\" -ge 120 ]"));
+        assert!(RESTART_SCRIPT.contains("then exit 0; fi; sleep 0.2; done; exec /usr/bin/open"));
+        #[cfg(unix)]
+        {
+            let script = RESTART_SCRIPT
+                .replace("-ge 120", "-ge 0")
+                .replace("exec /usr/bin/open", "exec /bin/echo");
+            let output = std::process::Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    &script,
+                    "zerus-restart-test",
+                    &std::process::id().to_string(),
+                    "unused",
+                ])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            assert!(
+                output.stdout.is_empty(),
+                "a timed-out helper reopened the app"
+            );
+        }
+    }
+
+    #[test]
+    fn replay_views_are_bounded_json_and_replace_the_initial_snapshot() {
+        let fixture = Fixture::new(Arc::new(|_| Ok(stable())), |_| {});
+        fixture.service.detect();
+        let view = fixture.service.view();
+        let root = std::env::temp_dir().join(format!(
+            "zerus-native-updates-replay-{}-{}",
+            std::process::id(),
+            SCRATCH.fetch_add(1, AtomicOrdering::Relaxed)
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("view.json");
+        std::fs::write(&path, serde_json::to_vec(&view).unwrap()).unwrap();
+        assert_eq!(read_replay_view(&path).unwrap(), view);
+        *lock(&fixture.service.0.replay_view) = Some(view.clone());
+        assert_eq!(fixture.service.view(), view);
+        std::fs::write(&path, vec![b' '; REPLAY_VIEW_LIMIT as usize + 1]).unwrap();
+        assert_eq!(
+            read_replay_view(&path).unwrap_err(),
+            "the replay update view exceeds 64 KiB"
         );
     }
 

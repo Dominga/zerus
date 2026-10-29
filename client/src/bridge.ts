@@ -4,6 +4,7 @@ import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, 
 import type { CreatedWorktree, CreationAction, CreationAdmission, CreationCard, CreationEvent, FolderOut, LaunchAccounts, LaunchChoices, LaunchPlan, LaunchStart, MachineMeta, NewSessionContext, NewSessionFormInput, NewSessionFormView, PathStyle, RepositoryFields } from "./types";
 import type { ActivityPort, FollowRequest } from "./store/activity";
 import { documentVisibility, type PageVisibility } from "./store/visibility";
+import { emptyUpdatesView, type UpdateChannel, type UpdatesView } from "./types";
 
 // The one path from the Rust side to the stores. The frontend asks for the next
 // batch from requestAnimationFrame with one call in flight; `next_batch`
@@ -573,7 +574,7 @@ export const windowVisibility: PageVisibility = {
 export type OpenSession = { computer: ComputerId; key: string; attention?: boolean };
 /** A notice for the window. */
 export type DeskNotice = { title: string; text: string };
-export type DeskPending = { open: OpenSession | null; notices: DeskNotice[] };
+export type DeskPending = { open: OpenSession | null; notices: DeskNotice[]; updates?: boolean };
 
 /** Listens to `name`; resolves with the stop once the listener is registered. */
 function onEvent<T>(name: string, listener: (payload: T) => void): Promise<() => void> {
@@ -583,8 +584,22 @@ function onEvent<T>(name: string, listener: (payload: T) => void): Promise<() =>
 
 /** `open-session`: the menu bar or a notification opens a session; resolves with the stop once listening. */
 export const onOpenSession = (listener: (target: OpenSession) => void) => onEvent<OpenSession>("open-session", listener);
+/** `open-updates`: an update notice or menu item opens Settings > Updates. */
+export const onOpenUpdates = (listener: () => void) => onEvent<void>("open-updates", listener);
 /** `desk-notice`: a notice for the window; resolves with the stop once listening. */
 export const onDeskNotice = (listener: (notice: DeskNotice) => void) => onEvent<DeskNotice>("desk-notice", listener);
+
+const UPDATES_DESKTOP_ONLY = "Updates need the desktop app.";
+export const updatesView = () => inTauri() ? invoke<UpdatesView>("updates_view") : Promise.resolve(emptyUpdatesView());
+export const updatesCheck = () => inTauri() ? invoke<void>("updates_check") : Promise.resolve();
+export const updatesSetChannel = (channel: UpdateChannel) => inTauri() ? invoke<void>("updates_set_channel", { channel }) : Promise.resolve();
+export const updatesSetAutomatic = (on: boolean) => inTauri() ? invoke<void>("updates_set_automatic", { on }) : Promise.resolve();
+export const updatesOpen = (target: "release" | "download" | "instructions") =>
+  inTauri() ? invoke<void>("updates_open", { target }) : Promise.reject(UPDATES_DESKTOP_ONLY);
+export const updatesCopyCommand = () => inTauri() ? invoke<void>("updates_copy_command") : Promise.reject(UPDATES_DESKTOP_ONLY);
+export const updatesRestart = () => inTauri() ? invoke<void>("updates_restart") : Promise.reject(UPDATES_DESKTOP_ONLY);
+/** `updates-changed`: the native worker's latest snapshot; resolves once listening. */
+export const onUpdates = (listener: (view: UpdatesView) => void) => onEvent<UpdatesView>("updates-changed", listener);
 
 /** Rust asks every mounted composer to flush before its bounded quit. */
 export const onExitFlush = (listener: (nonce: string) => void) => onEvent<string>("exit-flush", listener);

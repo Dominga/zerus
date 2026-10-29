@@ -735,3 +735,48 @@ export interface SavedDraftsPage { items: SavedDraftItem[]; next: string | null 
 /** The import's conflicts; `next` is the following page's offset. */
 export interface ConflictsPage { items: SavedDraftItem[]; next: number | null }
 export interface SavedDraftDetail { text: string; attachments: number; detail: string; restorable: boolean }
+
+// The update service's view (src-tauri `updates.rs`), shared by Settings and the status bar.
+export type UpdateChannel = "stable" | "nightly" | "dev";
+export interface UpdatesView {
+  busy: boolean;
+  available: boolean;
+  heading: string;
+  installed: string;
+  latest: string;
+  comparison: string;
+  last_checked: string;
+  cached: boolean;
+  error: string;
+  channel: UpdateChannel;
+  automatic: boolean;
+  release_label: string;
+  release_enabled: boolean;
+  download_label: string | null;
+  details: { ownership: string; command: string; copy_name: string; instructions: string };
+  restart_required: boolean;
+  version: string;
+  /** A source or unknown dev-app installation shows status in Settings only. */
+  quiet: boolean;
+}
+
+export const emptyUpdatesView = (): UpdatesView => ({
+  busy: false,
+  available: false,
+  heading: "Updates have not been checked",
+  installed: "",
+  latest: "Not checked",
+  comparison: "",
+  last_checked: "Never",
+  cached: false,
+  error: "",
+  channel: "stable",
+  automatic: true,
+  release_label: "View release",
+  release_enabled: false,
+  download_label: null,
+  details: { ownership: "", command: "", copy_name: "Copy command", instructions: "" },
+  restart_required: false,
+  version: "",
+  quiet: false,
+});

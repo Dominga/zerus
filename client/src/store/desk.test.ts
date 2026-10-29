@@ -2,11 +2,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as bridge from "../bridge";
 import * as ui from "./ui";
 import * as organization from "./organization";
+import * as settingsSections from "../ui/screens/settings/sections";
 import { startDesk } from "./desk";
 
+vi.mock("../ui/screens/settings/sections", () => ({ openSettings: vi.fn() }));
 vi.mock("../bridge", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../bridge")>()),
   onOpenSession: vi.fn(async () => () => {}),
+  onOpenUpdates: vi.fn(async () => () => {}),
   onDeskNotice: vi.fn(async () => () => {}),
   deskPage: vi.fn(async () => 3),
   deskTakePending: vi.fn(async () => ({ open: null, notices: [] })),
@@ -136,5 +139,26 @@ describe("desk wiring", () => {
     await startDesk();
     notice!({ title: "Zerus", text: "System notification was not delivered: denied" });
     expect(shown.toast).toHaveBeenCalledWith("Zerus", "System notification was not delivered: denied");
+  });
+
+  it("opens an update action in Settings, never as a session", async () => {
+    let open!: () => void;
+    mocked.onOpenUpdates.mockImplementation(async (listener) => {
+      open = listener;
+      return () => {};
+    });
+    await startDesk();
+    open();
+    await settle();
+    expect(settingsSections.openSettings).toHaveBeenCalledWith("updates");
+    expect(shown.setSelectedKey).not.toHaveBeenCalled();
+  });
+
+  it("applies Updates that waited for this page", async () => {
+    mocked.deskTakePending.mockResolvedValueOnce({ open: null, notices: [], updates: true });
+    await startDesk();
+    await settle();
+    expect(settingsSections.openSettings).toHaveBeenCalledWith("updates");
+    expect(shown.setPage).not.toHaveBeenCalledWith("sessions");
   });
 });

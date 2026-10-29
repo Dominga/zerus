@@ -18,11 +18,13 @@
 //! New session reads one computer's accounts on the same hub
 //! (`launch_accounts`): its `account ls` and the limits of its profiles go
 //! through the hub's catalogs and usage queue, never a second store. The open
-//! dialog's computer is watched until `launch_accounts_close`: its rows are
-//! grouped when a good catalog is filed and later limits only refresh them,
-//! as Qt's dialog does; each of its replies emits `launch-accounts-changed`
-//! with the computer, and the dialog pulls its rows again
-//! (`launch_account_rows`), as Qt's dialog follows the usage store.
+//! dialog's computer is watched until `launch_accounts_close`: only the first
+//! catalog filed after the dialog's ask answers it (Qt filters its replies by
+//! `m_accountRequest`), its rows are grouped when that answer is good, and
+//! later catalogs and limits only refresh them, as Qt's dialog does; each of
+//! its computer's replies emits `launch-accounts-changed` with the computer,
+//! and the dialog pulls its rows again (`launch_account_rows`), as Qt's dialog
+//! follows the usage store.
 //!
 //! The one-second ticker does no per-profile work: it compares the fleet and
 //! steps the account reads only when the fleet changed, a catalog arrived, an
@@ -107,9 +109,13 @@ struct LaunchWatch {
     /// `launch_accounts` calls still waiting for this computer's catalog: they
     /// ask for its limits themselves once they wake.
     waiting: usize,
-    /// A reply was filed since the last ask (`launch_start`).
+    /// The reply that answers the last ask (`launch_start`) was filed: the
+    /// first one since. Later replies only update the shared store (Qt's
+    /// `m_accountRequest`, NewSessionDialog.cpp:385).
     answered: bool,
-    /// The last ask was Refresh: the limits are forced.
+    /// The last ask was Refresh and its limits were not asked yet: taken
+    /// when they are, so it forces them once (`std::exchange(m_forceUsage,
+    /// false)`, 387).
     force: bool,
 }
 
@@ -155,9 +161,10 @@ fn launch_entry(hub: &Hub, computer: &ComputerId) -> FleetEntry {
         })
 }
 
-/// The hosts whose account reads the hub keeps: every machine that keeps
-/// accounts, and New session's computer while the dialog watches it, which Qt
-/// reads directly whatever the Accounts page lists (865-874).
+/// The hosts whose account reads the hub keeps (the warm-up and pruning):
+/// every machine that keeps accounts, and New session's computer while the
+/// dialog watches it, which Qt reads directly whatever the Accounts page lists
+/// (865-874). The page polls only [`account_hosts`].
 fn hub_hosts(hub: &Hub) -> Vec<ComputerId> {
     let mut hosts = account_hosts(&hub.fleet);
     if let Some(watch) = &hub.launch {
@@ -420,9 +427,13 @@ impl Screens {
             .collect();
         let shown = hub.accounts_shown();
         if shown || force {
+            // The page's own hosts only: New session's computer outside them is
+            // read on the dialog's asks, never every 30 s, and a read of it
+            // never holds back the page's Refresh.
+            let listed = account_hosts(&hub.fleet);
             runs.extend(
                 hub.accounts
-                    .ensure_catalogs(&hosts, now, force)
+                    .poll_catalogs(&listed, now, force)
                     .into_iter()
                     .map(Run::Catalog),
             );
@@ -431,7 +442,7 @@ impl Screens {
                 hub.accounts.ensure_usage(r, *reachable, now, force);
             }
             if shown {
-                hub.next_due = hub.accounts.next_due(&hosts, &refs);
+                hub.next_due = hub.accounts.next_due(&listed, &refs);
             }
         }
         runs.extend(hub.dispatch());
@@ -465,8 +476,9 @@ impl Screens {
                 let failure = reply.as_ref().err().cloned();
                 let now = self.now();
                 let mut hub = self.lock();
-                let hosts = hub_hosts(&hub);
-                let again = hub.accounts.finish_catalog(&host, reply, now, &hosts);
+                // A queued follow-up is the page's (its forced poll), for a host it lists.
+                let listed = account_hosts(&hub.fleet);
+                let again = hub.accounts.finish_catalog(&host, reply, now, &listed);
                 hub.stale = true;
                 hub.dirty.extend(ACCOUNT_SCREENS);
                 if hub
@@ -475,6 +487,14 @@ impl Screens {
                     .is_some_and(|watch| watch.computer == host)
                 {
                     heard = Some(host.clone());
+                }
+                // Only the first reply since the dialog's ask answers it; a later
+                // one, such as the page's poll, only updated the shared store.
+                if hub
+                    .launch
+                    .as_ref()
+                    .is_some_and(|watch| watch.computer == host && !watch.answered)
+                {
                     let grouped = match &failure {
                         // Grouped when the catalog arrives (`m_regroupAccounts`, 380-386, 883).
                         None => hub.launch.as_ref().and_then(|watch| {
@@ -493,8 +513,10 @@ impl Screens {
                                 watch.groups = grouped;
                                 // No `launch_accounts` waits for it any more: the
                                 // catalog arrived late, and Qt's accountsReady
-                                // asks for its limits (380-388).
-                                late = (watch.waiting == 0).then_some(watch.force);
+                                // asks for its limits (380-388), forced once.
+                                if watch.waiting == 0 {
+                                    late = Some(std::mem::take(&mut watch.force));
+                                }
                             }
                             Some(detail) => {
                                 watch.error = Some(format!("Could not load accounts: {detail}"));
@@ -740,8 +762,9 @@ impl Screens {
     /// rows until a reply is filed (Qt clears `m_accounts`). A computer the
     /// Accounts page does not list is read too, as Qt's dialog reads the
     /// selected computer directly (865-874): a computer that cannot be read
-    /// answers with hgs's error. The caller waits for the catalog until
-    /// [`Self::launch_waited`].
+    /// answers with hgs's error. The first catalog of the computer filed from
+    /// now on (a shared one's too) answers this ask. The caller waits for the
+    /// catalog until [`Self::launch_waited`].
     fn launch_start(&self, computer: &ComputerId, refresh: bool, agent: Option<&str>) -> Vec<Run> {
         let now = self.now();
         let mut hub = self.current();
@@ -784,20 +807,21 @@ impl Screens {
     }
 
     /// A `launch_accounts` call stopped waiting: once its ask was answered it
-    /// asks for the limits of the catalog (`requestUsage`, forced on Refresh).
-    /// A reply filed after the last caller stopped waiting asks for them itself.
-    fn launch_waited(&self, computer: &ComputerId, force: bool) -> Vec<Run> {
+    /// asks for the limits of the catalog (`requestUsage`), taking the
+    /// Refresh's force so that it applies once. A reply filed after the last
+    /// caller stopped waiting asks for them itself.
+    fn launch_waited(&self, computer: &ComputerId) -> Vec<Run> {
         let mut hub = self.lock();
-        let answered = match hub.launch.as_mut() {
+        let force = match hub.launch.as_mut() {
             Some(watch) if watch.computer == *computer => {
                 watch.waiting = watch.waiting.saturating_sub(1);
-                watch.answered
+                if !watch.answered {
+                    return Vec::new();
+                }
+                std::mem::take(&mut watch.force)
             }
             _ => return Vec::new(),
         };
-        if !answered {
-            return Vec::new();
-        }
         self.launch_limits(&mut hub, computer, force)
     }
 
@@ -922,8 +946,8 @@ impl Screens {
 
     /// New session's accounts of one computer (`loadAccounts` with
     /// `requestUsage`): reads its catalog (sharing a running read) and waits
-    /// for it, then asks for its profiles' limits (forced on `refresh`) and
-    /// answers the rows. `refresh` keeps the dialog's rows on failure; an
+    /// for it, then asks for its profiles' limits (forced once on `refresh`)
+    /// and answers the rows. `refresh` keeps the dialog's rows on failure; an
     /// open or another computer starts without them. `agent` is the dialog's
     /// requested agent. Blocks; the limits arrive later.
     pub fn launch_accounts(
@@ -938,7 +962,7 @@ impl Screens {
         let runs = self.launch_start(computer, refresh, agent);
         self.run(runs);
         self.launch_wait(computer);
-        let runs = self.launch_waited(computer, refresh);
+        let runs = self.launch_waited(computer);
         self.run(runs);
         self.publish();
         Ok(self.launch_rows(computer))
@@ -1833,7 +1857,7 @@ mod tests {
         let runs = h.screens.launch_start(&here, false, None);
         h.screens.run(runs);
         assert!(
-            h.screens.launch_waited(&here, false).is_empty(),
+            h.screens.launch_waited(&here).is_empty(),
             "no catalog yet, no limits"
         );
         h.drain();
@@ -1855,7 +1879,7 @@ mod tests {
             [0, 0, 0, 0],
             "the waiting caller asks, not the reply"
         );
-        let runs = h.screens.launch_waited(&here, false);
+        let runs = h.screens.launch_waited(&here);
         h.screens.run(runs);
         h.drain();
         assert_eq!(inspects(&h), [1, 1, 1, 1]);
@@ -1863,7 +1887,7 @@ mod tests {
         let runs = h.screens.launch_start(&here, true, None);
         h.screens.run(runs);
         assert!(
-            h.screens.launch_waited(&here, true).is_empty(),
+            h.screens.launch_waited(&here).is_empty(),
             "the earlier catalog is not this ask's answer"
         );
         h.drain();
@@ -1871,6 +1895,145 @@ mod tests {
             inspects(&h),
             [2, 2, 2, 2],
             "the late Refresh catalog forced them, once"
+        );
+    }
+
+    /// Every inspect of the launch fixture's local profiles so far.
+    fn launch_inspects(h: &Harness) -> usize {
+        ["work", "claude", "native-dsh", "native-opencode"]
+            .iter()
+            .map(|id| h.count(&format!("account inspect {id} --refresh")))
+            .sum()
+    }
+
+    /// The dialog's ask as `launch_accounts` makes it, on the queued reads.
+    fn launch_ask(h: &Harness, computer: &ComputerId, refresh: bool) {
+        let runs = h.screens.launch_start(computer, refresh, None);
+        h.screens.run(runs);
+        h.drain();
+        let runs = h.screens.launch_waited(computer);
+        h.screens.run(runs);
+        h.drain();
+    }
+
+    // Qt uses a Refresh's force once (`std::exchange(m_forceUsage, false)`,
+    // 385-387) and takes only its own request's reply: the page's later
+    // polls of that computer never force the limits again.
+    #[test]
+    fn a_dialog_refresh_forces_the_limits_once_while_overview_polls() {
+        let h = harness(launch_replies(false), true);
+        let here = ComputerId::local();
+        h.screens.set_visible(Screen::Overview, true);
+        h.drain();
+        launch_ask(&h, &here, false);
+        let opened = launch_inspects(&h);
+        h.at(1_000);
+        launch_ask(&h, &here, true);
+        let refreshed = launch_inspects(&h);
+        assert_eq!(
+            refreshed,
+            opened + 4,
+            "the Refresh forced each profile once"
+        );
+        for at in [31_000, 62_000, 93_000, 124_000] {
+            h.at(at);
+            h.screens.tick();
+            h.drain();
+        }
+        assert_eq!(
+            h.count("account ls"),
+            7,
+            "the first read, the two asks and four polls"
+        );
+        assert_eq!(
+            launch_inspects(&h),
+            refreshed,
+            "no later reply forced them again"
+        );
+    }
+
+    // Qt's dialog takes only its own request's reply (`m_accountRequest`,
+    // 385, 394): a later catalog of its computer, such as the page's poll,
+    // updates the shared store and is heard, but it is not the dialog's
+    // answer. The next ask is answered again.
+    #[test]
+    fn a_later_catalog_is_not_the_dialogs_answer() {
+        let h = harness(launch_replies(false), true);
+        let heard = Arc::new(AtomicUsize::new(0));
+        {
+            let heard = Arc::clone(&heard);
+            h.screens.on_launch_change(Arc::new(move |_: &ComputerId| {
+                heard.fetch_add(1, Ordering::SeqCst);
+            }));
+        }
+        let here = ComputerId::local();
+        h.screens.set_visible(Screen::Overview, true);
+        h.drain();
+        launch_ask(&h, &here, false);
+        let answer = h.screens.launch_rows(&here);
+        assert!(answer.loaded && answer.error.is_none(), "{answer:?}");
+        assert_eq!(answer.groups.len(), 4);
+        let busy = "hgs: account catalog busy\n";
+        h.fake
+            .set_reply("account ls", json!({"stderr": busy, "exit": 1}));
+        let before = heard.load(Ordering::SeqCst);
+        h.at(31_000);
+        h.screens.tick();
+        assert_eq!(h.queued(), 1, "the page's poll");
+        h.drain();
+        assert_eq!(h.count("account ls"), 3);
+        assert!(
+            heard.load(Ordering::SeqCst) > before,
+            "the dialog hears of it"
+        );
+        let later = h.screens.launch_rows(&here);
+        assert_eq!(later.error, None, "its failure is not the dialog's answer");
+        assert_eq!(members(&later), members(&answer));
+        launch_ask(&h, &here, true);
+        assert_eq!(
+            h.screens.launch_rows(&here).error.as_deref(),
+            Some("Could not load accounts: hgs: account catalog busy"),
+            "the Refresh's own reply answers it"
+        );
+    }
+
+    // The page polls only the computers it lists: New session's computer
+    // outside them is read on the dialog's asks, kept while the dialog
+    // watches it, and no read of it holds back the Accounts Refresh.
+    #[test]
+    fn the_page_never_polls_the_dialogs_unlisted_computer() {
+        let mut replies = launch_replies(false);
+        replies["@lab account ls"] = reply(&launch_catalog(&[(
+            "lab-claude",
+            "claude",
+            "lab@example.invalid",
+        )]));
+        let h = harness(replies, true);
+        let lab = ComputerId::from("lab");
+        h.screens.set_visible(Screen::Accounts, true);
+        h.drain();
+        launch_ask(&h, &lab, false);
+        assert_eq!(h.count("@lab account ls"), 1);
+        h.at(31_000);
+        h.screens.tick();
+        assert_eq!(h.queued(), 1, "only the listed computer's catalog fell due");
+        h.run(0);
+        assert_eq!(h.queued(), 0);
+        h.at(32_000);
+        assert!(h.screens.accounts(true).busy, "the Refresh started at once");
+        assert!(h.queued() > 0);
+        h.drain();
+        assert_eq!(h.count("account ls"), 3);
+        for at in [62_000, 93_000] {
+            h.at(at);
+            h.screens.tick();
+            h.drain();
+        }
+        assert_eq!(h.count("@lab account ls"), 1, "never polled");
+        assert_eq!(
+            members(&h.screens.launch_rows(&lab)),
+            [vec!["lab-claude"]],
+            "kept while the dialog watches it"
         );
     }
 

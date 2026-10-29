@@ -113,7 +113,8 @@ pub struct ViewRow {
     /// The raw working directory (`folder` is the name people know it by).
     pub cwd: String,
     /// The canonical working directory (`cwd_canonical`), empty when the row
-    /// has none. New session's prefill opens on it.
+    /// has none, and then not sent. New session's prefill opens on it.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub cwd_canonical: String,
     /// The checkout's root (`git_root`), empty outside Git. The worktree
     /// picker counts sessions by it.
@@ -1771,6 +1772,14 @@ mod tests {
             (plain.git_root.as_str(), plain.cwd_canonical.as_str()),
             ("", "")
         );
+        // Every row carries `git_root`; `cwd_canonical` only when it has one.
+        let sent = serde_json::to_value(&plain).unwrap();
+        assert_eq!(sent["git_root"], json!(""));
+        assert!(sent.get("cwd_canonical").is_none());
+        let sent = serde_json::to_value(&view).unwrap();
+        assert_eq!(sent["cwd_canonical"], json!("/srv/example/project"));
+        let back: ViewRow = serde_json::from_value(serde_json::to_value(&plain).unwrap()).unwrap();
+        assert_eq!(back.cwd_canonical, "");
     }
 
     #[test]

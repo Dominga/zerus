@@ -126,6 +126,18 @@ impl AccountsState {
         self.start_catalogs(hosts, now, force)
     }
 
+    /// [`Self::ensure_catalogs`] without forgetting a host: the hub prunes
+    /// with its full host list in [`Self::warm`], which keeps New session's
+    /// computer, and polls only the hosts the Accounts page lists.
+    pub fn poll_catalogs(
+        &mut self,
+        hosts: &[ComputerId],
+        now: u64,
+        force: bool,
+    ) -> Vec<ComputerId> {
+        self.start_catalogs(hosts, now, force)
+    }
+
     /// One host's `account ls` for New session, which reads on every open,
     /// computer change and Refresh (`NewSessionDialog::loadAccounts`): it
     /// starts now (marked running) unless one runs, which is shared without a
@@ -429,6 +441,32 @@ mod tests {
             s.warm(std::slice::from_ref(&mac), 2).is_empty(),
             "read for New session: no warm-up read again"
         );
+    }
+
+    // The page polls the hosts it lists; New session's computer outside them
+    // keeps its catalog until the warm-up's full list drops it.
+    #[test]
+    fn polling_the_listed_hosts_forgets_no_other_host() {
+        let (local, lab) = (ComputerId::local(), ComputerId::from("lab"));
+        let mut s = AccountsState::default();
+        assert!(s.ensure_catalog(&lab, 0));
+        s.finish_catalog(&lab, Ok(json!({"profiles": []})), 1, &[]);
+        let listed = std::slice::from_ref(&local);
+        assert_eq!(s.poll_catalogs(listed, 40_000, false), listed);
+        assert!(
+            s.poll_catalogs(listed, 41_000, true).is_empty(),
+            "one in flight"
+        );
+        assert!(
+            s.catalogs[&local].queued,
+            "a forced poll queues its follow-up"
+        );
+        assert!(
+            s.catalogs.contains_key(&lab) && !s.catalogs[&lab].pending,
+            "the unlisted host is kept and not read"
+        );
+        s.warm(listed, 42_000);
+        assert!(!s.catalogs.contains_key(&lab), "the full list forgets it");
     }
 
     #[test]

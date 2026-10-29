@@ -374,11 +374,12 @@ impl Organization {
             .unwrap_or_default()
     }
 
-    /// The catalog's `swarm_id`, empty before the first state: New session
-    /// infers a folder's project only from this swarm
-    /// (SessionsWindow.cpp:2922).
+    /// The observed catalog's `swarm_id`, empty before the first state: New
+    /// session infers a folder's project only from this swarm
+    /// (SessionsWindow.cpp:2922). It is top-level, so pending edits never
+    /// change it and the organization is not rebuilt for it.
     pub fn swarm_id(&self) -> String {
-        let value = self.lock().sync.presented_value();
+        let value = self.lock().sync.observed_value();
         value
             .and_then(|value| value["swarm_id"].as_str().map(str::to_owned))
             .unwrap_or_default()

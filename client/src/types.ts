@@ -75,7 +75,7 @@ export interface ViewRow {
   action_reasons?: Record<string, string>;
   /** The raw working directory (`folder` is the name people know the checkout by). */
   cwd?: string;
-  /** The canonical working directory, "" when the row has none (New session's prefill). */
+  /** The canonical working directory (New session's prefill); absent when the row has none. */
   cwd_canonical?: string;
   /** The checkout's root, "" outside Git (the worktree picker's session counts). */
   git_root?: string;

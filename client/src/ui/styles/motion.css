@@ -38,13 +38,15 @@
 :root[data-reduce-motion="1"] .typing i,
 :root[data-reduce-motion="1"] .skeleton::before,
 :root[data-reduce-motion="1"] .busy-arc,
+:root[data-reduce-motion="1"] .su-spin,
+:root[data-reduce-motion="1"] .set-spinner,
 :root[data-reduce-motion="1"] .tchip.rec svg,
 :root[data-reduce-motion="1"] .vm-frames { animation: none !important; }
 :root[data-reduce-motion="1"] .mtile.s-connecting .mtile-dot::after { animation: none; opacity: .6; }
 :root[data-reduce-motion="1"] .zlogo, :root[data-reduce-motion="1"] .zlogo * { animation: none !important; transition: none; }
 /* Entrances and a few transitions, as the mockup's media query has them. */
 :root[data-reduce-motion="1"] .menu, :root[data-reduce-motion="1"] dialog.dlg[open],
-:root[data-reduce-motion="1"] .toast, :root[data-reduce-motion="1"] .tab.on::after { animation-duration: 1ms; }
+:root[data-reduce-motion="1"] .acct-more, :root[data-reduce-motion="1"] .toast, :root[data-reduce-motion="1"] .tab.on::after { animation-duration: 1ms; }
 :root[data-reduce-motion="1"] .inspector, :root[data-reduce-motion="1"] .icard,
 :root[data-reduce-motion="1"] .icard-body, :root[data-reduce-motion="1"] .vm-text { animation: none !important; }
 :root[data-reduce-motion="1"] .icard-chev, :root[data-reduce-motion="1"] .col-edge::before,

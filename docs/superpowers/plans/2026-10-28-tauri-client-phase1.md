@@ -238,9 +238,12 @@ if __name__ == "__main__":
 | Phase | Scope | Beads |
 |---|---|---|
 | 2 | Guarded session actions through `hgs` (interrupt, mark read, pause, resume, rename, archive, terminate) with Qt's enablement, confirmations, notices and request identities; send moves to phase 4 with the full composer; plan: `docs/superpowers/plans/2026-10-28-tauri-client-phase2-actions.md` | zerus-5wmh.7 |
-| 3 | Screens: Overview, Projects, Machines, Accounts, Settings (read and write through `hgs`) | zerus-5wmh.8 |
+| 3a | Overview, Projects, Machines and Accounts on live data, reads only: machine cards from `catalog.meta`, account, machine and swarm reads through the screens hub; writes disabled with their phase; plan: `docs/superpowers/plans/2026-10-28-tauri-client-phase3a-screens.md` | zerus-5wmh.8 |
+| 3b | Settings, including the Phones panel the mockup shows under Machines | zerus-5wmh.24 |
+| 3c | Machines, Accounts and Projects writes (connections, install, accounts, defaults, permissions, models, projects, folders, swarm, the legacy `project ls` import, Open folder, local label and project colours) | zerus-5wmh.25 |
+| 3 | Peers without the watch-v1 stream: Qt's polling fallback (`hgs @alias ls --json`) | zerus-5wmh.34 |
 | 4 | Composer and Send (Qt's block reasons, cold cache confirmation, resume-then-send, local failed messages, durable drafts), attachments, voice and video, Terminal (xterm.js, PTY in Rust), Processes, Native UI | zerus-5wmh.9 |
-| 5 | Tasks and the side panel; New session and worktree flows | zerus-5wmh.10 |
+| 5 | Tasks and the side panel; New session and worktree flows; the Projects Worktrees panel and its `worktrees` read; New session from a project folder | zerus-5wmh.10 |
 | 6 | Skins v1 loader in Settings with user import and validation; i18n; accessibility pass | zerus-5wmh.11 |
 | 7 | Packaging and signing per platform (macOS notarised bundle, Arch package, Windows later), updates, Dev channel | zerus-5wmh.12 |
 | 8 | Side-by-side period: the client ships beside Qt as a separate app; parity checklist tracking; the owner switches the default | zerus-5wmh.13 |

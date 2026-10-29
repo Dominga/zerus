@@ -1,0 +1,76 @@
+// The approval journal's reads as AutomaticApprovalSettings.cpp runs them:
+// one list read at a time (an edit during a read reads once more, never a
+// queue of pages), Newer and Older by the journal's cursors, nothing to page
+// or select after a failed read, and an entry's detail where only the
+// latest selection's answer counts.
+
+export interface Entry { id: number; at: number; host: string; session: string; prompt: string; result: string }
+export interface Page { entries: Entry[]; next: number; previous: number }
+export interface ListRequest { host: string; session: string; before: number; after: number }
+
+export interface JournalState {
+  page: Page;
+  /** A read runs: nothing to page or select. */
+  loading: boolean;
+  status: string;
+  selected?: string;
+  detail?: string;
+  detailHint: string;
+}
+
+export interface JournalIo {
+  list(request: ListRequest): Promise<Page>;
+  detail(id: number): Promise<string>;
+}
+
+export const PLACEHOLDER = "Select a journal entry to read the question and its outcome.";
+const EMPTY: Page = { entries: [], next: 0, previous: 0 };
+
+export function createJournal(io: JournalIo, filters: () => { host: string; session: string }, show: (state: JournalState) => void) {
+  let state: JournalState = { page: EMPTY, loading: false, status: "", detailHint: PLACEHOLDER };
+  let before = 0;
+  let after = 0;
+  let busy = false;
+  let again = false;
+  let detailRequest = 0;
+  const update = (change: Partial<JournalState>) => { state = { ...state, ...change }; show(state); };
+
+  const refresh = () => {
+    detailRequest++;
+    update({ status: "Loading approval journal…", loading: true, selected: undefined, detail: undefined, detailHint: PLACEHOLDER });
+    if (busy) { again = true; return; }
+    busy = true;
+    const done = (finish: () => void) => {
+      busy = false;
+      if (again) { again = false; refresh(); return; }
+      finish();
+    };
+    io.list({ ...filters(), before, after }).then(
+      (page) => done(() => update({
+        page,
+        loading: false,
+        status: page.entries.length
+          ? `${page.entries.length} entries. Unconfirmed attempts require checking Activity or Terminal; they are not retried.`
+          : "No automatic approvals recorded for this filter.",
+      })),
+      // A failed read leaves no page to select from or move through.
+      (error) => done(() => update({ page: EMPTY, loading: false, status: String(error) })),
+    );
+  };
+
+  return {
+    state: () => state,
+    firstPage() { before = 0; after = 0; refresh(); },
+    newer() { if (state.loading || state.page.previous <= 0) return; after = state.page.previous; before = 0; refresh(); },
+    older() { if (state.loading || state.page.next <= 0) return; before = state.page.next; after = 0; refresh(); },
+    select(key: string) {
+      if (state.loading) return;
+      const request = ++detailRequest;
+      update({ selected: key, detail: undefined, detailHint: "Loading question…" });
+      io.detail(Number(key)).then(
+        (text) => { if (request === detailRequest) update({ detail: text }); },
+        (error) => { if (request === detailRequest) update({ detail: String(error) }); },
+      );
+    },
+  };
+}

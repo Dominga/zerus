@@ -40,7 +40,7 @@ export function MenuLayer() {
   return (
     <Show when={menu()}>
       {(m) => (
-        <div class="menu" role="menu" ref={el} style={{ left: `${m().x}px`, top: `${m().y}px` }} onKeyDown={onKey}>
+        <div class="menu" role="menu" data-shortcut-context="none" ref={el} style={{ left: `${m().x}px`, top: `${m().y}px` }} onKeyDown={onKey}>
           <For each={m().items}>
             {(item) =>
               "separator" in item ? <div class="menu-sep" role="separator" /> :

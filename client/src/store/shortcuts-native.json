@@ -1,0 +1,714 @@
+{
+ "linux": [
+  {
+   "count": 1,
+   "native": "Ctrl+1",
+   "portable": "Ctrl+1",
+   "roundtrip": "Ctrl+1"
+  },
+  {
+   "count": 1,
+   "native": "Ctrl+2",
+   "portable": "Ctrl+2",
+   "roundtrip": "Ctrl+2"
+  },
+  {
+   "count": 1,
+   "native": "Ctrl+3",
+   "portable": "Ctrl+3",
+   "roundtrip": "Ctrl+3"
+  },
+  {
+   "count": 1,
+   "native": "Ctrl+4",
+   "portable": "Ctrl+4",
+   "roundtrip": "Ctrl+4"
+  },
+  {
+   "count": 1,
+   "native": "Ctrl+5",
+   "portable": "Ctrl+5",
+   "roundtrip": "Ctrl+5"
+  },
+  {
+   "count": 1,
+   "native": "Ctrl+,",
+   "portable": "Ctrl+,",
+   "roundtrip": "Ctrl+,"
+  },
+  {
+   "count": 1,
+   "native": "Ctrl+K",
+   "portable": "Ctrl+K",
+   "roundtrip": "Ctrl+K"
+  },
+  {
+   "count": 1,
+   "native": "F1",
+   "portable": "F1",
+   "roundtrip": "F1"
+  },
+  {
+   "count": 1,
+   "native": "Ctrl+/",
+   "portable": "Ctrl+/",
+   "roundtrip": "Ctrl+/"
+  },
+  {
+   "count": 1,
+   "native": "Alt+Shift+Down",
+   "portable": "Alt+Shift+Down",
+   "roundtrip": "Alt+Shift+Down"
+  },
+  {
+   "count": 1,
+   "native": "Alt+Shift+Up",
+   "portable": "Alt+Shift+Up",
+   "roundtrip": "Alt+Shift+Up"
+  },
+  {
+   "count": 1,
+   "native": "Ctrl+N",
+   "portable": "Ctrl+N",
+   "roundtrip": "Ctrl+N"
+  },
+  {
+   "count": 1,
+   "native": "F2",
+   "portable": "F2",
+   "roundtrip": "F2"
+  },
+  {
+   "count": 1,
+   "native": "Ctrl+F",
+   "portable": "Ctrl+F",
+   "roundtrip": "Ctrl+F"
+  },
+  {
+   "count": 1,
+   "native": "Ctrl+R",
+   "portable": "Ctrl+R",
+   "roundtrip": "Ctrl+R"
+  },
+  {
+   "count": 1,
+   "native": "F5",
+   "portable": "F5",
+   "roundtrip": "F5"
+  },
+  {
+   "count": 1,
+   "native": "Ctrl+I",
+   "portable": "Ctrl+I",
+   "roundtrip": "Ctrl+I"
+  },
+  {
+   "count": 1,
+   "native": "F6",
+   "portable": "F6",
+   "roundtrip": "F6"
+  },
+  {
+   "count": 1,
+   "native": "Shift+F6",
+   "portable": "Shift+F6",
+   "roundtrip": "Shift+F6"
+  },
+  {
+   "count": 1,
+   "native": "Ctrl+Return",
+   "portable": "Ctrl+Return",
+   "roundtrip": "Ctrl+Return"
+  },
+  {
+   "count": 1,
+   "native": "Ctrl+Shift+Return",
+   "portable": "Ctrl+Shift+Return",
+   "roundtrip": "Ctrl+Shift+Return"
+  },
+  {
+   "count": 1,
+   "native": "Ctrl+=",
+   "portable": "Ctrl+=",
+   "roundtrip": "Ctrl+="
+  },
+  {
+   "count": 1,
+   "native": "Ctrl++",
+   "portable": "Ctrl++",
+   "roundtrip": "Ctrl++"
+  },
+  {
+   "count": 1,
+   "native": "Ctrl+-",
+   "portable": "Ctrl+-",
+   "roundtrip": "Ctrl+-"
+  },
+  {
+   "count": 1,
+   "native": "Ctrl+0",
+   "portable": "Ctrl+0",
+   "roundtrip": "Ctrl+0"
+  },
+  {
+   "count": 1,
+   "native": "Alt+Down",
+   "portable": "Alt+Down",
+   "roundtrip": "Alt+Down"
+  },
+  {
+   "count": 1,
+   "native": "Ctrl+Alt+Down",
+   "portable": "Ctrl+Alt+Down",
+   "roundtrip": "Ctrl+Alt+Down"
+  },
+  {
+   "count": 1,
+   "native": "Ctrl+PgDown",
+   "portable": "Ctrl+PgDown",
+   "roundtrip": "Ctrl+PgDown"
+  },
+  {
+   "count": 1,
+   "native": "Alt+Up",
+   "portable": "Alt+Up",
+   "roundtrip": "Alt+Up"
+  },
+  {
+   "count": 1,
+   "native": "Ctrl+Alt+Up",
+   "portable": "Ctrl+Alt+Up",
+   "roundtrip": "Ctrl+Alt+Up"
+  },
+  {
+   "count": 1,
+   "native": "Ctrl+PgUp",
+   "portable": "Ctrl+PgUp",
+   "roundtrip": "Ctrl+PgUp"
+  },
+  {
+   "count": 1,
+   "native": "Meta+Tab",
+   "portable": "Meta+Tab",
+   "roundtrip": "Meta+Tab"
+  },
+  {
+   "count": 1,
+   "native": "Ctrl+Tab",
+   "portable": "Ctrl+Tab",
+   "roundtrip": "Ctrl+Tab"
+  },
+  {
+   "count": 1,
+   "native": "Meta+Shift+Tab",
+   "portable": "Meta+Shift+Tab",
+   "roundtrip": "Meta+Shift+Tab"
+  },
+  {
+   "count": 1,
+   "native": "Ctrl+Shift+Tab",
+   "portable": "Ctrl+Shift+Tab",
+   "roundtrip": "Ctrl+Shift+Tab"
+  },
+  {
+   "count": 1,
+   "native": "Meta+`",
+   "portable": "Meta+`",
+   "roundtrip": "Meta+`"
+  },
+  {
+   "count": 1,
+   "native": "Ctrl+`",
+   "portable": "Ctrl+`",
+   "roundtrip": "Ctrl+`"
+  },
+  {
+   "count": 2,
+   "native": "Meta+X, Meta+S",
+   "portable": "Meta+X, Meta+S",
+   "roundtrip": "Meta+X, Meta+S"
+  },
+  {
+   "count": 2,
+   "native": "Ctrl+X, Ctrl+S",
+   "portable": "Ctrl+X, Ctrl+S",
+   "roundtrip": "Ctrl+X, Ctrl+S"
+  },
+  {
+   "count": 1,
+   "native": "Ctrl+Enter",
+   "portable": "Ctrl+Enter",
+   "roundtrip": "Ctrl+Enter"
+  },
+  {
+   "count": 1,
+   "native": "Ctrl+Del",
+   "portable": "Ctrl+Del",
+   "roundtrip": "Ctrl+Del"
+  },
+  {
+   "count": 1,
+   "native": "Ctrl+Backspace",
+   "portable": "Ctrl+Backspace",
+   "roundtrip": "Ctrl+Backspace"
+  },
+  {
+   "count": 1,
+   "native": "Ctrl+Esc",
+   "portable": "Ctrl+Esc",
+   "roundtrip": "Ctrl+Esc"
+  },
+  {
+   "count": 1,
+   "native": "Ctrl+Space",
+   "portable": "Ctrl+Space",
+   "roundtrip": "Ctrl+Space"
+  },
+  {
+   "count": 1,
+   "native": "Ctrl+Home",
+   "portable": "Ctrl+Home",
+   "roundtrip": "Ctrl+Home"
+  },
+  {
+   "count": 1,
+   "native": "Ctrl+End",
+   "portable": "Ctrl+End",
+   "roundtrip": "Ctrl+End"
+  },
+  {
+   "count": 1,
+   "native": "Ctrl+Ins",
+   "portable": "Ctrl+Ins",
+   "roundtrip": "Ctrl+Ins"
+  },
+  {
+   "count": 1,
+   "native": "Ctrl+Left",
+   "portable": "Ctrl+Left",
+   "roundtrip": "Ctrl+Left"
+  },
+  {
+   "count": 1,
+   "native": "Ctrl+Right",
+   "portable": "Ctrl+Right",
+   "roundtrip": "Ctrl+Right"
+  },
+  {
+   "count": 1,
+   "native": "Meta+Ctrl+Alt+Shift+K",
+   "portable": "Meta+Alt+Shift+Ctrl+K",
+   "roundtrip": "Meta+Ctrl+Alt+Shift+K"
+  },
+  {
+   "count": 1,
+   "native": "Ctrl+[",
+   "portable": "Ctrl+[",
+   "roundtrip": "Ctrl+["
+  },
+  {
+   "count": 1,
+   "native": "Ctrl+]",
+   "portable": "Ctrl+]",
+   "roundtrip": "Ctrl+]"
+  },
+  {
+   "count": 1,
+   "native": "Ctrl+;",
+   "portable": "Ctrl+;",
+   "roundtrip": "Ctrl+;"
+  },
+  {
+   "count": 1,
+   "native": "Ctrl+'",
+   "portable": "Ctrl+'",
+   "roundtrip": "Ctrl+'"
+  },
+  {
+   "count": 1,
+   "native": "Ctrl+.",
+   "portable": "Ctrl+.",
+   "roundtrip": "Ctrl+."
+  },
+  {
+   "count": 1,
+   "native": "Ctrl+\\",
+   "portable": "Ctrl+\\",
+   "roundtrip": "Ctrl+\\"
+  },
+  {
+   "count": 1,
+   "native": "Menu",
+   "portable": "Menu",
+   "roundtrip": "Menu"
+  },
+  {
+   "count": 1,
+   "native": "Shift+F10",
+   "portable": "Shift+F10",
+   "roundtrip": "Shift+F10"
+  },
+  {
+   "count": 1,
+   "native": "Ctrl+F12",
+   "portable": "Ctrl+F12",
+   "roundtrip": "Ctrl+F12"
+  }
+ ],
+ "macos": [
+  {
+   "count": 1,
+   "native": "⌘1",
+   "portable": "Ctrl+1",
+   "roundtrip": "Ctrl+1"
+  },
+  {
+   "count": 1,
+   "native": "⌘2",
+   "portable": "Ctrl+2",
+   "roundtrip": "Ctrl+2"
+  },
+  {
+   "count": 1,
+   "native": "⌘3",
+   "portable": "Ctrl+3",
+   "roundtrip": "Ctrl+3"
+  },
+  {
+   "count": 1,
+   "native": "⌘4",
+   "portable": "Ctrl+4",
+   "roundtrip": "Ctrl+4"
+  },
+  {
+   "count": 1,
+   "native": "⌘5",
+   "portable": "Ctrl+5",
+   "roundtrip": "Ctrl+5"
+  },
+  {
+   "count": 1,
+   "native": "⌘,",
+   "portable": "Ctrl+,",
+   "roundtrip": "Ctrl+,"
+  },
+  {
+   "count": 1,
+   "native": "⌘K",
+   "portable": "Ctrl+K",
+   "roundtrip": "Ctrl+K"
+  },
+  {
+   "count": 1,
+   "native": "F1",
+   "portable": "F1",
+   "roundtrip": "F1"
+  },
+  {
+   "count": 1,
+   "native": "⌘/",
+   "portable": "Ctrl+/",
+   "roundtrip": "Ctrl+/"
+  },
+  {
+   "count": 1,
+   "native": "⌥⇧↓",
+   "portable": "Alt+Shift+Down",
+   "roundtrip": "Alt+Shift+Down"
+  },
+  {
+   "count": 1,
+   "native": "⌥⇧↑",
+   "portable": "Alt+Shift+Up",
+   "roundtrip": "Alt+Shift+Up"
+  },
+  {
+   "count": 1,
+   "native": "⌘N",
+   "portable": "Ctrl+N",
+   "roundtrip": "Ctrl+N"
+  },
+  {
+   "count": 1,
+   "native": "F2",
+   "portable": "F2",
+   "roundtrip": "F2"
+  },
+  {
+   "count": 1,
+   "native": "⌘F",
+   "portable": "Ctrl+F",
+   "roundtrip": "Ctrl+F"
+  },
+  {
+   "count": 1,
+   "native": "⌘R",
+   "portable": "Ctrl+R",
+   "roundtrip": "Ctrl+R"
+  },
+  {
+   "count": 1,
+   "native": "F5",
+   "portable": "F5",
+   "roundtrip": "F5"
+  },
+  {
+   "count": 1,
+   "native": "⌘I",
+   "portable": "Ctrl+I",
+   "roundtrip": "Ctrl+I"
+  },
+  {
+   "count": 1,
+   "native": "F6",
+   "portable": "F6",
+   "roundtrip": "F6"
+  },
+  {
+   "count": 1,
+   "native": "⇧F6",
+   "portable": "Shift+F6",
+   "roundtrip": "Shift+F6"
+  },
+  {
+   "count": 1,
+   "native": "⌘↵",
+   "portable": "Ctrl+Return",
+   "roundtrip": "Ctrl+Return"
+  },
+  {
+   "count": 1,
+   "native": "⇧⌘↵",
+   "portable": "Ctrl+Shift+Return",
+   "roundtrip": "Ctrl+Shift+Return"
+  },
+  {
+   "count": 1,
+   "native": "⌘=",
+   "portable": "Ctrl+=",
+   "roundtrip": "Ctrl+="
+  },
+  {
+   "count": 1,
+   "native": "⌘+",
+   "portable": "Ctrl++",
+   "roundtrip": "Ctrl++"
+  },
+  {
+   "count": 1,
+   "native": "⌘-",
+   "portable": "Ctrl+-",
+   "roundtrip": "Ctrl+-"
+  },
+  {
+   "count": 1,
+   "native": "⌘0",
+   "portable": "Ctrl+0",
+   "roundtrip": "Ctrl+0"
+  },
+  {
+   "count": 1,
+   "native": "⌥↓",
+   "portable": "Alt+Down",
+   "roundtrip": "Alt+Down"
+  },
+  {
+   "count": 1,
+   "native": "⌥⌘↓",
+   "portable": "Ctrl+Alt+Down",
+   "roundtrip": "Ctrl+Alt+Down"
+  },
+  {
+   "count": 1,
+   "native": "⌘⇟",
+   "portable": "Ctrl+PgDown",
+   "roundtrip": "Ctrl+PgDown"
+  },
+  {
+   "count": 1,
+   "native": "⌥↑",
+   "portable": "Alt+Up",
+   "roundtrip": "Alt+Up"
+  },
+  {
+   "count": 1,
+   "native": "⌥⌘↑",
+   "portable": "Ctrl+Alt+Up",
+   "roundtrip": "Ctrl+Alt+Up"
+  },
+  {
+   "count": 1,
+   "native": "⌘⇞",
+   "portable": "Ctrl+PgUp",
+   "roundtrip": "Ctrl+PgUp"
+  },
+  {
+   "count": 1,
+   "native": "⌃⇥",
+   "portable": "Meta+Tab",
+   "roundtrip": "Meta+Tab"
+  },
+  {
+   "count": 1,
+   "native": "⌘⇥",
+   "portable": "Ctrl+Tab",
+   "roundtrip": "Ctrl+Tab"
+  },
+  {
+   "count": 1,
+   "native": "⌃⇧⇥",
+   "portable": "Meta+Shift+Tab",
+   "roundtrip": "Meta+Shift+Tab"
+  },
+  {
+   "count": 1,
+   "native": "⇧⌘⇥",
+   "portable": "Ctrl+Shift+Tab",
+   "roundtrip": "Ctrl+Shift+Tab"
+  },
+  {
+   "count": 1,
+   "native": "⌃`",
+   "portable": "Meta+`",
+   "roundtrip": "Meta+`"
+  },
+  {
+   "count": 1,
+   "native": "⌘`",
+   "portable": "Ctrl+`",
+   "roundtrip": "Ctrl+`"
+  },
+  {
+   "count": 2,
+   "native": "⌃X, ⌃S",
+   "portable": "Meta+X, Meta+S",
+   "roundtrip": "Meta+X, Meta+S"
+  },
+  {
+   "count": 2,
+   "native": "⌘X, ⌘S",
+   "portable": "Ctrl+X, Ctrl+S",
+   "roundtrip": "Ctrl+X, Ctrl+S"
+  },
+  {
+   "count": 1,
+   "native": "⌘⌤",
+   "portable": "Ctrl+Enter",
+   "roundtrip": "Ctrl+Enter"
+  },
+  {
+   "count": 1,
+   "native": "⌘⌦",
+   "portable": "Ctrl+Del",
+   "roundtrip": "Ctrl+Del"
+  },
+  {
+   "count": 1,
+   "native": "⌘⌫",
+   "portable": "Ctrl+Backspace",
+   "roundtrip": "Ctrl+Backspace"
+  },
+  {
+   "count": 1,
+   "native": "⌘⎋",
+   "portable": "Ctrl+Esc",
+   "roundtrip": "Ctrl+Esc"
+  },
+  {
+   "count": 1,
+   "native": "⌘Space",
+   "portable": "Ctrl+Space",
+   "roundtrip": "Ctrl+Space"
+  },
+  {
+   "count": 1,
+   "native": "⌘↖",
+   "portable": "Ctrl+Home",
+   "roundtrip": "Ctrl+Home"
+  },
+  {
+   "count": 1,
+   "native": "⌘↘",
+   "portable": "Ctrl+End",
+   "roundtrip": "Ctrl+End"
+  },
+  {
+   "count": 1,
+   "native": "⌘Ins",
+   "portable": "Ctrl+Ins",
+   "roundtrip": "Ctrl+Ins"
+  },
+  {
+   "count": 1,
+   "native": "⌘←",
+   "portable": "Ctrl+Left",
+   "roundtrip": "Ctrl+Left"
+  },
+  {
+   "count": 1,
+   "native": "⌘→",
+   "portable": "Ctrl+Right",
+   "roundtrip": "Ctrl+Right"
+  },
+  {
+   "count": 1,
+   "native": "⌃⌥⇧⌘K",
+   "portable": "Meta+Alt+Shift+Ctrl+K",
+   "roundtrip": "Meta+Ctrl+Alt+Shift+K"
+  },
+  {
+   "count": 1,
+   "native": "⌘[",
+   "portable": "Ctrl+[",
+   "roundtrip": "Ctrl+["
+  },
+  {
+   "count": 1,
+   "native": "⌘]",
+   "portable": "Ctrl+]",
+   "roundtrip": "Ctrl+]"
+  },
+  {
+   "count": 1,
+   "native": "⌘;",
+   "portable": "Ctrl+;",
+   "roundtrip": "Ctrl+;"
+  },
+  {
+   "count": 1,
+   "native": "⌘'",
+   "portable": "Ctrl+'",
+   "roundtrip": "Ctrl+'"
+  },
+  {
+   "count": 1,
+   "native": "⌘.",
+   "portable": "Ctrl+.",
+   "roundtrip": "Ctrl+."
+  },
+  {
+   "count": 1,
+   "native": "⌘\\",
+   "portable": "Ctrl+\\",
+   "roundtrip": "Ctrl+\\"
+  },
+  {
+   "count": 1,
+   "native": "Menu",
+   "portable": "Menu",
+   "roundtrip": "Menu"
+  },
+  {
+   "count": 1,
+   "native": "⇧F10",
+   "portable": "Shift+F10",
+   "roundtrip": "Shift+F10"
+  },
+  {
+   "count": 1,
+   "native": "⌘F12",
+   "portable": "Ctrl+F12",
+   "roundtrip": "Ctrl+F12"
+  }
+ ]
+}

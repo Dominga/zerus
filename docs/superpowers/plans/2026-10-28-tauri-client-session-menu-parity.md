@@ -19,7 +19,7 @@ Project organisation (Move to project, project header menu, grouping: `zerus-5wm
   - `marks.rs` (new) keeps the device's attention marks and read replies;
   - `readsync.rs` (new) ports `ReadMarkSync` (the queued delivery of read marks);
   - `reads.rs` gains the archive page read.
-- **`client/src-tauri`:** new commands (`copy_text`, `session_reference`, `copy_command`, `notifications`, `attention_marks`, `set_attention_marks`, `archive_page`) and the read-mark delivery worker.
+- **`client/src-tauri`:** new commands (`copy_text`, `session_reference`, `copy_command`, `notifications`, `attention_marks`, `update_attention_marks`, `queue_read_marks`, `archive_page`) and the read-mark delivery worker.
 - **SolidJS:** `store/marks.ts` (new) overlays the marks on catalog rows; `store/archive.ts` (new) holds archive pages; `store/batch.ts` (new) runs a selection one session at a time. Menu entries are built in `actions-ui.ts` and `ActionDialogs.tsx`, so `SessionList.tsx` changes by a few lines per entry.
 
 Unknown outcomes are shown and never replayed.
@@ -96,17 +96,20 @@ client/core/src/readsync.rs         ReadSync: Qt's queued delivery of read marks
 client/core/src/reads.rs            Read::ArchivePage and its checks
 client/core/tests/actions.rs        new calls through the fake hgs
 client/core/tests/support/fake_hgs_actions.py   "replies" by argument prefix
-client/src-tauri/src/actions.rs     copy_text, session_reference, copy_command, notifications, attention_marks, set_attention_marks
+client/src-tauri/src/actions.rs     copy_text, session_reference, copy_command, notifications, attention_marks, update_attention_marks,
+                                    queue_read_marks
 client/src-tauri/src/readsync.rs    the delivery worker around core ReadSync
 client/src-tauri/src/lib.rs         registers the commands, the clipboard plugin and the worker
 client/src/types.ts, bridge.ts      the new fields, actions and commands
 client/src/store/marks.ts (+test)   marks store and the row overlay
 client/src/store/archive.ts (+test) archive pages per computer
 client/src/store/batch.ts (+test)   selection runner
+client/src/store/restores.ts (+test)   Restore, its follow-up and limit, Forget archived, the batch's archive calls
 client/src/store/actions.ts         new actions, notices, the global batch busy flag
 client/src/store/catalog.ts         new flat Session fields; the overlay hook
 client/src/ui/sessions/actions-ui.ts (+test)   menuState additions, selection applicability, dialog copy
 client/src/ui/sessions/ActionDialogs.tsx       entries, Start fresh, Forget and batch confirmations
+client/src/ui/sessions/archive-entries.ts (+test)   Clear archive: the entry and its loaded rows in scope
 client/src/ui/sessions/ArchiveBar.tsx          date range, Older, Newer, Refresh, status
 client/src/ui/sessions/SessionList.tsx         wiring of the entries above only
 client/src/ui/sessions/SessionDetail.tsx       Mark read chip detail, Start fresh header action
@@ -283,7 +286,8 @@ pub struct AttentionMarks { /* path, marks: key -> Mark, replies: key -> reply_i
 impl AttentionMarks {
     pub fn load(path: PathBuf) -> Self;     // missing or unreadable: empty
     pub fn snapshot(&self) -> (BTreeMap<String, Mark>, BTreeMap<String, String>);
-    pub fn replace(&mut self, marks: BTreeMap<String, Mark>, replies: BTreeMap<String, String>); // saves atomically
+    // A delta: Some writes (the entry becomes the newest written), None removes; then caps and saves atomically.
+    pub fn update(&mut self, marks: BTreeMap<String, Option<Mark>>, replies: BTreeMap<String, Option<String>>);
 }
 pub struct ReadSync { /* ReadMarkSync */ }
 impl ReadSync {
@@ -291,14 +295,16 @@ impl ReadSync {
     pub fn set_pending(&mut self, pending: Vec<ReadMark>);
     pub fn due(&mut self, now_ms: i64) -> Vec<ReadMark>;   // the marks to send now, marked in flight
     pub fn finished(&mut self, mark: &ReadMark, delivered: bool, applied_all: bool, now_ms: i64);
+    pub fn not_sent(&mut self, mark: &ReadMark);          // its read lane was busy: due again, no failure counted
 }
+pub fn applied_all(mark: &ReadMark, receipt: &Value) -> bool; // every part the mark sets is `applied: true`
 ```
 
 Rules:
 - **Keys** are the client's own (`FleetState.cpp:44-52`):
   - reply key `["{computer}","{agent}","{conversation}"]`;
   - attention key the reply key, or `["{computer}","{agent}","{name}",created]` without a conversation.
-  - `set_attention_marks` keeps the frontend's merge (Task B3); the file is `attention-marks.json` beside `read-marks.json` (`read-marks-replay.json` style for a replay).
+  - The frontend keeps the merge rules (Task B3) and sends deltas: `attention_marks()` answers `{ marks, replies, order: { marks, replies } }` (maps by key, and each map's keys oldest written first, so the window's cap drops the same entries after a restart), `update_attention_marks(marks, replies)` takes maps of key to entry or null (removal). A full replace would send megabytes per click at the cap. The file is `attention-marks.json` beside `read-marks.json` (`attention-marks-replay.json` for a replay) and lists each map as `[key, value]` pairs in write order, so the cap drops the oldest written after a restart too.
 - **`ReadSync`** (`ReadMarkSync.h`, `ReadMarkSync.cpp:36-95`):
   - at most 4 marks in flight; each free slot goes to the computer with the fewest in flight, then key order;
   - a mark in flight, or one already sent unchanged that is not yet due, waits;
@@ -306,9 +312,11 @@ Rules:
   - failed: 10 s doubled per failure, at most 300 s;
   - a changed mark resets its counters;
   - a mark no longer pending is forgotten when it finishes.
-- **The worker** (`client/src-tauri/src/readsync.rs`): a thread that every 5 s, and whenever marks are added, takes `due`, runs each `MarkRead` through `run` (the phase 2 invocation and `classify`) and reports `finished`. Phase 2's frontend quiet retry and its read lane go away, since this worker owns delivery.
+- **The worker** (`client/src-tauri/src/readsync.rs`): a thread that every 5 s, and whenever marks are added, takes `due`, runs each `MarkRead` through `run` (the phase 2 invocation and `classify`) and reports `finished`. Phase 2's frontend quiet retry goes away in Task B3, since this worker owns delivery; the Rust Read lane stays, and the worker claims it for each call. Each wake first writes the marks `queue_read_marks` added (the command itself does no file I/O), and marks for computers the local listing no longer names are dropped once the peers are known (`publishReadMarks`, `TrayAgent.cpp:578-587`; marks for this computer stay).
   - A delivery shows no notice, as Qt (`markFinished` has no visible receiver).
-  - Settling stays `Actions::observe` (phase 2).
+  - Settling stays `Actions::observe` (phase 2): a mark is saved before any call, and an empty replace never drops pending marks.
+- **Queueing from the frontend:** a new command `queue_read_marks(marks: Vec<ReadMark>) -> Vec<ReadMark>` merges each mark into `ReadMarks` (`add`, which saves before any delivery), wakes the worker and returns the pending marks. Phase 2's `run_action` with `MarkRead` stays callable, but the UI no longer uses it.
+- **Lanes:** the worker claims a session's Read lane for each delivery and skips a session whose Read lane is busy; Write and Interrupt lanes are untouched (Stop never waits for a write; a read never blocks a write).
 
 - [ ] Tests: the cap drops the oldest written; a corrupt file loads empty; `ReadSync` with a fake clock covers four in flight, the fewest-busy computer, backoff 10 s, 20 s and so on to 300 s, the 120 s resend, partial applies doubling to 960 s, and a changed mark resetting.
 - [ ] Commit `feat(client): durable attention marks and queued read-mark delivery`.
@@ -343,16 +351,19 @@ Rules:
   - It sets the mark to `review = false, acknowledged = fingerprint`.
 - **`markNeedsAttention`:** the same match, then `review = true` (`FleetState.cpp:196-202`).
 - **`unreadReplies` and `markAllRead`** (`FleetState.cpp:234-262`):
-  - `unreadReplies` lists every row whose reply shows unread and that is not marked for review, hidden rows included.
+  - `unreadReplies` lists every row whose reply is unread (Qt's `unreadReply`, so a reply still in progress counts though it does not show yet) and that is not marked for review, hidden rows included.
   - `markAllRead` marks each of them whose reply is still the snapshot's, skipping an older host's row already in `replies`, and queues the reply marks. It returns the count.
-- **Persistence:** every change saves through `set_attention_marks` and adds queued marks through the phase 2 read-mark file. A host that starts sharing read state gets its legacy marks queued once (`legacyReadMarks`, `TrayAgent.cpp:570-572`).
+- **Pending mirror:** the store keeps the pending read marks the overlay reads: loaded at start, replaced by `queue_read_marks`' answer, and a mark is dropped when a batch row shows it settled or a non-empty snapshot of its computer no longer lists the session (the same rules as `ReadMarks::settle` and `Actions::observe`). Phase 2's frontend quiet retry (`observeBatch`'s retry) is removed; the worker owns delivery.
+- **Persistence:** every change saves through `update_attention_marks` (only the changed keys, after `attention_marks` has answered; a change made before that is kept and sent then) and queues read marks through `queue_read_marks`; an answer older than the latest local change is ignored. A host that starts sharing read state gets its legacy marks queued once (`legacyReadMarks`, `TrayAgent.cpp:570-572`); the computers already done are kept in the webview's local storage, as the client settings are until the QSettings migration.
 
 - [ ] Tests (vitest, mocked bridge): each overlay branch; a pending mark for another run is ignored; a newer reply after `markRead` shows unread again; `markRead` refuses a changed fingerprint; `markAllRead` skips review rows and counts; the fallback key migrates; the cap.
 - [ ] Commit `feat(client): local attention marks and read state, Qt's overlay`.
 
 ### Task B4: Mute and Unmute
 
-**Files:** core `actions.rs` (`Action::Notifications { muted: bool, expected_revision: i64 }`), the fake `hgs` replies, `store/actions.ts`, `actions-ui.ts`, `ActionDialogs.tsx`, `SessionList.tsx` (the Mute entry).
+**Files:** core `actions.rs` (`help_invocation`, `has_notifications_marker`, `notifications_invocation`, `classify_notifications`), the fake `hgs` replies, `client/src-tauri/src/actions.rs` (`set_notifications(target, muted, expected_revision) -> Result<Value, String>`, which runs the probe and then the call, returning the confirmed reply), `store/actions.ts`, `actions-ui.ts`, `ActionDialogs.tsx`, `SessionList.tsx` (the Mute entry).
+
+The change runs in its own per-session lane (`Lane::Notifications`): Qt tracks pending notification changes apart from `m_pending`, so a change never blocks a write and a write never blocks it. The frontend allows one pending change per conversation and 16 in all.
 
 Rules:
 - **The call** (`HgsClient.cpp:2401-2457`):
@@ -389,7 +400,7 @@ Rules:
   - Mark needs attention runs `markNeedsAttention`. Refused: the sticky "This session is no longer available. Open its actions again.".
   - No success notice.
   - This replaces phase 2's direct `hgs read` call and its "Update hgs on this session's host to share read state." refusal: an older host keeps this device's marks.
-- **The Mark read chip** (3777-3780): active for a row that is not archived and needs attention.
+- **The Mark read chip** (3777-3780) lives in Qt's composer toolbar (`ComposerToolbar::Slot::MarkRead`, 981-983), which the client builds in phase 4 (`zerus-5wmh.9`). This task adds only its pure state, `markReadChip(row)`, with tests; phase 4 places the chip. It is active for a row that is not archived and needs attention.
   - The detail is "Marked for later. Mark as read to clear this reminder." for a review mark.
   - Otherwise "Mark this session's current notification as read. This does not answer a pending question.".
   - A click runs Mark as read (1035-1040).
@@ -479,7 +490,9 @@ Rules (`SessionsWindow.cpp:5758-5826`):
 ```ts
 export type SelectionAction = "compact" | "expand" | "mark_read" | "review_later" | "pause" | "resume" | "archive" | "move" | "forget" | "terminate";
 export function applies(s: Session, a: SelectionAction, online: boolean, updating: boolean): boolean;   // selectionActionApplies
-export function run(a: SelectionAction, rows: ActionRow[], options?: { clearArchive?: boolean }): Promise<void>;
+export function run(a: SelectionAction, rows: SelectionRow[], options?: { clearArchive?: boolean; paged?: boolean }): Promise<void>;
+// SelectionRow = ActionRow plus `status` and `reviewLater` (needed for "needs attention").
+// Batch items call `perform(row, action, { quiet: true })`, which suppresses the single-session notices.
 export const running: () => boolean;     // Qt's m_pending while a batch runs
 ```
 
@@ -576,6 +589,7 @@ Rules (`SessionsWindow.cpp:2844-2893`, `HgsClient.cpp:1326-1343`):
 - **Each row:** `state == "archived"`, a non-empty name, `archive_id` a lowercase hyphenated UUID, and `archived_at` a number in `[from, until)`; else "Invalid archived session identity. Refresh the archive.".
 - **The reply:** rows projected with `view::row` (with `archived_at`), plus `next_cursor`, `previous_cursor`, `total` and `position`.
 - **Cancellation:** a newer request for the same computer cancels the older one; its answer is dropped (`cancelArchivePages`).
+- **Cancel all:** leaving the filter, a hosts change, a query change and Refresh cancel every archive read (`cancel_archive_pages`, Qt `cancelArchivePages`).
 
 - [ ] Tests for each check through `decode` and one fake `hgs` page. Commit `feat(client): archive page read`.
 
@@ -587,7 +601,7 @@ Rules (`ArchiveBrowser.cpp`, `ArchiveDatePicker.cpp`):
   - A page that comes back empty while rows were shown is the error "Archive changed. Refresh to start a new view.".
   - Pages load only while the Archive filter shows the list.
   - A query change cancels pages and reloads after 300 ms.
-- **Date range:** the picker's periods and custom range, default the last 30 days (`m_first = today - 29`). `from >= until` loads nothing.
+- **Date range:** the picker's periods and custom range. The default is All dates (`m_period = 0`); the custom range starts at the last 30 days (`m_first = today - 29`). `from >= until` loads nothing.
 - **Status:**
   - "Loading archive…" while loading;
   - one computer with a window: "{a}–{b} of {total}", or "{shown} shown of {total}";
@@ -627,13 +641,16 @@ An empty archive id fails before any call with "Missing archive identity". The o
 
 Rules:
 - **Restore session** (5302-5304, 5360-5361, 5542-5560):
-  - The change entry of an archived row is enabled when available, `resumable`, `archiveId` is set, no live row on the same computer has the name (`archiveNameOccupied`), and `allowed("restore")`.
-  - A restore of the same session already pending, or 64 restores pending, gives the sticky "Finish or refresh the earlier restores before restoring another session.".
+  - The change entry of an archived row is enabled when available, `resumable`, `archiveId` is set, no live row on the same computer has the name (`archiveNameOccupied`). It does not read `allowed("restore")`: Qt's header (`m_changeAction`, 3897-3898) does not, and the client's right-click selects the row first, so its context menu is Qt's selected-row case, which reuses `m_changeAction` (5360). The batch's Resume / restore still needs `allowed("restore")` (`SessionSelection.cpp` 94-96).
+  - A restore of the same session already pending, another single restore still running (`m_restoreWriteKey`), or 64 restores pending, gives the sticky "Finish or refresh the earlier restores before restoring another session.". In a batch, a second instance of a name restored earlier in the run meets the same limit ("{name}: earlier restores still need a refresh", `SessionSelection.cpp` 336-338), or "session changed or is unavailable" once the catalog lists its live row. A restore stays pending until its live row appears running or its call fails. Qt's limit also counts `m_restoredInspections`, which the client does not have (see the last rule below).
 - **After a successful restore** (1958-1969, 3281-3336):
-  - The archive refreshes.
+  - The archive refreshes (Forget keeps its refresh too). A successful rename or Move to archive also refreshes the archive (`SessionsWindow.cpp:1917`).
+  - The batch's Compact/Expand and E's archived calls find loaded archived rows (the store's `archive.row(key)`), not only catalog rows.
   - When the restored row is still selected under the Archive filter, the filter becomes All; other scopes stay.
-  - When the live row of that name appears with the restored conversation, the selection follows it.
+  - While its restore is pending, the archived row stays the selected row after the archive reloads (Qt's `selected()`, 3136-3139).
+  - When the live row of that name appears with the restored conversation, the selection follows it; a live row without a conversation is followed too (3322-3323).
   - When it appears with another conversation, the selection clears with the sticky "The restored conversation could not be verified." Qt adds "Your archived draft remains in Saved drafts."; the client has no saved drafts before phase 4 (`zerus-5wmh.9`), which restores the full text.
+  - Only the single restore of the selected row is followed (`m_restoreKey`). A batch, a state filter or search change, a Rename or a Forget archived session cancels the follow; then a verified live row only clears a selection still on the archived row (3297-3305).
   - Phase 2's details matching on run and conversation already keeps old-run details from enabling controls (Qt's `awaitingRestoredInspection`).
 - **Forget archived session** (5378-5380, 5771-5774):
   - The end entry is enabled when available, `allowed("forget")` and `archiveId` is set.
@@ -680,6 +697,66 @@ Controller rulings during Piece A:
 - "Session reference copied" appears only after the clipboard accepted the text; Qt shows it unconditionally and reports a copy failure separately.
 - The click-time recheck compares the conversation id; `created` joins it when Piece B adds it to the row.
 
+Controller rulings during Piece B:
+- Attention marks are saved as deltas (`update_attention_marks`) by a background writer; `attention_marks` returns each map's write order.
+- Read marks for computers no longer configured are dropped once the local listing names its peers, as Qt's `publishReadMarks`.
+- Mark all as read is also wired to the existing list footer button and the rail menu, as Qt has both.
+- The Mark read chip waits for phase 4's composer toolbar; only its state exists now.
+- The muted override guards only this client's own confirmed changes; Qt also guards every row against stale polls.
+- A same-revision change of other notification preferences is compared on the revision and `muted` only; the row carries no preferences digest.
+- The overlay ignores Qt's offline case of `visibleUnreadReply(online)`: an offline row's reply in progress does not show unread.
+- The attention and reply keys use the view agent (dsh keyed as `deepseek`) rather than Qt's raw `cmd`.
+- `set_notifications` answering "busy" (its lane is taken) is shown as the pending reason "A shared notification change is pending. Wait for its result."
+
+Controller rulings during Piece C:
+- Menu-launched Start fresh and Forget saved session run the click-time pre-check before their dialogs, as the copy entries do.
+- The header's Start fresh and Clear session follow Qt's main-context rule: neither shows while a subagent is open.
+- Forget archived session stays disabled until the Archive view (`zerus-5wmh.32`) (lifted by Piece E).
+- Task C4 added the README part and the smoke steps for PR 3.
+
+Controller rulings during Piece F:
+- The batch-running flag disables every write entry (Qt's m_pending).
+- Archived Resume and Forget are not counted until Piece E binds its hooks (lifted by Piece E).
+- Move to project is disabled with "Arrives with project organisation." until the organization stream's move lands.
+- Pause all and Resume all are computer-wide calls on their own write claim.
+- The client shows machines as headings, since its menus have no submenus.
+- The selection bar needs more than one selected row, since the client has no single-row bulk mode.
+- The batch Terminate omits Qt's worktree checkbox and "Stop {n} sessions" labels until `zerus-5wmh.10`.
+- Task F4 added the README part and the smoke steps for PR 4.
+
+Controller rulings during Piece D:
+- Pages are kept on leaving the Archive filter and the default range is All dates, both as Qt (the first draft of D2 said otherwise).
+- Archived rows are flat cards until `zerus-5wmh.40` (Qt groups them by project).
+- The archived Activity pane waits for `zerus-5wmh.42`.
+- The paging-computer scan reads catalog rows while some live computer has no rows (Qt rebuilds its hosts on every refresh).
+- Task D4 added the README part and the smoke steps for PR 5.
+- Archive reads carry the store's request number, counted from the app's start so a reload never reuses one: a read at or below the cancel mark, or older than its computer's current read, starts cancelled and never cancels a newer one (Qt's synchronous `requestArchivePage` and `cancelArchivePages`).
+- The archive read's failure texts are Qt's `failureDetail` ("timed out", "cannot start '{hgs}': {error}", the trimmed standard error up to 4000 characters, or "exit code {n}"); other actions keep the client's shared texts.
+- The date panel renders through a Portal, since a fixed element inside the transformed strip overlay was misplaced. As Qt's popup, it keeps a hover-opened peek open (`SessionPanelDock.h:50-56`), Escape closes it first and Tab wraps inside it.
+- Archived rows show neither Open terminal nor the Mute and Mark group, as Qt's `showSessionMenu`.
+- Parked: numbering from the clock assumes it does not step back across a reload; a child ended by a signal with no standard error reads "hgs ended abnormally" where Qt shows "exit code {n}".
+
 Deviations from Qt, both from owner rules:
 - Attention marks and read replies are capped at 20 000 entries per map (bounded caches); Qt keeps them without a bound.
 - "Deselect all (Esc)" is "Deselect all" (no obvious keyboard hints).
+
+Deviations from Qt after Piece D:
+- The date inputs show the browser's empty date field instead of "Any date" (`ArchiveDatePicker.cpp`); the hint says "All archived dates (no date limits)".
+- An empty Archive list, loading or not, shows the client's "No matching sessions" card with its "Show all sessions" button. Qt shows an empty list and says "No matching sessions" only in the footer count (`SessionsWindowRows.cpp:473`). With no live row at all the client footer is empty, where Qt's reads the same text. Both sit in `SessionList.tsx` outside the agreed ArchiveBar line, so they stay.
+
+Controller rulings during Piece E:
+- The archive reloads once after a write batch ends (Clear archive included). Qt's own path (`SessionsWindow.cpp:1916`) never runs, because its deferred step leaves the selection running, so this is kept as a deviation.
+- Restore follows Qt without `allowed("restore")` in the header (`SessionsWindow.cpp:3897-3898`) and in the context menu, since every client context menu is Qt's selectedTarget case (5360). A batch's Resume / restore still reads it (`SessionSelection.cpp:94-96`).
+- A second archived instance of the same name in one batch reaches the restore limit: "earlier restores still need a refresh" (`SessionSelection.cpp:336-338`).
+- A thrown restore shows the sticky error notice with the error text, as a failed outcome does.
+- Task E3 added the README part and the smoke steps for PR 6.
+
+Deviations from Qt after Piece E:
+- "Session restored. Refreshing its current state…" and Qt's restored-inspection set (`m_restoredInspections`) in the 64 limit are not ported; the control gating rests on the details matching run and conversation.
+- "Updating session on {machine}…" is absent, as for every client change entry.
+- Qt's local launch question before a restore (`confirmLocalStart`) has no client counterpart, as for Resume.
+- The header's Forget archived on a retained archived source (after the archive reloaded) refuses at click time with the client's pre-check text, "This session is no longer available. Open its actions again."; Qt opens the dialog and refuses at confirmation with "…Refresh the list and open its actions again."
+- The restore follow is cancelled by the state filter, the search, a running batch, Rename and Forget archived; other single writes (pause, resume, Move to archive, terminate, start fresh) do not cancel it, as they act on another selected row. Qt clears it in each of them (Move to archive: `archiveSession`, `SessionsWindow.cpp:5575`).
+- Clicking the state filter that is already active does not cancel the follow (only a change of the filter does); Qt cancels on every filter-button click (`SessionsWindow.cpp:409`). The filter buttons are the owner session's `SessionList`, outside this piece.
+- The restore's conversation is the row's conversation id; Qt prefers `m_details`, which the client only returns when it matches the row's conversation.
+- A live row of a restored name that appears during a batch by another path is seen by the batch's occupied check only through a tracked restore (`taken`); otherwise `hgs` decides and the item counts as failed.

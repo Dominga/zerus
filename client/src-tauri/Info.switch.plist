@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Merged into the switch bundle's Info.plist (tauri.switch.conf.json).
+         Qt's arrangement: Launch Services shows en.lproj's Zerus only while this
+         unlocalized name equals the bundle folder, hgs-tray.app. -->
+    <key>CFBundleName</key>              <string>Zerus</string>
+    <key>CFBundleDisplayName</key>       <string>hgs-tray</string>
+    <key>LSHasLocalizedDisplayName</key> <true/>
+    <key>CFBundleDevelopmentRegion</key> <string>en</string>
+    <key>CFBundleIconFile</key>          <string>hgs-zerus-swarm.icns</string>
+    <key>CFBundleIconName</key>          <string>hgs-zerus-swarm</string>
+    <!-- A menu-bar app; the client shows a Dock icon while its window is open. -->
+    <key>LSUIElement</key>               <true/>
+    <key>NSMicrophoneUsageDescription</key><string>Zerus records your voice when you start dictation and sends it to your selected speech computer for recognition.</string>
+    <key>NSCameraUsageDescription</key><string>Zerus records video messages when you hold the video recording button.</string>
+    <key>NSAppleEventsUsageDescription</key><string>Zerus opens your agent sessions in Terminal.</string>
+    <!-- tray/update-installed.py tells the clients apart by this key. -->
+    <key>ZerusGUI</key>                  <string>tauri</string>
+</dict>
+</plist>

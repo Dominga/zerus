@@ -8,7 +8,7 @@ import { questions } from "./questions";
 import { notices } from "./actions";
 import { detailTab, setDetailTab, setStateFilter } from "./ui";
 import { catalog } from "./catalog";
-import { grouping, groupOf } from "./organization";
+import { grouping, groupOf, groups } from "./organization";
 import { rowOut } from "./testing";
 import { emptyBatch, type GroupingOut, type ArchivePage } from "../types";
 
@@ -92,7 +92,8 @@ it("routes archived placement through receive without retaining it in live group
   answer({ rows: [{ name: "codex/sample-project/review", state: "archived", archive_id: key.slice(8), group: "ungrouped", rank: 0 }], total: 1, position: 0, next_cursor: "", previous_cursor: null });
   for (let i = 0; i < 10; i++) await Promise.resolve();
   expect(archive.row(`\n${key}`)).toMatchObject({ group: "alpha", rank: 30 });
-  expect(groupOf(`\n${key}`)).toBe("ungrouped");
+  expect(groups[`\n${key}`]).toBeUndefined();
+  expect(groupOf(`\n${key}`)).toBe("alpha");
   setStateFilter("all");
   read.mockRestore();
 });

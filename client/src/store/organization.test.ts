@@ -95,7 +95,7 @@ describe("the organization store", () => {
   it("never writes the live-name member of an archived row", async () => {
     const { org, say } = setup();
     const archived = { rawMachine: "workstation", name: "claude/sample-project/review", state: "archived" as const };
-    const why = "Archived sessions keep their project until the Archive view groups by project.";
+    const why = "Invalid archived session identity. Refresh the archive.";
     expect(await org.moveToProject([rows[1], archived], "alpha")).toEqual({ outcome: "refused", detail: why });
     expect(await org.createProject("New", [archived])).toEqual({ outcome: "refused", detail: why });
     expect(mocked.moveToProject).not.toHaveBeenCalled();
@@ -224,3 +224,27 @@ it("keeps request-tagged archive deltas out of live assignments", () => createRo
   expect(org.groups["\nrun:live"]).toEqual({ group: "alpha", rank: 11 });
   dispose();
 }));
+
+it("moves and creates projects with archive identities, including an archived before member", async () => {
+  const { org } = setup();
+  const archived = { ...rows[0], state: "archived" as const, archiveId: "10000000-0000-4000-8000-000000000001" };
+  const before = { ...rows[0], state: "archived" as const, archiveId: "10000000-0000-4000-8000-000000000002" };
+  mocked.moveToProject.mockResolvedValue({ outcome: "done", conflicts: 0 });
+  mocked.createProject.mockResolvedValue({ outcome: "done", conflicts: 0 });
+  await org.moveToProject([archived, rows[1]], "alpha", before);
+  expect(mocked.moveToProject).toHaveBeenCalledWith([`workstation\narchive\n${archived.archiveId}`, "studio\ncodex/aurora/orders-v3"], "alpha", `workstation\narchive\n${before.archiveId}`);
+  await org.createProject("New", [archived]);
+  expect(mocked.createProject).toHaveBeenCalledWith("New", [`workstation\narchive\n${archived.archiveId}`]);
+  mocked.moveToProject.mockClear();
+  await org.moveToProject([archived], "alpha", { ...before, archiveId: undefined });
+  expect(mocked.moveToProject).not.toHaveBeenCalled();
+});
+
+it("reads a loaded archived row's current group without growing the live assignments", () => {
+  let group = "alpha";
+  const org = createOrganization(vi.fn(), vi.fn(), (key) => key === "archive" ? group : undefined);
+  expect(org.groupOf("archive")).toBe("alpha");
+  group = "beta";
+  expect(org.groupOf("archive")).toBe("beta");
+  expect(Object.keys(org.groups)).toEqual([]);
+});

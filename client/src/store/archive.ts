@@ -5,9 +5,10 @@ import { catalog, toSession, type ComputerState } from "./catalog";
 import type { RowMarks } from "./marks";
 import { bindArchivedRows as bindSelectedRows, compactRows, machineFilter, page, projectFilter, search, stateFilter } from "./ui";
 import { initialRange, rangeBounds, type DateRange } from "../ui/sessions/archive-dates";
-import { emptyGrouping, grouping } from "./organization";
+import { bindArchivedGroups, emptyGrouping, grouping } from "./organization";
 import { groupRows, type Row } from "../ui/sessions/group-rows";
-import type { ArchivePage, ArchiveRow, ComputerId, GroupingOut, GroupOut, ViewRow } from "../types";
+import { machineCards } from "./machines";
+import type { ArchivePage, ArchiveRow, ComputerId, GroupingOut, GroupOut, MachineMeta, ViewRow } from "../types";
 import type { Session } from "../ui/sessions/types";
 
 // The Archive view's pages, after tray/src/ArchiveBrowser.cpp: one bounded
@@ -145,28 +146,22 @@ function newestFirst(a: ArchivedSession, b: ArchivedSession): number {
   return x < y ? -1 : x > y ? 1 : 0;
 }
 
-/**
- * The paging computers: every computer whose stream is live and whose machine
- * is inside the machine filter, named as its rows name it (by id otherwise).
- * `rows` is read only until every live computer has a name.
- */
-export function pagingComputers(computers: Readonly<Record<string, ComputerState>>, rows: Iterable<Pick<Session, "computer" | "machine">>, machines: readonly string[]): PagingComputer[] {
-  const live = Object.keys(computers).filter((id) => computers[id]?.status === "live").sort();
-  const wanted = new Set(live);
+/** Configured fleet choices, named from rows or the hello metadata even with an empty catalog. */
+export function fleetComputers(computers: Readonly<Record<string, ComputerState>>, rows: Iterable<Pick<Session, "computer" | "machine">>,
+                               metadata: Readonly<Record<string, Partial<Pick<MachineMeta, "host" | "local_sessions">>>> = {}): PagingComputer[] {
+  const ids = Object.keys(computers).filter((id) => computers[id]?.status !== "ended" && (id !== "" || metadata[id]?.local_sessions !== false)).sort();
   const names = new Map<string, string>();
-  if (wanted.size) {
-    for (const r of rows) {
-      if (!wanted.has(r.computer) || names.has(r.computer)) continue;
-      names.set(r.computer, r.machine);
-      if (names.size === wanted.size) break;
-    }
+  const wanted = new Set(ids);
+  for (const row of rows) {
+    if (wanted.has(row.computer) && !names.has(row.computer)) names.set(row.computer, row.machine);
+    if (names.size === wanted.size) break;
   }
-  const out: PagingComputer[] = [];
-  for (const computer of live) {
-    const machine = names.get(computer) || computer || "this computer";
-    if (!machines.length || machines.includes(machine)) out.push({ computer, machine });
-  }
-  return out;
+  return ids.map((computer) => ({ computer, machine: names.get(computer) || computer || metadata[computer]?.host || "this computer" }));
+}
+
+export function pagingComputers(computers: Readonly<Record<string, ComputerState>>, rows: Iterable<Pick<Session, "computer" | "machine">>, machines: readonly string[],
+                                metadata: Readonly<Record<string, Partial<Pick<MachineMeta, "host" | "local_sessions">>>> = {}): PagingComputer[] {
+  return fleetComputers(computers, rows, metadata).filter((h) => computers[h.computer]?.status === "live" && (!machines.length || machines.includes(h.machine)));
 }
 
 /** The machine, project and date scopes of the loaded archive window. */
@@ -440,14 +435,15 @@ export const { archive, archiveRows, archiveCount, archiveTip } = createRoot(() 
     firstRequest: Date.now(),
     active: () => stateFilter() === "archived" && page() === "sessions",
     query: search,
-    computers: () => pagingComputers(catalog.computers, catalogRows(), machineFilter()),
+    computers: () => pagingComputers(catalog.computers, catalogRows(), machineFilter(), machineCards),
   });
   const archiveRows = createMemo(() => archiveListRows(archive.rows(), {
     machines: machineFilter(), projects: projectFilter(), includes: archive.includes, compact: (key) => !!compactRows[key],
   }, grouping()));
   const counted = createMemo(() => {
     const scope = { machines: machineFilter() };
-    return archive.rows().filter((s) => inScope(s, scope)).length;
+    const projects = projectFilter();
+    return archive.rows().filter((s) => inScope(s, scope) && (!projects.length || projects.includes(s.group))).length;
   });
   return { archive, archiveRows, archiveCount: () => archive.countText(counted()), archiveTip: () => archive.tipText("Archive", counted()) };
 });
@@ -462,3 +458,5 @@ export function bindRetainedRows(lookup: (key: string) => Session | undefined) {
 
 bindSelectedRows((key) => archive.row(key) ?? retained(key));
 bindActionRows(archive.row);
+
+bindArchivedGroups((key) => archive.row(key)?.group);

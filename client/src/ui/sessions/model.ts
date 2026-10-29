@@ -1,8 +1,10 @@
 import { groupRows, type Row } from "./group-rows";
 export { groupRows, type Row, type ListInput } from "./group-rows";
 import { createMemo } from "solid-js";
-import { archiveRows } from "../../store/archive";
+import { archive, archiveRows, fleetComputers } from "../../store/archive";
 import { catalog, computerFresh, orderedRows } from "../../store/catalog";
+import { machineCards } from "../../store/machines";
+import { archiveFilterCounts, archiveMachineChoices, archiveProjectChoices } from "./archive-filters";
 import { defaultProject, grouping, groups } from "../../store/organization";
 import { stateFilter, matchesFilter, search, machineFilter, projectFilter, expandedChildren, compactRows } from "../../store/ui";
 import { isWorking, needsAttention } from "../../store/attention";
@@ -86,8 +88,11 @@ export function summarize(rows: readonly Row[], up: (s: Session) => boolean) {
 
 export const shownSummary = createMemo(() => summarize(listRows(), online));
 
+const archivedCounts = createMemo(() => archiveFilterCounts(archive.rows(), archive.includes, machineFilter(), projectFilter()));
+
 /** Machines with their session counts, in first-seen order (the machine filter's choices). */
 export const machineChoices = createMemo(() => {
+  if (stateFilter() === "archived") return archiveMachineChoices(fleetComputers(catalog.computers, orderedRows(), machineCards), archivedCounts().machine);
   const seen = new Map<string, { id: string; label: string; count: number; computer: string }>();
   for (const s of orderedRows()) {
     const m = seen.get(s.machine) ?? { id: s.machine, label: s.computer === "" ? `${s.machine} (this machine)` : s.machine, count: 0, computer: s.computer };
@@ -100,6 +105,7 @@ export const machineChoices = createMemo(() => {
 /** Projects with members and their member counts, in the organization's order (the project filter's choices, by id). */
 export const projectChoices = createMemo(() => {
   const g = grouping();
+  if (stateFilter() === "archived") return archiveProjectChoices(g, archivedCounts().project, projectFilter());
   const members = membersByGroup();
   if (!g.loaded) return [];
   return g.headers.filter((h) => members.get(h.id)?.length).map((h) => ({ id: h.id, label: h.name, count: members.get(h.id)!.length }));

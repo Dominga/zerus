@@ -4,6 +4,7 @@ import { applyBatch, catalog, rowId } from "../../store/catalog";
 import { rowOut } from "../../store/testing";
 import { emptyBatch, type GroupingOut } from "../../types";
 import { applyDrop, placement } from "./organize";
+import type { Session } from "./types";
 import type { Row } from "./model";
 
 // The drop half of organize.ts against a mocked organization: which edit a
@@ -17,6 +18,7 @@ const state = vi.hoisted(() => ({
   assigned: {} as Record<string, string>,
   listed: ["alpha", "beta", "ungrouped"],
   loaded: true,
+  archived: {} as Record<string, Session>,
 }));
 
 vi.mock("../../store/organization", () => ({
@@ -27,6 +29,7 @@ vi.mock("../../store/organization", () => ({
   moveProject: vi.fn(() => Promise.resolve({ outcome: "done", conflicts: 0 })),
   moveToProject: vi.fn(() => Promise.resolve({ outcome: "done", conflicts: 0 })),
 }));
+vi.mock("../../store/archive", () => ({ archive: { row: (key: string) => state.archived[key] } }));
 // The bulk-selection half reads the list; the drops do not.
 vi.mock("./model", () => ({ listRows: () => [] }));
 
@@ -51,6 +54,7 @@ beforeEach(() => {
   state.assigned = { [A]: "alpha", [B]: "alpha", [C]: "beta" };
   state.listed = ["alpha", "beta", "ungrouped"];
   state.loaded = true;
+  state.archived = {};
 });
 
 describe("project drops", () => {
@@ -131,4 +135,16 @@ describe("placement", () => {
     expect(placement(rows, offsets, heights, "h:alpha", 5, group)).toMatchObject({ before: "alpha" });
     expect(placement(rows, offsets, heights, "h:alpha", 35, group)).toMatchObject({ before: "beta" });
   });
+});
+
+it("drops loaded archive rows before archive identities and ignores an archive row no longer loaded", () => {
+  const a = { ...catalog.rows[A], key: "\narchive:a", catalogKey: "archive:a", state: "archived", archiveId: "a" } as Session;
+  const b = { ...catalog.rows[B], key: "\narchive:b", catalogKey: "archive:b", state: "archived", archiveId: "b" } as Session;
+  state.archived = { [a.key]: a, [b.key]: b };
+  applyDrop({ kind: "session", id: a.key }, { group: "beta", before: b.key });
+  expect(mocked.moveToProject).toHaveBeenLastCalledWith([a], "beta", b);
+  mocked.moveToProject.mockClear();
+  delete state.archived[a.key];
+  applyDrop({ kind: "session", id: a.key }, { group: "beta" });
+  expect(mocked.moveToProject).not.toHaveBeenCalled();
 });

@@ -30,7 +30,7 @@ import { counts, matchesFilter, selected, setMachineFilter, setProjectFilter, se
 import { catalog } from "../../store/catalog";
 import { applyGrouping, emptyGrouping } from "../../store/organization";
 import { applies } from "../../store/batch";
-import { listRows } from "./model";
+import { listRows, machineChoices, projectChoices } from "./model";
 import { markEntry } from "./mark-entries";
 import { snapshotOf } from "./actions-ui";
 import { emptyBatch, type ArchivePage, type ArchiveRow, type ViewRow } from "../../types";
@@ -152,6 +152,7 @@ describe("the Archive view in the app", () => {
 
 it("replays grouped Archive rows through the existing headers, newest first within each project", async () => {
   mocked.archivePage.mockImplementation(() => new Promise(() => {}));
+  applyBatch({ ...emptyBatch(), computers: [{ computer: "idle", status: "reconnecting", attempt: 1 }] });
   setStateFilter("archived");
   const request = mocked.archivePage.mock.calls.at(-1)![5];
   const headers = ["beta", "alpha"].map((id, palette) => ({ id, name: id.toUpperCase(), color: null, palette, accessible: true, collapsed: false, is_default: false }));
@@ -171,6 +172,8 @@ it("replays grouped Archive rows through the existing headers, newest first with
   ], total: 3, position: 0, next_cursor: "", previous_cursor: null });
   await flush();
   expect(listRows().map((r) => r.id)).toEqual(["h:beta", `\narchive:${uuid(10)}`, `\narchive:${uuid(11)}`, "h:alpha", `\narchive:${uuid(12)}`]);
+  expect(projectChoices()).toEqual([{ id: "beta", label: "BETA", count: 2 }, { id: "alpha", label: "ALPHA", count: 1 }]);
+  expect(machineChoices()).toContainEqual({ id: "idle", label: "idle", computer: "idle", count: 0 });
   archive.applyGroups([{ computer: "", key: `archive:${uuid(11)}`, group: "alpha", rank: 50, archive_request: current }]);
   expect(listRows().map((r) => r.id)).toEqual(["h:beta", `\narchive:${uuid(10)}`, "h:alpha", `\narchive:${uuid(11)}`, `\narchive:${uuid(12)}`]);
   archive.applyGroups([{ computer: "", key: `archive:${uuid(10)}`, group: "alpha", rank: 0, archive_request: request }]);
@@ -178,5 +181,6 @@ it("replays grouped Archive rows through the existing headers, newest first with
   applyGrouping({ ...emptyBatch(), grouping: { ...grouping, headers: [{ ...headers[0], collapsed: true }, headers[1]] } });
   expect(listRows().map((r) => r.id)).toEqual(["h:beta", "h:alpha", `\narchive:${uuid(11)}`, `\narchive:${uuid(12)}`]);
   setStateFilter("all");
+  applyBatch({ ...emptyBatch(), computers: [{ computer: "idle", status: "ended", attempt: 0 }] });
   applyGrouping({ ...emptyBatch(), grouping: emptyGrouping() });
 });

@@ -26,7 +26,7 @@ import { createRoot, createSignal } from "solid-js";
 import * as bridge from "../bridge";
 import { toSession } from "./catalog";
 import {
-  ARCHIVE_CHANGED, archiveListRows, archivedSession, buttonText, countText, createArchive, emptyPage, pagingComputers, statusOf, tipText,
+  ARCHIVE_CHANGED, archiveListRows, archivedSession, buttonText, countText, createArchive, emptyPage, fleetComputers, pagingComputers, statusOf, tipText,
   type ArchivedSession, type Page, type PagingComputer,
 } from "./archive";
 import { ALL_UNTIL } from "../ui/sessions/archive-dates";
@@ -524,4 +524,13 @@ describe("request-tagged archive placement", () => {
     expect(t.archive.rows().map((s) => s.computer)).toEqual([""]);
     t.dispose();
   });
+});
+
+it("names an empty local catalog from fleet metadata and keeps rowless peers available", () => {
+  const computers = { "": { id: "", status: "live", attempt: 0 }, peer: { id: "peer", status: "reconnecting", attempt: 1 }, ended: { id: "ended", status: "ended", attempt: 0 } };
+  expect(fleetComputers(computers, [], { "": { host: "workstation", local_sessions: true } })).toEqual([
+    { computer: "", machine: "workstation" }, { computer: "peer", machine: "peer" },
+  ]);
+  expect(pagingComputers(computers, [], ["workstation"], { "": { host: "workstation" } })).toEqual([{ computer: "", machine: "workstation" }]);
+  expect(fleetComputers(computers, [], { "": { local_sessions: false } })).toEqual([{ computer: "peer", machine: "peer" }]);
 });

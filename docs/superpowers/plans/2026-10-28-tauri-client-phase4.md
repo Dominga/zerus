@@ -10808,6 +10808,16 @@ Tasks 8-12 complete Part A. Task 12 runs the smoke for Part A and Part A2.
 
 ### Task 8: Dropped files: composer attach, Terminal paste and stage
 
+**As built (Rust backend, a2hub; webui rulings, 2026-10-29).** The frontend is a separate webui change. Where the snippets below differ, these rules and the current source win:
+- `Terminals::paste(view, generation, text)` checks the named generation and queues the paste under one views lock. A missing view or a mismatch returns "Terminal changed during file transfer. Drop the files again in the intended session.". The command IPC arguments and `Ok`/`Err` meanings are unchanged.
+- `terminal_drop` is async and runs its work on the blocking pool, using `actions::dispatch` once for a peer. It refuses a webview or a view other than `main`. The live handler registers it; the non-live handler lists no Terminal commands and needs no stub.
+- Review follow-up: `terminal_shown(view, generation, shown)` records the tab visibility for that attach; stale updates are ignored and a new attach starts shown. Paste checks visibility with its generation under the same views lock, so a transfer finishing while the tab is hidden refuses, as Qt's `terminalDropTarget` does (2620). The frontend calls it on tab hide/show.
+- A taken write lane (`dispatch` returning `Err(actions::BUSY)`) is a definite pre-dispatch refusal and returns `Ok(Some("Wait for the session update to finish."))`, an info notice (Qt 4395). No native failed or uncertain outcome is converted into that refusal.
+- A drop guard releases the window-wide `dropping` claim after success, refusal, failure, cancellation or a dispatch panic. A pending peer transfer blocks local drops too, before the local paste, as Qt does (`SessionsWindow.cpp:2650-2651`).
+- Receipt paths accept a leading `/` on every platform. Windows builds also accept a fully rooted alphabetic drive path or UNC path; drive-relative paths and control characters refuse. The pure receipt and platform-policy tests live under `cfg(test)` separately from the Unix fake-attach tests, so the parameterized policy test also executes on Windows; actual Windows execution remains in `zerus-5wmh.52`.
+- Windows quoting continues to consume core `terminal::paste_paths` unchanged. Its pre-existing difference from Qt's `SessionCommands::powerShellQuote` (smart apostrophes and the safe bare-word whitelist, `SessionCommands.h:40-51`) is core follow-up `zerus-5wmh.61`, off the Mac switch bar; actual Windows coverage remains in `zerus-5wmh.52`.
+- The fake attach must print its hello before the paste test writes input: switching the fake PTY to raw mode otherwise flushes that input. Tests also cover remote identities, one dispatch, uncertain outcomes without replay, reconnects, malformed receipts, concurrent drops and release during cancellation or unwinding.
+
 **Depends on:** A2 `zerus-5wmh.9.4` (#404): `Action::StageFiles {paths, expected_created}` and its `staged` receipt; `Session.created` from #406; Tasks 2, 3a and 6.
 
 **Qt reference:**

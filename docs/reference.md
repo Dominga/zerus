@@ -1955,6 +1955,45 @@ local transport bindings. `hgs swarm export` exports only shared fields. Origina
 Zerus settings stay in `workspace/organizationBeforeSwarm`; import/merge backups
 use `~/.config/hgs/swarm/backup-*.json`.
 
+On a computer without a Qt settings store, the first `hgs swarm get` or initial
+`organization` watch subscription may initialize an empty catalog. It derives
+no projects, folder links or session assignments from names. The client still
+sends only explicit edits; placement and concurrent field versions stay in hgs
+and the replica. An existing uninitialized catalog may also bootstrap; every
+existing operation, peer, binding and machine-name entry is preserved. Steady-state
+organization watch reads remain lock-free and do not save. Only the first read
+of an explicit organization subscription may try the bootstrap; a present or
+undecidable Qt probe is retried only on a new subscription.
+
+The presence check is conservative and never parses Qt settings. Any existing,
+malformed, unreadable or unexpected store counts as possibly holding an
+organization, as does a probe error. The locations are
+`$XDG_CONFIG_HOME/hgdev/hgs-tray.conf` (default `~/.config`) on Linux,
+`%APPDATA%/hgdev/hgs-tray.ini` on Windows, and
+`~/Library/Preferences/com.hgdev.hgs-tray.plist` on macOS. Zerus.app retains that
+macOS preferences domain after switching clients. A computer with such a store
+keeps the existing Qt import path; neither trigger bootstraps it or writes a
+pending-import marker. Watch hello still obtains its stable machine identity
+and may create an uninitialized catalog before the organization subscription.
+
+`hgs swarm get` keeps its ordinary locked load and save, including self bindings,
+the machine-name refresh and a stable persisted node identity even when a Qt
+store exists and the catalog is still uninitialized. The bootstrap is the only
+new behavior, evaluated under that same lock when `imported` is false and Qt
+settings are definitely absent. Get and the initial organization subscription
+share this idempotent operation, so concurrent first reads initialize once.
+
+An automatic bootstrap writes a node-bound `gui-import-pending.json` beside the
+catalog before saving the legacy `imported` flag. A later Qt first start, using
+the current hgs, can still call `swarm initialize` to import its local
+organization. While that marker is pending, initialize fills only missing
+fields, preserving existing values, deletions and concurrent versions. It saves
+the catalog before clearing the marker, so a crash can safely retry that
+missing-field import. An already imported catalog without a matching marker
+keeps the existing initialize no-op. The catalog and peer wire formats are
+unchanged; older hgs versions can read the catalog but do not perform the pending
+GUI import. Qt's settings store is never changed by the bootstrap or import.
+
 The independent `hgs-swarm` service (`com.hgdev.hgs-swarm` on macOS) makes no network
 requests without members. Local changes normally trigger exchange within three
 seconds; unchanged peers are checked every 30 seconds, backing off to five minutes

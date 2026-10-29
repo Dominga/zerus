@@ -4,7 +4,7 @@ import { createStore } from "solid-js/store";
 import { applyBatch, catalog, toSession } from "../../store/catalog";
 import { applyGrouping } from "../../store/organization";
 import { rowOut } from "../../store/testing";
-import { groupMembers, groupRows, membersByGroup, projectChoices, type ListInput } from "./model";
+import { groupMembers, groupRows, membersByGroup, projectChoices, summarize, type ListInput } from "./model";
 import { emptyBatch, type Batch, type GroupingOut, type ViewRow } from "../../types";
 import type { Session } from "./types";
 
@@ -18,7 +18,7 @@ const grouping = (headers: ReturnType<typeof header>[]): GroupingOut => ({
   loaded: true, default_project: "ungrouped", headers, ready: true, reason: null, busy: false, status: "", status_error: false, conflicts: 0,
 });
 const input = (g: GroupingOut, members: Map<string, Session[]>, extra: Partial<ListInput> = {}): ListInput => ({
-  grouping: g, members, visible: () => true, projects: [], expanded: () => false, compact: () => false, ...extra,
+  grouping: g, members, visible: () => true, online: () => true, projects: [], expanded: () => false, compact: () => false, ...extra,
 });
 const batchOf = (part: Partial<Batch>): Batch => ({ ...emptyBatch(), ...part });
 const shape = (rows: ReturnType<typeof groupRows>) => rows.map((r) => (r.type === "header" ? `#${r.project}` : r.type === "card" ? r.session.name.slice(-2) : "child"));
@@ -44,6 +44,79 @@ describe("grouped rows", () => {
     const rows = groupRows(input(grouping([header("alpha"), header("ungrouped")]), members, { visible: (s) => s.name.endsWith("s3") || s.name.endsWith("s5") }));
     const alpha = rows[0];
     expect(alpha.type === "header" && [alpha.total, alpha.attention, alpha.unread, alpha.working]).toEqual([1, 1, 2, 1]);
+  });
+
+  describe("a header's counters follow Qt's online rule (SessionsWindowRows.cpp:398-404)", () => {
+    // "" is this computer, online; "b" is a peer that is not.
+    const on = (n: number, extra: Partial<ViewRow> = {}) => session(n, extra);
+    const off = (n: number, extra: Partial<ViewRow> = {}) =>
+      toSession("b", `run:${n}`, { name: `claude/sample-project/s${n}`, machine: "b", status: "ready", ...extra });
+    const online = (s: Session) => s.computer === "";
+    const counts = (list: Session[]) => {
+      const rows = groupRows(input(grouping([header("alpha"), header("ungrouped")]), new Map([["alpha", list]]), { online }));
+      const h = rows[0];
+      if (h?.type !== "header") throw new Error("the project has no header");
+      return { attention: h.attention, unread: h.unread, working: h.working };
+    };
+    const asking = { status: "attention", needs_action: true, needs_attention: true } as const;
+
+    it("counts a request only while its computer is online", () => {
+      expect(counts([on(1, asking)])).toEqual({ attention: 1, unread: 0, working: 0 });
+      expect(counts([off(1, asking)])).toEqual({ attention: 0, unread: 0, working: 0 });
+    });
+
+    it("counts an error that needs the person, as Qt's needsAction does", () => {
+      expect(counts([on(1, { status: "error", needs_action: true, needs_attention: true })]).attention).toBe(1);
+      expect(counts([off(1, { status: "error", needs_action: true, needs_attention: true })]).attention).toBe(0);
+    });
+
+    it("counts a subagent that asks only while online", () => {
+      expect(counts([on(1, { status: "attention", child_attention: true, needs_attention: false })]).attention).toBe(1);
+      expect(counts([off(1, { status: "attention", child_attention: true, needs_attention: false })]).attention).toBe(0);
+    });
+
+    it("counts Review later online and offline", () => {
+      expect(counts([{ ...on(1), reviewLater: true }, { ...off(2), reviewLater: true }]).attention).toBe(2);
+    });
+
+    it("counts an unread reply as unread, not as needing a response", () => {
+      const reply = { unread: true, needs_attention: true } as const;
+      expect(counts([on(1, reply)])).toEqual({ attention: 0, unread: 1, working: 0 });
+      // An offline computer's unread replies still count (visibleUnreadReply, HgsClient.h:104-105).
+      expect(counts([off(1, reply)])).toEqual({ attention: 0, unread: 1, working: 0 });
+    });
+
+    it("counts work and background jobs only while online", () => {
+      expect(counts([on(1, { status: "working" }), on(2, { status: "background" })]).working).toBe(2);
+      expect(counts([off(1, { status: "working" }), off(2, { status: "background" })]).working).toBe(0);
+    });
+
+    it("never counts a muted member as attention or unread, online or not", () => {
+      const muted = { ...asking, unread: true, muted: true } as const;
+      expect(counts([on(1, muted), { ...off(2, muted), reviewLater: true }])).toEqual({ attention: 0, unread: 0, working: 0 });
+    });
+
+    it("counts each member by its own computer when a project spans online and offline ones", () => {
+      const list = [
+        on(1, asking), off(2, asking),
+        on(3, { status: "working" }), off(4, { status: "working" }),
+        on(5, { unread: true, needs_attention: true }), off(6, { unread: true, needs_attention: true }),
+        { ...off(7), reviewLater: true },
+      ];
+      expect(counts(list)).toEqual({ attention: 2, unread: 2, working: 1 });
+    });
+  });
+
+  it("the footer counts the cards shown as Qt does: work while online, attention unless muted (SessionsWindowRows.cpp:468-474)", () => {
+    const off = (n: number, extra: Partial<ViewRow> = {}) =>
+      toSession("b", `run:${n}`, { name: `claude/sample-project/s${n}`, machine: "b", status: "ready", ...extra });
+    const asking = { status: "attention", needs_action: true, needs_attention: true } as const;
+    const cards = [
+      session(1, { status: "working" }), session(2, { status: "background" }), off(3, { status: "working" }),
+      session(4, asking), session(5, { ...asking, muted: true }), off(6, asking), { ...off(7), reviewLater: true },
+    ];
+    const rows = groupRows(input(grouping([header("alpha")]), new Map([["alpha", cards]])));
+    expect(summarize(rows, (s) => s.computer === "")).toEqual({ shown: 7, working: 2, attention: 2 });
   });
 
   it("orders members by rank, keeps arrival order for ties and puts unassigned rows in the default project", () => {

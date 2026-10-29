@@ -2,7 +2,7 @@ import { createMemo, createSignal } from "solid-js";
 import { createStore } from "solid-js/store";
 import { catalog, computerFresh, orderedRows } from "./catalog";
 import { documentVisibility } from "./visibility";
-import { isActive, needsAttention } from "./attention";
+import { isActive, isWorking, needsAttention } from "./attention";
 import type { Session, Status } from "../ui/sessions/types";
 export { isActive, needsAttention };
 
@@ -105,7 +105,7 @@ export const counts = createMemo(() => {
     const up = online(s);
     if (isActive(s, up)) active++;
     if (needsAttention(s, up) && !s.muted) attention++;
-    if (s.status === "working" || s.status === "background") working++;
+    if (isWorking(s, up)) working++;
     if (s.status === "paused") paused++;
   }
   return { all, active, attention, working, paused };

@@ -4,7 +4,7 @@ import type { Session } from "../ui/sessions/types";
 // without the page state of store/ui.ts.
 
 /** What the attention rules read from a row. */
-export type AttentionFacts = Pick<Session, "state" | "status" | "unread" | "reviewLater" | "attentionNeeded" | "childAttention">;
+export type AttentionFacts = Pick<Session, "state" | "status" | "unread" | "reviewLater" | "attentionNeeded" | "actionNeeded" | "childAttention">;
 
 /**
  * Qt's SessionInfo::needsAttention (HgsClient.h:107-108) with this device's
@@ -26,6 +26,37 @@ export const attentionNeeded = (s: Pick<Session, "status" | "unread" | "attentio
 export const needsAttention = (s: AttentionFacts, online: boolean) =>
   s.state !== "archived" && (!!s.reviewLater || (online && (attentionNeeded(s) || !!s.childAttention)));
 
-/** Active = current work OR Scheduled OR Needs attention OR a local draft. */
+/**
+ * Qt's `needsAction() && !attentionAcknowledged` with this device's marks: a
+ * request, error or recovery that asks for the person and is not
+ * acknowledged. No unread reply, Review later or children. A projection
+ * without the field reads its status.
+ */
+export const actionNeeded = (s: Pick<Session, "status" | "actionNeeded">) => s.actionNeeded ?? s.status === "attention";
+
+/**
+ * A project header's "need a response" (SessionsWindowRows.cpp:400-401):
+ * Review later, or, while the row's computer is `online`, a request not
+ * acknowledged or a subagent that asks. The header counts an unread reply
+ * as unread, not here.
+ */
+export const headerAttention = (s: AttentionFacts, online: boolean) =>
+  s.state !== "archived" && (!!s.reviewLater || (online && (actionNeeded(s) || !!s.childAttention)));
+
+/**
+ * Qt's SessionPresentation::working (SessionPresentation.h:268-271): native
+ * work or confirmed background jobs, only while the row's computer is
+ * `online`. A computer that is not online shows its last rows, which never
+ * count as working.
+ */
+export const isWorking = (s: Pick<Session, "status">, online: boolean) =>
+  online && (s.status === "working" || s.status === "background");
+
+/**
+ * Active = current work OR Scheduled OR Needs attention OR a local draft
+ * (SessionPresentation::active, SessionPresentation.h:308-312). Work,
+ * Scheduled and Waiting count only while the row's computer is `online`; a
+ * computer that is not online keeps its Review later and its drafts.
+ */
 export const isActive = (s: Session, online: boolean) =>
-  s.status === "working" || s.status === "background" || s.status === "scheduled" || s.status === "waiting" || needsAttention(s, online) || s.draft;
+  isWorking(s, online) || (online && (s.status === "scheduled" || s.status === "waiting")) || needsAttention(s, online) || s.draft;

@@ -1,8 +1,9 @@
 import { createMemo } from "solid-js";
 import { archiveRows } from "../../store/archive";
-import { catalog, orderedRows } from "../../store/catalog";
+import { catalog, computerFresh, orderedRows } from "../../store/catalog";
 import { defaultProject, grouping, groups } from "../../store/organization";
 import { stateFilter, matchesFilter, search, machineFilter, projectFilter, expandedChildren, compactRows } from "../../store/ui";
+import { headerAttention, isWorking, needsAttention } from "../../store/attention";
 import type { GroupingOut } from "../../types";
 import type { Session, Subagent } from "./types";
 
@@ -63,6 +64,8 @@ export interface ListInput {
   members: Map<string, Session[]>;
   /** The state, machine and search filters. */
   visible: (s: Session) => boolean;
+  /** The window's online state of a row's computer (Qt's `entry.online`). */
+  online: (s: Session) => boolean;
   /** The project filter's project ids; empty is every project. */
   projects: readonly string[];
   expanded: (key: string) => boolean;
@@ -94,12 +97,14 @@ export function groupRows(input: ListInput): Row[] {
     // A project without visible members stays hidden (323; "Hide projects without active sessions" defaults on, 109).
     if (!list.length) continue;
     // The counters cover members the filters hide; muted members never count as attention or unread (398-404).
+    // A computer that is not online counts only Review later as attention and nothing as working.
     let attention = 0, unread = 0, working = 0;
     for (const s of all) {
-      if (!s.muted && (s.reviewLater || s.status === "attention")) attention++;
+      const up = input.online(s);
+      if (!s.muted && headerAttention(s, up)) attention++;
       // An offline computer's unread replies count too (visibleUnreadReply, HgsClient.h:104-105).
       if (!s.muted && s.unread) unread++;
-      if (s.status === "working" || s.status === "background") working++;
+      if (isWorking(s, up)) working++;
     }
     out.push({ type: "header", id: `h:${h.id}`, project: h.id, name: h.name, color: h.color, palette: h.palette,
                collapsed: h.collapsed, total: list.length, attention, unread, working });
@@ -107,6 +112,9 @@ export function groupRows(input: ListInput): Row[] {
   }
   return out;
 }
+
+/** The window's online state of a row (Qt's `entry.online`). */
+const online = (s: Session) => computerFresh(s.computer);
 
 /** The list's rows by project, from the row ids and the assignments only. */
 export const membersByGroup = createMemo(() => groupMembers(catalog.order, catalog.rows, groups, defaultProject()));
@@ -118,21 +126,25 @@ export const listRows = createMemo<Row[]>(() => {
   const hosts = machineFilter();
   const visible = (s: Session) => matchesFilter(s, f) && (!hosts.length || hosts.includes(s.machine)) && sessionMatchesSearch(s, q);
   return groupRows({
-    grouping: grouping(), members: membersByGroup(), visible, projects: projectFilter(),
+    grouping: grouping(), members: membersByGroup(), visible, online, projects: projectFilter(),
     expanded: (k) => !!expandedChildren[k], compact: (k) => !!compactRows[k],
   });
 });
 
-export const shownSummary = createMemo(() => {
+/** The list footer's counts of the cards shown (SessionsWindowRows.cpp:468-474). */
+export function summarize(rows: readonly Row[], up: (s: Session) => boolean) {
   let shown = 0, working = 0, attention = 0;
-  for (const r of listRows()) {
+  for (const r of rows) {
     if (r.type !== "card") continue;
     shown++;
-    if (r.session.status === "working") working++;
-    if (r.session.status === "attention") attention++;
+    const s = r.session;
+    if (isWorking(s, up(s))) working++;
+    if (!s.muted && needsAttention(s, up(s))) attention++;
   }
   return { shown, working, attention };
-});
+}
+
+export const shownSummary = createMemo(() => summarize(listRows(), online));
 
 /** Machines with their session counts, in first-seen order (the machine filter's choices). */
 export const machineChoices = createMemo(() => {

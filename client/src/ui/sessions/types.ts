@@ -70,6 +70,12 @@ export interface Session {
    * a projection without `needs_attention`.
    */
   attentionNeeded?: boolean;
+  /**
+   * Qt's `needsAction() && !attentionAcknowledged` with this device's marks:
+   * what a project header counts as needing a response, beside Review later
+   * and children. Undefined for a projection without `needs_attention`.
+   */
+  actionNeeded?: boolean;
   /** A subagent asks while the session runs and the attention is not acknowledged. */
   childAttention?: boolean;
   optionalQuestions?: number;

@@ -3418,7 +3418,9 @@ for a GUI that is not running, by its signature and its own `--build-info`) and
 only then becomes the one rollback copy in `~/.local/share/hgs/desktop-previous`;
 a new GUI that does not start is replaced by it again. A replaced bundle without
 its identity, executable or valid signature never becomes the rollback copy, and
-a Zerus process started during the update stops the change. Those cases and an
+a Zerus process started during the update stops the change. After the Mac switch,
+Qt stays the rollback copy; if it cannot be verified as complete, including when
+its signature check times out, the replaced client is kept too. Those cases and an
 interrupted update keep the replaced GUI in a `.hgs-tray-kept-*` folder beside
 the installed one and print where; later updates list such folders and never
 remove them. Links at the

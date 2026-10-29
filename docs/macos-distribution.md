@@ -478,7 +478,7 @@ HGS_MAC_GUI=client bash tray/install.sh
   7. verifies the drafts, the native processes and Qt's settings keys.
 
   A failure or interrupt before step 6 puts Qt back, or keeps it in `~/Applications/.hgs-tray-kept-*/previous/hgs-tray.app` and prints where. Later updates list such folders and never remove them.
-- **Later client updates.** Qt stays the rollback copy until the owner retires Qt; there is no second slot. The replaced client is kept only while that update runs, so a new client that does not start is replaced by it automatically.
+- **Later client updates.** Qt stays the rollback copy until the owner retires Qt; there is no second slot. The replaced client is kept while that update runs, so a new client that does not start is replaced by it automatically. After a successful update, the replaced client is removed only if Qt's rollback copy can be verified as complete. If that check fails or times out, both copies stay: the client in a `.hgs-tray-kept-*` folder beside the installed bundle, Qt in the rollback folder. The updater prints the kept client's path; later updates list it and never remove it.
 - **Dev numbers.** The updater refuses to replace a numbered Dev install with a build that has neither a Dev number nor a local preview label, also for `HGS_TRAY_RESTART=0` (`docs/reference.md`). `HGS_TRAY_RESTART=0` never switches between Qt and the client.
 
 ### Rollback

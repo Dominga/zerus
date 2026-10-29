@@ -1656,6 +1656,18 @@ pub fn composer_refresh(state: State<'_, Composers>, handle: u64) {
     state.refresh(handle);
 }
 
+/// Clear session for an unselected menu row, using its own inspection.
+#[tauri::command]
+pub async fn composer_clear_control(
+    state: State<'_, Composers>,
+    session: SessionRef,
+) -> Result<Option<send::ClearControl>, String> {
+    let composers = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || composers.clear_control_for(session))
+        .await
+        .map_err(|error| error.to_string())
+}
+
 /// The detail tab that shows. Terminal and Native UI retry a failed read at
 /// Settings > Processes' background interval, Processes at its active one,
 /// as Qt's poll timer does (`SessionsWindow.cpp:2013-2016`).

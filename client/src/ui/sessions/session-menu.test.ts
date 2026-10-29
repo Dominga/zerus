@@ -30,13 +30,15 @@ vi.mock("../../bridge", () => ({
   composerTab: vi.fn(async () => {}), sendMessage: vi.fn(), sendAnswer: vi.fn(), sendCancel: vi.fn(async () => {}), sendInterrupted: vi.fn(async () => {}), clearContext: vi.fn(),
   localRetry: vi.fn(), localDelete: vi.fn(async () => {}), localInspect: vi.fn(async () => null),
   savedDrafts: vi.fn(), draftConflicts: vi.fn(), savedDraft: vi.fn(), draftRecover: vi.fn(), draftRestore: vi.fn(),
+  composerClearControl: vi.fn(async () => null),
 }));
 
 import { sessionMenu } from "./SessionList";
 import { archivedSession } from "../../store/archive";
 import { applyBatch, toSession } from "../../store/catalog";
 import { composer } from "../../store/composer";
-import { setSelectedKey, type MenuEntry } from "../../store/ui";
+import { composerClearControl } from "../../bridge";
+import { selectedKey, setSelectedKey, type MenuEntry } from "../../store/ui";
 import { emptyBatch, type ComposerView, type ViewRow } from "../../types";
 
 const labels = (entries: MenuEntry[]) => entries.map((e) => ("separator" in e ? "---" : "heading" in e ? `# ${e.heading}` : e.label));
@@ -70,17 +72,24 @@ describe("the session menu (Qt showSessionMenu 5266-5382)", () => {
     ]);
   });
 
-  it("Clear session opens the composer's Clear dialog, for the selected row only (Qt 5339-5340, 5485-5490)", () => {
+  it("Clear session checks an unselected row and opens the same dialog for it", async () => {
     const row: ViewRow = { name: "codex/example/live", agent: "codex", state: "running", status: "ready", run_id: "run-live", conversation_id: "conv-live" };
     applyBatch({ ...emptyBatch(), computers: [{ computer: "", status: "live", attempt: 0 }], upserts: [{ computer: "", key: "run:run-live", row }] });
     const live = toSession("", "run:run-live", row);
     const clear = { enabled: true, dismiss: false, title: "Clear session?", text: "", confirm: "Clear session", run: "run-live", conversation: "conv-live",
       cache_enabled: true, running: false, reason: "", cache_reason: "" };
-    composer.apply({ handle: 1, key: "\ncodex/example/live", loaded: true, text_epoch: 1, text: "", attachments: [], local: [], clear } as unknown as ComposerView);
-    const entry = (s = live) => sessionMenu(s).find((e) => "label" in e && e.label === "Clear session…") as Extract<MenuEntry, { label: string }>;
-    expect(entry().disabled, "not the selected row").toBe(true);
+    vi.mocked(composerClearControl).mockResolvedValue(clear);
     setSelectedKey(live.key);
-    expect(entry().disabled).toBe(false);
+    const entry = (s = live) => sessionMenu(s).find((e) => "label" in e && e.label === "Clear session…") as Extract<MenuEntry, { label: string }>;
+    expect(entry()).toMatchObject({ disabled: true, hint: "Checking whether this session can be cleared…" });
+    await vi.waitFor(() => expect(entry().disabled).toBe(false));
+    expect(composerClearControl).toHaveBeenCalledWith({ computer: "", key: "run:run-live", name: "codex/example/live", archive_id: null });
+    entry().action?.();
+    await vi.waitFor(() => expect(composer.dialog()).toMatchObject({ kind: "clear", control: { run: "run-live" } }));
+    expect(selectedKey()).toBe(live.key);
+    composer.closeDialog();
+
+    composer.apply({ handle: 1, key: "\ncodex/example/live", loaded: true, text_epoch: 1, text: "", attachments: [], local: [], clear } as unknown as ComposerView);
     entry().action?.();
     expect(composer.dialog()).toMatchObject({ kind: "clear", control: { run: "run-live" } });
     composer.closeDialog();

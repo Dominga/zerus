@@ -35,8 +35,10 @@ import {
   type StateFilter, type MenuEntry,
 } from "../../store/ui";
 import type { Session } from "./types";
+import type { ClearControl, SessionRef } from "../../types";
 import { motionReduced } from "../motion";
 import { composer } from "../../store/composer";
+import { composerClearControl } from "../../bridge";
 import { bulkSelect, clearMulti, multiCount, setAnchor, dragItem, setDragItem, drop, setDrop, endDrag, placement, applyDrop, SESSION_MIME, type DragItem } from "./organize";
 
 const SavedDraftsDialog = lazy(() => import("./SavedDrafts").then((m) => ({ default: m.SavedDraftsDialog })));
@@ -110,19 +112,57 @@ function setRowCompact(key: string, compact: boolean) {
   morphTimer = window.setTimeout(() => setMorphing(false), MORPH.duration + 40);
 }
 
+let clearRead: { id: string; checking: boolean; control?: ClearControl } | undefined;
+const [clearRevision, setClearRevision] = createSignal(0);
+
+function clearReadFor(s: Session) {
+  clearRevision();
+  const online = !computerOffline(s.computer);
+  const id = `${s.key}\n${s.runId}\n${s.conversationId}\n${s.state}\n${online}`;
+  if (clearRead?.id !== id || (!clearRead.checking && !clearRead.control)) {
+    clearRead = { id, checking: true };
+    if (!catalog.rows[s.key] || !online) {
+      clearRead = { id, checking: false };
+    } else {
+      const session: SessionRef = { computer: s.computer, key: s.catalogKey, name: s.name, archive_id: s.archiveId ?? null };
+      void composerClearControl(session).then((control) => {
+        if (clearRead?.id !== id) return;
+        clearRead = { id, checking: false, control: control ?? undefined };
+        setClearRevision((n) => n + 1);
+      }).catch(() => {
+        if (clearRead?.id !== id) return;
+        clearRead = { id, checking: false };
+        setClearRevision((n) => n + 1);
+      });
+    }
+  }
+  return clearRead;
+}
+
 /**
- * The menu's Clear session (Qt's SessionMenuAction::Clear, SessionsWindow.cpp
- * 5339-5340 and 5485-5490): only for the selected row, with the header's
- * state and reason, and through the composer's Clear dialog. A row whose
- * state changed since the menu opened asks to open its actions again.
+ * The menu's Clear session (Qt's SessionMenuAction::Clear): the selected row
+ * uses the composer's control. An unselected row gets its own inspection and
+ * Qt's checking tooltip, then selects and opens the same guarded dialog.
  */
 function clearEntry(s: Session): MenuEntry {
-  const control = s.key === selectedKey() && !subagentOpen() ? composer.view()?.clear : undefined;
+  const selected = s.key === selectedKey() && !subagentOpen() && !!composer.view()?.clear;
+  const read = selected ? undefined : clearReadFor(s);
+  const control = selected ? composer.view()?.clear : read?.control;
   return {
-    label: "Clear session…", icon: "clear", disabled: !control?.enabled, hint: control?.reason || undefined,
+    label: "Clear session…", icon: "clear",
+    disabled: selected ? !control?.enabled : read?.checking || !control?.enabled,
+    hint: selected ? control?.reason || undefined : read?.checking ? "Checking whether this session can be cleared…" : control?.reason || undefined,
     action: () => {
       if (catalog.rows[s.key]?.state !== s.state) { notify("error", STATE_CHANGED, true); return; }
-      composer.openClear();
+      if (selected) { composer.openClear(); return; }
+      if (!read?.control?.enabled || clearRead?.id !== read.id) return;
+      const session: SessionRef = { computer: s.computer, key: s.catalogKey, name: s.name, archive_id: s.archiveId ?? null };
+      const control = read.control;
+      setSelectedKey(s.key);
+      setSubagentOpen(undefined);
+      void composer.open(session).then(() => {
+        if (selectedKey() === s.key && clearRead?.id === read.id) composer.openClear(control);
+      });
     },
   };
 }

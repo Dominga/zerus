@@ -2,7 +2,7 @@ import { Show, Suspense, createSignal, lazy, onCleanup, onMount } from "solid-js
 import { invoke } from "@tauri-apps/api/core";
 import { listRows } from "./sessions/model";
 import { applyBatch, orderedRows } from "../store/catalog";
-import { multi, peek, selectedKey, setMulti, setPeek, setSearch, setSelectedKey, setStateFilter, setStripMode, stateFilter, stripMode } from "../store/ui";
+import { multi, peek, selectedKey, setDetailTab, setMulti, setPeek, setSearch, setSelectedKey, setStateFilter, setStripMode, stateFilter, stripMode } from "../store/ui";
 import { clearMulti } from "./sessions/organize";
 import { archive, archiveRows } from "../store/archive";
 import { activity } from "../store/session";
@@ -484,6 +484,18 @@ async function actionsSmoke(allowed: boolean) {
       if (problem) bad++;
       // One poll, so the fake's log shows the next read after the reply's cursor.
       await sleep(ARCHIVED_POLL_MS + 500);
+    }
+    {
+      // The archived process inventory is one details read with processes included,
+      // never a live processes topic follow.
+      await setSetting("processes/enabled", true);
+      setDetailTab("processes");
+      const shown = await until(() => document.querySelector(".proc-tab")?.textContent?.includes("cargo test --workspace") === true,
+        15_000, "no archived process inventory").then(() => true, () => false);
+      log(`actions-smoke archive-processes: ${shown ? "done" : "failed (no inventory within 15 s)"}`);
+      if (!shown) bad++;
+      setDetailTab("activity");
+      await setSetting("processes/enabled", false);
     }
     // Restore, Forget archived and Clear archive on the loaded archived row. The fake answers
     // `resume NAME --archive ID -d` and `kill NAME --archive ID` with a plain success (its log.ndjson

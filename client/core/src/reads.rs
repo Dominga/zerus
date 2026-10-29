@@ -92,6 +92,9 @@ pub enum Read {
         archive_id: String,
         after: i64,
     },
+    /// `hgs [@host] inspect NAME --after 0 --archive ID` (5 s, 15 s on a peer):
+    /// an archived session's recorded process inventory, with processes included.
+    ArchivedProcesses { name: String, archive_id: String },
 }
 
 /// Qt's `requestInspection` text for a reply that is not a JSON object.
@@ -121,6 +124,7 @@ impl Read {
                 | Self::ProcessOutput { .. }
                 | Self::ArchivePage { .. }
                 | Self::ArchivedActivity { .. }
+                | Self::ArchivedProcesses { .. }
         )
     }
 
@@ -383,6 +387,19 @@ pub fn invocation(computer: &ComputerId, read: &Read) -> Result<Invocation, Read
                         "--archive",
                         archive_id,
                     ],
+                ),
+                None,
+                timeout(5, 15, computer),
+            )
+        }
+        Read::ArchivedProcesses { name, archive_id } => {
+            if name.is_empty() || archive_id.is_empty() {
+                return Err(bad(ARCHIVE_IDENTITY_INVALID));
+            }
+            (
+                arguments(
+                    computer,
+                    &["inspect", name, "--after", "0", "--archive", archive_id],
                 ),
                 None,
                 timeout(5, 15, computer),
@@ -1502,6 +1519,47 @@ mod tests {
             decode(&read, code("[]")),
             Err(ReadError::ArchiveInvalid { message }) if message == ACTIVITY_INVALID
         ));
+    }
+
+    #[test]
+    fn an_archived_process_inventory_asks_as_qt_does() {
+        let read = Read::ArchivedProcesses {
+            name: "alpha".into(),
+            archive_id: "a1".into(),
+        };
+        let peer = invocation(&peer(), &read).unwrap();
+        assert_eq!(
+            peer.args,
+            [
+                "@studio",
+                "inspect",
+                "alpha",
+                "--after",
+                "0",
+                "--archive",
+                "a1"
+            ]
+        );
+        assert_eq!(peer.timeout, Duration::from_secs(15));
+        let local = invocation(&ComputerId::local(), &read).unwrap();
+        assert_eq!(local.args[0], "inspect");
+        assert_eq!(local.timeout, Duration::from_secs(5));
+        assert_eq!(read.limit(), READ_LIMIT);
+        for (name, id) in [("", "a1"), ("alpha", "")] {
+            let bad = Read::ArchivedProcesses {
+                name: name.into(),
+                archive_id: id.into(),
+            };
+            assert!(matches!(
+                invocation(&ComputerId::local(), &bad),
+                Err(ReadError::BadRequest { message }) if message == ARCHIVE_IDENTITY_INVALID
+            ));
+        }
+        let inventory = json!({"processes": {"items": [{"id": "p1"}], "complete": true}});
+        assert_eq!(
+            decode(&read, code(&inventory.to_string())).unwrap(),
+            inventory
+        );
     }
 
     #[test]

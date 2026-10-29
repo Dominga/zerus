@@ -1722,7 +1722,10 @@ const CLEAR_SENT: &str =
 /// A call's outcome: a lane already taken (`actions::BUSY`) is a definite
 /// refusal with `refused` as its text; any other `Err` (the call's thread
 /// died) and a panic are uncertain.
-fn outcome_of(called: std::thread::Result<Result<Outcome, String>>, refused: &str) -> Outcome {
+pub(crate) fn outcome_of(
+    called: std::thread::Result<Result<Outcome, String>>,
+    refused: &str,
+) -> Outcome {
     match called {
         Ok(Ok(outcome)) => outcome,
         Ok(Err(error)) if error == crate::actions::BUSY => Outcome::Failed {

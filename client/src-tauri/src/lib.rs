@@ -916,6 +916,10 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         processes::processes_shown,
         processes::processes_select,
         processes::processes_stop,
+        composer::questions::question_submit,
+        composer::questions::question_decide,
+        composer::questions::question_skip,
+        composer::questions::question_cold,
         #[cfg(feature = "media")]
         voice::voice_open,
         #[cfg(feature = "media")]

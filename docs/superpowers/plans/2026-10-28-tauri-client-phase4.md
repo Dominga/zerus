@@ -7900,6 +7900,7 @@ They share `composer/mod.rs`, `Composer.tsx` and `SessionDetail.tsx` only additi
 - **"Asked"** is formatted before the hub lock is taken (`Answers.asked`, refreshed by `sync_questions`), as Task 4a formats the cache expiry: local time may read the time zone files.
 - **Commands** use `rename_all = "snake_case"` like the composer's and sit in the live handler only (the composer is `live`-only). `question_allow_retry` does nothing once the hub has closed.
 - **Review round 1.** Drafts whose newest save has not answered and drafts of cards the open session lists now are never evicted. A selection change, or details not read yet, clears the shown card, so the next card is built again (Qt clears its details, `SessionsWindow.cpp:451`). The "Asked" cache takes only the details it was formatted from. Nothing loads or saves once the hub has closed. Allow retry acts on the shown card only (Qt's `m_key`). Each ensure numbers its load, and only that load lands (`Answers.loads`): a load whose mark a Codex record cleared, then an eviction and a new ensure, can no longer land an older read. Seven tests pin the retry timer, eviction, the choice cap, Codex's recorded answers, OpenCode's defaults, a new run and the page.
+- **Review round 2** (a commit on top of A2-2). Every way out of `sync_questions` trims, the early returns included, so leaving a session with many cards drops back to 64 drafts. A load ticket goes with an evicted draft, and with a load whose mark a Codex record cleared. Tests pin `open(None)` forgetting the shown card and the "Asked" cache's `Arc::ptr_eq` guard (a test-only hook runs between `sync_questions`' two lock sections). The ticket test now evicts through the real trim.
 - **A2-3 sends every input event** of the card to `question_edit` at once, without a debounce (ruling, 2026-10-29). The epoch is global across cards, and Qt captures each keystroke.
 - **Later tasks bind to this:** A2-2's tests take the card and its epoch from `tests::shown(&c)`. A2-3 calls `question_edit` with `{ card, epoch, edit }`, and its `QuestionView` has `epoch: number`.
 
@@ -8578,6 +8579,19 @@ git commit -m "feat(client): question cards in the composer hub, with Qt's answe
 ---
 
 ### Task A2-2: The guarded answer: Submit, Approve once, Deny, Skip and the cold cache
+
+**As built** (this task's commit and its review rounds). Where the steps below differ, the code and this list win (Qt wins over the brief):
+- **The call's end** (ruling, 2026-10-29). `answer_now` runs the dispatch inside `catch_unwind` and maps it through Task 5's `send::outcome_of` with Qt's `ALREADY_ANSWERING` (`HgsClient.cpp:1905`). A taken lane is a definite failure with that text, never "busy" and never uncertain. Any other `Err`, or a panic, means the call's thread died, so it is uncertain. `in_flight` is always released. Tests: `a_taken_answer_lane_is_a_definite_failure`, `a_call_that_dies_is_uncertain_and_never_retried`.
+- **A reload drops the cold question.** `Composers::resend` (the reloaded webview) clears `Answers.cold`: the dialog is gone with the old page, and a held ask would refuse every later answer of the app. Test: `a_reload_drops_the_cold_question`.
+- **More pinned guards:** `one_answer_per_session_at_a_time` (Qt's quiet refusal while an answer of the session is in flight, 5072), `nothing_is_answered_once_the_app_quits`, and `an_answer_saved_as_the_app_quits_is_never_sent` (the draft stays on disk as sending and reloads uncertain).
+- **Names.** The events cap is `COMPOSER_EVENTS` (16), since `EVENTS` is Task 4b's 500 followed events. The core's `Actionable::Ready` holds a `Box<Question>`. Tests take the card and its epoch from A2-1's `tests::shown`, and the changed-card test holds the store with Task 3a's `hold`.
+- **Review round 1.**
+  - One answer per session: a second answer whose save answers while another of its session is under way ends with Qt's `ALREADY_ANSWERING`, definitely and without a call. An answer's end removes only its own `in_flight` entry. The cold question yields to an answer already under way.
+  - A cold question goes with its card: the hub drops it, as cancelled with nothing sent, once its card is no longer shown (another session, a changed or answered card) or the selection closes. A2-3 also answers `question_cold(token, false)` when its dialog goes unanswered.
+  - The captured details stay an `Arc`, never deep-copied under the hub lock.
+  - Tests pin each input of the post-save re-check (a cache that expires, a new run, offline, stopped, a terminate, a recreated row, each ending in `CHANGED_KEPT` with nothing sent), Approve once and Deny refused on a card with native choices, a consent change behind the cold question (`CONSENT_CHANGED`), and the dropped cold question.
+- **Run the tests** with `cargo +1.99.1 test --locked --manifest-path src-tauri/Cargo.toml -- composer:: actions::`: cargo takes one filter before `--`.
+- **A2-4 binds to this:** `ComposerEvent`, `Composers::{event, take_events}`, the envelope's `composer_events`, and `Answers.cold` (an answer's cold question is open).
 
 **Depends on:**
 - A2-1;

@@ -402,6 +402,9 @@ struct Envelope<'a> {
     draft_keys: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     processes_view: Option<crate::processes::ProcessesView>,
+    /// Notices and Terminal requests that arrived after their call (A2).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    composer_events: Vec<crate::composer::ComposerEvent>,
 }
 
 /// Everything pending since the last call; parks up to 250 ms while nothing is.
@@ -438,6 +441,7 @@ pub async fn next_batch(
             composer: composers.take_view(),
             draft_keys: composers.take_draft_keys(),
             processes_view: processes.take_view(),
+            composer_events: composers.take_events(),
         };
         serde_json::to_vec(&envelope).map_err(|error| error.to_string())
     })

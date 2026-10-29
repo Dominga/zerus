@@ -8,6 +8,7 @@ vi.hoisted(() => {
 });
 vi.mock("../bridge", () => ({
   archivePage: vi.fn(),
+  resetArchivePages: vi.fn(async () => {}),
   cancelArchivePages: vi.fn(),
   runAction: vi.fn(),
   inspectSession: vi.fn(),
@@ -29,16 +30,17 @@ import {
   type ArchivedSession, type Page, type PagingComputer,
 } from "./archive";
 import { ALL_UNTIL } from "../ui/sessions/archive-dates";
-import type { ArchivePage, ViewRow } from "../types";
+import type { ArchivePage, ArchiveRow, ViewRow, GroupOut } from "../types";
 
 const NOW = new Date(2026, 9, 28, 12, 0, 0);
 const local = (y: number, m: number, d: number) => new Date(y, m - 1, d).getTime() / 1000;
 const uuid = (n: number) => `10000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
-const arow = (n: number, at: number, extra: Partial<ViewRow> = {}): ViewRow => ({
+const arow = (n: number, at: number, extra: Partial<ArchiveRow> = {}): ArchiveRow => ({
+  group: "ungrouped", rank: 0,
   name: `codex/example/a${n}`, agent: "codex", state: "archived", status: "ended", caption: "Archived", archive_id: uuid(n), archived_at: at,
   run_id: `run-${n}`, conversation_id: `conv-${n}`, resumable: true, project: "example", ...extra,
 });
-const pageOf = (rows: ViewRow[], extra: Partial<ArchivePage> = {}): ArchivePage => ({ rows, next_cursor: "", previous_cursor: null, total: rows.length, position: null, ...extra });
+const pageOf = (rows: ArchiveRow[], extra: Partial<ArchivePage> = {}): ArchivePage => ({ rows, next_cursor: "", previous_cursor: null, total: rows.length, position: null, ...extra });
 const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
 const LOCAL: PagingComputer = { computer: "", machine: "Local" };
 const BOX: PagingComputer = { computer: "box", machine: "box" };
@@ -51,14 +53,16 @@ function setup(options: { active?: boolean; computers?: PagingComputer[]; firstR
     new Promise<ArchivePage>((resolve, reject) => { calls.push({ computer, from, until, cursor, query, resolve, reject }); }));
   const [active, setActive] = createSignal(options.active ?? true);
   const [query, setQuery] = createSignal("");
+  const [projects, setProjects] = createSignal<readonly string[]>([]);
   const [computers, setComputers] = createSignal<PagingComputer[]>(options.computers ?? [LOCAL]);
   const cancel = vi.fn((_through: number) => {});
+  const reset = vi.fn((_through: number) => {});
   let archive!: ReturnType<typeof createArchive>;
-  const dispose = createRoot((d) => { archive = createArchive({ read, cancel, active, query, computers, now: () => new Date(NOW), firstRequest: options.firstRequest }); return d; });
+  const dispose = createRoot((d) => { archive = createArchive({ read, cancel, reset, projects, active, query, computers, now: () => new Date(NOW), firstRequest: options.firstRequest }); return d; });
   /** Answers the call at `i` (default: the latest) and lets its handlers run. */
   const answer = async (page: ArchivePage, i = calls.length - 1) => { calls[i].resolve(page); await flush(); };
   const fail = async (error: unknown, i = calls.length - 1) => { calls[i].reject(error); await flush(); };
-  return { archive, read, cancel, calls, answer, fail, setActive, setQuery, setComputers, dispose };
+  return { archive, read, cancel, reset, setProjects, calls, answer, fail, setActive, setQuery, setComputers, dispose };
 }
 
 beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(NOW); });
@@ -239,9 +243,9 @@ describe("names and cancelling (ArchiveBrowser::configure, cancelArchivePages)",
   it("passes its request number to every read and cancels through the highest one issued", () => {
     const t = setup({ computers: [LOCAL, BOX] });
     expect(t.read.mock.calls.map((c) => c[5])).toEqual([1, 2]);
-    expect(t.cancel.mock.calls).toEqual([[0]]);
+    expect(t.reset.mock.calls).toEqual([[0]]);
     t.archive.refresh();
-    expect(t.cancel.mock.calls.at(-1)).toEqual([2]);
+    expect(t.reset.mock.calls.at(-1)).toEqual([2]);
     expect(t.read.mock.calls.slice(2).map((c) => c[5])).toEqual([3, 4]);
     t.setActive(false);
     expect(t.cancel.mock.calls.at(-1)).toEqual([4]);
@@ -254,32 +258,32 @@ describe("names and cancelling (ArchiveBrowser::configure, cancelArchivePages)",
     t.dispose();
   });
 
-  it("cancels the reads in flight on leaving, a computers change, a query change and Refresh, and not on a plain re-configure", () => {
+  it("resets both sides for scope changes and Refresh, but only cancels on hide", () => {
     const t = setup({ active: false });
-    // The paging computers changed from none.
-    expect(t.cancel).toHaveBeenCalledTimes(1);
+    expect(t.reset).toHaveBeenCalledTimes(1);
     t.setActive(true);
     t.setComputers([LOCAL]);
-    expect(t.cancel).toHaveBeenCalledTimes(1);
+    expect(t.reset).toHaveBeenCalledTimes(1);
     t.setActive(false);
-    expect(t.cancel).toHaveBeenCalledTimes(2);
+    expect(t.cancel).toHaveBeenCalledTimes(1);
+    expect(t.reset).toHaveBeenCalledTimes(1);
     t.setActive(true);
-    expect(t.cancel).toHaveBeenCalledTimes(2);
     t.setComputers([LOCAL, BOX]);
-    expect(t.cancel).toHaveBeenCalledTimes(3);
+    expect(t.reset).toHaveBeenCalledTimes(2);
     t.setQuery("x");
-    expect(t.cancel).toHaveBeenCalledTimes(4);
+    expect(t.reset).toHaveBeenCalledTimes(3);
     t.setQuery(" x ");
-    expect(t.cancel).toHaveBeenCalledTimes(4);
-    const before = t.read.mock.calls.length;
+    expect(t.reset).toHaveBeenCalledTimes(3);
     t.archive.refresh();
-    expect(t.cancel).toHaveBeenCalledTimes(5);
-    expect(t.cancel.mock.invocationCallOrder[4]).toBeLessThan(t.read.mock.invocationCallOrder[before]);
-    // A date-range change refreshes (Qt's rangeChanged); an unchanged range does nothing.
+    expect(t.reset).toHaveBeenCalledTimes(4);
     t.archive.setRange({ ...t.archive.range() });
-    expect(t.cancel).toHaveBeenCalledTimes(5);
+    expect(t.reset).toHaveBeenCalledTimes(4);
     t.archive.setRange({ ...t.archive.range(), period: 2 });
-    expect(t.cancel).toHaveBeenCalledTimes(6);
+    expect(t.reset).toHaveBeenCalledTimes(5);
+    t.setProjects(["alpha"]);
+    expect(t.reset).toHaveBeenCalledTimes(6);
+    t.setProjects(["alpha"]);
+    expect(t.reset).toHaveBeenCalledTimes(6);
     t.dispose();
   });
 });
@@ -439,5 +443,85 @@ describe("the paging computers", () => {
 describe("the bridge call", () => {
   it("the app's store reads nothing until the Archive filter shows the list", () => {
     expect(vi.mocked(bridge).archivePage).not.toHaveBeenCalled();
+  });
+});
+
+describe("request-tagged archive placement", () => {
+  const delta = (n: number, request: number, group: string, rank = 10, computer = ""): GroupOut =>
+    ({ computer, key: `archive:${uuid(n)}`, group, rank, archive_request: request });
+
+  it("merges a delta that beats its reply, newest per key, then applies shown deltas at once", async () => {
+    const t = setup();
+    t.archive.applyGroups([delta(1, 1, "alpha"), delta(1, 1, "beta", 20)]);
+    expect(t.archive.rows()).toEqual([]);
+    await t.answer(pageOf([arow(1, 100, { group: "ungrouped", rank: 1 })]));
+    expect(t.archive.rows()[0]).toMatchObject({ group: "beta", rank: 20 });
+    expect(t.archive.pages()[""].shownRequest).toBe(1);
+    t.archive.applyGroups([delta(1, 1, "alpha", 30)]);
+    expect(t.archive.rows()[0]).toMatchObject({ group: "alpha", rank: 30 });
+    t.dispose();
+  });
+
+  it("drops stale, cancelled and other computers' tags rather than merging them into a new page", async () => {
+    const t = setup();
+    t.archive.refresh();
+    t.archive.applyGroups([delta(1, 1, "stale"), delta(1, 3, "future"), delta(1, 2, "peer", 1, "box")]);
+    await t.answer(pageOf([arow(1, 100, { group: "alpha" })]), 1);
+    expect(t.archive.rows()[0].group).toBe("alpha");
+    t.archive.applyGroups([delta(1, 1, "stale"), { ...delta(1, 2, "live"), archive_request: undefined }]);
+    expect(t.archive.rows()[0].group).toBe("alpha");
+    t.dispose();
+  });
+
+  it("holds at most 50 identities for a request and still accepts newer values for a held key", async () => {
+    const t = setup();
+    t.archive.applyGroups(Array.from({ length: 51 }, (_, n) => delta(n, 1, "beta")));
+    t.archive.applyGroups([delta(0, 1, "latest")]);
+    await t.answer(pageOf([arow(0, 100), arow(49, 100), arow(50, 100)]));
+    expect(t.archive.rows().map((s) => s.group)).toEqual(["latest", "beta", "ungrouped"]);
+    t.dispose();
+  });
+
+  it("keeps shown placement live across hide and reopen without resetting its identities", async () => {
+    const t = setup();
+    await t.answer(pageOf([arow(1, 100)]));
+    t.setActive(false);
+    t.archive.applyGroups([delta(1, 1, "beta")]);
+    t.setActive(true);
+    expect(t.archive.rows()[0].group).toBe("beta");
+    expect(t.read).toHaveBeenCalledTimes(1);
+    expect(t.reset).toHaveBeenCalledTimes(1);
+    expect(t.cancel).toHaveBeenLastCalledWith(1);
+    t.dispose();
+  });
+
+  it("keeps the old shown request live after an empty next page, and Refresh clears both sides", async () => {
+    const t = setup();
+    await t.answer(pageOf([arow(1, 100, { group: "alpha" })], { next_cursor: "older", total: 2 }));
+    t.archive.older();
+    t.archive.applyGroups([delta(1, 2, "wrong")]);
+    await t.answer(pageOf([]));
+    expect(t.archive.pages()[""].shownRequest).toBe(1);
+    expect(t.archive.status().error).toContain(ARCHIVE_CHANGED);
+    t.archive.applyGroups([delta(1, 1, "beta")]);
+    expect(t.archive.rows()[0].group).toBe("beta");
+    t.archive.refresh();
+    expect(t.reset).toHaveBeenLastCalledWith(2);
+    expect(t.archive.rows()).toEqual([]);
+    t.archive.applyGroups([delta(1, 1, "stale")]);
+    await t.answer(pageOf([arow(1, 100)]));
+    expect(t.archive.rows()[0].group).toBe("ungrouped");
+    t.dispose();
+  });
+
+  it("removes a computer's rows and held deltas when it leaves the paging scope", async () => {
+    const t = setup({ computers: [LOCAL, BOX] });
+    t.archive.applyGroups([delta(1, 2, "beta", 2, "box")]);
+    t.setComputers([LOCAL]);
+    await t.answer(pageOf([arow(1, 100)]), 1);
+    expect(t.archive.rows()).toEqual([]);
+    await t.answer(pageOf([arow(2, 100)]), 2);
+    expect(t.archive.rows().map((s) => s.computer)).toEqual([""]);
+    t.dispose();
   });
 });

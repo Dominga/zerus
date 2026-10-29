@@ -67,7 +67,7 @@ export function createOrganization(say: Say, unsay: (key: string) => void = () =
         for (const id of Object.keys(s)) if (id.startsWith(prefix) && !kept.has(id)) delete s[id];
       }
       for (const k of b.removes) delete s[rowId(k.computer, k.key)];
-      for (const g of assigned) s[rowId(g.computer, g.key)] = { group: g.group, rank: g.rank };
+      for (const g of assigned) if (g.archive_request === undefined) s[rowId(g.computer, g.key)] = { group: g.group, rank: g.rank };
     }));
   }
 

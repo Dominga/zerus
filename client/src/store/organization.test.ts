@@ -213,3 +213,14 @@ describe("the organization store", () => {
     expect(say).not.toHaveBeenCalled();
   });
 });
+
+it("keeps request-tagged archive deltas out of live assignments", () => createRoot((dispose) => {
+  const { org } = setup();
+  org.applyGrouping(batchOf({ groups: [
+    { computer: "", key: "archive:old", group: "alpha", rank: 10, archive_request: 20 },
+    { computer: "", key: "run:live", group: "alpha", rank: 11 },
+  ] }));
+  expect(org.groups["\narchive:old"]).toBeUndefined();
+  expect(org.groups["\nrun:live"]).toEqual({ group: "alpha", rank: 11 });
+  dispose();
+}));

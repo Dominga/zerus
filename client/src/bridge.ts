@@ -274,6 +274,12 @@ export async function cancelArchivePages(through: number): Promise<void> {
   await invoke<null>("cancel_archive_pages", { through }).catch(() => {});
 }
 
+/** Resets the loaded placement identities as well as cancelling reads through this request. */
+export async function resetArchivePages(through: number): Promise<void> {
+  if (!inTauri()) return;
+  await invoke<null>("reset_archive_pages", { through }).catch(() => {});
+}
+
 /** Puts text on the clipboard: from Rust in the app, the page's clipboard in a browser. */
 export async function copyText(text: string): Promise<void> {
   if (inTauri()) return invoke<void>("copy_text", { text });

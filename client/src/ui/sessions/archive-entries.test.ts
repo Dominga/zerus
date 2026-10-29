@@ -8,6 +8,7 @@ vi.hoisted(() => {
 });
 vi.mock("../../bridge", () => ({
   archivePage: vi.fn(() => new Promise(() => {})),
+  resetArchivePages: vi.fn(async () => {}),
   cancelArchivePages: vi.fn(async () => {}),
   pendingReadMarks: vi.fn(async () => []),
   attentionMarks: vi.fn(async () => ({ marks: {}, replies: {} })),

@@ -10,6 +10,7 @@ vi.hoisted(() => {
 });
 vi.mock("../../bridge", () => ({
   archivePage: vi.fn(),
+  resetArchivePages: vi.fn(async () => {}),
   cancelArchivePages: vi.fn(async () => {}),
   runAction: vi.fn(),
   inspectSession: vi.fn(async () => null),
@@ -49,7 +50,7 @@ const archived = (n: number): ViewRow => ({
 const key = (n: number) => `\narchive:${uuid(n)}`;
 const texts = () => notices().map((n) => n.text);
 const pages: ((p: ArchivePage) => void)[] = [];
-const page = (...rows: ViewRow[]): ArchivePage => ({ rows, next_cursor: "", previous_cursor: null, total: rows.length, position: 0 });
+const page = (...rows: ViewRow[]): ArchivePage => ({ rows: rows.map((r) => ({ ...r, group: "ungrouped", rank: 0 })), next_cursor: "", previous_cursor: null, total: rows.length, position: 0 });
 
 async function loadArchive(...rows: ViewRow[]) {
   setStateFilter("archived");

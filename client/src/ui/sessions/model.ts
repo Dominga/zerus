@@ -1,22 +1,17 @@
+import { groupRows, type Row } from "./group-rows";
+export { groupRows, type Row, type ListInput } from "./group-rows";
 import { createMemo } from "solid-js";
 import { archiveRows } from "../../store/archive";
 import { catalog, computerFresh, orderedRows } from "../../store/catalog";
 import { defaultProject, grouping, groups } from "../../store/organization";
 import { stateFilter, matchesFilter, search, machineFilter, projectFilter, expandedChildren, compactRows } from "../../store/ui";
-import { headerAttention, isWorking, needsAttention } from "../../store/attention";
-import type { GroupingOut } from "../../types";
-import type { Session, Subagent } from "./types";
+import { isWorking, needsAttention } from "../../store/attention";
+import type { Session } from "./types";
 
 // Flattened list model. Heights match tray/src/SessionCardDelegate.h
 // sizeHint at the compact density, the only one in the web client: group
 // header 40, card 94, native child 64, collapsed row 40. Fixed heights per row
 // type let the virtualizer place rows without measuring the DOM.
-
-export type Row =
-  /** `project` is the project's id; `name` and the colour come from the organization's header. */
-  | { type: "header"; id: string; project: string; name: string; color: string | null; palette: number; collapsed: boolean; total: number; attention: number; unread: number; working: number }
-  | { type: "card"; id: string; session: Session; expandable: boolean; expanded: boolean; compactRow: boolean }
-  | { type: "child"; id: string; parent: Session; child: Subagent; first: boolean; last: boolean };
 
 export const ROW_HEIGHT = { header: 40, card: 94, child: 64, collapsedRow: 40 } as const;
 
@@ -56,61 +51,6 @@ export function groupMembers(order: readonly string[], rows: Record<string, Sess
   }
   for (const list of map.values()) list.sort((x, y) => rank.get(x.key)! - rank.get(y.key)!);
   return map;
-}
-
-export interface ListInput {
-  grouping: GroupingOut;
-  /** Each project's rows in list order (groupMembers). */
-  members: Map<string, Session[]>;
-  /** The state, machine and search filters. */
-  visible: (s: Session) => boolean;
-  /** The window's online state of a row's computer (Qt's `entry.online`). */
-  online: (s: Session) => boolean;
-  /** The project filter's project ids; empty is every project. */
-  projects: readonly string[];
-  expanded: (key: string) => boolean;
-  compact: (key: string) => boolean;
-}
-
-/** Qt's grouped rows (SessionsWindowRows.cpp:289-338, header counts 393-411). */
-export function groupRows(input: ListInput): Row[] {
-  const out: Row[] = [];
-  const cards = (list: readonly Session[]) => {
-    for (const s of list) {
-      const kids = s.subagents ?? [];
-      const expanded = kids.length > 0 && input.expanded(s.key);
-      out.push({ type: "card", id: s.key, session: s, expandable: kids.length > 0, expanded, compactRow: input.compact(s.key) });
-      if (expanded) kids.forEach((child, i) => out.push({ type: "child", id: `${s.key}/${child.id}`, parent: s, child, first: i === 0, last: i === kids.length - 1 }));
-    }
-  };
-  const wanted = (id: string) => !input.projects.length || input.projects.includes(id);
-  const headers = input.grouping.loaded ? input.grouping.headers : [];
-  if (headers.length <= 1) {
-    // One project, or none presented yet: no header, and nothing collapses (293, 324, 326).
-    for (const [id, list] of input.members) if (wanted(id)) cards(list.filter(input.visible));
-    return out;
-  }
-  for (const h of headers) {
-    if (!wanted(h.id)) continue;
-    const all = input.members.get(h.id) ?? [];
-    const list = all.filter(input.visible);
-    // A project without visible members stays hidden (323; "Hide projects without active sessions" defaults on, 109).
-    if (!list.length) continue;
-    // The counters cover members the filters hide; muted members never count as attention or unread (398-404).
-    // A computer that is not online counts only Review later as attention and nothing as working.
-    let attention = 0, unread = 0, working = 0;
-    for (const s of all) {
-      const up = input.online(s);
-      if (!s.muted && headerAttention(s, up)) attention++;
-      // An offline computer's unread replies count too (visibleUnreadReply, HgsClient.h:104-105).
-      if (!s.muted && s.unread) unread++;
-      if (isWorking(s, up)) working++;
-    }
-    out.push({ type: "header", id: `h:${h.id}`, project: h.id, name: h.name, color: h.color, palette: h.palette,
-               collapsed: h.collapsed, total: list.length, attention, unread, working });
-    if (!h.collapsed) cards(list);
-  }
-  return out;
 }
 
 /** The window's online state of a row (Qt's `entry.online`). */

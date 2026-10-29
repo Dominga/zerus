@@ -8,6 +8,7 @@ vi.hoisted(() => {
 });
 vi.mock("../../bridge", () => ({
   archivePage: vi.fn(),
+  resetArchivePages: vi.fn(async () => {}),
   cancelArchivePages: vi.fn(async () => {}),
   runAction: vi.fn(),
   inspectSession: vi.fn(),
@@ -23,20 +24,21 @@ vi.mock("../../bridge", () => ({
 
 import * as bridge from "../../bridge";
 import { applyBatch } from "../../store/catalog";
-import { archiveCount, archiveTip } from "../../store/archive";
+import { archive, archiveCount, archiveTip } from "../../store/archive";
 import { stillListed } from "../../store/actions";
 import { counts, matchesFilter, selected, setMachineFilter, setProjectFilter, setSearch, setSelectedKey, setStateFilter } from "../../store/ui";
 import { catalog } from "../../store/catalog";
+import { applyGrouping, emptyGrouping } from "../../store/organization";
 import { applies } from "../../store/batch";
 import { listRows } from "./model";
 import { markEntry } from "./mark-entries";
 import { snapshotOf } from "./actions-ui";
-import { emptyBatch, type ArchivePage, type ViewRow } from "../../types";
+import { emptyBatch, type ArchivePage, type ArchiveRow, type ViewRow } from "../../types";
 
 const mocked = vi.mocked(bridge);
 const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
 const uuid = (n: number) => `10000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
-const archived = (n: number, at: number): ViewRow => ({ name: `codex/example/a${n}`, agent: "codex", state: "archived", status: "ended", archive_id: uuid(n), archived_at: at, run_id: `run-a${n}`, conversation_id: `conv-a${n}` });
+const archived = (n: number, at: number): ArchiveRow => ({ group: "ungrouped", rank: 0, name: `codex/example/a${n}`, agent: "codex", state: "archived", status: "ended", archive_id: uuid(n), archived_at: at, run_id: `run-a${n}`, conversation_id: `conv-a${n}` });
 const live: ViewRow = { name: "codex/example/live", agent: "codex", state: "running", status: "ready", machine: "workstation", run_id: "run-live", conversation_id: "conv-live" };
 
 describe("the window's attention in the app", () => {
@@ -107,7 +109,7 @@ describe("the Archive view in the app", () => {
     expect(rows.map((r) => r.type === "card" && [r.session.name, r.session.machine])).toEqual([["codex/example/a2", "workstation"], ["codex/example/a1", "workstation"]]);
     expect(archiveCount()).toBe("2+");
     expect(archiveTip()).toBe("Archive / 2 loaded; more can be loaded in Archive");
-    expect(mocked.cancelArchivePages).toHaveBeenCalled();
+    expect(mocked.resetArchivePages).toHaveBeenCalled();
     // The app numbers its requests from its start time, so a reload never reuses a cancelled number.
     expect(mocked.archivePage.mock.calls[0][5]).toBeGreaterThan(1_700_000_000_000);
     const key = `\narchive:${uuid(2)}`;
@@ -129,11 +131,10 @@ describe("the Archive view in the app", () => {
     await flush();
     expect(listRows()).toHaveLength(1);
 
-    // The project filter holds organization project IDs; archived rows have
-    // none until the Archive view groups by project, so it keeps them.
+    // A project change resets both sides before re-reading the window.
     setProjectFilter(["p-aurora"]);
-    expect(listRows()).toHaveLength(1);
-    expect(archiveCount()).toBe("1");
+    expect(listRows()).toHaveLength(0);
+    expect(mocked.resetArchivePages).toHaveBeenCalled();
     setProjectFilter([]);
 
     // A machine outside the filter pages nothing.
@@ -147,4 +148,35 @@ describe("the Archive view in the app", () => {
     setStateFilter("all");
     expect(listRows().map((r) => r.type)).toEqual(["card"]);
   });
+});
+
+it("replays grouped Archive rows through the existing headers, newest first within each project", async () => {
+  mocked.archivePage.mockImplementation(() => new Promise(() => {}));
+  setStateFilter("archived");
+  const request = mocked.archivePage.mock.calls.at(-1)![5];
+  const headers = ["beta", "alpha"].map((id, palette) => ({ id, name: id.toUpperCase(), color: null, palette, accessible: true, collapsed: false, is_default: false }));
+  const grouping = { ...emptyGrouping(), loaded: true, ready: true, default_project: "alpha", headers };
+  applyGrouping({ ...emptyBatch(), grouping });
+  // Complete the actual app store's current read via its mock's saved resolver.
+  // A fresh Refresh gives this replay its own reply and request tag.
+  let answer!: (page: ArchivePage) => void;
+  mocked.archivePage.mockImplementation(() => new Promise((resolve) => { answer = resolve; }));
+  archive.refresh();
+  const current = mocked.archivePage.mock.calls.at(-1)![5];
+  archive.applyGroups([{ computer: "", key: `archive:${uuid(10)}`, group: "beta", rank: 99, archive_request: current }]);
+  answer({ rows: [
+    { ...archived(10, 400), group: "alpha", rank: 1 },
+    { ...archived(11, 300), group: "beta", rank: 0 },
+    { ...archived(12, 200), group: "alpha", rank: 0 },
+  ], total: 3, position: 0, next_cursor: "", previous_cursor: null });
+  await flush();
+  expect(listRows().map((r) => r.id)).toEqual(["h:beta", `\narchive:${uuid(10)}`, `\narchive:${uuid(11)}`, "h:alpha", `\narchive:${uuid(12)}`]);
+  archive.applyGroups([{ computer: "", key: `archive:${uuid(11)}`, group: "alpha", rank: 50, archive_request: current }]);
+  expect(listRows().map((r) => r.id)).toEqual(["h:beta", `\narchive:${uuid(10)}`, "h:alpha", `\narchive:${uuid(11)}`, `\narchive:${uuid(12)}`]);
+  archive.applyGroups([{ computer: "", key: `archive:${uuid(10)}`, group: "alpha", rank: 0, archive_request: request }]);
+  expect(listRows()[0].id).toBe("h:beta");
+  applyGrouping({ ...emptyBatch(), grouping: { ...grouping, headers: [{ ...headers[0], collapsed: true }, headers[1]] } });
+  expect(listRows().map((r) => r.id)).toEqual(["h:beta", "h:alpha", `\narchive:${uuid(11)}`, `\narchive:${uuid(12)}`]);
+  setStateFilter("all");
+  applyGrouping({ ...emptyBatch(), grouping: emptyGrouping() });
 });

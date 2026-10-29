@@ -1639,7 +1639,10 @@ mod tests {
             view.error.as_deref(),
             Some("Could not load accounts: Could not refresh this screen.")
         );
-        assert_eq!(*heard.lock().unwrap(), [here.clone()]);
+        assert_eq!(
+            heard.lock().unwrap().as_slice(),
+            std::slice::from_ref(&here)
+        );
         assert_eq!(
             h.count("account ls"),
             0,

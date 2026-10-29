@@ -89,6 +89,8 @@ LEGACY_AGE = 3600
 # Slow machines may allow longer; the defaults match the verified manual updates.
 QUIT_SECONDS = float(os.environ.get('HGS_TRAY_QUIT_TIMEOUT') or 35)
 START_SECONDS = float(os.environ.get('HGS_TRAY_START_TIMEOUT') or 35)
+# A codesign that hangs must not leave the GUI quit.
+CODESIGN_SECONDS = 30
 LSREGISTER = Path('/System/Library/Frameworks/CoreServices.framework/Frameworks/'
                   'LaunchServices.framework/Support/lsregister')
 DEFAULTS = 'defaults'
@@ -627,7 +629,7 @@ def swap_in(stage, installed, aside):
     try:
         os.rename(stage, installed)
         if MAC:
-            run(['codesign', '--verify', '--deep', '--strict', installed])
+            verify_signature(installed)
             register(installed)
         if present:
             unregister(aside)
@@ -637,10 +639,11 @@ def swap_in(stage, installed, aside):
         raise
 
 
-def take_slot(previous):
+def take_slot(previous, progress):
     """After a verified start, the replaced GUI becomes the one rollback copy,
     unregistered. The old copy leaves the slot only once the new one is in it;
-    an interrupted step puts the old copy back and says where the new one is."""
+    an interrupted step puts the old copy back and says where the new one is.
+    `progress` notes the removal of an original copied across file systems."""
     slot = rollback_dir() / previous.name
     incoming = Path(tempfile.mkdtemp(prefix='.incoming-', dir=ROLLBACK)) / previous.name
     replaced = None
@@ -671,9 +674,15 @@ def take_slot(previous):
     incoming.parent.rmdir()
     unregister(slot)
     if previous.exists():
+        progress['removing'] = True
         remove(previous)
     if replaced is not None:
         shutil.rmtree(replaced.parent)
+
+
+def verify_signature(path):
+    """codesign --verify --deep --strict, bounded by CODESIGN_SECONDS."""
+    run(['codesign', '--verify', '--deep', '--strict', path], timeout=CODESIGN_SECONDS)
 
 
 def complete_bundle(bundle):
@@ -686,18 +695,19 @@ def complete_bundle(bundle):
     if not (Path(bundle) / 'Contents/MacOS' / info.get('CFBundleExecutable', 'hgs-tray')).is_file():
         return False
     try:
-        run(['codesign', '--verify', '--deep', '--strict', bundle])
-    except (OSError, subprocess.CalledProcessError):
+        verify_signature(bundle)
+    except (OSError, subprocess.SubprocessError):
         return False
     return True
 
 
 def settle(previous, keep, progress):
     """Only after the new GUI was verified: the GUI it replaced becomes the
-    rollback copy, or goes when the slot keeps Qt (a superseded client). An
-    incomplete bundle never takes the slot and stays where the update keeps
-    it. Says which; `progress` notes a removal under way, which an interrupt
-    leaves partial."""
+    rollback copy, or goes when the slot keeps a complete Qt (a superseded
+    client). An incomplete bundle never takes the slot and stays where the
+    update keeps it, as does a client the slot's incomplete Qt cannot
+    replace. Says which; `progress` notes a removal under way, which an
+    interrupt leaves partial."""
     if previous is None:
         return 'nothing was installed before'
     if MAC and not complete_bundle(previous):
@@ -705,10 +715,14 @@ def settle(previous, keep, progress):
         return ('the replaced bundle is incomplete (no identity, executable or valid signature), '
                 'so it did not become the rollback copy')
     if keep:
+        if not complete_bundle(ROLLBACK / previous.name):
+            # take_slot would set the slot's copy aside for good: keep both.
+            return (f'the rollback copy in {ROLLBACK} is incomplete, so the replaced GUI was kept '
+                    'rather than removed')
         progress['removing'] = True
         remove(previous)
         return f'the Qt GUI stays the rollback copy in {ROLLBACK}'
-    take_slot(previous)
+    take_slot(previous, progress)
     return f'the replaced GUI is the rollback copy in {ROLLBACK}'
 
 
@@ -905,9 +919,9 @@ def update(built, installed, rollback=False):
     progress = {}
     try:
         if MAC:
-            run(['codesign', '--verify', '--deep', '--strict', built])
+            verify_signature(built)
             shutil.copytree(built, stage, symlinks=True)
-            run(['codesign', '--verify', '--deep', '--strict', stage])
+            verify_signature(stage)
         else:
             shutil.copy2(built, stage)
             os.chmod(stage, 0o755)

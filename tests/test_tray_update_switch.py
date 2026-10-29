@@ -253,7 +253,7 @@ class SlotAndRestore(Fixture):
         shutil.copytree(self.bundle('qt-old', 'qt'), self.slot)
         previous = self.root / 'Applications/.update/previous/hgs-tray.app'
         shutil.copytree(self.bundle('qt', 'qt'), previous)
-        updater.take_slot(previous)
+        updater.take_slot(previous, {})
         self.assertEqual(self.text(self.slot), 'qt')
         self.assertEqual([p.name for p in updater.ROLLBACK.iterdir()], ['hgs-tray.app'], 'no leftovers')
         self.assertIn(f'-u {self.slot}', (self.root / 'lsregister.log').read_text().splitlines())
@@ -270,7 +270,7 @@ class SlotAndRestore(Fixture):
                 raise OSError(errno.EXDEV, 'Invalid cross-device link')
             return rename(source, target, *args, **kwargs)
         with mock.patch.object(updater.os, 'rename', across):
-            updater.take_slot(previous)
+            updater.take_slot(previous, {})
         self.assertEqual(self.text(self.slot), 'qt')
         self.assertFalse(previous.exists())
         self.assertEqual([p.name for p in updater.ROLLBACK.iterdir()], ['hgs-tray.app'])
@@ -295,7 +295,7 @@ class SlotAndRestore(Fixture):
                     return rename(source, target, *args, **kwargs)
                 with mock.patch.object(updater.os, 'rename', interrupted), \
                         mock.patch.object(updater, 'say', lines.append), self.assertRaises(KeyboardInterrupt):
-                    updater.take_slot(previous)
+                    updater.take_slot(previous, {})
                 self.assertEqual(self.text(self.slot), 'qt-old')
                 [kept] = [path for path in (previous, *updater.ROLLBACK.glob('.incoming-*/hgs-tray.app')) if path.exists()]
                 self.assertEqual(self.text(kept), 'qt')
@@ -516,6 +516,64 @@ class UpdateFlow(Flow):
                 self.assertEqual((self.variant(self.installed), self.variant(self.slot)), ('client', 'qt-old'))
                 self.assertIn('the replaced bundle is incomplete', self.lines[-2])
                 self.assertTrue(list(self.installed.parent.glob('.hgs-tray-kept-*/previous/hgs-tray.app')))
+
+    def test_a_partial_qt_in_the_slot_keeps_the_replaced_client(self):
+        # main's replace() put any installed bundle into the slot, so a partial Qt can sit there.
+        for self.running in (True, False):
+            with self.subTest(running=self.running):
+                shutil.rmtree(self.installed.parent, ignore_errors=True)
+                shutil.rmtree(updater.ROLLBACK, ignore_errors=True)
+                self.install('client-1', 'tauri', self.installed)
+                self.install('qt-partial', 'qt', self.slot)
+                (self.slot / 'Contents/MacOS/hgs-tray').unlink()
+                self.assertEqual(updater.update(self.bundle('client-2', 'tauri'), self.installed), 0)
+                self.assertEqual(self.variant(self.installed), 'client-2')
+                self.assertEqual(updater.bundle_info(self.slot)['CFBundleIdentifier'], TEST_ID, 'the slot is untouched')
+                self.assertFalse((self.slot / 'Contents/MacOS/hgs-tray').exists())
+                [kept] = self.installed.parent.glob('.hgs-tray-kept-*/previous/hgs-tray.app')
+                self.assertEqual(self.variant(kept), 'client-1')
+                self.assertIn('is incomplete, so the replaced GUI was kept rather than removed', self.lines[-2])
+                self.assertNotIn('the Qt GUI stays the rollback copy', ' '.join(self.lines))
+
+    def test_every_codesign_is_bounded_and_a_timeout_means_incomplete(self):
+        calls = []
+
+        def run(args, **kwargs):
+            calls.append((str(args[0]), kwargs.get('timeout')))
+            return ''
+        self.install('qt', 'qt', self.installed)
+        self.domain({'attention.observed': b'{}'})
+        with mock.patch.object(updater, 'run', run):
+            self.assertEqual(updater.update(self.bundle('client', 'tauri'), self.installed), 0)
+        signatures = [timeout for name, timeout in calls if name == 'codesign']
+        self.assertEqual(len(signatures), 4, 'the build, the stage, the installed copy and the replaced one')
+        self.assertEqual(set(signatures), {updater.CODESIGN_SECONDS})
+
+        def hangs(args, **kwargs):
+            raise subprocess.TimeoutExpired(args, kwargs.get('timeout'))
+        with mock.patch.object(updater, 'run', hangs):
+            self.assertFalse(updater.complete_bundle(self.bundle('qt', 'qt')))
+
+    def test_an_interrupted_removal_across_file_systems_says_the_copy_may_be_partial(self):
+        self.install('qt', 'qt', self.installed)
+        self.domain({'attention.observed': b'{}'})
+        rename, remove = os.rename, updater.remove
+
+        def across(source, target, *args, **kwargs):
+            if Path(source).parent.name == 'previous':
+                raise OSError(errno.EXDEV, 'Invalid cross-device link')
+            return rename(source, target, *args, **kwargs)
+
+        def interrupted(path):
+            if Path(path).parent.name == 'previous':
+                (Path(path) / 'Contents/MacOS/hgs-tray').unlink()
+                raise KeyboardInterrupt
+            return remove(path)
+        with mock.patch.object(updater.os, 'rename', across), mock.patch.object(updater, 'remove', interrupted), \
+                self.assertRaises(KeyboardInterrupt):
+            updater.update(self.bundle('client', 'tauri'), self.installed)
+        self.assertEqual(self.variant(self.slot), 'qt', 'the slot holds the complete copy')
+        self.assertIn('may be partial; the new GUI was verified, so delete it rather than putting it back', self.lines[-1])
 
     def test_a_bundle_whose_signature_fails_never_takes_the_slot(self):
         self.install('qt-tampered', 'qt', self.installed)
@@ -759,8 +817,12 @@ class Invariants(Flow):
         # An interrupted rm -rf / cp -R left Qt's Info.plist without its executable:
         # it must never take the slot from the complete older Qt.
         'partial Qt to client': (('qt-partial', 'qt'), ('qt-old', 'qt'), ('client', 'tauri'), set()),
+        # main's replace() put any installed bundle into the slot: a partial Qt there
+        # must not cost the replaced client, and nothing may set it aside for good.
+        'partial Qt in the slot': (('client-1', 'tauri'), ('qt-partial', 'qt'), ('client-2', 'tauri'), set()),
     }
     PARTIAL = {'partial Qt to client'}
+    PARTIAL_SLOT = {'partial Qt in the slot'}
     STARTS = ('ok', 'start() raises', 'wait times out', 'Ctrl-C in wait_started')
     # No GUI runs, so none starts: the installed copy's --build-info verifies it.
     STOPPED = ('not running', 'build-info fails', 'build-info times out', 'Ctrl-C in build-info')
@@ -842,6 +904,9 @@ class Invariants(Flow):
             (self.installed / 'Contents/partial').write_text('the original partial bundle')
         if slot:
             self.install(*slot, self.slot)
+        if direction in self.PARTIAL_SLOT:
+            (self.slot / 'Contents/MacOS/hgs-tray').unlink()
+            (self.slot / 'Contents/partial').write_text('the original partial bundle')
         self.lines.clear()
         self.mode, self.started, self.waited, self.verified = mode, 0, 0, False
         self.running = mode not in self.STOPPED and installed is not None
@@ -871,15 +936,19 @@ class Invariants(Flow):
             self.assertNotIn(self.installed, set(bundles) - set(complete), 'never an incomplete installed GUI')
         # I1, I3: every original GUI survives, where the owner can find it, unless
         # policy superseded it after the new GUI was verified running.
-        originals = {installed and direction not in self.PARTIAL and installed[0], slot[0]} - {None, False}
+        originals = ({installed and direction not in self.PARTIAL and installed[0],
+                      direction not in self.PARTIAL_SLOT and slot[0]} - {None, False})
         for variant in originals - (superseded if self.verified else set()):
             places = [path for path, found in complete.items() if found[0] == variant and named(path)]
             self.assertTrue(places, f'{variant} lost or unnamed: {context}')
-        self.assertTrue(any(kind == 'qt' for _, kind in complete.values()), f'no complete Qt: {context}')
+        if direction not in self.PARTIAL_SLOT:
+            self.assertTrue(any(kind == 'qt' for _, kind in complete.values()), f'no complete Qt: {context}')
         self.assertTrue(any(kind == 'tauri' for _, kind in complete.values()) or (built and built[1] == 'tauri'),
                         f'no client: {context}')
-        # I2: the slot changes only after a verified start.
-        if not self.verified:
+        # I2: the slot changes only after a verified start; a partial one is never set aside.
+        if direction in self.PARTIAL_SLOT:
+            self.assertTrue((self.slot / 'Contents/partial').exists(), context)
+        elif not self.verified:
             self.assertEqual(complete.get(self.slot, (None,))[0], slot[0], context)
         # A line names the installed path whenever it does not hold the requested GUI.
         if complete.get(self.installed, (None,))[0] != self.requested:
@@ -901,7 +970,7 @@ class Invariants(Flow):
                         point += 1
                         if point > steps:
                             break
-        self.assertGreater(cases, 1300)
+        self.assertGreater(cases, 1700)
 
 
 if __name__ == '__main__':

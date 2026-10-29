@@ -4,6 +4,7 @@
 #include "TeamConversation.h"
 #include "TeamTemplateList.h"
 #include "TeamWidgets.h"
+#include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDir>
@@ -486,6 +487,18 @@ void TeamNewTab::hideEvent(QHideEvent *event)
     if (!m_dirty.isEmpty()) flush();
 }
 
+bool TeamNewTab::eventFilter(QObject *watched, QEvent *event)
+{
+    if (watched == m_membersPopup && event->type() == QEvent::Hide) {
+        watched->removeEventFilter(this);
+        m_membersPopup = nullptr;
+        // The list hides while its combo still handles the pick: the held
+        // back rebuild runs after that.
+        QTimer::singleShot(0, this, [this] { renderMembers(); });
+    }
+    return QWidget::eventFilter(watched, event);
+}
+
 void TeamNewTab::showLeadPage(const QString &page)
 {
     m_leadPage = page;
@@ -575,6 +588,18 @@ QStringList TeamNewTab::rowErrors(const Member &m) const
 void TeamNewTab::renderMembers()
 {
     if (!m_membersLayout) return;
+    // Rebuilding deletes the combo whose list is open and so closes the list
+    // under the pointer. A draft read, an account reply, a folder policy or a
+    // role edit can ask for the rows meanwhile: they are rebuilt once it closes.
+    if (QWidget *popup = QApplication::activePopupWidget(); popup && popup->parentWidget() && m_membersBox->isAncestorOf(popup->parentWidget())) {
+        if (m_membersPopup != popup) {
+            if (m_membersPopup) m_membersPopup->removeEventFilter(this);
+            m_membersPopup = popup;
+            popup->installEventFilter(this);
+        }
+        validate();
+        return;
+    }
     const Colors c = colorsFor(m_dark);
     while (auto *item = m_membersLayout->takeAt(0)) { if (auto *w = item->widget()) retire(w); delete item; }
     const bool git = QDir(m_folder->text().trimmed()).exists(QStringLiteral(".git"));

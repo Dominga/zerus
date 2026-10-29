@@ -12,6 +12,8 @@
 #include <QStandardItemModel>
 #include <algorithm>
 #include <QStyle>
+#include <QStyleFactory>
+#include <QStyleOption>
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
@@ -636,6 +638,9 @@ private slots:
     void permissionAnswersFoldToOneLineAndOpenToFive();
     void planningEditsSendTheWholePlan();
     void newTeamStartsTheLeadWithTheTemplate();
+    void newTeamRowErrorsKeepAnOpenListOpen();
+    void newTeamTabKeepsAMemberListOpenUntilItCloses();
+    void newTeamMaxMembersStepsUpAndDown();
     void catalogEditorSavesTheNextVersion();
     void catalogEditorKeepsTheFieldsItDoesNotEdit();
     void ownerActionsCarryNoAgentMarkers();
@@ -1526,6 +1531,115 @@ void TestTeamsUi::newTeamStartsTheLeadWithTheTemplate()
     QCOMPARE(input["settings"].toObject()["folder_policy"].toString(), QStringLiteral("shared"));
     QCOMPARE(input["settings"].toObject()["phase_approval"].toString(), QStringLiteral("auto"));
     QCOMPARE(input["lead"].toObject()["prompt"].toString(), QStringLiteral("You lead."));
+}
+
+// A row error flips a property on its own frame instead of setting the row's
+// style sheet: that re-styled every combo of the row, popup included, and the
+// Windows 11 style closed an open list (the member's role) under the pointer.
+void TestTeamsUi::newTeamRowErrorsKeepAnOpenListOpen()
+{
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    controller.refreshCatalog();
+    QTRY_VERIFY(controller.catalogReady());
+    QTemporaryDir folder;
+    TeamNewDialog dialog(&controller, &client, {{QString(), "this computer", true}, {"msi-old", "msi-old", false}},
+                         {}, QDir::toNativeSeparators(folder.path()), "Checkout");
+    dialog.show();
+    QVERIFY(chooseTemplate(&dialog, "feature"));
+    QTRY_COMPARE(dialog.findChildren<QFrame *>("teamNewMemberRow").size(), 2);
+    const auto rows = dialog.findChildren<QFrame *>("teamNewMemberRow");
+    auto *role = rows.first()->findChild<QComboBox *>("teamNewRole");
+    auto *computer = rows.last()->findChild<QComboBox *>("teamNewComputer");
+    QVERIFY(role && computer);
+    role->showPopup();
+    QTRY_VERIFY(role->view()->isVisible());
+    // validate runs while the list is open: another row gets an error, the
+    // name changes, the role's own text changes.
+    computer->setCurrentIndex(computer->findData("msi-old"));
+    dialog.findChild<QLineEdit *>("teamNewName")->setText("Checkout redesign");
+    role->setEditText(role->currentText() + QStringLiteral(" "));
+    QVERIFY(role->view()->isVisible());
+    QVERIFY(rows.last()->property("error").toBool());
+    QVERIFY(!rows.first()->property("error").toBool());
+    for (auto *row : rows) QVERIFY(row->styleSheet().isEmpty());
+    role->hidePopup();
+    computer->setCurrentIndex(computer->findData(QString()));
+    QVERIFY(!rows.last()->property("error").toBool());
+}
+
+// New team's tab rebuilds its member rows when the policy, the draft or an
+// account reply changes them; a rebuild while a member's list is open waits
+// until the list closes instead of deleting the combo under the pointer.
+void TestTeamsUi::newTeamTabKeepsAMemberListOpenUntilItCloses()
+{
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    controller.refreshCatalog();
+    QTRY_VERIFY(controller.catalogReady());
+    QTemporaryDir folder;
+    QVERIFY(QDir(folder.path()).mkdir(".git"));   // worktrees are offered
+    TeamNewTab tab(&controller, &client, {{QString(), "this computer", true}},
+                   TeamNewTab::Coordinator{"claude/checkout/coord", "claude", "Opus", "", QDir::toNativeSeparators(folder.path()), "msi", "Ready", false}, "Checkout");
+    tab.resize(1300, 860); tab.show();
+    QVERIFY(chooseTemplate(&tab, "feature"));
+    QTRY_COMPARE(tab.findChildren<QFrame *>("teamNewMemberRow").size(), 2);
+    QVERIFY(tab.findChild<QCheckBox *>("teamNewWorktrees")->isChecked());
+    QPointer<QComboBox> role = tab.findChildren<QComboBox *>("teamNewRole").first();
+    role->showPopup();
+    QTRY_VERIFY(role->view()->isVisible());
+    // Shared folders turn every member's worktree off: the rows are rebuilt.
+    auto *policy = tab.findChild<QComboBox *>("teamNewFolderPolicy");
+    policy->setCurrentIndex(policy->findData("shared"));
+    QTest::qWait(50);
+    QVERIFY(role);
+    QVERIFY(role->view()->isVisible());
+    role->hidePopup();
+    QTRY_VERIFY(!role);
+    QTRY_COMPARE(tab.findChildren<QFrame *>("teamNewMemberRow").size(), 2);
+    for (auto *worktree : tab.findChildren<QCheckBox *>("teamNewWorktree")) QVERIFY(!worktree->isChecked());
+}
+
+// The team style sheet gives the spin box a border; its buttons must come
+// from the style sheet too. Windows 11 places them side by side, and the
+// editor, sized for one stacked button, covered the up button: a click there
+// started editing the number instead of stepping it.
+void TestTeamsUi::newTeamMaxMembersStepsUpAndDown()
+{
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    controller.refreshCatalog();
+    QTRY_VERIFY(controller.catalogReady());
+    QTemporaryDir folder;
+    // Outlives the tab: the spin box uses it until it is destroyed.
+    std::unique_ptr<QStyle> windows11(QStyleFactory::create("windows11"));
+    TeamNewTab tab(&controller, &client, {{QString(), "this computer", true}},
+                   TeamNewTab::Coordinator{"claude/checkout/coord", "claude", "Opus", "", QDir::toNativeSeparators(folder.path()), "msi", "Ready", false}, "Checkout");
+    auto *max = tab.findChild<QSpinBox *>("teamNewMaxMembers");
+    QVERIFY(max);
+    if (windows11) max->setStyle(windows11.get());
+    tab.resize(1300, 860); tab.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&tab));
+    QTRY_VERIFY(max->isVisible());
+    QStyleOptionSpinBox option;
+    option.initFrom(max);
+    option.frame = max->hasFrame();
+    option.buttonSymbols = max->buttonSymbols();
+    option.stepEnabled = QAbstractSpinBox::StepUpEnabled | QAbstractSpinBox::StepDownEnabled;
+    option.subControls = QStyle::SC_SpinBoxFrame | QStyle::SC_SpinBoxEditField | QStyle::SC_SpinBoxUp | QStyle::SC_SpinBoxDown;
+    const QRect up = max->style()->subControlRect(QStyle::CC_SpinBox, &option, QStyle::SC_SpinBoxUp, max);
+    const QRect down = max->style()->subControlRect(QStyle::CC_SpinBox, &option, QStyle::SC_SpinBoxDown, max);
+    auto *editor = max->findChild<QLineEdit *>();
+    QVERIFY(editor && up.isValid() && down.isValid());
+    QVERIFY2(!up.intersects(editor->geometry()), qPrintable(QStringLiteral("up %1,%2 %3x%4 under the editor").arg(up.x()).arg(up.y()).arg(up.width()).arg(up.height())));
+    QVERIFY(!down.intersects(editor->geometry()));
+    QCOMPARE(max->style()->hitTestComplexControl(QStyle::CC_SpinBox, &option, up.center(), max), QStyle::SC_SpinBoxUp);
+    QCOMPARE(max->style()->hitTestComplexControl(QStyle::CC_SpinBox, &option, down.center(), max), QStyle::SC_SpinBoxDown);
+    QCOMPARE(max->value(), 6);
+    QTest::mouseClick(max, Qt::LeftButton, {}, up.center());
+    QCOMPARE(max->value(), 7);
+    QTest::mouseClick(max, Qt::LeftButton, {}, down.center());
+    QCOMPARE(max->value(), 6);
 }
 
 void TestTeamsUi::catalogEditorSavesTheNextVersion()

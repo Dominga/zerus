@@ -5066,19 +5066,34 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
                 let found = team.members.iter_mut().find(|m| m.id == *member).context("unknown member")?;
                 anyhow::ensure!(found.session.is_none() && found.launch_id.is_empty(), "already started");
                 found.launch_id = launch_id.clone();
-                found.launch_after_swap = false;
                 let found = found.clone();
                 planned = Some((team.clone(), found));
                 Ok(())
             })?;
             let (team, found) = planned.unwrap();
+            let swapped = found.launch_after_swap;
             if let Err(error) = launch(&team, &found) {
+                // U54: a failed post-swap launch keeps `launch_after_swap`, so a
+                // relaunch starts it at once; the error names its fix.
                 let error = error.to_string();
+                let error = if swapped {
+                    format!("{error}; fix the folder or the old session, then hgs team relaunch starts it at once")
+                } else {
+                    error
+                };
                 change(store, &team.id, |team, events| {
                     if let Some(found) = team.members.iter_mut().find(|m| m.id == *member && m.session.is_none()) {
                         found.error = error.clone();
+                        found.launch_after_swap = swapped;
                     }
                     events.push(Event::new("launch_failed", json!({"member":team.role_of(member),"error":error})));
+                    Ok(())
+                })?;
+            } else {
+                change(store, &team.id, |team, _| {
+                    if let Some(found) = team.members.iter_mut().find(|m| m.id == *member && m.session.is_none()) {
+                        found.launch_after_swap = false;
+                    }
                     Ok(())
                 })?;
             }

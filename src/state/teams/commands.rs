@@ -50,18 +50,72 @@ fn parent_lead_proven(team: &Team, parent: Option<&Team>, record: Option<&Value>
     link.team == parent.id && here.is_none() && there.as_deref() == Some(parent.lead.as_str())
 }
 
-/// The member whose session runs this CLI, proven by process ancestry.
+/// The member whose session runs this CLI, proven by process ancestry. U54: a
+/// renamed session stays the member: the run id and the conversation id match
+/// as well as the stored name, so `hgs rename` never drops a member.
 fn calling_member(team: &Team, record: &Value) -> Option<String> {
     let name = record["name"].as_str()?;
     let run = record["run_id"].as_str().unwrap_or_default();
+    let conversation = record["conversation_id"].as_str().unwrap_or_default();
     team.members
         .iter()
         .find(|member| {
             member.session.as_ref().is_some_and(|session| {
-                session.host.is_empty() && session.name == name && (session.run_id.is_empty() || session.run_id == run)
+                session.host.is_empty()
+                    && (session.name == name
+                        || (!run.is_empty() && session.run_id == run)
+                        || (!conversation.is_empty() && session.conversation_id == conversation))
             })
         })
         .map(|member| member.id.clone())
+}
+
+/// U54: the team record follows a session's rename. A caller proven by its run
+/// or conversation under a new name updates the member's stored session name
+/// (and fills the identity it was missing), so every later command matches it
+/// by name again.
+fn follow_session_rename(store: &mut Store, team_id: &str, record: Option<&Value>) -> anyhow::Result<()> {
+    let Some(record) = record else { return Ok(()) };
+    let name = record["name"].as_str().unwrap_or_default();
+    let run = record["run_id"].as_str().unwrap_or_default();
+    let conversation = record["conversation_id"].as_str().unwrap_or_default();
+    if name.is_empty() || (run.is_empty() && conversation.is_empty()) {
+        return Ok(());
+    }
+    let Some(team) = store.load(team_id)? else { return Ok(()) };
+    let matches = |session: &super::model::SessionRef| {
+        session.host.is_empty()
+            && session.name != name
+            && ((!run.is_empty() && session.run_id == run)
+                || (!conversation.is_empty() && session.conversation_id == conversation))
+    };
+    if !team.members.iter().any(|member| member.session.as_ref().is_some_and(matches)) {
+        return Ok(());
+    }
+    store.mutate(None, team_id, None, |team, events| {
+        let roles: Vec<(String, String)> = team.members.iter().map(|member| (member.id.clone(), team.role_of(&member.id))).collect();
+        for member in &mut team.members {
+            let Some(session) = member.session.as_mut() else { continue };
+            if session.host.is_empty()
+                && session.name != name
+                && ((!run.is_empty() && session.run_id == run)
+                    || (!conversation.is_empty() && session.conversation_id == conversation))
+            {
+                let old = session.name.clone();
+                session.name = name.to_owned();
+                if session.run_id.is_empty() {
+                    session.run_id = run.to_owned();
+                }
+                if session.conversation_id.is_empty() {
+                    session.conversation_id = conversation.to_owned();
+                }
+                let role = roles.iter().find(|(id, _)| *id == member.id).map(|(_, role)| role.clone()).unwrap_or_default();
+                events.push(Event::new("member_renamed", json!({"member":role,"from":old,"to":name})));
+            }
+        }
+        Ok(Value::Null)
+    })?;
+    Ok(())
 }
 
 /// The member whose dsh session carries this conversation id. A dsh session
@@ -3135,6 +3189,9 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                 // SQLite error.
                 Err(error) => return Err(super::store::write_error(error)),
             };
+            // U54: a renamed session's member keeps its team record in step, so
+            // commands after the rename match it by name again.
+            follow_session_rename(&mut store, team_id, caller_record().as_ref())?;
             let mut filled = input.clone();
             // C1: a caller can never hand in a verified owner word; only the
             // check below fills it, from the lead's own session.
@@ -3373,6 +3430,46 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
 
 #[cfg(test)]
 mod tests {
+    /// U54: a renamed session stays the member. The caller matches by its run
+    /// id or conversation id as well as by name, and the team record follows the
+    /// rename once (the next command matches by name again).
+    #[test]
+    fn a_renamed_session_stays_the_member_and_the_team_follows_it() {
+        use crate::state::teams::model::{Member, SessionRef, Team, TeamStatus};
+        let mut team = Team { id: "t".into(), name: "T".into(), lead: "lead".into(), status: TeamStatus::Running, ..Default::default() };
+        team.members.push(Member {
+            id: "lead".into(),
+            role: "Lead".into(),
+            session: Some(SessionRef {
+                name: "claude/x/old".into(),
+                run_id: "r1".into(),
+                conversation_id: "c1".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        for record in [
+            json!({"name":"claude/x/new","run_id":"r1"}),
+            json!({"name":"claude/x/new","run_id":"","conversation_id":"c1"}),
+            json!({"name":"claude/x/old","run_id":"r9"}),
+        ] {
+            assert_eq!(calling_member(&team, &record).as_deref(), Some("lead"), "{record}");
+        }
+        assert_eq!(calling_member(&team, &json!({"name":"claude/x/other","run_id":"r2","conversation_id":"c2"})), None);
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let mut store = Store::open(true).unwrap();
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), team.clone(), vec![]).unwrap();
+            let record = json!({"name":"claude/x/new","run_id":"r1","conversation_id":"c1"});
+            follow_session_rename(&mut store, "t", Some(&record)).unwrap();
+            let stored = store.load("t").unwrap().unwrap();
+            let session = stored.member("lead").unwrap().session.clone().unwrap();
+            assert_eq!((session.name.as_str(), session.run_id.as_str()), ("claude/x/new", "r1"));
+            let before = store.events("t", None, 100).unwrap();
+            follow_session_rename(&mut store, "t", Some(&record)).unwrap();
+            assert_eq!(store.events("t", None, 100).unwrap(), before);
+        });
+    }
     /// N37/F1.6: status reads each member's own folder - a worktree member's
     /// worktree, not the team folder - one read per distinct folder, and flags
     /// a member in another repository. N36: the team's project label is a GUI

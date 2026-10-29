@@ -167,6 +167,7 @@ private:
     QDateTime m_savedAt;
     QString m_saveError;       // the last refused draft call, until one succeeds
     bool m_starting = false, m_sending = false, m_applying = false, m_creating = false, m_retried = false;
+    bool m_createAfterSave = false; // Create team pressed while edits were unsaved
     QTimer m_flushTimer, m_pollTimer;
     static int s_pollInterval;
 };

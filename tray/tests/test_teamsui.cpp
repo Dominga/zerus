@@ -674,6 +674,7 @@ private slots:
     void embeddedNewTeamIsLedByTheSession();
     void draftDiscardAsksAndCanStopTheLead();
     void draftUpdateRetriesAStaleRevision();
+    void draftCreateSavesFirstAndShowsBlockersInRed();
     void templatesAreCompactWithSearchAndFavourites();
     void dialogTemplateListAppliesOnlyWhenChosen();
     void designerSessionKeepsItsNameAndLeadsNoTeam();
@@ -3888,6 +3889,49 @@ void TestTeamsUi::draftUpdateRetriesAStaleRevision()
     QCOMPARE(settings["report_timeout_seconds"].toInt(), 120);
     QTRY_VERIFY(tab.pendingFields().isEmpty());
     QTRY_VERIFY(tab.findChild<QLabel *>("teamNewSummary")->text().contains("rev 6"));
+}
+
+// Owner, 2026-10-29: an unsaved edit never blocks Create team; it is saved
+// first and the team is created after it. A real blocker is red in its field.
+void TestTeamsUi::draftCreateSavesFirstAndShowsBlockersInRed()
+{
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    controller.refreshCatalog();
+    QTRY_VERIFY(controller.catalogReady());
+    QTemporaryDir folder;
+    const QString path = QDir::toNativeSeparators(folder.path());
+    setTeam(draftTeam(path));
+    TeamNewTab tab(&controller, &client, {{QString(), "this computer", true}},
+                   TeamNewTab::Coordinator{"claude/checkout/coord", "claude", "Opus", "", path, "msi", "Ready", false}, "Checkout");
+    tab.resize(1300, 860); tab.show();
+    tab.openDraft("draft-1");
+    auto *name = tab.findChild<QLineEdit *>("teamNewName");
+    QTRY_COMPARE(name->text(), QStringLiteral("Checkout redesign"));
+    auto *create = tab.findChild<QPushButton *>("teamNewCreate");
+    QTRY_VERIFY(create->isEnabled());
+    // A blocker: the empty goal is red in its own field and named on the button.
+    auto *goal = tab.findChild<QPlainTextEdit *>("teamNewGoal");
+    QVERIFY(goal);
+    const QString goalText = goal->toPlainText();
+    goal->setPlainText(QString());
+    QTRY_VERIFY(!create->isEnabled());
+    QVERIFY(goal->styleSheet().contains("border"));
+    goal->setPlainText(goalText);
+    QTRY_VERIFY(create->isEnabled());
+    QVERIFY(goal->styleSheet().isEmpty());
+    QTRY_VERIFY(tab.pendingFields().isEmpty());
+    // An edit not yet saved: Create stays enabled, saves it, then creates.
+    const int before = calls(script(), "draft").size();
+    tab.findChild<QSpinBox *>("teamNewMaxMembers")->setValue(7);
+    QVERIFY(!tab.pendingFields().isEmpty());
+    QVERIFY(create->isEnabled());
+    create->click();
+    QTRY_VERIFY(calls(script(), "draft").size() >= before + 2);
+    const auto sent = calls(script(), "draft").mid(before);
+    QCOMPARE(sent.at(0)["action"].toString(), QStringLiteral("update"));
+    QCOMPARE(sent.at(0)["set"].toObject()["settings"].toObject()["max_members"].toInt(), 7);
+    QCOMPARE(sent.last()["action"].toString(), QStringLiteral("create"));
 }
 
 // F6: many templates in a compact list with a search field and favourites; the

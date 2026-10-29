@@ -6917,6 +6917,47 @@ git commit -m "feat(client): the composer with its toolbar, attachments list and
 
 ### Task 7: Local message rows in Activity, and Saved drafts
 
+**As built** (`1b45b750`). Where the steps below differ, the code and this list win (Qt wins over the brief; `ActivityView.cpp`, `SessionsWindow.cpp` and `MessageComposer.cpp` lines):
+- **The Rust side is `composer/saved.rs`**, not `mod.rs`: `DraftSource`, the items, `saved_drafts`, `saved_draft`, `import_conflicts`, `recover`, `restore` and the five commands. `Config`, `qt_store` and `dev_stores` stay in `mod.rs`, and `Composers::new` applies `qt_store` again, so a caller cannot hand the hub an overlapping Qt root.
+- **`qt_store`** reuses `drafts::import_sources` (the switch import's rule), which compares a folder not created yet by its longest existing ancestor. The brief's `canonicalize`-or-raw comparison misses `own/inner` when the temp folder is a symlink (macOS `/tmp`).
+- **`DraftSource` has a third value, `Dev`.** The switch import's conflicts (`<drafts root>/.imported-v1.json`, zerus-5wmh.13.1) name Qt's store or the dev app's, so `Config` also has `dev_drafts` (`drafts::dev_roots()` without the client's own root; empty in a replay). Dev drafts are only read: their preview and Restore. `saved_drafts(Dev, ..)` lists nothing.
+- **The conflicts** are a third section, "Not imported at the switch", with the note "A different draft was already here, so these copies stayed where they were.". The command is `draft_conflicts(limit, after) -> ConflictsPage { items, next: Option<usize> }`. It reads the marker (at most 16 MiB) on each page, drops repeated entries and unknown sources, and pages by offset (1-200). A row's detail is "Kept in the previous Zerus app" or "Kept in the development app".
+- **`SavedDraftsPage.next` is a string token** (`"{modified_ns}:{folder}"`, `cursor_token`/`cursor_of`), not a `Cursor`. A cursor's nanoseconds exceed what a JavaScript number holds exactly, so the next page would skip or repeat drafts. An invalid token is an error.
+- **`SavedDraftItem`** also has `source` and `archived`. Qt over the brief (`showSavedDrafts`, 1257-1300):
+  - a subagent's caption is "{caption} / {subagent}" (1287);
+  - the caption is everything after the second slash (`section('/', 2)`), not only the third part;
+  - `meta` is the session alone while there is no context (1294).
+- **`saved_draft`** reads a draft the hub holds loaded before the store (Qt reads `m_preservedDrafts` and `m_drafts` first, 1331-1333):
+  - a draft being sent shows "This message may already have been sent. Check Activity or Terminal before sending again." (1310-1313);
+  - a Retry that keeps the draft (`Composer.kept`) shows the draft as it was.
+  - A draft read from disk that was saved while sending shows the core's "Delivery was interrupted…" (Qt's `loadDirect`, `ComposerDraftStore.cpp:178-180`), not the brief's "may already have been sent".
+  - The voice rule reads the form state's `kind == "voice_message"` and its `session`, as Qt does (1318-1323), not the key's owner kind.
+  - The detail is a storage error, else the voice text, else "{n} attachment(s)" and the notice joined by " / ".
+- **`recover(key)`** answers a copy Qt could not read completely with its `NOT_RESTORED` text and writes nothing. A composer held here with no draft of its own takes the recovered draft and saves it again, so an empty save queued meanwhile cannot leave the store empty. The cards' draft mark follows (`stored_keys`).
+- **`restore(handle, source, key)`** refuses with `RESTORE_LATER` unless `handle` is the open composer and `editable` (loaded, not busy, not quitting), before and after its read. It keeps the selected draft's doubt: an uncertain draft stays uncertain until Allow retry. A Qt source is recovered here first; `ALREADY_EXISTS` or any other failure of that copy does not stop the restore.
+- **Local rows** (`transcript.ts` `mergeLocal`, `localItem`) follow `ActivityView.cpp:665-720`:
+  - a sent row takes over its own prompt event: the one with exactly its text when it has files and no other sent row competes, else the nearest prompt within 10 s that starts like it. The event then shows the row's text and files.
+  - A voice row the journal holds is left out.
+  - The others are placed by `submitted_at` against each event's `at` (Qt compares the exact times), after events of the same time.
+  - **Qt over the brief:** the stamp replaces the time (`at` is ""), as `stamp=` replaces `timeText` (1053-1055).
+  - `LocalItem` also has `available` per file: Qt's `request_id || local_path` rule (765). Activity's journal cards (Task 9's `cardTarget`) read a file by its request only; a local file without either shows "Attachment: {name}" (780).
+- **The composer store** has `localRetry`, `localDelete` and `localInspect` (`ComposerPort` too). Retry flushes, calls `local_retry` and answers through Task 6's `reply(r, h, at, false)`, so a reply after another composer opened keeps only its notice and its question answers Cancel. One Retry per row is on its way at a time. Check answers nothing once its composer went.
+- **Activity** reads the rows through `localRows(source, selected)`: none for a read-only source, a subagent, or a composer view of another draft key. The buttons are Retry, Check Terminal or Check native UI, and Delete.
+  - Check's routes are in `local-actions.ts`: `terminal` opens and connects the Terminal tab (Qt's `connectSession`), `native_ui` shows "Arrives with Native UI." until Task 14, and `refresh` shows its notice.
+  - **Code over Qt:** Delete asks "Delete message?" / "Remove this message from Activity? This cannot be undone." with Cancel focused and the default (ruling: destructive actions confirm). Qt deletes at once (4476).
+- **Saved drafts** (`store/savedDrafts.ts`, `ui/sessions/SavedDrafts.tsx`):
+  - pages of 100; Show more reads the next page on request, and a page never repeats a row the section shows. Closing drops every row and any late answer.
+  - The first draft listed is selected once (Qt's `setCurrentRow(0)`), and a late preview of an earlier selection is dropped (Qt's `selection`).
+  - Sections show only with rows. Qt's Close is the default button and has the focus. Rows show the caption, machine, meta, detail and "d MMM HH:mm", and a double click is Go to session.
+  - "Replace current draft?" asks when the editor holds text or files and the selection is not that very draft. A Qt draft of the same key is another draft, so it asks. Cancel is focused and the default.
+  - Go to session is Qt's `draftOwner`: not unknown, not archived, a non-archived row of that name, the key's alias first, else a subagent key's machine name. It applies to every kind with a session, task prompts included. It is found at selection and again on click, then the dialog closes and `openSession` shows the row (Qt's `showSession`, which clears the filters).
+  - Recover shows for Qt rows, Qt conflicts included. After a recover, "On this computer" is read again and the dialog says "Recovered to this computer.".
+  - Copy text uses the page's clipboard: `copy_text` refuses a line break.
+  - The dialog opens from the session list's Saved drafts button, for the open composer, or for none while a subagent shows (Qt picks the subagent composer, 488).
+- **The session menu's Clear session** (Task 5's As built) opens `composer.openClear()` for the selected row only, with `clear.enabled` and `clear.reason` (5339-5340). A row whose state changed since the menu opened shows "The session state changed. Open its actions again." (5487-5488).
+- **The restore notice** is "The restored conversation could not be verified. Your archived draft remains in Saved drafts." (3331). The client's follow-up moves no draft: the archived row has no composer, and its draft stays under its archive key.
+- **Tests:** src-tauri 479 (18 in `composer::saved`), vitest 1326. Hand mutations: 14 Rust and 20 TypeScript, all killed.
+
 **Depends on:** Tasks 4b and 6; S5's `drafts::{IndexPage, Page, Cursor, Summary, owner, qt_root, read_draft, read_index, ALREADY_EXISTS}` and `DraftStore::{index, load, recover}`.
 
 **Qt's store is read, never written** (owner decision, 2026-10-28: the client takes over Qt's identity on the Mac, and Qt's drafts are kept as they are). Every path that touches Qt's drafts root goes through `Config.qt_drafts` and only these reads: `drafts::read_index` (Saved drafts' Qt section), `drafts::read_draft` (its preview) and `DraftStore::recover`, which reads Qt's copy and writes only the client's own store. Nothing writes, renames, locks or deletes in Qt's folder, and `qt_store` leaves Qt's folder out entirely if it is, holds or sits inside the client's own root. A test proves the folder byte-for-byte unchanged after every Qt path runs.

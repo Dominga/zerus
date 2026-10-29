@@ -7,6 +7,17 @@
 #include <QGuiApplication>
 
 namespace {
+// #542: a test program run directly (a team's qt-test runner, a developer's
+// shell) has no QT_QPA_FONTDIR unless the caller sets one, and offscreen then
+// draws every glyph as a box of one width, so layout checks fail. Without one,
+// use the Windows fonts folder, as CTest does. This runs before main(), before
+// the platform reads its fonts; a folder the caller sets is kept.
+[[maybe_unused]] const bool windowsFontDirectory = [] {
+    if (qEnvironmentVariableIsEmpty("QT_QPA_FONTDIR") && !qEnvironmentVariableIsEmpty("SystemRoot"))
+        qputenv("QT_QPA_FONTDIR", (qEnvironmentVariable("SystemRoot") + QStringLiteral("\\Fonts")).toLocal8Bit());
+    return true;
+}();
+
 void useWindowsUiFont()
 {
     if (qobject_cast<QGuiApplication *>(QCoreApplication::instance()))

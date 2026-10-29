@@ -33,7 +33,13 @@ public:
     };
 
     TeamTreeIndent(QWidget *card, int level, bool last, const QList<bool> &through, const QColor &line, bool first,
-                   const Metrics &metrics = {}, QWidget *parent = nullptr)
+                   QWidget *parent = nullptr)
+        : TeamTreeIndent(card, level, last, through, line, first, Metrics{}, parent)
+    {
+    }
+
+    TeamTreeIndent(QWidget *card, int level, bool last, const QList<bool> &through, const QColor &line, bool first,
+                   const Metrics &metrics, QWidget *parent = nullptr)
         : QWidget(parent), m_level(level), m_last(last), m_through(through), m_line(line), m_metrics(metrics)
     {
         setObjectName("teamTreeIndent");

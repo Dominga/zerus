@@ -63,6 +63,9 @@ pub fn open(config: &Config, target: &str, name: &str, dry: bool) -> Result<i32>
 // is private; callers must never put it in ordinary session state or logs.
 #[cfg(unix)]
 pub fn address(config: &Config, target: &str, name: &str) -> Result<String> {
+    if crate::wsl::profile(config, target).is_some() {
+        return Err(Error::new(2, "Open the native UI in the selected WSL environment; this transport does not create SSH tunnels"));
+    }
     let remote = !target.is_empty() && !config.is_self(target);
     let mut url = if remote {
         if target.starts_with('-') || target.chars().any(char::is_whitespace) {

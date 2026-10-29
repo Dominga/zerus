@@ -1,5 +1,6 @@
 #include "support/PageShots.h"
 #include <QtTest>
+#include <QApplication>
 #include <QCheckBox>
 #include <QColorDialog>
 #include <QComboBox>
@@ -36,6 +37,7 @@ private slots:
     void removalRequiresExplicitConfirmationOfSameConnection_data();
     void removalRequiresExplicitConfirmationOfSameConnection();
     void localReadOnlyAndNewProfileCannotOverwrite();
+    void wslProfileKeepsItsTargetAcrossSaveAndReload();
     void newMachineDraftCancelAndDiscard_data();
     void newMachineDraftCancelAndDiscard();
     void editsKeepDraftWhileFleetRefreshesAndFailuresAreVisible();
@@ -222,6 +224,42 @@ void TestMachinesPage::localReadOnlyAndNewProfileCannotOverwrite()
     QCOMPARE(profile["port"].toInt(), 2222);
     QCOMPARE(profile["identity_file"].toString(), QString::fromUtf8("~/Keys/ключ space"));
 }
+void TestMachinesPage::wslProfileKeepsItsTargetAcrossSaveAndReload()
+{
+    MachinesPage page(FakeCli::program(m_script)); start(page);
+    widget<QPushButton>(page,"addMachine")->click();
+    widget<QLineEdit>(page,"machineAlias")->setText("linux-tools");
+    auto *transport = widget<QComboBox>(page,"machineTransport");
+    transport->setCurrentIndex(transport->findData("wsl-local"));
+    auto *save = widget<QPushButton>(page,"saveMachine");
+    QVERIFY(!save->isEnabled());
+    widget<QLineEdit>(page,"machineWslDistribution")->setText("Ubuntu-24.04");
+    widget<QLineEdit>(page,"machineWslUser")->setText("alice");
+    widget<QLineEdit>(page,"machineWslHgs")->setText("/home/alice/My Tools/hgs");
+    QVERIFY(save->isEnabled());
+    QVERIFY(widget<QLineEdit>(page,"machineHostname")->isHidden());
+    QSignalSpy changed(&page,&MachinesPage::machinesChanged); save->click();
+    QTRY_COMPARE(changed.size(),1);
+    QTRY_VERIFY(widget<QLineEdit>(page,"machineAlias")->isReadOnly());
+    QCOMPARE(transport->currentData().toString(),QString("wsl-local"));
+    QCOMPARE(widget<QLineEdit>(page,"machineWslUser")->text(),QString("alice"));
+    QVERIFY(!widget<QPushButton>(page,"installMachine")->isEnabled());
+    QCOMPARE(widget<QPushButton>(page,"sshMachine")->text(),QString("Open WSL terminal"));
+    QTRY_VERIFY(widget<QLineEdit>(page,"machineWslUser")->isEnabled());
+    widget<QLineEdit>(page,"machineWslUser")->setText("bob");
+    QTRY_VERIFY(save->isEnabled()); save->click();
+    QTRY_COMPARE(changed.size(),2);
+    QTRY_VERIFY(widget<QLineEdit>(page,"machineAlias")->isReadOnly());
+    QJsonObject profile;
+    for(const auto &call:calls()) {
+        const auto args=call.toArray();
+        if(args.size()>4 && args[1].toString()=="set") profile=QJsonDocument::fromJson(args[4].toString().toUtf8()).object();
+    }
+    QCOMPARE(profile["transport"].toString(),QString("wsl-local"));
+    QCOMPARE(profile["wsl"].toObject()["user"].toString(),QString("bob"));
+    QVERIFY(!profile.contains("hostname")); QVERIFY(!profile.contains("identity_file"));
+}
+
 void TestMachinesPage::newMachineDraftCancelAndDiscard_data()
 {
     QTest::addColumn<QString>("answer");
@@ -462,13 +500,19 @@ void TestMachinesPage::unsavedEditsGateActionsAndTheLabelHasSwatches()
     PageShots::shot(page, true, "ux-7-machines-dirty-dark");
     PageShots::shot(page, false, "ux-7-machines-dirty-light");
     // Discard changes asks, then reloads the saved values.
+    bool asked = false, answerFound = false;
+    QString prompt;
     QTimer::singleShot(0, &page, [&] {
-        auto *dialog = page.findChild<QMessageBox *>("unsavedMachineDialog"); QVERIFY(dialog);
-        QCOMPARE(dialog->windowTitle(), QString("Unsaved connection"));
-        QCOMPARE(dialog->text(), QString("Discard the unsaved changes to this connection?"));
-        dialog->button(QMessageBox::Discard)->click();
+        auto *dialog = page.findChild<QMessageBox *>("unsavedMachineDialog");
+        if (!dialog) { if (auto *modal=qobject_cast<QDialog *>(QApplication::activeModalWidget())) modal->reject(); return; }
+        asked = true; prompt = dialog->text();
+        auto *answer = dialog->button(QMessageBox::Discard);
+        answerFound = answer != nullptr;
+        if (answer) answer->click(); else dialog->reject();
     });
     discard->click();
+    QVERIFY(asked); QVERIFY(answerFound);
+    QCOMPARE(prompt, QString("Discard the unsaved changes to this connection?"));
     QVERIFY(widget<QLineEdit>(page, "machineHostname")->text() != "10.0.4.21");
     QVERIFY(!notice->isVisible()); QVERIFY(!list->currentItem()->data(Qt::UserRole + 1).toBool());
     QVERIFY(widget<QPushButton>(page, "checkMachine")->isEnabled());

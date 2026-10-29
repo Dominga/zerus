@@ -44,44 +44,112 @@ corpus is `tests/fixtures/command-guard.json`.
 
 ## Subagent confirmation
 
-Zerus asks the owner before an agent starts subagents. The global setting is on
-by default for every computer and account, including existing installs, and is
-kept by hgs: `hgs subagents-confirm get --json` and a bounded set request
-`{"request_id":"UUID","confirm":false} | hgs subagents-confirm set --json`.
+Zerus asks the owner before an agent starts subagents. The setting is on by
+default, including existing installs, and is kept per computer in that
+computer's hgs state, where the hooks that ask run. `hgs subagents-confirm get
+--json` reads it and a bounded set request
+`{"request_id":"UUID","confirm":false,"by":"human"} | hgs subagents-confirm set --json`
+changes it, also where local sessions are not enabled; Settings > Sessions >
+"Ask before an agent starts subagents" uses them. Neither goes to another
+`@host`, an SSH peer or a WSL profile: set it on each computer whose agents
+should not ask.
+Only the owner changes it: a set from an agent session (a caller record, a dsh
+conversation, an `HGS_SESSION` or an `HGS_RUN_ID`) is refused, so a member whose
+own subagent call was denied cannot turn the ask off for every later session.
+The same gate guards `hgs session-upload-block set --json`
+(`{"request_id":"UUID","block":false,"by":"human"}`), which turns DeepSeek's own
+session-log upload off for every later dsh host on that computer.
 When it is on, Claude's `PreToolUse` hook answers an `Agent`/`Task` call with
 `permissionDecision: "ask"` and a reason naming the subagent type, its model
 (the tool input, else the definition in `.claude/agents/<type>.md`, else
 "inherits <session model>"), its effort when known and the description.
 Subagent calls of one turn are grouped as "Start N subagents: ...".
 
-The ask becomes Claude's permission request, and the approval channel (the
-waiting `PermissionRequest` hook) turns it into a card for that exact tool use:
-"Subagents" with every open call of the group, a one-time Yes or No and a
-denial with your message. Claude's broader choices stay in Terminal. The
-answer goes back to that tool use through the hook, and it decides every call
-the card showed: the other calls' waiting hooks, and later `PreToolUse` calls
-of the group, take the same allow or deny without a card of their own. A new
-call joining the group changes the card, so an answer never covers a call it
-did not show. Without the waiting hook (an older Claude Code, or the shell
-hook form on Windows), the card is answered with the panel's keys and only its
-own call is decided.
+The ask becomes Claude's permission request. For a message that starts several
+subagents, Claude asks for all of them at once and shows them one at a time
+("1 of N"); each request starts a waiting `PermissionRequest` hook, and the
+session record keeps the last one. Its card, "Subagents", lists every open call
+of the group with **Yes**, **No**, a denial with your message and **Yes, and
+don't ask again for subagents**. One answer decides every call the card
+showed. The hook of the card's request answers it. The hook of every other call
+of the batch waits for its group rather than for a card of its own, also after
+another request has taken the record, and hands Claude the same allow, denial
+or message for its own call. A hook matches its call by tool and input, as the
+channel binds. Claude's requests for identical calls cannot be told apart, so
+each of their hooks hands over only an answer all of those calls got. A new
+call joining the group changes the card, so a one-time answer never covers a
+call it did not show. A waiting hook stops with its turn (a new prompt, Stop or
+SessionEnd), when Claude cancels it or the call ends, or when the session's
+agent, run or conversation changes; it then removes its files.
+
+An answer reports `claude_hook` only once every hook it was handed to says
+that it gave Claude the answer; Claude stops the other hooks of a turn that
+**No** ends, so they count. A call of the batch without a waiting hook (its
+hook ended, or an older hgs) still waits in Terminal: the answer names it as
+undelivered, and the session keeps waiting for an approval rather than showing
+as working.
+
+A card answered on the screen (no hook took its request, for example a request
+too long to show) still goes to the hooks when every call it shows has a
+waiting hook or one that already answered, so keys never land on the next
+queued panel after a hook answered the one shown; its receipt then reports
+`claude_hook`. Otherwise the keys answer the panel shown and the hooks the
+other calls.
+Without the waiting hooks (an older Claude Code, or the shell hook form on
+Windows), the keys answer only the call on screen.
+
+"Don't ask again" for subagents is **Allow all, don't ask again** on the
+desktop (after a second **Confirm**), the card's own option on the phone, or
+Claude's own "Yes, and don't ask again ..." on a screen card. It stops asking
+for the rest of that Zerus session: across turns, a new conversation (/clear,
+compaction) and a resume, until a fresh start, a fork or a new session with the
+same name. It also allows every call still waiting in the group, including one
+that joined after the card was drawn: the one exception to an answer covering
+only the calls its card showed. Later subagent calls of the session get no
+decision from Zerus, so Claude's own policy applies; they join no group.
+Through a hook, Zerus also hands Claude the rule its own panel offered for that
+request (`updatedPermissions` from the request's `permission_suggestions`,
+only rules that allow `Agent` or `Task`), for this Claude session only: their
+destination becomes `session`, so Claude saves no lasting rule. The allowance
+is kept in this computer's hgs state and removed once its session is gone
+(terminated into Archive, forgotten or replaced by a fresh start); a
+permission hook or a new allowance looks for such files.
+
+Claude's settings files never switch the ask off: an allow rule an agent
+writes or a repository commits is no answer of the owner's, and a session with
+`Agent` already allowed in its settings is still asked. An allow rule counts
+only as the owner's "don't ask again" in Claude's own Terminal panel: one for
+the call's subagent type that appears while its hook waits, in the user's
+settings (`settings.json` in `CLAUDE_CONFIG_DIR`, else in the account home
+Zerus started Claude with, else in `~/.claude`) or in the session folder's
+`.claude/settings.local.json`. That hook then allows its call and records the
+Zerus session allowance, so the rest of the batch goes ahead too. A rule that
+existed when the hook started never counts. `Agent`, `Task`, `Agent(*)`,
+`Task(*)` and an empty `Agent()` cover every subagent; `Agent(Explore)` covers
+only that `subagent_type`, and a call without one is `general-purpose`. Any
+ask or deny rule for the call in those files or the folder's
+`.claude/settings.json` means no, and so does a settings file that cannot be
+read. Managed settings, `--settings` files and the local settings of an
+enclosing repository root are not read, so a rule saved there leaves the batch
+to the card.
 
 The card also lists its calls in `subagents` (`id`, `type`, `model`, `effort`
 when the tool input or the agent definition gives it, and `description`); the
-desktop shows one row per subagent with Allow all and Deny, and the question
-text stays for older readers. A member's permission record and the lead's
-inbox item carry the same list.
+desktop shows one row per subagent with Allow all, Allow all, don't ask again
+and Deny, and the question text stays for older readers. A member's permission
+record and the lead's inbox item carry the same list.
 
 Automatic tool approvals never answer a subagent card: the approval journal
 refuses any card marked `subagent_confirmation` or for the `Agent`/`Task`
 tool. A team member's card reaches its lead like any other permission
 request: the lead's inbox item names the member, each subagent's type, model
 and task, and the lead answers it with `hgs team answer` (rating it as any
-permission: what the task needs, or ask the owner). The owner's own session
-still asks the owner; with the setting off nothing is asked, recorded or
-grouped. In Claude's print mode nobody can answer, so the call goes ahead and
-the session note says the ask was skipped. Agents without a pre-tool subagent
-approval are not blocked; their status says the confirmation is not supported.
+permission: what the task needs, or ask the owner), which takes only its
+one-time choices. The owner's own session still asks the owner; with the
+setting off nothing is asked, recorded or grouped. In Claude's print mode
+nobody can answer, so the call goes ahead and the session note says the ask
+was skipped. Agents without a pre-tool subagent approval are not blocked;
+their status says the confirmation is not supported.
 
 ## CLI sessions
 
@@ -326,6 +394,21 @@ which then names the new conversation instead of the restored one. A sent first
 message or an archive restore still waits for that confirmation.
 Unknown flags or noninteractive modes such as `codex exec` are not guessed.
 The original positional prompt is never replayed during resume.
+For Kimi Code whose help advertises a non-interactive `--prompt`, Zerus removes
+the initial message from native arguments and the saved resume recipe, then
+submits it through the ordinary guarded send path for the exact launched run.
+Folder trust and setup remain manual. `inspect` includes `launch_prompt` with
+a preview of at most 200 characters plus an ellipsis, request ID and status.
+The full text stays only in the launching supervisor until ordinary guarded
+submission stores its input receipt. Errors are limited to 512 characters plus
+an ellipsis. An undelivered message is cancelled when its child exits or shuts
+down. After an attempted submission there is no automatic retry, including on
+refusal or an uncertain delivery. Review
+the preview and ordinary input receipt before sending it manually.
+Capability detection and native spawn use the same resolved executable after
+account environment setup. A custom `run_kimi.sh` keeps its own argument
+contract and is never invoked a second time for help; `--bare` selects the
+native Kimi launch behavior described here.
 
 A launch interrupted before conversation confirmation is not a Saved session.
 Repeat the same command without `--fresh`; the diagnostic attempt is preserved in
@@ -1409,6 +1492,16 @@ lists when Stop sends Escape; while Codex reports that turn interrupted and its
 input holds exactly them, Activity says the queued follow-ups are back in Codex's
 input. An edited draft, any other draft and follow-ups Stop did not see listed
 keep the general notice to return Terminal to an empty prompt.
+
+Text left in Claude's or Codex's own input holds every message sent from
+Activity or a team window. When a send is refused for it, or messages wait
+while the agent is not working, Activity and the team conversations show that
+draft above the message field with **Send it** and **Open Terminal**. Send it
+presses Enter in Terminal only while the input still holds exactly the draft
+shown (`hgs terminal <session> --json` with `"action":"draft"`, then
+`"action":"submit_draft"` and its `draft_hash`; a replayed request ID returns
+its receipt and presses nothing). Your own message stays in its field. HGS
+never types into, edits or clears the draft.
 Uncertain interruption is not repeated. Stop notices name the original session
 and computer even if you navigate away. If the turn has already ended or is
 waiting for input, no interruption is sent and no action is needed; Zerus refreshes
@@ -1634,16 +1727,20 @@ card answers through it, so a clipped panel no longer needs a larger Terminal.
   **No** ends Claude's turn as in Terminal. **Tell Claude what to do instead**
   denies the call with your message, and Claude continues without it.
 - Options that reach beyond this request go only through the verified panel,
-  with the second **Confirm**. A **Yes** or **No** that the hook does not take
-  within three seconds also goes through a verified panel; feedback it does not
-  take is not sent.
+  with the second **Confirm**. A subagent card's own **Yes, and don't ask
+  again for subagents** is the exception: the hook takes it, as described in
+  [subagent confirmation](#subagent-confirmation). A **Yes** or **No** that
+  the hook does not take within three seconds also goes through a verified
+  panel; feedback it does not take is not sent.
 - A decision the hook has taken is never sent again. Until Claude confirms it,
   the card stays locked and is answered in Terminal.
 - `hgs answer` receipts report `transport` `claude_hook` or `claude_tui`.
 - Automatic approvals use the hook only for a card whose complete Bash panel
   shows exactly that operation, with the same one-time choice.
-- Subagent and workflow requests keep the screen path. Claude 2.1.296 runs
-  subagents in the background and shows their requests outside the main screen.
+- Requests made by subagents and workflows keep the screen path. Claude 2.1.296
+  runs subagents in the background and shows their requests outside the main
+  screen. The main agent's own subagent calls are answered as a batch (see
+  [subagent confirmation](#subagent-confirmation)).
 
 Claude's Bash safety confirmations, including warnings about possibly empty
 paths in `rm` commands, also appear in Activity with the native warning text.
@@ -3852,12 +3949,29 @@ would be a surprise.
 **DeepSeek members' folders.** A DeepSeek session's sandbox needs full control
 (WRITE_DAC and WRITE_OWNER) of the folder it confines. When Zerus creates a
 member's worktree or clone it adds this user's explicit, inheritable FullControl
-entry to that new folder, so the sandbox starts there. A folder Zerus did not
+entry to that new folder, so the sandbox starts there. The grant is asked for
+only where it is needed: `hgs worktrees create --sandbox`, passed for a DeepSeek
+member or session. Every other worktree, including the desktop's New session for
+Claude or Codex, is created without touching its ACLs, so a share or a file
+system without ACL support cannot turn a created checkout into a failed create.
+A folder Zerus did not
 create (a direct, existing or custom folder) is checked first: when a right is
 missing the session does not start, and the member's error — shown in the Lead's
 inbox — says `the DeepSeek sandbox needs full control of <folder>` with the
 one-line fix `icacls "<folder>" /grant *<SID>:(OI)(CI)F`. A member never repairs
 ACLs itself: it reports the exact error to the Lead.
+
+**DeepSeek session-log upload.** Zerus starts and resumes DeepSeek sessions with
+the official session-log upload off, unless the owner turns the block off in
+Settings. The promise is checked, not assumed: a session whose own records still
+accept an upload after its launch is marked, and `hgs ls`, the team status, the
+session card and the account on the Accounts page say
+`DeepSeek session-log upload still active`. A host that was already running when
+the block was turned on keeps the state it started with; a session launched or
+resumed into it says
+`DeepSeek session-log upload may still be active: the running DeepSeek host was started before the block`
+until that host is restarted (which Zerus never does by itself — it would close
+the live agents).
 
 **Updates.** The portable zip has no installer or self-update. Stable releases
 after 0.42.2 and nightly releases carry the same tested zip. A portable
@@ -4141,6 +4255,26 @@ from the screen first, so its old signature is no longer acknowledged. It prints
 an unknown session prints `{"ok": false, "error": "not_found"}` and exits with
 status 1. Marks live in `read-marks.json` in the hgs state directory, at most
 eight conversations per session, and follow `hgs rename`.
+
+Private stores (read marks, the analytics store, the approval journal, the
+history index, voice storage and the Windows mobile configuration) are checked
+before use. A store that is this user's, lies in the hgs state or configuration
+folder and is only too open (another tool added a group to its ACL, or Unix mode
+bits wider than 0600/0700) is made private again in place: on Windows a
+protected DACL granting this user FullControl through a handle that never
+follows a link, on Unix `fchmod`; the content and the owner stay. Each repair
+adds one line to the session host's `host.log` and to `private-stores.jsonl`
+(owner-only, the newest 200 lines or 64 KiB: path, kind, the removed accounts
+or the reason, time, never content). A store owned by another account, a link
+or reparse point, another kind of entry or a path outside those folders is
+never changed; it and a store a write failed on are kept in
+`private-stores.json` and reported until the store is next found private: in
+`hgs status` (with the one-line `icacls`/`chmod` fix), in `hgs inspect --json`
+as `private_stores` (empty when none) and in `hgs ls --json` as
+`private_stores` (absent when none), from which the desktop raises one notice
+per computer, path and reason. The session host checks the known store paths
+when it starts, and `hgs status` does too; the listing only reads the current
+set.
 Repeating an already-stored current mark reports it as applied without changing
 its timestamp or rewriting the file. Existing-owner writes retain other owners;
 admitting a new owner prunes abandoned entries using the current binding set.
@@ -4323,10 +4457,20 @@ current branch's ref or its upstream's tracking ref changes in the folder's Git
 and common directories; when a session working in the folder (its `cwd`,
 `cwd_canonical` or `git_root`) records a finished `Edit`, `Write`, `MultiEdit`,
 `NotebookEdit`, `apply_patch` or `Bash` call; when its remote check expires; and
-at least every 30 s. Checks of one folder start at least 1 s apart. Subscribing
-a followed folder again sends its state again. A stream follows at most 64
-folders (`limits.git_subscriptions`); more fail with `too_many_subscriptions`,
-and a missing or relative path fails with `bad_request`.
+at least every 30 s. Checks of one folder start at least 1 s apart. Streams
+on one computer share checks: each check is kept in the private `watch-git`
+folder of the state directory, and a stream takes a kept check instead of
+running Git when that check started after the change that made the folder
+due (the journal row's time for a session's call; for the 30 s check, at most
+30 s earlier) and the stat of the folder's Git metadata is unchanged. A stream
+that needs a folder while another stream checks it waits for that check, at
+most 4 s. A stream that took a kept check checks again a second after the
+stream that ran it, so several clients check each folder about as often as
+one. A new subscription takes only a check that started after it.
+Subscribing a followed folder again sends its state again. A stream follows at
+most 64 folders (`limits.git_subscriptions`); more fail with
+`too_many_subscriptions`, and a missing or relative path fails with
+`bad_request`.
 
 The `processes` topic follows one session's processes, subscribed like Activity
 (`{"op":"subscribe","topic":"processes","session":{...}}`) and keyed by its
@@ -4352,6 +4496,31 @@ project is read again when a stat of its task store changes and at least every
 changed. A list that cannot be read, such as an unknown project, sends a
 non-fatal `tasks_failed`. A stream follows at most 8 projects
 (`limits.tasks_subscriptions`).
+
+The `organization` topic follows the shared project catalog as `hgs swarm get`
+prints it: `{"op":"subscribe","topic":"organization"}`, one per stream. A
+worker thread reads the stored catalog without its lock, never saving it and
+never restarting the catalog worker. It reads again when a stat of the
+catalog, its member lists or the worker's marker changes and at least every
+30 s, at most once a second. The catalog travels as keyed rows that a client
+applies like the catalog topic's:
+
+- `organization` is the snapshot without `versions`, `written` and the
+  projects' contents. Its `organization.projects` lists the project IDs in
+  order, and it carries `digest` and `worker`.
+- `project:<id>` is a project without `sessions`, with `session_chunks`, the
+  number of its member rows.
+- `members:<id>:<n>` is `{sessions}`, at most 1000 sessions in order.
+- `version:<token>` is one `versions` entry.
+
+The first rows go out as a paged `snapshot`. A later change sends one `delta`
+with only the changed rows and removed keys, or a new snapshot when that would
+not fit one frame, so every frame leaves a client consistent. Rebuilding the
+rows gives `swarm get`'s object without `written`. An unreadable catalog sends
+a non-fatal `organization_failed`. The topic reports `worker.current` but never
+supervises the worker; a client that sees `false` runs one `hgs swarm get`,
+which restarts an outdated worker as before. Writes, including the first
+`swarm initialize`, stay with `hgs swarm`.
 
 The stream checks its sources every 250 ms. It stats the bindings, read marks,
 notification preferences, waits, launches, renames, name routes, the archive

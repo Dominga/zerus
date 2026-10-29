@@ -229,7 +229,10 @@ impl Tx {
 /// drive letter as a path, not a URL host (`sqlite:///C:/…`).
 fn sqlite_url(path: &Path) -> String {
     if cfg!(windows) && path.is_absolute() {
-        return format!("sqlite:///{}?mode=rw", path.display().to_string().replace('\\', "/"));
+        return format!(
+            "sqlite:///{}?mode=rw",
+            path.display().to_string().replace('\\', "/")
+        );
     }
     format!("sqlite://{}?mode=rw", path.display())
 }
@@ -280,10 +283,7 @@ impl Db {
         } else {
             Some(Arc::new(config::sqlite_file(path)?))
         };
-        let url = cfg
-            .database_url
-            .clone()
-            .unwrap_or_else(|| sqlite_url(path));
+        let url = cfg.database_url.clone().unwrap_or_else(|| sqlite_url(path));
         let options = AnyConnectOptions::from_str(&url)?.disable_statement_logging();
         let payload_max = if pg { cfg.payload_pool_max() } else { 1 };
         let pool = pool_options(

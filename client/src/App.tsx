@@ -1,10 +1,12 @@
 import { For, Match, Show, Switch, createEffect, createMemo, onCleanup, onMount } from "solid-js";
 import { Rail } from "./ui/components/Rail";
 import { MenuLayer, Toasts } from "./ui/components/Overlays";
+import { ActionDialogs, ActionNotices } from "./ui/sessions/ActionDialogs";
 import { SessionList } from "./ui/sessions/SessionList";
 import { SessionDetail } from "./ui/sessions/SessionDetail";
 import { Icon } from "./ui/lib/icons";
 import { PerfHost } from "./ui/PerfHost";
+import { SettingsScreen } from "./ui/components/SettingsScreen";
 import { applySkin, skin } from "./skin/runtime";
 import { catalog } from "./store/catalog";
 import { contentScale, page, setContentScale, setPage, toast, type Page } from "./store/ui";
@@ -86,12 +88,15 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
               <SessionDetail />
             </div>
           </Match>
+          <Match when={page() === "settings"}><SettingsScreen /></Match>
           <Match when={page() !== "sessions"}><LaterScreen page={page() as Exclude<Page, "sessions">} /></Match>
         </Switch>
       </main>
       <StatusBar mode={props.mode} />
       <MenuLayer />
       <Toasts />
+      <ActionDialogs />
+      <ActionNotices />
       <PerfHost />
     </div>
   );

@@ -1,6 +1,6 @@
 //! Unix (Linux and macOS) process, terminal, clipboard and file primitives.
 use super::{
-    available, capture, silent, ExitInfo, FileIdentity, Presence, Private, ProcessIdentity,
+    available, capture, silent, ExitInfo, FileIdentity, Presence, Private, PrivateRepair, ProcessIdentity,
     ProcessImage, ProcessRow, RunError,
 };
 use crate::{
@@ -186,6 +186,41 @@ fn private_metadata(metadata: &fs::Metadata, kind: Private) -> bool {
         Private::File => metadata.is_file() && metadata.nlink() == 1,
     }) && metadata.uid() == unsafe { libc::geteuid() }
         && metadata.mode() & 0o077 == 0
+}
+/// #569: makes the entry at `path` private when it is this user's and only too
+/// open: its mode becomes 0600 (a file) or 0700 (a folder), set through a
+/// descriptor that never follows a link. Another owner, a link, another kind
+/// of entry or a second link is refused and the entry is left as it is.
+pub fn repair_private(path: &Path, kind: Private) -> io::Result<PrivateRepair> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Ok(PrivateRepair::Refused("it is a symbolic link".into()));
+    }
+    match kind {
+        Private::Directory if !metadata.is_dir() => return Ok(PrivateRepair::Refused("it is not a folder".into())),
+        Private::File if !metadata.is_file() => return Ok(PrivateRepair::Refused("it is not a regular file".into())),
+        Private::File if metadata.nlink() != 1 => {
+            return Ok(PrivateRepair::Refused(format!("the file has {} links", metadata.nlink())));
+        }
+        _ => {}
+    }
+    if metadata.uid() != unsafe { libc::geteuid() } {
+        return Ok(PrivateRepair::Refused(format!("it is owned by uid {}", metadata.uid())));
+    }
+    let mode = metadata.mode() & 0o7777;
+    if mode & 0o077 == 0 {
+        return Ok(PrivateRepair::Private);
+    }
+    let wanted = if kind == Private::Directory { 0o700 } else { 0o600 };
+    let flags = libc::O_NOFOLLOW | libc::O_NONBLOCK | if kind == Private::Directory { libc::O_DIRECTORY } else { 0 };
+    let entry = fs::OpenOptions::new().read(true).custom_flags(flags).open(path)?;
+    // The entry opened is the one checked: never another one renamed into place.
+    let opened = entry.metadata()?;
+    if opened.ino() != metadata.ino() || opened.dev() != metadata.dev() {
+        return Ok(PrivateRepair::Refused("it changed while it was checked".into()));
+    }
+    entry.set_permissions(fs::Permissions::from_mode(wanted))?;
+    Ok(PrivateRepair::Repaired(vec![format!("mode {mode:04o} (now {wanted:04o})")]))
 }
 /// Create files owner-only.
 pub fn private_open(options: &mut fs::OpenOptions) -> &mut fs::OpenOptions {
@@ -447,6 +482,12 @@ pub fn process_identity(pid: u32) -> Option<ProcessIdentity> {
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn process_identity(_: u32) -> Option<ProcessIdentity> {
     None
+}
+
+/// `process_identity` for a process of a listed table. Reading one process
+/// here is cheap, so the table's parent and time are not needed.
+pub fn listed_identity(pid: u32, _parent: u32, _listed_at: f64) -> Option<ProcessIdentity> {
+    process_identity(pid)
 }
 
 // Read executable/argv from the kernel, not newline-delimited `ps` command text.
@@ -1292,9 +1333,20 @@ pub fn run_bounded(
     deadline: Instant,
     cancelled: &dyn Fn() -> bool,
 ) -> std::result::Result<(ExitStatus, Vec<u8>, Vec<u8>), RunError> {
+    run_bounded_stdin(command, Stdio::null(), limits, deadline, cancelled)
+}
+
+/// Bounded execution with explicitly supplied stdin; ownership/deadlines match run_bounded.
+pub fn run_bounded_stdin(
+    command: &mut Command,
+    input: Stdio,
+    limits: [usize; 2],
+    deadline: Instant,
+    cancelled: &dyn Fn() -> bool,
+) -> std::result::Result<(ExitStatus, Vec<u8>, Vec<u8>), RunError> {
     command
         .process_group(0)
-        .stdin(Stdio::null())
+        .stdin(input)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = command.spawn().map_err(RunError::Spawn)?;
@@ -1931,12 +1983,23 @@ mod tests {
         unsafe { libc::close(fds[1]) };
         assert!(unsafe { libc::fcntl(fds[0], libc::F_SETFL, libc::O_NONBLOCK) } >= 0);
         let mut byte = [0u8; 1];
-        // EOF (0), not EAGAIN: no write end is left anywhere.
-        let read = unsafe { libc::read(fds[0], byte.as_mut_ptr() as *mut _, 1) };
+        // Another parallel test may be between fork and exec, temporarily
+        // holding even a CLOEXEC descriptor. Wait for that bounded transition;
+        // inheriting it into the long-lived sleep child must still fail.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let (read, error) = loop {
+            let read = unsafe { libc::read(fds[0], byte.as_mut_ptr() as *mut _, 1) };
+            let error = std::io::Error::last_os_error();
+            if read >= 0 || !matches!(error.raw_os_error(), Some(libc::EAGAIN | libc::EINTR))
+                || std::time::Instant::now() >= deadline {
+                break (read, error);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        };
         let _ = child.kill();
         let _ = child.wait();
         unsafe { libc::close(fds[0]) };
-        assert_eq!(read, 0, "{}", std::io::Error::last_os_error());
+        assert_eq!(read, 0, "{error}");
     }
 
     #[test]
@@ -2267,6 +2330,22 @@ mod tests {
         child.kill().unwrap();
         child.wait().unwrap();
         assert_eq!(session, child.id() as i32);
+    }
+
+    #[test]
+    fn bounded_input_handle_preserves_bytes_eof_and_output_limits() {
+        use std::io::{Seek, SeekFrom, Write};
+        let make = || {
+            let mut file = tempfile::tempfile().unwrap();
+            file.write_all(b"literal \x00\xff\n").unwrap();
+            file.seek(SeekFrom::Start(0)).unwrap();
+            Stdio::from(file)
+        };
+        let (status,out,err)=run_bounded_stdin(&mut Command::new("cat"),make(),[64,64],
+            Instant::now()+Duration::from_secs(5),&||false).unwrap();
+        assert!(status.success());assert_eq!(out,b"literal \x00\xff\n");assert!(err.is_empty());
+        assert!(matches!(run_bounded_stdin(&mut Command::new("cat"),make(),[2,64],
+            Instant::now()+Duration::from_secs(5),&||false),Err(RunError::TooLarge)));
     }
 
     #[test]

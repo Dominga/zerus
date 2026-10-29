@@ -47,6 +47,12 @@ pub(super) fn alone(record:&Value,tool_use:&str)->bool {
         &&record[USES].as_object().is_some_and(|uses|uses.values().filter(|used|&used["tool_name"]==tool).count()==1)
 }
 
+/// Whether the main agent's call `tool_use` is still active: begun and neither
+/// ended, settled nor forgotten with its turn.
+pub(in crate::state) fn active(record:&Value,tool_use:&str)->bool {
+    !tool_use.is_empty()&&record[USES][tool_use].is_object()
+}
+
 /// Forget the tool use a denial settled: Claude reports no end for it.
 pub(super) fn forget(record:&mut Value,tool_use:&str) {
     if let Some(uses)=record[USES].as_object_mut() {uses.remove(tool_use);}
@@ -68,7 +74,7 @@ fn bound_use(record:&Value)->Option<String> {
 
 /// The channel identity of the pending main-agent request: its agent process,
 /// conversation, tool use and exact input.
-pub(super) fn identity(record:&Value)->Option<Value> {identity_for(record,&bound_use(record)?)}
+pub(in crate::state) fn identity(record:&Value)->Option<Value> {identity_for(record,&bound_use(record)?)}
 fn identity_for(record:&Value,tool_use:&str)->Option<Value> {
     let request=request(record)?;
     let tool=string(request,"tool_name");
@@ -109,14 +115,27 @@ pub(in crate::state) fn bind(record:&Value,event:&Value)->Option<Value> {
 /// PreToolUse before it asks, so in the first record a new hook reads, this is
 /// the call the event asks about; one that began later is another request.
 /// None when there is none or more than one.
+#[cfg(test)]
 pub(in crate::state) fn asked_use(record:&Value,event:&Value,started:f64)->Option<String> {
-    if !requested(event)||record[OVERFLOW]==true {return None;}
+    match asked_uses(record,event,started).as_slice() {[only] => Some(only.clone()),_ => None}
+}
+
+/// Every call `asked_use` chooses from: the active main-agent calls with the
+/// event's tool and input that began before the hook did. Several identical
+/// calls are ambiguous; the request is one of them.
+pub(in crate::state) fn asked_uses(record:&Value,event:&Value,started:f64)->Vec<String> {
+    if !requested(event)||record[OVERFLOW]==true {return Vec::new();}
     let input=digest(&event["tool_input"]);
-    let mut found=record[USES].as_object()?.iter()
+    // Claude 2.1.312 names no tool use in the request; one that does is taken
+    // at its word only for that active call of the same tool and input.
+    let named=string(event,"tool_use_id");
+    if !named.is_empty() {
+        let used=&record[USES][named];
+        return if used["tool_name"]==event["tool_name"]&&used["input"]==input.as_str() {vec![named.to_owned()]} else {Vec::new()};
+    }
+    record[USES].as_object().into_iter().flatten()
         .filter(|(_,used)|used["tool_name"]==event["tool_name"]&&used["input"]==input.as_str()
-            &&used["at"].as_f64().is_some_and(|at|at<=started)).map(|(id,_)|id);
-    let id=found.next()?.clone();
-    found.next().is_none().then_some(id)
+            &&used["at"].as_f64().is_some_and(|at|at<=started)).map(|(id,_)|id.clone()).collect()
 }
 
 /// `bind`, only to the tool call `tool_use` that the hook captured first: a
@@ -162,11 +181,34 @@ pub(in crate::state) fn waits(record:&Value,live:Result<Value>,capture:impl FnOn
     }
 }
 
+/// The rules Claude's own "don't ask again" would add for the subagent
+/// request `event`, for this Claude session only: its `permission_suggestions`
+/// that only add allow rules for Agent or Task, with their destination made
+/// `session`, so Claude saves no lasting folder or user rule; Zerus's own
+/// allowance covers a resume. None when it offers none.
+pub(in crate::state) fn subagent_rules(event:&Value)->Option<Value> {
+    let mut rules:Vec<Value>=Vec::new();
+    for update in event["permission_suggestions"].as_array()? {
+        let allows=update["type"]=="addRules"&&update["behavior"]=="allow"&&update["destination"].is_string()
+            &&update["rules"].as_array().is_some_and(|rules|!rules.is_empty()&&rules.iter()
+                .all(|rule|matches!(rule["toolName"].as_str(),Some("Agent"|"Task"))));
+        let rule=json!({"type":"addRules","rules":update["rules"],"behavior":"allow","destination":"session"});
+        if allows&&!rules.contains(&rule) {rules.push(rule);}
+    }
+    (!rules.is_empty()).then(||json!(rules))
+}
+
 /// Claude's PermissionRequest decision for an offered approval. Allow carries
-/// no updatedPermissions, so it grants this one tool use only.
-pub(in crate::state) fn decision(offer:&Value)->Result<Value> {
+/// no updatedPermissions, so it grants this one tool use only, unless the
+/// offer `remember`s a subagent request: then Claude also adds, for this
+/// Claude session, the rule its own "don't ask again" offered for `event`
+/// (`subagent_rules`).
+pub(in crate::state) fn decision(offer:&Value,event:&Value)->Result<Value> {
     let decision=match (string(offer,"decision"),string(offer,"message")) {
-        ("allow","") => json!({"behavior":"allow"}),
+        ("allow","") => match subagent_rules(event).filter(|_|offer["remember"]==true) {
+            Some(rules) => json!({"behavior":"allow","updatedPermissions":rules}),
+            None => json!({"behavior":"allow"}),
+        },
         ("deny","") => json!({"behavior":"deny","message":DENIED,"interrupt":true}),
         ("feedback",message) if !message.trim().is_empty()&&!message.chars().any(char::is_control) =>
             json!({"behavior":"deny","message":message}),
@@ -327,16 +369,76 @@ pub(in crate::state) fn decision(offer:&Value)->Result<Value> {
     }
 
     #[test] fn decisions_grant_once_deny_or_pass_feedback() {
-        let decided=|offer:Value|decision(&offer).map(|output|output["hookSpecificOutput"]["decision"].clone());
+        let bash=event("PermissionRequest",json!({}));
+        let decided=|offer:Value|decision(&offer,&bash).map(|output|output["hookSpecificOutput"]["decision"].clone());
         assert_eq!(decided(json!({"decision":"allow"})).unwrap(),json!({"behavior":"allow"}));
         assert_eq!(decided(json!({"decision":"deny"})).unwrap(),json!({"behavior":"deny","message":DENIED,"interrupt":true}));
         assert_eq!(decided(json!({"decision":"feedback","message":"Use printf other"})).unwrap(),
             json!({"behavior":"deny","message":"Use printf other"}));
-        assert_eq!(decision(&json!({"decision":"allow"})).unwrap()["hookSpecificOutput"]["hookEventName"],"PermissionRequest");
+        assert_eq!(decision(&json!({"decision":"allow"}),&bash).unwrap()["hookSpecificOutput"]["hookEventName"],"PermissionRequest");
         for invalid in [json!({}),json!({"decision":"allow","message":"x"}),json!({"decision":"deny","message":"x"}),
             json!({"decision":"feedback"}),json!({"decision":"feedback","message":"  "}),json!({"decision":"feedback","message":"a\nb"}),
             json!({"decision":"always"})] {
-            assert!(decision(&invalid).is_err(),"{invalid}");
+            assert!(decision(&invalid,&bash).is_err(),"{invalid}");
         }
+    }
+
+    /// U19: "don't ask again" for a subagent request hands Claude the rule
+    /// its own panel offered (Claude 2.1.312 `permission_suggestions`, the
+    /// shape `updatedPermissions` takes), and nothing broader.
+    #[test] fn a_remembered_subagent_allow_saves_only_claudes_own_subagent_rule() {
+        let agent_rule=json!({"type":"addRules","rules":[{"toolName":"Agent"}],"behavior":"allow","destination":"localSettings"});
+        let mut agent=json!({"hook_event_name":"PermissionRequest","tool_name":"Agent","tool_input":{"subagent_type":"Explore"},
+            "session_id":"conversation","permission_suggestions":[agent_rule.clone(),
+                {"type":"addRules","rules":[{"toolName":"Bash","ruleContent":"rm:*"}],"behavior":"allow","destination":"localSettings"},
+                {"type":"addRules","rules":[{"toolName":"Agent"},{"toolName":"Bash"}],"behavior":"allow","destination":"localSettings"},
+                {"type":"addRules","rules":[{"toolName":"Agent"}],"behavior":"deny","destination":"localSettings"},
+                {"type":"setMode","mode":"bypassPermissions","destination":"session"},
+                {"type":"addDirectories","directories":["/"],"destination":"session"}]});
+        let allowed=|offer:Value,event:&Value|decision(&offer,event).unwrap()["hookSpecificOutput"]["decision"].clone();
+        // For this Claude session only, whatever destination Claude offered.
+        let session_rule=json!({"type":"addRules","rules":[{"toolName":"Agent"}],"behavior":"allow","destination":"session"});
+        assert_eq!(allowed(json!({"decision":"allow","remember":true}),&agent),json!({"behavior":"allow","updatedPermissions":[session_rule]}));
+        agent["permission_suggestions"]=json!([agent_rule,{"type":"addRules","rules":[{"toolName":"Agent"}],"behavior":"allow","destination":"userSettings"},
+            {"type":"addRules","rules":[{"toolName":"Agent","ruleContent":"Explore"}],"behavior":"allow","destination":"projectSettings"}]);
+        assert_eq!(allowed(json!({"decision":"allow","remember":true}),&agent),json!({"behavior":"allow","updatedPermissions":[session_rule,
+            {"type":"addRules","rules":[{"toolName":"Agent","ruleContent":"Explore"}],"behavior":"allow","destination":"session"}]}));
+        assert_eq!(allowed(json!({"decision":"allow"}),&agent),json!({"behavior":"allow"}),"a one-time allow saves nothing");
+        // No suggestion of Claude's own: the allow alone; Zerus keeps its record.
+        agent.as_object_mut().unwrap().remove("permission_suggestions");
+        assert_eq!(allowed(json!({"decision":"allow","remember":true}),&agent),json!({"behavior":"allow"}));
+        let bash=event("PermissionRequest",json!({"permission_suggestions":[{"type":"addRules","rules":[{"toolName":"Bash"}],"behavior":"allow","destination":"localSettings"}]}));
+        assert_eq!(allowed(json!({"decision":"allow","remember":true}),&bash),json!({"behavior":"allow"}));
+    }
+
+    /// Identical subagent calls of one message: the request is one of them,
+    /// so its hook may only hand over what they were all given.
+    #[test] fn identical_calls_are_the_candidates_of_their_request() {
+        let mut r=json!({"agent":"claude"});
+        observe(&mut r,&event("PreToolUse",json!({"tool_use_id":"toolu_one"})));
+        observe(&mut r,&event("PreToolUse",json!({"tool_use_id":"toolu_two"})));
+        observe(&mut r,&event("PreToolUse",json!({"tool_use_id":"toolu_three","tool_input":{"command":"ls"}})));
+        let request=event("PermissionRequest",json!({}));
+        let mut found=asked_uses(&r,&request,now());found.sort();
+        assert_eq!(found,["toolu_one","toolu_two"]);
+        assert!(asked_use(&r,&request,now()).is_none());
+        assert_eq!(asked_uses(&r,&event("PermissionRequest",json!({"tool_input":{"command":"ls"}})),now()),["toolu_three"]);
+        let mut overflow=r.clone();overflow[OVERFLOW]=json!(true);
+        assert!(asked_uses(&overflow,&request,now()).is_empty());
+    }
+
+    #[test] fn a_request_that_names_its_tool_use_binds_only_that_active_call() {
+        let mut r=json!({"agent":"claude"});
+        observe(&mut r,&event("PreToolUse",json!({"tool_use_id":"toolu_one"})));
+        observe(&mut r,&event("PreToolUse",json!({"tool_use_id":"toolu_two"})));
+        let named=|id:&str|event("PermissionRequest",json!({"tool_use_id":id}));
+        assert!(asked_use(&r,&event("PermissionRequest",json!({})),now()).is_none(),"two identical calls are ambiguous");
+        assert_eq!(asked_use(&r,&named("toolu_two"),now()).as_deref(),Some("toolu_two"));
+        assert!(asked_use(&r,&named("toolu_three"),now()).is_none());
+        let mut other=named("toolu_one");other["tool_input"]=json!({"command":"rm"});
+        assert!(asked_use(&r,&other,now()).is_none(),"another input is another call");
+        assert!(active(&r,"toolu_one")&&!active(&r,"toolu_three")&&!active(&r,""));
+        observe(&mut r,&event("PostToolUse",json!({"tool_use_id":"toolu_one"})));
+        assert!(!active(&r,"toolu_one"));
     }
 }

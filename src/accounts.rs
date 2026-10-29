@@ -198,10 +198,14 @@ pub(crate) fn hook_profile(config: &Config, id: &str) -> Result<(String, PathBuf
     Ok((profile.provider, path))
 }
 
-/// The Claude account config the next launch reads (U16): the native
-/// `.claude.json`, or the one `CLAUDE_CONFIG_DIR` names.
-pub(crate) fn claude_account_config() -> Result<PathBuf> {
-    claude::account_config()
+/// The Claude account config a new launch without `--account` reads (U16,
+/// N18): the default managed profile's `.claude.json` (the launch sets
+/// `CLAUDE_CONFIG_DIR` to that profile), else the native one.
+pub(crate) fn claude_launch_config(config: &Config) -> Result<PathBuf> {
+    match default_account(config, "claude")? {
+        Some(id) if !native_id(&id) => Ok(lookup(config, &id)?.1.join(".claude.json")),
+        _ => claude::account_config(),
+    }
 }
 
 /// U16: mark Zerus's own Team designer folder trusted in the account config the
@@ -570,6 +574,13 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
         "model-defaults"=>{println!("{}",model_defaults::set(config,args,dry)?);},
         "set-key"=>{println!("{}",deepseek::set_key(config,args,dry)?);},
         "install"=>return install::run(id,dry),
+        "bind-existing"=>{
+            if id!="native-opencode" || args.len()!=3 || args[2]!="--json" {return Err(Error::new(2,"usage: hgs [@host] account bind-existing native-opencode --json (JSON stdin)"));}
+            #[cfg(unix)]
+            {println!("{}",crate::state::opencode::bind_existing(config,dry).map_err(|e|Error::new(1,e))?);}
+            #[cfg(not(unix))]
+            return Err(Error::new(2,"Bind OpenCode on its Linux or macOS environment; select its WSL or SSH machine"));
+        },
         "start"=>{
             if id!="native-opencode" {return Err(Error::new(1,"Only the native OpenCode account has a service to start"));}
             #[cfg(unix)]
@@ -1171,6 +1182,36 @@ mod permission_tests {
             assert!(prompt.iter().position(|s|s=="--").unwrap()>1);assert_eq!(prompt.last().unwrap(),flag);
             let saved=prompt.clone();apply_permissions(provider,"bypass",&mut prompt);assert_eq!(prompt,saved);
         }
+    }
+    #[test]
+    fn the_designer_is_trusted_in_the_profile_its_launch_uses() {
+        // N18: a launch without --account uses the default account; with a
+        // managed default that is <config>/accounts/<id>/.claude.json.
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            home: dir.path().to_str().unwrap().into(), dir: dir.path().join("config"), state: dir.path().join("state"),
+            selves: vec![], peers: vec![], base_peers: vec![], peers_from_environment: false,
+            machines: BTreeMap::new(), tab: false, tab_colors: String::new(),
+        };
+        assert_eq!(claude_launch_config(&config).unwrap(), claude::account_config().unwrap(), "no catalog: the native config");
+        fs::create_dir_all(&config.dir).unwrap();
+        fs::write(config.dir.join("accounts.json"), json!({
+            "profiles": {"work": {"provider": "claude", "label": "Work"}},
+            "defaults": {"claude": "work"}
+        }).to_string()).unwrap();
+        assert_eq!(claude_launch_config(&config).unwrap(), config.dir.join("accounts").join("work").join(".claude.json"));
+        fs::write(config.dir.join("accounts.json"), json!({
+            "profiles": {"work": {"provider": "claude", "label": "Work"}},
+            "defaults": {"claude": "native-claude"}
+        }).to_string()).unwrap();
+        assert_eq!(claude_launch_config(&config).unwrap(), claude::account_config().unwrap(), "a native default: the native config");
+    }
+    #[test]
+    fn claude_project_keys_use_forward_slashes_on_windows() {
+        // N19: as Claude writes them; the mixed form was another project.
+        let mixed = "C:\\Users\\example\\.local/state\\hgs/sessions\\team-designer";
+        assert_eq!(claude::project_key(mixed, true), "C:/Users/example/.local/state/hgs/sessions/team-designer");
+        assert_eq!(claude::project_key("/home/example/a\\b", false), "/home/example/a\\b");
     }
     #[test]
     fn auto_mode_is_claude_only() {

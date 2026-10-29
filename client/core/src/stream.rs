@@ -10,21 +10,25 @@
 //! [`ComputerStatus::Reconnecting`] with its rows kept, and the next start
 //! follows after 5 s, 15 s, 60 s, then every 5 minutes (failures more than ten
 //! minutes apart start over). Followed sessions are subscribed again on every
-//! new stream, after their last cursor.
+//! new stream, after their last cursor, and so are followed processes when the
+//! stream offers that topic. A followed organization comes from a stream that
+//! offers its topic; while none does, this computer's is polled with
+//! `hgs swarm get` every 5 s.
 use crate::{state::CatalogState, Change, ComputerId, ComputerStatus};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use zerus_watch_protocol::{
     decode, topic, Body, Control, Frame, FrameError, SessionRef, Subscription,
-    ACTIVITY_SUBSCRIPTIONS, ACTIVITY_TAIL, HELP_MARKER, MAX_FRAME_BYTES, VERSION,
+    ACTIVITY_SUBSCRIPTIONS, ACTIVITY_TAIL, HELP_MARKER, MAX_FRAME_BYTES, PROCESSES_SUBSCRIPTIONS,
+    TASKS_SUBSCRIPTIONS, VERSION,
 };
 
 /// Lines and commands a supervisor may have queued; a full queue makes the
@@ -48,6 +52,12 @@ pub struct Timing {
     pub peer_probe_timeout: Duration,
     /// How long a stream may take to exit after EOF on its stdin.
     pub stop_grace: Duration,
+    /// How often a followed organization without a stream offering it is
+    /// polled with `hgs swarm get`.
+    pub organization_poll: Duration,
+    /// How often a computer without the stream is polled (see
+    /// [`crate::legacy`]).
+    pub legacy: crate::legacy::Intervals,
 }
 
 impl Default for Timing {
@@ -59,17 +69,26 @@ impl Default for Timing {
             probe_timeout: Duration::from_secs(5),
             peer_probe_timeout: Duration::from_secs(15),
             stop_grace: Duration::from_secs(1),
+            organization_poll: crate::organization::POLL,
+            legacy: crate::legacy::Intervals::default(),
         }
     }
 }
 
 impl Timing {
-    /// The default timing with restart and re-probe delays times `factor`.
+    /// The default timing with restart, re-probe and organization poll
+    /// delays times `factor`.
     pub fn scaled(factor: f64) -> Self {
         let default = Self::default();
         Self {
             restart: default.restart.map(|delay| delay.mul_f64(factor)),
             reprobe: default.reprobe.mul_f64(factor),
+            organization_poll: default.organization_poll.mul_f64(factor),
+            legacy: crate::legacy::Intervals {
+                listing: default.legacy.listing.mul_f64(factor),
+                activity: default.legacy.activity.mul_f64(factor),
+                processes: default.legacy.processes.mul_f64(factor),
+            },
             ..default
         }
     }
@@ -110,10 +129,14 @@ pub enum FollowError {
     UnknownComputer,
     /// The key is not the session's catalog key.
     KeyMismatch,
-    /// The computer already follows [`ACTIVITY_SUBSCRIPTIONS`] sessions.
+    /// The computer already follows [`ACTIVITY_SUBSCRIPTIONS`] sessions (for
+    /// processes [`PROCESSES_SUBSCRIPTIONS`], for tasks [`TASKS_SUBSCRIPTIONS`]
+    /// projects, or the stream's lower limit).
     TooMany,
     /// The stream was stopped.
     Stopped,
+    /// Not a project ID: 1 to 128 bytes without control characters.
+    InvalidProject,
 }
 
 impl std::fmt::Display for FollowError {
@@ -121,8 +144,9 @@ impl std::fmt::Display for FollowError {
         f.write_str(match self {
             Self::UnknownComputer => "unknown computer",
             Self::KeyMismatch => "the key is not the session's catalog key",
-            Self::TooMany => "a computer follows at most 16 sessions",
+            Self::TooMany => "the computer already follows as many as its stream allows",
             Self::Stopped => "the stream was stopped",
+            Self::InvalidProject => "a project ID is 1 to 128 bytes without control characters",
         })
     }
 }
@@ -294,12 +318,58 @@ pub(crate) fn read_line(
 }
 
 enum Input {
-    Line { generation: u64, line: String },
-    Closed { generation: u64 },
-    Subscribe { key: String },
-    Unsubscribe { key: String, session: SessionRef },
+    Line {
+        generation: u64,
+        line: String,
+    },
+    Closed {
+        generation: u64,
+    },
+    Subscribe {
+        key: String,
+    },
+    Unsubscribe {
+        key: String,
+        session: SessionRef,
+    },
+    SubscribeProcesses {
+        key: String,
+    },
+    UnsubscribeProcesses {
+        key: String,
+        session: SessionRef,
+    },
+    SubscribeTasks {
+        key: String,
+    },
+    UnsubscribeTasks {
+        key: String,
+    },
+    SubscribeOrganization,
+    UnsubscribeOrganization,
+    /// A `swarm get` of the organization poll.
+    OrganizationPolled(Result<Value, crate::ReadError>),
+    /// A read of the polling of a computer without the stream.
+    Legacy {
+        read: crate::legacy::Read,
+        result: Result<Value, String>,
+    },
     Control(Control),
     Stop,
+}
+
+/// The organization edit snapshot the supervisor keeps current.
+type OrganizationShared = Arc<Mutex<Option<crate::OrganizationSnapshot>>>;
+
+/// Polls `hgs swarm get` on its own thread until dropped.
+struct Poller {
+    stop: Arc<AtomicBool>,
+}
+
+impl Drop for Poller {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -310,8 +380,12 @@ struct Follow {
 }
 
 type Follows = Arc<Mutex<BTreeMap<String, Follow>>>;
+/// Sessions whose processes are followed, by key.
+type ProcessFollows = Arc<Mutex<BTreeMap<String, SessionRef>>>;
+/// Projects whose task lists are followed.
+type TaskFollows = Arc<Mutex<BTreeSet<String>>>;
 
-fn lock(follows: &Follows) -> MutexGuard<'_, BTreeMap<String, Follow>> {
+fn lock<T>(follows: &Mutex<T>) -> MutexGuard<'_, T> {
     follows
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -322,6 +396,14 @@ pub struct StreamHandle {
     computer: ComputerId,
     tx: SyncSender<Input>,
     follows: Follows,
+    processes: ProcessFollows,
+    /// The processes follows the latest stream accepts.
+    processes_limit: Arc<AtomicUsize>,
+    tasks: TaskFollows,
+    /// The tasks follows the latest stream accepts.
+    tasks_limit: Arc<AtomicUsize>,
+    organization: Arc<AtomicBool>,
+    organization_snapshot: OrganizationShared,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -391,6 +473,128 @@ impl StreamHandle {
         lock(&self.follows).keys().cloned().collect()
     }
 
+    /// Follows a session's processes on this computer, now and on every later
+    /// stream that offers the topic; returns its key. Independent of
+    /// [`Self::follow`]. At most [`PROCESSES_SUBSCRIPTIONS`] per computer, or
+    /// the lower limit of the latest stream.
+    pub fn follow_processes(&self, session: SessionRef) -> Result<String, FollowError> {
+        if self.stopped() {
+            return Err(FollowError::Stopped);
+        }
+        let key = session.key();
+        {
+            let mut follows = lock(&self.processes);
+            if let Some(old) = follows.get(&key) {
+                if *old == session {
+                    return Ok(key);
+                }
+            } else if follows.len() >= self.processes_limit.load(Ordering::Relaxed) {
+                return Err(FollowError::TooMany);
+            }
+            follows.insert(key.clone(), session);
+        }
+        self.tx
+            .send(Input::SubscribeProcesses { key: key.clone() })
+            .map_err(|_| FollowError::Stopped)?;
+        Ok(key)
+    }
+
+    /// Stops following a session's processes and drops their state without an
+    /// update; false when the key was not followed.
+    pub fn unfollow_processes(&self, key: &str) -> bool {
+        let Some(session) = lock(&self.processes).remove(key) else {
+            return false;
+        };
+        let _ = self.tx.send(Input::UnsubscribeProcesses {
+            key: key.to_owned(),
+            session,
+        });
+        true
+    }
+
+    /// The keys whose processes are followed.
+    pub fn followed_processes(&self) -> Vec<String> {
+        lock(&self.processes).keys().cloned().collect()
+    }
+
+    /// Follows a project's task list on this computer, now and on every later
+    /// stream that offers the topic; returns its key, the project ID. At most
+    /// [`TASKS_SUBSCRIPTIONS`] per computer, or the lower limit of the latest
+    /// stream.
+    pub fn follow_tasks(&self, project: &str) -> Result<String, FollowError> {
+        if self.stopped() {
+            return Err(FollowError::Stopped);
+        }
+        if !crate::tasks::valid_project(project) {
+            return Err(FollowError::InvalidProject);
+        }
+        {
+            let mut follows = lock(&self.tasks);
+            if follows.contains(project) {
+                return Ok(project.to_owned());
+            }
+            if follows.len() >= self.tasks_limit.load(Ordering::Relaxed) {
+                return Err(FollowError::TooMany);
+            }
+            follows.insert(project.to_owned());
+        }
+        self.tx
+            .send(Input::SubscribeTasks {
+                key: project.to_owned(),
+            })
+            .map_err(|_| FollowError::Stopped)?;
+        Ok(project.to_owned())
+    }
+
+    /// Stops following a project's task list and forgets its digest, so a
+    /// later follow delivers the list again; false when it was not followed.
+    pub fn unfollow_tasks(&self, project: &str) -> bool {
+        if !lock(&self.tasks).remove(project) {
+            return false;
+        }
+        let _ = self.tx.send(Input::UnsubscribeTasks {
+            key: project.to_owned(),
+        });
+        true
+    }
+
+    /// The projects whose task lists are followed.
+    pub fn followed_tasks(&self) -> Vec<String> {
+        lock(&self.tasks).iter().cloned().collect()
+    }
+
+    /// Follows this computer's organization (see [`crate::organization`]):
+    /// from a stream that offers the topic, otherwise by polling
+    /// `hgs swarm get` every 5 s when the computer is this one.
+    pub fn follow_organization(&self) -> Result<(), FollowError> {
+        if self.stopped() {
+            return Err(FollowError::Stopped);
+        }
+        if !self.organization.swap(true, Ordering::Relaxed) {
+            self.tx
+                .send(Input::SubscribeOrganization)
+                .map_err(|_| FollowError::Stopped)?;
+        }
+        Ok(())
+    }
+
+    /// Stops following the organization and drops it without an update;
+    /// false when it was not followed.
+    pub fn unfollow_organization(&self) -> bool {
+        if !self.organization.swap(false, Ordering::Relaxed) {
+            return false;
+        }
+        *lock(&self.organization_snapshot) = None;
+        let _ = self.tx.send(Input::UnsubscribeOrganization);
+        true
+    }
+
+    /// The organization the view shows and the versions observed with it,
+    /// for an edit; None before the first state.
+    pub fn organization_snapshot(&self) -> Option<crate::OrganizationSnapshot> {
+        lock(&self.organization_snapshot).clone()
+    }
+
     /// Ends the stream (EOF on its stdin), reports the computer
     /// [`ComputerStatus::Ended`] with no rows, and waits for the supervisor.
     pub fn stop(mut self) {
@@ -425,6 +629,12 @@ pub fn spawn(
 ) -> StreamHandle {
     let (tx, rx) = mpsc::sync_channel(QUEUE_LINES);
     let follows = Follows::default();
+    let processes = ProcessFollows::default();
+    let processes_limit = Arc::new(AtomicUsize::new(PROCESSES_SUBSCRIPTIONS));
+    let tasks = TaskFollows::default();
+    let tasks_limit = Arc::new(AtomicUsize::new(TASKS_SUBSCRIPTIONS));
+    let organization = Arc::new(AtomicBool::new(false));
+    let organization_snapshot = OrganizationShared::default();
     let stop = Arc::new(AtomicBool::new(false));
     let supervisor = Supervisor {
         hgs: hgs.to_owned(),
@@ -434,6 +644,15 @@ pub fn spawn(
         rx,
         tx: tx.clone(),
         follows: follows.clone(),
+        processes: processes.clone(),
+        processes_limit: processes_limit.clone(),
+        tasks: tasks.clone(),
+        tasks_limit: tasks_limit.clone(),
+        organization_snapshot: organization_snapshot.clone(),
+        poller: None,
+        worker_fixed: None,
+        legacy: None,
+        legacy_windows: BTreeSet::new(),
         stop: stop.clone(),
         state: CatalogState::new(),
         generation: 0,
@@ -454,6 +673,12 @@ pub fn spawn(
         computer: computer.clone(),
         tx,
         follows,
+        processes,
+        processes_limit,
+        tasks,
+        tasks_limit,
+        organization,
+        organization_snapshot,
         stop,
         thread: Some(thread),
     }
@@ -473,6 +698,20 @@ struct Supervisor {
     rx: Receiver<Input>,
     tx: SyncSender<Input>,
     follows: Follows,
+    processes: ProcessFollows,
+    processes_limit: Arc<AtomicUsize>,
+    tasks: TaskFollows,
+    tasks_limit: Arc<AtomicUsize>,
+    organization_snapshot: OrganizationShared,
+    /// Polls `swarm get` while no stream offers the organization.
+    poller: Option<Poller>,
+    /// When an outdated catalog worker last got its `swarm get`.
+    worker_fixed: Option<Instant>,
+    /// The polling of this computer while its CLI lacks the stream; kept
+    /// across re-probes and dropped when a stream starts.
+    legacy: Option<crate::legacy::Schedule>,
+    /// Followed sessions whose first window the polling sent.
+    legacy_windows: BTreeSet<String>,
     stop: Arc<AtomicBool>,
     state: CatalogState,
     generation: u64,
@@ -493,10 +732,20 @@ impl Supervisor {
             self.state.begin();
             let timeout = self.timing.probe_timeout(&self.computer);
             match probe_until(&self.hgs, &self.computer, timeout, &self.stop) {
-                Probe::Supported => {}
+                Probe::Supported => {
+                    self.legacy = None;
+                    self.legacy_windows.clear();
+                }
                 Probe::Unsupported => {
-                    self.status(ComputerStatus::Unsupported);
-                    if self.wait(self.timing.reprobe) {
+                    // Polled already: the status stays until a listing fails.
+                    if !self
+                        .legacy
+                        .as_ref()
+                        .is_some_and(|legacy| legacy.has_listed())
+                    {
+                        self.status(ComputerStatus::Unsupported);
+                    }
+                    if self.poll(self.timing.reprobe) {
                         continue;
                     }
                     break;
@@ -521,6 +770,11 @@ impl Supervisor {
             }
         }
         self.close();
+        self.poller = None;
+        if let Some(change) = self.state.organization_mut().end(&self.computer) {
+            *lock(&self.organization_snapshot) = None;
+            self.emit(change);
+        }
         self.emit(Change::Replace {
             computer: self.computer.clone(),
             rows: Vec::new(),
@@ -550,6 +804,8 @@ impl Supervisor {
 
     /// Waits without a stream, keeping follows current; false on stop.
     fn wait(&mut self, time: Duration) -> bool {
+        // No stream: a followed organization is polled meanwhile.
+        self.sync_poller();
         let deadline = Instant::now() + time;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
@@ -560,9 +816,199 @@ impl Supervisor {
                 Ok(Input::Stop) | Err(RecvTimeoutError::Disconnected) => return false,
                 Ok(Input::Subscribe { key }) => self.state.follow(&key),
                 Ok(Input::Unsubscribe { key, .. }) => self.state.unfollow(&key),
+                Ok(Input::SubscribeProcesses { key }) => self.state.processes_mut().follow(&key),
+                Ok(Input::UnsubscribeProcesses { key, .. }) => {
+                    self.state.processes_mut().unfollow(&key)
+                }
+                Ok(Input::SubscribeTasks { key }) => self.state.tasks_mut().follow(&key),
+                Ok(Input::UnsubscribeTasks { key }) => self.state.tasks_mut().unfollow(&key),
+                Ok(Input::SubscribeOrganization) => self.subscribe_organization(),
+                Ok(Input::UnsubscribeOrganization) => self.unsubscribe_organization(),
+                Ok(Input::OrganizationPolled(result)) => self.organization_polled(result),
                 Ok(_) => {}
                 Err(RecvTimeoutError::Timeout) => return true,
             }
+        }
+    }
+
+    /// Waits like [`Self::wait`] while polling this computer as the Qt client
+    /// does (see [`crate::legacy`]); false on stop.
+    fn poll(&mut self, time: Duration) -> bool {
+        self.sync_poller();
+        let deadline = Instant::now() + time;
+        loop {
+            let now = Instant::now();
+            if now >= deadline {
+                return true;
+            }
+            let activity: Vec<(String, String, Option<i64>)> = lock(&self.follows)
+                .iter()
+                .filter(|(key, _)| self.state.is_followed(key))
+                .map(|(key, follow)| {
+                    let after = self
+                        .legacy_windows
+                        .contains(key)
+                        .then(|| self.state.cursor(key).unwrap_or(0));
+                    (key.clone(), follow.session.name.clone(), after)
+                })
+                .collect();
+            let processes: Vec<(String, String)> = lock(&self.processes)
+                .iter()
+                .filter(|(key, _)| self.state.processes().is_followed(key))
+                .map(|(key, session)| (key.clone(), session.name.clone()))
+                .collect();
+            let follows = crate::legacy::Follows {
+                activity: &activity,
+                processes: &processes,
+            };
+            let every = self.timing.legacy;
+            let legacy = self
+                .legacy
+                .get_or_insert_with(|| crate::legacy::Schedule::new(every));
+            let reads = legacy.due(now, &follows);
+            for read in reads {
+                self.spawn_legacy(read);
+            }
+            let wake = self
+                .legacy
+                .as_ref()
+                .and_then(crate::legacy::Schedule::next)
+                .map_or(deadline, |at| at.min(deadline));
+            let left = wake
+                .saturating_duration_since(Instant::now())
+                .max(Duration::from_millis(1));
+            match self.rx.recv_timeout(left) {
+                Ok(Input::Stop) | Err(RecvTimeoutError::Disconnected) => return false,
+                Ok(Input::Subscribe { key }) => self.state.follow(&key),
+                Ok(Input::Unsubscribe { key, .. }) => {
+                    self.state.unfollow(&key);
+                    self.legacy_windows.remove(&key);
+                }
+                Ok(Input::SubscribeProcesses { key }) => self.state.processes_mut().follow(&key),
+                Ok(Input::UnsubscribeProcesses { key, .. }) => {
+                    self.state.processes_mut().unfollow(&key)
+                }
+                Ok(Input::SubscribeTasks { key }) => self.state.tasks_mut().follow(&key),
+                Ok(Input::UnsubscribeTasks { key }) => self.state.tasks_mut().unfollow(&key),
+                Ok(Input::SubscribeOrganization) => self.subscribe_organization(),
+                Ok(Input::UnsubscribeOrganization) => self.unsubscribe_organization(),
+                Ok(Input::OrganizationPolled(result)) => self.organization_polled(result),
+                Ok(Input::Legacy { read, result }) => self.legacy_reply(read, result),
+                Ok(_) => {}
+                Err(RecvTimeoutError::Timeout) => {}
+            }
+        }
+    }
+
+    /// Runs one polling read on its own thread; the reply comes back as input.
+    fn spawn_legacy(&mut self, read: crate::legacy::Read) {
+        let (hgs, computer, tx) = (self.hgs.clone(), self.computer.clone(), self.tx.clone());
+        let failed = read.clone();
+        let spawned = thread::Builder::new()
+            .name("hgs-legacy-poll".into())
+            .spawn(move || {
+                let result = crate::legacy::run(&hgs, &computer, &read);
+                let _ = tx.send(Input::Legacy { read, result });
+            });
+        if spawned.is_err() {
+            if let Some(legacy) = self.legacy.as_mut() {
+                legacy.done(&failed, Instant::now());
+            }
+        }
+    }
+
+    /// Applies a polling reply as the stream's frames would be.
+    fn legacy_reply(&mut self, read: crate::legacy::Read, result: Result<Value, String>) {
+        let Some(legacy) = self.legacy.as_mut() else {
+            return;
+        };
+        legacy.done(&read, Instant::now());
+        let computer = self.computer.clone();
+        let changes = match (&read, result) {
+            (crate::legacy::Read::Listing, Ok(listing)) => {
+                let (_, first) = legacy.listed(true);
+                let mut changes = self.state.listing(&computer, &listing);
+                // This computer's listing names the peers, as its meta would.
+                if computer.is_local() {
+                    if let Some(peers) = self.state.peers() {
+                        let _ = self.sink.send(StreamEvent::Peers {
+                            computer: computer.clone(),
+                            peers,
+                        });
+                    }
+                }
+                if first {
+                    changes.push(Change::Computer {
+                        computer: computer.clone(),
+                        status: ComputerStatus::Polled,
+                    });
+                }
+                changes
+            }
+            (crate::legacy::Read::Listing, Err(_)) => {
+                let (attempt, _) = legacy.listed(false);
+                vec![Change::Computer {
+                    computer: computer.clone(),
+                    status: ComputerStatus::Reconnecting {
+                        attempt: attempt.unwrap_or(1),
+                    },
+                }]
+            }
+            (crate::legacy::Read::Activity { key, .. }, Ok(inspection)) => {
+                let run = lock(&self.follows)
+                    .get(key)
+                    .and_then(|follow| follow.session.run_id.clone());
+                let window = !self.legacy_windows.contains(key);
+                let changes =
+                    self.state
+                        .activity_polled(&computer, key, run.as_deref(), &inspection, window);
+                if self.state.is_followed(key) {
+                    self.legacy_windows.insert(key.clone());
+                }
+                changes
+            }
+            (crate::legacy::Read::Processes { key, .. }, Ok(inspection)) => self
+                .state
+                .processes_polled(&computer, key, &inspection)
+                .into_iter()
+                .collect(),
+            (crate::legacy::Read::Processes { key, .. }, Err(message)) => {
+                let error = zerus_watch_protocol::ErrorFrame {
+                    code: "inspect_failed".into(),
+                    message,
+                    topic: Some(topic::PROCESSES.into()),
+                    key: Some(key.clone()),
+                    fatal: false,
+                };
+                self.state
+                    .processes_mut()
+                    .error(&computer, &error)
+                    .into_iter()
+                    .collect()
+            }
+            // A failed Activity read is retried on the next tick.
+            (crate::legacy::Read::Activity { .. }, Err(_)) => Vec::new(),
+        };
+        for change in changes {
+            match &change {
+                Change::Activity {
+                    key,
+                    update: crate::ActivityUpdate::Ended,
+                    ..
+                } => {
+                    lock(&self.follows).remove(key);
+                    self.legacy_windows.remove(key);
+                }
+                Change::Processes {
+                    key,
+                    update: crate::ProcessesUpdate::Ended,
+                    ..
+                } => {
+                    lock(&self.processes).remove(key);
+                }
+                _ => {}
+            }
+            self.emit(change);
         }
     }
 
@@ -630,6 +1076,21 @@ impl Supervisor {
                         }));
                     }
                 }
+                Ok(Input::SubscribeProcesses { key }) => self.subscribe_processes(&key),
+                Ok(Input::UnsubscribeProcesses { key, session }) => {
+                    self.state.processes_mut().unfollow(&key);
+                    self.unsubscribe_processes(session);
+                }
+                Ok(Input::SubscribeOrganization) => self.subscribe_organization(),
+                Ok(Input::UnsubscribeOrganization) => self.unsubscribe_organization(),
+                Ok(Input::OrganizationPolled(result)) => self.organization_polled(result),
+                // A polling read that finished after the stream started.
+                Ok(Input::Legacy { .. }) => {}
+                Ok(Input::SubscribeTasks { key }) => self.subscribe_tasks(&key),
+                Ok(Input::UnsubscribeTasks { key }) => {
+                    self.state.tasks_mut().unfollow(&key);
+                    self.unsubscribe_tasks(&key);
+                }
                 Ok(Input::Control(control)) => self.write(&control),
                 Ok(Input::Stop) | Err(RecvTimeoutError::Disconnected) => return Outcome::Stopped,
                 Err(RecvTimeoutError::Timeout) => {}
@@ -640,22 +1101,68 @@ impl Supervisor {
     fn handle(&mut self, frame: &Frame) {
         let changes = self.state.apply(&self.computer, frame);
         for change in changes {
-            if let Change::Activity {
-                key,
-                update: crate::ActivityUpdate::Ended,
-                ..
-            } = &change
-            {
-                lock(&self.follows).remove(key);
+            if matches!(change, Change::Organization { .. }) {
+                self.organization_changed();
+            }
+            match &change {
+                Change::Activity {
+                    key,
+                    update: crate::ActivityUpdate::Ended,
+                    ..
+                } => {
+                    lock(&self.follows).remove(key);
+                }
+                Change::Processes {
+                    key,
+                    update: crate::ProcessesUpdate::Ended,
+                    ..
+                } => {
+                    // The server may still follow a key the catalog dropped.
+                    let removed = lock(&self.processes).remove(key);
+                    if let Some(session) = removed {
+                        self.unsubscribe_processes(session);
+                    }
+                }
+                Change::Tasks {
+                    key,
+                    update: crate::TasksUpdate::Ended,
+                    ..
+                } => {
+                    lock(&self.tasks).remove(key);
+                }
+                _ => {}
             }
             self.emit(change);
         }
         match &frame.body {
             Body::Hello(_) => {
                 self.greeted = true;
+                let limit = self
+                    .state
+                    .processes_limit()
+                    .map_or(PROCESSES_SUBSCRIPTIONS, |limit| {
+                        limit.min(PROCESSES_SUBSCRIPTIONS)
+                    });
+                self.processes_limit.store(limit, Ordering::Relaxed);
+                let limit = self
+                    .state
+                    .tasks_limit()
+                    .map_or(TASKS_SUBSCRIPTIONS, |limit| limit.min(TASKS_SUBSCRIPTIONS));
+                self.tasks_limit.store(limit, Ordering::Relaxed);
                 let keys: Vec<String> = lock(&self.follows).keys().cloned().collect();
                 for key in keys {
                     self.subscribe(&key);
+                }
+                let keys: Vec<String> = lock(&self.processes).keys().cloned().collect();
+                for key in keys {
+                    self.subscribe_processes(&key);
+                }
+                let keys: Vec<String> = lock(&self.tasks).iter().cloned().collect();
+                for key in keys {
+                    self.subscribe_tasks(&key);
+                }
+                if self.state.organization().is_followed() {
+                    self.subscribe_organization();
                 }
             }
             Body::Snapshot(snapshot)
@@ -698,6 +1205,191 @@ impl Supervisor {
         }));
     }
 
+    /// Accepts the key's processes frames and, on a greeted stream that offers
+    /// the topic, subscribes it. A key the live catalog lacks ends at once, and
+    /// so does one beyond the stream's limit.
+    fn subscribe_processes(&mut self, key: &str) {
+        let Some(session) = lock(&self.processes).get(key).cloned() else {
+            return;
+        };
+        self.state.processes_mut().follow(key);
+        if !self.greeted {
+            return;
+        }
+        let Some(limit) = self.state.processes_limit() else {
+            return;
+        };
+        let beyond = self.state.processes().keys().position(|known| known == key) >= Some(limit);
+        if (self.state.live() && !self.state.rows().contains_key(key)) || beyond {
+            if let Some(change) = self.state.processes_mut().end(&self.computer, key) {
+                lock(&self.processes).remove(key);
+                self.emit(change);
+            }
+            return;
+        }
+        self.write(&Control::Subscribe(Subscription {
+            topic: topic::PROCESSES.into(),
+            session: Some(session),
+            ..Subscription::default()
+        }));
+    }
+
+    /// Whether the running stream delivers the organization.
+    fn streams_organization(&self) -> bool {
+        self.greeted && self.state.organization_offered()
+    }
+
+    /// Polls this computer's `swarm get` while a followed organization has no
+    /// stream that offers it, and stops otherwise.
+    fn sync_poller(&mut self) {
+        let wanted = self.state.organization().is_followed()
+            && !self.streams_organization()
+            && self.computer.is_local()
+            && !self.stop.load(Ordering::Relaxed);
+        if !wanted {
+            self.poller = None;
+            return;
+        }
+        if self.poller.is_some() {
+            return;
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let (hgs, tx, flag) = (self.hgs.clone(), self.tx.clone(), stop.clone());
+        let every = self.timing.organization_poll;
+        let spawned = thread::Builder::new()
+            .name("hgs-swarm-poll".into())
+            .spawn(move || {
+                while !flag.load(Ordering::Relaxed) {
+                    let reply = crate::reads::read(&hgs, &ComputerId::local(), &crate::Read::Swarm);
+                    if flag.load(Ordering::Relaxed)
+                        || tx.send(Input::OrganizationPolled(reply)).is_err()
+                    {
+                        return;
+                    }
+                    let until = Instant::now() + every;
+                    while Instant::now() < until && !flag.load(Ordering::Relaxed) {
+                        thread::sleep(every.min(Duration::from_millis(50)));
+                    }
+                }
+            });
+        if spawned.is_ok() {
+            self.poller = Some(Poller { stop });
+        }
+    }
+
+    /// Follows the organization from the running stream when it offers the
+    /// topic, otherwise by polling.
+    fn subscribe_organization(&mut self) {
+        self.state.organization_mut().follow();
+        if self.streams_organization() {
+            self.write(&Control::Subscribe(Subscription {
+                topic: topic::ORGANIZATION.into(),
+                ..Subscription::default()
+            }));
+        }
+        self.sync_poller();
+    }
+
+    fn unsubscribe_organization(&mut self) {
+        if self.streams_organization() {
+            self.write(&Control::Unsubscribe(Subscription {
+                topic: topic::ORGANIZATION.into(),
+                ..Subscription::default()
+            }));
+        }
+        self.state.organization_mut().unfollow();
+        *lock(&self.organization_snapshot) = None;
+        self.sync_poller();
+    }
+
+    /// A poll's reply; one that arrives after the stream took over is late.
+    fn organization_polled(&mut self, reply: Result<Value, crate::ReadError>) {
+        if self.streams_organization() {
+            return;
+        }
+        let computer = self.computer.clone();
+        let organization = self.state.organization_mut();
+        let change = match reply {
+            Ok(value) => organization.polled(&computer, value),
+            Err(error) => {
+                let code = serde_json::to_value(&error)
+                    .ok()
+                    .and_then(|value| value["error"].as_str().map(str::to_owned))
+                    .unwrap_or_else(|| "failed".into());
+                organization.failed(&computer, &code, &error.to_string())
+            }
+        };
+        if let Some(change) = change {
+            self.organization_changed();
+            self.emit(change);
+        }
+    }
+
+    /// Keeps the edit snapshot current and gives an outdated catalog worker
+    /// one `swarm get`, which restarts it as before (at most every 10 min).
+    fn organization_changed(&mut self) {
+        *lock(&self.organization_snapshot) = self.state.organization().snapshot();
+        let due = self
+            .worker_fixed
+            .is_none_or(|at| at.elapsed() >= Duration::from_secs(600));
+        if self.computer.is_local() && due && self.state.organization().worker_outdated() {
+            self.worker_fixed = Some(Instant::now());
+            let hgs = self.hgs.clone();
+            let _ = thread::Builder::new()
+                .name("hgs-swarm-worker".into())
+                .spawn(move || {
+                    let _ = crate::reads::read(&hgs, &ComputerId::local(), &crate::Read::Swarm);
+                });
+        }
+    }
+
+    /// Accepts the project's tasks frames and, on a greeted stream that offers
+    /// the topic, subscribes it; one beyond the stream's limit ends at once.
+    fn subscribe_tasks(&mut self, key: &str) {
+        if !lock(&self.tasks).contains(key) {
+            return;
+        }
+        self.state.tasks_mut().follow(key);
+        if !self.greeted {
+            return;
+        }
+        let Some(limit) = self.state.tasks_limit() else {
+            return;
+        };
+        if self.state.tasks().keys().position(|known| known == key) >= Some(limit) {
+            if let Some(change) = self.state.tasks_mut().end(&self.computer, key) {
+                lock(&self.tasks).remove(key);
+                self.emit(change);
+            }
+            return;
+        }
+        self.write(&Control::Subscribe(Subscription {
+            topic: topic::TASKS.into(),
+            project: Some(key.to_owned()),
+            ..Subscription::default()
+        }));
+    }
+
+    fn unsubscribe_tasks(&mut self, key: &str) {
+        if self.greeted && self.state.tasks_limit().is_some() {
+            self.write(&Control::Unsubscribe(Subscription {
+                topic: topic::TASKS.into(),
+                project: Some(key.to_owned()),
+                ..Subscription::default()
+            }));
+        }
+    }
+
+    fn unsubscribe_processes(&mut self, session: SessionRef) {
+        if self.greeted && self.state.processes_limit().is_some() {
+            self.write(&Control::Unsubscribe(Subscription {
+                topic: topic::PROCESSES.into(),
+                session: Some(session),
+                ..Subscription::default()
+            }));
+        }
+    }
+
     fn write(&mut self, control: &Control) {
         let Some(stdin) = self.stdin.as_mut() else {
             return;
@@ -716,6 +1408,7 @@ impl Supervisor {
     fn close(&mut self) {
         self.stdin = None;
         self.greeted = false;
+        self.sync_poller();
         let Some(mut child) = self.child.take() else {
             return;
         };
@@ -774,6 +1467,7 @@ mod tests {
         assert_eq!(scaled.restart_delay(1), Duration::from_millis(5));
         assert_eq!(scaled.restart_delay(4), Duration::from_millis(300));
         assert_eq!(scaled.reprobe, Duration::from_millis(600));
+        assert_eq!(scaled.organization_poll, Duration::from_millis(5));
         assert_eq!(scaled.silence, Duration::from_secs(30));
     }
 

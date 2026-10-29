@@ -145,7 +145,7 @@ class WatchStream(unittest.TestCase):
         self.assertEqual((hello['v'], hello['t'], hello['seq']), (1, 'hello', 1))
         self.assertEqual(hello['host'], 'test')
         self.assertEqual((hello['heartbeat_ms'], hello['max_frame_bytes']), (10000, 1048576))
-        self.assertEqual(hello['topics'], ['catalog', 'catalog.meta', 'activity', 'git', 'processes', 'tasks'])
+        self.assertEqual(hello['topics'], ['catalog', 'catalog.meta', 'activity', 'git', 'processes', 'tasks', 'organization'])
         self.assertEqual(hello['limits']['activity_subscriptions'], 16)
         self.assertEqual(hello['limits']['git_subscriptions'], 64)
         self.assertEqual(hello['limits']['processes_subscriptions'], 16)
@@ -372,6 +372,70 @@ class WatchStream(unittest.TestCase):
         stream.next(lambda f: f['t'] == 'pong' and f['id'] == 'unsubscribed')
         self.task('add', '--project', 'orchard', text='Unwatched task')
         stream.quiet(lambda f: f['t'] == 'snapshot' and f['topic'] == 'tasks', 3)
+        self.assertEqual(stream.close(), 0)
+
+    @staticmethod
+    def organization_rebuilt(rows):
+        """The `swarm get` snapshot (without `written`) the organization rows encode."""
+        snapshot = json.loads(json.dumps(rows['organization']))
+        projects = []
+        for project_id in snapshot['organization']['projects']:
+            project = dict(rows['project:' + project_id])
+            chunks = project.pop('session_chunks')
+            project['sessions'] = [s for n in range(chunks) for s in rows[f'members:{project_id}:{n}']['sessions']]
+            projects.append(project)
+        snapshot['organization']['projects'] = projects
+        snapshot['versions'] = {key[len('version:'):]: row for key, row in rows.items() if key.startswith('version:')}
+        return snapshot
+
+    def swarm(self, *args, payload=None):
+        result = subprocess.run([str(HGS), 'swarm', *args], input=json.dumps(payload) if payload is not None else '',
+                                env=self.env, text=True, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        value = json.loads(result.stdout)
+        value.pop('written', None)
+        return value
+
+    def test_the_organization_streams_as_rows_with_deltas_of_what_changed(self):
+        catalog = {"projects": [{"id": "project-1", "name": "orchard", "color": "#123456", "folders": [], "sessions": []}]}
+        self.swarm('initialize', payload=catalog)
+        before = self.swarm('get')
+        stream, *_ = self.start()
+        stream.send(op='subscribe', topic='organization')
+        rows = {}
+        while True:
+            frame = stream.next(lambda f: f['t'] == 'snapshot' and f['topic'] == 'organization', timeout=10)
+            if frame['page'] == 0:
+                rows = {}
+            rows.update({item['key']: item['row'] for item in frame['items']})
+            if frame['last']:
+                break
+        self.assertEqual(self.organization_rebuilt(rows), before)
+        self.assertIn('project:project-1', rows)
+        # A new project through the shared catalog's own edit: one delta of the
+        # changed rows, after which the rows match `swarm get` again.
+        desired = json.loads(json.dumps(before['organization']))
+        desired['projects'].append({"id": "project-2", "name": "meadow", "color": "#654321", "folders": [], "sessions": []})
+        self.swarm('apply', payload={'base': before['organization'], 'desired': desired, 'versions': before['versions']})
+        delta = stream.next(lambda f: f['t'] == 'delta' and f['topic'] == 'organization', timeout=10)
+        upserted = {item['key'] for item in delta['upsert']}
+        self.assertIn('project:project-2', upserted)
+        self.assertIn('organization', upserted)
+        self.assertNotIn('project:project-1', upserted)
+        self.assertGreater(delta['cursor'], frame['cursor'])
+        rows.update({item['key']: item['row'] for item in delta['upsert']})
+        for removal in delta['remove']:
+            rows.pop(removal['key'], None)
+        self.assertEqual(self.organization_rebuilt(rows), self.swarm('get'))
+        # Unsubscribed, a change sends nothing.
+        stream.send(op='unsubscribe', topic='organization')
+        stream.send(op='ping', id='unsubscribed')
+        stream.next(lambda f: f['t'] == 'pong' and f['id'] == 'unsubscribed')
+        after = self.swarm('get')
+        changed = json.loads(json.dumps(after['organization']))
+        changed['projects'][0]['name'] = 'grove'
+        self.swarm('apply', payload={'base': after['organization'], 'desired': changed, 'versions': after['versions']})
+        stream.quiet(lambda f: f.get('topic') == 'organization', 3)
         self.assertEqual(stream.close(), 0)
 
     def test_resume_after_a_cursor_and_gap_below_retention(self):

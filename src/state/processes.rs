@@ -384,8 +384,9 @@ fn collect(record: &Value, live: bool) -> (Jobs, Vec<String>) {
         notes.push(e);
     }
     if live {
-        if let Err(e) = control::collect(record, &mut jobs) {
-            notes.push(e);
+        match control::collect(record, &mut jobs) {
+            Err(e) => notes.push(e),
+            Ok(()) => claude_background(record, &mut jobs, now()),
         }
     }
     for job in jobs.values_mut() {
@@ -409,6 +410,47 @@ fn collect(record: &Value, live: bool) -> (Jobs, Vec<String>) {
     }
     (jobs, notes)
 }
+/// Claude tells only the model, never a hook, that a background command ended,
+/// so its job stayed unconfirmed for good (owner, 2026-10-28: the Tasks card
+/// showed nothing the lead waited for). The session's process tree settles it:
+/// a background Bash call whose command still runs there is running (its tree
+/// entry, which names no call, is dropped); one past its first half minute
+/// that runs nowhere has ended.
+pub(super) fn claude_background(record: &Value, jobs: &mut Jobs, at: f64) {
+    if string(record, "agent") != "claude" {
+        return;
+    }
+    // Claude runs `bash -c ... eval '<command>'`: inside the quotes each `'`
+    // of the command is written `'"'"'`.
+    let tree: Vec<(String, String)> = jobs
+        .iter()
+        .filter(|(_, job)| job["source"] == "process_tree")
+        .map(|(key, job)| (key.clone(), string(job, "command").to_owned()))
+        .collect();
+    let mut placed = Vec::new();
+    for job in jobs.values_mut() {
+        if job["source"] == "process_tree" || job["background"] != true || job["provider"] != "claude" || job["run_id"] != record["run_id"] || !active(job) {
+            continue;
+        }
+        let command = string(job, "command").trim().to_owned();
+        if command.is_empty() {
+            continue;
+        }
+        let probe: String = command.replace('\'', "'\"'\"'").chars().take(200).collect();
+        if let Some((key, _)) = tree.iter().find(|(key, line)| !placed.contains(key) && line.contains(&probe)) {
+            job["status"] = json!("running");
+            job["observed"] = json!(true);
+            placed.push(key.clone());
+        } else if job["started_at"].as_f64().is_some_and(|started| at - started > 30.0) {
+            job["status"] = json!("ended");
+            job["ended_at"] = json!(at);
+        }
+    }
+    for key in placed {
+        jobs.remove(&key);
+    }
+}
+
 fn projection(jobs: &Jobs, notes: Vec<String>, complete: bool) -> Value {
     let mut items: Vec<_> = jobs.values().cloned().collect();
     items.sort_by(|a, b| {

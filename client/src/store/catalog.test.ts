@@ -103,4 +103,21 @@ describe("toSession", () => {
     const asking = toSession("", "run:a", view("a", { status: "attention", attention: "question", caption: "Needs input", run_id: "a", conversation_id: "c", turn_started: 5 }));
     expect([asking.status, asking.attention, asking.caption, asking.runId, asking.conversationId, asking.turnStarted]).toEqual(["attention", "question", "Needs input", "a", "c", 5]);
   });
+
+  it("copies what the actions read as flat values, never the core's row", () => {
+    const s = toSession("", "run:a", view("dsh/sample-project/a", {
+      agent: "deepseek", state: "paused", tracked: true, resumable: true, activity: "idle", process_state: "exited", archive_id: null,
+      reply_id: "r1", attention_signature: "s1", shared_read: true, allowed_actions: ["resume", "rename"],
+      action_reasons: { archive: "No archive", terminate: "Use Pause", pause: "Not live" },
+    }));
+    expect(s).toMatchObject({
+      agent: "deepseek", cmd: "deepseek", state: "paused", tracked: true, resumable: true, activity: "idle", processState: "exited",
+      archiveId: undefined, replyId: "r1", attentionSignature: "s1", sharedRead: true, allowed: "resume rename",
+      archiveReason: "No archive", terminateReason: "Use Pause",
+    });
+    expect(Object.values(s).some((v) => typeof v === "object" && v !== null)).toBe(false);
+    expect(toSession("", "run:a", view("a", { allowed_actions: null })).allowed).toBeUndefined();
+    expect(toSession("", "run:a", view("a", { allowed_actions: [] })).allowed).toBe("");
+    expect(toSession("", "run:a", view("x/a", { agent: "sh" }))).toMatchObject({ agent: "claude", cmd: "sh" });
+  });
 });

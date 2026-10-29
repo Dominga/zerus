@@ -45,6 +45,7 @@ mod kimi_plan;
 mod kimi_trust;
 mod kimi_tui_choice;
 mod lifecycle;
+mod kimi_launch;
 mod provider_errors;
 mod recovery;
 mod service_worker;
@@ -104,6 +105,11 @@ mod worktree_maintenance;
 /// Read the selected account's native catalog without starting an agent.
 pub(crate) fn account_models(provider: &str, home: &std::path::Path) -> serde_json::Value {
     effort::account_models(provider, home)
+}
+
+/// Explicit native copy snapshot; no session is created or modified.
+pub(crate) fn download_snapshot(path: &str) -> Result<Value> {
+    computer_files::download_snapshot(path)
 }
 
 /// Current bounded native Git evidence for exact project/worktree placement.
@@ -283,6 +289,22 @@ pub(super) fn stdin_json() -> Result<Value> {
 
 pub(super) fn nonempty_env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
+}
+
+/// C6: a global setting only you change, from a process outside every agent
+/// session. It is the gate the team owner paths use: no caller record, no dsh
+/// conversation, no hgs session or run marker, and the request says it is you
+/// (`"by":"human"`). An agent that runs `hgs subagents-confirm set` or
+/// `hgs session-upload-block set` therefore changes nothing, whatever it pipes.
+pub(crate) fn owner_request(input: &Value, what: &str) -> Result<()> {
+    let (dsh, session, run) = teams::commands::caller_identities();
+    if session_graph::caller_record().is_some() || dsh.is_some() || session.is_some() || run.is_some() {
+        return Err(format!("An agent session cannot change {what}"));
+    }
+    if string(input, "by") != "human" {
+        return Err("Add \"by\":\"human\" to act as yourself".into());
+    }
+    Ok(())
 }
 
 pub(super) fn home() -> PathBuf {
@@ -812,6 +834,10 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     if args.first().map(String::as_str)==Some("repository-git-worker") { return repositories::git_worker(&args[1..]); }
     #[cfg(unix)]
     if args.first().map(String::as_str)==Some("worktree-request-worker") { return worktree_requests::worker(&args[1..]); }
+    // Settings this computer keeps for its hooks (U19, U22): a control console
+    // reads and changes them too.
+    if args.first().map(String::as_str)==Some("subagents-confirm") { return subagents_confirm::dispatch(&args[1..]); }
+    if args.first().map(String::as_str)==Some("session-upload-block") { return session_upload::dispatch(&args[1..]); }
     session_operations()?;
     let Some((command, args)) = args.split_first() else {
         return Err("missing state operation".into());
@@ -858,12 +884,6 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     }
     if command == "hook" {
         return hooks::hook();
-    }
-    if command == "subagents-confirm" {
-        return subagents_confirm::dispatch(args);
-    }
-    if command == "session-upload-block" {
-        return session_upload::dispatch(args);
     }
     if command == "answer-channel" {
         return answer_channel::run();
@@ -950,14 +970,17 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
             if after < 0 {
                 return Err("cursor must be nonnegative".into());
             }
-            println!(
-                "{}",
-                if let Some(id) = agent_id {
-                    subagents::inspection(name, id, archive_id)?
-                } else {
-                    journal::inspection(name, after, archive_id, include_processes)?
-                }
-            );
+            let mut inspection = if let Some(id) = agent_id {
+                subagents::inspection(name, id, archive_id)?
+            } else {
+                journal::inspection(name, after, archive_id, include_processes)?
+            };
+            // #569: this computer's refused private stores, with their fix;
+            // empty when none is refused.
+            if inspection.is_object() {
+                inspection["private_stores"] = json!(crate::private_stores::refused());
+            }
+            println!("{inspection}");
         }
         "archive" => {
             if args.len() != 1 {

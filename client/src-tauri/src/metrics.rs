@@ -98,7 +98,10 @@ pub fn summarize(pid: u32, first: &TreeSample, second: &TreeSample, elapsed: f64
     let mut total = Map::new();
     total.insert("processes".into(), json!(second.processes.len()));
     total.insert("rss_bytes".into(), json!(rss));
-    total.insert(extra_key(second.source).into(), json!(extra_known.then_some(extra)));
+    total.insert(
+        extra_key(second.source).into(),
+        json!(extra_known.then_some(extra)),
+    );
     total.insert("cpu_seconds".into(), json!(round3(cpu_seconds)));
     total.insert("cpu_percent".into(), json!(round3(cpu_percent)));
     json!({
@@ -130,7 +133,10 @@ pub fn role(root: u32, process: &ProcSample) -> &'static str {
         return "app";
     }
     let name = process.name.to_ascii_lowercase();
-    if name.contains("webcontent") || name.contains("webkitwebproces") || name.contains("webprocess") {
+    if name.contains("webcontent")
+        || name.contains("webkitwebproces")
+        || name.contains("webprocess")
+    {
         "web"
     } else if name.contains("network") {
         "network"
@@ -207,7 +213,11 @@ pub mod linux {
         let ppid = rest.get(1)?.parse().ok()?;
         let utime: u64 = rest.get(11)?.parse().ok()?;
         let stime: u64 = rest.get(12)?.parse().ok()?;
-        Some(Stat { name, ppid, cpu_ticks: utime + stime })
+        Some(Stat {
+            name,
+            ppid,
+            cpu_ticks: utime + stime,
+        })
     }
 
     /// The value in kB of `key` in a /proc status-like file, in bytes.
@@ -221,10 +231,22 @@ pub mod linux {
 
     fn parents() -> BTreeMap<u32, u32> {
         let mut parents = BTreeMap::new();
-        let Ok(entries) = fs::read_dir("/proc") else { return parents };
+        let Ok(entries) = fs::read_dir("/proc") else {
+            return parents;
+        };
         for entry in entries.flatten() {
-            let Some(pid) = entry.file_name().to_str().and_then(|name| name.parse::<u32>().ok()) else { continue };
-            if let Some(stat) = fs::read_to_string(format!("/proc/{pid}/stat")).ok().as_deref().and_then(parse_stat) {
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            if let Some(stat) = fs::read_to_string(format!("/proc/{pid}/stat"))
+                .ok()
+                .as_deref()
+                .and_then(parse_stat)
+            {
                 parents.insert(pid, stat.ppid);
             }
         }
@@ -234,7 +256,9 @@ pub mod linux {
     fn sample(pid: u32) -> Option<ProcSample> {
         let stat = parse_stat(&fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)?;
         let status = fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
-        let pss = fs::read_to_string(format!("/proc/{pid}/smaps_rollup")).ok().and_then(|text| kb_field(&text, "Pss"));
+        let pss = fs::read_to_string(format!("/proc/{pid}/smaps_rollup"))
+            .ok()
+            .and_then(|text| kb_field(&text, "Pss"));
         Some(ProcSample {
             pid,
             ppid: stat.ppid,
@@ -246,7 +270,8 @@ pub mod linux {
     }
 
     pub fn sample_tree(root: u32) -> Result<TreeSample, String> {
-        let root_sample = sample(root).ok_or_else(|| format!("process {root} is not readable in /proc"))?;
+        let root_sample =
+            sample(root).ok_or_else(|| format!("process {root} is not readable in /proc"))?;
         let mut processes = BTreeMap::new();
         processes.insert(root, root_sample);
         for pid in descendants(root, &parents()) {
@@ -258,7 +283,10 @@ pub mod linux {
                 processes.insert(pid, process);
             }
         }
-        Ok(TreeSample { source: "procfs", processes })
+        Ok(TreeSample {
+            source: "procfs",
+            processes,
+        })
     }
 }
 
@@ -330,7 +358,11 @@ pub mod macos {
             return Err("proc_listallpids failed".into());
         }
         pids.truncate(filled as usize);
-        Ok(pids.into_iter().filter(|&pid| pid > 0).map(|pid| pid as u32).collect())
+        Ok(pids
+            .into_iter()
+            .filter(|&pid| pid > 0)
+            .map(|pid| pid as u32)
+            .collect())
     }
 
     fn bsd_info(pid: u32) -> Option<libc::proc_bsdinfo> {
@@ -338,7 +370,13 @@ pub mod macos {
         let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
         let size = std::mem::size_of::<libc::proc_bsdinfo>() as c_int;
         let read = unsafe {
-            libc::proc_pidinfo(pid as c_int, libc::PROC_PIDTBSDINFO, 0, &mut info as *mut _ as *mut c_void, size)
+            libc::proc_pidinfo(
+                pid as c_int,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                &mut info as *mut _ as *mut c_void,
+                size,
+            )
         };
         (read == size).then_some(info)
     }
@@ -347,7 +385,11 @@ pub mod macos {
         // SAFETY: rusage_info_v2 is plain data written by proc_pid_rusage.
         let mut usage: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
         let result = unsafe {
-            libc::proc_pid_rusage(pid as c_int, libc::RUSAGE_INFO_V2, &mut usage as *mut _ as *mut libc::rusage_info_t)
+            libc::proc_pid_rusage(
+                pid as c_int,
+                libc::RUSAGE_INFO_V2,
+                &mut usage as *mut _ as *mut libc::rusage_info_t,
+            )
         };
         if result != 0 {
             return None;
@@ -364,8 +406,16 @@ pub mod macos {
     }
 
     fn name_of(info: &libc::proc_bsdinfo) -> String {
-        let raw = if info.pbi_name[0] != 0 { &info.pbi_name[..] } else { &info.pbi_comm[..] };
-        let bytes: Vec<u8> = raw.iter().take_while(|&&c| c != 0).map(|&c| c as u8).collect();
+        let raw = if info.pbi_name[0] != 0 {
+            &info.pbi_name[..]
+        } else {
+            &info.pbi_comm[..]
+        };
+        let bytes: Vec<u8> = raw
+            .iter()
+            .take_while(|&&c| c != 0)
+            .map(|&c| c as u8)
+            .collect();
         String::from_utf8_lossy(&bytes).into_owned()
     }
 
@@ -392,7 +442,9 @@ pub mod macos {
                 owned.extend(descendants(pid, &parents));
             }
         }
-        let root_info = infos.get(&root).ok_or_else(|| format!("process {root} is not visible to libproc"))?;
+        let root_info = infos
+            .get(&root)
+            .ok_or_else(|| format!("process {root} is not visible to libproc"))?;
         let mut processes = BTreeMap::new();
         let root_sample = sample(root, root_info.pbi_ppid, name_of(root_info))
             .ok_or_else(|| format!("proc_pid_rusage failed for {root}"))?;
@@ -407,7 +459,10 @@ pub mod macos {
                 }
             }
         }
-        Ok(TreeSample { source: "proc_pidinfo", processes })
+        Ok(TreeSample {
+            source: "proc_pidinfo",
+            processes,
+        })
     }
 }
 
@@ -445,11 +500,14 @@ pub mod ps {
         let mut parents = BTreeMap::new();
         for line in text.lines() {
             let mut fields = line.split_whitespace();
-            let (Some(pid), Some(ppid), Some(rss), Some(time)) = (fields.next(), fields.next(), fields.next(), fields.next())
+            let (Some(pid), Some(ppid), Some(rss), Some(time)) =
+                (fields.next(), fields.next(), fields.next(), fields.next())
             else {
                 continue;
             };
-            let (Ok(pid), Ok(ppid), Ok(rss)) = (pid.parse::<u32>(), ppid.parse::<u32>(), rss.parse::<u64>()) else {
+            let (Ok(pid), Ok(ppid), Ok(rss)) =
+                (pid.parse::<u32>(), ppid.parse::<u32>(), rss.parse::<u64>())
+            else {
                 continue;
             };
             let name = fields.collect::<Vec<_>>().join(" ");
@@ -457,14 +515,27 @@ pub mod ps {
             parents.insert(pid, ppid);
             all.insert(
                 pid,
-                ProcSample { pid, ppid, name, cpu_seconds: parse_time(time).unwrap_or(0.0), rss_bytes: rss * 1024, extra_bytes: None },
+                ProcSample {
+                    pid,
+                    ppid,
+                    name,
+                    cpu_seconds: parse_time(time).unwrap_or(0.0),
+                    rss_bytes: rss * 1024,
+                    extra_bytes: None,
+                },
             );
         }
         if !all.contains_key(&root) {
             return Err(format!("process {root} is not listed by ps"));
         }
-        let processes = descendants(root, &parents).into_iter().filter_map(|pid| all.remove(&pid).map(|p| (pid, p))).collect();
-        Ok(TreeSample { source: "ps", processes })
+        let processes = descendants(root, &parents)
+            .into_iter()
+            .filter_map(|pid| all.remove(&pid).map(|p| (pid, p)))
+            .collect();
+        Ok(TreeSample {
+            source: "ps",
+            processes,
+        })
     }
 }
 
@@ -473,12 +544,27 @@ mod tests {
     use super::*;
 
     fn process(pid: u32, ppid: u32, name: &str, cpu: f64, rss: u64) -> ProcSample {
-        ProcSample { pid, ppid, name: name.into(), cpu_seconds: cpu, rss_bytes: rss, extra_bytes: Some(rss / 2) }
+        ProcSample {
+            pid,
+            ppid,
+            name: name.into(),
+            cpu_seconds: cpu,
+            rss_bytes: rss,
+            extra_bytes: Some(rss / 2),
+        }
     }
 
     #[test]
     fn descendants_follow_parent_chains_only() {
-        let parents = BTreeMap::from([(1, 0), (10, 1), (11, 10), (12, 11), (20, 1), (21, 20), (30, 30)]);
+        let parents = BTreeMap::from([
+            (1, 0),
+            (10, 1),
+            (11, 10),
+            (12, 11),
+            (20, 1),
+            (21, 20),
+            (30, 30),
+        ]);
         assert_eq!(descendants(10, &parents), BTreeSet::from([10, 11, 12]));
         assert_eq!(descendants(30, &parents), BTreeSet::from([30]));
         assert_eq!(descendants(99, &parents), BTreeSet::from([99]));
@@ -488,9 +574,18 @@ mod tests {
     fn roles_come_from_process_names() {
         assert_eq!(role(5, &process(5, 1, "zerus-client", 0.0, 0)), "app");
         assert_eq!(role(5, &process(6, 5, "WebKitWebProces", 0.0, 0)), "web");
-        assert_eq!(role(5, &process(7, 1, "com.apple.WebKit.WebContent", 0.0, 0)), "web");
-        assert_eq!(role(5, &process(8, 5, "WebKitNetworkPr", 0.0, 0)), "network");
-        assert_eq!(role(5, &process(9, 1, "com.apple.WebKit.GPU", 0.0, 0)), "gpu");
+        assert_eq!(
+            role(5, &process(7, 1, "com.apple.WebKit.WebContent", 0.0, 0)),
+            "web"
+        );
+        assert_eq!(
+            role(5, &process(8, 5, "WebKitNetworkPr", 0.0, 0)),
+            "network"
+        );
+        assert_eq!(
+            role(5, &process(9, 1, "com.apple.WebKit.GPU", 0.0, 0)),
+            "gpu"
+        );
         assert_eq!(role(5, &process(10, 5, "bwrap", 0.0, 0)), "child");
     }
 
@@ -498,7 +593,10 @@ mod tests {
     fn summary_totals_and_cpu_percent_over_the_window() {
         let first = TreeSample {
             source: "procfs",
-            processes: BTreeMap::from([(5, process(5, 1, "app", 1.0, 100)), (6, process(6, 5, "WebKitWebProces", 2.0, 300))]),
+            processes: BTreeMap::from([
+                (5, process(5, 1, "app", 1.0, 100)),
+                (6, process(6, 5, "WebKitWebProces", 2.0, 300)),
+            ]),
         };
         let second = TreeSample {
             source: "procfs",
@@ -534,15 +632,28 @@ mod tests {
     fn stat_lines_with_parentheses_in_the_name_parse() {
         let line = "4242 (Web (Content) 2) S 4000 4242 4242 0 -1 4194560 100 0 0 0 250 50 0 0 20 0 9 0 12345 0 0";
         let stat = linux::parse_stat(line).unwrap();
-        assert_eq!(stat, linux::Stat { name: "Web (Content) 2".into(), ppid: 4000, cpu_ticks: 300 });
-        assert_eq!(linux::kb_field("Name:\tx\nVmRSS:\t  2048 kB\n", "VmRSS"), Some(2048 * 1024));
+        assert_eq!(
+            stat,
+            linux::Stat {
+                name: "Web (Content) 2".into(),
+                ppid: 4000,
+                cpu_ticks: 300
+            }
+        );
+        assert_eq!(
+            linux::kb_field("Name:\tx\nVmRSS:\t  2048 kB\n", "VmRSS"),
+            Some(2048 * 1024)
+        );
         assert_eq!(linux::kb_field("VmRSSX: 1 kB\n", "VmRSS"), None);
     }
 
     #[cfg(target_os = "linux")]
     #[test]
     fn own_process_tree_reports_rss_cpu_and_children() {
-        let mut child = std::process::Command::new("sleep").arg("5").spawn().expect("spawn sleep");
+        let mut child = std::process::Command::new("sleep")
+            .arg("5")
+            .spawn()
+            .expect("spawn sleep");
         // Keep this thread busy for part of the window so the app's CPU is measurable.
         let busy = std::thread::spawn(|| {
             let until = Instant::now() + Duration::from_millis(150);
@@ -557,13 +668,24 @@ mod tests {
         let _ = child.kill();
         let _ = child.wait();
         assert_eq!(value["source"], "procfs", "{value}");
-        assert!(value["total"]["rss_bytes"].as_u64().unwrap() > 1 << 20, "{value}");
+        assert!(
+            value["total"]["rss_bytes"].as_u64().unwrap() > 1 << 20,
+            "{value}"
+        );
         assert!(value["total"]["pss_bytes"].as_u64().unwrap() > 0, "{value}");
         let processes = value["processes"].as_array().unwrap();
-        let app = processes.iter().find(|p| p["role"] == "app").expect("app row");
+        let app = processes
+            .iter()
+            .find(|p| p["role"] == "app")
+            .expect("app row");
         assert_eq!(app["pid"], std::process::id());
         assert!(app["cpu_percent"].as_f64().unwrap() > 5.0, "{value}");
-        assert!(processes.iter().any(|p| p["pid"] == child.id() && p["name"] == "sleep" && p["role"] == "child"), "{value}");
+        assert!(
+            processes
+                .iter()
+                .any(|p| p["pid"] == child.id() && p["name"] == "sleep" && p["role"] == "child"),
+            "{value}"
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -580,6 +702,9 @@ mod tests {
         let value = process_tree_metrics_over(std::process::id(), Duration::from_millis(100));
         assert_eq!(value["source"], "proc_pidinfo", "{value}");
         assert!(value["total"]["rss_bytes"].as_u64().unwrap() > 0, "{value}");
-        assert!(value["total"]["footprint_bytes"].as_u64().unwrap() > 0, "{value}");
+        assert!(
+            value["total"]["footprint_bytes"].as_u64().unwrap() > 0,
+            "{value}"
+        );
     }
 }

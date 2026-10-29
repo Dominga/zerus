@@ -129,7 +129,8 @@ struct Store {
 impl Store {
     fn open_at(directory: &Path) -> Result<Self> {
         private_dir(directory)?;
-        if !crate::platform::verify_private(directory, crate::platform::Private::Directory)
+        // #569: made private again when only too open, else reported.
+        if !crate::private_stores::ensure(directory, crate::platform::Private::Directory)
             .map_err(err)?
         {
             return Err("Voice storage must be private to this user".into());

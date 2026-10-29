@@ -81,7 +81,46 @@ def reverse_reviewed_patch(name, source, fixture, fixture_sha):
     return source
 
 
+def reverse_fork_presentation(name, source):
+    """Remove only three reviewed cooperative presentation additions; keep policy pins.
+
+    No question policy, verification writer or send admission is projected out.
+    Requiring each exact replacement once makes drift/duplicate additions fail.
+    """
+    if name != "MainActivity.kt":
+        return source
+    edits = (
+        ('    val cooperative = ConversationSource.cooperative(model.activity ?: session.raw)\n', ''),
+        ('placeholder = if(cooperative) "Queue instruction" else "Message"', 'placeholder = "Message"'),
+        ('if(cooperative) "Queue instruction for external agent" else "Send message"', '"Send message"'),
+    )
+    for current, original in edits:
+        if source.count(current) != 1:
+            raise AssertionError("reviewed fork presentation hunk is missing, changed or duplicated")
+        source = source.replace(current, original, 1)
+    return source
+
+
+def reverse_host_state_presentation(name, source):
+    """Reverse exact U30 badge/preview additions without moving any policy pin."""
+    if name != "MainActivity.kt":
+        return source
+    edits = (
+        ('                    DesktopBadgeKind.Working, DesktopBadgeKind.Background, DesktopBadgeKind.Building -> Box(Modifier.size(5.dp).background(Color(colors.foreground), CircleShape))\n', '                    DesktopBadgeKind.Working, DesktopBadgeKind.Background -> Box(Modifier.size(5.dp).background(Color(colors.foreground), CircleShape))\n'),
+        ('                    DesktopBadgeKind.Scheduled, DesktopBadgeKind.Waiting, DesktopBadgeKind.Deps -> Icon(Icons.Default.Schedule, null, Modifier.size(12.dp), tint = Color(colors.foreground))\n                    DesktopBadgeKind.Cooling, DesktopBadgeKind.Cold -> Box(Modifier.size(5.dp).background(Color(colors.foreground), CircleShape))\n', '                    DesktopBadgeKind.Scheduled, DesktopBadgeKind.Waiting -> Icon(Icons.Default.Schedule, null, Modifier.size(12.dp), tint = Color(colors.foreground))\n'),
+        ('                    maxLines=if(badge.kind in setOf(DesktopBadgeKind.Waiting, DesktopBadgeKind.Deps, DesktopBadgeKind.Cooling, DesktopBadgeKind.Cold)) 1 else Int.MAX_VALUE,\n                    overflow=if(badge.kind in setOf(DesktopBadgeKind.Waiting, DesktopBadgeKind.Deps, DesktopBadgeKind.Cooling, DesktopBadgeKind.Cold)) TextOverflow.Ellipsis else TextOverflow.Clip)\n', '                    maxLines=if(badge.kind==DesktopBadgeKind.Waiting) 1 else Int.MAX_VALUE,\n                    overflow=if(badge.kind==DesktopBadgeKind.Waiting) TextOverflow.Ellipsis else TextOverflow.Clip)\n'),
+        ('                        if (SessionStateContract.hasHostState(session.raw) || !online) {\n                            // U30: line 3 names what waits, how warm the cache is, or who stopped it.\n                            SessionStateLine(session, online, onNew = { sessionActions = session },\n                                onResume = { model.open(session, preserveProject = true) })\n                        } else Text(if(online && SessionFilters.waitingIdle(session)) SessionFilters.waitingLabel(session) else session.preview.ifBlank { "Open to view activity" }, maxLines = 2, overflow = TextOverflow.Ellipsis, color = Muted, style = MaterialTheme.typography.bodyMedium, lineHeight = 20.sp)\n', '                        Text(if(online && SessionFilters.waitingIdle(session)) SessionFilters.waitingLabel(session) else session.preview.ifBlank { "Open to view activity" }, maxLines = 2, overflow = TextOverflow.Ellipsis, color = Muted, style = MaterialTheme.typography.bodyMedium, lineHeight = 20.sp)\n'),
+    )
+    for current, original in edits:
+        if source.count(current) != 1:
+            raise AssertionError("reviewed host-state presentation hunk is missing, changed or duplicated")
+        source = source.replace(current, original, 1)
+    return source
+
+
 def reverse_reviewed_updates(name, source):
+    source = reverse_fork_presentation(name, source)
+    source = reverse_host_state_presentation(name, source)
     source = reverse_reviewed_patch(name, source, VISIBLE_REFRESH_UPDATES, VISIBLE_REFRESH_UPDATES_SHA)
     source = reverse_reviewed_patch(name, source, TASK_TRACKER_UPDATES, TASK_TRACKER_UPDATES_SHA)
     source = reverse_reviewed_patch(name, source, WORKSPACE_UPDATES, WORKSPACE_UPDATES_SHA)
@@ -101,16 +140,44 @@ def original_source(name, source):
 
 
 class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
+    def test_host_state_projection_refuses_changed_or_duplicate_presentation(self):
+        source = (MAIN / "MainActivity.kt").read_text()
+        for expression in ("DesktopBadgeKind.Building", "DesktopBadgeKind.Cooling, DesktopBadgeKind.Cold",
+                           "SessionStateLine(session, online, onNew = { sessionActions = session }"):
+            with self.subTest(expression=expression):
+                self.assertIn(expression, source)
+                self.assertFalse(original_source("MainActivity.kt", source.replace(expression, "changed", 1)))
+        line = "                    DesktopBadgeKind.Cooling, DesktopBadgeKind.Cold -> Box(Modifier.size(5.dp).background(Color(colors.foreground), CircleShape))\n"
+        self.assertFalse(original_source("MainActivity.kt", source.replace(line, line + line, 1)))
+
     def test_workspace_projection_matches_reviewed_current_main_exactly(self):
         for name, digest in WORKSPACE_BASE_SHA.items():
             with self.subTest(source=name):
-                current = reverse_reviewed_patch(name, (MAIN / name).read_text(),
+                current = reverse_reviewed_patch(name, reverse_host_state_presentation(name, reverse_fork_presentation(name, (MAIN / name).read_text())),
                                                 VISIBLE_REFRESH_UPDATES, VISIBLE_REFRESH_UPDATES_SHA)
                 current = reverse_reviewed_patch(name, current,
                                                 TASK_TRACKER_UPDATES, TASK_TRACKER_UPDATES_SHA)
                 projected = reverse_reviewed_patch(name, current,
                                                   WORKSPACE_UPDATES, WORKSPACE_UPDATES_SHA)
                 self.assertEqual(hashlib.sha256(projected.encode()).hexdigest(), digest)
+
+    def test_upstream_default_relay_is_pinned_and_not_projected_out(self):
+        source = (MAIN / "MainActivity.kt").read_text()
+        baseline = 'mutableStateOf("https://relay.zerus.dev")'
+        self.assertEqual(source.count(baseline), 1)
+        self.assertFalse(original_source("MainActivity.kt", source.replace(baseline, 'mutableStateOf("")', 1)))
+        self.assertFalse(original_source("MainActivity.kt", source.replace(baseline, baseline + baseline, 1)))
+
+    def test_fork_projection_is_exact_and_does_not_hide_question_policy_changes(self):
+        source=(MAIN / "MainActivity.kt").read_text()
+        for old,new in [('ConversationSource.cooperative(model.activity ?: session.raw)','true'),
+                        ('"Queue instruction"','"Send silently"'),
+                        ('model.activityVerified || model.demo','true')]:
+            with self.subTest(change=old):
+                self.assertIn(old,source)
+                self.assertFalse(original_source("MainActivity.kt",source.replace(old,new,1)))
+        changed=source+"\n    val cooperative = ConversationSource.cooperative(model.activity ?: session.raw)\n"
+        self.assertFalse(original_source("MainActivity.kt",changed))
 
     def test_original_model_and_main_reconstruct_including_every_policy_and_assignment(self):
         for name, digest in [("ZerusViewModel.kt", MODEL_SHA), ("MainActivity.kt", MAIN_SHA)]:

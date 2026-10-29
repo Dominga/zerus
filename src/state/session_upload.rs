@@ -141,12 +141,6 @@ pub(crate) fn uploaded_after(records: &[Value], since_seconds: f64) -> bool {
     records.iter().any(|record| is_acceptance(record) && record["time"].as_f64().is_some_and(|time| time >= since_ms))
 }
 
-/// A session still uploads when any record is the plugin's acceptance event.
-#[cfg(test)]
-pub(crate) fn uploading(records: &[Value]) -> bool {
-    records.iter().any(is_acceptance)
-}
-
 /// `hgs session-upload-block get|set --json`.
 pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
     if args.len() != 2 || args[1] != "--json" {
@@ -154,18 +148,23 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
     }
     match args[0].as_str() {
         "get" => println!("{}", json!({"block":block()})),
-        "set" => {
-            let input: Value = stdin_json()?;
-            if !super::teams::store::canonical_uuid(string(&input, "request_id")) {
-                return Err("A canonical request_id is required".into());
-            }
-            let value = input["block"].as_bool().ok_or("block is true or false")?;
-            write(value)?;
-            println!("{}", json!({"block":value}));
-        }
+        "set" => println!("{}", set(&stdin_json()?)?),
         other => return Err(format!("Unknown session-upload-block operation {other}")),
     }
     Ok(0)
+}
+
+/// C6: the setting changes only on your own command, with `"by":"human"`, from
+/// a process outside every agent session (the gate the team owner paths use).
+/// Otherwise any agent would turn the upload block off for every later host.
+fn set(input: &Value) -> Result<Value> {
+    owner_request(input, "the DeepSeek session-log upload block")?;
+    if !super::teams::store::canonical_uuid(string(input, "request_id")) {
+        return Err("A canonical request_id is required".into());
+    }
+    let value = input["block"].as_bool().ok_or("block is true or false")?;
+    write(value)?;
+    Ok(json!({"block":value}))
 }
 
 #[cfg(test)]
@@ -189,11 +188,39 @@ mod tests {
         }
     }
 
+    /// C6: only the owner turns the block off. Any agent session is refused,
+    /// so no agent can lift the upload block for every later dsh host; the
+    /// stored value never moves.
+    #[test]
+    fn only_the_owner_changes_the_session_upload_block() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let request = "11111111-1111-4111-8111-111111111111";
+            for identities in [
+                (Some("conversation".to_owned()), None, None),
+                (None, Some("hgs/x/dev".to_owned()), None),
+                (None, None, Some("run-1".to_owned())),
+            ] {
+                crate::state::teams::commands::set_test_caller_identities(Some(identities));
+                let error = set(&json!({"request_id":request,"block":false,"by":"human"})).unwrap_err();
+                assert!(error.contains("An agent session cannot change"), "{error}");
+                assert!(block(), "a refused change wrote nothing");
+            }
+            crate::state::teams::commands::set_test_caller_identities(Some((None, None, None)));
+            let error = set(&json!({"request_id":request,"block":false})).unwrap_err();
+            assert!(error.contains("by"), "{error}");
+            assert_eq!(set(&json!({"request_id":request,"block":false,"by":"human"})).unwrap(), json!({"block":false}));
+            assert!(!block());
+            assert_eq!(set(&json!({"request_id":request,"block":true,"by":"human"})).unwrap(), json!({"block":true}));
+            assert!(block());
+        });
+    }
+
     #[test]
     fn a_recorded_session_with_an_acceptance_event_still_uploads() {
-        let clean = vec![json!({"type":"session-log-deepseek/delivery-accepted"})];
-        assert!(uploading(&clean));
-        assert!(!uploading(&[json!({"type":"user"}), json!({"type":"assistant"})]));
+        let clean = vec![json!({"type":"session-log-deepseek/delivery-accepted","time":2_000_500.0})];
+        assert!(uploaded_after(&clean, 1_500.0));
+        assert!(!uploaded_after(&[json!({"type":"user"}), json!({"type":"assistant"})], 0.0));
         assert!(overlay_row()["insert"][0]["config"]["enabled"] == false);
     }
 

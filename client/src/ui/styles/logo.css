@@ -22,8 +22,6 @@
 
   /* Strong spin-up: three turns, a faster peak and a longer coast. */
   .zlogo[data-motion="turbine"][data-running="1"] .zl-mark { animation: zl-turbine 3s infinite; }
-
-  .zlogo[data-paused="1"] * { animation-play-state: paused !important; }
 }
 
 @keyframes zl-clock { to { opacity: 0; } }
@@ -51,8 +49,3 @@
   63.333% { transform: rotate(1088deg); animation-timing-function: cubic-bezier(.45, 0, .55, 1); }
   73.333%, 100% { transform: rotate(1080deg); }
 }
-
-@media (prefers-reduced-motion: reduce) {
-  .zlogo, .zlogo * { animation: none !important; transition: none; }
-}
-:root[data-reduce-motion="1"] .zlogo, :root[data-reduce-motion="1"] .zlogo * { animation: none !important; transition: none; }

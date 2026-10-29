@@ -20,6 +20,8 @@
 #include "AttentionTracker.h"
 #include "AttentionNotifier.h"
 #include "ApplicationBadge.h"
+#include "PrivateStoreNotices.h"
+#include <QSettings>
 
 class SessionsWindow;
 class SwarmWorkerSupervisor;
@@ -54,6 +56,9 @@ private slots:
 private:
     void refreshIcon();
     void observeAttention(const QString &host, const BoxState &box);
+    // WhiteWh fork, #569: a refused private store, once per (computer, path, reason).
+    void observePrivateStores(const QString &host, const BoxState &box);
+    PrivateStoreNotices m_privateStores{QSettings().value(QStringLiteral("privateStores/notified")).toStringList()};
     void migrateReadMarks(const QString &host);
     void publishReadMarks();
     void warmCaches(const QString &host, const BoxState &box);
@@ -130,6 +135,8 @@ private:
     QString m_localReadError;
     ReadState m_appliedReadState;
     SessionsWindow *m_sessionsWindow = nullptr;
+    // N32 of #499: team attention notifications until the window exists.
+    class TeamAttentionWatch *m_teamWatch = nullptr;
     // Records desktop activity for phone alerts; see DesktopPresence.h.
     std::unique_ptr<DesktopPresence> m_presence;
     class EventStreams *m_streams = nullptr;

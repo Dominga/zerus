@@ -1484,12 +1484,22 @@ mod tests {
         let (result, ()) = future::join(engine.requests(), stopping).await;
         result.unwrap();
         let (claims, results, gaps) = server.join().unwrap();
+        // Two requests executed once each; a Windows gateway inspects first.
         assert_eq!(
             (claims, results, f.connector.native.calls.borrow().len()),
-            (4, 2, 2)
+            (4, 2, 2 * DISPATCH_CALLS)
         );
         assert_eq!(gaps.len(), 2);
-        assert!(gaps.iter().all(|gap| *gap < Duration::from_millis(200)), "queued reads must claim promptly after a flushed result, without a quarter-second success sleep: {gaps:?}");
+        // A fresh TCP connection per claim takes up to a few hundred ms on a
+        // loaded Windows runner (219 and 363 ms seen with no sleep at all), so
+        // the quarter-second pacing is told apart only off Windows; there, a
+        // gap under a second still rules out the retry waits.
+        let prompt = if cfg!(windows) {
+            Duration::from_secs(1)
+        } else {
+            Duration::from_millis(200)
+        };
+        assert!(gaps.iter().all(|gap| *gap < prompt), "queued reads must claim promptly after a flushed result, without a quarter-second success sleep: {gaps:?}");
         assert!(f.connector.journal.encrypted_pending().unwrap().is_empty());
     }
     #[tokio::test]

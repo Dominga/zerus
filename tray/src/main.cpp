@@ -27,6 +27,7 @@
 #include "HgsClient.h"
 #include "MainThreadWatchdog.h"
 #include "SettingsJson.h"
+#include "WorkspaceSkin.h"
 #include "TrayAgent.h"
 #include "WorkspaceStyle.h"
 #include "WorkspaceFocus.h"
@@ -426,6 +427,7 @@ int main(int argc, char *argv[])
     // Nothing is shown yet: parse the saved JSON values the tray and its windows
     // read first, so the GUI thread finds them parsed (SettingsJson.h).
     SettingsJson::preload(TrayAgent::jsonSettings());
+    WorkspaceSkin::preload();
     // KSNI derives its persistent tray ID from the initial display name. Rename
     // the UI only after constructing the icon to preserve Plasma's visibility setting.
     TrayAgent agent(cfg);

@@ -420,7 +420,10 @@ fn inherited_upstream(read: &dyn Fn(&[&str]) -> Result<String>, base: &str) -> O
 /// confines: on Windows its write grant needs WRITE_DAC and WRITE_OWNER, which
 /// a folder on a second drive does not inherit. Only the folder this call
 /// created is changed, and a failure is a member error, never a silent skip.
-/// Other systems have nothing to grant.
+/// N9: the grant is made only when the caller asks for it (a dsh member); every
+/// other worktree, including the desktop's for Claude or Codex, is left as it
+/// is, so a share or a file system without ACL support cannot turn a created
+/// worktree into a failed create. Other systems have nothing to grant.
 #[cfg(windows)]
 fn grant_for_sandbox(folder: &Path) -> Result<()> {
     crate::platform::grant_full_control(folder).map_err(|error| {
@@ -434,6 +437,28 @@ fn grant_for_sandbox(_: &Path) -> Result<()> {
     Ok(())
 }
 
+// N9: records the folders a test asked a grant for, so the scope is testable.
+#[cfg(test)]
+thread_local! {
+    static SANDBOX_GRANTS: std::cell::RefCell<Vec<std::path::PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+pub(super) fn granted_worktrees() -> Vec<std::path::PathBuf> {
+    SANDBOX_GRANTS.with(|grants| std::mem::take(&mut *grants.borrow_mut()))
+}
+
+/// N9: the grant a `--sandbox` caller asks for, and nothing for any other
+/// worktree.
+fn grant_if_requested(sandbox: bool, folder: &Path) -> Result<()> {
+    if !sandbox {
+        return Ok(());
+    }
+    #[cfg(test)]
+    SANDBOX_GRANTS.with(|grants| grants.borrow_mut().push(folder.to_path_buf()));
+    grant_for_sandbox(folder)
+}
+
 pub(super) fn create(args: &[String]) -> Result<Value> {
     let mobile = args.iter().any(|value| value == "--mobile");
     let _signals = mobile.then(MobileSignals::install);
@@ -442,9 +467,12 @@ pub(super) fn create(args: &[String]) -> Result<Value> {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--json" | "--mobile" | "--clone" => {
+            "--json" | "--mobile" | "--clone" | "--sandbox" => {
                 if args[i] == "--clone" {
                     options.insert("--clone", "true");
+                }
+                if args[i] == "--sandbox" {
+                    options.insert("--sandbox", "true");
                 }
             }
             key @ ("--path" | "--destination" | "--branch" | "--base" | "--common-dir" | "--request-id") => {
@@ -455,7 +483,7 @@ pub(super) fn create(args: &[String]) -> Result<Value> {
                 }
                 if options.insert(key, value.as_str()).is_some() { return Err(format!("duplicate {key}")); }
             }
-            _ => return Err("usage: hgs worktrees create --path REPO --destination FOLDER --branch NEW_BRANCH [--base HEAD] [--json]".into()),
+            _ => return Err("usage: hgs worktrees create --path REPO --destination FOLDER --branch NEW_BRANCH [--base HEAD] [--clone] [--sandbox] [--json]".into()),
         }
         i += 1;
     }
@@ -551,6 +579,8 @@ pub(super) fn create(args: &[String]) -> Result<Value> {
     if mobile_stopped() || Instant::now() >= total_deadline { return Err("Worktree creation cancelled before checkout".into()); }
     super::worktree_requests::reserve_checkout()?;
     fs::create_dir(&destination).map_err(|e| format!("Cannot reserve destination: {e}"))?;
+    // N9: only a folder made for a sandboxed member is granted to it.
+    let sandbox = options.contains_key("--sandbox");
     if options.contains_key("--clone") {
         // B4/F10: a full clone with its own .git, so commit, merge and fetch
         // work inside a sandboxed member's folder. Never a worktree.
@@ -566,7 +596,7 @@ pub(super) fn create(args: &[String]) -> Result<Value> {
         if String::from_utf8_lossy(&actual_branch).trim_end_matches('\n') != reference {
             return Err("Clone creation could not be confirmed. Inspect the destination before retrying.".into());
         }
-        grant_for_sandbox(&destination)?;
+        grant_if_requested(sandbox, &destination)?;
         let upstream = upstream.map(|(remote, merge)| format!("{remote}/{}", merge.strip_prefix("refs/heads/").unwrap_or(&merge)));
         return Ok(json!({"status":"created", "path":destination, "branch":branch, "base":base, "head":head,
             "upstream":upstream, "clone":true, "request_id":options.get("--request-id"),
@@ -609,7 +639,7 @@ pub(super) fn create(args: &[String]) -> Result<Value> {
                 .into(),
         );
     }
-    grant_for_sandbox(&destination)?;
+    grant_if_requested(sandbox, &destination)?;
     // Best effort: the checkout exists either way, and a missing upstream only
     // leaves publication unverified. Never keep half of the tracking pair.
     let upstream = upstream.filter(|(remote, merge)| {
@@ -630,4 +660,22 @@ pub(super) fn create(args: &[String]) -> Result<Value> {
         "managed_cleanup":managed.is_ok(), "cleanup_note":managed.err(),
         "machine":crate::config::Config::load().map_err(|e|e.to_string())?.host()}),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// N9: the sandbox grant is made only when the caller asks for it; every
+    /// other worktree is created without touching its ACLs.
+    #[test]
+    fn only_a_sandboxed_worktree_asks_for_the_grant() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("member");
+        std::fs::create_dir(&folder).unwrap();
+        grant_if_requested(false, &folder).unwrap();
+        assert!(granted_worktrees().is_empty(), "a Codex or Claude worktree is never granted");
+        grant_if_requested(true, &folder).unwrap();
+        assert_eq!(granted_worktrees(), vec![folder.clone()], "a dsh member's folder is");
+    }
 }

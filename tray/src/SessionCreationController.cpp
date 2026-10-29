@@ -157,7 +157,7 @@ SessionCreationController::SessionCreationController(const QString &hgs,QObject 
         persist(id,[this,id]{
             const auto v=operation(id);if(v.value("stop_requested").toBool())return failed(id,tr("Creation stopped before checkout."));
             flight("create",m_client.createWorktree(v.value("host").toString(),v.value("target").toString(),v.value("worktree_common").toString(),
-                v.value("branch").toString(),"HEAD",v.value("destination").toString(),v.value("worktree_id").toString(),v.value("worktree_receipts").toBool(),v.value("expected_machine").toString()),id);
+                v.value("branch").toString(),"HEAD",v.value("destination").toString(),v.value("worktree_id").toString(),v.value("worktree_receipts").toBool(),v.value("expected_machine").toString(),v.value("cmd").toString()=="dsh"),id);
         });
     });
     connect(&m_client,&HgsClient::worktreesFailed,this,[this](quint64 request,const QString &,const QString &,const QString &error){

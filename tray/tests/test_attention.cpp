@@ -15,10 +15,12 @@ QJsonObject sharedPreferences(const QString &conversation, bool muted, qint64 re
 #include "FleetState.h"
 #include "SessionPresentation.h"
 #include "SessionNotifications.h"
+#include "PrivateStoreNotices.h"
 
 class TestAttention : public QObject {
     Q_OBJECT
 private slots:
+    void privateStoreNoticeIsRaisedOnceUntilResolved();
     void edgesOfflineRestartAndIdentity();
     void countsOnlyActionableFreshSessions();
     void providerErrorNotifiesOnceAndClearsWhenResumed();
@@ -1040,4 +1042,43 @@ void TestAttention::nativeRequestIdentityIgnoresMetadataTimeChanges()
 }
 
 QTEST_APPLESS_MAIN(TestAttention)
+// #569: a refused private store reaches the desktop once per (computer, path,
+// reason) with its fix, and again only after it was resolved and came back.
+void TestAttention::privateStoreNoticeIsRaisedOnceUntilResolved()
+{
+    const QJsonObject store{{"path", "C:\\Users\\u\\.local\\state\\hgs\\sessions\\read-marks.json"}, {"kind", "file"},
+        {"reason", "it is owned by NT SERVICE\\TrustedInstaller (S-1-5-80-1)"},
+        {"fix", "takeown /f \"C:\\Users\\u\\.local\\state\\hgs\\sessions\\read-marks.json\" && icacls \"C:\\Users\\u\\.local\\state\\hgs\\sessions\\read-marks.json\" /inheritance:r /grant:r \"%USERNAME%:F\""},
+        {"source", "check"}, {"at", 1}};
+    // The listing carries it.
+    const auto box = HgsClient::box(QJsonObject{{"host", "msi"}, {"ok", true}, {"sessions", QJsonArray{}}, {"private_stores", QJsonArray{store}}});
+    QCOMPARE(box.privateStores, QJsonArray{store});
+    QVERIFY(HgsClient::box(QJsonObject{{"host", "msi"}, {"ok", true}, {"sessions", QJsonArray{}}}).privateStores.isEmpty());
+
+    PrivateStoreNotices notices;
+    auto raised = notices.observe({}, "msi", true, box.privateStores);
+    QCOMPARE(raised.size(), 1);
+    QCOMPARE(raised[0].title, QString("Zerus: a private store is refused"));
+    QVERIFY(raised[0].body.startsWith("msi: C:\\Users\\u\\.local\\state\\hgs\\sessions\\read-marks.json\n"));
+    QVERIFY(raised[0].body.contains("\nFix: takeown /f "));
+    QVERIFY(raised[0].body.contains("/inheritance:r /grant:r \"%USERNAME%:F\""));
+    // Once: later listings, an offline answer and a restart raise nothing.
+    QVERIFY(notices.observe({}, "msi", true, box.privateStores).isEmpty());
+    QVERIFY(notices.observe({}, "msi", false, {}).isEmpty());
+    PrivateStoreNotices restarted(notices.known());
+    QVERIFY(restarted.observe({}, "msi", true, box.privateStores).isEmpty());
+    // Another computer's store is its own notice.
+    QCOMPARE(restarted.observe("mac", "mac", true, box.privateStores).size(), 1);
+    // A different reason for the same store is new.
+    auto widened = store; widened["reason"] = "a write failed: Access is denied. (os error 5)";
+    QCOMPARE(restarted.observe({}, "msi", true, QJsonArray{widened}).size(), 1);
+    // Resolved, then refused again: raised again.
+    QVERIFY(restarted.observe({}, "msi", true, {}).isEmpty());
+    for (const auto &key : restarted.known()) QVERIFY2(!key.startsWith(QLatin1Char(10)), qPrintable(key));   // this computer's are gone
+    QCOMPARE(restarted.observe({}, "msi", true, QJsonArray{store}).size(), 1);
+    // A removed computer is forgotten.
+    restarted.forget("mac");
+    QCOMPARE(restarted.observe("mac", "mac", true, box.privateStores).size(), 1);
+}
+
 #include "test_attention.moc"

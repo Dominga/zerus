@@ -48,6 +48,7 @@ class DeepSeekScopedRecovery(dsh_fixtures.DeepSeekScopedActions):
     def setUp(self):
         super().setUp()
         self.replace_binding=False
+        self.rows_supported=True
         self.job={'id':str(uuid.uuid4()),'name':self.name,'state':'waiting',
                   'identity':['run','session-synthetic','native-model','native-dsh','fixture-generation'],
                   'attempt':1,'due_at':time.time()+500,'not_before':time.time()+100,'history':[]}
@@ -64,7 +65,11 @@ class DeepSeekScopedRecovery(dsh_fixtures.DeepSeekScopedActions):
                 if request['method']=='inspect':
                     value={'generation':'fixture-generation','live':True,'selection':{'provider':'synthetic','model':'native-model'},'page':{'records':[],'hasMore':False}}
                     if self.replace_binding:self.binding.write_text(json.dumps({**self.record,'run_id':'replacement'}))
-                elif request['method']=='list':value={'items':[{'sessionId':'session-synthetic','agentAvailable':True,'running':False}]}
+                elif request['method']=='rows' and not self.rows_supported:
+                    client.sendall((json.dumps({'ok':False,'error':'Unsupported HGS native request'})+'\n').encode())
+                    continue
+                elif request['method'] in ('rows','list'):
+                    value={'generation':'fixture-generation','items':[{'sessionId':'session-synthetic','agentAvailable':True,'running':False}]}
                 elif request['method']=='ping':value={'generation':'fixture-generation','sessionActions':True}
                 else:value={}
                 client.sendall((json.dumps({'ok':True,'value':value})+'\n').encode())
@@ -77,7 +82,21 @@ class DeepSeekScopedRecovery(dsh_fixtures.DeepSeekScopedActions):
         result=self.recovery();self.assertEqual(result['status'],'scheduled',result)
         self.assertGreaterEqual(result['recovery']['due_at'],self.job['not_before'])
         self.assertEqual(result['recovery']['identity'],self.job['identity'])
-        self.assertTrue(set(call['method'] for call in self.calls)<={'inspect','list','ping','catalog'})
+        methods={call['method'] for call in self.calls}
+        self.assertTrue(methods<={'inspect','rows','ping','catalog'}, methods)
+        rows=[call for call in self.calls if call['method']=='rows']
+        self.assertTrue(rows, 'The fork must read only the selected session, not list the whole store')
+        self.assertTrue(all(call['params']=={'sessionIds':['session-synthetic']} for call in rows))
+        self.assertFalse(any(call['params'].get('includeProcesses',False) for call in self.calls))
+    def test_older_adapter_falls_back_to_read_only_list_without_native_mutations(self):
+        self.rows_supported=False
+        result=self.recovery();self.assertEqual(result['status'],'scheduled',result)
+        methods=[call['method'] for call in self.calls]
+        self.assertIn('rows',methods);self.assertIn('list',methods)
+        self.assertLess(methods.index('rows'),methods.index('list'))
+        self.assertTrue(set(methods)<={'inspect','rows','list','ping','catalog'}, methods)
+        self.assertEqual(result['recovery']['identity'],self.job['identity'])
+        self.assertGreaterEqual(result['recovery']['due_at'],self.job['not_before'])
     def test_binding_replacement_during_normalized_inspection_rejects_before_edit(self):
         self.replace_binding=True
         self.assertEqual(self.recovery()['status'],'failed')

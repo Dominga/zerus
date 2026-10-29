@@ -667,6 +667,111 @@ class OpenCodeNative(unittest.TestCase):
         self.assertEqual([s['id'] for s in sessions['data'] if s.get('title') == lost_tag], [lost_id])
         self.assertEqual(self.hgs(['inspect', 'opencode/workspace/' + lost_tag])['phase'], 'idle')
 
+    def external_conversation(self):
+        """Create a fixture through the native API, not through a Zerus launch."""
+        self.ready_account()
+        conversation = 'ses_' + native_suffix()
+        body = {'id': conversation, 'location': {'directory': os.path.realpath(self.workspace)},
+                'title': 'Existing native title', 'metadata': {'owner_fixture': 'keep-this'},
+                'model': {'providerID': 'fixture', 'id': 'local'}}
+        status, answer = self.api('POST', '/api/session', body)
+        self.assertIn(status, (200, 201), answer)
+        return conversation
+
+    def binding_request(self, conversation, **extra):
+        return {'schema_version': 1, 'request_id': str(uuid.uuid4()),
+                'name': 'opencode/workspace/adopt-' + uuid.uuid4().hex[:8],
+                'conversation_id': conversation, 'directory': os.path.realpath(self.workspace),
+                'agent_home': str(self.root / 'xdg-config/opencode'), 'preview': True, **extra}
+
+    def bind_existing(self, request, success=True):
+        return self.hgs(['account', 'bind-existing', 'native-opencode', '--json'], request, success=success)
+
+    def test_30_existing_preview_bind_reopen_preserves_native_history(self):
+        conversation = self.external_conversation()
+        message = 'msg_' + native_suffix()
+        status, reply = self.api('POST', f'/api/session/{conversation}/prompt',
+                                 {'id': message, 'text': 'Before Zerus binding', 'delivery': 'queue'})
+        self.assertIn(status, (200, 202), reply)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            _, page = self.api('GET', f'/api/session/{conversation}/message?limit=100')
+            if (any(m.get('type') == 'assistant' and m.get('time', {}).get('completed')
+                    and any(c.get('text') == 'Native OpenCode reply' for c in m.get('content', []))
+                    for m in page['data']) and any(m.get('type') == 'idle' for m in page['data'])):
+                break
+            time.sleep(.1)
+        else:
+            self.fail('The native fixture did not finish its pre-binding reply')
+        native_before = self.session(conversation)
+        messages_before = self.api('GET', f'/api/session/{conversation}/message?limit=100')[1]
+        registration = self.registration()
+        request = self.binding_request(conversation)
+        preview = self.bind_existing(request)
+        self.assertEqual(preview['status'], 'preview')
+        self.assertFalse(self.binding_path(request['name']).exists())
+        request.update(preview=False, expected_identity=preview['identity'])
+        bound = self.bind_existing(request)
+        self.assertEqual(bound['status'], 'bound')
+        self.assertEqual(self.session(conversation), native_before)
+        self.assertEqual(self.api('GET', f'/api/session/{conversation}/message?limit=100')[1], messages_before)
+        self.assertEqual(self.registration(), registration)
+        replay = self.bind_existing(request)
+        self.assertEqual((replay['status'], replay['run_id']), ('already_bound', bound['run_id']))
+        detail = self.hgs(['inspect', request['name']])
+        self.assertEqual((detail['conversation_id'], detail['run_id']), (conversation, bound['run_id']))
+        page = self.hgs(['history', request['name'], '--json'], self.payload(detail, limit=100))
+        self.assertTrue(any(e.get('detail') == 'Before Zerus binding' for e in page['events']), page)
+        submit = self.payload(detail, text='Continue the existing conversation')
+        once = self.hgs(['send', request['name'], '--json'], submit)
+        self.assertEqual(self.hgs(['send', request['name'], '--json'], submit), once)
+        self.wait(request['name'], lambda v: v['phase'] == 'idle' and v.get('reply_id') != detail.get('reply_id'))
+        self.assertCountEqual([text for _, text in self.user_messages(conversation)],
+                              ['Before Zerus binding', 'Continue the existing conversation'])
+        self.assertEqual(self.session(conversation)['metadata'], native_before['metadata'])
+        self.assertEqual(self.session(conversation)['title'], native_before['title'])
+        self.assertEqual(self.hgs(['inspect', request['name']])['run_id'], bound['run_id'])
+
+    def test_31_existing_binding_refuses_duplicates_profile_and_directory_changes(self):
+        conversation = self.external_conversation()
+        request = self.binding_request(conversation)
+        for fields in [{'agent_home': str(self.root / 'other-profile')}, {'directory': str(self.project)},
+                       {'conversation_id': 'ses_missing'}, {'name': 'opencode/../unsafe'}, {'extra': True}]:
+            self.bind_existing({**request, **fields}, success=False)
+        self.bind_existing({**request, 'preview': False}, success=False)
+        preview = self.bind_existing(request)
+        commit = {**request, 'preview': False, 'expected_identity': preview['identity']}
+        self.bind_existing(commit)
+        self.bind_existing({**request, 'name': request['name'] + '-duplicate', 'request_id': str(uuid.uuid4())}, success=False)
+        conflict = self.binding_request('ses_' + native_suffix(), name=request['name'])
+        self.bind_existing(conflict, success=False)
+        # Forget only removes the Zerus owner. Replaying an old bind cannot undo it.
+        detail = self.hgs(['inspect', request['name']])
+        self.action(detail, 'forget')
+        self.bind_existing(commit, success=False)
+        self.assertFalse(self.binding_path(request['name']).exists())
+        self.assertEqual(self.session(conversation)['id'], conversation)
+
+    def test_32_existing_binding_never_starts_a_service(self):
+        self.stop_service()
+        request = self.binding_request('ses_' + native_suffix())
+        before = self.opencode_files('xdg-state', 'xdg-config/opencode')
+        self.bind_existing(request, success=False)
+        self.assertEqual(self.opencode_files('xdg-state', 'xdg-config/opencode'), before)
+        self.assertFalse(self.binding_path(request['name']).exists())
+        self.assertFalse(self.native_processes())
+
+    def test_33_existing_binding_preview_is_invalidated_by_a_service_restart(self):
+        conversation = self.external_conversation()
+        request = self.binding_request(conversation)
+        preview = self.bind_existing(request)
+        self.stop_service()
+        self.ready_account()
+        self.bind_existing({**request, 'preview': False, 'expected_identity': preview['identity']}, success=False)
+        self.assertFalse(self.binding_path(request['name']).exists())
+        refreshed = self.bind_existing(request)
+        self.assertNotEqual(refreshed['identity'], preview['identity'])
+
     def test_03_lost_response_and_queue_never_duplicate(self):
         b = self.create()
         name, conversation = b['name'], b['conversation_id']

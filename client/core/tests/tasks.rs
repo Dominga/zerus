@@ -1,0 +1,176 @@
+//! Task list follows through `Fleet` against a fake `hgs`
+//! (tests/support/fake_hgs.py), never the real CLI.
+mod common;
+
+use common::{catalog, eventually, hello, status_of, FakeHgs, Seen};
+use serde_json::{json, Value};
+use std::sync::mpsc::channel;
+use std::time::Duration;
+use zerus_client_core::{
+    Change, ComputerId, ComputerStatus, Fleet, FollowError, TasksUpdate, Timing,
+};
+
+fn quick() -> Timing {
+    Timing {
+        stop_grace: Duration::from_millis(500),
+        ..Timing::scaled(0.002)
+    }
+}
+
+/// A hello that offers the tasks topic with `limit` subscriptions.
+fn hello_with_tasks(limit: usize) -> Value {
+    let mut hello = hello("workstation");
+    hello["topics"].as_array_mut().unwrap().push(json!("tasks"));
+    hello["limits"]["tasks_subscriptions"] = json!(limit);
+    hello
+}
+
+/// One snapshot page of a project's list; the last carries its summary.
+fn page(project: &str, tasks: &[&str], page: u32, digest: Option<&str>) -> Value {
+    let mut frame = json!({"t": "snapshot", "topic": "tasks", "key": project, "page": page,
+        "last": digest.is_some(), "cursor": 0,
+        "items": tasks.iter().map(|text| json!({"text": text})).collect::<Vec<_>>()});
+    if let Some(digest) = digest {
+        frame["value"] =
+            json!({"project": {"id": project, "name": "orchard"}, "damaged": [], "digest": digest});
+    }
+    frame
+}
+
+fn live(change: &Change) -> bool {
+    status_of(change, &ComputerId::local()) == Some(ComputerStatus::Live)
+}
+
+fn tasks<'a>(change: &'a Change, wanted: &str) -> Option<&'a TasksUpdate> {
+    match change {
+        Change::Tasks {
+            computer,
+            key,
+            update,
+        } if computer.is_local() && key == wanted => Some(update),
+        _ => None,
+    }
+}
+
+fn texts(update: &TasksUpdate) -> Vec<String> {
+    match update {
+        TasksUpdate::List { tasks, .. } => tasks
+            .iter()
+            .map(|task| task["text"].as_str().unwrap().to_owned())
+            .collect(),
+        other => panic!("not a list: {other:?}"),
+    }
+}
+
+/// The tasks subscriptions the fake read, as `(op, project)`.
+fn controls(fake: &FakeHgs) -> Vec<(String, String)> {
+    fake.stdin("")
+        .into_iter()
+        .filter(|control| control["topic"] == "tasks")
+        .map(|control| {
+            (
+                control["op"].as_str().unwrap().to_owned(),
+                control["project"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_followed_project_gets_whole_lists_once_per_digest_across_reconnects() {
+    let fake = FakeHgs::new(
+        "tasks_follow",
+        json!({"": {"runs": [
+            [{"lines": [hello_with_tasks(1), catalog(&[])]}, {"await_file": "followed"},
+             {"lines": [page("p1", &["a", "b"], 0, None), page("p1", &["c"], 1, Some("d1")),
+                        page("p2", &["x"], 0, Some("d9"))]},
+             {"await_file": "again"}],
+            [{"lines": [hello_with_tasks(1), catalog(&[]), page("p1", &["a", "b", "c"], 0, Some("d1")),
+                        page("p1", &["a"], 0, Some("d2")),
+                        {"t": "error", "code": "tasks_failed", "message": "unknown project", "topic": "tasks", "key": "p1", "fatal": false}]},
+             {"serve": true}]
+        ]}}),
+    );
+    let (tx, rx) = channel();
+    let mut seen = Seen::new(rx);
+    let fleet = Fleet::start_local(fake.path(), tx, quick());
+    let local = ComputerId::local();
+    seen.until("live", live);
+    assert_eq!(fleet.follow_tasks(&local, "p1"), Ok("p1".into()));
+    assert_eq!(fleet.follow_tasks(&local, "p1"), Ok("p1".into()));
+    assert_eq!(fleet.follow_tasks(&local, "p2"), Err(FollowError::TooMany));
+    assert_eq!(
+        fleet.follow_tasks(&local, ""),
+        Err(FollowError::InvalidProject)
+    );
+    assert_eq!(
+        fleet.follow_tasks(&local, "bad\nproject"),
+        Err(FollowError::InvalidProject)
+    );
+    fake.touch("followed");
+    let first = seen.until("the first list", |change| tasks(change, "p1").is_some());
+    assert_eq!(
+        texts(tasks(&seen.all[first], "p1").unwrap()),
+        ["a", "b", "c"]
+    );
+    // After a reconnect the same list (digest d1) gives nothing; a changed
+    // one does, then a failed read.
+    fake.touch("again");
+    let second = seen.until_from(first + 1, "the changed list", |change| {
+        tasks(change, "p1").is_some()
+    });
+    let Some(TasksUpdate::List { digest, .. }) = tasks(&seen.all[second], "p1") else {
+        panic!("{:?}", seen.all[second])
+    };
+    assert_eq!(digest, "d2");
+    assert_eq!(texts(tasks(&seen.all[second], "p1").unwrap()), ["a"]);
+    seen.until_from(second + 1, "the failure", |change| {
+        matches!(tasks(change, "p1"), Some(TasksUpdate::Failed { code, .. }) if code == "tasks_failed")
+    });
+    assert!(seen.all.iter().all(|change| tasks(change, "p2").is_none()));
+    assert!(fleet.unfollow_tasks(&local, "p1"));
+    assert!(!fleet.unfollow_tasks(&local, "p1"));
+    eventually("the unsubscription", || controls(&fake).len() == 2);
+    assert_eq!(
+        controls(&fake),
+        vec![
+            ("subscribe".into(), "p1".into()),
+            ("unsubscribe".into(), "p1".into())
+        ]
+    );
+    assert!(fleet.followed_tasks(&local).is_empty());
+    fleet.stop();
+}
+
+#[test]
+fn a_cli_without_the_topic_stays_quiet_and_a_refusal_ends_the_follow() {
+    let fake = FakeHgs::new(
+        "tasks_unsupported",
+        json!({"": {"runs": [
+            [{"lines": [hello("workstation"), catalog(&[])]}, {"await_file": "followed"}],
+            [{"lines": [hello_with_tasks(8), catalog(&[]),
+                        {"t": "error", "code": "too_many_subscriptions", "message": "no", "topic": "tasks", "key": "p1", "fatal": false}]},
+             {"serve": true}]
+        ]}}),
+    );
+    let (tx, rx) = channel();
+    let mut seen = Seen::new(rx);
+    let fleet = Fleet::start_local(fake.path(), tx, quick());
+    let local = ComputerId::local();
+    seen.until("live", live);
+    assert_eq!(fleet.follow_tasks(&local, "p1"), Ok("p1".into()));
+    seen.drain_for(Duration::from_millis(100));
+    assert!(seen
+        .all
+        .iter()
+        .all(|change| !matches!(change, Change::Tasks { .. })));
+    // The next stream offers the topic, subscribes and is refused.
+    fake.touch("followed");
+    seen.until("the refusal's end", |change| {
+        tasks(change, "p1") == Some(&TasksUpdate::Ended)
+    });
+    assert!(fleet.followed_tasks(&local).is_empty());
+    eventually("the subscription", || !controls(&fake).is_empty());
+    assert_eq!(controls(&fake), vec![("subscribe".into(), "p1".into())]);
+    fleet.stop();
+}

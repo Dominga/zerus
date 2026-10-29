@@ -365,10 +365,51 @@ fn claude(home: &Path, native: bool) -> Value {
     }
     result
 }
+struct KimiEnvironment {
+    credentials: String,
+    base_url: String,
+}
+fn kimi_environment(home: &Path) -> KimiEnvironment {
+    let mut environment = KimiEnvironment {
+        credentials: "credentials/kimi-code.json".into(),
+        base_url: "https://api.kimi.com/coding/v1".into(),
+    };
+    let document = fs::read_to_string(home.join("config.toml"))
+        .ok()
+        .and_then(|text| text.parse::<toml_edit::DocumentMut>().ok());
+    let provider = document
+        .as_ref()
+        .and_then(|document| document.get("providers"))
+        .and_then(toml_edit::Item::as_table_like)
+        .and_then(|providers| providers.get("managed:kimi-code"))
+        .and_then(toml_edit::Item::as_table_like);
+    if let Some(provider) = provider {
+        if let Some(name) = provider
+            .get("oauth")
+            .and_then(toml_edit::Item::as_table_like)
+            .and_then(|oauth| oauth.get("key"))
+            .and_then(toml_edit::Item::as_str)
+            .and_then(|key| key.strip_prefix("oauth/"))
+            .map(|name| format!("{name}.json"))
+            .filter(|name| valid_credential_name(name))
+        {
+            environment.credentials = format!("credentials/{name}");
+        }
+        if let Some(base_url) = provider.get("base_url").and_then(toml_edit::Item::as_str) {
+            environment.base_url = base_url.trim_end_matches('/').into();
+        }
+    }
+    if let Ok(base_url) = env::var("KIMI_CODE_BASE_URL") {
+        environment.base_url = base_url.trim_end_matches('/').into();
+    }
+    environment
+}
 fn kimi(home: &Path) -> Value {
     let mut result =
         json!({"identity":{},"windows":[],"source":"Kimi Code","status":"unavailable"});
-    let auth = read_json(&home.join("credentials/kimi-code.json"));
+    let environment = kimi_environment(home);
+    let credentials = home.join(&environment.credentials);
+    let auth = read_json(&credentials);
     let token = auth["access_token"].as_str().unwrap_or("");
     if token.is_empty() {
         result["status"] = json!("signed_out");
@@ -395,7 +436,7 @@ fn kimi(home: &Path) -> Value {
             .unwrap_or(result);
         // Without renewal the grant stays expired: opening Kimi or signing in again
         // renews it, which "unavailable" would not say.
-        let renewed = read_json(&home.join("credentials/kimi-code.json"));
+        let renewed = read_json(&credentials);
         if output["status"] != "ok"
             && renewed["expires_at"].as_u64().is_some_and(|expiry| expiry <= now() + 60)
         {
@@ -403,22 +444,20 @@ fn kimi(home: &Path) -> Value {
         }
         return output;
     }
-    // Match the native managed provider's default endpoint. Custom gateways do not receive this token.
-    let base =
-        env::var("KIMI_CODE_BASE_URL").unwrap_or_else(|_| "https://api.kimi.com/coding/v1".into());
+    // Only Kimi's managed endpoints receive this token; custom gateways stay untouched.
     if ![
         "https://api.kimi.com/coding/v1",
-        "https://api.kimi.com/coding/v1/",
+        "https://api.kimi.ai/coding/v1",
     ]
-    .contains(&base.as_str())
+    .contains(&environment.base_url.as_str())
     {
         return result;
     }
-    if let Ok(a) = http_json("https://api.kimi.com/coding/v1/me", token, &[]) {
+    if let Ok(a) = http_json(&format!("{}/me", environment.base_url), token, &[]) {
         let a = a.get("user").or_else(|| a.get("data")).unwrap_or(&a);
         result["identity"] = json!({"name":text(a,"nickname"),"email":text(a,"email"),"plan":text(a,"user_level_name"),"auth_method":"Kimi Code"});
     }
-    if let Ok(usage) = http_json("https://api.kimi.com/coding/v1/usages", token, &[]) {
+    if let Ok(usage) = http_json(&format!("{}/usages", environment.base_url), token, &[]) {
         let mut windows = Vec::new();
         for (key, label, minutes) in [
             ("limit_5h", "", Some(300)),
@@ -444,10 +483,10 @@ fn kimi(home: &Path) -> Value {
     }
     result
 }
-fn dsh(home: &Path) -> Value {
+pub(super) fn dsh(home: &Path) -> Value {
     let fallback =
         json!({"identity":{},"windows":[],"source":"DeepSeek Harness","status":"unavailable"});
-    // Without a running native UI only the API key and its balance are read.
+    // Without a running native UI only the API key, its balance and public models are read.
     let url = crate::state::dsh::account_ui_url(home).ok();
     let mut cmd = Command::new("node");
     cmd.args([
@@ -490,12 +529,20 @@ pub(super) fn signature(home: &Path, provider: &str) -> String {
             }
         }
     }
-    for name in [
-        "auth.json",
-        ".credentials.json",
-        "credentials/kimi-code.json",
-        ".credentials.yaml",
-    ] {
+    let kimi = (provider == "kimi").then(|| kimi_environment(home));
+    let names: Vec<&str> = if let Some(environment) = &kimi {
+        fingerprint.update(environment.credentials.as_bytes());
+        fingerprint.update(environment.base_url.as_bytes());
+        vec![&environment.credentials]
+    } else {
+        vec![
+            "auth.json",
+            ".credentials.json",
+            "credentials/kimi-code.json",
+            ".credentials.yaml",
+        ]
+    };
+    for name in names {
         if let Ok(bytes) = fs::read(home.join(name)) {
             match signed_in(provider, name, &bytes) {
                 Some(account) => fingerprint.update(account),
@@ -511,7 +558,7 @@ pub(super) fn signature(home: &Path, provider: &str) -> String {
 fn signed_in(provider: &str, name: &str, bytes: &[u8]) -> Option<String> {
     let credentials = serde_json::from_slice::<Value>(bytes).ok()?;
     match (provider, name) {
-        ("kimi", "credentials/kimi-code.json") => {
+        ("kimi", name) if name.starts_with("credentials/") => {
             use base64::Engine;
             ["access_token", "refresh_token"].iter().find_map(|key| {
                 let payload = credentials[*key].as_str()?.split('.').nth(1)?;
@@ -732,6 +779,39 @@ mod tests {
         use base64::Engine;
         let part = |v: Value| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v.to_string());
         format!("{}.{}.signature", part(json!({"alg":"none"})), part(claims))
+    }
+
+    #[test]
+    fn kimi_global_region_uses_its_active_scoped_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        fs::create_dir_all(home.join("credentials")).unwrap();
+        let config = r#"[providers."managed:kimi-code"]
+type = "kimi"
+base_url = "https://api.kimi.ai/coding/v1"
+[providers."managed:kimi-code".oauth]
+storage = "file"
+key = "oauth/kimi-code-env-0e4f99c69cc27850"
+oauth_host = "https://auth.kimi.ai"
+"#;
+        fs::write(home.join("config.toml"), config).unwrap();
+        let environment = kimi_environment(home);
+        assert_eq!(environment.credentials, "credentials/kimi-code-env-0e4f99c69cc27850.json");
+        assert_eq!(environment.base_url, "https://api.kimi.ai/coding/v1");
+
+        let token = |user: &str, issued: u64| jwt(json!({"user_id":user,"sub":user,"iat":issued}));
+        let scoped = home.join(&environment.credentials);
+        fs::write(&scoped, json!({"access_token":token("user-a",1_000)}).to_string()).unwrap();
+        fs::write(home.join("credentials/kimi-code.json"), r#"{"access_token":"old-default"}"#).unwrap();
+        let first = signature(home, "kimi");
+        fs::write(&scoped, json!({"access_token":token("user-a",1_900)}).to_string()).unwrap();
+        fs::write(home.join("credentials/kimi-code.json"), r#"{"access_token":"changed-default"}"#).unwrap();
+        assert_eq!(signature(home, "kimi"), first);
+        fs::write(&scoped, json!({"access_token":token("user-b",1_900)}).to_string()).unwrap();
+        assert_ne!(signature(home, "kimi"), first);
+
+        fs::write(home.join("config.toml"), config.replace("oauth/kimi-code-env-0e4f99c69cc27850", "oauth/../outside")).unwrap();
+        assert_eq!(kimi_environment(home).credentials, "credentials/kimi-code.json");
     }
 
     #[test]

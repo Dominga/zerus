@@ -42,6 +42,11 @@ fn a_stream_delivers_frames_and_writes_controls() {
             == Some(ComputerStatus::Probing)
     });
     seen.until("live", live);
+    // Its catalog.meta gives this computer's card data.
+    seen.until("the machine card", |event| {
+        matches!(change_of(event), Some(Change::Machine { computer, machine })
+            if computer.is_local() && machine.host.as_deref() == Some("workstation"))
+    });
     // The basic fixture's last heartbeat follows its unknown frame type and
     // every other frame kind: the stream stays up through all of them.
     seen.until("peers", |event| matches!(event, StreamEvent::Peers { .. }));

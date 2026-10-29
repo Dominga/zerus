@@ -1,4 +1,5 @@
 #pragma once
+#include "SettingsJson.h"
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSettings>
@@ -11,7 +12,7 @@ namespace SessionLeads {
 
 inline QJsonObject all()
 {
-    return QJsonDocument::fromJson(QSettings().value(QStringLiteral("workspace/sessionLeads")).toByteArray()).object();
+    return SettingsJson::object(QStringLiteral("workspace/sessionLeads"));
 }
 
 inline QString lead(const QString &identity)
@@ -30,7 +31,7 @@ inline bool setLead(const QString &identity, const QString &leadIdentity)
         for (auto it = links.begin(); it != links.end(); ++it) if (it.value().toString() == identity) return false;
         links[identity] = leadIdentity;
     } else links.remove(identity);
-    QSettings().setValue(QStringLiteral("workspace/sessionLeads"), QJsonDocument(links).toJson(QJsonDocument::Compact));
+    SettingsJson::store(QStringLiteral("workspace/sessionLeads"), QJsonDocument(links));
     return true;
 }
 }

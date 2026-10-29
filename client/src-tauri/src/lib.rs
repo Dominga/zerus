@@ -4,6 +4,9 @@
 //! code can hand the webview its configuration before it exists (the macOS
 //! frame-rate preference, plan Task 7).
 
+#[cfg(feature = "live")]
+mod actions;
+mod clipboard;
 mod commands;
 mod display;
 mod metrics;
@@ -21,20 +24,19 @@ pub const MAIN_WINDOW: &str = "main";
 /// Builds the app and runs its event loop until the last window closes.
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_clipboard_manager::init())
         .manage(commands::AppState::default())
-        .invoke_handler(tauri::generate_handler![
-            commands::start,
-            commands::next_batch,
-            commands::follow,
-            commands::unfollow,
-            commands::metrics,
-            commands::perf_config,
-            commands::save_perf,
-            commands::perf_log,
-            commands::display_hz,
-            commands::exit_app,
-        ])
+        .invoke_handler(handler())
         .setup(|app| {
+            #[cfg(feature = "live")]
+            {
+                use tauri::Manager;
+                let dir = app.path().app_data_dir()?;
+                std::fs::create_dir_all(&dir)?;
+                // A replay never touches the real read marks.
+                let replay = std::env::var_os("ZERUS_CLIENT_REPLAY").is_some_and(|list| !list.is_empty());
+                app.manage(actions::Actions::new(dir.join(actions::marks_file(replay))));
+            }
             let display = display::display_name();
             if !display::headless_allowed(std::env::var("ZERUS_CLIENT_HEADLESS").is_ok_and(|v| v == "1"), display.as_deref()) {
                 eprintln!("zerus-client: ZERUS_CLIENT_HEADLESS=1 but the display is {display:?}, not an X server; no window opens (set GDK_BACKEND=x11)");
@@ -54,13 +56,60 @@ pub fn run() {
         .expect("Zerus Next failed to start");
 }
 
+/// The commands the frontend may call. The session actions need the core's
+/// `hgs` runner, so they exist only with the `live` feature.
+#[cfg(feature = "live")]
+fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
+    tauri::generate_handler![
+        commands::start,
+        commands::next_batch,
+        commands::follow,
+        commands::unfollow,
+        commands::metrics,
+        commands::perf_config,
+        commands::save_perf,
+        commands::perf_log,
+        commands::display_hz,
+        commands::exit_app,
+        commands::perf_away,
+        actions::run_action,
+        actions::inspect_session,
+        actions::pending_read_marks,
+        actions::session_reference,
+        actions::copy_command,
+        clipboard::copy_text,
+    ]
+}
+
+#[cfg(not(feature = "live"))]
+fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
+    tauri::generate_handler![
+        commands::start,
+        commands::next_batch,
+        commands::follow,
+        commands::unfollow,
+        commands::metrics,
+        commands::perf_config,
+        commands::save_perf,
+        commands::perf_log,
+        commands::display_hz,
+        commands::exit_app,
+        commands::perf_away,
+        clipboard::copy_text,
+    ]
+}
+
 /// Creates the main window. Platform webview configuration (macOS: the
 /// display-rate preference) is applied to the builder here, before `build`.
 pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     // ZERUS_CLIENT_QUERY opens a given state (`select=<session name>`) for
     // headless screenshots and scripted measurements, as the mockup's URL
     // parameters do; ZERUS_CLIENT_PERF=auto adds `perf=auto`.
-    let mut query: Vec<String> = std::env::var("ZERUS_CLIENT_QUERY").ok().filter(|q| !q.is_empty()).into_iter().collect();
+    let mut query: Vec<String> = std::env::var("ZERUS_CLIENT_QUERY")
+        .ok()
+        .filter(|q| !q.is_empty())
+        .into_iter()
+        .collect();
     if let Ok(mode) = std::env::var("ZERUS_CLIENT_PERF") {
         if !mode.is_empty() {
             query.push(format!("perf={mode}"));
@@ -81,7 +130,8 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     #[cfg(target_os = "macos")]
     if !keep_default_preference() {
         if let Some(mtm) = objc2::MainThreadMarker::new() {
-            builder = builder.with_webview_configuration(platform::macos::webview_configuration(mtm));
+            builder =
+                builder.with_webview_configuration(platform::macos::webview_configuration(mtm));
         }
     }
     builder.build()

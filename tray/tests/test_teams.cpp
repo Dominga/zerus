@@ -416,7 +416,8 @@ void TestTeams::permissionRequestFromTheMemberAndItsAnswer()
         {"asked_at", 1792868400.0},
         {"answer", QJsonObject{{"question_id", "decision"}, {"allow", "allow"}, {"deny", "deny"}}}};
     answeredMembers[1] = answeredMember; answered["members"] = answeredMembers;
-    const auto *answeredParsed = parse(answered).member("backend");
+    const auto answeredTeam = parse(answered);
+    const auto *answeredParsed = answeredTeam.member("backend");
     QVERIFY(answeredParsed);
     QVERIFY(answeredParsed->permission.native.known);
     QCOMPARE(answeredParsed->permission.native.questionId, QStringLiteral("decision"));

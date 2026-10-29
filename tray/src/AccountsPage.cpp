@@ -9,6 +9,7 @@
 #include "LocalSessionHost.h"
 #include "MachinePlatform.h"
 #include "OpenCodeModels.h"
+#include "OpenCodeExistingDialog.h"
 #include "WorkspaceIcons.h"
 #include "WorkspacePageHeader.h"
 #include "WorkspaceList.h"
@@ -309,6 +310,17 @@ AccountsPage::AccountsPage(const QString &hgsPath, QWidget *parent, AccountUsage
     // Explicit only: inspecting accounts never starts OpenCode's shared service.
     m_startOpenCode = new QPushButton; m_startOpenCode->setObjectName("startOpenCode"); actions->addWidget(m_startOpenCode);
     m_startOpenCode->setToolTip(tr("Start the shared OpenCode service on this machine. Zerus never stops it.")); m_startOpenCode->hide();
+    m_bindOpenCode = new QPushButton(tr("Bind existing conversation…")); m_bindOpenCode->setObjectName("bindOpenCodeConversation");
+    actions->addWidget(m_bindOpenCode); m_bindOpenCode->hide();
+    connect(m_bindOpenCode, &QPushButton::clicked, this, [this, hgsPath] {
+        const auto p = selected();
+        if (changing() || p["id"] != "native-opencode" || !online(p["host"].toString()) || p["home"].toString().isEmpty()) return;
+        OpenCodeExistingDialog dialog(hgsPath, p["host"].toString(), p["home"].toString(), this);
+        if (dialog.exec() == QDialog::Accepted) {
+            emit accountsChanged();
+            emit notice(tr("Existing OpenCode conversation is bound as %1. Native history was preserved.").arg(dialog.bound()["name"].toString()));
+        }
+    });
     m_copy = new QPushButton(tr("Add to machine…"), this); m_copy->setObjectName("copyAccount"); m_copy->hide();
     actions->addStretch();machineLayout->addLayout(actions);
     // OpenCode's connected providers: plain, read-only text from that machine's
@@ -723,6 +735,8 @@ void AccountsPage::selectionChanged()
     updateRefreshState();
     m_install->setVisible(has && !p["installed"].toBool()); m_install->setEnabled(has && idle && online(p["host"].toString()) && !nativeConfig);
     m_startOpenCode->setVisible(false);
+    m_bindOpenCode->setVisible(nativeConfig);
+    m_bindOpenCode->setEnabled(nativeConfig && idle && online(p["host"].toString()) && p["installed"].toBool() && p["catalog_state"] == "ready" && !p["home"].toString().isEmpty());
     if(!nativeConfig){m_openCodeProviders->hide();m_openCodeProvidersNote->hide();}
     m_remove->setText(has ? tr("Remove from %1…").arg(p["machine"].toString()) : tr("Remove…"));
     m_login->setText(tr("Sign in…")); m_login->setToolTip({});
@@ -797,6 +811,10 @@ void AccountsPage::selectionChanged()
         m_openCodeProvidersNote->setText(notes.join('\n'));m_openCodeProvidersNote->setVisible(!notes.isEmpty());
     }
     m_detail->setToolTip(p["home"].toString());
+    // U22/N17: the DeepSeek account whose sessions still upload - or whose host
+    // was started before the block - says so here, in the session card's words.
+    if (const auto upload = deepSeekUploadNote(p["host"].toString(), p["home"].toString(), p["provider"].toString()); !upload.isEmpty())
+        m_detail->setText(m_detail->text().isEmpty() ? upload : m_detail->text() + QLatin1Char('\n') + upload);
     // U25 (spec 9): an account that cannot be used here says so in warn, and
     // its sign-in becomes the primary action.
     const bool attention = !online(p["host"].toString()) || status == "signed_out" || status == "expired";
@@ -810,6 +828,22 @@ void AccountsPage::selectionChanged()
     renderTeams(selectedAccount());
     if(isVisible())inspectSelected();
 }
+QString AccountsPage::deepSeekUploadNote(const QString &host, const QString &home, const QString &provider) const
+{
+    if (provider != QLatin1String("dsh")) return {};
+    // The local machine's accounts name it by host; peers by their alias.
+    const BoxState *box = host.isEmpty() || host == m_fleet.local().host ? &m_fleet.local() : m_fleet.peer(host);
+    if (!box) return {};
+    for (const auto &session : box->sessions) {
+        if (session.cmd != QLatin1String("dsh") || session.uploadNote.isEmpty()) continue;
+        // A profile's own home scopes the warning to its sessions; an empty
+        // profile home is the machine's default account, which keeps every one.
+        if (!home.isEmpty() && !session.accountHome.isEmpty() && session.accountHome != home) continue;
+        return session.uploadNote;
+    }
+    return {};
+}
+
 // U25 (spec 9): "Checkout v2 · Frontend, Lead (GPT)" with Open team, for every
 // team whose members use the account; hidden when none does.
 void AccountsPage::renderTeams(const QJsonObject &account)

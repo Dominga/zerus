@@ -853,6 +853,43 @@ class Input(Contract):
         self.assertEqual(self.received(pid),
                          b"\x1b[200~draft\x1b[201~" + b"\x7f" * 5 + b"\x1b[200~hello\x1b[201~\r")
 
+    def test_terminal_draft_is_read_and_submitted_only_while_unchanged(self):
+        # Owner, 2026-10-28: text left in Terminal blocked every send. Any
+        # window reads the draft and submits it with Enter, only as it was shown.
+        name, row, agent = self.launch()
+        pid = agent["pid"]
+        rule = "─" * 20
+
+        def draft(**fields):
+            return self.json("terminal", name, "--json", input=json.dumps(dict(
+                request_id=str(uuid.uuid4()), expected_run_id=row["run_id"],
+                expected_conversation_id=row["conversation_id"], **fields)))
+
+        self.control(pid, f"write \\e[2J\\e[H{rule}\\r\\n{PROMPT}\\r\\n{rule}\\e[2;3H")
+        self.screen(row, lambda frame, rows: rows[1] == PROMPT.strip() and frame["cursor"] == dict(x=2, y=1),
+                    "an empty composer")
+        empty = draft(action="draft")
+        self.assertEqual((empty["status"], empty["draft"], empty["draft_supported"]), ("draft", None, True))
+        self.control(pid, f"write \\e[2J\\e[H{rule}\\r\\n{PROMPT}fix the build\\r\\n  and lint\\r\\n{rule}\\e[3;12H")
+        self.screen(row, lambda frame, rows: rows[2] == "  and lint" and frame["cursor"] == dict(x=11, y=2), "the draft")
+        shown = draft(action="draft")
+        self.assertEqual(shown["draft"], "fix the build\nand lint")
+        self.assertNotEqual(shown["draft_hash"], empty["draft_hash"])
+        before = self.received(pid)
+        # A stale hash sends nothing.
+        refused = draft(action="submit_draft", draft_hash=empty["draft_hash"])
+        self.assertEqual(refused["status"], "failed")
+        self.assertIn("draft changed", refused["error"])
+        request = dict(request_id=str(uuid.uuid4()), action="submit_draft", expected_run_id=row["run_id"],
+                       expected_conversation_id=row["conversation_id"], draft_hash=shown["draft_hash"])
+        receipt = self.json("terminal", name, "--json", input=json.dumps(request))
+        self.assertEqual(receipt["status"], "submitted", receipt)
+        self.wait_for(lambda: self.received(pid) == before + b"\r", "Enter")
+        # A replay returns the receipt and presses nothing again.
+        self.assertEqual(self.json("terminal", name, "--json", input=json.dumps(request)), receipt)
+        time.sleep(0.5)
+        self.assertEqual(self.received(pid), before + b"\r")
+
     def test_send_needs_a_raw_terminal(self):
         self.configure(RAW="0")
         name, row, agent = self.launch()

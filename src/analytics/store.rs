@@ -55,8 +55,10 @@ impl Store {
             // #526: made owner-only here, never trusted to inherit it.
             crate::platform::owner_only_dir(root)?;
         }
+        // #569: a store only too open is made private again; one that stays
+        // refused is reported with its fix.
         ensure!(
-            crate::platform::verify_private(root, crate::platform::Private::Directory)?,
+            crate::private_stores::ensure(root, crate::platform::Private::Directory)?,
             "Analytics directory must be private"
         );
         if create {
@@ -69,14 +71,14 @@ impl Store {
             ))
             .open(&path)?;
             ensure!(
-                crate::platform::verify_private_file(&file)?,
+                crate::private_stores::ensure_file(&path, &file)?,
                 "Analytics file must be private"
             );
         } else {
             let file =
                 crate::platform::refuse_link(fs::OpenOptions::new().read(true)).open(&path)?;
             ensure!(
-                crate::platform::verify_private_file(&file)?,
+                crate::private_stores::ensure_file(&path, &file)?,
                 "Analytics file must be private"
             );
         }

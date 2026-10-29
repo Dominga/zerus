@@ -1,4 +1,6 @@
 #pragma once
+#include "ChildProcess.h"
+#include "JsonParse.h"
 #include <QCheckBox>
 #include <QCoreApplication>
 #include <QCryptographicHash>
@@ -61,6 +63,7 @@ inline QString relay()
 inline bool startHidden(const QString &program, const QStringList &arguments, const QString &log)
 {
     QProcess process;
+    ChildProcess::inheritStdioOnly(process);
     process.setProgram(program);
     process.setArguments(arguments);
     process.setWorkingDirectory(QDir::homePath());
@@ -77,6 +80,7 @@ inline bool startHidden(const QString &program, const QStringList &arguments, co
 inline bool relayRunning()
 {
     QProcess check;
+    ChildProcess::inheritStdioOnly(check);
     check.start(relay(), {QStringLiteral("healthcheck"), QStringLiteral("--port"), QString::number(relayPort())});
     if (!check.waitForFinished(5000)) { check.kill(); check.waitForFinished(1000); return false; }
     return check.exitStatus() == QProcess::NormalExit && check.exitCode() == 0;
@@ -88,13 +92,17 @@ inline bool startRelay()
 }
 inline void stopRelay()
 {
-    QProcess::execute(QStringLiteral("taskkill"), {QStringLiteral("/F"), QStringLiteral("/IM"), QStringLiteral("zerus-relay.exe")});
+    QProcess process;
+    ChildProcess::inheritStdioOnly(process);
+    process.start(QStringLiteral("taskkill"), {QStringLiteral("/F"), QStringLiteral("/IM"), QStringLiteral("zerus-relay.exe")});
+    process.waitForFinished(-1);
 }
 
 // One `--manage` call, its JSON input on stdin, as WindowsMobileSettings sends it.
 inline QJsonObject manage(const QString &action, const QString &config, const QJsonObject &input)
 {
     QProcess process;
+    ChildProcess::inheritStdioOnly(process);
     auto environment = QProcessEnvironment::systemEnvironment();
     for (const auto *key : {"HGS_SESSION", "HGS_RUN_ID", "HGS_EXPECTED_ID", "HGS_AGENT", "HGS_HOST_PANE", "HGS_HOST_SESSION", "TMUX", "TMUX_PANE"})
         environment.remove(QLatin1String(key));
@@ -105,7 +113,7 @@ inline QJsonObject manage(const QString &action, const QString &config, const QJ
     process.closeWriteChannel();
     if (!process.waitForFinished(12000)) { process.kill(); process.waitForFinished(1000); return {}; }
     if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) return {};
-    return QJsonDocument::fromJson(process.readAllStandardOutput()).object();
+    return JsonParse::object(process.readAllStandardOutput());
 }
 
 // At Zerus start, off the GUI thread: the chosen relay, then a configured
@@ -133,6 +141,7 @@ inline void keepResidentHost(const QString &hgs)
 {
     if (!residentHost() || hgs.isEmpty()) return;
     QProcess process;
+    ChildProcess::inheritStdioOnly(process);
     process.setProgram(hgs);
     process.setArguments({QStringLiteral("session-host"), QStringLiteral("start"), QStringLiteral("--json")});
     process.setStandardInputFile(QProcess::nullDevice());

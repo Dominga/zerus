@@ -751,6 +751,10 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         composer::send::send_cancel,
         composer::send::send_interrupted,
         composer::send::clear_context,
+        composer::questions::question_edit,
+        composer::questions::question_page,
+        composer::questions::question_navigate,
+        composer::questions::question_allow_retry,
         #[cfg(feature = "media")]
         voice::voice_open,
         #[cfg(feature = "media")]

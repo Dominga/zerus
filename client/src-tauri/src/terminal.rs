@@ -760,76 +760,9 @@ pub fn terminal_status(input: StatusInput) -> TerminalStatus {
     status(input)
 }
 
-#[cfg(all(test, unix))]
-mod tests {
+#[cfg(test)]
+mod path_tests {
     use super::*;
-    use std::path::Path;
-
-    /// What a view received; `ack` mirrors the webview acknowledging each output.
-    #[derive(Default)]
-    struct Collect {
-        seen: Mutex<(Vec<Vec<u8>>, Vec<Value>)>,
-    }
-
-    impl Sink for Collect {
-        fn output(&self, bytes: Vec<u8>) {
-            lock(&self.seen).0.push(bytes);
-        }
-        fn message(&self, json: String) {
-            lock(&self.seen)
-                .1
-                .push(serde_json::from_str(&json).unwrap());
-        }
-    }
-
-    impl Collect {
-        fn text(&self) -> String {
-            String::from_utf8_lossy(&lock(&self.seen).0.concat()).into_owned()
-        }
-        fn outputs(&self) -> usize {
-            lock(&self.seen).0.len()
-        }
-        fn messages(&self) -> Vec<Value> {
-            lock(&self.seen).1.clone()
-        }
-    }
-
-    fn terminals() -> Terminals {
-        Terminals::new(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../core/tests/support/fake_attach.py"),
-            true,
-        )
-    }
-
-    fn target(run: &str) -> TerminalTarget {
-        TerminalTarget {
-            computer: "mac".into(),
-            name: "claude/sample-project/review".into(),
-            run_id: run.into(),
-            machine: "studio".into(),
-        }
-    }
-
-    /// Waits up to ten seconds for `done`, acknowledging every output as it arrives.
-    fn until(t: &Terminals, generation: u64, sink: &Collect, done: impl Fn(&Collect) -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let mut acked = 0;
-        while !done(sink) {
-            assert!(Instant::now() < deadline, "timed out: {:?}", sink.text());
-            for _ in acked..sink.outputs() {
-                t.ack("main", generation);
-            }
-            acked = sink.outputs();
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-
-    /// Waits for the fake's hello line: input written before it is flushed
-    /// when the fake switches the terminal to raw mode.
-    fn hello(t: &Terminals, generation: u64, sink: &Collect) {
-        until(t, generation, sink, |s| s.text().contains("\"COLORTERM\""));
-        until(t, generation, sink, |s| s.text().ends_with("\r\n"));
-    }
 
     #[test]
     fn staged_receipts_are_checked_as_qt_does() {
@@ -922,6 +855,78 @@ mod tests {
                 Err("Terminal drops are available only in the main view.".into())
             );
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    /// What a view received; `ack` mirrors the webview acknowledging each output.
+    #[derive(Default)]
+    struct Collect {
+        seen: Mutex<(Vec<Vec<u8>>, Vec<Value>)>,
+    }
+
+    impl Sink for Collect {
+        fn output(&self, bytes: Vec<u8>) {
+            lock(&self.seen).0.push(bytes);
+        }
+        fn message(&self, json: String) {
+            lock(&self.seen)
+                .1
+                .push(serde_json::from_str(&json).unwrap());
+        }
+    }
+
+    impl Collect {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&lock(&self.seen).0.concat()).into_owned()
+        }
+        fn outputs(&self) -> usize {
+            lock(&self.seen).0.len()
+        }
+        fn messages(&self) -> Vec<Value> {
+            lock(&self.seen).1.clone()
+        }
+    }
+
+    fn terminals() -> Terminals {
+        Terminals::new(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../core/tests/support/fake_attach.py"),
+            true,
+        )
+    }
+
+    fn target(run: &str) -> TerminalTarget {
+        TerminalTarget {
+            computer: "mac".into(),
+            name: "claude/sample-project/review".into(),
+            run_id: run.into(),
+            machine: "studio".into(),
+        }
+    }
+
+    /// Waits up to ten seconds for `done`, acknowledging every output as it arrives.
+    fn until(t: &Terminals, generation: u64, sink: &Collect, done: impl Fn(&Collect) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut acked = 0;
+        while !done(sink) {
+            assert!(Instant::now() < deadline, "timed out: {:?}", sink.text());
+            for _ in acked..sink.outputs() {
+                t.ack("main", generation);
+            }
+            acked = sink.outputs();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Waits for the fake's hello line: input written before it is flushed
+    /// when the fake switches the terminal to raw mode.
+    fn hello(t: &Terminals, generation: u64, sink: &Collect) {
+        until(t, generation, sink, |s| s.text().contains("\"COLORTERM\""));
+        until(t, generation, sink, |s| s.text().ends_with("\r\n"));
     }
 
     #[test]

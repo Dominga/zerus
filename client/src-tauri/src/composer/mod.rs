@@ -26,6 +26,7 @@
 pub mod fetch;
 pub mod files;
 pub mod questions;
+pub mod queue;
 pub mod saved;
 pub mod send;
 
@@ -235,6 +236,7 @@ pub struct ComposerView {
     pub clear: send::ClearControl,
     /// The agent's question card shown in the composer (A2-1).
     pub question: Option<questions::QuestionView>,
+    pub queue: Option<zerus_client_core::input_queue::QueueView>,
     /// The editor and the action row show: false while a required card
     /// stands in for them (`MessageComposer::setInputVisible`).
     pub input_visible: bool,
@@ -443,6 +445,7 @@ pub(crate) struct Hub {
     /// Terminal or Native UI, `activeMs` behind Processes
     /// (`SessionsWindow.cpp:2013-2016`); None is Activity's 2.5 s.
     pub(crate) poll: Option<f64>,
+    pub(crate) queue: queue::Queue,
     /// Events for the next batch (`composer_events`), at most 16.
     pub(crate) events: VecDeque<ComposerEvent>,
 }
@@ -582,6 +585,10 @@ impl Composers {
     /// catalog row under a new name is a rename: its draft moves (`renameDraft`).
     pub fn open(&self, session: Option<SessionRef>) -> Option<ComposerView> {
         let mut hub = self.lock();
+        let next = session
+            .as_ref()
+            .map(|s| draft_key(&s.computer, &s.name, s.archive_id.as_deref()));
+        self.push_selection(&mut hub, next.as_deref());
         let Some(session) = session else {
             hub.open = None;
             hub.open_key = None;
@@ -1284,6 +1291,7 @@ impl Composers {
         }
         let state_changed = match update.filter(|_| followed) {
             Some(Some((details, expiry))) => {
+                hub.queue.hidden = false;
                 hub.followed.details = Some(details);
                 hub.followed.expiry = expiry;
                 hub.followed.inspect_error = None;
@@ -1325,6 +1333,7 @@ impl Composers {
         self.reconcile();
         self.continue_open();
         self.sync_questions();
+        self.queue_observed();
         self.changed();
     }
 
@@ -1485,6 +1494,7 @@ impl Composers {
             compacting: hub.compacts.contains_key(key),
             clear: session.clear,
             question,
+            queue: self.queue_part(hub),
             input_visible,
         })
     }

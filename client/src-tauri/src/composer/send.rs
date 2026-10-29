@@ -365,6 +365,7 @@ impl Composers {
                 match read {
                     Ok((details, expiry, events)) => {
                         hub.followed.inspect_error = None;
+                        hub.queue.hidden = false;
                         hub.followed.details = Some(details);
                         hub.followed.expiry = expiry;
                         let (replace, events) = events;
@@ -449,6 +450,7 @@ impl Composers {
         }
         self.tick_continuations(now);
         self.retry_answer_saves();
+        self.push_check();
     }
 
     /// Ticks once a second while a composer is open, until the app quits.
@@ -872,7 +874,13 @@ impl Composers {
         reply
     }
 
-    fn send_held(&self, hub: &mut Hub, handle: u64, epoch: u64, text: &str) -> SendReply {
+    pub(super) fn send_held(
+        &self,
+        hub: &mut Hub,
+        handle: u64,
+        epoch: u64,
+        text: &str,
+    ) -> SendReply {
         let Some(ctx) = self.context(hub) else {
             return SendReply::Busy;
         };
@@ -1246,6 +1254,13 @@ impl Composers {
                 &delivery.conversation,
                 now,
             );
+            hub.queue.pusher.dispatched(
+                &delivery.key,
+                &delivery.text,
+                &request_id,
+                &delivery.run,
+                &delivery.conversation,
+            );
         }
         self.changed();
         let target = Target {
@@ -1277,6 +1292,7 @@ impl Composers {
         let detail = self.lock().local.finished(&key, &request_id, &outcome);
         let ok = matches!(outcome, Outcome::Done { .. });
         let uncertain = matches!(outcome, Outcome::Uncertain { .. });
+        self.push_finished(&request_id, ok, uncertain);
         self.ended(&delivery, ok, &detail, uncertain);
         // `finishMessage`: the open session is read again (`inspect()`).
         if self.lock().open_key.as_deref() == Some(key.as_str()) {

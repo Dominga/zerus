@@ -1227,7 +1227,9 @@ mod tests {
     fn the_worker_verifies_stores_and_notifies_once() {
         let mut fixture = Fixture::new(Arc::new(|_| Ok(stable())), |_| {});
         fixture.start();
-        let view = until(&fixture, |view| view.available && !view.busy);
+        let view = until(&fixture, |view| {
+            view.available && !view.busy && fixture.notices.lock().unwrap().len() == 1
+        });
         assert_eq!(view.latest, "0.47.0");
         assert_eq!(view.last_checked, "1970-01-01T00:16:40Z");
         assert_eq!(view.release_label, "View release");

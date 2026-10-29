@@ -8678,17 +8678,17 @@ The coordinator runs this on the owner's Mac after Tasks 1 to 9 are merged to ma
 
 **What the switch carries over (coordinator rulings).** Settings are seeded once from Qt's, read-only, except the client's own `client/…` settings (defaults), the microphone (chosen again) and automatic approvals (off; Qt's choice is only recorded). Read marks start fresh; the hosts' read state stays authoritative. Qt's drafts and the dev app's drafts reach the client through its one-time import (`zerus-5wmh.13.1`) at its first start, which reads both stores read-only; step 7 checks its marker. In-app update notices are missing after the switch, accepted until `zerus-5wmh.12.4`; the coordinator rolls Dev out by hand meanwhile.
 
-1. **Prepare the clean checkout** (no display). In the clean clone used for Dev rollouts, record its path and the commit: later steps cd to `$CLONE` and compare against `$SHA` (in another Terminal window, export both again):
+1. **Prepare the clean checkout** (no display). In the clean clone used for Dev rollouts, record its path and the commit: later steps cd to `$CLONE` and compare against `$SHA` (in another Terminal window, export all three again; the `${CLONE:?}` below stops a step whose `CLONE` is unset):
    ```sh
    cd PATH_OF_THE_CLEAN_CLONE
    git fetch origin && git switch --detach SHA_OF_THAT_MAIN_PUSH
    export ZERUS_DEV_BUILD_NUMBER=N CLONE="$PWD" SHA="$(git rev-parse HEAD)"
    ```
-2. **Compare the privacy identity** (no display, Terminal, in the clean clone of step 1). The installed app is read only through `codesign`, and the switch bundle is checked and signed in a scratch folder. The `$(…)` that adds the `media` feature splits into words in zsh and bash alike, where a variable would not in zsh, and `env -u CARGO_TARGET_DIR` keeps the build in the clone's own target, where the next lines take the bundle from:
+2. **Compare the privacy identity** (no display, Terminal, in the clean clone of step 1). The installed app is read only through `codesign`, and the switch bundle is checked and signed in a scratch folder. The `$(…)` that adds the `media` feature splits into words in zsh and bash alike, where a variable would not in zsh, and `CARGO_TARGET_DIR` set to the clone's own target, as `tray/install.sh` sets it, wins over any `build.target-dir` in the Cargo configuration, so the bundle lands where the next lines take it from:
    ```sh
-   cd "$CLONE/client" && npm ci --no-audit --no-fund
+   cd "${CLONE:?}/client" && npm ci --no-audit --no-fund
    python3 scripts/switch-config.py src-tauri/target/switch.conf.json
-   env -u CARGO_TARGET_DIR RUSTUP_TOOLCHAIN=1.99.1 npx tauri build --config src-tauri/target/switch.conf.json --bundles app \
+   CARGO_TARGET_DIR="$PWD/src-tauri/target" RUSTUP_TOOLCHAIN=1.99.1 npx tauri build --config src-tauri/target/switch.conf.json --bundles app \
      $(grep -q '^media = ' src-tauri/Cargo.toml && echo --features media)
    S="$(mktemp -d)"; ditto src-tauri/target/release/bundle/macos/Zerus.app "$S/hgs-tray.app"
    python3 ../scripts/check-macos-bundle.py --gui tauri --version "$(cat ../VERSION)" \
@@ -8696,7 +8696,7 @@ The coordinator runs this on the owner's Mac after Tasks 1 to 9 are merged to ma
    python3 ../tray/sign-local-macos.py "$S/hgs-tray.app" ~/Applications/hgs-tray.app
    codesign -d -r- ~/Applications/hgs-tray.app 2>&1 | grep designated
    codesign -d -r- "$S/hgs-tray.app" 2>&1 | grep designated
-   rm -rf "$S"; cd "$CLONE"
+   rm -rf "$S"; cd "${CLONE:?}"
    ```
    `sign-local-macos.py` must print "privacy identity matches the installed application". Report both `designated =>` lines to the owner privately; they contain the team. Equal requirements carry the TCC and Notification Center grants over. Different ones need the owner's decision, because the grants would be asked for again.
 3. **Check the socket path** (no display, read-only):
@@ -8705,7 +8705,7 @@ The coordinator runs this on the owner's Mac after Tasks 1 to 9 are merged to ma
    echo "$(realpath "$(getconf DARWIN_USER_TEMP_DIR)")/hgs-tray"
    ```
    The two paths must be equal: the client binds `hgs-tray` in the canonical per-user temporary folder (`TMPDIR`, else `_CS_DARWIN_USER_TEMP_DIR`, as Qt's `QDir::tempPath`). Both sides go through `realpath`, so `/var` and `/private/var` spellings of one folder compare equal; the updater reaches the socket through either. If they still differ, stop and report: the updater would time out on the new client and roll it back.
-4. **Try the dev app** (**display**, in an owner-given window; the implementer tells the coordinator when the work reaches this step). Build the dev bundle under the heavy-build lock (**mac-lock**): in `~/zerus-dev/webui`, `git fetch origin && git checkout --detach origin/main`, then `env -u CARGO_TARGET_DIR npx tauri build --bundles app` in `client/`, so the bundle lands in its own `src-tauri/target`; remove `~/zerus-dev/.heavy.lock` once the build is done. Start its executable from Terminal, in `~/zerus-dev/webui/client`:
+4. **Try the dev app** (**display**, in an owner-given window; the implementer tells the coordinator when the work reaches this step). Build the dev bundle under the heavy-build lock (**mac-lock**): in `~/zerus-dev/webui`, `git fetch origin && git checkout --detach origin/main`, then `CARGO_TARGET_DIR="$PWD/src-tauri/target" npx tauri build --bundles app` in `client/`, so the bundle lands in its own `src-tauri/target` whatever the Cargo configuration says; remove `~/zerus-dev/.heavy.lock` once the build is done. Start its executable from Terminal, in `~/zerus-dev/webui/client`:
    ```sh
    ZERUS_CLIENT_SINGLE_INSTANCE=1 ZERUS_CLIENT_NOTIFICATIONS=1 ZERUS_CLIENT_WATCHDOG=1 \
      "src-tauri/target/release/bundle/macos/Zerus Next (dev).app/Contents/MacOS/zerus-client"
@@ -8764,8 +8764,7 @@ The coordinator runs this on the owner's Mac after Tasks 1 to 9 are merged to ma
 5. **Agree the moment with the owner.** Qt flushes its drafts when it quits, but the owner should not be typing.
 6. **Switch** (Terminal). From the root of the clean clone, not the dev app's clone of step 4, with `ZERUS_DEV_BUILD_NUMBER`, `CLONE` and `SHA` still set, run only the GUI installer, not the CLI `install.sh`:
    ```sh
-   cd "$CLONE"
-   HGS_MAC_GUI=client bash tray/install.sh 2>&1 | tee ~/zerus-switch.log
+   cd "${CLONE:?}" && HGS_MAC_GUI=client bash tray/install.sh 2>&1 | tee ~/zerus-switch.log
    ```
    Expected lines:
    - quitting Zerus;
@@ -8782,7 +8781,7 @@ The coordinator runs this on the owner's Mac after Tasks 1 to 9 are merged to ma
    find ~/Applications -maxdepth 1 -name '.hgs-tray-kept-*'
    lsof -n -a -c hgs-tray -U -F n | grep '/hgs-tray$'
    python3 -c 'import json, pathlib; m = json.loads((pathlib.Path.home() / "Library/Application Support/com.hgdev.hgs-tray/drafts/.imported-v1.json").read_text()); print(m["version"], m["report"].get("unfinished"))'
-   python3 -c 'import json, pathlib; s = json.loads((pathlib.Path.home() / "Library/Application Support/com.hgdev.hgs-tray/settings.json").read_text()); print(s["seed"]["source"], sorted(s["seed"]["keys"]))'
+   python3 -c 'import json, pathlib; s = json.loads((pathlib.Path.home() / "Library/Application Support/com.hgdev.hgs-tray/settings.json").read_text()); print((s["seed"]["source"], sorted(s["seed"]["keys"])) if "seed" in s else "no seed record")'
    ```
    Expected:
    - `--build-info` prints `N True False`: Dev number N, the commit of step 1 (`$SHA`), a clean tree;
@@ -8790,7 +8789,7 @@ The coordinator runs this on the owner's Mac after Tasks 1 to 9 are merged to ma
    - the rollback folder holds `hgs-tray.app` (Qt) and `com.hgdev.hgs-tray.plist`, and no `.hgs-tray-kept-*` folder exists;
    - the socket is at the path from step 3;
    - the draft import marker, `<data dir>/drafts/.imported-v1.json` with the data directory `~/Library/Application Support/com.hgdev.hgs-tray`, prints `1 None`: version 1, with no `unfinished`. The marker is written only once the import finished, so a missing one (the command fails) means it did not: it runs again at the next start; report its `drafts import: …` line from `~/Library/Logs/hgs-tray.log`;
-   - the settings seed record names its source and the keys it carried over: those Qt has stored (for example `workspace/theme` once the owner chose a theme), never `speech/microphone`, and Qt's automatic approvals only as `automaticApprovals/qtEnabledAtSwitch`. Report the list; step 8 checks one of these keys in Settings.
+   - the settings seed record names its source and the keys it carried over: those Qt has stored (for example `workspace/theme` once the owner chose a theme), never `speech/microphone`, and Qt's automatic approvals only as `automaticApprovals/qtEnabledAtSwitch`. Report the list; step 8 checks one of these keys in Settings. An empty list means Qt had stored none of them, and step 8 then checks only automatic approvals and the microphone. `no seed record` means the seed failed and runs again at the next start: report its `settings seed:` line from `~/Library/Logs/hgs-tray.log`.
 8. **Confirm** (**display**; the coordinator's job, done with the owner):
    - one menu-bar item;
    - notifications post without a new permission prompt (when step 2 matched);
@@ -8802,8 +8801,7 @@ The coordinator runs this on the owner's Mac after Tasks 1 to 9 are merged to ma
 9. **Later Dev rollouts.** Run the same `bash tray/install.sh` with the new `N` and without `HGS_MAC_GUI`. The installed client is kept, and Qt stays the rollback copy: there is no second slot. A new client that does not start is replaced by the client it replaced, automatically. The numbered Dev guard refuses a run without `ZERUS_DEV_BUILD_NUMBER` or a local preview label.
 10. **Rollback.** From the clean checkout, in Terminal:
     ```sh
-    cd "$CLONE"
-    python3 tray/update-installed.py --rollback ~/Applications/hgs-tray.app
+    cd "${CLONE:?}" && python3 tray/update-installed.py --rollback ~/Applications/hgs-tray.app
     ```
     Qt comes back with its drafts, and the client moves into the rollback folder, so a second `--rollback` returns to the client. If the updater reports changed Qt settings, quit Zerus, run `defaults import com.hgdev.hgs-tray ~/.local/share/hgs/desktop-previous/com.hgdev.hgs-tray.plist`, then `launchctl kickstart gui/$(id -u)/com.hgdev.hgs-tray` (KeepAlive Crashed does not restart a clean quit). Drafts typed in the client after the switch stay in `~/Library/Application Support/com.hgdev.hgs-tray/drafts/`, where Qt does not see them. Use `HGS_MAC_GUI=qt` on later installs to stay on Qt, and file a bead for the cause.
 

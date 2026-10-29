@@ -865,9 +865,11 @@ void TeamNewTab::validate()
     // Owner, 2026-10-29: saving never blocks Create team (it saves first); a
     // blocker shows red in its own field.
     const QString redBorder = QStringLiteral("border:1px solid %1;").arg(c.danger.name());
-    m_goal->setStyleSheet(drafting && m_goal->toPlainText().trimmed().isEmpty() ? redBorder : QString());
-    m_name->setStyleSheet(drafting && name.isEmpty() ? redBorder : QString());
-    m_folder->setStyleSheet(drafting && !folderOk ? redBorder : QString());
+    // Only on a change: setting a style sheet repolishes the widget (#11).
+    const auto mark = [](QWidget *field, const QString &style) { if (field->styleSheet() != style) field->setStyleSheet(style); };
+    mark(m_goal, drafting && m_goal->toPlainText().trimmed().isEmpty() ? redBorder : QString());
+    mark(m_name, drafting && name.isEmpty() ? redBorder : QString());
+    mark(m_folder, drafting && !folderOk ? redBorder : QString());
     m_reason->setText(reason);
     m_reason->setStyleSheet(QStringLiteral("color:%1;").arg((drafting ? c.danger : c.muted).name()));
     m_reason->setVisible(!reason.isEmpty() && !m_creating);

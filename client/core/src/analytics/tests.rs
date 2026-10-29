@@ -691,6 +691,7 @@ type Answers = (Result<Summary, String>, Result<Speech, String>);
 fn fake_hgs(dir: &Path, help: &str, reply: &[u8], fail: bool) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let script = dir.join("hgs");
+    let staged = dir.join("hgs.new");
     std::fs::write(dir.join("help"), help).unwrap();
     std::fs::write(dir.join("reply"), reply).unwrap();
     let answer = if fail {
@@ -699,13 +700,14 @@ fn fake_hgs(dir: &Path, help: &str, reply: &[u8], fail: bool) -> std::path::Path
         "cat \"$here/reply\""
     };
     std::fs::write(
-        &script,
+        &staged,
         format!(
             "#!/bin/sh\nhere=$(dirname \"$0\")\necho \"$* session=${{HGS_SESSION:-unset}} run=${{HGS_RUN_ID:-unset}}\" >> \"$here/calls\"\ncase \"$*\" in *--help*) cat \"$here/help\"; exit 0;; esac\ncat >/dev/null\n{answer}\n"
         ),
     )
     .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::rename(&staged, &script).unwrap();
     script
 }
 

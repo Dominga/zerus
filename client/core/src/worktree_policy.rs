@@ -381,12 +381,14 @@ mod tests {
         std::fs::write(dir.join("help"), help).unwrap();
         std::fs::write(dir.join("reply"), reply).unwrap();
         let script = dir.join("hgs");
+        let staged = dir.join("hgs.new");
         std::fs::write(
-            &script,
+            &staged,
             "#!/bin/sh\nhere=$(dirname \"$0\")\necho \"$*\" >> \"$here/calls\"\ncase \"$*\" in *--help*) cat \"$here/help\"; exit 0;; esac\ncat >/dev/null\ncat \"$here/reply\"\n",
         )
         .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::rename(&staged, &script).unwrap();
         script
     }
 

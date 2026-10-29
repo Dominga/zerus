@@ -118,14 +118,16 @@ fn a_detail_shows_the_question_and_the_answer_chosen() {
 fn fake(dir: &std::path::Path, help: &str, list: &str) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let script = dir.join("hgs");
+    let staged = dir.join("hgs.new");
     std::fs::write(
-        &script,
+        &staged,
         format!(
             "#!/bin/sh\nhere=$(dirname \"$0\")\necho \"$*\" >> \"$here/calls\"\ncat >/dev/null\ncase \"$*\" in\n  --help) {help};;\n  'approval-log list') {list};;\n  'approval-log detail') echo '{{\"status\":\"approved\",\"detail\":\"\"}}';;\n  *) exit 9;;\nesac\n"
         ),
     )
     .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::rename(&staged, &script).unwrap();
     script
 }
 

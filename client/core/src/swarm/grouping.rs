@@ -119,7 +119,9 @@ struct ArchiveSlot {
 
 #[derive(Debug)]
 struct ArchivePage {
+    /// The shown page, including while an empty next reply raises Archive changed.
     request: u64,
+    answered: u64,
     rows: Vec<ArchiveSlot>,
 }
 
@@ -483,11 +485,24 @@ impl Grouping {
             || self
                 .archives
                 .get(computer)
-                .is_some_and(|page| request <= page.request)
+                .is_some_and(|page| request <= page.answered)
         {
             return None;
         }
         let rows = rows.iter().filter(|row| &row.computer == computer);
+        // ArchiveBrowser.cpp:37 keeps the shown rows on an empty next reply.
+        // Their deltas keep the shown request; the answered watermark still
+        // rejects a late reply older than this empty answer.
+        if rows.clone().next().is_none() {
+            if let Some(page) = self
+                .archives
+                .get_mut(computer)
+                .filter(|page| !page.rows.is_empty())
+            {
+                page.answered = request;
+                return Some(Vec::new());
+            }
+        }
         let mut out = self.place_archive_rows(rows.clone());
         for place in &mut out {
             place.archive_request = Some(request);
@@ -505,6 +520,7 @@ impl Grouping {
             computer.clone(),
             ArchivePage {
                 request,
+                answered: request,
                 rows: retained,
             },
         );

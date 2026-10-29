@@ -430,7 +430,7 @@ live catalog.
   drops the pages and loads the first. Pages load only while the Archive filter
   shows the Sessions list and are kept when it is left, as Qt keeps them.
   Leaving the filter, a change of the computers or their names, a change of
-  the search text, a change of the date range and Refresh archive cancel the
+  the search text, a change of the project filter or date range and Refresh archive cancel the
   reads that are running, also one sent before the cancel that has not started
   yet; an answer that arrives afterwards is dropped. Each read carries the
   store's request number, so a late older read never cancels a newer one.
@@ -450,8 +450,12 @@ live catalog.
   count chip of the filter shows "…" while some computer's total is unknown and
   no archived row is counted, otherwise the count with a "+" while more can be
   loaded; its tooltip says how many are loaded.
-- The list shows the loaded archived rows as flat cards, newest archived first
-  (Qt groups them by project: `zerus-5wmh.40`). Selecting one shows its header
+- The list groups loaded archive identities by project, in organization order,
+  newest archived first inside each project (SessionsWindow.cpp:3238-3242).
+  Machine and project choices count the loaded archive rows inside the date
+  range before their corresponding filter applies (SessionsWindowRows.cpp:266-284).
+  Machine choices come from the fleet, including machines with no loaded rows.
+  Selecting an archived row shows its header
   and its details, read with `inspect --archive ID`, and its recorded Activity
   (below). Restore session, Forget archived session, the copy entries and
   Rename work on a loaded archived row (see Actions).
@@ -941,16 +945,24 @@ Deviations from Qt (the plan's Decisions):
 3. No `swarm initialize`: a computer without the Qt GUI's import keeps edits
    disabled.
 4. Edits made before the first ready catalog are refused, not queued.
-5. Renames made while the client was closed are not followed yet (Qt follows
-   them by persisted run tokens).
-6. Archived sessions are not placed in projects yet: Qt keys them by their
-   archive identity, `machine\narchive\n<archive id>`, which `zerus-5wmh.40`
-   ports. Until then, the Archive view and its
-   count ignore the project filter (it holds project IDs), Clear archive takes
-   no row while a project filter is set, and Move to project is disabled for an
-   archived row ("Archived sessions keep their project until the Archive view
-   groups by project."), so the client never writes the live-name member
-   `host\nname` for an archived session.
+5. Persisted live-run identities follow closed-client renames (`zerus-5wmh.47`);
+   their separate file is bounded at 100,000 tokens and 24 MiB.
+
+Archive placement follows Qt's archive identity, `machine\narchive\n<archive id>`.
+The page reply carries its group and rank; later `Batch.groups` deltas carry
+`archive_request`, so the archive store applies shown-request deltas immediately,
+holds at most 50 for the in-flight request (newest per key), and merges those
+after its reply. Other request tags are discarded. The live assignment store
+never retains archive identities. Project edits, default-project changes and
+verified post-Terminate placement keep the loaded window current.
+
+Leaving Archive only cancels in-flight reads and keeps loaded placements live.
+Scope changes and Refresh use `reset_archive_pages` to clear both sides. An empty
+next page raises "Archive changed. Refresh to start a new view." while keeping
+the shown rows and their placement updates, as ArchiveBrowser.cpp:37 does.
+Clear archive respects the project filter and resets after the confirmed batch;
+Move to project and drag-and-drop use archive identities, including a destination
+row's archive identity, so a live session with the same name stays in place.
 
 ### Organization smoke run
 

@@ -7,6 +7,7 @@ import { flag, num } from "./settings";
 import { bindActivity, bindSelection, followedFor, notify } from "./actions";
 import { observeMarks } from "./marks";
 import { createActivity } from "./activity";
+import { archive } from "./archive";
 import { applyGrouping } from "./organization";
 import { activityReadOnly } from "./activitySource";
 import { compactRows, detailTab, page, selected, selectedKey, setCompactRows, setDetailTab, setSelectedKey, subagentOpen } from "./ui";
@@ -32,6 +33,7 @@ export function receive(b: Batch) {
   batch(() => {
     applyBatch(b);
     applyGrouping(b);
+    archive.applyGroups(b.groups ?? []);
   });
   observeMarks(b);
   if (b.activity.length) activity.applyActivity(b.activity);

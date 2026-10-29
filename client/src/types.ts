@@ -95,7 +95,7 @@ export interface ActivityOut { computer: ComputerId; key: string; kind: Activity
 // the webview gets each row's project and rank, and the ordered headers.
 
 /** One row's place: its project and its rank inside it. */
-export interface GroupOut { computer: ComputerId; key: string; group: string; rank: number }
+export interface GroupOut { computer: ComputerId; key: string; group: string; rank: number; archive_request?: number }
 export interface HeaderOut {
   id: string;
   name: string;
@@ -399,8 +399,9 @@ export interface TerminalFacts {
 }
 
 /** One checked page of a computer's archive (`archive_page`). */
+export interface ArchiveRow extends ViewRow { group: string; rank: number }
 export interface ArchivePage {
-  rows: ViewRow[];
+  rows: ArchiveRow[];
   next_cursor: string;
   previous_cursor: string | null;
   total: number;

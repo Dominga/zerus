@@ -491,8 +491,9 @@ fn archive_identity_memory_is_one_fifty_row_page_per_computer_and_ends_with_its_
     let org = json!({"default_project":INBOX,"projects":[{"id":"alpha"},{"id":INBOX}]});
     grouping.present(&org, Arc::new(members(&org)), 3);
     assert_eq!(grouping.take().0.len(), 1);
-    // Replacing a page with an empty reply forgets its old identities too.
+    // An explicit reset forgets the old identities even after an empty reply.
     grouping.retain_archive_page(&peer, 3, &[]).unwrap();
+    grouping.reset_archive_pages(3);
     grouping.present(&json!({"projects":[{"id":"alpha"}]}), Arc::default(), 4);
     assert!(grouping.take().0.is_empty());
 }
@@ -565,4 +566,44 @@ fn pruning_on_a_quiet_catalog_protects_every_retained_computers_page() {
     assert!(delta
         .iter()
         .any(|p| p.computer == peer && p.key == "archive:b"));
+}
+
+#[test]
+fn an_empty_next_archive_page_keeps_live_placement_and_rejects_older_replies() {
+    let computer = ComputerId::local();
+    let member = archive_member("workstation", "a");
+    let mut grouping = Grouping::default();
+    present(&mut grouping, &[&member], &[], 1);
+    grouping.take();
+    grouping
+        .retain_archive_page(&computer, 4, &[archived("workstation", "a", "")])
+        .unwrap();
+    assert!(grouping
+        .retain_archive_page(&computer, 7, &[])
+        .unwrap()
+        .is_empty());
+    assert!(grouping
+        .retain_archive_page(&computer, 6, &[archived("workstation", "stale", "")])
+        .is_none());
+    present(&mut grouping, &[], &[&member], 2);
+    let delta = grouping.take().0;
+    assert_eq!(delta.len(), 1);
+    assert_eq!(
+        (&*delta[0].key, &*delta[0].group, delta[0].archive_request),
+        ("archive:a", "beta", Some(4))
+    );
+    grouping.reset_archive_pages(7);
+    present(&mut grouping, &[&member], &[], 3);
+    assert!(grouping.take().0.is_empty());
+    assert!(grouping
+        .retain_archive_page(&computer, 8, &[])
+        .unwrap()
+        .is_empty());
+    assert!(grouping
+        .retain_archive_page(&computer, 9, &[])
+        .unwrap()
+        .is_empty());
+    assert!(grouping
+        .retain_archive_page(&computer, 8, &[archived("workstation", "stale", "")])
+        .is_none());
 }

@@ -190,11 +190,11 @@ describe("the Move to project dialog (SessionsWindow.cpp:5363-5372)", () => {
     expect([waiting.disabled, waiting.hint]).toEqual([true, WAITING]);
   });
 
-  it("is disabled for an archived row, which keeps its project until the Archive view groups by project", () => {
+  it("offers Move to project for an archived row when sync is ready", () => {
     const { dialogs, calls } = fakeStore();
     const archived = { ...one, key: "\narchive:a1", state: "archived", archiveId: "a1" } as Session;
     const e = dialogs.moveEntry(archived) as Item;
-    expect([e.disabled, e.hint]).toEqual([true, "Archived sessions keep their project until the Archive view groups by project."]);
+    expect([e.disabled, e.hint]).toEqual([false, undefined]);
     expect(calls()).toBe(0);
   });
 

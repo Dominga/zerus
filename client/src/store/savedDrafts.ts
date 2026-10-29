@@ -25,8 +25,45 @@ export const TEXTS = {
   recovered: "Recovered to this computer.",
 } as const;
 
-/** "Replace the unsent draft in {key} with the selected saved draft?" (MessageComposer.cpp:1365), the key's lines joined by " / ". */
-export const replaceText = (key: string) => `Replace the unsent draft in ${key.replaceAll("\n", " / ")} with the selected saved draft?`;
+/**
+ * "Replace the unsent draft in {key} with the selected saved draft?"
+ * (MessageComposer.cpp:1365). Qt joins the key's lines with " / ", which
+ * reads " / claude/..." for this computer's empty machine: the empty parts
+ * are left out.
+ */
+export const replaceText = (key: string) => `Replace the unsent draft in ${key.split("\n").filter(Boolean).join(" / ")} with the selected saved draft?`;
+
+/** Why a button is off; each shows as its tooltip. */
+export const REASONS = {
+  select: "Select a draft.",
+  loading: "Loading draft…",
+  noText: "This draft has no text.",
+  noSession: "Select a session to restore a draft into it.",
+  otherSession: "Another session opened after Saved drafts. Open Saved drafts again to restore into it.",
+  /** src-tauri `saved::RESTORE_LATER`. */
+  composerBusy: "The current draft cannot be replaced while it is loading, sending or waiting to send.",
+  working: "Wait for the current action to finish.",
+} as const;
+
+/**
+ * The row a key moves the selection to (ArrowUp and ArrowDown by one, Home
+ * and End to the ends, PageUp and PageDown by `page` rows), or undefined for
+ * another key or an empty list.
+ */
+export function listStep(count: number, index: number, key: string, page: number): number | undefined {
+  if (count <= 0) return undefined;
+  const last = count - 1;
+  const from = Math.min(Math.max(index, -1), last);
+  switch (key) {
+    case "ArrowDown": return Math.min(last, from + 1);
+    case "ArrowUp": return Math.max(0, from - 1);
+    case "Home": return 0;
+    case "End": return last;
+    case "PageDown": return Math.min(last, Math.max(0, from) + Math.max(1, page));
+    case "PageUp": return Math.max(0, from - Math.max(1, page));
+  }
+  return undefined;
+}
 
 export type SectionId = "client" | "qt" | "conflicts";
 export const SECTIONS: { id: SectionId; title: string; note?: string }[] = [
@@ -97,7 +134,9 @@ export function createSavedDrafts(port: SavedDraftsPort) {
   const [detail, setDetail] = createSignal<SavedDraftDetail>();
   /** Why Restore or Recover did not run, or that Recover ran. */
   const [message, setMessage] = createSignal<{ text: string; error: boolean }>();
-  const [busy, setBusy] = createSignal(false);
+  /** A Restore or Recover on its way. */
+  const [pending, setPending] = createSignal<"restore" | "recover">();
+  const busy = () => pending() !== undefined;
   /** Counts opens and closes: an answer of an earlier opening is dropped. */
   let opening = 0;
   /** Counts selections (Qt's `selection`): a late preview of another draft is dropped. */
@@ -165,12 +204,38 @@ export function createSavedDrafts(port: SavedDraftsPort) {
       setSelected(undefined);
       setDetail(undefined);
       setMessage(undefined);
-      setBusy(false);
+      setPending(undefined);
     });
+  }
+
+  /** Why Restore in current session is off, "" when it is on (MessageComposer.cpp:1321-1323). */
+  function restoreReason(composer: RestoreTarget | undefined): string {
+    const d = detail();
+    if (!selected()) return REASONS.select;
+    if (!d) return REASONS.loading;
+    // A storage error or a voice message: the detail line says which.
+    if (!d.restorable) return d.detail;
+    if (!composer || target === undefined) return REASONS.noSession;
+    if (composer.handle !== target) return REASONS.otherSession;
+    if (!composer.idle) return REASONS.composerBusy;
+    if (busy()) return REASONS.working;
+    return "";
   }
 
   return {
     open, sections, selected, detail, message, busy,
+    /** Recover is on its way ("Recovering…"). */
+    recovering: () => pending() === "recover",
+    restoreReason,
+    /** Why Copy text is off, "" when it is on. */
+    copyReason(): string {
+      if (!selected()) return REASONS.select;
+      const d = detail();
+      if (!d) return REASONS.loading;
+      return d.text ? "" : REASONS.noText;
+    },
+    /** Why Recover is off, "" when it is on. */
+    recoverReason: (): string => (busy() ? REASONS.working : ""),
     /** Every section's first page answered and none lists a draft. */
     empty: () => SECTIONS.every(({ id }) => sections[id].loaded && sections[id].items.length === 0),
     /** Opens for the composer `handle` (undefined: Restore stays off). */
@@ -190,10 +255,7 @@ export function createSavedDrafts(port: SavedDraftsPort) {
     more: load,
     select,
     /** Restore in current session is enabled (MessageComposer.cpp:1321-1323). */
-    canRestore(composer: RestoreTarget | undefined): boolean {
-      const d = detail();
-      return !!composer && composer.handle === target && composer.idle && !!selected() && !!d && d.restorable && !busy();
-    },
+    canRestore: (composer: RestoreTarget | undefined): boolean => restoreReason(composer) === "",
     /**
      * Whether Restore asks "Replace current draft?" first: the open draft is
      * not empty and the selection is not that very draft (1362-1364).
@@ -205,8 +267,8 @@ export function createSavedDrafts(port: SavedDraftsPort) {
     /** Restores the selection into the composer; true when the dialog may close. */
     async restore(composer: RestoreTarget | undefined): Promise<boolean> {
       const item = selected();
-      if (!item || !composer || composer.handle !== target || !composer.idle) return false;
-      setBusy(true);
+      if (!item || !composer || composer.handle !== target || !composer.idle || busy()) return false;
+      setPending("restore");
       try {
         await port.restore(composer.handle, item.source, item.key);
         return true;
@@ -214,7 +276,7 @@ export function createSavedDrafts(port: SavedDraftsPort) {
         setMessage({ text: errorText(error), error: true });
         return false;
       } finally {
-        setBusy(false);
+        setPending(undefined);
       }
     },
     /** Recover (Qt's drafts only): a copy in this computer's store, never over a draft here. */
@@ -222,7 +284,8 @@ export function createSavedDrafts(port: SavedDraftsPort) {
       const item = selected();
       if (!item || item.source !== "qt" || busy()) return;
       const at = opening;
-      setBusy(true);
+      setPending("recover");
+      setMessage(undefined);
       try {
         await port.recover(item.key);
         if (at !== opening) return;
@@ -233,7 +296,7 @@ export function createSavedDrafts(port: SavedDraftsPort) {
       } catch (error) {
         if (at === opening) setMessage({ text: errorText(error), error: true });
       } finally {
-        if (at === opening) setBusy(false);
+        if (at === opening) setPending(undefined);
       }
     },
   };

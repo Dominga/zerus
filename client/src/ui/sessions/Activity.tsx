@@ -10,7 +10,7 @@ import { terminal } from "../../store/terminal";
 import type { ActivitySource } from "../../store/activitySource";
 import type { LocalMessage } from "../../types";
 import { buildTranscript, VOICE_STATE_LABEL, voiceStateDetail, voiceStateIssue } from "./transcript";
-import { DELETE_TEXT, DELETE_TITLE, routeInspect } from "./local-actions";
+import { DELETE_TEXT, DELETE_TITLE, retryReason, routeInspect } from "./local-actions";
 import { statusOf } from "./SessionCard";
 import type { LocalItem, MediaMessage, Session, TranscriptItem } from "./types";
 
@@ -314,14 +314,17 @@ function MediaCard(props: { item: MediaMessage }) {
 // Local message rows: Retry, Check Terminal (or native UI) and Delete
 // (ActivityView.cpp:1059-1068, SessionsWindow.cpp messageAction 4470-4527).
 
-/** The row whose Delete waits for its confirmation. */
-const [deleting, setDeleting] = createSignal<string>();
+/** The row whose Delete waits for its confirmation, and its Delete button, which the focus returns to on Cancel. */
+const [deleting, setDeleting] = createSignal<{ id: string; from: HTMLElement }>();
 
 function LocalActions(props: { local: LocalItem }) {
-  const run = (action: LocalItem["actions"][number]) => {
+  // Retry stays focusable while off and says why (Rust refuses it while the composer is busy).
+  const reason = (action: LocalItem["actions"][number]) => (action === "retry" ? retryReason(composer.view(), composer.operationLocked()) : "");
+  const run = (action: LocalItem["actions"][number], from: HTMLElement) => {
     const id = props.local.id;
+    if (reason(action)) return;
     if (action === "retry") void composer.localRetry(id);
-    else if (action === "delete") setDeleting(id);
+    else if (action === "delete") setDeleting({ id, from });
     else void composer.localInspect(id).then((routed) => routeInspect(routed, {
       showTerminal: () => { terminal.opened(); setDetailTab("terminal"); },
       notify: (tone, text) => { notify(tone, text); },
@@ -330,7 +333,10 @@ function LocalActions(props: { local: LocalItem }) {
   const label = (action: LocalItem["actions"][number]) => (action === "retry" ? "Retry" : action === "delete" ? "Delete" : props.local.inspectLabel);
   return (
     <div class="act-local-actions">
-      <For each={props.local.actions}>{(action) => <button type="button" class="btn small" onClick={() => run(action)}>{label(action)}</button>}</For>
+      <For each={props.local.actions}>{(action) => (
+        <button type="button" class="btn small" aria-disabled={reason(action) ? "true" : undefined} title={reason(action) || undefined}
+          onClick={(e) => run(action, e.currentTarget)}>{label(action)}</button>
+      )}</For>
     </div>
   );
 }
@@ -344,19 +350,27 @@ function LocalDeleteDialog() {
     if (!el.open) el.showModal();
     queueMicrotask(() => el?.querySelector<HTMLElement>("[data-initial]")?.focus());
   });
+  /** Cancel: the focus returns to the row's Delete. */
+  const cancel = () => {
+    const from = deleting()?.from;
+    setDeleting(undefined);
+    if (from?.isConnected) from.focus();
+  };
+  /** Delete: the row goes, and the focus moves to the transcript. */
   const confirm = () => {
-    const id = deleting();
+    const id = deleting()?.id;
     setDeleting(undefined);
     if (id) void composer.localDelete(id);
+    focusTranscript();
   };
   return (
     <dialog class="dlg" ref={el} role="alertdialog" aria-labelledby="local-delete-title" aria-describedby="local-delete-body" style={{ width: "440px" }}
-      onCancel={(e) => { e.preventDefault(); setDeleting(undefined); }} onClose={() => { if (!el?.open) setDeleting(undefined); }}>
-      <div class="dlg-head"><Icon name="triangle-alert" size={18} class="accent" /><h2 id="local-delete-title">{DELETE_TITLE}</h2></div>
+      onCancel={(e) => { e.preventDefault(); cancel(); }} onClose={() => { if (!el?.open && deleting()) cancel(); }}>
+      <div class="dlg-head"><Icon name="trash" size={18} class="danger" /><h2 id="local-delete-title">{DELETE_TITLE}</h2></div>
       <div class="dlg-body"><div class="confirm-body" id="local-delete-body">{DELETE_TEXT}</div></div>
       <div class="dlg-foot">
         <span class="spacer" />
-        <button type="button" class="btn primary" data-initial onClick={() => setDeleting(undefined)}>Cancel</button>
+        <button type="button" class="btn primary" data-initial onClick={cancel}>Cancel</button>
         <button type="button" class="btn solid-danger" onClick={confirm}>Delete</button>
       </div>
     </dialog>

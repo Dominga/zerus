@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createRoot, createSignal, untrack } from "solid-js";
+import { For, Show, createEffect, createRoot, createSignal, untrack, type JSX } from "solid-js";
 import * as bridge from "../../bridge";
 import { Icon } from "../lib/icons";
 import { composer } from "../../store/composer";
@@ -6,22 +6,41 @@ import { orderedRows } from "../../store/catalog";
 import { openSession } from "../../store/desk";
 import { toast } from "../../store/ui";
 import {
-  createSavedDrafts, draftOwnerRow, modifiedText, replaceText, SECTIONS, TEXTS,
+  createSavedDrafts, draftOwnerRow, listStep, modifiedText, replaceText, SECTIONS, TEXTS,
   type RestoreTarget, type SavedDrafts,
 } from "../../store/savedDrafts";
 import type { SavedDraftItem } from "../../types";
 import type { Session } from "./types";
 
 // The Saved drafts dialog (MessageComposer.cpp:1230-1387), opened from the
-// session list's Saved drafts button (SessionsWindow.cpp:485-489). Restore
-// over a draft that is not empty asks "Replace current draft?" with Cancel
-// as the default; Close is the dialog's default button, as in Qt.
+// session list's Saved drafts button (SessionsWindow.cpp:485-489). The list
+// is one listbox of options grouped by section; its keys move the selection
+// and Enter goes to the session (a double click's equivalent). Restore over a
+// draft that is not empty asks "Replace current draft?" with Cancel as the
+// default; Close is the dialog's default button, as in Qt. A button that is
+// off stays focusable and names its reason as its tooltip.
 
 /** The dialog's store; its rows go when it closes. */
 export const savedDrafts: SavedDrafts = createRoot(() => createSavedDrafts({
   page: bridge.savedDrafts, conflicts: bridge.draftConflicts, detail: bridge.savedDraft,
   recover: bridge.draftRecover, restore: bridge.draftRestore,
 }));
+
+/** The element the focus returns to when the dialog closes (the list's Saved drafts button). */
+let opener: HTMLElement | undefined;
+
+/** Opens Saved drafts for the open composer `handle`; the focus returns to `from` when it closes. */
+export function openSavedDrafts(from: HTMLElement | undefined, handle: number | undefined) {
+  opener = from;
+  savedDrafts.show(handle);
+}
+
+/** "Show more" per section, below the list (a listbox holds options only). */
+export const MORE_LABEL: Record<(typeof SECTIONS)[number]["id"], string> = {
+  client: "Show more on this computer",
+  qt: "Show more from the previous Zerus app",
+  conflicts: "Show more not imported at the switch",
+};
 
 /** A row's element id, for the list's active descendant. */
 const rowIds = new WeakMap<SavedDraftItem, string>();
@@ -41,6 +60,14 @@ function restoreTarget(): RestoreTarget | undefined {
     hasDraft: composer.text() !== "" || v.attachments.length > 0,
     idle: v.loaded && !v.sending && !v.waiting && !composer.operationLocked(),
   };
+}
+
+/** A footer button that stays focusable while off and names why as its tooltip. */
+function Action(props: { reason: string; onClick: () => void; ref?: (el: HTMLButtonElement) => void; children: JSX.Element }) {
+  return (
+    <button type="button" class="btn" ref={props.ref} aria-disabled={props.reason ? "true" : undefined} title={props.reason || undefined}
+      onClick={() => { if (!props.reason) props.onClick(); }}>{props.children}</button>
+  );
 }
 
 function Row(props: { item: SavedDraftItem; onOpen: () => void }) {
@@ -90,46 +117,65 @@ function ReplaceDialog(props: { open: boolean; text: string; onCancel: () => voi
 export function SavedDraftsDialog() {
   let el: HTMLDialogElement | undefined;
   let list: HTMLDivElement | undefined;
+  let restoreButton: HTMLButtonElement | undefined;
   const [replacing, setReplacing] = createSignal<string>();
+  /** The list takes the focus once its first draft is selected after opening. */
+  let focusList = false;
   /** The selected draft's session row, found when it is selected (Qt's canOpenDraftSession). */
   const [owner, setOwner] = createSignal<Session>();
   createEffect(() => {
     const item = savedDrafts.selected();
     setOwner(item ? untrack(() => draftOwnerRow(item, orderedRows())) : undefined);
-    // The selected row stays in view.
-    if (item) queueMicrotask(() => list?.querySelector(".draft-row.on")?.scrollIntoView({ block: "nearest" }));
+    if (!item) return;
+    queueMicrotask(() => {
+      // The selected row stays in view.
+      list?.querySelector(".draft-row.on")?.scrollIntoView({ block: "nearest" });
+      if (focusList && list && el?.open) { focusList = false; list.focus(); }
+    });
   });
   createEffect(() => {
     if (!el) return;
-    if (!savedDrafts.open()) { if (el.open) el.close(); setReplacing(undefined); return; }
+    if (!savedDrafts.open()) {
+      setReplacing(undefined);
+      if (el.open) el.close();
+      return;
+    }
+    focusList = true;
     if (!el.open) el.showModal();
     queueMicrotask(() => el?.querySelector<HTMLElement>("[data-initial]")?.focus());
   });
 
   const all = () => SECTIONS.flatMap(({ id }) => savedDrafts.sections[id].items);
-  const move = (step: number) => {
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === "Enter") { e.preventDefault(); goTo(); return; }
     const items = all();
-    if (!items.length) return;
-    const at = items.indexOf(savedDrafts.selected()!);
-    const next = items[Math.max(0, Math.min(items.length - 1, at < 0 ? 0 : at + step))];
-    if (next !== savedDrafts.selected()) savedDrafts.select(next);
+    const row = list?.querySelector<HTMLElement>(".draft-row");
+    const page = list && row ? Math.max(1, Math.floor(list.clientHeight / Math.max(1, row.offsetHeight)) - 1) : 1;
+    const next = listStep(items.length, items.indexOf(savedDrafts.selected()!), e.key, page);
+    if (next === undefined) return;
+    e.preventDefault();
+    if (items[next] !== savedDrafts.selected()) savedDrafts.select(items[next]);
   };
 
+  const close = () => savedDrafts.close();
+  const goToReason = () => (!savedDrafts.selected() ? "Select a draft." : owner() ? "" : TEXTS.unreachable);
   const goTo = () => {
     const item = savedDrafts.selected();
     // The row is looked for again: the list may have changed since the selection.
     const row = item && draftOwnerRow(item, orderedRows());
     if (!row) return;
+    opener = undefined;
     savedDrafts.close();
     openSession({ computer: row.computer, key: row.catalogKey });
   };
   const restore = async (confirmed = false) => {
     const target = restoreTarget();
-    if (!target || !savedDrafts.canRestore(target)) return;
-    if (!confirmed && savedDrafts.asks(target)) { setReplacing(target.key); return; }
+    if (!savedDrafts.canRestore(target)) return;
+    if (!confirmed && savedDrafts.asks(target!)) { setReplacing(target!.key); return; }
     // What was typed reaches Rust first; Restore replaces it with a new text epoch.
     await composer.flush();
     if (await savedDrafts.restore(restoreTarget())) savedDrafts.close();
+    else restoreButton?.focus();
   };
   const copy = () => {
     const text = savedDrafts.detail()?.text ?? "";
@@ -142,46 +188,63 @@ export function SavedDraftsDialog() {
     return savedDrafts.detail()?.detail ?? TEXTS.loading;
   };
   return (
-    <dialog class="dlg saved-drafts" ref={el} aria-labelledby="saved-drafts-title" style={{ width: "720px" }}
-      onCancel={(e) => { e.preventDefault(); savedDrafts.close(); }} onClose={() => { if (!el?.open && savedDrafts.open()) savedDrafts.close(); }}>
+    <dialog class="dlg saved-drafts" classList={{ "no-drafts": savedDrafts.empty() }} ref={el} aria-labelledby="saved-drafts-title" style={{ width: savedDrafts.empty() ? "480px" : "720px" }}
+      onCancel={(e) => { e.preventDefault(); close(); }}
+      onClose={() => {
+        if (!el?.open && savedDrafts.open()) savedDrafts.close();
+        // The focus returns to what opened the dialog.
+        const back = opener;
+        opener = undefined;
+        if (back?.isConnected) back.focus();
+      }}>
       <div class="dlg-head"><Icon name="drafts" size={18} class="accent" /><h2 id="saved-drafts-title">{TEXTS.title}</h2></div>
       <div class="dlg-body saved-drafts-body">
-        <p class="hint">{savedDrafts.empty() ? TEXTS.empty : TEXTS.hint}</p>
-        <div class="draft-list" ref={list} role="listbox" tabindex="0" aria-label={TEXTS.title}
-          aria-activedescendant={savedDrafts.selected() ? rowId(savedDrafts.selected()!) : undefined}
-          onKeyDown={(e) => {
-            if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); move(e.key === "ArrowDown" ? 1 : -1); }
-          }}>
-          <For each={SECTIONS}>{(section) => (
-            <Show when={savedDrafts.sections[section.id].items.length > 0}>
-              <div class="draft-section" role="group" aria-label={section.title}>
-                <div class="eyebrow draft-section-title">{section.title}</div>
-                <Show when={section.note}><p class="hint draft-section-note">{section.note}</p></Show>
-                <For each={savedDrafts.sections[section.id].items}>{(item) => <Row item={item} onOpen={goTo} />}</For>
-                <Show when={savedDrafts.sections[section.id].next !== null}>
-                  <button type="button" class="btn small draft-more" disabled={savedDrafts.sections[section.id].loading}
-                    onClick={() => { void savedDrafts.more(section.id); }}>Show more</button>
-                </Show>
-              </div>
-            </Show>
-          )}</For>
-        </div>
-        <pre class="draft-preview mono" aria-label="Draft text">{savedDrafts.detail()?.text ?? ""}</pre>
-        <p class="hint draft-detail">{detailLine()}</p>
-        <Show when={savedDrafts.message()}>{(m) => <p class="draft-message" classList={{ error: m().error }}>{m().text}</p>}</Show>
+        <p class="hint" id="saved-drafts-hint">{savedDrafts.empty() ? TEXTS.empty : TEXTS.hint}</p>
+        <Show when={!savedDrafts.empty()}>
+          <div class="draft-list" ref={list} role="listbox" tabindex="0" aria-label={TEXTS.title} aria-describedby="saved-drafts-hint"
+            aria-activedescendant={savedDrafts.selected() ? rowId(savedDrafts.selected()!) : undefined} onKeyDown={onKey}>
+            <For each={SECTIONS}>{(section) => (
+              <Show when={savedDrafts.sections[section.id].items.length > 0}>
+                <div class="draft-section" role="group" aria-labelledby={`draft-section-${section.id}`}>
+                  <div class="eyebrow draft-section-title" id={`draft-section-${section.id}`} role="presentation">{section.title}</div>
+                  <Show when={section.note}><p class="hint draft-section-note" role="presentation">{section.note}</p></Show>
+                  <For each={savedDrafts.sections[section.id].items}>{(item) => <Row item={item} onOpen={goTo} />}</For>
+                </div>
+              </Show>
+            )}</For>
+          </div>
+          <div class="draft-more-bar">
+            <For each={SECTIONS}>{(section) => (
+              <Show when={savedDrafts.sections[section.id].next !== null}>
+                <button type="button" class="btn small" aria-disabled={savedDrafts.sections[section.id].loading ? "true" : undefined}
+                  onClick={() => { void savedDrafts.more(section.id); }}>
+                  {savedDrafts.sections[section.id].loading ? "Loading…" : MORE_LABEL[section.id]}
+                </button>
+              </Show>
+            )}</For>
+          </div>
+          <pre class="draft-preview mono" aria-label="Draft text" tabindex="0">{savedDrafts.detail()?.text ?? ""}</pre>
+          <p class="hint draft-detail" aria-live="polite">{detailLine()}</p>
+        </Show>
+        <Show when={savedDrafts.message()}>
+          {(m) => <p class="draft-message" classList={{ error: m().error }} role={m().error ? "alert" : "status"}>{m().text}</p>}
+        </Show>
       </div>
       <div class="dlg-foot">
-        <button type="button" class="btn" disabled={!savedDrafts.detail()?.text} onClick={copy}>Copy text</button>
-        <button type="button" class="btn" disabled={!savedDrafts.canRestore(restoreTarget())} onClick={() => { void restore(); }}>Restore in current session</button>
-        <button type="button" class="btn" disabled={!owner()} title={!owner() && savedDrafts.selected() ? TEXTS.unreachable : undefined} onClick={goTo}>Go to session</button>
+        <Action reason={savedDrafts.copyReason()} onClick={copy}>Copy text</Action>
+        <Action reason={savedDrafts.restoreReason(restoreTarget())} ref={(b) => { restoreButton = b; }} onClick={() => { void restore(); }}>Restore in current session</Action>
+        <Action reason={goToReason()} onClick={goTo}>Go to session</Action>
         <Show when={savedDrafts.selected()?.source === "qt"}>
-          <button type="button" class="btn" disabled={savedDrafts.busy()} onClick={() => { void savedDrafts.recover(); }}>Recover</button>
+          <Action reason={savedDrafts.recoverReason()} onClick={() => { void savedDrafts.recover(); }}>
+            {savedDrafts.recovering() ? "Recovering…" : "Recover"}
+          </Action>
         </Show>
         <span class="spacer" />
-        <button type="button" class="btn primary" data-initial onClick={() => savedDrafts.close()}>Close</button>
+        <button type="button" class="btn primary" data-initial onClick={close}>Close</button>
       </div>
       <ReplaceDialog open={!!replacing()} text={replaceText(replacing() ?? "")}
-        onCancel={() => setReplacing(undefined)} onConfirm={() => { setReplacing(undefined); void restore(true); }} />
+        onCancel={() => { setReplacing(undefined); restoreButton?.focus(); }}
+        onConfirm={() => { setReplacing(undefined); void restore(true); }} />
     </dialog>
   );
 }

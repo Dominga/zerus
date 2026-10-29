@@ -79,8 +79,10 @@
   /* Local message rows (ActivityView.cpp:1053-1068): the stamp in place of the
      time, the error line in the warning colour and the row's buttons. */
   .act-stamp { color: var(--z-color-dim); font-size: var(--fs-xs); }
-  .act-stamp.failed { color: var(--z-color-warn); }
-  .act-error { margin-top: 6px; font-size: var(--fs-xs); color: var(--z-color-warn); white-space: pre-wrap; }
+  /* The warning colour, mixed toward the text colour so it keeps its
+     contrast on the tinted user bubble in every skin. */
+  .act-stamp.failed { color: color-mix(in srgb, var(--z-color-warn) 78%, var(--z-color-text)); }
+  .act-error { margin-top: 6px; font-size: var(--fs-sm); color: color-mix(in srgb, var(--z-color-warn) 78%, var(--z-color-text)); white-space: pre-wrap; }
   .act-local-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; white-space: normal; }
   .att-chip.unavailable { color: var(--z-color-dim); }
   .act-copy { opacity: 0; transition: opacity var(--z-motion-fast); }
@@ -370,8 +372,10 @@
      selected draft's text and its detail line. */
   /* Qt's 720 x 640: the list takes two parts of the height, the text one. */
   dialog.saved-drafts[open] { height: min(640px, calc(100vh - 64px)); }
+  /* With no draft the dialog is the hint and Close only. */
+  dialog.saved-drafts.no-drafts[open] { height: fit-content; }
   .saved-drafts-body { flex: 1 1 auto; display: flex; flex-direction: column; gap: 10px; min-height: 0; overflow: hidden; }
-  .saved-drafts .draft-list { flex: 2 1 0; max-height: none; min-height: 96px; padding: 2px; border: 1px solid var(--z-color-divider); border-radius: var(--z-radius-md); outline: none; }
+  .saved-drafts .draft-list { flex: 3 1 0; max-height: none; min-height: 120px; padding: 2px; border: 1px solid var(--z-color-divider); border-radius: var(--z-radius-md); outline: none; }
   .saved-drafts .draft-list:focus-visible { border-color: var(--z-color-accent-muted); }
   .draft-section { display: flex; flex-direction: column; gap: 2px; }
   .draft-section + .draft-section { margin-top: 8px; }
@@ -384,8 +388,9 @@
   .draft-machine { color: var(--z-color-muted); font-size: var(--fs-xs); max-width: 40%; }
   .draft-row-meta { color: var(--z-color-dim); font-size: var(--fs-xs); }
   .draft-row-foot { color: var(--z-color-text-2); }
-  .draft-more { align-self: flex-start; margin: 4px 8px; }
-  .draft-preview { flex: 1 1 0; min-height: 56px; margin: 0; padding: 8px 10px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+  .draft-more-bar { display: flex; flex-wrap: wrap; gap: 6px; margin-top: -4px; }
+  .draft-more-bar:empty { display: none; }
+  .draft-preview { flex: 1 1 0; min-height: 48px; margin: 0; padding: 8px 10px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
     border: 1px solid var(--z-color-divider); border-radius: var(--z-radius-md); background: var(--z-color-code-bg); font-size: calc(var(--fs-base) * .9); }
   .draft-message { font-size: var(--fs-xs); color: var(--z-color-text-2); }
   .draft-message.error { color: var(--z-color-danger); }

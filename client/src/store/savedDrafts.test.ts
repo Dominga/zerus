@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createRoot } from "solid-js";
-import { createSavedDrafts, draftOwnerRow, modifiedText, PAGE, replaceText, TEXTS, type RestoreTarget, type SavedDraftsPort } from "./savedDrafts";
+import { createSavedDrafts, draftOwnerRow, listStep, modifiedText, PAGE, REASONS, replaceText, TEXTS, type RestoreTarget, type SavedDraftsPort } from "./savedDrafts";
 import type { DraftSource, SavedDraftDetail, SavedDraftItem } from "../types";
 import type { Session } from "../ui/sessions/types";
 
@@ -167,7 +167,9 @@ describe("Saved drafts (MessageComposer.cpp:1230-1387)", () => {
       s.select(item("\nclaude/p/open", "qt"));
       expect(s.asks(target({ hasDraft: true }))).toBe(true);
       expect(TEXTS.replaceTitle).toBe("Replace current draft?");
-      expect(replaceText("\nclaude/p/open")).toBe("Replace the unsent draft in  / claude/p/open with the selected saved draft?");
+      // This computer's empty machine leaves no leading " / ".
+      expect(replaceText("\nclaude/p/open")).toBe("Replace the unsent draft in claude/p/open with the selected saved draft?");
+      expect(replaceText("studio\nclaude/p/open\narchive-1")).toBe("Replace the unsent draft in studio / claude/p/open / archive-1 with the selected saved draft?");
       expect(TEXTS.replaceConfirm).toBe("Replace draft");
     });
   });
@@ -238,5 +240,60 @@ describe("Saved drafts (MessageComposer.cpp:1230-1387)", () => {
     const at = new Date(2026, 9, 7, 9, 5).getTime() / 1000;
     expect(modifiedText(at)).toBe("7 Oct 09:05");
     expect(modifiedText(0)).toBe("");
+  });
+
+  it("names why Restore and Copy text are off", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const s = createSavedDrafts(f.port);
+      s.show(4);
+      expect([s.restoreReason(target()), s.copyReason()]).toEqual([REASONS.select, REASONS.select]);
+      s.select(item("\nclaude/p/a"));
+      expect([s.restoreReason(target()), s.copyReason()]).toEqual([REASONS.loading, REASONS.loading]);
+      f.details.answer(detail(""));
+      await tick();
+      expect(s.copyReason()).toBe(REASONS.noText);
+      expect(s.restoreReason(undefined)).toBe(REASONS.noSession);
+      expect(s.restoreReason(target({ handle: 5 }))).toBe(REASONS.otherSession);
+      expect(s.restoreReason(target({ idle: false }))).toBe(REASONS.composerBusy);
+      expect(s.restoreReason(target())).toBe("");
+      s.select(item("voice-message-draft\n\nclaude/p/a"));
+      const voice = "Open the original conversation (claude/p/a) to review or check this voice message.";
+      f.details.answer(detail("words", { restorable: false, detail: voice }));
+      await tick();
+      expect(s.restoreReason(target())).toBe(voice);
+      expect(s.copyReason()).toBe("");
+      s.show(undefined);
+      s.select(item("\nclaude/p/a"));
+      f.details.answer(detail("saved"));
+      await tick();
+      expect(s.restoreReason(target())).toBe(REASONS.noSession);
+    });
+  });
+
+  it("Recover is busy until its answer, and Restore waits for it", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const s = createSavedDrafts(f.port);
+      s.show(4);
+      s.select(item("\nclaude/p/q", "qt"));
+      f.details.answer(detail("saved"));
+      await tick();
+      const run = s.recover();
+      expect([s.recovering(), s.recoverReason(), s.restoreReason(target())]).toEqual([true, REASONS.working, REASONS.working]);
+      expect(await s.restore(target())).toBe(false);
+      f.recovers.answer();
+      await run;
+      expect([s.recovering(), s.recoverReason()]).toEqual([false, ""]);
+    });
+  });
+
+  it("the list's keys move the selection by one, by a page and to the ends", () => {
+    expect([listStep(5, 1, "ArrowDown", 3), listStep(5, 4, "ArrowDown", 3), listStep(5, -1, "ArrowDown", 3)]).toEqual([2, 4, 0]);
+    expect([listStep(5, 1, "ArrowUp", 3), listStep(5, 0, "ArrowUp", 3), listStep(5, -1, "ArrowUp", 3)]).toEqual([0, 0, 0]);
+    expect([listStep(5, 2, "Home", 3), listStep(5, 2, "End", 3)]).toEqual([0, 4]);
+    expect([listStep(9, 1, "PageDown", 3), listStep(9, 7, "PageDown", 3), listStep(9, -1, "PageDown", 3)]).toEqual([4, 8, 3]);
+    expect([listStep(9, 5, "PageUp", 3), listStep(9, 1, "PageUp", 3), listStep(9, 4, "PageUp", 0)]).toEqual([2, 0, 3]);
+    expect([listStep(0, -1, "ArrowDown", 3), listStep(5, 1, "Enter", 3), listStep(5, 1, "a", 3)]).toEqual([undefined, undefined, undefined]);
   });
 });

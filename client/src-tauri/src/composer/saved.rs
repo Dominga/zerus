@@ -1265,27 +1265,24 @@ mod tests {
         let root = dir("recover-queued");
         let qt = qt_store_with_a_draft(&root);
         let store = drafts(&root);
-        let (c, _) = hub_with_qt(&store, Some(qt));
+        let (c, _) = hub_with_qt(&store, Some(qt.clone()));
         c.open(Some(session()));
         let view = until(&c, |v| v.loaded);
-        // The writer is held: the recover waits, and an edit of the empty
-        // draft (a cursor move) queues its save behind it.
+        // The writer is held, so the order is the test's: an edit of the
+        // empty draft (a cursor move) queues its save, and the recover's
+        // answer reaches the hub while that save still waits, as when the
+        // edit lands while the recover runs on the writer.
         let release = crate::composer::tests::hold(&store);
-        let recovering = {
-            let c = c.clone();
-            std::thread::spawn(move || c.recover(KEY))
-        };
-        std::thread::sleep(std::time::Duration::from_millis(100));
         c.edit(view.handle, 1, view.text_epoch, String::new(), 0, 0);
+        c.recovered(KEY, read_draft(&qt, KEY));
+        assert_eq!(c.current().unwrap().text, "from the Qt app");
         release.send(()).unwrap();
-        assert_eq!(recovering.join().unwrap(), Ok(()));
-        until(&c, |v| v.text == "from the Qt app");
         c.flush();
         store.flush();
         assert_eq!(
             read_draft(&root.join("drafts"), KEY).draft.draft.text,
             "from the Qt app",
-            "the composer that took the draft saved it after the empty save"
+            "the composer that took the draft saves it over the empty save"
         );
     }
 

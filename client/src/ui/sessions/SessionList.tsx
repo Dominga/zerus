@@ -30,7 +30,7 @@ import {
 import type { Session } from "./types";
 import { motionReduced } from "../motion";
 import { composer } from "../../store/composer";
-import { SavedDraftsDialog, savedDrafts } from "./SavedDrafts";
+import { SavedDraftsDialog, openSavedDrafts } from "./SavedDrafts";
 import { bulkSelect, clearMulti, multiCount, setAnchor, dragItem, setDragItem, drop, setDrop, endDrag, placement, applyDrop, SESSION_MIME, type DragItem } from "./organize";
 
 /** Actions that go through guarded `hgs` calls arrive in phase 2; their menu entries show disabled. */
@@ -475,7 +475,7 @@ export function SessionList() {
           <button class="icon-btn small" title={markAllTip(markAllEntry())} disabled={markAllEntry().disabled} onClick={() => runMarkAll()}><Icon name="read-all" size={16} /></button>
           {/* The open composer is the dialog's target, none while a subagent shows (SessionsWindow.cpp:485-489). */}
           <button class="icon-btn small" data-tip="Saved drafts: recover local drafts, including those from ended sessions" aria-label="Saved drafts"
-            onClick={() => savedDrafts.show(subagentOpen() ? undefined : composer.view()?.handle)}><Icon name="drafts" size={16} /></button>
+            onClick={(e) => openSavedDrafts(e.currentTarget, subagentOpen() ? undefined : composer.view()?.handle)}><Icon name="drafts" size={16} /></button>
         </footer>
       </div>
       <Show when={!stripMode()}><ResizeHandle /></Show>

@@ -309,6 +309,39 @@ mod tests {
     }
 
     #[test]
+    fn an_idle_process_refresh_waits_for_the_original_read_gap() {
+        let start = Instant::now();
+        let mut schedule = Schedule::new(Intervals::default());
+        let followed = [("run:r".into(), "codex/p/t".into())];
+        let follows = Follows {
+            activity: &[],
+            processes: &followed,
+        };
+        let first = schedule.due(start, &follows);
+        let read = first
+            .iter()
+            .find(|read| matches!(read, Read::Processes { .. }))
+            .unwrap();
+        schedule.done(read, start + Duration::from_millis(100));
+        for _ in 0..2 {
+            assert!(schedule.refresh_processes("run:r", start + Duration::from_millis(100)));
+        }
+        assert!(schedule
+            .due(start + Duration::from_millis(999), &follows)
+            .is_empty());
+        let refreshed = schedule.due(start + SECOND, &follows);
+        assert_eq!(refreshed.len(), 1);
+        assert!(matches!(refreshed[0], Read::Processes { .. }));
+        schedule.done(&refreshed[0], start + SECOND);
+        assert!(schedule.refresh_processes("run:r", start + SECOND * 4));
+        assert_eq!(
+            schedule.due(start + SECOND * 4, &follows).len(),
+            1,
+            "an idle read past the gap refreshes immediately"
+        );
+    }
+
+    #[test]
     fn reads_follow_the_qt_cadence_with_one_in_flight_each() {
         let start = Instant::now();
         let mut schedule = Schedule::new(Intervals::default());

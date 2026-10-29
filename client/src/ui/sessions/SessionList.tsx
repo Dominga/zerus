@@ -445,7 +445,7 @@ export function SessionList() {
       onPointerEnter={onSectionEnter} onPointerLeave={onSectionLeave}>
       <Show when={stripMode()}><Strip onEnter={onStripEnter} onToggle={toggleDock} /></Show>
       <div class="sp-panel" ref={panel} classList={{ overlay: stripMode() }} hidden={!panelVisible()}
-        onContextMenu={(e) => { if ((e.target as Element).closest("input,textarea")) return; openMenu(e, backgroundEntries({ newProject: openCreateProjectDialog })); }}>
+        onContextMenu={(e) => { if ((e.target as Element).closest("input,textarea")) return; openMenu(e, backgroundEntries({ newSession: newSessionFromPanel, newProject: openCreateProjectDialog })); }}>
         <header class="sp-head">
           <h1>{stateFilter() === "archived" ? "Archive" : "Sessions"}</h1>
           <span class="grow" />

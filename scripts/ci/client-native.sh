@@ -14,7 +14,7 @@ case "$platform" in
         cargo +1.99.1 clippy --locked --manifest-path client/src-tauri/Cargo.toml --all-targets --features video -- -D warnings
         ;;
     macos|windows)
-        cargo +1.99.1 test --locked --manifest-path client/core/Cargo.toml
+        cargo +1.99.1 test --locked --manifest-path client/core/Cargo.toml --no-fail-fast
         if [[ "$platform" == macos ]]; then
             cargo +1.99.1 test --locked --manifest-path client/src-tauri/Cargo.toml
         fi

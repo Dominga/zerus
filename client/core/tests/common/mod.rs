@@ -30,7 +30,10 @@ impl FakeHgs {
         #[cfg(unix)]
         std::os::unix::fs::symlink(manifest.join("tests/support/fake_hgs.py"), &script).unwrap();
         #[cfg(not(unix))]
-        std::fs::copy(manifest.join("tests/support/fake_hgs.py"), &script).unwrap();
+        {
+            std::fs::copy(manifest.join("tests/support/fake_hgs.py"), &script).unwrap();
+            std::fs::copy(env!("CARGO_BIN_EXE_fake-hgs-launcher"), dir.join("hgs.exe")).unwrap();
+        }
         let config = json!({"fixtures": manifest.join("tests/fixtures"), "hosts": hosts});
         std::fs::write(dir.join("config.json"), config.to_string()).unwrap();
         std::fs::write(dir.join("log.ndjson"), "").unwrap();
@@ -38,7 +41,14 @@ impl FakeHgs {
     }
 
     pub fn path(&self) -> PathBuf {
-        self.dir.join("hgs")
+        #[cfg(unix)]
+        {
+            self.dir.join("hgs")
+        }
+        #[cfg(not(unix))]
+        {
+            self.dir.join("hgs.exe")
+        }
     }
 
     pub fn touch(&self, name: &str) {

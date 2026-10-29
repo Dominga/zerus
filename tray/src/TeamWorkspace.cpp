@@ -27,6 +27,7 @@
 #include <QResizeEvent>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QScopedValueRollback>
 #include <QSettings>
 #include <QShowEvent>
 #include <QSplitter>
@@ -151,6 +152,11 @@ TeamWorkspace::TeamWorkspace(TeamController *teams, TeamPanel *panel, QWidget *p
     QObject::connect(m_teams, &TeamController::watchedChanged, this, [this] { scheduleRender(); });
     QObject::connect(m_teams, &TeamController::feedChanged, this, [this] { scheduleRender(); });
     QObject::connect(m_teams, &TeamController::inboxChanged, this, [this] { scheduleRender(); });
+    QObject::connect(qApp, &QApplication::focusChanged, this, [this](QWidget *, QWidget *now) {
+        // Losing focus during a rebuild is recoverable; choosing another field
+        // cancels both the recovery and an Answer still waiting for its box.
+        if (now && !m_answerRendering) { m_answerAt.invalidate(); ++m_answerGeneration; }
+    });
     setTheme(true);
 }
 
@@ -211,6 +217,7 @@ void TeamWorkspace::setTheme(bool dark)
 void TeamWorkspace::showTeam(const QString &team)
 {
     if (m_team != team) {
+        m_answerAt.invalidate(); ++m_answerGeneration;
         m_team = team; m_focus.clear(); m_drawerTask = 0; m_fit = true; if (m_popover) m_popover->hide();
         // N14/N15: another team's send-back words and blocker emphasis stay behind.
         m_rejectPhase.clear(); m_rejectText.clear(); m_showBlockers = false;
@@ -265,6 +272,7 @@ void TeamWorkspace::placePopover()
 
 void TeamWorkspace::render()
 {
+    const QScopedValueRollback<bool> rebuilding(m_answerRendering, true);
     renderHeader();
     if (!isVisible()) return;
     // A confirmation is open (TeamPanel::confirm): its asker stays alive.
@@ -935,21 +943,32 @@ void TeamWorkspace::attentionRows(const Team &team, QVBoxLayout *v)
     if (team.attention.size() > shown) v->addWidget(label(tr("+%1 more").arg(team.attention.size() - shown), c.muted, 10));
 }
 
-void TeamWorkspace::answerAttention(const QString &teamId, const QString &member, const QString &command, int attempts)
+void TeamWorkspace::answerAttention(const QString &teamId, const QString &member, const QString &command, int attempts,
+                                    const QString &question, const QString &hash, quint64 generation)
 {
-    // Read the team again: a poll may have rebuilt everything since the click.
-    const auto *team = m_teams->team(teamId);
+    // A retry belongs to the question clicked, not whatever a later poll or
+    // a switch to another team puts in the same member's place.
+    if (m_team != teamId || (generation && generation != m_answerGeneration)) return;
+    const auto *team = currentTeam(teamId);
     if (!team) return;
-    QString id;
+    QString id, currentQuestion, currentHash;
     for (const auto &m : team->members)
-        if (m.id == member || team->roleOf(m.id) == member) { id = m.id; break; }
+        if (m.id == member || team->roleOf(m.id) == member) {
+            id = m.id; currentQuestion = m.permission.id; currentHash = m.permission.hash; break;
+        }
+    if (generation && (question != currentQuestion || hash != currentHash)) return;
+    if (!generation) { generation = ++m_answerGeneration; m_answerAt.invalidate(); }
     for (auto *box : findChildren<QFrame *>("teamMemberPermission")) {
         if (box->property("member").toString() != id) continue;
+        if (box->property("team").toString() != teamId || box->property("question").toString() != currentQuestion
+            || box->property("questionHash").toString() != currentHash) return;
         // Built but not shown yet (a rebuild in progress on a loaded
         // computer): look again shortly instead of falling back to the command.
         if (!box->isVisible()) {
             if (attempts > 0) {
-                QTimer::singleShot(100, this, [this, teamId, member, command, attempts] { answerAttention(teamId, member, command, attempts - 1); });
+                QTimer::singleShot(100, this, [this, teamId, id, command, attempts, currentQuestion, currentHash, generation] {
+                    answerAttention(teamId, id, command, attempts - 1, currentQuestion, currentHash, generation);
+                });
                 return;
             }
             continue;

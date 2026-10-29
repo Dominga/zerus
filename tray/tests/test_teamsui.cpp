@@ -640,6 +640,8 @@ private slots:
     void catalogEditorKeepsTheFieldsItDoesNotEdit();
     void ownerActionsCarryNoAgentMarkers();
     void permissionAttentionNamesTheMemberAndAnswers();
+    void permissionAttentionFocusKeepsItsContext_data();
+    void permissionAttentionFocusKeepsItsContext();
     void leadAnswersAMembersSubagentRequest();
     void sendBackFormBelongsToItsTeamAndPhase();
     void catalogRoleChoosesAccountModelAndComputer();
@@ -2716,6 +2718,84 @@ void TestTeamsUi::permissionAttentionNamesTheMemberAndAnswers()
     later["attention"] = QJsonArray{items[1]};
     changes = notices.observe({Teams::parse(later)});
     QVERIFY(changes.raised.isEmpty()); QCOMPARE(changes.cleared.size(), 1);
+}
+
+// Answer can outlive a hidden box or a lost focus, but never the owner's
+// next focus choice, a team switch, or the exact question it was clicked for.
+void TestTeamsUi::permissionAttentionFocusKeepsItsContext_data()
+{
+    QTest::addColumn<QString>("change");
+    for (const auto &change : {"lost-focus", "another-input", "retry-same", "retry-input", "retry-team-switch",
+                               "retry-question", "retry-hash", "retry-box-team"})
+        QTest::newRow(change) << QString::fromLatin1(change);
+}
+
+void TestTeamsUi::permissionAttentionFocusKeepsItsContext()
+{
+    QFETCH(QString, change);
+    auto fixture = phasedTeam();
+    auto members = fixture["members"].toArray(); auto backend = members[1].toObject();
+    backend["question"] = memberQuestionFixture(); members[1] = backend; fixture["members"] = members;
+    fixture["attention"] = QJsonArray{QJsonObject{{"kind", "permission"}, {"member", "Backend"},
+        {"summary", "Backend waits for your answer"}, {"command", "hgs team answer"}}};
+    setTeam(fixture);
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live); workspace.resize(1300, 900); workspace.show();
+    controller.refresh(); workspace.showTeam("team-1");
+    QTRY_VERIFY(workspace.findChild<QPushButton *>("teamAttentionAnswer")
+                && workspace.findChild<QPushButton *>("teamMemberPermissionAllow"));
+    workspace.activateWindow(); QVERIFY(QTest::qWaitForWindowActive(&workspace));
+    // Freeze the loaded fixture: these cases control exactly when a rebuild
+    // happens, rather than letting an unrelated initial poll replace the box.
+    QObject::disconnect(&controller, nullptr, &workspace, nullptr);
+    QCoreApplication::processEvents(); workspace.render();
+    // Outside the rebuilt Members subtree: its focus choice survives a render.
+    QLineEdit other(&workspace); other.setGeometry(10, 10, 150, 24); other.show();
+    const auto allow = [&] { return workspace.findChild<QPushButton *>("teamMemberPermissionAllow"); };
+    if (!change.startsWith("retry-")) {
+        workspace.findChild<QPushButton *>("teamAttentionAnswer")->click();
+        QTRY_COMPARE(QApplication::focusWidget(), static_cast<QWidget *>(allow()));
+        if (change == "another-input") {
+            other.setFocus(Qt::OtherFocusReason);
+            QCOMPARE(QApplication::focusWidget(), static_cast<QWidget *>(&other));
+            workspace.render();
+            QCOMPARE(QApplication::focusWidget(), static_cast<QWidget *>(&other));
+            // Cancellation persists even if that field subsequently loses focus.
+            other.clearFocus(); workspace.render();
+            QVERIFY(QApplication::focusWidget() != allow());
+        } else {
+            allow()->clearFocus();
+            QVERIFY(!QApplication::focusWidget());
+            workspace.render();
+            QTRY_COMPARE(QApplication::focusWidget(), static_cast<QWidget *>(allow()));
+        }
+        return;
+    }
+    // Queue the retry without depending on a slow process or a race with a
+    // poll: the exact rendered box exists, but is temporarily hidden.
+    other.setFocus(Qt::OtherFocusReason);
+    auto *box = workspace.findChild<QFrame *>("teamMemberPermission");
+    QVERIFY(box); box->hide();
+    workspace.findChild<QPushButton *>("teamAttentionAnswer")->click();
+    if (change == "retry-question") box->setProperty("question", "another-question");
+    if (change == "retry-hash") box->setProperty("questionHash", "another-hash");
+    if (change == "retry-box-team") box->setProperty("team", "another-team");
+    if (change == "retry-team-switch") {
+        workspace.showTeam("another-team"); workspace.showTeam("team-1");
+    }
+    box->show();
+    if (change == "retry-input") { other.clearFocus(); other.setFocus(Qt::OtherFocusReason); }
+    if (change == "retry-same") {
+        QTRY_COMPARE(QApplication::focusWidget(), static_cast<QWidget *>(allow()));
+    } else {
+        // The one queued attempt runs at 100 ms; no callback may take focus.
+        QTest::qWait(150);
+        QVERIFY(QApplication::focusWidget() != allow());
+        QCOMPARE(calls(script(), "answer").size(), 0);
+    }
 }
 
 void TestTeamsUi::leadLoadViewsShowInTheDesktop()

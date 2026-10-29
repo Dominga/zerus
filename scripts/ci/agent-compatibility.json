@@ -61,6 +61,20 @@
       "integrity": "sha512-wASwXBsWaOAYcZrh4ZLl4oaVxPCUAGVb7zZvXBBF8TjWE4uWgY0D2tj6gn80JfcO3b/s9woM6dP/gKqYKK2EdQ=="
     }
   ],
+  "dsh": [
+    {
+      "version": "0.2.1-rc.2",
+      "target": "npm",
+      "url": "https://registry.npmjs.org/@deepseek-ai/dsh/-/dsh-0.2.1-rc.2.tgz",
+      "integrity": "sha512-tvY+yhfKRifthbqPe/OK0AYxM5ZkvqfYq/jMYgJcEUxiRRL1Vwra3Ti5TB6AXgSWQdiPHYh/Vp6SJa9yHwMNuw=="
+    },
+    {
+      "version": "0.2.1-rc.5",
+      "target": "npm",
+      "url": "https://registry.npmjs.org/@deepseek-ai/dsh/-/dsh-0.2.1-rc.5.tgz",
+      "integrity": "sha512-WkyJZv4zl9sCAxSzRctGm58m0rilGqwR6pniBiLOz5CPDfHfDuAUicg0AAazXI7oj/Cph6/cjNTncA/rpLTXpw=="
+    }
+  ],
   "upstream": [
     {
       "name": "Codex",
@@ -96,7 +110,7 @@
       "url": "https://registry.npmjs.org/@deepseek-ai/dsh/latest",
       "version_path": ["version"],
       "notes": "https://github.com/deepseek-ai/deepseek-harness/releases",
-      "reviewed_versions": ["0.2.1-rc.2"]
+      "reviewed_versions": ["0.2.1-rc.2", "0.2.1-rc.5"]
     }
   ]
 }

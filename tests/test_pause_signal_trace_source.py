@@ -111,7 +111,10 @@ class SignalTraceSource(unittest.TestCase):
         signal_phase = next(node for node in ast.parse(wrapped).body if isinstance(node, ast.FunctionDef) and node.name == "signal_phase")
         self.assertEqual(len(signal_phase.body), 1)
         self.assertIsInstance(signal_phase.body[0], ast.Try)
-        self.assertEqual(ast.dump(signal_phase.body[0].handlers[0].type), "Name(id='Exception', ctx=Load())")
+        exception = signal_phase.body[0].handlers[0].type
+        self.assertIsInstance(exception, ast.Name)
+        self.assertEqual(exception.id, "Exception")
+        self.assertIsInstance(exception.ctx, ast.Load)
         self.assertIsInstance(signal_phase.body[0].handlers[0].body[0], ast.Pass)
 
     def test_agent_labels_and_paths_are_finite_and_cannot_mix(self):

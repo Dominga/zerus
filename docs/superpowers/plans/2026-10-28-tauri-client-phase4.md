@@ -9971,6 +9971,14 @@ git commit -m "feat(client): the question card, its review delay and cold cache 
 
 ### Task A2-4: The native queue, Send now and Send and push now in the hub
 
+**As built (a2hub; webui rulings, 2026-10-29).** The current core and Tasks 4a/4b/5 surfaces win over the snippets below:
+- `begin_queue` captures the selected session, its native queue id and its run/conversation under the hub lock. A push's snapshot match and its Send now claim share that lock, so navigation cannot redirect the action. The worker retains the captured target through navigation and starts nothing after the hub closes.
+- A completed Send now removes `input_queue` from the actual held details, hides its panel and calls `refresh_details`, retaining Task 4a's live-stream no-poll policy (Qt `inspect`, 3467-3492). Only an accepted state or inspection shows a queue again. The stale-queue notice is the full transient Qt error.
+- Lane::Queue busy is a quiet pre-dispatch refusal: release the window-wide request, keep the queue and show no notice. Other errors or dispatch panics are uncertain via A2-2's `outcome_of`; nothing retries them automatically.
+- **Approved deviation from Qt for no replay:** an explicit Send now consumes an armed push of the same session when the captured queue holds its message, including while the text acknowledgement is pending. Done, failed and uncertain outcomes all leave that push consumed; definite failure leaves the message queued for an explicit next action. No extra notice appears. Qt leaves `m_push` armed in `sendQueuedNow`; consuming it prevents a later fresh snapshot from repeating an uncertain action through that older push. An unrelated queue or another session's push stays untouched.
+- `send_push` checks the current handle, editor epoch and text, arms only the selected session, and calls the existing `send_held` under that same lock (`pub(super)` for this reuse). Its ordinary durable save, request identity, cold/start dialogs and continuations stay on Task 5's path. No text is resent by the push.
+- `queue_send_now` and `send_push` commands are async blocking-pool wrappers and refuse a child webview. Their normal IPC results remain a bool and `SendReply`. All notices use A2-2's existing bounded `composer_events`; no second event field is added.
+
 **Depends on:**
 - R8 (`input_queue::{queue_view, can_send_now, send_now_notice, Notice, NOTHING_QUEUED, Pusher, PushFacts, PushStep, QueueView}`, `Action::SendNow`, `Lane::Queue`);
 - Tasks 4a, 4b and 5 (`observe`, `refresh_details`, `after_observe`, `send_now`, `prompts`);

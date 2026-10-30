@@ -13,6 +13,8 @@ const READ_ENTRIES: usize = 50_000;
 
 mod tasks;
 pub use tasks::{qt_task_forms, task_delivery};
+mod approvals;
+pub use approvals::approval_policies;
 
 #[derive(Clone, Copy)]
 pub enum Origin {

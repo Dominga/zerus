@@ -6,6 +6,163 @@ use std::sync::{
 };
 use zerus_desktop_migration::{Evidence, SOURCE};
 
+fn policy_qt(value: Option<QtValue>) -> QtSnapshot {
+    QtSnapshot {
+        values: value
+            .into_iter()
+            .map(|v| ("automaticApprovals/enabled".into(), v))
+            .collect(),
+        source: "qt-ini",
+        sha256: sha256(b"original Qt policy"),
+        modified_at: Some(1),
+    }
+}
+
+#[test]
+fn approval_evidence_reads_both_policies_without_converting_either_to_consent() {
+    for former in [None, Some(false), Some(true)] {
+        let qt = policy_qt(former.map(QtValue::Bool));
+        let qt_original = qt.values.clone();
+        let next = serde_json::to_vec(&json!({"version":1,"values":{
+            "automaticApprovals/enabled":true,
+            "automaticApprovals/qtEnabledAtSwitch":false,
+            "automaticApprovals/futurePolicy":{"unknown":"retain privately"},
+            "unrelated":"another family"}}))
+        .unwrap();
+        let original = next.clone();
+        let streams = approval_policies(&qt, &next).unwrap();
+        let mut snapshots = Vec::new();
+        let mut record = None;
+        for item in Bundle::new(
+            SOURCE,
+            false,
+            "a".repeat(64),
+            ID.into(),
+            1,
+            streams.into(),
+            1 << 20,
+        )
+        .unwrap()
+        {
+            match item.unwrap() {
+                BundleItem::Snapshot { reader, .. } => {
+                    snapshots.push(serde_json::from_slice::<Value>(reader.get_ref()).unwrap())
+                }
+                BundleItem::Record(value) => record = Some(value),
+                _ => (),
+            }
+        }
+        assert_eq!(snapshots.len(), 2);
+        assert_eq!(snapshots[0]["previous_enabled"], json!(former));
+        assert_eq!(snapshots[1]["previous_enabled"], true);
+        assert_eq!(snapshots[1]["qt_enabled_at_switch"], false);
+        assert_eq!(
+            snapshots[1]["original"]["automaticApprovals/futurePolicy"]["unknown"],
+            "retain privately"
+        );
+        assert!(snapshots.iter().all(|v| v["automatic_approvals"] == false));
+        assert!(!snapshots[1]["original"]
+            .as_object()
+            .unwrap()
+            .contains_key("unrelated"));
+        let record = record.unwrap();
+        assert!(!record.automatic_approvals);
+        assert_eq!(record.sources[0].sha256, qt.sha256);
+        assert_eq!(record.sources[1].sha256, sha256(&original));
+        assert!(!serde_json::to_string(&record)
+            .unwrap()
+            .contains("futurePolicy"));
+        assert_eq!(qt.values, qt_original);
+        assert_eq!(next, original);
+    }
+}
+
+#[test]
+fn missing_next_policy_is_distinct_from_its_old_qt_notice() {
+    for values in [
+        json!({}),
+        json!({"automaticApprovals/qtEnabledAtSwitch":true}),
+    ] {
+        let next = serde_json::to_vec(&json!({"values":values})).unwrap();
+        let [_, mut stream] =
+            approval_policies(&policy_qt(Some(QtValue::Text("true".into()))), &next).unwrap();
+        let body = stream.chunks.next().unwrap().unwrap();
+        assert_eq!(body["previous_enabled"], Value::Null);
+        assert!(!body["automatic_approvals"].as_bool().unwrap());
+    }
+}
+
+#[test]
+fn malformed_future_or_oversized_policy_refuses_the_whole_pair() {
+    for value in [
+        QtValue::Invalid,
+        QtValue::Text("enabled".into()),
+        QtValue::Double(f64::NAN),
+        QtValue::Bytes(b"true".to_vec()),
+    ] {
+        assert_eq!(
+            approval_policies(&policy_qt(Some(value)), b"{}").err(),
+            Some(SourceError::UnsupportedSource)
+        );
+    }
+    let qt = policy_qt(Some(QtValue::Bool(true)));
+    for next in [
+        json!({"version":2}),
+        json!({"values":[]}),
+        json!({"values":{"automaticApprovals/enabled":"true"}}),
+        json!({"values":{"automaticApprovals/qtEnabledAtSwitch":1}}),
+    ] {
+        assert_eq!(
+            approval_policies(&qt, &serde_json::to_vec(&next).unwrap()).err(),
+            Some(SourceError::UnsupportedSource)
+        );
+    }
+    let mut future = policy_qt(Some(QtValue::Bool(true)));
+    future.source = "qt-future";
+    assert_eq!(
+        approval_policies(&future, b"{}").err(),
+        Some(SourceError::UnsupportedSource)
+    );
+    let huge =
+        json!({"values":{"automaticApprovals/future":"x".repeat(MAX_SNAPSHOT_BYTES as usize)}});
+    assert_eq!(
+        approval_policies(&qt, &serde_json::to_vec(&huge).unwrap()).err(),
+        Some(SourceError::TooLarge)
+    );
+    assert_eq!(
+        approval_policies(&qt, &vec![b' '; (4 << 20) + 1]).err(),
+        Some(SourceError::TooLarge)
+    );
+}
+
+#[test]
+fn both_policy_rechecks_must_finish_before_a_final_record() {
+    let qt = policy_qt(Some(QtValue::Bool(true)));
+    let [qt_stream, next_stream] = approval_policies(&qt, b"{}").unwrap();
+    let hash = qt.sha256.clone();
+    let qt_stream = qt_stream.recheck(move || Ok(hash));
+    let next_stream = next_stream.recheck(|| Ok(sha256(b"changed settings")));
+    let bundle = Bundle::new(
+        SOURCE,
+        false,
+        "a".repeat(64),
+        ID.into(),
+        1,
+        vec![qt_stream, next_stream],
+        1 << 20,
+    )
+    .unwrap();
+    let mut changed = false;
+    for item in bundle {
+        match item {
+            Ok(BundleItem::Record(_)) => panic!("partial policy evidence cannot finish"),
+            Err(SourceError::SourceChanged) => changed = true,
+            _ => (),
+        }
+    }
+    assert!(changed);
+}
+
 const ID: &str = "11111111-1111-4111-8111-111111111111";
 fn operation(state: &str) -> Value {
     json!({"id":ID,"creation_schema":1,"state":state,"cmd":"codex",

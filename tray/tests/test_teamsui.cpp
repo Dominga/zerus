@@ -779,6 +779,7 @@ private slots:
     void cancelledWorkIsHiddenUntilShown();
     void thePlanHidesCancelledTasksAndNeverSendsTheCopy();
     void aTaskThatHasNotStartedMovesToAnotherPhase();
+    void anAutoAcceptedDraftReadsAsDraftUntilItStarts();
     void workingTimeFollowsTheActivityLabel();
     void subLeadsAreATreeInMembersAndTheInspector();
     void aPollUnderTheMemberMenuKeepsItsButtonAndTheSwapDialog();
@@ -5752,6 +5753,114 @@ void TestTeamsUi::aTaskThatHasNotStartedMovesToAnotherPhase()
     // A team without later phases offers none either, as before.
     card.setTask(parse(team()), 5, live, true);
     QVERIFY(moves().isEmpty());
+}
+
+// U61: with Auto-accept drafts on, a drafted phase stays a draft the lead edits
+// until its first task is handed out; then Auto accepts it.
+static QJsonObject autoDraftTeam(bool startAhead, bool accepted)
+{
+    auto t = phasedTeam();
+    auto settings = t["settings"].toObject(); settings["auto_accept"] = true; settings["phase_approval"] = "auto"; t["settings"] = settings;
+    auto phases = t["phases"].toArray();
+    auto three = phases[1].toObject();
+    three["approval"] = "auto";
+    if (startAhead) three["start_ahead"] = true;
+    if (accepted) { three["state"] = "approved"; three["decided_by"] = "Auto"; three["decided_at"] = 1800.0; t["pending_phase"] = 0; }
+    phases[1] = three; t["phases"] = phases;
+    if (accepted) {
+        auto tasks = t["tasks"].toArray();
+        for (int i = 0; i < tasks.size(); ++i) {
+            auto task = tasks[i].toObject();
+            if (task["id"].toInt() == 5) { task["status"] = "assigned"; task["attempts"] = QJsonArray{QJsonObject{{"n", 1}, {"id", "a5"}, {"member", "backend"}, {"state", "delivered"}, {"sent_at", 1800.0}}}; }
+            tasks[i] = task;
+        }
+        t["tasks"] = tasks;
+    }
+    return t;
+}
+
+void TestTeamsUi::anAutoAcceptedDraftReadsAsDraftUntilItStarts()
+{
+    QSettings().setValue("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([] { QSettings().remove("workspace/skin"); darkPalette(); });
+    setTeam(autoDraftTeam(false, false));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    panel.setLive(live); workspace.setLive(live);
+    darkPalette(); workspace.setTheme(true);
+    workspace.resize(1400, 860); workspace.show();
+    controller.refresh();
+    QTRY_VERIFY(controller.team("team-1"));
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    const auto badge = [&](int phase) -> QWidget * { auto *frame = phaseScrollOf(&workspace, phase); return frame ? frame->findChild<QWidget *>("teamPhaseBadge") : nullptr; };
+    const auto view = [&](const QString &value) {
+        QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceView"));
+        for (auto *b : workspace.findChild<QWidget *>("teamWorkspaceView")->findChildren<QPushButton *>())
+            if (b->property("segment") == value) { b->click(); break; }
+    };
+    QTRY_VERIFY(phaseScrollOf(&workspace, 3));
+    // Graph, Board and Layers: Draft (auto), with when Auto accepts it.
+    for (const auto &name : {QStringLiteral("graph"), QStringLiteral("board"), QStringLiteral("layers")}) {
+        view(name);
+        QTRY_VERIFY(badge(3) && badge(3)->property("auto").toBool());
+        auto *phaseBadge = dynamic_cast<TeamUi::PhaseBadge *>(badge(3));
+        QVERIFY(phaseBadge);
+        QCOMPARE(phaseBadge->text(), QStringLiteral("Draft (auto)"));
+        QCOMPARE(badge(3)->property("state").toString(), QStringLiteral("draft"));
+        QVERIFY(badge(3)->toolTip().startsWith(QStringLiteral("Auto accepts it when its first task starts")));
+        QVERIFY(!phaseScrollOf(&workspace, 3)->findChild<QLabel *>("teamPhaseStartAhead"));
+    }
+    view("graph");
+    QTRY_VERIFY(badge(3));
+    // It does not wait for you: no draft count; the switch says when a draft is fixed.
+    QVERIFY(!workspace.findChild<QPushButton *>("teamWorkspaceDrafts"));
+    auto *autoSwitch = workspace.findChild<QAbstractButton *>("teamWorkspaceAutoAccept");
+    QVERIFY(autoSwitch && autoSwitch->isChecked());
+    QCOMPARE(autoSwitch->toolTip(), QStringLiteral("On: a phase draft without errors stays a draft the lead edits, and Auto accepts it when its first task starts"));
+    if (auto *phaseSwitch = workspace.findChild<QAbstractButton *>("teamPhaseAutoAccept")) QCOMPARE(phaseSwitch->toolTip(), autoSwitch->toolTip());
+    // The plan's band says the same.
+    QTRY_VERIFY(controller.watched() && controller.watched()->full);
+    const auto bands = TeamUi::phaseBands(*controller.watched(), [](const PhaseGroup &) { return true; });
+    QVERIFY(std::any_of(bands.cbegin(), bands.cend(), [](const TeamUi::TaskView::PhaseBand &band) { return band.n == 3 && band.autoDraft && !band.startAhead; }));
+    QVERIFY(std::none_of(bands.cbegin(), bands.cend(), [](const TeamUi::TaskView::PhaseBand &band) { return band.n == 2 && band.autoDraft; }));
+    shot(&workspace, "u61-auto-draft-dark");
+    workspace.setTheme(false); lightShot(&workspace, "u61-auto-draft-light");
+    darkPalette(); workspace.setTheme(true);
+    // The lead started it ahead: the header says so.
+    setTeam(autoDraftTeam(true, false));
+    QTRY_VERIFY(([&] { controller.refresh(); auto *frame = phaseScrollOf(&workspace, 3); return frame && frame->findChild<QLabel *>("teamPhaseStartAhead"); })());
+    auto *ahead = phaseScrollOf(&workspace, 3)->findChild<QLabel *>("teamPhaseStartAhead");
+    QCOMPARE(ahead->text(), QStringLiteral("started ahead by the lead"));
+    QVERIFY(ahead->toolTip().startsWith(QStringLiteral("The lead started it ahead")));
+    QVERIFY(badge(3)->toolTip().contains(QStringLiteral("Its reports need no approval from you")));
+    QTRY_VERIFY(([&] { if (!controller.watched()) return false; const auto now = TeamUi::phaseBands(*controller.watched(), [](const PhaseGroup &) { return true; });
+                       return std::any_of(now.cbegin(), now.cend(), [](const TeamUi::TaskView::PhaseBand &band) { return band.n == 3 && band.startAhead; }); })());
+    shot(&workspace, "u61-started-ahead-dark");
+    workspace.setTheme(false); lightShot(&workspace, "u61-started-ahead-light");
+    darkPalette(); workspace.setTheme(true);
+    // Its first task was handed out: Auto accepted it, and it reads as accepted.
+    setTeam(autoDraftTeam(true, true));
+    QTRY_VERIFY(([&] { controller.refresh(); auto *frame = phaseScrollOf(&workspace, 3); return frame && frame->findChild<QLabel *>("teamPhaseByAuto"); })());
+    QVERIFY(!badge(3)->property("auto").toBool());
+    QVERIFY(badge(3)->property("state").toString() != QStringLiteral("draft"));
+    QVERIFY(!phaseScrollOf(&workspace, 3)->findChild<QLabel *>("teamPhaseStartAhead"));
+    QCOMPARE(phaseScrollOf(&workspace, 3)->findChild<QLabel *>("teamPhaseByAuto")->text(), QStringLiteral("accepted by Auto"));
+    for (const auto &name : {QStringLiteral("board"), QStringLiteral("layers")}) {
+        view(name);
+        QTRY_VERIFY(phaseScrollOf(&workspace, 3) && phaseScrollOf(&workspace, 3)->findChild<QLabel *>("teamPhaseByAuto"));
+    }
+    view("graph");
+    QTRY_VERIFY(phaseScrollOf(&workspace, 3) && phaseScrollOf(&workspace, 3)->findChild<QLabel *>("teamPhaseByAuto"));
+    shot(&workspace, "u61-accepted-by-auto-dark");
+    workspace.setTheme(false); lightShot(&workspace, "u61-accepted-by-auto-light");
+    darkPalette(); workspace.setTheme(true);
+    // A review draft keeps today's words.
+    setTeam(phasedTeam());
+    QTRY_VERIFY(([&] { controller.refresh(); auto *b = dynamic_cast<TeamUi::PhaseBadge *>(badge(3)); return b && b->text() == QStringLiteral("Draft — waiting for you"); })());
+    QVERIFY(!badge(3)->property("auto").toBool());
 }
 
 void TestTeamsUi::workingTimeFollowsTheActivityLabel()

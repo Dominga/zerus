@@ -1458,6 +1458,8 @@ QWidget *TeamWorkspace::toolbar(const Team &team)
         int drafts = 0, first = 0;
         for (const auto &group : groups) {
             const QString state = ownerPhaseState(team, group);
+            // U61: an auto draft does not wait for you; Auto accepts it at its first hand-out.
+            if (const auto *record = team.phase(group.n); record && record->autoDraft()) continue;
             if (state == "draft" || state == "rejected") { ++drafts; if (!first) first = group.n; }
         }
         if (drafts) {
@@ -1486,7 +1488,7 @@ QWidget *TeamWorkspace::toolbar(const Team &team)
         }
         auto *autoSwitch = new ToggleSwitch(c); autoSwitch->setObjectName("teamWorkspaceAutoAccept"); autoSwitch->setChecked(team.autoAccept);
         autoSwitch->setAccessibleName(tr("Auto-accept drafts"));
-        autoSwitch->setToolTip(team.autoAccept ? tr("On: phase drafts without errors start by themselves") : tr("Off: every phase draft waits for you"));
+        autoSwitch->setToolTip(autoAcceptSwitchTip(team.autoAccept));
         autoSwitch->setEnabled(settingsOpen(team));
         QObject::connect(autoSwitch, &QAbstractButton::clicked, this, [this, id = team.id](bool on) { if (const auto *t = currentTeam(id)) setAutoAccept(*t, on); });
         h->addWidget(autoSwitch);
@@ -2118,6 +2120,8 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
     const QString state = freeOpen ? (team.freePhase.idle() ? QStringLiteral("idle") : QStringLiteral("running")) : ownerPhaseState(team, group);
     const bool open = m_panel->phaseOpen(team, group);
     const Phase *record = team.phase(group.n);
+    // U61: Auto accepts this draft at its first hand-out; it does not wait for you.
+    const bool autoDraft = !freeOpen && state == "draft" && record && record->autoDraft();
     const auto problemsByTask = problemTasks(team);
     auto *frame = new PhaseFrame(c, state); frame->setProperty("phase", group.n); frame->expanded = open;
     auto *fv = new QVBoxLayout(frame); fv->setContentsMargins(1, 1, 1, 1); fv->setSpacing(0);
@@ -2154,9 +2158,19 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
                        : state == "done" ? QStringLiteral("accepted") : state == "rejected" ? QStringLiteral("rejected") : QStringLiteral("pending");
     auto *badge = freeOpen ? new PhaseBadge(state == "idle" ? tr("Open, idle") : tr("Open, running"), state == "idle" ? c.text2 : tone,
                                             state == "idle" ? QStringLiteral("delivered") : QStringLiteral("running"), false)
-                           : new PhaseBadge(phaseStateBadge(state), tone, kind, state == "draft" || state == "planned");
-    badge->setObjectName("teamPhaseBadge"); badge->setProperty("state", state);
+                           : new PhaseBadge(autoDraft ? autoDraftBadge() : phaseStateBadge(state), tone, kind, state == "draft" || state == "planned");
+    badge->setObjectName("teamPhaseBadge"); badge->setProperty("state", state); badge->setProperty("auto", autoDraft);
+    if (autoDraft) badge->setToolTip(autoDraftTip(record->startAhead));
     h->addWidget(badge);
+    // U61: the lead let idle members start this auto draft early; a phase
+    // Auto accepted at its first hand-out says so.
+    if (autoDraft && record->startAhead) {
+        auto *ahead = label(tr("started ahead by the lead"), c.accent, 11, true, "teamPhaseStartAhead");
+        ahead->setToolTip(autoDraftTip(true)); h->addWidget(ahead);
+    } else if (!freeOpen && record && record->acceptedByAuto()) {
+        auto *byAuto = label(tr("accepted by Auto"), c.dim, 11, false, "teamPhaseByAuto");
+        byAuto->setToolTip(tr("Auto accepted this phase when its first task started")); h->addWidget(byAuto);
+    }
     if (auto *mode = phaseModeBadge(team, group.n)) h->addWidget(mode);
     // A cancelled task is not work the phase still owes: a Done phase with one
     // cancelled task reads 7/7, not 7/8 (owner, 2026-10-28).
@@ -2238,7 +2252,7 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
         }
         auto *autoLabel = label(tr("Auto-accept"), c.text3, 11); h->addWidget(autoLabel);
         auto *autoSwitch = new ToggleSwitch(c); autoSwitch->setObjectName("teamPhaseAutoAccept"); autoSwitch->setChecked(team.autoAccept);
-        autoSwitch->setToolTip(tr("Accept phase drafts without errors by themselves"));
+        autoSwitch->setToolTip(autoAcceptSwitchTip(team.autoAccept));
         autoSwitch->setAccessibleName(tr("Auto-accept drafts"));
         autoSwitch->setEnabled(settingsOpen(team));
         QObject::connect(autoSwitch, &QAbstractButton::clicked, this, [this, id = team.id](bool on) { if (const auto *t = currentTeam(id)) setAutoAccept(*t, on); });

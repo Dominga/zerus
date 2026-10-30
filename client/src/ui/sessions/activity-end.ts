@@ -9,7 +9,7 @@ export const animationFrames: AnimationFrames = { request: (callback) => request
  * Layout and browser scroll anchoring never revoke the pin. The owner
  * releases it on explicit user scroll intent or before restoring an older page.
  */
-export function createActivityEnd(read: () => ScrollGeometry, writeEnd: () => void, frames: AnimationFrames = animationFrames) {
+export function createActivityEnd(read: () => ScrollGeometry, writeEnd: () => void, frames: AnimationFrames = animationFrames, canWrite: () => boolean = () => true) {
   let active = false, disposed = false, epoch = 0;
   let frame: number | undefined;
   let last: ScrollGeometry | undefined;
@@ -20,6 +20,7 @@ export function createActivityEnd(read: () => ScrollGeometry, writeEnd: () => vo
     frame = frames.request(() => {
       if (mine !== epoch || !active || disposed) return;
       frame = undefined;
+      if (!canWrite()) return;
       writeEnd();
       last = read();
       if (verify) schedule(false);

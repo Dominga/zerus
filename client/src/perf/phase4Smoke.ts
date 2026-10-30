@@ -184,6 +184,37 @@ async function sendStep(path: string) {
   if (sent[0].argv.some((word) => word.includes("phase 4 smoke"))) throw new Error("message text appeared in argv");
 }
 
+async function sendFollowStep() {
+  await select(API);
+  const scroller = document.querySelector<HTMLDivElement>(".act-scroll")!;
+  await until(() => scroller.scrollHeight > scroller.clientHeight + 200, 10_000, "Activity is too short for the follow check");
+  scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -300, bubbles: true, cancelable: true }));
+  scroller.scrollTo({ top: 0, behavior: "instant" });
+  await sleep(100);
+  type("follow smoke\nsecond line\nthird line");
+  await composer.send();
+  await until(() => composer.view()?.local.some((row) => row.status === "sent" && row.text === "follow smoke\nsecond line\nthird line") === true,
+    10_000, "the follow-check send did not settle");
+  const atEnd = () => Math.abs(scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight) < 2;
+  await until(atEnd, 3000, "the sent row did not return to the end");
+  const disclosure = scroller.querySelector<HTMLButtonElement>(".act-tools-head");
+  if (!disclosure) throw new Error("the follow check needs a tool disclosure");
+  disclosure.click();
+  await until(atEnd, 3000, "content growth did not stay at the end after send");
+  const range = document.createRange();
+  range.selectNodeContents(scroller.querySelector(".act-msg")!);
+  const selection = document.getSelection()!;
+  selection.removeAllRanges();
+  selection.addRange(range);
+  await sleep(100);
+  const selectedTop = scroller.scrollTop;
+  disclosure.click();
+  await sleep(200);
+  if (scroller.scrollTop !== selectedTop) throw new Error("a text selection did not pause Activity follow");
+  selection.removeAllRanges();
+  await until(atEnd, 3000, "clearing the selection did not resume Activity follow");
+}
+
 async function coldStep() {
   await select(PAGINATION);
   type("cold cache smoke");
@@ -344,6 +375,7 @@ export async function phase4Smoke(allowed: boolean, smokeFile?: string) {
     ["queue", queueStep],
     ["image-paste", imagePasteStep],
     ["clear-close-order", clearCloseOrderStep],
+    ["send-follow", sendFollowStep],
   ];
   let current = "start";
   try {

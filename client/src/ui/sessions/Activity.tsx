@@ -1,3 +1,4 @@
+import { activityReadingRows, createActivityAnchor } from "./activity-anchor";
 import { searchPreview, clearSearchPreview } from "../../store/searchSelection";
 import { SearchHighlight } from "./SearchHighlight";
 import { For, Show, createContext, createEffect, createMemo, createSignal, on, onCleanup, onMount, useContext } from "solid-js";
@@ -560,6 +561,7 @@ const [unseen, setUnseen] = createSignal(0);
 /** The mounted transcript's scroller (one Activity view shows at a time). */
 let liveScroller: HTMLDivElement | undefined;
 let liveEnd: ReturnType<typeof createActivityEnd> | undefined;
+let liveAnchor: ReturnType<typeof createActivityAnchor> | undefined;
 export { following, unseen };
 
 /**
@@ -577,6 +579,7 @@ export function jumpToLatest() {
   if (searchPreview()) { clearSearchPreview(); return; }
   setFollowing(true);
   setUnseen(0);
+  liveAnchor?.reset();
   liveEnd?.pin();
   liveScroller?.scrollTo({ top: liveScroller.scrollHeight, behavior: "instant" });
 }
@@ -634,10 +637,14 @@ export function ActivityView(props: { source?: ActivitySource }) {
   const [view, setView] = createStore<{ items: TranscriptItem[] }>({ items: [] });
   const local = createMemo(() => localRows(source(), s()), undefined, { equals: (a, b) => a === b || (a.length === 0 && b.length === 0) });
   const built = createMemo(() => transcriptOf(source(), local()));
-  createEffect(() => setView("items", reconcile(built(), { key: "id" })));
+  createEffect(() => {
+    const items = built();
+    settleReading(true);
+    setView("items", reconcile(items, { key: "id" }));
+    reading.changed(); end.changed();
+  });
 
-  // Stay at the bottom while it is in view; keep the reading position when an older page lands above.
-  let anchor: { height: number; top: number } | undefined;
+  // Keep a named row and its offset while the end pin is released.
   /** The newest event's seq the view has seen, for the count of new ones. */
   let newest: number | undefined;
   const selectionInside = () => {
@@ -651,44 +658,81 @@ export function ActivityView(props: { source?: ActivitySource }) {
     animationFrames,
     () => !selectionInside(),
   );
-  let manualAway = false;
+  let anchorScroll: number | undefined, rememberedTop = 0;
+  const reading = createActivityAnchor({
+    visible: () => activityReadingRows(scroller).visible(),
+    offset: (key) => activityReadingRows(scroller).offset(key),
+    adjust: (delta) => { activityReadingRows(scroller).adjust(delta); anchorScroll = rememberedTop = scroller.scrollTop; },
+  }, () => !end.active() && !preview());
+  let pointerScrolling = false, userScrolling = false, scrollIdle: ReturnType<typeof setTimeout> | undefined;
+  const scrollIntent = () => { userScrolling = true; clearTimeout(scrollIdle); scrollIdle = setTimeout(() => { userScrolling = false; }, 180); };
+  const rememberReading = () => { reading.remember(); rememberedTop = scroller.scrollTop; };
+  const settleReading = (before = false) => {
+    // Compositor scrolling can precede its scroll event. Adopt that user
+    // movement before reconciling, rather than correcting it back as drift.
+    if ((userScrolling || pointerScrolling) && scroller.scrollTop !== rememberedTop && scroller.scrollTop !== anchorScroll) rememberReading();
+    if (before) reading.beforeChange(); else reading.changed();
+  };
+  let manualAway = false, hasLeftEnd = false;
   let touchY: number | undefined;
-  const scrollAway = () => { end.release(); manualAway = true; setFollowing(false); };
+  const scrollAway = () => { settleReading(true); end.release(); manualAway = true; hasLeftEnd = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight > 1; setFollowing(false); rememberReading(); };
   onMount(() => {
     liveScroller = scroller;
     liveEnd = end;
+    liveAnchor = reading;
+    const pointerEnded = () => { if (pointerScrolling) { pointerScrolling = false; scrollIntent(); } };
+    window.addEventListener("pointerup", pointerEnded); window.addEventListener("pointercancel", pointerEnded);
+    onCleanup(() => { window.removeEventListener("pointerup", pointerEnded); window.removeEventListener("pointercancel", pointerEnded); });
     const selectionChanged = () => end.changed();
     document.addEventListener("selectionchange", selectionChanged);
     // Content includes Markdown, images and tool disclosures; the viewport
     // also resizes when the composer or a question card changes height.
-    const resize = new ResizeObserver(() => end.changed());
+    const changed = () => { end.changed(); settleReading(); };
+    const resize = new ResizeObserver(changed);
     resize.observe(scroller);
     const column = scroller.querySelector(".act-col");
-    if (column) resize.observe(column);
-    onCleanup(() => { document.removeEventListener("selectionchange", selectionChanged); resize.disconnect(); });
+    const mutations = new MutationObserver(changed);
+    if (column) {
+      resize.observe(column);
+      mutations.observe(column, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["class", "style", "src", "width", "height", "hidden", "open"] });
+    }
+    scroller.addEventListener("load", changed, true);
+    scroller.addEventListener("contentvisibilityautostatechange", changed, true);
+    document.fonts?.addEventListener("loadingdone", changed);
+    onCleanup(() => { document.removeEventListener("selectionchange", selectionChanged); resize.disconnect(); mutations.disconnect(); scroller.removeEventListener("load", changed, true); scroller.removeEventListener("contentvisibilityautostatechange", changed, true); document.fonts?.removeEventListener("loadingdone", changed); });
   });
   onCleanup(() => {
-    end.dispose();
+    end.dispose(); reading.dispose(); clearTimeout(scrollIdle);
     if (liveScroller === scroller) liveScroller = undefined;
     if (liveEnd === end) liveEnd = undefined;
+    if (liveAnchor === reading) liveAnchor = undefined;
   });
   const onScroll = () => {
     // A first render or a resize can emit scroll before the pin's frame.
     // It must not turn following off or trigger an older-page read.
     if (end.scrolled()) return;
+    // Layout, anchor corrections and remeasurement cannot change reading mode.
+    const correction = anchorScroll !== undefined && Math.abs(anchorScroll - scroller.scrollTop) < .5;
+    anchorScroll = undefined;
+    if (correction || (!userScrolling && !pointerScrolling) || preview()) { reading.changed(); return; }
+    scrollIntent();
     const atBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < (manualAway ? 1 : STICK_EDGE);
-    if (atBottom) manualAway = false;
+    // A queued end-scroll event can arrive after an upward wheel/key intent,
+    // before the browser has moved. It cannot re-pin that released reader.
+    if (atBottom && manualAway && !hasLeftEnd) return;
+    if (!atBottom) hasLeftEnd = true;
+    if (atBottom) { manualAway = false; hasLeftEnd = false; }
     if (atBottom !== following()) setFollowing(atBottom);
-    if (atBottom && unseen()) setUnseen(0);
+    if (atBottom) { reading.reset(); end.pin(); if (unseen()) setUnseen(0); }
+    else rememberReading();
     if (scroller.scrollTop < OLDER_EDGE && readsOlder(source())) {
-      anchor = { height: scroller.scrollHeight, top: scroller.scrollTop };
       source().loadOlder();
     }
   };
   let sendIds: Set<string> | undefined;
   createEffect(on(() => source().target()?.id, () => {
     sendIds = undefined;
-    setFollowing(true); setUnseen(0); anchor = undefined; newest = undefined; manualAway = false;
+    setFollowing(true); setUnseen(0); reading.reset(); newest = undefined; manualAway = false; hasLeftEnd = false;
     // Selection changes must place even when the next page has the same row count.
     end.pin();
   }));
@@ -699,7 +743,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
   }));
   createEffect(on(preview, (match) => {
     if (match) {
-      end.release(); manualAway = true; setFollowing(false);
+      end.release(); reading.reset(); manualAway = true; setFollowing(false);
       requestAnimationFrame(() => scroller.querySelector(".search-preview mark")?.scrollIntoView({ block: "center" }));
     } else { manualAway = false; setFollowing(true); end.pin(); }
   }));
@@ -713,17 +757,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
     }
     if (last !== undefined) newest = last;
   }));
-  createEffect(on(() => view.items.length, () => {
-    queueMicrotask(() => {
-      if (!scroller) return;
-      if (anchor && !following()) {
-        const grown = scroller.scrollHeight - anchor.height;
-        if (grown > 0) scroller.scrollTo({ top: anchor.top + grown, behavior: "instant" });
-        anchor = undefined;
-      } else if (end.active()) end.changed();
-      else if (following()) scroller.scrollTo({ top: scroller.scrollHeight, behavior: "instant" });
-    });
-  }));
+
 
   const summary = () => source().summary();
   const scope = createMemo(() => source().attachmentScope?.(), undefined, { equals: (a, b) => JSON.stringify(a) === JSON.stringify(b) });
@@ -738,13 +772,13 @@ export function ActivityView(props: { source?: ActivitySource }) {
     <div class="activity">
       <LocalDeleteDialog />
       <SessionFileDialog />
-      <div class="act-scroll" ref={scroller} tabindex="-1" onContextMenu={activityMenu} onScroll={onScroll}
-        onWheel={(e) => { if (e.deltaY < 0) scrollAway(); }}
-        onKeyDown={(e) => { if (!e.defaultPrevented && ["ArrowUp", "PageUp", "Home"].includes(e.key)
-          && !(e.target as HTMLElement).closest("input,textarea,select")) scrollAway(); }}
-        onPointerDown={(e) => { if (e.target === scroller) scrollAway(); }}
+      <div class="act-scroll" ref={scroller} tabindex="-1" onContextMenu={activityMenu} onScroll={onScroll} style={{ "overflow-anchor": "none" }}
+        onWheel={(e) => { scrollIntent(); if (e.deltaY < 0) scrollAway(); }}
+        onKeyDown={(e) => { if (!e.defaultPrevented && ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(e.key)
+          && !(e.target as HTMLElement).closest("input,textarea,select,[contenteditable=true]") && !(e.key === " " && (e.target as HTMLElement).closest("button,a"))) { scrollIntent(); if (["ArrowUp", "PageUp", "Home"].includes(e.key)) scrollAway(); } }}
+        onPointerDown={(e) => { if (e.target === scroller) { pointerScrolling = true; scrollIntent(); scrollAway(); } }}
         onTouchStart={(e) => { touchY = e.touches[0]?.clientY; }}
-        onTouchMove={(e) => { const y = e.touches[0]?.clientY; if (y !== undefined && touchY !== undefined && y > touchY) scrollAway(); touchY = y; }}>
+        onTouchMove={(e) => { const y = e.touches[0]?.clientY; scrollIntent(); if (y !== undefined && touchY !== undefined && y > touchY) scrollAway(); touchY = y; }}>
         <div class="act-col">
           <Show when={!fullWidth()}><ColumnEdge /><ColumnEdge right /></Show>
           <Show when={subagentOpen()}>

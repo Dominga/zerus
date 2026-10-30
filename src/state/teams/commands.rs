@@ -10,7 +10,7 @@ use super::store::{self, canonical_uuid, Event, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|move-task|add-to-phase|approve-phase|discard-phase|return-to-draft|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|spans|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|close-phase|integrate-build|run|templates|safe-action|reports-to|sub-lead --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|move-task|add-to-phase|approve-phase|discard-phase|return-to-draft|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|spans|profile|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|close-phase|integrate-build|run|templates|safe-action|reports-to|sub-lead --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
 
 const MUTATIONS: &[&str] = &[
     "plan", "extend", "edit-draft", "move-phase", "move-task", "add-to-phase", "approve-phase", "discard-phase", "return-to-draft", "reject-phase", "undo-reject-phase",
@@ -2332,6 +2332,75 @@ fn spans_view(input: &Value) -> anyhow::Result<Value> {
     Ok(json!({"team":team.id,"tasks":tasks,"next_cursor":next,"events":{"read":journal.len(),"truncated":cut}}))
 }
 
+/// U38: the profile of one task (`task`), a phase (`phase`) or the plan: the
+/// losses ranked by time and by tokens (pages of `limit` after `after_time` or
+/// `after_tokens`), the planned and the real critical path, per member, role
+/// and model the utilization and tokens, and a page of task rows after
+/// `after_task`. `compare` [a, b] sets two phases side by side; `tokens`:false
+/// reads no session. Read only; one bounded journal read per scope.
+fn profile_view(input: &Value) -> anyhow::Result<Value> {
+    use super::profile;
+    let store = Store::open(false)?;
+    let team = store.load(text(input, "team"))?.context("Unknown team")?;
+    let now = now();
+    let read = input["tokens"].as_bool() != Some(false);
+    let page = profile::Page {
+        limit: input["limit"].as_u64().map_or(profile::LOSS_PAGE, |n| n as usize),
+        after_time: Some(input["after_time"].clone()).filter(Value::is_object),
+        after_tokens: Some(input["after_tokens"].clone()).filter(Value::is_object),
+        after_task: input["after_task"].as_u64().map_or(0, |n| n as u32),
+    };
+    // A draft has no timeline yet; cancelled work stays, its time was spent.
+    let scope = |phase: Option<u64>| -> Vec<&Task> {
+        let mut list: Vec<&Task> = team
+            .tasks
+            .iter()
+            .filter(|task| task.status != TaskStatus::Draft && phase.is_none_or(|phase| u64::from(task.phase) == phase))
+            .collect();
+        list.sort_by_key(|task| task.id);
+        list
+    };
+    if let Some(pair) = input["compare"].as_array() {
+        let phases: Vec<u32> = pair.iter().filter_map(Value::as_u64).filter_map(|n| u32::try_from(n).ok()).collect();
+        ensure!(phases.len() == 2, "compare names two phases");
+        let first = profile_of(&store, &team, &scope(Some(u64::from(phases[0]))), &profile::Page { limit: 3, ..Default::default() }, read, now)?;
+        let second = profile_of(&store, &team, &scope(Some(u64::from(phases[1]))), &profile::Page { limit: 3, ..Default::default() }, read, now)?;
+        return Ok(json!({"team":team.id,"compare":profile::compare((phases[0], &first), (phases[1], &second))}));
+    }
+    let (chosen, label) = match (input["task"].as_u64(), input["phase"].as_u64()) {
+        (Some(id), _) => (vec![team.task(id as u32).with_context(|| format!("Unknown task #{id}"))?], json!({"task":id})),
+        (None, Some(phase)) => (scope(Some(phase)), json!({"phase":phase})),
+        (None, None) => (scope(None), json!({"plan":true})),
+    };
+    let mut value = profile_of(&store, &team, &chosen, &page, read, now)?;
+    value["team"] = json!(team.id);
+    value["scope"] = label;
+    Ok(value)
+}
+
+/// The profile of `chosen` tasks: their timelines from one bounded journal
+/// read, the tokens of their spans (at most `profile::TOKEN_READS` reads) and
+/// the ranked losses.
+fn profile_of(store: &Store, team: &Team, chosen: &[&Task], page: &super::profile::Page, read: bool, now: f64) -> anyhow::Result<Value> {
+    use super::{profile, spans};
+    let (journal, cut) = match spans::window(team, chosen, now) {
+        Some((from, to)) => store.span_events(&team.id, from, to, spans::EVENT_LIMIT)?,
+        None => (Vec::new(), false),
+    };
+    let holders = spans::holders(team, now);
+    let timelines: Vec<Value> = chosen.iter().map(|task| spans::spans(team, task, &journal, &holders, now)).collect();
+    let asks = profile::asks(&timelines, now);
+    let (tokens, capped) = if read {
+        profile::read_tokens(team, &asks)
+    } else {
+        (asks.iter().map(|ask| ((ask.task, ask.part.clone()), None)).collect(), false)
+    };
+    let mut value = profile::profile(team, chosen, &timelines, &tokens, page, now);
+    value["events"] = json!({"read":journal.len(),"truncated":cut});
+    value["token_reads"] = json!({"asked":asks.len(),"read":if read { asks.len().min(profile::TOKEN_READS) } else { 0 },"truncated":capped});
+    Ok(value)
+}
+
 /// The member's live attempt from its own session; `team` is optional when the
 /// session belongs to one team (spec section 5). Read only.
 fn current(input: &Value) -> anyhow::Result<Value> {
@@ -3566,6 +3635,12 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             let mut value = view_with_cancelled(&team, &teams, sessions.as_deref(), include_cancelled);
             // D2: the findings page takes a before cursor.
             value["findings"] = findings_page(&team, input["before"].as_u64());
+            // U38: the profile only on request, as hgs team profile gives it.
+            if input["profile"].is_object() {
+                let mut ask = input["profile"].clone();
+                ask["team"] = json!(team.id);
+                value["profile"] = profile_view(&ask)?;
+            }
             Ok(value)
         }
         "inbox" => {
@@ -3590,6 +3665,7 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             Store::open(false)?.events(text(input, "team"), before, input["limit"].as_i64().unwrap_or(PAGE))
         }
         "spans" => spans_view(input),
+        "profile" => profile_view(input),
         "current" => current(input),
         "escalate" => escalate(input),
         op if MUTATIONS.contains(&op) => {
@@ -4913,6 +4989,29 @@ mod tests {
             let phase = run("spans", &json!({"team":"rv","phase":2}), false).unwrap();
             assert_eq!(phase["tasks"].as_array().unwrap().len(), 1);
             assert!(run("spans", &json!({"team":"rv","task":99}), false).is_err());
+        });
+    }
+
+    /// U38: `profile` ranks a scope's losses read only; status carries it only
+    /// when asked; two phases compare side by side.
+    #[test]
+    fn profile_ranks_a_scope_and_status_carries_it_on_request() {
+        let (team, _, _) = review_team();
+        assert!(USAGE.contains("|profile|") && !MUTATIONS.contains(&"profile"));
+        with_review_team(&team, || {
+            let plan = run("profile", &json!({"team":"rv","tokens":false}), false).unwrap();
+            assert_eq!(plan["scope"], json!({"plan":true}));
+            assert!(plan["losses"]["by_time"]["items"].is_array() && plan["critical_path"]["planned"]["tasks"].is_array(), "{plan}");
+            assert_eq!(plan["token_reads"]["read"], 0);
+            let one = run("profile", &json!({"team":"rv","task":1,"tokens":false}), false).unwrap();
+            assert_eq!(one["summary"]["tasks"], 1);
+            let compared = run("profile", &json!({"team":"rv","compare":[1,2],"tokens":false}), false).unwrap();
+            assert_eq!((compared["compare"]["a"]["phase"].clone(), compared["compare"]["b"]["phase"].clone()), (json!(1), json!(2)));
+            assert!(run("profile", &json!({"team":"rv","compare":[1]}), false).is_err());
+            let status = run("status", &json!({"team":"rv"}), false).unwrap();
+            assert!(status.get("profile").is_none());
+            let status = run("status", &json!({"team":"rv","profile":{"phase":2,"tokens":false}}), false).unwrap();
+            assert_eq!(status["profile"]["scope"], json!({"phase":2}));
         });
     }
 

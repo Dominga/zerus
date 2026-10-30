@@ -13,6 +13,7 @@ pub(crate) mod owner_waiting;
 pub(crate) mod owner_word;
 pub(crate) mod pipeline;
 pub(crate) mod plan;
+pub(crate) mod profile;
 pub(crate) mod safe_actions;
 pub(crate) mod spans;
 pub(crate) mod stages;

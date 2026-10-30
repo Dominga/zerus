@@ -8,7 +8,7 @@ vi.mock("./organization", () => ({ groupOf: () => fixture.project }));
 vi.mock("./tasks", () => ({ tasks: { project: () => "example", tasks: () => fixture.tasks } }));
 vi.mock("./actions", () => ({ notify: vi.fn() }));
 import { assignTask } from "../bridge";
-import { assign, canAssign, taskDrop, setDraggedTask, TASK_MIME } from "./taskAssignment";
+import { assign, canAssign, taskDrop, taskDragStart, readTaskDrag, setDraggedTask, TASK_MIME } from "./taskAssignment";
 const row = { key: "peer\nrun:one", catalogKey: "run:one", computer: "peer", name: "codex/example/one", runId: "run", conversationId: "conversation", launchId: "launch", tracked: true, state: "running" } as Session;
 const task = taskItem({ uuid: "11111111-1111-4111-8111-111111111111", stage: "todo", writable: true, title: "Example" });
 beforeEach(() => { vi.clearAllMocks(); fixture.rows[row.key] = { ...row }; fixture.tasks = [task]; fixture.project = "example"; fixture.online = true; });
@@ -35,4 +35,11 @@ describe("guarded task assignment", () => {
     const e = { dataTransfer: { types: [TASK_MIME], getData: () => JSON.stringify({ project: "other", uuid: task.uuid }) }, preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as DragEvent;
     taskDrop(e, "example", row); expect(assignTask).not.toHaveBeenCalled();
   });
+  it("allows same-stage reordering drags for review tasks without allowing assignment", async () => {
+   const review = { ...task, stage: "review" }; fixture.tasks = [review];
+   const payload = new Map<string, string>();
+   const e = { dataTransfer: { types: [TASK_MIME], setData: (key: string, value: string) => payload.set(key, value), getData: (key: string) => payload.get(key) }, preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as DragEvent;
+   taskDragStart(e, review); expect(readTaskDrag(e, "example")).toBe(review);
+   taskDrop(e, "example", row); await Promise.resolve(); expect(assignTask).not.toHaveBeenCalled();
+ });
 });

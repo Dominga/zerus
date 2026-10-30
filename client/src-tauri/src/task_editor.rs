@@ -668,6 +668,7 @@ fn submitted(
 }
 #[tauri::command]
 pub async fn task_editor_submit(
+    writes: State<'_, crate::task_details::TaskWrites>,
     state: State<'_, TaskEditor>,
     composers: State<'_, Composers>,
     fetcher: State<'_, Arc<Fetcher>>,
@@ -678,11 +679,13 @@ pub async fn task_editor_submit(
     if crate::actions::blocked() {
         return Err(crate::screens::REPLAY_NEEDS_HGS.into());
     }
+    let write_permit = writes.begin()?;
     let permit = state.begin()?;
     let editor = state.inner().clone();
     let composers = composers.inner().clone();
     let fetcher = Arc::clone(fetcher.inner());
     tauri::async_runtime::spawn_blocking(move || {
+        let _write_permit = write_permit;
         let _permit = permit;
         let mut guard = crate::composer::lock(&editor.0.slot);
         let slot = guard

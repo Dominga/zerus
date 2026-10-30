@@ -11,14 +11,14 @@ import { text } from "../../store/settings";
 import { composer } from "../../store/composer";
 import { computerOffline } from "../../store/catalog";
 import { followedFor } from "../../store/actions";
-import { accountTooltip, exhausted, exhaustedSummary, summaryText, usageLoading, windowsAt } from "../lib/usage";
+import { accountTooltip, exhausted, exhaustedSummary, usageLoading, windowsAt } from "../lib/usage";
 import { recoveryInspection, recoveryUsageNotice } from "./recovery-ui";
-import { sessionUsageView } from "./session-usage-ui";
+import { footerUsageSummary, sessionUsageView } from "./session-usage-ui";
 import type { Session } from "./types";
 
 const toneClass = (tone: string) => tone === "danger" ? "danger" : tone === "warning" ? "warn" : tone === "success" ? "ok" : "";
 
-/** AccountUsage::Button and RefreshButton in the session header. */
+/** AccountUsage::Button and RefreshButton in the bottom status bar. */
 export function AccountUsageChip(props: { session: Session }) {
   const now = useNow(30_000);
   onMount(startSessionUsage);
@@ -38,10 +38,10 @@ export function AccountUsageChip(props: { session: Session }) {
   };
   return (
     <Show when={props.session.tracked && !props.session.archiveId}>
-      <span class="dh-usage">
+      <span class="session-usage-strip">
         <button type="button" class="sb-usage account-usage" title={accountTooltip(u(), now())} aria-label={`Account usage\n${exhausted(u(), now())}\n${accountTooltip(u(), now())}`} onClick={openAccount}>
           <Show when={u().provider}><AgentBadge agent={props.session.agent} /></Show>
-          <UsageMeters windows={windowsAt(u().windows, now())} loading={usageLoading(u())} summary={summaryText(u())} indicator={text("workspace/usageIndicator") as UsageIndicator} />
+          <UsageMeters windows={windowsAt(u().windows, now())} loading={usageLoading(u())} summary={footerUsageSummary(u())} indicator={text("workspace/usageIndicator") as UsageIndicator} />
         </button>
         <button type="button" class="icon-btn usage-refresh" disabled={!online() || u().refreshing} aria-label="Refresh account usage"
           title={u().refreshing ? "Updating account usage…" : "Refresh account usage (automatically every 5 minutes)"} onClick={() => void refreshSessionUsage(true)}>

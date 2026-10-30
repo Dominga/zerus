@@ -23,8 +23,10 @@ async function pull(force: boolean): Promise<void> {
   }
 }
 
-/** Follows a live session, or null for no composer. A new run gets no old data. */
+/** Follows a live session, or null while its strip is hidden. A new run gets no old data. */
 export function followSessionUsage(next: SessionUsageRef | null, agent = ""): void {
+  // Renders of the same binding keep its snapshot and any open limit popover.
+  if (provider === agent && (target === next || (!!target && !!next && target.host === next.host && target.name === next.name && target.run_id === next.run_id))) return;
   target = next;
   provider = agent;
   setSnapshot(emptyUsage(provider));
@@ -39,7 +41,7 @@ export async function refreshSessionUsage(force = true): Promise<void> {
 export const sessionUsage = (): Usage => snapshot();
 export const sessionUsageTarget = (): SessionUsageRef | null => target;
 
-/** Subscribes only while a session header is mounted, so tests and headless
+/** Subscribes only while the session usage strip is mounted, so tests and headless
  * stores do not need an event bridge. */
 export function startSessionUsage(): void {
   if (listening) return;

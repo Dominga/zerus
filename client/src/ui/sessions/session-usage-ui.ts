@@ -1,5 +1,16 @@
 // SessionUsage::html, as labelled rows rather than HTML. Values stay separate
 // through the table layout; no field separator is added.
+import type { Session } from "./types";
+import type { Usage } from "../../types";
+import { summaryText } from "../lib/usage";
+
+/** SessionsWindow::renderAccountUsage, including saved live-catalog sessions. */
+export function usageStripVisible(page: string, session: Session | undefined, subagent: string | undefined): boolean {
+  return page === "sessions" && !!session?.tracked && session.state !== "archived" && !session.archiveId && !subagent;
+}
+
+export const footerUsageSummary = (usage: Usage) => !usage.status || usage.status === "unavailable" || usage.status === "offline" ? "limits n/a" : summaryText(usage);
+
 export type UsageObject = Record<string, unknown>;
 const object = (value: unknown): UsageObject => value && typeof value === "object" && !Array.isArray(value) ? value as UsageObject : {};
 const valid = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value >= 0;

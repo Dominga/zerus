@@ -45,6 +45,9 @@ void TeamWaitingFeed::refresh()
         m_inFlight = false;
         // A failed read keeps what is shown; the next one tries again.
         if (!ok || read != m_read) return;
+        // #706: the same list again redraws no banner and writes no setting.
+        if (result == m_last) return;
+        m_last = result;
         m_items.clear();
         QList<TeamWaitingNotices::Item> seen;
         for (const auto &value : result["items"].toArray()) {
@@ -55,8 +58,9 @@ void TeamWaitingFeed::refresh()
         m_total = result["total"].toInt(int(m_items.size()));
         emit changed();
         auto notices = TeamWaitingNotices::stored();
+        const QStringList known = notices.known();
         const auto fresh = notices.observe(seen, m_teams->teams(), !result["next"].isObject());
-        notices.store();
+        if (notices.known() != known) notices.store();
         for (const auto &notice : fresh) emit notify(notice.token, notice.title, notice.body);
     }, false);
 }

@@ -22,6 +22,10 @@ public:
     static QString message();
     // Hours per session, 0 when off. Device-local, keyed like collapsed rows.
     static int hours(const QString &host, const SessionInfo &session);
+    // #705: every session's saved hours at once, for a loop over many
+    // sessions (each hours() reads the setting again); empty when none keeps warm.
+    static QJsonObject savedHours();
+    static int hours(const QJsonObject &saved, const QString &host, const SessionInfo &session);
     static void setHours(const QString &host, const SessionInfo &session, int hours);
     // The provider cache's lifetime: Claude's from its native usage once seen.
     static int ttl(const QJsonObject &details);

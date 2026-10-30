@@ -47,6 +47,10 @@ public:
     // `?N` for the tab: questions and approvals waiting in member sessions.
     std::function<void(int answers)> answersChanged;
     void render();
+    // #706: the window's refresh and the team's polls rebuild the panel only
+    // when what it shows changed (the team's visible shape, its members' live
+    // states, the feed's head, the minute of its age); render() always does.
+    void refresh();
     // Shared with the team workspace.
     QWidget *problemActions(const Teams::Team &team, const Teams::Member &member, const Teams::Status &status);
     // The "Left from <team>" block of a Done/Stopped team (F7).
@@ -106,6 +110,11 @@ protected:
     void showEvent(QShowEvent *event) override;
 private:
     void scheduleRender();
+    void pollRender();
+    void queueRender();
+    QByteArray renderKey() const;
+    QByteArray m_renderedKey;
+    bool m_forced = false;
     QWidget *header(const Teams::Team &team, const QString &status, bool narrow);
     // The inspector's short view (design D4) and its no-team state.
     QWidget *emptyState(bool narrow);

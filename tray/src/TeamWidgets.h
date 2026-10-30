@@ -552,6 +552,15 @@ public:
         setToolTip(tip);
     }
     QSize sizeHint() const override { return {fontMetrics().horizontalAdvance(m_text) + 18, 18}; }
+    QString text() const { return m_text; }
+    // #706: a member's live state changes its mark in place.
+    void setState(const QString &text, const QColor &color, const QString &kind, const QString &tooltip = {})
+    {
+        if (text == m_text && color == m_color && kind == m_kind) return;
+        m_text = text; m_color = color; m_kind = kind;
+        setToolTip(tooltip.isEmpty() ? text : text.isEmpty() ? tooltip : tooltip + QLatin1Char('\n') + text);
+        updateGeometry(); update();
+    }
 protected:
     void paintEvent(QPaintEvent *) override
     {
@@ -803,6 +812,15 @@ public:
             n.worked = text;
         }
         if (changed) update();
+    }
+    // #706: a member's live state changes its nodes' activity labels and
+    // working dots in place; the layout stays.
+    void refreshLive(const std::function<void(Node &)> &apply)
+    {
+        bool working = false;
+        for (auto &n : nodes) { apply(n); working = working || n.working; }
+        if (m_mode == Wide && working && AgentWorking::animated()) m_dots.start(); else m_dots.stop();
+        update();
     }
     // Compatibility with the two-mode form.
     TaskView(const Colors &colors, bool graph, QWidget *parent = nullptr) : TaskView(colors, graph ? Graph : List, parent) {}

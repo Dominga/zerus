@@ -846,6 +846,9 @@ private slots:
     void heldByFromTheStatusOnTheBoard();
     void aPollThatChangesNothingDrawnRebuildsNothing();
     void aPhaseGraphThatFitsShowsNoSidewaysBar();
+    void aMembersLiveStateChangesInPlace();
+    void aListPollThatMovesOnlyTheRevisionChangesNothing();
+    void aWaitingReadThatChangesNothingRedrawsNothing();
 private:
     QString script() const { return m_dir.filePath("hgs"); }
     void setTeam(const QJsonObject &value) { QVERIFY(FakeCli::replace(script() + ".status", QJsonDocument(value).toJson(QJsonDocument::Compact))); }
@@ -13332,6 +13335,175 @@ void TestTeamsUi::aHeatReadThatDrawsTheSameRebuildsNothing()
     QTRY_VERIFY(!view || view != graph());
     QTRY_COMPARE(node(483).heat, QStringLiteral("lost 3h 58m"));
     QVERIFY2(node(483).tooltip.contains("Top loss: Waited for the lead (decision 1h 42m, questions 20m), 2h 02m"), qPrintable(node(483).tooltip));
+}
+
+namespace {
+// #706: a small running team: Backend works on #1, the lead waits on #2.
+QJsonObject liveTeam()
+{
+    return QJsonDocument::fromJson(R"JSON({
+ "id":"team-1","name":"Live","status":"running","project":"Orbit platform","folder":"/work/orbit","lead":"lead",
+ "revision":1,"created":1000,"updated":5000,"settings":{},"layers":{},"cycle":[],"ready":[],"validation":{},
+ "members":[
+  {"id":"lead","role":"Lead","agent":"claude","model":"claude-opus-4-6","state":"active","session":{"host":"","name":"claude/orbit/live"}},
+  {"id":"backend","role":"Backend","agent":"codex","model":"gpt-6.1-sol","state":"active","session":{"host":"","name":"codex/orbit/api"}}],
+ "phases":[{"n":1,"title":"Build","state":"approved","tasks":[1,2],"added_by":"Lead","added_at":1000}],
+ "tasks":[
+  {"id":1,"phase":1,"title":"Saved cards API","assignee":"backend","status":"in_progress",
+   "attempts":[{"n":1,"id":"a1","member":"backend","state":"delivered","sent_at":1800002000,"started_at":1800002010}]},
+  {"id":2,"phase":1,"title":"Release notes","assignee":"lead","status":"pending","deps":[{"task":1}]}]})JSON").object();
+}
+}
+
+// #706: a member going from working to idle changes its activity label on
+// the Board and its node on the Graph in place, and its mark in Members is
+// set again where it is: the canvas, the cards and the column stay. A live change that makes a problem
+// (the member goes offline) rebuilds as before.
+void TestTeamsUi::aMembersLiveStateChangesInPlace()
+{
+    setTeam(liveTeam());
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    bool working = true, offline = false;
+    workspace.setLive([&](const Member &m) {
+        Live l; l.known = true;
+        if (m.id == "backend") { l.working = working; l.offline = offline; l.attentionText = working ? "cargo test" : "cargo build"; }
+        return l;
+    });
+    darkPalette(); workspace.setTheme(true);
+    workspace.resize(1500, 640); workspace.show();
+    controller.refresh(); panel.showTeam("team-1"); workspace.showTeam("team-1");
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceView"));
+    const auto view = [&](const char *segment) {
+        for (auto *b : workspace.findChild<QWidget *>("teamWorkspaceView")->findChildren<QPushButton *>()) if (b->property("segment") == segment) b->click();
+    };
+    view("board");
+    const auto area = [&] { return workspace.findChild<QScrollArea *>("teamWorkspaceBoard"); };
+    QTRY_VERIFY(area() && boardCard(area(), 1) && controller.watched());
+    TestWait::settle();
+    const auto activity = [&] { auto *l = boardCard(area(), 1)->findChild<QLabel *>("teamBoardActivity"); return l ? l->text() : QString(); };
+    const auto mark = [&]() -> TeamUi::StatusMark * {
+        for (auto *card : workspace.findChildren<QFrame *>("teamWorkspaceMember"))
+            if (card->property("teamMember") == "backend") return dynamic_cast<TeamUi::StatusMark *>(card->findChild<QWidget *>("teamWorkspaceMemberState"));
+        return nullptr;
+    };
+    const auto side = [&] { return workspace.findChild<QWidget *>("teamWorkspaceSide"); };
+    QCOMPARE(activity(), QStringLiteral("working"));
+    QVERIFY(mark());
+    QPointer<QScrollArea> canvas = area();
+    QPointer<QFrame> card = boardCard(area(), 1);
+    QPointer<QWidget> column = side();
+    QPointer<QWidget> state = mark();
+    // The session list's poll names the same team: Backend is idle now.
+    working = false;
+    workspace.showTeam("team-1");
+    QTRY_COMPARE(activity(), QStringLiteral("idle"));
+    QVERIFY(canvas && canvas == area() && card && card == boardCard(area(), 1));
+    QVERIFY(column && column == side() && state && state == mark());
+    const Live idle = [] { Live l; l.known = true; return l; }();
+    QCOMPARE(mark()->text(), Teams::memberStatus(*controller.watched(), *controller.watched()->member("backend"), idle).text);
+    shot(&workspace, "u706-board-idle-in-place-dark");
+    // The Graph's node: its activity, the view kept.
+    view("graph");
+    const auto graph = [&]() -> TeamUi::TaskView * {
+        for (auto *w : workspace.findChildren<QWidget *>()) if (auto *v = dynamic_cast<TeamUi::TaskView *>(w); v && !v->nodes.isEmpty()) return v;
+        return nullptr;
+    };
+    const auto node = [&](int id) { TeamUi::TaskView::Node found; if (auto *v = graph()) for (const auto &n : v->nodes) if (n.id == id) found = n; return found; };
+    QTRY_COMPARE(node(1).activity, QStringLiteral("idle"));
+    TestWait::settle();
+    QPointer<QWidget> graphView = graph();
+    working = true;
+    workspace.showTeam("team-1");
+    QTRY_COMPARE(node(1).activity, QStringLiteral("working"));
+    QVERIFY(node(1).working);
+    QVERIFY(graphView && graphView == graph());
+    // Offline is a problem: the team's problems change, so it rebuilds.
+    offline = true;
+    workspace.showTeam("team-1");
+    QTRY_VERIFY(!graphView || graphView != graph());
+    QVERIFY(node(1).problem);
+}
+
+// #706: a `team list` read that moves only the revision and the updated time
+// keeps the new values and tells nobody (the session list used to rebuild
+// all its rows for it); a change it shows does. The team panel's refresh
+// rebuilds only for a change it shows.
+void TestTeamsUi::aListPollThatMovesOnlyTheRevisionChangesNothing()
+{
+    auto team = liveTeam();
+    setTeam(team);
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    QSignalSpy changed(&controller, &TeamController::teamsChanged);
+    const auto listReads = [&] { return calls(script(), "list").size(); };
+    controller.refresh();
+    QTRY_COMPARE(changed.count(), 1);
+    for (int i = 1; i <= 2; ++i) {
+        team["revision"] = 1 + i; team["updated"] = 5000 + 60 * i;
+        setTeam(team);
+        const auto before = listReads();
+        controller.refresh();
+        QTRY_VERIFY(listReads() > before && controller.team("team-1")->revision == 1 + i);
+        QTest::qWait(50);
+        QCOMPARE(changed.count(), 1);
+    }
+    team["name"] = "Live checkout";
+    setTeam(team);
+    controller.refresh();
+    QTRY_COMPARE(changed.count(), 2);
+    // The panel: a poll and the window's refresh with nothing new keep it.
+    TeamPanel panel(&controller);
+    panel.resize(360, 640); panel.show();
+    panel.showTeam("team-1");
+    QTRY_VERIFY(controller.watched() && panel.findChild<QWidget *>("teamPanelContent"));
+    TestWait::settle();
+    QPointer<QWidget> content = panel.findChild<QWidget *>("teamPanelContent");
+    const auto statusReads = [&] { return calls(script(), "status").size(); };
+    team["revision"] = 9; team["updated"] = 6000;
+    setTeam(team);
+    const auto before = statusReads();
+    controller.refresh();
+    QTRY_VERIFY(statusReads() > before && controller.watched()->revision == 9);
+    panel.refresh();
+    QTest::qWait(50);
+    QVERIFY(content && content == panel.findChild<QWidget *>("teamPanelContent"));
+    // A shown change: #1 is submitted.
+    auto tasks = team["tasks"].toArray();
+    auto first = tasks[0].toObject(); first["status"] = "submitted"; tasks[0] = first;
+    team["tasks"] = tasks;
+    setTeam(team);
+    controller.refresh();
+    QTRY_VERIFY(!content || content != panel.findChild<QWidget *>("teamPanelContent"));
+}
+
+// #706: the waiting list read every 30 s redraws its banners only when the
+// list changed, and asks for no team poll of its own.
+void TestTeamsUi::aWaitingReadThatChangesNothingRedrawsNothing()
+{
+    QSettings().remove(TeamWaitingNotices::kSetting);
+    const auto restore = qScopeGuard([] { QSettings().remove(TeamWaitingNotices::kSetting); });
+    const auto items = waitingKinds(double(QDateTime::currentSecsSinceEpoch()));
+    QVERIFY(writeWaiting(script() + ".waiting", QJsonArray{items[1]}));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamWaitingFeed feed(&controller);
+    QSignalSpy changed(&feed, &TeamWaitingFeed::changed);
+    const auto reads = [&] { return calls(script(), "waiting").size(); };
+    feed.setActive(true);
+    QTRY_COMPARE(changed.count(), 1);
+    const auto listReads = calls(script(), "list").size();
+    feed.refresh();
+    QTRY_COMPARE(reads(), 2);
+    QTest::qWait(100);
+    QCOMPARE(changed.count(), 1);
+    QCOMPARE(calls(script(), "list").size(), listReads);
+    QVERIFY(writeWaiting(script() + ".waiting", items));
+    feed.refresh();
+    QTRY_COMPARE(changed.count(), 2);
+    QCOMPARE(feed.total(), int(items.size()));
 }
 
 #include "test_teamsui.moc"

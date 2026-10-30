@@ -41,6 +41,7 @@ pub fn begin(
         "UPDATE desktop_catalog_sources SET staged=?2,next_page=0,cursor=?3 WHERE computer=?1",
         params![source.computer, stage, rows as i64],
     )?;
+    check_budget(&tx)?;
     tx.commit()?;
     Ok(())
 }
@@ -109,12 +110,12 @@ pub fn complete(db: &mut Connection, source: &Source) -> Result<Applied> {
             old.next_page == old.seq && rows == old.cursor,
             "incomplete legacy replacement"
         );
-        check_budget(&tx)?;
         publish(&tx, source, &old)?;
         tx.execute(
-            "UPDATE desktop_catalog_sources SET meta=hello,hello='{}' WHERE computer=?1",
+            "UPDATE desktop_catalog_sources SET meta=hello,hello='' WHERE computer=?1",
             [&source.computer],
         )?;
+        check_budget(&tx)?;
         tx.commit()?;
         Ok(Applied::Visible)
     })

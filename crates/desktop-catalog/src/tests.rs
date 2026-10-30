@@ -273,6 +273,12 @@ fn deltas_keep_insertion_identity_and_counts_and_refuse_incomplete_base() {
             .iter()
             .map(|r| charge(&r.key, &r.json))
             .sum::<i64>()
+            + serde_json::to_vec(match &hello().body {
+                Body::Hello(h) => h,
+                _ => unreachable!(),
+            })
+            .unwrap()
+            .len() as i64
     );
     assert!(apply(&mut db, &source, &delta(4, 2, vec![], &[])).is_err());
     let newer = Source {

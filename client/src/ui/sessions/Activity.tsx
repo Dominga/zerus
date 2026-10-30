@@ -12,6 +12,7 @@ import type { ActivitySource, AttachmentScope } from "../../store/activitySource
 import { composer, draftKey } from "../../store/composer";
 import { terminal } from "../../store/terminal";
 import type { LocalMessage } from "../../types";
+import { createActivityEnd } from "./activity-end";
 import { buildTranscript, VOICE_STATE_LABEL, voiceStateDetail, voiceStateIssue } from "./transcript";
 import { DELETE_TEXT, DELETE_TITLE, retryReason, routeInspect } from "./local-actions";
 import { statusOf } from "./SessionCard";
@@ -584,10 +585,30 @@ export function ActivityView(props: { source?: ActivitySource }) {
   let anchor: { height: number; top: number } | undefined;
   /** The newest event's seq the view has seen, for the count of new ones. */
   let newest: number | undefined;
-  onMount(() => { liveScroller = scroller; });
-  onCleanup(() => { if (liveScroller === scroller) liveScroller = undefined; });
+  const end = createActivityEnd(
+    () => ({ top: scroller.scrollTop, height: scroller.scrollHeight, viewport: scroller.clientHeight }),
+    () => scroller.scrollTo({ top: scroller.scrollHeight, behavior: "instant" }),
+  );
+  let manualAway = false;
+  let touchY: number | undefined;
+  const scrollAway = () => { end.release(); manualAway = true; setFollowing(false); };
+  onMount(() => {
+    liveScroller = scroller;
+    // Content includes Markdown, images and tool disclosures; the viewport
+    // also resizes when the composer or a question card changes height.
+    const resize = new ResizeObserver(() => end.changed());
+    resize.observe(scroller);
+    const column = scroller.querySelector(".act-col");
+    if (column) resize.observe(column);
+    onCleanup(() => resize.disconnect());
+  });
+  onCleanup(() => { end.dispose(); if (liveScroller === scroller) liveScroller = undefined; });
   const onScroll = () => {
-    const atBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < STICK_EDGE;
+    // A first render or a resize can emit scroll before the pin's frame.
+    // It must not turn following off or trigger an older-page read.
+    if (end.scrolled()) return;
+    const atBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < (manualAway ? 1 : STICK_EDGE);
+    if (atBottom) manualAway = false;
     if (atBottom !== following()) setFollowing(atBottom);
     if (atBottom && unseen()) setUnseen(0);
     if (scroller.scrollTop < OLDER_EDGE && readsOlder(source())) {
@@ -595,7 +616,11 @@ export function ActivityView(props: { source?: ActivitySource }) {
       source().loadOlder();
     }
   };
-  createEffect(on(() => source().target()?.id, () => { setFollowing(true); setUnseen(0); anchor = undefined; newest = undefined; }));
+  createEffect(on(() => source().target()?.id, () => {
+    setFollowing(true); setUnseen(0); anchor = undefined; newest = undefined; manualAway = false;
+    // Selection changes must place even when the next page has the same row count.
+    end.pin();
+  }));
   // Events after the newest one seen count as new while the view does not follow (Qt's m_unseen).
   createEffect(on(() => source().events(), (events) => {
     const last = events.at(-1)?.seq;
@@ -613,7 +638,8 @@ export function ActivityView(props: { source?: ActivitySource }) {
         const grown = scroller.scrollHeight - anchor.height;
         if (grown > 0) scroller.scrollTo({ top: anchor.top + grown, behavior: "instant" });
         anchor = undefined;
-      } else if (following()) scroller.scrollTo({ top: scroller.scrollHeight, behavior: "instant" });
+      } else if (end.active()) end.changed();
+      else if (following()) scroller.scrollTo({ top: scroller.scrollHeight, behavior: "instant" });
     });
   }));
 
@@ -624,7 +650,13 @@ export function ActivityView(props: { source?: ActivitySource }) {
   return (
     <div class="activity">
       <LocalDeleteDialog />
-      <div class="act-scroll" ref={scroller} tabindex="-1" onContextMenu={activityMenu} onScroll={onScroll}>
+      <div class="act-scroll" ref={scroller} tabindex="-1" onContextMenu={activityMenu} onScroll={onScroll}
+        onWheel={(e) => { if (e.deltaY < 0) scrollAway(); }}
+        onKeyDown={(e) => { if (!e.defaultPrevented && ["ArrowUp", "PageUp", "Home"].includes(e.key)
+          && !(e.target as HTMLElement).closest("input,textarea,select")) scrollAway(); }}
+        onPointerDown={(e) => { if (e.target === scroller) scrollAway(); }}
+        onTouchStart={(e) => { touchY = e.touches[0]?.clientY; }}
+        onTouchMove={(e) => { const y = e.touches[0]?.clientY; if (y !== undefined && touchY !== undefined && y > touchY) scrollAway(); touchY = y; }}>
         <div class="act-col">
           <Show when={!fullWidth()}><ColumnEdge /><ColumnEdge right /></Show>
           <Show when={subagentOpen()}>

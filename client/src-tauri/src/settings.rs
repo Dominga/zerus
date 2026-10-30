@@ -14,7 +14,7 @@ use zerus_client_core::settings::{QtStore, Settings};
 
 /// The identity that replaces Qt at the switch: only it seeds from Qt's
 /// store, once. The dev identity never does.
-pub const SWITCH_IDENTITY: &str = "com.hgdev.hgs-tray";
+pub const SWITCH_IDENTITY: &str = crate::identity::SWITCH_ID;
 
 /// How long quitting waits for the last change to reach the disk.
 pub const EXIT_FLUSH: Duration = Duration::from_millis(750);
@@ -23,10 +23,19 @@ pub const EXIT_FLUSH: Duration = Duration::from_millis(750);
 pub struct Store(pub Settings);
 
 /// Qt's store to seed from, for this app identity.
-pub fn seed_source(identifier: &str) -> Option<QtStore> {
-    (identifier == SWITCH_IDENTITY)
+pub fn seed_source(identifier: &str, replay: bool) -> Option<QtStore> {
+    crate::identity::Identity::new(identifier)
+        .seeds_qt(replay)
         .then(QtStore::here)
         .flatten()
+}
+
+pub fn file(replay: bool) -> &'static str {
+    if replay {
+        "settings-replay.json"
+    } else {
+        "settings.json"
+    }
 }
 
 /// Settings > Appearance > Keep Zerus above other windows (WindowLayer.cpp).
@@ -35,13 +44,16 @@ pub const ALWAYS_ON_TOP: &str = "workspace/alwaysOnTop";
 /// Opens the store in `dir`; every change is announced as
 /// `settings-changed` with its key and new value, and Keep Zerus above other
 /// windows applies to the main window at once.
-pub fn open(app: &AppHandle, dir: &Path) -> Store {
+pub fn open(app: &AppHandle, dir: &Path, replay: bool) -> Store {
     let settings = Settings::open(
-        dir.join("settings.json"),
-        seed_source(&{
-            use tauri::Manager;
-            app.state::<crate::identity::Identity>().bundle_id.clone()
-        }),
+        dir.join(file(replay)),
+        seed_source(
+            &{
+                use tauri::Manager;
+                app.state::<crate::identity::Identity>().bundle_id.clone()
+            },
+            replay,
+        ),
     );
     let handle = app.clone();
     settings.subscribe(Box::new(move |key, value, revision| {
@@ -222,10 +234,17 @@ mod tests {
 
     #[test]
     fn only_the_switch_identity_seeds_from_qt() {
-        assert!(seed_source("dev.zerus.next").is_none());
-        assert!(seed_source("dev.zerus.next.phase2").is_none());
+        assert!(seed_source("dev.zerus.next", false).is_none());
+        assert!(seed_source("dev.zerus.next.phase2", false).is_none());
+        assert!(seed_source(SWITCH_IDENTITY, true).is_none());
         if std::env::var_os("HOME").is_some() || std::env::var_os("APPDATA").is_some() {
-            assert!(seed_source(SWITCH_IDENTITY).is_some());
+            assert!(seed_source(SWITCH_IDENTITY, false).is_some());
         }
+    }
+
+    #[test]
+    fn replay_settings_use_their_own_store() {
+        assert_eq!(file(false), "settings.json");
+        assert_eq!(file(true), "settings-replay.json");
     }
 }

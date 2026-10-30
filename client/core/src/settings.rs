@@ -334,6 +334,15 @@ const DEFAULTS: &str = "/usr/bin/defaults";
 /// (cfprefsd), `qt-plist` (the plist file) or `qt-ini`.
 pub type QtValues = (BTreeMap<String, QtValue>, &'static str);
 
+/// Qt's platform-specific settings location. Kept explicit so migration
+/// tests can resolve all three platforms without changing process globals.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QtPlatform {
+    Linux,
+    Mac,
+    Windows,
+}
+
 impl QtStore {
     /// Qt's store on this computer (tray/src/main.cpp:178, :276-277).
     pub fn here() -> Option<QtStore> {
@@ -342,21 +351,39 @@ impl QtStore {
                 .filter(|home| !home.is_empty())
                 .map(PathBuf::from)
         };
-        if cfg!(windows) {
-            std::env::var_os("APPDATA")
-                .filter(|path| !path.is_empty())
-                .map(|path| QtStore::Ini(PathBuf::from(path).join("hgdev").join("hgs-tray.ini")))
+        let (platform, config) = if cfg!(windows) {
+            (QtPlatform::Windows, std::env::var_os("APPDATA"))
         } else if cfg!(target_os = "macos") {
-            home().map(|home| QtStore::Plist {
+            (QtPlatform::Mac, None)
+        } else {
+            (QtPlatform::Linux, std::env::var_os("XDG_CONFIG_HOME"))
+        };
+        Self::locate(
+            platform,
+            home().as_deref(),
+            config.as_deref().map(Path::new),
+        )
+    }
+
+    /// Resolve Qt's source without opening it. `config` is XDG_CONFIG_HOME
+    /// on Linux and APPDATA on Windows; macOS uses its existing domain.
+    pub fn locate(
+        platform: QtPlatform,
+        home: Option<&Path>,
+        config: Option<&Path>,
+    ) -> Option<Self> {
+        let config = config.filter(|path| !path.as_os_str().is_empty());
+        match platform {
+            QtPlatform::Linux => config
+                .filter(|path| path.as_os_str().as_encoded_bytes().starts_with(b"/"))
+                .map(Path::to_path_buf)
+                .or_else(|| home.map(|home| home.join(".config")))
+                .map(|root| Self::Ini(root.join("hgdev/hgs-tray.conf"))),
+            QtPlatform::Windows => config.map(|root| Self::Ini(root.join("hgdev/hgs-tray.ini"))),
+            QtPlatform::Mac => home.map(|home| Self::Plist {
                 domain: Some("com.hgdev.hgs-tray".into()),
                 path: home.join("Library/Preferences/com.hgdev.hgs-tray.plist"),
-            })
-        } else {
-            std::env::var_os("XDG_CONFIG_HOME")
-                .filter(|path| !path.is_empty())
-                .map(PathBuf::from)
-                .or_else(|| home().map(|home| home.join(".config")))
-                .map(|config| QtStore::Ini(config.join("hgdev").join("hgs-tray.conf")))
+            }),
         }
     }
 

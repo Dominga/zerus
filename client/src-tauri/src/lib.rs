@@ -315,7 +315,8 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
             {
                 let dir = data_dir(app.handle());
                 std::fs::create_dir_all(&dir)?;
-                app.manage(settings::open(app.handle(), &dir));
+                let replay = std::env::var_os("ZERUS_CLIENT_REPLAY").is_some_and(|list| !list.is_empty());
+                app.manage(settings::open(app.handle(), &dir, replay));
                 app.manage(speech_settings::SpeechPage::default());
                 app.manage(recovery::start(app.handle()));
                 app.manage(files::start());
@@ -324,7 +325,6 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(worktree_policy::start(app.handle()));
                 app.manage(mobile::start(app.handle()));
                 // A replay never touches the real read or attention marks.
-                let replay = std::env::var_os("ZERUS_CLIENT_REPLAY").is_some_and(|list| !list.is_empty());
                 let actions = actions::Actions::new(dir.join(actions::marks_file(replay)));
                 readsync::start(actions.clone());
                 app.manage(actions);
@@ -382,7 +382,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 // The switch build takes Qt's and the dev app's drafts once,
                 // as the store's first job (zerus-5wmh.13.1); the dev identity
                 // and a replay never import.
-                if !replay && app.state::<identity::Identity>().is_switch() {
+                if app.state::<identity::Identity>().seeds_qt(replay) {
                     zerus_client_core::drafts::import_at_start(&drafts);
                 }
                 #[cfg(feature = "media")]

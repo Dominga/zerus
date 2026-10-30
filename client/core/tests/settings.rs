@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use zerus_client_core::settings::qt::{qt_key, read_ini, read_plist, QtValue};
 use zerus_client_core::settings::{
-    effective, find, from_qt, seed_values, Kind, QtStore, Settings, CLIENT, KEYS,
+    effective, find, from_qt, seed_values, Kind, QtPlatform, QtStore, Settings, CLIENT, KEYS,
     QT_AUTOMATIC_APPROVALS,
 };
 
@@ -41,6 +41,87 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 const FLUSH: Duration = Duration::from_secs(5);
+
+#[test]
+fn qt_sources_resolve_without_opening_any_user_store() {
+    let home = Path::new("/home/example");
+    assert_eq!(
+        QtStore::locate(QtPlatform::Linux, Some(home), None),
+        Some(QtStore::Ini(home.join(".config/hgdev/hgs-tray.conf")))
+    );
+    assert_eq!(
+        QtStore::locate(
+            QtPlatform::Linux,
+            Some(home),
+            Some(Path::new("/config/example"))
+        ),
+        Some(QtStore::Ini(PathBuf::from(
+            "/config/example/hgdev/hgs-tray.conf"
+        )))
+    );
+    for relative in ["", "relative-config"] {
+        assert_eq!(
+            QtStore::locate(QtPlatform::Linux, Some(home), Some(Path::new(relative))),
+            QtStore::locate(QtPlatform::Linux, Some(home), None)
+        );
+    }
+    let appdata = Path::new("C:/Users/example/AppData/Roaming");
+    assert_eq!(
+        QtStore::locate(QtPlatform::Windows, None, Some(appdata)),
+        Some(QtStore::Ini(appdata.join("hgdev/hgs-tray.ini")))
+    );
+    assert_eq!(QtStore::locate(QtPlatform::Windows, Some(home), None), None);
+    assert_eq!(QtStore::locate(QtPlatform::Linux, None, None), None);
+    let mac = Path::new("/Users/example");
+    assert_eq!(
+        QtStore::locate(QtPlatform::Mac, Some(mac), None),
+        Some(QtStore::Plist {
+            domain: Some("com.hgdev.hgs-tray".into()),
+            path: mac.join("Library/Preferences/com.hgdev.hgs-tray.plist"),
+        })
+    );
+}
+
+#[test]
+fn linux_and_windows_switches_seed_once_and_keep_the_clients_choices() {
+    let scratch = Scratch::new("switch-platforms");
+    for platform in [QtPlatform::Linux, QtPlatform::Windows] {
+        let base = scratch.0.join(format!("{platform:?}"));
+        let config = base.join("config");
+        let qt = QtStore::locate(
+            platform,
+            Some(&base),
+            (platform == QtPlatform::Windows).then_some(config.as_path()),
+        )
+        .unwrap();
+        fs::create_dir_all(qt.path().parent().unwrap()).unwrap();
+        let source = b"[workspace]\ntheme=dark\nlanguage=ru\n[automaticApprovals]\nenabled=true\n";
+        fs::write(qt.path(), source).unwrap();
+        let before = fs::metadata(qt.path()).unwrap().modified().unwrap();
+        let path = base.join("com.hgdev.hgs-tray/settings.json");
+        // An existing interim choice wins over Qt's old value.
+        let interim = Settings::open(path.clone(), None);
+        interim.set("workspace/theme", json!("light")).unwrap();
+        assert!(interim.flush_within(FLUSH));
+        drop(interim);
+        let migrated = Settings::open(path.clone(), Some(qt.clone()));
+        assert_eq!(migrated.get("workspace/theme"), "light");
+        assert_eq!(migrated.get("workspace/language"), "ru");
+        assert_eq!(migrated.get(QT_AUTOMATIC_APPROVALS), true);
+        assert!(!migrated.all().contains_key("automaticApprovals/enabled"));
+        let seed = migrated.seed_record().unwrap();
+        assert!(migrated.flush_within(FLUSH));
+        drop(migrated);
+        assert_eq!(fs::read(qt.path()).unwrap(), source);
+        assert_eq!(fs::metadata(qt.path()).unwrap().modified().unwrap(), before);
+        // A rollback edit never becomes a new seed, even after client edits.
+        fs::write(qt.path(), b"[workspace]\ntheme=system\nlanguage=en\n").unwrap();
+        let restarted = Settings::open(path, Some(qt.clone()));
+        assert_eq!(restarted.get("workspace/theme"), "light");
+        assert_eq!(restarted.get("workspace/language"), "ru");
+        assert_eq!(restarted.seed_record(), Some(seed));
+    }
+}
 
 #[test]
 fn qt_ini_values_read_as_qt_reads_them() {

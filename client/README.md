@@ -21,6 +21,16 @@ stops or replaces the installed Zerus GUI, CLI, agents or services.
 On the Mac the client also builds as Zerus itself, the switch bundle that takes
 over `com.hgdev.hgs-tray`; see `docs/macos-distribution.md#tauri-client-switch`.
 
+The installed Linux and Windows switch uses the same identifier,
+`com.hgdev.hgs-tray`, and the `hgs-tray` executable/instance name. Settings seed
+once from Qt's `~/.config/hgdev/hgs-tray.conf` on Linux (an absolute
+`XDG_CONFIG_HOME` replaces `~/.config`) or `%APPDATA%/hgdev/hgs-tray.ini` on
+Windows. The destination is the platform data directory under
+`com.hgdev.hgs-tray/settings.json`. Existing client choices win. The saved seed
+record prevents a second import after rollback; Qt's files are never changed.
+Development identities never seed, and a replay uses `settings-replay.json`
+without reading Qt, including when launched from the installed switch.
+
 ## Menu bar, single instance and notifications (macOS)
 
 | Piece | Where | Qt source it follows |

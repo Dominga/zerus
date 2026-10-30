@@ -84,6 +84,8 @@ mod task_start;
 #[cfg(feature = "live")]
 mod terminal;
 #[cfg(feature = "live")]
+mod termination_cleanup;
+#[cfg(feature = "live")]
 mod updates;
 #[cfg(feature = "media")]
 mod voice;
@@ -357,6 +359,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 let replay = std::env::var_os("ZERUS_CLIENT_REPLAY").is_some_and(|list| !list.is_empty());
                 app.manage(settings::open(app.handle(), &dir, replay));
                 app.manage(speech_settings::SpeechPage::default());
+                app.manage(termination_cleanup::TerminationCleanup::default());
                 app.manage(recovery::start(app.handle()));
                 app.manage(files::start());
                 app.manage(analytics::start(app.handle()));
@@ -1113,6 +1116,14 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         composer::fetch::attachment_unpin,
         composer::fetch::attachment_open,
         composer::fetch::attachment_open_draft,
+        termination_cleanup::termination_cleanup_inspect,
+        termination_cleanup::termination_cleanup_view,
+        termination_cleanup::termination_cleanup_offer,
+        termination_cleanup::termination_cleanup_cancel,
+        termination_cleanup::termination_cleanup_confirm,
+        termination_cleanup::termination_cleanup_check,
+        termination_cleanup::termination_cleanup_remove,
+        termination_cleanup::termination_cleanup_keep,
         session_files::session_file_dialog,
         session_files::session_file_check,
         session_files::session_file_download,

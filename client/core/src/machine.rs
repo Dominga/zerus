@@ -9,6 +9,9 @@ use serde_json::Value;
 /// One computer's card data.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct MachineMeta {
+    /// Physical identity from the current watch hello, separate from host/alias.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_id: Option<String>,
     pub host: Option<String>,
     pub hgs_version: Option<String>,
     /// `metrics.platform`, such as `linux`, `macos` or `windows`.
@@ -115,6 +118,7 @@ impl MachineMeta {
                 error: text(host, "error"),
             });
         Self {
+            machine_id: text(meta, "machine_id").filter(|id| crate::creation::canonical_uuid(id)),
             host: text(meta, "host"),
             hgs_version: text(meta, "hgs_version"),
             platform: text(metrics, "platform"),

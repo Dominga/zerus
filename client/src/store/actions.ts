@@ -65,7 +65,7 @@ export function createActions(
   const updating = (computer: string, name: string) => !!writes[sessionId(computer, name)];
   const interrupting = (computer: string, name: string) => !!interrupts[sessionId(computer, name)];
 
-  function report(action: Action, out: Outcome, row: ActionRow) {
+  function report(action: Action, out: Outcome, row: ActionRow, cleanupHandled = false) {
     if (action.kind === "interrupt") {
       // Qt's Stop notices (SessionsWindow.cpp 1206-1211).
       const target = `${row.name} (${row.machine})`;
@@ -78,7 +78,7 @@ export function createActions(
     if (action.kind === "forget_binding") { notify("info", `Zerus forgot ${row.name}. The conversation stays in OpenCode.`); return; }
     if (action.kind === "rename") notify("info", "Session renamed. Refreshing…");
     else notify("info", "Session updated. Refreshing…");
-    reportCleanup(out);
+    if (!cleanupHandled) reportCleanup(out);
   }
 
   /** The worktree lines of an Archive or Terminate (Qt's worktreeCleanupFinished), shown also during a selection batch. */
@@ -92,13 +92,13 @@ export function createActions(
   }
 
   /** One guarded call in its lane; a session with a call in that lane gets none. */
-  async function call(target: Target, action: Action): Promise<{ out: Outcome; busy: boolean }> {
+  async function call(target: Target, action: Action, cleanupId?: string): Promise<{ out: Outcome; busy: boolean }> {
     const id = sessionId(target.computer, target.name);
     const interrupt = action.kind === "interrupt";
     if (interrupt ? interrupts[id] : writes[id]) return { out: failed("busy"), busy: true };
     if (interrupt) setInterrupts(id, true); else setWrites(id, action.kind);
     try {
-      return { out: await bridge.runAction(target, action), busy: false };
+      return { out: await (cleanupId ? bridge.terminationCleanupConfirm(cleanupId) : bridge.runAction(target, action)), busy: false };
     } catch (error) {
       const detail = typeof error === "string" ? error : error instanceof Error ? error.message : String(error);
       return { out: failed(detail), busy: detail === "busy" };
@@ -114,15 +114,15 @@ export function createActions(
    * silent no-op. `quiet` is a selection batch's item (Qt's finishSelectionAction):
    * the batch words the outcome, and only the worktree lines show.
    */
-  async function perform(row: ActionRow, action: Action, options: { quiet?: boolean } = {}): Promise<Outcome> {
+  async function perform(row: ActionRow, action: Action, options: { quiet?: boolean; cleanupId?: string } = {}): Promise<Outcome> {
     const live = catalog.rows[row.key];
     const target = targetOf(row, action.kind);
     if (!live || !target || (row.runId && live.runId !== row.runId)) {
       if (!options.quiet) notify("info", CHANGED);
       return failed(CHANGED);
     }
-    const { out, busy } = await call(target, action);
-    if (!busy) { if (options.quiet) reportCleanup(out); else report(action, out, row); }
+    const { out, busy } = await call(target, action, options.cleanupId);
+    if (!busy) { if (options.quiet) reportCleanup(out); else report(action, out, row, !!options.cleanupId); }
     return out;
   }
 
@@ -144,14 +144,14 @@ export function createActions(
    * opened; then `action` is the call the dialog chose. A computer that went
    * offline meanwhile gets no call and no notice, as in Qt.
    */
-  async function end(row: ActionRow, action: "terminate" | "kill"): Promise<Outcome> {
+  async function end(row: ActionRow, action: "terminate" | "kill", cleanupId?: string): Promise<Outcome> {
     if (!online(row.computer)) return failed("offline");
     const live = catalog.rows[row.key];
     if (live && terminates(live) !== terminates(row)) {
       notify("error", STATE_CHANGED, true);
       return failed(STATE_CHANGED);
     }
-    return perform(row, { kind: action });
+    return perform(row, { kind: action }, { cleanupId: action === "terminate" ? cleanupId : undefined });
   }
 
   /**

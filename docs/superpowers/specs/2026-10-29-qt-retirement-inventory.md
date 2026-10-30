@@ -423,9 +423,12 @@ The design owner's 2026-10-30 ruling retains `projectFolderSplit` and
 `tasks/inspectorSplit` as private typed evidence, with no Qt splitter decoding
 or seed, including when Next's Projects splitter lands. Tasks has no equivalent
 splitter; never map it onto a different inspector panel. The remembered
-`removeWorktreeAfterTermination` value also stays private evidence until the
-Terminate dialog owner (`.10`) may prefill its checkbox once, with explicit
-confirmation every time, never automatic-maintenance consent.
+`removeWorktreeAfterTermination` value is retained as private evidence and now
+prefills the `.10.17` Terminate checkbox through one `termination-default` G3
+family. Import only when Next has no stored value: a current false wins. The
+family uses the same source hash, mtime, key and one-time handled record as the
+existing importer. Every Terminate still needs explicit confirmation, and this
+remembered default never authorizes automatic maintenance or a removal alone.
 
 The shared `tray.conf` also has bounded private evidence through its existing
 key parser; it preserves the original text without changing the selected CLI,

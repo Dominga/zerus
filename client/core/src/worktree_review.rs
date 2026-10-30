@@ -1024,3 +1024,138 @@ mod tests {
         );
     }
 }
+
+/// The existing bounded read-only worktree inspector. The native caller owns
+/// the root/common directory; the optional file is relative to that root.
+pub fn inspect_invocation(
+    computer: &ComputerId,
+    path: &str,
+    common_dir: &str,
+    file: &str,
+    offset: usize,
+) -> Invocation {
+    let mut args = hgs_args(
+        computer,
+        &[
+            "worktrees",
+            "inspect",
+            "--path",
+            path,
+            "--common-dir",
+            common_dir,
+            "--json",
+        ],
+    );
+    if !file.is_empty() {
+        args.extend(["--file".into(), file.into()]);
+    }
+    if offset > 0 {
+        args.extend(["--offset".into(), offset.to_string()]);
+    }
+    call(args, None, if computer.is_local() { 30 } else { 45 })
+}
+/// Match the original Qt verifier; inspection is never removal evidence.
+pub fn inspected(
+    exit: Exit,
+    path: &str,
+    common_dir: &str,
+    file: &str,
+    offset: usize,
+) -> Result<Value, String> {
+    let value = match exit {
+        Exit::Code {
+            code: 0, stdout, ..
+        } if stdout.len() <= REVIEW_LIMIT => {
+            serde_json::from_slice::<Value>(&stdout).unwrap_or(Value::Null)
+        }
+        _ => Value::Null,
+    };
+    if value["state"] != "ok"
+        || value["path"] != path
+        || value["common_dir"] != common_dir
+        || (!file.is_empty() && value["file"]["path"] != file)
+        || (offset > 0 && value["file"]["offset"].as_u64() != Some(offset as u64))
+    {
+        return Err("Worktree inspection could not be verified. Refresh and try again.".into());
+    }
+    Ok(value)
+}
+
+#[cfg(test)]
+mod inspection_tests {
+    use super::*;
+    #[test]
+    fn bounded_inspection_binds_checkout_repository_and_exact_file_page() {
+        let inv = inspect_invocation(
+            &ComputerId("example-peer".into()),
+            "/srv/example/w",
+            "/srv/example/.git",
+            "src/main.rs",
+            200,
+        );
+        assert_eq!(
+            inv.args,
+            [
+                "@example-peer",
+                "worktrees",
+                "inspect",
+                "--path",
+                "/srv/example/w",
+                "--common-dir",
+                "/srv/example/.git",
+                "--json",
+                "--file",
+                "src/main.rs",
+                "--offset",
+                "200"
+            ]
+        );
+        assert_eq!(inv.timeout.as_secs(), 45);
+        let good = json!({"state":"ok","path":"/srv/example/w","common_dir":"/srv/example/.git","file":{"path":"src/main.rs","offset":200}});
+        let exit = |v: Value| Exit::Code {
+            code: 0,
+            stdout: serde_json::to_vec(&v).unwrap(),
+            stderr: String::new(),
+        };
+        assert!(inspected(
+            exit(good.clone()),
+            "/srv/example/w",
+            "/srv/example/.git",
+            "src/main.rs",
+            200
+        )
+        .is_ok());
+        for field in ["state", "path", "common_dir", "file"] {
+            let mut bad = good.clone();
+            bad[field] = json!("other");
+            assert!(inspected(
+                exit(bad),
+                "/srv/example/w",
+                "/srv/example/.git",
+                "src/main.rs",
+                200
+            )
+            .is_err());
+        }
+        assert!(inspected(
+            exit(good),
+            "/srv/example/w",
+            "/srv/example/.git",
+            "src/main.rs",
+            201
+        )
+        .is_err());
+        for bad in [
+            Exit::TimedOut,
+            Exit::WriteFailed,
+            exit(Value::Null),
+            Exit::Code {
+                code: 0,
+                stdout: vec![b'x'; REVIEW_LIMIT + 1],
+                stderr: String::new(),
+            },
+        ] {
+            assert!(inspected(bad, "/srv/example/w", "/srv/example/.git", "", 0).is_err())
+        }
+    }
+}

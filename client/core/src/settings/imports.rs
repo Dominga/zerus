@@ -13,6 +13,7 @@ const FAMILIES: &[&str] = &[
     "project-view",
     "row-density",
     "task-preferences",
+    "termination-default",
 ];
 
 #[derive(Default, Serialize, Deserialize)]
@@ -250,6 +251,7 @@ fn matches(family: &str, key: &str) -> bool {
         }
         "project-view" => key == "workspace/allSwarmProjects",
         "row-density" => key == crate::row_preferences::KEY,
+        "termination-default" => key == "workspace/removeWorktreeAfterTermination",
         "task-preferences" => key == "tasks/onlySession",
         _ => false,
     }

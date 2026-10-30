@@ -835,3 +835,14 @@ export const draftRestore = (handle: number, source: DraftSource, key: string) =
 /** Availability is a local folder stat; opening does a fresh identity/directory check. */
 export const sessionFolderStatus = (computer: string, directory: string) => desktop<import("./store/sessionFolders").FolderStatus>("session_folder_status", { computer, directory });
 export const sessionFolderOpen = (input: import("./store/sessionFolders").FolderRequest, kind: "folder" | "shell") => desktop<string | null>("session_folder_open", { input, kind });
+
+export const terminationCleanupConfirm = (id: string) => desktop<Outcome>("termination_cleanup_confirm", { id });
+export const terminationCleanupOffer = (target: Target) => desktop<{ id: string; checked: boolean } | null>("termination_cleanup_offer", { target });
+export const terminationCleanupCancel = (id: string) => desktop<void>("termination_cleanup_cancel", { id });
+export const terminationCleanupView = () => desktop<import("./store/terminationCleanup").CleanupView>("termination_cleanup_view", {});
+export const terminationCleanupCheck = (id: string) => desktop<import("./store/terminationCleanup").CleanupView>("termination_cleanup_check", { id });
+export const terminationCleanupRemove = (revision: number, consents: import("./store/terminationCleanup").Consents) => desktop<import("./store/terminationCleanup").CleanupView>("termination_cleanup_remove", { revision, consents });
+export const terminationCleanupKeep = (revision: number) => desktop<import("./store/terminationCleanup").CleanupView>("termination_cleanup_keep", { revision });
+export const terminationCleanupInspect = (id: string, file = "", offset = 0) => desktop<import("./store/terminationCleanup").Inspection>("termination_cleanup_inspect", { id, file, offset });
+export const onTerminationCleanupChanged = (changed: () => void) => inTauri() ? listen("termination-cleanup-changed", changed) : Promise.resolve(() => {});
+export const onTerminationFolderRemoved = (changed: (label: string) => void) => inTauri() ? listen<string>("termination-folder-removed", (e) => changed(e.payload)) : Promise.resolve(() => {});

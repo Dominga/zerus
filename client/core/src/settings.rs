@@ -125,6 +125,12 @@ pub const KEYS: &[Key] = &[
     key("workspace/showCompletedSubagents", Kind::Flag(false)),
     key("workspace/reduceMotion", Kind::Flag(false)),
     key("notifications/optionalQuestions", Kind::Flag(false)),
+    // A remembered Terminate checkbox, never maintenance/removal consent.
+    Key {
+        name: "workspace/removeWorktreeAfterTermination",
+        kind: Kind::Flag(false),
+        seeded: false,
+    },
     // TasksView's local scope switch.
     // A first-G3 family also covers clients whose original seed predates Tasks.
     Key {

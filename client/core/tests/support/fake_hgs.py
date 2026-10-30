@@ -42,9 +42,26 @@ MARKER = "Event stream ABI: watch-v1"
 
 def log(entry):
     entry["at"] = time.time()
-    with open(os.path.join(HERE, "log.ndjson"), "a", encoding="utf-8") as handle:
-        handle.write(json.dumps(entry) + "\n")
-        handle.flush()
+    line = json.dumps(entry) + "\n"
+    # Several fake processes append at once. Windows emulates append mode with a
+    # seek and a write, so concurrent entries can overwrite each other: hold an
+    # exclusive lock on a separate file (Windows byte locks would block readers).
+    with open(os.path.join(HERE, "log.lock"), "a+b") as lock:
+        if os.name == "nt":
+            import msvcrt
+            lock.seek(0)
+            msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            with open(os.path.join(HERE, "log.ndjson"), "a", encoding="utf-8") as handle:
+                handle.write(line)
+                handle.flush()
+        finally:
+            if os.name == "nt":
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 def previous_watches(host):

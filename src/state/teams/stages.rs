@@ -298,7 +298,19 @@ pub(crate) fn waiting(team: &Team) -> Vec<(u32, Vec<String>)> {
         })
         .collect();
     found.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-    found.into_iter().map(|(_, task, candidates)| (task, candidates)).collect()
+    found
+        .into_iter()
+        .map(|(_, task, mut candidates)| {
+            // #581 N1: a stage reserved for the member whose model switch or
+            // context action it waits for goes only to that member.
+            if let Some(run) = team.task(task).and_then(|task| task.pipeline_run.as_ref()).and_then(PipelineRun::open_run) {
+                if !run.member.is_empty() {
+                    candidates.retain(|member| *member == run.member);
+                }
+            }
+            (task, candidates)
+        })
+        .collect()
 }
 
 /// The stages that ended with a checkout or a temporary folder left to remove.

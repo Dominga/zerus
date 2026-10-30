@@ -539,6 +539,8 @@ pub(crate) fn strip_stage_facts(value: &mut Value) {
                 for run in runs {
                     if let Some(run) = run.as_object_mut() {
                         run.remove("awaiting_run");
+                        run.remove("prepare");
+                        run.remove("context");
                     }
                 }
             }

@@ -9,6 +9,8 @@ fn endpoint(sender: &Sender, name: &str) -> Endpoint {
             incarnation: 1,
         },
         resnapshot: Arc::default(),
+        cancel: None,
+        _worker: None,
     }
 }
 
@@ -199,9 +201,13 @@ fn source_cap_refuses_without_starting_a_thread() {
     {
         let mut state = sender.shared.lock();
         for n in 0..SOURCES {
-            state
-                .sources
-                .insert(format!("peer-{n}").as_str().into(), n as u64);
+            state.sources.insert(
+                format!("peer-{n}").as_str().into(),
+                Registered {
+                    incarnation: n as u64,
+                    cancel: None,
+                },
+            );
         }
     }
     assert!(sender
@@ -211,4 +217,60 @@ fn source_cap_refuses_without_starting_a_thread() {
             Timing::default()
         )
         .is_err());
+}
+
+#[test]
+fn pending_workers_keep_admission_after_handle_registrations_end() {
+    let (sender, _receiver) = channel(Command::spawn);
+    let mut workers = Vec::new();
+    for _ in 0..SOURCES {
+        sender.shared.lock().usage.workers += 1;
+        workers.push(Arc::new(Worker(sender.shared.clone())));
+    }
+    assert_eq!(sender.usage().sources, 0);
+    assert!(sender
+        .spawn(
+            Path::new("missing-hgs-source-fixture"),
+            &"extra".into(),
+            Timing::default()
+        )
+        .is_err());
+    workers.pop();
+    let handle = sender
+        .spawn(
+            Path::new("missing-hgs-source-fixture"),
+            &"extra".into(),
+            Timing::default(),
+        )
+        .unwrap();
+    handle.stop();
+    drop(workers);
+    assert_eq!(sender.usage().workers, 0);
+}
+
+#[test]
+fn a_cancelled_endpoint_cannot_admit_a_late_reader() {
+    let (sender, _receiver) = channel(Command::spawn);
+    let handle = sender
+        .spawn(
+            Path::new("missing-hgs-source-fixture"),
+            &"peer".into(),
+            Timing::default(),
+        )
+        .unwrap();
+    let cancel = sender
+        .shared
+        .lock()
+        .sources
+        .get(&"peer".into())
+        .unwrap()
+        .cancel
+        .clone()
+        .unwrap();
+    let mut endpoint = endpoint(&sender, "peer");
+    endpoint.set_cancel(cancel.clone());
+    cancel.cancel();
+    assert!(endpoint.reader().is_none());
+    handle.stop();
+    assert_eq!(sender.usage().workers, 0);
 }

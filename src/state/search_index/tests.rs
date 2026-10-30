@@ -72,6 +72,27 @@ impl Fixture {
             )
             .unwrap()
     }
+    fn prepare_until(
+        &self,
+        store: &mut Store,
+        targets: &[Identity],
+        ready: impl Fn(&Store, &Progress) -> bool,
+    ) -> Progress {
+        for _ in 0..32 {
+            let progress = store
+                .step(
+                    &self.state,
+                    targets,
+                    &self.budget(128),
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+            if ready(store, &progress) {
+                return progress;
+            }
+        }
+        panic!("fixture preparation did not finish within 32 bounded passes");
+    }
 }
 
 #[test]
@@ -228,7 +249,11 @@ fn forgotten_changed_and_replaced_sources_cannot_reappear() {
         let fixture = Fixture::new();
         let mut store = fixture.store();
         fixture.append(&Fixture::event(1, "needle public", "final"));
-        fixture.step(&mut store, 128);
+        fixture.prepare_until(
+            &mut store,
+            std::slice::from_ref(&fixture.identity),
+            |store, _| store.index.status().unwrap().messages == 1,
+        );
         assert_eq!(
             store.index.query("needle", 100, None).unwrap().hits.len(),
             1
@@ -246,7 +271,11 @@ fn forgotten_changed_and_replaced_sources_cannot_reappear() {
                 fs::rename(replacement, &fixture.path).unwrap();
             }
         }
-        let result = fixture.step(&mut store, 128);
+        let result = fixture.prepare_until(
+            &mut store,
+            std::slice::from_ref(&fixture.identity),
+            |_, progress| !progress.errors.is_empty(),
+        );
         assert!(!result.errors.is_empty(), "{mode}");
         assert!(
             store
@@ -346,27 +375,19 @@ fn same_name_live_and_archive_remain_distinct_through_archive_forget() {
         .join("archives")
         .join(format!("{}.json", archived.archive_id));
     fs::write(&archive, record.to_string()).unwrap();
-    store
-        .step(
-            &fixture.state,
-            &[fixture.identity.clone(), archived.clone()],
-            &fixture.budget(128),
-            &AtomicBool::new(false),
-        )
-        .unwrap();
+    fixture.prepare_until(
+        &mut store,
+        &[fixture.identity.clone(), archived.clone()],
+        |store, _| store.index.status().unwrap().messages == 2,
+    );
     assert_eq!(
         store.index.query("needle", 100, None).unwrap().hits.len(),
         2
     );
     fs::remove_file(archive).unwrap();
-    store
-        .step(
-            &fixture.state,
-            &[],
-            &fixture.budget(128),
-            &AtomicBool::new(false),
-        )
-        .unwrap();
+    fixture.prepare_until(&mut store, &[], |store, _| {
+        store.index.status().unwrap().messages == 1
+    });
     let page = store.index.query("needle", 100, None).unwrap();
     assert_eq!(page.hits.len(), 1);
     assert!(page.hits[0].target.archive_id.is_empty());

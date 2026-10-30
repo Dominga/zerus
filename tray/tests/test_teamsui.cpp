@@ -770,6 +770,8 @@ private slots:
     void waitingPageEmptyAndRefused();
     void stageColumnsAndChipsOnTheBoard();
     void inspectorShowsThePipelineAndOverridesAskForAReason();
+    void commandStagesShowTheirCommandExitAndTail();
+    void catalogRoleDeleteNamesThePresetsItStrips();
     void stageOverridesReachHgsWithTheirReason();
     void planEditorPicksATasksPipeline();
 private:
@@ -10303,6 +10305,232 @@ void TestTeamsUi::inspectorShowsThePipelineAndOverridesAskForAReason()
     card.setTask(team, 9, live, true);
     QVERIFY(!card.findChild<QWidget *>("teamTaskPipeline"));
     QVERIFY(!card.findChild<QPushButton *>("teamTaskSkipStage"));
+}
+
+namespace {
+// #538 N8, L5, L6 and QA #539: the mock-up team plus a command stage running
+// on a commit (#20), a command that returned with its exit and tail (#21), a
+// land stage that waits for its folder (#22), a task the lead sent back at the
+// round limit (#23) and a review no member may take (#24); #4's test has run
+// two suites.
+QJsonObject commandTeam()
+{
+    auto team = pipelineTeam();
+    auto tasks = team["tasks"].toArray();
+    for (int i = 0; i < tasks.size(); ++i) {
+        auto task = tasks[i].toObject();
+        if (task["id"].toInt() != 4) continue;
+        auto run = task["pipeline_run"].toObject(); auto runs = run["runs"].toArray(); auto test = runs[2].toObject();
+        test["runs"] = QJsonDocument::fromJson(R"([{"template":"qt-test","args":{"suite":"test_teamsui","functions":["boardShows"]},"exit":0,"at":1800003500,"ms":29000},
+            {"template":"cargo-test","args":{"filter":"state::teams"},"exit":1,"at":1800003800,"ms":125000}])").array();
+        runs[2] = test; run["runs"] = runs; task["pipeline_run"] = run; tasks[i] = task;
+    }
+    const auto ship = R"("stages":[{"kind":"review","role":"reviewer"},{"kind":"command","command":{"command":"ctest --output-on-failure","expect_exit":0,"timeout_minutes":45}},
+        {"kind":"land","command":{"command":"scripts/land.sh --squash","expect_exit":0,"timeout_minutes":30},"exits":{"0":"accepted","1":"held"}}])";
+    const auto extra = QJsonDocument::fromJson(QStringLiteral(R"JSON([
+  {"id":20,"phase":2,"title":"Paged ledger","assignee":"backend","status":"in_test","deps":[{"task":1}],"stage_candidates":[],
+   "attempts":[{"n":1,"id":"a20","member":"backend","state":"reported","report":{"text":"Ledger pages","at":1800003000}}],
+   "pipeline_run":{"id":"ship","name":"Ship: review, command, land","max_rounds":3,"folder":"hold","accept":"lead","round":1,%1,
+    "runs":[{"id":"r20a","stage":0,"kind":"review","round":1,"attempt":1,"member":"reviewer","state":"passed","by":"Reviewer","at":1800003050,"ended_at":1800003600},
+            {"id":"r20b","stage":1,"kind":"command","round":1,"attempt":1,"state":"delivered","by":"Zerus","at":1800003600,"delivered_at":1800003700,
+             "folder":"/work/orbit-team/backend","commit":"abc1234def567"}]}},
+  {"id":21,"phase":2,"title":"Cards cache","assignee":"secretary","status":"pending","deps":[{"task":1}],
+   "attempts":[{"n":1,"id":"a21","member":"secretary","state":"rejected","report":{"text":"Cache added","at":1800002000}}],
+   "pipeline_run":{"id":"ship","name":"Ship: review, command, land","max_rounds":3,"folder":"hold","accept":"lead","round":2,%1,
+    "runs":[{"id":"r21a","stage":0,"kind":"review","round":1,"attempt":1,"member":"reviewer","state":"passed","by":"Reviewer","at":1800002050,"ended_at":1800002200},
+            {"id":"r21b","stage":1,"kind":"command","round":1,"attempt":1,"state":"returned","by":"Zerus","at":1800002200,"delivered_at":1800002210,"ended_at":1800002400,
+             "commit":"abc1234def567","text":"The command stage's command exited 1 (expected 0). Output tail:\nrunning 12 tests\ntest cards::paged ... FAILED",
+             "check":{"exit":1,"tail":"running 12 tests\ntest cards::paged ... FAILED","at":1800002400}}]}},
+  {"id":22,"phase":2,"title":"Release notes","assignee":"secretary","status":"in_test","deps":[{"task":1}],"stage_candidates":[],
+   "attempts":[{"n":1,"id":"a22","member":"secretary","state":"reported","report":{"text":"Notes","at":1800003900}}],
+   "pipeline_run":{"id":"ship","name":"Ship: review, command, land","max_rounds":3,"folder":"hold","accept":"lead","round":1,%1,
+    "runs":[{"id":"r22a","stage":0,"kind":"review","round":1,"attempt":1,"member":"reviewer","state":"passed","by":"Reviewer","at":1800003910,"ended_at":1800003920},
+            {"id":"r22b","stage":1,"kind":"command","round":1,"attempt":1,"state":"passed","by":"Zerus","at":1800003920,"ended_at":1800003940,"commit":"fedcba9876",
+             "text":"The command stage's command exited 0 (expected 0).","check":{"exit":0,"tail":"","at":1800003940}},
+            {"id":"r22c","stage":2,"kind":"land","round":1,"attempt":1,"state":"waiting","at":1800003950}]}},
+  {"id":23,"phase":2,"title":"Fee rounding","assignee":"backend","status":"pending","deps":[{"task":1}],"decided_by":"lead","decision_reason":"Use the paged API",
+   "attempts":[{"n":1,"id":"a23","member":"backend","state":"rejected"},{"n":2,"id":"a23b","member":"backend","state":"rejected"},{"n":3,"id":"a23c","member":"backend","state":"rejected"}],
+   "pipeline_run":{"id":"code","name":"Code: review, test, lead","max_rounds":3,"folder":"hold","accept":"lead","round":4,"stages":[{"kind":"review","role":"reviewer"}],
+    "runs":[{"id":"r23a","stage":0,"kind":"review","round":1,"attempt":1,"member":"reviewer","state":"returned","at":1800001000,"ended_at":1800001100,"findings":["a"]},
+            {"id":"r23b","stage":0,"kind":"review","round":2,"attempt":2,"member":"reviewer","state":"returned","at":1800001200,"ended_at":1800001300,"findings":["b"]},
+            {"id":"r23c","stage":0,"kind":"review","round":3,"attempt":3,"member":"reviewer","state":"returned","at":1800001400,"ended_at":1800001500,"findings":["c"]}]}},
+  {"id":24,"phase":2,"title":"Webhook docs","assignee":"secretary","status":"in_review","deps":[{"task":1}],"stage_candidates":[],
+   "attempts":[{"n":1,"id":"a24","member":"secretary","state":"reported","report":{"text":"Webhook page","at":1800003800}}],
+   "pipeline_run":{"id":"edit","name":"Edit: review, lead","max_rounds":3,"folder":"hold","accept":"lead","round":1,"stages":[{"kind":"review","role":"editor"}],
+    "runs":[{"id":"r24","stage":0,"kind":"review","round":1,"attempt":1,"state":"waiting","at":1800003810}]}}])JSON").arg(QLatin1String(ship)).toUtf8()).array();
+    Q_ASSERT(extra.size() == 5);
+    auto phases = team["phases"].toArray(); auto build = phases[1].toObject(); auto ids = build["tasks"].toArray();
+    auto layers = team["layers"].toObject();
+    for (const auto &value : extra) { const int id = value.toObject()["id"].toInt(); tasks.append(value); ids.append(id); layers[QString::number(id)] = 1; }
+    build["tasks"] = ids; phases[1] = build;
+    team["tasks"] = tasks; team["phases"] = phases; team["layers"] = layers;
+    return team;
+}
+}
+
+// #538 N8: a command or land stage shows the command, its exit and its output
+// tail, never a member, a queue or what a review may do. L5: a task the lead
+// sent back at the round limit shows no "returned without the lead" chip. L6:
+// a stage no member may take warns on its card and makes the team Stuck. QA
+// #539: the phase header counts the folders its tests hold, and a running test
+// lists the suites hgs recorded (no shots line: hgs records none).
+void TestTeamsUi::commandStagesShowTheirCommandExitAndTail()
+{
+    QSettings().setValue("workspace/skin", "whitewh");
+    TeamUi::workedClock() = &stageNow;
+    const auto restore = qScopeGuard([] {
+        QSettings().remove("workspace/skin"); darkPalette();
+        TeamUi::workedClock() = [] { return double(QDateTime::currentSecsSinceEpoch()); };
+    });
+    const QJsonObject value = commandTeam();
+    const Team team = parse(value);
+    QCOMPARE(team.tasks.size(), pipelineTeam()["tasks"].toArray().size() + 5);
+    // L6: Stuck when the only open work is a stage nobody may take; a command
+    // stage or a named candidate keeps it Running, as does an hgs without the list.
+    {
+        auto only = value; QJsonArray kept;
+        for (const auto &task : value["tasks"].toArray()) if (task.toObject()["id"].toInt() == 1 || task.toObject()["id"].toInt() == 24) kept << task;
+        only["tasks"] = kept;
+        QCOMPARE(displayStatus(parse(only), {}), QStringLiteral("stuck"));
+        auto named = kept[1].toObject(); named["stage_candidates"] = QJsonArray{"reviewer"}; kept[1] = named; only["tasks"] = kept;
+        QCOMPARE(displayStatus(parse(only), {}), QStringLiteral("running"));
+        named.remove("stage_candidates"); kept[1] = named; only["tasks"] = kept;
+        QCOMPARE(displayStatus(parse(only), {}), QStringLiteral("running"));
+        kept = QJsonArray{};
+        for (const auto &task : value["tasks"].toArray()) if (task.toObject()["id"].toInt() == 1 || task.toObject()["id"].toInt() == 22) kept << task;
+        only["tasks"] = kept;
+        QCOMPARE(displayStatus(parse(only), {}), QStringLiteral("running"));
+    }
+    setTeam(value);
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    darkPalette(); workspace.setTheme(true);
+    workspace.resize(2000, 1100); workspace.show();
+    controller.refresh(); panel.showTeam("team-1"); workspace.showTeam("team-1");
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceView"));
+    for (auto *b : workspace.findChild<QWidget *>("teamWorkspaceView")->findChildren<QPushButton *>()) if (b->property("segment") == "board") b->click();
+    const auto area = [&] { return workspace.findChild<QScrollArea *>("teamWorkspaceBoard"); };
+    QTRY_VERIFY(area() && boardCard(area(), 20));
+    // In review waits for members (#10, #24); the queued land stage (#22)
+    // waits for its folder, not for a member.
+    QStringList waiting;
+    for (auto *note : area()->findChildren<QLabel *>("teamBoardColumnWaiting")) waiting << note->text();
+    QCOMPARE(waiting, (QStringList{QStringLiteral("· 2 waiting")}));
+    const auto chips = boardChips(area());
+    QCOMPARE(chips.value(20), QStringList{"Command running"});
+    QCOMPARE(chips.value(21), QStringList{QStringLiteral("Command returned r1 · exit 1")});
+    QCOMPARE(chips.value(22), QStringList{"Land queued"});
+    QCOMPARE(chips.value(24), QStringList{QStringLiteral("Review waits · no member")});
+    QVERIFY2(!chips.contains(23), qPrintable(chips.value(23).join(", ")));   // L5: the lead sent it back
+    QCOMPARE(chips.value(2), QStringList{"Review returned r1"});              // a stage's own return still says so
+    QCOMPARE(boardCard(area(), 21)->findChild<QLabel *>("teamBoardActivity")->text(), QStringLiteral("Attempt 2 · exit 1"));
+    QVERIFY(!boardCard(area(), 20)->findChild<QLabel *>("teamStageAgent"));
+    const auto tipOf = [&](int task) { QString tip; for (auto *chip : boardCard(area(), task)->findChildren<QWidget *>("teamStageChip")) tip = chip->toolTip(); return tip; };
+    QVERIFY2(tipOf(20).contains("ctest --output-on-failure") && tipOf(20).contains("abc1234") && tipOf(20).contains("Next: Land")
+             && !tipOf(20).contains("member"), qPrintable(tipOf(20)));
+    QVERIFY2(tipOf(21).contains("test cards::paged ... FAILED"), qPrintable(tipOf(21)));
+    QVERIFY2(tipOf(22).contains("scripts/land.sh --squash") && !tipOf(22).contains("queue"), qPrintable(tipOf(22)));
+    const auto warnEdge = [&](int task) { return boardCard(area(), task)->styleSheet().contains(TeamUi::colorsFor(true).warn.name()); };
+    QVERIFY(warnEdge(24) && !warnEdge(20));
+    // QA #539 1: the phase header says the folder its test holds.
+    QLabel *held = nullptr;
+    QTRY_VERIFY((held = area()->findChild<QLabel *>("teamPhaseHeld")) || (held = workspace.findChild<QLabel *>("teamPhaseHeld")));
+    QCOMPARE(held->text(), QStringLiteral("1 folder held"));
+    QVERIFY2(held->toolTip().contains("Frontend's folder: held by the test of #4"), qPrintable(held->toolTip()));
+    QVERIFY(held->isVisibleTo(&workspace));
+    if (auto *all = workspace.findChild<QPushButton *>("teamWorkspaceExpandAll"); all && all->text() == QStringLiteral("Expand all")) all->click();
+    shot(&workspace, "u47-board-command-dark");
+    workspace.setTheme(false);
+    lightShot(&workspace, "u47-board-command-light");
+    darkPalette();
+    // The inspector: what Zerus runs, what it expects, on which commit.
+    TeamTaskCard card;
+    card.resize(560, 1300); card.show();
+    card.setTask(team, 20, live, true);
+    auto *pipeline = card.findChild<QWidget *>("teamTaskPipeline");
+    QVERIFY(pipeline);
+    QCOMPARE(pipeline->findChild<QLabel *>("teamTaskPipelineCommand")->text(), QStringLiteral("ctest --output-on-failure"));
+    QCOMPARE(pipeline->findChild<QLabel *>("teamTaskPipelineExpect")->text(), QStringLiteral("exit 0 · 45 min limit"));
+    QCOMPARE(pipeline->findChild<QLabel *>("teamTaskPipelineRuns")->text(), QStringLiteral("Zerus itself on commit abc1234, outside any member's sandbox"));
+    QVERIFY(!pipeline->findChild<QLabel *>("teamTaskPipelineMay"));
+    QStringList by;
+    for (auto *label : pipeline->findChildren<QLabel *>("teamRoundCommand")) by << label->text();
+    QCOMPARE(by, (QStringList{QStringLiteral("Zerus · running · abc1234")}));
+    shot(&card, "u47-inspector-command-dark");
+    lightPalette(); card.setTask(team, 20, live, false);
+    lightShot(&card, "u47-inspector-command-light");
+    darkPalette();
+    // The returned command: hgs's summary, the exit and the output tail.
+    card.setTask(team, 21, live, true);
+    pipeline = card.findChild<QWidget *>("teamTaskPipeline");
+    by.clear();
+    for (auto *label : pipeline->findChildren<QLabel *>("teamRoundCommand")) by << label->text();
+    QCOMPARE(by, (QStringList{QStringLiteral("Zerus · exit 1 · abc1234")}));
+    QCOMPARE(pipeline->findChild<QLabel *>("teamRoundTail")->text(), QStringLiteral("running 12 tests\ntest cards::paged ... FAILED"));
+    QStringList texts;
+    for (auto *label : pipeline->findChildren<QLabel *>("teamRoundText")) texts << label->text();
+    QVERIFY2(texts.contains(QStringLiteral("The command stage's command exited 1 (expected 0).")), qPrintable(texts.join(" | ")));
+    // A land stage waiting for its folder: its exit map, no member.
+    card.setTask(team, 22, live, true);
+    pipeline = card.findChild<QWidget *>("teamTaskPipeline");
+    QCOMPARE(pipeline->findChild<QLabel *>("teamTaskPipelineCommand")->text(), QStringLiteral("scripts/land.sh --squash"));
+    QCOMPARE(pipeline->findChild<QLabel *>("teamTaskPipelineExpect")->text(), QStringLiteral("0 accepted · 1 held · 30 min limit"));
+    QCOMPARE(pipeline->findChild<QLabel *>("teamTaskPipelineWhere")->text(), QStringLiteral("Secretary's folder, once it is free"));
+    QCOMPARE(pipeline->findChild<QLabel *>("teamTaskPipelineRuns")->text(), QStringLiteral("Zerus itself, once the folder is free; no member takes it"));
+    by.clear();
+    for (auto *label : pipeline->findChildren<QLabel *>("teamRoundCommand")) by << label->text();
+    QCOMPARE(by, (QStringList{QStringLiteral("Zerus · exit 0 · fedcba9"), QStringLiteral("Zerus · starts once the folder is free")}));
+    // QA #539 2: the running test lists the suites hgs recorded; with none, no line.
+    card.setTask(team, 4, live, true);
+    pipeline = card.findChild<QWidget *>("teamTaskPipeline");
+    QCOMPARE(pipeline->findChild<QLabel *>("teamTaskPipelineRan")->text(), QStringLiteral("qt-test test_teamsui ✓ in 29 s · cargo-test state::teams exit 1 in 2 min"));
+    shot(&card, "u36-inspector-ran-dark");
+    lightPalette(); card.setTask(team, 4, live, false);
+    lightShot(&card, "u36-inspector-ran-light");
+    darkPalette();
+    card.setTask(parse(pipelineTeam()), 4, live, true);
+    QVERIFY(!card.findChild<QLabel *>("teamTaskPipelineRan"));
+    QVERIFY(card.findChild<QLabel *>("teamTaskPipelineMay"));
+}
+
+// #538 N9: deleting a role names the pipeline presets that lose its stages
+// (and one left with none) before it strips them; No keeps everything.
+void TestTeamsUi::catalogRoleDeleteNamesThePresetsItStrips()
+{
+    QSettings().setValue("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([this] { QSettings().remove("workspace/skin"); darkPalette(); writeCatalog(script(), catalog()); });
+    writeCatalog(script(), pipelineCatalog());
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamCatalogEditor editor(&controller);
+    QString asked; bool yes = false;
+    editor.confirm = [&](const QString &, const QString &, const QString &text, const QString &) { asked = text; return yes; };
+    editor.resize(1320, 1000); editor.show();
+    auto *roles = editor.findChild<QListWidget *>("teamCatalogRoles");
+    QTRY_COMPARE(roles->count(), 4);
+    const auto remove = [&](const QString &id) {
+        for (int i = 0; i < roles->count(); ++i) if (roles->item(i)->data(Qt::UserRole).toString() == id) roles->setCurrentRow(i);
+        QTRY_VERIFY(editor.findChild<QToolButton *>("teamRoleDelete") && editor.findChild<QToolButton *>("teamRoleDelete")->isVisible());
+        asked.clear();
+        editor.findChild<QToolButton *>("teamRoleDelete")->click();
+    };
+    remove("reviewer");
+    QCOMPARE(asked, QStringLiteral("Delete the role Reviewer? These templates lose it: Feature delivery, Documentation. "
+                                   "These pipelines lose its stages: Code: review, test, lead; Docs: review, auto (left with no stage). Running teams keep their members."));
+    QCOMPARE(roles->count(), 4);   // No: nothing changes
+    // Tester takes one stage of Code only; Yes strips it from Code.
+    yes = true;
+    remove("tester");
+    QCOMPARE(asked, QStringLiteral("Delete the role Tester? These templates lose it: Feature delivery. "
+                                   "These pipelines lose its stages: Code: review, test, lead. Running teams keep their members."));
+    QTRY_COMPARE(roles->count(), 3);
+    // A role no preset uses names only its templates.
+    yes = false;
+    remove("frontend");
+    QCOMPARE(asked, QStringLiteral("Delete the role Frontend? These templates lose it: Feature delivery. Running teams keep their members."));
 }
 
 // U36: the override reaches hgs from the workspace's inspector with its reason:

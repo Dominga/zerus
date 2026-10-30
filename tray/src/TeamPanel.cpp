@@ -15,7 +15,6 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QGuiApplication>
-#include <QInputDialog>
 #include <QDateTime>
 #include <QHBoxLayout>
 #include <QJsonDocument>
@@ -1014,61 +1013,6 @@ void TeamPanel::reassignMenu(const Team &team, int taskId, const QPoint &global)
         });
     }
     if (menu.isEmpty()) menu.addAction(tr("No other member"))->setEnabled(false);
-    RenderHold hold(this);
-    menu.exec(global);
-}
-
-void TeamPanel::taskMenu(const Team &team, int taskId, const QPoint &global)
-{
-    const auto *task = team.task(taskId);
-    if (!task) return;
-    QMenu menu(this);
-    menu.setObjectName("teamTaskMenu");
-    auto *title = menu.addAction(QStringLiteral("#%1 %2 · %3").arg(task->id).arg(task->title, taskStatus(*task).text));
-    title->setEnabled(false);
-    menu.addSeparator();
-    const auto *assignee = team.member(task->assignee);
-    if (assignee && !assignee->session.isEmpty())
-        menu.addAction(tr("Open %1's session").arg(team.roleOf(assignee->id)), this, [this, host = assignee->host, session = assignee->session] {
-            if (openSession) openSession(host, session);
-        });
-    const bool open = !task->finished() && task->status != "draft";
-    if (task->status == "submitted") {
-        menu.addAction(tr("Accept"), this, [this, taskId] { act("accept", {{"task", taskId}}); });
-        menu.addAction(tr("Reject with comment…"), this, [this, taskId] {
-            bool ok = false;
-            const auto reason = QInputDialog::getMultiLineText(this, tr("Reject with comment"), tr("Why is the report not accepted? The task goes back for another attempt."), {}, &ok);
-            if (ok && !reason.trimmed().isEmpty()) act("reject", {{"task", taskId}, {"reason", reason.trimmed()}});
-        });
-    }
-    if (open) {
-        // A5: park a pending task until it is released; a held one goes back.
-        if (task->held) {
-            menu.addAction(tr("Release"), this, [this, taskId] { act("release", {{"task", taskId}}); });
-        } else if (task->status == "pending") {
-            menu.addAction(tr("Hold…"), this, [this, taskId] {
-                bool ok = false;
-                const auto reason = QInputDialog::getMultiLineText(this, tr("Hold task"), tr("Why does it wait? The task stays with its member and is not handed out until released."), {}, &ok);
-                if (ok) act("hold", {{"task", taskId}, {"reason", reason.trimmed()}});
-            });
-        }
-        menu.addAction(tr("Reassign…"), this, [this, t = team, taskId] { reassignMenu(t, taskId, QCursor::pos()); });
-        menu.addAction(tr("Retry"), this, [this, taskId, n = task->last() ? task->last()->n : 0] {
-            if (n == 0 || confirm("teamRetryConfirm", tr("Retry task?"), tr("Revoke attempt %1 and hand the task out again?").arg(n), tr("Retry")))
-                act("retry", {{"task", taskId}});
-        });
-        menu.addAction(tr("Take over"), this, [this, taskId] {
-            if (confirm("teamTakeOverConfirm", tr("Take over task?"), tr("You do this task yourself; its current attempt is revoked and no member gets it."), tr("Take over")))
-                act("take-over", {{"task", taskId}});
-        });
-        menu.addAction(tr("Cancel task…"), this, [this, taskId] {
-            if (confirm("teamCancelTaskConfirm", tr("Cancel task?"), tr("Cancel this task? Tasks that depend on it hard never become ready."), tr("Cancel task")))
-                act("cancel", {{"task", taskId}});
-        });
-    } else if (task->finished()) {
-        auto *none = menu.addAction(tr("Decided — no actions"));
-        none->setEnabled(false);
-    }
     RenderHold hold(this);
     menu.exec(global);
 }

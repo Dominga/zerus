@@ -113,7 +113,6 @@ private:
     QWidget *tasks(const Teams::Team &team, bool narrow);
     QWidget *feed(const Teams::Team &team);
     QWidget *planning(const Teams::Team &team);
-    void taskMenu(const Teams::Team &team, int task, const QPoint &global);
     void remind(const Teams::Team &team, const Teams::Member &member, int task);
     // Planning (TeamPanelPlan.cpp).
     QWidget *planMembers(const Teams::Team &team, bool narrow);

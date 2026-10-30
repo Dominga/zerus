@@ -1,4 +1,5 @@
 #include "TeamStages.h"
+#include "NewSessionDense.h"
 #include <QGridLayout>
 #include <QRegularExpression>
 #include <QResizeEvent>
@@ -29,7 +30,7 @@ protected:
         QPainter p(this); p.setRenderHint(QPainter::Antialiasing);
         const QRectF r = QRectF(rect()).adjusted(.5, .5, -.5, -.5);
         const bool outlined = m_chip.state == "returned" || m_chip.state == "limit" || m_chip.state == "held" || m_chip.state == "waiting"
-                              || m_chip.state == "skipped";
+                              || m_chip.state == "skipped" || m_chip.state == "stuck";
         p.setPen(QPen(alpha(m_chip.color, outlined ? .85 : .35), 1)); p.setBrush(alpha(m_chip.color, outlined ? .06 : .14));
         p.drawRoundedRect(r, 6, 6);
         glyph(p, QRectF(6, 4.5, 10, 10), m_chip.color, m_chip.kind);
@@ -77,6 +78,12 @@ private:
 };
 
 QString acceptKind(const PipelineRun &run) { return run.accept == "auto" ? QStringLiteral("auto") : run.accept == "sub_lead" ? QStringLiteral("sub_lead") : QStringLiteral("lead"); }
+// U47/U48: Zerus runs a command or land stage itself, with no member.
+bool runsCommand(const StageRun &stage) { return StageSpec{stage.kind}.runsCommand(); }
+const StageSpec *specOf(const PipelineRun &run, const StageRun &stage)
+{
+    return stage.stage >= 0 && stage.stage < run.stages.size() ? &run.stages[stage.stage] : nullptr;
+}
 QString glyphOf(const QString &kind)
 {
     if (kind == "review") return QStringLiteral("stage_review");
@@ -96,8 +103,23 @@ QMap<int, const StageRun *> currentRuns(const PipelineRun &run)
 int findingsCount(const PipelineRun &run)
 {
     int n = 0;
-    for (const auto &stage : run.runs) if (stage.state == "returned") n += int(stage.findings.size());
+    // A command's return has no finding lines: its output tail is the one finding.
+    for (const auto &stage : run.runs) if (stage.state == "returned") n += runsCommand(stage) ? qMax(1, int(stage.findings.size())) : int(stage.findings.size());
     return n;
+}
+
+// QA #539: the build and test templates a stage member ran, as hgs recorded
+// them when each ended: "qt-test test_teamsui ✓ in 29 s · cargo-test exit 1 in 2 min".
+QString ranText(const StageRun &stage)
+{
+    QStringList parts;
+    for (const auto &ran : stage.ran) {
+        QString part = ran.suite.isEmpty() ? ran.templateId : tr("%1 %2").arg(ran.templateId, ran.suite);
+        part += QLatin1Char(' ') + (ran.timedOut ? tr("timed out") : !ran.exited ? tr("did not start") : ran.exit == 0 ? QStringLiteral("✓") : tr("exit %1").arg(ran.exit));
+        if (ran.ms > 0) part += QLatin1Char(' ') + (ran.ms < 60000 ? tr("in %1 s").arg(qMax<qint64>(1, ran.ms / 1000)) : tr("in %1 min").arg(ran.ms / 60000));
+        parts << part;
+    }
+    return parts.join(QStringLiteral(" · "));
 }
 
 // The files a stage's change lists: a commit's count, or each file.
@@ -117,6 +139,29 @@ QString memberAgent(const Team &team, const QString &member)
 {
     const auto *m = team.member(member);
     return m ? m->agent : QString();
+}
+
+// A command stage's verdict in a few words: "exit 1", "timed out".
+QString exitText(const StageRun &stage)
+{
+    if (!stage.check.known) return {};
+    return stage.check.exit < 0 ? tr("did not finish") : tr("exit %1").arg(stage.check.exit);
+}
+
+// The last lines of a command's output, for a tooltip or the inspector.
+QString lastLines(const QString &tail, int lines)
+{
+    const auto all = tail.trimmed().split(QLatin1Char('\n'));
+    return all.mid(qMax(0, int(all.size()) - lines)).join(QLatin1Char('\n'));
+}
+
+// A land stage's exit map as the preset has it: "0 accepted · 1 held".
+QString exitsText(const StageSpec &spec)
+{
+    if (spec.exits.isEmpty()) return tr("0 accepted, any other code held");
+    QStringList parts;
+    for (auto it = spec.exits.cbegin(); it != spec.exits.cend(); ++it) parts << tr("%1 %2").arg(it.key(), it.value());
+    return parts.join(QStringLiteral(" · "));
 }
 }
 
@@ -198,6 +243,31 @@ StageLine stageLine(const Team &team, const Task &task, const Colors &c)
     if (open) {
         const QString kind = open->kind;
         const Member *member = team.member(open->member);
+        // #538 N8: Zerus runs a command or land stage itself; no member, no queue.
+        if (runsCommand(*open)) {
+            const bool running = open->state == "delivered";
+            QStringList tip;
+            tip << (running ? tr("Zerus runs the %1 stage's command").arg(stageName(kind).toLower())
+                            : tr("Reported; Zerus starts the %1 stage's command once the folder is free").arg(stageName(kind).toLower()));
+            if (const auto *spec = specOf(run, *open); spec && !spec->command.isEmpty()) tip << spec->command;
+            if (!open->commit.isEmpty()) tip << tr("On commit %1").arg(open->commit.left(7));
+            const int next = open->stage + 1;
+            if (kind != "land")
+                tip << (next < run.stages.size() ? tr("Next: %1").arg(stageName(run.stages[next].kind))
+                                                 : run.accept == "auto" ? tr("Next: accepted by the pipeline") : tr("Next: %1 accepts").arg(stageName(acceptKind(run))));
+            line.chips << StageChip{glyphOf(kind), running ? tr("%1 running").arg(stageName(kind)) : tr("%1 queued").arg(stageName(kind)), tip.join(QLatin1Char('\n')),
+                                    running ? QStringLiteral("running") : QStringLiteral("waiting"), stageColor(c, kind)};
+            return line;
+        }
+        // #538 L6: nobody in the team may take the stage; it waits for the lead.
+        if (stageWithoutCandidate(task)) {
+            line.chips << StageChip{glyphOf(kind), tr("%1 waits · no member").arg(stageName(kind)),
+                                    tr("No member of the team may take the %1: its role has nobody free who did not implement the task. The lead adds a member, skips the stage or sends the task back.")
+                                        .arg(stageName(kind).toLower()),
+                                    QStringLiteral("stuck"), c.warn};
+            line.warn = true;
+            return line;
+        }
         if (open->state == "waiting") {
             const int place = stageQueuePlace(team, task.id);
             StageChip chip{glyphOf(kind), place > 0 ? tr("%1 waits · %2 in queue").arg(stageName(kind), ordinal(place)) : tr("%1 waits").arg(stageName(kind)),
@@ -243,13 +313,28 @@ StageLine stageLine(const Team &team, const Task &task, const Colors &c)
         return line;
     }
     // Returned to its implementer, without the lead: the round's findings go
-    // with the next attempt.
-    if (!task.finished() && last && last->state == "returned") {
+    // with the next attempt. #538 L5: once the lead or the owner decided after
+    // that return (a send-back at the round limit), the chip would say the
+    // opposite, so the task shows no stage line.
+    const bool decided = task.decidedBy.compare(QLatin1String("lead"), Qt::CaseInsensitive) == 0
+                         || task.decidedBy.compare(QLatin1String("human"), Qt::CaseInsensitive) == 0;
+    if (!task.finished() && last && last->state == "returned" && !decided) {
+        const int attempt = task.status == "pending" ? (task.last() ? task.last()->n + 1 : 1) : (task.last() ? task.last()->n : 1);
+        // #538 N8: a command or land stage returns with its exit and output tail.
+        if (runsCommand(*last)) {
+            const QString exit = exitText(*last);
+            QString tip = tr("The %1 stage's command returned round %2 to %3 without the lead.").arg(stageName(last->kind).toLower()).arg(last->round).arg(team.roleOf(task.assignee));
+            if (!last->check.tail.trimmed().isEmpty()) tip += QLatin1Char('\n') + lastLines(last->check.tail, 6);
+            line.chips << StageChip{QStringLiteral("rejected"), exit.isEmpty() ? tr("%1 returned r%2").arg(stageName(last->kind)).arg(last->round)
+                                                                               : tr("%1 returned r%2 · %3").arg(stageName(last->kind)).arg(last->round).arg(exit),
+                                    tip, QStringLiteral("returned"), c.warn};
+            line.note = exit.isEmpty() ? tr("Attempt %1").arg(attempt) : tr("Attempt %1 · %2").arg(attempt).arg(exit);
+            return line;
+        }
         line.chips << StageChip{QStringLiteral("rejected"), tr("%1 returned r%2").arg(stageName(last->kind)).arg(last->round),
                                 tr("%1 round %2 returned %3 to %4 without the lead.").arg(stageName(last->kind)).arg(last->round)
                                     .arg(last->findings.size() == 1 ? tr("1 finding") : tr("%1 findings").arg(last->findings.size()), team.roleOf(task.assignee)),
                                 QStringLiteral("returned"), c.warn};
-        const int attempt = task.status == "pending" ? (task.last() ? task.last()->n + 1 : 1) : (task.last() ? task.last()->n : 1);
         line.note = last->findings.size() == 1 ? tr("Attempt %1 · 1 finding").arg(attempt) : tr("Attempt %1 · %2 findings").arg(attempt).arg(last->findings.size());
         return line;
     }
@@ -282,10 +367,22 @@ bool usesPipelines(const Team &team)
     });
 }
 
+QString heldFoldersNote(const Team &team, const QList<int> &tasks, QString *tip)
+{
+    QStringList lines;
+    for (const auto &member : team.members)
+        if (const int holder = folderHeldBy(team, member.id); holder && tasks.contains(holder))
+            lines << tr("%1's folder: held by the test of #%2").arg(team.roleOf(member.id)).arg(holder);
+    if (tip) *tip = lines.join(QLatin1Char('\n'));
+    if (lines.isEmpty()) return {};
+    return lines.size() == 1 ? tr("1 folder held") : tr("%1 folders held").arg(lines.size());
+}
+
 QString waitingNote(const Team &, const QList<const Task *> &tasks)
 {
     int waiting = 0;
-    for (const auto *task : tasks) if (const auto *run = task->pipelineRun.openRun(); run && task->inStage() && run->state == "waiting") ++waiting;
+    // A queued command or land stage waits for its folder, not for a member.
+    for (const auto *task : tasks) if (const auto *run = task->pipelineRun.openRun(); run && task->inStage() && run->state == "waiting" && !runsCommand(*run)) ++waiting;
     return waiting ? tr("%1 waiting").arg(waiting) : QString();
 }
 
@@ -340,12 +437,15 @@ QWidget *pipelineSection(const Team &team, const Task &task, const Colors &c, bo
             g->addWidget(label(name, c.muted, 11), r, 0, Qt::AlignTop);
             auto *value = label(text, c.fg, 11, false, object); value->setWordWrap(true); value->setTextInteractionFlags(Qt::TextSelectableByMouse);
             g->addWidget(value, r, 1); ++r;
+            return value;
         };
         const QString implementer = implementerOf(task, *open);
         const Member *owner = team.member(implementer);
+        const bool command = runsCommand(*open);
         QString where;
         if (!open->checkout.isEmpty()) where = tr("%1 · a detached checkout of the attempt's commits").arg(open->checkout);
         else if (!open->folder.isEmpty()) where = tr("%1 · %2's folder").arg(open->folder, team.roleOf(implementer));
+        else if (open->state == "waiting" && command) where = tr("%1's folder, once it is free").arg(team.roleOf(implementer));
         else if (open->state == "waiting") where = run.folder == "checkout" && open->kind == "test" ? tr("a detached checkout, once a member takes it")
                                                                                                    : tr("%1's folder, once a member takes it").arg(team.roleOf(implementer));
         else where = owner && !owner->directory.isEmpty() ? tr("%1 · %2's folder").arg(owner->directory, team.roleOf(implementer)) : tr("%1's folder").arg(team.roleOf(implementer));
@@ -359,8 +459,25 @@ QWidget *pipelineSection(const Team &team, const Task &task, const Colors &c, bo
             fact(tr("Changes"), commits ? (shas.size() == 1 ? tr("%1 · %2").arg(shas.first(), count) : tr("%1..%2 · %3 commits · %4").arg(shas.first(), shas.last()).arg(shas.size()).arg(count))
                                         : tr("%1 the report listed").arg(count), "teamTaskPipelineChanges");
         } else fact(tr("Changes"), tr("the attempt's commits, or the report's files"), "teamTaskPipelineChanges");
-        fact(open->kind == "test" ? tr("Test may") : tr("Review may"),
-             open->kind == "test" ? tr("read; build; write build output and its own temporary folder") : tr("read the change and the task's files"), "teamTaskPipelineMay");
+        if (command) {
+            // #538 N8: what Zerus runs, what it expects, and on which commit.
+            const auto *spec = specOf(run, *open);
+            if (spec && !spec->command.isEmpty()) fact(tr("Command"), spec->command, "teamTaskPipelineCommand")->setFont(NewSessionDense::mono(11));
+            else fact(tr("Command"), tr("the preset's command"), "teamTaskPipelineCommand");
+            if (spec)
+                fact(open->kind == "land" ? tr("Exits") : tr("Expects"),
+                     open->kind == "land" ? tr("%1 · %2 min limit").arg(exitsText(*spec)).arg(spec->timeoutMinutes)
+                                          : tr("exit %1 · %2 min limit").arg(spec->expectExit).arg(spec->timeoutMinutes), "teamTaskPipelineExpect");
+            fact(tr("Runs"), open->state == "delivered" ? (open->commit.isEmpty() ? tr("Zerus itself, outside any member's sandbox")
+                                                                                  : tr("Zerus itself on commit %1, outside any member's sandbox").arg(open->commit.left(7)))
+                                                        : tr("Zerus itself, once the folder is free; no member takes it"), "teamTaskPipelineRuns");
+        } else {
+            fact(open->kind == "test" ? tr("Test may") : tr("Review may"),
+                 open->kind == "test" ? tr("read; build; write build output and its own temporary folder") : tr("read the change and the task's files"), "teamTaskPipelineMay");
+            // QA #539: the suites the stage ran so far, as hgs records each
+            // when it ends; nothing recorded, no line.
+            if (const QString ran = ranText(*open); !ran.isEmpty()) fact(tr("Ran"), ran, "teamTaskPipelineRan");
+        }
         if (open->kind == "test") {
             QString holds = tr("nothing: it works on a detached checkout");
             if (folderHeldBy(team, implementer) == task.id) {
@@ -427,7 +544,18 @@ QWidget *pipelineSection(const Team &team, const Task &task, const Colors &c, bo
             sv->parentWidget()->setProperty("stage", stage.kind);
             sv->parentWidget()->setProperty("round", stage.round);
             auto *by = row(6);
-            if (!stage.member.isEmpty()) {
+            const bool command = runsCommand(stage);
+            if (command) {
+                // #538 N8: Zerus ran it: the exit, the commit and what it meant.
+                QStringList facts{tr("Zerus")};
+                if (const QString exit = exitText(stage); !exit.isEmpty()) facts << exit;
+                else if (stage.state == "waiting") facts << tr("starts once the folder is free");
+                else if (stage.state == "delivered") facts << tr("running");
+                if (!stage.commit.isEmpty()) facts << stage.commit.left(7);
+                if (stage.flaky) facts << tr("flaky: the same output on the same commit; the lead decides");
+                else if (stage.kind == "land" && !stage.outcome.isEmpty()) facts << tr("landing %1").arg(stage.outcome);
+                by->addWidget(label(facts.join(QStringLiteral(" · ")), stage.flaky ? c.warn : c.muted, 11, false, "teamRoundCommand"));
+            } else if (!stage.member.isEmpty()) {
                 const QString role = team.roleOf(stage.member);
                 by->addWidget(new Pill(role, roleColor(role, dark)));
                 if (const auto *m = team.member(stage.member)) {
@@ -438,9 +566,22 @@ QWidget *pipelineSection(const Team &team, const Task &task, const Colors &c, bo
             else if (!stage.by.isEmpty()) by->addWidget(label(tr("by %1").arg(stage.by), c.muted, 11));
             by->addStretch();
             auto *byBox = new QWidget; byBox->setLayout(by); sv->addWidget(indent(byBox));
-            if (!stage.text.isEmpty()) {
+            if (command && stage.check.known) {
+                // The command's own words: hgs's summary, then the output tail.
+                auto *t = label(stage.text.section(QStringLiteral(" Output tail:"), 0, 0).trimmed(), c.text2, 11, false, "teamRoundText");
+                t->setWordWrap(true); sv->addWidget(indent(t));
+                if (!stage.check.tail.trimmed().isEmpty()) {
+                    auto *tail = label(lastLines(stage.check.tail, 12), c.text2, 10, false, "teamRoundTail");
+                    tail->setFont(NewSessionDense::mono(10)); tail->setWordWrap(true); tail->setTextInteractionFlags(Qt::TextSelectableByMouse);
+                    tail->setToolTip(stage.check.tail);
+                    sv->addWidget(indent(tail));
+                }
+            } else if (!stage.text.isEmpty()) {
                 auto *t = label(stage.state == "skipped" || stage.state == "revoked" ? tr("%1: %2").arg(stage.by, stage.text) : stage.text, c.text2, 11, false, "teamRoundText");
                 t->setWordWrap(true); sv->addWidget(indent(t));
+            }
+            if (const QString ran = ranText(stage); !ran.isEmpty()) {
+                auto *t = label(tr("Ran %1").arg(ran), c.muted, 11, false, "teamRoundRan"); t->setWordWrap(true); sv->addWidget(indent(t));
             }
             const bool fixed = stage.state == "returned" && passedAt.value(stage.stage) > stage.endedAt;
             for (const auto &finding : stage.findings) {

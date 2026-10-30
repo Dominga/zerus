@@ -15,7 +15,7 @@ QColor stageColor(const Colors &c, const QString &kind);
 
 // One chip: its glyph kind, text and color; a skipped stage is struck through.
 struct StageChip {
-    QString kind, text, tooltip, state;   // state: running, waiting, returned, passed, skipped, limit, held, accept
+    QString kind, text, tooltip, state;   // state: running, waiting, returned, passed, skipped, limit, held, accept, stuck
     QColor color;
     bool strike = false;
 };
@@ -40,6 +40,9 @@ QWidget *stageLineWidget(const Teams::Team &team, const Teams::Task &task, const
 bool usesPipelines(const Teams::Team &team);
 // "1st", "2nd", "3rd", "4th".
 QString ordinal(int n);
+// QA #539: a phase header's note, "1 folder held", when tests of its tasks
+// hold their implementers' folders; `tip` names each folder and its test.
+QString heldFoldersNote(const Teams::Team &team, const QList<int> &tasks, QString *tip = nullptr);
 // A column header's note: "1 waiting" when stages there wait for a member.
 QString waitingNote(const Teams::Team &team, const QList<const Teams::Task *> &tasks);
 

@@ -1949,6 +1949,12 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
         const auto *summary = team.phaseSummaryOf(group.n);
         health->setToolTip(!tip.isEmpty() ? tip : summary ? summary->healthLine : QString());
         info->add(health, 2);
+        // QA #539: the folders the phase's tests hold, as the mock-up's "1 folder held".
+        QString heldTip;
+        if (const QString held = heldFoldersNote(team, group.tasks, &heldTip); !held.isEmpty()) {
+            auto *note = label(held, c.warn, 11, false, "teamPhaseHeld"); note->setToolTip(heldTip);
+            info->add(note, 1);
+        }
     }
     // F12 and F10: why a draft waits, and the lead's edits since you last saw it.
     if (state == "draft" || state == "rejected") {

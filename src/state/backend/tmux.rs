@@ -672,7 +672,7 @@ impl TerminalBackend for Tmux {
                 if spec.detached { "-d " } else { "" },
                 spec.env
                     .iter()
-                    .map(|v| format!("-e {v}"))
+                    .map(|v| format!("-e {}", super::masked(v)))
                     .collect::<Vec<_>>()
                     .join(" "),
                 spec.name,
@@ -823,5 +823,23 @@ mod tests {
         assert!(Tmux
             .describe(&DryRun::Launch(&spec))
             .starts_with("tmux -u new-session -d  -s claude/p/t -c /tmp/a b -- "));
+    }
+
+    #[test]
+    fn a_dry_run_masks_a_secret_in_the_launch_environment() {
+        let spec = LaunchSpec {
+            name: "claude/p/t".into(),
+            cwd: "/work".into(),
+            env: vec![
+                "ANTHROPIC_AUTH_TOKEN=sk-secret".into(),
+                "ANTHROPIC_BASE_URL=http://192.0.2.10:8080".into(),
+            ],
+            command: vec!["claude".into()],
+            detached: false,
+        };
+        let line = Tmux.describe(&DryRun::Launch(&spec));
+        assert!(line.contains("ANTHROPIC_AUTH_TOKEN=***"), "{line}");
+        assert!(!line.contains("sk-secret"), "the secret never reaches a dry-run: {line}");
+        assert!(line.contains("ANTHROPIC_BASE_URL=http://192.0.2.10:8080"), "{line}");
     }
 }

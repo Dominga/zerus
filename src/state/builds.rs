@@ -133,6 +133,27 @@ fn start(input: &Value, wait: bool) -> Result<Value> {
 /// implementer whose folder it is) shows Building while it runs, and the run
 /// log keeps its outcome. The dispatcher reads it back with `record`.
 pub(crate) fn start_for(id: &str, label: &str, command: &str, cwd: &Path, session: Value, minutes: u32, env: &[(&str, &str)]) -> Result<()> {
+    start_claim(id, label, command, None, cwd, session, minutes, env)
+}
+
+/// U60 (#658 N5): the same detached run, started as an argv. The runner never
+/// builds a shell line for it, so a Windows path or a quoted remote command
+/// reaches the program as one argument (a detached model-server up).
+pub(crate) fn start_argv_for(id: &str, label: &str, argv: &[String], cwd: &Path, session: Value, minutes: u32, env: &[(&str, &str)]) -> Result<()> {
+    if argv.is_empty() || argv[0].is_empty() || argv.iter().any(|arg| arg.len() > COMMAND_BYTES || arg.contains('\0')) {
+        return Err("a run's argv starts with a program and has no NUL".into());
+    }
+    if !cwd.is_absolute() || !cwd.is_dir() {
+        return Err(format!("the run's folder is not an existing absolute folder: {}", cwd.display()));
+    }
+    let display = argv.iter().map(|arg| crate::platform::quote(arg)).collect::<Vec<_>>().join(" ");
+    start_claim(id, label, &display, Some(argv), cwd, session, minutes, env)
+}
+
+/// The claim both starters write; `argv` runs without a shell, `command` with
+/// the platform's shell.
+#[allow(clippy::too_many_arguments)]
+fn start_claim(id: &str, label: &str, command: &str, argv: Option<&[String]>, cwd: &Path, session: Value, minutes: u32, env: &[(&str, &str)]) -> Result<()> {
     if !canonical_uuid(id) {
         return Err("A stage run needs a canonical id".into());
     }
@@ -143,16 +164,16 @@ pub(crate) fn start_for(id: &str, label: &str, command: &str, cwd: &Path, sessio
     if command.is_empty() || command.len() > COMMAND_BYTES || command.contains('\0') {
         return Err(format!("a stage's command is at most {COMMAND_BYTES} bytes"));
     }
-    if !cwd.is_absolute() || !cwd.is_dir() {
-        return Err(format!("the stage's folder is not an existing absolute folder: {}", cwd.display()));
-    }
     let minutes = u64::from(minutes).clamp(1, MAX_MINUTES);
     let label: String = label.chars().filter(|ch| !ch.is_control()).take(LABEL_CHARS).collect();
     private_dir(&dir())?;
     prune();
-    let claim = json!({"request_id":id,"label":label,"command":command,"cwd":cwd.display().to_string(),
+    let mut claim = json!({"request_id":id,"label":label,"command":command,"cwd":cwd.display().to_string(),
         "session":session,"started":now(),"timeout_secs":minutes * 60,"source":"team_stage",
         "env":env.iter().map(|(key, value)| ((*key).to_owned(), json!(value))).collect::<serde_json::Map<String, Value>>()});
+    if let Some(argv) = argv {
+        claim["argv"] = json!(argv);
+    }
     storage::atomic(&running_path(id), &claim.to_string())?;
     if let Err(error) = spawn(id) {
         let _ = fs::remove_file(running_path(id));
@@ -243,7 +264,16 @@ fn worker(id: &str) -> Result<i32> {
     let Some(mut claim) = read(&running_path(id)) else { return Ok(1) };
     claim["pid"] = json!(std::process::id());
     let _ = storage::atomic(&running_path(id), &claim.to_string());
-    let mut command = shell(string(&claim, "command"));
+    let argv: Vec<String> = claim["argv"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
+    let mut command = if argv.is_empty() {
+        shell(string(&claim, "command"))
+    } else {
+        // An argv claim runs without a shell: a Windows path or a quoted remote
+        // command is one argument, not shell text (U60 #658 N5).
+        let mut command = Command::new(&argv[0]);
+        command.args(&argv[1..]);
+        command
+    };
     command.current_dir(string(&claim, "cwd"));
     // U47/U48: a stage's command gets the task, its branch and the checked commit.
     if let Some(env) = claim["env"].as_object() {
@@ -425,6 +455,25 @@ mod tests {
             assert_eq!(read(&result_path(stale)).unwrap()["status"], "refused");
             let kept = fs::read_dir(dir()).unwrap().count();
             assert!(kept <= MAX_RECORDS, "{kept} records kept");
+        });
+    }
+
+    #[test]
+    fn an_argv_claim_runs_without_a_shell() {
+        let root = tempfile::tempdir().unwrap();
+        with_test_state_root(root.path(), || {
+            private_dir(&dir()).unwrap();
+            let id = "44444444-4444-4444-8444-444444444444";
+            #[cfg(windows)]
+            let argv = vec!["cmd.exe".to_owned(), "/C".to_owned(), "exit".to_owned(), "0".to_owned()];
+            #[cfg(not(windows))]
+            let argv = vec!["sh".to_owned(), "-c".to_owned(), "exit 0".to_owned()];
+            INLINE_RUNNER.with(|flag| flag.set(true));
+            start_argv_for(id, "argv up", &argv, root.path(), json!({"name":"","run_id":"","conversation_id":""}), 1, &[]).unwrap();
+            INLINE_RUNNER.with(|flag| flag.set(false));
+            let done = read(&result_path(id)).unwrap();
+            assert_eq!((done["status"].as_str(), done["exit"].as_i64()), (Some("ran"), Some(0)), "{done}");
+            assert_eq!(done["argv"], json!(argv), "the claim keeps the argv for the runner");
         });
     }
 

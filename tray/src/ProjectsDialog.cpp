@@ -26,6 +26,7 @@
 #include <QDir>
 #include <QFormLayout>
 #include <QFileInfo>
+#include "PathProbe.h"
 #include <QHeaderView>
 #include <QInputDialog>
 #include <QJsonDocument>
@@ -270,6 +271,9 @@ ProjectsDialog::ProjectsDialog(HgsClient *client, QWidget *parent, bool embedded
       m_ownedProjects(SettingsJson::object("workspace/organization")),
       m_projects(projects ? projects : &m_ownedProjects)
 {
+    // #744: a folder's state comes from PathProbe's worker; its answer updates
+    // the selected folder's actions.
+    connect(&PathProbe::instance(),&PathProbe::answered,this,[this](const QString &path){if(m_folders&&selectedFolder().path==path)updateFolderActions();});
     setObjectName("projectsPage"); setWindowTitle(tr("Projects")); resize(850, 560);
     if (embedded) setWindowFlags(Qt::Widget);
     auto *root = new QVBoxLayout(this); root->setContentsMargins(0, 0, 0, embedded ? 0 : 12); root->setSpacing(0);
@@ -1035,8 +1039,16 @@ QString ProjectsDialog::folderOpenProblem(const SessionOrganization::Folder &fol
     if(folder.id.isEmpty())return tr("Select a folder to open.");
     if(folder.machine.isEmpty()||m_fleet.local().host.isEmpty())return tr("Waiting for this computer's identity.");
     if(folder.machine!=m_fleet.local().host)return tr("Open this folder from Zerus on %1.").arg(folder.machine);
-    const QFileInfo path(folder.path);
-    if(!path.isAbsolute()||!path.isDir())return tr("This folder is unavailable on this computer.");
+    if(!QFileInfo(folder.path).isAbsolute())return tr("This folder is unavailable on this computer.");
+    return localFolderProblem(folder.path);
+}
+QString ProjectsDialog::localFolderProblem(const QString &path) const
+{
+    // #744: never a stat on this thread; "checking" until the worker answers.
+    const auto info=PathProbe::instance().info(path);
+    if(info.state==PathProbe::Info::Checking)return tr("Checking this folder…");
+    if(info.state==PathProbe::Info::Unresponsive)return tr("This folder does not answer: its disk may be busy.");
+    if(!info.dir)return tr("This folder is unavailable on this computer.");
     return {};
 }
 void ProjectsDialog::updateFolderActions()
@@ -1059,8 +1071,8 @@ QString ProjectsDialog::folderLaunchProblem(const SessionOrganization::Folder &f
     const bool local=folder.machine==m_fleet.local().host;
     const auto *machine=local?&m_fleet.local():m_fleet.peer(folder.machine);
     if(!machine||!machine->ok)return tr("Reconnect %1 to start a session in this folder.").arg(folder.machine);
-    if(!MachinePlatform::absolute(folder.path,folderStyle(folder.machine))||(local&&!QFileInfo(folder.path).isDir()))return tr("This folder is unavailable on this computer.");
-    return {};
+    if(!MachinePlatform::absolute(folder.path,folderStyle(folder.machine)))return tr("This folder is unavailable on this computer.");
+    return local?localFolderProblem(folder.path):QString();
 }
 void ProjectsDialog::newFolderSession(const QString &projectId,const SessionOrganization::Folder &folder)
 {
@@ -1075,7 +1087,12 @@ void ProjectsDialog::openFolder(const SessionOrganization::Folder &folder)
 {
     const auto problem=folderOpenProblem(folder);
     if(!problem.isEmpty()){setStatus(problem,true);return;}
-    if(!QDesktopServices::openUrl(QUrl::fromLocalFile(folder.path)))setStatus(tr("Could not open the folder in the file manager."),true);
+    // #744: a fresh answer from the worker before the file manager opens it.
+    PathProbe::instance().check(folder.path,this,[this,path=folder.path](const PathProbe::Info &info){
+        if(info.state==PathProbe::Info::Unresponsive){setStatus(tr("This folder does not answer: its disk may be busy."),true);return;}
+        if(!info.dir){setStatus(tr("This folder is unavailable on this computer."),true);return;}
+        if(!QDesktopServices::openUrl(QUrl::fromLocalFile(path)))setStatus(tr("Could not open the folder in the file manager."),true);
+    });
 }
 void ProjectsDialog::showFolderMenu(const QPoint &position)
 {
@@ -1093,6 +1110,12 @@ void ProjectsDialog::showFolderMenu(const QPoint &position)
         menu->addSeparator();
         auto *open=menu->addAction(workspaceIcon("folder",color),tr("Open folder"));open->setObjectName("contextOpenProjectFolder");
         const auto problem=folderOpenProblem(folder);open->setEnabled(problem.isEmpty());open->setToolTip(problem.isEmpty()?shown:problem);
+        // #744: the worker's answer reaches the open menu too.
+        connect(&PathProbe::instance(),&PathProbe::answered,menu,[this,folder,launch,open,shown](const QString &path){
+            if(path!=folder.path)return;
+            const auto launchNow=folderLaunchProblem(folder);launch->setEnabled(launchNow.isEmpty());launch->setToolTip(launchNow.isEmpty()?shown:launchNow);
+            const auto openNow=folderOpenProblem(folder);open->setEnabled(openNow.isEmpty());open->setToolTip(openNow.isEmpty()?shown:openNow);
+        });
         connect(open,&QAction::triggered,this,[this,folder]{openFolder(folder);});
         auto *copy=menu->addAction(tr("Copy folder path"));copy->setObjectName("contextCopyProjectFolder");
         connect(copy,&QAction::triggered,this,[shown]{QApplication::clipboard()->setText(shown);});

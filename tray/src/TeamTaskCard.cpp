@@ -7,6 +7,7 @@
 #include <QDesktopServices>
 #include <QFile>
 #include <QFileInfo>
+#include "PathProbe.h"
 #include <QGraphicsOpacityEffect>
 #include <QGridLayout>
 #include <QHBoxLayout>
@@ -26,7 +27,8 @@
 #include <QVBoxLayout>
 
 // D1: evidence may be previewed only inside the team's folder, a member's
-// folder or settings.evidence_folders.
+// folder or settings.evidence_folders. #744: run by PathProbe's worker, never
+// on the GUI thread (canonicalFilePath reads the disk).
 static bool insideRoots(const QString &path, const QStringList &roots)
 {
     const auto target = QFileInfo(path).canonicalFilePath();
@@ -59,7 +61,7 @@ TeamTaskCard::TeamTaskCard(QWidget *parent) : QWidget(parent)
 
 void TeamTaskCard::setTask(const Team &team, int task, const LiveLookup &live, bool dark)
 {
-    if (task != m_task) m_form.clear();
+    if (task != m_task) { m_form.clear(); m_evidence.clear(); }
     m_team = team; m_task = task; m_live = live; m_dark = dark;
     rebuild();
 }
@@ -472,24 +474,28 @@ void TeamTaskCard::rebuild()
                 auto *ev = new QVBoxLayout(card); ev->setContentsMargins(0, 6, 0, 0); ev->setSpacing(3);
                 const QString caption = evidence.caption.isEmpty() ? tr("Evidence %1").arg(index + 1) : evidence.caption;
                 ev->addWidget(label(QStringLiteral("%1 \u00b7 %2").arg(index + 1).arg(caption), c.text3, 11, true));
-                const bool allowed = !evidence.path.isEmpty() && insideRoots(evidence.path, roots);
                 const auto suffix = QFileInfo(evidence.path).suffix().toLower();
-                if (evidence.kind == QLatin1String("image") && allowed && QFileInfo(evidence.path).size() <= 10 * 1024 * 1024
-                    && QStringList{"png", "jpg", "jpeg", "webp"}.contains(suffix)) {
-                    QPixmap pixmap(evidence.path);
+                const bool picture = evidence.kind == QLatin1String("image") && QStringList{"png", "jpg", "jpeg", "webp"}.contains(suffix);
+                const bool page = evidence.kind == QLatin1String("html");
+                // #744: the file (in a member's folder) is checked and read by
+                // PathProbe's worker; the card shows it once it answers.
+                const auto read = (picture || page) && !evidence.path.isEmpty()
+                    ? evidenceRead(evidence.path, roots, picture ? 10 * 1024 * 1024 : 1024 * 1024) : EvidenceRead{true, false, {}};
+                if (!read.done) {
+                    ev->addWidget(label(tr("Checking the evidence file…"), c.muted, 11, false, "teamReportEvidencePending"));
+                } else if (picture && read.allowed) {
+                    QPixmap pixmap;
+                    pixmap.loadFromData(read.bytes);
                     if (!pixmap.isNull()) {
                         auto *image = new QLabel; image->setObjectName("teamReportEvidenceImage");
                         image->setPixmap(pixmap.scaledToWidth(qMin(420, pixmap.width()), Qt::SmoothTransformation));
                         ev->addWidget(image);
                     } else ev->addWidget(label(evidence.path, c.muted, 11, false, "teamReportEvidenceLink"));
-                } else if (evidence.kind == QLatin1String("html") && allowed && QFileInfo(evidence.path).size() <= 1024 * 1024) {
-                    QFile file(evidence.path);
-                    if (file.open(QIODevice::ReadOnly)) {
-                        auto *view = new QTextBrowser; view->setObjectName("teamReportEvidenceHtml");
-                        view->setOpenLinks(false); view->setOpenExternalLinks(false);
-                        view->setMaximumHeight(220); view->setHtml(QString::fromUtf8(file.read(1024 * 1024)));
-                        ev->addWidget(view);
-                    }
+                } else if (page && read.allowed) {
+                    auto *view = new QTextBrowser; view->setObjectName("teamReportEvidenceHtml");
+                    view->setOpenLinks(false); view->setOpenExternalLinks(false);
+                    view->setMaximumHeight(220); view->setHtml(QString::fromUtf8(read.bytes));
+                    ev->addWidget(view);
                 } else if (evidence.kind == QLatin1String("command") || evidence.kind == QLatin1String("log")) {
                     auto *command = label(QStringLiteral("$ %1").arg(evidence.command), c.text2, 11, true);
                     command->setWordWrap(true); ev->addWidget(command);
@@ -759,4 +765,25 @@ void TeamTaskCard::rebuild()
          [this] { m_form = "done"; rebuild(); });
     more->setMenu(menu);
     footer->addWidget(more);
+}
+
+TeamTaskCard::EvidenceRead TeamTaskCard::evidenceRead(const QString &path, const QStringList &roots, qint64 limit)
+{
+    const QString key = path + QLatin1Char('\n') + roots.join(QLatin1Char('\n')) + QLatin1Char('\n') + QString::number(limit);
+    if (const auto it = m_evidence.constFind(key); it != m_evidence.constEnd()) return *it;
+    m_evidence.insert(key, {});
+    PathProbe::instance().run(this, [path, roots, limit] {
+        QVariantMap out;
+        // Inside the roots, small enough and readable: its bytes; else none.
+        if (insideRoots(path, roots) && QFileInfo(path).size() <= limit) {
+            QFile file(path);
+            if (file.open(QIODevice::ReadOnly)) out.insert(QStringLiteral("bytes"), file.read(limit));
+        }
+        return QVariant(out);
+    }, [this, key](bool ok, const QVariant &value) {
+        const auto out = value.toMap();
+        m_evidence.insert(key, {true, ok && out.contains(QStringLiteral("bytes")), out.value(QStringLiteral("bytes")).toByteArray()});
+        rebuild();
+    });
+    return {};
 }

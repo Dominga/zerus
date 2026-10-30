@@ -464,6 +464,13 @@ private:
     void openFolderShell();
     void openSessionFolder();
     void openLocalFolder(const QString &directory);
+    // #744: a session folder's Open folder state, read from PathProbe (never a
+    // stat on this thread): enabled, checking, and its tooltip.
+    struct FolderState { bool open = false; bool checking = false; QString hint; };
+    FolderState folderState(bool local, const QString &directory) const;
+    void showFolderState(QPushButton *button, QAction *action, bool local, const QString &directory);
+    QString m_folderButtonPath, m_menuFolderPath;
+    QPointer<QAction> m_menuFolderAction;
     const Entry *selected() const;
     bool awaitingRestoredInspection(const Entry &entry) const;
     bool isTerminating(const Entry &entry) const;

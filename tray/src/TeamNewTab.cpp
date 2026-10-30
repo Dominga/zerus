@@ -1,4 +1,5 @@
 #include "TeamNewTab.h"
+#include "PathProbe.h"
 #include "HgsClient.h"
 #include "TeamController.h"
 #include "TeamConversation.h"
@@ -183,6 +184,12 @@ QWidget *TeamNewTab::buildSettings()
     m_gitNote->setObjectName("teamNewGitNote"); m_gitNote->setWordWrap(true);
     v->addWidget(m_gitNote);
     // N10: typing a path keeps auto; a finished non-Git path forces shared.
+    // #744: the folder's state comes from PathProbe's worker; its answer runs
+    // validate() again.
+    connect(&PathProbe::instance(), &PathProbe::answered, this, [this](const QString &path) {
+        const QString folder = m_folder ? m_folder->text().trimmed() : QString();
+        if (!folder.isEmpty() && (path == folder || path == PathProbe::gitOf(folder))) validate();
+    });
     connect(m_folder, &QLineEdit::editingFinished, this, [this] { m_folderCommitted = true; validate(); });
     connect(m_folder, &QLineEdit::textChanged, this, [this] {
         m_folderCommitted = false;
@@ -602,7 +609,7 @@ void TeamNewTab::renderMembers()
     }
     const Colors c = colorsFor(m_dark);
     while (auto *item = m_membersLayout->takeAt(0)) { if (auto *w = item->widget()) retire(w); delete item; }
-    const bool git = QDir(m_folder->text().trimmed()).exists(QStringLiteral(".git"));
+    const bool git = PathProbe::instance().folder(m_folder->text().trimmed()).git;   // #744
     if (m_members.isEmpty()) {
         auto *empty = new QLabel(m_draft.isEmpty() ? tr("No members yet. Pick a template, add members by role, or let the lead draft them.")
                                                    : tr("No members yet. The lead drafts them with you, or add them by role."));
@@ -810,35 +817,40 @@ void TeamNewTab::validate()
     if (!m_folderPolicy || !m_name || !m_create || !m_start || !m_goal) return;
     const Colors c = colorsFor(m_dark);
     const QString folder = m_folder->text().trimmed();
-    const bool git = !folder.isEmpty() && QDir(folder).exists(QStringLiteral(".git"));
-    m_worktrees->setEnabled(git);
-    if (!git && m_worktrees->isChecked()) { const QSignalBlocker block(m_worktrees); m_worktrees->setChecked(false); }
-    // N10: a Git path with auto or worktree policy brings the worktree rows back.
-    else if (git && !m_worktrees->isChecked() && m_folderPolicy->currentData().toString() != QStringLiteral("shared"))
-        m_worktrees->setChecked(true);
-    // B6/N10: typing a path keeps auto; a finished non-Git path forces shared.
-    // QA #347: the draft's folder is fixed, so from Start planning on the policy
-    // is what the owner and the lead chose - and a non-Git folder has one folder
-    // for every member: it shows Shared, disabled, with the reason beside the
-    // warning, instead of an Auto this folder can never honour.
-    const bool inDraft = !m_draft.isEmpty();
-    const bool sharedOnly = !folder.isEmpty() && !git;
-    if (sharedOnly && (inDraft || m_folderCommitted)) {
-        if (m_folderPolicy->currentData().toString() != "shared") {
-            // No signals: currentIndexChanged would call validate() again inside this one.
-            const QSignalBlocker block(m_folderPolicy);
-            m_folderPolicy->setCurrentIndex(m_folderPolicy->findData(QStringLiteral("shared")));
-            m_worktrees->setChecked(false);
-            m_forcedShared = true;
-            if (!inDraft) touch("settings");
+    // #744: never a stat on this thread. Until the worker answers, what depends
+    // on Git stays as it is and Start planning waits.
+    const auto probed = PathProbe::instance().folder(folder);
+    const bool git = probed.git;
+    if (!probed.checking && !probed.unresponsive) {
+        m_worktrees->setEnabled(git);
+        if (!git && m_worktrees->isChecked()) { const QSignalBlocker block(m_worktrees); m_worktrees->setChecked(false); }
+        // N10: a Git path with auto or worktree policy brings the worktree rows back.
+        else if (git && !m_worktrees->isChecked() && m_folderPolicy->currentData().toString() != QStringLiteral("shared"))
+            m_worktrees->setChecked(true);
+        // B6/N10: typing a path keeps auto; a finished non-Git path forces shared.
+        // QA #347: the draft's folder is fixed, so from Start planning on the policy
+        // is what the owner and the lead chose - and a non-Git folder has one folder
+        // for every member: it shows Shared, disabled, with the reason beside the
+        // warning, instead of an Auto this folder can never honour.
+        const bool inDraft = !m_draft.isEmpty();
+        const bool sharedOnly = !folder.isEmpty() && !git;
+        if (sharedOnly && (inDraft || m_folderCommitted)) {
+            if (m_folderPolicy->currentData().toString() != "shared") {
+                // No signals: currentIndexChanged would call validate() again inside this one.
+                const QSignalBlocker block(m_folderPolicy);
+                m_folderPolicy->setCurrentIndex(m_folderPolicy->findData(QStringLiteral("shared")));
+                m_worktrees->setChecked(false);
+                m_forcedShared = true;
+                if (!inDraft) touch("settings");
+            }
+            m_folderPolicy->setEnabled(false);
+            m_folderPolicy->setToolTip(tr("Folder is not a Git repository: every member works in this folder, so the policy is shared."));
+        } else {
+            m_folderPolicy->setEnabled(true);
+            m_folderPolicy->setToolTip(tr("Auto lets the lead choose the folder each member works in"));
         }
-        m_folderPolicy->setEnabled(false);
-        m_folderPolicy->setToolTip(tr("Folder is not a Git repository: every member works in this folder, so the policy is shared."));
-    } else {
-        m_folderPolicy->setEnabled(true);
-        m_folderPolicy->setToolTip(tr("Auto lets the lead choose the folder each member works in"));
+        m_gitNote->setVisible(!folder.isEmpty() && !git);
     }
-    m_gitNote->setVisible(!folder.isEmpty() && !git);
     const QString name = m_name->text().trimmed();
     QString slug = name.toLower(); slug.replace(QRegularExpression(QStringLiteral("[^a-z0-9]+")), QStringLiteral("-")); slug.remove(QRegularExpression(QStringLiteral("^-+|-+$")));
     m_branch->setText(git ? tr("· branch team/%1/<role>").arg(slug.isEmpty() ? QStringLiteral("…") : slug) : QString());
@@ -848,10 +860,12 @@ void TeamNewTab::validate()
     m_membersCount->setToolTip(tr("The lead counts as one member"));
     m_addMember->setEnabled(m_members.size() + 1 < m_max->value() && !m_creating);
     const bool drafting = !m_draft.isEmpty();
-    const bool folderOk = !folder.isEmpty() && QDir(folder).exists();
+    const bool folderOk = !folder.isEmpty() && probed.dir;
     // Start planning: a folder and a lead.
     QString startReason;
-    if (!folderOk) startReason = tr("Choose an existing folder");
+    if (!folder.isEmpty() && probed.checking) startReason = tr("Checking the folder…");
+    else if (!folder.isEmpty() && probed.unresponsive) startReason = tr("The folder does not answer: its disk may be busy");
+    else if (!folderOk) startReason = tr("Choose an existing folder");
     else if (m_leadThis->isChecked() && m_coordinator.name.isEmpty()) startReason = tr("Choose who leads");
     m_start->setEnabled(!drafting && !m_starting && startReason.isEmpty());
     m_start->setToolTip(startReason);

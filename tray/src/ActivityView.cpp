@@ -1,4 +1,6 @@
 #include "ActivityView.h"
+#include "PathProbe.h"
+#include <QBuffer>
 #include "MediaViewer.h"
 #include "IronRules.h"
 #include "ActivityWidth.h"
@@ -2342,12 +2344,20 @@ void ActivityView::setMediaPreview(const QString &key, const QString &path, cons
         return;
     }
     const QSize bound(ActivityMedia::Width * 2, ActivityMedia::Height * 2);
+    // #744: the file (in a session's folder) is read by PathProbe's worker,
+    // bounded in time, never on this thread.
     if (kind == MediaFiles::Kind::Animation) {
-        delete m_movies.take(key);
-        auto *movie = new QMovie(path, {}, this);
-        m_movies.insert(key, movie);
-        connect(movie, &QMovie::frameChanged, this, [install, movie, name] { install(ActivityMedia::tile(movie->currentImage(), name, false, {})); });
-        if (isVisible()) movie->start(); else movie->jumpToFrame(0);
+        PathProbe::instance().read(path, MediaFiles::PreviewLimit, this, [this, key, name, install](bool ok, const QByteArray &bytes) {
+            if (!ok) { install(ActivityMedia::tile({}, name, false, tr("This picture cannot be shown"))); return; }
+            delete m_movies.take(key);
+            auto *buffer = new QBuffer;
+            buffer->setData(bytes);
+            auto *movie = new QMovie(buffer, {}, this);
+            buffer->setParent(movie);
+            m_movies.insert(key, movie);
+            connect(movie, &QMovie::frameChanged, this, [install, movie, name] { install(ActivityMedia::tile(movie->currentImage(), name, false, {})); });
+            if (isVisible()) movie->start(); else movie->jumpToFrame(0);
+        });
         return;
     }
     if (kind == MediaFiles::Kind::Video) {
@@ -2355,8 +2365,11 @@ void ActivityView::setMediaPreview(const QString &key, const QString &path, cons
         MediaFiles::poster(path, this, [install, name](const QImage &frame) { install(ActivityMedia::tile(frame, name, true, {})); });
         return;
     }
-    const auto image = MediaFiles::picture(path, bound);
-    install(ActivityMedia::tile(image, name, false, image.isNull() ? tr("This picture cannot be shown") : QString()));
+    PathProbe::instance().run(this, [path, bound] { return QVariant::fromValue(MediaFiles::picture(path, bound)); },
+                              [install, name](bool ok, const QVariant &value) {
+        const auto image = ok ? value.value<QImage>() : QImage();
+        install(ActivityMedia::tile(image, name, false, image.isNull() ? tr("This picture cannot be shown") : QString()));
+    });
 }
 
 void ActivityView::setAttachmentPreview(const QString &key, const QImage &image)

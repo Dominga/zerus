@@ -147,6 +147,8 @@
 #include "QuestionNotificationSettings.h"
 #include "Shortcuts.h"
 #include "support/DialogTheme.h"
+#include "PathProbe.h"
+#include <QThread>
 #include "ModelServerSettings.h"
 
 // U25 part 6: the inspector is a column of cards; a card by its key and
@@ -272,6 +274,7 @@ private slots:
     void settingsPhonesPanelFollowsTheTheme();
     void dialogsDrawTheThemeNotTheSystem_data();
     void dialogsDrawTheThemeNotTheSystem();
+    void sessionAndProjectFoldersAreReadOffTheGuiThread();
     void machinesPageMatchesThePrototype_data();
     void machinesPageMatchesThePrototype();
     void nativeSettingsNavigationOnExplicitSpeechHost();
@@ -2927,6 +2930,90 @@ void TestSessionsWindow::dialogsDrawTheThemeNotTheSystem()
     found = DialogTheme::problem(servers, dark);
     QVERIFY2(found.isEmpty(), qPrintable(found));
     save(&window, QStringLiteral("model-server-settings"));
+}
+
+// #744 (the owner's tray aborted, 2026-10-31 02:06: 39 s in QFileInfo::isDir for
+// the selected session's folder while its disk deleted large folders). The
+// inspector, the session menu and the project list never stat a folder on the
+// GUI thread: with a stat that blocks for 1.5 s the window keeps answering,
+// Open folder says checking, then follows the worker's answer; opening the
+// folder checks it off the thread too.
+void TestSessionsWindow::sessionAndProjectFoldersAreReadOffTheGuiThread()
+{
+    QTemporaryDir temporary; QVERIFY(temporary.isValid());
+    const QString slow = QDir::cleanPath(temporary.path()) + "/slow";
+    const QString sessionFolder = slow + " session", projectFolder = slow + " project";
+    QVERIFY(QDir().mkpath(sessionFolder)); QVERIFY(QDir().mkpath(projectFolder));
+    auto stats = std::make_shared<std::atomic<int>>(0);
+    PathProbe::instance().clear();
+    PathProbe::setStat([slow, stats](const QString &path) {
+        if (path.startsWith(slow)) { ++*stats; QThread::msleep(1500); }
+        return PathProbe::statOf(path);
+    });
+    const auto restore = qScopeGuard([] { PathProbe::setStat({}); PathProbe::instance().clear(); });
+    auto state = fleet(); auto own = state.local(); own.metrics.remove("platform");
+    own.sessions[0].cwd = sessionFolder;
+    state.setLocal(own, QDateTime::currentMSecsSinceEpoch());
+    const auto style = MachinePlatform::of(own.metrics, true);
+    SessionOrganization projects; const auto project = projects.createGroup("Slow");
+    projects.addFolder(project, "arch", projectFolder, "Slow", style); projects.markImported("arch");
+    setJsonSetting("workspace/organization", QJsonDocument(projects.toJson()).toJson(QJsonDocument::Compact));
+    SessionsWindow window(program()); window.setFleet(state); window.resize(1260, 820); window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    // The event loop's longest pause from here on.
+    QElapsedTimer beat; beat.start(); qint64 worst = 0;
+    QTimer heart; heart.setInterval(5);
+    connect(&heart, &QTimer::timeout, &window, [&] { worst = qMax(worst, beat.restart()); });
+    const auto timed = [](const std::function<void()> &step) { QElapsedTimer t; t.start(); step(); return t.elapsed(); };
+    heart.start();
+    // The inspector: the folder button says checking.
+    const qint64 inspector = timed([&] { window.showSession({}, "codex/hgs/dashboard"); });
+    auto *button = window.findChild<QPushButton *>("openSessionFolderAction"); QVERIFY(button);
+    QTRY_COMPARE(button->toolTip(), QStringLiteral("Checking the session folder…"));
+    QVERIFY(!button->isEnabled());
+    // The session menu: Open folder (checking…).
+    auto *list = window.findChild<QListWidget *>("sessionList"); QVERIFY(list);
+    int row = -1; for (int i = 0; i < list->count(); ++i) if (list->item(i)->data(SessionRoles::Key).toString() == "\ncodex/hgs/dashboard") row = i;
+    QVERIFY(row >= 0);
+    auto *menu = window.findChild<QMenu *>("sessionContextMenu"); QVERIFY(menu);
+    const qint64 menuShown = timed([&] {
+        const auto point = list->visualItemRect(list->item(row)).center();
+        QContextMenuEvent event(QContextMenuEvent::Mouse, point, list->viewport()->mapToGlobal(point));
+        QApplication::sendEvent(list->viewport(), &event);
+    });
+    QPointer<QAction> open = menu->findChild<QAction *>("contextOpenFolder"); QVERIFY(open);
+    QCOMPARE(open->text(), QStringLiteral("Open folder (checking…)"));
+    QVERIFY(!open->isEnabled());
+    // The worker answers: both follow, the menu still open.
+    QTRY_VERIFY_WITH_TIMEOUT(button->isEnabled(), 5000);
+    QVERIFY2(button->toolTip().contains(QDir::toNativeSeparators(sessionFolder)) || button->toolTip().contains(sessionFolder), qPrintable(button->toolTip()));
+    QTRY_VERIFY(open && open->isEnabled());
+    QCOMPARE(open->text(), QStringLiteral("Open folder"));
+    // Open folder: a fresh check by the worker, then the file manager.
+    QTest::qWait(1100);
+    FolderUrlRecorder files;
+    const qint64 opened = timed([&] { open->trigger(); });
+    QCOMPARE(files.urls.size(), 0);
+    QTRY_COMPARE_WITH_TIMEOUT(files.urls.size(), 1, 5000);
+    QCOMPARE(QDir::cleanPath(files.urls[0].toLocalFile()), sessionFolder);
+    menu->hide();
+    // The project list: its folder says checking, then opens.
+    window.showProjects();
+    auto *page = window.findChild<ProjectsDialog *>(); QVERIFY(page);
+    page->selectProject(project);
+    auto *table = page->findChild<QTableWidget *>("projectFolders"); QVERIFY(table);
+    auto *openProject = page->findChild<QPushButton *>("openProjectFolder"); QVERIFY(openProject);
+    const qint64 projectList = timed([&] { table->setCurrentCell(0, 0); });
+    QCOMPARE(openProject->toolTip(), QStringLiteral("Checking this folder…"));
+    QVERIFY(!openProject->isEnabled());
+    QTRY_VERIFY_WITH_TIMEOUT(openProject->isEnabled(), 5000);
+    heart.stop();
+    worst = qMax(worst, beat.elapsed());
+    qInfo() << "inspector" << inspector << "menu" << menuShown << "open" << opened << "project list" << projectList << "longest pause" << worst;
+    // Every stat ran on the worker; none held the window.
+    QVERIFY(stats->load() >= 3);
+    for (const qint64 step : {inspector, menuShown, opened, projectList}) QVERIFY2(step < 100, qPrintable(QString::number(step)));
+    QVERIFY2(worst < 100, qPrintable(QString::number(worst)));
 }
 
 void TestSessionsWindow::colorPickerUsesWorkspaceThemeAndCancelsOutside()
@@ -10390,7 +10477,8 @@ void TestSessionsWindow::fileReferenceOpeningOutlivesDialog()
         QVERIFY(opened.urls.isEmpty());
         auto *button = dialog->findChild<QPushButton *>(folder ? "openSessionFileFolder" : "openSessionFile");
         QVERIFY(button); button->click();
-        QVERIFY(!dialog->isVisible());
+        // #744: the path is checked by PathProbe's worker first.
+        QTRY_VERIFY(!dialog->isVisible());
         // The desktop request must not belong to the disappearing modal window.
         QVERIFY(opened.urls.isEmpty());
     });
@@ -15152,7 +15240,7 @@ void TestSessionsWindow::projectFolderNewSessionPrefillsExactTarget()
     auto *table=page->findChild<QTableWidget *>("projectFolders");auto *create=page->findChild<QPushButton *>("newProjectFolderSession");
     const auto rowFor=[&](const QString &id){for(int row=0;row<table->rowCount();++row)if(table->item(row,0)->data(Qt::UserRole).toString()==id)return row;return -1;};
     QVERIFY(rowFor(localId)>=0);QVERIFY(rowFor(remoteId)>=0);
-    QVERIFY(!create->isEnabled());table->setCurrentCell(rowFor(localId),0);QVERIFY(create->isEnabled());
+    QVERIFY(!create->isEnabled());table->setCurrentCell(rowFor(localId),0);QTRY_VERIFY(create->isEnabled()); // #744: the worker's answer
     // U25 part 7 (spec 7), #646: Color… lives in the project header; the
     // default checkbox stays right under the project's name.
     auto *metadata=page->findChild<QLabel *>("projectHeaderName");auto *defaultProject=page->findChild<QCheckBox *>("defaultProject");
@@ -15223,8 +15311,9 @@ void TestSessionsWindow::projectFolderActionsKeepTargets()
     auto *page=window.findChild<ProjectsDialog *>();page->selectProject(first);
     auto *table=page->findChild<QTableWidget *>("projectFolders");
     auto *open=page->findChild<QPushButton *>("openProjectFolder");QVERIFY(open);QVERIFY(!open->isEnabled());
-    FolderUrlRecorder files;table->setCurrentCell(0,0);QVERIFY(open->isEnabled());open->click();
-    QCOMPARE(files.urls.size(),1);QCOMPARE(files.urls[0].toLocalFile(),path);
+    // #744: the folder's state and the open both wait for PathProbe's worker.
+    FolderUrlRecorder files;table->setCurrentCell(0,0);QTRY_VERIFY(open->isEnabled());open->click();
+    QTRY_COMPARE(files.urls.size(),1);QCOMPARE(files.urls[0].toLocalFile(),path);
     const auto preview=qEnvironmentVariable("HGS_BULK_PREVIEW");
     if(!preview.isEmpty()){QDir().mkpath(preview);QTest::qWait(30);QVERIFY(page->grab().save(preview+"/project-folders.png"));}
     table->setCurrentCell(2,0);QCOMPARE(table->item(2,0)->text(),QString("Remote"));QVERIFY(!open->isEnabled());QVERIFY(open->toolTip().contains("mac"));
@@ -15241,7 +15330,7 @@ void TestSessionsWindow::projectFolderActionsKeepTargets()
     table->setCurrentCell(1,0);QCOMPARE(table->item(1,0)->text(),QString("Missing"));QVERIFY(!open->isEnabled());
     table->customContextMenuRequested(table->visualItemRect(table->item(0,0)).center());
     menu=page->findChild<QMenu *>("projectFolderMenu");QVERIFY(menu);
-    menu->findChild<QAction *>("contextOpenProjectFolder")->trigger();QCOMPARE(files.urls.size(),2);
+    menu->findChild<QAction *>("contextOpenProjectFolder")->trigger();QTRY_COMPARE(files.urls.size(),2);
     page->selectProject(second);
     // N25: Remove folder asks first; the question names the menu's project.
     // The question closes the menu, which deletes itself: its New session…

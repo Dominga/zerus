@@ -523,13 +523,36 @@ class TrayUpdate(unittest.TestCase):
         self.assertEqual(calls[0]['request_id'], calls[1]['request_id'])
         self.assertEqual([variant for variant, _ in self.running()], ['second'])
 
-    def test_unsupported_revocation_is_never_called(self):
+    def test_legacy_cli_without_desktop_state_keeps_qt_update_and_rollback(self):
         self.env['REVOCATION_MODE'] = 'unsupported'
+        self.env.pop('HGS_STATE_DIR', None)
+        self.env.pop('XDG_STATE_HOME', None)
+        self.build('first', self.installed)
+        result = self.update(self.build('second'))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("'second'", self.installed.read_text())
+        self.assertIn('no desktop state; keeping the plain Qt path', result.stdout)
+
+        result = self.rollback()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("'first'", self.installed.read_text())
+        self.assertFalse(any(call['args'][:2] in (['desktop', 'status'], ['desktop', 'revoke'],
+                                                  ['desktop', 'request']) for call in self.revocation_calls()))
+        self.assertFalse((self.home / '.local/state/hgs/sessions').exists())
+
+    def test_legacy_cli_with_desktop_state_keeps_qt_stopped(self):
+        self.env['REVOCATION_MODE'] = 'unsupported'
+        self.env.pop('HGS_STATE_DIR', None)
+        self.env.pop('XDG_STATE_HOME', None)
+        desktop = self.home / '.local/state/hgs/sessions/desktop'
+        desktop.mkdir(parents=True)
         self.build('first', self.installed)
         result = self.update(self.build('second'))
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn('lacks Desktop revoke ABI', result.stderr)
+        self.assertIn('cannot check desktop revocation', result.stderr)
+        self.assertIn(str(desktop), result.stderr)
         self.assertIn("'first'", self.installed.read_text())
+        self.assertEqual(self.running(), [])
         self.assertFalse(any(call['args'][:2] == ['desktop', 'revoke'] for call in self.revocation_calls()))
 
     def test_failed_revocation_keeps_qt_stopped(self):

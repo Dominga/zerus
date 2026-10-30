@@ -46,10 +46,12 @@ build, before it changes anything; without `--live` (HGS_TRAY_RESTART=0, which
 replaces the GUI on disk only) it also refuses a switch between Qt and the
 client.
 
-Before Qt starts, the selected hgs must provide desktop-revoke-v1 and either
-settle that revocation or explicitly report no handoff. A failed, pending,
-mismatched or timed-out receipt keeps Qt stopped. Recovery reads only the same
-request ID; it never invents a new UUID or stops another service.
+Before Qt starts, a selected hgs with desktop-revoke-v1 must either settle
+that revocation or explicitly report no handoff. An older hgs keeps the plain
+path only when no desktop state entry exists; any such entry keeps Qt stopped.
+A failed, pending, mismatched or timed-out receipt keeps Qt stopped. Recovery
+reads only the same request ID; it never invents a new UUID or stops another
+service.
 
 Native agents, tmux servers and other services are never signalled. When a check
 fails, the private draft snapshot is kept and its location printed.
@@ -946,15 +948,38 @@ def revocation_receipt(result, request_id, configuration):
     return settled or absent
 
 
+def legacy_desktop_state_absent():
+    """An old CLI is compatible only on a host with no desktop state entry."""
+    if 'HGS_STATE_DIR' in os.environ:
+        raw_state = os.environ['HGS_STATE_DIR']
+    else:
+        base = (os.environ['XDG_STATE_HOME'] if 'XDG_STATE_HOME' in os.environ
+                else f'{HOME}/.local/state')
+        raw_state = f'{base}/hgs/sessions'
+    state = Path(raw_state)
+    if not state.is_absolute():
+        state = Path.cwd() / state
+    desktop = state / 'desktop'
+    try:
+        os.lstat(desktop)
+    except FileNotFoundError:
+        return True
+    except OSError as error:
+        raise UpdateError(f'cannot inspect {desktop} without following links; keep Qt stopped: {error}')
+    raise UpdateError(f'the selected hgs lacks {REVOKE_MARKER}, but {desktop} exists; '
+                      'cannot check desktop revocation; keep Qt stopped and upgrade or repair hgs')
+
+
 def revoke_configuration():
     """The selected CLI's supported, read-only configuration, never an approximation."""
     try:
         help_result = subprocess.run([CLI, '--help'], capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.TimeoutExpired) as error:
         raise UpdateError(f'cannot probe the selected hgs for {REVOKE_MARKER}: {error}; keep Qt stopped')
-        return None
     if help_result.returncode != 0 or REVOKE_MARKER not in help_result.stdout:
-        raise UpdateError(f'the selected hgs lacks {REVOKE_MARKER}; upgrade or repair it before starting Qt')
+        if legacy_desktop_state_absent():
+            say('selected hgs predates desktop revocation and has no desktop state; keeping the plain Qt path')
+            return None
     try:
         status = subprocess.run([CLI, 'desktop', 'status', '--json'], capture_output=True, text=True, timeout=10)
         result = json.loads(status.stdout)
@@ -968,6 +993,8 @@ def revoke_configuration():
 def revoke_before_qt():
     """Revoke migrated writers before any Qt start, with one retained request ID."""
     configuration = revoke_configuration()
+    if configuration is None:
+        return
     request_id = str(uuid.uuid4())
     args = [CLI, 'desktop', 'revoke', '--json', '--request-id', request_id, '--reason', 'rollback']
     try:

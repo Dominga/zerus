@@ -381,9 +381,11 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     draft_path,
                     replay,
                 );
-                organization.seed_runs(organization::run_seed_source(
+                let qt_source = organization::run_seed_source(
                     &app.state::<identity::Identity>().bundle_id, replay,
-                ));
+                );
+                organization.seed_runs(qt_source.clone());
+                organization.recover_qt(qt_source,app.state::<settings::Store>().0.clone());
                 // Before any start of the source (the menu bar's below, or the webview's).
                 app.state::<commands::AppState>().set_organization(organization.clone());
                 let screens = screens::Screens::tauri(app.handle().clone(), pump.clone());

@@ -9,6 +9,7 @@
 
 mod imports;
 pub mod qt;
+pub use imports::OrganizationImport;
 
 use qt::QtValue;
 use serde_json::{json, Map, Value};
@@ -902,6 +903,77 @@ impl Settings {
         self.loaded().contents.seed.clone()
     }
 
+    /// Background organization recovery shares this writer and its existing
+    /// G3 journal. Unsupported settings/metadata never admit an import.
+    pub fn organization_import(&self) -> Result<OrganizationImport, String> {
+        let state = self.loaded();
+        if state.unreadable.is_some() {
+            return Err("Settings cannot record a project import.".into());
+        }
+        imports::organization_state(&state.contents).map_err(str::to_owned)
+    }
+
+    /// Durably reserve metadata before the idempotent missing-field import.
+    /// No Qt values or pending operation bodies enter this record.
+    pub fn prepare_organization_import(
+        &self,
+        node_id: &str,
+        source: &QtStore,
+        snapshot: Option<&QtSnapshot>,
+    ) -> Result<bool, String> {
+        match (
+            zerus_desktop_migration::canonical(&self.shared.path),
+            zerus_desktop_migration::canonical(source.path()),
+        ) {
+            (Ok(target), Ok(source)) if target != source => (),
+            _ => {
+                return Err(
+                    "Project import cannot overwrite an overlapping or unverified Qt source."
+                        .into(),
+                )
+            }
+        }
+        self.update_organization_record(|contents| {
+            imports::prepare_organization(contents, node_id, source, snapshot)
+        })
+    }
+
+    /// Same-node initialized catalog evidence completes the pending record.
+    pub fn complete_organization_import(&self, node_id: &str) -> Result<(), String> {
+        self.update_organization_record(|contents| {
+            imports::complete_organization(contents, node_id)?;
+            Ok(true)
+        })
+        .map(|_| ())
+    }
+
+    fn update_organization_record(
+        &self,
+        update: impl FnOnce(&mut Contents) -> Result<bool, &'static str>,
+    ) -> Result<bool, String> {
+        let changed = {
+            let mut state = self.loaded();
+            if state.unreadable.is_some() || state.closed {
+                return Err("Settings cannot record a project import.".into());
+            }
+            let mut candidate = state.contents.clone();
+            let changed = update(&mut candidate).map_err(str::to_owned)?;
+            if candidate.to_bytes().len() as u64 > MAX_STORE {
+                return Err("Project import metadata exceeds the settings limit.".into());
+            }
+            if changed {
+                state.contents = candidate;
+                state.dirty = true;
+                self.shared.signal.notify_all();
+            }
+            changed
+        };
+        if !self.flush_within(Duration::from_secs(10)) {
+            return Err("Project import metadata could not be saved; import stays pending.".into());
+        }
+        Ok(changed)
+    }
+
     /// Why the store could not be read or written, if it could not.
     pub fn error(&self) -> Option<String> {
         let state = self.loaded();
@@ -1067,5 +1139,15 @@ fn seed_from(store: &QtStore, snapshot: Option<&QtSnapshot>) -> (BTreeMap<String
 /// so a cut-off write keeps the old file.
 fn write_store(path: &Path, bytes: &[u8]) -> Result<(), String> {
     crate::fsx::write_private_atomic(path, bytes, true)
+        .and_then(|()| {
+            #[cfg(unix)]
+            File::open(
+                path.parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or_else(|| Path::new(".")),
+            )?
+            .sync_all()?;
+            Ok(())
+        })
         .map_err(|error| format!("Settings not saved: {error}"))
 }

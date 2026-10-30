@@ -21,6 +21,7 @@ pub mod draft;
 pub mod edit;
 pub mod grouping;
 pub mod layout;
+pub mod qt_import;
 pub mod runs;
 pub mod sync;
 

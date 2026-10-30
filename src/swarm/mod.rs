@@ -224,12 +224,21 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
         "get" | "initialize" | "apply" | "export" | "resolve" | "disconnect" => {
             // Read stdin before taking the lock: slow clients cannot monopolize it.
             let request = if matches!(action,"initialize"|"apply"|"resolve") { input()? } else { Value::Null };
+            if action == "initialize" && args.iter().any(|arg|arg == "--g3-status") {
+                ensure!(args == ["initialize", "--g3-status", "--json"], "usage: hgs swarm initialize --g3-status --json");
+                return bootstrap::g3_status(config, request);
+            }
+            let g3 = if action == "initialize" && args.iter().any(|arg|arg == "--g3") {
+                ensure!(args == ["initialize", "--g3", "--json"], "usage: hgs swarm initialize --g3 --json");
+                Some(bootstrap::G3Import::parse(request.clone())?)
+            } else { None };
             let mut store = LockedStore::load(config)?;
             let previous: std::collections::BTreeSet<_> = store.data.catalog.operations.keys().cloned().collect();
             match action {
                 "get" => { bootstrap::maybe(&mut store, config)?; }
                 "initialize" => {
-                    bootstrap::initialize(&mut store, &request)?;
+                    if let Some(import) = &g3 { import.initialize(&mut store)?; }
+                    else { bootstrap::initialize(&mut store, &request)?; }
                 }
                 "apply" => { ensure!(store.data.imported,"initialize the local project catalog first"); store.data.apply(serde_json::from_value(request)?)?; }
                 "resolve" => {
@@ -244,6 +253,7 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
             if action != "initialize" { store.save()?; }
             if action == "export" { return Ok(json!({"schema":1,"node_id":store.data.node_id,"initialized":store.data.imported,"catalog":store.data.catalog})); }
             let mut snapshot = store.snapshot(config);
+            if let Some(import) = &g3 { snapshot["g3_import"] = import.receipt(); }
             snapshot["worker"] = worker.unwrap_or_else(|| service::status(config)).json();
             let mut written: std::collections::BTreeMap<String,Vec<String>> = std::collections::BTreeMap::new();
             for op in store.data.catalog.operations.values().filter(|op| !previous.contains(&op.id)) {

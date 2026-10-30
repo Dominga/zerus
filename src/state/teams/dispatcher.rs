@@ -321,6 +321,9 @@ pub(crate) enum Step {
     WaitOnMember { task: u32, member: String, reason: String },
     /// U56: the member is available again; the wait goes.
     ReleaseWait { task: u32 },
+    /// U61: an auto-accepted draft whose phases ahead are done and whose plan has
+    /// no blocker is accepted by Auto; the ready path hands its tasks out next.
+    AutoAcceptDraft { phase: u32 },
     /// U56: the member's phase and activity as the dispatcher saw them, so
     /// status shows them without an inspect.
     Watch { member: String, phase: String, activity: String, last_event_at: Option<f64> },
@@ -1088,6 +1091,12 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     }
     // C7: a member idle without a ready task while tasks are open starves the
     // plan. The lead hears once after 20 minutes; the episode ends with work.
+    // U61: an auto-accepted draft whose phases ahead are done and whose plan has
+    // no blocker is accepted by Auto here, in its own change; the ordinary ready
+    // path then hands its tasks out (launch, rebalance, role routing).
+    for phase in super::ops::drafts_ready_to_auto_accept(team, &BTreeSet::new()) {
+        steps.push(Step::AutoAcceptDraft { phase });
+    }
     let ready_ids = plan::ready(team);
     let staging_open = team.tasks.iter().any(|task| !task.status.finished());
     // U9: while every open task waits for the owner's phase approval, a
@@ -1473,7 +1482,18 @@ pub(crate) fn work_ahead_tasks(team: &Team) -> Vec<u32> {
     if !team.settings.work_ahead {
         return Vec::new();
     }
-    let Some(draft) = team.phases.iter().filter(|phase| phase.state == PhaseState::Draft).map(|phase| phase.n).min() else { return Vec::new() };
+    // U61: work ahead keeps its meaning for review drafts; an auto-accepted
+    // draft starts early only on the lead's start-ahead (or when the phases
+    // ahead are done, which the Auto path above handles).
+    let Some(draft) = team
+        .phases
+        .iter()
+        .filter(|phase| phase.state == PhaseState::Draft && phase.approval != Approval::Auto)
+        .map(|phase| phase.n)
+        .min()
+    else {
+        return Vec::new();
+    };
     let running: Vec<&Task> = team
         .tasks
         .iter()
@@ -5972,6 +5992,10 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             }
         }
         Step::PrepareContext { task, member } => check_context_step(store, &team.id, *task, member, host),
+        Step::AutoAcceptDraft { phase } => change(store, &team.id, |team, events| {
+            super::ops::accept_auto_draft(team, *phase, &BTreeSet::new(), events);
+            Ok(())
+        }),
         Step::WorkAhead { task, member } => {
             hand_out(store, &team.id, *task, member, None, host)?;            change(store, &team.id, |team, _| {
                 if let Some(attempt) = team.task_mut(*task).and_then(|task| task.attempts.last_mut()) {
@@ -10411,9 +10435,9 @@ mod tests {
         assert!(found.iter().any(|step| matches!(step, Step::MarkStuck { .. })), "{found:?}");
     }
 
-    /// U61: with the phases ahead done, the first tick hands out a draft's task
-    /// through the work-ahead path and accepts the phase by Auto in the same
-    /// store change; a second hand-out does not accept it again.
+    /// U61: with the phases ahead done, the tick accepts the draft by Auto and
+    /// the ordinary ready path hands its task out (no work-ahead needed); a
+    /// second hand-out does not accept the phase again.
     #[test]
     fn the_first_hand_out_of_an_auto_draft_accepts_it_in_the_same_change() {
         let dir = tempfile::tempdir().unwrap();
@@ -10440,19 +10464,98 @@ mod tests {
         store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
         let seen = [session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", true)];
         let found = steps(&t, &seen, 100.0);
-        assert!(found.contains(&Step::WorkAhead { task: 4, member: "dev".into() }), "{found:?}");
-        run_step(&mut store, &t, &Step::WorkAhead { task: 4, member: "dev".into() }, "").unwrap();
+        assert_eq!(found.iter().filter(|step| matches!(step, Step::AutoAcceptDraft { .. })).count(), 1, "{found:?}");
+        run_step(&mut store, &t, &Step::AutoAcceptDraft { phase: 2 }, "").unwrap();
         let saved = store.load(&t.id).unwrap().unwrap();
         assert!(saved.phases[0].state.is_accepted(), "{:?}", saved.phases[0].state);
         assert_eq!(saved.phases[0].decided_by, "Auto");
-        assert_ne!(saved.task(4).unwrap().status, TaskStatus::Draft, "the accepted phase's task is live");
         let feed = store.events(&t.id, None, 50).unwrap().to_string();
         assert_eq!(feed.matches("phase_auto_accepted").count(), 1, "{feed}");
-        // A second hand-out (or a second tick) does not accept the phase again.
-        let mut again = saved.clone();
-        let mut more = Vec::new();
-        super::ops::accept_phase_on_hand_out(&mut again, 5, &mut more);
-        assert!(!more.iter().any(|event| event.kind == "phase_auto_accepted"), "{more:?}");
+        // The ordinary ready path hands the accepted phase's tasks out.
+        let next = steps(&saved, &seen, 101.0);
+        assert!(next.contains(&Step::HandOut { task: 4, member: "dev".into() }), "{next:?}");
+        run_step(&mut store, &saved, &Step::HandOut { task: 4, member: "dev".into() }, "").unwrap();
+        let feed = store.events(&t.id, None, 80).unwrap().to_string();
+        assert_eq!(feed.matches("phase_auto_accepted").count(), 1, "{feed}");
+    }
+
+    /// U61 #709 C1: an auto draft whose phases ahead are done accepts and the
+    /// ready path launches a member never launched and routes a role task.
+    #[test]
+    fn an_auto_draft_free_of_blockers_launches_and_routes_its_tasks() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        t.settings.auto_accept = true;
+        let mut events = Vec::new();
+        for id in [1u32, 2, 3] {
+            ops::apply(&mut t, "cancel", &json!({"task":id}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        }
+        t.phases.push(Phase {
+            n: 2,
+            order: 2,
+            title: "Next".into(),
+            barrier: true,
+            approval: Approval::Auto,
+            state: PhaseState::Draft,
+            tasks: vec![4, 5],
+            ..Default::default()
+        });
+        // qa had nothing in phase 1, so its session was never launched.
+        t.tasks.push(Task { id: 4, title: "For qa".into(), phase: 2, status: TaskStatus::Draft, assignee: "qa".into(), ..Default::default() });
+        // A task for a role, with no assignee yet.
+        t.tasks.push(Task { id: 5, title: "For the role".into(), phase: 2, status: TaskStatus::Draft, assignee: String::new(), role: "Backend".into(), ..Default::default() });
+        t.status = TeamStatus::Running;
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+        let seen = [session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", true)];
+        run_step(&mut store, &t, &Step::AutoAcceptDraft { phase: 2 }, "").unwrap();
+        let saved = store.load(&t.id).unwrap().unwrap();
+        assert!(saved.phases[0].state.is_accepted());
+        let found = steps(&saved, &seen, 100.0);
+        assert!(found.contains(&Step::Launch { member: "qa".into() }), "a never-launched member is launched: {found:?}");
+        assert!(
+            found.iter().any(|step| matches!(step, Step::Rebalance { task: 5, from, to } if from.is_empty() && to == "dev")),
+            "a role task is routed: {found:?}"
+        );
+    }
+
+    /// U61 #709 L3: a plan blocker keeps an auto draft a draft at the hand-out.
+    #[test]
+    fn an_auto_draft_with_a_plan_blocker_is_not_accepted_on_hand_out() {
+        let mut t = team();
+        t.settings.auto_accept = true;
+        t.phases.push(Phase {
+            n: 2,
+            order: 2,
+            title: "Broken".into(),
+            approval: Approval::Auto,
+            state: PhaseState::Draft,
+            tasks: vec![4],
+            ..Default::default()
+        });
+        // A task for a member who was removed: the plan has an error.
+        t.tasks.push(Task { id: 4, title: "Broken".into(), phase: 2, status: TaskStatus::Draft, assignee: "gone".into(), ..Default::default() });
+        let mut events = Vec::new();
+        assert!(super::ops::drafts_ready_to_auto_accept(&t, &BTreeSet::new()).is_empty(), "a plan error blocks Auto");
+        super::ops::accept_phase_on_hand_out(&mut t, 4, &mut events);
+        assert!(t.phases[0].state.is_draft(), "the phase stays a draft");
+        assert!(!events.iter().any(|event| event.kind == "phase_auto_accepted"));
+    }
+
+    /// U61 #709 N3: work ahead keeps its meaning for review drafts; it never
+    /// takes an auto-accepted draft (only start-ahead or phases-ahead do).
+    #[test]
+    fn work_ahead_skips_an_auto_draft() {
+        let mut t = team();
+        t.settings.work_ahead = true;
+        t.settings.auto_accept = true;
+        t.phases.push(Phase { n: 2, order: 2, title: "Auto".into(), approval: Approval::Auto, state: PhaseState::Draft, tasks: vec![4], ..Default::default() });
+        t.phases.push(Phase { n: 3, order: 3, title: "Review".into(), approval: Approval::Review, state: PhaseState::Draft, tasks: vec![5], ..Default::default() });
+        t.tasks.push(Task { id: 4, title: "Auto task".into(), phase: 2, status: TaskStatus::Pending, assignee: "dev".into(), ..Default::default() });
+        t.tasks.push(Task { id: 5, title: "Review task".into(), phase: 3, status: TaskStatus::Pending, assignee: "dev".into(), ..Default::default() });
+        let ahead = work_ahead_tasks(&t);
+        assert!(!ahead.contains(&4), "an auto draft is not work-ahead: {ahead:?}");
+        assert!(ahead.contains(&5), "a review draft keeps its work ahead: {ahead:?}");
     }
 
     /// U61: started ahead, an idle member takes an independent task of the draft

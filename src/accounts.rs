@@ -457,6 +457,84 @@ pub fn prepare_mcp_servers(agent: &str) -> Result<()> {
     let home = platform::home().ok_or_else(||Error::new(1,"User home is missing."))?;
     mcp_servers::inherit(agent,Path::new(&home),Path::new(&profile))
 }
+/// U53: an account a running session may move to: it must belong to the
+/// session's own agent and be signed in on this computer. The owner chooses it.
+pub(crate) fn switch_target(config: &Config, id: &str, provider: &str) -> Result<(String, PathBuf)> {
+    let (profile, home, native) = lookup(config, id)?;
+    if profile.provider != provider {
+        return Err(Error::new(
+            1,
+            format!(
+                "Account '{id}' belongs to another agent ({}); a session moves only to an account of its own agent.",
+                profile.provider
+            ),
+        ));
+    }
+    if !native && !home.is_dir() {
+        return Err(Error::new(
+            1,
+            format!("Account '{id}' has no profile folder on this computer; log in to it first."),
+        ));
+    }
+    if !signed_in(&home, &profile.provider, native) {
+        return Err(Error::new(
+            1,
+            format!(
+                "Account '{id}' is not signed in on {}; log in to it before moving a session.",
+                config.host()
+            ),
+        ));
+    }
+    Ok((profile.label, home))
+}
+
+/// Whether the account has a sign-in to run with: a credential file, a keychain
+/// item (macOS Claude), or the provider's key in this process's environment.
+fn signed_in(home: &Path, provider: &str, native: bool) -> bool {
+    if credential_file(home, provider) {
+        return true;
+    }
+    let key = |name: &str| env::var(name).ok().is_some_and(|value| !value.is_empty());
+    match provider {
+        "claude" => {
+            key("ANTHROPIC_API_KEY")
+                || (cfg!(target_os = "macos") && claude::missing_login_status(home, native) != "signed_out")
+        }
+        "codex" => key("OPENAI_API_KEY") || key("CODEX_API_KEY") || key("CODEX_ACCESS_TOKEN"),
+        "kimi" => key("KIMI_API_KEY") || key("MOONSHOT_API_KEY"),
+        _ => false,
+    }
+}
+
+/// U53: an account id's label, as `inspect` and `ls` show it beside the id.
+pub(crate) fn label(config: &Config, id: &str) -> String {
+    let mut labels = labels(config);
+    labels.remove(id).unwrap_or_else(|| id.to_owned())
+}
+/// U53: every known account id's label: the native accounts and the profiles.
+pub(crate) fn labels(config: &Config) -> BTreeMap<String, String> {
+    let catalog = read(config).ok().and_then(|bytes| decode(&bytes).ok()).unwrap_or_default();
+    let mut labels: BTreeMap<String, String> = ["codex", "claude", "kimi"]
+        .into_iter()
+        .map(|provider| {
+            let id = format!("native-{provider}");
+            let label = catalog.native_labels.get(&id).cloned().unwrap_or_else(|| default_label(provider).into());
+            (id, label)
+        })
+        .collect();
+    for provider in ["dsh", "opencode"] {
+        let id = format!("native-{provider}");
+        labels.insert(
+            id.clone(),
+            catalog.native_labels.get(&id).cloned().unwrap_or_else(|| default_label(provider).into()),
+        );
+    }
+    for (id, profile) in &catalog.profiles {
+        labels.insert(id.clone(), profile.label.clone());
+    }
+    labels
+}
+
 pub fn select(config: &Config, id: &str, provider: &str) -> Result<Vec<String>> {
     let (profile, home, native) = lookup(config, id)?;
     if profile.provider != provider {

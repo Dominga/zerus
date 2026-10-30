@@ -1,0 +1,1 @@
+{"alias":"studio","effective":{"identity_files":["/home/example/.ssh/id_ed25519","/home/example/.ssh/id_rsa"],"proxy_command":false,"hostname":"studio.example","user":"person","port":"2222","proxy_jump":"bastion.example.net"}}

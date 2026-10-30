@@ -1080,7 +1080,11 @@ bool TeamPanel::phaseOpen(const Team &team, const PhaseGroup &group) const
         const auto it = teamIt->constFind(group.n);
         if (it != teamIt->constEnd()) return it.value();
     }
-    return !group.finished();   // a finished phase starts collapsed, the rest open
+    // A finished phase starts collapsed, the rest open; the last phase stays
+    // open, so a finished one-phase plan still shows its tasks.
+    if (!group.finished()) return true;
+    for (const auto &task : team.tasks) if (task.phase > group.n) return false;
+    return true;
 }
 
 void TeamPanel::togglePhase(const Team &team, int phase)
@@ -1180,7 +1184,7 @@ QWidget *TeamPanel::tasks(const Team &team, bool narrow)
         QStringList deps;
         for (const auto &dep : task->deps) deps << QStringLiteral("#%1").arg(dep.task);
         node.deps = deps.isEmpty() ? QString() : QStringLiteral("← ") + deps.join(' ');
-        const bool active = QStringList{"assigned", "in_progress", "submitted"}.contains(task->status);
+        const bool active = QStringList{"assigned", "in_progress", "submitted", "in_review", "in_test"}.contains(task->status);
         node.match = m_filter == "all" || (m_filter == "active" && active) || (m_filter == "problems" && node.problem);
         view->nodes.append(node);
     }

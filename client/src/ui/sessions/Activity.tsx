@@ -1,34 +1,44 @@
-import { For, Show, createEffect, createMemo, createRoot, createSignal, on, onCleanup } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, on, onCleanup } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import { Icon } from "../lib/icons";
 import { selected, toast, contentScale, subagentOpen, setSubagentOpen, setMenu, type MenuEntry } from "../../store/ui";
 import { activity } from "../../store/session";
-import { skin } from "../../skin/runtime";
+import { flag, num, setSetting } from "../../store/settings";
+import type { ActivitySource } from "../../store/activitySource";
 import { buildTranscript, VOICE_STATE_LABEL, voiceStateDetail, voiceStateIssue } from "./transcript";
 import { statusOf } from "./SessionCard";
-import type { MediaMessage, TranscriptItem } from "./types";
+import type { MediaMessage, Session, TranscriptItem } from "./types";
 
 // ---------------------------------------------------------------------------
 // Reading column (ActivityWidth.h): 900 px at 100% content scale, 480–2400,
 // scaled with the content scale, or the full pane. The transcript, queue,
 // questions, banners and the composer all share it; Terminal, Processes and
-// Native UI ignore it. The skin's L2 activity-column variant is the start.
+// Native UI ignore it.
 
 export const COLUMN = { min: 480, max: 2400, initial: 900, edge: 10 } as const;
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
-const COLUMN_KEY = "zerus-client-activity-width";
-const savedColumn = (() => { try { return Number(localStorage.getItem(COLUMN_KEY)) || 0; } catch { return 0; } })();
-const [columnWidth, setColumnWidthRaw] = createSignal(savedColumn ? clamp(savedColumn, COLUMN.min, COLUMN.max) : COLUMN.initial);
-const [fullWidth, setFullWidth] = createSignal(skin().layout["activity-column"] === "full");
-createRoot(() => createEffect(on(() => skin().layout["activity-column"], (v) => setFullWidth(v === "full"), { defer: true })));
+// The width is Settings > Appearance > Activity width (workspace/activityWidth,
+// workspace/activityFullWidth): a drag shows it live and stores it once, when
+// the pointer lets go. Choosing a skin applies its activity-column variant
+// (skin/runtime.ts chooseSkin).
+const [dragColumn, setDragColumn] = createSignal<number | undefined>();
+const columnWidth = () => dragColumn() ?? clamp(Math.round(num("workspace/activityWidth")), COLUMN.min, COLUMN.max);
+const fullWidth = () => flag("workspace/activityFullWidth");
+const setFullWidth = (full: boolean) => { if (full !== fullWidth()) void setSetting("workspace/activityFullWidth", full); };
 export { columnWidth, fullWidth };
 
-function setColumnWidth(width: number) {
-  setColumnWidthRaw(clamp(Math.round(width), COLUMN.min, COLUMN.max));
-  try { localStorage.setItem(COLUMN_KEY, String(columnWidth())); } catch { /* storage may be unavailable */ }
+/** Stores a width once, and only when it differs from the stored one. */
+function storeColumn(width: number) {
+  setDragColumn(undefined);
+  const next = clamp(Math.round(width), COLUMN.min, COLUMN.max);
+  if (next !== clamp(Math.round(num("workspace/activityWidth")), COLUMN.min, COLUMN.max)) void setSetting("workspace/activityWidth", next);
+}
+/** Shows a width while Settings' slider moves, or the stored one again (undefined). */
+export function previewColumn(width: number | undefined) {
+  setDragColumn(width === undefined ? undefined : clamp(Math.round(width), COLUMN.min, COLUMN.max));
 }
 /** Double-click on an edge or Reset Activity width: the default, centered. */
-export function resetColumn() { setColumnWidth(COLUMN.initial); setFullWidth(false); }
+export function resetColumn() { storeColumn(COLUMN.initial); setFullWidth(false); }
 
 /** CSS variables for everything that shares the column (set on the Activity tab body). */
 export const columnStyle = () => ({
@@ -48,6 +58,9 @@ export function columnMenuItems(): MenuEntry[] {
 /** A 10 px column edge in the transcript margin; both edges move together. */
 function ColumnEdge(props: { right?: boolean }) {
   const [dragging, setDragging] = createSignal(false);
+  // A drag cut off (capture lost, the edge unmounted) leaves the stored width.
+  const endDrag = () => { if (dragging()) { setDragging(false); setDragColumn(undefined); } };
+  onCleanup(endDrag);
   let origin = 0, start = 0, widest = 0, narrowest = 0;
   const measure = (el: HTMLElement) => {
     const scroller = el.closest(".act-scroll") as HTMLElement;
@@ -56,10 +69,7 @@ function ColumnEdge(props: { right?: boolean }) {
     widest = scroller.clientWidth - 2 * COLUMN.edge;
     narrowest = Math.min(widest, COLUMN.min * contentScale());
   };
-  const apply = (distance: number) => {
-    setColumnWidth(clamp(start + 2 * distance, narrowest, widest) / contentScale());
-    setFullWidth(false);
-  };
+  const width = (distance: number) => clamp(start + 2 * distance, narrowest, widest) / contentScale();
   return (
     <div class="col-edge" classList={{ right: props.right, dragging: dragging() }} role="separator" aria-orientation="vertical" tabindex="0"
       aria-label="Activity width" aria-valuemin={COLUMN.min} aria-valuemax={COLUMN.max} aria-valuenow={columnWidth()}
@@ -72,16 +82,27 @@ function ColumnEdge(props: { right?: boolean }) {
         measure(el);
         setDragging(true);
       }}
-      onPointerMove={(e) => { if (dragging()) apply(props.right ? e.clientX - origin : origin - e.clientX); }}
-      onPointerUp={(e) => { setDragging(false); e.currentTarget.releasePointerCapture(e.pointerId); }}
-      onPointerCancel={() => setDragging(false)}
+      onPointerMove={(e) => { if (dragging()) setDragColumn(clamp(Math.round(width(props.right ? e.clientX - origin : origin - e.clientX)), COLUMN.min, COLUMN.max)); }}
+      onPointerUp={(e) => {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+        if (!dragging()) return;
+        setDragging(false);
+        // A click without movement stores nothing.
+        const moved = dragColumn();
+        if (moved === undefined) return;
+        storeColumn(moved);
+        setFullWidth(false);
+      }}
+      onPointerCancel={endDrag}
+      onLostPointerCapture={endDrag}
       onDblClick={resetColumn}
       onKeyDown={(e) => {
         const step = e.key === "ArrowLeft" ? -1 : e.key === "ArrowRight" ? 1 : 0;
         if (!step) return;
         e.preventDefault();
         measure(e.currentTarget);
-        apply((props.right ? step : -step) * 20);
+        storeColumn(width((props.right ? step : -step) * 20));
+        setFullWidth(false);
       }}
       onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setMenu({ x: e.clientX, y: e.clientY, items: columnMenuItems() }); }}
     />
@@ -345,13 +366,43 @@ const OLDER_EDGE = 120;
 /** Within this distance of the bottom, new events keep the view at the bottom. */
 const STICK_EDGE = 48;
 
-export function ActivityView() {
+/** The transcript items of a source. */
+export const transcriptOf = (source: ActivitySource) => buildTranscript(source.events(), source.summary());
+
+/** Scrolling near the top reads the previous page, unless one is loading or none is left. */
+export const readsOlder = (source: ActivitySource) => !source.loadingOlder() && !source.olderDone() && source.events().length > 0;
+
+/**
+ * What the pane shows besides the transcript, for its source and the selected
+ * row. A read-only source (an archived row's recorded Activity) shows its
+ * transcript and none of the live states; a source that lacks something shows
+ * nothing for it.
+ */
+export function paneStates(source: ActivitySource, s: Session | undefined) {
+  const live = source.readOnly || !s ? undefined : statusOf(s);
+  return {
+    /** "This conversation is archived." in place of the transcript. */
+    archived: live === "ended",
+    working: live === "working",
+    attention: live === "attention",
+    error: live === "error",
+    offline: live === "offline",
+    /** "This session left the list; its Activity stopped here." */
+    ended: source.ended(),
+    /** Why the last read failed, as a notice: read-only sources only (the live pane never showed its follow error). */
+    failure: source.readOnly ? source.error() ?? "" : "",
+  };
+}
+
+export function ActivityView(props: { source?: ActivitySource }) {
   const s = () => selected();
+  /** The live follow unless the detail passes another source (an archived row's). */
+  const source = (): ActivitySource => props.source ?? activity;
   let scroller!: HTMLDivElement;
   // Items keep their identity while events append: the list reconciles by id,
   // so a growing tool group updates in place and older pages only add nodes.
   const [view, setView] = createStore<{ items: TranscriptItem[] }>({ items: [] });
-  const built = createMemo(() => buildTranscript(activity.events(), activity.summary()));
+  const built = createMemo(() => transcriptOf(source()));
   createEffect(() => setView("items", reconcile(built(), { key: "id" })));
 
   // Stay at the bottom while it is in view; keep the reading position when an older page lands above.
@@ -359,12 +410,12 @@ export function ActivityView() {
   let anchor: { height: number; top: number } | undefined;
   const onScroll = () => {
     atBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < STICK_EDGE;
-    if (scroller.scrollTop < OLDER_EDGE && !activity.loadingOlder() && !activity.olderDone() && activity.events().length) {
+    if (scroller.scrollTop < OLDER_EDGE && readsOlder(source())) {
       anchor = { height: scroller.scrollHeight, top: scroller.scrollTop };
-      activity.loadOlder();
+      source().loadOlder();
     }
   };
-  createEffect(on(() => activity.target()?.id, () => { atBottom = true; anchor = undefined; }));
+  createEffect(on(() => source().target()?.id, () => { atBottom = true; anchor = undefined; }));
   createEffect(on(() => view.items.length, () => {
     queueMicrotask(() => {
       if (!scroller) return;
@@ -376,8 +427,9 @@ export function ActivityView() {
     });
   }));
 
-  const summary = () => activity.summary();
+  const summary = () => source().summary();
   const liveTool = () => String(summary()?.current_tool || summary()?.activity_summary || s()?.summary || "");
+  const states = createMemo(() => paneStates(source(), s()));
   return (
     <div class="activity">
       <div class="act-scroll" ref={scroller} onContextMenu={activityMenu} onScroll={onScroll}>
@@ -391,30 +443,33 @@ export function ActivityView() {
             </div>
           </Show>
           <div class="act-label eyebrow">Recorded activity — messages and tool excerpts</div>
-          <Show when={activity.loadingOlder()}><div class="act-older hint">Reading earlier activity…</div></Show>
-          <Show when={activity.olderDone() && activity.events().length > 0 && summary()?.history_truncated === true}>
+          <Show when={source().loadingOlder()}><div class="act-older hint">Reading earlier activity…</div></Show>
+          <Show when={source().olderDone() && source().events().length > 0 && summary()?.history_truncated === true}>
             <div class="act-older hint">Older events have expired from the journal.</div>
           </Show>
-          <Show when={statusOf(s()!) !== "ended"} fallback={<div class="notice"><Icon name="archive" size={14} /><div>This conversation is archived.</div></div>}>
-            <Show when={activity.loaded() || view.items.length} fallback={<div class="act-older hint">Reading activity…</div>}>
+          <Show when={!states().archived} fallback={<div class="notice"><Icon name="archive" size={14} /><div>This conversation is archived.</div></div>}>
+            <Show when={source().loaded() || view.items.length} fallback={<div class="act-older hint">Reading activity…</div>}>
               <Show when={view.items.length} fallback={<div class="act-older hint">No recorded activity yet.</div>}>
                 <For each={view.items}>{(it) => <Item item={it} />}</For>
               </Show>
             </Show>
-            <Show when={statusOf(s()!) === "working" && liveTool()}>
+            <Show when={states().working && liveTool()}>
               <div class="act-live"><span class="typing"><i /><i /><i /></span>Agent is running <b class="mono ell">{liveTool()}</b></div>
             </Show>
-            <Show when={statusOf(s()!) === "attention"}>
+            <Show when={states().attention}>
               <div class="notice warn"><Icon name="circle-alert" size={14} /><div><b>{s()?.caption}.</b> Answer it in the agent's terminal or in the Zerus app; answering here arrives with the session actions.</div></div>
             </Show>
-            <Show when={statusOf(s()!) === "error"}>
+            <Show when={states().error}>
               <div class="notice danger"><Icon name="circle-alert" size={14} /><div><b>{s()?.caption}.</b> {s()?.summary}</div></div>
             </Show>
-            <Show when={statusOf(s()!) === "offline"}>
+            <Show when={states().offline}>
               <div class="notice warn"><Icon name="wifi-off" size={14} /><div><b>{s()?.machine} is offline.</b> This is the last activity received. It updates again when the machine reconnects.</div></div>
             </Show>
-            <Show when={activity.ended()}>
+            <Show when={states().ended}>
               <div class="notice"><Icon name="archive" size={14} /><div>This session left the list; its Activity stopped here.</div></div>
+            </Show>
+            <Show when={states().failure}>
+              <div class="notice danger"><Icon name="circle-alert" size={14} /><div>{states().failure}</div></div>
             </Show>
           </Show>
         </div>

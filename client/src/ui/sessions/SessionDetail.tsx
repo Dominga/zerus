@@ -1,13 +1,21 @@
-import { For, Show, createMemo } from "solid-js";
+import { For, Match, Show, Switch, createEffect, createMemo, createRoot, createSignal, on } from "solid-js";
+import * as bridge from "../../bridge";
+import { terminal } from "../../store/terminal";
+import { TerminalTab } from "./Terminal";
+import type { TerminalStatus } from "../../types";
 import { Icon } from "../lib/icons";
 import { ActivityView, columnStyle } from "./Activity";
 import { AgentBadge, MachineBadge, statusOf, folderOf } from "./SessionCard";
-import { selected, setMenu, subagentOpen, type MenuEntry } from "../../store/ui";
+import { detailTab, page, selected, setDetailTab, setMenu, subagentOpen, type MenuEntry } from "../../store/ui";
 import { activity } from "../../store/session";
+import { activityReadOnly, type ActivitySource } from "../../store/activitySource";
+import { archiveActivity } from "../../store/archiveActivity";
 import { computerOffline } from "../../store/catalog";
 import { copyName, detailsFor, followedFor } from "../../store/actions";
-import { actionEntries } from "./ActionDialogs";
+import { headerClearSlot } from "./actions-ui";
+import { actionEntries, freshActionEntry } from "./ActionDialogs";
 import { snapshotOf } from "./actions-ui";
+import { markEntry } from "./mark-entries";
 
 // The session header and its Activity, after design/webui SessionDetail. The
 // composer, Terminal, Processes and the side panel move in with later phases;
@@ -35,6 +43,9 @@ function Header() {
   // inspects only once that subscription answered without one.
   const details = createMemo(() => detailsFor(s(), !computerOffline(s().computer), followedFor(s().key)));
   const act = createMemo(() => actionEntries(s(), details()));
+  const mark = createMemo(() => markEntry(s()));
+  const slot = () => headerClearSlot(!subagentOpen(), s().state);
+  const fresh = createMemo(() => freshActionEntry(s(), true));
   const actions = (): MenuEntry[] => [
     { label: "Open folder", icon: "folder-open", disabled: true },
     { label: "Open shell in session folder", icon: "square-terminal", disabled: true },
@@ -46,9 +57,9 @@ function Header() {
     { label: "Copy connect command", icon: "link", disabled: true },
     act().change,
     ...(act().stop.disabled ? [] : [act().stop]),
-    act().markRead,
+    ...(mark() ? [mark()!] : []),
     { separator: true },
-    { label: "Clear session…", icon: "clear", disabled: true },
+    ...(slot() === "fresh" && fresh() ? [fresh()!] : slot() === "clear" ? [{ label: "Clear session…", icon: "clear", disabled: true }] : []),
     ...(act().archive ? [act().archive!] : []),
     act().end,
   ];
@@ -69,7 +80,7 @@ function Header() {
         <button class="icon-btn" data-tip="Open session folder in file manager" disabled><Icon name="folder-open" size={16} /></button>
         <button class="icon-btn" data-tip="Open shell in session folder" disabled><Icon name="square-terminal" size={16} /></button>
         <button class="icon-btn" data-tip="Copy session name" onClick={() => { void copyName(snapshotOf(s())); }}><Icon name="copy" size={15} /></button>
-        <button class="icon-btn" data-tip="Clear session" disabled><Icon name="clear" size={15} /></button>
+        <Show when={slot() === "clear"}><button class="icon-btn" data-tip="Clear session" disabled><Icon name="clear" size={15} /></button></Show>
         <button class="icon-btn" data-tip="Session actions" onClick={(e) => setMenu({ x: e.clientX - 200, y: e.clientY + 12, items: actions() })}><Icon name="ellipsis" size={16} /></button>
       </div>
       <div class="dh-row2">
@@ -89,7 +100,63 @@ function Header() {
   );
 }
 
-const TABS = [{ id: "activity", label: "Activity" }] as const;
+type Tab = { id: string; label: string };
+const TABS: readonly Tab[] = [{ id: "activity", label: "Activity" }, { id: "terminal", label: "Terminal" }];
+
+/** The Activity of a row: an archived row's recorded one, read-only and never streamed, else the live follow. */
+export const activitySourceFor = (key: string): ActivitySource => (activityReadOnly(key) ? archiveActivity : activity);
+
+/** The tabs of a row: an archived row has no Terminal (Qt hides only that one; terminal_status answers unsupported). */
+export function detailTabs(key: string): readonly Tab[];
+export function detailTabs<T extends Tab>(key: string, tabs: readonly T[]): readonly T[];
+export function detailTabs(key: string, tabs: readonly Tab[] = TABS): readonly Tab[] {
+  return activityReadOnly(key) ? tabs.filter((t) => t.id !== "terminal") : tabs;
+}
+
+/** The selected session's terminal status (terminal_status), refreshed when its inputs change. */
+const [terminalTexts, setTerminalTexts] = createSignal<TerminalStatus | undefined>();
+createRoot(() => {
+  // The inputs of terminal_status as one string: a row change that leaves them alone calls nothing.
+  const inputs = createMemo(() => {
+    const s = selected();
+    if (!s) return undefined;
+    const followed = followedFor(s.key);
+    const details = detailsFor(s, !computerOffline(s.computer), followed);
+    return JSON.stringify([s.key, s.name, s.runId, s.cmd, s.state, s.terminalSupported, s.terminalReported, s.terminalAttachSupported,
+      s.terminalAttachReported, !computerOffline(s.computer), followed.value ?? details ?? null]);
+  });
+  // Another selection: input stops reaching the previous session before anything is awaited.
+  createEffect(on(() => selected()?.key, () => { terminal.leaveSession(); }, { defer: true }));
+  createEffect(on(inputs, (input) => {
+    const s = selected();
+    if (!input || !s) { setTerminalTexts(undefined); void terminal.setTarget(undefined, undefined); return; }
+    const followed = followedFor(s.key);
+    void bridge.terminalStatus({
+      facts: { cmd: s.cmd, terminal_supported: s.terminalSupported, terminal_reported: s.terminalReported, terminal_attach_supported: s.terminalAttachSupported,
+        terminal_attach_reported: s.terminalAttachReported, terminal_reason: "", terminal_attach_reason: "" },
+      details: followed.value ?? detailsFor(s, !computerOffline(s.computer), followed) ?? {},
+      state: s.state, online: !computerOffline(s.computer), restored_pending: false, name: s.name, machine: s.machine,
+    }).then((status) => {
+      if (selected()?.key !== s.key) return;
+      setTerminalTexts(status);
+      void terminal.setTarget({ computer: s.computer, name: s.name, run_id: s.runId ?? "", machine: s.machine }, status);
+    });
+  }));
+  // Leaving the Sessions page disconnects, and coming back does not connect (SessionsWindow.cpp:1637, QStackedWidget::currentChanged).
+  createEffect(on(page, (p) => { if (p !== "sessions") void terminal.leavePage(); }, { defer: true }));
+});
+
+const tabs = () => {
+  const all = [
+    { id: "activity" as const, label: "Activity", show: true },
+    { id: "terminal" as const, label: "Terminal", show: !!terminalTexts()?.supported && !subagentOpen() },
+  ];
+  const s = selected();
+  return s ? detailTabs(s.key, all) : all;
+};
+
+// A tab that disappears returns to Activity (SessionsWindow.cpp:4019-4020).
+createRoot(() => createEffect(() => { if (!tabs().find((t) => t.id === detailTab())?.show) setDetailTab("activity"); }));
 
 export function SessionDetail() {
   return (
@@ -99,15 +166,16 @@ export function SessionDetail() {
         <div class="work">
           <div class="work-main">
             <div class="detail-tabs tabs" role="tablist">
-              <For each={TABS}>{(t) => (
-                <button class="tab on" role="tab" aria-selected="true">{t.label}</button>
+              <For each={tabs().filter((t) => t.show)}>{(t) => (
+                <button class="tab" role="tab" classList={{ on: detailTab() === t.id }} aria-selected={detailTab() === t.id} onClick={() => { if (t.id === "terminal") terminal.opened(); setDetailTab(t.id); }}>{t.label}</button>
               )}</For>
               <span class="grow" />
             </div>
             <div class="tab-body">
-              <div class="activity-wrap" style={columnStyle()}>
-                <ActivityView />
-              </div>
+              <Switch>
+                <Match when={detailTab() === "activity"}><div class="activity-wrap" style={columnStyle()}><ActivityView source={activitySourceFor(selected()!.key)} /></div></Match>
+                <Match when={detailTab() === "terminal"}><TerminalTab /></Match>
+              </Switch>
             </div>
           </div>
         </div>

@@ -69,6 +69,9 @@ member; work continues outside any attempt.
 - **A6. Replace a captured report.** While a captured report is undecided, the
   member may send the real report for the same attempt; it replaces the
   captured text and is marked as such. Owner: yes.
+- **A7. A captured report holds its member.** Until a captured report is
+  decided or replaced, its member gets no new task, rebalance or work ahead
+  and does not starve. Owner: yes (2026-10-29). Spec: team delivery 7a.
 
 ## B. Sandbox, permissions and permission requests
 
@@ -1215,6 +1218,113 @@ sets them in the catalog, the team settings or the plan; members never do.
   name; a failed launch returns to the old account, an unconfirmed one is
   reported uncertain and never retried. Nothing changes until the owner
   chooses; a team member's account changes only through swap-member.
+- **U59. Free planning: an open phase that takes tasks as they come (owner,
+  2026-10-30).** Besides the standard mode (phases that are planned, approved,
+  run and close with their integration and build), a team can plan in the free
+  mode: its phase is not closed when its tasks are done, and the owner and the
+  lead keep adding tasks to it.
+  - *The modes:* `standard` (the default and today's behaviour) and `free`.
+    A free phase runs each task as it is added, under the same pipelines,
+    reports and acceptance; it never closes by itself, and an empty queue is
+    idle, not done. Integration and a build run when the owner or the lead asks
+    (a lead task added to the phase), never as a phase barrier. The owner
+    closes a free phase explicitly; the team then continues in standard mode.
+  - *Choosing at the start:* when planning begins (Start planning, a new goal,
+    a next phase), the lead reads the goal and the tasks and proposes one of
+    the two modes with a one-line reason (a known scope with a release: standard;
+    a stream of small independent requests, support or polishing: free). The
+    owner chooses one of the two; with no choice, standard.
+  - *Switching to free:* only on the owner's confirmation. The lead (or the
+    owner through the lead's chat) requests it; Zerus shows a pop-up dialog
+    with the reason and Switch to free / Keep standard, bound to the request
+    id (U57 later moves it onto the shared confirmation card). Deny keeps standard and its
+    reason reaches the lead. Switching back to standard is the owner's close
+    of the free phase.
+  - The mode is shown beside the phase (status, the plan header, Graph and
+    Board), and `hgs team status` carries `plan_mode`. The lead protocol says
+    to propose a mode at the start, never to switch to free without the
+    dialog, and to add incoming work to the open phase instead of planning a
+    new one.
+- **U58. Changing a plan on the go costs less than the work (owner, 2026-10-30).**
+  From team 6d0aabee (RogueDOD QA bot): a task was cancelled and copied under
+  a new id three times to start it earlier, fully cancelled phases stayed on
+  the dashboard as approved, and a queued phase could not be edited.
+  - `move-task {task, phase}` moves a task that has not started (no delivered
+    attempt) to another phase, keeping its id, its deps checked against the
+    target phase; `reassign` keeps the id for a member change, as today.
+  - A queued or approved phase with no delivered attempt is edited like a
+    draft (extend, edit-draft, remove tasks) by the lead; the scope the owner
+    approved is the work, not its numbering.
+  - A phase whose tasks are all cancelled reads `cancelled`; status and the
+    dashboard hide cancelled tasks and phases by default, with a toggle.
+  - The owner's word by text (the CLI fallback of U57) is not spent when its
+    change fails, and one sentence naming a member and its tasks applies both,
+    the member first.
+  - A reply that only says it waits (a build lock, a queue) is a status, never
+    a captured report.
+  - Role and task text normalises CRLF to LF; a refused control character
+    names the field and its position.
+  - Work ahead (U31) stays an owner setting, off by default.
+- **U57. The owner confirms a lead's change in the chat, not by a phrase (owner,
+  2026-10-30).** Today the lead asks the owner to type an exact sentence
+  ("add a member", "план принят") and the change is refused when the words
+  differ. Instead the lead proposes the change and the owner answers a card in
+  the lead's chat, the same way a subagent start is approved:
+  - *What is proposed:* adding members, adding tasks to a running phase,
+    removing (cancelling) tasks, discarding a phase, and the existing roster
+    kinds (remove, swap, next goal). The proposal carries the exact change
+    (members with role/agent/model, task titles and ids, the phase).
+  - *The card:* in the lead's conversation (TeamConversation and the session
+    window), in Activity and in the U50/U55 waiting list: what changes, who
+    asks, Allow and Deny, and for Deny an optional reason that reaches the
+    lead. Allow applies exactly that change, bound to the proposal id and a
+    hash of its content; a changed or stale proposal is refused, never
+    re-applied. The owner word by text stays as a fallback for the CLI.
+  - *A phase with no work done:* a phase whose tasks are all cancelled or
+    never started (none accepted, none with a delivered attempt) may be
+    discarded, by the owner directly or by the lead through this card, even
+    when it is running; its numbering closes up as for a draft.
+  - The lead protocol says to propose and wait for the card, never to ask the
+    owner for a sentence.
+- **U56. A stuck member never blocks its tasks silently (owner, 2026-10-29).**
+  From team 6d0aabee (RogueDOD QA bot): member b-body stayed in context
+  compaction for over 80 minutes after its report; its pinned tasks #15/#16
+  were never handed out, the only signal was a starved notice about another
+  member, named by role, and the lead could neither release nor relaunch.
+  - *Stuck.* A member busy in one phase (compacting, a turn) with no session
+    event for 10 minutes (setting `stuck_minutes`) is marked stuck
+    (`state_reason: compaction_timeout | no_progress`); the lead gets one
+    `member_stuck` item naming the member id, phase, duration and the tasks
+    that wait for it. The member's open attempt, if any, keeps today's silent
+    rule.
+  - *Tasks waiting for an unavailable member.* A pending task pinned to a
+    stuck, stopped or offline member says so in its waits and in one inbox
+    item, with the commands that free it.
+  - *Ids, not roles.* Every notice names the member id with its role
+    ("b-body (backend-opus)"); several members may share a role.
+  - *The lead on a stuck member.* With the owner's team setting
+    `lead_restarts_stuck` (default off), the lead may interrupt or relaunch a
+    member Zerus marks stuck; otherwise the item tells the lead to ask the
+    owner and names the command.
+  - *Status without inspect.* `hgs team status` shows each member's phase,
+    activity summary and minutes without progress.
+  - *Small fixes.* A refused owner's word names the expected sentence ("plan
+    approved", "phase N approved"); the lead may discard an empty draft phase;
+    `hgs team draft` seen documents its request_id; a captured reply that says
+    it still waits ("waiting for the editor to close") is not made a report;
+    a team setting `keep_assignees` (default off) pins every planned assignee.
+- **U55. What waits for the owner is shown where the owner looks (owner,
+  2026-10-29).** Mock-up #530 waited a day for the owner, who never knew. An
+  item that waits for the owner (the kinds of U50's `hgs team waiting`: a
+  draft phase or plan, an escalated report or permission, the owner's word
+  asked, a task the owner holds or a report marked for the owner, a finished
+  team) shows as a banner at the top of the session's chat and Activity, and
+  under Activity in the team view: what waits, for how long, and its action
+  (Open, Approve, Accept). Several fold into one line with a count. The first
+  time an item starts waiting, one desktop notification says so; it never
+  repeats for the same item. A member's report that names the owner ("ready
+  for the owner") is the lead's to decide unless the lead escalates it; the
+  lead protocol says so.
 - **U54. Move a team to another account (owner, 2026-10-29).** Moving team
   528aebfe's Claude members and its lead off an account near its weekly limit
   took two owner scripts in an outside PowerShell, a manual pause of six old
@@ -1310,6 +1420,16 @@ phase 37. Lanes are balanced by volume and cost (U28 rule 9), not by count.
   their tokens on the server, `hgs team profile` with the ranked losses,
   the Profile view and the heat overlay, the lead protocol and docs;
   integration, review, QA and the build.
+
+## Free planning in phase 43 (owner, 2026-10-30)
+
+- U59 joins phase 43 as its last work, before the phase's integration,
+  review, QA, build and the fork release: the plan mode on the server and
+  its status field, the lead's proposal at the start of planning, the
+  switch-to-free dialog bound to the request, adding tasks to an open phase
+  and closing it, the mode in the desktop and Android views, the lead
+  protocol and docs. The dialog is its own confirmation bound to the request
+  id; U57 (phase 45) later moves it onto the shared confirmation card.
 
 ## Order of work (proposal)
 

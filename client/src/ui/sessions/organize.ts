@@ -1,7 +1,8 @@
 import { batch, createSignal } from "solid-js";
 import { listRows, type Row } from "./model";
-import { catalog, moveRow } from "../../store/catalog";
-import { multi, setMulti, selectedKey, projectOrder, setProjectOrder, toast } from "../../store/ui";
+import { catalog } from "../../store/catalog";
+import { grouping, groupOf, headerOf, INBOX, moveProject, moveToProject } from "../../store/organization";
+import { multi, setMulti, selectedKey } from "../../store/ui";
 
 // Bulk selection and drag-and-drop organisation of the session list, after
 // tray/src/SessionList.cpp (mousePressEvent, selectRange, placement, dropEvent).
@@ -50,19 +51,16 @@ export const [dragItem, setDragItem] = createSignal<DragItem>();
 export const [drop, setDrop] = createSignal<Drop>();
 export const endDrag = () => batch(() => { setDragItem(undefined); setDrop(undefined); });
 
-// The blank area after the list ends the last project (the listing names no default project yet).
-const defaultProject = () => projectOrder().at(-1) ?? "";
-
 /** SessionList::placement for a pointer at content offset `y` over row `overId`. */
 export function placement(rows: Row[], offsets: number[], heights: number[], overId: string | undefined, y: number, item: DragItem): Drop {
   const end = rows.length ? offsets[rows.length - 1] + heights[rows.length - 1] : 0;
   let i = overId ? rows.findIndex((r) => r.id === overId) : -1;
-  // The blank area after the list moves a session to the default project's end.
-  if (i < 0) return item.kind === "group" ? { group: "", line: end, inset: 8 } : { group: defaultProject(), line: end, inset: 12 };
+  // The blank area after the list is an explicit move to the end of the Inbox, whichever project is the default (SessionList.cpp:482-484).
+  if (i < 0) return item.kind === "group" ? { group: "", line: end, inset: 8 } : { group: INBOX, line: end, inset: 12 };
   // A subagent row is not a target of its own: the whole family is one session.
   while (i > 0 && rows[i].type === "child") i--;
   const over = rows[i];
-  const group = over.type === "header" ? over.project : over.type === "card" ? over.session.project : over.parent.project;
+  const group = over.type === "header" ? over.project : over.type === "card" ? groupOf(over.session.key) : groupOf(over.parent.key);
   const top = offsets[i];
   let bottom = top + heights[i];
   if (item.kind === "session") for (let n = i + 1; n < rows.length && rows[n].type === "child"; n++) bottom = offsets[n] + heights[n];
@@ -80,34 +78,19 @@ export function placement(rows: Row[], offsets: number[], heights: number[], ove
   let n = i + 1;
   while (n < rows.length && rows[n].type === "child") n++;
   const next = rows[n];
-  return { group, before: next?.type === "card" && next.session.project === group ? next.id : undefined, line: bottom, inset: 12 };
+  return { group, before: next?.type === "card" && groupOf(next.session.key) === group ? next.id : undefined, line: bottom, inset: 12 };
 }
 
-/** Applies a drop: reorders projects, or moves a session within or across projects. */
+/**
+ * Applies a drop: a project moves before another (SessionList::groupMoved,
+ * moveGroup), a session into a project before a row or at its end, inside
+ * its own project too (sessionMoved, moveSession; SessionsWindow.cpp:556-561).
+ */
 export function applyDrop(item: DragItem, d: Drop) {
-  if (item.kind === "group") {
-    if (d.before === item.id) return;
-    const order = projectOrder().filter((id) => id !== item.id);
-    const at = d.before ? order.indexOf(d.before) : -1;
-    order.splice(at < 0 ? order.length : at, 0, item.id);
-    setProjectOrder(order);
-    return;
-  }
   if (d.before === item.id) return;
+  if (item.kind === "group") { void moveProject(item.id, d.before); return; }
   const moving = catalog.rows[item.id];
-  if (!moving) return;
-  if (moving.project !== d.group) {
-    // Moving between projects is a guarded `hgs` action; this list only reorders.
-    toast("Not moved", `Moving ${moving.title} to another project arrives with the session actions.`);
-    return;
-  }
-  // No session after the drop point: after the project's last session.
-  let before = d.before;
-  if (!before) {
-    const order = catalog.order;
-    let last = -1;
-    order.forEach((id, i) => { if (catalog.rows[id]?.project === d.group && id !== item.id) last = i; });
-    before = last >= 0 ? order[last + 1] : undefined;
-  }
-  moveRow(item.id, before);
+  // Qt's moveSession ignores a project that is not listed (SessionOrganization.cpp:188-189), such as the Inbox once it is deleted.
+  if (!moving || (grouping().loaded && !headerOf(d.group))) return;
+  void moveToProject([moving], d.group, d.before ? catalog.rows[d.before] : undefined);
 }

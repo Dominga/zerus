@@ -20,6 +20,7 @@
 #include "SessionPresentation.h"
 #include "TeamAttentionNotices.h"
 #include "AccountUsage.h"
+#include "AccountSwitch.h"
 #include "SessionUsage.h"
 #include "CacheKeepalive.h"
 #include "SessionStates.h"
@@ -43,6 +44,7 @@
 #include "TeamCatalogEditor.h"
 #include "TeamWorkspace.h"
 #include "TeamDesignerPage.h"
+#include "TeamWaitingPage.h"
 #include "TeamNewTab.h"
 #include <memory>
 #include "Extensions.h"
@@ -352,7 +354,10 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     // WhiteWh fork: agent teams. The Team designer mode: the universal catalog.
     m_teamDesignerNav = iconButton("team", tr("Team designer"), "railButton"); m_teamDesignerNav->setProperty("teamDesignerNav", true); m_teamDesignerNav->setCheckable(true);
     connect(m_teamDesignerNav, &QPushButton::clicked, this, [this] { showTeamDesigner(); });
-    for (auto *button : {m_sessionsNav, m_projectsNav, m_machinesNav, m_accountsNav, m_teamDesignerNav}) { button->setFixedSize(42, 44); button->setIconSize(QSize(24, 24)); side->addWidget(button); }
+    // U50: what waits for you across every team, beside the Team designer.
+    m_teamWaitingNav = iconButton("inbox", tr("Waiting for you"), "railButton"); m_teamWaitingNav->setProperty("teamWaitingNav", true); m_teamWaitingNav->setCheckable(true);
+    connect(m_teamWaitingNav, &QPushButton::clicked, this, [this] { showTeamWaiting(); });
+    for (auto *button : {m_sessionsNav, m_projectsNav, m_machinesNav, m_accountsNav, m_teamDesignerNav, m_teamWaitingNav}) { button->setFixedSize(42, 44); button->setIconSize(QSize(24, 24)); side->addWidget(button); }
     m_attentionBadge = new QLabel(m_sessionsNav); m_attentionBadge->setObjectName("railAttentionBadge");
     m_attentionBadge->setAlignment(Qt::AlignCenter); m_attentionBadge->setAttribute(Qt::WA_TransparentForMouseEvents);
     m_attentionBadge->setGeometry(24, 3, 17, 16); m_attentionBadge->hide();
@@ -1434,6 +1439,25 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         m_detailTabs->setCurrentWidget(m_terminal); m_terminal->connectSession();
     });
     connect(m_composer, &MessageComposer::settingsRequested, this, &SessionsWindow::changeModelSettings);
+    // U53: the owner's confirmed account choice; one switch at a time.
+    m_composer->accountChip()->switchRequested = [this](const QString &key, const QString &account) {
+        const auto *entry = selected();
+        if (m_accountSwitchRequest || !entry || entry->key != key || !accountSwitchBlockReason(*entry).isEmpty()) {
+            m_composer->accountChip()->finish(key, {}, tr("the session changed before the switch began; choose again"));
+            return renderDetails();
+        }
+        m_accountSwitchKey = key;
+        m_accountSwitchRequest = m_client.requestSwitchAccount(entry->host, entry->session.name, account);
+    };
+    connect(&m_client, &HgsClient::switchAccountFinished, this, [this](quint64 request, const QString &, const QString &, const QJsonObject &receipt, const QString &error) {
+        if (request != m_accountSwitchRequest) return;
+        m_accountSwitchRequest = 0;
+        const auto key = std::exchange(m_accountSwitchKey, QString());
+        const auto outcome = m_composer->accountChip()->finish(key, receipt, error);
+        if (!outcome.text.isEmpty()) showNotice(outcome.text, outcome.kind != AccountSwitch::Outcome::Switched);
+        // The session runs again (or still) under the account the receipt names.
+        refreshRequested(); if (const auto *entry = selected(); entry && entry->key == key) inspect();
+    });
     connectOpenCodeModels();
     connect(&m_client, &HgsClient::settingsFinished, this, [this](quint64 request, bool ok, const QJsonObject &receipt, const QString &error) {
         if (request != m_settingsRequest) return;
@@ -2167,6 +2191,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(m_pages,&QStackedWidget::currentChanged,this,[this](int index) {
         m_sessionsNav->setChecked(index==0); m_projectsNav->setChecked(index==1); m_machinesNav->setChecked(index==2); m_brand->setChecked(index==3); m_accountsNav->setChecked(index==4); m_settingsNav->setChecked(index==5);
         if (m_teamDesignerNav) m_teamDesignerNav->setChecked(index==m_teamDesignerPageIndex);
+        if (m_teamWaitingNav) m_teamWaitingNav->setChecked(index==m_teamWaitingPageIndex);
         // WhiteWh fork: the catalog's Computer and Account dropdowns, fresh on each visit.
         if (index==5 && m_teamCatalog) m_teamCatalog->setSources(&m_client, teamComputers());
         if (index==m_teamDesignerPageIndex && m_teamDesignerPage) m_teamDesignerPage->editor()->setSources(&m_client, teamComputers());
@@ -2753,7 +2778,7 @@ void SessionsWindow::applyTheme()
         QFrame#sessionInspectorPanel { background:transparent; border:0; }
     )").arg(bg, m_fg, m_surface, m_border, m_accent, m_muted, hover,
               colors.accentText, colors.accentHover, selected,
-              colors.inset, tone("Error", m_dark).name()) + workspaceScrollbars(m_dark) + skin.stylesheet);
+              colors.inset, tone("Error", m_dark).name()) + workspaceSpinButtons(hover) + workspaceScrollbars(m_dark) + skin.stylesheet);
     if (textSelection != selected)
         setStyleSheet(styleSheet().replace(QStringLiteral("selection-background-color:") + selected + ';',
             QStringLiteral("selection-background-color:") + textSelection + QStringLiteral("; selection-color:") + m_fg + ';'));
@@ -2792,6 +2817,7 @@ void SessionsWindow::applyTheme()
     if (m_teamCatalog) m_teamCatalog->setDark(m_dark);
     if (m_teamWorkspace) m_teamWorkspace->setTheme(m_dark);
     if (m_teamDesignerPage) m_teamDesignerPage->setDark(m_dark);
+    if (m_teamWaitingPage) m_teamWaitingPage->setDark(m_dark);
     if (m_teamNewForm) m_teamNewForm->setDark(m_dark);
     m_processes->setTheme(m_dark);
     m_tasks->setTheme(m_dark); m_taskInspector->setTheme(m_dark);
@@ -4271,6 +4297,14 @@ void SessionsWindow::acceptInspection(const QString &host, const QString &name, 
             else (*held)[i] = item;
         }
     }
+    // #511 N5: a held message hgs could not deliver comes back to this
+    // session's composer with why; an uncertain one says Delivery unconfirmed.
+    if (auto sent = m_sentHeld.find(entry->key); sent != m_sentHeld.end() && entry->key == m_selectedKey) {
+        for (const auto &lost : sent->take(data.value("held_settled").toArray())) {
+            m_composer->editor()->setPlainText(HeldSent::restored(m_composer->editor()->toPlainText(), lost.text));
+            showNotice(HeldSent::notice(lost), true);
+        }
+    }
     // WhiteWh fork: the Tasks card's background jobs come from the same read,
     // whether or not the Processes tab is on (it drops the rest).
     if(data.contains("processes")){
@@ -4578,6 +4612,7 @@ void SessionsWindow::renderDetails()
         m_question->setQuestion({}, {}); m_question->hide();
         m_terminal->setAvailable(false, tr("Select a running session."));
         m_composer->setCooperativeInbox(false);
+        m_composer->accountChip()->setSession({}, {}, {}, {});
         m_composer->setAvailability(false, tr("Select a session.")); return;
     }
     m_composer->setFileReferenceTarget(m_subagentId.isEmpty() ? entry->key : QString(), entry->host, entry->machine,
@@ -4847,6 +4882,7 @@ void SessionsWindow::renderDetails()
         m_details.value("pending_model").toString(), m_details.value("pending_effort").toString(),
         m_details.value("settings_apply_when").toString(), s.cmd == "opencode");
     m_composer->setSettingsNotice(m_details.value("settings_change_notice").toString());
+    updateAccountChip(*entry, archived || restoredPending);
     renderQuestion(*entry);
     updateSessionFeedback();
     m_terminal->setSession(m_client.executable(), entry->host, s.name, m_details.value("run_id").toString(), entry->machine);
@@ -5192,6 +5228,38 @@ QString SessionsWindow::modelSettingsBlockReason(const Entry &entry) const
         const QString reason = m_details.value("settings_change_reason").toString();
         return reason.isEmpty() ? tr("Model settings are not available for this session.") : reason;
     }
+    return {};
+}
+
+// U53: the session's account by its label (inspect's account_label; an older
+// hgs names none and shows no chip), the same agent's signed-in accounts on
+// that computer, and the reason it cannot change now.
+void SessionsWindow::updateAccountChip(const Entry &entry, bool unavailable)
+{
+    auto *chip = m_composer->accountChip();
+    const auto &s = entry.session;
+    const auto account = m_details.value("account_id").toString(s.accountId);
+    chip->setSession(entry.key, s.cmd, account, unavailable ? QString() : m_details.value("account_label").toString());
+    // The window's copy of the accounts page's listing; removed profiles are skipped.
+    chip->setOptions(AccountSwitch::options(m_sessionAccountDetailsProfiles, entry.host, s.cmd, AccountSwitch::accountOf(s.cmd, account), m_dark));
+    // A team member's account changes only with swap-member (U53, U54).
+    const auto *team = m_teams ? m_teams->teamOfSession(entry.host, s.name) : nullptr;
+    const bool member = team && QStringList{"planning", "running", "paused"}.contains(team->status);
+    chip->setLocked(member ? tr("A member of team %1: its account changes with Swap member in the team's Members.").arg(team->name) : QString());
+    chip->setBlocked(accountSwitchBlockReason(entry));
+}
+
+QString SessionsWindow::accountSwitchBlockReason(const Entry &entry) const
+{
+    if (!entry.online) return tr("%1 is offline; change the account when it is back.").arg(entry.machine);
+    if (entry.session.state != "running") return tr("The session is not running; resume it to change its account.");
+    if (isTerminating(entry) || m_pending || !m_renameKey.isEmpty() || !m_forkKey.isEmpty() || m_composer->isSending(entry.key))
+        return tr("Wait for the session update to finish.");
+    if (!m_inspectError.isEmpty()) return tr("Refresh the session before changing its account.");
+    const auto phase = m_details.value("phase").toString(entry.session.phase);
+    if (QStringList{"working", "tool", "compacting"}.contains(phase))
+        return tr("The agent is working; change its account once it is idle.");
+    if (m_details.value("build").isObject()) return tr("A build Zerus runs for the session is still going; wait for it.");
     return {};
 }
 
@@ -6027,9 +6095,12 @@ void SessionsWindow::finishMessage(quint64 request, bool ok, const QJsonObject &
     auto &messages = m_localMessages[pending.key];
     // U35: a held message shows in the queued line, not as a sent card.
     if (ok && receipt.value("status") == "queued") {
+        // #511 N5: the text the owner wrote, without the iron rules sent ahead of it.
+        QString written;
         for (qsizetype i = 0; i < messages.size(); ++i)
-            if (messages.at(i).toObject().value("id").toString() == QString::number(request)) { messages.removeAt(i); break; }
+            if (messages.at(i).toObject().value("id").toString() == QString::number(request)) { written = messages.at(i).toObject().value("text").toString(); messages.removeAt(i); break; }
         m_justHeld[pending.key].append(QJsonObject{{"request_id", receipt.value("request_id")}, {"text", receipt.value("text")}});
+        m_sentHeld[pending.key].add(receipt.value("request_id").toString(), written.isEmpty() ? receipt.value("text").toString() : written);
         if (pending.key == m_selectedKey) { renderHeld(); renderDetails(); inspect(); }
         emit refreshRequested();
         return;
@@ -6987,7 +7058,7 @@ void SessionsWindow::placeRailControls(bool inTitle)
     // the controls once the window is complete.
     if (inTitle == m_railInTitle || !m_railLayout || !m_statusLayout || !m_titleBar) return;
     m_railInTitle = inTitle;
-    const QList<QPushButton *> leading{m_railSessionsToggle, m_railNewSession, m_sessionsNav, m_projectsNav, m_machinesNav, m_accountsNav, m_teamDesignerNav};
+    const QList<QPushButton *> leading{m_railSessionsToggle, m_railNewSession, m_sessionsNav, m_projectsNav, m_machinesNav, m_accountsNav, m_teamDesignerNav, m_teamWaitingNav};
     const QList<QPushButton *> trailing{m_windowPin, m_settingsNav};
     QList<QPushButton *> all{m_brand}; all << leading << trailing;
     // Moving a widget hides it; each keeps whether it was shown.
@@ -7518,6 +7589,26 @@ void SessionsWindow::showTeamDesigner()
     m_teamDesignerPage->setContext(m_teamDesignerFolder,m_teamDesignerProject);
     m_pages->setCurrentWidget(m_teamDesignerPage);
     m_teamDesignerPage->refresh();
+}
+// U50: the waiting list of every team; a row opens its team's Team tab, a
+// draft phase unfolded.
+void SessionsWindow::showTeamWaiting()
+{
+    if(!m_teams)return;
+    if(!m_teamWaitingPage){
+        m_teamWaitingPage=new TeamWaitingPage(m_teams);m_teamWaitingPage->setDark(m_dark);
+        m_teamWaitingPage->openTeam=[this](const TeamWaitingPage::Item &item){
+            m_pages->setCurrentIndex(0);showTeam(item.team);
+            if(m_teamPanel&&m_teamPanel->openWorkspace)m_teamPanel->openWorkspace();
+            if(item.phase>0&&item.kind=="phase_draft"&&m_teamWorkspace)m_teamWorkspace->showPhase(item.phase);
+        };
+        m_teamWaitingPage->countChanged=[this](int total){
+            m_teamWaitingNav->setToolTip(total>0?tr("Waiting for you: %1").arg(total):tr("Waiting for you"));
+        };
+        m_teamWaitingPageIndex=m_pages->addWidget(m_teamWaitingPage);
+    }
+    m_pages->setCurrentWidget(m_teamWaitingPage);
+    m_teamWaitingNav->setChecked(true);
 }
 void SessionsWindow::startTeamDesigner(const QString &folder,const QString &goal,const QJsonObject &agent)
 {

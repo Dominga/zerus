@@ -64,7 +64,7 @@ class SessionStateContractTest {
     fun everyContractCaseShowsItsStateAndItsTexts() {
         // Every case of the shared fixture, not a subset: the phone reads what the host decided.
         val names = cases()
-        assertEquals("the contract's cases", 44, names.size)
+        assertEquals("the contract's cases", 45, names.size)
         for (name in names) {
             val raw = output(name)
             val expected = contract.getJSONArray("cases").let { array ->

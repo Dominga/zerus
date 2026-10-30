@@ -1,5 +1,6 @@
 #include "ConversationSource.h"
 #include "MessageComposer.h"
+#include "AccountSwitch.h"
 #include "OpenCodeEffort.h"
 #include "OpenCodeModelPicker.h"
 #include "OpenCodeModels.h"
@@ -318,6 +319,8 @@ MessageComposer::MessageComposer(QWidget *parent) : QWidget(parent)
     m_send->setToolTip(tr("Send: Enter; new line: Shift+Enter"));
     m_stop = new QPushButton(tr("Stop")); m_stop->setObjectName("interruptAgent"); m_stop->hide();
     connect(m_stop,&QPushButton::clicked,this,[this]{emit interruptRequested(m_key);});
+    // U53: the session's account beside the model; the window fills it and runs the switch.
+    m_account = new AccountSwitchChip(this);
     m_settings = new SettingsButton(this); m_settings->setObjectName("sessionModelSettings"); m_settings->setFixedHeight(34);
     m_settings->setAccessibleName(tr("Model and reasoning effort for this session"));
     m_settingsPopup = new ChipPopover(this); m_settingsPopup->setObjectName("sessionSettingsPopup");
@@ -375,7 +378,7 @@ MessageComposer::MessageComposer(QWidget *parent) : QWidget(parent)
     m_sessionReference->setToolTip(tr("Copy session reference")); m_sessionReference->setAccessibleName(tr("Copy session reference"));
     m_sessionReference->setCursor(Qt::PointingHandCursor);
     connect(m_sessionReference, &QPushButton::clicked, this, [this] { if (!m_key.isEmpty()) emit sessionReferenceRequested(m_key); });
-    actions->addWidget(m_attach); actions->addWidget(m_reference); actions->addWidget(m_rulesChip); actions->addStretch(0); actions->addWidget(m_status, 1); actions->addWidget(m_refreshStatus); actions->addWidget(m_retry); actions->addWidget(m_settings); actions->addWidget(m_stop); actions->addWidget(m_send);
+    actions->addWidget(m_attach); actions->addWidget(m_reference); actions->addWidget(m_rulesChip); actions->addStretch(0); actions->addWidget(m_status, 1); actions->addWidget(m_refreshStatus); actions->addWidget(m_retry); actions->addWidget(m_account); actions->addWidget(m_settings); actions->addWidget(m_stop); actions->addWidget(m_send);
     inputLayout->addLayout(actions);
     connect(edit, &QPlainTextEdit::textChanged, this, [this]() {
         if (m_loading || m_key.isEmpty()) return;
@@ -1249,6 +1252,7 @@ void MessageComposer::updateControls()
     const auto focus = QApplication::focusWidget();
     const bool returnFocus = !showSettings && (m_settings->hasFocus() || (focus && m_settingsPopup->isAncestorOf(focus)));
     m_settings->setVisible(showSettings && !m_taskMode);
+    m_account->setAllowed(showSettings && !m_taskMode);
     if (!showSettings) m_settingsPopup->hide();
     // Do not transfer an unfinished settings interaction to the Stop action.
     if (returnFocus) m_editor->setFocus(Qt::OtherFocusReason);
@@ -1704,6 +1708,7 @@ void MessageComposer::setTheme(bool dark)
     const auto token = [dark](const char *name) { return WorkspaceSkin::color(WorkspaceSkin::active(), dark, QString::fromLatin1(name)).name(); };
     updateSettingsButton();
     m_toolbar->setTheme(dark);
+    m_account->setTheme(dark);
     m_attach->setIcon(workspaceIcon("attachment", dark ? QColor("#c5cfdb") : QColor("#536477")));
     m_reference->setIcon(workspaceIcon("connect", dark ? QColor("#c5cfdb") : QColor("#536477")));
     m_refreshStatus->setIcon(composerIcon("refresh", QColor(dark ? "#efc978" : "#92641b"), QColor(dark ? "#85909e" : "#6d7784")));
@@ -1814,7 +1819,7 @@ void MessageComposer::setCompact(bool compact)
         {ComposerToolbar::Slot::Attach, m_attach}, {ComposerToolbar::Slot::FileReference, m_reference},
         {ComposerToolbar::Slot::IronRules, m_rulesChip}, {ComposerToolbar::Slot::SessionReference, m_sessionReference},
         {ComposerToolbar::Slot::Status, m_status}, {ComposerToolbar::Slot::StatusRefresh, m_refreshStatus},
-        {ComposerToolbar::Slot::Retry, m_retry}, {ComposerToolbar::Slot::Model, m_settings}};
+        {ComposerToolbar::Slot::Retry, m_retry}, {ComposerToolbar::Slot::Account, m_account}, {ComposerToolbar::Slot::Model, m_settings}};
     if (compact) {
         if (!m_card) {
             m_card = new QFrame; m_card->setObjectName("composerCard");
@@ -1843,7 +1848,7 @@ void MessageComposer::setCompact(bool compact)
         // The classic action row, as the constructor built it.
         m_actions->insertWidget(0, m_attach); m_actions->insertWidget(1, m_reference); m_actions->insertWidget(2, m_rulesChip);
         m_actions->addWidget(m_status, 1);
-        for (auto *widget : {static_cast<QWidget *>(m_refreshStatus), static_cast<QWidget *>(m_retry), static_cast<QWidget *>(m_settings),
+        for (auto *widget : {static_cast<QWidget *>(m_refreshStatus), static_cast<QWidget *>(m_retry), static_cast<QWidget *>(m_account), static_cast<QWidget *>(m_settings),
                              static_cast<QWidget *>(m_stop), static_cast<QWidget *>(m_send)}) m_actions->addWidget(widget);
         m_sessionReference->hide();
         m_send->setMinimumSize(0, 0); m_send->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX); m_send->setLayoutDirection(Qt::RightToLeft);

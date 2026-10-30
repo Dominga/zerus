@@ -85,6 +85,8 @@ private:
     // U28: the lead's planning rules: the text, or a proposal's line diff.
     QWidget *planningRulesEditor();
     void resetPlanningRules();
+    bool canResetPlanningRules() const;
+    void updatePlanningRulesReset();
     void selectTemplate(const QString &id);
     QWidget *roleEditor(int index);
     QWidget *templateEditor(int index);

@@ -246,6 +246,48 @@ void TeamPanel::editTask(const Team &team, int taskId)
     form->addRow(tr("Acceptance criteria"), criteria);
     form->addRow(tr("Assignee"), assignee);
     form->addRow(tr("Models"), models);
+    // U36: the task's pipeline: the default (its role's, else the template's),
+    // a catalog preset, or none; the task keeps a snapshot once handed out.
+    auto *pipeline = new QComboBox; pipeline->setObjectName("teamTaskEditPipeline");
+    const QList<Teams::Pipeline> presets = m_controller->catalog().pipelines;
+    const auto presetText = [](const Teams::Pipeline &preset) {
+        QStringList flow;
+        for (const auto &stage : preset.stages) flow << stageName(stage.kind);
+        flow << stageName(preset.accept.isEmpty() ? QStringLiteral("lead") : preset.accept);
+        return preset.stages.isEmpty() ? flow.join(QStringLiteral(" › "))
+                                       : tr("%1 · %2 rounds").arg(flow.join(QStringLiteral(" › "))).arg(preset.rounds());
+    };
+    const auto defaultText = [this, &team](const QString &member) {
+        const Member *m = team.member(member);
+        const Role *role = m ? m_controller->catalog().roleNamed(m->role) : nullptr;
+        const Teams::Pipeline *preset = role && !role->pipeline.isEmpty() ? m_controller->catalog().pipeline(role->pipeline) : nullptr;
+        if (preset) return tr("Default: %1 (%2's default)").arg(preset->name.isEmpty() ? preset->id : preset->name, team.roleOf(member));
+        return tr("Default: the role's or the template's");
+    };
+    pipeline->addItem(defaultText(task.assignee), QString());
+    pipeline->setItemData(0, tr("Its role's pipeline, else its template's; none when neither names one"), Qt::ToolTipRole);
+    for (const auto &preset : presets) {
+        pipeline->addItem(preset.name.isEmpty() ? preset.id : preset.name, preset.id);
+        pipeline->setItemData(pipeline->count() - 1, presetText(preset), Qt::ToolTipRole);
+    }
+    pipeline->addItem(tr("None: the report goes to the lead"), QStringLiteral("none"));
+    // A preset the catalog no longer lists stays as it was chosen.
+    if (!task.pipeline.isEmpty() && pipeline->findData(task.pipeline) < 0) pipeline->addItem(task.pipeline, task.pipeline);
+    pipeline->setCurrentIndex(qMax(0, pipeline->findData(task.pipeline)));
+    auto *pipelineNote = new QLabel; pipelineNote->setObjectName("teamTaskEditPipelineNote"); pipelineNote->setWordWrap(true);
+    const auto describe = [pipeline, pipelineNote, presets, presetText, this] {
+        const QString id = pipeline->currentData().toString();
+        QString text = id == "none" ? tr("No stages: the report goes to the lead as today.") : tr("Its role's or template's pipeline, if any.");
+        for (const auto &preset : presets) if (preset.id == id) text = presetText(preset);
+        pipelineNote->setText(text + QStringLiteral("\n") + tr("Changes the preset for this task only; the task keeps a snapshot when it is assigned."));
+    };
+    describe();
+    QObject::connect(pipeline, &QComboBox::currentIndexChanged, pipelineNote, describe);
+    QObject::connect(assignee, &QComboBox::currentIndexChanged, pipeline, [pipeline, assignee, defaultText] { pipeline->setItemText(0, defaultText(assignee->currentData().toString())); });
+    auto *pipelineBox = new QWidget; auto *pipelineLayout = new QVBoxLayout(pipelineBox); pipelineLayout->setContentsMargins(0, 0, 0, 0); pipelineLayout->setSpacing(3);
+    pipelineLayout->addWidget(pipeline); pipelineLayout->addWidget(pipelineNote);
+    form->addRow(tr("Pipeline"), pipelineBox);
+    if (!m_controller->catalogReady()) m_controller->refreshCatalog();
     // Dependencies: each other task, hard or soft.
     auto *depsBox = new QWidget; auto *deps = new QVBoxLayout(depsBox); deps->setContentsMargins(0, 0, 0, 0); deps->setSpacing(2);
     QList<std::tuple<int, QCheckBox *, QCheckBox *>> depRows;
@@ -297,6 +339,7 @@ void TeamPanel::editTask(const Team &team, int taskId)
     task.models.clear();
     for (const auto &model : models->text().split(QRegularExpression(QStringLiteral("[,\\s]+")), Qt::SkipEmptyParts))
         if (!task.models.contains(model) && task.models.size() < 20) task.models << model;
+    task.pipeline = pipeline->currentData().toString();
     task.deps.clear();
     for (const auto &[id, on, soft] : depRows) if (on->isChecked()) task.deps.append({id, soft->isChecked()});
     bool replaced = false;

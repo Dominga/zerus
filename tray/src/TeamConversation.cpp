@@ -1,4 +1,5 @@
 #include "TeamConversation.h"
+#include "AccountSwitch.h"
 #include "ActivityView.h"
 #include "CacheStatus.h"
 #include "HeldInputBar.h"
@@ -154,13 +155,35 @@ TeamConversation::TeamConversation(HgsClient *client, QWidget *parent) : QWidget
     QObject::connect(m_attach, &QPushButton::clicked, this, [this] {
         for (const auto &path : QFileDialog::getOpenFileNames(this, tr("Attach files"))) addFile(path, false);
     });
-    row->addWidget(m_input, 1); row->addWidget(m_attach, 0, Qt::AlignBottom); row->addWidget(m_send, 0, Qt::AlignBottom);
+    m_accountChip = new AccountSwitchChip;
+    row->addWidget(m_input, 1); row->addWidget(m_accountChip, 0, Qt::AlignBottom); row->addWidget(m_attach, 0, Qt::AlignBottom); row->addWidget(m_send, 0, Qt::AlignBottom);
     bv->addWidget(m_composerRow);
     v->addWidget(bottom);
     m_input->installEventFilter(new ComposerFilter([this] { send(m_input->toPlainText()); }, this));
     QObject::connect(m_send, &QPushButton::clicked, this, [this] { send(m_input->toPlainText()); });
     QObject::connect(m_client, &HgsClient::inspectionReady, this, [this](const QString &host, const QString &name, const QJsonObject &data, const QString &archive) {
         received(host, name, data, archive);
+    });
+    // U53: the session computer's accounts, read when the session changes.
+    QObject::connect(m_client, &HgsClient::accountsReady, this, [this](quint64 request, const QString &host, const QJsonObject &result) {
+        if (request != m_accountsRequest || host != m_host) return;
+        m_accountsRequest = 0; m_accountProfiles = {};
+        for (const auto &value : result.value("profiles").toArray()) { auto p = value.toObject(); p["host"] = host; m_accountProfiles.append(p); }
+        updateAccountChip();
+    });
+    m_accountChip->switchRequested = [this](const QString &key, const QString &account) {
+        if (m_switchRequest || key != m_host + '\n' + m_name) { m_accountChip->finish(key, {}, tr("the conversation changed before the switch began; choose again")); return; }
+        m_switchRequest = m_client->requestSwitchAccount(m_host, m_name, account);
+    };
+    QObject::connect(m_client, &HgsClient::switchAccountFinished, this, [this](quint64 request, const QString &host, const QString &name, const QJsonObject &receipt, const QString &error) {
+        if (request != m_switchRequest) return;
+        m_switchRequest = 0;
+        const auto outcome = m_accountChip->finish(host + '\n' + name, receipt, error);
+        if (host == m_host && name == m_name && !outcome.text.isEmpty()) {
+            m_status->setText(outcome.text); m_status->setProperty("tone", outcome.kind == AccountSwitch::Outcome::Switched ? "info" : "warn"); m_status->show();
+        }
+        // The account changed (or stayed): the next read names it.
+        m_accountHost = QStringLiteral("\x1f"); poll();
     });
     QObject::connect(m_client, &HgsClient::messageSent, this, [this](quint64 request, const QString &, const QString &, const QJsonObject &receipt) {
         if (request != m_sendRequest) return;
@@ -173,6 +196,7 @@ TeamConversation::TeamConversation(HgsClient *client, QWidget *parent) : QWidget
         // Held by hgs: its line shows at once, then as the next reads list it.
         if (receipt.value("status") == "queued") {
             m_justHeld.append(QJsonObject{{"request_id", receipt.value("request_id")}, {"text", receipt.value("text")}});
+            m_sentHeld.add(receipt.value("request_id").toString(), m_pendingText.isEmpty() ? receipt.value("text").toString() : m_pendingText);
             renderHeld();
         }
         if (sent) sent({});
@@ -236,13 +260,43 @@ void TeamConversation::setSession(const QString &host, const QString &name)
         if (m_intro) m_intro->setVisible(name.isEmpty());
         updateSend(); fitDesigner();
     }
-    m_justHeld = {}; renderHeld();
+    m_justHeld = {}; m_sentHeld.clear(); renderHeld();
+    updateAccountChip();
     if (isVisible()) poll();
+}
+
+void TeamConversation::setAccountLocked(const QString &reason)
+{
+    m_accountLock = reason; updateAccountChip();
+}
+
+// U53: the session's account by its label, the same agent's signed-in
+// accounts on its computer, and why it cannot change now.
+void TeamConversation::updateAccountChip()
+{
+    // The accounts are read once per computer, again after a switch.
+    if (!m_name.isEmpty() && m_accountHost != m_host && !m_accountsRequest) {
+        m_accountHost = m_host; m_accountProfiles = {};
+        m_accountsRequest = m_client->requestAccounts(m_host);
+    }
+    const auto agent = m_details.value("agent").toString();
+    const auto account = m_details.value("account_id").toString();
+    m_accountChip->setSession(m_name.isEmpty() ? QString() : m_host + '\n' + m_name, agent, account,
+                              m_name.isEmpty() ? QString() : m_details.value("account_label").toString());
+    m_accountChip->setOptions(AccountSwitch::options(m_accountProfiles, m_host, agent, AccountSwitch::accountOf(agent, account), m_dark));
+    m_accountChip->setLocked(m_accountLock);
+    const auto phase = m_details.value("phase").toString();
+    m_accountChip->setBlocked(m_details.value("runtime_state").toString() != QLatin1String("live") || m_details.value("process_state").toString() != QLatin1String("running")
+                                  ? tr("The session is not running; resume it to change its account.")
+                              : QStringList{"working", "tool", "compacting"}.contains(phase) ? tr("The agent is working; change its account once it is idle.")
+                              : m_sendRequest ? tr("Wait for the message to be delivered.")
+                              : m_details.value("build").isObject() ? tr("A build Zerus runs for the session is still going; wait for it.") : QString());
 }
 
 void TeamConversation::setTheme(bool dark)
 {
     m_dark = dark;
+    m_accountChip->setTheme(dark);
     const Colors c = colorsFor(dark);
     setStyleSheet(QStringLiteral("QWidget#teamConversationBottom{border-top:1px solid %1;} QPlainTextEdit#teamConversationInput{background:%2;color:%3;border:1px solid %1;border-radius:8px;padding:4px 6px;}")
                       .arg(c.border.name(), c.surface.name(), c.fg.name()));
@@ -322,6 +376,7 @@ void TeamConversation::useDesignerLayout(QWidget *intro, QWidget *above)
     m_row->add(ComposerToolbar::Slot::Cache, cache);
     m_row->add(ComposerToolbar::Slot::Context, context);
     m_row->add(ComposerToolbar::Slot::SessionReference, m_reference);
+    m_row->add(ComposerToolbar::Slot::Account, m_accountChip);
     m_row->add(ComposerToolbar::Slot::Model, m_model);
     bv->addWidget(m_row);
     QObject::connect(m_reference, &QPushButton::clicked, this, [this] {
@@ -513,6 +568,7 @@ void TeamConversation::received(const QString &host, const QString &name, const 
     m_cursor = data.value("cursor").toInteger();
     m_view->setTimeline(m_details, m_events, {});
     renderQuestion();
+    updateAccountChip();
     if (m_designer) {
         static_cast<CacheStatus::Chip *>(m_cache)->setData(data);
         static_cast<SessionUsage::ContextButton *>(m_context)->setData(data.value("session_usage").toObject());
@@ -529,6 +585,14 @@ void TeamConversation::received(const QString &host, const QString &name, const 
         else m_justHeld[i] = item;
     }
     renderHeld();
+    // #511 N5: a held message hgs could not deliver comes back to the composer
+    // with why; an uncertain one says Delivery unconfirmed.
+    for (const auto &lost : m_sentHeld.take(m_details.value("held_settled").toArray())) {
+        m_input->setPlainText(HeldSent::restored(m_input->toPlainText(), lost.text));
+        m_status->setText(HeldSent::notice(lost));
+        m_status->setStyleSheet(QStringLiteral("color:%1;").arg(colorsFor(m_dark).danger.name()));
+        m_status->show();
+    }
 }
 
 void TeamConversation::send(const QString &raw)

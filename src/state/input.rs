@@ -531,6 +531,59 @@ pub(super) fn composer_empty(agent: &str, screen: &str, cursor_x: usize, cursor_
     composer_empty_for_model(agent, screen, cursor_x, cursor_y, None)
 }
 
+/// Claude Code 2.1.312 draws the input as `rule, ❯, rule, footer` with an effort
+/// line above the top rule ("● high · /effort"), and parks its idle caret on
+/// any of those rows. The empty prompt row makes the frame unambiguous: a draft
+/// fills that row and this never accepts it. Older layouts keep their own
+/// prompt-row check; this only answers where the caret sits.
+fn claude_input_frame_empty(screen: &str, cursor_y: usize) -> bool {
+    let lines: Vec<&str> = screen.lines().collect();
+    let plain = |index: usize| -> Option<String> {
+        lines.get(index).map(|row| styled_row(row).iter().map(|(ch, _)| ch).collect())
+    };
+    let empty_prompt = |index: usize| {
+        plain(index).is_some_and(|text| {
+            let mut chars = text.chars();
+            matches!(chars.next(), Some('❯' | '>')) && chars.all(char::is_whitespace)
+        })
+    };
+    let rule = |index: usize| {
+        plain(index).is_some_and(|text| {
+            !text.starts_with(char::is_whitespace)
+                && text.chars().count() >= 12
+                && text.chars().all(|ch| "─━╌".contains(ch))
+        })
+    };
+    let effort = |index: usize| {
+        plain(index).is_some_and(|text| {
+            let text = text.trim();
+            text.starts_with('●') && text.contains("/effort")
+        })
+    };
+    for composer in 0..lines.len() {
+        if !empty_prompt(composer) || !rule(composer + 1) {
+            continue;
+        }
+        // Only the 2.1.312 frame: the effort line, the top rule, the composer,
+        // the bottom rule and its footer. An older layout with the effort on
+        // the footer keeps its fail-closed caret handling.
+        if composer < 2 || !rule(composer - 1) || !effort(composer - 2) {
+            continue;
+        }
+        // The caret may rest anywhere around this frame: on it, above it, or on
+        // a blank row below it. Text below the footer (a dialog) means the
+        // screen is not a plain empty input.
+        let footer = composer + 2;
+        let blank = |index: usize| {
+            lines.get(index).is_none_or(|row| styled_row(row).iter().all(|(ch, _)| ch.is_whitespace()))
+        };
+        if cursor_y <= footer || ((footer + 1)..=cursor_y).all(blank) {
+            return true;
+        }
+    }
+    false
+}
+
 // A local model has no GPT prefix. Accept its native footer only when the
 // model/effort label matches this exact session's confirmed or launch model.
 fn codex_model_footer(footer: &str, model: Option<&str>) -> bool {
@@ -585,6 +638,13 @@ fn composer_empty_for_model(agent: &str, screen: &str, cursor_x: usize, cursor_y
         .copied()
         .unwrap_or("");
     if !prompt_empty(agent, row, previous, screen, cursor_x) {
+        // Claude Code 2.1.312 frames the composer with an unindented rule above
+        // and below and can leave its idle caret outside the prompt row (on the
+        // rule or the footer) with the effort line above it. The empty frame is
+        // the evidence then; a draft fills the prompt row and is refused here.
+        if agent == "claude" && claude_input_frame_empty(screen, cursor_y) {
+            return true;
+        }
         return false;
     }
     let placeholder = styled_row(row)
@@ -713,6 +773,22 @@ pub(super) fn checked_terminal(record: &Value, empty: bool) -> Result<()> {
             cursor_y,
             codex_footer_model(record),
         ) {
+            // U53 diagnostics: one native run prints which check refused and
+            // where the caret and its row are, behind a flag only a test sets.
+            if nonempty_env("HGS_INPUT_TRACE").is_some() {
+                let agent = string(record, "agent");
+                let lines: Vec<&str> = screen.lines().collect();
+                let row = lines.get(cursor_y).copied().unwrap_or("");
+                let previous = cursor_y
+                    .checked_sub(1)
+                    .and_then(|y| lines.get(y))
+                    .copied()
+                    .unwrap_or("");
+                let prompt = prompt_empty(agent, row, previous, &screen, cursor_x);
+                return Err(format!(
+                    "{DRAFT} [trace: agent={agent} cursor=({cursor_x},{cursor_y}) prompt_empty={prompt} row={row:?}]"
+                ));
+            }
             return Err(DRAFT.into());
         }
     }
@@ -1219,6 +1295,46 @@ mod tests {
         }
         assert!(!composer_empty("claude", screen, 3, 1));
     }
+    #[test]
+    fn claude_2312_effort_line_and_framed_composer_keep_an_empty_input() {
+        // Native 2.1.312 layout: header, a blank body, the effort line, then
+        // rule, composer, rule, footer. The caret may rest anywhere in that
+        // frame while the composer is empty.
+        let rule = "─".repeat(80);
+        let mut lines: Vec<String> = vec![
+            " ▐▛███▛█   Claude Code v2.1.312".into(),
+            "▝▜█████▛▘  Sonnet 4.6 · API Usage Billing".into(),
+            " ▝▝   ▝▝   C:\\work\\example".into(),
+        ];
+        lines.extend(std::iter::repeat_n(String::new(), 8));
+        lines.push(format!("{:>62}● high · /effort", ""));
+        lines.push(rule.clone());
+        lines.push("❯\u{a0}".into());
+        lines.push(rule.clone());
+        lines.push("  ⏸ manual mode on · ? for shortcuts · ← for agents".into());
+        let screen = lines.join("\n");
+        let composer = 13;
+        for y in [composer - 2, composer - 1, composer, composer + 1, composer + 2] {
+            assert!(composer_empty("claude", &screen, 2, y), "caret row {y}");
+        }
+        // A draft fills the composer row: no frame, whatever the caret row.
+        let drafted = screen.replace("❯\u{a0}", "❯ fix the build");
+        for y in [composer - 2, composer - 1, composer + 1, composer + 2] {
+            assert!(!composer_empty("claude", &drafted, 2, y), "drafted row {y}");
+        }
+        // A dialog that replaces the composer row is not an empty input.
+        let dialog = screen.replace("❯\u{a0}", "╭─ Question ─╮");
+        assert!(!composer_empty("claude", &dialog, 2, composer));
+        // A hidden caret parked on a blank row below the footer is the same
+        // input; text there (a dialog) is never accepted.
+        let mut parked = lines.clone();
+        parked.extend([String::new(), String::new(), String::new()]);
+        assert!(composer_empty("claude", &parked.join("\n"), 0, composer + 4));
+        let mut text_below = lines.clone();
+        text_below.push("  Approve command?".into());
+        assert!(!composer_empty("claude", &text_below.join("\n"), 0, composer + 3));
+    }
+
     #[test]
     fn claude_draft_reads_the_composer_only() {
         let rule = "────────────────────────────────────────";

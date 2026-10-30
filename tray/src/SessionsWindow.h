@@ -29,6 +29,7 @@ class QPlainTextEdit;
 #include "TeamModel.h"   // WhiteWh fork: agent teams
 #include "TeamCatalogEditor.h"
 #include "SessionAccounts.h"
+#include "HeldInputBar.h"
 #include "SessionRows.h"
 #include <QFont>
 
@@ -469,6 +470,9 @@ private:
     bool archiveNameOccupied(const Entry &archive) const;
     QString messageBlockReason(const Entry &entry) const;
     QString modelSettingsBlockReason(const Entry &entry) const;
+    // U53: the account chip beside the model, and why it cannot change now.
+    void updateAccountChip(const Entry &entry, bool unavailable);
+    QString accountSwitchBlockReason(const Entry &entry) const;
     void changeModelSettings(const QString &key, const QString &model, const QString &effort);
     // OpenCode's grouped model picker in the composer: catalog and favorite requests.
     void connectOpenCodeModels();
@@ -576,6 +580,7 @@ private:
     // F7: a session named here is taken into the new team as its existing lead.
     void showNewTeam(const QString &host = {}, const QString &name = {});
     void showTeamDesigner();
+    void showTeamWaiting();
     void startTeamDesigner(const QString &folder,const QString &goal,const QJsonObject &agent);
     QString m_teamDesignerFolder,m_teamDesignerProject;
     QString teamDesignerSession() const;
@@ -595,6 +600,10 @@ private:
     class QLabel *m_branchIcon=nullptr,*m_branchText=nullptr;
     class QPushButton *m_teamDesignerNav=nullptr;
     int m_teamDesignerPageIndex=-1;
+    // U50: the rail's Waiting for you page, made on first use.
+    class TeamWaitingPage *m_teamWaitingPage=nullptr;
+    class QPushButton *m_teamWaitingNav=nullptr;
+    int m_teamWaitingPageIndex=-1;
     QWidget *m_teamNewTab=nullptr;
     class TeamNewTab *m_teamNewForm=nullptr;
     bool m_teamNewWaiting=false;
@@ -779,6 +788,8 @@ private:
     class HeldInputBar *m_heldBar = nullptr;
     class TerminalDraftBar *m_terminalDraft = nullptr;
     QHash<QString, QJsonArray> m_justHeld;
+    // #511 N5: the held messages each session's composer queued, until hgs settles them.
+    QHash<QString, HeldSent> m_sentHeld;
     QHash<quint64, QPair<QString, QString>> m_heldCancels;
     void renderHeld();
     void openSessionTerminal(const QString &host, const QString &name);
@@ -848,6 +859,9 @@ private:
     ProjectsDialog *m_projectsPage;
     QPushButton *m_projectsNav;
     bool m_dark = false;
+    // U53: the one account switch in flight: its request and session.
+    quint64 m_accountSwitchRequest = 0;
+    QString m_accountSwitchKey;
     QFileSystemWatcher *m_skinWatcher = nullptr;
     QString m_fg, m_muted, m_surface, m_border, m_accent;
 };

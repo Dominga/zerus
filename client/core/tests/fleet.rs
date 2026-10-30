@@ -39,8 +39,29 @@ fn a_local_fleet_starts_no_peer_streams() {
     let fleet = Fleet::start_local(fake.path(), tx, quick());
     seen.until("the upsert after the meta", |c| upserted(c, "", "run:l2"));
     assert_eq!(fleet.computers(), vec![ComputerId::local()]);
+    // The listed peers are known even without their streams.
+    assert_eq!(fleet.peers(), Some(["alpha".to_owned()].into()));
     fleet.stop();
     assert_eq!(fake.hosts_started(), vec![String::new(), String::new()]);
+}
+
+#[test]
+fn peers_stay_unknown_until_a_listing_names_them() {
+    let fake = FakeHgs::new(
+        "fleet_peers_unknown",
+        json!({
+            "": {"runs": [[{"lines": [hello("workstation"), catalog(&[("l1", "claude/sample-project/local")]),
+                meta(None), upsert("l2", "claude/sample-project/after-meta")]}, {"serve": true}]]}
+        }),
+    );
+    let (tx, rx) = channel();
+    let mut seen = Seen::new(rx);
+    let fleet = Fleet::start_with(fake.path(), tx, quick());
+    assert_eq!(fleet.peers(), None);
+    seen.until("the upsert after the meta", |c| upserted(c, "", "run:l2"));
+    // An older host's listing has no peers array: still unknown.
+    assert_eq!(fleet.peers(), None);
+    fleet.stop();
 }
 
 #[test]
@@ -77,6 +98,8 @@ fn the_fleet_follows_the_peers_this_computer_lists() {
     seen.until("beta live", |c| is_status(c, "beta", ComputerStatus::Live));
     // beta's own peers came before this upsert and were ignored.
     seen.until("beta after its meta", |c| upserted(c, "beta", "run:b2"));
+    let listed = |aliases: &[&str]| Some(aliases.iter().map(|a| (*a).to_owned()).collect());
+    assert_eq!(fleet.peers(), listed(&["alpha", "beta"]));
     let alpha_rows = seen
         .all
         .iter()
@@ -104,6 +127,7 @@ fn the_fleet_follows_the_peers_this_computer_lists() {
     assert!(seen.all[..ended].iter().any(|change| matches!(change,
         Change::Replace { computer, rows } if computer.0 == "alpha" && rows.is_empty())));
     eventually("alpha's stream EOF", || fake.eofs("alpha") == 1);
+    assert_eq!(fleet.peers(), listed(&["beta"]));
 
     // A listing without a peers array keeps the previous peers.
     fake.touch("step3");
@@ -119,6 +143,7 @@ fn the_fleet_follows_the_peers_this_computer_lists() {
         fleet.computers(),
         vec![ComputerId::local(), ComputerId::from("beta")]
     );
+    assert_eq!(fleet.peers(), listed(&["beta"]));
     assert!(!fake.hosts_started().iter().any(|host| host == "gamma"));
     assert_eq!(fake.runs("alpha", &["watch", "--json"]).len(), 1);
     assert_eq!(fake.runs("beta", &["watch", "--json"]).len(), 1);

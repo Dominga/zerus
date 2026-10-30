@@ -80,8 +80,9 @@ object DesktopSessionPalette {
         DesktopBadgeKind.Paused -> if (dark) DesktopBadgeColors(0xFF443654, 0xFFDEC3FF) else DesktopBadgeColors(0xFFE8DDF5, 0xFF634187)
         DesktopBadgeKind.Scheduled -> if (dark) DesktopBadgeColors(0xFF173E48, 0xFF9FE0F0) else DesktopBadgeColors(0xFFD3EDF4, 0xFF165A6B)
         DesktopBadgeKind.Neutral -> if (dark) DesktopBadgeColors(0xFF2B343E, 0xFFB6C2D0) else DesktopBadgeColors(0xFFE7EDF2, 0xFF566575)
-        // U30: the tokens of SESSION-STATES.md section 6, filled like the badge draws them.
-        DesktopBadgeKind.Building -> if (dark) DesktopBadgeColors(0xFF1B3A4A, 0xFF7FD3F2) else DesktopBadgeColors(0xFFDFF0F8, 0xFF17627F)
+        // U30: the tokens of SESSION-STATES.md section 6, filled like the badge draws them. Building
+        // takes the desktop's Build tone (SessionStatusBadge.h), 13 % of it over the card surface.
+        DesktopBadgeKind.Building -> if (dark) DesktopBadgeColors(0xFF203832, 0xFF4CC98A) else DesktopBadgeColors(0xFFE3F2EB, 0xFF2A9D63)
         DesktopBadgeKind.Deps -> if (dark) DesktopBadgeColors(0xFF1B2A44, 0xFF6FA8FF) else DesktopBadgeColors(0xFFE6EFFB, 0xFF2F66C9)
         DesktopBadgeKind.Cooling -> if (dark) DesktopBadgeColors(0xFF12333B, 0xFF56C8E0) else DesktopBadgeColors(0xFFE1F3F8, 0xFF137F95)
         DesktopBadgeKind.Cold -> if (dark) DesktopBadgeColors(0xFF2A3547, 0xFF8FA6C4) else DesktopBadgeColors(0xFFE9EEF5, 0xFF55708F)

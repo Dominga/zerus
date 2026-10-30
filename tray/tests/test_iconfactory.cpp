@@ -35,7 +35,7 @@ void TestIconFactory::svgResourcesRender()
 {
     // Loading a QIcon alone does not prove that its image-format plugin exists.
     // The packaged desktop uses these SVG resources for menu/combo arrows.
-    for (const auto *path : {":/hgs/chevron-down.svg", ":/hgs/chevron-right.svg", ":/hgs/icons/hgs-zerus-symbolic.svg"}) {
+    for (const auto *path : {":/hgs/chevron-down.svg", ":/hgs/chevron-up.svg", ":/hgs/chevron-right.svg", ":/hgs/icons/hgs-zerus-symbolic.svg"}) {
         QImageReader reader(QString::fromLatin1(path));
         const QImage image = reader.read();
         QVERIFY2(!image.isNull(), qPrintable(QString::fromLatin1(path) + ": " + reader.errorString()));

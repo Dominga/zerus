@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::Read;
+use std::sync::Mutex;
+use std::time::SystemTime;
 
 const MAX_REVISION: u64 = i64::MAX as u64;
 const MAX_CONVERSATIONS: usize = 8;
@@ -225,9 +227,38 @@ pub(super) fn enrich(session: &mut Value, store: Option<&Store>, owner: &str) {
     let conversation = string(session, "conversation_id");
     let value = store
         .filter(|_| owner_identity(owner) && identity(conversation))
-        .map(|store| json!(preference(store, owner, conversation)))
+        .map(|store| {
+            let mut preference = preference(store, owner, conversation);
+            // U43: a member of an active team without a recorded choice is muted
+            // by default on every device. A stored choice (revision > 0) wins;
+            // the lead of every active team is never muted by this default.
+            if preference.revision == 0 && !preference.muted && team_muted(string(session, "name")) {
+                preference.muted = true;
+            }
+            json!(preference)
+        })
         .unwrap_or(Value::Null);
     session["notification_preferences"] = value;
+}
+
+/// U43: the team store identity and the non-lead member names read from it.
+type TeamMutedCache = Option<((PathBuf, u64, Option<SystemTime>), BTreeSet<String>)>;
+
+/// U43: whether this session name is a non-lead member of an active team. The
+/// cache key is the team store itself, so one listing that asks per session
+/// reads the teams once and a changed store is read again.
+fn team_muted(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let Ok(metadata) = fs::metadata(super::teams::store::path()) else { return false };
+    let key = (root(), metadata.len(), metadata.modified().ok());
+    static TEAM_MUTED: Mutex<TeamMutedCache> = Mutex::new(None);
+    let mut cache = TEAM_MUTED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if cache.as_ref().map(|(cached, _)| cached) != Some(&key) {
+        *cache = Some((key, super::teams::muted_member_names()));
+    }
+    cache.as_ref().is_some_and(|(_, names)| names.contains(name))
 }
 
 /// Preserve the preference owner when a native provider renames its binding.
@@ -994,5 +1025,68 @@ mod tests {
         fs::write(&path, "{broken").unwrap();
         assert!(read_store(&path).is_err());
         assert_eq!(fs::read(&path).unwrap(), b"{broken");
+    }
+
+    /// U43: an active team's member with no recorded choice reads muted in
+    /// every listing; its lead, a session outside any team, a recorded choice
+    /// and a finished team's member do not.
+    #[test]
+    fn an_active_teams_member_reads_muted_without_a_recorded_choice() {
+        use crate::state::teams::model::{Member, SessionRef, Team, TeamStatus};
+        use crate::state::teams::store::Store as TeamStore;
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let mut teams = TeamStore::open(true).unwrap();
+            let team = |id: &str, status: TeamStatus, lead: &str, member: &str| Team {
+                id: id.into(),
+                name: "T".into(),
+                lead: lead.into(),
+                status,
+                members: vec![
+                    Member {
+                        id: lead.into(),
+                        role: "Lead".into(),
+                        agent: "claude".into(),
+                        session: Some(SessionRef { name: format!("claude/x/{lead}"), run_id: "r0".into(), ..Default::default() }),
+                        ..Default::default()
+                    },
+                    Member {
+                        id: "dev".into(),
+                        role: "Backend".into(),
+                        agent: "dsh".into(),
+                        session: Some(SessionRef { name: member.into(), run_id: "r1".into(), ..Default::default() }),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            };
+            teams.create("11111111-1111-4111-8111-111111111111", &json!({}), team("running", TeamStatus::Running, "lead", "dsh/x/dev"), vec![]).unwrap();
+            teams.create("22222222-2222-4222-8222-222222222222", &json!({}), team("done", TeamStatus::Done, "oldlead", "dsh/x/old"), vec![]).unwrap();
+            let store = Store::default();
+            // The member's default row: revision 0 and muted, with no write.
+            let mut member = session();
+            member["name"] = json!("dsh/x/dev");
+            enrich(&mut member, Some(&store), "dsh/x/dev");
+            assert_eq!(member["notification_preferences"]["muted"], true, "{member}");
+            assert_eq!(member["notification_preferences"]["revision"], 0);
+            // A recorded choice wins, even when it is an unmute at revision 3.
+            let mut chosen = Store::default();
+            chosen.sessions.entry("dsh/x/dev".into()).or_default().insert(
+                "conversation-1".into(),
+                Preference { conversation_id: "conversation-1".into(), muted: false, revision: 3, suppressed: Suppressed::default() },
+            );
+            let mut chosen_row = session();
+            chosen_row["name"] = json!("dsh/x/dev");
+            enrich(&mut chosen_row, Some(&chosen), "dsh/x/dev");
+            assert_eq!(chosen_row["notification_preferences"]["muted"], false);
+            // The lead is never muted by the default; nor is a non-member or a
+            // member of a finished team.
+            for (owner, name) in [("claude/x/lead", "claude/x/lead"), ("dsh/x/other", "dsh/x/other"), ("dsh/x/old", "dsh/x/old")] {
+                let mut row = session();
+                row["name"] = json!(name);
+                enrich(&mut row, Some(&store), owner);
+                assert_eq!(row["notification_preferences"]["muted"], false, "{name}: {row}");
+            }
+        });
     }
 }

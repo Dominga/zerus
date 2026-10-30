@@ -148,6 +148,7 @@ pub fn role(root: u32, process: &ProcSample) -> &'static str {
 }
 
 /// `root` and every process whose parent chain reaches it.
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
 pub fn descendants(root: u32, parents: &BTreeMap<u32, u32>) -> BTreeSet<u32> {
     let mut children: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
     for (&pid, &ppid) in parents {
@@ -189,6 +190,8 @@ pub mod linux {
     use super::{descendants, ProcSample, TreeSample};
     use std::collections::BTreeMap;
     use std::fs;
+    use std::io;
+    use std::path::Path;
 
     /// USER_HZ: the unit of utime and stime in /proc/<pid>/stat. It is part of
     /// the kernel ABI and 100 on every architecture Linux supports today.
@@ -229,9 +232,38 @@ pub mod linux {
         })
     }
 
-    fn parents() -> BTreeMap<u32, u32> {
+    /// errno "No such process" on Linux, which a vanished process's files give.
+    const ESRCH: i32 = 3;
+
+    /// A process's proportional set size, as `smaps_rollup` gives it.
+    #[derive(Debug, PartialEq)]
+    pub enum Pss {
+        Bytes(u64),
+        /// The process exited between the listing and the read.
+        Vanished,
+        /// The size cannot be read (permission or another failure).
+        Unknown,
+    }
+
+    /// Reads `smaps_rollup`: a file without a `Pss` line (an exited process
+    /// not yet reaped has no memory left) counts as 0; a missing file or
+    /// process is a process that vanished.
+    pub fn pss(read: io::Result<String>) -> Pss {
+        match read {
+            Ok(text) => Pss::Bytes(kb_field(&text, "Pss").unwrap_or(0)),
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound
+                    || error.raw_os_error() == Some(ESRCH) =>
+            {
+                Pss::Vanished
+            }
+            Err(_) => Pss::Unknown,
+        }
+    }
+
+    fn parents(proc: &Path) -> BTreeMap<u32, u32> {
         let mut parents = BTreeMap::new();
-        let Ok(entries) = fs::read_dir("/proc") else {
+        let Ok(entries) = fs::read_dir(proc) else {
             return parents;
         };
         for entry in entries.flatten() {
@@ -242,7 +274,7 @@ pub mod linux {
             else {
                 continue;
             };
-            if let Some(stat) = fs::read_to_string(format!("/proc/{pid}/stat"))
+            if let Some(stat) = fs::read_to_string(proc.join(pid.to_string()).join("stat"))
                 .ok()
                 .as_deref()
                 .and_then(parse_stat)
@@ -253,12 +285,16 @@ pub mod linux {
         parents
     }
 
-    fn sample(pid: u32) -> Option<ProcSample> {
-        let stat = parse_stat(&fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)?;
-        let status = fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
-        let pss = fs::read_to_string(format!("/proc/{pid}/smaps_rollup"))
-            .ok()
-            .and_then(|text| kb_field(&text, "Pss"));
+    /// One process under `proc`; None when it vanished meanwhile.
+    fn sample(proc: &Path, pid: u32) -> Option<ProcSample> {
+        let dir = proc.join(pid.to_string());
+        let stat = parse_stat(&fs::read_to_string(dir.join("stat")).ok()?)?;
+        let status = fs::read_to_string(dir.join("status")).unwrap_or_default();
+        let pss = match pss(fs::read_to_string(dir.join("smaps_rollup"))) {
+            Pss::Bytes(bytes) => Some(bytes),
+            Pss::Vanished => return None,
+            Pss::Unknown => None,
+        };
         Some(ProcSample {
             pid,
             ppid: stat.ppid,
@@ -270,16 +306,21 @@ pub mod linux {
     }
 
     pub fn sample_tree(root: u32) -> Result<TreeSample, String> {
+        sample_tree_at(Path::new("/proc"), root)
+    }
+
+    /// [`sample_tree`] over a procfs mounted at `proc`.
+    pub fn sample_tree_at(proc: &Path, root: u32) -> Result<TreeSample, String> {
         let root_sample =
-            sample(root).ok_or_else(|| format!("process {root} is not readable in /proc"))?;
+            sample(proc, root).ok_or_else(|| format!("process {root} is not readable in /proc"))?;
         let mut processes = BTreeMap::new();
         processes.insert(root, root_sample);
-        for pid in descendants(root, &parents()) {
+        for pid in descendants(root, &parents(proc)) {
             if pid == root {
                 continue;
             }
             // A process may exit between the listing and the read; skip it.
-            if let Some(process) = sample(pid) {
+            if let Some(process) = sample(proc, pid) {
                 processes.insert(pid, process);
             }
         }
@@ -313,6 +354,13 @@ pub mod macos {
     }
 
     /// Whether the responsible-process lookup is available (for diagnostics).
+    #[cfg_attr(
+        target_os = "macos",
+        allow(
+            dead_code,
+            reason = "used by client/perf-probe-mac, which includes this file by path"
+        )
+    )]
     pub fn responsible_lookup_available() -> bool {
         responsible_fn().is_some()
     }
@@ -629,6 +677,58 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn a_child_that_vanished_mid_sample_is_skipped_and_only_unknown_pss_nulls_the_total() {
+        use linux::{pss, sample_tree_at, Pss};
+        use std::io;
+        let proc = std::env::temp_dir().join(format!("zerus-fake-proc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&proc);
+        let process = |pid: u32, ppid: u32, smaps: Option<&str>| {
+            let dir = proc.join(pid.to_string());
+            std::fs::create_dir_all(&dir).unwrap();
+            let stat = format!("{pid} (proc {pid}) S {ppid} 0 0 0 0 0 0 0 0 0 0 10 5 0 0");
+            std::fs::write(dir.join("stat"), stat).unwrap();
+            std::fs::write(dir.join("status"), "VmRSS:\t   400 kB\n").unwrap();
+            if let Some(text) = smaps {
+                std::fs::write(dir.join("smaps_rollup"), text).unwrap();
+            }
+        };
+        process(100, 1, Some("Rss: 400 kB\nPss:   100 kB\n"));
+        process(101, 100, Some("Rss: 400 kB\nPss:   50 kB\n"));
+        // An hgs child that exited after its stat was read.
+        process(102, 100, None);
+        // An exited child not reaped yet: no memory left.
+        process(103, 100, Some(""));
+        let tree = sample_tree_at(&proc, 100).unwrap();
+        assert_eq!(
+            tree.processes.keys().copied().collect::<Vec<_>>(),
+            [100, 101, 103]
+        );
+        let value = summarize(100, &tree, &tree, 0.5);
+        assert_eq!(value["total"]["pss_bytes"], (100 + 50) * 1024);
+        // A size that cannot be read keeps the process and makes the total unknown.
+        std::fs::create_dir_all(proc.join("101/smaps_rollup.d")).unwrap();
+        std::fs::remove_file(proc.join("101/smaps_rollup")).unwrap();
+        std::fs::rename(
+            proc.join("101/smaps_rollup.d"),
+            proc.join("101/smaps_rollup"),
+        )
+        .unwrap();
+        let tree = sample_tree_at(&proc, 100).unwrap();
+        assert!(tree.processes.contains_key(&101));
+        assert_eq!(
+            summarize(100, &tree, &tree, 0.5)["total"]["pss_bytes"],
+            Value::Null
+        );
+        assert_eq!(pss(Err(io::Error::from_raw_os_error(3))), Pss::Vanished);
+        assert_eq!(
+            pss(Err(io::Error::from(io::ErrorKind::PermissionDenied))),
+            Pss::Unknown
+        );
+        let _ = std::fs::remove_dir_all(&proc);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn stat_lines_with_parentheses_in_the_name_parse() {
         let line = "4242 (Web (Content) 2) S 4000 4242 4242 0 -1 4194560 100 0 0 0 250 50 0 0 20 0 9 0 12345 0 0";
         let stat = linux::parse_stat(line).unwrap();
@@ -650,6 +750,9 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn own_process_tree_reports_rss_cpu_and_children() {
+        let _tree = crate::PROCESS_TREE
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut child = std::process::Command::new("sleep")
             .arg("5")
             .spawn()
@@ -699,6 +802,9 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn own_process_tree_on_macos() {
+        let _tree = crate::PROCESS_TREE
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let value = process_tree_metrics_over(std::process::id(), Duration::from_millis(100));
         assert_eq!(value["source"], "proc_pidinfo", "{value}");
         assert!(value["total"]["rss_bytes"].as_u64().unwrap() > 0, "{value}");

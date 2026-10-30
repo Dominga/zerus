@@ -65,7 +65,7 @@ import androidx.compose.ui.unit.sp
         SessionState.Deps -> Color(if (dark) 0xFF6FA8FF else 0xFF2F66C9)
         SessionState.Cooling -> Color(if (dark) 0xFF56C8E0 else 0xFF137F95)
         SessionState.Cold -> Color(if (dark) 0xFF8FA6C4 else 0xFF55708F)
-        SessionState.Building -> Color(if (dark) 0xFF7FD3F2 else 0xFF17627F)
+        SessionState.Building -> Color(if (dark) 0xFF4CC98A else 0xFF2A9D63)
         SessionState.Offline -> MaterialTheme.colorScheme.error
         SessionState.Working, SessionState.User, SessionState.Stopped -> MaterialTheme.colorScheme.onSurfaceVariant
     }

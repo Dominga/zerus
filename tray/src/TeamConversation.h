@@ -5,6 +5,7 @@
 #include <QPointer>
 #include <QTextDocument>
 #include <QTimer>
+#include "HeldInputBar.h"
 #include "HgsClient.h"
 #include <QWidget>
 #include <functional>
@@ -64,6 +65,11 @@ public:
     // U35: who takes the owner's messages, in "Queued until %1 takes your
     // previous message" ("the lead"); the agent's name when empty.
     void setAgentName(const QString &name);
+    // U53: the account chip beside Attach (the designer's row: beside the
+    // model). A team member's account changes only with swap-member: its
+    // owner names why here and the menu only lists the accounts.
+    void setAccountLocked(const QString &reason);
+    class AccountSwitchChip *accountChip() const { return m_accountChip; }
     // Opens the session's terminal when a send is refused at a dialog or draft.
     std::function<void(const QString &host, const QString &name)> openTerminal;
 protected:
@@ -78,6 +84,7 @@ private:
     QJsonObject actionableQuestion(const QString &key, const QString &questionId, bool skipping) const;
     void finishAnswer(quint64 request, bool ok, const QString &error = {}, bool uncertain = false, bool submitted = false);
     void renderHeld();
+    void updateAccountChip();
     void showRefusal(const QString &error, bool uncertain);
     QString sessionKey() const { return m_name.isEmpty() ? QString() : m_host + '\n' + m_name; }
     void fitDesigner();
@@ -92,6 +99,11 @@ private:
     QWidget *m_intro = nullptr, *m_above = nullptr, *m_bottom = nullptr, *m_filesRow = nullptr;
     class QFrame *m_card = nullptr;
     class ComposerToolbar *m_row = nullptr;
+    class AccountSwitchChip *m_accountChip = nullptr;
+    QJsonArray m_accountProfiles;
+    QString m_accountLock;
+    QString m_accountHost = QStringLiteral("\x1f");   // the computer whose accounts were read; none yet
+    quint64 m_accountsRequest = 0, m_switchRequest = 0;
     QPushButton *m_attach = nullptr, *m_voice = nullptr, *m_video = nullptr, *m_reference = nullptr, *m_model = nullptr;
     class ToolbarChip *m_cache = nullptr;
     QPushButton *m_context = nullptr;
@@ -109,6 +121,8 @@ private:
     HeldInputBar *m_held = nullptr;
     TerminalDraftBar *m_terminalDraft = nullptr;
     QJsonArray m_justHeld;
+    // #511 N5: the held messages this composer queued, until hgs settles them.
+    HeldSent m_sentHeld;
     QString m_agentName;
     QPushButton *m_openTerminal = nullptr;
     QHBoxLayout *m_statusRow = nullptr;   // the status and Open terminal

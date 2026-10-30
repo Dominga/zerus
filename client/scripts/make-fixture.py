@@ -4,12 +4,16 @@
 fixtures/replay.ndjson       watch-v1 frames of this computer, for ZERUS_CLIENT_REPLAY
 fixtures/replay-mac.ndjson   the same for a peer named "mac"
 fixtures/replay-batches.json the same fleet as ready batches, for `npm run dev` in a browser
+fixtures/replay-organization.json the fleet's shared project organization as `hgs swarm get`
+                             prints it, for a fake `hgs` (the organization smoke)
 
 Every name, path and message is synthetic: reserved example domains and
 paths under /home/example/ only. The frames follow crates/watch-protocol: a hello, a
 catalog snapshot in pages, then deltas separated by heartbeats (the replay
 pauses one interval per heartbeat and loops the deltas). Activity frames are
 held by the replay and served on follow, as the stream does after a subscribe.
+This computer's stream also offers the `organization` topic: one snapshot of
+the organization's rows follows `catalog.meta`.
 """
 import json
 import pathlib
@@ -54,6 +58,16 @@ REPLIES = [
     "Two checks still fail on main as well, so they are not caused by this change:\n\n- `lint: unused import`\n- `docs: broken anchor`",
     "I kept the change scoped to the branch and left a note in the task.",
 ]
+# Project colours of the replay organization, in order; the Inbox keeps Qt's grey.
+PALETTE = ["#3fb950", "#64b5f6", "#d29922", "#bc8cff", "#f778ba", "#56d4dd", "#e3b341", "#ff7b72"]
+INBOX = {"id": "ungrouped", "name": "Inbox", "color": "#8d9baa"}
+# Name-derived projects whose rows no project lists, so they show in the Inbox.
+UNASSIGNED = {"infra"}
+# Sessions per member row of the topic (src/watch/organization.rs CHUNK).
+CHUNK = 1000
+# The rank step of the Rust grouping (client/core/src/swarm/layout.rs GAP).
+RANK_GAP = 1 << 20
+NEEDS_APP = "Project changes need the desktop app."
 THOUGHTS = ["The test builds the cursor from the last row, so an empty page needs its own branch.", "Checking whether the retry cap is configurable before changing it."]
 
 
@@ -183,7 +197,118 @@ def deltas_for(rows):
     return steps
 
 
-def stream(host, rows, long_key):
+METRIC_KEYS = ("cpu_percent", "cpu_count", "cpu_state", "cpu_interval_seconds", "load_1", "load_5", "load_15",
+               "memory_used_bytes", "memory_total_bytes", "memory_available_bytes", "uptime_seconds", "sampled_at")
+
+
+def metrics_for(host):
+    """A synthetic sample with the keys of src/metrics.rs; the peer "mac" is a Mac."""
+    mac = host == "mac"
+    total = (32 if mac else 64) * 1024 ** 3
+    return {"sampled_at": BASE_AT, "platform": "macos" if mac else "linux", "cpu_percent": 31.0 if mac else 12.0,
+            "cpu_interval_seconds": 2.0, "cpu_state": "available", "cpu_count": 10 if mac else 16,
+            "load_1": 2.4 if mac else 1.1, "load_5": 2.0 if mac else 0.9, "load_15": 1.8 if mac else 0.8,
+            "memory_total_bytes": total, "memory_used_bytes": int(total * (0.74 if mac else 0.38)),
+            "memory_available_bytes": int(total * (0.26 if mac else 0.62)), "uptime_seconds": 86400.0}
+
+
+def machine_card(host):
+    """The same sample as the core's MachineMeta projects it, for the browser replay."""
+    metrics = metrics_for(host)
+    return {"host": host, "hgs_version": "1.56.0", "platform": metrics["platform"], "ok": True,
+            "metrics": {key: metrics[key] for key in METRIC_KEYS},
+            "presence": {"idle_seconds": None, "locked": None, "locked_seconds": None},
+            "local_sessions": None, "local_host": None}
+
+
+def version_token(project_id):
+    """A `versions` key as hgs writes it (src/swarm/catalog.rs Key::token)."""
+    return json.dumps({"kind": "project", "id": project_id, "field": "name"}, separators=(",", ":"))
+
+
+def organization(computers):
+    """`hgs swarm get`'s object of the fleet: one project `p-<name>` per name-derived
+    project in first-seen order, whose members are its rows (`<host>\n<session name>`),
+    and the Inbox last. The rows of UNASSIGNED projects are listed nowhere."""
+    projects = {}
+    for _computer, host, rows, _long in computers:
+        for row in rows:
+            name = row["project"]
+            if name in UNASSIGNED:
+                continue
+            if name not in projects:
+                projects[name] = {"id": f"p-{name}", "name": name, "color": PALETTE[len(projects) % len(PALETTE)],
+                                  "accessible": True, "folders": [], "sessions": []}
+            projects[name]["sessions"].append(f"{host}\n{row['name']}")
+    listed = [*projects.values(), dict(INBOX, accessible=True, folders=[], sessions=[])]
+    ids = [project["id"] for project in listed]
+    return {
+        "schema": 1, "node_id": "node-workstation", "swarm_id": "swarm-replay", "digest": "replay-1", "initialized": True,
+        "organization": {"version": 2, "default_project": INBOX["id"], "project_order": ids, "projects": listed},
+        "versions": {version_token(project_id): [f"op-{project_id}-name"] for project_id in ids},
+        "conflicts": [], "preferences": {"mobile_delivery": "auto"},
+        "machines": [{"id": "node-workstation", "name": "workstation", "connection": None, "local": True},
+                     {"id": "node-mac", "name": "mac", "connection": "mac", "local": False}],
+        "peers": {"mac": {"last_sync": BASE_AT, "node": "node-mac"}},
+        "worker": {"running": True, "current": True},
+    }
+
+
+def organization_rows(full):
+    """The `organization` topic's rows of `full` by key, as src/watch/organization.rs
+    `rows` builds them: the summary without `versions`, whose `organization.projects`
+    are the IDs; `project:<id>` without `sessions`, with `session_chunks`;
+    `members:<id>:<n>` of at most CHUNK sessions; `version:<token>`."""
+    rows = {}
+    for project in full["organization"]["projects"]:
+        sessions = project["sessions"]
+        chunks = [sessions[start:start + CHUNK] for start in range(0, len(sessions), CHUNK)]
+        rows[f"project:{project['id']}"] = dict({k: v for k, v in project.items() if k != "sessions"}, session_chunks=len(chunks))
+        for n, chunk in enumerate(chunks):
+            rows[f"members:{project['id']}:{n}"] = {"sessions": chunk}
+    summary = {k: v for k, v in full.items() if k not in ("versions", "written")}
+    summary["organization"] = dict(full["organization"], projects=[p["id"] for p in full["organization"]["projects"]])
+    rows["organization"] = summary
+    for token, operations in full["versions"].items():
+        rows[f"version:{token}"] = operations
+    return dict(sorted(rows.items()))
+
+
+def grouping_view(full):
+    """The headers the Rust grouping sends for `full`, with edits disabled: the
+    browser replay has no hub to run them."""
+    projects = full["organization"]["projects"]
+    return {"loaded": True, "default_project": INBOX["id"],
+            "headers": [{"id": p["id"], "name": p["name"], "color": p["color"] or None, "accessible": p["accessible"],
+                         "collapsed": False, "is_default": p["id"] == INBOX["id"], "palette": at % 8}
+                        for at, p in enumerate(projects)],
+            "ready": False, "reason": NEEDS_APP, "busy": False, "status": "", "status_error": False, "conflicts": 0}
+
+
+def placements(full, computers):
+    """Each member's project and rank, as the Rust grouping ranks them: the
+    catalog's order inside a project, then the rows no project lists, in
+    arrival order, in the default project; `(index in its project + 1) << 20`."""
+    out = {}
+    for project in full["organization"]["projects"]:
+        for at, member in enumerate(project["sessions"]):
+            out.setdefault(member, (project["id"], (at + 1) * RANK_GAP))
+    fallback = 0
+    for _computer, host, rows, _long in computers:
+        for row in rows:
+            member = f"{host}\n{row['name']}"
+            if member not in out:
+                fallback += 1
+                out[member] = (INBOX["id"], fallback * RANK_GAP)
+    return out
+
+
+def group_out(computer, host, row, places):
+    group, rank = places[f"{host}\n{row['name']}"]
+    return {"computer": computer, "key": key_of(row), "group": group, "rank": rank}
+
+
+def stream(host, rows, long_key, topic_rows=None):
     frames = []
     seq = [0]
 
@@ -192,14 +317,18 @@ def stream(host, rows, long_key):
         frames.append({"v": 1, "seq": seq[0], "t": t, **body})
 
     frame("hello", machine_id="00000000-0000-4000-8000-0000000000" + ("01" if host == "workstation" else "02"), host=host, hgs_version="1.56.0",
-          stream=f"stream-{host}", heartbeat_ms=10000, max_frame_bytes=1 << 20, topics=["catalog", "catalog.meta", "activity", "git"],
+          stream=f"stream-{host}", heartbeat_ms=10000, max_frame_bytes=1 << 20,
+          topics=["catalog", "catalog.meta", "activity", "git"] + (["organization"] if topic_rows is not None else []),
           limits={"activity_subscriptions": 16, "page_bytes": 524288, "queue_bytes": 4194304, "activity_tail": 100, "activity_read": 200,
                   "control_line_bytes": 65536, "git_subscriptions": 64})
     half = len(rows) // 2
     pages = [rows[:half], rows[half:]]
     for page, chunk in enumerate(pages):
         frame("snapshot", topic="catalog", items=[{"key": key_of(r), "row": r} for r in chunk], page=page, last=page == len(pages) - 1, cursor=1)
-    frame("snapshot", topic="catalog.meta", value={"host": host, "ok": True, "projects": {}, "peers": []}, page=0, last=True, cursor=1)
+    frame("snapshot", topic="catalog.meta", value={"host": host, "ok": True, "hgs_version": "1.56.0", "projects": {}, "peers": [],
+                                                   "metrics": metrics_for(host)}, page=0, last=True, cursor=1)
+    if topic_rows is not None:
+        frame("snapshot", topic="organization", items=[{"key": k, "row": r} for k, r in topic_rows.items()], page=0, last=True, cursor=1)
     activity = {}
     for r in rows:
         count = 1100 if key_of(r) == long_key else rng.randint(8, 40)
@@ -224,22 +353,35 @@ def main():
     long_key = key_of(next(r for r in local_rows if r["activity"] == "busy"))
     mac_rows = session_rows(MAC_PROJECTS, 7)
     computers = [("", "workstation", local_rows, long_key), ("mac", "mac", mac_rows, None)]
-    batches = {"interval_ms": INTERVAL_MS, "computers": [], "snapshot": [], "deltas": [], "activity": {}}
+    full = organization(computers)
+    places = placements(full, computers)
+    batches = {"interval_ms": INTERVAL_MS, "computers": [], "machines": [], "snapshot": [], "deltas": [], "activity": {},
+               "grouping": grouping_view(full), "groups": []}
     for computer, host, rows, long in computers:
-        frames, activity = stream(host, rows, long)
+        frames, activity = stream(host, rows, long, organization_rows(full) if computer == "" else None)
         name = "replay.ndjson" if computer == "" else f"replay-{computer}.ndjson"
         (ROOT / name).write_text("".join(json.dumps(f, separators=(",", ":")) + "\n" for f in frames), encoding="utf-8")
         machine = host
         batches["computers"].append({"computer": computer, "status": "live", "attempt": 0})
+        batches["machines"].append({"computer": computer, "machine": machine_card(host)})
         batches["snapshot"].append({"computer": computer, "rows": [{"computer": computer, "key": key_of(r), "row": view_row(r, machine)} for r in rows]})
+        batches["groups"] += [group_out(computer, host, r, places) for r in rows]
+        present = {key_of(r) for r in rows}
         for n, step in enumerate(deltas_for(rows)):
             if len(batches["deltas"]) <= n:
                 batches["deltas"].append({"upserts": [], "removes": []})
             batches["deltas"][n]["upserts"] += [{"computer": computer, "key": key_of(r), "row": view_row(r, machine)} for r in step["upsert"]]
             batches["deltas"][n]["removes"] += [{"computer": computer, "key": k["key"], "reason": k["reason"]} for k in step["remove"]]
+            # A row that arrives (a replaced run) gets its place, as the Rust grouping sends it.
+            present -= {k["key"] for k in step["remove"]}
+            arrived = [r for r in step["upsert"] if key_of(r) not in present]
+            present |= {key_of(r) for r in step["upsert"]}
+            if arrived:
+                batches["deltas"][n].setdefault("groups", []).extend(group_out(computer, host, r, places) for r in arrived)
         for key, (events, state) in activity.items():
             batches["activity"][f"{computer}\n{key}"] = {"events": events, "cursor": events[-1]["seq"], "state": state}
     (ROOT / "replay-batches.json").write_text(json.dumps(batches, separators=(",", ":")) + "\n", encoding="utf-8")
+    (ROOT / "replay-organization.json").write_text(json.dumps(full, indent=2) + "\n", encoding="utf-8")
     for path in sorted(ROOT.iterdir()):
         print(f"{path.name}: {path.stat().st_size} bytes")
 

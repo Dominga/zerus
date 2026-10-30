@@ -14,6 +14,7 @@ pub fn parse_override(value: Option<&str>) -> Option<f64> {
 }
 
 /// A GdkMonitor refresh rate (millihertz, 0 when unknown) in hertz.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn from_millihertz(millihertz: i32) -> Option<f64> {
     (millihertz > 0).then(|| f64::from(millihertz) / 1000.0)
 }

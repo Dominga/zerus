@@ -5,8 +5,10 @@
 #include <QPointer>
 #include <QWidget>
 #include <functional>
+#include "TeamAccountMove.h"
 #include "TeamModel.h"
 
+class QDialog;
 class QFrame;
 class QLabel;
 class QScrollArea;
@@ -75,6 +77,9 @@ private:
     // F10 arrows move a draft among the drafts.
     bool approvePhase(const QString &team, int phase);
     bool discardPhase(const QString &team, int phase);
+    // U42: an accepted phase whose work has not started goes back to a draft
+    // that waits for your approval again; asks first.
+    bool returnPhaseToDraft(const QString &team, int phase);
     void movePhase(const Teams::Team &team, int phase, int to, const QString &position);
     QWidget *inboxStrip(const Teams::Team &team, const QList<Teams::InboxItem> &items);
     // F8: the lead's open membership proposals with Accept and Reject; remove
@@ -90,6 +95,18 @@ private:
     // H6: swap a member's session, agent, model or account (the lead too),
     // confirmed; the old session keeps running and is listed for you to stop.
     void swapDialog(const Teams::Team &team, const Teams::Member &member);
+    // U54 (TeamWorkspaceAccounts.cpp): move every member of one agent on an
+    // account to another, asked once, with each member's progress; the
+    // account each card shows, read from its session; the review action for a
+    // member folder left on another branch.
+    void accountMoveDialog(const Teams::Team &team, const Teams::Member &member);
+    void startAccountMove(const Teams::Team &team, const QString &agent, const QString &from, const QString &to);
+    void renderAccountMove();
+    void requestAccounts();
+    QString accountLabel(const Teams::Member &member) const;
+    Teams::AccountMove::Step moveStep(const Teams::Team &team, const QString &member) const;
+    QWidget *memberBlock(const Teams::Team &team, const Teams::Member &member);
+    void checkoutMemberBranch(const Teams::Team &team, const Teams::Member &member, const Teams::AccountMove::Block &block);
     QWidget *swappedList(const Teams::Team &team);
     // F7/F8: opens another team in this workspace (previous, next, a new one).
     void openOtherTeam(const QString &team);
@@ -99,7 +116,8 @@ private:
     // N7: Answer on a permission item: the member's Allow / Deny box, or its
     // command on the clipboard when this hgs sends no box.
     // attempts: a member's box not shown yet is looked for again (fork CI).
-    void answerAttention(const QString &teamId, const QString &member, const QString &command, int attempts = 10);
+    void answerAttention(const QString &teamId, const QString &member, const QString &command, int attempts = 10,
+                         const QString &question = {}, const QString &hash = {}, quint64 generation = 0);
     // A planning, running or paused team takes a settings change (ops.rs settings).
     static bool settingsOpen(const Teams::Team &team)
     {
@@ -182,6 +200,8 @@ private:
     // seconds focus it again, even when the focus was already lost.
     QString m_answerTeam, m_answerMember, m_answerQuestion, m_answerHash;
     QElapsedTimer m_answerAt;
+    quint64 m_answerGeneration = 0;
+    bool m_answerRendering = false;
     bool m_dark = true, m_pending = false, m_feedOpen = false, m_inboxOpen = false, m_fit = true;
     // G9: one phase decision is in flight at a time; a second click on a header
     // before the answer arrives sends nothing. After an answer, that phase stays
@@ -229,4 +249,13 @@ private:
     QLabel *m_empty;
     TeamTaskCard *m_drawer;
     QPointer<QFrame> m_popover;
+    // U54: the move this desktop started (one at a time), the lead's
+    // computer's accounts and each member's checkout refusal.
+    Teams::AccountMove::Move m_move;
+    QPointer<QDialog> m_moveDialog;
+    QList<QJsonObject> m_accountProfiles;
+    quint64 m_accountsRequest = 0;
+    bool m_accountsRead = false;
+    QHash<QString, QString> m_checkoutErrors;
+    QSet<QString> m_checkingOut;
 };

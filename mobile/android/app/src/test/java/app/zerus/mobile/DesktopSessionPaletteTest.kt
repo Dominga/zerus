@@ -42,7 +42,8 @@ class DesktopSessionPaletteTest {
         val expected = mapOf(
             DesktopBadgeKind.Neutral to (DesktopBadgeColors(0xFF2B343E, 0xFFB6C2D0) to DesktopBadgeColors(0xFFE7EDF2, 0xFF566575)),
             DesktopBadgeKind.Working to (DesktopBadgeColors(0xFF194D36, 0xFF97F0BA) to DesktopBadgeColors(0xFFCCEFDC, 0xFF145B37)),
-            DesktopBadgeKind.Building to (DesktopBadgeColors(0xFF1B3A4A, 0xFF7FD3F2) to DesktopBadgeColors(0xFFDFF0F8, 0xFF17627F)),
+            // The desktop's Build tone (SessionStatusBadge.h stateTone): #4cc98a dark, #2a9d63 light.
+            DesktopBadgeKind.Building to (DesktopBadgeColors(0xFF203832, 0xFF4CC98A) to DesktopBadgeColors(0xFFE3F2EB, 0xFF2A9D63)),
             DesktopBadgeKind.Attention to (DesktopBadgeColors(0xFFFFDA76, 0xFF392900) to DesktopBadgeColors(0xFFF4CE65, 0xFF392900)),
             DesktopBadgeKind.Error to (DesktopBadgeColors(0xFFFFABB6, 0xFF46202A) to DesktopBadgeColors(0xFFB73750, 0xFFFFFFFF)),
             DesktopBadgeKind.Paused to (DesktopBadgeColors(0xFF443654, 0xFFDEC3FF) to DesktopBadgeColors(0xFFE8DDF5, 0xFF634187)),

@@ -146,13 +146,13 @@ void TeamController::answerQuestion(const QString &question, const QString &text
     act(QStringLiteral("reply"), {{"question", question}, {"text", text}}, done);
 }
 
-void TeamController::call(const QString &operation, QJsonObject input, const Reply &done, bool change)
+void TeamController::call(const QString &operation, QJsonObject input, const Reply &done, bool change, int timeoutMs)
 {
     if (change) {
         input.insert("by", "human");
         input.insert("request_id", QUuid::createUuid().toString(QUuid::WithoutBraces));
     }
-    m_calls.insert(m_client->requestTeam({}, operation, input), done);
+    m_calls.insert(m_client->requestTeam({}, operation, input, timeoutMs), done);
 }
 
 void TeamController::refreshCatalog()

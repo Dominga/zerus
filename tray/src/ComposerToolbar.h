@@ -91,12 +91,13 @@ private:
 // field: left Attach, Voice and the iron rules; in the centre, under the field,
 // Video, Cache, the context and Copy session reference; right the status and
 // the model. The centre stays centred while the sides fit beside it.
+// U53: the session's account sits right before the model.
 class ComposerToolbar : public QWidget {
     Q_OBJECT
 public:
     // The composer's own controls (Attach .. Model) join the row only with three zones.
     enum class Slot { Attachments, Voice, VoiceMode, VoiceCancel, VoiceResult, Latest, MarkRead, Compaction, CompactionCancel, UsageLimit, Recovery, Cache, Context,
-                      Attach, FileReference, IronRules, SessionReference, Status, StatusRefresh, Retry, Model };
+                      Attach, FileReference, IronRules, SessionReference, Status, StatusRefresh, Retry, Account, Model };
     enum class Zone { Left, Centre, Right };
     static constexpr int RowHeight = 34;
     explicit ComposerToolbar(QWidget *parent = nullptr);

@@ -2,6 +2,7 @@
 //! GUI's `SessionCommands` (`tray/src/SessionCommands.h`) and
 //! `WindowsCommandLine` (`tray/src/WindowsCommandLine.h`), so a copied command
 //! addresses the same CLI and session as the terminal action.
+use crate::paths;
 use serde::{Deserialize, Serialize};
 
 /// The shell a copied command is written for: POSIX sh on Unix, PowerShell
@@ -110,6 +111,24 @@ fn windows_command_line(arguments: &[String]) -> String {
         .collect()
 }
 
+/// The `CreateProcess` command line of `program` and `arguments` as `QProcess`
+/// builds it (`WindowsCommandLine::build`): the program with backslashes, in
+/// quotes when it has a space, then a space before each argument (so two
+/// after the program).
+pub fn windows_program_line(program: &str, arguments: &[String]) -> String {
+    let mut line = String::new();
+    if !program.is_empty() {
+        let quoted = !program.starts_with('"') && !program.ends_with('"') && program.contains(' ');
+        let name = if quoted {
+            format!("\"{program}\"")
+        } else {
+            program.to_owned()
+        };
+        line = name.replace('/', "\\") + " ";
+    }
+    line + &windows_command_line(arguments)
+}
+
 /// The command line for `hgs` with `arguments` in `shell`; an empty `hgs`
 /// means the bare name found on PATH.
 pub fn command(hgs: &str, arguments: &[String], shell: Shell) -> String {
@@ -174,6 +193,79 @@ pub fn open_command(
     shell: Shell,
 ) -> String {
     command(hgs, &open_arguments(computer, name, archive_id), shell)
+}
+
+/// The command line of a shell in `directory` (`SessionCommands::folderShell`):
+/// on this computer a login shell there, or PowerShell's `Set-Location` on
+/// Windows; on a peer, which is POSIX, `hgs machine ssh` into it. None when
+/// the path is no absolute folder of that computer.
+pub fn folder_shell(hgs: &str, computer: &str, directory: &str, shell: Shell) -> Option<String> {
+    let windows = computer.is_empty() && shell == Shell::PowerShell;
+    let style = if windows {
+        paths::Style::Windows
+    } else {
+        paths::Style::Posix
+    };
+    if !paths::absolute(directory, style) || directory.contains('\0') {
+        return None;
+    }
+    if windows {
+        return Some(format!(
+            "Set-Location -LiteralPath {}",
+            power_shell_quote(&paths::native(directory, style))
+        ));
+    }
+    if computer.is_empty() {
+        return Some(format!(
+            "cd -- {} && exec \"${{SHELL:-/bin/sh}}\" -l",
+            shell_quote(directory)
+        ));
+    }
+    let arguments = ["machine", "ssh", computer, "--directory", directory].map(str::to_owned);
+    Some(command(hgs, &arguments, shell))
+}
+
+/// An AppleScript string literal's contents: backslash first, then quote and
+/// newline (`MacBackend.cpp:7-23`).
+pub fn apple_script_escape(text: &str) -> String {
+    text.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+}
+
+/// Opens `command` in a new Terminal.app window and brings it to the front
+/// (`MacBackend::terminalAppScript`).
+pub fn terminal_app_script(command: &str) -> String {
+    format!(
+        "tell application \"Terminal\"\n    do script \"{}\"\n    activate\nend tell",
+        apple_script_escape(command)
+    )
+}
+
+/// Qt's tray message on macOS (`MacBackend::notificationScript`).
+pub fn notification_script(title: &str, body: &str) -> String {
+    format!(
+        "display notification \"{}\" with title \"{}\"",
+        apple_script_escape(body),
+        apple_script_escape(title)
+    )
+}
+
+/// A copied command as its notice shows it: at most 120 characters, cut in
+/// the middle (`ClipboardBackend::notificationText`).
+pub fn notification_text(command: &str) -> String {
+    const MAX: usize = 120;
+    const ELLIPSIS: &str = " \u{2026} ";
+    let chars: Vec<char> = command.chars().collect();
+    if chars.len() <= MAX {
+        return command.to_owned();
+    }
+    let keep = MAX - ELLIPSIS.chars().count();
+    let (head, tail) = (keep / 2, keep - keep / 2);
+    let mut shown: String = chars[..head].iter().collect();
+    shown.push_str(ELLIPSIS);
+    shown.extend(&chars[chars.len() - tail..]);
+    shown
 }
 
 #[cfg(test)]
@@ -415,5 +507,29 @@ mod tests {
         assert_eq!(copyable("a\nb"), Err(newline.to_owned()));
         assert_eq!(copyable("a\rb"), Err(newline.to_owned()));
         assert_eq!(copyable("a\n"), Err(newline.to_owned()));
+    }
+
+    #[test]
+    fn apple_script_strings_escape_backslash_first() {
+        assert_eq!(apple_script_escape(r#"a\b"c"#), r#"a\\b\"c"#);
+        assert_eq!(apple_script_escape("one\ntwo"), "one\\ntwo");
+        assert_eq!(
+            terminal_app_script("hgs @mac a 'claude/R\"D'"),
+            "tell application \"Terminal\"\n    do script \"hgs @mac a 'claude/R\\\"D'\"\n    activate\nend tell"
+        );
+        assert_eq!(
+            notification_script("Zerus: copied", "hgs a x\nnext"),
+            "display notification \"hgs a x\\nnext\" with title \"Zerus: copied\""
+        );
+    }
+
+    #[test]
+    fn long_copied_commands_are_cut_in_the_middle() {
+        assert_eq!(notification_text("hgs a x"), "hgs a x");
+        let long = format!("hgs @mac a {}", "x".repeat(200));
+        let shown = notification_text(&long);
+        assert_eq!(shown.chars().count(), 120);
+        assert!(shown.starts_with("hgs @mac a xx"));
+        assert!(shown.contains(" \u{2026} "));
     }
 }

@@ -17,7 +17,8 @@ const SUMMARY_CHARS: usize = 300;
 /// message never names it twice.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Item {
-    /// `report`, `question`, `permission`, `lead_task`, `stalled` or `budget`.
+    /// `report`, `question`, `permission`, `lead_task`, `stalled`, `budget`
+    /// or `task_waits` (spec 0: U45, U46, U48).
     pub kind: &'static str,
     pub key: String,
     pub task: Option<u32>,
@@ -86,6 +87,15 @@ fn decide_command(team: &Team, task: &Task, accept: bool) -> String {
     )
 }
 
+/// A7: what a captured report means for its member, for the reviewer.
+pub(crate) fn captured_hold_note(team: &Team, member: &str) -> String {
+    let role = team.role_of(member);
+    format!(
+        "Captured from {role}'s last reply, which may only acknowledge the task. {role} gets no new work until you \
+         accept, reject, retry, reassign or cancel this task, or {role} replaces the report with hgs team report."
+    )
+}
+
 /// How many decided proposals the lead's inbox lists (C9), the latest first.
 const DECIDED_PROPOSALS: usize = 5;
 
@@ -146,6 +156,54 @@ fn all_items(team: &Team) -> Vec<Item> {
                 json!({"request_id":PLACEHOLDER,"team":team.id,"member":member.id})
             ),
             detail: member.error.clone(),
+        });
+    }
+    // Spec 0: a task that waits for a step Zerus could not take (U45 model,
+    // U46 context, U48 branch) is one item for the lead, with the reason and
+    // the retry that starts the step again. A context action that still runs
+    // waits for nobody.
+    for task in team.tasks.iter().filter(|_| active).filter(|task| task.status == TaskStatus::Pending) {
+        let Some(wait) = task.waits.as_ref().filter(|wait| !wait.running()) else { continue };
+        let attempt = task.attempts.iter().rev().find(|attempt| wait.attempt > 0 && attempt.n == wait.attempt);
+        items.push(Item {
+            subagents: Value::Null,
+            kind: "task_waits",
+            key: format!("task_waits:{}:{}", task.id, wait.at),
+            task: Some(task.id),
+            member: match attempt {
+                Some(attempt) => team.role_of(&attempt.member),
+                None if task.assignee.is_empty() => task.role.clone(),
+                None => team.role_of(&task.assignee),
+            },
+            since: wait.at,
+            summary: summary(&format!("#{} {} waits: {}", task.id, task.title, wait.reason)),
+            command: format!("{} | hgs team retry --json", json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id})),
+            detail: wait.reason.clone(),
+        });
+    }
+    // U52: a member whose session crashed too often this hour stays stopped
+    // until the owner or the lead starts it again.
+    for member in team.members.iter().filter(|member| member.id != team.lead && member.crash_told).filter(|_| active) {
+        let role = team.role_of(&member.id);
+        let at = member.crash.unwrap_or_else(crate::state::now);
+        let restarts = member.restarts.iter().filter(|restart| crate::state::now() - **restart <= 3600.0).count();
+        let command = member
+            .session
+            .as_ref()
+            .map(|session| format!("hgs resume {} -d", session.name))
+            .unwrap_or_default();
+        items.push(Item {
+            subagents: Value::Null,
+            kind: "crashed",
+            key: format!("crashed:{}", member.id),
+            task: None,
+            member: role.clone(),
+            since: at,
+            summary: summary(&format!(
+                "{role}'s session crashed again after {restarts} restart(s) this hour and stays stopped"
+            )),
+            command,
+            detail: "The team's restart_crashed setting launches a crashed member at most three times an hour; a fourth crash waits for you.".into(),
         });
     }
     // F8: each decided proposal reaches the lead with the decision and the
@@ -209,7 +267,10 @@ fn all_items(team: &Team) -> Vec<Item> {
                     items.push(Item {
                         subagents: Value::Null,
                         kind: "report",
-                        key: format!("report:{}:{}", task.id, attempt.id),
+                        // A replaced report (A6: the member's own report after a
+                        // captured reply) is a new item: the key carries how many
+                        // texts it replaced, so the digest tells the lead again.
+                        key: format!("report:{}:{}:{}", task.id, attempt.id, report.replaced.len()),
                         task: Some(task.id),
                         member: team.role_of(&attempt.member),
                         since: report.at,
@@ -217,11 +278,28 @@ fn all_items(team: &Team) -> Vec<Item> {
                         // the owner's approval of that phase.
                         summary: if attempt.worked_ahead {
                             format!("worked ahead of phase {}: {}", task.phase, summary(&report.text))
+                        } else if !report.replaced.is_empty() {
+                            format!("replaces the earlier report: {}", summary(&report.text))
                         } else {
                             summary(&report.text)
                         },
                         command: decide_command(team, task, true),
-                        detail: String::new(),
+                        // A7: a captured reply may be only an acknowledgement;
+                        // its member waits for this decision. U36: after the
+                        // round limit the lead reads every round's findings
+                        // with the report.
+                        detail: [
+                            if report.captured && attempt.member != team.lead {
+                                captured_hold_note(team, &attempt.member)
+                            } else {
+                                String::new()
+                            },
+                            super::pipeline::rounds_text(task),
+                        ]
+                        .into_iter()
+                        .filter(|part| !part.is_empty())
+                        .collect::<Vec<_>>()
+                        .join("\n"),
                     });
                 }
             }
@@ -487,10 +565,35 @@ pub(crate) fn waits(team: &Team, task: &Task, ready: bool) -> Option<Value> {
     if let Some(hold) = &task.hold {
         return Some(json!({"for":"hold","on":[hold.by],"unblock":format!("release #{}", task.id)}));
     }
+    // Spec 0: a step before the hand-out was refused or never confirmed; U46:
+    // while Zerus still prepares the context it waits for nobody.
+    if let Some(wait) = task.waits.as_ref().filter(|_| task.status == TaskStatus::Pending) {
+        if wait.state == "waiting" {
+            return Some(json!({"for":wait.waits_for,"on":wait.on,"reason":"Zerus is preparing the context","unblock":"wait"}));
+        }
+        return Some(json!({"for":wait.waits_for,"on":wait.on,"reason":wait.reason,"unblock":format!("retry or reassign #{}", task.id)}));
+    }
+    // U36: a test holds the assignee's folder; its next task waits for it.
+    if matches!(task.status, TaskStatus::Pending) {
+        if let Some(held) = super::stages::held(team, &task.assignee).filter(|held| *held != task.id) {
+            return Some(json!({"for":"folder","on":[format!("#{held}")],"unblock":format!("folder held by the test of #{held}")}));
+        }
+    }
     if task.status == TaskStatus::Submitted {
         return Some(json!({
             "for":"lead","on":[team.role_of(&team.lead)],"unblock":format!("accept #{}", task.id)
         }));
+    }
+    // U36: a stage waits for its member (or for one with its role).
+    if let Some(run) = task.pipeline_run.as_ref().filter(|_| task.status.in_stage()) {
+        let open = run.open_run();
+        let who = match open {
+            Some(stage) if !stage.member.is_empty() => team.role_of(&stage.member),
+            Some(stage) => run.stages.get(stage.stage).map(|spec| spec.role.clone()).unwrap_or_default(),
+            None => String::new(),
+        };
+        let kind = open.map(|stage| stage.kind.clone()).unwrap_or_default();
+        return Some(json!({"for":"stage","on":[who],"unblock":format!("the {kind} of #{} by {who}", task.id)}));
     }
     if let Some(attempt) = task.open_attempt() {
         let role = team.role_of(&attempt.member);
@@ -960,6 +1063,37 @@ mod tests {
         }
         let text = super::text(&many, &super::items(&many), 40.0);
         assert!(text.contains("[20 more item(s)") || text.contains("more item(s)"), "{text}");
+    }
+
+    #[test]
+    fn a_report_that_replaces_a_captured_one_is_told_again() {
+        // Owner, 2026-10-30: the member's own report replaced the reply Zerus
+        // had captured, and the lead never heard of it: both had one key.
+        let mut team = team();
+        submitted(&mut team, 1, 100.0);
+        team.task_mut(1).unwrap().attempts.last_mut().unwrap().report.as_mut().unwrap().captured = true;
+        let first = super::items(&team);
+        let mut told = Vec::new();
+        let open: BTreeSet<String> = first.iter().map(|item| item.key.clone()).collect();
+        mark_told(&mut told, &first, &open);
+        let (attempt, member) = {
+            let attempt = team.task(1).unwrap().attempts.last().unwrap();
+            (attempt.id.clone(), attempt.member.clone())
+        };
+        let replaced = ops::apply(
+            &mut team,
+            "report",
+            &serde_json::json!({"task":1,"attempt":attempt,"text":"Done: the real report."}),
+            &Actor::Member(member),
+            &BTreeSet::new(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(replaced["status"], "submitted");
+        let items = super::items(&team);
+        let report = items.iter().find(|item| item.kind == "report").unwrap();
+        assert!(!told.contains(&report.key), "the replacement must be a new item: {told:?} {}", report.key);
+        assert!(report.summary.starts_with("replaces the earlier report"), "{}", report.summary);
     }
 
     #[test]

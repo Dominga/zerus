@@ -6,14 +6,20 @@
 #include <QComboBox>
 #include <QJsonDocument>
 #include <QLabel>
+#include <memory>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSettings>
 #include <QTemporaryDir>
 #include "HgsClient.h"
 #include "TeamController.h"
+#include "TeamAccountMove.h"
 #include "TeamModel.h"
 #include "TeamPanel.h"
+#include "TeamStages.h"
+#include <QDir>
+#include <QFileInfo>
+#include <QFile>
 #include "support/FakeCli.h"
 
 using namespace Teams;
@@ -134,7 +140,11 @@ class TestTeams : public QObject {
     Q_OBJECT
 private slots:
     void initTestCase();
+    void accountMoveReadsAccountsBlocksAndSteps();
     void subLeadsFormTheMemberTree();
+    void pipelineFixtureReadsEveryStageState();
+    void stageDeliveryFixtureReadsTheDeliveredStage();
+    void stageQueuesStatesAndFeedLines();
     void modelReadsTheTeamAndDerivesMemberStates();
     void modelReadsPhasesPinnedAndTheWaitingState();
     void leftRunningMembersOfAFinishedTeam();
@@ -150,6 +160,7 @@ private slots:
     void attemptPhasesAreDerivedForAnOlderHgs();
     void finishedRevokedAndRefusedAttemptsHaveNoPhase();
     void oldStatusJsonStillParses();
+    void modelReadsEachTasksTiming();
     void aDraftTeamReadsItsRevisionUnseenFieldsAndGoal();
     void proposalsSwapsLimitsAndHostsRead();
     void feedLinesSpeakOfStartsQuestionsAndHolds();
@@ -1150,6 +1161,45 @@ void TestTeams::oldStatusJsonStillParses()
     QVERIFY(team.member("backend")->queueKnown == false);
 }
 
+// U37: tasks[].timing as hgs status computes it; an older hgs sends none.
+void TestTeams::modelReadsEachTasksTiming()
+{
+    QVERIFY(!parse(checkout()).task(3)->timing.known);
+    auto t = checkout();
+    auto tasks = t["tasks"].toArray();
+    for (int i = 0; i < tasks.size(); ++i) {
+        auto task = tasks[i].toObject();
+        if (task["id"].toInt() != 3) continue;
+        task["timing"] = QJsonObject{
+            {"worked_s", 5400}, {"running_since", 5100.0},
+            {"waits", QJsonObject{{"deps_s", 2400}, {"member_s", 180}, {"lead_s", 600}}},
+            {"attempts", QJsonArray{
+                QJsonObject{{"n", 1}, {"member", "backend"}, {"state", "rejected"}, {"from", 2000.0}, {"to", 3500.0},
+                            {"worked_s", 1500}, {"member_s", 120}, {"lead_s", 600}},
+                QJsonObject{{"n", 2}, {"member", "backend"}, {"state", "delivered"}, {"from", 5100.0}, {"to", QJsonValue()},
+                            {"worked_s", 3900}, {"member_s", 60}, {"lead_s", 0}}}},
+            {"unknown", QJsonArray{"deps"}}};
+        tasks[i] = task;
+    }
+    t["tasks"] = tasks;
+    const auto timing = parse(t).task(3)->timing;
+    QVERIFY(timing.known);
+    QCOMPARE(timing.worked, 5400);
+    QCOMPARE(timing.runningSince, 5100.0);
+    QCOMPARE((QList<qint64>{timing.deps, timing.member, timing.lead}), (QList<qint64>{2400, 180, 600}));
+    QCOMPARE(timing.unknown, QStringList{"deps"});
+    QCOMPARE(timing.attempts.size(), 2);
+    const auto &first = timing.attempts[0];
+    QCOMPARE(first.n, 1);
+    QCOMPARE(first.member, QStringLiteral("backend"));
+    QCOMPARE(first.state, QStringLiteral("rejected"));
+    QCOMPARE((QList<double>{first.from, first.to}), (QList<double>{2000, 3500}));
+    QCOMPARE((QList<qint64>{first.worked, first.memberWait, first.leadWait}), (QList<qint64>{1500, 120, 600}));
+    // The running attempt has no end yet.
+    QCOMPARE(timing.attempts[1].to, 0.0);
+    QVERIFY(!parse(t).task(2)->timing.known);
+}
+
 void TestTeams::feedLinesSpeakOfStartsQuestionsAndHolds()
 {
     const auto team = parse(deliveryTeam());
@@ -1607,6 +1657,323 @@ void TestTeams::subLeadsFormTheMemberTree()
     const auto status = memberStatus(running, *subMember, Live{});
     QCOMPARE(status.kind, QStringLiteral("reviewing"));
     QCOMPARE(status.text, QStringLiteral("Reviewing #%1 %2").arg(reviewed->id).arg(reviewed->title));
+}
+
+namespace {
+// U36: the shared fixture (#531) as `hgs team status` writes its tasks.
+QJsonObject pipelineFixture()
+{
+    QFile file(QFileInfo(QStringLiteral(__FILE__)).dir().filePath(QStringLiteral("../../tests/fixtures/team-pipeline-tasks.json")));
+    if (!file.open(QIODevice::ReadOnly)) return {};
+    auto json = QJsonDocument::fromJson(file.readAll()).object();
+    json["id"] = "team-p"; json["name"] = "Pipelines"; json["status"] = "running"; json["lead"] = "lead";
+    json["members"] = QJsonArray{
+        QJsonObject{{"id", "lead"}, {"role", "Lead"}, {"agent", "claude"}, {"state", "active"}, {"session", QJsonObject{{"name", "claude/p/lead"}}}},
+        QJsonObject{{"id", "dev"}, {"role", "Backend"}, {"agent", "codex"}, {"state", "active"}, {"session", QJsonObject{{"name", "codex/p/dev"}}}},
+        QJsonObject{{"id", "rev"}, {"role", "Reviewer"}, {"agent", "claude"}, {"state", "active"}, {"session", QJsonObject{{"name", "claude/p/rev"}}}},
+        QJsonObject{{"id", "qa"}, {"role", "Tester"}, {"agent", "kimi"}, {"state", "active"}, {"session", QJsonObject{{"name", "kimi/p/qa"}}}}};
+    return json;
+}
+}
+
+// U36 (#532 with #534): a delivered stage as `hgs team status` writes it after
+// a real hand-out (tests/fixtures/team-stage-delivery.json, written by the
+// dispatcher's test): the member's stage_queue, the run's folder and its hold
+// reach the queue, the chip, the folder hold and the inspector.
+void TestTeams::stageDeliveryFixtureReadsTheDeliveredStage()
+{
+    QFile file(QFileInfo(QStringLiteral(__FILE__)).dir().filePath(QStringLiteral("../../tests/fixtures/team-stage-delivery.json")));
+    QVERIFY2(file.open(QIODevice::ReadOnly), "tests/fixtures/team-stage-delivery.json");
+    auto json = QJsonDocument::fromJson(file.readAll()).object();
+    json["id"] = "team-s"; json["name"] = "Stages"; json["status"] = "running"; json["lead"] = "lead";
+    const QHash<QString, QString> agents{{"lead", "claude"}, {"dev", "codex"}, {"qa", "kimi"}, {"rev", "claude"}};
+    auto members = json["members"].toArray();
+    for (int i = 0; i < members.size(); ++i) {
+        auto m = members[i].toObject();
+        m["agent"] = agents.value(m["id"].toString()); m["state"] = "active";
+        m["session"] = QJsonObject{{"name", QStringLiteral("%1/s/%2").arg(m["agent"].toString(), m["id"].toString())}};
+        members[i] = m;
+    }
+    json["members"] = members;
+    const Team team = parse(json);
+    const auto queue = stageQueue(team, "qa");
+    QCOMPARE(queue.size(), 1);
+    QCOMPARE(queue[0].task, 1); QCOMPARE(queue[0].stage, QString("test")); QCOMPARE(queue[0].state, QString("delivered"));
+    QVERIFY(stageQueue(team, "rev").isEmpty());
+    const Task &task = *team.task(1);
+    QCOMPARE(task.pipelineRun.runs.size(), 2);
+    const auto &run = task.pipelineRun.runs[1];
+    QCOMPARE(run.state, QString("delivered")); QCOMPARE(run.member, QString("qa"));
+    QCOMPARE(run.folder, QString("/srv/example/proj"));
+    QVERIFY(run.holds);
+    QCOMPARE(folderHeldBy(team, "dev"), 1);
+    const auto c = TeamUi::colorsFor(true);
+    const auto line = TeamUi::stageLine(team, task, c);
+    QCOMPARE(line.chips.size(), 1);
+    // Delivered is the running stage; its hold names the implementer's folder.
+    QCOMPARE(line.chips[0].state, QString("running"));
+    QVERIFY2(line.chips[0].tooltip.contains("Holds Backend's folder"), qPrintable(line.chips[0].tooltip));
+    std::unique_ptr<QWidget> section(TeamUi::pipelineSection(team, task, c, true));
+    QVERIFY(section);
+    auto *where = section->findChild<QLabel *>("teamTaskPipelineWhere");
+    QVERIFY(where);
+    QCOMPARE(where->text(), QString("/srv/example/proj · Backend's folder"));
+    std::unique_ptr<QWidget> stages(TeamUi::memberStageQueue(team, *team.member("qa"), c, 1800000000.0, [](int) {}));
+    QVERIFY(stages);
+}
+
+// U36: every stage state of the shared fixture reads as the server wrote it:
+// the snapshot, its runs and verdicts, the statuses, the chip each card shows
+// and the folder a waiting test holds; a plan writes the choice, never a run.
+void TestTeams::pipelineFixtureReadsEveryStageState()
+{
+    const auto json = pipelineFixture();
+    QVERIFY2(!json.isEmpty(), "tests/fixtures/team-pipeline-tasks.json");
+    const Team team = parse(json);
+    QCOMPARE(team.tasks.size(), 4);
+    const auto &review = *team.task(1), &test = *team.task(2), &returned = *team.task(3), &limit = *team.task(4);
+    QVERIFY(review.inStage() && test.inStage() && !returned.inStage() && !limit.inStage());
+    QCOMPARE(review.pipeline, QString("code"));
+    const auto &run = review.pipelineRun;
+    QVERIFY(run.known);
+    QCOMPARE(run.name, QString("Code: review, test, lead"));
+    QCOMPARE(run.stages.size(), 2);
+    QCOMPARE(run.stages[1].kind, QString("test")); QCOMPARE(run.stages[1].role, QString("tester"));
+    QCOMPARE(run.rounds(), 3); QCOMPARE(run.folder, QString("hold")); QCOMPARE(run.accept, QString("lead"));
+    QVERIFY(run.openRun() && run.openRun()->state == "waiting" && run.openRun()->kind == "review");
+    QCOMPARE(taskStatus(review).text, QString("In review"));
+    QCOMPARE(taskStatus(test).text, QString("In test"));
+    // A passed review keeps its member, verdict and text.
+    QCOMPARE(test.pipelineRun.runs.size(), 2);
+    const auto &passed = test.pipelineRun.runs.first();
+    QCOMPARE(passed.state, QString("passed")); QCOMPARE(passed.member, QString("rev")); QCOMPARE(passed.by, QString("Reviewer"));
+    QCOMPARE(passed.text, QString("Read it")); QCOMPARE(passed.deliveredAt, 1800000260.0); QCOMPARE(passed.endedAt, 1800000800.0);
+    QCOMPARE(returned.pipelineRun.returned(), 1);
+    QCOMPARE(returned.pipelineRun.runs.first().findings, QStringList{"Page size is unbounded"});
+    QCOMPARE(limit.pipelineRun.returned(), 3);
+    QCOMPARE(limit.pipelineRun.round, 3);
+    // The chips the cards show.
+    const auto c = TeamUi::colorsFor(true);
+    auto line = TeamUi::stageLine(team, review, c);
+    QCOMPARE(line.chips.size(), 1);
+    QCOMPARE(line.chips[0].text, QString("Review waits · 1st in queue"));
+    QCOMPARE(line.chips[0].state, QString("waiting"));
+    QCOMPARE(line.track.size(), 4);   // implement, review, test, the lead
+    line = TeamUi::stageLine(team, test, c);
+    QCOMPARE(line.chips[0].text, QString("Test waits · 1st in queue"));   // its own stage's queue
+    QCOMPARE(line.track[1], c.accent);                                     // the review passed
+    // #3 was returned to dev, whose folder #2's waiting test holds: the
+    // hold shows, with the returned round's findings as its note.
+    line = TeamUi::stageLine(team, returned, c);
+    QCOMPARE(line.chips.size(), 1);
+    QCOMPARE(line.chips[0].text, QString("Folder held by the test of #2"));
+    QCOMPARE(line.chips[0].state, QString("held"));
+    QCOMPARE(line.note, QString("Attempt 2 · 1 finding"));
+    QVERIFY(line.warn);
+    // Once the test no longer holds it (a detached checkout), the return shows.
+    auto detached = json;
+    auto tasks = detached["tasks"].toArray(); auto second = tasks[1].toObject(); auto snapshot = second["pipeline_run"].toObject();
+    snapshot["folder"] = "checkout"; second["pipeline_run"] = snapshot; tasks[1] = second; detached["tasks"] = tasks;
+    const Team free = parse(detached);
+    QCOMPARE(folderHeldBy(free, "dev"), 0);
+    line = TeamUi::stageLine(free, *free.task(3), c);
+    QCOMPARE(line.chips[0].text, QString("Review returned r1"));
+    QCOMPARE(line.chips[0].state, QString("returned"));
+    QCOMPARE(line.note, QString("Attempt 2 · 1 finding"));
+    QVERIFY(!line.warn);
+    line = TeamUi::stageLine(team, limit, c);
+    QCOMPARE(line.chips[0].text, QString("Lead decides · 3 findings"));
+    QCOMPARE(line.chips[0].state, QString("limit"));
+    QCOMPARE(line.note, QString("3 review rounds used"));
+    QVERIFY(line.warn);
+    // #2's test waits for its member and already holds dev's folder (the hold
+    // rule); no other member's folder is held.
+    QCOMPARE(folderHeldBy(team, "dev"), 2);
+    QCOMPARE(folderHeldBy(team, "rev"), 0);
+    // A plan sends the choice, never the snapshot; no choice sends nothing.
+    const auto written = review.json();
+    QCOMPARE(written["pipeline"].toString(), QString("code"));
+    QVERIFY(!written.contains("pipeline_run"));
+    Task plain; plain.id = 9; plain.title = "x";
+    QVERIFY(!plain.json().contains("pipeline"));
+}
+
+// U36: a member's stage queue (hgs's own, or derived from the open stages and
+// their candidates), a waiting stage's place, the stage member's and the
+// implementer's states, soft dependencies on a task in a stage, and the feed
+// lines of the stages and overrides with who did it and why.
+void TestTeams::stageQueuesStatesAndFeedLines()
+{
+    auto json = pipelineFixture();
+    QVERIFY(!json.isEmpty());
+    auto tasks = json["tasks"].toArray();
+    // #1's review was given to rev; #2's test waits with qa as its candidate,
+    // and a fifth task waits for review after it.
+    auto first = tasks[0].toObject(); auto pipeline = first["pipeline_run"].toObject(); auto runs = pipeline["runs"].toArray();
+    auto r = runs[0].toObject(); r["state"] = "delivered"; r["member"] = "rev"; r["delivered_at"] = 1800000300.0; runs[0] = r;
+    pipeline["runs"] = runs; first["pipeline_run"] = pipeline; tasks[0] = first;
+    auto second = tasks[1].toObject(); second["stage_candidates"] = QJsonArray{"qa"}; tasks[1] = second;
+    auto fifth = tasks[0].toObject(); fifth["id"] = 5; fifth["title"] = "Docs";
+    pipeline = fifth["pipeline_run"].toObject(); runs = pipeline["runs"].toArray();
+    r = runs[0].toObject(); r["state"] = "waiting"; r.remove("member"); r["at"] = 1800000500.0; runs[0] = r;
+    pipeline["runs"] = runs; fifth["pipeline_run"] = pipeline; fifth["stage_candidates"] = QJsonArray{"rev"};
+    tasks.append(fifth);
+    auto sixth = QJsonObject{{"id", 6}, {"title", "Docs too"}, {"status", "in_review"}, {"assignee", "dev"}, {"stage_candidates", QJsonArray{"rev"}},
+                             {"pipeline_run", QJsonObject{{"name", "Docs"}, {"accept", "auto"}, {"round", 1}, {"stages", QJsonArray{QJsonObject{{"kind", "review"}, {"role", "reviewer"}}}},
+                                                          {"runs", QJsonArray{QJsonObject{{"id", "s6"}, {"kind", "review"}, {"stage", 0}, {"round", 1}, {"attempt", 1},
+                                                                                          {"state", "waiting"}, {"at", 1800000400.0}}}}}}};
+    tasks.append(sixth);
+    // A pending task of dev's waits for its folder; another depends softly on #1.
+    tasks.append(QJsonObject{{"id", 7}, {"title", "Next"}, {"status", "pending"}, {"assignee", "dev"}});
+    tasks.append(QJsonObject{{"id", 8}, {"title", "Soft"}, {"status", "pending"}, {"assignee", "qa"}, {"deps", QJsonArray{QJsonObject{{"task", 1}, {"kind", "soft"}}}}});
+    json["tasks"] = tasks;
+    Team team = parse(json);
+    // Derived: rev has #1, then #6 and #5 by their waiting time.
+    auto queue = stageQueue(team, "rev");
+    QCOMPARE(queue.size(), 3);
+    QCOMPARE(queue[0].task, 1); QCOMPARE(queue[0].state, QString("delivered")); QCOMPARE(queue[0].since, 1800000300.0);
+    QCOMPARE(queue[1].task, 6); QCOMPARE(queue[2].task, 5);
+    QCOMPARE(stageQueue(team, "qa").size(), 1);
+    QCOMPARE(stageQueue(team, "dev").size(), 0);
+    QCOMPARE(stageQueuePlace(team, 6), 1);
+    QCOMPARE(stageQueuePlace(team, 5), 2);
+    QCOMPARE(stageQueuePlace(team, 1), 0);   // delivered: not waiting
+    QCOMPARE(TeamUi::stageLine(team, *team.task(5), TeamUi::colorsFor(true)).chips[0].text, QString("Review waits · 2nd in queue"));
+    // hgs's queue (#532) wins over the derived one.
+    auto members = json["members"].toArray();
+    auto rev = members[2].toObject(); rev["stage_queue"] = QJsonArray{QJsonObject{{"task", 5}, {"stage", "review"}, {"round", 1}, {"state", "waiting"}, {"since", 1.0}}};
+    members[2] = rev; json["members"] = members;
+    const Team read = parse(json);
+    QCOMPARE(stageQueue(read, "rev").size(), 1);
+    QCOMPARE(stageQueue(read, "rev")[0].task, 5);
+    // The states on the member cards.
+    const auto status = memberStatus(team, *team.member("rev"), Live{});
+    QCOMPARE(status.text, QString("Reviewing #1 API · round 1"));
+    QCOMPARE(status.kind, QString("stage_review"));
+    QCOMPARE(status.task, 1);
+    const auto held = memberStatus(team, *team.member("dev"), Live{});
+    QCOMPARE(held.kind, QString("folder_held"));
+    QCOMPARE(held.text, QString("Waits: its folder is held by the test of #2"));
+    QVERIFY(!held.problem);
+    QCOMPARE(displayStatus(team, {}), QString("running"));
+    // A soft dependency in review counts as started.
+    QVERIFY(ready(team, *team.task(8)));
+    // The feed.
+    const auto feed = [&](const QString &kind, const QJsonObject &detail) {
+        return feedLine(team, QJsonObject{{"kind", kind}, {"at", 1.0}, {"detail", detail}});
+    };
+    auto line = feed("stage_started", {{"task", 1}, {"title", "API"}, {"stage", "review"}, {"round", 1}, {"max_rounds", 3}, {"who", "Reviewer"}});
+    QCOMPARE(line.text, QString("Review round 1 of 3 started · #1 API · Reviewer"));
+    line = feed("stage_returned", {{"by", "Reviewer"}, {"task", 3}, {"title", "API"}, {"stage", "review"}, {"round", 1}, {"findings", QJsonArray{"a", "b", "c"}}});
+    QCOMPARE(line.text, QString("Review returned #3 API · round 1 · 3 findings"));
+    QCOMPARE(line.tone, Tone::Warn);
+    line = feed("stage_skipped", {{"by", "You"}, {"task", 3}, {"title", "Card form UI"}, {"stage", "review"}, {"round", 2}, {"reason", "Storybook already reviewed by the owner"}});
+    QCOMPARE(line.by, QString("You"));
+    QCOMPARE(line.text, QString("Skipped Review on #3 Card form UI at round 2: “Storybook already reviewed by the owner”"));
+    line = feed("sent_back", {{"by", "You"}, {"task", 2}, {"title", "Saved cards API"}, {"stage", "review"}, {"reason", "keep cursor ids opaque"}});
+    QCOMPARE(line.text, QString("Sent #2 Saved cards API back from Review: “keep cursor ids opaque”"));
+    line = feed("accepted", {{"by", "Lead"}, {"task", 5}, {"title", "Contract tests"}, {"reason", "sandbox flake, tracked in #14"}});
+    QCOMPARE(line.text, QString("Accepted #5 Contract tests: “sandbox flake, tracked in #14”"));
+    line = feed("accepted", {{"by", "Pipeline"}, {"task", 13}, {"title", "Checkout copy review"}, {"reason", "Accepted by the pipeline Docs"}});
+    QCOMPARE(line.text, QString("Accepted #13 Checkout copy review"));
+    line = feed("round_limit", {{"task", 4}, {"title", "API"}, {"rounds", 3}});
+    QCOMPARE(line.text, QString("Out of rounds · #4 API goes to the lead after 3 returns"));
+    QCOMPARE(feed("stages_passed", {{"task", 2}, {"title", "API"}, {"to", "Lead"}}).text, QString("Every stage passed · #2 API waits for Lead"));
+    QCOMPARE(feed("stage_passed", {{"task", 2}, {"title", "API"}, {"stage", "test"}, {"round", 1}}).text, QString("Test passed #2 API · round 1"));
+}
+
+// U54: the account a member's session really runs on (session_account), the
+// members a move takes (the lead included, the default account under any of
+// its names), what keeps a member from its move or launch, and each member's
+// step from Moving to its result.
+void TestTeams::accountMoveReadsAccountsBlocksAndSteps()
+{
+    using namespace Teams::AccountMove;
+    const auto team = parse(QJsonDocument::fromJson(R"({"id":"t","name":"T","status":"running","lead":"lead","members":[
+      {"id":"lead","role":"Lead","agent":"claude","account":"","session_account":"work","session":{"host":"","name":"claude/x/lead","run_id":"r1"}},
+      {"id":"dev","role":"Backend","agent":"claude","account":"work","session_account":"native-claude","session":{"host":"","name":"claude/x/dev","run_id":"r2"}},
+      {"id":"rev","role":"Reviewer","agent":"claude","account":"","session_account":"","session":{"host":"","name":"claude/x/rev","run_id":"r3"}},
+      {"id":"qa","role":"QA","agent":"codex","account":"","session_account":"work","session":{"host":"","name":"codex/x/qa"}},
+      {"id":"far","role":"Far","agent":"claude","computer":"gb10","session_account":"work","session":{"host":"gb10","name":"claude/x/far"}},
+      {"id":"new","role":"New","agent":"claude","account":"second","state":"not_created"},
+      {"id":"old","role":"Old","agent":"claude","account":"work","session":{"host":"","name":"claude/x/old"}}]})").object());
+    // The default account under each of its names.
+    QCOMPARE(accountOf("claude", ""), QStringLiteral("native-claude"));
+    QCOMPARE(accountOf("claude", "native"), QStringLiteral("native-claude"));
+    QCOMPARE(accountOf("codex", "native-codex"), QStringLiteral("native-codex"));
+    QCOMPARE(accountOf("claude", "work"), QStringLiteral("work"));
+    // The session's account, not the roster's; the roster's before a session, or from an older hgs.
+    QCOMPARE(memberAccount(*team.member("lead")), QStringLiteral("work"));
+    QCOMPARE(memberAccount(*team.member("dev")), QStringLiteral("native-claude"));
+    QCOMPARE(memberAccount(*team.member("rev")), QStringLiteral("native-claude"));
+    QCOMPARE(memberAccount(*team.member("new")), QStringLiteral("second"));
+    QVERIFY(!team.member("old")->sessionAccountKnown);
+    QCOMPARE(memberAccount(*team.member("old")), QStringLiteral("work"));
+    const QList<QJsonObject> profiles{QJsonObject{{"id", "work"}, {"label", "Work"}}, QJsonObject{{"id", "native-claude"}, {"label", "Default"}}};
+    QCOMPARE(labelOf(profiles, "claude", "work"), QStringLiteral("Work"));
+    QCOMPARE(labelOf(profiles, "claude", ""), QStringLiteral("Default"));
+    QCOMPARE(labelOf({}, "claude", "native-claude"), QStringLiteral("Default account"));
+    QCOMPARE(labelOf({}, "claude", "elsewhere"), QStringLiteral("elsewhere"));
+    // A move takes the agent's local sessions on that account, the lead included.
+    QCOMPARE(affected(team, "claude", "work"), (QStringList{"lead", "old"}));
+    QCOMPARE(affected(team, "claude", ""), (QStringList{"dev", "rev"}));
+    QCOMPARE(affected(team, "claude", "native-claude"), (QStringList{"dev", "rev"}));
+    QCOMPARE(affected(team, "codex", "work"), QStringList{"qa"});
+    QCOMPARE(agents(team), (QStringList{"claude", "codex"}));
+    QCOMPARE(fromAccounts(team, "claude"), (QStringList{"work", "native-claude"}));
+    QVERIFY(!movable("kimi") && movable("codex"));
+    // What keeps a member: #619's folder errors, a busy old session, an unconfirmed switch.
+    Teams::Member member;
+    member.error = "D:/w/dev is on team/t/dev-3, not team/t/dev; team/t/dev-3 is not merged into team/t/dev. Merge it, then check out team/t/dev in the folder.";
+    auto block = blockOf(member);
+    QCOMPARE(block.kind, Block::FolderBranch);
+    QCOMPARE(block.folder, QStringLiteral("D:/w/dev"));
+    QCOMPARE(block.current, QStringLiteral("team/t/dev-3"));
+    QCOMPARE(block.own, QStringLiteral("team/t/dev"));
+    member.error = "C:/Users/a b/dev is on team/t/dev-3, not team/t/dev; it has uncommitted changes, so Zerus did not switch it.";
+    QCOMPARE(blockOf(member).folder, QStringLiteral("C:/Users/a b/dev"));
+    member.error = "D:/w/dev is on team/t/dev-3, not team/t/dev, and Zerus could not switch it: locked";
+    QCOMPARE(blockOf(member).own, QStringLiteral("team/t/dev"));
+    member.error = "the account switch is rolled_back; waiting for the old session to finish its turn";
+    QCOMPARE(blockOf(member).kind, Block::OldSession);
+    member.error = "the account switch is uncertain; the old session was not paused: gone";
+    QCOMPARE(blockOf(member).kind, Block::Uncertain);
+    member.error = "launch refused";
+    QCOMPARE(blockOf(member).kind, Block::None);
+    // The member state says so; another error is still a failed start.
+    QCOMPARE(memberStatus(team, member, {}).kind, QStringLiteral("failed"));
+    member.error = "the account switch is rolled_back; waiting for the old session to finish its turn";
+    QCOMPARE(memberStatus(team, member, {}).text, QStringLiteral("Waiting for its old session"));
+    // Steps: moving while it runs (resumed once the session's account changed),
+    // then each result from the receipt and the team.
+    Move move;
+    move.team = "t"; move.agent = "claude"; move.from = "work"; move.to = "second"; move.toLabel = "Second";
+    move.members = {"lead", "old"}; move.runs = {{"lead", "r1"}, {"old", ""}}; move.running = true;
+    QCOMPARE(stepOf(team, move, "lead").state, QStringLiteral("moving"));
+    QCOMPARE(stepOf(team, move, "lead").text, QStringLiteral("Moving to Second"));
+    auto later = team;
+    for (auto &m : later.members) if (m.id == "lead") m.sessionAccount = "second";
+    QCOMPARE(stepOf(later, move, "lead").state, QStringLiteral("resumed"));
+    move.running = false; move.finished = true;
+    move.receipt = QJsonDocument::fromJson(R"({"status":"swapped","members":[{"member":"lead"},{"member":"old"}],"fresh":["old"]})").object();
+    QCOMPARE(stepOf(later, move, "lead").text, QStringLiteral("Resumed on Second in the same conversation"));
+    // The fresh one: its session is cleared, then a new one starts.
+    for (auto &m : later.members) if (m.id == "old") { m.session.clear(); m.runId.clear(); }
+    QCOMPARE(stepOf(later, move, "old").state, QStringLiteral("fresh"));
+    observe(move, later);
+    QVERIFY(move.cleared.contains("old"));
+    for (auto &m : later.members) if (m.id == "old") m.session = "claude/x/old";
+    QCOMPARE(stepOf(later, move, "old").state, QStringLiteral("launched"));
+    // Not in the receipt: the member's error says why.
+    move.receipt = QJsonDocument::fromJson(R"({"status":"swapped","members":[{"member":"lead"}],"fresh":[]})").object();
+    for (auto &m : later.members) if (m.id == "old") m.error = "the account switch is rolled_back; waiting for the old session to finish its turn";
+    QCOMPARE(stepOf(later, move, "old").state, QStringLiteral("waiting"));
+    for (auto &m : later.members) if (m.id == "old") m.error = "the account switch is uncertain; the old session was not paused: gone";
+    QCOMPARE(stepOf(later, move, "old").state, QStringLiteral("uncertain"));
+    // A refused call: nothing moved, with its reason.
+    move.error = "No member of team T could move to account second";
+    QCOMPARE(stepOf(later, move, "lead").state, QStringLiteral("failed"));
+    QVERIFY(stepOf(later, move, "lead").text.contains(move.error));
 }
 
 QTEST_MAIN(TestTeams)

@@ -51,6 +51,8 @@ private slots:
     void notificationsRequireLocalCapabilityEvenForANewPeer();
     void readMarksUseStdinAndAcceptOnlyHostAnswers();
     void taskCommandsUseStdinAndReportFailures();
+    void terminalDraftsPreserveIdentityAndReportReceipts();
+    void switchAccountReadsReceiptsAndRefusals();
     void sendsAndCancelsWaitForAnotherComputer();
     void cliVersionUsesConfiguredExecutableAndRefreshes();
     void parsesSavedSessions();
@@ -2327,6 +2329,116 @@ void TestHgsClient::parsesSharedReadState()
     QCOMPARE(box.sessions[0].readReplyId, QString("7:100.5")); QVERIFY(box.sessions[0].readAttentionSignature.isEmpty());
     QVERIFY(box.sessions[1].sharedRead); QVERIFY(box.sessions[1].readReplyId.isEmpty());
     QVERIFY(!box.sessions[2].sharedRead);
+}
+
+// U53: switch-account names the session, the account and a new request id;
+// its receipt arrives whether hgs exits 0 (switched) or 1 (rolled_back), and a
+// refusal on stderr arrives as its reason.
+void TestHgsClient::switchAccountReadsReceiptsAndRefusals()
+{
+    QTemporaryDir fixture; QVERIFY(fixture.isValid());
+    const auto program = fixture.filePath("hgs");
+    QVERIFY(FakeCli::install(program, R"PY(#!/usr/bin/env python3
+import json,os,sys
+here=__file__
+open(here+'.args','a').write(json.dumps(sys.argv[1:])+'\n')
+mode=open(here+'.mode').read().strip()
+if mode=='refuse':
+ sys.stderr.write('hgs: claude/p/s: the session is not idle; a turn is running\n');sys.exit(1)
+print(json.dumps({'status':mode,'session':'claude/p/s','from':{'account_id':'work','label':'Work'},'to':{'account_id':'second','label':'Second'}}))
+sys.exit(0 if mode=='switched' else 1)
+)PY"));
+    const auto mode = [&](const char *value) { QFile file(program + ".mode"); QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Truncate)); file.write(value); };
+    HgsClient client(FakeCli::program(program));
+    QSignalSpy finished(&client, &HgsClient::switchAccountFinished);
+    mode("switched");
+    const auto first = client.requestSwitchAccount("box", "claude/p/s", "second");
+    QTRY_COMPARE(finished.size(), 1);
+    QCOMPARE(finished[0][0].toULongLong(), first);
+    QCOMPARE(finished[0][1].toString(), QStringLiteral("box")); QCOMPARE(finished[0][2].toString(), QStringLiteral("claude/p/s"));
+    QCOMPARE(finished[0][3].toJsonObject()["status"].toString(), QStringLiteral("switched")); QVERIFY(finished[0][4].toString().isEmpty());
+    mode("rolled_back");
+    client.requestSwitchAccount({}, "claude/p/s", "second");
+    QTRY_COMPARE(finished.size(), 2);
+    QCOMPARE(finished[1][3].toJsonObject()["status"].toString(), QStringLiteral("rolled_back")); QVERIFY(finished[1][4].toString().isEmpty());
+    mode("refuse");
+    client.requestSwitchAccount({}, "claude/p/s", "second");
+    QTRY_COMPARE(finished.size(), 3);
+    QVERIFY(finished[2][3].toJsonObject().isEmpty());
+    QCOMPARE(finished[2][4].toString(), QStringLiteral("hgs: claude/p/s: the session is not idle; a turn is running"));
+    QList<QStringList> calls; QFile file(program + ".args"); QVERIFY(file.open(QIODevice::ReadOnly));
+    for (const auto &line : file.readAll().split('\n')) if (!line.isEmpty()) {
+        QStringList args; for (const auto &value : QJsonDocument::fromJson(line).array()) args << value.toString(); calls << args;
+    }
+    QCOMPARE(calls.size(), 3);
+    QCOMPARE(calls[0].mid(0, 6), (QStringList{"@box", "switch-account", "claude/p/s", "--account", "second", "--request-id"}));
+    QCOMPARE(calls[1].mid(0, 5), (QStringList{"switch-account", "claude/p/s", "--account", "second", "--request-id"}));
+    // A canonical UUID, new for every request: none is a retry.
+    const QRegularExpression uuid("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
+    QVERIFY(uuid.match(calls[0].last()).hasMatch()); QVERIFY(uuid.match(calls[1].last()).hasMatch());
+    QVERIFY(calls[0].last() != calls[1].last() && calls[1].last() != calls[2].last());
+}
+
+void TestHgsClient::terminalDraftsPreserveIdentityAndReportReceipts()
+{
+    QTemporaryDir fixture; QVERIFY(fixture.isValid());
+    const auto program = fixture.filePath("hgs");
+    QVERIFY(FakeCli::install(program, R"PY(#!/usr/bin/env python3
+import json,pathlib,sys
+root=pathlib.Path(__file__).parent
+with (root/'calls.jsonl').open('a') as log:
+ log.write(json.dumps({'argv':sys.argv[1:],'input':json.load(sys.stdin)})+'\n')
+print((root/'reply').read_text())
+)PY"));
+    std::atomic<QThread *> launchThread{nullptr}, replyThread{nullptr};
+    ProcessRunner::setLaunchObserver([&] { launchThread = QThread::currentThread(); });
+    const auto resetObserver = qScopeGuard([] { ProcessRunner::setLaunchObserver({}); });
+    HgsClient client(FakeCli::program(program));
+    QSignalSpy ready(&client, &HgsClient::terminalDraftReady), failed(&client, &HgsClient::terminalDraftFailed);
+    connect(&client, &HgsClient::terminalDraftReady, this, [&] { replyThread = QThread::currentThread(); }, Qt::DirectConnection);
+    connect(&client, &HgsClient::terminalDraftFailed, this, [&] { replyThread = QThread::currentThread(); }, Qt::DirectConnection);
+    struct Case { QByteArray response; QString error; bool submit; };
+    const QList<Case> cases{
+        {R"({"status":"ok","draft":"literal '$HOME' draft","draft_hash":"hash-1"})", {}, false},
+        {R"({"status":"ok","submitted":true})", {}, true},
+        {R"({"status":"failed","error":"draft changed"})", "draft changed", true},
+        {R"({"status":"failed"})", "Not sent", true},
+        {R"({"status":"uncertain","error":"link lost"})", "Enter may have reached Terminal; check it before sending again. link lost", true},
+        {"not json", "Invalid Terminal response", false},
+        {"[]", "Invalid Terminal response", false},
+    };
+    const QString name = "codex/project '$HOME' `literal`";
+    quint64 previous = 0; QSet<QString> requestIds;
+    for (qsizetype index = 0; index < cases.size(); ++index) {
+        const auto &test = cases[index]; const QString host = test.submit ? "remote" : QString();
+        QFile response(fixture.filePath("reply")); QVERIFY(response.open(QIODevice::WriteOnly));
+        QCOMPARE(response.write(test.response), test.response.size()); response.close();
+        ready.clear(); failed.clear(); replyThread = nullptr;
+        const auto request = client.requestTerminalDraft(host, name, "run-1", "conversation-1", test.submit ? "hash-1" : QString());
+        QVERIFY(request > previous); previous = request;
+        QTRY_COMPARE(ready.size() + failed.size(), 1);
+        if (test.error.isEmpty()) {
+            QVERIFY(failed.isEmpty()); QCOMPARE(ready.first()[0].toULongLong(), request);
+            QCOMPARE(ready.first()[1].toJsonObject(), QJsonDocument::fromJson(test.response).object());
+        } else {
+            QVERIFY(ready.isEmpty()); QCOMPARE(failed.first()[0].toULongLong(), request);
+            QCOMPARE(failed.first()[1].toString(), test.error);
+        }
+        QVERIFY(launchThread.load() && launchThread.load() != QThread::currentThread());
+        QCOMPARE(replyThread.load(), QThread::currentThread());
+        QFile calls(fixture.filePath("calls.jsonl")); QVERIFY(calls.open(QIODevice::ReadOnly));
+        const auto lines = calls.readAll().trimmed().split('\n');
+        QCOMPARE(lines.size(), index + 1); // Failed and uncertain receipts are never replayed.
+        const auto call = QJsonDocument::fromJson(lines.last()).object();
+        QJsonArray arguments{"terminal", name, "--json"}; if (!host.isEmpty()) arguments.prepend('@' + host);
+        QCOMPARE(call.value("argv").toArray(), arguments);
+        auto input = call.value("input").toObject(); const auto requestId = input.take("request_id").toString();
+        QVERIFY(!QUuid(requestId).isNull()); QVERIFY(!requestIds.contains(requestId)); requestIds.insert(requestId);
+        QJsonObject expected{{"action", test.submit ? "submit_draft" : "draft"},
+                             {"expected_run_id", "run-1"}, {"expected_conversation_id", "conversation-1"}};
+        if (test.submit) expected["draft_hash"] = "hash-1";
+        QCOMPARE(input, expected);
+    }
 }
 
 void TestHgsClient::taskCommandsUseStdinAndReportFailures()

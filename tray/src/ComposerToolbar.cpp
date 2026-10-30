@@ -312,7 +312,7 @@ ComposerToolbar::Zone ComposerToolbar::zone(Slot slot, bool three)
     case Slot::VoiceMode: return three ? Zone::Centre : Zone::Left;
     case Slot::UsageLimit: case Slot::Recovery: case Slot::Cache: case Slot::Context: case Slot::SessionReference:
         return three ? Zone::Centre : Zone::Right;
-    case Slot::Status: case Slot::StatusRefresh: case Slot::Retry: case Slot::Model:
+    case Slot::Status: case Slot::StatusRefresh: case Slot::Retry: case Slot::Account: case Slot::Model:
         return Zone::Right;
     }
     return Zone::Left;
@@ -324,11 +324,11 @@ int ComposerToolbar::rank(Slot slot, bool three)
 {
     static const QList<Slot> classic{Slot::Attach, Slot::FileReference, Slot::Attachments, Slot::Voice, Slot::VoiceMode, Slot::VoiceCancel,
         Slot::VoiceResult, Slot::IronRules, Slot::Latest, Slot::MarkRead, Slot::Compaction, Slot::CompactionCancel,
-        Slot::UsageLimit, Slot::Recovery, Slot::Cache, Slot::Context, Slot::SessionReference, Slot::Status, Slot::StatusRefresh, Slot::Retry, Slot::Model};
+        Slot::UsageLimit, Slot::Recovery, Slot::Cache, Slot::Context, Slot::SessionReference, Slot::Status, Slot::StatusRefresh, Slot::Retry, Slot::Account, Slot::Model};
     static const QList<Slot> zones{Slot::Attach, Slot::FileReference, Slot::Attachments, Slot::Voice, Slot::VoiceCancel, Slot::VoiceResult,
         Slot::IronRules, Slot::Latest, Slot::MarkRead, Slot::Compaction, Slot::CompactionCancel,
         Slot::VoiceMode, Slot::UsageLimit, Slot::Recovery, Slot::Cache, Slot::Context, Slot::SessionReference,
-        Slot::Status, Slot::StatusRefresh, Slot::Retry, Slot::Model};
+        Slot::Status, Slot::StatusRefresh, Slot::Retry, Slot::Account, Slot::Model};
     return int((three ? zones : classic).indexOf(slot));
 }
 
@@ -341,6 +341,7 @@ int ComposerToolbar::priority(Slot slot)
     case Slot::Cache: return 30;
     case Slot::Recovery: return 40;
     case Slot::UsageLimit: return 50;
+    case Slot::Account: return 35;
     default: return NeverShortened;
     }
 }

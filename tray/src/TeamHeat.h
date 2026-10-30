@@ -57,6 +57,9 @@ QString heatLossName(const HeatLoss &loss);
 QString heatLabel(const Heat &heat, const Teams::Task &task);
 // The tooltip's lines: the loss and the task's top loss, then the next two.
 QString heatTip(const Heat &heat, const Teams::Task &task);
+// #709 L6: what the tint draws in `c`, to tell a read that changes nothing
+// drawn from one that does.
+QByteArray heatDigest(const Heat &heat, const Colors &c);
 // Whether a task takes the tint at all: drafts and cancelled tasks do not.
 bool heatCovers(const Teams::Task &task);
 // A node's or card's fill for `share`, and its loss text's color.

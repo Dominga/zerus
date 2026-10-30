@@ -172,6 +172,10 @@ pub(crate) struct Settings {
     /// task does; off by default, so a free same-role member may take it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub keep_assignees: bool,
+    /// U62: the owner's override of the project's `.zerus/tests.toml`, merged
+    /// over it field by field (providers by name).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tests: Option<serde_json::Value>,
 }
 
 /// U48: the name of a task's branch: `{id}`, `{member}` and `{team8}` are
@@ -262,6 +266,7 @@ impl Default for Settings {
             stuck_minutes: 0,
             lead_restarts_stuck: false,
             keep_assignees: false,
+            tests: None,
         }
     }
 }

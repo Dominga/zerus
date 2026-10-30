@@ -23,6 +23,9 @@ public:
     // are rebuilt only when what they show changes, so a typed reason stays.
     void setTeam(const Teams::Team *team);
     void setDark(bool dark);
+    // #724: only this proposal's card (Waiting for you answers one item);
+    // empty: every open proposal. Set before setTeam.
+    void setOnly(const QString &proposal) { m_only = proposal; }
     // Sends decide-proposal; the input carries team, proposal, accept,
     // expected_hash and, when given, reason. Done's message on success is the
     // receipt's status ("accepted", "rejected").
@@ -61,7 +64,7 @@ private:
     class QScrollArea *m_scroll;
     QWidget *m_inner;
     QVBoxLayout *m_layout;
-    QString m_team;
+    QString m_team, m_only;
     QList<View> m_views;
     // A card whose answer found its proposal changed or decided: the view it
     // was answered on and what the card says.

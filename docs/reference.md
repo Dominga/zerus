@@ -1032,6 +1032,22 @@ minutes; `settings`), else five minutes (`default`). Keep cache warm extends it:
 each keepalive turn is a native event, and `kept_warm` says the last turn only
 warmed the cache. These fields are additive; older fields keep their meaning.
 
+A team's builds may share one build cache (U62): the project file
+`.zerus/tests.toml` turns it on with `[build_cache]`, `enabled = true`
+(off when absent), `size` (each tool's bound, `20G` by default, K/M/G/T),
+`compilers` (`["rust", "cxx"]` by default) and `dir` (an absolute folder;
+by default `build-cache` in Zerus state, so every worktree and team on the
+computer shares it). The owner's `build_cache` object in the team templates
+file (Settings > Teams) overrides any of these keys. With it on, the
+`cargo-build`, `cargo-test` and `cargo-clippy` templates run rustc through
+`sccache` (`RUSTC_WRAPPER`, `SCCACHE_DIR`, `SCCACHE_CACHE_SIZE`, and a server
+of the run's own on a free port that ends with the run), and `qt-configure`
+sets `ccache` as the C and C++ compiler launcher with `CCACHE_DIR`,
+`CCACHE_MAXSIZE` and `CCACHE_BASEDIR` (the member's folder, so worktrees hit
+each other's entries); `qt-build` sets the launcher first in a build folder
+configured without it. A tool not found on `PATH` (or in cargo's bin folder)
+is named at the start of the run's output and the run builds without it.
+
 Start builds and long tests through Zerus so they show as work:
 `hgs team run` for a team member's templates (`hgs guide team-run`), and
 `hgs run --json [--wait]` with `{request_id, label, command, cwd?,
@@ -5382,3 +5398,36 @@ clang -Wno-deprecated-declarations tests/test_macos_session_protocol.c \
 Process coverage includes exact call identity, background tasks, stale generations,
 independent output cursors, targeted stopping and offline/read-position behavior.
 Native DeepSeek tests use a local keyless model rather than paid API requests.
+### Affected tests (U62)
+
+A project names its test suites in `.zerus/tests.toml`; Zerus reads it, and the
+owner may override any field in the team settings (`settings.tests`, an object
+shaped like the file and merged over it, providers by name; only the owner sets
+it). Without the file `hgs test config` shows a proposal from the stacks it
+finds (Cargo, CMake/CTest, pytest or unittest, Gradle, npm) and nothing is
+enforced: a team without a configuration keeps today's flow.
+
+- `hgs test map --write` writes the committed map (`.zerus/test-map.json`) from
+  the build: a Cargo package's module graph (each module's tests, widened to
+  the modules that use it, `include_str!` files included); CMake's file API
+  reply, the CTest files and the include graph for each test binary (its
+  functions too); and for Python, Gradle and npm the files a test names or
+  imports. `[[provider.paths]]` adds path rules, with targets or with the tests
+  that mention a text (such as the CLI binary).
+- `hgs test map --check` fails on a tracked file outside every provider's area
+  and `map.ignore`, on a test file the map lacks, and on a map older than the
+  sources; the CLI job runs it.
+- `hgs test affected [RANGE|--staged|--files ...] [--full] [--json]` prints the
+  commands to run with their estimate from `.zerus/test-durations.json`. A file
+  the map does not know runs its provider's whole set; a file in no area is
+  named, never skipped. `--full` prints the whole set and its time; the
+  full-run policy (`[full]`) says who may start it.
+- `hgs test durations --record LOG --provider NAME` keeps the slowest measured
+  time per target from CTest, QtTest, Cargo (and libtest JSON), unittest or
+  pytest output, or a JSON object of test ids to seconds.
+- `hgs test coverage --provider NAME --report TARGET=FILE` compares one
+  target's coverage (lcov, Cobertura or llvm-cov JSON) with the map: a covered
+  file the map does not give the target is a gap. The weekly
+  `test-map-coverage.yml` workflow measures every Rust module and Qt binary.
+
+The file's fields are listed in `hgs guide tests`.

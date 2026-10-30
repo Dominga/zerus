@@ -1,4 +1,5 @@
 #include "TeamWaitingPage.h"
+#include "TeamWaitingAnswer.h"
 #include "TeamController.h"
 #include "TeamWidgets.h"
 #include <QDateTime>
@@ -136,6 +137,7 @@ void TeamWaitingPage::setDark(bool dark)
              a(c.accent, .6), c.text2.name(), c.tile.name()));
     m_tile->setPixmap(workspaceIcon("inbox", c.accent).pixmap(16, 16));
     m_refresh->setIcon(workspaceIcon("refresh", c.text2));
+    for (const auto &open : std::as_const(m_answers)) if (open) open->setDark(dark);
     render();
 }
 
@@ -193,17 +195,60 @@ void TeamWaitingPage::loadOlder()
     }, false);
 }
 
+TeamWaitingAnswer *TeamWaitingPage::answerOf(const QString &id) const
+{
+    return m_answers.value(id).data();
+}
+
+TeamWaitingAnswer *TeamWaitingPage::answer(const Item &item)
+{
+    if (auto *found = m_answers.value(item.id).data()) return found;
+    auto *made = new TeamWaitingAnswer(m_teams, item, m_dark);
+    made->answered = [this](const Item &done) {
+        const Item copy = done;
+        drop(copy.id);
+        if (answered) answered(copy);
+    };
+    made->closed = [this, id = item.id] { closeAnswer(id); };
+    m_answers.insert(item.id, made);
+    return made;
+}
+
+void TeamWaitingPage::closeAnswer(const QString &id)
+{
+    if (auto found = m_answers.take(id)) found->deleteLater();
+    render();
+}
+
+void TeamWaitingPage::drop(const QString &id)
+{
+    const auto gone = [&id](const Item &item) { return item.id == id; };
+    const auto before = m_head.size() + m_older.size();
+    m_head.erase(std::remove_if(m_head.begin(), m_head.end(), gone), m_head.end());
+    m_older.erase(std::remove_if(m_older.begin(), m_older.end(), gone), m_older.end());
+    if (auto found = m_answers.take(id)) found->deleteLater();
+    if (m_head.size() + m_older.size() == before) return;
+    m_total = qMax(0, m_total - 1);
+    // The next read draws the list as the store has it.
+    m_lastHead = {};
+    if (countChanged) countChanged(m_total);
+    render();
+}
+
 QWidget *TeamWaitingPage::rowFor(const Item &item)
 {
     const Colors c = colorsFor(m_dark);
     const QColor tone = kindColor(c, item.kind);
-    // U57: a lead's proposal is answered on its card in the lead's chat.
     const bool proposal = item.action == "decide_proposal";
     const QString kindName = proposal ? tr("Proposal") : kindLabel(item.kind);
+    // #724: a decision the owner takes in one click is answered in the row.
+    const bool inPlace = TeamWaitingAnswer::answersInPlace(item.action);
     auto *frame = new WaitingRow; frame->setObjectName("teamWaitingRow"); frame->setAttribute(Qt::WA_StyledBackground);
     frame->setProperty("kind", item.kind); frame->setProperty("team", item.team); frame->setProperty("itemId", item.id);
     frame->setCursor(Qt::PointingHandCursor);
-    auto *h = new QHBoxLayout(frame); h->setContentsMargins(12, 9, 10, 9); h->setSpacing(10);
+    auto *rowBox = new QVBoxLayout(frame); rowBox->setContentsMargins(12, 9, 10, 9); rowBox->setSpacing(0);
+    auto *h = new QHBoxLayout; h->setContentsMargins(0, 0, 0, 0); h->setSpacing(10);
+    rowBox->addLayout(h);
     auto *icon = new QLabel; icon->setObjectName("teamWaitingKindIcon"); icon->setFixedSize(18, 18);
     icon->setPixmap(workspaceIcon(kindIcon(item.kind), tone).pixmap(18, 18)); icon->setToolTip(kindName);
     h->addWidget(icon, 0, Qt::AlignTop);
@@ -221,13 +266,41 @@ QWidget *TeamWaitingPage::rowFor(const Item &item)
     auto *since = label(agoText(item.since, now), c.muted, 11, false, "teamWaitingSince");
     since->setToolTip(QDateTime::fromSecsSinceEpoch(qint64(item.since)).toString(QStringLiteral("yyyy-MM-dd HH:mm")));
     h->addWidget(since);
-    auto *open = button(proposal ? tr("Answer") : tr("Open team"), "teamWaitingOpen");
-    open->setAccessibleName(proposal ? tr("Answer the proposal in team %1").arg(item.teamName) : tr("Open team %1").arg(item.teamName));
-    if (proposal) open->setToolTip(tr("Allow or deny it on its card in the lead's chat"));
+    TeamWaitingAnswer *shown = m_answers.value(item.id).data();
+    if (TeamWaitingAnswer::approves(item.action)) {
+        auto *approve = button(tr("Approve…"), "teamWaitingApprove", true);
+        approve->setAccessibleName(tr("Approve in team %1").arg(item.teamName));
+        approve->setToolTip(item.kind == "plan_draft" ? tr("Approve the plan and run it; the team's question comes first")
+                                                      : tr("Approve the phase; the team's question comes first"));
+        approve->setEnabled(!shown || !shown->busy());
+        QObject::connect(approve, &QPushButton::clicked, this, [this, item] {
+            auto *made = answer(item);
+            render();
+            made->approve();
+        });
+        h->addWidget(approve);
+    } else if (TeamWaitingAnswer::opensCard(item.action)) {
+        auto *toggle = button(shown ? tr("Close") : tr("Answer"), "teamWaitingAnswerToggle", !shown);
+        toggle->setAccessibleName(tr("Answer in team %1").arg(item.teamName));
+        toggle->setEnabled(!shown || !shown->busy());
+        QObject::connect(toggle, &QPushButton::clicked, this, [this, item] {
+            if (m_answers.value(item.id)) closeAnswer(item.id);
+            else { answer(item); render(); }
+        });
+        h->addWidget(toggle);
+    }
+    auto *open = button(tr("Open team"), "teamWaitingOpen");
+    if (inPlace) open->setProperty("ghost", true);
+    open->setAccessibleName(tr("Open team %1").arg(item.teamName));
     h->addWidget(open);
     const auto go = [this, item] { if (openTeam) openTeam(item); };
     QObject::connect(open, &QPushButton::clicked, frame, go);
-    frame->clicked = go;
+    // A click in an open answer stays there.
+    frame->clicked = [this, id = item.id, go] { if (!m_answers.value(id)) go(); };
+    if (shown) {
+        rowBox->addWidget(shown);
+        shown->setVisible(shown->hasContent());
+    }
     return frame;
 }
 
@@ -235,11 +308,22 @@ void TeamWaitingPage::render()
 {
     const Colors c = colorsFor(m_dark);
     const int scrolled = m_scroll->verticalScrollBar()->value();
+    // #724: an open answer keeps its typed words and its question across the
+    // rebuild; one whose item is gone goes too, unless it is still asking.
+    for (const auto &open : std::as_const(m_answers)) if (open) { open->hide(); open->setParent(nullptr); }
     while (auto *child = m_rows->takeAt(0)) {
         if (auto *widget = child->widget()) retire(widget);
         delete child;
     }
     m_items = m_head + m_older;
+    QSet<QString> listed;
+    for (const auto &item : std::as_const(m_items)) listed.insert(item.id);
+    for (auto it = m_answers.begin(); it != m_answers.end();) {
+        if (!*it) { it = m_answers.erase(it); continue; }
+        if (listed.contains(it.key()) || (*it)->busy()) { ++it; continue; }
+        (*it)->deleteLater();
+        it = m_answers.erase(it);
+    }
     if (m_total < 0) m_count->setText(m_error.isEmpty() ? tr("Reading the teams") : QString());
     else {
         QSet<QString> teams; for (const auto &item : std::as_const(m_items)) teams.insert(item.team);

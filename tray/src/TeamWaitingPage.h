@@ -1,8 +1,10 @@
 #pragma once
 #include <QElapsedTimer>
+#include <QHash>
 #include <QJsonObject>
 #include <QJsonValue>
 #include <QList>
+#include <QPointer>
 #include <QTimer>
 #include <QWidget>
 #include <functional>
@@ -12,13 +14,16 @@ class QPushButton;
 class QScrollArea;
 class QVBoxLayout;
 class TeamController;
+class TeamWaitingAnswer;
 
 // WhiteWh fork: U50 (spec 2026-10-28-team-customization.md section 7). The
 // rail page beside the Team designer: every item of every team that waits for
 // the owner (draft phases and plans, reports and permissions escalated to the
 // owner, the owner's word asked for, tasks the owner holds, finished teams),
-// newest first, read with `hgs team waiting` while the page shows. It only
-// reads; a row opens its team. Pages of 50, "Show older" for the next.
+// newest first, read with `hgs team waiting` while the page shows. A row opens
+// its team. Pages of 50, "Show older" for the next. #724: a one-click owner
+// decision is answered in its row (TeamWaitingAnswer); an answered item leaves
+// at once.
 class TeamWaitingPage : public QWidget {
 public:
     struct Item {
@@ -35,6 +40,13 @@ public:
     std::function<void(const Item &item)> openTeam;
     // How many items wait, for the rail button's caption; -1 before the first read.
     std::function<void(int total)> countChanged;
+    // #724: an item answered here; the window drops it from the banner and
+    // withdraws its notification.
+    std::function<void(const Item &item)> answered;
+    // The item leaves the list at once (answered here or in the banner).
+    void drop(const QString &id);
+    // The answer of an item, open in its row; null when none is.
+    TeamWaitingAnswer *answerOf(const QString &id) const;
     const QList<Item> &items() const { return m_items; }
     static Item parse(const QJsonObject &item);
     // The kind's short name and its icon (WorkspaceIcons).
@@ -47,6 +59,10 @@ protected:
 private:
     void render();
     QWidget *rowFor(const Item &item);
+    // The item's answer, made when first wanted; it outlives the rebuilds.
+    TeamWaitingAnswer *answer(const Item &item);
+    void closeAnswer(const QString &id);
+    QHash<QString, QPointer<TeamWaitingAnswer>> m_answers;
     TeamController *m_teams;
     QTimer m_poll;
     // The newest page as last read, and the older pages "Show older" added;

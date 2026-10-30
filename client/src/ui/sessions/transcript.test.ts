@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildTranscript, localFileAvailable, mergeLocal } from "./transcript";
+import { buildTranscript, localFileAvailable, mergeLocal, createTranscriptProjection } from "./transcript";
 import type { ActivityEvent, LocalMessage } from "../../types";
 import type { ActivityItem } from "./types";
 
@@ -54,7 +54,7 @@ describe("local message rows (ActivityView.cpp:665-720, 1053-1068)", () => {
     const sent = local("sent", false, { text: "hello there" });
     const items = buildTranscript(events, {}, [sent]) as ActivityItem[];
     expect(items).toHaveLength(1);
-    expect(items[0]).toMatchObject({ id: "s4", kind: "user", body: "hello there", receipt: "Sent" });
+    expect(items[0]).toMatchObject({ id: `local-${sent.id}`, kind: "user", body: "hello there", receipt: "Sent" });
     // More than 10 s away, or a failed row: never the same message.
     expect(buildTranscript(events, {}, [{ ...sent, submitted_at: 1_793_000_020 }])).toHaveLength(2);
     expect(buildTranscript(events, {}, [local("error", false, { text: "hello there" })])).toHaveLength(2);
@@ -96,5 +96,45 @@ describe("local message rows (ActivityView.cpp:665-720, 1053-1068)", () => {
     expect(items.map((i) => i.kind)).toEqual(["context", "user", "user"]);
     expect(items[2].local?.stamp).toBe("Not sent");
     expect(buildTranscript([], { prompt: "earlier request" })).toHaveLength(2);
+  });
+});
+
+
+describe("local-to-recorded display identity", () => {
+  const event = (seq: number, detail = "hello", at = 1_793_000_001): ActivityEvent => ({seq,type:"UserPromptSubmit",detail,at});
+  it("keeps one key and body before acknowledgement, at acknowledgement and after local receipt removal", () => {
+    const projection=createTranscriptProjection(), row=local("sending",false,{id:"request-one",text:"**hello**\n\n- one\n- two"});
+    const initial=projection.build([],{},[row]);
+    const acknowledged=projection.build([event(4,row.text)],{},[{...row,status:"sent"}]);
+    const recorded=projection.build([event(4,row.text)],{},[]);
+    expect(initial).toHaveLength(1);expect(acknowledged).toHaveLength(1);expect(recorded).toHaveLength(1);
+    expect([initial[0].id,acknowledged[0].id,recorded[0].id]).toEqual(Array(3).fill("local-request-one"));
+    expect([(initial[0] as ActivityItem).body,(acknowledged[0] as ActivityItem).body,(recorded[0] as ActivityItem).body]).toEqual(Array(3).fill(row.text));
+  });
+  it("binds when Rust drops a sending receipt before the journal batch arrives, without a blank handoff frame", () => {
+    const projection=createTranscriptProjection(),row=local("sending");projection.build([],{},[row]);
+    expect(projection.build([],{},[]).map(item=>item.id)).toEqual([`local-${row.id}`]);
+    expect(projection.build([event(8)],{},[]).map(item=>item.id)).toEqual([`local-${row.id}`]);
+    projection.reset();expect(projection.build([event(8)],{},[]).map(item=>item.id)).toEqual(["s8"]);
+  });
+  it("never makes two distinct equal-text sends adopt one event or swap already bound keys", () => {
+    const projection=createTranscriptProjection(),one=local("sent",false,{id:"one"}),two=local("sent",false,{id:"two",submitted_at:1_793_000_002});
+    const first=projection.build([event(1)],{},[one]);expect(first.map(item=>item.id)).toEqual(["local-one"]);
+    const both=projection.build([event(1),event(2,"hello",1_793_000_002)],{},[one,two]);
+    expect(both.map(item=>item.id)).toEqual(["local-one","local-two"]);
+    expect(projection.build([event(1),event(2,"hello",1_793_000_002)],{},[]).map(item=>item.id)).toEqual(["local-one","local-two"]);
+    expect(mergeLocal([event(1)],[one,two])).toHaveLength(2);
+  });
+  it("preserves exact attachment receipts while keeping the local display key", () => {
+    const projection=createTranscriptProjection();
+    const file={name:"notes.txt",mime:"text/plain",bytes:12,reference:"[File #1]",request_id:"request",index:0};
+    const row=local("sending",false,{id:"request",text:"Read [File #1]",attachments:[{...file,request_id:""}]});
+    projection.build([],{},[row]);
+    const items=projection.build([{...event(3,row.text),source:"hgs_delivery",message_id:"request",attachments:[file]}],{},[]) as ActivityItem[];
+    expect(items).toHaveLength(1);expect(items[0].id).toBe("local-request");expect(items[0].attachments?.[0]).toMatchObject({request_id:"request",index:0});
+  });
+  it("does not resurrect a deleted failed local row or bind it to another prompt", () => {
+    const projection=createTranscriptProjection(),row=local("error");projection.build([],{},[row]);
+    expect(projection.build([event(1)],{},[]).map(item=>item.id)).toEqual(["s1"]);
   });
 });

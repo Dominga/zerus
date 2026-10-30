@@ -18,7 +18,7 @@ import { composer, draftKey } from "../../store/composer";
 import { terminal } from "../../store/terminal";
 import type { LocalMessage } from "../../types";
 import { animationFrames, createActivityEnd, newLocalSends } from "./activity-end";
-import { buildTranscript, VOICE_STATE_LABEL, voiceStateDetail, voiceStateIssue } from "./transcript";
+import { buildTranscript, createTranscriptProjection, VOICE_STATE_LABEL, voiceStateDetail, voiceStateIssue } from "./transcript";
 import { DELETE_TEXT, DELETE_TITLE, retryReason, routeInspect } from "./local-actions";
 import { inlineParts, markdownBlocks } from "./markdown";
 import { openExternal, openSessionFile } from "./sessionFiles";
@@ -349,22 +349,17 @@ function AttachmentCard(props: { file: ItemAttachment; scope?: AttachmentScope }
     const state = previews.state(now.computer, now.ref);
     return state.kind === "ready" && state.fetched.thumbnail ? state.url : undefined;
   };
+  const contents = () => <>
+    <Show when={props.file.image}>
+      <span class="att-thumb"><Show when={thumbnail()}>{(url) => <img src={url()} alt="" onError={() => { const now=target(); if(now)previews.failed(now.computer,now.ref); }} />}</Show></span>
+    </Show>
+    <span class="att-caption">{props.file.caption}</span>
+    <span class="dim">{props.file.meta}</span>
+    <span class="att-open" style={{ visibility: target() ? "visible" : "hidden" }}>Open →</span>
+  </>;
   return (
-    <Show when={target()} fallback={<span class="att-card">Attachment: {props.file.name}</span>}>
-      {(now) => (
-        <button class="att-card" title={props.file.caption} onClick={() => void openAttachment(now().computer, now().ref)}>
-          <Show when={props.file.image}>
-            <span class="att-thumb">
-              <Show when={thumbnail()}>
-                {(url) => <img src={url()} alt="" onError={() => previews.failed(now().computer, now().ref)} />}
-              </Show>
-            </span>
-          </Show>
-          <span class="att-caption">{props.file.caption}</span>
-          <span class="dim">{props.file.meta}</span>
-          <span class="att-open">Open →</span>
-        </button>
-      )}
+    <Show when={target()} fallback={<span class="att-card" title={`Attachment: ${props.file.name}`}>{contents()}</span>}>
+      {(now) => <button class="att-card" title={props.file.caption} onClick={() => void openAttachment(now().computer,now().ref)}>{contents()}</button>}
     </Show>
   );
 }
@@ -442,7 +437,7 @@ function ItemBody(props: { item: ActivityItem; scope?: AttachmentScope }) {
     <div class="act-body">
       <Show when={it.kind === "user"} fallback={<Body text={it.body ?? ""} />}>
         {/* A Codex question reply reads as Question and Your answer blocks (ActivityView.cpp:347-363). */}
-        <Show when={it.replies?.length} fallback={<p>{it.body}</p>}>
+        <Show when={it.replies?.length} fallback={<Body text={it.body ?? ""} />}>
           <For each={it.replies}>{(r) => (
             <div class="act-reply">
               <div class="act-reply-q">Question</div>
@@ -456,12 +451,10 @@ function ItemBody(props: { item: ActivityItem; scope?: AttachmentScope }) {
       <Show when={it.code}><pre class="act-code mono">{it.code}</pre></Show>
       <Show when={it.attachments}>
         <div class="act-attachments">
-          <For each={it.attachments}>{(a, i) => (
-            // A local row's file without its request or cached copy only names itself (ActivityView.cpp:765, 780);
-            // the others are Qt's attachment card.
-            <Show when={!it.local || it.local.available[i()]} fallback={<span class="att-card">Attachment: {a.name}</span>}>
-              <AttachmentCard file={a} scope={props.scope} />
-            </Show>
+          <For each={it.attachments}>{(a) => (
+            // Reserve the same card geometry before its delivery receipt arrives.
+            // A missing request remains read-only; it never authorizes a file read.
+            <AttachmentCard file={a} scope={props.scope} />
           )}</For>
         </div>
       </Show>
@@ -628,20 +621,27 @@ export function ActivityView(props: { source?: ActivitySource }) {
   /** The live follow unless the detail passes another source (an archived row's). */
   const source = (): ActivitySource => props.source ?? activity;
   let scroller!: HTMLDivElement;
+  const [placed, setPlaced] = createSignal(false);
   // Items keep their identity while events append: the list reconciles by id,
   // so a growing tool group updates in place and older pages only add nodes.
-  const [view, setView] = createStore<{ items: TranscriptItem[]; expired: boolean; pane: ReturnType<typeof paneStates>; tool: string }>({ items: [], expired: false, pane: paneStates(source(), s()), tool: "" });
+  const [view, setView] = createStore<{ items: TranscriptItem[]; expired: boolean; loaded: boolean; pane: ReturnType<typeof paneStates>; tool: string }>({ items: [], expired: false, loaded: false, pane: paneStates(source(), s()), tool: "" });
   const local = createMemo(() => localRows(source(), s()), undefined, { equals: (a, b) => a === b || (a.length === 0 && b.length === 0) });
-  const built = createMemo(() => transcriptOf(source(), local()));
+  const projection = createTranscriptProjection();
+  let projectedTarget: string | undefined;
+  const built = createMemo(() => {
+    const target = source().target()?.id;
+    if (target !== projectedTarget) { projection.reset(); projectedTarget = target; }
+    return projection.build(source().events(), source().summary(), local());
+  });
   createEffect(() => {
-    const items = built();
+    const items = built(), loaded = source().loaded();
     const expired = source().olderDone() && source().events().length > 0 && source().summary()?.history_truncated === true;
     const pane = paneStates(source(), s());
     const summary = source().summary(), tool = String(summary?.current_tool || summary?.activity_summary || s()?.summary || "");
     motion.update(() => {
       settleReading(true);
       setView("items", reconcile(items, { key: "id" }));
-      setView({ expired, pane, tool });
+      setView({ expired, loaded, pane, tool });
       reading.changed(); end.changed();
     });
   });
@@ -659,6 +659,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
     () => scroller.scrollTo({ top: scroller.scrollHeight, behavior: "instant" }),
     animationFrames,
     () => !motion.active() && !selectionInside(),
+    () => { if (view.loaded || view.items.length) setPlaced(true); },
   );
   let latestAfterScroll = false;
   const motion = createActivityScroll(() => scroller.scrollTop, (flush) => {
@@ -723,7 +724,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
   };
   let sendIds: Set<string> | undefined;
   createEffect(on(() => source().target()?.id, () => {
-    sendIds = undefined;
+    sendIds = undefined; setPlaced(false);
     motion.reset(); latestAfterScroll = false; setFollowing(true); setUnseen(0); reading.reset(); newest = undefined;
     // Selection changes must place even when the next page has the same row count.
     end.pin();
@@ -735,6 +736,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
   }));
   createEffect(on(preview, (match) => {
     if (match) {
+      setPlaced(true);
       motion.reset(); end.release(); reading.reset(); setFollowing(false);
       requestAnimationFrame(() => { if (!motion.active()) scroller.querySelector(".search-preview mark")?.scrollIntoView({ block: "center" }); });
     } else { setFollowing(true); end.pin(); }
@@ -760,7 +762,13 @@ export function ActivityView(props: { source?: ActivitySource }) {
   };
   return (
     <ActivitySession.Provider value={fileSession}>
-    <div class="activity">
+    <div class="activity" style={{ position: "relative" }}>
+      <Show when={!placed()}>
+        <div class="act-col" style={{ position: "absolute", inset: "0", "min-height": "0", "pointer-events": "none" }} role="status">
+          <div class="act-label eyebrow">Recorded activity — messages and tool excerpts</div>
+          <div class="act-older hint">Reading activity…</div>
+        </div>
+      </Show>
       <LocalDeleteDialog />
       <SessionFileDialog />
       <div class="act-scroll" ref={scroller} tabindex="-1" onContextMenu={activityMenu} onScroll={onScroll} style={{ "overflow-anchor": "none" }}
@@ -769,7 +777,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
           && !(e.target as HTMLElement).closest("input,textarea,select,[contenteditable=true]") && !(e.key === " " && (e.target as HTMLElement).closest("button,a"))) { scrollIntent(); } }}
         onPointerDown={(e) => { if (e.button === 0 && !(e.target as HTMLElement).closest("button,a,input,textarea,.col-edge")) { scrollIntent(); motion.hold(); } }}
         onTouchStart={() => { scrollIntent(); motion.hold(); }} onTouchMove={scrollIntent} onTouchEnd={() => motion.release()} onTouchCancel={() => motion.release()}>
-        <div class="act-col">
+        <div class="act-col" style={{ visibility: placed() ? "visible" : "hidden" }}>
           <Show when={!fullWidth()}><ColumnEdge /><ColumnEdge right /></Show>
           <Show when={subagentOpen()}>
             <div class="subagent-bar">
@@ -792,7 +800,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
             <div class="act-older hint">Older events have expired from the journal.</div>
           </Show>
           <Show when={!states().archived} fallback={<div class="notice"><Icon name="archive" size={14} /><div>This conversation is archived.</div></div>}>
-            <Show when={source().loaded() || view.items.length} fallback={<div class="act-older hint">Reading activity…</div>}>
+            <Show when={view.loaded || view.items.length} fallback={<div class="act-older hint">Reading activity…</div>}>
               <Show when={view.items.length} fallback={<div class="act-older hint">No recorded activity yet.</div>}>
                 <For each={view.items}>{(it) => <Item item={it} scope={scope()} />}</For>
               </Show>

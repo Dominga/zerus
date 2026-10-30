@@ -250,13 +250,15 @@ export type Action =
   | { kind: "forget_archive"; archive_id: string }
   /** Computer-wide: the target's session name is empty and ignored. */
   | { kind: "pause_all"; count: number }
-  | { kind: "resume_all"; count: number };
+  | { kind: "resume_all"; count: number }
+  | { kind: "recovery"; job_id: string; action: "now" | "cancel" };
 
 export interface WorktreeCleanup { status: string; path: string; common_dir: string; reason?: string | null }
 
 export type Outcome =
   | { outcome: "done"; receipt: unknown; cleanup: WorktreeCleanup | null }
-  | { outcome: "failed"; detail: string };
+  | { outcome: "failed"; detail: string }
+  | { outcome: "uncertain"; detail: string };
 
 /** The inspect fields that enable header actions (client/core `details.rs`). */
 export interface Details {
@@ -330,6 +332,8 @@ export type Screen = "overview" | "projects" | "machines" | "accounts";
 export interface ProjectedWindow { id: string; label: string; used: number; minutes: number | null; resets_at: number | null }
 export interface Identity { email: string; name: string; plan: string; organization: string; account_id: string; auth_method: string }
 export interface Usage {
+  /** The account profile id, when the source reports one. */
+  id?: string;
   status: string;
   provider: string;
   label: string;
@@ -345,6 +349,12 @@ export interface Usage {
   refresh_error: boolean;
   offline: boolean;
 }
+export interface SessionUsageRef { host: ComputerId; name: string; run_id: string }
+export const emptyUsage = (provider = ""): Usage => ({
+  status: "loading", provider, label: "", auth_status: "", checked_at: null, seeded: false,
+  identity: { email: "", name: "", plan: "", organization: "", account_id: "", auth_method: "" },
+  windows: [], balances: [], credits: null, refreshing: false, refresh_error: false, offline: false,
+});
 export type MemberState = "ready" | "offline" | "not-installed" | "apikey" | "signed-out" | "keychain" | "desktop" | "unavailable" | "expired" | "checking" | "unknown";
 export interface OpenCodeInfo { providers: { label: string; connection: string; models: string }[]; truncated: boolean; stale_catalog_at: number | null; stopped: boolean }
 export interface Profile {

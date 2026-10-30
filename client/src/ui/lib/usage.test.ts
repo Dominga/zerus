@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { accountTooltip, current, dayTime, forecast, fromProjected, pace, period, remaining, severest, stateText, summaryText, windowText } from "./usage";
+import { accountTooltip, current, dayTime, exhausted, exhaustedSummary, forecast, fromProjected, limitRecoveryNotice, pace, period, remaining, severest, stateText, summaryText, windowText } from "./usage";
 import { NOW, projected, usageOf } from "../../store/testing";
 
 describe("usage windows (inventory 8.4, gaps 1-4 and 7)", () => {
@@ -82,5 +82,27 @@ describe("usage windows (inventory 8.4, gaps 1-4 and 7)", () => {
 
   it("formats local dates as Qt's d MMM HH:mm", () => {
     expect(dayTime(new Date(2026, 9, 28, 7, 5).getTime() / 1000)).toBe("28 Oct 07:05");
+  });
+
+  it("shows exhausted limits and cached warnings without a dot separator", () => {
+    const windows = [
+      projected({ used: 100, resets_at: NOW + 3600 }),
+      projected({ id: "week", minutes: 10080, used: 100, resets_at: NOW + 7200 }),
+    ];
+    const u = usageOf({ windows, refresh_error: true });
+    expect(exhausted(u, NOW)).toBe("Last reported usage: 5h limit reached. Resets in 1h 0m\n7d limit reached. Resets in 2h 0m. Refresh to check current limits.");
+    expect(exhaustedSummary(u, NOW)).toEqual({ label: "Limit reached", shortLabel: "Limit", remaining: "1h 0m" });
+    expect(exhaustedSummary(usageOf({ windows: [projected({ used: 100, resets_at: NOW - 1 })] }), NOW))
+      .toEqual({ label: "Refresh usage", shortLabel: "Limit", remaining: "" });
+  });
+
+  it("accepts only a fresh below-limit recovery snapshot", () => {
+    const windows = [projected({ used: 40 }), projected({ id: "week", minutes: 10080, used: 60 })];
+    const u = usageOf({ windows, checked_at: NOW - 30 });
+    expect(limitRecoveryNotice(u, NOW - 60, NOW)).toContain("Latest account usage is below the limit.");
+    expect(limitRecoveryNotice({ ...u, checked_at: NOW - 60 }, NOW - 60, NOW)).toBe("");
+    expect(limitRecoveryNotice({ ...u, refresh_error: true }, NOW - 60, NOW)).toBe("");
+    expect(limitRecoveryNotice({ ...u, windows: [windows[0]] }, NOW - 60, NOW)).toBe("");
+    expect(limitRecoveryNotice({ ...u, windows: [projected({ used: 100 }), windows[1]] }, NOW - 60, NOW)).toBe("");
   });
 });

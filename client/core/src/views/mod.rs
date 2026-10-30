@@ -11,6 +11,7 @@ pub mod accounts;
 pub mod machines;
 pub mod projects;
 pub mod schedule;
+pub mod session_usage;
 pub mod usage;
 
 /// One computer of the fleet as the screens see it: the Tauri pump's mirror

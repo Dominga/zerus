@@ -14,7 +14,17 @@ use std::{
     time::{Duration, Instant},
 };
 
-const VERSION: &str = "0.2.1-rc.2";
+// Resident bridge identity is independent of the installed harness release.
+const ADAPTER_VERSION: &str = "0.2.1-rc.2";
+const REVIEWED_VERSIONS: &[&str] = &["0.2.1-rc.2", "0.2.1-rc.5"];
+/// The harness release recommended to install: the newest reviewed one.
+const VERSION: &str = "0.2.1-rc.5";
+fn reviewed_harness_version(version: &str) -> bool {
+    REVIEWED_VERSIONS.contains(&version)
+}
+fn compatible_adapter(ping: &Value) -> bool {
+    ping["version"] == ADAPTER_VERSION && ping["protocol"] == 1
+}
 const BRIDGE: &str = include_str!("../dsh/bridge.mjs");
 const COMMAND_GUARD: &str = include_str!("../dsh/command-guard.mjs");
 fn bindings() -> PathBuf {
@@ -261,7 +271,7 @@ fn ensure_host(record: &Value) -> Result<bool> {
     private_dir(&dir)?;
     let _guard = lock(Some(&dir.join("start.lock")))?;
     if let Ok(ping) = rpc(record, "ping", json!({})) {
-        if ping["version"] == VERSION && ping["protocol"] == 1 {
+        if compatible_adapter(&ping) {
             // N17: a host that was already running keeps the block state it was
             // started with; sessions launched into it may still upload.
             return Ok(running_host_block_stale(&dir));
@@ -276,7 +286,9 @@ fn ensure_host(record: &Value) -> Result<bool> {
     let version = dsh_command().and_then(|mut command| command.arg("--version").output()).map_err(|_| {
         format!("Install the official harness: npm install -g @deepseek-ai/dsh@{VERSION}")
     })?;
-    if !version.status.success() || String::from_utf8_lossy(&version.stdout).trim() != VERSION {
+    if !version.status.success()
+        || !reviewed_harness_version(String::from_utf8_lossy(&version.stdout).trim())
+    {
         return Err(format!(
             "This adapter requires official @deepseek-ai/dsh@{VERSION}; installed version differs"
         ));
@@ -2309,5 +2321,29 @@ mod notification_tests {
             assert_eq!(again["upload_checked_at"], json!(at));
             assert!(again.get("upload_seen").is_none());
         });
+    }
+}
+
+#[cfg(all(test, unix))]
+mod compatibility_tests {
+    use super::*;
+
+    #[test]
+    fn startup_accepts_only_the_explicitly_reviewed_harness_releases() {
+        assert!(reviewed_harness_version("0.2.1-rc.2"));
+        assert!(reviewed_harness_version("0.2.1-rc.5"));
+        for unknown in ["0.2.1-rc.1", "0.2.1-rc.3", "0.2.1-rc.4", "0.2.1-rc.6",
+            "0.2.1-rc.50", "0.2.1", "0.3.0", "0.2.1-rc.5+unreviewed", "0.2.1-rc.5\nother"] {
+            assert!(!reviewed_harness_version(unknown), "{unknown}");
+        }
+    }
+
+    #[test]
+    fn reviewed_engine_versions_do_not_change_the_resident_adapter_identity() {
+        assert!(compatible_adapter(&json!({"protocol":1,"version":"0.2.1-rc.2"})));
+        for ping in [json!({"protocol":1,"version":"0.2.1-rc.5"}),
+            json!({"protocol":2,"version":"0.2.1-rc.2"}), json!({"protocol":1})] {
+            assert!(!compatible_adapter(&ping));
+        }
     }
 }

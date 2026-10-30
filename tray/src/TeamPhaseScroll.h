@@ -55,7 +55,7 @@ protected:
         QPainter p(this); p.setRenderHint(QPainter::Antialiasing);
         const QRectF r = QRectF(rect()).adjusted(.5, .5, -.5, -.5);
         QPainterPath shape; shape.addRoundedRect(r, 10, 10);
-        const bool dashed = m_state == "draft" || m_state == "planned" || m_state == "queued";
+        const bool dashed = m_state == "draft" || m_state == "planned" || m_state == "queued" || m_state == "idle";
         const bool folder = m_state == "draft";
         QColor fill = m_c.cardFill;
         if (folder) fill = blend(m_c.cardFill, m_c.folder, .05);

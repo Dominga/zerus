@@ -25,3 +25,6 @@ __pycache__/
 .beads-credential-key
 .beads/proxieddb/
 *.gate.lock*
+
+# Zerus team runtime files in a member's folder (outbox, run results)
+.zerus-team/

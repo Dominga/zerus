@@ -1,7 +1,11 @@
-import { For, Match, Show, Switch, createEffect, createMemo, createRoot, createSignal, on } from "solid-js";
+import { For, Match, Show, Switch, createEffect, createMemo, createRoot, createSignal, on, onCleanup } from "solid-js";
 import * as bridge from "../../bridge";
 import { terminal } from "../../store/terminal";
 import { TerminalTab } from "./Terminal";
+import { ProcessesTab } from "./Processes";
+import { drops } from "../../store/drops";
+import { processes, processesTab } from "../../store/processes";
+import { flag } from "../../store/settings";
 import type { TerminalStatus } from "../../types";
 import { Icon } from "../lib/icons";
 import { ActivityView, columnStyle } from "./Activity";
@@ -16,10 +20,16 @@ import { headerClearSlot } from "./actions-ui";
 import { actionEntries, freshActionEntry } from "./ActionDialogs";
 import { snapshotOf } from "./actions-ui";
 import { markEntry } from "./mark-entries";
+import { Composer } from "./Composer";
+import { ComposerDialogs } from "./ComposerDialogs";
+import { QuestionCard } from "./QuestionCard";
+import { QueuePanel } from "./QueuePanel";
+import { onCommand } from "../../store/shortcuts";
+import { composer } from "../../store/composer";
 
-// The session header and its Activity, after design/webui SessionDetail. The
-// composer, Terminal, Processes and the side panel move in with later phases;
-// their actions show disabled until then.
+// The session header and its Activity with the composer under it, after
+// design/webui SessionDetail. Processes and the side panel move in with later
+// phases; their actions show disabled until then.
 
 function headerCaption(): string {
   const s = selected();
@@ -46,6 +56,17 @@ function Header() {
   const mark = createMemo(() => markEntry(s()));
   const slot = () => headerClearSlot(!subagentOpen(), s().state);
   const fresh = createMemo(() => freshActionEntry(s(), true));
+  // Every Stop is the composer's (Qt's interruptRequested, 1187-1191): its start or compaction is cancelled first.
+  const stopTurn = () => {
+    const stop = act().stop;
+    if (stop.disabled) return;
+    void composer.interrupted().then(() => stop.action());
+  };
+  // Clear session goes through the composer's clear_context (Qt's clearContext): its dialog shows the identity it sends back.
+  const clear = () => composer.view()?.clear;
+  const clearEntry = (): MenuEntry => ({
+    label: "Clear session…", icon: "clear", disabled: !clear()?.enabled, hint: clear()?.reason || undefined, action: () => composer.openClear(),
+  });
   const actions = (): MenuEntry[] => [
     { label: "Open folder", icon: "folder-open", disabled: true },
     { label: "Open shell in session folder", icon: "square-terminal", disabled: true },
@@ -56,10 +77,10 @@ function Header() {
     { separator: true },
     { label: "Copy connect command", icon: "link", disabled: true },
     act().change,
-    ...(act().stop.disabled ? [] : [act().stop]),
+    ...(act().stop.disabled ? [] : [{ ...act().stop, action: stopTurn }]),
     ...(mark() ? [mark()!] : []),
     { separator: true },
-    ...(slot() === "fresh" && fresh() ? [fresh()!] : slot() === "clear" ? [{ label: "Clear session…", icon: "clear", disabled: true }] : []),
+    ...(slot() === "fresh" && fresh() ? [fresh()!] : slot() === "clear" ? [clearEntry()] : []),
     ...(act().archive ? [act().archive!] : []),
     act().end,
   ];
@@ -73,14 +94,17 @@ function Header() {
         {/* Qt's composer Stop: shown while the turn works, enabled when the host can interrupt it. */}
         <Show when={act().stop.shown}>
           <button class="icon-btn" data-tip={act().stop.hint ?? "Stop the current turn"} aria-label="Stop the current turn" disabled={act().stop.disabled}
-            onClick={() => act().stop.action()}><Icon name="circle-stop" size={16} /></button>
+            onClick={stopTurn}><Icon name="circle-stop" size={16} /></button>
         </Show>
         <button class="icon-btn" data-tip={act().change.hint ?? act().change.label} disabled={act().change.disabled} aria-label={act().change.label}
           onClick={() => act().change.action()}><Icon name={act().change.icon!} size={16} /></button>
         <button class="icon-btn" data-tip="Open session folder in file manager" disabled><Icon name="folder-open" size={16} /></button>
         <button class="icon-btn" data-tip="Open shell in session folder" disabled><Icon name="square-terminal" size={16} /></button>
         <button class="icon-btn" data-tip="Copy session name" onClick={() => { void copyName(snapshotOf(s())); }}><Icon name="copy" size={15} /></button>
-        <Show when={slot() === "clear"}><button class="icon-btn" data-tip="Clear session" disabled><Icon name="clear" size={15} /></button></Show>
+        <Show when={slot() === "clear"}>
+          <button class="icon-btn" data-tip={clear()?.reason || "Clear session"}
+            aria-label={clear()?.running ? "Clearing…" : "Clear session"} disabled={!clear()?.enabled} onClick={() => composer.openClear()}><Icon name="clear" size={15} /></button>
+        </Show>
         <button class="icon-btn" data-tip="Session actions" onClick={(e) => setMenu({ x: e.clientX - 200, y: e.clientY + 12, items: actions() })}><Icon name="ellipsis" size={16} /></button>
       </div>
       <div class="dh-row2">
@@ -147,9 +171,11 @@ createRoot(() => {
 });
 
 const tabs = () => {
+  const count = processes.view()?.count ?? 0;
   const all = [
     { id: "activity" as const, label: "Activity", show: true },
     { id: "terminal" as const, label: "Terminal", show: !!terminalTexts()?.supported && !subagentOpen() },
+    processesTab(flag("processes/enabled"), count),
   ];
   const s = selected();
   return s ? detailTabs(s.key, all) : all;
@@ -159,8 +185,16 @@ const tabs = () => {
 createRoot(() => createEffect(() => { if (!tabs().find((t) => t.id === detailTab())?.show) setDetailTab("activity"); }));
 
 export function SessionDetail() {
+  createEffect(() => {
+    if (page() !== "sessions" || !selected()) return;
+    // Window scope on every detail tab (SessionsWindowShortcuts.cpp:202,242).
+    const stop = onCommand("queue.sendNow", () => { void composer.sendNow(); });
+    onCleanup(stop);
+  });
   return (
     <section class="detail" aria-label="Session">
+      {/* Qt's drop overlay (SessionFileDrop): what a drop on this panel does. */}
+      <Show when={drops.hint()}>{(text) => <div class="drop-overlay" aria-hidden="true"><span>{text()}</span></div>}</Show>
       <Show when={selected()} fallback={<EmptyDetail />}>
         <Header />
         <div class="work">
@@ -173,12 +207,23 @@ export function SessionDetail() {
             </div>
             <div class="tab-body">
               <Switch>
-                <Match when={detailTab() === "activity"}><div class="activity-wrap" style={columnStyle()}><ActivityView source={activitySourceFor(selected()!.key)} /></div></Match>
+                <Match when={detailTab() === "activity"}>
+                  <div class="activity-wrap" style={columnStyle()}>
+                    <ActivityView source={activitySourceFor(selected()!.key)} />
+                    {/* Only the subagent view stays read-only; archives keep their editable draft (Qt 3454). */}
+                    <Show when={!subagentOpen()}>
+                      <QueuePanel /><div class="cmp-col"><QuestionCard /><Composer /></div>
+                    </Show>
+                  </div>
+                </Match>
                 <Match when={detailTab() === "terminal"}><TerminalTab /></Match>
+                <Match when={detailTab() === "processes"}><ProcessesTab /></Match>
               </Switch>
             </div>
           </div>
         </div>
+        {/* The composer's questions and Clear session, also from the header on another tab; the field takes the focus back. */}
+        <ComposerDialogs onClosed={() => { if (document.activeElement === document.body) document.querySelector<HTMLTextAreaElement>(".cmp-editor")?.focus(); }} />
       </Show>
     </section>
   );

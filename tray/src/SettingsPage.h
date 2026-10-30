@@ -358,8 +358,8 @@ public:
         const qint64 offered=updater->offeredBuild();
         forkUpdate->setText(ready?tr("Restart to install fork build %1").arg(updater->readyBuild())
                             :offered>0?tr("Replace this build with fork build %1…").arg(offered):tr("Check for updates from WhiteWh/zerus"));
-        forkUpdate->setEnabled(updater->manualAvailable());
-        forkUpdate->setToolTip(updater->manualAvailable()?QString():tr("Updates from the fork run in its portable Windows build"));
+        forkUpdate->setEnabled(updater->manualAvailable()&&!updater->installing());
+        forkUpdate->setToolTip(updater->installing()?tr("The fork update is being installed"):updater->manualAvailable()?QString():tr("Updates from the fork run in its portable Windows build or a per-user Linux source installation"));
         forkStatus->setText(updater->status());
     }
     // The running build has no fork number: the feed's build is not known to be newer.

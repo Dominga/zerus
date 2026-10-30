@@ -6714,7 +6714,7 @@ void SessionsWindow::openSession()
         e->host.isEmpty() && e->session.attached && !e->session.clients.isEmpty() ? e->session.clients.first() : QString());
 }
 
-bool SessionsWindow::confirmLocalStart(Entry original)
+bool SessionsWindow::confirmLocalStart(const Entry original)
 {
     // The modal loop may rebuild m_entries. Keep the confirmed identity by
     // value, so the comparison below never reads a retired or replaced row.

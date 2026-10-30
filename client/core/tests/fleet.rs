@@ -25,6 +25,220 @@ fn upserted(change: &Change, computer: &str, key: &str) -> bool {
 }
 
 #[test]
+fn an_offline_refresh_retries_only_its_computer_and_keeps_rows_and_follows() {
+    let fake = FakeHgs::new(
+        "fleet_refresh_offline",
+        json!({
+            "": {"runs": [[{"lines": [hello("workstation"), catalog(&[]), meta(Some(&["alpha", "beta"]))]}, {"serve": true}]]},
+            "alpha": {"runs": [
+                [{"lines": [hello("alpha"), catalog(&[("a1", "codex/sample-project/alpha")])]}, {"serve": true, "until_file": "offline"}],
+                [{"await_file": "release"}, {"lines": [hello("alpha"), catalog(&[("a1", "codex/sample-project/alpha")])]}, {"serve": true}]
+            ]},
+            "beta": {"runs": [[{"lines": [hello("beta"), catalog(&[])]}, {"serve": true}]]}
+        }),
+    );
+    let (tx, rx) = channel();
+    let mut seen = Seen::new(rx);
+    let mut timing = quick();
+    timing.restart = [Duration::from_secs(30); 4];
+    timing.silence = Duration::from_secs(30);
+    let fleet = Fleet::start_with(fake.path(), tx, timing);
+    for computer in ["", "alpha", "beta"] {
+        seen.until("online", |c| is_status(c, computer, ComputerStatus::Live));
+        assert!(
+            !fleet.reconnect(&ComputerId::from(computer)),
+            "online is unchanged"
+        );
+    }
+    assert!(!fleet.reconnect(&ComputerId::from("absent")));
+    let session = SessionRef {
+        name: "codex/sample-project/alpha".into(),
+        run_id: Some("a1".into()),
+        ..SessionRef::default()
+    };
+    fleet
+        .follow(&ComputerId::from("alpha"), "run:a1", session, None, 100)
+        .unwrap();
+    eventually("first subscription", || fake.stdin("alpha").len() == 1);
+    fake.touch("offline");
+    let failed = seen.until("offline", |c| {
+        is_status(c, "alpha", ComputerStatus::Reconnecting { attempt: 1 })
+    });
+    assert!(fleet.reconnect(&ComputerId::from("alpha")));
+    for _ in 0..100 {
+        assert!(
+            !fleet.reconnect(&ComputerId::from("alpha")),
+            "one pending retry"
+        );
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while fake.runs("alpha", &["watch", "--json"]).len() < 2 && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        fake.runs("alpha", &["watch", "--json"]).len(),
+        2,
+        "outside the 30 s back-off"
+    );
+    assert_eq!(fleet.followed(&ComputerId::from("alpha")), ["run:a1"]);
+    seen.drain_for(Duration::from_millis(50));
+    assert!(!seen.all[failed..].iter().any(|change| matches!(change,
+        Change::Replace { computer, rows } if computer.0 == "alpha" && rows.is_empty())));
+    fake.touch("release");
+    seen.until_from(failed + 1, "online again", |c| {
+        is_status(c, "alpha", ComputerStatus::Live)
+    });
+    eventually("subscription survives retry", || {
+        fake.stdin("alpha").len() == 2
+    });
+    assert!(!fleet.reconnect(&ComputerId::from("alpha")));
+    assert_eq!(fake.runs("alpha", &["-h"]).len(), 2);
+    for computer in ["", "beta"] {
+        assert_eq!(fake.runs(computer, &["watch", "--json"]).len(), 1);
+        assert_eq!(fake.runs(computer, &["-h"]).len(), 1);
+    }
+    fleet.stop();
+}
+
+#[test]
+fn an_offline_legacy_refresh_retries_the_existing_listing_now() {
+    let fake = FakeHgs::new("fleet_refresh_legacy", json!({"": {"marker": false}}));
+    let (tx, rx) = channel();
+    let mut seen = Seen::new(rx);
+    let mut timing = quick();
+    timing.reprobe = Duration::from_secs(30);
+    timing.legacy.listing = Duration::from_secs(30);
+    let fleet = Fleet::start_local(fake.path(), tx, timing);
+    seen.until("offline listing", |c| {
+        is_status(c, "", ComputerStatus::Reconnecting { attempt: 1 })
+    });
+    std::fs::write(
+        fake.dir.join("ls-local.json"),
+        json!({"sessions": []}).to_string(),
+    )
+    .unwrap();
+    assert!(fleet.reconnect(&ComputerId::local()));
+    for _ in 0..100 {
+        assert!(!fleet.reconnect(&ComputerId::local()));
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while fake.runs("", &["ls", "--json"]).len() < 2 && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(fake.runs("", &["ls", "--json"]).len(), 2);
+    seen.until("online polling", |c| {
+        is_status(c, "", ComputerStatus::Polled)
+    });
+    assert!(!fleet.reconnect(&ComputerId::local()));
+    assert_eq!(fake.runs("", &["-h"]).len(), 1);
+    assert!(fake.runs("", &["watch", "--json"]).is_empty());
+    fleet.stop();
+}
+
+#[test]
+fn an_offline_legacy_refresh_still_works_after_a_periodic_capability_probe() {
+    let fake = FakeHgs::new(
+        "fleet_refresh_legacy_reprobe",
+        json!({"": {"marker": false}}),
+    );
+    let listing = fake.dir.join("ls-local.json");
+    std::fs::write(&listing, json!({"sessions": []}).to_string()).unwrap();
+    let (tx, rx) = channel();
+    let mut seen = Seen::new(rx);
+    let mut timing = quick();
+    timing.reprobe = Duration::from_secs(1);
+    timing.legacy.listing = Duration::from_millis(3500);
+    let fleet = Fleet::start_local(fake.path(), tx, timing);
+    seen.until("initial listing succeeded", |c| {
+        is_status(c, "", ComputerStatus::Polled)
+    });
+    std::fs::remove_file(&listing).unwrap();
+    let failed = seen.until("next listing failed", |c| {
+        is_status(c, "", ComputerStatus::Reconnecting { attempt: 1 })
+    });
+    let before = fake.runs("", &["-h"]).len();
+    eventually("periodic capability re-probe", || {
+        fake.runs("", &["-h"]).len() > before
+    });
+    let probes = fake.runs("", &["-h"]).len();
+    assert_eq!(
+        fake.runs("", &["ls", "--json"]).len(),
+        2,
+        "next listing is not due"
+    );
+    std::fs::write(&listing, json!({"sessions": []}).to_string()).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_millis(500);
+    let mut accepted = false;
+    while std::time::Instant::now() < deadline {
+        if fleet.reconnect(&ComputerId::local()) {
+            accepted = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        accepted,
+        "offline retry eligibility survives the capability probe"
+    );
+    for _ in 0..100 {
+        assert!(!fleet.reconnect(&ComputerId::local()));
+    }
+    seen.until_from(failed + 1, "listing recovered", |c| {
+        is_status(c, "", ComputerStatus::Polled)
+    });
+    assert_eq!(fake.runs("", &["ls", "--json"]).len(), 3);
+    assert_eq!(
+        fake.runs("", &["-h"]).len(),
+        probes,
+        "no extra capability probe"
+    );
+    fleet.stop();
+}
+
+#[test]
+fn a_scheduled_legacy_listing_in_flight_coalesces_refresh_without_an_extra_read() {
+    let fake = FakeHgs::new(
+        "fleet_refresh_legacy_pending",
+        json!({"": {"marker": false}}),
+    );
+    let (tx, rx) = channel();
+    let mut seen = Seen::new(rx);
+    let mut timing = quick();
+    timing.reprobe = Duration::from_secs(30);
+    timing.legacy.listing = Duration::from_secs(2);
+    let fleet = Fleet::start_local(fake.path(), tx, timing);
+    seen.until("offline listing", |c| {
+        is_status(c, "", ComputerStatus::Reconnecting { attempt: 1 })
+    });
+    let config_path = fake.dir.join("config.json");
+    let mut config: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+    config["hosts"][""]["listing_wait_file"] = json!("release-listing");
+    std::fs::write(config_path, config.to_string()).unwrap();
+    std::fs::write(
+        fake.dir.join("ls-local.json"),
+        json!({"sessions": []}).to_string(),
+    )
+    .unwrap();
+    eventually("normal listing is in flight", || {
+        fake.runs("", &["ls", "--json"]).len() == 2
+    });
+    let redundant = (0..100)
+        .filter(|_| fleet.reconnect(&ComputerId::local()))
+        .count();
+    fake.touch("release-listing");
+    seen.until("scheduled listing recovered", |c| {
+        is_status(c, "", ComputerStatus::Polled)
+    });
+    assert_eq!(redundant, 0, "the scheduled read already owns the retry");
+    seen.drain_for(Duration::from_millis(100));
+    assert_eq!(fake.runs("", &["ls", "--json"]).len(), 2);
+    assert_eq!(fake.runs("", &["-h"]).len(), 1);
+    fleet.stop();
+}
+
+#[test]
 fn a_local_fleet_starts_no_peer_streams() {
     let fake = FakeHgs::new(
         "fleet_local_only",
@@ -127,6 +341,10 @@ fn the_fleet_follows_the_peers_this_computer_lists() {
     assert!(seen.all[..ended].iter().any(|change| matches!(change,
         Change::Replace { computer, rows } if computer.0 == "alpha" && rows.is_empty())));
     eventually("alpha's stream EOF", || fake.eofs("alpha") == 1);
+    assert!(
+        !fleet.reconnect(&ComputerId::from("alpha")),
+        "ended computer"
+    );
     assert_eq!(fleet.peers(), listed(&["beta"]));
 
     // A listing without a peers array keeps the previous peers.

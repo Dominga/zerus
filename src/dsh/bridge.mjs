@@ -1,4 +1,5 @@
-// HGS adapter for the official @deepseek-ai/dsh 0.2.1-rc.2 host.
+// HGS adapter for the reviewed official @deepseek-ai/dsh rc.2 and rc.5 hosts
+// (0.2.1). Its ping version identifies this adapter, not the harness release.
 // Loaded through its supported Cordis --patch extension mechanism. No fork of
 // the engine, credential copying, HTTP authentication bypass or PTY injection.
 import net from 'node:net';
@@ -20,7 +21,7 @@ function absoluteFolder(folder) {
 
 export function apply(ctx, config) {
   const api = ctx.sessionController;
-  // These extension seams are deliberately pinned to the tested release.
+  // These extension seams are deliberately pinned to the reviewed releases.
   // In particular the public selectModel also changes the profile default, and
   // only the private selection map tells whether an Agent has a selection.
   const control = api.agents;

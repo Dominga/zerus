@@ -6,6 +6,7 @@
 //! and 114-131 (orderedMembers).
 use super::edit::Intent;
 use super::layout::Layout;
+use super::runs::Runs;
 use super::{
     default_project, project_id, projects, sessions, INBOX, INBOX_COLOR, INBOX_NAME, MAX_PROJECTS,
 };
@@ -27,6 +28,20 @@ pub struct GroupOut {
     pub key: String,
     pub group: String,
     pub rank: u64,
+    /// The archive read whose reply owns this placement. Live rows omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_request: Option<u64>,
+}
+
+/// One checked archive placement identity, without session content. The caller
+/// supplies its page key and the computer's machine identity, as for live rows.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ArchivedRow {
+    pub computer: ComputerId,
+    pub key: String,
+    pub machine: String,
+    pub archive_id: String,
+    pub run_id: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -85,6 +100,8 @@ pub struct GroupingOut {
 #[derive(Debug)]
 struct Slot {
     member: String,
+    /// Only live, non-archived rows remember a run's project.
+    run: Option<String>,
     title: String,
     group: String,
     rank: u64,
@@ -92,11 +109,28 @@ struct Slot {
     seq: u64,
 }
 
+#[derive(Debug)]
+struct ArchiveSlot {
+    row: ArchivedRow,
+    group: String,
+    rank: u64,
+    dirty: bool,
+}
+
+#[derive(Debug)]
+struct ArchivePage {
+    /// The shown page, including while an empty next reply raises Archive changed.
+    request: u64,
+    answered: u64,
+    rows: Vec<ArchiveSlot>,
+}
+
 type At = (ComputerId, String);
 
 #[derive(Debug)]
 pub struct Grouping {
     pub(crate) layout: Layout,
+    runs: Runs,
     loaded: bool,
     revision: Option<u64>,
     /// id, name, colour, accessible.
@@ -105,6 +139,9 @@ pub struct Grouping {
     default: String,
     membership: Arc<BTreeMap<String, String>>,
     rows: HashMap<At, Slot>,
+    /// Only the last produced page's identities, at most 50 per configured computer.
+    archives: BTreeMap<ComputerId, ArchivePage>,
+    archive_reset_through: u64,
     dirty: BTreeSet<At>,
     sent: Option<GroupingOut>,
     sync: SyncView,
@@ -136,6 +173,7 @@ impl Grouping {
     pub fn new(layout: Layout) -> Self {
         Self {
             layout,
+            runs: Runs::default(),
             loaded: false,
             revision: None,
             projects: Vec::new(),
@@ -143,6 +181,8 @@ impl Grouping {
             default: INBOX.into(),
             membership: Arc::default(),
             rows: HashMap::new(),
+            archives: BTreeMap::new(),
+            archive_reset_through: 0,
             dirty: BTreeSet::new(),
             sent: None,
             sync: SyncView::default(),
@@ -153,7 +193,8 @@ impl Grouping {
         }
     }
 
-    fn group_of(&self, member: &str) -> String {
+    /// The current project of an identity, including one whose live row left.
+    pub fn group_for(&self, member: &str) -> String {
         self.membership
             .get(member)
             .filter(|project| self.listed.contains(project.as_str()))
@@ -161,8 +202,31 @@ impl Grouping {
             .unwrap_or_else(|| self.default.clone())
     }
 
-    fn place(&mut self, at: At, member: String, title: String, seq: u64) {
-        let group = self.group_of(&member);
+    fn place(
+        &mut self,
+        at: At,
+        member: String,
+        run: Option<String>,
+        title: String,
+        seq: u64,
+    ) -> bool {
+        let group = self.group_for(&member);
+        // Qt's run_groups is distinct from the rename token map. Unchanged
+        // observations do not refresh the written age (SessionOrganization.cpp:239-243).
+        let mut run_changed = false;
+        if let Some((machine, run)) = member
+            .split_once('\n')
+            .and_then(|(machine, _)| run.as_deref().map(|run| (machine, run)))
+        {
+            let project = self
+                .membership
+                .get(&member)
+                .map(String::as_str)
+                .filter(|project| self.listed.contains(*project));
+            if self.layout.run_project(machine, run) != project {
+                run_changed = self.layout.remember_run(machine, run, project);
+            }
+        }
         let rank = self.layout.rank(&group, &member);
         let changed = self
             .rows
@@ -175,58 +239,56 @@ impl Grouping {
             at,
             Slot {
                 member,
+                run,
                 title,
                 group,
                 rank,
                 seq,
             },
         );
+        run_changed
     }
 
-    fn upsert(&mut self, computer: &ComputerId, key: &str, machine: &str, name: &str, title: &str) {
+    fn upsert(&mut self, computer: &ComputerId, key: &str, row: &crate::ViewRow) {
+        let run = row
+            .run_id
+            .as_ref()
+            .filter(|run| !run.is_empty() && row.state != "archived" && row.archive_id.is_none())
+            .cloned();
+        self.upsert_with_run(computer, key, &row.machine, &row.name, &row.title, run);
+    }
+
+    fn upsert_with_run(
+        &mut self,
+        computer: &ComputerId,
+        key: &str,
+        machine: &str,
+        name: &str,
+        title: &str,
+        run: Option<String>,
+    ) {
         let at = (computer.clone(), key.to_owned());
         let member = super::member(machine, name);
         let mut seq = None;
-        if let Some((old, kept)) = self
-            .rows
-            .get(&at)
-            .map(|slot| (slot.member.clone(), slot.seq))
-        {
-            seq = Some(kept);
-            // The catalog keys a run by its ID: the same key under a new name is a rename.
-            if old != member
-                && key.starts_with("run:")
-                && !machine.is_empty()
-                && !old.starts_with('\n')
-            {
-                self.layout.rename(&old, &member);
-                let explicit = self.membership.contains_key(&old);
-                if explicit {
-                    // The new name stays in the old one's project until the catalog follows.
-                    let membership = Arc::make_mut(&mut self.membership);
-                    if let Some(project) = membership.remove(&old) {
-                        // Like Layout::rename and Renamed: the old name's project wins.
-                        membership.insert(member.clone(), project);
-                    }
-                }
-                // Only an explicit member's rename changes the catalog; a
-                // fallback row's is a no-op, as Qt's renameSession of an
-                // unknown id. Before the first catalog none is known, so the
-                // hub checks each one.
-                if explicit || !self.loaded {
-                    if self.renames.len() >= MAX_RENAMES {
-                        self.renames.pop_front();
-                    }
-                    self.renames.push_back((old, member.clone()));
-                }
-            }
+        if let Some(slot) = self.rows.get(&at) {
+            seq = Some(slot.seq);
+        }
+        let remembered = key
+            .strip_prefix("run:")
+            .and_then(|run| self.runs.observe(machine, run, name));
+        // A live upsert and a restart use the same machine-scoped token.
+        if let Some(old) = remembered {
+            self.renamed(old, &member);
         }
         let seq = seq.unwrap_or_else(|| {
             self.next_seq += 1;
             self.next_seq
         });
         if self.loaded {
-            self.place(at, member, title.to_owned(), seq);
+            if self.place(at, member, run, title.to_owned(), seq) {
+                // A run write can evict another computer's oldest remembered run.
+                self.reposition_archives();
+            }
         } else {
             // Before the first catalog the row is only recorded: no placement,
             // no rank, no group. A rename above has already moved the layout's
@@ -236,6 +298,7 @@ impl Grouping {
                 at,
                 Slot {
                     member,
+                    run,
                     title: title.to_owned(),
                     group: String::new(),
                     rank: 0,
@@ -245,12 +308,63 @@ impl Grouping {
         }
     }
 
+    fn renamed(&mut self, old: String, member: &str) {
+        self.layout.rename(&old, member);
+        self.runs.rename(&old, member);
+        let explicit = self.membership.contains_key(&old);
+        if explicit {
+            let membership = Arc::make_mut(&mut self.membership);
+            if let Some(project) = membership.remove(&old) {
+                membership.insert(member.to_owned(), project);
+            }
+        }
+        // Only the hub can prove that the absence of an old member is
+        // authoritative rather than the effect of its own unsaved draft.
+        // Even fallback renames wait for that check before tokens advance.
+        if self.renames.len() >= MAX_RENAMES {
+            self.renames.pop_front();
+        }
+        self.renames.push_back((old, member.to_owned()));
+    }
+
+    /// Startup runs off the main thread and may follow the first row batch.
+    pub fn replace_runs(&mut self, mut runs: Runs) {
+        runs.merge_missing(&self.runs);
+        self.runs = runs;
+        let mut slots: Vec<_> = self
+            .rows
+            .iter()
+            .map(|(at, slot)| {
+                (
+                    slot.seq,
+                    at.clone(),
+                    slot.member.clone(),
+                    slot.run.clone(),
+                    slot.title.clone(),
+                )
+            })
+            .collect();
+        slots.sort_unstable_by_key(|slot| slot.0);
+        for (_, at, member, run, title) in slots {
+            if let Some((machine, name)) = member.split_once('\n') {
+                self.upsert_with_run(&at.0, &at.1, machine, name, &title, run);
+            }
+        }
+    }
+
+    pub fn take_runs(&mut self) -> Option<super::runs::Snapshot> {
+        self.runs.take_dirty()
+    }
+
+    /// A rename is recoverable (durable draft), or its old member was absent.
+    pub fn acknowledge_rename(&mut self, from: &str, to: &str) {
+        self.runs.acknowledge_rename(from, to);
+    }
+
     /// A row change from the pump.
     pub fn observe(&mut self, change: &Change) {
         match change {
-            Change::Upsert { computer, key, row } => {
-                self.upsert(computer, key, &row.machine, &row.name, &row.title)
-            }
+            Change::Upsert { computer, key, row } => self.upsert(computer, key, row),
             Change::Remove { computer, key, .. } => {
                 let at = (computer.clone(), key.clone());
                 self.rows.remove(&at);
@@ -263,8 +377,14 @@ impl Grouping {
                 self.dirty
                     .retain(|(owner, key)| owner != computer || keep.contains(key.as_str()));
                 for (key, row) in rows {
-                    self.upsert(computer, key, &row.machine, &row.name, &row.title);
+                    self.upsert(computer, key, row);
                 }
+            }
+            Change::Computer {
+                computer,
+                status: crate::ComputerStatus::Ended,
+            } => {
+                self.archives.remove(computer);
             }
             _ => {}
         }
@@ -277,10 +397,163 @@ impl Grouping {
     }
 
     fn prune_layout(&mut self) {
+        self.prune_layout_with(&HashSet::new());
+    }
+
+    fn prune_layout_with(&mut self, page: &HashSet<String>) {
         let listed: HashSet<String> = self.rows.values().map(|slot| slot.member.clone()).collect();
+        let retained: HashSet<_> = self
+            .archives
+            .values()
+            .flat_map(|page| page.rows.iter())
+            .map(|slot| super::archive_member(&slot.row.machine, &slot.row.archive_id))
+            .collect();
         let membership = Arc::clone(&self.membership);
-        self.layout
-            .prune(|member| listed.contains(member) || membership.contains_key(member));
+        self.layout.prune(|member| {
+            listed.contains(member)
+                || membership.contains_key(member)
+                || page.contains(member)
+                || retained.contains(member)
+        });
+    }
+
+    /// Place one archive page: explicit archive membership, then the run's
+    /// last project if it still exists, then the default (Qt observe,
+    /// SessionOrganization.cpp:223-247). A page adds no live rows or stream
+    /// changes. The normal archive reader rejects oversized pages; this
+    /// boundary also caps work at [`crate::reads::ARCHIVE_PAGE_ROWS`].
+    pub fn place_archived(&mut self, rows: &[ArchivedRow]) -> Vec<GroupOut> {
+        self.place_archive_rows(rows.iter())
+    }
+
+    fn place_archive_rows<'a>(
+        &mut self,
+        rows: impl Iterator<Item = &'a ArchivedRow>,
+    ) -> Vec<GroupOut> {
+        let mut page = HashSet::new();
+        let out = rows
+            .take(crate::reads::ARCHIVE_PAGE_ROWS)
+            .map(|row| {
+                let (group, rank) = self.archive_place(row);
+                page.insert(super::archive_member(&row.machine, &row.archive_id));
+                GroupOut {
+                    computer: row.computer.clone(),
+                    key: row.key.clone(),
+                    group,
+                    rank,
+                    archive_request: None,
+                }
+            })
+            .collect();
+        if self.layout.len() > super::layout::MAX_MEMBERS.max(self.prune_floor) + 1024 {
+            self.prune_layout_with(&page);
+            self.prune_floor = self.layout.len();
+        }
+        out
+    }
+
+    fn archive_place(&mut self, row: &ArchivedRow) -> (String, u64) {
+        let member = super::archive_member(&row.machine, &row.archive_id);
+        let project = self
+            .membership
+            .get(&member)
+            .map(String::as_str)
+            .filter(|project| self.listed.contains(*project))
+            .or_else(|| {
+                self.layout
+                    .run_project(&row.machine, &row.run_id)
+                    .filter(|project| self.listed.contains(*project))
+            })
+            .unwrap_or(&self.default)
+            .to_owned();
+        let rank = self.layout.rank(&project, &member);
+        (project, rank)
+    }
+
+    /// Produce the reply's placement before retaining its identities. The caller
+    /// holds the pump lock across both: no delta for this request can exist before
+    /// this snapshot. A later edit's delta may beat IPC delivery; the UI merges it
+    /// by archive_request after applying that reply (SessionsWindowRows.cpp:266-300).
+    /// The caller checks that this computer is still configured and its source current.
+    pub fn retain_archive_page(
+        &mut self,
+        computer: &ComputerId,
+        request: u64,
+        rows: &[ArchivedRow],
+    ) -> Option<Vec<GroupOut>> {
+        if request <= self.archive_reset_through
+            || self
+                .archives
+                .get(computer)
+                .is_some_and(|page| request <= page.answered)
+        {
+            return None;
+        }
+        let rows = rows.iter().filter(|row| &row.computer == computer);
+        // ArchiveBrowser.cpp:37 keeps the shown rows on an empty next reply.
+        // Their deltas keep the shown request; the answered watermark still
+        // rejects a late reply older than this empty answer.
+        if rows.clone().next().is_none() {
+            if let Some(page) = self
+                .archives
+                .get_mut(computer)
+                .filter(|page| !page.rows.is_empty())
+            {
+                page.answered = request;
+                return Some(Vec::new());
+            }
+        }
+        let mut out = self.place_archive_rows(rows.clone());
+        for place in &mut out {
+            place.archive_request = Some(request);
+        }
+        let retained = rows
+            .zip(&out)
+            .map(|(row, place)| ArchiveSlot {
+                row: row.clone(),
+                group: place.group.clone(),
+                rank: place.rank,
+                dirty: false,
+            })
+            .collect();
+        self.archives.insert(
+            computer.clone(),
+            ArchivePage {
+                request,
+                answered: request,
+                rows: retained,
+            },
+        );
+        Some(out)
+    }
+
+    /// Explicit page reset, separate from hiding/cancelling in-flight reads.
+    /// The watermark also rejects a pre-reset reply that arrives late.
+    pub fn reset_archive_pages(&mut self, through: u64) {
+        self.archive_reset_through = self.archive_reset_through.max(through);
+        self.archives.retain(|_, page| page.request > through);
+    }
+
+    fn reposition_archive_computer(&mut self, computer: &ComputerId) {
+        let Some(mut page) = self.archives.remove(computer) else {
+            return;
+        };
+        for slot in &mut page.rows {
+            let (group, rank) = self.archive_place(&slot.row);
+            if slot.group != group || slot.rank != rank {
+                slot.group = group;
+                slot.rank = rank;
+                slot.dirty = true;
+            }
+        }
+        self.archives.insert(computer.clone(), page);
+    }
+
+    fn reposition_archives(&mut self) {
+        let computers: Vec<_> = self.archives.keys().cloned().collect();
+        for computer in computers {
+            self.reposition_archive_computer(&computer);
+        }
     }
 
     /// The organization the list shows; `revision` changes whenever it does.
@@ -329,16 +602,29 @@ impl Grouping {
             self.default = self.projects[0].0.clone();
         }
         self.membership = membership;
+        // Startup tokens may reveal a rename before any organization was
+        // presented. Keep its project/rank while the hub writes that intent;
+        // a second writer that already removed the old member stays untouched.
+        if !self.renames.is_empty() {
+            let membership = Arc::make_mut(&mut self.membership);
+            for (old, new) in &self.renames {
+                if let Some(project) = membership.remove(old) {
+                    membership.insert(new.clone(), project);
+                }
+            }
+        }
         for project in &listed_projects {
             for member in sessions(project) {
-                self.layout.rank(project_id(project), member);
+                if self.membership.contains_key(member) {
+                    self.layout.rank(project_id(project), member);
+                }
             }
         }
         if self.layout.len() > super::layout::MAX_MEMBERS {
             self.prune_layout();
             self.prune_floor = self.layout.len();
         }
-        let mut slots: Vec<(u64, At, String, String)> = self
+        let mut slots: Vec<_> = self
             .rows
             .iter()
             .map(|(at, slot)| {
@@ -346,14 +632,16 @@ impl Grouping {
                     slot.seq,
                     at.clone(),
                     slot.member.clone(),
+                    slot.run.clone(),
                     slot.title.clone(),
                 )
             })
             .collect();
         slots.sort_unstable_by_key(|slot| slot.0);
-        for (seq, at, member, title) in slots {
-            self.place(at, member, title, seq);
+        for (seq, at, member, run, title) in slots {
+            self.place(at, member, run, title, seq);
         }
+        self.reposition_archives();
     }
 
     /// Replaces the saved layout, keeping the observed rows, membership and
@@ -363,7 +651,7 @@ impl Grouping {
         self.prune_floor = 0;
         self.headers_dirty = true;
         if self.loaded {
-            let mut slots: Vec<(u64, At, String, String)> = self
+            let mut slots: Vec<_> = self
                 .rows
                 .iter()
                 .map(|(at, slot)| {
@@ -371,15 +659,34 @@ impl Grouping {
                         slot.seq,
                         at.clone(),
                         slot.member.clone(),
+                        slot.run.clone(),
                         slot.title.clone(),
                     )
                 })
                 .collect();
             slots.sort_unstable_by_key(|slot| slot.0);
-            for (seq, at, member, title) in slots {
-                self.place(at, member, title, seq);
+            for (seq, at, member, run, title) in slots {
+                self.place(at, member, run, title, seq);
             }
         }
+        self.reposition_archives();
+    }
+
+    pub fn runs_seeded(&self) -> bool {
+        self.layout.runs_seeded()
+    }
+
+    /// Merge a seed read on a worker into the current layout, retaining newer
+    /// native assignments. Reobserve live rows: implicit assignments made
+    /// while the read was pending must remove their old Qt run memory again.
+    pub fn seed_runs(&mut self, groups: &serde_json::Map<String, Value>) -> usize {
+        if self.layout.runs_seeded() {
+            return 0;
+        }
+        let imported = self.layout.seed_runs(groups);
+        let layout = std::mem::take(&mut self.layout);
+        self.replace_layout(layout);
+        imported
     }
 
     pub fn set_sync(&mut self, sync: SyncView) {
@@ -412,7 +719,10 @@ impl Grouping {
                 }
                 self.layout.forget(project);
             }
-            Intent::Rename { .. } | Intent::Reorder { .. } | Intent::Renamed { .. } => {}
+            Intent::Rename { .. }
+            | Intent::Reorder { .. }
+            | Intent::Renamed { .. }
+            | Intent::AddFolder { .. } => {}
         }
         self.revision = None;
         self.headers_dirty = true;
@@ -463,7 +773,7 @@ impl Grouping {
 
     /// What changed since the last take.
     pub fn take(&mut self) -> (Vec<GroupOut>, Option<GroupingOut>) {
-        let groups = std::mem::take(&mut self.dirty)
+        let mut groups: Vec<_> = std::mem::take(&mut self.dirty)
             .into_iter()
             .filter_map(|at| {
                 let slot = self.rows.get(&at)?;
@@ -472,9 +782,23 @@ impl Grouping {
                     key: at.1,
                     group: slot.group.clone(),
                     rank: slot.rank,
+                    archive_request: None,
                 })
             })
             .collect();
+        for (computer, page) in &mut self.archives {
+            for slot in &mut page.rows {
+                if std::mem::take(&mut slot.dirty) {
+                    groups.push(GroupOut {
+                        computer: computer.clone(),
+                        key: slot.row.key.clone(),
+                        group: slot.group.clone(),
+                        rank: slot.rank,
+                        archive_request: Some(page.request),
+                    });
+                }
+            }
+        }
         let headers = if std::mem::take(&mut self.headers_dirty) {
             let out = self.out();
             (self.sent.as_ref() != Some(&out)).then(|| {
@@ -694,6 +1018,123 @@ mod tests {
         assert_eq!(out.default_project, "ungrouped");
     }
 
+    // SessionOrganization::observe, 223-231: a run last seen before exit is
+    // still the same session after an unseen rename.
+    #[test]
+    fn a_persisted_run_follows_an_unseen_rename_once_and_keeps_its_rank() {
+        let old = "workstation\nclaude/p/old";
+        let new = "workstation\nclaude/p/new";
+        let org = organization(&["workstation\nclaude/p/first", old], &[]);
+        let mut first = Grouping::default();
+        present(&mut first, &org, 1);
+        first.observe(&upsert("run:one", "workstation", "claude/p/old"));
+        let rank = first.layout.rank("alpha", old);
+        let layout = first.take_layout().unwrap();
+        let runs = first
+            .take_runs()
+            .expect("a live run is remembered separately")
+            .to_json();
+        assert!(first.take_runs().is_none(), "only a change needs saving");
+
+        for rows_first in [false, true] {
+            let mut next = Grouping::new(Layout::from_json(&layout));
+            if rows_first {
+                next.observe(&upsert("run:one", "workstation", "claude/p/new"));
+            }
+            next.replace_runs(super::super::runs::Runs::from_json(&runs).unwrap());
+            present(&mut next, &org, 1);
+            next.observe(&upsert("run:one", "workstation", "claude/p/new"));
+            assert_eq!(next.take_renames(), [(old.to_owned(), new.to_owned())]);
+            assert!(next.take_renames().is_empty());
+            let (groups, _) = next.take();
+            assert_eq!(groups[0].group, "alpha");
+            assert_eq!(groups[0].rank, rank);
+            next.observe(&upsert("run:one", "workstation", "claude/p/new"));
+            assert!(
+                next.take_renames().is_empty(),
+                "never migrate the same token twice"
+            );
+        }
+    }
+
+    #[test]
+    fn presenting_a_pending_rename_does_not_reintroduce_the_old_rank() {
+        let old = "workstation\nclaude/p/old";
+        let new = "workstation\nclaude/p/new";
+        let mut grouping = Grouping::default();
+        grouping.observe(&upsert("run:one", "workstation", "claude/p/old"));
+        grouping.observe(&upsert("run:two", "workstation", "claude/p/old"));
+        let org = organization(&[old], &[]);
+        present(&mut grouping, &org, 1);
+        grouping.observe(&upsert("run:one", "workstation", "claude/p/new"));
+        // A historical token must not leave an old-name live row that later
+        // moves the mistakenly recreated rank into the fallback project.
+        grouping.observe(&Change::Remove {
+            computer: ComputerId::local(),
+            key: "run:two".into(),
+            reason: None,
+        });
+        present(&mut grouping, &org, 2);
+        let saved: Value = serde_json::from_slice(&grouping.take_layout().unwrap()).unwrap();
+        assert_eq!(saved["order"]["alpha"], serde_json::json!([new]));
+        assert_eq!(grouping.take_renames(), [(old.to_owned(), new.to_owned())]);
+        // Qt moves every historical run of the old member. The grouping's
+        // runs.rename call must also suppress an intent from the second run.
+        grouping.observe(&upsert("run:two", "workstation", "claude/p/new"));
+        assert!(grouping.take_renames().is_empty());
+        grouping.acknowledge_rename(old, new);
+        let mut loaded =
+            super::super::runs::Runs::from_json(&grouping.take_runs().unwrap().to_json()).unwrap();
+        assert_eq!(
+            loaded.observe("workstation", "two", "later"),
+            Some(new.into())
+        );
+    }
+
+    #[test]
+    fn persisted_runs_exclude_archives_empty_identities_and_other_machines() {
+        let mut first = Grouping::default();
+        for (key, machine, name) in [
+            ("archive:one", "workstation", "archived"),
+            ("run:", "workstation", "empty-run"),
+            ("run:unknown", "", "unknown-machine"),
+            ("run:empty-name", "workstation", ""),
+            ("name:plain", "workstation", "plain"),
+        ] {
+            first.observe(&upsert(key, machine, name));
+        }
+        assert!(
+            first.take_runs().is_none(),
+            "only named live runs belong here"
+        );
+        first.observe(&upsert("run:one", "workstation", "claude/p/old"));
+        let bytes = first.take_runs().unwrap().to_json();
+        let mut next = Grouping::default();
+        next.replace_runs(super::super::runs::Runs::from_json(&bytes).unwrap());
+        present(&mut next, &organization(&[], &[]), 1);
+        next.observe(&upsert("run:one", "studio", "claude/p/new"));
+        next.observe(&upsert("archive:one", "workstation", "claude/p/new"));
+        assert!(
+            next.take_renames().is_empty(),
+            "tokens are machine scoped and live only"
+        );
+    }
+
+    #[test]
+    fn a_layout_toggle_never_dirties_the_run_tokens() {
+        let mut grouping = Grouping::default();
+        present(&mut grouping, &organization(&[], &[]), 1);
+        grouping.observe(&upsert("run:one", "workstation", "claude/p/old"));
+        assert!(grouping.take_runs().is_some());
+        grouping.take_layout();
+        grouping.set_collapsed("alpha", true);
+        grouping
+            .layout
+            .place("alpha", &["workstation\nclaude/p/old".into()], None);
+        assert!(grouping.take_layout().is_some());
+        assert!(grouping.take_runs().is_none());
+    }
+
     #[test]
     fn a_rename_under_the_same_run_is_reported_once_and_keeps_its_place() {
         let mut grouping = Grouping::new(Layout::default());
@@ -713,9 +1154,13 @@ mod tests {
         grouping.observe(&upsert("name:x", "workstation", "sh/p"));
         grouping.observe(&upsert("run:1", "workstation", "claude/p/new"));
         grouping.observe(&upsert("name:x", "workstation", "sh/q"));
-        assert!(
-            grouping.take_renames().is_empty(),
-            "a fallback row's rename changes nothing shared: none for the hub"
+        assert_eq!(
+            grouping.take_renames(),
+            [(
+                "workstation\nclaude/p/old".into(),
+                "workstation\nclaude/p/new".into()
+            )],
+            "the hub checks that the fallback needs no edit before acknowledging"
         );
         let (after, _) = grouping.take();
         assert_eq!(
@@ -745,7 +1190,7 @@ mod tests {
     }
 
     #[test]
-    fn renames_for_the_hub_are_explicit_members_or_unknown_yet_and_bounded() {
+    fn renames_for_the_hub_include_fallbacks_for_the_authoritative_check() {
         let mut grouping = Grouping::new(Layout::default());
         // Before the first catalog no member is known: each rename waits for the hub.
         grouping.observe(&upsert("run:1", "workstation", "claude/p/a"));
@@ -768,11 +1213,17 @@ mod tests {
         grouping.observe(&upsert("run:3", "workstation", "claude/p/c2"));
         assert_eq!(
             grouping.take_renames(),
-            [(
-                "workstation\nclaude/p/b".to_owned(),
-                "workstation\nclaude/p/b2".to_owned()
-            )],
-            "only the explicit member's rename"
+            [
+                (
+                    "workstation\nclaude/p/b".to_owned(),
+                    "workstation\nclaude/p/b2".to_owned()
+                ),
+                (
+                    "workstation\nclaude/p/c".to_owned(),
+                    "workstation\nclaude/p/c2".to_owned()
+                )
+            ],
+            "the hub decides which rename needs an edit"
         );
     }
 

@@ -315,6 +315,21 @@ QString ForkUpdater::sourceCommit(const QString &folder)
     return full.match(commit).hasMatch() ? commit : QString();
 }
 
+bool ForkUpdater::linuxSourceInstall(const QString &executable, const QString &home)
+{
+#ifdef Q_OS_LINUX
+    const QFileInfo exe(executable);
+    const QDir bin(QDir(home).filePath(QStringLiteral(".local/bin")));
+    return exe.fileName() == QLatin1String("hgs-tray")
+        && resolvedFolder(exe.absolutePath()) == resolvedFolder(bin.absolutePath())
+        && QFileInfo(bin.filePath(QStringLiteral("hgs"))).isExecutable();
+#else
+    Q_UNUSED(executable);
+    Q_UNUSED(home);
+    return false;
+#endif
+}
+
 ForkUpdater::ForkUpdater(QObject *parent) : QObject(parent)
 {
     connect(this, &ForkUpdater::installStarted, QCoreApplication::instance(), &QCoreApplication::quit);
@@ -325,10 +340,19 @@ ForkUpdater::ForkUpdater(QObject *parent) : QObject(parent)
 #ifdef Q_OS_WIN
     // Only the portable zip carries build-info.json next to hgs-tray.exe.
     m_portable = !m_install.isEmpty() && QFileInfo::exists(m_install + QStringLiteral("/build-info.json")) && !m_layout.superseded;
-    m_enabled = m_portable && *feedUrl && QString::fromLatin1(feedUrl).startsWith(QLatin1String(releasePrefix));
 #endif
+#ifdef Q_OS_LINUX
+    m_linux = linuxSourceInstall(QCoreApplication::applicationFilePath(), QDir::homePath());
+    if (m_linux) {
+        m_stage = QDir::home().filePath(QStringLiteral(".cache/hgs/fork-source-update"));
+#ifdef ZERUS_BUILD_SOURCE_COMMIT
+        if (m_runningCommit.isEmpty()) m_runningCommit = QStringLiteral(ZERUS_BUILD_SOURCE_COMMIT);
+#endif
+    }
+#endif
+    m_enabled = (m_portable || m_linux) && *feedUrl && QString::fromLatin1(feedUrl).startsWith(QLatin1String(releasePrefix));
     m_status = m_enabled ? tr("Fork updates have not been checked.")
-             : m_portable ? tr("This build was made locally: it checks the fork's releases only when you ask.") : QString();
+             : (m_portable || m_linux) ? tr("This build was made locally: it checks the fork's releases only when you ask.") : QString();
     if (!m_enabled) return;
     m_network = new QNetworkAccessManager(this);
     QTimer::singleShot(firstCheckMs, this, &ForkUpdater::check);
@@ -347,25 +371,28 @@ void ForkUpdater::finish(const QString &status)
 
 QString ForkUpdater::unpacked() const
 {
+#ifdef Q_OS_LINUX
+    if (m_linux) return QDir(m_stage).filePath(QStringLiteral("source"));
+#endif
     return QDir(m_stage).filePath(QString::fromLatin1(top));
 }
 
 void ForkUpdater::check()
 {
-    if (!m_enabled) return;
+    if (!m_enabled || m_installing) return;
     fetch();
 }
 
 void ForkUpdater::checkNow()
 {
-    if (!m_portable) return;
+    if ((!m_portable && !m_linux) || m_installing) return;
     if (!m_network) m_network = new QNetworkAccessManager(this);
     fetch();
 }
 
 void ForkUpdater::fetch()
 {
-    if (m_busy) return;
+    if (m_busy || m_installing) return;
     m_busy = true;
     m_offeredBuild = 0;
     m_status = tr("Checking the fork's releases…");
@@ -434,6 +461,31 @@ void ForkUpdater::download()
         return finish(tr("Could not clear %1.").arg(QDir::toNativeSeparators(m_download)));
     if (!QDir().mkpath(m_download))
         return finish(tr("Could not create %1.").arg(QDir::toNativeSeparators(m_download)));
+#ifdef Q_OS_LINUX
+    if (m_linux) {
+        const QString helper = QDir::home().filePath(QStringLiteral(".local/lib/hgs-tray/linux-source-update.sh"));
+        if (!QFileInfo::exists(helper))
+            return finish(tr("The Linux update helper is not installed. Run tray/install.sh first."));
+        auto *process = new QProcess(this);
+        process->setProgram(QStringLiteral("/bin/bash"));
+        process->setArguments({helper, QStringLiteral("prepare"), m_download, m_commit, QString::number(m_build)});
+        process->setWorkingDirectory(QDir::tempPath());
+        process->setProcessChannelMode(QProcess::MergedChannels);
+        connect(process, &QProcess::finished, this, &ForkUpdater::sourcePrepared);
+        connect(process, &QProcess::errorOccurred, this, [this, process](QProcess::ProcessError error) {
+            if (error != QProcess::FailedToStart) return;
+            process->deleteLater();
+            QDir(m_download).removeRecursively();
+            finish(tr("Could not prepare fork build %1: %2").arg(m_build).arg(process->errorString()));
+        });
+        m_extract = process;
+        m_status = tr("Preparing fork build %1 from its published source…").arg(m_build);
+        emit changed();
+        ChildProcess::inheritStdioOnly(*process);
+        process->start();
+        return;
+    }
+#endif
     m_file = new QFile(stage.filePath(QStringLiteral("update.zip")), this);
     if (!m_file->open(QIODevice::WriteOnly)) {
         m_file->deleteLater();
@@ -499,6 +551,17 @@ void ForkUpdater::extracted()
                         [this, complete, output](const QJsonObject &info) { applyExtracted(complete, output, info); });
 }
 
+void ForkUpdater::sourcePrepared()
+{
+    const bool complete = m_extract && m_extract->exitStatus() == QProcess::NormalExit && m_extract->exitCode() == 0;
+    if (m_extract) m_extract->deleteLater();
+    if (!complete) {
+        const QString log = QDir(m_download).filePath(QStringLiteral("prepare.log"));
+        return finish(tr("Could not prepare fork build %1. See %2.").arg(m_build).arg(QDir::toNativeSeparators(log)));
+    }
+    acceptPrepared();
+}
+
 void ForkUpdater::applyExtracted(bool complete, const QString &output, const QJsonObject &info)
 {
     if (!complete || info.value("source_commit").toString() != m_commit) {
@@ -506,15 +569,21 @@ void ForkUpdater::applyExtracted(bool complete, const QString &output, const QJs
         return finish(output.isEmpty() ? tr("Fork build %1 is incomplete.").arg(m_build)
                                        : tr("Could not unpack fork build %1: %2").arg(m_build).arg(output));
     }
+    acceptPrepared();
+}
+
+void ForkUpdater::acceptPrepared()
+{
     // The newer build takes the waiting one's place.
     if (m_download != m_stage) {
         if (!QDir(m_stage).removeRecursively() || !QDir().rename(m_download, m_stage)) {
             QDir(m_download).removeRecursively();
-            if (!QFileInfo::exists(unpacked())) m_readyBuild = 0;
+            if (!QFileInfo::exists(unpacked())) { m_readyBuild = 0; m_readyCommit.clear(); }
             return finish(ready() ? readyStatus() : tr("Could not replace the waiting fork update in %1.").arg(QDir::toNativeSeparators(m_stage)));
         }
     }
     m_readyBuild = m_build;
+    m_readyCommit = m_commit;
     finish(readyStatus());
     emit buildReady(m_build);
 }
@@ -528,6 +597,36 @@ QString ForkUpdater::readyStatus() const
 bool ForkUpdater::startInstall()
 {
     if (m_installing || !ready() || !QFileInfo::exists(unpacked())) return false;
+#ifdef Q_OS_LINUX
+    if (m_linux) {
+        const QString helper = QDir::home().filePath(QStringLiteral(".local/lib/hgs-tray/linux-source-update.sh"));
+        if (!QFileInfo::exists(helper)) return false;
+        const QStringList arguments{helper, QStringLiteral("install"), m_stage, m_readyCommit, QString::number(m_readyBuild)};
+        if (!ChildProcess::startDetached(QStringLiteral("/bin/bash"), arguments, QDir::tempPath())) return false;
+        m_installing = true;
+        m_status = tr("Installing fork build %1. Zerus restarts only when the verified build is ready.").arg(m_readyBuild);
+        emit changed();
+        auto *watch = new QTimer(this);
+        watch->setInterval(1000);
+        connect(watch, &QTimer::timeout, this, [this, watch] {
+            QFile result(QDir(m_stage).filePath(QStringLiteral("install.exit")));
+            if (!result.open(QIODevice::ReadOnly)) return;
+            watch->stop();
+            watch->deleteLater();
+            m_installing = false;
+            if (result.readAll().trimmed() == "0") {
+                m_readyBuild = 0;
+                m_readyCommit.clear();
+                finish(tr("The fork build is installed. Start Zerus again to use it."));
+            } else {
+                const QString log = QDir(m_stage).filePath(QStringLiteral("install.log"));
+                finish(tr("Could not install fork build %1. See %2.").arg(m_readyBuild).arg(QDir::toNativeSeparators(log)));
+            }
+        });
+        watch->start();
+        return true;
+    }
+#endif
     const QString script = QDir::temp().filePath(QStringLiteral("zerus-fork-install-%1.ps1").arg(m_readyBuild));
     QFile file(script);
     const QByteArray text = m_layout.versioned ? QByteArray(versionedHead) + bannerScript + versionedBody

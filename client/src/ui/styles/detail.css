@@ -1,7 +1,11 @@
 /* Session detail: header, tabs, Activity, composer, inspector, terminal. */
 @layer components {
   .sessions-page { display: flex; flex: 1; min-width: 0; min-height: 0; gap: 0; }
-  .detail { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; margin: 8px; background: var(--z-color-surface); border: 1px solid var(--z-color-divider); border-radius: 12px; overflow: hidden; }
+  .detail { position: relative; flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; margin: 8px; background: var(--z-color-surface); border: 1px solid var(--z-color-divider); border-radius: 12px; overflow: hidden; }
+  /* Qt's file drop overlay (SessionFileDrop.h:33-34): a dashed panel over the session with what a drop does. */
+  .drop-overlay { position: absolute; inset: 0; z-index: 30; display: grid; place-items: center; pointer-events: none; border-radius: 10px;
+    background: light-dark(rgba(237, 249, 243, 0.92), rgba(24, 45, 39, 0.9)); border: 2px dashed light-dark(#167357, #8bdfc0); }
+  .drop-overlay span { color: light-dark(#167357, #8bdfc0); font-size: 16px; padding: 24px; text-align: center; }
   .detail-empty { margin: auto; text-align: center; color: var(--z-color-muted); }
   .detail-empty h2 { font-size: 21px; font-weight: 600; color: var(--z-color-text-2); margin-bottom: 8px; }
 
@@ -54,7 +58,9 @@
      The scroll bar stays at the pane edge; the margins scroll with the content. */
   .activity-wrap { --col: calc(900px * var(--content-scale, 1)); flex: 1; min-height: 0; display: flex; flex-direction: column; }
   .activity { flex: 1; min-height: 0; display: flex; }
-  .act-scroll { flex: 1; overflow-y: auto; overflow-x: hidden; scroll-behavior: smooth; }
+  .act-scroll { flex: 1; overflow-y: auto; overflow-x: hidden; scroll-behavior: smooth; will-change: transform; }
+  /* It takes the focus only from code (a toolbar chip that hides), as Qt's browser does; no ring. */
+  .act-scroll:focus { outline: none; }
   .act-col { position: relative; container: act-col / inline-size; box-sizing: border-box; min-height: 100%; width: min(var(--col), calc(100% - 32px)); margin: 0 auto; padding: 10px 0 18px; display: flex; flex-direction: column; gap: 10px; font-size: calc(var(--fs-base) * var(--content-scale, 1)); }
   /* Column edges: 10 px handles just outside the column. A 2 px line shows on
      hover and while dragging; nothing else moves. */
@@ -74,6 +80,15 @@
   .act-msg.k-receipt header b { color: var(--z-color-violet); }
   .act-time { color: var(--z-color-dim); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; }
   .act-receipt { display: inline-flex; align-items: center; gap: 3px; color: var(--z-color-accent-muted); font-size: var(--fs-xs); }
+  /* Local message rows (ActivityView.cpp:1053-1068): the stamp in place of the
+     time, the error line in the warning colour and the row's buttons. */
+  .act-stamp { color: var(--z-color-dim); font-size: var(--fs-xs); }
+  /* The warning colour, mixed toward the text colour so it keeps its
+     contrast on the tinted user bubble in every skin. */
+  .act-stamp.failed { color: color-mix(in srgb, var(--z-color-warn) 78%, var(--z-color-text)); }
+  .act-error { margin-top: 6px; font-size: var(--fs-sm); color: color-mix(in srgb, var(--z-color-warn) 78%, var(--z-color-text)); white-space: pre-wrap; }
+  .act-local-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; white-space: normal; }
+  .att-chip.unavailable { color: var(--z-color-dim); }
   .act-copy { opacity: 0; transition: opacity var(--z-motion-fast); }
   .act-msg:hover .act-copy { opacity: 1; }
   .act-body { line-height: 1.5; color: var(--z-color-text); }
@@ -83,9 +98,15 @@
   .md-list { padding-left: 20px !important; list-style: disc !important; }
   .md-list li { margin: 2px 0; }
   .act-code { margin: 8px 0 0; padding: 9px 12px; border-radius: var(--z-radius-md); background: var(--z-color-code-bg); border: 1px solid var(--z-color-divider); font-size: calc(var(--fs-base) * .9); line-height: 1.45; overflow-x: auto; white-space: pre; }
-  .act-attachments { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-  .att-chip { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border-radius: var(--z-radius-md); border: 1px solid var(--z-color-border); background: var(--z-color-surface); font-size: var(--fs-xs); }
-  .att-chip:hover { border-color: var(--z-color-accent-muted); }
+  .act-attachments { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; margin-top: 8px; }
+  /* Qt's attachment card (ActivityView.cpp:779): one bordered row, an image's thumbnail in a fixed 96x64 cell. */
+  .att-card { display: inline-flex; align-items: center; gap: 8px; max-width: 100%; padding: 8px; border-radius: var(--z-radius-md); border: 1px solid var(--z-color-border); background: var(--z-color-surface); font: inherit; font-size: var(--fs-xs); color: var(--z-color-text); text-align: left; }
+  button.att-card { cursor: pointer; }
+  button.att-card:hover { border-color: var(--z-color-accent-muted); }
+  .att-thumb { flex: none; width: 96px; height: 64px; display: grid; place-items: center; overflow: hidden; }
+  .att-thumb img { max-width: 96px; max-height: 64px; object-fit: contain; }
+  .att-caption { color: var(--z-color-accent); overflow-wrap: anywhere; }
+  .att-open { flex: none; color: var(--z-color-muted); }
   .act-tools { border: 1px solid var(--z-color-divider); border-radius: var(--z-radius-lg); padding: 6px 10px; font-size: var(--fs-sm); animation: rise var(--z-motion-slow) var(--ease) both; }
   .act-tools-head { display: flex; align-items: center; gap: 6px; width: 100%; text-align: left; }
   .act-tools-head .chev { transition: rotate var(--z-motion-base) var(--ease); color: var(--z-color-dim); }
@@ -173,6 +194,13 @@
   .q-option small { color: var(--z-color-muted); font-size: var(--fs-xs); }
   .question-card footer { display: flex; align-items: center; gap: 10px; }
 
+  /* The native queue shares the reading column (ActivityView.cpp:1280-1292). */
+  .act-queue { width: min(var(--col), calc(100% - 32px)); margin: 0 auto 8px; padding: 8px 12px; flex-shrink: 0;
+    background: var(--z-color-surface); border: 1px solid var(--z-color-border); border-radius: var(--z-radius-md); }
+  .act-queue-head { display: flex; align-items: center; gap: 8px; }
+  .act-queue-head b { color: var(--z-color-muted); font-weight: 600; }
+  .act-queue-text { max-height: 100px; overflow-y: auto; user-select: text; }
+
   /* Composer: toolbar 34, editor 76, action row 34. */
   .cmp-col { width: min(var(--col), calc(100% - 32px)); margin: 0 auto 10px; }
   .composer { border: 1px solid var(--z-color-border); border-radius: var(--z-radius-xl); background: var(--z-color-field); transition: border-color var(--z-motion-fast), box-shadow var(--z-motion-fast); }
@@ -190,6 +218,7 @@
   .cmp-resize.gap:hover .cmp-grip, .cmp-resize.gap:focus-visible .cmp-grip, .composer:has(.cmp-resize.edge:hover) .cmp-grip { width: min(52px, calc(100% - 12px)); background: var(--z-color-accent); }
   .cmp-resize.dragging .cmp-grip, .composer:has(.cmp-resize.dragging) .cmp-grip { width: min(52px, calc(100% - 12px)); background: var(--z-color-accent); transition: none; }
   .tchip:disabled { opacity: .45; cursor: default; }
+  .tchip[hidden] { display: none; }
   .tchip.on { color: var(--z-color-text); background: var(--z-color-segment-on); }
   /* Attachments list (MessageComposer attachmentsPopover): rows with a 30×22
      thumbnail, "[Image #1] name" over its size, and a separate remove button;
@@ -236,6 +265,27 @@
   .cmp-attach { width: 32px; height: 32px; }
   .cmp-status { font-size: var(--fs-xs); color: var(--z-color-dim); }
   .cmp-model { gap: 4px; max-width: 330px; font-size: var(--fs-xs); }
+  /* The status line's colours (MessageComposer updateControls 1224-1226): an
+     error, or a send that waits; the field while the session status blocks it. */
+  .cmp-status { min-width: 0; }
+  .cmp-status.error { color: var(--z-color-danger); }
+  .cmp-status.waiting { color: var(--z-color-warn); }
+  .composer.blocked .cmp-editor { color: var(--z-color-muted); }
+  /* Cancel send: a borderless link-like button (SessionsWindow.cpp:961). */
+  .tchip.link { background: transparent; padding: 0 6px; }
+  .tchip.link:hover { text-decoration: underline; }
+  /* Compacting context: a 48×5 indeterminate bar before its caption (ActivityView.cpp 1269-1279). */
+  .cmp-progress { position: relative; flex: none; width: 48px; height: 5px; border-radius: 3px; overflow: hidden; background: color-mix(in srgb, currentColor 20%, transparent); }
+  .cmp-progress::after { content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 40%; border-radius: 3px; background: currentColor; animation: cmp-progress 1.4s ease-in-out infinite; }
+  /* The cache popover (cachePopover: 14×12 padding, 8 px spacing). */
+  .att-pop.cache-pop { padding: 12px 14px; gap: 8px; }
+  .cache-pop p { margin: 0; font-size: var(--fs-xs); line-height: 1.45; white-space: pre-line; color: var(--z-color-text-2); }
+  .cache-pop .cache-warning { color: var(--z-color-warn); }
+  .cache-actions { display: flex; justify-content: flex-end; gap: 8px; }
+  /* A disabled Send shows the status at the field for 5 s (Qt's QToolTip there). */
+  .cmp-hint { position: absolute; z-index: 2; left: 12px; bottom: 46px; max-width: calc(100% - 24px); padding: 4px 8px; border-radius: var(--z-radius-sm);
+    border: 1px solid var(--z-color-border); background: var(--z-color-raised); box-shadow: var(--z-shadow-popover); color: var(--z-color-text);
+    font-size: var(--fs-xs); white-space: pre-line; pointer-events: none; animation: fadeIn var(--z-motion-fast) both; }
 
   /* Inspector: a pane-colored panel of grouped, collapsible cards. It slides
      in from the right and fades (~200 ms); while leaving it is taken out of
@@ -319,7 +369,26 @@
   .proc-table td { padding: 5px 8px; border-bottom: 1px solid color-mix(in srgb, var(--z-color-divider) 60%, transparent); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .proc-table tr.grp td { color: var(--z-color-dim); font-size: var(--fs-2xs); text-transform: uppercase; letter-spacing: .4px; font-weight: 600; padding-top: 10px; }
   .proc-table tr.sel td { background: var(--z-color-row-selected); }
-  .proc-detail { margin: 10px 12px; padding: 10px; border: 1px solid var(--z-color-divider); border-radius: var(--z-radius-lg); display: flex; flex-direction: column; gap: 6px; }
+  .proc-detail { margin: 10px 12px; padding: 10px; border: 1px solid var(--z-color-divider); border-radius: var(--z-radius-lg); display: flex; flex-direction: column; gap: 6px; flex: none; max-height: 45%; min-height: 0; }
+  /* Qt's summary keeps its four-space gaps. */
+  .proc-summary-text { white-space: pre; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .proc-note { padding: 0 12px 6px; overflow-wrap: anywhere; }
+  .proc-note.warn { color: var(--z-color-warn); }
+  .proc-list { flex: 1; min-height: 0; overflow: auto; }
+  .proc-table tr:not(.grp) { cursor: default; }
+  .proc-table tr.grp { cursor: pointer; }
+  .proc-chevron { display: inline-block; width: 14px; }
+  .proc-table tr.current td:first-child { box-shadow: inset 2px 0 0 var(--z-color-accent); }
+  .proc-list:focus { outline: none; }
+  .proc-list:focus-visible .proc-table tr.focused td { box-shadow: inset 0 0 0 1px var(--z-color-accent); }
+  /* Qt's state colours (ProcessView.cpp:224). */
+  .proc-state.danger { color: light-dark(#b42332, #ff8c93); }
+  .proc-state.muted { color: light-dark(#657582, #9aabb8); }
+  .proc-state.warning { color: light-dark(#9b6b00, #e9b949); }
+  .proc-state.success { color: light-dark(#237d67, #81d8bf); }
+  .proc-command { overflow-wrap: anywhere; }
+  .proc-details { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .proc-output { margin: 0; flex: 1; min-height: 60px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
   .native-frame { flex: 1; margin: 0 10px 10px; border-radius: var(--z-radius-lg); border: 1px dashed var(--z-color-border); display: grid; place-items: center; }
 
   /* Go to */
@@ -335,6 +404,32 @@
   .sc-group { margin: 6px 0 12px; }
   .sc-group .kv { grid-template-columns: 1fr auto; }
   .draft-list { display: flex; flex-direction: column; gap: 2px; max-height: 330px; overflow-y: auto; }
+  /* Saved drafts (MessageComposer.cpp:1230-1387): sections of rows, the
+     selected draft's text and its detail line. */
+  /* Qt's 720 x 640: the list takes two parts of the height, the text one. */
+  dialog.saved-drafts[open] { height: min(640px, calc(100vh - 64px)); }
+  /* With no draft the dialog is the hint and Close only. */
+  dialog.saved-drafts.no-drafts[open] { height: fit-content; }
+  .saved-drafts-body { flex: 1 1 auto; display: flex; flex-direction: column; gap: 10px; min-height: 0; overflow: hidden; }
+  .saved-drafts .draft-list { flex: 3 1 0; max-height: none; min-height: 120px; padding: 2px; border: 1px solid var(--z-color-divider); border-radius: var(--z-radius-md); outline: none; }
+  .saved-drafts .draft-list:focus-visible { border-color: var(--z-color-accent-muted); }
+  .draft-section { display: flex; flex-direction: column; gap: 2px; }
+  .draft-section + .draft-section { margin-top: 8px; }
+  .draft-section-title { padding: 6px 8px 2px; }
+  .draft-section-note { padding: 0 8px 4px; }
+  .draft-row { display: flex; flex-direction: column; gap: 2px; padding: 6px 10px; border-radius: var(--z-radius-md); cursor: default; font-size: var(--fs-sm); min-width: 0; }
+  .draft-row:hover { background: var(--z-color-hover, var(--z-color-segment-on)); }
+  .draft-row.on { background: var(--z-color-segment-on); box-shadow: inset 2px 0 0 var(--z-color-accent); }
+  .draft-row-head, .draft-row-foot { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+  .draft-machine { color: var(--z-color-muted); font-size: var(--fs-xs); max-width: 40%; }
+  .draft-row-meta { color: var(--z-color-dim); font-size: var(--fs-xs); }
+  .draft-row-foot { color: var(--z-color-text-2); }
+  .draft-more-bar { display: flex; flex-wrap: wrap; gap: 6px; margin-top: -4px; }
+  .draft-more-bar:empty { display: none; }
+  .draft-preview { flex: 1 1 0; min-height: 48px; margin: 0; padding: 8px 10px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+    border: 1px solid var(--z-color-divider); border-radius: var(--z-radius-md); background: var(--z-color-code-bg); font-size: calc(var(--fs-base) * .9); }
+  .draft-message { font-size: var(--fs-xs); color: var(--z-color-text-2); }
+  .draft-message.error { color: var(--z-color-danger); }
   .confirm-body p { line-height: 1.5; }
 
   /* Status bar */
@@ -348,3 +443,33 @@
 @keyframes insp-in { from { opacity: 0; translate: 24px 0; } }
 @keyframes vm-drift { to { transform: rotate(360deg); } }
 @keyframes insp-out { to { opacity: 0; translate: 24px 0; } }
+@keyframes cmp-progress { from { translate: -100% 0; } to { translate: 250% 0; } }
+
+/* A required question card hides the composer's input without unmounting it. */
+.composer [hidden] { display: none !important; }
+
+/* The question card (Qt's QuestionCard), between Activity and the composer. */
+.qcard { display: flex; flex-direction: column; gap: 9px; padding: 12px 14px; margin-bottom: 8px; background: var(--z-color-surface);
+  border: 1px solid var(--z-color-border); border-radius: var(--z-radius-lg); max-height: 60vh; }
+.qcard-head, .qcard-meta, .qcard-actions { display: flex; align-items: center; gap: 8px; }
+.qcard-title { color: var(--z-color-accent); font-weight: 600; }
+.qcard-dim, .qcard-mode { color: var(--z-color-muted); font-size: 11px; }
+.qcard-page { display: flex; flex-direction: column; gap: 7px; min-height: 0; }
+.qcard-scroll { display: flex; flex-direction: column; gap: 7px; overflow-y: auto; min-height: 40px; }
+.qcard-prompt { font-weight: 600; }
+.qcard-body { color: var(--z-color-muted); font-size: 11px; }
+.qchoice { display: flex; gap: 8px; align-items: flex-start; padding: 9px 12px 9px 10px; border: 1px solid var(--z-color-border);
+  border-radius: var(--z-radius-md); background: var(--z-color-raised); cursor: pointer; }
+.qchoice:hover, .qchoice.on { border-color: var(--z-color-accent); }
+.qchoice.on { background: var(--z-color-accent-bg); }
+.qchoice.off { cursor: default; opacity: .7; }
+.qchoice-copy { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.qchoice-desc { color: var(--z-color-muted); font-size: 11px; }
+.qcard-text { min-height: 35px; padding: 7px; border: 1px solid var(--z-color-border); border-radius: var(--z-radius-md); background: var(--z-color-raised); color: var(--z-color-text); }
+.qcard-text:focus { border-color: var(--z-color-accent); outline: none; }
+.qcard-status { color: var(--z-color-muted); font-size: 11px; margin: 0; }
+.qcard-status.error { color: var(--z-color-danger); }
+.wrap-pre { white-space: pre-wrap; }
+.act-reply-q { color: var(--z-color-muted); font-size: 10px; margin-bottom: 3px; }
+.act-reply-a { border: 1px solid var(--z-color-border); background: var(--z-color-code-bg); padding: 10px; border-radius: var(--z-radius-md); margin-bottom: 10px; }
+.act-reply-a b { color: var(--z-color-accent); font-size: 10px; }

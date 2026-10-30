@@ -5,6 +5,7 @@ import "./ui/styles/app.css";
 import "./ui/styles/sessions.css";
 import "./ui/styles/detail.css";
 import "./ui/styles/client.css";
+import "./ui/styles/goto.css";
 import "./ui/styles/screens.css";
 import "./ui/styles/machines.css";
 import "./ui/styles/motion.css";
@@ -15,17 +16,26 @@ import { inTauri, startBridge, type BridgeMode } from "./bridge";
 import { invoke } from "@tauri-apps/api/core";
 import { receive } from "./store/session";
 import { startDesk } from "./store/desk";
+import { startDrops } from "./store/drops";
+import { startUpdates } from "./store/updates";
+import { composer } from "./store/composer";
+import { exitFlush } from "./store/exitFlush";
 import { startMotion } from "./ui/motion";
 
 const [mode, setMode] = createSignal<BridgeMode | "starting">("starting");
 
 // The motion attributes are on the root before the first frame.
+exitFlush.register(composer.flushForExit);
+void exitFlush.start().catch((error) => console.warn("Zerus Next: exit flush listener did not start", error));
 startMotion();
 render(() => <App mode={mode} />, document.getElementById("root")!);
 // The menu bar and notifications open sessions and show notices in this window.
 startDesk().catch((error) => console.warn("Zerus Next: the menu bar wiring did not start", error));
+startUpdates().catch((error) => console.warn("Zerus Next: the updates wiring did not start", error));
 
 void startBridge(receive).then(setMode, (error) => console.error("Zerus Next: the data source did not start", error));
+// Files dropped on the session's panel go to its composer or its Terminal.
+startDrops();
 
 // The second frame after load reached the page: a DMA-BUF start worked, so its crash marker goes.
 if (inTauri()) {

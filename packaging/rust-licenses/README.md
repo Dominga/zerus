@@ -39,6 +39,8 @@ URL and the checksum.
 | `objc2-quartz-core` | https://github.com/madsmtm/objc2/blob/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md | `7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54` |
 | `objc2-web-kit` | MIT.txt (see below) | `b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5` |
 | `objc2-web-kit` | https://github.com/madsmtm/objc2/blob/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md | `7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54` |
+| `objc2-user-notifications` | MIT.txt (see below) | `b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5` |
+| `objc2-user-notifications` | https://github.com/madsmtm/objc2/blob/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md | `7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54` |
 | `selectors` | https://github.com/spdx/license-list-data/blob/v3.29.0/text/MPL-2.0.txt (see below) | `66a3107d5ad6a058aab753eaac2047ccb2ed0e39465dd0fe5844da3e300d5172` |
 | `serde_columnar` | https://github.com/loro-dev/columnar/blob/06663cfc569c6c770b28688f015f8a87fc04e156/LICENSE | `a9af0e3a3ded007f9914a1125b736ec526d469105c6577e367e2a9ca4de39d6b` |
 | `serde_columnar_derive` | https://github.com/loro-dev/columnar/blob/06663cfc569c6c770b28688f015f8a87fc04e156/LICENSE | `a9af0e3a3ded007f9914a1125b736ec526d469105c6577e367e2a9ca4de39d6b` |

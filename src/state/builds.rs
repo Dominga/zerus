@@ -132,7 +132,7 @@ fn start(input: &Value, wait: bool) -> Result<Value> {
 /// model, as a detached run in the stage's folder: the stage's session (the
 /// implementer whose folder it is) shows Building while it runs, and the run
 /// log keeps its outcome. The dispatcher reads it back with `record`.
-pub(crate) fn start_for(id: &str, label: &str, command: &str, cwd: &Path, session: Value, minutes: u32) -> Result<()> {
+pub(crate) fn start_for(id: &str, label: &str, command: &str, cwd: &Path, session: Value, minutes: u32, env: &[(&str, &str)]) -> Result<()> {
     if !canonical_uuid(id) {
         return Err("A stage run needs a canonical id".into());
     }
@@ -151,7 +151,8 @@ pub(crate) fn start_for(id: &str, label: &str, command: &str, cwd: &Path, sessio
     private_dir(&dir())?;
     prune();
     let claim = json!({"request_id":id,"label":label,"command":command,"cwd":cwd.display().to_string(),
-        "session":session,"started":now(),"timeout_secs":minutes * 60,"source":"team_stage"});
+        "session":session,"started":now(),"timeout_secs":minutes * 60,"source":"team_stage",
+        "env":env.iter().map(|(key, value)| ((*key).to_owned(), json!(value))).collect::<serde_json::Map<String, Value>>()});
     storage::atomic(&running_path(id), &claim.to_string())?;
     if let Err(error) = spawn(id) {
         let _ = fs::remove_file(running_path(id));
@@ -244,6 +245,14 @@ fn worker(id: &str) -> Result<i32> {
     let _ = storage::atomic(&running_path(id), &claim.to_string());
     let mut command = shell(string(&claim, "command"));
     command.current_dir(string(&claim, "cwd"));
+    // U47/U48: a stage's command gets the task, its branch and the checked commit.
+    if let Some(env) = claim["env"].as_object() {
+        for (key, value) in env {
+            if let Some(value) = value.as_str() {
+                command.env(key, value);
+            }
+        }
+    }
     let timeout = Duration::from_secs(claim["timeout_secs"].as_u64().unwrap_or(DEFAULT_MINUTES * 60));
     let outcome = teams::templates::run_tree(&mut command, timeout, None);
     let mut done = claim.clone();
@@ -274,6 +283,26 @@ fn live(claim: &Value, at: f64) -> bool {
         Some(pid) => crate::platform::process_identity(pid).is_some(),
         None => at - started < START_SECONDS,
     }
+}
+
+/// The live runs whose folder is `folder`: #680's N11 check sees the stage's
+/// own `team_stage` runs beside the outbox claims.
+pub(super) fn running_in(folder: &Path, at: f64) -> Vec<Value> {
+    let folder = crate::platform::canonical(folder).ok();
+    running(at)
+        .into_iter()
+        .filter(|claim| claim["cwd"].as_str().and_then(|cwd| crate::platform::canonical(Path::new(cwd)).ok()) == folder)
+        .collect()
+}
+
+/// A live `team_stage` claim a test can see without spawning a runner.
+#[cfg(test)]
+pub(crate) fn test_running_claim(id: &str, cwd: &Path, source: &str) -> PathBuf {
+    private_dir(&dir()).unwrap();
+    let claim = json!({"request_id":id,"label":"test stage","command":"echo","cwd":cwd.display().to_string(),
+        "session":{},"started":now(),"timeout_secs":3600.0,"source":source,"pid":std::process::id()});
+    storage::atomic(&running_path(id), &claim.to_string()).unwrap();
+    running_path(id)
 }
 
 /// The builds running now, at most `MAX_RECORDS` claims read; the listing

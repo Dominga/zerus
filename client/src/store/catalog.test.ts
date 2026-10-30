@@ -108,6 +108,12 @@ describe("toSession", () => {
     expect(toSession("", "k", view("a", { agent: "opencode", bulk_lifecycle_supported: true })).bulkLifecycle).toBe(true);
     expect(toSession("", "k", view("a", { agent: "claude", bulk_lifecycle_supported: false })).bulkLifecycle).toBe(false);
   });
+  it("reads the canonical folder only when the core sends one (view.rs skips an empty one)", () => {
+    const sent = toSession("", "k", view("a", { cwd_canonical: "/srv/example/project", git_root: "/srv/example/project" }));
+    expect([sent.cwdCanonical, sent.gitRoot]).toEqual(["/srv/example/project", "/srv/example/project"]);
+    const absent = toSession("", "k", view("a", { git_root: "" }));
+    expect([absent.cwdCanonical, absent.gitRoot]).toEqual(["", ""]);
+  });
   it("derives the presentation status from status kinds and raw phases", () => {
     expect(statusOf(view("a", { status: "working" }))).toBe("working");
     expect(statusOf(view("a", { status: "", phase: "approval" }))).toBe("attention");
@@ -137,5 +143,26 @@ describe("toSession", () => {
     expect(toSession("", "run:a", view("a", { allowed_actions: null })).allowed).toBeUndefined();
     expect(toSession("", "run:a", view("a", { allowed_actions: [] })).allowed).toBe("");
     expect(toSession("", "run:a", view("x/a", { agent: "sh" }))).toMatchObject({ agent: "claude", cmd: "sh" });
+  });
+});
+
+describe("setDraftKeys", () => {
+  it("marks the rows with a nonempty draft, also rows that arrive later or change", () => {
+    createRoot((dispose) => {
+      const { catalog, applyBatch, setDraftKeys } = createCatalog();
+      applyBatch(batchOf({ replaces: [{ computer: "mac", rows: [row("run:a", "claude/p/a", {}, "mac"), row("run:b", "claude/p/b", {}, "mac")] }] }));
+      // Draft keys are `computer + "\n" + name`; an archived draft's key also names its archive.
+      setDraftKeys(["mac\nclaude/p/a", "mac\nclaude/p/c", "mac\nclaude/p/b\narchive-1"]);
+      expect(catalog.rows[rowId("mac", "run:a")].draft).toBe(true);
+      expect(catalog.rows[rowId("mac", "run:b")].draft).toBe(false);
+      // An update keeps the mark; a row listed later takes it.
+      applyBatch(batchOf({ upserts: [row("run:a", "claude/p/a", { summary: "Bash: cargo test" }, "mac"), row("run:c", "claude/p/c", {}, "mac")] }));
+      expect(catalog.rows[rowId("mac", "run:a")].draft).toBe(true);
+      expect(catalog.rows[rowId("mac", "run:c")].draft).toBe(true);
+      setDraftKeys([]);
+      expect(catalog.rows[rowId("mac", "run:a")].draft).toBe(false);
+      expect(catalog.rows[rowId("mac", "run:c")].draft).toBe(false);
+      dispose();
+    });
   });
 });

@@ -5,6 +5,7 @@ nothing reaches an installed GUI, its LaunchAgent or a real settings domain."""
 import errno
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -101,6 +102,10 @@ class Switch(Fixture):
         with mock.patch.object(updater, 'MAC', False):
             self.assertEqual(updater.client_drafts_root('dev.zerus.next'),
                              self.home / '.local/share/dev.zerus.next/drafts')
+        with mock.patch.object(updater, 'MAC', False), \
+                mock.patch.object(updater, 'INSTALL_PREFIX', self.root / 'prefix'):
+            self.assertEqual(updater.client_drafts_root('dev.zerus.next'),
+                             self.root / 'prefix/share/dev.zerus.next/drafts')
 
     def test_each_client_root_joins_qt_once(self):
         qt = {'CFBundleIdentifier': 'com.hgdev.hgs-tray'}
@@ -299,7 +304,11 @@ class SlotAndRestore(Fixture):
                 self.assertEqual(self.text(self.slot), 'qt-old')
                 [kept] = [path for path in (previous, *updater.ROLLBACK.glob('.incoming-*/hgs-tray.app')) if path.exists()]
                 self.assertEqual(self.text(kept), 'qt')
-                self.assertIn(str(kept), lines[-1])
+                if kept == previous:
+                    self.assertNotIn(str(previous), lines[-1], 'keep_aside will rename this path')
+                    self.assertIn('remains with this update for recovery', lines[-1])
+                else:
+                    self.assertIn(str(kept), lines[-1])
 
 
 class Flow(Fixture):
@@ -514,7 +523,7 @@ class UpdateFlow(Flow):
                 self.domain({'attention.observed': b'{}'})
                 self.assertEqual(updater.update(self.bundle('client', 'tauri'), self.installed), 0)
                 self.assertEqual((self.variant(self.installed), self.variant(self.slot)), ('client', 'qt-old'))
-                self.assertIn('the replaced bundle is incomplete', self.lines[-2])
+                self.assertIn('the replaced bundle could not be verified as complete', self.lines[-2])
                 self.assertTrue(list(self.installed.parent.glob('.hgs-tray-kept-*/previous/hgs-tray.app')))
 
     def test_a_partial_qt_in_the_slot_keeps_the_replaced_client(self):
@@ -532,10 +541,10 @@ class UpdateFlow(Flow):
                 self.assertFalse((self.slot / 'Contents/MacOS/hgs-tray').exists())
                 [kept] = self.installed.parent.glob('.hgs-tray-kept-*/previous/hgs-tray.app')
                 self.assertEqual(self.variant(kept), 'client-1')
-                self.assertIn('is incomplete, so the replaced GUI was kept rather than removed', self.lines[-2])
+                self.assertIn('could not be verified as complete, so the replaced GUI was kept rather than removed', self.lines[-2])
                 self.assertNotIn('the Qt GUI stays the rollback copy', ' '.join(self.lines))
 
-    def test_every_codesign_is_bounded_and_a_timeout_means_incomplete(self):
+    def test_every_codesign_is_bounded_and_a_timeout_means_unverified(self):
         calls = []
 
         def run(args, **kwargs):
@@ -553,6 +562,97 @@ class UpdateFlow(Flow):
             raise subprocess.TimeoutExpired(args, kwargs.get('timeout'))
         with mock.patch.object(updater, 'run', hangs):
             self.assertFalse(updater.complete_bundle(self.bundle('qt', 'qt')))
+
+    def test_an_interrupted_cross_filesystem_copy_names_only_the_final_recovery_path(self):
+        self.install('qt', 'qt', self.installed)
+        self.install('qt-old', 'qt', self.slot)
+        self.domain({'attention.observed': b'{}'})
+        rename, copytree = os.rename, shutil.copytree
+
+        def across(source, target, *args, **kwargs):
+            if Path(source).parent.name == 'previous':
+                raise OSError(errno.EXDEV, 'Invalid cross-device link')
+            return rename(source, target, *args, **kwargs)
+
+        def partial(source, target, *args, **kwargs):
+            copied = copytree(source, target, *args, **kwargs)
+            if Path(target).parent.name.startswith('.incoming-'):
+                (Path(target) / 'Contents/MacOS/hgs-tray').unlink()
+                raise KeyboardInterrupt
+            return copied
+
+        with mock.patch.object(updater.os, 'rename', across), mock.patch.object(updater.shutil, 'copytree', partial), \
+                self.assertRaises(KeyboardInterrupt):
+            updater.update(self.bundle('client', 'tauri'), self.installed)
+        [kept] = self.installed.parent.glob('.hgs-tray-kept-*/previous/hgs-tray.app')
+        [incoming] = updater.ROLLBACK.glob('.incoming-*/hgs-tray.app')
+        self.assertEqual((self.variant(self.installed), self.variant(self.slot), self.variant(kept)),
+                         ('client', 'qt-old', 'qt'))
+        self.assertFalse((incoming / 'Contents/MacOS/hgs-tray').exists())
+        [interrupted] = [line for line in self.lines if 'did not change;' in line]
+        self.assertNotIn('the replaced GUI is kept in', interrupted)
+        self.assertNotIn('/previous/', interrupted, 'the old update folder has been renamed')
+        self.assertIn('may be partial', interrupted)
+        self.assertIn(str(kept), self.lines[-1], 'the final recovery line names the complete copy')
+
+    def test_a_signature_check_failure_does_not_describe_a_complete_bundle_as_incomplete(self):
+        for running in (True, False):
+            for target in ('previous', 'slot'):
+                for fault in (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+                    with self.subTest(running=running, target=target, fault=fault.__name__):
+                        shutil.rmtree(self.installed.parent, ignore_errors=True)
+                        shutil.rmtree(updater.ROLLBACK, ignore_errors=True)
+                        self.lines.clear()
+                        self.running = running
+                        self.install('client-1', 'tauri', self.installed)
+                        self.install('qt', 'qt', self.slot)
+
+                        def codesign(args, **kwargs):
+                            path = Path(args[-1])
+                            if (target == 'slot' and path == self.slot) or (target == 'previous' and path.parent.name == 'previous'):
+                                if fault is subprocess.TimeoutExpired:
+                                    raise fault(args, kwargs.get('timeout'))
+                                raise fault(1, args)
+                            return ''
+
+                        with mock.patch.object(updater, 'run', codesign):
+                            self.assertEqual(updater.update(self.bundle('client-2', 'tauri'), self.installed), 0)
+                        [kept] = self.installed.parent.glob('.hgs-tray-kept-*/previous/hgs-tray.app')
+                        self.assertEqual((self.variant(kept), self.variant(self.slot)), ('client-1', 'qt'))
+                        output = '\n'.join(self.lines)
+                        self.assertIn('could not be verified as complete', output)
+                        self.assertNotIn('is incomplete', output)
+
+    def test_main_reports_codesign_failures_on_the_build_stage_and_stopped_swap(self):
+        for point in (1, 2, 3):
+            for fault in (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+                with self.subTest(point=point, fault=fault.__name__):
+                    shutil.rmtree(self.installed.parent, ignore_errors=True)
+                    shutil.rmtree(updater.ROLLBACK, ignore_errors=True)
+                    self.lines.clear()
+                    self.running = False
+                    self.install('client-1', 'tauri', self.installed)
+                    self.install('qt', 'qt', self.slot)
+                    calls = []
+
+                    def codesign(args, **kwargs):
+                        calls.append(args)
+                        if len(calls) == point:
+                            if fault is subprocess.TimeoutExpired:
+                                raise fault(args, kwargs.get('timeout'))
+                            raise fault(1, args)
+                        return ''
+
+                    errors = io.StringIO()
+                    argv = ['update-installed.py', str(self.bundle('client-2', 'tauri')), str(self.installed)]
+                    with mock.patch.object(updater, 'run', codesign), mock.patch.object(sys, 'argv', argv), \
+                            mock.patch.object(sys, 'stderr', errors):
+                        self.assertEqual(updater.main(), 1)
+                    self.assertEqual((self.variant(self.installed), self.variant(self.slot)), ('client-1', 'qt'))
+                    self.assertIn('hgs-tray update failed:', errors.getvalue())
+                    self.assertNotIn('Traceback', errors.getvalue())
+                    self.assertIn(f'{self.installed} keeps the previous GUI', self.lines[-1])
+                    self.assertEqual(list(self.installed.parent.glob('.hgs-tray-*')), [])
 
     def test_an_interrupted_removal_across_file_systems_says_the_copy_may_be_partial(self):
         self.install('qt', 'qt', self.installed)
@@ -719,7 +819,7 @@ class UpdateFlow(Flow):
         self.install('qt', 'qt', self.slot)
         self.assertEqual(updater.update(self.bundle('client-2', 'tauri'), self.installed), 0)
         self.assertEqual((self.variant(self.installed), self.variant(self.slot)), ('client-2', 'qt'))
-        self.assertIn('the replaced bundle is incomplete', self.lines[-2])
+        self.assertIn('the replaced bundle could not be verified as complete', self.lines[-2])
         # Kept, never deleted: the check may have failed for another reason.
         [kept] = self.installed.parent.glob('.hgs-tray-kept-*/previous/hgs-tray.app')
         self.assertEqual(self.lines[-1], f'the replaced GUI is kept in {kept}')

@@ -1,4 +1,4 @@
-import { For, Show, createMemo, createEffect, createSignal, on, onCleanup } from "solid-js";
+import { For, Show, Suspense, createMemo, createEffect, createSignal, lazy, on, onCleanup } from "solid-js";
 import { createVirtualizer } from "@tanstack/solid-virtual";
 import { Icon } from "../lib/icons";
 import { listRows, rowHeight, shownSummary, machineChoices, projectChoices, type Row } from "./model";
@@ -6,29 +6,42 @@ import {
   SessionCard, ChildCard, CompactCard, AgentBadge, StatusBadge, badgeKind, statusCaption, stripCaption,
   emphasis, childStatus, gitTooltip, paletteIndex, folderOf,
 } from "./SessionCard";
-import { catalog, computerOffline } from "../../store/catalog";
+import { catalog, computerFresh, computerOffline } from "../../store/catalog";
+import { visibleUnreadReply } from "../../store/attention";
+import { runningCommandsEntry } from "../../store/processes";
+import { flag } from "../../store/settings";
 import { archiveCount, archiveTip } from "../../store/archive";
 import { ArchiveBar, datePanelOpen } from "./ArchiveBar";
-import { detailsFor, followedFor, updating } from "../../store/actions";
+import { detailsFor, followedFor, notify, updating } from "../../store/actions";
+import { STATE_CHANGED } from "./actions-ui";
 import { running } from "../../store/batch";
 import { grouping, headerOf, moveProject, setProjectCollapsed, setProjectToShow, sortProject } from "../../store/organization";
 import { TOOL_WIDTH, clearArchiveMenuEntry, machineMenu, runSelection, selectedRows, selectionContextMenu, selectionCount } from "./selection-live";
 import { barTools, splitTools, toolEntry } from "./selection-ui";
 import { actionEntries, copyEntries, freshActionEntry, muteEntry } from "./ActionDialogs";
 import { markAllEntry, markAllTip, markEntry, runMarkAll } from "./mark-entries";
-import { moveEntry, openDeleteProjectDialog, openRenameProjectDialog } from "./OrganizationDialogs";
+import { moveEntry, openCreateProjectDialog, openDeleteProjectDialog, openRenameProjectDialog } from "./OrganizationDialogs";
+import { backgroundEntries } from "./background-menu";
 import { chipColor, headerEntries, projectColor, type FilterChip } from "./organization-ui";
+import { newSessionForProject, newSessionFromPanel } from "./newsession-view";
+import { CreationCard, CreationTile } from "./CreationCard";
+import { creationCount, creationFooter, creationStatusMenu } from "../../store/creations";
 import {
   selectedKey, setSelectedKey, setExpandedChildren, expandedChildren,
   setCompactRows, compactRows, stateFilter, setStateFilter, counts, search, setSearch, stripMode, setStripMode,
   setMenu, machineFilter, setMachineFilter, projectFilter, setProjectFilter, setPage,
   multi, setMulti, peek, setPeek, setSubagentOpen, sessionsWidth, setSessionsWidth, menu, subagentOpen,
-  revealing, setRevealing,
+  revealing, setRevealing, setDetailTab,
   type StateFilter, type MenuEntry,
 } from "../../store/ui";
 import type { Session } from "./types";
+import type { ClearControl, SessionRef } from "../../types";
 import { motionReduced } from "../motion";
+import { composer } from "../../store/composer";
+import { composerClearControl } from "../../bridge";
 import { bulkSelect, clearMulti, multiCount, setAnchor, dragItem, setDragItem, drop, setDrop, endDrag, placement, applyDrop, SESSION_MIME, type DragItem } from "./organize";
+
+const SavedDraftsDialog = lazy(() => import("./SavedDrafts").then((m) => ({ default: m.SavedDraftsDialog })));
 
 /** Actions that go through guarded `hgs` calls arrive in phase 2; their menu entries show disabled. */
 const LATER = true;
@@ -99,6 +112,61 @@ function setRowCompact(key: string, compact: boolean) {
   morphTimer = window.setTimeout(() => setMorphing(false), MORPH.duration + 40);
 }
 
+let clearRead: { id: string; checking: boolean; control?: ClearControl } | undefined;
+const [clearRevision, setClearRevision] = createSignal(0);
+
+function clearReadFor(s: Session) {
+  clearRevision();
+  const online = !computerOffline(s.computer);
+  const id = `${s.key}\n${s.runId}\n${s.conversationId}\n${s.state}\n${online}`;
+  if (clearRead?.id !== id || (!clearRead.checking && !clearRead.control)) {
+    clearRead = { id, checking: true };
+    if (!catalog.rows[s.key] || !online) {
+      clearRead = { id, checking: false };
+    } else {
+      const session: SessionRef = { computer: s.computer, key: s.catalogKey, name: s.name, archive_id: s.archiveId ?? null };
+      void composerClearControl(session).then((control) => {
+        if (clearRead?.id !== id) return;
+        clearRead = { id, checking: false, control: control ?? undefined };
+        setClearRevision((n) => n + 1);
+      }).catch(() => {
+        if (clearRead?.id !== id) return;
+        clearRead = { id, checking: false };
+        setClearRevision((n) => n + 1);
+      });
+    }
+  }
+  return clearRead;
+}
+
+/**
+ * The menu's Clear session (Qt's SessionMenuAction::Clear): the selected row
+ * uses the composer's control. An unselected row gets its own inspection and
+ * Qt's checking tooltip, then selects and opens the same guarded dialog.
+ */
+function clearEntry(s: Session): MenuEntry {
+  const selected = s.key === selectedKey() && !subagentOpen() && !!composer.view()?.clear;
+  const read = selected ? undefined : clearReadFor(s);
+  const control = selected ? composer.view()?.clear : read?.control;
+  return {
+    label: "Clear session…", icon: "clear",
+    disabled: selected ? !control?.enabled : read?.checking || !control?.enabled,
+    hint: selected ? control?.reason || undefined : read?.checking ? "Checking whether this session can be cleared…" : control?.reason || undefined,
+    action: () => {
+      if (catalog.rows[s.key]?.state !== s.state) { notify("error", STATE_CHANGED, true); return; }
+      if (selected) { composer.openClear(); return; }
+      if (!read?.control?.enabled || clearRead?.id !== read.id) return;
+      const session: SessionRef = { computer: s.computer, key: s.catalogKey, name: s.name, archive_id: s.archiveId ?? null };
+      const control = read.control;
+      setSelectedKey(s.key);
+      setSubagentOpen(undefined);
+      void composer.open(session).then(() => {
+        if (selectedKey() === s.key && clearRead?.id === read.id) composer.openClear(control);
+      });
+    },
+  };
+}
+
 export function sessionMenu(s: Session): MenuEntry[] {
   // The selected row's menu reads the same details as the header (Qt's m_details).
   const details = s.key === selectedKey() && !subagentOpen() ? detailsFor(s, !computerOffline(s.computer), followedFor(s.key)) : undefined;
@@ -108,19 +176,21 @@ export function sessionMenu(s: Session): MenuEntry[] {
   const mark = markEntry(s);
   const fresh = freshActionEntry(s);
   const archived = s.state === "archived";
+  const commands = runningCommandsEntry(s, () => computerFresh(s.computer), () => flag("processes/enabled"), () => { setSelectedKey(s.key); setDetailTab("processes"); });
   return [
     { label: compactRows[s.key] ? "Expand session row" : "Compact session row", icon: compactRows[s.key] ? "expand-row" : "compact-row", action: () => setRowCompact(s.key, !compactRows[s.key]) },
     { label: "Expand all collapsed", icon: "expand-row", disabled: !Object.values(compactRows).some(Boolean), action: () => Object.keys(compactRows).forEach((k) => setCompactRows(k, false)) },
     { separator: true },
     // An archived row has no terminal, and no Mute or Mark group (Qt's `if (!archived)`).
     ...(archived ? [] : [s.agent === "deepseek" ? { label: "Open native DeepSeek UI", icon: "external-link", disabled: LATER } : { label: "Open terminal", icon: "square-terminal", disabled: LATER }]),
+    ...(commands ? [commands] : []),
     { label: "Open folder", icon: "folder-open", disabled: LATER },
     { label: "Open shell in session folder", icon: "terminal", disabled: LATER },
     cp.command,
     ...(archived ? [] : [{ separator: true } as const, ...(mute ? [mute] : []), ...(mark ? [mark] : [])]),
     { separator: true },
     act.change,
-    ...(fresh ? [fresh] : archived ? [] : [{ label: "Clear session…", icon: "clear", disabled: LATER }]),
+    ...(fresh ? [fresh] : archived ? [] : [clearEntry(s)]),
     act.rename,
     { label: "Fork session…", icon: "git-fork", disabled: LATER },
     ...(act.archive ? [act.archive] : []),
@@ -137,6 +207,7 @@ export function sessionMenu(s: Session): MenuEntry[] {
 /** The project header's menu (SessionsWindow.cpp:2568-2616); its rules are organization-ui.ts's. */
 function headerMenu(project: string): MenuEntry[] {
   return headerEntries(grouping(), project, {
+    newSession: () => newSessionForProject(project),
     filter: () => setProjectFilter([project]),
     collapse: (collapsed) => setProjectCollapsed(project, collapsed),
     rename: () => openRenameProjectDialog(project),
@@ -328,6 +399,13 @@ export function SessionList() {
   let section: HTMLElement | undefined;
   const [panelVisible, setPanelVisible] = createSignal(!stripMode());
   const [searchFocused, setSearchFocused] = createSignal(false);
+  const [savedOpen, setSavedOpen] = createSignal(false);
+  const showSavedDrafts = async (from: HTMLElement) => {
+    const handle = subagentOpen() ? undefined : composer.view()?.handle;
+    setSavedOpen(true);
+    const { openSavedDrafts } = await import("./SavedDrafts");
+    openSavedDrafts(from, handle);
+  };
 
   // Docked <-> strip: the conversation resizes once; the panel animates above it.
   const toggleDock = () => {
@@ -406,11 +484,12 @@ export function SessionList() {
       style={{ "--pane-w": stripMode() ? `${STRIP_WIDTH}px` : `${sessionsWidth()}px`, "--panel-w": `${sessionsWidth()}px` }}
       onPointerEnter={onSectionEnter} onPointerLeave={onSectionLeave}>
       <Show when={stripMode()}><Strip onEnter={onStripEnter} onToggle={toggleDock} /></Show>
-      <div class="sp-panel" ref={panel} classList={{ overlay: stripMode() }} hidden={!panelVisible()}>
+      <div class="sp-panel" ref={panel} classList={{ overlay: stripMode() }} hidden={!panelVisible()}
+        onContextMenu={(e) => { if ((e.target as Element).closest("input,textarea")) return; openMenu(e, backgroundEntries({ newSession: newSessionFromPanel, newProject: openCreateProjectDialog })); }}>
         <header class="sp-head">
           <h1>{stateFilter() === "archived" ? "Archive" : "Sessions"}</h1>
           <span class="grow" />
-          <button class="icon-btn hd" data-tip="New session" disabled><Icon name="add" size={18} /></button>
+          <button class="icon-btn hd" data-tip="New session" aria-label="New session" onClick={newSessionFromPanel}><Icon name="add" size={18} /></button>
           <button class="icon-btn hd" data-tip={toggleCaption()} onClick={toggleDock}><Icon name={toggleGlyph()} size={18} /></button>
           <button class="icon-btn hd" data-tip="Session and machine actions" onClick={(e) => openMenu(e, batchMenu())}><Icon name="more" size={18} /></button>
         </header>
@@ -435,7 +514,7 @@ export function SessionList() {
         <FilterChips />
 
         <Show when={stateFilter() === "archived"}><ArchiveBar /></Show>
-          <Show when={catalog.order.length > 0 || stateFilter() === "archived"} fallback={<ListPlaceholder />}>
+          <Show when={catalog.order.length > 0 || creationCount() > 0 || stateFilter() === "archived"} fallback={<ListPlaceholder />}>
             <div class="sp-scroll" classList={{ morphing: morphing(), organizing: !!dragItem() }} ref={list.ref} tabindex="0" onKeyDown={onKey} role="tree"
               onDragOver={(e) => organizeOver(e, list)} onDrop={(e) => organizeDrop(e)} onDragLeave={(e) => { if (!(e.currentTarget as Element).contains(e.relatedTarget as Node)) setDrop(undefined); }}
               aria-label="Agent sessions; Ctrl-click to select several; drag to organize, left/right to collapse or expand a group">
@@ -449,14 +528,17 @@ export function SessionList() {
           </Show>
         <SelectionBar />
         <footer class="sp-foot">
-          <span class="tabular ell">{shownSummary().shown ? `${shownSummary().shown} shown, ${shownSummary().working} working, ${shownSummary().attention} attention` : catalog.order.length ? "No matching sessions" : ""}</span>
+          <span class="tabular ell">{shownSummary().shown ? `${shownSummary().shown} shown, ${shownSummary().working} working, ${shownSummary().attention} attention${creationFooter(true)}` : creationFooter(false) || (catalog.order.length ? "No matching sessions" : "")}</span>
           <span class="grow" />
-          <button class="icon-btn small" data-tip="Session creation status" disabled><Icon name="clock" size={16} /></button>
+          <button class="icon-btn small" data-tip="Session creation status" onClick={(e) => openMenu(e, creationStatusMenu())}><Icon name="clock" size={16} /></button>
           <button class="icon-btn small" title={markAllTip(markAllEntry())} disabled={markAllEntry().disabled} onClick={() => runMarkAll()}><Icon name="read-all" size={16} /></button>
-          <button class="icon-btn small" data-tip="Saved drafts: recover local drafts, including those from ended sessions" disabled><Icon name="drafts" size={16} /></button>
+          {/* The open composer is the dialog's target, none while a subagent shows (SessionsWindow.cpp:485-489). */}
+          <button class="icon-btn small" data-tip="Saved drafts: recover local drafts, including those from ended sessions" aria-label="Saved drafts"
+            onClick={(e) => { void showSavedDrafts(e.currentTarget); }}><Icon name="drafts" size={16} /></button>
         </footer>
       </div>
       <Show when={!stripMode()}><ResizeHandle /></Show>
+      <Show when={savedOpen()}><Suspense><SavedDraftsDialog /></Suspense></Show>
     </section>
   );
 }
@@ -541,6 +623,7 @@ function ListRow(props: { id: string; list: RowSource }) {
           </div>
         )}
       </Show>
+      <Show when={row()?.type === "creation" ? (row() as Extract<Row, { type: "creation" }>) : undefined}>{(v) => <CreationCard card={v().creation} />}</Show>
       <Show when={row()?.type === "card" ? (row() as Extract<Row, { type: "card" }>) : undefined}>
         {(v) => (
           <div class="rowhit" classList={{ "has-kids-open": v().expanded && !v().compactRow, multi: !!multi[v().session.key], dragged: dragItem()?.id === v().session.key }}
@@ -639,7 +722,7 @@ function Strip(props: { onEnter: () => void; onToggle: () => void }) {
           <For each={list.keys()}>{(id) => <StripRow id={id} list={list} />}</For>
         </div>
       </div>
-      <div class="strip-count tabular">{shownSummary().shown}</div>
+      <div class="strip-count tabular">{shownSummary().shown + creationCount()}</div>
     </div>
   );
 }
@@ -660,6 +743,7 @@ function StripRow(props: { id: string; list: RowSource }) {
         )}
       </Show>
       <Show when={row()?.type === "card" ? (row() as Extract<Row, { type: "card" }>) : undefined}>{(v) => <StripTile row={v()} />}</Show>
+      <Show when={row()?.type === "creation" ? (row() as Extract<Row, { type: "creation" }>) : undefined}>{(v) => <CreationTile card={v().creation} />}</Show>
     </div>
   );
 }
@@ -691,7 +775,7 @@ function StripTile(props: { row: Extract<Row, { type: "card" }> }) {
         <span class="st-top">
           <span class="st-status">
             <StatusBadge kind={kind()} caption="" iconOnly />
-            <Show when={s().unread && (s().status === "working" || s().status === "attention" || s().draft)}><i class="st-unread" classList={{ muted: !!s().muted }} /></Show>
+            <Show when={visibleUnreadReply(s(), computerFresh(s().computer)) && (s().status === "working" || s().status === "attention" || s().draft)}><i class="st-unread" classList={{ muted: !!s().muted }} /></Show>
           </span>
           <Show when={s().muted}><Icon name="mute" size={14} class="st-mute" /></Show>
           <span class="st-provider">

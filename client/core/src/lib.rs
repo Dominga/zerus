@@ -28,6 +28,7 @@ pub mod fsx;
 pub mod input_queue;
 pub mod launch;
 pub mod legacy;
+pub mod linux_notify;
 pub mod local_messages;
 pub mod machine;
 pub mod marks;

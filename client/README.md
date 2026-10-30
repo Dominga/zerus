@@ -114,6 +114,14 @@ current update token separately. Unconfirmed native deliveries remain reserved
 across restart instead of being posted again. Invalid client state is preserved
 and posting stays disabled until it can be reviewed.
 
+The pure `zerus_client_core::linux_notify` module shares the existing schema-1
+saved-state decoder, namespace quarantine and literal body escaping. Its values
+are retained evidence, not authenticated connections or permission to post. It
+opens no files or buses and adds no dependencies. The GUI still owns its secure
+reader, Qt seed, persistence and OS calls. Importers must retain original source
+bytes and unknown fields separately from this projection. A future service
+transport and writer handoff require G1 admission and current producer drain.
+
 ## Build and run
 
 ```sh

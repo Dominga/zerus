@@ -9,17 +9,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 use zbus::blocking::{Connection, MessageIterator, Proxy};
 use zbus::zvariant::Value;
 use zerus_client_core::attention::Notice;
+use zerus_client_core::linux_notify::{
+    decode_saved, escape_body, Namespace, Saved, FILE_LIMIT, LIMIT,
+};
 
 const SERVICE: &str = "org.freedesktop.Notifications";
 const PATH: &str = "/org/freedesktop/Notifications";
 pub const FILE: &str = "linux-notifications.json";
-const LIMIT: usize = 8192;
-const FILE_LIMIT: u64 = 16 * 1024 * 1024;
 type Sink = Arc<dyn Fn(Event) + Send + Sync>;
 type QtSeed = Box<dyn FnOnce() -> Result<Option<Saved>, String> + Send>;
 
@@ -30,36 +30,6 @@ enum Event {
     Uncertain(String),
 }
 
-#[derive(Default, Serialize, Deserialize)]
-pub struct Saved {
-    version: u32,
-    /// Unique daemon names are scoped to one bus generation. Older Next/Qt
-    /// records omit this and retain suppression only, never numeric-ID authority.
-    #[serde(default)]
-    bus_id: String,
-    owner: String,
-    tokens: BTreeMap<u32, String>,
-    /// A reservation survives an unknown Notify result. It is never reposted
-    /// automatically: a late native banner may already exist without its ID.
-    #[serde(default)]
-    uncertain: BTreeSet<String>,
-}
-impl Saved {
-    fn valid(&self) -> bool {
-        self.version == 1
-            && (self.bus_id.is_empty()
-                || (self.bus_id.len() == 32 && self.bus_id.bytes().all(|b| b.is_ascii_hexdigit())))
-            && self.tokens.len() + self.uncertain.len() <= LIMIT
-            && self
-                .tokens
-                .iter()
-                .all(|(id, token)| *id > 0 && !token.is_empty() && token.len() <= 16384)
-            && self
-                .uncertain
-                .iter()
-                .all(|token| !token.is_empty() && token.len() <= 16384)
-    }
-}
 struct Pending {
     nonce: u64,
     notice: Notice,
@@ -121,8 +91,7 @@ fn load(path: &Path, qt: QtSeed) -> Result<Saved, String> {
             if bytes.len() as u64 > FILE_LIMIT {
                 return Err("Notification identities exceed the storage limit".into());
             }
-            serde_json::from_slice::<Saved>(&bytes)
-                .map_err(|e| format!("Could not read notification identities: {e}"))?
+            decode_saved(&bytes)?
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => qt()?.unwrap_or(Saved {
             version: 1,
@@ -304,40 +273,17 @@ fn owner(connection: &Connection) -> Result<String, String> {
         Err(error) => Err(error.to_string()),
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct Namespace {
-    bus_id: String,
-    owner: String,
-}
-impl Namespace {
-    fn saved(saved: &Saved) -> Self {
-        Self {
-            bus_id: saved.bus_id.clone(),
-            owner: saved.owner.clone(),
-        }
-    }
-    fn current(connection: &Connection) -> Result<Self, String> {
-        let bus = zbus::blocking::fdo::DBusProxy::new(connection).map_err(|e| e.to_string())?;
-        Ok(Self {
-            bus_id: bus.get_id().map_err(|e| e.to_string())?.to_string(),
-            owner: owner(connection)?,
-        })
-    }
+fn current_namespace(connection: &Connection) -> Result<Namespace, String> {
+    let bus = zbus::blocking::fdo::DBusProxy::new(connection).map_err(|e| e.to_string())?;
+    Ok(Namespace {
+        bus_id: bus.get_id().map_err(|e| e.to_string())?.to_string(),
+        owner: owner(connection)?,
+    })
 }
 fn adopt_namespace(state: &mut State, current: &Namespace) -> bool {
-    if Namespace::saved(&state.saved) == *current
-        && (!current.owner.is_empty() || state.saved.tokens.is_empty())
-    {
+    if !state.saved.adopt_namespace(current) {
         return false;
     }
-    // Lost/unproved IDs cannot activate or close, but their exact edge tokens
-    // must survive as suppression. A changed daemon/bus never permits replay.
-    state
-        .saved
-        .uncertain
-        .extend(std::mem::take(&mut state.saved.tokens).into_values());
-    state.saved.bus_id.clone_from(&current.bus_id);
-    state.saved.owner.clone_from(&current.owner);
     state.activation.clear();
     true
 }
@@ -345,7 +291,7 @@ fn refresh_owner(shared: &Shared, connection: &Connection) -> Result<Namespace, 
     // Serialize the lookup and publication: an older concurrent lookup cannot
     // restore IDs from a daemon the owner-change worker already retired.
     let mut state = lock(&shared.state);
-    let current = Namespace::current(connection)?;
+    let current = current_namespace(connection)?;
     if !adopt_namespace(&mut state, &current) {
         return Ok(current);
     }
@@ -357,19 +303,13 @@ fn refresh_owner(shared: &Shared, connection: &Connection) -> Result<Namespace, 
 fn close(connection: &Connection, namespace: &Namespace, id: u32) {
     if namespace.owner.is_empty()
         || namespace.bus_id.is_empty()
-        || Namespace::current(connection).as_ref() != Ok(namespace)
+        || current_namespace(connection).as_ref() != Ok(namespace)
     {
         return;
     }
     if let Ok(proxy) = Proxy::new(connection, namespace.owner.as_str(), PATH, SERVICE) {
         let _ = proxy.call::<_, _, ()>("CloseNotification", &(id,));
     }
-}
-fn escaped(body: &str) -> String {
-    body.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
 }
 
 fn run(
@@ -421,7 +361,7 @@ fn run(
         state.saved = load(&shared.path, qt)?;
         // Quarantine legacy/different-bus IDs before processing an early
         // withdrawal, so even a pre-start clear cannot close an unproved ID.
-        let current = Namespace::current(&connection)?;
+        let current = current_namespace(&connection)?;
         adopt_namespace(&mut state, &current);
         let withdrawn = std::mem::take(&mut state.withdrawn);
         for token in withdrawn {
@@ -592,7 +532,7 @@ fn post(shared: &Shared, connection: &Connection, nonce: u64, notice: Notice) {
                 0_u32,
                 "hgs-zerus-swarm-symbolic",
                 notice.title.as_str(),
-                escaped(&notice.body),
+                escape_body(&notice.body),
                 vec!["default", "Open session", "open-session", "Open session"],
                 hints,
                 -1_i32,

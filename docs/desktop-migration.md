@@ -303,6 +303,31 @@ no current content identity, cleanup permission or reuse authority. G1's
 current drain/publication and G2's fresh content/ownership guards remain
 separate. This is Staged evidence only, with no discovery or startup hook.
 
+`qt_attention_observed(&QtSnapshot)` and `next_attention_observed(bytes)` use
+the existing `attention::seed` object decoder, extracted verbatim as the pure
+`decode_observed` helper. The families are `qt-attention-observed` and
+`next-attention-observed`, schema 1. Qt uses its existing source format/raw-store
+hash; Next uses `attention-observed-json-v1` and the original file hash. The
+interim file is `attention-observed.json` in the client's own data root.
+
+Private snapshots begin with
+`{kind:"attention-observed-header",present,hosts:{host:"object"|"value"}}`.
+An object host has paged `{host,key,value}` entries; an unknown non-object host
+has one `{host,value}` entry. Empty host objects, absent Qt keys and explicit
+empty roots remain distinct. Original phase/request/reply/question identities,
+tokens, retry times, seen-question arrays and unknown or malformed child values
+survive unchanged. The existing seed parser accepts those children; retaining
+them privately is not semantic validation. The report/manifest stays body-free.
+The 16 MiB input, 50,000-entry, 64-entry page and 1 MiB body/header limits apply;
+an oversized individual entry refuses rather than truncates. The existing
+source reader must freshly recheck identity/hash before the final Staged record.
+
+Neither adapter constructs a Tracker/Delivery, seeds live state, normalizes
+historical entries, posts/withdraws a notification, routes a click, schedules a
+retry or settles a read. The existing initial seed still prefers Next's own
+file, even if malformed. Native Linux owner/token maps, current producer drain,
+source discovery and production handoff remain separate.
+
 `qt_organization_checkpoints(&QtSnapshot)` preserves these separate objects
 through the existing QtStore/Qt JSON decoder:
 

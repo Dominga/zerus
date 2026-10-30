@@ -3,6 +3,8 @@ import { createStore } from "solid-js/store";
 import { catalog, computerFresh, orderedRows } from "./catalog";
 import { documentVisibility } from "./visibility";
 import { isActive, isWorking, needsAttention } from "./attention";
+import { settings, settingsReady, setSetting } from "./settings";
+import { createRowDensity, ROW_DENSITY_KEY } from "./rowDensity";
 import type { Session, Status } from "../ui/sessions/types";
 export { isActive, needsAttention };
 
@@ -35,7 +37,17 @@ export const [detailTab, setDetailTab] = createSignal<DetailTab>("activity");
 export const [subagentOpen, setSubagentOpen] = createSignal<string | undefined>();
 export const [search, setSearch] = createSignal(params.get("q") ?? "");
 export const [expandedChildren, setExpandedChildren] = createStore<Record<string, boolean>>({});
-export const [compactRows, setCompactRows] = createStore<Record<string, boolean>>({});
+const rowDensity = createRowDensity({
+  stored: () => settings[ROW_DENSITY_KEY], ready: settingsReady,
+  save: (keys) => setSetting(ROW_DENSITY_KEY, keys),
+  keys: (key) => (catalog.rows[key] ?? archivedRow(key))?.compactKeys,
+});
+export const compactRows = new Proxy<Record<string, boolean>>({}, {
+  get: (_target, key) => typeof key === "string" ? rowDensity.get(key) : undefined,
+});
+export const setCompactRows = rowDensity.set;
+export const expandCompactRows = rowDensity.expandAll;
+export const hasCompactRows = rowDensity.any;
 export const [stripMode, setStripMode] = createSignal(params.get("strip") === "1");
 export const [menu, setMenu] = createSignal<{ x: number; y: number; items: MenuEntry[] } | undefined>();
 export const [contentScale, setContentScale] = createSignal(1);

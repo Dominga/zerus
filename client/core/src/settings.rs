@@ -40,6 +40,8 @@ pub enum Kind {
     /// `toStringList()`: the shortcut group, one list of portable chord
     /// strings per command id, an empty list meaning no chord.
     Chords,
+    /// Device-local row density: at most 50,000 Qt-compatible SHA-256 keys.
+    RowKeys,
 }
 
 /// One setting: its QSettings name, how Qt reads it, and whether the
@@ -131,6 +133,11 @@ pub const KEYS: &[Key] = &[
     Key {
         name: "workspace/allSwarmProjects",
         kind: Kind::Flag(false),
+        seeded: false,
+    },
+    Key {
+        name: crate::row_preferences::KEY,
+        kind: Kind::RowKeys,
         seeded: false,
     },
     // Processes (ProcessSettings.h), web client phase 4 Task 11.
@@ -281,7 +288,7 @@ pub fn default_value(kind: Kind) -> Value {
         Kind::Whole { default, .. } | Kind::Long { default, .. } => Value::from(default),
         Kind::Text(text) => Value::from(text),
         Kind::Bytes => Value::from(""),
-        Kind::Chords => Value::Array(Vec::new()),
+        Kind::Chords | Kind::RowKeys => Value::Array(Vec::new()),
     }
 }
 
@@ -320,6 +327,13 @@ pub fn effective(kind: Kind, value: Option<&Value>) -> Value {
                 })
                 .unwrap_or_default(),
         ),
+        Kind::RowKeys => {
+            if crate::row_preferences::valid(value) {
+                value.clone()
+            } else {
+                default_value(kind)
+            }
+        }
     }
 }
 
@@ -339,6 +353,9 @@ pub fn from_qt(kind: Kind, value: &QtValue) -> Value {
         },
         Kind::Long { .. } => Value::from(value.to_long().0),
         Kind::Chords => Value::Array(value.to_text_list().into_iter().map(Value::from).collect()),
+        Kind::RowKeys => {
+            crate::row_preferences::from_qt(value).unwrap_or_else(|| default_value(kind))
+        }
     };
     effective(kind, Some(&stored))
 }
@@ -763,6 +780,9 @@ impl Settings {
             (Kind::Flag(_), Value::Bool(_))
             | (Kind::Choice(_) | Kind::Text(_) | Kind::Bytes, Value::String(_))
             | (Kind::Chords, Value::Array(_)) => Some(effective(key.kind, Some(&value))),
+            (Kind::RowKeys, Value::Array(_)) if crate::row_preferences::valid(&value) => {
+                Some(value.clone())
+            }
             (Kind::Real { .. }, Value::Number(_)) => Some(effective(key.kind, Some(&value))),
             (Kind::Whole { .. } | Kind::Long { .. }, Value::Number(number))
                 if number.is_i64() || number.is_u64() =>
@@ -776,14 +796,19 @@ impl Settings {
             if let Some(error) = &state.unreadable {
                 return Err(error.clone());
             }
+            let mut candidate = state.contents.clone();
             match &stored {
                 Some(value) => {
-                    state.contents.values.insert(name.to_owned(), value.clone());
+                    candidate.values.insert(name.to_owned(), value.clone());
                 }
                 None => {
-                    state.contents.values.remove(name);
+                    candidate.values.remove(name);
                 }
             }
+            if candidate.to_bytes().len() as u64 > MAX_STORE {
+                return Err("Settings exceed their byte limit; existing values were kept.".into());
+            }
+            state.contents = candidate;
             state.dirty = true;
             state.revision += 1;
             self.shared.signal.notify_all();

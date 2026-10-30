@@ -46,6 +46,7 @@ pub mod reads;
 pub mod readsync;
 pub mod recovery_settings;
 pub mod repository;
+pub mod row_preferences;
 pub mod run;
 pub mod send;
 pub mod session_usage;

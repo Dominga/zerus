@@ -28,7 +28,7 @@ import { CreationCard, CreationTile } from "./CreationCard";
 import { creationCount, creationFooter, creationStatusMenu } from "../../store/creations";
 import {
   selectedKey, setSelectedKey, setExpandedChildren, expandedChildren,
-  setCompactRows, compactRows, stateFilter, setStateFilter, counts, search, setSearch, stripMode, setStripMode,
+  setCompactRows, compactRows, expandCompactRows, hasCompactRows, stateFilter, setStateFilter, counts, search, setSearch, stripMode, setStripMode,
   setMenu, machineFilter, setMachineFilter, projectFilter, setProjectFilter, setPage,
   multi, setMulti, peek, setPeek, setSubagentOpen, sessionsWidth, setSessionsWidth, menu, subagentOpen,
   revealing, setRevealing, setDetailTab,
@@ -182,7 +182,7 @@ export function sessionMenu(s: Session): MenuEntry[] {
   const commands = runningCommandsEntry(s, () => computerFresh(s.computer), () => flag("processes/enabled"), () => { setSelectedKey(s.key); setDetailTab("processes"); });
   return [
     { label: compactRows[s.key] ? "Expand session row" : "Compact session row", icon: compactRows[s.key] ? "expand-row" : "compact-row", action: () => setRowCompact(s.key, !compactRows[s.key]) },
-    { label: "Expand all collapsed", icon: "expand-row", disabled: !Object.values(compactRows).some(Boolean), action: () => Object.keys(compactRows).forEach((k) => setCompactRows(k, false)) },
+    { label: "Expand all collapsed", icon: "expand-row", disabled: !hasCompactRows(), action: expandCompactRows },
     { separator: true },
     // An archived row has no terminal, and no Mute or Mark group (Qt's `if (!archived)`).
     ...(archived ? [] : [s.agent === "deepseek" ? { label: "Open native DeepSeek UI", icon: "external-link", disabled: LATER } : { label: "Open terminal", icon: "square-terminal", disabled: LATER }]),
@@ -224,7 +224,7 @@ function headerMenu(project: string): MenuEntry[] {
 function batchMenu(): MenuEntry[] {
   return [
     ...machineMenu(),
-    { label: "Expand all collapsed", icon: "expand-row", action: () => Object.keys(compactRows).forEach((k) => setCompactRows(k, false)) },
+    { label: "Expand all collapsed", icon: "expand-row", action: expandCompactRows },
     markAllEntry(),
     clearArchiveMenuEntry(),
   ];

@@ -53,6 +53,10 @@ pub struct ViewRow {
     pub notification_error: Option<String>,
     /// `created`, truncated to whole seconds.
     pub created: i64,
+    /// Qt-compatible exact/fallback row-density hashes, filled only with the
+    /// configured host identity. Unknown raw command identity leaves them absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compact_keys: Option<[String; 2]>,
     /// The compact JSON the attention marks compare (`attentionFingerprint`).
     pub attention_fingerprint: String,
     /// The session needs the person's action (approval, input, error, recovery).
@@ -1143,6 +1147,7 @@ pub fn row(value: &Value) -> ViewRow {
         notification_error: None,
         created: number(value, "created").unwrap_or(0.0) as i64,
         attention_fingerprint: session.attention_fingerprint(),
+        compact_keys: None,
         needs_action: session.needs_action(),
         needs_attention: attention_needed(
             session.needs_action(),

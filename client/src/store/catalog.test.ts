@@ -13,6 +13,12 @@ const row = (key: string, name: string, extra: Partial<ViewRow> = {}, computer =
 const batchOf = (part: Partial<Batch>): Batch => ({ ...emptyBatch(), ...part });
 
 describe("applyBatch", () => {
+  it("keeps verified Rust density keys without reconstructing them from display fields", () => {
+    const hashes: [string, string] = ["a".repeat(64), "b".repeat(64)];
+    const s=toSession("peer-fixture","run:fixture",view("codex/sample/fixture",{compact_keys:hashes}));
+    expect(s.compactKeys).toEqual(hashes);
+    expect(toSession("peer-fixture","run:older",view("older")).compactKeys).toBeUndefined();
+  });
   it("keeps the identity of unchanged rows and updates a changed row in place", () => {
     createRoot((dispose) => {
       const { catalog, applyBatch } = createCatalog();

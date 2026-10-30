@@ -532,7 +532,6 @@ pub(super) fn read(record: &Value) -> Value {
 
 /// U38: the native transcript and cache a Claude or Codex session reads, with
 /// the same validation and cache key as `read`.
-#[allow(dead_code)] // U38's profile (#664) calls this before its caller lands.
 fn transcript(record: &Value) -> Result<(String, String, PathBuf, PathBuf)> {
     let provider = string(record, "agent");
     let id = string(record, "conversation_id");
@@ -563,7 +562,6 @@ fn transcript(record: &Value) -> Result<(String, String, PathBuf, PathBuf)> {
 /// (epoch seconds), per provider and model, from the usage history the cached
 /// transcript scan keeps. It reads only the bytes after the cached offset; a
 /// provider or a window without timestamped counters is unknown, never zero.
-#[allow(dead_code)] // U38's profile (#664) calls this before its caller lands.
 pub(super) fn span(record: &Value, from: f64, to: f64) -> Value {
     let provider = string(record, "agent");
     let unknown = |reason: &str| {

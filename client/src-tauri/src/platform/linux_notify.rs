@@ -33,6 +33,10 @@ enum Event {
 #[derive(Default, Serialize, Deserialize)]
 pub struct Saved {
     version: u32,
+    /// Unique daemon names are scoped to one bus generation. Older Next/Qt
+    /// records omit this and retain suppression only, never numeric-ID authority.
+    #[serde(default)]
+    bus_id: String,
     owner: String,
     tokens: BTreeMap<u32, String>,
     /// A reservation survives an unknown Notify result. It is never reposted
@@ -43,6 +47,8 @@ pub struct Saved {
 impl Saved {
     fn valid(&self) -> bool {
         self.version == 1
+            && (self.bus_id.is_empty()
+                || (self.bus_id.len() == 32 && self.bus_id.bytes().all(|b| b.is_ascii_hexdigit())))
             && self.tokens.len() + self.uncertain.len() <= LIMIT
             && self
                 .tokens
@@ -64,7 +70,7 @@ struct State {
     saved: Saved,
     activation: BTreeMap<u32, String>,
     pending: BTreeMap<String, Pending>,
-    closes: BTreeSet<(String, u32)>,
+    closes: BTreeSet<(Namespace, u32)>,
     withdrawn: BTreeSet<String>,
     nonce: u64,
     ready: bool,
@@ -161,6 +167,7 @@ fn qt_seed() -> Result<Option<Saved>, String> {
     };
     Ok(Some(Saved {
         version: 1,
+        bus_id: String::new(),
         owner,
         tokens,
         uncertain: BTreeSet::new(),
@@ -225,8 +232,8 @@ impl Poster {
             for id in ids {
                 state.saved.tokens.remove(&id);
                 state.activation.remove(&id);
-                let owner = state.saved.owner.clone();
-                state.closes.insert((owner, id));
+                let namespace = Namespace::saved(&state.saved);
+                state.closes.insert((namespace, id));
             }
             changed = true;
         }
@@ -297,28 +304,64 @@ fn owner(connection: &Connection) -> Result<String, String> {
         Err(error) => Err(error.to_string()),
     }
 }
-fn refresh_owner(shared: &Shared, connection: &Connection) -> Result<String, String> {
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Namespace {
+    bus_id: String,
+    owner: String,
+}
+impl Namespace {
+    fn saved(saved: &Saved) -> Self {
+        Self {
+            bus_id: saved.bus_id.clone(),
+            owner: saved.owner.clone(),
+        }
+    }
+    fn current(connection: &Connection) -> Result<Self, String> {
+        let bus = zbus::blocking::fdo::DBusProxy::new(connection).map_err(|e| e.to_string())?;
+        Ok(Self {
+            bus_id: bus.get_id().map_err(|e| e.to_string())?.to_string(),
+            owner: owner(connection)?,
+        })
+    }
+}
+fn adopt_namespace(state: &mut State, current: &Namespace) -> bool {
+    if Namespace::saved(&state.saved) == *current
+        && (!current.owner.is_empty() || state.saved.tokens.is_empty())
+    {
+        return false;
+    }
+    // Lost/unproved IDs cannot activate or close, but their exact edge tokens
+    // must survive as suppression. A changed daemon/bus never permits replay.
+    state
+        .saved
+        .uncertain
+        .extend(std::mem::take(&mut state.saved.tokens).into_values());
+    state.saved.bus_id.clone_from(&current.bus_id);
+    state.saved.owner.clone_from(&current.owner);
+    state.activation.clear();
+    true
+}
+fn refresh_owner(shared: &Shared, connection: &Connection) -> Result<Namespace, String> {
     // Serialize the lookup and publication: an older concurrent lookup cannot
     // restore IDs from a daemon the owner-change worker already retired.
     let mut state = lock(&shared.state);
-    let owner = owner(connection)?;
-    if state.saved.owner == owner {
-        return Ok(owner);
+    let current = Namespace::current(connection)?;
+    if !adopt_namespace(&mut state, &current) {
+        return Ok(current);
     }
-    state.saved.owner = owner.clone();
-    state.saved.tokens.clear();
-    state.saved.uncertain.clear();
-    state.activation.clear();
     if state.ready {
         persist(&shared.path, &state.saved)?;
     }
-    Ok(owner)
+    Ok(current)
 }
-fn close(connection: &Connection, owner: &str, id: u32) {
-    if owner.is_empty() {
+fn close(connection: &Connection, namespace: &Namespace, id: u32) {
+    if namespace.owner.is_empty()
+        || namespace.bus_id.is_empty()
+        || Namespace::current(connection).as_ref() != Ok(namespace)
+    {
         return;
     }
-    if let Ok(proxy) = Proxy::new(connection, owner, PATH, SERVICE) {
+    if let Ok(proxy) = Proxy::new(connection, namespace.owner.as_str(), PATH, SERVICE) {
         let _ = proxy.call::<_, _, ()>("CloseNotification", &(id,));
     }
 }
@@ -376,6 +419,10 @@ fn run(
     {
         let mut state = lock(&shared.state);
         state.saved = load(&shared.path, qt)?;
+        // Quarantine legacy/different-bus IDs before processing an early
+        // withdrawal, so even a pre-start clear cannot close an unproved ID.
+        let current = Namespace::current(&connection)?;
+        adopt_namespace(&mut state, &current);
         let withdrawn = std::mem::take(&mut state.withdrawn);
         for token in withdrawn {
             state.saved.uncertain.remove(&token);
@@ -387,24 +434,19 @@ fn run(
                 .collect();
             for id in ids {
                 state.saved.tokens.remove(&id);
-                let old = state.saved.owner.clone();
-                state.closes.insert((old, id));
+                let namespace = Namespace::saved(&state.saved);
+                state.closes.insert((namespace, id));
             }
-        }
-        let current = owner(&connection)?;
-        if state.saved.owner != current {
-            state.saved.owner = current;
-            state.saved.tokens.clear();
-            state.saved.uncertain.clear();
         }
         state.ready = true;
         persist(&shared.path, &state.saved)?;
     }
     let events = shared.clone();
+    let signals_bus = connection.clone();
     let signals_worker = std::thread::spawn(move || {
         for message in signals {
             let Ok(message) = message else { break };
-            signal(&events, &message);
+            signal(&events, &signals_bus, &message);
         }
     });
     let ownership = shared.clone();
@@ -468,7 +510,7 @@ fn run(
     Ok(())
 }
 enum Work {
-    Close(String, u32),
+    Close(Namespace, u32),
     Post(u64, Notice),
     Continue,
 }
@@ -503,7 +545,19 @@ fn post(shared: &Shared, connection: &Connection, nonce: u64, notice: Notice) {
         {
             return;
         }
-        if current.is_empty() {
+        // A notice may have queued before the saved/Qt seed loaded. Recheck
+        // suppression at the effect boundary, not only in deliver().
+        if state.saved.uncertain.contains(&notice.token)
+            || state
+                .saved
+                .tokens
+                .values()
+                .any(|token| *token == notice.token)
+        {
+            state.pending.remove(&notice.token);
+            return;
+        }
+        if current.owner.is_empty() {
             state.pending.remove(&notice.token);
             drop(state);
             (shared.sink)(Event::Failed {
@@ -525,7 +579,7 @@ fn post(shared: &Shared, connection: &Connection, nonce: u64, notice: Notice) {
         }
     }
     let result = (|| {
-        let proxy = Proxy::new(connection, current.as_str(), PATH, SERVICE)?;
+        let proxy = Proxy::new(connection, current.owner.as_str(), PATH, SERVICE)?;
         let hints = BTreeMap::from([
             ("desktop-entry", Value::from("hgs-tray")),
             ("urgency", Value::from(1_u8)),
@@ -555,7 +609,7 @@ fn post(shared: &Shared, connection: &Connection, nonce: u64, notice: Notice) {
     }
     match result {
         Ok(id) if id > 0 => {
-            if wanted && state.saved.owner == current {
+            if wanted && Namespace::saved(&state.saved) == current {
                 state.saved.uncertain.remove(&notice.token);
                 state.saved.tokens.insert(id, notice.token);
             } else {
@@ -594,12 +648,24 @@ fn post(shared: &Shared, connection: &Connection, nonce: u64, notice: Notice) {
         (shared.sink)(Event::Uncertain(error));
     }
 }
-fn signal(shared: &Shared, message: &zbus::Message) {
+fn signal(shared: &Shared, connection: &Connection, message: &zbus::Message) {
     let header = message.header();
+    if !matches!(
+        header.member().map(|member| member.as_str()),
+        Some("ActivationToken" | "ActionInvoked" | "NotificationClosed")
+    ) {
+        return;
+    }
+    // An owner-change signal may still be queued on its separate reader.
+    // Check the current connection before interpreting a numeric ID.
+    let Ok(current) = refresh_owner(shared, connection) else {
+        return;
+    };
     let mut state = lock(&shared.state);
-    if header
-        .sender()
-        .is_none_or(|sender| sender.as_str() != state.saved.owner)
+    if Namespace::saved(&state.saved) != current
+        || header
+            .sender()
+            .is_none_or(|sender| sender.as_str() != state.saved.owner)
     {
         return;
     }

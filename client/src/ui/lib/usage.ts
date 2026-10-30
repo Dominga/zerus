@@ -157,10 +157,11 @@ export function stateText(u: Usage) {
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const two = (n: number) => String(n).padStart(2, "0");
 
-/** Qt's "d MMM HH:mm" in local time. */
-export function dayTime(seconds: number) {
+/** Qt's "d MMM HH:mm" in local time with English months; optionally include seconds. */
+export function dayTime(seconds: number, withSeconds = false) {
   const d = new Date(seconds * 1000);
-  return `${d.getDate()} ${MONTHS[d.getMonth()]} ${two(d.getHours())}:${two(d.getMinutes())}`;
+  const text = `${d.getDate()} ${MONTHS[d.getMonth()]} ${two(d.getHours())}:${two(d.getMinutes())}`;
+  return withSeconds ? `${text}:${two(d.getSeconds())}` : text;
 }
 
 /** Qt's "HH:mm" in local time. */

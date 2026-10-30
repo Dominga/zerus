@@ -1,3 +1,4 @@
+import { dayTime } from "../lib/usage";
 import type { CreatedWorktree } from "../../types";
 import { array, object, string, type Json } from "../lib/json";
 import { composing } from "../lib/keys";
@@ -48,14 +49,8 @@ export interface WorktreePickerView {
 
 /** The catalog lists at most this many worktrees (Partial catalog). */
 export const MAX_WORKTREES = 512;
-const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-const two = (n: number) => String(n).padStart(2, "0");
-
 /** Qt's "d MMM HH:mm:ss" in local time, with C-locale month names. */
-export function snapshotTime(seconds: number): string {
-  const at = new Date(seconds * 1000);
-  return `${at.getDate()} ${MONTHS[at.getMonth()]} ${two(at.getHours())}:${two(at.getMinutes())}:${two(at.getSeconds())}`;
-}
+export const snapshotTime = (seconds: number): string => dayTime(seconds, true);
 
 /** A row's label (WorktreePanel::render): its kind, branch, marks and its session count. */
 export function worktreeLabel(row: Json, sessions: number): string {

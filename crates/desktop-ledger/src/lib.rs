@@ -244,7 +244,7 @@ pub fn authorize(db: &mut Connection, epoch: &str, service_epoch: &str) -> Resul
     ensure!(changed == 1, "service epoch changed");
     Ok(())
 }
-pub fn revoke(db: &mut Connection, reason: &str) -> Result<()> {
+pub fn revoke(db: &Connection, reason: &str) -> Result<()> {
     ensure!(
         !reason.is_empty()
             && reason.len() <= 64

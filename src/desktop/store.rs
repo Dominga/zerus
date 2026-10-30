@@ -9,7 +9,21 @@ use std::{
 };
 use zerus_desktop_migration::{canonical, configuration, HANDOFF_LOCK};
 
-pub const SCHEMA: i64 = 2;
+pub const SCHEMA: i64 = 3;
+pub struct HandoffLock {
+    _lock: platform::FileLock,
+    root: PathBuf,
+    configuration: String,
+}
+impl HandoffLock {
+    pub fn verify(&self, location: &Location) -> Result<()> {
+        ensure!(
+            self.root == location.root && self.configuration == location.configuration,
+            "handoff lock belongs to another configuration"
+        );
+        Ok(())
+    }
+}
 pub struct Location {
     pub root: PathBuf,
     pub configuration: String,
@@ -56,11 +70,15 @@ impl Location {
     }
     /// Passive inspection releases this immediately. Migrated writers will
     /// retain it for their full lifetime; the service process lock is separate.
-    pub fn handoff_lock(&self) -> Result<platform::FileLock> {
+    pub fn handoff_lock(&self) -> Result<HandoffLock> {
         self.check_existing()?;
         let file = private_file(&self.root.join(HANDOFF_LOCK))?;
         fs2::FileExt::try_lock_exclusive(&file).context("desktop handoff is busy")?;
-        Ok(platform::FileLock::held(file))
+        Ok(HandoffLock {
+            _lock: platform::FileLock::held(file),
+            root: self.root.clone(),
+            configuration: self.configuration.clone(),
+        })
     }
 }
 
@@ -80,7 +98,7 @@ fn private_file(path: &Path) -> Result<fs::File> {
 }
 
 pub struct Store {
-    db: Connection,
+    pub(super) db: Connection,
     pub generation: u64,
     recovery_error: bool,
 }
@@ -147,6 +165,18 @@ impl Store {
             tx.execute_batch("PRAGMA user_version=2;")?;
             tx.commit()?;
         }
+        if version < 3 {
+            let tx = db.transaction()?;
+            tx.execute_batch(
+                "CREATE TABLE desktop_commands (
+                request_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL,
+                reason TEXT NOT NULL CHECK(reason IN('manual','rollback')),
+                writer_epoch TEXT, state TEXT NOT NULL CHECK(state IN('prepared','settled')),
+                result TEXT, at INTEGER NOT NULL);
+                PRAGMA user_version=3;",
+            )?;
+            tx.commit()?;
+        }
         // No marker or previous policy re-enables a worker after restart.
         zerus_desktop_ledger::begin_service(&mut db, epoch)?;
         zerus_desktop_ledger::recover_batch(&mut db, epoch)?;
@@ -167,7 +197,15 @@ impl Store {
         })
     }
     pub fn checkpoint(&self) -> Result<()> {
-        self.db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+        let (busy, _, _): (i64, i64, i64) =
+            self.db
+                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })?;
+        ensure!(
+            busy == 0,
+            "desktop checkpoint is busy; revocation is not settled"
+        );
         Ok(())
     }
     pub fn effect_status(&self) -> serde_json::Value {

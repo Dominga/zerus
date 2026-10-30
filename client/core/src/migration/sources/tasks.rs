@@ -181,3 +181,47 @@ pub fn task_delivery(
         std::iter::once(Ok(item)),
     ))
 }
+
+/// Next's existing-executor Start checkpoint, separate from discussion
+/// delivery. The caller reads only outbox::path(root.join("task-start"),
+/// project, task) and verifies/rechecks that exact file and reservation marker
+/// under G1's fresh drain. This never opens a task, recovers or releases it.
+pub fn task_start_delivery(
+    project: &str,
+    task: &str,
+    marker_id: &str,
+    bytes: &[u8],
+) -> SourceResult<SourceStream> {
+    // Use the live writer's scope validator, without running its TaskCall.
+    crate::task_details::document_call(project, task)
+        .map_err(|_| SourceError::UnsupportedSource)?;
+    if !creation::canonical_uuid(marker_id) {
+        return Err(SourceError::UnsupportedSource);
+    }
+    // The original guarded plan is one indivisible item. Refuse before JSON
+    // allocation rather than dropping its prompt, target or unknown fields.
+    if bytes.len() as u64 > MAX_SNAPSHOT_BYTES {
+        return Err(SourceError::TooLarge);
+    }
+    let record = outbox::decode(bytes).map_err(|_| SourceError::UnsupportedSource)?;
+    crate::task_start::checked(&record, project, task)
+        .map_err(|_| SourceError::UnsupportedSource)?;
+    if record["id"].as_str() != Some(marker_id) {
+        return Err(SourceError::UnsupportedSource);
+    }
+    let item = json!({"project":project,"task":task,"marker_id":marker_id,"record":record});
+    bounded_json(&item, MAX_SNAPSHOT_BYTES as usize)?;
+    Ok(SourceStream::new(
+        SourceRecord {
+            family: format!(
+                "next-task-start/{}",
+                sha256(format!("{project}\n{task}").as_bytes())
+            ),
+            schema: 1,
+            format: "task-start-outbox-json-v1".into(),
+            sha256: sha256(bytes),
+            build: None,
+        },
+        std::iter::once(Ok(item)),
+    ))
+}

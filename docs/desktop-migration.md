@@ -211,6 +211,22 @@ review; this adapter does not discover or authorize them. It never reserves,
 releases, submits or reconciles a message. Source discovery and remaining
 families are separate slices.
 
+`task_start_delivery(project, task, marker_id, bytes)` covers Next's separate
+existing-executor Start checkpoint at
+`outbox::path(draft_root.join("task-start"), project, task)`. It reuses the
+bounded outbox decoder and the live task-start writer's pure structural check.
+The exact canonical reservation UUID, plan UUID, original request UUID and
+project/task scope must agree. All four saved phases (`delivering`, `review`,
+`started`, `released`), the complete original guarded CLI plan and opaque
+unknown fields remain private evidence without mapping or settlement. The
+distinct `next-task-start/<scope hash>` family cannot replace discussion
+delivery evidence. The indivisible source and evidence envelope must each fit
+1 MiB; future, partial or mismatched records refuse. The caller verifies and
+freshly rechecks both the source file and its exact marker under G1's drain.
+This adapter never calls task open/start/recover/release, reserves an identity
+or writes a source. Startup publication and G1 consumption remain separate;
+neither an imported phase nor an original plan authorizes execution.
+
 `approval_policies(&QtSnapshot, next_settings_bytes)` inspects both policy
 stores before returning either `qt-approval-policy` or `next-approval-policy`
 stream. It reuses the existing Qt flag conversion and bounded Next settings

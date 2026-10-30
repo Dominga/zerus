@@ -482,6 +482,227 @@ fn delivery() -> Vec<u8> {
     serde_json::to_vec(&json!({"id":REQUEST,"intent":{"content":{"text":"original private body","attachments":[]},
         "mode":"append","dispatch":"original-dispatch","future_intent":true},"future_record":"keep"})).unwrap()
 }
+
+fn start_checkpoint(phase: &str) -> Value {
+    json!({"schema":1,"id":REQUEST,"phase":phase,"error":"original result","session":"codex/example/worker @peer",
+        "intent":{"plan":{"schema":1,"id":REQUEST,"project":"project-fixture","task":ID,"stage_at":123,
+            "target":{"kind":"any"},"revision":"original-revision",
+            "session":{"machine":"node-fixture","session":"codex/example/worker","session_id":"run_id:worker"},
+            "request":{"request_id":REQUEST,"text":"original private start prompt","attachments":[],
+                "expected_run_id":"original-run","expected_conversation_id":"original-conversation"},
+            "private_future":{"keep":"original-plan"}},"future_intent":true},
+        "private_future":{"keep":"original-record"}})
+}
+
+#[test]
+fn task_start_evidence_preserves_every_phase_and_original_plan_separately_from_discussion() {
+    for phase in ["delivering", "review", "started", "released"] {
+        let original = start_checkpoint(phase);
+        let bytes = serde_json::to_vec(&original).unwrap();
+        let digest = sha256(&bytes);
+        let stream = task_start_delivery("project-fixture", ID, REQUEST, &bytes)
+            .unwrap()
+            .recheck(move || Ok(digest));
+        let discussion =
+            task_delivery(Origin::Next, "project-fixture", ID, REQUEST, &delivery()).unwrap();
+        let path = crate::tasks_write::outbox::path(
+            std::path::Path::new("/srv/example-drafts/task-start"),
+            "project-fixture",
+            ID,
+        );
+        assert_eq!(
+            stream.identity().family,
+            format!(
+                "next-task-start/{}",
+                path.file_stem().unwrap().to_str().unwrap()
+            )
+        );
+        assert_ne!(stream.identity().family, discussion.identity().family);
+        let mut body = None;
+        let mut record = None;
+        for item in bundle(stream) {
+            match item.unwrap() {
+                BundleItem::Snapshot { reader, .. } => {
+                    body = Some(serde_json::from_slice::<Value>(reader.get_ref()).unwrap())
+                }
+                BundleItem::Record(value) => record = Some(value),
+                _ => {}
+            }
+        }
+        let body = body.unwrap();
+        assert_eq!(
+            body["record"], original,
+            "no phase mapping, settlement or plan projection"
+        );
+        assert_eq!(body["marker_id"], REQUEST);
+        assert_eq!(body["task"], ID);
+        let record = record.unwrap();
+        assert_eq!(record.evidence, Evidence::Staged);
+        assert_eq!(record.sources[0].sha256, sha256(&bytes));
+        assert!(!serde_json::to_string(&record)
+            .unwrap()
+            .contains("original private start prompt"));
+    }
+}
+
+#[test]
+fn task_start_evidence_refuses_mismatched_scopes_markers_and_future_or_incomplete_checkpoints() {
+    let original = start_checkpoint("review");
+    for (pointer, value) in [
+        ("/schema", json!(2)),
+        ("/version", json!(2)),
+        ("/id", json!(ID)),
+        ("/phase", json!("future")),
+        ("/intent/plan/schema", json!(2)),
+        ("/intent/plan/id", json!(ID)),
+        ("/intent/plan/project", json!("other-project")),
+        ("/intent/plan/task", json!(REQUEST)),
+        ("/intent/plan/request/request_id", json!(ID)),
+        ("/intent/plan", Value::Null),
+    ] {
+        let mut changed = original.clone();
+        if pointer == "/version" {
+            changed["version"] = value;
+        } else {
+            *changed.pointer_mut(pointer).unwrap() = value;
+        }
+        assert!(
+            matches!(
+                task_start_delivery(
+                    "project-fixture",
+                    ID,
+                    REQUEST,
+                    &serde_json::to_vec(&changed).unwrap()
+                ),
+                Err(SourceError::UnsupportedSource)
+            ),
+            "{pointer}"
+        );
+    }
+    let bytes = serde_json::to_vec(&original).unwrap();
+    for (project, task, marker) in [
+        ("", ID, REQUEST),
+        ("project-fixture", "not-a-task", REQUEST),
+        ("project-fixture", ID, ""),
+        ("project-fixture", ID, ID),
+        (
+            "project-fixture",
+            ID,
+            "{22222222-2222-4222-8222-222222222222}",
+        ),
+    ] {
+        assert!(matches!(
+            task_start_delivery(project, task, marker, &bytes),
+            Err(SourceError::UnsupportedSource)
+        ));
+    }
+    for bytes in [b"not json".as_slice(), b"[]", b"null", b"{}"] {
+        assert!(matches!(
+            task_start_delivery("project-fixture", ID, REQUEST, bytes),
+            Err(SourceError::UnsupportedSource)
+        ));
+    }
+}
+
+#[test]
+fn a_task_start_plan_and_its_evidence_envelope_must_both_fit_without_truncation() {
+    assert!(matches!(
+        task_start_delivery(
+            "project-fixture",
+            ID,
+            REQUEST,
+            &vec![b' '; MAX_SNAPSHOT_BYTES as usize + 1]
+        ),
+        Err(SourceError::TooLarge)
+    ));
+    let mut original = start_checkpoint("review");
+    original["padding"] = json!("");
+    let overhead = serde_json::to_vec(&original).unwrap().len();
+    original["padding"] = json!("x".repeat(MAX_SNAPSHOT_BYTES as usize - overhead));
+    let bytes = serde_json::to_vec(&original).unwrap();
+    assert_eq!(bytes.len() as u64, MAX_SNAPSHOT_BYTES);
+    assert!(matches!(
+        task_start_delivery("project-fixture", ID, REQUEST, &bytes),
+        Err(SourceError::TooLarge)
+    ));
+}
+
+#[test]
+fn task_start_evidence_keeps_the_existing_writer_files_and_requires_a_fresh_marker_recheck() {
+    use crate::tasks_write::outbox;
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let scratch = std::env::temp_dir().join(format!(
+        "zerus-g3-task-start-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::SeqCst)
+    ));
+    let root = scratch.join("task-start");
+    let original = start_checkpoint("delivering");
+    let reserved =
+        outbox::reserve(&root, "project-fixture", ID, &original["intent"], REQUEST).unwrap();
+    assert!(outbox::replace_if_unchanged(
+        &root,
+        "project-fixture",
+        ID,
+        &reserved.record,
+        &original
+    )
+    .unwrap());
+    let file = outbox::path(&root, "project-fixture", ID);
+    let marker = file.with_extension("marker");
+    let bytes = std::fs::read(&file).unwrap();
+    let file_mtime = std::fs::metadata(&file).unwrap().modified().unwrap();
+    let marker_mtime = std::fs::metadata(&marker).unwrap().modified().unwrap();
+    let make = || {
+        let (file, marker) = (file.clone(), marker.clone());
+        task_start_delivery("project-fixture", ID, REQUEST, &bytes)
+            .unwrap()
+            .recheck(move || {
+                let marker = std::fs::read(&marker).map_err(|_| SourceError::SourceUnreadable)?;
+                if marker != REQUEST.as_bytes() {
+                    return Err(SourceError::SourceChanged);
+                }
+                std::fs::read(&file)
+                    .map(|bytes| sha256(&bytes))
+                    .map_err(|_| SourceError::SourceUnreadable)
+            })
+    };
+    let body = snapshot_bodies(make());
+    assert_eq!(body[0]["record"], original);
+    assert_eq!(std::fs::read(&file).unwrap(), bytes);
+    assert_eq!(std::fs::read(&marker).unwrap(), REQUEST.as_bytes());
+    assert_eq!(
+        std::fs::metadata(&file).unwrap().modified().unwrap(),
+        file_mtime
+    );
+    assert_eq!(
+        std::fs::metadata(&marker).unwrap().modified().unwrap(),
+        marker_mtime
+    );
+    let mut producer = bundle(make());
+    assert!(matches!(
+        producer.next(),
+        Some(Ok(BundleItem::Snapshot { .. }))
+    ));
+    std::fs::write(&marker, ID).unwrap(); // only the fixture owner changes its source
+    let mut refused = false;
+    for item in producer {
+        match item {
+            Err(SourceError::SourceChanged) => refused = true,
+            Ok(BundleItem::Record(_)) => panic!("changed marker cannot finish evidence"),
+            Err(other) => panic!("{other}"),
+            _ => {}
+        }
+    }
+    assert!(refused);
+    assert_eq!(std::fs::read(&file).unwrap(), bytes);
+    assert_eq!(
+        std::fs::read(&marker).unwrap(),
+        ID.as_bytes(),
+        "migration never repairs a changed marker"
+    );
+    std::fs::remove_dir_all(scratch).unwrap();
+}
 #[test]
 fn task_delivery_reuses_the_outbox_decoder_and_keeps_exact_marker_and_intent() {
     for origin in [Origin::Qt, Origin::Next] {

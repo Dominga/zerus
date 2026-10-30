@@ -967,6 +967,14 @@ Team parse(const QJsonObject &v)
         proposal.member = p.value("member"); proposal.change = p.value("change");
         if (!proposal.id.isEmpty()) team.proposals.append(proposal);
     }
+    for (const auto &value : v.value("pending_additions").toArray()) {
+        const auto a = value.toObject();
+        Team::Addition addition;
+        addition.id = str(a, "id"); addition.by = str(a, "by"); addition.request = str(a, "request");
+        addition.phase = a.value("phase").toInt(); addition.warnedAt = a.value("warned_at").toDouble();
+        for (const auto &task : a.value("tasks").toArray()) addition.titles << task.toObject().value("title").toString();
+        if (!addition.id.isEmpty()) team.additions.append(addition);
+    }
     for (const auto &value : v.value("swapped").toArray()) {
         const auto entry = value.toObject();
         team.swapped.append({str(entry, "member"), str(entry, "old"), str(entry, "by"), entry.value("at").toDouble()});
@@ -1289,7 +1297,8 @@ QString proposedMember(const Team &team, const QJsonObject &object, const QStrin
     QStringList how;
     for (const auto *key : {"agent", "model", "effort", "account"})
         if (const auto value = object.value(QLatin1String(key)).toString(); !value.isEmpty()) how << value;
-    return how.isEmpty() ? role : QStringLiteral("%1 (%2)").arg(role, how.join(QStringLiteral(" · ")));
+    // #724: no dots as separators (the card shows on Waiting for you too).
+    return how.isEmpty() ? role : QStringLiteral("%1 (%2)").arg(role, how.join(QStringLiteral(", ")));
 }
 
 QJsonArray proposedMembers(const Team::Proposal &proposal)
@@ -1324,7 +1333,7 @@ QString proposalText(const Team &team, const Team::Proposal &proposal)
     if (proposal.kind == "swap-member") {
         const auto session = object.value("session").toObject().value("name").toString();
         if (!session.isEmpty()) return tr("Swap %1 to the session %2").arg(role, session);
-        return how.isEmpty() ? tr("Swap %1 to a new session").arg(role) : tr("Swap %1 to %2").arg(role, how.join(QStringLiteral(" · ")));
+        return how.isEmpty() ? tr("Swap %1 to a new session").arg(role) : tr("Swap %1 to %2").arg(role, how.join(QStringLiteral(", ")));
     }
     if (proposal.kind == "next-goal") return tr("Next goal: %1").arg(proposal.goal.section('\n', 0, 0).left(120));
     if (proposal.kind == "switch-plan-mode") return proposal.mode == "standard" ? tr("Switch to standard planning") : tr("Switch to free planning");
@@ -1826,6 +1835,75 @@ int alongsidePhase(const Team &team, int phase)
     if (!record->draft()) return 0;
     const auto blocker = nearestBlocker(team, phase);
     return blocker.phase && blocker.approved ? blocker.phase : 0;
+}
+
+Approval phaseApproval(const Team &team, int phase)
+{
+    int count = 0;
+    bool barrier = false;
+    for (const auto &group : phaseGroups(team)) if (group.n == phase) { count = int(group.tasks.size()); barrier = group.barrier; }
+    // F12/N40: a draft approved while an earlier phase runs runs alongside it;
+    // the owner is warned of what that costs before anything is sent.
+    const int alongside = alongsidePhase(team, phase);
+    Approval approval;
+    approval.input = QJsonObject{{"phase", phase}};
+    if (alongside) {
+        // N6: a barrier phase's tasks wait for the earlier phase however it is
+        // approved, so its confirmation says that instead of promising them now.
+        approval.name = QStringLiteral("teamApproveAlongsideConfirm");
+        approval.title = tr("Approve phase %1 now?").arg(phase);
+        approval.text = barrier ? tr("Phase %1 is a barrier: its tasks start only when phase %2 is finished, so approving it "
+                                     "now just locks the plan. Are you sure?").arg(phase).arg(alongside)
+                                : tr("If you approve phase %1 now, the lead can send members to its tasks while phase %2 still runs, "
+                                     "but can no longer edit this phase. Are you sure?").arg(phase).arg(alongside);
+        approval.action = tr("Approve now");
+        // N6: the confirmed alongside approval really hands the tasks out; a
+        // barrier phase keeps its U25 queue because its barrier holds it anyway.
+        if (!barrier) approval.input.insert("alongside", true);
+    } else {
+        approval.name = QStringLiteral("teamApprovePhaseConfirm");
+        approval.title = tr("Approve phase?");
+        approval.text = tr("Hand phase %1's %2 tasks to the members?").arg(phase).arg(count);
+        approval.action = tr("Approve phase");
+    }
+    return approval;
+}
+
+Approval planApproval(const Team &team, const QString &mode)
+{
+    QStringList sessions;
+    for (const auto &m : team.members) {
+        if (m.lead || !m.session.isEmpty()) continue;
+        const QString role = team.roleOf(m.id);
+        sessions << (m.computer.isEmpty() ? tr("%1 (%2)").arg(role, m.agent) : tr("%1 (%2 on %3)").arg(role, m.agent, m.computer));
+    }
+    const QString starts = sessions.isEmpty() ? tr("Every member has a session already; none starts.")
+                                              : sessions.size() == 1 ? tr("It starts 1 member session: %1.").arg(sessions.first())
+                                              : tr("It starts %1 member sessions: %2.").arg(sessions.size()).arg(sessions.join(QStringLiteral(", ")));
+    // U59: the owner's mode goes with the approval; with no choice, none (standard).
+    const QString runs = mode == "free" ? tr(" It runs in free planning: one open phase that takes tasks as they come until you close it.")
+                       : mode == "standard" ? tr(" It runs in standard planning.") : QString();
+    Approval approval;
+    if (!mode.isEmpty()) approval.input.insert("plan_mode", mode);
+    if (!team.widenings.isEmpty()) {
+        QStringList lines;
+        for (const auto &widening : team.widenings) {
+            const QString who = widening.role.isEmpty() ? widening.member : widening.role;
+            lines << tr("%1: %2 → %3").arg(who, widening.from, widening.to);
+        }
+        approval.name = QStringLiteral("teamWideningConfirm");
+        approval.title = tr("Widen permissions?");
+        approval.text = tr("This plan widens the permissions of its members beyond the template:\n\n%1\n\n"
+                           "Approve it only if they need it.").arg(lines.join(QStringLiteral("\n"))) + QStringLiteral("\n\n") + starts + runs;
+        approval.action = tr("Confirm and approve");
+        approval.input.insert("confirm_widening", true);
+        return approval;
+    }
+    approval.name = QStringLiteral("teamApproveConfirm");
+    approval.title = tr("Approve plan and run?");
+    approval.text = tr("Approve the plan of %1 and run it? %2 Ready tasks are handed out at once.").arg(team.name, starts) + runs;
+    approval.action = tr("Approve and run");
+    return approval;
 }
 
 QString acceptBlocked(const Team &team, int phase)

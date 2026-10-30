@@ -56,6 +56,7 @@
 #include "TeamDesignerPage.h"
 #include "TeamWaitingPage.h"
 #include "TeamWaitingBanner.h"
+#include "TeamWaitingAnswer.h"
 #include "TeamConversation.h"
 #include "AccountSwitch.h"
 #include "MessageComposer.h"
@@ -698,6 +699,7 @@ private slots:
     void permissionAnswersFoldToOneLineAndOpenToFive();
     void planningEditsSendTheWholePlan();
     void newTeamStartsTheLeadWithTheTemplate();
+    void newTeamOffersEachAgentsModels();
     void newTeamRowErrorsKeepAnOpenListOpen();
     void newTeamTabKeepsAMemberListOpenUntilItCloses();
     void newTeamMaxMembersStepsUpAndDown();
@@ -835,6 +837,8 @@ private slots:
     void waitingBannerFoldsOpensAndHides();
     void waitingPagePagesStayStableWhileItemsArrive();
     void waitingPageEmptyAndRefused();
+    void waitingItemsAreAnsweredInPlace();
+    void waitingBannerAnswersInPlaceAndWithdrawsTheNotice();
     void stageColumnsAndChipsOnTheBoard();
     void inspectorShowsThePipelineAndOverridesAskForAReason();
     void commandStagesShowTheirCommandExitAndTail();
@@ -990,7 +994,9 @@ elif a[:2]==['account','ls'] and os.path.exists(__file__+'.accounts'):sys.stdout
 elif a[:2]==['account','ls']:print(json.dumps({'profiles':[{'id':'native-claude','provider':'claude','label':'Default','account_status':{'status':'ok'}},
  {'id':'work','provider':'claude','label':'Claude work','account_status':{'status':'signed_out'}}]}))
 elif a[:2]==['account','model-settings']:
- models={'native-claude':[{'id':'opus'},{'id':'sonnet'},{'id':'haiku'}],
+ # #738: `.models` holds the catalogs by account when a test sets them.
+ import os
+ models=json.load(open(__file__+'.models')) if os.path.exists(__file__+'.models') else {'native-claude':[{'id':'opus'},{'id':'sonnet'},{'id':'haiku'}],
          'native-kimi':[{'id':'kimi-code/kimi-for-coding'},{'id':'kimi-code/k3.1-pro'}]}
  print(json.dumps({'account_id':a[2],'models':models.get(a[2],[])}))
 else:print(json.dumps({'status':'ok','version':4,'request_id':body.get('request_id')}))
@@ -1011,7 +1017,7 @@ void TestTeamsUi::init()
     QFile::remove(script() + ".calls");
     QFile::remove(script() + ".draftrev");
     QFile::remove(script() + ".statushold");
-    for (const char *suffix : {".swaphold", ".swaprefuse", ".swapreceipt", ".accounts"}) QFile::remove(script() + QLatin1String(suffix));
+    for (const char *suffix : {".swaphold", ".swaprefuse", ".swapreceipt", ".accounts", ".models"}) QFile::remove(script() + QLatin1String(suffix));
     QFile::remove(script() + ".refuse");
     QFile::remove(script() + ".refuseapply");
     QFile::remove(script() + ".proposalrefuse");
@@ -4064,8 +4070,9 @@ void TestTeamsUi::waitingBannerFoldsOpensAndHides()
     auto *action = line->findChild<QPushButton *>("teamWaitingBannerAction");
     QCOMPARE(action->text(), QStringLiteral("Approve…"));
     QVERIFY(!banner->findChild<QLabel *>("teamWaitingBannerCount"));
-    // Approve... opens the team at the item; nothing is approved from here.
-    action->click();
+    // Its open button opens the team at the item; nothing is approved from
+    // there (#724: Approve… asks in place, waitingBannerAnswersInPlace).
+    line->findChild<QToolButton *>("teamWaitingBannerOpen")->click();
     QCOMPARE(opened.size(), 1);
     QCOMPARE(opened[0].phase, 2);
     QCOMPARE(calls(script(), "approve-phase").size(), 0);
@@ -4096,7 +4103,7 @@ void TestTeamsUi::waitingBannerFoldsOpensAndHides()
     }
     QCOMPARE(ids, (QStringList{"team-plan/plan_draft/plan", "team-1/phase_draft/2", "team-3/permission_escalated/Tester",
                                "team-2/owner_word_asked/proposal-p3", "team-2/report_escalated/4"}));
-    QCOMPARE(actions, (QStringList{"Approve…", "Approve…", "Open team", "Answer", "Accept…"}));
+    QCOMPARE(actions, (QStringList{"Approve…", "Approve…", "Answer", "Answer", "Accept…"}));
     // No dots as separators: the rows keep their parts apart with space.
     for (auto *label : banner->findChildren<QLabel *>()) QVERIFY2(label->text() != QStringLiteral("·"), "a dot separator");
     auto *more = banner->findChild<QPushButton *>("teamWaitingBannerAll");
@@ -4155,10 +4162,16 @@ void TestTeamsUi::waitingPageListsEveryKindAcrossTeams()
         QVERIFY(!row->findChild<QLabel *>("teamWaitingItemTitle")->text().isEmpty());
     }
     QCOMPARE(kinds, (QStringList{"Plan", "Phase draft", "Permission", "Proposal", "Report", "Held task", "All decided"}));
-    // U57: a lead's proposal is answered on its card in the lead's chat.
-    for (auto *row : page.findChildren<QFrame *>("teamWaitingRow"))
-        QCOMPARE(row->findChild<QPushButton *>("teamWaitingOpen")->text(),
-                 row->property("itemId") == "team-2/owner_word_asked/proposal-p3" ? QStringLiteral("Answer") : QStringLiteral("Open team"));
+    // #724: every row opens its team; a one-click decision is answered in it
+    // too (Approve… for the drafts, Answer for the proposal and the permission).
+    QStringList answers;
+    for (auto *row : page.findChildren<QFrame *>("teamWaitingRow")) {
+        QCOMPARE(row->findChild<QPushButton *>("teamWaitingOpen")->text(), QStringLiteral("Open team"));
+        const auto *approve = row->findChild<QPushButton *>("teamWaitingApprove");
+        const auto *answer = row->findChild<QPushButton *>("teamWaitingAnswerToggle");
+        answers << (approve ? approve->text() : answer ? answer->text() : QString());
+    }
+    QCOMPARE(answers, (QStringList{"Approve…", "Approve…", "Answer", "Answer", "", "", ""}));
     QCOMPARE(teams.size(), 6);
     const QString count = page.findChild<QLabel *>("teamWaitingCount")->text();
     QVERIFY2(count.contains("7 items") && count.contains("6 teams"), qPrintable(count));
@@ -9018,8 +9031,8 @@ void TestTeamsUi::proposalsAreAcceptedOrRejectedOnce()
     // In the lead's conversation, above the composer.
     auto *conversation = workspace.findChild<QWidget *>("teamConversation");
     QVERIFY(conversation && conversation->isAncestorOf(cardOf("p1")));
-    QCOMPARE(cardOf("p1")->findChild<QLabel *>("teamProposalWhat")->text(), QStringLiteral("Add Designer (claude · sonnet)"));
-    QCOMPARE(cardOf("p2")->findChild<QLabel *>("teamProposalWhat")->text(), QStringLiteral("Swap Backend to codex · gpt-5.5"));
+    QCOMPARE(cardOf("p1")->findChild<QLabel *>("teamProposalWhat")->text(), QStringLiteral("Add Designer (claude, sonnet)"));
+    QCOMPARE(cardOf("p2")->findChild<QLabel *>("teamProposalWhat")->text(), QStringLiteral("Swap Backend to codex, gpt-5.5"));
     QCOMPARE(cardOf("p3")->findChild<QLabel *>("teamProposalWhat")->text(), QStringLiteral("Remove Tester"));
     QCOMPARE(cardOf("p3")->property("hash").toString(), QStringLiteral("h3"));
     QVERIFY(cardOf("p1")->findChild<QLabel *>("teamProposalBy")->text().startsWith("Lead asks"));
@@ -9116,7 +9129,7 @@ void TestTeamsUi::proposalCardsNameTheChangeAndAStaleCardSendsNothing()
     };
     QTRY_VERIFY(cardOf("p1") && cardOf("p2") && cardOf("p3") && cardOf("p4"));
     QCOMPARE(cardOf("p1")->findChild<QLabel *>("teamProposalWhat")->text(), QStringLiteral("Add 2 members"));
-    QCOMPARE(linesOf("p1"), (QStringList{"Designer (claude · sonnet)", "Writer (codex)"}));
+    QCOMPARE(linesOf("p1"), (QStringList{"Designer (claude, sonnet)", "Writer (codex)"}));
     QCOMPARE(cardOf("p2")->findChild<QLabel *>("teamProposalWhat")->text(), QStringLiteral("Add 2 tasks to phase 2 (QA fixes)"));
     QCOMPARE(linesOf("p2"), (QStringList{"Saved card list, for Backend", "Empty state"}));
     QCOMPARE(cardOf("p3")->findChild<QLabel *>("teamProposalWhat")->text(), QStringLiteral("Cancel 1 task"));
@@ -13426,6 +13439,442 @@ void TestTeamsUi::aWaitingReadThatChangesNothingRedrawsNothing()
     feed.refresh();
     QTRY_COMPARE(changed.count(), 2);
     QCOMPARE(feed.total(), int(items.size()));
+}
+
+namespace {
+// #724: liveTeam with what waits for the owner in it: the lead's proposals
+// p1 and p2, an addition to running phase 1, Backend's permission question
+// (escalated: on the attention list) and phase 2 as a draft.
+QJsonObject answerTeam()
+{
+    auto t = liveTeam();
+    auto members = t["members"].toArray();
+    auto backend = members[1].toObject();
+    backend["question"] = memberQuestionFixture();
+    members[1] = backend;
+    t["members"] = members;
+    auto tasks = t["tasks"].toArray();
+    auto second = tasks[1].toObject(); second["phase"] = 2; tasks[1] = second;
+    t["tasks"] = tasks;
+    t["phases"] = QJsonArray{
+        QJsonObject{{"n", 1}, {"title", "Build"}, {"state", "approved"}, {"tasks", QJsonArray{1}}, {"added_by", "Lead"}, {"added_at", 1000}},
+        QJsonObject{{"n", 2}, {"title", "Release"}, {"state", "draft"}, {"tasks", QJsonArray{2}}, {"added_by", "Lead"}, {"added_at", 1500}}};
+    t["proposals"] = QJsonArray{
+        QJsonObject{{"id", "p1"}, {"kind", "add-member"}, {"by", "Lead"}, {"at", 2000.0}, {"state", "open"}, {"reason", "The UI needs a designer"},
+                    {"member", QJsonObject{{"role", "Designer"}, {"agent", "claude"}, {"model", "sonnet"}}}, {"hash", "h1"}},
+        QJsonObject{{"id", "p2"}, {"kind", "add-member"}, {"by", "Lead"}, {"at", 2100.0}, {"state", "open"}, {"reason", "Docs need an owner"},
+                    {"member", QJsonObject{{"role", "Writer"}, {"agent", "claude"}, {"model", "haiku"}}}, {"hash", "h2"}}};
+    t["pending_additions"] = QJsonArray{QJsonObject{{"id", "add-1"}, {"phase", 1}, {"by", "Lead"}, {"request", "add the card form tests"},
+                                                    {"warned_at", 1800003000.0},
+                                                    {"tasks", QJsonArray{QJsonObject{{"id", 3}, {"title", "Card form tests"}}}}}};
+    t["attention"] = QJsonArray{QJsonObject{{"kind", "permission"}, {"member", "backend"}, {"since", 1800003100.0},
+                                            {"summary", "Backend asks to run cargo test --locked"}}};
+    return t;
+}
+
+QJsonObject waitingItem(const QString &key, const QString &kind, const QString &action, const QString &title, double since)
+{
+    return {{"id", QStringLiteral("team-1/%1/%2").arg(kind, key)}, {"team", "team-1"}, {"team_name", "Live"}, {"kind", kind},
+            {"title", title}, {"since", since}, {"action", action}};
+}
+
+QJsonArray answerItems(double now)
+{
+    auto proposal = waitingItem("proposal-p1", "owner_word_asked", "decide_proposal", "The lead proposes: add member — The UI needs a designer", now - 60);
+    proposal["proposal"] = "p1";
+    auto stale = waitingItem("proposal-p2", "owner_word_asked", "decide_proposal", "The lead proposes: add member — Docs need an owner", now - 70);
+    stale["proposal"] = "p2";
+    auto addition = waitingItem("addition-add-1", "owner_word_asked", "confirm_addition", "Adding 1 task to running phase 1 waits for your confirmation", now - 120);
+    addition["phase"] = 1;
+    auto permission = waitingItem("backend", "permission_escalated", "answer_permission", "Backend asks to run cargo test --locked", now - 180);
+    permission["member"] = "backend";
+    auto draft = waitingItem("2", "phase_draft", "approve_phase", "Phase 2 Release waits for your approval", now - 240);
+    draft["phase"] = 2;
+    auto report = waitingItem("1", "report_escalated", "decide_report", "Report on #1 Saved cards API from Backend waits for your decision", now - 300);
+    report["task"] = 1; report["member"] = "Backend";
+    auto held = waitingItem("2", "task_waits_owner", "release_task", "#2 Release notes is held by you", now - 360);
+    held["task"] = 2;
+    return {proposal, stale, addition, permission, draft, report, held};
+}
+}
+
+// #724 (owner, 2026-10-30): Waiting for you answers a one-click decision in
+// its row, with the team view's command and confirmation, bound to the item:
+// the lead's proposal (Deny with a reason, Allow), an addition (the typed
+// "add", Add or Cancel), an escalated permission (Allow, Deny) and a phase
+// draft (Approve… with the team's question). A report and a held task keep
+// Open team only. A stale item says so and sends nothing; an answered one
+// leaves at once.
+void TestTeamsUi::waitingItemsAreAnsweredInPlace()
+{
+    QSettings().setValue("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([] { QSettings().remove("workspace/skin"); darkPalette(); });
+    const double now = double(QDateTime::currentSecsSinceEpoch());
+    auto team = answerTeam();
+    setTeam(team);
+    QVERIFY(writeWaiting(script() + ".waiting", answerItems(now)));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);   // the confirmation helpers' context
+    TeamWaitingPage page(&controller);
+    QStringList answered, opened;
+    page.answered = [&](const TeamWaitingPage::Item &item) { answered << item.id; };
+    page.openTeam = [&](const TeamWaitingPage::Item &item) { opened << item.id; };
+    darkPalette(); page.setDark(true);
+    page.resize(900, 1000); page.show();
+    const auto row = [&](const QString &id) -> QFrame * {
+        for (auto *frame : page.findChildren<QFrame *>("teamWaitingRow")) if (frame->property("itemId") == id) return frame;
+        return nullptr;
+    };
+    const QString proposal = "team-1/owner_word_asked/proposal-p1", stale = "team-1/owner_word_asked/proposal-p2",
+                  addition = "team-1/owner_word_asked/addition-add-1", permission = "team-1/permission_escalated/backend",
+                  draft = "team-1/phase_draft/2", report = "team-1/report_escalated/1", held = "team-1/task_waits_owner/2";
+    QTRY_VERIFY(row(proposal) && row(held));
+    // The store drops what was answered: so does the fake's list, for the polls.
+    QStringList gone;
+    const auto storeDrops = [&](const QString &id) {
+        gone << id;
+        QJsonArray left;
+        for (const auto &value : answerItems(now)) if (!gone.contains(value.toObject()["id"].toString())) left.append(value);
+        QVERIFY(writeWaiting(script() + ".waiting", left));
+    };
+    // A report and a held task are read in the team first: Open team only.
+    for (const auto &id : {report, held}) {
+        QVERIFY(row(id)->findChild<QPushButton *>("teamWaitingOpen"));
+        QVERIFY(!row(id)->findChild<QPushButton *>("teamWaitingAnswerToggle") && !row(id)->findChild<QPushButton *>("teamWaitingApprove"));
+    }
+    const auto toggle = [&](const QString &id) { row(id)->findChild<QPushButton *>("teamWaitingAnswerToggle")->click(); };
+    // Open the three cards: the proposal, the addition and the permission.
+    toggle(proposal); toggle(addition); toggle(permission);
+    QTRY_VERIFY(row(proposal)->findChild<QFrame *>("teamProposalCard") && row(addition)->findChild<QLineEdit *>("teamWaitingAdditionConfirm")
+                && row(permission)->findChild<QLabel *>("teamWaitingPermissionCommand"));
+    // A click inside an open answer stays there.
+    QTest::mouseClick(row(proposal), Qt::LeftButton, {}, QPoint(row(proposal)->width() / 2, row(proposal)->height() - 4));
+    QVERIFY(opened.isEmpty());
+    QCOMPARE(row(addition)->findChild<QLabel *>("teamWaitingAdditionTask")->text(), QStringLiteral("Card form tests"));
+    QCOMPARE(row(permission)->findChild<QLabel *>("teamWaitingPermissionCommand")->text(), QStringLiteral("cargo test --locked"));
+    // No dots as separators in what the answers say.
+    for (auto *label : page.findChildren<QLabel *>()) QVERIFY2(!label->text().contains(QStringLiteral(" · ")), qPrintable(label->text()));
+    TestWait::settle();
+    shot(&page, "u724-page-answers-dark");
+    page.setDark(false);
+    lightShot(&page, "u724-page-answers-light");
+    darkPalette(); page.setDark(true);
+    // The proposal: Deny with its reason, bound to its hash.
+    row(proposal)->findChild<QLineEdit *>("teamProposalDenyReason")->setText("Not this week");
+    row(proposal)->findChild<QPushButton *>("teamProposalDeny")->click();
+    QTRY_COMPARE(calls(script(), "decide-proposal").size(), 1);
+    auto sent = calls(script(), "decide-proposal").first();
+    QCOMPARE(sent["team"].toString(), QStringLiteral("team-1"));
+    QCOMPARE(sent["proposal"].toString(), QStringLiteral("p1"));
+    QCOMPARE(sent["accept"].toBool(), false);
+    QCOMPARE(sent["expected_hash"].toString(), QStringLiteral("h1"));
+    QCOMPARE(sent["reason"].toString(), QStringLiteral("Not this week"));
+    QCOMPARE(sent["by"].toString(), QStringLiteral("human"));
+    // It leaves at once.
+    QTRY_VERIFY(!row(proposal));
+    storeDrops(proposal);
+    QCOMPARE(answered, QStringList{proposal});
+    // The permission: Allow with the question's id, hash and answer ids.
+    row(permission)->findChild<QPushButton *>("teamWaitingPermissionAllow")->click();
+    QTRY_COMPARE(calls(script(), "answer").size(), 1);
+    sent = calls(script(), "answer").first();
+    QCOMPARE(sent["team"].toString(), QStringLiteral("team-1"));
+    QCOMPARE(sent["member"].toString(), QStringLiteral("backend"));
+    QCOMPARE(sent["question_id"].toString(), QStringLiteral("claude-approval:6f2b0e3a"));
+    QCOMPARE(sent["expected_question_hash"].toString(), QStringLiteral("6f2b0e3a"));
+    const auto question = Teams::parse(team).member("backend")->permission;
+    const auto native = sent["answers"].toArray()[0].toObject();
+    QCOMPARE(native["question_id"].toString(), question.native.questionId);
+    QCOMPARE(native["selected_option_ids"].toArray(), QJsonArray{question.native.allow});
+    QTRY_VERIFY(!row(permission));
+    storeDrops(permission);
+    // The addition: Cancel closes it and sends nothing; Add wants the typed word.
+    row(addition)->findChild<QPushButton *>("teamWaitingAdditionCancel")->click();
+    QTRY_VERIFY(!row(addition)->findChild<QLineEdit *>("teamWaitingAdditionConfirm"));
+    QCOMPARE(calls(script(), "add-to-phase").size(), 0);
+    toggle(addition);
+    QTRY_VERIFY(row(addition)->findChild<QLineEdit *>("teamWaitingAdditionConfirm"));
+    auto *typed = row(addition)->findChild<QLineEdit *>("teamWaitingAdditionConfirm");
+    auto *add = row(addition)->findChild<QPushButton *>("teamWaitingAdditionAdd");
+    QVERIFY(!add->isEnabled());
+    typed->setText("ad");
+    QVERIFY(!add->isEnabled());
+    typed->setText("add");
+    QVERIFY(add->isEnabled());
+    add->click();
+    QTRY_COMPARE(calls(script(), "add-to-phase").size(), 1);
+    sent = calls(script(), "add-to-phase").first();
+    QCOMPARE(sent["team"].toString(), QStringLiteral("team-1"));
+    QCOMPARE(sent["phase"].toInt(), 1);
+    QCOMPARE(sent["confirm"].toString(), QStringLiteral("add-1"));
+    QCOMPARE(sent["confirmation"].toString(), QStringLiteral("add"));
+    QTRY_VERIFY(!row(addition));
+    storeDrops(addition);
+    // The phase draft: Approve… asks the team view's question; Cancel sends nothing.
+    const auto approval = Teams::phaseApproval(Teams::parse(team), 2);
+    QString name, text;
+    armConfirmRecord(&panel, true, &name, &text);
+    row(draft)->findChild<QPushButton *>("teamWaitingApprove")->click();
+    QTRY_VERIFY(!name.isEmpty());
+    QCOMPARE(name, approval.name);
+    QCOMPARE(text, approval.text);
+    QTest::qWait(100);
+    QCOMPARE(calls(script(), "approve-phase").size(), 0);
+    QVERIFY(row(draft));
+    armConfirm(&panel, false);
+    row(draft)->findChild<QPushButton *>("teamWaitingApprove")->click();
+    QTRY_COMPARE(calls(script(), "approve-phase").size(), 1);
+    sent = calls(script(), "approve-phase").first();
+    QCOMPARE(sent["team"].toString(), QStringLiteral("team-1"));
+    QCOMPARE(sent["phase"].toInt(), 2);
+    QCOMPARE(sent["alongside"].toBool(), approval.input.value("alongside").toBool());
+    QTRY_VERIFY(!row(draft));
+    storeDrops(draft);
+    // A stale item: p2 was decided after its card opened. Allow says so and
+    // sends nothing; the item stays until the list is read again.
+    toggle(stale);
+    QTRY_VERIFY(row(stale)->findChild<QPushButton *>("teamProposalAllow"));
+    auto decided = team;
+    auto proposals = decided["proposals"].toArray();
+    auto second = proposals[1].toObject(); second["state"] = "accepted"; proposals[1] = second;
+    decided["proposals"] = proposals;
+    setTeam(decided);
+    row(stale)->findChild<QPushButton *>("teamProposalAllow")->click();
+    QTRY_VERIFY(([&] {
+        auto *notice = row(stale) ? row(stale)->findChild<QLabel *>("teamWaitingAnswerNotice") : nullptr;
+        return notice && notice->isVisible() && notice->text().contains(QStringLiteral("nothing was sent"));
+    })());
+    QCOMPARE(calls(script(), "decide-proposal").size(), 1);
+    QCOMPARE(answered, (QStringList{proposal, permission, addition, draft}));
+    shot(&page, "u724-page-stale-dark");
+    // An answer between rebuilds never shows as a window of its own.
+    for (auto *window : QApplication::topLevelWidgets())
+        QVERIFY2(!(window->objectName() == QLatin1String("teamWaitingAnswer") && window->isVisible()), "a stray answer window");
+}
+
+// #724: the banner answers in its row too; an item answered there leaves the
+// banner and the page at once, and its notifications (the waiting one and the
+// team attention one that covers it) are withdrawn.
+void TestTeamsUi::waitingBannerAnswersInPlaceAndWithdrawsTheNotice()
+{
+    QSettings().setValue("workspace/skin", "whitewh");
+    QSettings().remove(TeamWaitingNotices::kSetting);
+    const auto restore = qScopeGuard([] { QSettings().remove("workspace/skin"); QSettings().remove(TeamWaitingNotices::kSetting); darkPalette(); });
+    const double now = double(QDateTime::currentSecsSinceEpoch());
+    const auto team = answerTeam();
+    setTeam(team);
+    const auto items = answerItems(now);
+    QVERIFY(writeWaiting(script() + ".waiting", QJsonArray{items[3], items[6]}));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    controller.refresh();
+    QTRY_VERIFY(controller.team("team-1") && !controller.team("team-1")->attention.isEmpty());
+    TeamWaitingFeed feed(&controller);
+    QSignalSpy withdrawn(&feed, &TeamWaitingFeed::withdrawn);
+    TeamWaitingPage page(&controller);
+    // SessionsWindow's wiring: either place answers, both lose the item.
+    page.answered = [&](const TeamWaitingPage::Item &item) { feed.answered(item); };
+    QObject::connect(&feed, &TeamWaitingFeed::dropped, &page, [&](const QString &id) { page.drop(id); });
+    QWidget host; host.setObjectName("bannerHost");
+    auto *v = new QVBoxLayout(&host); v->setContentsMargins(0, 0, 0, 0);
+    auto *banner = new TeamWaitingBanner(&feed); banner->setDark(true);
+    v->addWidget(banner); v->addStretch();
+    darkPalette();
+    host.resize(820, 360); host.show();
+    page.resize(820, 600); page.show();
+    feed.setActive(true);
+    const QString permission = "team-1/permission_escalated/backend", held = "team-1/task_waits_owner/2";
+    const auto pageRow = [&](const QString &id) -> QFrame * {
+        for (auto *frame : page.findChildren<QFrame *>("teamWaitingRow")) if (frame->property("itemId") == id) return frame;
+        return nullptr;
+    };
+    QTRY_VERIFY(banner->findChild<QPushButton *>("teamWaitingBannerToggle") && pageRow(permission));
+    banner->findChild<QPushButton *>("teamWaitingBannerToggle")->click();
+    const auto bannerRow = [&](const QString &id) -> QWidget * {
+        for (auto *row : banner->findChildren<QWidget *>("teamWaitingBannerRow")) if (row->property("itemId") == id) return row;
+        return nullptr;
+    };
+    QTRY_VERIFY(bannerRow(permission) && bannerRow(held));
+    QCOMPARE(bannerRow(held)->findChild<QPushButton *>("teamWaitingBannerAction")->text(), QStringLiteral("Open team"));
+    QVERIFY(!bannerRow(held)->findChild<QToolButton *>("teamWaitingBannerOpen"));
+    auto *answer = bannerRow(permission)->findChild<QPushButton *>("teamWaitingBannerAction");
+    QCOMPARE(answer->text(), QStringLiteral("Answer"));
+    QVERIFY(bannerRow(permission)->findChild<QToolButton *>("teamWaitingBannerOpen"));
+    answer->click();
+    QTRY_VERIFY(bannerRow(permission) && bannerRow(permission)->findChild<QPushButton *>("teamWaitingPermissionDeny"));
+    TestWait::settle();
+    shot(banner, "u724-banner-permission-dark");
+    banner->setDark(false);
+    lightShot(banner, "u724-banner-permission-light");
+    darkPalette(); banner->setDark(true);
+    QTRY_VERIFY(bannerRow(permission) && bannerRow(permission)->findChild<QLineEdit *>("teamWaitingPermissionDenyReason"));
+    // Deny with a reason for the member.
+    bannerRow(permission)->findChild<QLineEdit *>("teamWaitingPermissionDenyReason")->setText("Not on main");
+    bannerRow(permission)->findChild<QPushButton *>("teamWaitingPermissionDeny")->click();
+    QTRY_COMPARE(calls(script(), "answer").size(), 1);
+    const auto sent = calls(script(), "answer").first();
+    const auto question = Teams::parse(team).member("backend")->permission;
+    const auto native = sent["answers"].toArray()[0].toObject();
+    QCOMPARE(native["selected_option_ids"].toArray(), QJsonArray{question.native.deny});
+    QCOMPARE(native["text"].toString(), QStringLiteral("Not on main"));
+    QCOMPARE(sent["expected_question_hash"].toString(), question.hash);
+    // At once: out of the banner and the page, before any read.
+    QTRY_VERIFY(!bannerRow(permission) && !pageRow(permission));
+    QVERIFY(pageRow(held));
+    QCOMPARE(feed.items().size(), 1);
+    QCOMPARE(withdrawn.count(), 1);
+    const auto tokens = withdrawn.first().first().toStringList();
+    const auto *listed = controller.team("team-1");
+    QVERIFY(tokens.contains(QStringLiteral("zerus-team-attention:team-1:waiting:") + permission));
+    QVERIFY2(tokens.contains(TeamAttentionNotices::token(*listed, listed->attention.first())), qPrintable(tokens.join(' ')));
+    // One item left: the banner's single line.
+    QTRY_VERIFY(banner->findChild<QWidget *>("teamWaitingBannerLine"));
+    QCOMPARE(banner->findChild<QWidget *>("teamWaitingBannerLine")->property("itemId").toString(), held);
+    // An answer between rebuilds never shows as a window of its own.
+    for (auto *window : QApplication::topLevelWidgets())
+        QVERIFY2(!(window->objectName() == QLatin1String("teamWaitingAnswer") && window->isVisible()), "a stray answer window");
+    feed.setActive(false);
+}
+
+// #738 (owner, 2026-10-31: with Kimi as the lead the model picker was empty):
+// New team's model pickers list the selected account's native catalog (as the
+// role editor reads it; OpenCode's model_options from its account row), fall
+// back to Teams::knownModels when the catalog is empty, refill when the agent
+// or the account changes, and keep a typed model. The effort picker follows
+// the chosen model's efforts where the catalog names them.
+void TestTeamsUi::newTeamOffersEachAgentsModels()
+{
+    const auto restore = qScopeGuard([] { darkPalette(); });
+    darkPalette();
+    const auto profile = [](const QString &id, const QString &provider, const QString &label) {
+        return QJsonObject{{"id", id}, {"provider", provider}, {"label", label}, {"account_status", QJsonObject{{"status", "ok"}}}};
+    };
+    auto opencode = profile("native-opencode", "opencode", "OpenCode");
+    opencode["model_options"] = QJsonArray{QJsonObject{{"id", "openrouter/qwen3-coder"}, {"label", "Qwen3 Coder"}, {"effort_options", QJsonArray{"low", "high"}}}};
+    const QJsonArray profiles{profile("native-claude", "claude", "Claude"), profile("work", "claude", "Claude work"),
+                              profile("native-codex", "codex", "Codex"), profile("native-kimi", "kimi", "Kimi"),
+                              profile("kimi-new", "kimi", "Kimi new"), profile("native-dsh", "dsh", "DeepSeek"), opencode};
+    QVERIFY(FakeCli::replace(script() + ".accounts", QJsonDocument(QJsonObject{{"profiles", profiles}}).toJson(QJsonDocument::Compact)));
+    const auto model = [](const QString &id, const QStringList &efforts) {
+        return QJsonObject{{"id", id}, {"effort_options", QJsonArray::fromStringList(efforts)}};
+    };
+    const QJsonObject catalogs{
+        {"native-claude", QJsonArray{model("claude-opus-4-7", {"low", "medium", "high", "xhigh"}), model("claude-sonnet-4-6", {"low", "medium", "high"}),
+                                  model("claude-haiku-4-5", {})}},
+        {"work", QJsonArray{model("claude-opus-4-6", {"low", "high"})}},
+        {"native-codex", QJsonArray{model("gpt-6.1-sol", {"low", "medium", "high", "xhigh"}), model("gpt-5.5", {"low", "medium"})}},
+        {"native-kimi", QJsonArray{model("kimi-code/k3.1-pro", {"low", "high"}), model("kimi-code/kimi-for-coding", {})}},
+        {"kimi-new", QJsonArray{}},   // not read yet: the known Kimi models
+        {"native-dsh", QJsonArray{QJsonObject{{"id", "deepseek/deepseek-v4-pro"}, {"label", "DeepSeek V4 Pro (DeepSeek)"},
+                                              {"effort_options", QJsonArray{"high", "max"}}}}}};
+    QVERIFY(FakeCli::replace(script() + ".models", QJsonDocument(catalogs).toJson(QJsonDocument::Compact)));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    controller.refreshCatalog();
+    QTRY_VERIFY(controller.catalogReady());
+    QTemporaryDir folder;
+    TeamNewDialog dialog(&controller, &client, {{QString(), "this computer", true}}, {}, QDir::toNativeSeparators(folder.path()), "Checkout");
+    dialog.resize(900, 640);
+    dialog.show();
+    auto *agent = dialog.findChild<QComboBox *>("teamNewLeadAgent");
+    auto *account = dialog.findChild<QComboBox *>("teamNewLeadAccount");
+    auto *leadModel = dialog.findChild<QComboBox *>("teamNewLeadModel");
+    auto *effort = dialog.findChild<QComboBox *>("teamNewLeadEffort");
+    QVERIFY(agent && account && leadModel && effort);
+    const auto items = [](QComboBox *box) { QStringList list; for (int i = 0; i < box->count(); ++i) list << box->itemText(i); return list; };
+    const auto efforts = [](QComboBox *box) { QStringList list; for (int i = 0; i < box->count(); ++i) list << box->itemData(i).toString(); return list; };
+    const auto choose = [](QComboBox *box, const QString &data) { box->setCurrentIndex(box->findData(data)); };
+    const auto pick = [](QComboBox *box, const QString &text) { box->setCurrentIndex(box->findText(text)); };
+    const QStringList anyEffort{"", "low", "medium", "high", "xhigh"};
+    // Kimi leads: its kimi-code models, no model chosen (the agent's default).
+    choose(agent, "kimi");
+    QTRY_COMPARE(items(leadModel), (QStringList{"kimi-code/k3.1-pro", "kimi-code/kimi-for-coding"}));
+    QCOMPARE(leadModel->currentText(), QString());
+    pick(leadModel, "kimi-code/k3.1-pro");
+    QCOMPARE(efforts(effort), (QStringList{"", "low", "high"}));
+    QCOMPARE(effort->currentData().toString(), QStringLiteral("high"));   // the lead's high stays where the model has it
+    shot(&dialog, "u738-new-team-kimi-dark");
+    // Another Kimi account whose catalog is empty: the known Kimi models.
+    choose(account, "kimi-new");
+    QTRY_COMPARE(items(leadModel), Teams::knownModels("kimi"));
+    QCOMPARE(leadModel->currentText(), QStringLiteral("kimi-code/k3.1-pro"));   // still listed: kept
+    // Claude: the default account's catalog, then the work account's.
+    choose(agent, "claude");
+    QTRY_COMPARE(items(leadModel), (QStringList{"claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"}));
+    pick(leadModel, "claude-sonnet-4-6");
+    QCOMPARE(efforts(effort), (QStringList{"", "low", "medium", "high"}));
+    shot(&dialog, "u738-new-team-claude-dark");
+    choose(account, "work");
+    QTRY_COMPARE(items(leadModel), QStringList{"claude-opus-4-6"});
+    QCOMPARE(leadModel->currentText(), QStringLiteral("claude-sonnet-4-6"));   // a model the account lacks stays as typed
+    QCOMPARE(efforts(effort), anyEffort);
+    // Codex: its models and each one's efforts.
+    choose(agent, "codex");
+    QTRY_COMPARE(items(leadModel), (QStringList{"gpt-6.1-sol", "gpt-5.5"}));
+    pick(leadModel, "gpt-6.1-sol");
+    QCOMPARE(efforts(effort), (QStringList{"", "low", "medium", "high", "xhigh"}));
+    pick(leadModel, "gpt-5.5");
+    QCOMPARE(efforts(effort), (QStringList{"", "low", "medium"}));
+    shot(&dialog, "u738-new-team-codex-dark");
+    // A typed model still goes as typed, with any effort.
+    leadModel->setEditText(QStringLiteral("gpt-6-preview"));
+    QCOMPARE(efforts(effort), anyEffort);
+    // Members: DeepSeek and OpenCode list theirs.
+    dialog.findChild<QPushButton *>("teamNewAddMember")->click();
+    QTRY_VERIFY(!dialog.findChildren<QComboBox *>("teamNewAgent").isEmpty());
+    auto *memberAgent = dialog.findChildren<QComboBox *>("teamNewAgent").last();
+    auto *memberModel = dialog.findChildren<QComboBox *>("teamNewModel").last();
+    auto *memberEffort = dialog.findChildren<QComboBox *>("teamNewEffort").last();
+    choose(memberAgent, "dsh");
+    QTRY_COMPARE(items(memberModel), QStringList{"deepseek/deepseek-v4-pro"});
+    QCOMPARE(memberModel->itemData(0, Qt::ToolTipRole).toString(), QStringLiteral("DeepSeek V4 Pro (DeepSeek)"));
+    pick(memberModel, "deepseek/deepseek-v4-pro");
+    QCOMPARE(efforts(memberEffort), (QStringList{"", "high", "max"}));
+    choose(memberEffort, "max");
+    choose(memberAgent, "opencode");
+    QTRY_COMPARE(items(memberModel), QStringList{"openrouter/qwen3-coder"});
+    pick(memberModel, "openrouter/qwen3-coder");
+    QCOMPARE(efforts(memberEffort), (QStringList{"", "low", "high"}));
+    choose(memberEffort, "high");
+    // Each catalog was read once, by its account.
+    QStringList read;
+    QFile log(script() + ".calls");
+    QVERIFY(log.open(QIODevice::ReadOnly));
+    for (const auto &line : log.readAll().split('\n')) {
+        const auto args = QJsonDocument::fromJson(line).object()["args"].toArray();
+        if (args.size() > 2 && args[0] == "account" && args[1] == "model-settings") read << args[2].toString();
+    }
+    QCOMPARE(read.size(), QSet<QString>(read.cbegin(), read.cend()).size());
+    QVERIFY(read.contains("native-kimi") && read.contains("native-codex") && read.contains("native-dsh") && read.contains("work"));
+    QVERIFY(!read.contains("native-opencode"));
+    // Create sends the typed lead model and the member's catalog model and effort.
+    dialog.findChild<QLineEdit *>("teamNewName")->setText("Checkout models");
+    auto *create = dialog.findChild<QPushButton *>("teamNewCreate");
+    QTRY_VERIFY(create->isEnabled());
+    create->click();
+    QTRY_COMPARE(calls(script(), "create").size(), 1);
+    const auto input = calls(script(), "create").first();
+    QCOMPARE(input["lead"].toObject()["model"].toString(), QStringLiteral("gpt-6-preview"));
+    const auto member = input["members"].toArray().last().toObject();
+    QCOMPARE(member["agent"].toString(), QStringLiteral("opencode"));
+    QCOMPARE(member["model"].toString(), QStringLiteral("openrouter/qwen3-coder"));
+    QCOMPARE(member["effort"].toString(), QStringLiteral("high"));
+    // The light theme: the form reads its colors when it opens.
+    lightPalette();
+    for (const auto &[lead, first] : {std::pair{QStringLiteral("kimi"), QStringLiteral("kimi-code/k3.1-pro")},
+                                      std::pair{QStringLiteral("claude"), QStringLiteral("claude-opus-4-7")},
+                                      std::pair{QStringLiteral("codex"), QStringLiteral("gpt-6.1-sol")}}) {
+        TeamNewDialog light(&controller, &client, {{QString(), "this computer", true}}, {}, QDir::toNativeSeparators(folder.path()), "Checkout");
+        light.resize(900, 640);
+        light.show();
+        auto *lightAgent = light.findChild<QComboBox *>("teamNewLeadAgent");
+        auto *lightModel = light.findChild<QComboBox *>("teamNewLeadModel");
+        choose(lightAgent, lead);
+        QTRY_COMPARE(lightModel->itemText(0), first);
+        pick(lightModel, first);
+        lightShot(&light, QStringLiteral("u738-new-team-%1-light").arg(lead));
+    }
 }
 
 #include "test_teamsui.moc"

@@ -550,6 +550,15 @@ struct Team {
         QString memberId() const;
     };
     QList<Proposal> proposals;
+    // U29: additions to a running phase that wait for the owner's typed
+    // confirmation (pending_additions): the task titles that would join.
+    struct Addition {
+        QString id, by, request;
+        int phase = 0;
+        QStringList titles;
+        double warnedAt = 0;
+    };
+    QList<Addition> additions;
     // H6: the sessions a swap left running for the owner to stop (last 20).
     struct Swapped { QString member, old, by; double at = 0; };
     QList<Swapped> swapped;
@@ -653,6 +662,13 @@ QString approveBlocked(const Team &team, int phase);
 // F12/N40: the earlier approved phase this draft would run alongside (0 when
 // none); the desktop warns the owner before approving it.
 int alongsidePhase(const Team &team, int phase);
+// #724: the owner's question before approving a phase draft or the plan, the
+// same in the team view and on Waiting for you: the dialog's object name,
+// title, text and action, and what the approval sends besides the team.
+struct Approval { QString name, title, text, action; QJsonObject input; };
+Approval phaseApproval(const Team &team, int phase);
+// `mode`: the owner's plan mode choice (U59), empty for none (standard).
+Approval planApproval(const Team &team, const QString &mode);
 // U25 (spec 5.2): the owner's state of a phase: planned (the team is planning),
 // draft, rejected, queued, running or done. phase_summary[].state when the
 // server sends it, else read from the record and the phase's tasks.

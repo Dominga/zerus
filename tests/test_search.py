@@ -80,6 +80,22 @@ class ContentSearch(unittest.TestCase):
         self.assertEqual(result["results"][0]["content"], "Резервная копия успешно завершена")
         self.assertEqual(result["results"][0]["source"], "codex_transcript")
 
+    def test_archive_hits_carry_recorded_accounts_and_exact_folder_scopes_without_writes(self):
+        repo = self.root / "repo"
+        subprocess.run(["git", "init", "--quiet", str(repo)], check=True, env=self.env)
+        folder = repo / "subfolder"
+        folder.mkdir()
+        record, path = self.binding("codex/example/old", "needle public history", archive=True)
+        record.update(account_id="recorded-work", agent_home=str(self.root / "old-profile"), cwd=str(folder))
+        path.write_text(json.dumps(record))
+        before = self.snapshot()
+        session = self.run_search("--query", "needle")["results"][0]["session"]
+        self.assertEqual(session["account_id"], "recorded-work")
+        self.assertEqual(session["account_home"], record["agent_home"])
+        self.assertEqual(Path(session["cwd_canonical"]), folder.resolve())
+        self.assertEqual(Path(session["git_root"]), repo.resolve())
+        self.assertEqual(before, self.snapshot())
+
     def test_missing_transcript_keeps_snapshot_and_marks_partial_coverage(self):
         record, binding = self.binding("codex/project", "unrelated")
         Path(record["transcript"]).unlink()

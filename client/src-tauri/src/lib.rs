@@ -1031,6 +1031,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         screens::screen_visible,
         screens::session_usage,
         screens::accounts_view,
+        screens::account_filters_view,
         screens::machines_view,
         screens::machine_resolve,
         screens::machine_check,

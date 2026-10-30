@@ -422,6 +422,11 @@ export async function accountsView(force = false): Promise<AccountsView> {
   if (!inTauri()) return emptyAccounts([DESKTOP_ONLY]);
   return invoke<AccountsView>("accounts_view", { force });
 }
+/** Sessions' explicit account chooser reads catalogs, without profile inspects. */
+export async function accountFiltersView(force = false): Promise<AccountsView> {
+  if (!inTauri()) return emptyAccounts([DESKTOP_ONLY]);
+  return invoke<AccountsView>("account_filters_view", { force });
+}
 
 /** The Machines view; `force` is Refresh. */
 export async function machinesView(force = false): Promise<MachinesView> {

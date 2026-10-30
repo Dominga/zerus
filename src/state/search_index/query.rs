@@ -10,7 +10,7 @@ const INDEX_REPLY_BYTES: usize = 2 << 20;
 const FALLBACK_REPLY_BYTES: usize = 5 << 20;
 
 enum SourceProof {
-    Current(Target),
+    Current(Value),
     Appended,
 }
 
@@ -124,8 +124,9 @@ impl Store {
                 .map_err(|e| e.to_string())?,
         });
         let mut results = Vec::new();
+        let mut scopes = search::ArchiveScopes::new();
         let mut progress = Progress::default();
-        let mut verified = BTreeMap::<String, Option<Target>>::new();
+        let mut verified = BTreeMap::<String, Option<Value>>::new();
         let mut candidates = 0;
         let mut bytes = 2;
         let mut rejected = 0;
@@ -141,7 +142,7 @@ impl Store {
                 .map_err(|e| e.to_string())?;
             candidates += page.candidates;
             next = page.next_cursor;
-            let Some(mut hit) = page.hits.into_iter().next() else {
+            let Some(hit) = page.hits.into_iter().next() else {
                 continue;
             };
             // Unsupported adapters retain native/legacy reads. They cannot
@@ -180,13 +181,13 @@ impl Store {
                 };
                 verified.insert(key.clone(), target);
             }
-            let Some(target) = verified.get(&key).and_then(Clone::clone) else {
+            let Some(record) = verified.get(&key).and_then(Clone::clone) else {
                 continue;
             };
-            hit.target = target;
-            let Some(hit) = search::indexed_hit(pattern.clone(), hit) else {
+            let Some(mut hit) = search::indexed_hit(pattern.clone(), hit, &record) else {
                 continue;
             };
+            scopes.enrich(&mut hit);
             let size = serde_json::to_vec(&hit).map_err(|e| e.to_string())?.len() + 1;
             if bytes + size > INDEX_REPLY_BYTES {
                 next = before;
@@ -197,6 +198,7 @@ impl Store {
         }
         let status = self.status()?;
         let ready = status["coverage"]["state"] == "ready"
+            && !scopes.incomplete
             && status["catalog"]["discovery"] == "complete"
             && status["catalog"]["fallback_sources"] == 0
             && status["catalog"]["invalidation_overflow"] == false
@@ -305,7 +307,7 @@ impl Store {
             // cursor pending, and let the next bounded demand ingest it.
             return Ok(SourceProof::Appended);
         }
-        Ok(SourceProof::Current(record_target(&record)))
+        Ok(SourceProof::Current(record))
     }
 }
 

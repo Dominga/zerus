@@ -5,7 +5,8 @@ import { catalog, computerFresh, orderedRows } from "./catalog";
 import { archive, archivedSession, fleetComputers } from "./archive";
 import { machineCards } from "./machines";
 import { defaultProject, groups } from "./organization";
-import { bindSearchRow, machineFilter, matchesFilter, page, projectFilter, search, selectedKey, setDetailTab, setSelectedKey, setSubagentOpen, stateFilter } from "./ui";
+import { bindSearchRow, machineFilter, matchesFilter, page, projectFilter, accountFilter, folderFilter, search, selectedKey, setDetailTab, setSelectedKey, setSubagentOpen, stateFilter } from "./ui";
+import { compileScopes } from "../ui/sessions/scope-filters";
 import { pageHidden } from "./visibility";
 import { notify, bindSearchActionRow } from "./actions";
 import { createContentSearch, identityMatches, metadataMatches, mergeSessionMatch, searchCount, SEARCH_ROWS, type FoundHit, type SearchReply } from "./content-search-model";
@@ -28,12 +29,12 @@ export const { contentSearch, searchItems, searchStatus, activateSearchItem } = 
     (hit.run_id ? catalog.rows[`${computer}\nrun:${hit.run_id}`] : undefined) ?? catalog.rows[`${computer}\nname:${hit.name}`];
   const hosts = createMemo(() => fleetComputers(catalog.computers, orderedRows(), machineCards)
     .filter((host) => !machineFilter().length || machineFilter().includes(host.machine))
+    .filter((host) => !folderFilter() || folderFilter()!.computer === host.computer)
     .map((host) => ({ ...host, online: computerFresh(host.computer) })));
   createEffect(() => contentSearch.configure(search(), hosts(), page() === "sessions" && !pageHidden()));
   createEffect(() => { if (!search().trim()) clearSearchPreview(); if (held()?.key !== selectedKey()) setHeld(undefined); });
-  const accepts = (row: Session, group: string) => matchesFilter(row, stateFilter())
-    && (!machineFilter().length || machineFilter().includes(row.machine))
-    && (!projectFilter().length || projectFilter().includes(group))
+  const scoped = createMemo(() => compileScopes({ machines: machineFilter(), projects: projectFilter(), accounts: accountFilter(), folder: folderFilter() }));
+  const accepts = (row: Session, group: string) => matchesFilter(row, stateFilter()) && scoped()(row, group)
     && (stateFilter() !== "archived" || archive.includes((row as { archivedAt?: number }).archivedAt ?? 0));
   const built = createMemo(() => {
     const items: SearchItem[] = [], positions = new Map<string, number>(); let limited = false;
@@ -60,7 +61,11 @@ export const { contentSearch, searchItems, searchStatus, activateSearchItem } = 
     let text = [...search().trim()].length < 2 ? "Type 2+ characters to search message contents" : searchCount(items.filter((item) => item.found).length, items.length);
     if (contentSearch.busy()) text += " — Searching…";
     if (contentSearch.limited() || built().limited) text += " — Limited history searched";
-    if (contentSearch.errors().length) text += ` — ${contentSearch.errors().join("; ")}`;
+    const errors = new Set(contentSearch.errors());
+    if (accountFilter().length) for (const found of contentSearch.hits()) {
+      if (found.hit.archive_id && found.hit.session?.account_binding_reported === false) errors.add(`${found.machine}: contents unavailable`);
+    }
+    if (errors.size) text += ` — ${[...errors].join("; ")}`;
     return text;
   });
   function activateSearchItem(item: SearchItem) {

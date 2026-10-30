@@ -3,7 +3,7 @@ import { catalog, rowId } from "./catalog";
 import { groupOf, headerOf, setProjectCollapsed } from "./organization";
 import {
   revealRow, search, setDetailTab, setMachineFilter, setPage, setProjectFilter, setSearch, setSelectedKey,
-  setStateFilter, setSubagentOpen, toast,
+  setAccountFilter, setFolderFilter, setStateFilter, setSubagentOpen, toast,
 } from "./ui";
 
 // The menu bar and attention notifications open sessions and show notices
@@ -33,6 +33,7 @@ export function openSession(target: OpenSession, options: OpenSessionOptions = {
     setStateFilter("all");
     setMachineFilter([]);
     setProjectFilter([]);
+    setAccountFilter([]); setFolderFilter(undefined);
     setSearch("");
   }
   setPage("sessions");

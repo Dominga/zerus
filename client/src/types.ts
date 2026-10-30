@@ -78,6 +78,11 @@ export interface ViewRow {
   action_reasons?: Record<string, string>;
   /** The raw working directory (`folder` is the name people know the checkout by). */
   cwd?: string;
+  /** Recorded listing binding; never inferred from a default account. */
+  account_provider?: string;
+  account_id?: string;
+  account_home?: string;
+  account_binding_reported?: boolean;
   /** The canonical working directory (New session's prefill); absent when the row has none. */
   cwd_canonical?: string;
   /** The checkout's root, "" outside Git (the worktree picker's session counts). */
@@ -379,7 +384,12 @@ export interface Account {
   usage: Usage; permission: string; identity_lines: string[]; identity_note: string;
 }
 export interface AccountHost { computer: ComputerId; name: string; label: string; online: boolean }
+export interface BindingEvidence { host: ComputerId; provider: string; id: string; home: string; group: string }
 export interface AccountsView {
+  /** Current and removed profiles; evidence only, not extra account choices. */
+  binding_evidence?: BindingEvidence[];
+  binding_evidence_complete?: boolean;
+  catalog_loading?: boolean;
   /** Computation order from the screens hub; absent on older snapshots. */
   revision?: number;
   hosts: AccountHost[]; accounts: Account[]; overview: Account[]; snapshot: boolean; loading: boolean;

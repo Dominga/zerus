@@ -5,7 +5,7 @@ import { catalog, computerFresh } from "./catalog";
 import { errorText, notify } from "./actions";
 import { groupOf, grouping, setProjectCollapsed } from "./organization";
 import {
-  machineFilter, projectFilter, search, selectedKey, setPage, setRevealing, setSelectedKey, setSubagentOpen, stateFilter,
+  machineFilter, projectFilter, accountFilter, folderFilter, search, selectedKey, setPage, setRevealing, setSelectedKey, setSubagentOpen, stateFilter,
 } from "./ui";
 import {
   CARD_LIMIT, NOTICE_LIMIT, RESOLVED, creationOfRow, creationRowId, footerText, newestFirst, noticeOf, placeCreations, shownCards, statusMenu,
@@ -328,8 +328,8 @@ const app = createRoot(() => createCreations({
   session: (key) => catalog.rows[key],
   sessionKeys: () => catalog.order,
   online: computerFresh,
-  scope: () => ({ grouping: grouping(), filter: stateFilter(), hosts: machineFilter(), query: search().trim(), projects: projectFilter() }),
-  filterKey: () => `${stateFilter()}\n${machineFilter().join("\t")}\n${projectFilter().join("\t")}\n${search()}`,
+  scope: () => ({ grouping: grouping(), filter: stateFilter(), hosts: machineFilter(), query: search().trim(), projects: projectFilter(), accounts: accountFilter(), folder: folderFilter() }),
+  filterKey: () => JSON.stringify([stateFilter(), machineFilter(), projectFilter(), accountFilter(), folderFilter(), search()]),
 }));
 // Without a listener the cards stay empty; nothing else depends on them.
 void app.start().catch((error) => console.warn("Zerus Next: the creation cards could not start.", error));

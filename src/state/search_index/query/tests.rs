@@ -94,6 +94,18 @@ fn archive_pages_keep_exact_navigation_and_cursor_snapshot_without_fallback() {
 }
 
 #[test]
+fn publication_uses_fresh_recorded_account_binding_not_an_indexed_copy() {
+    let (_temp, state, path, _transcript, mut store) = fixture();
+    let mut record: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    record["account_id"] = json!("changed-profile");
+    record["agent_home"] = json!("/srv/example/recorded-home");
+    fs::write(&path, record.to_string()).unwrap();
+    let first = page(&mut store, &state, None, &budget());
+    assert_eq!(first["results"][0]["session"]["account_id"], "changed-profile");
+    assert_eq!(first["results"][0]["session"]["account_home"], "/srv/example/recorded-home");
+}
+
+#[test]
 fn an_unverified_hit_is_never_consumed_when_the_proof_budget_runs_out() {
     let (_temp, state, _path, _transcript, mut store) = fixture();
     let mut tiny = budget();

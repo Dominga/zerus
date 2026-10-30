@@ -794,7 +794,7 @@ fn apply(app: &AppHandle, outcome: Outcome) {
     for text in outcome.notices {
         window_notice(app, "Zerus", &text);
     }
-    if app.get_webview_window(crate::MAIN_WINDOW).is_some() {
+    if crate::main_window(app).is_some() {
         for text in outcome.window_notices {
             window_notice(app, "Zerus", &text);
         }

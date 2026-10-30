@@ -1576,13 +1576,12 @@ pub async fn composer_pick(
     start: usize,
     end: usize,
 ) -> Result<(), String> {
-    use tauri::Manager;
     use tauri_plugin_dialog::DialogExt;
     let composers = state.inner().clone();
     if !composers.can_attach(handle) {
         return Ok(());
     }
-    let window = app.get_webview_window(crate::MAIN_WINDOW);
+    let window = crate::main_window(&app);
     let picked = tauri::async_runtime::spawn_blocking(move || {
         // The window handle is asked of the main thread: never block it here.
         let mut dialog = app.dialog().file().set_title("Attach files");

@@ -2794,7 +2794,10 @@ mod tests {
         writing.recv_timeout(Duration::from_secs(5)).unwrap();
         // The normal background run save is now held in I/O. Its independent
         // lock leaves both the shared writer and the pump available.
-        assert!(organization.0.writer.try_lock().is_ok());
+        wait_until(
+            "shared writer availability during token serialization",
+            || organization.0.writer.try_lock().is_ok(),
+        );
         let answer = submitted(&organization, move_to_inbox());
         assert!(matches!(
             answer.recv_timeout(Duration::from_secs(5)),

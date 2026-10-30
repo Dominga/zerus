@@ -205,6 +205,7 @@ void TeamWorkspace::accountMoveDialog(const Team &team, const Member &member)
     auto *dialog = new QDialog(this);
     m_moveDialog = dialog;
     dialog->setObjectName("teamMoveAccountDialog");
+    dialog->setStyleSheet(dialogSheet(c));   // #737
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     dialog->setProperty("team", team.id);
     dialog->setWindowTitle(tr("Move to another account"));

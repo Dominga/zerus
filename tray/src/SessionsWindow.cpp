@@ -2680,7 +2680,11 @@ void SessionsWindow::applyTheme()
     }
     if (!m_skinWatcher->files().isEmpty()) m_skinWatcher->removePaths(m_skinWatcher->files());
     if (!skin.path.isEmpty()) m_skinWatcher->addPath(skin.path);
+    // #737: a dialog is a window and takes the system's palette, not this
+    // window's: every dialog opened over it draws the theme's surface and text
+    // (the New team dialog drew a light surface under the dark theme's labels).
     setStyleSheet(QString(R"(
+        QDialog { background:%1; color:%2; }
         QWidget#settingsPage, QWidget#recoverySettingsPage, QWidget#sessionsWindow, QWidget#machinesPage, QWidget#accountsPage, QDialog#accountDialog, QDialog#accountPermissionsDialog, QDialog#machineSetupDialog, QDialog#projectsPage, QDialog#projectColorDialog, QDialog#projectFolderDialog, QDialog#deleteProjectDialog, QDialog#newSessionDialog, QDialog#folderBrowser, QDialog#forkSessionDialog, QDialog#renameSessionDialog, QDialog#workspaceSettingsDialog, QDialog#sessionFileDialog, QDialog#swarmDialog, QDialog#speechProfileEditor { background:%1; color:%2; }
         QColorDialog#workspaceColorDialog { background:%1; color:%2; }
         QDialog#worktreeBatchCleanupDialog, QDialog#cleanupFileInspection { background:%1; color:%2; }

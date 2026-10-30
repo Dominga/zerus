@@ -75,6 +75,10 @@ public:
     void discardDraft(const Reply &done = {});
     QString proposalError(const QString &proposal) const { return m_proposalErrors.value(proposal); }
     QString draftError() const { return m_draftError; }
+    // U58: the reads ask for cancelled work (hgs hides it by default since
+    // U58); Graph, Board, Layers and the plan hide it unless this is on.
+    bool showCancelled() const { return m_showCancelled; }
+    void setShowCancelled(bool on);
     bool available() const { return m_available; }
     HgsClient *client() const { return m_client; }
     static void setPollInterval(int milliseconds);
@@ -84,6 +88,7 @@ signals:
     void feedChanged();
     void catalogChanged();
     void inboxChanged();
+    void showCancelledChanged();
 private:
     void received(quint64 request, const QString &operation, const QJsonObject &result);
     void failed(quint64 request, const QString &operation, const QString &error);
@@ -91,7 +96,7 @@ private:
     void draftCall(const QString &operation, const Reply &done);
     HgsClient *m_client;
     QTimer m_poll;
-    bool m_active = false, m_available = false;
+    bool m_active = false, m_available = false, m_showCancelled = false;
     quint64 m_listRequest = 0, m_statusRequest = 0, m_feedRequest = 0, m_olderRequest = 0;
     QList<Teams::Team> m_teams;
     // The last answers, so an unchanged poll changes nothing on screen.

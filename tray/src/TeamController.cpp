@@ -30,7 +30,7 @@ void TeamController::setActive(bool active)
 
 void TeamController::refresh()
 {
-    if (!m_listRequest) m_listRequest = m_client->requestTeam({}, QStringLiteral("list"), QJsonObject{});
+    if (!m_listRequest) m_listRequest = m_client->requestTeam({}, QStringLiteral("list"), {{"include_cancelled", true}});
     readWatched();
     if ((m_watchCatalog || m_watchCatalogPage) && !m_catalogInFlight) refreshCatalog();
 }
@@ -45,9 +45,16 @@ void TeamController::refreshInbox()
 void TeamController::readWatched()
 {
     if (m_watch.isEmpty()) return;
-    if (!m_statusRequest) m_statusRequest = m_client->requestTeam({}, QStringLiteral("status"), {{"team", m_watch}});
+    if (!m_statusRequest) m_statusRequest = m_client->requestTeam({}, QStringLiteral("status"), {{"team", m_watch}, {"include_cancelled", true}});
     if (!m_feedRequest) m_feedRequest = m_client->requestTeam({}, QStringLiteral("events"), {{"team", m_watch}});
     if (!m_inboxRequest) refreshInbox();
+}
+
+void TeamController::setShowCancelled(bool on)
+{
+    if (m_showCancelled == on) return;
+    m_showCancelled = on;
+    emit showCancelledChanged();
 }
 
 const Teams::Team *TeamController::team(const QString &id) const

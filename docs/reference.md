@@ -3525,16 +3525,21 @@ number, and the build shows as `DEV_VERSION-preview.LABEL.COMMIT`. The Qt GUI
 reads it as a CMake cache variable (configure `tray/build` with
 `-DZERUS_DEV_BUILD_NUMBER= -DZERUS_LOCAL_PREVIEW_LABEL=task-board` before
 running `tray/install.sh`); the Tauri client reads the environment variable
-when it builds. Clear the label before building main again. On macOS, a switch
-between the Qt GUI and the Tauri client always takes the live update, never
-`HGS_TRAY_RESTART=0`.
+when it builds. Clear the label before building main again. On either platform,
+a switch between the Qt GUI and the Tauri client always takes the live update,
+never `HGS_TRAY_RESTART=0`.
 
 Linux installs the binary under `~/.local/bin`, a systemd user service under
 `~/.config/systemd/user` and a launcher under `~/.local/share/applications`.
-The launcher is not a second autostart entry. The service belongs to
-`graphical-session.target`, restarts after crashes and does not loop on exit code 4
-(system tray unavailable). Compare `systemctl --user status hgs-tray.service` and
-`journalctl --user -u hgs-tray.service` when startup fails.
+The launcher is not a second autostart entry. `HGS_LINUX_GUI=client` selects the
+Tauri client, later installs retain the selected GUI, and a fresh installation
+defaults to Qt. `HGS_INSTALL_PREFIX` redirects the binary, launch files and
+updater state into a scratch prefix and performs no service-manager action; see
+[Linux source installation and the Tauri client switch](linux-distribution.md).
+The service belongs to `graphical-session.target`, restarts after crashes and
+does not loop on exit code 4 (system tray unavailable). Compare
+`systemctl --user status hgs-tray.service` and `journalctl --user -u
+hgs-tray.service` when startup fails.
 
 On macOS the installer uses Qt/Homebrew, builds and ad-hoc-signs an app bundle,
 and installs it under `~/Applications/hgs-tray.app` with

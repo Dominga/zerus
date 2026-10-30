@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { accountTooltip, current, dayTime, exhausted, exhaustedSummary, forecast, fromProjected, limitRecoveryNotice, pace, period, remaining, severest, stateText, summaryText, windowText } from "./usage";
+import { accountTooltip, current, dayTime, exhausted, exhaustedSummary, forecast, fromProjected, limitRecoveryNotice, pace, period, remaining, severest, stateText, summaryText, usageChipPercent, windowText } from "./usage";
 import { NOW, projected, usageOf } from "../../store/testing";
 
 describe("usage windows (inventory 8.4, gaps 1-4 and 7)", () => {
@@ -96,6 +96,13 @@ describe("usage windows (inventory 8.4, gaps 1-4 and 7)", () => {
     expect(exhaustedSummary(u, NOW)).toEqual({ label: "Limit reached", shortLabel: "Limit", remaining: "1h 0m" });
     expect(exhaustedSummary(usageOf({ windows: [projected({ used: 100, resets_at: NOW - 1 })] }), NOW))
       .toEqual({ label: "Refresh usage", shortLabel: "Limit", remaining: "" });
+  });
+
+  it("shows the mockup's usage percentage from 50%, ignoring ended windows", () => {
+    expect(usageChipPercent(usageOf({ windows: [projected({ used: 49.9 })] }), NOW)).toBeUndefined();
+    expect(usageChipPercent(usageOf({ windows: [projected({ used: 50 })] }), NOW)).toBe(50);
+    expect(usageChipPercent(usageOf({ windows: [projected({ used: 52 }), projected({ id: "week", minutes: 10080, used: 71.4 })] }), NOW)).toBe(71);
+    expect(usageChipPercent(usageOf({ windows: [projected({ used: 100, resets_at: NOW - 1 })] }), NOW)).toBeUndefined();
   });
 
   it("accepts only a fresh below-limit recovery snapshot", () => {

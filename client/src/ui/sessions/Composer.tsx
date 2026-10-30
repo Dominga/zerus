@@ -19,9 +19,9 @@ import type { ChipTone } from "../../types";
 // The message composer (Qt MessageComposer, 300-366), after the mockup's
 // structure: an edge grip, the 34 px toolbar, the editor (76-720 px) and the
 // action row. The toolbar keeps Qt's slots (ComposerToolbar.h, Slot): the
-// leading zone holds Attachments, the voice slot (Task 13), Latest, Mark as
-// read, the compaction indicator and Cancel send; the grip fills the space
-// between; the trailing zone holds Usage limit, Recovery, Cache and Context. The action
+// leading zone holds Attachments, the voice slot (Task 13), Mark as read,
+// Latest, the compaction indicator and Cancel send; the grip fills the space
+// between; the trailing zone holds Recovery, Usage, Cache and Context. The action
 // row holds Attach, Reference file, the status line, Refresh, Allow retry,
 // the model button, Stop and Send (364). The store (store/composer.ts) owns
 // the text and the locks; Rust owns the draft, the attachments and the send.
@@ -122,8 +122,7 @@ function CacheChip(props: { compact: boolean }) {
             setOpen(!open());
             if (open()) queueMicrotask(() => (e.detail === 0 ? pop?.querySelector<HTMLElement>("button:not(:disabled)") ?? pop : pop)?.focus({ preventScroll: true }));
           }}>
-          {/* A warm cache shows no icon; every other state the warning glyph (CacheStatus.h refresh()). */}
-          <Show when={v().cache.tone !== "success"}><Icon name="context-warning" size={13} /></Show>
+          <Icon name={v().cache.tone === "success" ? "timer" : "context-warning"} size={13} />
           {props.compact ? v().cache.short_label : v().cache.label}
         </button>
         <Show when={open()}>
@@ -229,10 +228,6 @@ export function Composer() {
       <div class="cmp-toolbar">
         <AttachmentsChip compact={compact()} />
         {/* The voice slot: Task 13. */}
-        <Show when={!following()}>
-          <button type="button" class="tchip icon" title={jumpCaption()} aria-label={jumpCaption()}
-            onClick={(e) => { if (document.activeElement === e.currentTarget) moveFocusOff(focusTranscript, editor); jumpToLatest(); }}><Icon name="chevrons-down" size={14} /></button>
-        </Show>
         <Show when={mark().active}>
           <button type="button" class="tchip accent" classList={{ icon: compact() }} title={mark().detail} aria-label="Mark as read"
             onClick={(e) => {
@@ -240,8 +235,12 @@ export function Composer() {
               if (document.activeElement === e.currentTarget) moveFocusOff(focusTranscript, editor);
               runMarkRead(snapshotOf(s()));
             }}>
-            <Icon name="read-all" size={13} /><Show when={!compact()}>Mark as read</Show>
+            <Icon name="check-check" size={13} /><Show when={!compact()}>Mark as read</Show>
           </button>
+        </Show>
+        <Show when={!following()}>
+          <button type="button" class="tchip icon" title={jumpCaption()} aria-label={jumpCaption()}
+            onClick={(e) => { if (document.activeElement === e.currentTarget) moveFocusOff(focusTranscript, editor); jumpToLatest(); }}><Icon name="chevrons-down" size={14} /></button>
         </Show>
         <Show when={compacting()}>
           <span class="tchip cmp-compaction" title="The agent is compressing conversation context." role="status">
@@ -253,10 +252,10 @@ export function Composer() {
         </Show>
         <ResizeHandle hidden={!input()} />
         <Show when={!input()}><span class="grow" /></Show>
-        <UsageLimitChip session={s()} compact={compact()} />
         <RecoveryChip session={s()} compact={compact()} />
+        <UsageLimitChip session={s()} compact={compact()} />
         <Show when={v()}><CacheChip compact={compact()} /></Show>
-        <SessionUsageChip session={s()} />
+        <SessionUsageChip />
       </div>
       <textarea ref={editor} class="cmp-editor" hidden={!input()} style={{ height: `${editorHeight() * contentScale()}px` }} aria-label="Message to selected agent"
         placeholder="Message this agent…" readOnly={composer.locked()} disabled={!v()} value={composer.text()} title={editorTip()}

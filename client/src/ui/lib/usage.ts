@@ -242,3 +242,14 @@ export function exhaustedSummary(u: Usage, now: number): ExhaustedSummary | unde
   if (reached) return { label: "Limit reached", shortLabel: "Limit", remaining: nearest === undefined ? "" : remaining((nearest - now) / 60) };
   return ended ? { label: "Refresh usage", shortLabel: "Limit", remaining: "" } : undefined;
 }
+
+/** The mockup's usage chip shows the highest current percentage from 50%. */
+export function usageChipPercent(u: Usage, now: number): number | undefined {
+  let highest: number | undefined;
+  for (const p of u.windows) {
+    const w = fromProjected(p, now);
+    if (!current(w) || !Number.isFinite(w.used) || w.used < 50) continue;
+    highest = Math.max(highest ?? 0, w.used);
+  }
+  return highest === undefined ? undefined : Math.round(highest);
+}

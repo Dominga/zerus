@@ -54,7 +54,7 @@ export function RecoveryChip(props: { session: Session; compact: boolean }) {
         <button ref={chip} type="button" class={`tchip ${view().tone === "danger" ? "danger" : "warn"}`} classList={{ on: open() }} aria-haspopup="dialog" aria-expanded={open()}
           aria-label={view().label} title={`${view().status}\n${view().detail}`.trim()}
           onClick={(event) => { setKeyboard(event.detail === 0); setOpen(!open()); }}>
-          <Icon name="refresh-cw" size={13} />
+          <Icon name="rotate-ccw" size={13} />
           {props.compact ? view().shortLabel : view().label}
         </button>
         <ChipPopover open={open()} anchor={chip} label="Automatic recovery" keyboard={keyboard()} class="recovery-pop" width={560} onClose={(focus) => { setOpen(false); if (focus) chip.focus(); }}>

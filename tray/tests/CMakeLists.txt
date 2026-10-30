@@ -360,7 +360,8 @@ set_tests_properties(terminalbackend PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=off
 # Сам ProjectsDialog здесь не конструируется (QTEST_APPLESS_MAIN, приложения нет вовсе),
 # но Qt6::Widgets всё равно нужен: ProjectsDialog.cpp наследует QDialog и тянет виджеты
 # на этапе линковки, а HgsClient.cpp -- за projectSet/projectRemove, которые он зовёт.
-add_executable(test_projectsdialog test_projectsdialog.cpp)
+# The agent logos of the Sessions rows (#646 shots).
+add_executable(test_projectsdialog test_projectsdialog.cpp ../resources.qrc)
 target_include_directories(test_projectsdialog PRIVATE ../src)
 target_link_libraries(test_projectsdialog PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
 zerus_add_test(projectsdialog test_projectsdialog)

@@ -2,6 +2,7 @@
 #include <QApplication>
 #include "JsonSettings.h"
 #include "ProjectsDialog.h"
+#include "IronRules.h"
 #include "CloneRepositoryDialog.h"
 #include "PopupMouse.h"
 #include "FakeCli.h"
@@ -37,6 +38,7 @@ private slots:
     void projectConnectionsGuideExplainsMissingCatalogsWithoutJoining();
     void cloneAddsFolderWithoutLaunchingSession();
     void projectPageHasHeaderAndCollapsibleBlocks();
+    void projectPageMatchesThePrototype();
     void folderKindsFollowTheFleetAndTheTeams();
     void projectSessionsFollowTheFleetWhileShown();
     void projectSessionRowsAreBounded();
@@ -132,7 +134,8 @@ void TestProjectsDialog::projectPageHasHeaderAndCollapsibleBlocks()
     QVERIFY(dialog.findChild<QWidget *>("projectRulesBlock"));QVERIFY(dialog.findChild<QWidget *>("projectIronRules"));
     // One row per session: name and role, machine, branch, status.
     auto *sessions=dialog.findChild<QTableWidget *>("projectSessions");QCOMPARE(sessions->rowCount(),3);
-    QCOMPARE(sessions->item(1,0)->text(),QString("Backend  ·  Backend"));
+    QCOMPARE(sessions->item(1,0)->text(),QString("Backend"));QCOMPARE(sessions->item(1,0)->data(Qt::UserRole+2).toString(),QString("Backend"));
+    QCOMPARE(sessions->item(1,0)->data(Qt::UserRole+3).toString(),QString("dsh"));
     QCOMPARE(sessions->item(1,1)->text(),QString("workstation"));QCOMPARE(sessions->item(1,2)->text(),QString("team/528aebfe/backend"));
     QCOMPARE(sessions->item(1,3)->text(),QString("Needs input"));QCOMPARE(sessions->item(1,3)->data(Qt::UserRole+1).toString(),QString("warn"));
     // A team member's worktree goes with its team.
@@ -150,7 +153,11 @@ void TestProjectsDialog::projectPageHasHeaderAndCollapsibleBlocks()
     // A block folds to its header and remembers it.
     auto *foldersCard=dialog.findChild<QWidget *>("projectFoldersCard"),*sessionsCard=dialog.findChild<QWidget *>("projectSessionsCard");
     auto *foldersHeader=folders->findChild<QPushButton *>("collapsibleHeader");
-    QVERIFY(foldersCard->height()>300);
+    // #646: the card is as tall as its rows and actions, never the page's empty height.
+    const int open=foldersCard->height();
+    auto *split=dialog.findChild<QSplitter *>("projectFolderSplitter");
+    QVERIFY2(open<=split->height()+90,qPrintable(QStringLiteral("%1 %2").arg(open).arg(split->height())));
+    QVERIFY(table->height()<=table->horizontalHeader()->height()+3*table->verticalHeader()->defaultSectionSize()+8);
     foldersHeader->click();
     QVERIFY(!folders->findChild<QWidget *>("collapsibleBody")->isVisible());
     // QA #399 (3): the page lays out again - the card shrinks to its header,
@@ -161,7 +168,7 @@ void TestProjectsDialog::projectPageHasHeaderAndCollapsibleBlocks()
     PageShots::shot(dialog,true,"ux-7-projects-collapsed-dark");
     PageShots::shot(dialog,false,"ux-7-projects-collapsed-light");
     foldersHeader->click();
-    QTRY_VERIFY(foldersCard->height()>300);
+    QTRY_VERIFY(qAbs(foldersCard->height()-open)<=8);
 }
 
 namespace {
@@ -181,6 +188,159 @@ void selectFolder(QTableWidget *table,const QString &path)
 {
     for(int row=0;row<table->rowCount();++row)if(table->item(row,2)->text()==path)table->setCurrentCell(row,0);
 }
+}
+
+// #646 (spec 7): the page as the prototype draws it, with real data shapes -
+// compact project rows with their session counts, the ghost header actions,
+// rename on the name, folder rows with the team chip, label-colour machine
+// tags (an unreachable one faded), bold mono folders and kinds with their
+// branches, session rows with the agent, role, branch and status, and Iron
+// rules with their count and hint. Every action stays.
+void TestProjectsDialog::projectPageMatchesThePrototype()
+{
+    QTemporaryDir directory;QVERIFY(directory.isValid());
+    QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,directory.path());
+    QCoreApplication::setOrganizationName("hgs-project-prototype-test");QCoreApplication::setApplicationName("projects");QSettings().clear();
+    HgsClient client("/nonexistent/hgs");SessionOrganization projects;
+    const auto orbit=projects.createGroup("Orbit platform");projects.setColor(orbit,"#2b97ff");
+    const auto infra=projects.createGroup("Infrastructure");projects.setColor(infra,"#ff9234");
+    const auto wallet=projects.createGroup("Mobile wallet and the long-named partner integration");projects.setColor(wallet,"#a96bf5");
+    const auto general=projects.defaultProject();QVERIFY(projects.group(general));
+    for(const auto &machine:{"workstation","macbook","build-01","build-02"})projects.markImported(machine);
+    const auto win=MachinePlatform::Style::Windows,posix=MachinePlatform::Style::Posix;
+    projects.addFolder(orbit,"workstation","D:/work/orbit","Orbit platform",win);
+    projects.addFolder(orbit,"workstation","D:/work/orbit/.worktrees/backend","Team · Backend",win);
+    projects.addFolder(orbit,"macbook","/Users/anna/code/orbit/.worktrees/frontend","Team · Frontend",posix);
+    projects.addFolder(orbit,"workstation","D:/work/orbit-design-assets","Design assets",win);
+    projects.addFolder(orbit,"build-01","/srv/orbit","build-01 clone",posix);
+    projects.addFolder(orbit,"build-01","/srv/builds/orbit/services/payments-gateway/releases/2026-10/checkout-v2-hotfix-rounding","Payments hotfix checkout",posix);
+    projects.addFolder(orbit,"build-02","/srv/orbit","build-02 clone",posix);
+    projects.addFolder(orbit,"macbook","/Users/anna/code/orbit","MacBook clone",posix);
+    projects.addFolder(infra,"build-01","/srv/infra",{},posix);
+    IronRules::setRules(orbit,{"Use pnpm for web and cargo for services.","Never log card numbers or provider tokens."});
+    FleetState fleet;
+    BoxState ws;ws.host="workstation";ws.ok=true;ws.localSessions=true;ws.metrics=QJsonObject{{"platform","windows"}};
+    ws.sessions={folderSession("claude/orbit/checkout","D:/work/orbit","D:/work/orbit","main",false),
+                 folderSession("dsh/orbit/backend","D:/work/orbit/.worktrees/backend","D:/work/orbit/.worktrees/backend","team/checkout-v2/backend",true),
+                 folderSession("claude/orbit/design","D:/work/orbit-design-assets",{},{},false)};
+    fleet.setLocal(ws,1);
+    BoxState mac;mac.host="macbook";mac.ok=true;mac.metrics=QJsonObject{{"platform","macos"}};
+    mac.sessions={folderSession("codex/orbit/frontend","/Users/anna/code/orbit/.worktrees/frontend","/Users/anna/code/orbit/.worktrees/frontend","team/checkout-v2/frontend",true),
+                  folderSession("claude/orbit/ios","/Users/anna/code/orbit","/Users/anna/code/orbit","main",false)};
+    fleet.setPeer(mac,1);
+    BoxState b1;b1.host="build-01";b1.ok=true;b1.metrics=QJsonObject{{"platform","linux"}};
+    b1.sessions={folderSession("kimi/orbit/tester","/srv/orbit","/srv/orbit","main",false),
+                 folderSession("opencode/orbit/hotfix","/srv/builds/orbit/services/payments-gateway/releases/2026-10/checkout-v2-hotfix-rounding",
+                               "/srv/builds/orbit/services/payments-gateway/releases/2026-10/checkout-v2-hotfix-rounding","hotfix/payments-rounding",false)};
+    fleet.setPeer(b1,1);
+    // build-02 cannot be reached.
+    BoxState b2;b2.host="build-02";b2.ok=false;b2.metrics=QJsonObject{{"platform","linux"}};
+    b2.sessions={folderSession("dsh/orbit/review","/srv/orbit","/srv/orbit","release/2.4",false)};
+    fleet.setPeer(b2,1);
+    ProjectsDialog dialog(&client,nullptr,true,&projects);
+    dialog.setFleet(fleet);
+    dialog.setSessionsProvider([](const QString &project) {
+        QList<ProjectsDialog::ProjectSession> rows;
+        if(project.isEmpty())return rows;
+        const auto row=[&rows](const QString &host,const QString &name,const QString &title,const QString &agent,const QString &role,const QString &machine,
+                              const QString &branch,const QString &status,const QString &tone,const QString &team,const QString &cwd,bool teamFolder){
+            rows<<ProjectsDialog::ProjectSession{host,name,title,agent,role,machine,branch,status,tone,team,cwd,teamFolder,qint64(1000-rows.size())};
+        };
+        row("","claude/orbit/checkout","checkout","claude","Lead","workstation","feat/checkout-v2","Ready","muted","team-1","D:/work/orbit",false);
+        row("","dsh/orbit/backend","Backend","dsh","Backend","workstation","team/checkout-v2/backend","Needs approval","warn","team-1","D:/work/orbit/.worktrees/backend",true);
+        row("macbook","codex/orbit/frontend","Frontend","codex","Frontend","macbook","team/checkout-v2/frontend","Ready","muted","team-1","/Users/anna/code/orbit/.worktrees/frontend",true);
+        row("build-01","kimi/orbit/tester","Tester","kimi","Tester","build-01","main","Working","active","team-1","/srv/orbit",false);
+        row("","codex/orbit/search","search","codex","","workstation","feat/search-index","Working","active","","D:/work/orbit",false);
+        row("build-02","dsh/orbit/review","review","dsh","","build-02","release/2.4","Offline","offline","","/srv/orbit",false);
+        row("build-01","opencode/orbit/hotfix","payments-hotfix-with-a-long-session-name","opencode","","build-01","hotfix/payments-rounding","New reply","warn","",
+            "/srv/builds/orbit/services/payments-gateway/releases/2026-10/checkout-v2-hotfix-rounding",false);
+        row("macbook","claude/orbit/ios","ios-shell","claude","","macbook","feat/ios-wallet","Paused","paused","","/Users/anna/code/orbit",false);
+        return rows;
+    });
+    dialog.setSessionCountsProvider([orbit,infra,general]{return QHash<QString,int>{{orbit,8},{infra,1},{general,3}};});
+    QSignalSpy newTeam(&dialog,&ProjectsDialog::newTeamRequested),swarm(&dialog,&ProjectsDialog::swarmRequested);
+    QSignalSpy launch(&dialog,&ProjectsDialog::newSessionRequested);
+    dialog.resize(1280,1000);dialog.selectProject(orbit);dialog.show();
+    // The project list: compact rows with their session counts, + Project and the hint.
+    auto *list=dialog.findChild<QListWidget *>("logicalProjects");QCOMPARE(list->count(),4);
+    QCOMPARE(list->item(0)->data(Qt::UserRole+4).toInt(),8);QCOMPARE(list->item(2)->data(Qt::UserRole+4).toInt(),0);
+    QVERIFY(list->item(3)->data(Qt::UserRole+3).toBool());   // General is the default
+    QCOMPARE(list->visualItemRect(list->item(0)).height(),38);
+    QVERIFY(list->height()<=4*38+10);
+    QCOMPARE(dialog.findChild<QLabel *>("projectsHeading")->text(),QString("Projects"));
+    QCOMPARE(dialog.findChild<QPushButton *>("newProject")->text(),QString("Project"));
+    QVERIFY(dialog.findChild<QLabel *>("projectListHint")->text().startsWith("Projects group sessions"));
+    // The header: ghost Color…, Worktrees… and Swarm…, New team… and the primary New session….
+    for(const char *name:{"projectColor","projectWorktrees","projectSwarm"}){
+        auto *button=dialog.findChild<QPushButton *>(name);QVERIFY2(button&&button->property("pageGhost").toBool()&&button->property("pageSm").toBool(),name);
+    }
+    QVERIFY(!dialog.findChild<QPushButton *>("projectNewTeam")->property("pageGhost").toBool());
+    QVERIFY(dialog.findChild<QPushButton *>("newProjectFolderSession")->property("pagePrimary").toBool());
+    QCOMPARE(dialog.findChild<QLabel *>("projectSummary")->text(),QString("8 sessions · 4 in teams · 1 team"));
+    QCOMPARE(dialog.findChild<QLabel *>("projectId")->text(),orbit);
+    // No name field: the name renames in place.
+    auto *name=dialog.findChild<QLineEdit *>("projectName");QVERIFY(name->isHidden());
+    // Folders: one row each, the team chip, the machines, the kinds with their branches.
+    auto *table=dialog.findChild<QTableWidget *>("projectFolders");QCOMPARE(table->rowCount(),8);
+    QCOMPARE(folderKindAt(table,"D:\\work\\orbit"),QString("Main checkout · main"));
+    bool team=false;QCOMPARE(folderKindAt(table,"D:\\work\\orbit\\.worktrees\\backend",&team),QString("Worktree · team/checkout-v2/backend"));QVERIFY(team);
+    QCOMPARE(folderKindAt(table,"/Users/anna/code/orbit/.worktrees/frontend",&team),QString("Worktree · team/checkout-v2/frontend"));QVERIFY(team);
+    QCOMPARE(folderKindAt(table,"D:\\work\\orbit-design-assets"),QString("Folder"));
+    QCOMPARE(folderKindAt(table,"/srv/builds/orbit/services/payments-gateway/releases/2026-10/checkout-v2-hotfix-rounding"),QString("Clone · hotfix/payments-rounding"));
+    int offline=0;for(int row=0;row<table->rowCount();++row)if(table->item(row,1)->data(Qt::UserRole+2).toBool()){
+        ++offline;QCOMPARE(table->item(row,1)->text(),QString("build-02"));QCOMPARE(table->item(row,1)->toolTip(),QString("build-02 is offline"));
+        QCOMPARE(table->item(row,3)->text(),QString("Clone"));   // no live session tells its branch
+    }
+    QCOMPARE(offline,1);
+    QVERIFY(table->item(0,2)->font().bold());
+    // The table keeps its rows' height; nothing stretches it.
+    QCOMPARE(table->height(),table->horizontalHeader()->height()+8*table->verticalHeader()->defaultSectionSize()+8);
+    // Sessions: agent, bold name, role, machine, branch, status.
+    auto *sessions=dialog.findChild<QTableWidget *>("projectSessions");QCOMPARE(sessions->rowCount(),8);
+    QCOMPARE(sessions->item(1,0)->text(),QString("Backend"));QCOMPARE(sessions->item(1,0)->data(Qt::UserRole+2).toString(),QString("Backend"));
+    QCOMPARE(sessions->item(1,0)->data(Qt::UserRole+3).toString(),QString("dsh"));QVERIFY(sessions->item(1,0)->font().bold());
+    QCOMPARE(sessions->item(5,3)->data(Qt::UserRole+1).toString(),QString("offline"));QVERIFY(sessions->item(5,1)->data(Qt::UserRole+2).toBool());
+    QCOMPARE(sessions->item(7,3)->data(Qt::UserRole+1).toString(),QString("paused"));
+    // Iron rules: their count and what they are for.
+    auto *rules=dialog.findChild<QWidget *>("projectRulesBlock");
+    QCOMPARE(rules->findChild<QLabel *>("collapsibleNote")->text(),QString("2"));
+    QVERIFY(dialog.findChild<QLabel *>("projectRulesHint")->text().startsWith("Sent at the start of every message"));
+    // The first folder selected, as the prototype shows the page.
+    selectFolder(table,"D:\\work\\orbit");
+    PageShots::shot(dialog,true,"pm-projects-dark");
+    PageShots::shot(dialog,false,"pm-projects-light");
+    // Actions: New team… and Swarm… ask for them; New session… starts in the
+    // selected folder and refuses one on the unreachable machine.
+    dialog.findChild<QPushButton *>("projectNewTeam")->click();QCOMPARE(newTeam.size(),1);QCOMPARE(newTeam.first().first().toString(),orbit);
+    dialog.findChild<QPushButton *>("projectSwarm")->click();QCOMPARE(swarm.size(),1);
+    auto *create=dialog.findChild<QPushButton *>("newProjectFolderSession");
+    selectFolder(table,"/srv/builds/orbit/services/payments-gateway/releases/2026-10/checkout-v2-hotfix-rounding");
+    QVERIFY(create->isEnabled());create->click();QCOMPARE(launch.size(),1);QCOMPARE(launch.first().at(0).toString(),orbit);
+    QCOMPARE(launch.first().at(1).toString(),QString("build-01"));
+    for(int row=0;row<table->rowCount();++row)if(table->item(row,1)->data(Qt::UserRole+2).toBool())table->setCurrentCell(row,0);
+    QVERIFY(!create->isEnabled());QCOMPARE(create->toolTip(),QString("Reconnect build-02 to start a session in this folder."));
+    // Rename: a click on the name opens it in place; Escape keeps the old
+    // name, Enter the new one.
+    auto *header=dialog.findChild<QLabel *>("projectHeaderName");
+    QTest::mouseClick(header,Qt::LeftButton);QVERIFY(!name->isHidden());QVERIFY(header->isHidden());QCOMPARE(name->text(),QString("Orbit platform"));
+    selectFolder(table,"D:\\work\\orbit");
+    PageShots::shot(dialog,true,"pm-projects-rename-dark");
+    PageShots::shot(dialog,false,"pm-projects-rename-light");
+    name->setFocus();QTest::keyClicks(name,"x");QTest::keyClick(name,Qt::Key_Escape);
+    QTRY_VERIFY(name->isHidden());QVERIFY(!header->isHidden());QCOMPARE(projects.group(orbit)->name,QString("Orbit platform"));
+    QTest::mouseClick(header,Qt::LeftButton);name->selectAll();QTest::keyClicks(name,"Orbit");QTest::keyClick(name,Qt::Key_Return);
+    QTRY_VERIFY(name->isHidden());QCOMPARE(projects.group(orbit)->name,QString("Orbit"));QCOMPARE(header->text(),QString("Orbit"));
+    QCOMPARE(list->item(0)->text(),QString("Orbit"));
+    projects.renameGroup(orbit,"Orbit platform");dialog.refresh();
+    // Enter renamed and nothing else: no block folded.
+    for(const char *block:{"projectFoldersBlock","projectSessionsBlock","projectRulesBlock"})
+        QVERIFY2(dialog.findChild<QWidget *>(block)->findChild<QWidget *>("collapsibleBody")->isVisible(),block);
+    // Sessions and Iron rules folded, as the prototype's second shot.
+    for(const char *block:{"projectSessionsBlock","projectRulesBlock"})dialog.findChild<QWidget *>(block)->findChild<QPushButton *>("collapsibleHeader")->click();
+    selectFolder(table,"D:\\work\\orbit");
+    PageShots::shot(dialog,true,"pm-projects-collapsed-dark");
+    PageShots::shot(dialog,false,"pm-projects-collapsed-light");
+    for(const char *block:{"projectSessionsBlock","projectRulesBlock"})dialog.findChild<QWidget *>(block)->findChild<QPushButton *>("collapsibleHeader")->click();
 }
 
 // N24 (#386): a folder without Git is a Folder; a team member's own folder is
@@ -629,28 +789,34 @@ void TestProjectsDialog::sortingKeepsFolderIdentityAndLaunchTarget()
 
 void TestProjectsDialog::folderSplitPrioritizesListAndRemembersAdjustment()
 {
+    // #646: the folder table is as tall as its rows; the selected folder's
+    // worktrees follow under its actions, and the handle between them sizes
+    // the worktrees, remembered for the next time.
     QTemporaryDir directory;QVERIFY(directory.isValid());
     QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,directory.path());
-    QCoreApplication::setOrganizationName("hgs-folder-split-test");QCoreApplication::setApplicationName("projects");
+    QCoreApplication::setOrganizationName("hgs-folder-split-test");QCoreApplication::setApplicationName("projects");QSettings().clear();
     HgsClient client("/nonexistent/hgs");SessionOrganization projects;const auto project=projects.createGroup("Work");
     projects.addFolder(project,"arch","/workspace/repo");
     ProjectsDialog dialog(&client,nullptr,true,&projects);dialog.resize(1100,1000);dialog.selectProject(project);dialog.show();
     auto *table=dialog.findChild<QTableWidget *>("projectFolders");auto *split=dialog.findChild<QSplitter *>("projectFolderSplitter");QVERIFY(split);
+    const int rows=table->horizontalHeader()->height()+table->verticalHeader()->defaultSectionSize()+8;
+    QTRY_COMPARE(table->height(),rows);QVERIFY(!split->widget(1)->isVisible());
     table->setCurrentCell(0,0);QTRY_VERIFY(split->widget(1)->isVisible());QTest::qWait(30);
-    QVERIFY(table->height()>230);QVERIFY(split->sizes()[0]>split->sizes()[1]);
-    const auto initial=split->sizes();
+    QCOMPARE(table->height(),rows);
+    const auto initial=split->sizes();QVERIFY(initial[1]>=200);
+    // Down: the worktrees shrink; the folder rows keep their height.
     auto *handle=split->handle(1);const auto center=handle->rect().center();
     QTest::mousePress(handle,Qt::LeftButton,Qt::NoModifier,center);
-    QTest::mouseMove(handle,center-QPoint(0,80));QTest::mouseRelease(handle,Qt::LeftButton,Qt::NoModifier,center);
-    QTRY_VERIFY(split->sizes()[0]<initial[0]);
-    const auto adjusted=split->sizes();QVERIFY(!QSettings().value("workspace/projectFolderSplit").toByteArray().isEmpty());
-    dialog.refresh();QCOMPARE(split->sizes(),adjusted);
+    QTest::mouseMove(handle,center+QPoint(0,60));QTest::mouseRelease(handle,Qt::LeftButton,Qt::NoModifier,center+QPoint(0,60));
+    QTRY_VERIFY(split->sizes()[1]<initial[1]-20);
+    QTRY_COMPARE(table->height(),rows);QTRY_COMPARE(split->sizes()[0]+split->sizes()[1]+split->handleWidth(),split->height());
+    const int adjusted=split->sizes()[1];QCOMPARE(QSettings().value("workspace/projectFolderWorktrees").toInt(),adjusted);
+    dialog.refresh();QTRY_COMPARE(split->sizes()[1],adjusted);
     table->clearSelection();QTRY_VERIFY(!split->widget(1)->isVisible());table->setCurrentCell(0,0);QTest::qWait(30);
-    QVERIFY(qAbs(split->sizes()[1]-adjusted[1])<4);
+    QVERIFY(qAbs(split->sizes()[1]-adjusted)<4);
     ProjectsDialog reopened(&client,nullptr,true,&projects);reopened.resize(dialog.size());reopened.selectProject(project);reopened.show();
     reopened.findChild<QTableWidget *>("projectFolders")->setCurrentCell(0,0);QTest::qWait(30);
-    const auto restored=reopened.findChild<QSplitter *>("projectFolderSplitter")->sizes();
-    QVERIFY(qAbs(restored[1]-adjusted[1])<4);
+    QVERIFY(qAbs(reopened.findChild<QSplitter *>("projectFolderSplitter")->sizes()[1]-adjusted)<4);
 }
 
 void TestProjectsDialog::folderDialogTakesDriveFoldersOnlyOnLocalWindows_data()
@@ -793,8 +959,13 @@ void TestProjectsDialog::emptyListContextCreatesProject()
     QVERIFY(std::any_of(projects.groups().cbegin(),projects.groups().cend(),[](const auto &p){return p.name=="Created from empty space";}));
     auto *item=list->currentItem();QVERIFY(item);list->customContextMenuRequested(list->visualItemRect(item).center());
     menu=qobject_cast<QMenu*>(QApplication::activePopupWidget());QVERIFY(menu);QCOMPARE(menu->actions().first()->objectName(),"addProjectAction");
-    QVERIFY(menu->findChild<QAction*>("addProjectAction"));QCOMPARE(menu->actions().size(),4);
-    QVERIFY(!menu->findChild<QAction*>("projectShowInGraph")); menu->close();
+    QVERIFY(menu->findChild<QAction*>("addProjectAction"));QCOMPARE(menu->actions().size(),5);
+    QVERIFY(!menu->findChild<QAction*>("projectShowInGraph"));
+    // #646: the menu renames the project in place.
+    auto *rename=menu->findChild<QAction*>("renameProjectAction");QVERIFY(rename);
+    auto *name=dialog.findChild<QLineEdit*>("projectName");QVERIFY(name->isHidden());
+    rename->trigger();QVERIFY(!name->isHidden());QCOMPARE(name->text(),item->text());
+    menu->close();
 }
 
 void TestProjectsDialog::acceptsPlainName()

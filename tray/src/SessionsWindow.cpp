@@ -2106,10 +2106,17 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             const bool working=SessionPresentation::working(s,entry.online);
             const bool reply=entry.online&&!working&&!s.needsAction()&&s.visibleUnreadReply(entry.online);
             row.status=reply?tr("New reply"):SessionPresentation::status(s,entry.online);
-            row.tone=entry.online&&(s.needsAction()||reply)?QStringLiteral("warn"):working?QStringLiteral("active"):QStringLiteral("muted");
+            row.tone=!entry.online?QStringLiteral("offline"):s.needsAction()||reply?QStringLiteral("warn"):working?QStringLiteral("active")
+                    :s.state=="paused"?QStringLiteral("paused"):QStringLiteral("muted");
             rows<<row;
         }
         return rows;
+    });
+    // #646: each project's session count for the project list, in one pass.
+    m_projectsPage->setSessionCountsProvider([this]{
+        QHash<QString,int> counts;
+        for(const auto &entry:std::as_const(m_entries))if(entry.session.state!="archived")++counts[m_organization.groupFor(entry.identity)];
+        return counts;
     });
     m_machinesPage = new MachinesPage(hgsPath); m_pages->addWidget(m_machinesPage);
     connect(m_machinesPage, &MachinesPage::machinesChanged, this, &SessionsWindow::refreshRequested);

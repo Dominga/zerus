@@ -43,6 +43,9 @@ public:
     // The Sessions block lists this many rows; "Show all in Sessions" opens the rest.
     static constexpr int kSessionRows = 50;
     void setSessionsProvider(std::function<QList<ProjectSession>(const QString &project)> provider) { m_sessionsProvider = std::move(provider); showProject(); }
+    // #646: how many sessions each project has, for the project list's rows
+    // (one pass over the window's sessions); without it the rows show none.
+    void setSessionCountsProvider(std::function<QHash<QString, int>()> provider) { m_countsProvider = std::move(provider); refresh(); }
     // The kind of a folder: "Main checkout · main", "Worktree · feat/x",
     // "Clone · release/2.4", "Folder" (no Git), "Team folder · team/x/y";
     // `team` is set for a team member's own worktree or clone.
@@ -64,7 +67,14 @@ signals:
     void projectSessionsRequested(const QString &project);
 protected:
     void showEvent(QShowEvent *event) override;
+    bool eventFilter(QObject *watched, QEvent *event) override;
 private:
+    // #646: a click on the project's name renames it in place; Enter keeps
+    // the new name, Escape the old one.
+    void startRename();
+    void finishRename(bool save);
+    // The folder table as tall as its rows, the worktrees under it.
+    void fitFolders();
     struct FolderKind { QString text; bool team = false; };
     void showProject();
     // The Sessions rows and the folders' kinds again, from the fleet the page
@@ -127,7 +137,10 @@ private:
     QPushButton *m_color, *m_remove, *m_removeFolder, *m_editFolder, *m_openFolder, *m_newSession;
     // U25 part 7: the header, the three blocks and the sessions table.
     QLabel *m_headerIcon = nullptr, *m_headerName = nullptr, *m_summary = nullptr;
-    QPushButton *m_newTeam = nullptr;
+    QPushButton *m_newTeam = nullptr, *m_add = nullptr, *m_addFolder = nullptr;
+    int m_worktreeHeight = 0;
+    bool m_renaming = false;
+    std::function<QHash<QString, int>()> m_countsProvider;
     CollapsibleBlock *m_foldersBlock = nullptr, *m_sessionsBlock = nullptr, *m_rulesBlock = nullptr;
     QTableWidget *m_sessions = nullptr;
     QPushButton *m_allSessions = nullptr;

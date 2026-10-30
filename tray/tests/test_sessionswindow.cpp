@@ -15149,14 +15149,15 @@ void TestSessionsWindow::projectFolderNewSessionPrefillsExactTarget()
     const auto rowFor=[&](const QString &id){for(int row=0;row<table->rowCount();++row)if(table->item(row,0)->data(Qt::UserRole).toString()==id)return row;return -1;};
     QVERIFY(rowFor(localId)>=0);QVERIFY(rowFor(remoteId)>=0);
     QVERIFY(!create->isEnabled());table->setCurrentCell(rowFor(localId),0);QVERIFY(create->isEnabled());
-    // U25 part 7 (spec 7): Color… lives in the project header now; the
-    // default checkbox stays right under the project's name field.
-    auto *metadata=page->findChild<QLineEdit *>("projectName");auto *defaultProject=page->findChild<QCheckBox *>("defaultProject");
+    // U25 part 7 (spec 7), #646: Color… lives in the project header; the
+    // default checkbox stays right under the project's name.
+    auto *metadata=page->findChild<QLabel *>("projectHeaderName");auto *defaultProject=page->findChild<QCheckBox *>("defaultProject");
     for(int height:{760,1100}) {
         window.resize(1150,height);table->clearSelection();QTest::qWait(30);
         QVERIFY(defaultProject->mapTo(page,QPoint()).y()-metadata->mapTo(page,QPoint(0,metadata->height())).y()<45);
         const int full=table->height();table->setCurrentCell(rowFor(localId),0);QTest::qWait(30);QVERIFY(full>=table->height());
-        if(height==1100)QVERIFY(table->height()>230);
+        // #646: the table keeps its rows' height at every window height.
+        QCOMPARE(table->height(),table->horizontalHeader()->height()+table->rowCount()*table->verticalHeader()->defaultSectionSize()+8);
         // The folder actions under the table (Add folder moved to the Folders block's header).
         auto *folderActions=page->findChild<QPushButton *>("editProjectFolder");
         // The scrolling project lays out after the worktree panel shows: wait for it.

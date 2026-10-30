@@ -129,6 +129,38 @@ struct Registration {
     shared: Arc<Shared>,
     identity: Identity,
 }
+
+/// One transient request per greeted generation, independent of input-queue
+/// pressure. Closing the connection cancels it; it never follows a reconnect.
+#[derive(Default)]
+pub(crate) struct Resnapshot(Mutex<(u64, bool)>);
+impl Resnapshot {
+    fn lock(&self) -> MutexGuard<'_, (u64, bool)> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    pub fn open(&self, generation: u64) {
+        *self.lock() = (generation, false);
+    }
+    pub fn close(&self) {
+        *self.lock() = (0, false);
+    }
+    fn request(&self, generation: u64) -> bool {
+        let mut state = self.lock();
+        if generation == 0 || state.0 != generation || state.1 {
+            return false;
+        }
+        state.1 = true;
+        true
+    }
+    pub fn take(&self, generation: u64) -> bool {
+        let mut state = self.lock();
+        if state.0 != generation || !state.1 {
+            return false;
+        }
+        *state = (0, false);
+        true
+    }
+}
 impl Drop for Registration {
     fn drop(&mut self) {
         let mut state = self.shared.lock();
@@ -216,10 +248,13 @@ impl Sender {
         let endpoint = Endpoint {
             sender: self.clone(),
             identity,
+            resnapshot: Arc::default(),
         };
+        let resnapshot = endpoint.resnapshot.clone();
         let stream = stream::spawn_source(hgs, computer, timing, endpoint)?;
         Ok(Handle {
             stream,
+            resnapshot,
             _slot: slot,
         })
     }
@@ -275,6 +310,7 @@ impl Sender {
 /// cancellation never waits for an Ended event to fit in a full channel.
 pub struct Handle {
     stream: stream::StreamHandle,
+    resnapshot: Arc<Resnapshot>,
     _slot: Registration,
 }
 impl Handle {
@@ -284,6 +320,22 @@ impl Handle {
     pub fn reconnect(&self) -> bool {
         self.stream.reconnect()
     }
+    /// Ask the current greeted watch to reconnect for a complete snapshot.
+    /// Nonblocking and coalesced; false for stale/offline/already-pending work.
+    /// This transient request is cancelled if that generation ends meanwhile.
+    /// Keep consuming ingress while it closes; queued old frames retain their
+    /// original generation and must not restore coverage.
+    pub fn resnapshot(&self, generation: u64) -> bool {
+        if !self.resnapshot.request(generation) {
+            return false;
+        }
+        if self.stream.wake_source_resnapshot() {
+            true
+        } else {
+            self.resnapshot.close();
+            false
+        }
+    }
     pub fn stop(self) {
         drop(self);
     }
@@ -292,6 +344,7 @@ impl Handle {
 pub(crate) struct Endpoint {
     sender: Sender,
     identity: Identity,
+    pub resnapshot: Arc<Resnapshot>,
 }
 impl Endpoint {
     /// A descendant retaining a pipe must not create a leaked reader on every

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Private on-demand index protocol; no agents, desktop, services or live data."""
+from contextlib import closing
 import hashlib
 import json
 import os
@@ -75,7 +76,7 @@ class SearchIndex(unittest.TestCase):
         # The next pass catches a forgotten source even when it is not requested.
         binding.unlink()
         self.invoke("--index-step", dict(abi="content-search-index-v1", targets=[]))
-        with sqlite3.connect(index) as db:
+        with closing(sqlite3.connect(index)) as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 0)
             self.assertEqual(db.execute("SELECT SUM(active) FROM sources").fetchone()[0], 0)
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Read-only content search, isolated bindings/transcripts and no agent processes."""
+from contextlib import closing
 import hashlib
 import json
 import os
@@ -74,7 +75,7 @@ class ContentSearch(unittest.TestCase):
 
     def test_journal_and_provider_duplicate_are_one_public_message(self):
         record, _ = self.binding("codex/project", "Резервная копия успешно завершена")
-        with sqlite3.connect(self.state / "events.sqlite3") as db:
+        with closing(sqlite3.connect(self.state / "events.sqlite3")) as db, db:
             db.execute("CREATE TABLE events (seq INTEGER PRIMARY KEY, name TEXT, conversation TEXT, payload TEXT)")
             payload = dict(type="Stop", at=1767261601, detail="Резервная копия успешно…", agent_id="")
             db.execute("INSERT INTO events(name,conversation,payload) VALUES (?,?,?)",

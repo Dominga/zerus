@@ -154,6 +154,10 @@ fn execute(
     }
     ensure!(record.state == "prepared", "invalid revoke state");
     step(drain(), "drain_not_settled")?;
+    ensure!(
+        zerus_desktop_ledger::operations::totals(&store.db)?.undrained == 0,
+        Declined("operation_resources_not_drained")
+    );
     if let Some(marker) = marker {
         step(
             handoff::write_revoked(location, lock, &marker),
@@ -430,6 +434,94 @@ mod tests {
         assert_eq!(response(&f.location, &mut f.store, &command), result);
         assert_eq!(f.store.effect_status()["reason"], "manual_rollback");
     }
+    #[test]
+    fn undrained_operation_blocks_revocation_even_after_an_unknown_outcome() {
+        use zerus_desktop_ledger::operations;
+        let mut f = Fixture::new();
+        let marker = f.marker();
+        zerus_desktop_ledger::authorize(&mut f.store.db, &marker.writer_epoch, &f.epoch).unwrap();
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../client/fixtures/desktop-operation-port-v1.json"
+        ))
+        .unwrap();
+        let core_binding: zerus_client_core::operation_recovery::task_start::Binding =
+            serde_json::from_value(fixture["binding"].clone()).unwrap();
+        let raw = fixture["raw_record"].as_str().unwrap().as_bytes();
+        let input = fixture["retained_input"].as_str().unwrap().as_bytes();
+        // Cross-crate frozen schema/bytes are checked by the real G2 policy.
+        zerus_client_core::operation_recovery::task_start::Original::verify(
+            core_binding,
+            raw,
+            input,
+        )
+        .unwrap_or_else(|_| panic!("fixture policy refused"));
+        let binding: operations::Binding =
+            serde_json::from_value(fixture["binding"].clone()).unwrap();
+        let admitted = operations::admit(
+            &mut f.store.db,
+            &operations::Admission {
+                admission_id: "00000004-1111-4111-8111-111111111111",
+                binding: &binding,
+                raw_record: raw,
+                retained_input: input,
+                provenance: &Value::Null,
+                writer_epoch: &marker.writer_epoch,
+                service_epoch: &f.epoch,
+            },
+        )
+        .unwrap();
+        let ticket = operations::reserve(
+            &mut f.store.db,
+            &operations::Reserve {
+                operation_id: admitted.operation_id,
+                attempt_id: uuid::Uuid::new_v4().to_string(),
+                revision: 1,
+                writer_epoch: marker.writer_epoch.clone(),
+                service_epoch: f.epoch.clone(),
+                lease: uuid::Uuid::new_v4().to_string(),
+            },
+        )
+        .unwrap()
+        .attempt
+        .ticket;
+        operations::finish(
+            &mut f.store.db,
+            &ticket,
+            &operations::Outcome::Unknown {
+                reason: operations::Unknown::LostResult,
+            },
+        )
+        .unwrap();
+        let command = f.command();
+        assert!(execute(&f.location, &mut f.store, &command, None, || Ok(())).is_err());
+        assert_eq!(
+            record(&f.store, &command.request_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            "prepared"
+        );
+        assert_eq!(f.store.operation_status()["undrained"], 1);
+        let lock = f.location.handoff_lock().unwrap();
+        assert_eq!(
+            handoff::marker(&f.location, &lock).unwrap().unwrap().phase,
+            Phase::Complete
+        );
+        drop(lock);
+        // Storage guard simulation only; no child/reader runtime proof is
+        // claimed here. The executing actor must derive these from lifetimes.
+        operations::drained(
+            &mut f.store.db,
+            &ticket,
+            operations::VerifiedDrain::from_owned_resources(true, true, true, true).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            execute(&f.location, &mut f.store, &command, None, || Ok(())).unwrap()["revoked"],
+            true
+        );
+    }
+
     #[test]
     fn failed_drain_keeps_a_durable_pending_command_and_reconciles_after_reopen() {
         let mut f = Fixture::new();

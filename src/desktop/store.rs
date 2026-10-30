@@ -9,7 +9,7 @@ use std::{
 };
 use zerus_desktop_migration::{canonical, configuration, HANDOFF_LOCK};
 
-pub const SCHEMA: i64 = 6;
+pub const SCHEMA: i64 = 7;
 pub struct HandoffLock {
     _lock: platform::FileLock,
     root: PathBuf,
@@ -183,6 +183,7 @@ pub struct Store {
     pub generation: u64,
     recovery_error: bool,
     read_recovery_error: bool,
+    operation_recovery_error: bool,
     catalog_collection_error: bool,
 }
 impl Store {
@@ -264,6 +265,12 @@ impl Store {
             tx.execute_batch("PRAGMA user_version=6;")?;
             tx.commit()?;
         }
+        if version < 7 {
+            let tx = db.transaction()?;
+            zerus_desktop_ledger::operations::migrate(&tx)?;
+            tx.execute_batch("PRAGMA user_version=7;")?;
+            tx.commit()?;
+        }
         zerus_desktop_catalog::begin_service(&mut db, epoch)?;
         // No marker or previous policy re-enables a worker after restart.
         zerus_desktop_ledger::begin_service(&mut db, epoch)?;
@@ -274,6 +281,8 @@ impl Store {
             chrono::Utc::now().timestamp_millis(),
         )
         .is_err();
+        let operation_recovery_error =
+            zerus_desktop_ledger::operations::recover_batch(&mut db, epoch).is_err();
         let tx = db.transaction()?;
         tx.execute(
             "UPDATE service SET generation=generation+1, epoch=?1 WHERE id=1",
@@ -289,6 +298,7 @@ impl Store {
             generation,
             recovery_error: false,
             read_recovery_error,
+            operation_recovery_error,
             catalog_collection_error: false,
         })
     }
@@ -320,6 +330,18 @@ impl Store {
         status["recovery_error"] = self.read_recovery_error.into();
         status
     }
+    pub fn operation_status(&self) -> serde_json::Value {
+        match zerus_desktop_ledger::operations::totals(&self.db) {
+            Ok(totals) => {
+                serde_json::json!({"unsettled":totals.unsettled,"undrained":totals.undrained,
+                "admissions_paused":true,"recovery_error":self.operation_recovery_error})
+            }
+            Err(_) => {
+                serde_json::json!({"unsettled":null,"undrained":null,"admissions_paused":true,
+                "error":"operation_store_unavailable","recovery_error":self.operation_recovery_error})
+            }
+        }
+    }
     pub fn catalog_status(&self) -> serde_json::Value {
         match zerus_desktop_catalog::totals(&self.db) {
             Ok(totals) => serde_json::json!({
@@ -350,6 +372,8 @@ impl Store {
     }
     pub fn recover_effects(&mut self, epoch: &str) {
         self.recovery_error = zerus_desktop_ledger::recover_batch(&mut self.db, epoch).is_err();
+        self.operation_recovery_error =
+            zerus_desktop_ledger::operations::recover_batch(&mut self.db, epoch).is_err();
         self.read_recovery_error = zerus_desktop_ledger::reads::recover(
             &mut self.db,
             epoch,

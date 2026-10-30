@@ -307,7 +307,7 @@ private:
     // Spec D5: asks before resuming or restoring this selected session starts its
     // agent in a session host of another Windows session. False after Cancel, or
     // when the selection changed while the warning was open.
-    bool confirmLocalStart(const Entry &original);
+    bool confirmLocalStart(const Entry original);
     void terminateSession();
     void archiveSession();
     // Native lifecycle cleanup reports its result after Archive or Terminate.

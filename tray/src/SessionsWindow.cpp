@@ -5530,7 +5530,7 @@ void SessionsWindow::openSession()
         e->host.isEmpty() && e->session.attached && !e->session.clients.isEmpty() ? e->session.clients.first() : QString());
 }
 
-bool SessionsWindow::confirmLocalStart(const Entry &original)
+bool SessionsWindow::confirmLocalStart(const Entry original)
 {
     if (!LocalSessionHost::confirmLaunch(this, m_fleet.local(), original.host)) return false;
     const auto *e = selected();

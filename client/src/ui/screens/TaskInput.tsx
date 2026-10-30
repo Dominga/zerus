@@ -1,4 +1,5 @@
 import { descriptionEditing, setDescriptionEditing } from "../../store/taskStart";
+import { noteOnly, setNoteOnly, queuedTask, messageChoice, messageLabel, messagePlaceholder, messageDelivery } from "../../store/taskMessage";
 import { For, Show, createEffect, createMemo, on, onCleanup, onMount } from "solid-js";
 import { Icon } from "../lib/icons";
 import { taskEditor, type TaskEditorMode } from "../../store/taskEditor";
@@ -22,8 +23,8 @@ export function TaskInput(props: { project: string; task: Task; describing: bool
   const locked = () => !props.task.writable || !view() || taskEditor.locked();
   const text = () => view()?.text ?? "";
   const files = () => view()?.files ?? [];
-  const label = () => props.describing ? "Save description" : "Add to task";
-  const save = async (recover = false) => { if (locked()) return; if (await taskEditor.submit(recover) && alive) { props.saved(); queueMicrotask(() => editor.focus()); } };
+  const label = () => props.describing ? "Save description" : noteOnly() || queuedTask(props.task) ? "Add to task" : "Send feedback";
+  const save = async (recover = false) => { if (locked()) return; const delivery = !recover && !props.describing ? messageDelivery(props.task, noteOnly()) : undefined; if (await taskEditor.submit(recover, delivery) && alive) { props.saved(); queueMicrotask(() => editor.focus()); } };
   onMount(() => { onCleanup(onCommand("message.send", () => void save(), editor)); });
   const cursor = () => {
     const position = editor.selectionDirection === "backward" ? editor.selectionStart : editor.selectionEnd;
@@ -43,17 +44,17 @@ export function TaskInput(props: { project: string; task: Task; describing: bool
   };
   createEffect(() => { const paths = files().map((f) => f.path); paths.forEach(attachmentPin); onCleanup(() => paths.forEach(attachmentUnpin)); });
   return <div class="cmp-col"><div class="tv-composer-wrap"><div class="composer tv-composer" classList={{ disabled: locked(), describing: props.describing }}>
-    <div class="cmp-toolbar"><Show when={props.describing} fallback={<button class="tchip tv-mode" disabled={locked()} title="Save note only, no delivery" aria-haspopup="menu" onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); setMenu({ x: r.left, y: r.top, items: [{ label: "Save note only", checked: true }] }); }}><Icon name="file-text" size={12} /><span class="ell">Save note only, no delivery</span><Icon name="chevron-down" size={12} /></button>}>
+    <div class="cmp-toolbar"><Show when={props.describing} fallback={<button class="tchip tv-mode" disabled={locked() || !!view()?.recovery} title={messageLabel(props.task, noteOnly())} aria-haspopup="menu" onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); setMenu({ x: r.left, y: r.bottom + 4, items: [{ label: messageChoice(props.task), checked: !noteOnly(), action: () => setNoteOnly(false) }, { label: "Save note only", checked: noteOnly(), action: () => setNoteOnly(true) }] }); }}><Icon name={noteOnly() ? "file-text" : queuedTask(props.task) ? "clock" : "send"} size={12} /><span class="ell">{messageLabel(props.task, noteOnly())}</span><Icon name="chevron-down" size={12} /></button>}>
       <span class="tchip accent tv-mode" title="Save updates the canonical task document. Comments remain separate."><Icon name="pencil" size={12} />Editing description</span><button class="tchip" disabled={taskEditor.busy()} onClick={props.cancel}>Cancel</button>
     </Show><Show when={files().length}><button class="tchip" title="Attachments: preview, open or remove" onClick={(e) => fileMenu(e.currentTarget)}><Icon name="paperclip" size={12} />{files().length} attached<Icon name="chevron-down" size={12} /></button></Show>
       <Show when={view()?.recovery && !props.describing}><button class="tchip warn" title="Keep the previous comment in the task and check its delivery. It will not be sent again." disabled={locked()} onClick={() => void save(true)}><Icon name="rotate-ccw" size={12} />Recover saved comment</button></Show>
       <span class="grow" /><button class="tchip icon" title="Jump to the latest discussion" onClick={() => { const scroll = document.querySelector(".tv-scroll"); scroll?.scrollTo({ top: scroll.scrollHeight, behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth" }); }}><Icon name="chevrons-down" size={13} /></button>
     </div>
-    <textarea ref={editor} class="cmp-editor" aria-label={props.describing ? "Task description" : "Comment on this task"} placeholder={!props.task.writable ? "Update Zerus to comment on this task" : props.describing ? "Describe the task…" : "Write a note for this task…"} value={text()} readOnly={locked()} onInput={cursor}
+    <textarea ref={editor} class="cmp-editor" aria-label={props.describing ? "Task description" : "Comment on this task"} placeholder={!props.task.writable ? "Update Zerus to comment on this task" : props.describing ? "Describe the task…" : messagePlaceholder(props.task, noteOnly())} value={text()} readOnly={locked()} onInput={cursor}
       onSelect={() => { const v = view(); if (v && document.activeElement === editor && (v.position !== editor.selectionEnd || v.anchor !== editor.selectionStart)) cursor(); }} onBlur={() => void taskEditor.flush().catch(() => {})}
       onKeyDown={(e) => { if (!e.defaultPrevented && e.key === "Enter" && !e.shiftKey && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); void save(); } }} />
     <div class="cmp-actions"><button class="icon-btn cmp-attach" aria-label="Attach files" title="Attach files (up to 8 files, 10 MiB each, 20 MiB per task)" disabled={locked()} onClick={() => void taskEditor.pick().then(() => { if (alive) editor.focus(); })}><Icon name="paperclip" size={17} /></button><span class="cmp-status ell">{props.describing ? "Save updates the canonical task document. Comments remain separate." : ""}</span><span class="grow" />
-      <Show when={props.describing} fallback={<button class="btn primary tv-send" title={label()} aria-label={label()} disabled={locked() || (!text().trim() && !files().length) || !!view()?.recovery} onClick={() => void save()}><Icon name={taskEditor.busy() ? "loader-circle" : "plus"} size={14} /></button>}><button class="btn primary" disabled={locked()} onClick={() => void save()}>Save description</button></Show>
+      <Show when={props.describing} fallback={<button class="btn primary tv-send" title={label()} aria-label={label()} disabled={locked() || (!text().trim() && !files().length) || !!view()?.recovery} onClick={() => void save()}><Icon name={taskEditor.busy() ? "loader-circle" : noteOnly() || queuedTask(props.task) ? "plus" : "send"} size={14} /></button>}><button class="btn primary" disabled={locked()} onClick={() => void save()}>Save description</button></Show>
     </div>
   </div><Show when={taskEditor.error()}><div class="tv-note-error" role="alert">{taskEditor.error()}</div></Show>
     <Show when={props.describing && files().length}><div class="tv-draft-files"><For each={files()}>{(file) => <span class="att-chip"><Icon name={file.thumbnail ? "image" : "file-text"} size={13} />{file.reference} {file.name}</span>}</For></div></Show>

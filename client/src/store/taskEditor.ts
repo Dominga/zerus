@@ -4,6 +4,7 @@ import { notify } from "./actions";
 import { exitFlush } from "./exitFlush";
 import type { Fetched } from "../types";
 export type TaskEditorMode = "note" | "description";
+export interface TaskMessageDelivery { mode: "note" | "queue" | "send" | "reopen"; stage_at: number; dispatch_id: string }
 export interface TaskEditorTarget<M extends string = TaskEditorMode> { project: string; task: string; mode: M }
 export interface TaskEditorView<M extends string = TaskEditorMode> extends TaskEditorTarget<M> {
   handle: number; rev: number; text: string; position: number; anchor: number;
@@ -14,7 +15,7 @@ export interface TaskEditorPort<M extends string = TaskEditorMode> {
   edit(input: Pick<TaskEditorView<M>, "handle" | "rev" | "text" | "position" | "anchor">): Promise<TaskEditorView<M>>;
   pick(handle: number, start: number, end: number): Promise<TaskEditorView<M>>;
   remove(handle: number, index: number): Promise<TaskEditorView<M>>;
-  submit(handle: number, rev: number, recover: boolean): Promise<TaskEditorView<M>>;
+  submit(handle: number, rev: number, recover: boolean, delivery?: TaskMessageDelivery): Promise<TaskEditorView<M>>;
   discard?(handle: number, rev: number): Promise<TaskEditorView<M>>;
 }
 export function createTaskEditor<M extends string = TaskEditorMode>(port: TaskEditorPort<M>, report: (message: string) => void = () => {}) {
@@ -80,12 +81,12 @@ export function createTaskEditor<M extends string = TaskEditorMode>(port: TaskEd
     flush, pick: () => run((v) => port.pick(v.handle, Math.min(v.position, v.anchor), Math.max(v.position, v.anchor))),
     remove: (index: number) => run((v) => port.remove(v.handle, index)),
     discard: () => run((v) => port.discard ? port.discard(v.handle, v.rev) : Promise.reject(new Error("This draft cannot be discarded here."))),
-    submit: (recover = false) => run((v) => port.submit(v.handle, v.rev, recover)),
+    submit: (recover = false, delivery?: TaskMessageDelivery) => run((v) => delivery && !recover ? port.submit(v.handle, v.rev, false, delivery) : port.submit(v.handle, v.rev, recover)),
   };
 }
 export const taskEditor = createTaskEditor({
   open: (target) => bridge.taskEditorOpen(target), edit: (input) => bridge.taskEditorEdit(input),
   pick: (handle, start, end) => bridge.taskEditorPick(handle, start, end), remove: (handle, index) => bridge.taskEditorRemove(handle, index),
-  submit: (handle, rev, recover) => bridge.taskEditorSubmit(handle, rev, recover),
+  submit: (handle, rev, recover, delivery) => bridge.taskEditorSubmit(handle, rev, recover, delivery),
 }, (message) => notify("error", message));
 exitFlush.register(taskEditor.flushForExit);

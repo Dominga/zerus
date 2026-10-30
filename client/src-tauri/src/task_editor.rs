@@ -513,11 +513,23 @@ pub async fn task_editor_pick(
     .map_err(|e| e.to_string())?
 }
 
+#[cfg(test)]
 fn submitted(
     slot: &mut Slot,
     composers: &Composers,
     detail: Value,
     recover: bool,
+    call: &impl Fn(&TaskCall) -> Result<serde_json::Map<String, Value>, String>,
+) -> Result<bool, String> {
+    submitted_with_delivery(slot, composers, detail, recover, None, call)
+}
+
+fn submitted_with_delivery(
+    slot: &mut Slot,
+    composers: &Composers,
+    detail: Value,
+    recover: bool,
+    delivery: Option<&zerus_client_core::task_feedback::Delivery>,
     call: &impl Fn(&TaskCall) -> Result<serde_json::Map<String, Value>, String>,
 ) -> Result<bool, String> {
     if slot.blocked {
@@ -529,6 +541,14 @@ fn submitted(
     if slot.mode == Mode::Description && recover {
         return Err("Open this task's description to review the saved document.".into());
     }
+    let message_mode = if !recover && slot.mode == Mode::Note {
+        delivery
+            .map(|d| zerus_client_core::task_feedback::checked(&detail, d))
+            .transpose()?
+            .unwrap_or("note")
+    } else {
+        "note"
+    };
     let original = if slot.mode == Mode::Note {
         let pending = outbox::pending(store.root(), &slot.project, &slot.task)?;
         if !recover && pending.is_none() && (slot.stored.uncertain || slot.stored.sending) {
@@ -598,7 +618,7 @@ fn submitted(
                 let intent = tasks_write::message_intent(
                     &expected.text,
                     &expected.attachments,
-                    "note",
+                    message_mode,
                     detail["dispatch_id"].as_str().unwrap_or(""),
                 );
                 let reservation = outbox::reserve(
@@ -666,15 +686,22 @@ fn submitted(
     slot.error.clear();
     Ok(cleared)
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Submission {
+    handle: u64,
+    rev: u64,
+    recover: bool,
+    delivery: Option<zerus_client_core::task_feedback::Delivery>,
+}
+
 #[tauri::command]
 pub async fn task_editor_submit(
     writes: State<'_, crate::task_details::TaskWrites>,
     state: State<'_, TaskEditor>,
     composers: State<'_, Composers>,
     fetcher: State<'_, Arc<Fetcher>>,
-    handle: u64,
-    rev: u64,
-    recover: bool,
+    input: Submission,
 ) -> Result<View, String> {
     if crate::actions::blocked() {
         return Err(crate::screens::REPLAY_NEEDS_HGS.into());
@@ -684,6 +711,12 @@ pub async fn task_editor_submit(
     let editor = state.inner().clone();
     let composers = composers.inner().clone();
     let fetcher = Arc::clone(fetcher.inner());
+    let Submission {
+        handle,
+        rev,
+        recover,
+        delivery,
+    } = input;
     tauri::async_runtime::spawn_blocking(move || {
         let _write_permit = write_permit;
         let _permit = permit;
@@ -693,9 +726,14 @@ pub async fn task_editor_submit(
             .filter(|s| s.handle == handle && s.rev == rev)
             .ok_or(CHANGED)?;
         let result = document(&slot.project, &slot.task).and_then(|detail| {
-            submitted(slot, &composers, detail, recover, &|call| {
-                tasks_write::run(&zerus_client_core::default_hgs(), call)
-            })
+            submitted_with_delivery(
+                slot,
+                &composers,
+                detail,
+                recover,
+                delivery.as_ref(),
+                &|call| tasks_write::run(&zerus_client_core::default_hgs(), call),
+            )
         });
         let saved = match result {
             Ok(saved) => saved,
@@ -752,6 +790,103 @@ mod tests {
             .as_object()
             .unwrap()
             .clone()
+    }
+    #[test]
+    fn every_feedback_mode_reserves_once_and_recovers_only_its_original_intent() {
+        use zerus_client_core::task_feedback::Delivery;
+        for (stage, mode) in [
+            ("todo", "queue"),
+            ("backlog", "queue"),
+            ("active", "send"),
+            ("review", "reopen"),
+            ("done", "reopen"),
+            ("active", "note"),
+        ] {
+            let root = crate::composer::tests::dir(&format!("task-feedback-{stage}-{mode}"));
+            let store = crate::composer::tests::drafts(&root);
+            let (hub, _) = crate::composer::tests::hub_on(&store);
+            let mut slot = slot(Mode::Note);
+            let detail = json!({"uuid":ID,"project":"example","stage":stage,"stage_at":123,"dispatch_id":"original-dispatch","writable":true});
+            let delivery = Delivery {
+                mode: mode.into(),
+                stage_at: 123,
+                dispatch_id: "original-dispatch".into(),
+            };
+            assert!(submitted_with_delivery(
+                &mut slot,
+                &hub,
+                detail.clone(),
+                false,
+                Some(&delivery),
+                &|call| {
+                    let record = outbox::pending(store.root(), "example", ID)?.unwrap();
+                    assert_eq!(record["intent"]["mode"], mode);
+                    assert_eq!(record["intent"]["dispatch"], "original-dispatch");
+                    assert!(call.args.windows(2).any(|p| p == ["--mode", mode]));
+                    assert!(!call.args.iter().any(|s| s == "--recover-only"));
+                    Err("reply lost".into())
+                }
+            )
+            .is_err());
+            let original = outbox::pending(store.root(), "example", ID)
+                .unwrap()
+                .unwrap();
+            let mut changed = detail;
+            changed["stage_at"] = json!(456);
+            changed["dispatch_id"] = json!("later-dispatch");
+            let wrong = Delivery {
+                mode: "note".into(),
+                stage_at: 456,
+                dispatch_id: "later-dispatch".into(),
+            };
+            assert!(submitted_with_delivery(
+                &mut slot,
+                &hub,
+                changed,
+                true,
+                Some(&wrong),
+                &|call| {
+                    assert!(call.args.windows(2).any(|p| p == ["--mode", mode]));
+                    assert!(call
+                        .args
+                        .windows(2)
+                        .any(|p| p == ["--expect-dispatch", "original-dispatch"]));
+                    assert!(call.args.iter().any(|s| s == "--recover-only"));
+                    Ok(receipt(original["id"].as_str().unwrap()))
+                }
+            )
+            .unwrap());
+            assert!(outbox::pending(store.root(), "example", ID)
+                .unwrap()
+                .is_none());
+        }
+    }
+    #[test]
+    fn a_changed_feedback_snapshot_keeps_the_draft_before_reservation() {
+        use zerus_client_core::task_feedback::Delivery;
+        let root = crate::composer::tests::dir("task-feedback-stale");
+        let store = crate::composer::tests::drafts(&root);
+        let (hub, _) = crate::composer::tests::hub_on(&store);
+        let mut slot = slot(Mode::Note);
+        let detail = json!({"stage":"active","stage_at":124,"dispatch_id":"other","writable":true});
+        let delivery = Delivery {
+            mode: "send".into(),
+            stage_at: 123,
+            dispatch_id: "original".into(),
+        };
+        assert!(submitted_with_delivery(
+            &mut slot,
+            &hub,
+            detail,
+            false,
+            Some(&delivery),
+            &|_| panic!("stale feedback cannot call hgs")
+        )
+        .is_err());
+        assert_eq!(slot.stored.draft.text, "Original");
+        assert!(outbox::pending(store.root(), "example", ID)
+            .unwrap()
+            .is_none());
     }
     #[test]
     fn note_unknown_is_only_checked_by_original_request_and_never_resubmitted() {

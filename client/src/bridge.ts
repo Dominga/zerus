@@ -32,7 +32,7 @@ export const taskEditorOpen = (target: import("./store/taskEditor").TaskEditorTa
 export const taskEditorEdit = (input: Pick<import("./store/taskEditor").TaskEditorView, "handle" | "rev" | "text" | "position" | "anchor">) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_edit", { input });
 export const taskEditorPick = (handle: number, start: number, end: number) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_pick", { handle, start, end });
 export const taskEditorRemove = (handle: number, index: number) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_files", { handle, change: { kind: "remove", index } });
-export const taskEditorSubmit = (handle: number, rev: number, recover: boolean) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_submit", { handle, rev, recover });
+export const taskEditorSubmit = (handle: number, rev: number, recover: boolean, delivery?: import("./store/taskEditor").TaskMessageDelivery) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_submit", { input: { handle, rev, recover, delivery: delivery ?? null } });
 export const taskStartOpen = (project: string, task: string) => desktop<import("./store/taskStart").StartView>("task_start_open", { project, task });
 export const readTaskSettings = (project: string) => desktop<import("./store/taskSettings").TaskSettings>("task_settings", { project, changes: null });
 export const saveTaskSettings = (project: string, changes: Partial<import("./store/taskSettings").TaskSettings>) => desktop<import("./store/taskSettings").TaskSettings>("task_settings", { project, changes });

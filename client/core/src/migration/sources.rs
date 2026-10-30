@@ -17,6 +17,8 @@ mod approvals;
 pub use approvals::approval_policies;
 mod launches;
 pub use launches::{qt_executor_launches, qt_pending_launches};
+mod clones;
+pub use clones::qt_repository_clones;
 
 #[derive(Clone, Copy)]
 pub enum Origin {

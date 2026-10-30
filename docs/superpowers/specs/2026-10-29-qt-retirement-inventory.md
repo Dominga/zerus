@@ -384,7 +384,8 @@ private quarantine metadata and retries for failed families. Row density keeps
 Qt's bounded packed hashes, matches exact host/raw-command/archive/conversation
 identity and persists new choices without rereading a handled Qt family.
 `client/core::migration` supplies bounded staged evidence over the existing
-creation/read decoders and task forms/delivery records; original states and
+creation/read decoders, task forms/delivery records, Qt pending/executor launches
+and separate repository-clone checkpoints; original states and
 identities are preserved without replay. Its transport client streams to G1's
 selected publisher with exact capability/configuration checks, bounded pipes
 and source rechecks; it has no startup hook. The shared handoff contract lives
@@ -403,8 +404,8 @@ and the earlier run-memory seed never repeat. Legacy groups/pinned recovery,
 project vivid state and local Windows folders remain separate.
 
 Remaining source coverage includes `projectFolderSplit`,
-`removeWorktreeAfterTermination`, worktree snapshots, `pendingLaunches`,
-repository-clone pending state, `swarm/observed*`, `tray.conf`, task inspector
+`removeWorktreeAfterTermination`, worktree snapshots,
+`swarm/observed*`, `tray.conf`, task inspector
 geometry, `.zerus-files.json` and the rest of the interim stores listed below.
 Source discovery and production integration remain separate; adapters do not
 by themselves publish eligible evidence or transfer writer authority. The

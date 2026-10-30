@@ -248,8 +248,30 @@ truncates. Malformed identities, unsupported phases/shapes and partial sources
 cannot complete a family manifest. The caller still discovers only the existing
 source and freshly rechecks it under G1's current drain. These are Staged
 evidence adapters with no startup publication, status service, placement,
-launch, task delivery, release, settlement or replay authority. Separate clone,
-deferred, draft operation, download and cleanup sources remain uncovered.
+launch, task delivery, release, settlement or replay authority. Deferred,
+draft operation, download and cleanup sources remain uncovered.
+
+`qt_repository_clones(&QtSnapshot)` preserves the separate Qt
+`workspace/repositoryClone/<scope>/pending|previous|parent` namespace as
+`qt-repository-clones`, schema 1, using the existing Qt source format/hash.
+Qt's scope is lower-case hex of UTF-8 compact JSON `[hgs executable,host]`;
+the adapter decodes that original identity without choosing an executable or
+host, or claiming it belongs to the current service configuration. Private
+chunks have `{kind:"clone-header",present}` followed by
+`{entries:[{key,executable,host,kind,record}]}`. Pending/previous records reuse
+`repository::Pending` serde and the existing pure UUID, name and path checks;
+the original object and unknown fields survive. The remembered parent remains
+text. A previous record proves neither settlement nor that a clone stopped.
+
+The existing 16 MiB/50,000-entry source budget and 64-entry/1 MiB pages apply;
+each source item is bounded at 1 MiB before JSON allocation, and scope JSON at
+16 KiB. Unsupported scopes/suffixes, invalid/mismatched original identities or
+destinations, unsafe credential-bearing repository URLs and oversized records
+remain in the unchanged source without a final family record. Attach the fresh
+source recheck before publication. No live Clone, status, retirement, clone,
+checkout or launch call runs. Next keeps no separate pending-clone store: its
+actual clone operations are already in the covered creation journal. These
+adapters add no discovery, startup publication, consumer or execution authority.
 
 `approval_policies(&QtSnapshot, next_settings_bytes)` inspects both policy
 stores before returning either `qt-approval-policy` or `next-approval-policy`

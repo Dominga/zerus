@@ -628,6 +628,12 @@ void TeamConversation::setCards(QWidget *cards)
     v->insertWidget(v->indexOf(m_question), cards);
 }
 
+void TeamConversation::setBanner(QWidget *banner)
+{
+    // The banner hides itself, its margins included, while nothing waits.
+    static_cast<QVBoxLayout *>(layout())->insertWidget(0, banner);
+}
+
 void TeamConversation::setQuestionsShown(bool shown)
 {
     m_questionsShown = shown;

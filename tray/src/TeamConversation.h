@@ -48,6 +48,9 @@ public:
     // U57: cards the owner answers (the lead's proposals), right above the
     // question card and the composer; the conversation takes ownership.
     void setCards(QWidget *cards);
+    // U55: what waits for the owner, at the top above the messages; the
+    // conversation takes ownership.
+    void setBanner(QWidget *banner);
     QuestionCard *questionCard() const { return m_question; }
     // U25 (spec 11.1): the Team designer's chat. Before the first message the
     // intro and the composer stand in the middle; then the messages and the

@@ -55,6 +55,7 @@
 #include "TeamController.h"
 #include "TeamDesignerPage.h"
 #include "TeamWaitingPage.h"
+#include "TeamWaitingBanner.h"
 #include "TeamConversation.h"
 #include "AccountSwitch.h"
 #include "MessageComposer.h"
@@ -823,6 +824,7 @@ private slots:
     void phaseScrollDecisions();
     void sideListsAndMemberTasks();
     void waitingPageListsEveryKindAcrossTeams();
+    void waitingBannerFoldsOpensAndHides();
     void waitingPagePagesStayStableWhileItemsArrive();
     void waitingPageEmptyAndRefused();
     void stageColumnsAndChipsOnTheBoard();
@@ -3987,6 +3989,111 @@ QStringList waitingRowIds(QWidget *page)
 // U50: the rail page lists every kind of item that waits for the owner, from
 // several teams, newest first, each with its kind's icon and label and its
 // team; a row (or its Open team) opens that team. Shots in both themes.
+// U55: the banner: one waiting item is one line with its icon, title, team,
+// age and action; several fold into one line with a count that opens; it
+// hides when nothing waits; the feed reads only while active and notifies
+// once per item. Shots in both themes.
+void TestTeamsUi::waitingBannerFoldsOpensAndHides()
+{
+    QSettings().setValue("workspace/skin", "whitewh");
+    QSettings().remove(TeamWaitingNotices::kSetting);
+    const auto restore = qScopeGuard([] { QSettings().remove("workspace/skin"); QSettings().remove(TeamWaitingNotices::kSetting); darkPalette(); });
+    const double now = double(QDateTime::currentSecsSinceEpoch());
+    const auto items = waitingKinds(now);
+    QVERIFY(writeWaiting(script() + ".waiting", QJsonArray{items[1]}));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamWaitingFeed feed(&controller);
+    QStringList notified;
+    QObject::connect(&feed, &TeamWaitingFeed::notify, &feed, [&](const QString &token, const QString &, const QString &body) { notified << token + "|" + body; });
+    QWidget host; host.setObjectName("bannerHost");
+    auto *v = new QVBoxLayout(&host); v->setContentsMargins(0, 0, 0, 0);
+    auto *banner = new TeamWaitingBanner(&feed); banner->setDark(true);
+    QList<TeamWaitingPage::Item> opened; int all = 0;
+    banner->openItem = [&](const TeamWaitingPage::Item &item) { opened << item; };
+    banner->openAll = [&] { ++all; };
+    v->addWidget(banner); v->addStretch();
+    host.resize(760, 260); host.show();
+    // Nothing read yet: hidden, and the feed reads nothing while inactive.
+    QVERIFY(banner->isHidden());
+    QTest::qWait(50);
+    QVERIFY(calls(script(), "waiting").isEmpty());
+    feed.setActive(true);
+    // One item: its line with the kind's icon, title, team, age and action.
+    QTRY_VERIFY(!banner->isHidden() && banner->findChild<QWidget *>("teamWaitingBannerLine"));
+    auto *line = banner->findChild<QWidget *>("teamWaitingBannerLine");
+    QCOMPARE(line->property("itemId").toString(), QStringLiteral("team-1/phase_draft/2"));
+    QVERIFY(!line->findChild<QLabel *>("teamWaitingBannerIcon")->pixmap().isNull());
+    QCOMPARE(line->findChild<QLabel *>("teamWaitingBannerTitle")->text(), items[1].toObject()["title"].toString());
+    QCOMPARE(line->findChild<QLabel *>("teamWaitingBannerTeam")->text(), QStringLiteral("Checkout"));
+    QCOMPARE(line->findChild<QLabel *>("teamWaitingBannerAge")->text(), QStringLiteral("5 min ago"));
+    auto *action = line->findChild<QPushButton *>("teamWaitingBannerAction");
+    QCOMPARE(action->text(), QStringLiteral("Approve…"));
+    QVERIFY(!banner->findChild<QLabel *>("teamWaitingBannerCount"));
+    // Approve... opens the team at the item; nothing is approved from here.
+    action->click();
+    QCOMPARE(opened.size(), 1);
+    QCOMPARE(opened[0].phase, 2);
+    QCOMPARE(calls(script(), "approve-phase").size(), 0);
+    // One notification for it, with the team the click opens.
+    QCOMPARE(notified, QStringList{"zerus-team-attention:team-1:waiting:team-1/phase_draft/2|" + items[1].toObject()["title"].toString()});
+    shot(banner, "u55-banner-one-dark");
+    // Every kind: one line with the count and the newest, folded.
+    QVERIFY(writeWaiting(script() + ".waiting", items));
+    feed.refresh();
+    QTRY_VERIFY(banner->findChild<QLabel *>("teamWaitingBannerCount"));
+    QCOMPARE(banner->findChild<QLabel *>("teamWaitingBannerCount")->text(), QStringLiteral("7 wait for you"));
+    QCOMPARE(banner->property("count").toInt(), 7);
+    QCOMPARE(banner->findChild<QLabel *>("teamWaitingBannerNewest")->text(), items[0].toObject()["title"].toString());
+    QVERIFY(banner->findChildren<QWidget *>("teamWaitingBannerRow").isEmpty());
+    // The six new ones: two notifications and one line for the other four;
+    // the phase draft is not announced again.
+    QCOMPARE(notified.size(), 4);
+    QVERIFY(notified[3].endsWith("|4 more items wait for you"));
+    QVERIFY(std::none_of(notified.cbegin() + 1, notified.cend(), [](const QString &n) { return n.contains("phase_draft/2"); }));
+    shot(banner, "u55-banner-folded-dark");
+    // Show all: five rows, newest first, each with its action, and the list.
+    banner->findChild<QPushButton *>("teamWaitingBannerToggle")->click();
+    QTRY_COMPARE(banner->findChildren<QWidget *>("teamWaitingBannerRow").size(), TeamWaitingBanner::MaxRows);
+    QStringList ids, actions;
+    for (auto *row : banner->findChildren<QWidget *>("teamWaitingBannerRow")) {
+        ids << row->property("itemId").toString();
+        actions << row->findChild<QPushButton *>("teamWaitingBannerAction")->text();
+    }
+    QCOMPARE(ids, (QStringList{"team-plan/plan_draft/plan", "team-1/phase_draft/2", "team-3/permission_escalated/Tester",
+                               "team-2/owner_word_asked/proposal-p3", "team-2/report_escalated/4"}));
+    QCOMPARE(actions, (QStringList{"Approve…", "Approve…", "Open team", "Answer", "Accept…"}));
+    // No dots as separators: the rows keep their parts apart with space.
+    for (auto *label : banner->findChildren<QLabel *>()) QVERIFY2(label->text() != QStringLiteral("·"), "a dot separator");
+    auto *more = banner->findChild<QPushButton *>("teamWaitingBannerAll");
+    QVERIFY(more);
+    QCOMPARE(more->text(), QStringLiteral("Open the waiting list (7)"));
+    more->click();
+    QCOMPARE(all, 1);
+    shot(banner, "u55-banner-open-dark");
+    banner->setDark(false);
+    lightShot(banner, "u55-banner-open-light");
+    banner->findChild<QPushButton *>("teamWaitingBannerToggle")->click();
+    QTRY_VERIFY(banner->findChildren<QWidget *>("teamWaitingBannerRow").isEmpty());
+    lightShot(banner, "u55-banner-folded-light");
+    darkPalette(); banner->setDark(true);
+    // Read again: no notification repeats.
+    feed.refresh();
+    QTest::qWait(300);
+    QCOMPARE(notified.size(), 4);
+    // Nothing waits: the banner hides.
+    QVERIFY(writeWaiting(script() + ".waiting", QJsonArray{}));
+    feed.refresh();
+    QTRY_VERIFY(banner->isHidden());
+    // Inactive: no more reads.
+    feed.setActive(false);
+    const auto reads = calls(script(), "waiting").size();
+    QTest::qWait(100);
+    QCOMPARE(calls(script(), "waiting").size(), reads);
+    const auto inputs = calls(script(), "waiting");
+    QVERIFY(std::all_of(inputs.cbegin(), inputs.cend(), [](const QJsonObject &input) { return input["limit"].toInt() == TeamWaitingFeed::MaxItems; }));
+}
+
 void TestTeamsUi::waitingPageListsEveryKindAcrossTeams()
 {
     QSettings().setValue("workspace/skin", "whitewh");

@@ -17,6 +17,7 @@
 #include "TeamModel.h"
 #include "TeamPanel.h"
 #include "TeamStages.h"
+#include "TeamWaitingNotices.h"
 #include <QDir>
 #include <QFileInfo>
 #include <QFile>
@@ -148,6 +149,7 @@ private slots:
     void modelReadsTheTeamAndDerivesMemberStates();
     void modelReadsPhasesPinnedAndTheWaitingState();
     void cancelledWorkAndMoveTargets();
+    void waitingNoticesOncePerItemAndNeverTwiceWithAttention();
     void leftRunningMembersOfAFinishedTeam();
     void draftPhasesApproveInOrder();
     void phaseProgressShowsThePhaseInWorkAndThePhases();
@@ -293,6 +295,87 @@ void TestTeams::cancelledWorkAndMoveTargets()
     // A finished team moves nothing.
     auto done = team; done.status = "done";
     QVERIFY(moveTargets(done, 16).isEmpty());
+}
+
+// U55: one notification per waiting item the first time it waits; never
+// again while it waits; dropped once a whole read lacks it; at most 500 ids;
+// and with the N7 attention notices one notification per thing, whichever
+// of the two sees it first.
+void TestTeams::waitingNoticesOncePerItemAndNeverTwiceWithAttention()
+{
+    using Item = TeamWaitingNotices::Item;
+    const Item plan{"t-plan/plan_draft/plan", "t-plan", "Billing", "plan_draft", "Plan of 6 tasks waits for Approve & Run"};
+    const Item held{"team-1/task_waits_owner/7", "team-1", "Checkout", "task_waits_owner", "#7 Publish is held by you"};
+    TeamWaitingNotices notices;
+    auto fresh = notices.observe({plan, held}, {}, true);
+    QCOMPARE(fresh.size(), 2);
+    QCOMPARE(fresh[0].title, QStringLiteral("Waiting for you in Billing"));
+    QCOMPARE(fresh[0].body, plan.title);
+    QCOMPARE(fresh[0].token, QStringLiteral("zerus-team-attention:t-plan:waiting:t-plan/plan_draft/plan"));
+    QCOMPARE(TeamAttentionNotices::teamOf(fresh[0].token), QStringLiteral("t-plan"));   // a click opens the team
+    // The same items again, or a partial read without them: nothing.
+    QVERIFY(notices.observe({plan, held}, {}, true).isEmpty());
+    QVERIFY(notices.observe({}, {}, false).isEmpty());
+    QVERIFY(notices.known(plan.id) && notices.known(held.id));
+    // Remembered across a restart (QSettings).
+    notices.store();
+    QVERIFY(TeamWaitingNotices::stored().observe({plan, held}, {}, true).isEmpty());
+    // A complete read without #7 drops it; when it waits again later it is new.
+    QVERIFY(notices.observe({plan}, {}, true).isEmpty());
+    QVERIFY(!notices.known(held.id));
+    QCOMPARE(notices.observe({plan, held}, {}, true).size(), 1);
+    // Bounded: at most 500 ids, the oldest dropped first.
+    QStringList many; for (int i = 0; i < 520; ++i) many << QStringLiteral("t/x/%1").arg(i);
+    const TeamWaitingNotices bounded(many);
+    QCOMPARE(bounded.knownIds().size(), TeamWaitingNotices::Limit);
+    QVERIFY(!bounded.known("t/x/0") && bounded.known("t/x/519"));
+    // Five new at once: two of them and one line for the rest.
+    TeamWaitingNotices burst;
+    QList<Item> five; for (int i = 1; i <= 5; ++i) five.append({QStringLiteral("t/task_waits_owner/%1").arg(i), "t", "T", "task_waits_owner", QStringLiteral("#%1").arg(i)});
+    fresh = burst.observe(five, {}, true);
+    QCOMPARE(fresh.size(), 3);
+    QCOMPARE(fresh[2].body, QStringLiteral("3 more items wait for you"));
+    QVERIFY(burst.observe(five, {}, true).isEmpty());
+
+    // With the attention notices: a phase draft, a report and a permission.
+    auto json = checkout();
+    json["attention"] = QJsonArray{QJsonObject{{"kind", "phase_draft"}, {"phase", 2}, {"since", 100.0}},
+                                   QJsonObject{{"kind", "report"}, {"task", 2}, {"member", "Frontend"}, {"since", 200.0}},
+                                   QJsonObject{{"kind", "permission"}, {"member", "Tester"}, {"since", 300.0}}};
+    const QList<Team> withAttention{parse(json)};
+    const Item draft{"team-1/phase_draft/2", "team-1", "Checkout", "phase_draft", "Phase 2 waits"};
+    const Item report{"team-1/report_escalated/2", "team-1", "Checkout", "report_escalated", "Report on #2"};
+    const Item permission{"team-1/permission_escalated/Tester", "team-1", "Checkout", "permission_escalated", "Tester waits"};
+    const Item other{"team-1/report_escalated/9", "team-1", "Checkout", "report_escalated", "Report on #9"};
+    QCOMPARE(TeamWaitingNotices::waitingId(withAttention[0], withAttention[0].attention[1]), report.id);
+    // 1. The attention notice came first: the waiting item covered by it is
+    //    not announced, and the attention notices are not dropped.
+    TeamWaitingNotices first;
+    fresh = first.observe({draft, report, permission, other}, withAttention, true);
+    QCOMPARE(fresh.size(), 1);
+    QCOMPARE(fresh[0].body, other.title);
+    TeamAttentionNotices attention;
+    auto changes = attention.observe(withAttention);
+    QCOMPARE(changes.raised.size(), 3);
+    // 2. The waiting item came first, the attention item later: the attention
+    //    notice for it is dropped, the one for an item not seen here stays.
+    auto json2 = checkout();
+    const QList<Team> without{parse(json2)};
+    TeamWaitingNotices second;
+    QCOMPARE(second.observe({draft, report}, without, true).size(), 2);
+    const auto skip = second.suppressed(withAttention);
+    QCOMPARE(skip.size(), 2);
+    QVERIFY(skip.contains(TeamAttentionNotices::token(withAttention[0], withAttention[0].attention[0])));
+    QVERIFY(skip.contains(TeamAttentionNotices::token(withAttention[0], withAttention[0].attention[1])));
+    QVERIFY(!skip.contains(TeamAttentionNotices::token(withAttention[0], withAttention[0].attention[2])));
+    // dropAnnounced reads the stored ids, as the window and the tray watch do.
+    second.store();
+    TeamAttentionNotices later;
+    changes = later.observe(withAttention);
+    TeamWaitingNotices::dropAnnounced(changes, withAttention);
+    QCOMPARE(changes.raised.size(), 1);
+    QVERIFY(changes.raised[0].token.contains(":permission:"));
+    QSettings().remove(TeamWaitingNotices::kSetting);
 }
 
 void TestTeams::modelReadsPhasesPinnedAndTheWaitingState()

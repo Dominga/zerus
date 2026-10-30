@@ -51,6 +51,9 @@ public:
     QWidget *headerStatus() const { return m_headerStatus; }
     QWidget *headerActions() const { return m_headerActions; }
     void takeHeader();
+    // U55: what waits for the owner, above the lead's conversation (the
+    // window's banner, TeamWaitingBanner); the conversation takes it.
+    void setWaitingBanner(QWidget *banner);
     // Off while the shown session is not the team's lead (or the team is archived).
     void setHeaderShown(bool shown);
     // "Phase N waits for you": opens the Team tab with that phase unfolded.

@@ -109,6 +109,8 @@
 #include "TeamPanel.h"    // N7: the leftover Stop lives in the Team tab
 #include "TeamNewTab.h"   // WhiteWh fork: agent teams
 #include "TeamWidgets.h"
+#include "TeamConversation.h"   // U55: the banner above the lead's conversation
+#include "TeamWaitingBanner.h"
 #include <QToolBar>
 #include <QTimer>
 #include <QFileInfo>
@@ -305,6 +307,7 @@ private slots:
     void socratiCodeIsAnOptionalExtension();
     void subordinateSessionsFollowTheirLead();
     void agentTeamsGroupTheirSessions();
+    void waitingBannersShowInTheChatAndTheTeamView();
     void teamTreeShowsSubteamsAndRollsUp();
     void teamMembersFollowTheirSubLead_data();
     void teamMembersFollowTheirSubLead();
@@ -861,6 +864,78 @@ void TestSessionsWindow::subordinateSessionsFollowTheirLead()
     QTRY_VERIFY(SessionLeads::lead(identities.last()).isEmpty());
     QTRY_VERIFY(!list->item(rowOf(identities.last()))->data(SessionRoles::Subordinate).toBool());
     QTRY_VERIFY(panel->findChild<QComboBox *>("sessionLeadChoice"));
+}
+
+// U55: what waits for the owner shows as a banner at the top of the session's
+// chat and Activity and above the lead's conversation in the Team tab; each
+// thing raises one notification, whether the attention list or the waiting
+// list sees it first, and a read again raises nothing.
+void TestSessionsWindow::waitingBannersShowInTheChatAndTheTeamView()
+{
+    const auto clean = [] { for (const char *key : {"teams/waitingNotified", "teams/attentionNotified"}) QSettings().remove(QLatin1String(key)); };
+    clean();
+    const auto restore = qScopeGuard(clean);
+    QFile original(script()); QVERIFY(original.open(QIODevice::ReadOnly));
+    const double now = double(QDateTime::currentSecsSinceEpoch());
+    const QJsonObject team{{"id", "team-1"}, {"name", "Checkout"}, {"status", "running"}, {"lead", "lead"}, {"revision", 3},
+        {"members", QJsonArray{QJsonObject{{"id", "lead"}, {"role", "Lead"}, {"agent", "codex"}, {"state", "active"},
+                                           {"session", QJsonObject{{"host", ""}, {"name", "codex/hgs/dashboard"}}}},
+                               QJsonObject{{"id", "qa"}, {"role", "Tester"}, {"agent", "kimi"}, {"state", "active"}}}},
+        {"tasks", QJsonArray{QJsonObject{{"id", 2}, {"title", "Tests"}, {"status", "submitted"}, {"assignee", "qa"}}}},
+        {"attention", QJsonArray{QJsonObject{{"kind", "report"}, {"task", 2}, {"member", "Tester"}, {"since", now - 600}, {"minutes", 10}}}}};
+    const QJsonArray waiting{
+        QJsonObject{{"id", "team-1/report_escalated/2"}, {"team", "team-1"}, {"team_name", "Checkout"}, {"kind", "report_escalated"},
+                    {"title", "Report on #2 Tests from Tester waits for your decision"}, {"since", now - 600}, {"action", "decide_report"}, {"task", 2}},
+        QJsonObject{{"id", "team-9/plan_draft/plan"}, {"team", "team-9"}, {"team_name", "Billing"}, {"kind", "plan_draft"},
+                    {"title", "Plan of 4 tasks waits for Approve & Run"}, {"since", now - 60}, {"action", "approve_plan"}}};
+    const auto compact = [](const QJsonValue &value) {
+        return FakeCli::pythonString(QString::fromUtf8(value.isArray() ? QJsonDocument(value.toArray()).toJson(QJsonDocument::Compact)
+                                                                        : QJsonDocument(value.toObject()).toJson(QJsonDocument::Compact)));
+    };
+    const QByteArray answer = "elif c=='team' and a[1:2]==['list']:print(" + compact(QJsonObject{{"items", QJsonArray{team}}}) + ")\n"
+                              "elif c=='team' and a[1:2]==['waiting']:print(json.dumps({'items':json.loads(" + compact(waiting) + "),'next':None,'total':2}))\n"
+                              "elif c=='team':print('{}')\n";
+    const QString fixture = m_dir->filePath("hgs-waiting");
+    QVERIFY(FakeCli::install(fixture, original.readAll().replace("if False:pass\n", "if False:pass\n" + answer)));
+    SessionsWindow window(FakeCli::program(fixture)); window.resize(1280, 760);
+    QSignalSpy raised(&window, &SessionsWindow::teamAttentionRaised);
+    window.setFleet(fleet()); window.show();
+    auto *chat = dynamic_cast<TeamWaitingBanner *>(window.findChild<QWidget *>("sessionWaitingBanner"));
+    auto *teamView = dynamic_cast<TeamWaitingBanner *>(window.findChild<QWidget *>("workspaceWaitingBanner"));
+    QVERIFY(chat && teamView);
+    // At the top of the chat: above the team strip and the Activity view.
+    auto *activity = window.findChild<QWidget *>("mainActivity");
+    QVERIFY(activity);
+    auto *page = activity->parentWidget();
+    QVERIFY(page->isAncestorOf(chat));
+    auto *pageLayout = static_cast<QVBoxLayout *>(page->layout());
+    QCOMPARE(pageLayout->indexOf(chat->parentWidget()), 0);
+    QVERIFY(pageLayout->indexOf(chat->parentWidget()) < pageLayout->indexOf(activity));
+    // Above the lead's conversation in the Team tab.
+    auto *conversation = dynamic_cast<TeamConversation *>(teamView->parentWidget());
+    QVERIFY(conversation);
+    QCOMPARE(static_cast<QVBoxLayout *>(conversation->layout())->indexOf(teamView), 0);
+    // Both list the two items, folded, with the count.
+    QTRY_VERIFY(!chat->isHidden() && chat->property("count").toInt() == 2);
+    QCOMPARE(teamView->property("count").toInt(), 2);
+    QCOMPARE(chat->findChild<QLabel *>("teamWaitingBannerCount")->text(), QStringLiteral("2 wait for you"));
+    QVERIFY(teamView->findChild<QLabel *>("teamWaitingBannerCount"));
+    // One notification per thing once both lists are read: the report (from
+    // whichever list saw it first) and the plan; never both for the report.
+    auto *controller = window.findChild<TeamController *>();
+    QTRY_VERIFY(controller->teams().size() == 1);
+    QTRY_COMPARE(raised.size(), 2);
+    const auto tokens = [&] { QStringList found; for (const auto &args : raised) found << args.at(0).toString(); return found; };
+    QCOMPARE(tokens().filter("report").size(), 1);   // ":report:" (attention) or "report_escalated" (waiting)
+    QCOMPARE(tokens().filter("plan_draft").size(), 1);
+    // Read again: nothing repeats.
+    window.findChild<TeamWaitingFeed *>()->refresh();
+    controller->refresh();
+    QTest::qWait(600);
+    QCOMPARE(raised.size(), 2);
+    // Show all lists both, newest first.
+    chat->findChild<QPushButton *>("teamWaitingBannerToggle")->click();
+    QTRY_COMPARE(chat->findChildren<QWidget *>("teamWaitingBannerRow").size(), 2);
 }
 
 // WhiteWh fork: agent teams. A team's header stands above its lead, its

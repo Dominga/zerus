@@ -46,6 +46,7 @@
 #include "TeamProposalCard.h"
 #include "TeamDesignerPage.h"
 #include "TeamWaitingPage.h"
+#include "TeamWaitingBanner.h"
 #include "TeamNewTab.h"
 #include <memory>
 #include "Extensions.h"
@@ -784,6 +785,10 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     };
     auto *activityPage = new QWidget; auto *activityLayout = new QVBoxLayout(activityPage);
     activityLayout->setContentsMargins(0, 0, 0, 0); activityLayout->setSpacing(0);
+    // U55: what waits for the owner, at the top of the chat (filled with the teams).
+    m_waitingHost=new QWidget;m_waitingHost->setObjectName("waitingBannerHost");
+    {auto *host=new QVBoxLayout(m_waitingHost);host->setContentsMargins(0,0,0,0);host->setSpacing(0);}
+    activityLayout->addWidget(m_waitingHost);
     // WhiteWh fork: agent teams. A member session names its team and task here.
     m_teamStrip=new QFrame;m_teamStrip->setObjectName("teamStrip");m_teamStrip->hide();
     {auto *strip=new QHBoxLayout(m_teamStrip);strip->setContentsMargins(10,4,8,4);strip->setSpacing(8);
@@ -1749,6 +1754,16 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_titleRow->insertWidget(1,m_teamWorkspace->headerStatus());
     m_chipsRow->addWidget(m_teamWorkspace->headerActions());
     m_teamWorkspace->openWorkspace=[this]{if(m_teamPanel->openWorkspace)m_teamPanel->openWorkspace();};
+    // U55: one feed for both banners; it reads while the window shows.
+    m_waitingFeed=new TeamWaitingFeed(m_teams,this);
+    connect(m_waitingFeed,&TeamWaitingFeed::notify,this,[this](const QString &token,const QString &title,const QString &body){emit teamAttentionRaised(token,title,body);});
+    for(auto **banner:{&m_waitingBanner,&m_teamWaitingBanner}){
+        *banner=new TeamWaitingBanner(m_waitingFeed);
+        (*banner)->openItem=[this](const TeamWaitingPage::Item &item){openWaitingItem(item.team,item.kind,item.phase,item.task);};
+        (*banner)->openAll=[this]{showTeamWaiting();};
+    }
+    m_waitingBanner->setObjectName("sessionWaitingBanner");m_waitingHost->layout()->addWidget(m_waitingBanner);
+    m_teamWaitingBanner->setObjectName("workspaceWaitingBanner");m_teamWorkspace->setWaitingBanner(m_teamWaitingBanner);
     // The tab exists only while a team is shown.
     m_teamWorkspace->hide();
     m_teamNewTab=new QWidget(this);m_teamNewTab->setObjectName("teamNewTab");
@@ -1770,9 +1785,11 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         if(members!=m_teamMembers){m_teamMembers=members;m_fleet.setTeamMembers(members);emit teamMembersChanged(members);}
         rebuild();updateTeamPanel();
         if(!m_pendingTeamAttention.isEmpty()&&m_teams->team(TeamAttentionNotices::teamOf(m_pendingTeamAttention)))showTeamAttention(m_pendingTeamAttention);
-        const auto changes=m_teamNotices->observe(m_teams->teams());
+        auto changes=m_teamNotices->observe(m_teams->teams());
         if(changes.raised.isEmpty()&&changes.cleared.isEmpty())return;
         QSettings().setValue("teams/attentionNotified",m_teamNotices->known());
+        // U55: a thing the waiting banner announced already is not announced twice.
+        TeamWaitingNotices::dropAnnounced(changes,m_teams->teams());
         for(const auto &token:changes.cleared)emit teamAttentionCleared(token);
         for(const auto &notice:changes.raised)emit teamAttentionRaised(notice.token,notice.title,notice.body);
     });
@@ -2522,6 +2539,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         const int interval=background?ProcessSettings::backgroundMs():m_detailTabs->currentWidget()==m_processes?ProcessSettings::activeMs():m_activityPollMs;
         if(!m_inspectionAge.isValid() || m_inspectionAge.elapsed()>=interval)inspect();
         if (m_teams) m_teams->setActive(isVisible());   // WhiteWh fork: agent teams poll while shown
+        if (m_waitingFeed) m_waitingFeed->setActive(isVisible());   // U55: so does what waits for the owner
         if (++m_tick % 10 == 0) {
             emit refreshRequested();
             updateGitWatch();
@@ -2828,6 +2846,7 @@ void SessionsWindow::applyTheme()
     if (m_teamWorkspace) m_teamWorkspace->setTheme(m_dark);
     if (m_teamDesignerPage) m_teamDesignerPage->setDark(m_dark);
     if (m_teamWaitingPage) m_teamWaitingPage->setDark(m_dark);
+    for (auto *banner : {m_waitingBanner, m_teamWaitingBanner}) if (banner) banner->setDark(m_dark);
     if (m_teamNewForm) m_teamNewForm->setDark(m_dark);
     m_processes->setTheme(m_dark);
     m_tasks->setTheme(m_dark); m_taskInspector->setTheme(m_dark);
@@ -7633,6 +7652,16 @@ void SessionsWindow::showTeamWaiting()
     }
     m_pages->setCurrentWidget(m_teamWaitingPage);
     m_teamWaitingNav->setChecked(true);
+}
+// U55: a banner's button opens the team at its item: a draft phase unfolded,
+// a task's card; the owner decides there with the usual confirmations.
+void SessionsWindow::openWaitingItem(const QString &team,const QString &kind,int phase,int task)
+{
+    if(!m_teams||team.isEmpty())return;
+    m_pages->setCurrentIndex(0);showTeam(team);
+    if(m_teamPanel&&m_teamPanel->openWorkspace)m_teamPanel->openWorkspace();
+    if(phase>0&&kind=="phase_draft"&&m_teamWorkspace)m_teamWorkspace->showPhase(phase);
+    else if(task>0&&m_teamPanel)m_teamPanel->openTask(task);
 }
 void SessionsWindow::startTeamDesigner(const QString &folder,const QString &goal,const QJsonObject &agent)
 {

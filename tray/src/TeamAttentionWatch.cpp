@@ -1,5 +1,6 @@
 #include "TeamAttentionWatch.h"
 #include "TeamAttentionNotices.h"
+#include "TeamWaitingNotices.h"
 #include "TeamController.h"
 #include <QSettings>
 
@@ -27,9 +28,11 @@ void TeamAttentionWatch::observe()
 {
     // An answer that arrives after the window took over is not ours.
     if (!m_notices) return;
-    const auto changes = m_notices->observe(m_teams->teams());
+    auto changes = m_notices->observe(m_teams->teams());
     if (changes.raised.isEmpty() && changes.cleared.isEmpty()) return;
     QSettings().setValue("teams/attentionNotified", m_notices->known());
+    // U55: a thing the waiting banner announced already is not announced twice.
+    TeamWaitingNotices::dropAnnounced(changes, m_teams->teams());
     for (const auto &token : changes.cleared) emit cleared(token);
     for (const auto &notice : changes.raised) emit raised(notice.token, notice.title, notice.body);
 }

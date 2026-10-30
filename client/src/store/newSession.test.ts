@@ -987,3 +987,28 @@ describe("what the dialog view reads (Task 3)", () => {
     expect(t.world.count("newSessionContext")).toBe(1);
   });
 });
+
+
+describe("task executor admission", () => {
+  const task = { project: "alpha", task: "11111111-1111-4111-8111-111111111111", stage_at: 123, assignment: { kind: "new_session", machine: "node-parent", session_id: "run_id:parent", name: "" }, target: { computer: "", name: "codex/example/parent", run_id: "parent", conversation_id: "conversation" }, catalog_key: "run:parent", session_id: "run_id:parent" };
+  it("opening and cancelling reserves nothing; explicit Start carries the original task context once", async () => {
+    const t = setup((w) => { w.projects = [project("alpha", "Example")]; });
+    await t.open({ agent: "codex", path: "/workspace/example", project: "alpha", task });
+    expect(t.world.creating()).toEqual([]);
+    t.store.closeNewSession(); expect(t.world.creating()).toEqual([]);
+    await t.open({ agent: "codex", path: "/workspace/example", project: "alpha", task });
+    await t.start(); await t.start();
+    expect(t.world.count("creationSubmit")).toBe(0);
+    expect(t.world.of("taskExecutorSubmit")).toHaveLength(1);
+    expect(t.world.of("taskExecutorSubmit")[0].args[0]).toMatchObject({ ...task, plan: { cmd: "codex" } });
+    expect(t.world.admitted).toEqual(["creation-1"]);
+  });
+  it("retains an unknown task launch without submitting it again", async () => {
+    const t = setup((w) => { w.admission = new Error("Task launch reply lost"); w.projects = [project("alpha", "Example")]; });
+    await t.open({ agent: "codex", path: "/workspace/example", project: "alpha", task });
+    await t.start(); await t.start();
+    expect(t.world.count("taskExecutorSubmit")).toBe(1);
+    expect(t.world.count("creationSubmit")).toBe(0);
+    expect(t.state()).toMatchObject({ submitted: true, error: "Task launch reply lost" });
+  });
+});

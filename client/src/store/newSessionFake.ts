@@ -16,7 +16,7 @@ export type Json = Record<string, unknown>;
 export interface Call { command: string; args: unknown[] }
 
 /** Commands that create or change something; opening, choosing and reading send none of them. */
-export const CREATING = ["creationSubmit", "createWorktree", "createDirectory", "openCodeStart", "openCodeFavorite"];
+export const CREATING = ["creationSubmit", "taskExecutorSubmit", "createWorktree", "createDirectory", "openCodeStart", "openCodeFavorite"];
 
 export const NOT_LOADED: LaunchAccounts = { loaded: false, error: null, profiles: [], groups: [] };
 
@@ -248,6 +248,13 @@ export function bridgeOf(world: World): NewSessionBridge {
       await world.wait(`folders:${project}`);
       if (failure) throw failure;
       return listed;
+    },
+    taskExecutorSubmit: async (input) => {
+      record("taskExecutorSubmit", input);
+      const admission = world.admission;
+      await world.wait("submit");
+      if (admission instanceof Error) throw admission.message;
+      return admission;
     },
     creationSubmit: async (plan) => {
       record("creationSubmit", plan);

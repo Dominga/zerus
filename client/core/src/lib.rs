@@ -64,6 +64,7 @@ pub mod swarm;
 pub mod task_board;
 pub mod task_cancel;
 pub mod task_details;
+pub mod task_executor;
 pub mod task_feedback;
 pub mod task_settings;
 pub mod task_start;

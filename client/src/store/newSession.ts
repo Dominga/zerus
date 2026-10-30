@@ -37,6 +37,7 @@ import { snapshotOf } from "../ui/sessions/actions-ui";
 
 /** What New session is opened with (`showNewSession`'s arguments). */
 export interface NewSessionOptions {
+  task?: import("./taskExecutors").TaskLaunchContext;
   agent?: string;
   /** A project id or name: it wins, and only it makes the project explicit (2921). */
   project?: string;
@@ -56,7 +57,7 @@ export interface NewSessionOptions {
 export type NewSessionBridge = Pick<typeof bridge,
   | "newSessionContext" | "newSessionForm" | "newSessionStart" | "newSessionPlan" | "launchWarning" | "repositoryFields" | "worktreeSnapshot"
   | "worktreeCatalog" | "pickLocalFolder" | "localFolderExists" | "openCodeModels" | "openCodeFavorite" | "openCodeStart" | "launchAccounts"
-  | "launchAccountRows" | "launchAccountsClose" | "onLaunchAccountsChanged" | "creationSubmit" | "projectFolders">;
+  | "launchAccountRows" | "launchAccountsClose" | "onLaunchAccountsChanged" | "creationSubmit" | "taskExecutorSubmit" | "projectFolders">;
 
 export interface NewSessionDeps {
   bridge: NewSessionBridge;
@@ -231,7 +232,7 @@ interface Leave {
 }
 
 /** One open dialog: Qt's NewSessionDialog members and slots. */
-function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { host: string; agent: string; project: string }, emit: () => void, leave: Leave) {
+function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { host: string; agent: string; project: string; task?: import("./taskExecutors").TaskLaunchContext }, emit: () => void, leave: Leave) {
   const b = deps.bridge;
   let closed = false;
   let ticket = 0;
@@ -925,7 +926,7 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
       if (closed) return undefined;
       let admission: CreationAdmission;
       try {
-        admission = await b.creationSubmit(plan);
+        admission = init.task ? await b.taskExecutorSubmit({ ...init.task, plan }) : await b.creationSubmit(plan);
       } catch (failure) {
         // A lost call is an unknown outcome: it stays submitted, and nothing sends it again.
         if (!closed) { setError(errorText(failure)); updateForm(); }
@@ -1131,7 +1132,7 @@ export function createNewSessionStore(deps: NewSessionDeps, launches: FolderLaun
       const computer = context ? context.row.computer : options.computer ?? selectedHostTarget();
       const started = await deps.bridge.newSessionContext();
       launches.setBuildStyle(started.build_style);
-      const open = createDialog(deps, started, { host: computer, agent: options.agent ?? "", project: launchProject }, emit, {
+      const open = createDialog(deps, started, { host: computer, agent: options.agent ?? "", project: launchProject, task: options.task }, emit, {
         folders: (project) => { closeNewSession(); deps.openProjects(project); },
         machines: () => { closeNewSession(); deps.openMachines(); },
       });

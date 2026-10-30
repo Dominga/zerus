@@ -18,6 +18,8 @@ use std::time::{Duration, Instant};
 /// Incremental listing decode for the future raw source adapter. The existing
 /// GUI runner and polling schedule retain their current behavior.
 pub mod listing;
+/// Ephemeral private staging for the future raw legacy source adapter.
+pub mod spool;
 
 /// How often a computer's listing is read.
 pub const LISTING: Duration = Duration::from_secs(60);

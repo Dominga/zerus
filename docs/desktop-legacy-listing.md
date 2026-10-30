@@ -33,8 +33,33 @@ stop flag and deadline; a blocked OS read cannot be interrupted by a flag alone.
 The existing bounded decoder meets those input requirements.
 
 This is an execution primitive, not a source admission or polling schedule.
-Service registration, private spool creation and raw legacy supervisor wiring
-are still separate work, and the service remains passive.
+Service registration, host private-file creation and raw legacy supervisor
+wiring are still separate work, and the service remains passive.
+
+The additive legacy::spool primitive supplies ephemeral staging. The host
+creates one shared Pool per source configuration and reserves before creating
+a file or spawning a child. At most two reservations each charge 32 MiB; both
+input and encoded file bytes have their own 32 MiB limits. The reservation
+survives decoding, completed-spool retention and replay, including a blocked
+reader after a failed child deadline. There is no per-session offset or key map.
+
+Storage is a new empty private ephemeral object supplied through the host's
+existing private-file helpers, with deletion on drop or an already unlinked
+file. The primitive opens/deletes no paths and never truncates a nonempty
+object. It serializes bounded pages with lengths and SHA-256 checks, retaining
+only one page/current row and bounded metadata. Replay consumes the spool once,
+verifies lengths, page hashes, aggregate digest/counts and actual EOF, and never
+loads the whole file. Its callbacks remain provisional until replay succeeds;
+any failure must abandon the indexed staging and preserve the previous view.
+Do not mark a replay callback as a final snapshot page: publish completion
+only after replay returns successfully.
+The caller supplies an observation time captured before child spawn; decoding
+and replay never renew it.
+
+With a child, return the staged spool from run_decoded and publish only after
+the runner succeeds. This ephemeral listing spool is separate from G3 import
+evidence and grants no source freshness or writer authority. Whole-service RSS,
+physical disk behavior and runtime source admission still need qualification.
 
 The decoder retains one page, one current row and bounded metadata. Pages target
 512 KiB and at most 128 rows. A larger legal singleton fits the existing 1 MiB

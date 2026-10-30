@@ -127,17 +127,22 @@ sys.exit(subprocess.run(['sh', '-c', command], input=data).returncode)
             found, pending = set(), [manifest]
             while pending:
                 current = pending.pop()
-                for spec in tomllib.loads(current.read_text()).get('dependencies', {}).values():
-                    if not isinstance(spec, dict) or 'path' not in spec:
-                        continue
-                    crate = (current.parent / spec['path']).resolve().relative_to(REPO)
-                    if crate.parts[0] == 'crates' and crate not in found:
-                        found.add(crate)
-                        pending.append(REPO / crate / 'Cargo.toml')
+                manifest = tomllib.loads(current.read_text())
+                owners = [manifest, *manifest.get('target', {}).values()]
+                for owner in owners:
+                    for group in ('dependencies', 'build-dependencies'):
+                        for spec in owner.get(group, {}).values():
+                            if not isinstance(spec, dict) or 'path' not in spec:
+                                continue
+                            crate = (current.parent / spec['path']).resolve().relative_to(REPO)
+                            if crate not in found:
+                                found.add(crate)
+                                pending.append(REPO / crate / 'Cargo.toml')
             return found
         cli = closure(REPO / 'Cargo.toml')
         client = closure(REPO / 'client/core/Cargo.toml') | closure(REPO / 'client/src-tauri/Cargo.toml')
         self.assertIn(Path('crates/desktop-read-policy'), cli & client)
+        self.assertIn(Path('client/core'), cli)
         result = self.run_install('fixture-mac', HGS_MAC_GUI='client')
         self.assertEqual(result.returncode, 0, result.stderr)
         sent = [line.split() for line in (self.root / 'transport.log.tar').read_text().splitlines()]
@@ -146,8 +151,30 @@ sys.exit(subprocess.run(['sh', '-c', command], input=data).returncode)
         for crates, tar in ((cli, cli_tar), (client, tray_tar)):
             for crate in sorted(crates):
                 with self.subTest(crate=str(crate), tray=tar is tray_tar):
-                    self.assertIn(f'{crate}/Cargo.toml', tar)
-                    self.assertIn(f'{crate}/src', tar)
+                    for suffix in ('Cargo.toml', 'src'):
+                        required = crate / suffix
+                        # The GUI ships its whole client tree; the CLI names
+                        # only the core manifest/src, never GUI caches.
+                        self.assertTrue(any(Path(entry) == required or Path(entry) in required.parents
+                                            for entry in tar), (required, tar))
+        # The retained checkout serves old launch paths after a successful build.
+        # It needs the same transitive source closure as the private build tree.
+        script = (REPO / 'mac-install.sh').read_text()
+        copy_line = next(line for line in script.splitlines() if line.startswith('copy="'))
+        retained = shlex.split(copy_line.removeprefix('copy='))[0].split()
+        for crate in cli:
+            for suffix in ('Cargo.toml', 'src'):
+                required = crate / suffix
+                self.assertTrue(any(Path(entry) == required or Path(entry) in required.parents
+                                    for entry in retained), (required, retained))
+        (self.root / 'transport.log.tar').unlink()
+        result = self.run_install('fixture-mac', '--no-tray')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        cli_only = (self.root / 'transport.log.tar').read_text().split()
+        self.assertIn('client/core/Cargo.toml', cli_only)
+        self.assertIn('client/core/src', cli_only)
+        self.assertNotIn('client', cli_only)
+        self.assertFalse(any('target' in Path(entry).parts for entry in cli_only))
 
     def test_default_does_not_create_ssh_or_reverse_peer(self):
         result = self.run_install('fixture-mac', '--no-tray')

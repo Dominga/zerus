@@ -192,7 +192,10 @@ fn walk_capacity_idle_and_absolute_expiry_never_grow_metadata() {
         tokens.push(token(&f.read(&mut reader, None, now)));
     }
     assert_eq!(reader.walks.len(), WALKS);
-    assert_eq!(f.read(&mut reader, None, now)["accepted"], false);
+    assert_eq!(
+        f.read(&mut reader, None, now)["code"],
+        "catalog_walk_capacity"
+    );
     let next = token(&f.read(&mut reader, Some(&tokens[0]), now + Duration::from_secs(1)));
     assert_eq!(reader.walks.len(), WALKS, "rotation needs no extra slot");
     assert_eq!(

@@ -246,6 +246,14 @@ elif [ -e "${PLUGIN_DEST}" ]; then
     CHANGED=1
 fi
 
+HELPER_SOURCE="${SCRIPT_DIR}/linux-source-update.sh"
+HELPER_DEST="${HOME}/.local/lib/hgs-tray/linux-source-update.sh"
+if ! cmp -s "${HELPER_SOURCE}" "${HELPER_DEST}" 2>/dev/null; then
+    install -Dm755 "${HELPER_SOURCE}" "${HELPER_DEST}.new"
+    mv -f "${HELPER_DEST}.new" "${HELPER_DEST}"
+    CHANGED=1
+fi
+
 # --- 3. systemd --user unit + autostart .desktop -------------------------------
 echo "[3/4] Installing the systemd --user unit and the .desktop launcher..."
 ICON_ROOT="${HOME}/.local/share/icons/hicolor"

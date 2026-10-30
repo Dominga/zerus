@@ -12,16 +12,11 @@ class QNetworkReply;
 class QJsonObject;
 class QProcess;
 
-// WhiteWh/zerus only; upstream Zerus has no such updater. A portable Windows
-// build of this fork installs the newer builds that .github/workflows/
-// fork-windows.yml publishes as releases of the fork (docs/fork-updates.md).
-// It downloads and verifies a newer build in the background; Restart to finish
-// update then installs it once Zerus has quit, keeping one copy to roll back to.
-// The feed is read again while a build waits, and a newer build replaces it.
-// A plain portable folder is swapped with its sibling copies; a versioned root
-// (docs/fork-updates.md) keeps every build inside it and only re-points its
-// `current` junction. Native agents and the session host run from
-// %USERPROFILE%\.local and are never stopped.
+// WhiteWh/zerus only; upstream Zerus has no such updater. Portable Windows
+// builds install the fork's published zip. A per-user Linux source installation
+// builds the exact published commit in a clean clone, then uses the maintained
+// installers. Both keep native agents and the session host running; the Linux
+// GUI keeps its ordinary rollback copy (docs/fork-updates.md).
 class ForkUpdater : public QObject {
     Q_OBJECT
 public:
@@ -39,6 +34,7 @@ public:
         QString stage;
     };
     static Layout layoutFor(const QString &executable);
+    static bool linuxSourceInstall(const QString &executable, const QString &home);
     static ForkUpdater *instance();
     // The fork workflow's run number, or 0 for a build made elsewhere.
     static qint64 installedBuild();
@@ -50,11 +46,11 @@ public:
     static Offer offerFor(qint64 installed, const QString &runningCommit, qint64 build, const QString &commit);
     // The source_commit in a portable folder's build-info.json, or empty.
     static QString sourceCommit(const QString &folder);
-    // Built with a feed and running from a portable folder.
+    // Built with a feed and running from a supported installation.
     bool enabled() const { return m_enabled; }
-    // A portable Windows build can check WhiteWh releases by hand even when
-    // built locally without an automatic feed.
-    bool manualAvailable() const { return m_portable; }
+    // Portable Windows and per-user Linux source installations can check by hand.
+    bool manualAvailable() const { return m_portable || m_linux; }
+    bool installing() const { return m_installing; }
     // Check the configured or latest WhiteWh feed now.
     void checkNow();
     // A build the running unnumbered build can only be replaced with.
@@ -68,8 +64,8 @@ public:
     qint64 readyBuild() const { return m_readyBuild; }
     QString status() const { return m_status; }
     void check();
-    // Starts the helper that swaps the folders once this process has exited.
-    // installStarted is emitted after any connector stop request completes.
+    // Windows swaps folders after Zerus quits. Linux runs the maintained
+    // installers, which save drafts and restart only the GUI at replacement time.
     bool startInstall();
 signals:
     void changed();
@@ -84,12 +80,14 @@ private:
     void download();
     void downloadFinished(QNetworkReply *reply);
     void extracted();
+    void sourcePrepared();
     void applyExtracted(bool complete, const QString &output, const QJsonObject &info);
+    void acceptPrepared();
     void finish(const QString &status);
     QString unpacked() const;
     QString readyStatus() const;
 
-    bool m_enabled = false, m_portable = false, m_busy = false, m_installing = false;
+    bool m_enabled = false, m_portable = false, m_linux = false, m_busy = false, m_installing = false;
     Layout m_layout;
     QString m_install, m_stage, m_status;
     // Where a download goes: the stage, or beside it while a ready build waits
@@ -102,9 +100,9 @@ private:
     qint64 m_received = 0, m_readyBuild = 0;
     // The build the feed offers.
     qint64 m_build = 0, m_size = 0;
-    QString m_commit;
+    QString m_commit, m_readyCommit;
     QUrl m_url;
-    // build-info.json's commit of the running build, and the replacement offered.
+    // The running build's commit, and the replacement offered.
     QString m_runningCommit;
     qint64 m_offeredBuild = 0;
     QByteArray m_sha256;

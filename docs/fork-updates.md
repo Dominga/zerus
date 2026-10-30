@@ -39,12 +39,13 @@ schema 1:
 
 ## Updates
 
-`tray/src/ForkUpdater.cpp` is active only in a portable installation (a folder
-with `build-info.json` next to `hgs-tray.exe`) of a build that embeds the feed.
-Two minutes after start, then hourly, it reads the feed. When `build` is newer than
-its own, it downloads the zip into `<installation>.update`, beside the
-installation. Only HTTPS release URLs of this fork are accepted, up to 1 GiB. The
-zip must match the feed's size and SHA-256, and its `build-info.json` must name
+`tray/src/ForkUpdater.cpp` supports a portable Windows installation (a folder
+with `build-info.json` next to `hgs-tray.exe`) and the per-user Linux source
+installation `~/.local/bin/hgs-tray` with its `hgs` CLI. In either installation,
+a build that embeds the feed checks two minutes after start, then hourly. On
+Windows, when `build` is newer than its own, it downloads the zip into
+`<installation>.update`, beside the installation. Only HTTPS release URLs of
+this fork are accepted, up to 1 GiB. The zip must match the feed's size and SHA-256, and its `build-info.json` must name
 the feed's commit. Windows `tar.exe` unpacks it. The feed is read hourly even
 while a build waits for the restart: a newer build downloads into
 `<stage>-next` and replaces the waiting one only once it is verified, so the
@@ -53,18 +54,18 @@ restart always installs the newest build found.
 
 **Settings -> About** names `WhiteWh/zerus` as the active repository beside
 upstream `ufna/zerus`, with **Check for updates from WhiteWh/zerus** (then
-**Restart to install fork build N** once a build is verified). In a portable
-folder of a build made locally, without an embedded feed, this button is the
-only check: it reads the feed of the fork's latest release,
+**Restart to install fork build N** once a build is verified). In a supported
+installation of a build made locally, without an embedded feed, this button is
+the only check: it reads the feed of the fork's latest release,
 `https://github.com/WhiteWh/zerus/releases/latest/download/zerus-fork-feed.json`,
-with the same rules, and never checks by itself. Outside a portable folder the
+with the same rules, and never checks by itself. Outside those installations the
 button stays off.
 
-The feed's `commit` is compared with the running build's `build-info.json`
-`source_commit` first: the build of the running commit is never offered. A
-build without a fork build number (made locally, or an experimental
+The feed's `commit` is compared with the running build's `build-info.json` or
+compiled source commit first: the build of the running commit is never offered.
+A build without a fork build number (made locally, or an experimental
 `whitewh-exp-*` zip) cannot tell whether the feed's build is newer, so it never
-downloads it by itself: the status names both commits and the button becomes
+prepares it by itself: the status names both commits and the button becomes
 **Replace this build with fork build N...**, which asks for confirmation before
 the download. Restart then installs it as an ordinary update, keeping the
 running build as the rollback copy.
@@ -99,6 +100,28 @@ them. On its first start, the new build refreshes the staged CLI through
 
 The first fork build is installed by hand. Builds made elsewhere, including
 upstream releases, have no fork build number and never update this way.
+
+### Linux source installation
+
+The Linux updater deliberately supports only the per-user layout installed by
+`install.sh` and `tray/install.sh`: `~/.local/bin/hgs-tray` beside an executable
+`~/.local/bin/hgs`. It does not replace package-managed, system-wide or unknown
+installations.
+
+A newer feed starts `tray/linux-source-update.sh`, installed under
+`~/.local/lib/hgs-tray/`. In `~/.cache/hgs/fork-source-update` it creates a clean
+clone of `WhiteWh/zerus`, checks out the feed's exact commit and verifies both
+`HEAD` and a clean tracked tree. It builds the release CLI and GUI there, with
+the feed's build number and update URL. No checkout, build product or installer
+from the developer's working tree is used.
+
+**Restart to install fork build N** verifies that source identity again, then
+runs the maintained `install.sh` and `tray/install.sh`. The old GUI remains
+usable during any remaining build work. Only the ordinary GUI replacement quits
+it, saves drafts, keeps one rollback copy and starts the verified build; native
+agents and tmux sessions are not stopped. Preparation and installation logs stay
+in the stage as `prepare.log` and `install.log`. A newer release replaces the
+waiting source tree only after its own build succeeds.
 
 ### Versioned root
 

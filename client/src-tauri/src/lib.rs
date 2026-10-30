@@ -66,6 +66,7 @@ mod speech_settings;
 mod task_details;
 #[cfg(feature = "live")]
 mod task_editor;
+#[cfg(feature = "live")]
 mod task_forms;
 #[cfg(feature = "live")]
 mod terminal;

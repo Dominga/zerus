@@ -14,6 +14,7 @@ REPO = Path(__file__).resolve().parents[1]
 HGS = Path(os.environ.get("HGS_TEST_BIN", REPO / "target/debug/hgs")).resolve()
 
 
+@unittest.skipIf(os.name == "nt", "indexed content search is not available on Windows yet")
 class SearchIndex(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="hgs-index-")

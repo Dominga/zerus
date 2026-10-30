@@ -341,5 +341,5 @@ fn queued_record(
     Ok(record)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

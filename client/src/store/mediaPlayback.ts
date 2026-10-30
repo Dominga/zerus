@@ -1,5 +1,3 @@
-import { createSignal } from "solid-js";
-
 /** One owner for a playing or pending recording, including composer previews.
  * Taking ownership cancels the previous read before it can begin playback. */
 export function createPlaybackOwner() {
@@ -24,7 +22,6 @@ export function createPlaybackOwner() {
 }
 
 export const mediaPlayback = createPlaybackOwner();
-export const [playingId, setPlayingId] = createSignal<string>();
 
 /** Qt's registered message players pause together, also before capture. */
 export function pauseMessagePlayback() {

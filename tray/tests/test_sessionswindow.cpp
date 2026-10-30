@@ -127,6 +127,7 @@
 #include "MachinesPage.h"
 #include "WorkspaceColorDialog.h"
 #include "PhonePairing.h"
+#include <QTreeWidget>
 #include "PopupMouse.h"
 #include "AccountsPage.h"
 #include "FakeCli.h"
@@ -261,6 +262,8 @@ private slots:
     void initTestCase();
     void phonePairingDialogUsesWorkspaceTheme_data();
     void phonePairingDialogUsesWorkspaceTheme();
+    void machinesPageMatchesThePrototype_data();
+    void machinesPageMatchesThePrototype();
     void nativeSettingsNavigationOnExplicitSpeechHost();
     void copySessionReferencePreservesSelectionAndDraft();
     void sessionIdentifiersRemainInDetailsAcrossNavigation();
@@ -17469,4 +17472,114 @@ void TestSessionsWindow::rowPreparationRevealsSessionsAfterFilterChanges()
     QVERIFY(list->viewport()->rect().intersects(list->visualItemRect(item)));
     auto *composer = window.findChild<MessageComposer *>("messageComposer");
     QTRY_COMPARE(composer->sessionKey(), QString("\ncodex/reveal/session-35"));
+}
+
+// #647: the Machines page as the prototype draws it (Zerus-prototype.html,
+// Machines), in the app's own styling and both themes: the list column with
+// its title, Refresh, Add machine, the summary and each machine's monitor,
+// state dot and session count; the header's label, system and state; this
+// computer's Label line and This machine card with no empty SSH card under
+// it; a remote machine's form; the flat Phones table with its workspace row
+// and short dates, and an unreachable computer's error on a line of its own.
+// Shots of each state to ZERUS_TEAM_SHOTS (pm-machines-*).
+void TestSessionsWindow::machinesPageMatchesThePrototype_data()
+{
+    QTest::addColumn<QString>("theme");
+    QTest::newRow("dark") << QString("dark"); QTest::newRow("light") << QString("light");
+}
+void TestSessionsWindow::machinesPageMatchesThePrototype()
+{
+    QFETCH(QString, theme); QSettings().setValue("workspace/theme", theme);
+    const auto restoreTheme = qScopeGuard([] { QSettings().remove("workspace/theme"); });
+    QTemporaryDir fixture; QVERIFY(fixture.isValid()); const auto fake = fixture.filePath("hgs");
+    const auto now = QDateTime::currentDateTime();
+    const auto at = [&](int days, int hour, int minute) { return QString::number(QDateTime(now.date().addDays(-days), QTime(hour, minute)).toSecsSinceEpoch()); };
+    const QString phones = QStringLiteral(
+        "{'configured':True,'server_url':'https://relay.example.test','workspace_id':'w1','workspace_name':'Orbit','devices':["
+        "{'id':'00000000-0000-4000-8000-0000000000a1','name':'Anna\\u2019s iPhone','platform':'ios','paired_at':%1,'last_seen_at':%2,'added_by':{'name':'workstation'}},"
+        "{'id':'00000000-0000-4000-8000-0000000000a2','name':'Pixel 9','platform':'android','paired_at':%3,'last_seen_at':%4,'added_by':{'name':'macbook'}}]}")
+        .arg(at(18, 10, 0), at(0, 23, 2), at(57, 9, 30), at(6, 18, 40));
+    QVERIFY(FakeCli::install(fake, (QStringLiteral("#!/usr/bin/env python3\nimport json,runpy,sys\na=sys.argv[1:]\n"
+        "host=a.pop(0)[1:] if a and a[0].startswith('@') else ''\n"
+        "if host=='studio':print('ssh: connect to host studio.example.test port 22: Connection timed out\\nhgs: studio unreachable',file=sys.stderr);sys.exit(255)\n"
+        "if a==['--help']:print('usage: hgs [@host] <cmd>\\n       hgs [@host] mobile phones|invite|revoke-phone <id> --json')\n"
+        "elif a[:2]==['machine','ls']:print(json.dumps({'local':'workstation','revision':'r1','machines':["
+        "{'alias':'macbook','connection':{'hostname':'macbook.local','user':'anna','port':22,'identity_file':'~/.ssh/id_ed25519','enabled':True},'enabled':True,'source':'local','inherited':False},"
+        "{'alias':'build-01','connection':{'hostname':'build-01.example.test','enabled':True},'enabled':True,'source':'local','inherited':False},"
+        "{'alias':'studio','connection':{'hostname':'studio.example.test','enabled':True},'enabled':True,'source':'local','inherited':False}]}))\n"
+        "elif a[:2]==['machine','resolve']:print(json.dumps({'alias':a[2],'effective':{'hostname':a[2]+'.local','user':'anna','port':'22','identity_files':['~/.ssh/id_ed25519']}}))\n"
+        "elif a==['mobile','phones','--json']:print(json.dumps(%1 if host=='' else {'configured':False}))\n"
+        "elif 'account' in a[:2]:print(json.dumps({'profiles':[]}))\n"
+        "else:\n sys.argv[0]=").arg(phones) + FakeCli::pythonString(script()) + ";runpy.run_path(sys.argv[0],run_name='__main__')\n").toUtf8()));
+    // A Windows workstation with six sessions, two connected machines and one that does not answer.
+    const auto ms = QDateTime::currentMSecsSinceEpoch();
+    auto base = fleet(); const auto sessions = base.local().sessions;
+    BoxState local = base.local(); local.host = "workstation"; local.localSessions = true;
+    QList<SessionInfo> six;
+    for (int i = 0; i < 6; ++i) { auto s = sessions[i % sessions.size()]; s.name += QStringLiteral("-%1").arg(i); s.tag += QString::number(i); six << s; }
+    local.sessions = six;
+    local.metrics = QJsonObject{{"platform", "windows"}, {"sampled_at", ms / 1000.}};
+    local.localHost = QJsonObject{{"state", "running"}, {"pid", 18244}, {"protocol", 1}, {"conpty", "bundled"}, {"integrity", "medium"}, {"windows_session", 1}};
+    FleetState state; state.setLocal(local, ms);
+    BoxState mac; mac.host = "macbook"; mac.ok = true; mac.sessions = sessions.mid(0, 2); mac.hgsVersion = "0.47.0"; mac.metrics = QJsonObject{{"platform", "macos"}};
+    BoxState build; build.host = "build-01"; build.ok = true; build.sessions = sessions.mid(0, 3); build.metrics = QJsonObject{{"platform", "linux"}};
+    BoxState studio; studio.host = "studio"; studio.ok = false; studio.error = "offline";
+    state.setPeer(mac, ms); state.setPeer(build, ms); state.setPeer(studio, ms);
+    SessionsWindow window(FakeCli::program(fake)); window.resize(1260, 760); window.setFleet(state); window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    for (auto *button : window.findChildren<QPushButton *>("railButton")) if (button->toolTip().startsWith("Machines")) button->click();
+    auto *page = window.findChild<MachinesPage *>(); QVERIFY(page); QTRY_VERIFY(page->isVisible());
+    auto *list = page->findChild<QListWidget *>("machineProfiles");
+    QTRY_COMPARE(list->count(), 4);
+    // The list: this machine with its sessions, each machine's state.
+    QCOMPARE(list->item(0)->text(), QStringLiteral("workstation\nThis machine · 6 sessions"));
+    QCOMPARE(list->item(1)->text(), QStringLiteral("macbook\nConnected, 2 sessions"));
+    QCOMPARE(list->item(3)->text(), QStringLiteral("studio\nNot connected"));
+    QCOMPARE(list->item(0)->data(Qt::UserRole + 2).toString(), QStringLiteral("ok"));
+    QCOMPARE(list->item(3)->data(Qt::UserRole + 2).toString(), QStringLiteral("off"));
+    QStringList summary; for (auto *label : page->findChildren<QLabel *>("muted")) summary << label->text();
+    QVERIFY2(summary.contains(QStringLiteral("SSH connections and HGS setup · 3 connected, 4 machines")), qPrintable(summary.join(" | ")));
+    // This computer: its label and system, its session host, the Label card's
+    // line, the This machine card with Test session host, and no SSH card.
+    QCOMPARE(page->findChild<QLabel *>("machineTitle")->text(), QStringLiteral("workstation"));
+    QVERIFY(page->findChild<QLabel *>("machineSystem")->isVisible());
+    QVERIFY(page->findChild<QLabel *>("localSessionHost")->text().startsWith("Session host: running, PID 18244"));
+    QVERIFY(page->findChild<QLabel *>("machineLocalConnection")->isVisible());
+    QVERIFY(page->findChild<QFrame *>("machineLocalCard")->isVisible());
+    QVERIFY(page->findChild<QPushButton *>("testSessionHost")->isVisible());
+    QVERIFY2(!page->findChild<QFrame *>("machineConnectionCard")->isVisible(), "no empty card under the Label card");
+    // Phones: the count beside the title, the workspace row, short dates and
+    // the unreachable computer's own line.
+    auto *table = page->findChild<QTreeWidget *>("linkedPhones");
+    QTRY_COMPARE(table->topLevelItemCount(), 1);
+    QCOMPARE(table->topLevelItem(0)->text(0), QStringLiteral("Orbit · this computer"));
+    QCOMPARE(table->topLevelItem(0)->childCount(), 2);
+    QCOMPARE(table->topLevelItem(0)->child(0)->text(3), QStringLiteral("Today 23:02"));
+    QCOMPARE(page->findChild<QLabel *>("phonesCount")->text(), QStringLiteral("2 phones"));
+    QTRY_COMPARE(page->findChildren<QLabel *>("phonesProblem").size(), 1);
+    QVERIFY(page->findChild<QLabel *>("phonesProblem")->text().startsWith("studio: ssh: connect to host studio.example.test"));
+    QVERIFY(!page->findChild<QLabel *>("phonesProblem")->text().contains('\n'));
+    QVERIFY(table->height() < 160);
+    const auto shots = qEnvironmentVariable("ZERUS_TEAM_SHOTS");
+    const auto save = [&](const QString &name) {
+        if (shots.isEmpty()) return;
+        QDir().mkpath(shots); QTest::qWait(60);
+        QVERIFY(window.grab().save(shots + "/" + name + "-" + theme + ".png"));
+    };
+    save("pm-machines-local");
+    // A remote machine: its system and state, and the prototype's form.
+    list->setCurrentRow(1);
+    QTRY_COMPARE(page->findChild<QLabel *>("machineTitle")->text(), QStringLiteral("macbook"));
+    QCOMPARE(page->findChild<QLabel *>("machineSystem")->text(), QStringLiteral("macOS"));
+    QCOMPARE(page->findChild<QLabel *>("machineState")->text(), QStringLiteral("Connected · hgs 0.47.0"));
+    QVERIFY(page->findChild<QFrame *>("machineConnectionCard")->isVisible());
+    QVERIFY(!page->findChild<QFrame *>("machineLocalCard")->isVisible());
+    QTRY_VERIFY(page->findChild<QLabel *>("effectiveMachineConnection")->text().contains("anna@macbook.local, port 22"));
+    for (const char *name : {"saveMachine", "discardNewMachine", "checkMachine", "sshMachine", "installMachine", "resetMachine", "removeMachine", "browseMachineKey"})
+        QVERIFY2(page->findChild<QPushButton *>(name)->isVisible(), name);
+    save("pm-machines-remote");
+    // The machine that does not answer.
+    list->setCurrentRow(3);
+    QTRY_COMPARE(page->findChild<QLabel *>("machineState")->text(), QStringLiteral("Not connected"));
+    save("pm-machines-unreachable");
 }

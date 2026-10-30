@@ -1,6 +1,7 @@
 #include <QtTest>
 #include <QFile>
 #include <QClipboard>
+#include <QHeaderView>
 #include <QLabel>
 #include <QPlainTextEdit>
 #include <QPushButton>
@@ -35,7 +36,7 @@ class TestPhonePairing : public QObject {
 private slots:
     void init() {
         QVERIFY(m_dir.isValid());
-        for (const auto *name : {"calls", "revoked", "old-peer", "no-connection", "other-workspace", "fail-revoke", "long-code", "too-large-code", "fail-invite", "workspace-switched", "hold-phone-list", "phone-list-held", "release-phone-list"}) QFile::remove(m_dir.filePath(name));
+        for (const auto *name : {"calls", "revoked", "old-peer", "no-connection", "other-workspace", "fail-revoke", "long-code", "too-large-code", "fail-invite", "workspace-switched", "hold-phone-list", "phone-list-held", "release-phone-list", "unreachable"}) QFile::remove(m_dir.filePath(name));
         m_hgs = m_dir.filePath("hgs");
         QVERIFY(FakeCli::install(m_hgs, R"PY(#!/usr/bin/env python3
 import json, pathlib, sys, time
@@ -43,12 +44,16 @@ root = pathlib.Path(__file__).parent
 args = sys.argv[1:]
 with (root / 'calls').open('a') as file: file.write(' '.join(args) + '\n')
 host = args.pop(0)[1:] if args and args[0].startswith('@') else ''
+if host == 'gone':
+    print('ssh: connect to host gone.example.test port 22: Connection timed out\nhgs: gone unreachable', file=sys.stderr); sys.exit(255)
 if args == ['--help']:
     print('usage: hgs [@host] <cmd>')
     if not (root / ('old-' + host)).exists():
         print('       hgs [@host] mobile phones|invite|revoke-phone <id> --json   phones')
 elif args == ['machine', 'ls']:
-    print(json.dumps({'local': 'desk', 'machines': [{'alias': 'peer', 'enabled': True}, {'alias': 'off', 'enabled': False}]}))
+    machines = [{'alias': 'peer', 'enabled': True}, {'alias': 'off', 'enabled': False}]
+    if (root / 'unreachable').exists(): machines.append({'alias': 'gone', 'enabled': True})
+    print(json.dumps({'local': 'desk', 'machines': machines}))
 elif args == ['mobile', 'phones', '--json']:
     switched = (root / 'workspace-switched').exists()
     if host == 'peer' and (root / 'hold-phone-list').exists():
@@ -199,11 +204,53 @@ else:
         QCOMPARE(children(tree, 4), (QStringList{"Gateway", "—"}));
         QCOMPARE(children(tree, 2).value(1), QString("—"));
         QVERIFY(panel.findChild<QPushButton *>("pairPhone")->isEnabled());
-        QCOMPARE(panel.findChild<QLabel *>("phonesStatus")->text(), QString("2 phones"));
+        // #647: the count sits beside the title; nothing else to say.
+        QCOMPARE(panel.findChild<QLabel *>("phonesCount")->text(), QString("2 phones"));
+        QVERIFY(panel.findChild<QLabel *>("phonesStatus")->text().isEmpty());
+        QVERIFY(panel.findChildren<QLabel *>("phonesProblem").isEmpty());
         const auto log = calls();
         QVERIFY(log.contains("mobile phones --json")); QVERIFY(log.contains("@peer mobile phones --json"));
         for (const auto &call : log) QVERIFY2(!call.startsWith("@off"), qPrintable(call));
         QCOMPARE(panel.targets().size(), 1); QCOMPARE(panel.targets().first().host, QString("peer"));
+    }
+    // #647 (prototype, Phones): a flat table only as tall as its rows, the
+    // workspace a bold row nobody selects, and a computer that did not answer
+    // on a short line of its own, never in the title.
+    void phonesTableIsFlatAndAnUnreachableComputerHasItsOwnLine() {
+        touch("unreachable");
+        PhonePairing::Panel panel(FakeCli::program(m_hgs)); panel.resize(900, 400); panel.show();
+        auto *tree = panel.findChild<QTreeWidget *>("linkedPhones");
+        panel.refresh();
+        QTRY_COMPARE(children(tree, 0).size(), 2);
+        QTRY_COMPARE(panel.findChildren<QLabel *>("phonesProblem").size(), 1);
+        auto *problem = panel.findChild<QLabel *>("phonesProblem");
+        QCOMPARE(problem->text(), QString("gone: ssh: connect to host gone.example.test port 22: Connection timed out"));
+        QVERIFY(problem->toolTip().contains("hgs: gone unreachable"));
+        QCOMPARE(panel.findChild<QLabel *>("phonesCount")->text(), QString("2 phones"));
+        QCOMPARE(panel.findChild<QLabel *>("phonesHeading")->text(), QString("Phones"));
+        QVERIFY(panel.findChild<QLabel *>("phonesStatus")->text().isEmpty());
+        // The group row: bold, never chosen; the phones are.
+        auto *group = tree->topLevelItem(0);
+        QVERIFY(group->font(0).bold());
+        QVERIFY(!(group->flags() & Qt::ItemIsSelectable));
+        QVERIFY(group->child(0)->flags() & Qt::ItemIsSelectable);
+        // As tall as the header and three rows, with no scroll bar.
+        QCOMPARE(tree->verticalScrollBarPolicy(), Qt::ScrollBarAlwaysOff);
+        QTRY_VERIFY(tree->height() >= 3 * 29 && tree->height() <= tree->header()->height() + 3 * 29 + 8);
+        QVERIFY(!tree->rootIsDecorated());
+    }
+    void phoneTimesReadShort() {
+        const QDateTime now(QDate(2026, 10, 30), QTime(23, 30));
+        const auto at = [](int year, int month, int day, int hour, int minute) {
+            return QJsonValue(double(QDateTime(QDate(year, month, day), QTime(hour, minute)).toSecsSinceEpoch()));
+        };
+        QCOMPARE(PhonePairing::shortTime(at(2026, 10, 30, 23, 2), true, now), QString("Today 23:02"));
+        QCOMPARE(PhonePairing::shortTime(at(2026, 10, 30, 8, 0), false, now), QString("Today"));
+        QCOMPARE(PhonePairing::shortTime(at(2026, 10, 29, 9, 10), true, now), QString("Yesterday 09:10"));
+        QCOMPARE(PhonePairing::shortTime(at(2026, 10, 24, 18, 40), true, now), QString("24 Oct 18:40"));
+        QCOMPARE(PhonePairing::shortTime(at(2026, 10, 12, 18, 40), false, now), QString("12 Oct"));
+        QCOMPARE(PhonePairing::shortTime(at(2025, 9, 3, 7, 5), false, now), QString("3 Sep 2025"));
+        QCOMPARE(PhonePairing::shortTime(QJsonValue(QJsonValue::Null), true, now), QString("—"));
     }
     void revokesThroughTheSameRouteOnlyAfterConfirmation() {
         bool accept = false; QString asked;
@@ -241,7 +288,8 @@ else:
         QCOMPARE(revokes, 1);
         // An explicit refresh shows the current list and clears the notice.
         panel.findChild<QPushButton *>("refreshPhones")->click();
-        QTRY_COMPARE(status->text(), QString("2 phones"));
+        QTRY_VERIFY(status->text().isEmpty());
+        QCOMPARE(panel.findChild<QLabel *>("phonesCount")->text(), QString("2 phones"));
     }
     void thePairingDialogNeverShowsAnotherWorkspacesCode() {
         touch("other-workspace");
@@ -259,7 +307,10 @@ else:
         PhonePairing::Panel panel(FakeCli::program(m_hgs));
         auto *status = panel.findChild<QLabel *>("phonesStatus");
         panel.refresh();
-        QTRY_VERIFY(status->text().contains("Update Zerus on peer to manage phones"));
+        // #647: the computer that cannot answer has its own line, not the title.
+        QTRY_VERIFY(!panel.findChildren<QLabel *>("phonesProblem").isEmpty());
+        QCOMPARE(panel.findChild<QLabel *>("phonesProblem")->text(), QString("peer: Update Zerus on peer to manage phones from here."));
+        QVERIFY(!panel.findChild<QLabel *>("phonesCount")->text().contains("Update"));
         for (const auto &call : calls()) QVERIFY2(!call.startsWith("@peer mobile"), qPrintable(call));
         QVERIFY(status->text().contains("Settings → Mobile connection"));
         QVERIFY(!panel.findChild<QPushButton *>("pairPhone")->isEnabled());

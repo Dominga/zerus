@@ -7,7 +7,7 @@ license = "MIT"
 description = "Watch streams, catalog state and per-frame batches of the Zerus desktop client"
 publish = false
 
-# Pure Rust and fast to test: no Tauri, no async runtime. The Tauri app in
+# Pure Rust and fast to test: no Tauri or async runtime by default. The Tauri app in
 # client/src-tauri depends on this crate by path.
 [dependencies]
 zerus-desktop-read-policy = { path = "../../crates/desktop-read-policy" }
@@ -30,6 +30,13 @@ socket2 = "0.6"
 # turns it on, while the crate's own checks build without it.
 [target.'cfg(target_os = "linux")'.dependencies]
 dbus = { version = "0.9", optional = true }
+# Explicit native-method opt-in only; the default core/root stays passive.
+zbus = { version = "5.19", default-features = false, features = ["async-io", "blocking-api"], optional = true }
+async-io = { version = "2.6", optional = true }
+futures-lite = { version = "2.6", optional = true }
+# Probe only: refuse a Tokio context so zbus always uses its owned async-io
+# executor. Its Tokio executor reports is_empty=true without task accounting.
+tokio = { version = "1", default-features = false, features = ["rt"], optional = true }
 
 # macOS: the quarantine a file from another machine carries (external_file).
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -45,6 +52,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 
 [features]
 konsole = ["dep:dbus"]
+linux-native-notify = ["dep:zbus", "dep:async-io", "dep:futures-lite", "dep:tokio"]
 
 [[bin]]
 name = "fake-hgs-launcher"

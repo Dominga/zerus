@@ -9,12 +9,12 @@ fn a_team_without_the_new_fields_hands_out_reports_stages_and_accepts_as_today()
     let root = tempfile::tempdir().unwrap();
     crate::state::with_test_state_root(root.path(), || {
         let (lead, dev) = stage_repo(root.path());
-        let team = stage_team(&lead, &dev, "docs", &|_| super::super::catalog::builtin());
+        let team = stage_team(&lead, &dev, "docs", &|_| super::super::super::catalog::builtin());
         let stored = serde_json::to_string(&team).unwrap();
         for key in ["land_allowed", "branch_per_task", "base_branch", "\"prepare\"", "\"waits\"", "\"exits\"", "\"command\"", "\"flaky\"", "\"outcome\""] {
             assert!(!stored.contains(key), "{key} in {stored}");
         }
-        let mut store = Store::open_at(&super::super::store::path(), true).unwrap();
+        let mut store = Store::open_at(&super::super::super::store::path(), true).unwrap();
         store.create(&uuid::Uuid::new_v4().to_string(), &json!({}), team, vec![]).unwrap();
         deliver_all();
         hand_out(&mut store, STAGE_TEAM, 1, "dev", None, "").unwrap();
@@ -25,7 +25,7 @@ fn a_team_without_the_new_fields_hands_out_reports_stages_and_accepts_as_today()
         assert_eq!(git_in(&dev, &["rev-parse", "--abbrev-ref", "HEAD"]), format!("team/{}/dev", &STAGE_TEAM[..8]));
         store
             .mutate(None, STAGE_TEAM, None, |team, events| {
-                let stage = super::super::pipeline::give_stage(team, 1, "rev")?;
+                let stage = super::super::super::pipeline::give_stage(team, 1, "rev")?;
                 ops::apply(team, "report", &json!({"task":1,"attempt":stage,"verdict":"pass","text":"Read it"}), &Actor::Member("rev".into()), &BTreeSet::new(), events)
             })
             .unwrap();
@@ -113,7 +113,7 @@ fn a_work_ahead_step_hands_the_draft_task_out() {
         let mut t = work_ahead_team();
         t.id = "88888888-8888-4888-8888-888888888888".into();
         assert_eq!(t.task(4).unwrap().status, TaskStatus::Draft);
-        let mut store = Store::open_at(&super::super::store::path(), true).unwrap();
+        let mut store = Store::open_at(&super::super::super::store::path(), true).unwrap();
         store.create(&uuid::Uuid::new_v4().to_string(), &json!({}), t.clone(), vec![]).unwrap();
         set_fake_hgs(Some(Box::new(|_, args: &[&str], _| {
             assert_eq!(args.first().copied(), Some("send"));
@@ -163,7 +163,7 @@ fn a_phase_sent_back_tells_the_member_working_ahead_to_stop() {
         let mut gone = session("codex/x/dev", "r1", false);
         gone.live = false;
         assert!(!steps(&t, &[gone], 100.0).iter().any(|step| matches!(step, Step::TellStop { .. })));
-        let mut store = Store::open_at(&super::super::store::path(), true).unwrap();
+        let mut store = Store::open_at(&super::super::super::store::path(), true).unwrap();
         store.create(&uuid::Uuid::new_v4().to_string(), &json!({}), t.clone(), vec![]).unwrap();
         let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::<Value>::new()));
         let record = sent.clone();

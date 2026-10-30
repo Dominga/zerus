@@ -4837,7 +4837,7 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
 }
 
 #[cfg(test)]
-#[path = "tests/support.rs"]
+#[path = "tests/support_ops.rs"]
 mod support;
 
 #[cfg(test)]

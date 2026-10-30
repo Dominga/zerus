@@ -4163,7 +4163,7 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
 }
 
 #[cfg(test)]
-#[path = "tests/support.rs"]
+#[path = "tests/support_commands.rs"]
 mod support;
 
 #[cfg(test)]

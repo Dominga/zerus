@@ -10,7 +10,7 @@ fn a_command_stage_runs_in_the_stage_folder_and_its_exit_code_decides() {
         let (lead, dev) = stage_repo(root.path());
         let command = "git grep -q pass -- gate.txt || (echo gate is red && exit 1)".to_owned();
         let team = stage_team(&lead, &dev, "gate", &|_| command_preset("command", command.clone(), &[]));
-        let mut store = Store::open_at(&super::super::store::path(), true).unwrap();
+        let mut store = Store::open_at(&super::super::super::store::path(), true).unwrap();
         store.create(&uuid::Uuid::new_v4().to_string(), &json!({}), team, vec![]).unwrap();
         deliver_all();
         hand_out(&mut store, STAGE_TEAM, 1, "dev", None, "").unwrap();
@@ -62,14 +62,14 @@ fn a_command_stage_with_the_checkout_rule_checks_the_checked_commit_and_holds_th
         let (lead, dev) = stage_repo(root.path());
         let mut team = stage_team(&lead, &dev, "gate", &|_| checkout_command_preset("command", env_command()));
         team.settings.branch_per_task = Some(BranchPerTask { template: "task/{id}".into() });
-        let mut store = Store::open_at(&super::super::store::path(), true).unwrap();
+        let mut store = Store::open_at(&super::super::super::store::path(), true).unwrap();
         store.create(&uuid::Uuid::new_v4().to_string(), &json!({}), team, vec![]).unwrap();
         deliver_all();
         hand_out(&mut store, STAGE_TEAM, 1, "dev", None, "").unwrap();
         std::fs::write(dev.join("a.txt"), "one\n").unwrap();
         let team = store.load(STAGE_TEAM).unwrap().unwrap();
         let attempt = team.task(1).unwrap().open_attempt().unwrap().id.clone();
-        let committed = super::super::commands::commit_in_team(
+        let committed = super::super::super::commands::commit_in_team(
             &team,
             "dev",
             &json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":STAGE_TEAM,"attempt":attempt,"message":"Task 1"}),
@@ -78,7 +78,7 @@ fn a_command_stage_with_the_checkout_rule_checks_the_checked_commit_and_holds_th
         let sha = committed["sha"].as_str().unwrap().to_owned();
         stage_report(&mut store, 1);
         let team = store.load(STAGE_TEAM).unwrap().unwrap();
-        assert_eq!(super::super::stages::held(&team, "dev"), Some(1), "a command stage holds the implementer from the report on");
+        assert_eq!(super::super::super::stages::held(&team, "dev"), Some(1), "a command stage holds the implementer from the report on");
         let seen = [session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", true)];
         let found = steps(&team, &seen, now());
         assert!(
@@ -105,7 +105,7 @@ fn a_command_stage_with_the_checkout_rule_checks_the_checked_commit_and_holds_th
         assert_eq!(record["source"], "team_stage");
         assert!(same_path(record["cwd"].as_str().unwrap(), &checkout.display().to_string()), "{record}");
         // The hold ends with the stage: the next task goes ahead.
-        assert_eq!(super::super::stages::held(&store.load(STAGE_TEAM).unwrap().unwrap(), "dev"), None);
+        assert_eq!(super::super::super::stages::held(&store.load(STAGE_TEAM).unwrap().unwrap(), "dev"), None);
         hand_out(&mut store, STAGE_TEAM, 2, "dev", None, "").unwrap();
         set_fake_hgs(None);
         crate::state::builds::INLINE_RUNNER.with(|inline| inline.set(false));
@@ -120,13 +120,13 @@ fn a_review_before_a_command_or_land_stage_holds_the_folder_under_the_hold_rule(
     crate::state::with_test_state_root(root.path(), || {
         let (lead, dev) = stage_repo(root.path());
         let team = stage_team(&lead, &dev, "deliver", &|_| deliver_preset());
-        let mut store = Store::open_at(&super::super::store::path(), true).unwrap();
+        let mut store = Store::open_at(&super::super::super::store::path(), true).unwrap();
         store.create(&uuid::Uuid::new_v4().to_string(), &json!({}), team, vec![]).unwrap();
         deliver_all();
         hand_out(&mut store, STAGE_TEAM, 1, "dev", None, "").unwrap();
         stage_report(&mut store, 1);
         let team = store.load(STAGE_TEAM).unwrap().unwrap();
-        assert_eq!(super::super::stages::held(&team, "dev"), Some(1), "the review before a command and land stage holds the folder");
+        assert_eq!(super::super::super::stages::held(&team, "dev"), Some(1), "the review before a command and land stage holds the folder");
         let seen = [session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", true)];
         let found = steps(&team, &seen, now());
         assert!(!found.iter().any(|step| matches!(step, Step::HandOut { task: 2, .. })), "no second task while the review is open: {found:?}");
@@ -144,13 +144,13 @@ fn a_review_before_a_command_or_land_stage_does_not_hold_under_the_checkout_rule
         let mut catalog = deliver_preset();
         catalog.pipelines.last_mut().unwrap().folder = "checkout".into();
         let team = stage_team(&lead, &dev, "deliver", &|_| catalog.clone());
-        let mut store = Store::open_at(&super::super::store::path(), true).unwrap();
+        let mut store = Store::open_at(&super::super::super::store::path(), true).unwrap();
         store.create(&uuid::Uuid::new_v4().to_string(), &json!({}), team, vec![]).unwrap();
         deliver_all();
         hand_out(&mut store, STAGE_TEAM, 1, "dev", None, "").unwrap();
         stage_report(&mut store, 1);
         let team = store.load(STAGE_TEAM).unwrap().unwrap();
-        assert_eq!(super::super::stages::held(&team, "dev"), None, "the checkout rule holds nothing for a review");
+        assert_eq!(super::super::super::stages::held(&team, "dev"), None, "the checkout rule holds nothing for a review");
         let seen = [session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", true)];
         let found = steps(&team, &seen, now());
         assert!(found.contains(&Step::HandOut { task: 2, member: "dev".into() }), "{found:?}");
@@ -169,14 +169,14 @@ fn a_land_stage_refuses_a_folder_moved_from_the_checked_commit() {
         let mut team = stage_team(&lead, &dev, "gate", &|_| command_preset("land", "git status --porcelain".into(), &[("0", "accepted")]));
         team.settings.land_allowed = true;
         team.settings.branch_per_task = Some(BranchPerTask { template: "task/{id}".into() });
-        let mut store = Store::open_at(&super::super::store::path(), true).unwrap();
+        let mut store = Store::open_at(&super::super::super::store::path(), true).unwrap();
         store.create(&uuid::Uuid::new_v4().to_string(), &json!({}), team, vec![]).unwrap();
         deliver_all();
         hand_out(&mut store, STAGE_TEAM, 1, "dev", None, "").unwrap();
         std::fs::write(dev.join("a.txt"), "one\n").unwrap();
         let team = store.load(STAGE_TEAM).unwrap().unwrap();
         let attempt = team.task(1).unwrap().open_attempt().unwrap().id.clone();
-        super::super::commands::commit_in_team(
+        super::super::super::commands::commit_in_team(
             &team,
             "dev",
             &json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":STAGE_TEAM,"attempt":attempt,"message":"Task 1"}),
@@ -225,7 +225,7 @@ fn a_members_run_waits_for_the_stages_own_team_stage_run() {
     let id = "77777777-7777-4777-8777-777777777771";
     let request = json!({"op":"run","request_id":id,"team":t.id,"member":"dev","attempt":"A1","template":"say","args":{},
         "input":{"request_id":id,"team":t.id,"attempt":"A1","template":"say","args":{}}});
-    super::super::outbox::push(&folder, &request).unwrap();
+    super::super::super::outbox::push(&folder, &request).unwrap();
     let mut dev = session("codex/x/dev", "r1", true);
     dev.cwd = folder.display().to_string();
     let started = std::cell::RefCell::new(Vec::<String>::new());
@@ -236,7 +236,7 @@ fn a_members_run_waits_for_the_stages_own_team_stage_run() {
     let current = store.load(&t.id).unwrap().unwrap();
     take_outbox_with(&mut store, &current, &[dev.clone()], &spawn).unwrap();
     assert!(started.borrow().is_empty(), "the stage's run holds the folder");
-    assert!(super::super::outbox::request_path(&folder, id).exists(), "the member's run waits");
+    assert!(super::super::super::outbox::request_path(&folder, id).exists(), "the member's run waits");
     // The stage's run ends; the member's run starts on the next tick.
     std::fs::remove_file(&claim).unwrap();
     let current = store.load(&t.id).unwrap().unwrap();
@@ -270,20 +270,20 @@ fn a_stage_run_is_serialized_by_the_stage_folder() {
             };
         }
         // The review passes and the test stage is delivered to qa.
-        super::super::pipeline::give_stage(&mut t, 1, "rev").unwrap();
+        super::super::super::pipeline::give_stage(&mut t, 1, "rev").unwrap();
         let review = t.task(1).unwrap().pipeline_run.as_ref().unwrap().open_run().unwrap().id.clone();
         let mut events = Vec::new();
         ops::apply(&mut t, "report", &json!({"task":1,"attempt":review,"verdict":"pass","text":"Fine"}), &Actor::Member("rev".into()), &BTreeSet::new(), &mut events).unwrap();
-        let prepared = super::super::stages::prepare(&t, 1).unwrap();
-        let stage_id = super::super::pipeline::give_stage(&mut t, 1, "qa").unwrap();
-        super::super::stages::record(&mut t, 1, &stage_id, &prepared);
+        let prepared = super::super::super::stages::prepare(&t, 1).unwrap();
+        let stage_id = super::super::super::pipeline::give_stage(&mut t, 1, "qa").unwrap();
+        super::super::super::stages::record(&mut t, 1, &stage_id, &prepared);
         assert_eq!(t.task(1).unwrap().status, TaskStatus::InTest);
         let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
         store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
         // A run is going in the stage's folder (dev's worktree).
         let other = "88888888-8888-4888-8888-888888888888";
         let marker = json!({"request_id":other,"started":crate::state::now(),"timeout_secs":3600.0,"label":"cargo-test","command":"cargo test"});
-        super::super::outbox::write_running(&dev, other, &marker).unwrap();
+        super::super::super::outbox::write_running(&dev, other, &marker).unwrap();
         // qa's own folder is free, but the stage's is not: its claim waits.
         let id = "77777777-7777-4777-8777-777777777777";
         let request = json!({"op":"run","request_id":id,"team":t.id,"member":"qa","attempt":stage_id,"template":"cargo-test","args":{},
@@ -297,7 +297,7 @@ fn a_stage_run_is_serialized_by_the_stage_folder() {
         start_run(&mut store, &t, &member, &qa, &request, &spawn).unwrap();
         assert!(started.borrow().is_empty(), "the stage folder's run holds the claim");
         // It ends: the same claim starts.
-        std::fs::remove_file(super::super::outbox::running_path(&dev, other)).unwrap();
+        std::fs::remove_file(super::super::super::outbox::running_path(&dev, other)).unwrap();
         start_run(&mut store, &t, &member, &qa, &request, &spawn).unwrap();
         assert_eq!(started.borrow().as_slice(), [id.to_owned()]);
     });
@@ -306,7 +306,7 @@ fn a_stage_run_is_serialized_by_the_stage_folder() {
 #[test]
 fn a_stage_run_is_the_stage_members_attempt() {
     let mut t = staged("C:\\proj");
-    super::super::pipeline::give_stage(&mut t, 1, "rev").unwrap();
+    super::super::super::pipeline::give_stage(&mut t, 1, "rev").unwrap();
     let review = t.task(1).unwrap().pipeline_run.as_ref().unwrap().open_run().unwrap().id.clone();
     assert!(attempt_of(&t, &review, "rev"), "the stage member's open stage run");
     assert!(!attempt_of(&t, &review, "qa"), "another member's stage run");
@@ -324,7 +324,7 @@ fn a_replaced_captured_report_refreshes_the_folder_head_for_the_land_stage() {
         let (lead, dev) = stage_repo(root.path());
         let mut team = stage_team(&lead, &dev, "gate", &|_| command_preset("land", "git rev-parse HEAD > landed.txt".into(), &[("0", "accepted")]));
         team.settings.land_allowed = true;
-        let mut store = Store::open_at(&super::super::store::path(), true).unwrap();
+        let mut store = Store::open_at(&super::super::super::store::path(), true).unwrap();
         store.create(&uuid::Uuid::new_v4().to_string(), &json!({}), team, vec![]).unwrap();
         deliver_all();
         hand_out(&mut store, STAGE_TEAM, 1, "dev", None, "").unwrap();
@@ -380,7 +380,7 @@ fn a_command_stage_waits_for_an_earlier_run_of_the_task_that_is_awaiting() {
         crate::state::builds::INLINE_RUNNER.with(|inline| inline.set(true));
         let (lead, dev) = stage_repo(root.path());
         let team = stage_team(&lead, &dev, "gate", &|_| command_preset("command", "echo ok".into(), &[]));
-        let mut store = Store::open_at(&super::super::store::path(), true).unwrap();
+        let mut store = Store::open_at(&super::super::super::store::path(), true).unwrap();
         store.create(&uuid::Uuid::new_v4().to_string(), &json!({}), team, vec![]).unwrap();
         deliver_all();
         hand_out(&mut store, STAGE_TEAM, 1, "dev", None, "").unwrap();
@@ -434,7 +434,7 @@ fn a_land_stage_refuses_a_folder_moved_after_a_plain_git_commit() {
         let (lead, dev) = stage_repo(root.path());
         let mut team = stage_team(&lead, &dev, "gate", &|_| command_preset("land", "git status --porcelain".into(), &[("0", "accepted")]));
         team.settings.land_allowed = true;
-        let mut store = Store::open_at(&super::super::store::path(), true).unwrap();
+        let mut store = Store::open_at(&super::super::super::store::path(), true).unwrap();
         store.create(&uuid::Uuid::new_v4().to_string(), &json!({}), team, vec![]).unwrap();
         deliver_all();
         hand_out(&mut store, STAGE_TEAM, 1, "dev", None, "").unwrap();
@@ -477,8 +477,8 @@ fn a_land_stage_in_a_folder_without_git_runs() {
         team.settings.land_allowed = true;
         let catalog = command_preset("land", "echo landed".into(), &[("0", "accepted")]);
         team.task_mut(1).unwrap().pipeline = "gate".into();
-        super::super::pipeline::snapshot_with(&mut team, 1, &catalog);
-        let mut store = Store::open_at(&super::super::store::path(), true).unwrap();
+        super::super::super::pipeline::snapshot_with(&mut team, 1, &catalog);
+        let mut store = Store::open_at(&super::super::super::store::path(), true).unwrap();
         store.create(&uuid::Uuid::new_v4().to_string(), &json!({}), team, vec![]).unwrap();
         deliver_all();
         hand_out(&mut store, STAGE_TEAM, 1, "dev", None, "").unwrap();
@@ -500,14 +500,14 @@ fn a_checkout_prepared_for_a_start_that_is_not_recorded_is_removed() {
     crate::state::with_test_state_root(root.path(), || {
         let (lead, dev) = stage_repo(root.path());
         let team = stage_team(&lead, &dev, "gate", &|_| checkout_command_preset("command", "echo ok".into()));
-        let mut store = Store::open_at(&super::super::store::path(), true).unwrap();
+        let mut store = Store::open_at(&super::super::super::store::path(), true).unwrap();
         store.create(&uuid::Uuid::new_v4().to_string(), &json!({}), team, vec![]).unwrap();
         deliver_all();
         hand_out(&mut store, STAGE_TEAM, 1, "dev", None, "").unwrap();
         std::fs::write(dev.join("a.txt"), "one\n").unwrap();
         let team = store.load(STAGE_TEAM).unwrap().unwrap();
         let attempt = team.task(1).unwrap().open_attempt().unwrap().id.clone();
-        super::super::commands::commit_in_team(
+        super::super::super::commands::commit_in_team(
             &team,
             "dev",
             &json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":STAGE_TEAM,"attempt":attempt,"message":"Task 1"}),
@@ -518,7 +518,7 @@ fn a_checkout_prepared_for_a_start_that_is_not_recorded_is_removed() {
         let run_id = team.task(1).unwrap().pipeline_run.as_ref().unwrap().open_run().unwrap().id.clone();
         // A read-only store makes command_started fail after prepare made
         // the checkout; the prepared checkout must go.
-        let mut read_only = Store::open_at(&super::super::store::path(), false).unwrap();
+        let mut read_only = Store::open_at(&super::super::super::store::path(), false).unwrap();
         let error = start_stage_command(&mut read_only, &team, 1, &run_id).unwrap_err().to_string();
         let leftovers = std::fs::read_dir(root.path().join("teams/stages"))
             .map(|entries| entries.flatten().filter(|entry| entry.path().is_dir()).count())
@@ -596,11 +596,11 @@ fn a_stage_hand_out_switches_to_a_model_the_stage_role_lists() {
         let folder = dir.path().join("proj");
         std::fs::create_dir_all(&folder).unwrap();
         // The catalog's reviewer role lists one model.
-        let mut catalog = super::super::catalog::load().unwrap_or_else(|_| super::super::catalog::builtin());
+        let mut catalog = super::super::super::catalog::load().unwrap_or_else(|_| super::super::super::catalog::builtin());
         let version = catalog.version;
         let reviewer = catalog.roles.iter_mut().find(|role| role.id == "reviewer").unwrap();
         reviewer.models = vec![crate::state::teams::model::ModelChoice { model: "gpt-5.5".into(), effort: "high".into() }];
-        super::super::catalog::run("set", &json!({"catalog":catalog,"version":version}), true).unwrap();
+        super::super::super::catalog::run("set", &json!({"catalog":catalog,"version":version}), true).unwrap();
         let mut t = staged(&folder.display().to_string());
         {
             let rev = t.members.iter_mut().find(|member| member.id == "rev").unwrap();
@@ -673,7 +673,7 @@ fn a_branch_per_task_lands_two_tasks_as_squash_without_the_first_ones_commits() 
         let mut team = stage_team(&lead, &dev, "gate", &land);
         team.settings.land_allowed = true;
         team.settings.branch_per_task = Some(BranchPerTask { template: "task/{id}".into() });
-        let mut store = Store::open_at(&super::super::store::path(), true).unwrap();
+        let mut store = Store::open_at(&super::super::super::store::path(), true).unwrap();
         store.create(&uuid::Uuid::new_v4().to_string(), &json!({}), team, vec![]).unwrap();
         deliver_all();
         let mut first_commit = String::new();
@@ -696,7 +696,7 @@ fn a_branch_per_task_lands_two_tasks_as_squash_without_the_first_ones_commits() 
             }
             // `hgs team commit` takes the task's branch while the attempt is open.
             std::fs::write(dev.join(format!("{}.txt", if n == 1 { "a" } else { "b" })), format!("task {n}\n")).unwrap();
-            let committed = super::super::commands::commit_in_team(
+            let committed = super::super::super::commands::commit_in_team(
                 &team,
                 "dev",
                 &json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":STAGE_TEAM,"attempt":attempt.id,"message":format!("Task {n}")}),
@@ -732,7 +732,7 @@ fn a_land_stage_holds_for_the_lead_without_land_allowed_or_on_a_held_exit() {
         crate::state::builds::INLINE_RUNNER.with(|inline| inline.set(true));
         let (lead, dev) = stage_repo(root.path());
         let team = stage_team(&lead, &dev, "gate", &|_| command_preset("land", "exit 3".into(), &[("0", "accepted"), ("2", "returned"), ("3", "held")]));
-        let mut store = Store::open_at(&super::super::store::path(), true).unwrap();
+        let mut store = Store::open_at(&super::super::super::store::path(), true).unwrap();
         store.create(&uuid::Uuid::new_v4().to_string(), &json!({}), team, vec![]).unwrap();
         deliver_all();
         hand_out(&mut store, STAGE_TEAM, 1, "dev", None, "").unwrap();
@@ -776,9 +776,9 @@ fn a_dirty_folder_waits_for_the_lead_and_the_default_keeps_the_members_branch() 
     let root = tempfile::tempdir().unwrap();
     crate::state::with_test_state_root(root.path(), || {
         let (lead, dev) = stage_repo(root.path());
-        let mut team = stage_team(&lead, &dev, "none", &|_| super::super::catalog::builtin());
+        let mut team = stage_team(&lead, &dev, "none", &|_| super::super::super::catalog::builtin());
         team.settings.branch_per_task = Some(BranchPerTask { template: "task/{id}-{member}".into() });
-        let mut store = Store::open_at(&super::super::store::path(), true).unwrap();
+        let mut store = Store::open_at(&super::super::super::store::path(), true).unwrap();
         store.create(&uuid::Uuid::new_v4().to_string(), &json!({}), team, vec![]).unwrap();
         // Uncommitted changes: nothing is sent, the task waits with its reason.
         std::fs::write(dev.join("gate.txt"), "half done\n").unwrap();

@@ -7149,7 +7149,7 @@ mod models_tests;
 
 
 #[cfg(test)]
-#[path = "tests/support.rs"]
+#[path = "tests/support_dispatcher.rs"]
 mod support;
 
 #[cfg(test)]
@@ -7215,39 +7215,39 @@ mod tests {
 
 
     #[cfg(test)]
-    #[path = "../tests/dispatcher_replies.rs"]
+    #[path = "../../tests/dispatcher_replies.rs"]
     mod dispatcher_replies;
 
     #[cfg(test)]
-    #[path = "../tests/dispatcher_inbox_questions.rs"]
+    #[path = "../../tests/dispatcher_inbox_questions.rs"]
     mod dispatcher_inbox_questions;
 
     #[cfg(test)]
-    #[path = "../tests/dispatcher_handout.rs"]
+    #[path = "../../tests/dispatcher_handout.rs"]
     mod dispatcher_handout;
 
     #[cfg(test)]
-    #[path = "../tests/dispatcher_report_holds.rs"]
+    #[path = "../../tests/dispatcher_report_holds.rs"]
     mod dispatcher_report_holds;
 
     #[cfg(test)]
-    #[path = "../tests/dispatcher_handoff_brief.rs"]
+    #[path = "../../tests/dispatcher_handoff_brief.rs"]
     mod dispatcher_handoff_brief;
 
     #[cfg(test)]
-    #[path = "../tests/dispatcher_worktrees.rs"]
+    #[path = "../../tests/dispatcher_worktrees.rs"]
     mod dispatcher_worktrees;
 
     #[cfg(test)]
-    #[path = "../tests/dispatcher_worker.rs"]
+    #[path = "../../tests/dispatcher_worker.rs"]
     mod dispatcher_worker;
 
     #[cfg(test)]
-    #[path = "../tests/dispatcher_stage_land.rs"]
+    #[path = "../../tests/dispatcher_stage_land.rs"]
     mod dispatcher_stage_land;
 
     #[cfg(test)]
-    #[path = "../tests/dispatcher_work_ahead.rs"]
+    #[path = "../../tests/dispatcher_work_ahead.rs"]
     mod dispatcher_work_ahead;
 
 }

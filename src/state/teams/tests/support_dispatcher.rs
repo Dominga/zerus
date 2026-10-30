@@ -1,244 +1,7 @@
-use super::*;
-thread_local! {
-    static TEST_SWITCH: std::cell::RefCell<Option<super::TestSwitch>> = const { std::cell::RefCell::new(None) };
-}
-
-pub(crate) fn set_test_switch(switch: Option<super::TestSwitch>) {
-    TEST_SWITCH.with(|slot| *slot.borrow_mut() = switch);
-}
-
-pub(crate) fn test_switch() -> Option<super::TestSwitch> {
-    TEST_SWITCH.with(|slot| *slot.borrow())
-}
-
-thread_local! {
-    pub(super) static SWITCH_CALLS: std::cell::RefCell<Vec<(String, String)>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
-pub(super) fn switched_switch(name: &str, account: &str, _request: &str) -> anyhow::Result<Value> {
-    SWITCH_CALLS.with(|calls| calls.borrow_mut().push((name.to_owned(), account.to_owned())));
-    Ok(json!({"status":"switched"}))
-}
-
-pub(super) fn uncertain_switch(_name: &str, _account: &str, _request: &str) -> anyhow::Result<Value> {
-    Ok(json!({"status":"uncertain"}))
-}
-
-/// The dispatcher's worker lock, held so a command that would start a
-/// worker does not spawn one from the test binary.
-pub(super) fn hold_worker_lock() -> crate::platform::FileLock {
-    let path = crate::state::teams::dispatcher::lock_path();
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let file = std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(&path).unwrap();
-    let lock = crate::platform::FileLock::exclusive(file).unwrap();
-    assert!(crate::status::locked(&path), "the worker lock is held");
-    lock
-}
-
-// ---- #480: the phase 35 review's findings through the real entry point
-// (commands::run on a private store), as the owner, the lead and members.
-
-/// A running team: the lead (a dsh session, so a test can act as it),
-/// dev and qa; #1 handed to dev, #2 to qa; phase 2 is a draft.
-pub(super) fn review_team() -> (Team, String, String) {
-    use crate::state::teams::model::{Attempt, AttemptState, TaskStatus};
-    let (mut team, _) = ops::create(
-        "rv",
-        &json!({"name":"Review","lead":{"id":"lead","agent":"dsh",
-            "session":{"name":"dsh/x/lead","run_id":"r0","conversation_id":"lead-conversation"}}}),
-    )
-    .unwrap();
-    let mut events = Vec::new();
-    ops::apply(
-        &mut team,
-        "plan",
-        &json!({"members":[{"id":"dev","role":"Backend","agent":"codex"},{"id":"qa","role":"Tester","agent":"kimi"}],
-            "phases":[{"n":2,"title":"Polish"}],
-            "tasks":[{"id":1,"title":"API","assignee":"dev"},{"id":2,"title":"Tests","assignee":"qa"},
-                {"id":3,"title":"Docs","assignee":"dev","phase":2}]}),
-        &Actor::Human,
-        &BTreeSet::new(),
-        &mut events,
-    )
-    .unwrap();
-    ops::apply(&mut team, "approve", &json!({}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
-    let mut attempts = Vec::new();
-    for id in [1u32, 2] {
-        let task = team.task_mut(id).unwrap();
-        let attempt = format!("00000000-0000-4000-8000-00000000010{id}");
-        task.attempts.push(Attempt { n: 1, id: attempt.clone(), member: task.assignee.clone(), state: AttemptState::Delivered, ..Default::default() });
-        task.status = TaskStatus::InProgress;
-        attempts.push(attempt);
-    }
-    (team, attempts[0].clone(), attempts[1].clone())
-}
-
-pub(super) fn with_review_team<T>(team: &Team, body: impl FnOnce() -> T) -> T {
-    let dir = tempfile::tempdir().unwrap();
-    crate::state::with_test_state_root(dir.path(), || {
-        Store::open(true).unwrap().create(&uuid::Uuid::new_v4().to_string(), &json!({}), team.clone(), vec![]).unwrap();
-        body()
-    })
-}
-
-/// One command, with a fresh request id, as the owner unless the input
-/// names an attempt (a member) or the lead acts.
-pub(super) fn call(op: &str, mut input: Value) -> anyhow::Result<Value> {
-    input["request_id"] = json!(uuid::Uuid::new_v4().to_string());
-    input["team"] = json!("rv");
-    run(op, &input, false)
-}
-
-pub(super) fn as_lead<T>(body: impl FnOnce() -> T) -> T {
-    set_test_caller_identities(Some((Some("lead-conversation".into()), None, None)));
-    let result = body();
-    set_test_caller_identities(Some((None, None, None)));
-    result
-}
-
-pub(super) fn stored() -> Team {
-    Store::open(false).unwrap().load("rv").unwrap().unwrap()
-}
-
-pub(super) fn finding(severity: &str, title: &str) -> Value {
-    json!({"severity":severity,"title":title,"scenario":"two saves at once","task":1})
-}
-
-/// U32: the events fixture the lead's own session reads owner words from.
-pub(super) fn owner_word_events(dir: &std::path::Path, prompts: &[(f64, &str)]) {
-    use rusqlite::Connection;
-    let db = Connection::open(dir.join("events.sqlite3")).unwrap();
-    db.execute_batch("CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY, name TEXT, conversation TEXT, payload TEXT);").unwrap();
-    for (at, detail) in prompts {
-        db.execute(
-            "INSERT INTO events(name,conversation,payload) VALUES ('dsh/x/lead','c1',?1)",
-            rusqlite::params![json!({"type":"UserPromptSubmit","at":at,"agent_id":"","detail":detail}).to_string()],
-        ).unwrap();
-    }
-}
-
-/// U32: a running team whose member cap is already full (six members).
-pub(super) fn full_team() -> Team {
-    use crate::state::teams::model::{FolderPolicy, Settings};
-    let mut team = Team {
-        id: "abcdef12-0000-4000-8000-000000000000".into(),
-        name: "T".into(),
-        lead: "lead".into(),
-        status: TeamStatus::Running,
-        settings: Settings { max_members: 6, folder_policy: FolderPolicy::Shared, ..Default::default() },
-        ..Default::default()
-    };
-    team.members.push(Member {
-        id: "lead".into(),
-        role: "Lead".into(),
-        agent: "dsh".into(),
-        session: Some(SessionRef { name: "dsh/x/lead".into(), conversation_id: "c1".into(), ..Default::default() }),
-        ..Default::default()
-    });
-    for index in 1..=5 {
-        team.members.push(Member { id: format!("m{index}"), role: "Backend".into(), agent: "dsh".into(), ..Default::default() });
-    }
-    team
-}
-
-pub(super) use super::super::dispatcher::Seen;
-
-/// A running team with an open hand-out to dev.
-pub(super) fn running_team() -> Team {
-    let (mut team, _) = ops::create(
-        "t",
-        &json!({"name":"T","lead":{"id":"lead","agent":"claude","session":{"name":"claude/x/lead","run_id":"r0"}}}),
-    )
-    .unwrap();
-    let mut events = Vec::new();
-    ops::apply(
-        &mut team,
-        "plan",
-        &json!({"members":[{"id":"dev","role":"Backend","agent":"codex","session":{"name":"codex/x/dev","run_id":"r1"}}],
-            "tasks":[{"id":1,"title":"API","assignee":"dev"}]}),
-        &Actor::Human,
-        &BTreeSet::new(),
-        &mut events,
-    )
-    .unwrap();
-    ops::apply(&mut team, "approve", &json!({}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
-    {
-        let task = team.task_mut(1).unwrap();
-        task.attempts.push(Attempt {
-            n: 1,
-            id: "00000000-0000-4000-8000-000000000001".into(),
-            member: "dev".into(),
-            state: AttemptState::Delivered,
-            sent_at: 10.0,
-            delivered_at: Some(10.0),
-            started_at: Some(11.0),
-            ..Default::default()
-        });
-        task.status = TaskStatus::InProgress;
-    }
-    team
-}
-
-pub(super) fn found_session(name: &str, run: &str, live: bool, cwd: &str) -> Seen {
-    Seen {
-        name: name.into(),
-        run_id: run.into(),
-        conversation_id: "conversation-1".into(),
-        cwd: cwd.into(),
-        live,
-        ..Default::default()
-    }
-}
-
-pub(super) fn existing_member() -> Member {
-    Member {
-        id: "dev2".into(),
-        role: "Backend".into(),
-        agent: "dsh".into(),
-        session: Some(SessionRef { name: "dsh/x/dev2".into(), ..Default::default() }),
-        ..Default::default()
-    }
-}
-
-pub(super) fn live_session(session: &SessionRef) -> Seen {
-    Seen {
-        host: session.host.clone(),
-        name: session.name.clone(),
-        run_id: session.run_id.clone(),
-        conversation_id: session.conversation_id.clone(),
-        live: true,
-        ..Default::default()
-    }
-}
-
-/// What the dispatcher records for a delivered hand-off.
-pub(super) fn hand_out(team: &mut Team, id: u32) -> String {
-    let task = team.task_mut(id).unwrap();
-    let n = task.attempts.len() as u32 + 1;
-    let attempt = format!("00000000-0000-4000-8000-00000000000{n}");
-    task.attempts.push(Attempt { n, id: attempt.clone(), member: task.assignee.clone(), state: AttemptState::Delivered, ..Default::default() });
-    task.status = TaskStatus::InProgress;
-    attempt
-}
-
-/// The running team with "qalead" as the Tester's sub-lead (spec 5.6).
-pub(super) fn team_with_sub_lead() -> Team {
-    let mut team = running_team();
-    let none = BTreeSet::new();
-    let mut events = Vec::new();
-    apply(&mut team, "add-member", &json!({"member":{"id":"qalead","role":"QA lead","agent":"codex"}}), &Actor::Human, &none, &mut events)
-        .unwrap();
-    apply(&mut team, "sub-lead", &json!({"member":"qalead","sub":true}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
-    apply(&mut team, "reports-to", &json!({"member":"qa","parent":"qalead"}), &Actor::Human, &none, &mut events).unwrap();
-    team
-}
-
-pub(super) fn kinds(events: &[Event]) -> Vec<String> {
-    events.iter().map(|event| event.kind.to_owned()).collect()
-}
-
 use super::super::ops::{self, Actor};
-fn team() -> Team {
+use super::*;
+
+pub(crate) fn team() -> Team {
     let (mut team, _) = ops::create(
         "t",
         &json!({"name":"Checkout","lead":{"id":"lead","agent":"claude","session":{"name":"claude/x/lead","run_id":"r0"}}}),
@@ -260,9 +23,10 @@ fn team() -> Team {
     ops::apply(&mut team, "approve", &json!({}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
     team
 }
+
 /// U36: dev reported #1 under the Code pipeline; rev reviews and qa tests,
 /// each with a free session; every member works in `folder`.
-fn staged(folder: &str) -> Team {
+pub(crate) fn staged(folder: &str) -> Team {
     let mut t = team();
     t.folder = folder.to_owned();
     t.members.push(Member { id: "rev".into(), role: "Reviewer".into(), agent: "claude".into(), state: MemberState::Active,
@@ -284,19 +48,23 @@ fn staged(folder: &str) -> Team {
     assert_eq!(t.task(1).unwrap().status, TaskStatus::InReview);
     t
 }
-fn free_sessions() -> Vec<Seen> {
+
+pub(crate) fn free_sessions() -> Vec<Seen> {
     vec![session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", true), session("claude/x/rev", "r2", true), session("kimi/x/qa", "r3", true)]
 }
-fn session(name: &str, run: &str, free: bool) -> Seen {
+
+pub(crate) fn session(name: &str, run: &str, free: bool) -> Seen {
     Seen { name: name.into(), run_id: run.into(), conversation_id: "c".into(), free, idle: free, live: true, ..Default::default() }
 }
+
 /// U52: the listing row of a session that is no longer running, with the
 /// state the listing reports for it.
-fn stopped(name: &str, run: &str, state: &str) -> Seen {
+pub(crate) fn stopped(name: &str, run: &str, state: &str) -> Seen {
     Seen { name: name.into(), run_id: run.into(), conversation_id: "c".into(), live: false, state: state.into(), ..Default::default() }
 }
+
 /// A hand-out delivered at 10 to `dev`, with the attempts list one open.
-fn delivered(team: &mut Team) {
+pub(crate) fn delivered(team: &mut Team) {
     let task = team.task_mut(1).unwrap();
     task.attempts.push(Attempt {
         n: 1,
@@ -309,7 +77,8 @@ fn delivered(team: &mut Team) {
     });
     task.status = TaskStatus::InProgress;
 }
-fn reopen_store(dir: &std::path::Path) -> (Store, Team) {
+
+pub(crate) fn reopen_store(dir: &std::path::Path) -> (Store, Team) {
     let mut store = Store::open_at(&dir.join("teams/teams.sqlite3"), true).unwrap();
     let mut t = team();
     let task = t.task_mut(1).unwrap();
@@ -318,21 +87,29 @@ fn reopen_store(dir: &std::path::Path) -> (Store, Team) {
     store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
     (store, t)
 }
-fn event_kinds(store: &Store, team: &str) -> Vec<String> {
+
+/// U46: a stored team for the context tests, in a state root of its own.
+pub(crate) fn stored(store: &mut Store, team: &Team) {
+    store.create("11111111-1111-4111-8111-111111111111", &json!({}), team.clone(), vec![]).unwrap();
+}
+
+pub(crate) fn event_kinds(store: &Store, team: &str) -> Vec<String> {
     let page = store.events(team, None, 50).unwrap();
     let mut items: Vec<String> = page["items"].as_array().unwrap().iter().map(|event| event["kind"].as_str().unwrap_or_default().to_owned()).collect();
     items.reverse();
     items
 }
+
 /// U46: the member the hand-out prepares, with a session and a setting.
-fn with_context(team: &mut Team, member: &str, setting: &str) {
+pub(crate) fn with_context(team: &mut Team, member: &str, setting: &str) {
     let found = team.members.iter_mut().find(|found| found.id == member).unwrap();
     found.session = Some(SessionRef { name: format!("codex/x/{member}"), run_id: "r1".into(), conversation_id: "c1".into(), ..Default::default() });
     found.state = MemberState::Active;
     found.context_before_task = setting.into();
 }
+
 /// U46: one dispatcher tick for a waiting hand-out, as the worker runs it.
-fn prepare_tick(store: &mut Store, team_id: &str) -> bool {
+pub(crate) fn prepare_tick(store: &mut Store, team_id: &str) -> bool {
     let team = store.load(team_id).unwrap().unwrap();
     let found = steps(&team, &[], crate::state::now());
     let step = found.iter().find(|step| matches!(step, Step::PrepareContext { .. })).cloned();
@@ -341,20 +118,23 @@ fn prepare_tick(store: &mut Store, team_id: &str) -> bool {
     }
     step.is_some()
 }
+
 /// The sessions the local recovery service is asked to wait for.
-fn local_overrides() -> Vec<String> {
+pub(crate) fn local_overrides() -> Vec<String> {
     let path = crate::state::storage::root().join("recovery/team.json");
     let value: Value = std::fs::read_to_string(path).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default();
     value["items"].as_object().map(|items| items.keys().cloned().collect()).unwrap_or_default()
 }
-fn limited_dev(name: &str, run: &str) -> Seen {
+
+pub(crate) fn limited_dev(name: &str, run: &str) -> Seen {
     let mut dev = session(name, run, false);
     dev.phase = "error".into();
     dev.limited = Some(SeenLimit { at: 100.0, resets_at: Some(200.0), detail: "session limit".into() });
     dev
 }
+
 /// Every step of one pass, as the worker runs them.
-fn pass(store: &mut Store, id: &str, seen: &[Seen]) -> Vec<Step> {
+pub(crate) fn pass(store: &mut Store, id: &str, seen: &[Seen]) -> Vec<Step> {
     let team = store.load(id).unwrap().unwrap();
     let found = steps(&team, seen, 300.0);
     for step in &found {
@@ -362,9 +142,10 @@ fn pass(store: &mut Store, id: &str, seen: &[Seen]) -> Vec<Step> {
     }
     found
 }
+
 /// U21: a repository whose `teams-v2/lead` branch diverged from the member's
 /// branch, with a post-merge hook that writes `marker` when it runs.
-fn diverged_repo(dir: &std::path::Path, marker: &std::path::Path) -> bool {
+pub(crate) fn diverged_repo(dir: &std::path::Path, marker: &std::path::Path) -> bool {
     let git = |args: &[&str]| {
         std::process::Command::new("git")
             .arg("-C")
@@ -394,8 +175,9 @@ fn diverged_repo(dir: &std::path::Path, marker: &std::path::Path) -> bool {
         && std::fs::create_dir_all(dir.join(".git").join("hooks")).is_ok()
         && std::fs::write(dir.join(".git").join("hooks").join("post-merge"), format!("#!/bin/sh\necho x > \"{}\"\n", marker.display())).is_ok()
 }
+
 /// The team with a second Backend member, dev2, free and started.
-fn team_with_two_backends() -> (Team, Vec<Seen>) {
+pub(crate) fn team_with_two_backends() -> (Team, Vec<Seen>) {
     let mut team = team();
     let mut dev2 = team.member("dev").unwrap().clone();
     dev2.id = "dev2".into();
@@ -404,15 +186,17 @@ fn team_with_two_backends() -> (Team, Vec<Seen>) {
     let seen = vec![session("claude/x/lead", "r0", false), session("codex/x/dev", "r1", true), session("codex/x/dev2", "r3", true)];
     (team, seen)
 }
-fn folder_team(folder: &Path, member: Member) -> Team {
+
+pub(crate) fn folder_team(folder: &Path, member: Member) -> Team {
     let mut team = Team { id: "abcdef12-0000-4000-8000-000000000000".into(), name: "T".into(), lead: "lead".into(), folder: folder.display().to_string(), ..Default::default() };
     team.members.push(Member { id: "lead".into(), role: "Lead".into(), agent: "claude".into(), ..Default::default() });
     team.members.push(member);
     team
 }
 
+
 /// N6: one NoReport step with a given `hgs inspect` record.
-fn capture_with(reply: Value) -> (tempfile::TempDir, Store, String, u32) {
+pub(crate) fn capture_with(reply: Value) -> (tempfile::TempDir, Store, String, u32) {
     let dir = tempfile::tempdir().unwrap();
     let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
     let mut t = team();
@@ -438,7 +222,7 @@ fn capture_with(reply: Value) -> (tempfile::TempDir, Store, String, u32) {
 }
 /// A7: `member`'s report on `task`, Submitted and undecided; `captured`
 /// when Zerus took it from the member's last reply (A2).
-fn submit(team: &mut Team, task: u32, member: &str, captured: bool) {
+pub(crate) fn submit(team: &mut Team, task: u32, member: &str, captured: bool) {
     let task = team.task_mut(task).unwrap();
     task.status = TaskStatus::Submitted;
     task.attempts.push(Attempt {
@@ -455,11 +239,11 @@ fn submit(team: &mut Team, task: u32, member: &str, captured: bool) {
         ..Default::default()
     });
 }
-fn attempt_with_report(member: &str, text: &str, state: AttemptState) -> Attempt {
+pub(crate) fn attempt_with_report(member: &str, text: &str, state: AttemptState) -> Attempt {
     Attempt { n: 1, member: member.into(), state, report: Some(Report { text: text.into(), at: 0.0, ..Default::default() }), ..Default::default() }
 }
 /// A Git repository with one commit in `dir/name`, for the folder tests.
-fn folder_repo(dir: &Path, name: &str) -> PathBuf {
+pub(crate) fn folder_repo(dir: &Path, name: &str) -> PathBuf {
     let repo = dir.join(name);
     std::fs::create_dir(&repo).unwrap();
     let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&repo).args(args).status().unwrap();
@@ -472,7 +256,7 @@ fn folder_repo(dir: &Path, name: &str) -> PathBuf {
     repo
 }
 /// What `hgs worktrees create` does on this computer, for `member_folder_with`.
-fn local_create(args: &[&str]) -> anyhow::Result<Output> {
+pub(crate) fn local_create(args: &[&str]) -> anyhow::Result<Output> {
     let value = |key: &str| args.iter().position(|arg| *arg == key).map(|at| args[at + 1].to_owned()).unwrap();
     let (source, branch, destination) = (value("--path"), value("--branch"), value("--destination"));
     if args.contains(&"--clone") {
@@ -484,18 +268,18 @@ fn local_create(args: &[&str]) -> anyhow::Result<Output> {
     }
 }
 /// U47/U48: one git command in a test repository, which must succeed.
-fn git_in(folder: &Path, args: &[&str]) -> String {
+pub(crate) fn git_in(folder: &Path, args: &[&str]) -> String {
     let output = std::process::Command::new("git").arg("-C").arg(folder).args(["-c", "commit.gpgsign=false"]).args(args).output().unwrap();
     assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
-fn git_fails(folder: &Path, args: &[&str]) -> bool {
+pub(crate) fn git_fails(folder: &Path, args: &[&str]) -> bool {
     !std::process::Command::new("git").arg("-C").arg(folder).args(args).output().unwrap().status.success()
 }
-const STAGE_TEAM: &str = "77777777-7777-4777-8777-777777777777";
+pub(crate) const STAGE_TEAM: &str = "77777777-7777-4777-8777-777777777777";
 /// A real repository: the lead's folder on main and dev's worktree on its
 /// team branch, as Zerus makes them.
-fn stage_repo(root: &Path) -> (PathBuf, PathBuf) {
+pub(crate) fn stage_repo(root: &Path) -> (PathBuf, PathBuf) {
     let lead = root.join("lead");
     std::fs::create_dir_all(&lead).unwrap();
     git_in(&lead, &["init", "-q"]);
@@ -512,7 +296,7 @@ fn stage_repo(root: &Path) -> (PathBuf, PathBuf) {
 /// A running team in that repository: dev (Backend) works in its own
 /// worktree, rev reviews; tasks #1 and #2 are dev's, each with the preset
 /// `catalog(n)` gives it.
-fn stage_team(lead: &Path, dev: &Path, pipeline: &str, catalog: &dyn Fn(u32) -> super::super::catalog::Catalog) -> Team {
+pub(crate) fn stage_team(lead: &Path, dev: &Path, pipeline: &str, catalog: &dyn Fn(u32) -> super::super::catalog::Catalog) -> Team {
     let (mut team, _) = ops::create(
         "t",
         &json!({"name":"Stages","lead":{"id":"lead","agent":"claude","session":{"name":"claude/x/lead","run_id":"r0"}}}),
@@ -541,7 +325,7 @@ fn stage_team(lead: &Path, dev: &Path, pipeline: &str, catalog: &dyn Fn(u32) -> 
     team
 }
 /// The owner's preset of one Zerus stage of `kind` running `command`.
-fn command_preset(kind: &str, command: String, exits: &[(&str, &str)]) -> super::super::catalog::Catalog {
+pub(crate) fn command_preset(kind: &str, command: String, exits: &[(&str, &str)]) -> super::super::catalog::Catalog {
     let mut catalog = super::super::catalog::builtin();
     catalog.pipelines.push(super::super::catalog::Pipeline {
         id: "gate".into(),
@@ -557,13 +341,13 @@ fn command_preset(kind: &str, command: String, exits: &[(&str, &str)]) -> super:
     catalog
 }
 /// #680: the same preset with the checkout rule.
-fn checkout_command_preset(kind: &str, command: String) -> super::super::catalog::Catalog {
+pub(crate) fn checkout_command_preset(kind: &str, command: String) -> super::super::catalog::Catalog {
     let mut catalog = command_preset(kind, command, &[("0", "accepted")]);
     catalog.pipelines.last_mut().unwrap().folder = "checkout".into();
     catalog
 }
 /// #683: Deliver - review, then the command, then land - under the hold rule.
-fn deliver_preset() -> super::super::catalog::Catalog {
+pub(crate) fn deliver_preset() -> super::super::catalog::Catalog {
     let mut catalog = command_preset("command", "git status --porcelain".into(), &[]);
     let pipeline = catalog.pipelines.last_mut().unwrap();
     pipeline.id = "deliver".into();
@@ -578,7 +362,7 @@ fn deliver_preset() -> super::super::catalog::Catalog {
     catalog
 }
 /// #680: a stage command that writes the environment it got into `env.txt`.
-fn env_command() -> String {
+pub(crate) fn env_command() -> String {
     if cfg!(windows) {
         "> env.txt echo %HGS_TASK_ID%^|%HGS_TASK_BRANCH%^|%HGS_TASK_COMMIT%".to_owned()
     } else {
@@ -586,7 +370,7 @@ fn env_command() -> String {
     }
 }
 /// The member reports its open attempt of `task`, as `hgs team report` does.
-fn stage_report(store: &mut Store, task: u32) {
+pub(crate) fn stage_report(store: &mut Store, task: u32) {
     let team = store.load(STAGE_TEAM).unwrap().unwrap();
     let attempt = team.task(task).unwrap().open_attempt().unwrap().id.clone();
     store
@@ -597,7 +381,7 @@ fn stage_report(store: &mut Store, task: u32) {
 }
 /// The dispatcher's two passes over a Zerus stage: start it (the runner
 /// runs inline in a test), then read its record and decide.
-fn run_stage(store: &mut Store) -> String {
+pub(crate) fn run_stage(store: &mut Store) -> String {
     let team = store.load(STAGE_TEAM).unwrap().unwrap();
     let found = steps(&team, &[], now());
     let Some(Step::StageCommand { task, run }) = found.iter().find(|step| matches!(step, Step::StageCommand { .. })).cloned() else {
@@ -613,13 +397,13 @@ fn run_stage(store: &mut Store) -> String {
     }
     run
 }
-fn feed_kinds(store: &Store) -> Vec<String> {
+pub(crate) fn feed_kinds(store: &Store) -> Vec<String> {
     let page = store.events(STAGE_TEAM, None, 200).unwrap();
     let mut kinds: Vec<String> = page["items"].as_array().unwrap().iter().map(|item| item["kind"].as_str().unwrap().to_owned()).collect();
     kinds.reverse();
     kinds
 }
-fn deliver_all() {
+pub(crate) fn deliver_all() {
     set_fake_hgs(Some(Box::new(|_, args: &[&str], _| {
         assert_eq!(args.first().copied(), Some("send"));
         Ok(fake_output(0, r#"{"status":"submitted"}"#, ""))
@@ -628,7 +412,7 @@ fn deliver_all() {
 /// A team whose running phase has no ready work, and a draft phase 2 with
 /// #4 (dev), #5 (qa) that depends on #4, and #6 (dev) that depends on the
 /// running #1.
-fn work_ahead_team() -> Team {
+pub(crate) fn work_ahead_team() -> Team {
     let mut t = team();
     for task in &mut t.tasks {
         if task.phase == 1 {

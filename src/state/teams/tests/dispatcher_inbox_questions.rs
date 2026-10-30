@@ -263,7 +263,7 @@ fn the_desktop_fixture_is_a_real_status_question_with_the_native_answer() {
     // Saved from a real `hgs team status --json` call (the member question
     // of a pending Claude Bash approval), for the desktop test.
     let fixture: Value = serde_json::from_str(include_str!(
-        "../../../tray/tests/fixtures/hgs-team-member-question.json"
+        "../../../../tray/tests/fixtures/hgs-team-member-question.json"
     ))
     .expect("the desktop fixture parses");
     assert_eq!(fixture["tool"], "Bash");

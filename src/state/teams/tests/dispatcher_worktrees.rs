@@ -211,7 +211,7 @@ fn an_adopted_sessions_outbox_is_the_sessions_own_folder() {
     // reaches the lead as the member's own question.
     let request = json!({"op":"ask","request_id":request_id,"team":t.id,"member":"dev","attempt":"A1",
         "input":{"request_id":request_id,"team":t.id,"attempt":"A1","text":"Must I keep the cache?"}});
-    super::super::outbox::push(&folder, &request).unwrap();
+    super::super::super::outbox::push(&folder, &request).unwrap();
     let mut dev = session("codex/x/dev", "r1", true);
     dev.cwd = folder.display().to_string();
     take_outbox(&mut store, &current, &[dev]).unwrap();
@@ -245,8 +245,8 @@ fn a_second_run_in_one_folder_waits_for_the_first() {
     };
     let first = "77777777-7777-4777-8777-777777777771";
     let second = "77777777-7777-4777-8777-777777777772";
-    super::super::outbox::push(&folder, &run(first)).unwrap();
-    super::super::outbox::push(&folder, &run(second)).unwrap();
+    super::super::super::outbox::push(&folder, &run(first)).unwrap();
+    super::super::super::outbox::push(&folder, &run(second)).unwrap();
     let mut dev = session("codex/x/dev", "r1", true);
     dev.cwd = folder.display().to_string();
     let started = std::cell::RefCell::new(Vec::<String>::new());
@@ -257,7 +257,7 @@ fn a_second_run_in_one_folder_waits_for_the_first() {
     let current = store.load(&t.id).unwrap().unwrap();
     take_outbox_with(&mut store, &current, &[dev.clone()], &spawn).unwrap();
     assert_eq!(started.borrow().as_slice(), [first.to_owned()], "a second run waits");
-    assert!(super::super::outbox::request_path(&folder, second).exists(), "the second run is still queued");
+    assert!(super::super::super::outbox::request_path(&folder, second).exists(), "the second run is still queued");
     // The first run ends; the next tick claims the second.
     run_request(&mut store, &folder, &run(first));
     let current = store.load(&t.id).unwrap().unwrap();
@@ -297,7 +297,7 @@ fn a_shared_folders_request_belongs_to_the_member_that_queued_it() {
     let request_id = "44444444-4444-4444-8444-444444444445";
     let request = json!({"op":"report","request_id":request_id,"team":t.id,"member":"qa","attempt":"A3",
         "input":{"request_id":request_id,"team":t.id,"task":qa_id,"attempt":"A3","text":"qa done"}});
-    super::super::outbox::push(&folder, &request).unwrap();
+    super::super::super::outbox::push(&folder, &request).unwrap();
     let mut dev = session("codex/x/dev", "r1", true);
     dev.cwd = folder.display().to_string();
     let mut qa = session("kimi/x/qa", "r2", true);

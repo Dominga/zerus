@@ -77,8 +77,57 @@ impl Store {
         } else {
             false
         };
+        let current: bool = self
+            .index
+            .connection()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='catalog_source_fallback')",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        let (fallback, unknown, invalid) = if current {
+            let fallback: u64 = self
+                .index
+                .connection()
+                .query_row("SELECT fallback FROM catalog_totals WHERE id=1", [], |r| {
+                    r.get(0)
+                })
+                .map_err(|e| e.to_string())?;
+            let unknown: bool = self
+                .index
+                .connection()
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM catalog_queue WHERE identity IS NULL LIMIT 1)",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            let invalid: bool = self
+                .index
+                .connection()
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM catalog_queue WHERE skipped=1 LIMIT 1)",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            (fallback, unknown, invalid)
+        } else {
+            (paths, paths > 0, false)
+        };
+        let overflow: bool = self
+            .index
+            .connection()
+            .query_row(
+                "SELECT COALESCE((SELECT value='1' FROM meta WHERE key='invalidation_overflow'),0)",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
         Ok(
-            json!({"discovery":if fresh{"complete"}else if complete{"stale"}else{"incomplete"},"queued_paths":paths,"pending_paths":pending}),
+            json!({"invalidation_overflow":overflow,"discovery":if fresh{"complete"}else if complete{"stale"}else{"incomplete"},"queued_paths":paths,"pending_paths":pending,
+            "fallback_sources":fallback,"unknown_metadata":unknown,"invalid_metadata":invalid}),
         )
     }
 
@@ -87,16 +136,77 @@ impl Store {
             id INTEGER PRIMARY KEY AUTOINCREMENT,path TEXT NOT NULL UNIQUE,
             kind TEXT NOT NULL,stamp TEXT NOT NULL,seen TEXT NOT NULL,
             done INTEGER NOT NULL CHECK(done IN(0,1)),identity TEXT);
+            CREATE INDEX IF NOT EXISTS catalog_pending ON catalog_queue(done,id);
             CREATE INDEX IF NOT EXISTS catalog_seen ON catalog_queue(seen,id);
             CREATE TABLE IF NOT EXISTS catalog_totals(id INTEGER PRIMARY KEY CHECK(id=1),paths INTEGER NOT NULL,pending INTEGER NOT NULL);
-            INSERT OR IGNORE INTO catalog_totals VALUES(1,0,0);
+            INSERT OR IGNORE INTO catalog_totals(id,paths,pending) VALUES(1,0,0);
             CREATE TRIGGER IF NOT EXISTS catalog_insert AFTER INSERT ON catalog_queue BEGIN
                 UPDATE catalog_totals SET paths=paths+1,pending=pending+1-NEW.done WHERE id=1; END;
             CREATE TRIGGER IF NOT EXISTS catalog_update AFTER UPDATE OF done ON catalog_queue BEGIN
                 UPDATE catalog_totals SET pending=pending+OLD.done-NEW.done WHERE id=1; END;
             CREATE TRIGGER IF NOT EXISTS catalog_delete AFTER DELETE ON catalog_queue BEGIN
                 UPDATE catalog_totals SET paths=paths-1,pending=pending-1+OLD.done WHERE id=1; END;")
-            .map_err(|e|e.to_string())
+            .map_err(|e|e.to_string())?;
+        let columns: Vec<String> = self
+            .index
+            .connection()
+            .prepare("PRAGMA table_info(catalog_queue)")
+            .map_err(|e| e.to_string())?
+            .query_map([], |r| r.get(1))
+            .map_err(|e| e.to_string())?
+            .collect::<rusqlite::Result<_>>()
+            .map_err(|e| e.to_string())?;
+        for (name, definition) in [
+            ("source", "TEXT"),
+            ("fallback", "INTEGER NOT NULL DEFAULT 1"),
+            ("updated", "REAL NOT NULL DEFAULT 0"),
+            ("skipped", "INTEGER NOT NULL DEFAULT 0"),
+        ] {
+            if !columns.iter().any(|column| column == name) {
+                self.index
+                    .connection()
+                    .execute(
+                        &format!("ALTER TABLE catalog_queue ADD COLUMN {name} {definition}"),
+                        [],
+                    )
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        let counter: bool = self
+            .index
+            .connection()
+            .prepare("PRAGMA table_info(catalog_totals)")
+            .map_err(|e| e.to_string())?
+            .query_map([], |r| r.get::<_, String>(1))
+            .map_err(|e| e.to_string())?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| e.to_string())?
+            .iter()
+            .any(|column| column == "fallback");
+        if !counter {
+            let tx = self
+                .index
+                .connection()
+                .unchecked_transaction()
+                .map_err(|e| e.to_string())?;
+            tx.execute_batch(
+                "ALTER TABLE catalog_totals ADD COLUMN fallback INTEGER NOT NULL DEFAULT 0;
+                UPDATE catalog_totals SET fallback=paths WHERE id=1",
+            )
+            .map_err(|e| e.to_string())?;
+            tx.commit().map_err(|e| e.to_string())?;
+        }
+        self.index.connection().execute_batch("CREATE INDEX IF NOT EXISTS catalog_known ON catalog_queue(identity,id);
+            CREATE INDEX IF NOT EXISTS catalog_source ON catalog_queue(source,id);
+            CREATE INDEX IF NOT EXISTS catalog_source_fallback ON catalog_queue(source,fallback,id);
+            CREATE INDEX IF NOT EXISTS catalog_fallback ON catalog_queue(fallback,updated DESC,id DESC);
+            CREATE INDEX IF NOT EXISTS catalog_skipped ON catalog_queue(skipped,id);
+            CREATE TRIGGER IF NOT EXISTS fallback_insert AFTER INSERT ON catalog_queue BEGIN
+                UPDATE catalog_totals SET fallback=fallback+NEW.fallback WHERE id=1; END;
+            CREATE TRIGGER IF NOT EXISTS fallback_update AFTER UPDATE OF fallback ON catalog_queue BEGIN
+                UPDATE catalog_totals SET fallback=fallback+NEW.fallback-OLD.fallback WHERE id=1; END;
+            CREATE TRIGGER IF NOT EXISTS fallback_delete AFTER DELETE ON catalog_queue BEGIN
+                UPDATE catalog_totals SET fallback=fallback-OLD.fallback WHERE id=1; END;").map_err(|e|e.to_string())
     }
 
     /// Called only for explicit search demand. Handles live within this call,
@@ -259,6 +369,9 @@ impl Store {
                 ON CONFLICT(path) DO UPDATE SET
                 done=CASE WHEN catalog_queue.stamp=excluded.stamp THEN catalog_queue.done ELSE 0 END,
                 identity=CASE WHEN catalog_queue.stamp=excluded.stamp THEN catalog_queue.identity ELSE NULL END,
+                source=CASE WHEN catalog_queue.stamp=excluded.stamp THEN catalog_queue.source ELSE NULL END,
+                fallback=CASE WHEN catalog_queue.stamp=excluded.stamp THEN catalog_queue.fallback ELSE 1 END,
+                skipped=CASE WHEN catalog_queue.stamp=excluded.stamp THEN catalog_queue.skipped ELSE 0 END,
                 stamp=excluded.stamp,seen=excluded.seen",params![path,kind,stamp,generation]).map_err(|e|e.to_string())?;
         }
         tx.commit().map_err(|e| e.to_string())
@@ -306,5 +419,6 @@ fn directory_stamp(roots: &[(&str, PathBuf)]) -> Result<String> {
     Ok(format!("{:x}", hash.finalize()))
 }
 
+mod queue;
 #[cfg(test)]
 mod tests;

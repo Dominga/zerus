@@ -29,8 +29,17 @@ never establishes complete discovery. Repeated passes reuse staged paths;
 an unchanged directory stamp avoids enumeration. New or changed metadata
 returns that path to pending. Status reads constant-size path/pending counters.
 Complete discovery still leaves history coverage cold or incomplete until
-queued bindings and their histories have actually been consumed; source queue
-consumption, stale queue cleanup and indexed query publication follow next.
+queued bindings and their histories have actually been consumed.
+
+`hgs search --index-catchup` combines that bounded discovery pass with one
+250 ms ingestion pass. The persisted queue uses indexed 16-path keyset pages;
+public history cursors resume on the next explicit call. Metadata reads count
+against the source-file/byte budget. A completed catalog pass also prunes at
+most 16 vanished paths; retirement excludes their text before bounded secure
+cleanup. Constant counters distinguish pending paths from sources that still
+need the legacy search (live, unsupported, invalid, evicted or incomplete).
+Live histories retain the fresh legacy read even after cache ingestion. Indexed
+query publication and client selection follow separately.
 
 The adapter refuses copied/restored loose directory, database or auxiliary-file
 permissions and links. New index directories are 0700, database and rollback

@@ -40,6 +40,23 @@ switch bundle does not see what the dev app saved there. The attachment cache
 follows the same rule with Tauri's `app_cache_dir` formula
 (`Identity::cache_dir_now`): `~/Library/Caches/<identifier>/` on the Mac.
 
+## Linux tray
+
+Live Linux builds keep the same desk and menu models behind a native
+StatusNotifierItem and DBusMenu (`src-tauri/src/platform/linux_tray.rs`). Tauri's
+AppIndicator backend does not report primary clicks on Linux, so this adapter
+exports the protocols directly, as specified in the approved design. It keeps
+Qt's tile sizes, attention colour, tooltip and menu texts; updates wait while
+the menu is open, and its actions keep their captured session identities.
+
+`--background` starts without a window, `--sessions` presents the existing
+window, and closing it keeps the tray alive. Single-instance names and the
+`show`/`sessions` handshake stay in `instance.rs`. The Open in submenu offers
+Automatic, Tab, Window and Clipboard, reads `open-mode`/`terminal` from
+`tray.conf`, and saves changes in the client's own `menubar.json`.
+Native protocol tests create a private D-Bus daemon and fake Plasma watcher;
+they never connect to the desktop's bus.
+
 ## Build and run
 
 ```sh

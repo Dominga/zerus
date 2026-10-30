@@ -5978,6 +5978,7 @@ dependencies = [
  "ureq",
  "uuid",
  "webkit2gtk",
+ "zbus",
  "zerus-client-core",
  "zerus-client-media",
  "zerus-watch-protocol",

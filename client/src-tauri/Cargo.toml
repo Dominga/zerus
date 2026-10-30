@@ -66,6 +66,9 @@ libc = "0.2"
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
 webkit2gtk = "2.0.2"
+# Tauri's AppIndicator backend has no primary-click events on Linux. The
+# approved Linux adapter exports the same native SNI/DBusMenu protocol as Qt.
+zbus = { version = "5.19", features = ["blocking-api"] }
 
 # macOS: process metrics through libproc, the WebKit preference that lets
 # page rendering follow the display rate (platform/macos.rs), and the menu-bar

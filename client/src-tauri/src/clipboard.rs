@@ -3,7 +3,22 @@
 //! `live` feature, so Copy session name works in both.
 
 use tauri::AppHandle;
+#[cfg(not(target_os = "linux"))]
 use tauri_plugin_clipboard_manager::ClipboardExt;
+
+#[cfg(target_os = "linux")]
+mod linux;
+
+/// Linux fallbacks can wait for a peer/helper; callers run this off GTK's
+/// thread. The plugin also forbids read_text on GTK's thread.
+fn write(app: &AppHandle, text: String) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    return linux::write(app, &text);
+    #[cfg(not(target_os = "linux"))]
+    app.clipboard()
+        .write_text(text)
+        .map_err(|error| error.to_string())
+}
 
 /// Whether `text` may go to the clipboard (Qt's `ClipboardBackend::isCopyable`):
 /// a newline would make the shell run the command the moment it is pasted.
@@ -18,12 +33,10 @@ fn copyable(text: &str) -> Result<(), String> {
 }
 
 /// Puts `text` on the clipboard, refusing an empty text or one with a line break.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn copy_text(app: AppHandle, text: String) -> Result<(), String> {
     copyable(&text)?;
-    app.clipboard()
-        .write_text(text)
-        .map_err(|error| error.to_string())
+    write(&app, text)
 }
 
 /// Whether `text` may go to the clipboard as it is: anything but an empty
@@ -37,12 +50,10 @@ fn verbatim(text: &str) -> Result<(), String> {
 }
 
 /// Puts `text` on the clipboard exactly as it is, refusing only an empty text.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn copy_verbatim(app: AppHandle, text: String) -> Result<(), String> {
     verbatim(&text)?;
-    app.clipboard()
-        .write_text(text)
-        .map_err(|error| error.to_string())
+    write(&app, text)
 }
 
 #[cfg(test)]

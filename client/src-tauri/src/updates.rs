@@ -997,7 +997,7 @@ pub fn updates_open(updates: TauriState<'_, Updates>, target: String) -> Result<
     crate::settings::open_url(&url).map_err(|error| format!("Could not open {url}: {error}"))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn updates_copy_command(
     app: AppHandle,
     updates: TauriState<'_, Updates>,

@@ -3,7 +3,7 @@ import { activityReadingRows, createActivityAnchor } from "./activity-anchor";
 import { searchPreview, clearSearchPreview } from "../../store/searchSelection";
 import { SearchHighlight } from "./SearchHighlight";
 import { For, Show, createContext, createEffect, createMemo, createSignal, on, onCleanup, onMount, useContext } from "solid-js";
-import { attachmentFetch, attachmentOpen } from "../../bridge";
+import { attachmentFetch, attachmentOpen, copyVerbatim } from "../../bridge";
 import { notify } from "../../store/actions";
 import { previews } from "../../store/attachments";
 import { cardTarget, createOpen, readCards } from "./attachment-card";
@@ -146,7 +146,7 @@ function activityMenu(e: MouseEvent) {
 // Transcript
 
 const copyText = (text: string, what: string) => {
-  void navigator.clipboard?.writeText(text).then(() => toast("Copied", what), () => toast("Not copied", "The clipboard is unavailable", "error"));
+  void copyVerbatim(text).then(() => toast("Copied", what), () => toast("Not copied", "The clipboard is unavailable", "error"));
 };
 
 // Inline Markdown stays text except its links: HTTP(S) uses the system

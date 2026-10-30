@@ -185,6 +185,22 @@ decisions, identity and consent changes, exact receipts and historical records.
 They do not claim a real process-kill, pipe-drain, late-epoch or worker restart
 proof: those remain required at G1's executing reserve/finish boundary.
 
+The shared test-only [operation-port vectors](../client/fixtures/desktop-operation-port-v1.json)
+pin UTF-8 source and retained input bytes, the distinct UI/source/input hashes,
+the versioned consent domain and the length-prefixed operation-key domain. A
+Unicode project name distinguishes UTF-8 byte lengths from character counts.
+There are 27 valid/invalid model traces: pressure, fresh=false, revoke before
+reserve, exact ticket/receipt identities, unknown terminality, restart, separate
+explicit attempts and child/stdout/stderr drain before global release.
+
+`client/core/tests/support/operation_port.rs` is an observation checker that G1
+can reuse against its fake-port traces. It calls no port and implements no
+ledger, actor or runner. `operation_port_contract` tests that checker and the
+actual merged pure Original/Proposal policy. These are model conformance and
+fixed-byte interoperability evidence, not executing-backend proof. G1
+`zerus-5wmh.66.3.22` still owns the real schema, guards, reserve/finish, worker,
+startup recovery and actual drain qualification; G2 `.66.4.2` depends on it.
+
 All slices preserve `.9.30`: Dock Quit, logout/shutdown, other Cocoa
 `terminate:`, Windows `WM_ENDSESSION`, SIGKILL and Tauri restart retain the
 Exit/`exit_work` fallback without requiring a page flush. The updater restart

@@ -1476,6 +1476,37 @@ continues in standard mode. The feed records `plan_mode_proposed`,
 `plan_mode_switched`, `plan_mode_denied`, `phase_build_added`,
 `free_phase_close_pending`, `free_phase_closed` and `free_phase_build_failed`.
 
+### Auto-accepted drafts: start-ahead
+
+With Auto-accept drafts on (`settings.auto_accept`), a drafted phase whose
+approval is `auto` is not accepted when it is added. While the current phase
+runs and no member has taken one of its tasks, it stays a draft the lead edits
+freely: `extend`, `edit-draft`, `move-task` and `cancel` all work on it. Status
+carries each phase's `state` (`draft` and the rest), `auto` (true for these) and
+`start_ahead`.
+
+The phase is accepted with `phase_auto_accepted`, by Auto, at the moment its
+first task is handed out: when every phase ahead of it is done, or earlier when
+the lead starts it ahead. Its tasks' reports need no owner approval. The lead
+starts a phase ahead per phase (not the owner):
+
+```sh
+{"request_id":"<uuid>","team":"<id>","phase":2} | hgs team start-ahead --json
+{"request_id":"<uuid>","team":"<id>","phase":2,"undo":true} | hgs team start-ahead --json
+```
+
+Only an `auto` draft is eligible, only while the team runs or is paused, and
+only before any of its tasks was handed out; `undo` takes the start-ahead back
+the same way, before the first hand-out. The feed records `phase_started_ahead`
+and `phase_start_ahead_undone`. The hand-out admits the draft's independent
+tasks (dependencies met, no barrier, not held or waiting) through the same
+work-ahead step, and the first hand-out accepts the phase in the same change by
+turning its `draft` tasks `pending`; a second hand-out does not accept it again.
+
+A review draft keeps the owner's approval, and `settings.work_ahead` keeps its
+meaning for review drafts: starting an auto draft ahead is the lead's decision,
+not a change of the review rules.
+
 ### A model per task, a task for a role, and the context before one
 
 The owner's catalog gives a role the models its members may switch between,

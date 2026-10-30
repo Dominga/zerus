@@ -316,6 +316,11 @@ pub(crate) enum Step {
     /// The dispatcher saw a member's session live or stopped; status derives
     /// `stopped` from it without a listing of its own (L3).
     Liveness { member: String, live: bool },
+    /// U56: a pending task pinned to a stuck, stopped or offline member says so
+    /// in its waits.
+    WaitOnMember { task: u32, member: String, reason: String },
+    /// U56: the member is available again; the wait goes.
+    ReleaseWait { task: u32 },
     /// U56: the member's phase and activity as the dispatcher saw them, so
     /// status shows them without an inspect.
     Watch { member: String, phase: String, activity: String, last_event_at: Option<f64> },
@@ -730,6 +735,43 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             }
         } else if member.stuck.is_some() {
             steps.push(Step::Unstuck { member: member.id.clone() });
+        }
+    }
+    // U56: a pending task pinned to a stuck, stopped or offline member says so
+    // in its waits, so the lead sees why it never starts.
+    for task in &team.tasks {
+        if !task.pinned || task.status != TaskStatus::Pending || task.assignee.is_empty() {
+            continue;
+        }
+        if task.waits.as_ref().is_some_and(|wait| wait.waits_for != "member") {
+            continue;
+        }
+        let Some(member) = team.member(&task.assignee) else { continue };
+        let stuck = member.stuck.as_ref();
+        let stopped = session_of(member, seen)
+            .map(|found| !found.live)
+            .or_else(|| member.seen.map(|seen| !seen.live))
+            .unwrap_or(false);
+        let reason = match (stuck, stopped) {
+            (Some(stuck), _) => Some(format!(
+                "pinned to {} ({}), stuck for {} min (phase {})",
+                member.id,
+                team.role_of(&member.id),
+                ((now - stuck.at) / 60.0).max(0.0).round() as u64,
+                if stuck.phase.is_empty() { "unknown" } else { stuck.phase.as_str() }
+            )),
+            (None, true) => Some(format!(
+                "pinned to {} ({}), whose session is stopped or offline",
+                member.id,
+                team.role_of(&member.id)
+            )),
+            (None, false) => None,
+        };
+        let waiting = task.waits.as_ref().is_some_and(|wait| wait.waits_for == "member");
+        match (reason, waiting) {
+            (Some(reason), false) => steps.push(Step::WaitOnMember { task: task.id, member: member.id.clone(), reason }),
+            (None, true) => steps.push(Step::ReleaseWait { task: task.id }),
+            _ => {}
         }
     }
     // U52: a member session that exited on its own is launched again into its
@@ -5374,6 +5416,30 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             }
             Ok(())
         }),
+        Step::WaitOnMember { task, member, reason } => change(store, &team.id, |team, events| {
+            let found = team.task_mut(*task).context("unknown task")?;
+            found.waits = Some(TaskWait {
+                waits_for: "member".into(),
+                on: vec![member.clone()],
+                reason: reason.clone(),
+                at: now(),
+                state: "member".into(),
+                ..Default::default()
+            });
+            events.push(Event::new(
+                "task_waiting_member",
+                json!({"task":task,"member":member,"reason":reason}),
+            ));
+            Ok(())
+        }),
+        Step::ReleaseWait { task } => change(store, &team.id, |team, _| {
+            if let Some(found) = team.task_mut(*task) {
+                if found.waits.as_ref().is_some_and(|wait| wait.waits_for == "member") {
+                    found.waits = None;
+                }
+            }
+            Ok(())
+        }),
         Step::Watch { member, phase, activity, last_event_at } => change(store, &team.id, |team, _| {
             let found = team.members.iter_mut().find(|found| found.id == *member).context("unknown member")?;
             found.seen_phase = phase.clone();
@@ -9373,6 +9439,68 @@ mod tests {
         let mut fresh = dev.clone();
         fresh.last_event_at = Some(at - 5.0);
         assert!(steps(&t, &[lead, fresh], at).iter().any(|step| matches!(step, Step::Unstuck { member } if member == "dev")));
+    }
+
+    /// U56: a pending task pinned to a stuck or stopped member says so in its
+    /// waits, and the wait goes once the member is back.
+    #[test]
+    fn a_pinned_pending_task_waits_for_a_stuck_or_stopped_member() {
+        let at = 10_000.0;
+        let mut t = team();
+        let lead = session("claude/x/lead", "r0", true);
+        {
+            let task = t.tasks.iter_mut().find(|task| task.assignee == "dev").unwrap();
+            task.status = TaskStatus::Pending;
+            task.pinned = true;
+        }
+        let mut dev = session("codex/x/dev", "r1", true);
+        // Stuck: the wait says so with the member id, role and cause.
+        t.members.iter_mut().find(|member| member.id == "dev").unwrap().stuck =
+            Some(MemberStuck { at: at - 15.0 * 60.0, reason: "no_progress".into(), phase: "tool".into() });
+        let found = steps(&t, &[lead.clone(), dev.clone()], at);
+        let reason = found
+            .iter()
+            .find_map(|step| match step {
+                Step::WaitOnMember { member, reason, .. } if member == "dev" => Some(reason.clone()),
+                _ => None,
+            })
+            .expect("the pinned task waits");
+        assert!(reason.contains("dev (Backend)") && reason.contains("stuck for 15 min"), "{reason}");
+        // Not live: the wait names a stopped session, and a live member clears it.
+        t.members.iter_mut().find(|member| member.id == "dev").unwrap().stuck = None;
+        dev.live = false;
+        let found = steps(&t, &[lead.clone(), dev.clone()], at);
+        let reason = found
+            .iter()
+            .find_map(|step| match step {
+                Step::WaitOnMember { reason, .. } => Some(reason.clone()),
+                _ => None,
+            })
+            .expect("the pinned task waits");
+        assert!(reason.contains("stopped or offline"), "{reason}");
+        // The wait is recorded on the task, then cleared when the member is back.
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+        let task_id = t.tasks.iter().find(|task| task.assignee == "dev").unwrap().id;
+        run_step(
+            &mut store,
+            &t,
+            &Step::WaitOnMember { task: task_id, member: "dev".into(), reason: "pinned to dev (Backend), whose session is stopped or offline".into() },
+            "",
+        )
+        .unwrap();
+        let saved = store.load(&t.id).unwrap().unwrap();
+        let wait = saved.task(task_id).unwrap().waits.clone().unwrap();
+        assert_eq!((wait.waits_for.as_str(), wait.on.clone()), ("member", vec!["dev".to_owned()]));
+        let items = super::inbox::items(&saved);
+        let item = items.iter().find(|item| item.kind == "task_waits").expect("a waits item");
+        assert!(item.detail.contains("reassign") || item.detail.contains("resume"), "{}", item.detail);
+        assert!(item.command.contains("reassign") || item.command.contains("resume-member"), "{}", item.command);
+        // A task pin to an available member frees the wait.
+        run_step(&mut store, &saved, &Step::ReleaseWait { task: task_id }, "").unwrap();
+        assert!(store.load(&t.id).unwrap().unwrap().task(task_id).unwrap().waits.is_none());
+        assert!(!steps(&t, &[lead, session("codex/x/dev", "r1", true)], at).iter().any(|step| matches!(step, Step::WaitOnMember { .. })));
     }
 
     /// U56: marking a member stuck records it, the feed says so, and the lead's

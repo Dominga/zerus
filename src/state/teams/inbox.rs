@@ -165,20 +165,60 @@ fn all_items(team: &Team) -> Vec<Item> {
     for task in team.tasks.iter().filter(|_| active).filter(|task| task.status == TaskStatus::Pending) {
         let Some(wait) = task.waits.as_ref().filter(|wait| !wait.running()) else { continue };
         let attempt = task.attempts.iter().rev().find(|attempt| wait.attempt > 0 && attempt.n == wait.attempt);
+        let member = match attempt {
+            Some(attempt) => team.role_of(&attempt.member),
+            None if task.assignee.is_empty() => task.role.clone(),
+            None => team.role_of(&task.assignee),
+        };
+        // U56: a task pinned to a stuck, stopped or offline member frees itself
+        // by moving to a free same-role member, or by retrying once the member
+        // is back; the item names both.
+        let (command, detail) = if wait.waits_for == "member" {
+            let target = task.assignee.clone();
+            let free = team
+                .members
+                .iter()
+                .find(|other| {
+                    other.id != target
+                        && other.state != MemberState::Removed
+                        && !other.draining
+                        && other.stuck.is_none()
+                        && other.seen.is_none_or(|seen| seen.live)
+                        && team.role_of(&other.id) == team.role_of(&target)
+                })
+                .map(|other| other.id.clone());
+            match free {
+                Some(peer) => (
+                    format!(
+                        "{} | hgs team reassign --json",
+                        json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id,"member":peer})
+                    ),
+                    format!("{}; reassigning it to {peer} frees it, or resume {} and hgs team retry", wait.reason, target),
+                ),
+                None => (
+                    format!(
+                        "{} | hgs team resume-member --json",
+                        json!({"request_id":PLACEHOLDER,"team":team.id,"member":target})
+                    ),
+                    format!("{}; no other {} can take it, so resume the member and hgs team retry", wait.reason, member),
+                ),
+            }
+        } else {
+            (
+                format!("{} | hgs team retry --json", json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id})),
+                wait.reason.clone(),
+            )
+        };
         items.push(Item {
             subagents: Value::Null,
             kind: "task_waits",
             key: format!("task_waits:{}:{}", task.id, wait.at),
             task: Some(task.id),
-            member: match attempt {
-                Some(attempt) => team.role_of(&attempt.member),
-                None if task.assignee.is_empty() => task.role.clone(),
-                None => team.role_of(&task.assignee),
-            },
+            member,
             since: wait.at,
             summary: summary(&format!("#{} {} waits: {}", task.id, task.title, wait.reason)),
-            command: format!("{} | hgs team retry --json", json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id})),
-            detail: wait.reason.clone(),
+            command,
+            detail,
         });
     }
     // N3: a draining member whose tasks still keep it open is one item for the

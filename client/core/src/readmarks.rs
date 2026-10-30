@@ -6,21 +6,28 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::PathBuf;
 
 pub use zerus_desktop_read_policy::ReadMark;
+mod checkpoint;
+pub use checkpoint::{Checkpoint, CHECKPOINT_BYTES, CHECKPOINT_MARKS};
 
 pub struct ReadMarks {
     path: PathBuf,
     marks: BTreeMap<(String, String), ReadMark>,
     /// Marks added by [`ReadMarks::add_all`] and not yet written.
     unsaved: bool,
+    checkpoint: checkpoint::State,
 }
 
 impl ReadMarks {
     /// A missing or unreadable file gives no marks.
     pub fn load(path: PathBuf) -> Self {
-        let list: Vec<ReadMark> = std::fs::read(&path)
+        let bytes = std::fs::read(&path);
+        let parsed: Option<Vec<ReadMark>> = bytes
+            .as_ref()
             .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default();
+            .and_then(|bytes| serde_json::from_slice(bytes).ok());
+        let checkpoint = checkpoint::State::loaded(&bytes, parsed.as_ref().map(Vec::len));
+        drop(bytes);
+        let list = parsed.unwrap_or_default();
         let marks = list
             .into_iter()
             .map(|mark| ((mark.computer.clone(), mark.name.clone()), mark))
@@ -29,6 +36,7 @@ impl ReadMarks {
             path,
             marks,
             unsaved: false,
+            checkpoint,
         }
     }
 
@@ -61,6 +69,7 @@ impl ReadMarks {
             added = true;
         }
         self.unsaved |= added;
+        self.checkpoint.dirty |= added;
         added
     }
 
@@ -137,11 +146,16 @@ impl ReadMarks {
     /// without a flush to disk. A failure keeps the marks in memory; the next
     /// change tries again.
     fn save(&mut self) {
+        self.checkpoint.dirty = true;
         self.unsaved = false;
         let list: Vec<&ReadMark> = self.marks.values().collect();
         let written = serde_json::to_vec(&list)
             .map_err(std::io::Error::from)
-            .and_then(|bytes| write_private_atomic(&self.path, &bytes, false));
+            .and_then(|bytes| {
+                write_private_atomic(&self.path, &bytes, false)?;
+                self.checkpoint.saved(&bytes);
+                Ok(())
+            });
         if let Err(error) = written {
             eprintln!(
                 "zerus-client: could not save read marks to {}: {error}",

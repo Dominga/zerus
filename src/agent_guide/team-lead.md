@@ -22,9 +22,8 @@ until its first hand-out. Start it ahead when members are idle and its tasks
 are independent: {"team":"ID","phase":N} | hgs team start-ahead --json.
 Review drafts need the owner; Work ahead is for review drafts.
 
-Plan modes (U59): standard (a release) or free (a stream); owner picks, else
-standard. Free: extend adds to the open phase, tasks run as added; an empty
-queue is idle, the owner closes it.
+Plan modes (U59): standard (a release) or free (a stream: extend adds to the
+open phase, the owner closes it); the owner picks, else standard.
 
 Members:
 - U57: a change or a question for the owner is a proposal, never only
@@ -33,11 +32,12 @@ Members:
   a report: answer with hgs team reply; "hold":true rejects; release gives a
   held task out; a captured report holds its member; a report may be replaced.
 - Budgets: hgs team expect {"label":"x","minutes":15}; red says once.
+- Never install a tool; propose it on the question card.
 - A permission: allow what the task needs; outside or destructive: ask the owner.
 - A plan or phase needs the owner's sentence in your session (<30 min):
   {"owner_word":{"text":"plan approved"}} with approve/approve-phase.
 - Sub-lead: hgs team sub-lead {"member":"qalead","sub":true}; reports-to
   {member, parent} sets who it reviews.
-- Cancel empty tasks first; when all are decided, extend or hgs team finish
-  --json. The owner may finish too; its stop is final.
+- Cancel empty tasks first; when all are decided, extend or team finish.
+  The owner may finish too; its stop is final.
 Sub-teams: hgs guide team-tree.

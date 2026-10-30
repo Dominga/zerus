@@ -115,6 +115,63 @@ class Signing(unittest.TestCase):
                                  "6.11.2", "ABCDE12345", image)
         self.assertFalse(output.exists())
 
+    def disk_image_attempts(self, image, results):
+        def execute(command, **kwargs):
+            if command[0] == "hdiutil":
+                image.write_bytes(b"partial image")
+            return results.pop(0)
+        return execute
+
+    def test_disk_image_create_retries_resource_busy_then_succeeds(self):
+        image = Path(self.temporary.name) / "Zerus.dmg"
+        results = [subprocess.CompletedProcess([], 0),
+                   subprocess.CompletedProcess([], 1, "Creating disk\n", "hdiutil: create failed - Resource busy\n"),
+                   subprocess.CompletedProcess([], 0, "created: Zerus.dmg\n", "")]
+        output = io.StringIO()
+        with mock.patch.object(sign.subprocess, "run",
+                               side_effect=self.disk_image_attempts(image, results)) as run, \
+                mock.patch.object(sign.time, "sleep") as sleep, \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            sign.create_disk_image(self.app, image)
+        self.assertEqual([call.args[0][0] for call in run.call_args_list], ["ditto", "hdiutil", "hdiutil"])
+        self.assertEqual(sleep.call_args_list, [mock.call(2)])
+        for call in run.call_args_list[1:]:
+            self.assertEqual(call.kwargs, {"capture_output": True, "text": True})
+        self.assertIn("Creating disk\n", output.getvalue())
+        self.assertIn("hdiutil: create failed - Resource busy\n", output.getvalue())
+
+    def test_disk_image_create_stops_after_three_resource_busy_failures(self):
+        image = Path(self.temporary.name) / "Zerus.dmg"
+        results = [subprocess.CompletedProcess([], 0)] + [
+            subprocess.CompletedProcess([], 1, "", "hdiutil: create failed - Resource busy\n")] * 3
+        output = io.StringIO()
+        with mock.patch.object(sign.subprocess, "run",
+                               side_effect=self.disk_image_attempts(image, results)) as run, \
+                mock.patch.object(sign.time, "sleep") as sleep, \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            with self.assertRaises(subprocess.CalledProcessError) as error:
+                sign.create_disk_image(self.app, image)
+        self.assertEqual(error.exception.returncode, 1)
+        self.assertEqual([call.args[0][0] for call in run.call_args_list],
+                         ["ditto", "hdiutil", "hdiutil", "hdiutil"])
+        self.assertEqual(sleep.call_args_list, [mock.call(2), mock.call(5)])
+        self.assertEqual(output.getvalue().count("Resource busy"), 3)
+
+    def test_disk_image_create_does_not_retry_other_failures(self):
+        image = Path(self.temporary.name) / "Zerus.dmg"
+        results = [subprocess.CompletedProcess([], 0),
+                   subprocess.CompletedProcess([], 1, "", "hdiutil: create failed - Invalid argument\n")]
+        output = io.StringIO()
+        with mock.patch.object(sign.subprocess, "run",
+                               side_effect=self.disk_image_attempts(image, results)) as run, \
+                mock.patch.object(sign.time, "sleep") as sleep, \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            with self.assertRaises(subprocess.CalledProcessError):
+                sign.create_disk_image(self.app, image)
+        self.assertEqual([call.args[0][0] for call in run.call_args_list], ["ditto", "hdiutil"])
+        sleep.assert_not_called()
+        self.assertIn("Invalid argument", output.getvalue())
+
     def test_notary_failure_or_malformed_response_never_staples_the_disk_image(self):
         identifier = "0123abcd-4567-89ef-0123-456789abcdef"
         for code, response in ((0, []), (0, {"status": "Accepted", "id": None}),

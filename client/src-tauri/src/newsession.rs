@@ -813,7 +813,7 @@ pub async fn pick_local_folder(app: AppHandle, start: String) -> Option<String> 
         if let Some(directory) = directory {
             dialog = dialog.set_directory(directory);
         }
-        if let Some(window) = app.get_webview_window(crate::MAIN_WINDOW) {
+        if let Some(window) = crate::main_window(&app) {
             dialog = dialog.set_parent(&window);
         }
         dialog.blocking_pick_folder()

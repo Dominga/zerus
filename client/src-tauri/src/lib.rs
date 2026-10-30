@@ -359,6 +359,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
         })
         .setup(move |app| {
             use tauri::Manager;
+            app.manage(MainWindow::default());
             // The one source of the client's data directory (Decision 5).
             app.manage(identity);
             #[cfg(feature = "live")]
@@ -1253,9 +1254,33 @@ fn app_navigation_allowed(url: &tauri::Url) -> bool {
     )
 }
 
+#[derive(Default)]
+struct MainWindow(std::sync::Mutex<Option<WebviewWindow>>);
+
+/// Tauri's get_webview_window only recognizes windows with exactly one
+/// matching webview. Retain the original main pair when native children are
+/// attached. A cached pair must still answer both native window and webview
+/// queries; a destroyed resource can never authorize reuse of its old handle.
+pub(crate) fn main_window(app: &AppHandle) -> Option<WebviewWindow> {
+    use tauri::Manager;
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+        return Some(window);
+    }
+    app.try_state::<MainWindow>()
+        .and_then(|state| {
+            state
+                .0
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone()
+        })
+        .filter(|window| window.is_visible().is_ok() && window.url().is_ok())
+}
+
 /// Creates the main window and applies the platform display-rate preference:
 /// macOS before the webview is built, Linux through its public settings API.
 pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
+    use tauri::Manager;
     // ZERUS_CLIENT_QUERY opens a given state (`select=<session name>`) for
     // headless screenshots and scripted measurements, as the mockup's URL
     // parameters do; ZERUS_CLIENT_PERF=auto adds `perf=auto`.
@@ -1292,6 +1317,9 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         }
     }
     let window = builder.build()?;
+    if let Some(state) = app.try_state::<MainWindow>() {
+        *state.0.lock().unwrap_or_else(|error| error.into_inner()) = Some(window.clone());
+    }
     #[cfg(target_os = "linux")]
     if !keep_default_preference() {
         window.with_webview(|webview| {

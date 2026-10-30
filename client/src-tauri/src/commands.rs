@@ -715,8 +715,8 @@ pub fn save_perf(path: String, json: String) -> Result<String, String> {
 /// (`ZERUS_CLIENT_PERF_HZ` overrides it). Synchronous: it runs on the main
 /// thread, where the platform display APIs must be called.
 #[tauri::command]
-pub fn display_hz(window: tauri::WebviewWindow) -> Option<f64> {
-    crate::display::display_hz(&window)
+pub fn display_hz(app: tauri::AppHandle) -> Option<f64> {
+    crate::main_window(&app).and_then(|window| crate::display::display_hz(&window))
 }
 
 /// One progress line of a measurement run on stderr, so a stalled run shows
@@ -740,7 +740,7 @@ fn smoke_origin(label: &str) -> Result<(), String> {
 /// Refused outside a smoke run, so a real `hgs` folder is never read.
 #[cfg(feature = "live")]
 #[tauri::command]
-pub async fn smoke_log(window: tauri::WebviewWindow) -> Result<Vec<serde_json::Value>, String> {
+pub async fn smoke_log(window: tauri::Webview) -> Result<Vec<serde_json::Value>, String> {
     smoke_origin(window.label())?;
     if !crate::actions::smoke_env_allowed() {
         return Err("not a smoke run".into());
@@ -765,7 +765,7 @@ pub async fn smoke_log(window: tauri::WebviewWindow) -> Result<Vec<serde_json::V
 #[tauri::command]
 pub async fn smoke_resume(
     state: State<'_, AppState>,
-    window: tauri::WebviewWindow,
+    window: tauri::Webview,
     key: String,
 ) -> Result<(), String> {
     smoke_origin(window.label())?;
@@ -810,13 +810,14 @@ pub fn exit_app(app: tauri::AppHandle, code: i32) -> Result<(), String> {
 /// X server has none). Refused outside a measurement run.
 #[tauri::command(async, rename_all = "snake_case")]
 pub fn perf_away(
-    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
     how: String,
     window_ms: Option<u64>,
 ) -> Result<Value, String> {
     if !perf_mode() {
         return Err("not a measurement run (ZERUS_CLIENT_PERF is not set)".into());
     }
+    let window = crate::main_window(&app).ok_or("The main window is unavailable")?;
     match how.as_str() {
         "hide" => window.hide(),
         "minimize" => window.minimize(),

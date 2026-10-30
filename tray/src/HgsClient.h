@@ -168,6 +168,8 @@ struct BoxState {
     // pid, protocol, conpty, integrity, windows_session, and error when it is
     // unavailable). Empty on Unix and from an older CLI.
     QJsonObject localHost;
+    // #647: the listing's "hgs_version" (empty from an older CLI).
+    QString hgsVersion;
     // WhiteWh fork, #569: "private_stores", the stores this computer's hgs
     // refuses now (path, kind, reason, fix, source, at). Empty when none.
     QJsonArray privateStores;

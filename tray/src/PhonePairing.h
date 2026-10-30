@@ -1,4 +1,6 @@
 #pragma once
+#include <QColor>
+#include <QDateTime>
 #include <QDialog>
 #include <QJsonObject>
 #include <QList>
@@ -9,7 +11,7 @@
 #include <functional>
 #include <vector>
 
-class HgsClient; class QComboBox; class QLabel; class QPlainTextEdit; class QPushButton; class QScrollArea; class QStackedWidget; class QTimer; class QTreeWidget;
+class HgsClient; class QVBoxLayout; class QComboBox; class QLabel; class QPlainTextEdit; class QPushButton; class QScrollArea; class QStackedWidget; class QTimer; class QTreeWidget;
 
 // Phones paired with the workspaces this computer reaches: through its own
 // mobile connection, or through one enabled peer that has one (hgs @peer
@@ -25,6 +27,11 @@ struct Target {
 // The QR modules of `text` (row-major, true = dark), with the side length.
 // Empty for text that does not fit a QR code.
 std::vector<bool> encode(const QString &text, int *size);
+
+// #647 (prototype, Phones): a time as the table shows it: "Today 23:02",
+// "Yesterday 09:10", "24 Oct 18:40" this year, "3 Sep 2025" before; without
+// the time "Today", "12 Oct". "—" for none.
+QString shortTime(const QJsonValue &seconds, bool withTime, const QDateTime &now);
 
 class QrCodeView : public QWidget {
 public:
@@ -80,6 +87,8 @@ public:
                    std::function<bool(const QString &phone, const QString &workspace)> confirm = {});
     void refresh();
     QList<Target> targets() const { return m_targets; }
+    // #647: the table, its notes and problem lines in the page's theme.
+    void setTheme(bool dark);
 protected:
     void showEvent(QShowEvent *) override;
 private:
@@ -88,11 +97,16 @@ private:
     void revoke();
     void pair();
     void openPairing();
+    void showStatus(const QString &text);
     QString m_executable;
     HgsClient *m_client;
     std::function<bool(const QString &, const QString &)> m_confirm;
     QTreeWidget *m_tree;
-    QLabel *m_status;
+    // The count beside the title, a notice or setup line, and a line per
+    // computer that did not answer (#647).
+    QLabel *m_status, *m_count;
+    QVBoxLayout *m_problemList;
+    QColor m_groupFill, m_warnColor;
     QPushButton *m_pair, *m_revoke, *m_refresh;
     QList<Target> m_targets;
     QList<QJsonObject> m_lists;

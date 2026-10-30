@@ -303,6 +303,7 @@ BoxState boxFromObject(const QJsonObject &obj)
     if (!errorDetail.isEmpty()) box.error = errorDetail;
     box.localSessions = obj.value(QStringLiteral("local_sessions")).toBool(true);
     box.localHost = obj.value(QStringLiteral("local_host")).toObject();
+    box.hgsVersion = obj.value(QStringLiteral("hgs_version")).toString();
     box.privateStores = obj.value(QStringLiteral("private_stores")).toArray();
     for (const auto &value : obj.value(QStringLiteral("ended_launches")).toArray()) {
         const auto launch = value.toObject(); const auto id = launch.value(QStringLiteral("launch_id")).toString();

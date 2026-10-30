@@ -1,5 +1,6 @@
 #include "PhonePairing.h"
 #include "HgsClient.h"
+#include "PageCards.h"
 #include "qrcodegen.hpp"
 #include <QApplication>
 #include <QClipboard>
@@ -25,6 +26,7 @@
 #include <QTimer>
 #include <QToolButton>
 #include <QTreeWidget>
+#include <QTreeWidgetItemIterator>
 #include <QVBoxLayout>
 #include <algorithm>
 #include <cmath>
@@ -35,9 +37,34 @@ namespace {
 constexpr int QuietZone = 4;
 enum Role { KindRole = Qt::UserRole, IdRole, HostRole, WorkspaceRole, TargetRole, WorkspaceIdRole, ServerRole };
 QString hostName(const QString &host) { return host.isEmpty() ? QCoreApplication::translate("PhonePairing", "this computer") : host; }
-QString when(const QJsonValue &seconds) {
-    if (!seconds.isDouble() || seconds.toDouble() <= 0) return QStringLiteral("—");
-    return QLocale().toString(QDateTime::fromMSecsSinceEpoch(qint64(seconds.toDouble() * 1000)), QLocale::ShortFormat);
+QString full(const QJsonValue &seconds) {
+    if (!seconds.isDouble() || seconds.toDouble() <= 0) return {};
+    return QLocale(QLocale::English).toString(QDateTime::fromMSecsSinceEpoch(qint64(seconds.toDouble() * 1000)), QStringLiteral("d MMMM yyyy, HH:mm"));
+}
+// #647 (prototype, Phones): a flat table on the card, only as tall as its
+// rows, its columns in the prototype's shares.
+constexpr int PhoneRowHeight = 29;
+class PhoneTable final : public QTreeWidget {
+public:
+    using QTreeWidget::QTreeWidget;
+    void fit() {
+        int rows = 0;
+        for (QTreeWidgetItemIterator it(this); *it; ++it) ++rows;
+        setFixedHeight(header()->sizeHint().height() + rows * PhoneRowHeight + 2 * frameWidth() + 2);
+    }
+protected:
+    void resizeEvent(QResizeEvent *event) override {
+        QTreeWidget::resizeEvent(event);
+        static constexpr double share[] = {.31, .16, .14, .21};
+        const int width = viewport()->width();
+        for (int i = 0; i < 4; ++i) setColumnWidth(i, int(width * share[i]));
+    }
+};
+// A problem in one short line; the whole text is its tooltip.
+QString shortProblem(const QString &text) {
+    QString line = text.section('\n', 0, 0).simplified();
+    if (line.size() > 160) line = line.left(159) + QStringLiteral("…");
+    return line;
 }
 QString origin(QString url) { while (url.endsWith('/')) url.chop(1); return url; }
 // Pins the relay and workspace the user saw, so a gateway whose connection
@@ -54,6 +81,17 @@ QString platform(const QString &value) {
     return QStringLiteral("—");
 }
 } // namespace
+
+QString shortTime(const QJsonValue &seconds, bool withTime, const QDateTime &now) {
+    if (!seconds.isDouble() || seconds.toDouble() <= 0) return QStringLiteral("—");
+    const auto at = QDateTime::fromMSecsSinceEpoch(qint64(seconds.toDouble() * 1000)).toLocalTime();
+    const QString time = at.toString(QStringLiteral("HH:mm"));
+    const qint64 days = at.date().daysTo(now.toLocalTime().date());
+    if (days == 0) return withTime ? QCoreApplication::translate("PhonePairing", "Today %1").arg(time) : QCoreApplication::translate("PhonePairing", "Today");
+    if (days == 1) return withTime ? QCoreApplication::translate("PhonePairing", "Yesterday %1").arg(time) : QCoreApplication::translate("PhonePairing", "Yesterday");
+    const QString date = QLocale(QLocale::English).toString(at.date(), at.date().year() == now.toLocalTime().date().year() ? QStringLiteral("d MMM") : QStringLiteral("d MMM yyyy"));
+    return withTime ? date + QLatin1Char(' ') + time : date;
+}
 
 std::vector<bool> encode(const QString &text, int *size) {
     *size = 0;
@@ -256,29 +294,39 @@ void Dialog::tick() {
 Panel::Panel(const QString &executable, QWidget *parent, std::function<bool(const QString &, const QString &)> confirm)
     : QWidget(parent), m_executable(executable), m_client(new HgsClient(executable, this)), m_confirm(std::move(confirm)) {
     setObjectName("phonesPanel");
-    auto *layout = new QVBoxLayout(this); layout->setContentsMargins(0, 0, 12, 0); layout->setSpacing(10);
-    // U25 (spec 8): "Phones · N phones" with Pair a phone… as the primary
-    // action on the right, then the list, then Revoke… and Refresh.
+    auto *layout = new QVBoxLayout(this); layout->setContentsMargins(0, 0, 0, 0); layout->setSpacing(8);
+    // U25 (spec 8), #647 (prototype): "Phones  N phones" with Pair a phone… as
+    // the primary action on the right; the intro, a line per notice and per
+    // unreachable computer, the flat table, then Revoke… and Refresh.
     auto *head = new QHBoxLayout; head->setSpacing(8);
-    auto *heading = new QLabel(tr("Phones")); heading->setObjectName("phonesHeading"); heading->setStyleSheet(QStringLiteral("font-weight:600;"));
-    heading->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred); head->addWidget(heading, 0, Qt::AlignTop);
+    auto *heading = new QLabel(tr("Phones")); heading->setObjectName("phonesHeading"); heading->setStyleSheet(QStringLiteral("font-weight:600;font-size:13px;"));
+    head->addWidget(heading);
+    m_count = new QLabel; m_count->setObjectName("phonesCount"); m_count->setTextFormat(Qt::PlainText); head->addWidget(m_count); head->addStretch(1);
+    m_pair = new QPushButton(tr("Pair a phone…")); m_pair->setObjectName("pairPhone"); m_pair->setProperty("pagePrimary", true);
+    head->addWidget(m_pair);
+    layout->addLayout(head);
     auto *intro = new QLabel(tr("Phones paired with your computers. A phone can control every computer of its workspace; "
                                 "revoke one you no longer use."));
-    intro->setObjectName("muted"); intro->setWordWrap(true); layout->addWidget(intro);
-    m_tree = new QTreeWidget; m_tree->setObjectName("linkedPhones"); m_tree->setAccessibleName(tr("Phones"));
+    intro->setObjectName("phonesIntro"); intro->setWordWrap(true); layout->addWidget(intro);
+    m_status = new QLabel; m_status->setObjectName("phonesStatus"); m_status->setWordWrap(true); m_status->setTextFormat(Qt::PlainText);
+    m_status->setTextInteractionFlags(Qt::TextSelectableByMouse); m_status->hide(); layout->addWidget(m_status);
+    auto *problems = new QWidget; problems->setObjectName("phonesProblems");
+    m_problemList = new QVBoxLayout(problems); m_problemList->setContentsMargins(0, 0, 0, 0); m_problemList->setSpacing(2);
+    layout->addWidget(problems);
+    auto *table = new PhoneTable; m_tree = table; m_tree->setObjectName("linkedPhones"); m_tree->setAccessibleName(tr("Phones"));
     m_tree->setHeaderLabels({tr("Phone"), tr("Platform"), tr("Paired"), tr("Last active"), tr("Added from")});
     m_tree->setSelectionMode(QAbstractItemView::SingleSelection); m_tree->setUniformRowHeights(true);
-    m_tree->header()->setSectionResizeMode(QHeaderView::ResizeToContents); m_tree->header()->setStretchLastSection(true);
-    m_tree->setMinimumHeight(140); layout->addWidget(m_tree);
-    auto *buttons = new QHBoxLayout;
-    m_pair = new QPushButton(tr("Pair a phone…")); m_pair->setObjectName("pairPhone"); m_pair->setProperty("pagePrimary", true);
+    m_tree->setRootIsDecorated(false); m_tree->setIndentation(14); m_tree->setFrameShape(QFrame::NoFrame);
+    m_tree->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff); m_tree->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_tree->header()->setSectionResizeMode(QHeaderView::Interactive); m_tree->header()->setStretchLastSection(true);
+    m_tree->header()->setDefaultAlignment(Qt::AlignLeft | Qt::AlignVCenter); m_tree->header()->setSectionsClickable(false);
+    m_tree->setAutoFillBackground(false); m_tree->viewport()->setAutoFillBackground(false);
+    table->fit(); layout->addWidget(m_tree);
+    auto *buttons = new QHBoxLayout; buttons->setSpacing(8);
     m_revoke = new QPushButton(tr("Revoke…")); m_revoke->setObjectName("revokePhone");
     m_refresh = new QPushButton(tr("Refresh")); m_refresh->setObjectName("refreshPhones");
     buttons->addWidget(m_revoke); buttons->addWidget(m_refresh); buttons->addStretch(); layout->addLayout(buttons);
-    m_status = new QLabel; m_status->setObjectName("phonesStatus"); m_status->setWordWrap(true); m_status->setTextFormat(Qt::PlainText);
-    m_status->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    head->addWidget(m_status, 1); head->addWidget(m_pair, 0, Qt::AlignTop);
-    layout->insertLayout(0, head);
+    setTheme(false);
     m_pair->setEnabled(false); m_revoke->setEnabled(false);
     connect(m_pair, &QPushButton::clicked, this, [this] { pair(); });
     connect(m_revoke, &QPushButton::clicked, this, [this] { revoke(); });
@@ -330,7 +378,7 @@ void Panel::refresh() {
     if (m_machines || !m_pending.isEmpty()) { m_refreshQueued = true; return; }
     m_lists.clear(); m_problems.clear();
     m_pair->setEnabled(false); m_revoke->setEnabled(false);
-    m_status->setText(tr("Checking phones…")); m_refresh->setEnabled(false);
+    m_count->setText(tr("Checking phones…")); m_refresh->setEnabled(false);
     m_machines = m_client->requestMachines({QStringLiteral("ls")});
 }
 
@@ -357,16 +405,23 @@ void Panel::finish() {
 void Panel::render() {
     const auto selected = m_tree->currentItem() ? m_tree->currentItem()->data(0, IdRole).toString() : QString();
     m_tree->clear(); int phones = 0;
+    const auto now = QDateTime::currentDateTime();
+    QFont bold = m_tree->font(); bold.setWeight(QFont::DemiBold);
     for (int index = 0; index < m_lists.size(); ++index) {
         const auto &list = m_lists[index]; const auto host = list.value("host").toString();
         const auto workspace = list.value("workspace_name").toString();
         auto *top = new QTreeWidgetItem(m_tree, {host.isEmpty() ? tr("%1 · this computer").arg(workspace) : tr("%1 · via %2").arg(workspace, host)});
         top->setData(0, KindRole, "workspace"); top->setData(0, TargetRole, index); top->setFirstColumnSpanned(true);
+        // #647: the workspace is a bold group row on a tint; only phones are chosen.
+        top->setFont(0, bold); top->setBackground(0, m_groupFill); top->setSizeHint(0, QSize(0, PhoneRowHeight));
+        top->setFlags(Qt::ItemIsEnabled);
         for (const auto &value : list.value("devices").toArray()) {
             const auto device = value.toObject(); const auto added = device.value("added_by").toObject();
             auto *item = new QTreeWidgetItem(top, {device.value("name").toString(), platform(device.value("platform").toString()),
-                when(device.value("paired_at")), when(device.value("last_seen_at")),
+                shortTime(device.value("paired_at"), false, now), shortTime(device.value("last_seen_at"), true, now),
                 added.isEmpty() ? QStringLiteral("—") : added.value("name").toString()});
+            item->setSizeHint(0, QSize(0, PhoneRowHeight));
+            item->setToolTip(2, full(device.value("paired_at"))); item->setToolTip(3, full(device.value("last_seen_at")));
             if (added.isEmpty()) item->setToolTip(4, list.value("encrypted").toBool()
                 ? tr("Verified device membership. Private device names are not stored by the relay.")
                 : tr("Paired with an administrator invitation, or before Zerus recorded it"));
@@ -378,6 +433,8 @@ void Panel::render() {
         }
     }
     m_tree->expandAll();
+    static_cast<PhoneTable *>(m_tree)->fit();
+    m_tree->setVisible(!m_lists.isEmpty());
     QStringList lines;
     if (!m_notice.isEmpty()) lines << m_notice;
     if (m_targets.isEmpty()) {
@@ -387,12 +444,46 @@ void Panel::render() {
         lines << tr("No computer here has a mobile connection. Set one up in Settings → Mobile connection on a computer with local sessions enabled, then refresh Phones.");
 #endif
     }
-    else lines << (phones == 1 ? tr("1 phone") : tr("%1 phones").arg(phones));
-    for (const auto &problem : std::as_const(m_problems)) lines << problem;
-    if (!m_revoking) m_status->setText(lines.join('\n'));
+    m_count->setText(m_targets.isEmpty() ? QString() : phones == 1 ? tr("1 phone") : tr("%1 phones").arg(phones));
+    if (!m_revoking) showStatus(lines.join('\n'));
+    // #647: each computer that did not answer has a short line of its own.
+    while (auto *item = m_problemList->takeAt(0)) { if (auto *w = item->widget()) w->deleteLater(); delete item; }
+    for (const auto &problem : std::as_const(m_problems)) {
+        auto *line = new QLabel(shortProblem(problem)); line->setObjectName("phonesProblem"); line->setTextFormat(Qt::PlainText);
+        line->setToolTip(problem); line->setStyleSheet(QStringLiteral("color:%1;font-size:11.5px;").arg(m_warnColor.name()));
+        line->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        m_problemList->addWidget(line);
+    }
     m_pair->setEnabled(!m_pairRequested && !m_targets.isEmpty()); m_refresh->setEnabled(true);
     const auto *item = m_tree->currentItem();
     m_revoke->setEnabled(!m_revoking && item && item->data(0, KindRole).toString() == QLatin1String("phone"));
+}
+
+void Panel::showStatus(const QString &text) {
+    m_status->setText(text); m_status->setVisible(!text.isEmpty());
+}
+
+void Panel::setTheme(bool dark) {
+    const auto token = [dark](const char *name) { return PageCards::token(dark, name); };
+    const auto hex = [&token](const char *name) { return token(name).name(QColor::HexArgb); };
+    m_groupFill = token("hover"); m_warnColor = token("warn");
+    QColor selected = token("accent"); selected.setAlphaF(dark ? .16 : .12);
+    findChild<QLabel *>(QStringLiteral("phonesIntro"))->setStyleSheet(QStringLiteral("color:%1;font-size:11.5px;").arg(hex("muted")));
+    m_count->setStyleSheet(QStringLiteral("color:%1;font-size:12px;").arg(hex("muted")));
+    m_status->setStyleSheet(QStringLiteral("color:%1;font-size:11.5px;").arg(hex("text2")));
+    m_tree->setStyleSheet(QStringLiteral(
+        "QTreeWidget#linkedPhones{background:transparent;border:0;outline:0;color:%1;font-size:12px;}"
+        "QTreeWidget#linkedPhones::item{border:0;border-bottom:1px solid %2;padding-left:6px;}"
+        "QTreeWidget#linkedPhones::item:hover{background:%3;}"
+        "QTreeWidget#linkedPhones::item:selected{background:%4;color:%1;}"
+        "QTreeWidget#linkedPhones::branch{background:transparent;border-bottom:1px solid %2;}"
+        "QTreeWidget#linkedPhones QHeaderView{background:transparent;border:0;}"
+        "QTreeWidget#linkedPhones QHeaderView::section{background:transparent;color:%5;border:0;border-bottom:1px solid %2;"
+        "padding:5px 6px 5px 8px;font-size:11.5px;font-weight:400;}")
+        .arg(hex("fg"), hex("border"), hex("hover"), selected.name(QColor::HexArgb), hex("muted")));
+    for (int i = 0; i < m_tree->topLevelItemCount(); ++i) m_tree->topLevelItem(i)->setBackground(0, m_groupFill);
+    for (auto *line : findChildren<QLabel *>(QStringLiteral("phonesProblem")))
+        line->setStyleSheet(QStringLiteral("color:%1;font-size:11.5px;").arg(m_warnColor.name()));
 }
 
 void Panel::revoke() {
@@ -412,7 +503,7 @@ void Panel::revoke() {
     }();
     if (!confirmed) return;
     m_notice.clear(); m_revokingName = phone;
-    m_status->setText(tr("Revoking %1…").arg(phone)); m_revoke->setEnabled(false);
+    showStatus(tr("Revoking %1…").arg(phone)); m_revoke->setEnabled(false);
     m_revoking = m_client->requestMobile(host, pinned(QStringLiteral("revoke-phone"), id, workspaceId, server));
 }
 

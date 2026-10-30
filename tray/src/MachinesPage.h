@@ -1,9 +1,11 @@
 #pragma once
 #include <QWidget>
+#include <QHash>
 #include <QJsonObject>
 #include "FleetState.h"
 class QComboBox; class IdentityBadge; class HgsClient; class QListWidget; class QLabel; class QLineEdit; class QSpinBox; class QCheckBox;
-class QFormLayout; class QPushButton; class QPlainTextEdit;
+class QFormLayout; class QPushButton; class QPlainTextEdit; class QFrame;
+namespace PhonePairing { class Panel; }
 class MachinesPage : public QWidget {
     Q_OBJECT
 public:
@@ -38,6 +40,9 @@ private:
     bool discardChanges();
     void resolveConnection();
     void showEffectiveConnection(const QJsonObject &data);
+    // #647: the header's label, system and state line.
+    void updateHeader();
+    QString hostFacts(const QJsonObject &host) const;
     void updateAppearance();
     QString appearanceMachine() const;
     HgsClient *m_client;
@@ -64,6 +69,15 @@ private:
     QComboBox *m_colorStyle;
     IdentityBadge *m_colorPreview;
     QPlainTextEdit *m_log;
+    // #647 (prototype, Machines): the list column, the header's state line,
+    // a draft's hint, this computer's line and card, the SSH card, Test
+    // session host and the Phones panel; the last check of each machine.
+    QFrame *m_sidebar, *m_localCard, *m_connectionCard;
+    QLabel *m_stateLine, *m_hint, *m_localLine;
+    QPushButton *m_testHost;
+    PhonePairing::Panel *m_phones;
+    quint64 m_hostTest = 0;
+    QHash<QString, QJsonObject> m_checks;
     QString m_selected = "@local", m_operation, m_pendingSelection;
     quint64 m_request = 0, m_resolveRequest = 0, m_hostRequest = 0;
     QString m_resolveAlias;

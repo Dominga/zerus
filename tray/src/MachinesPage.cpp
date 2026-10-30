@@ -29,64 +29,136 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMessageBox>
+#include <QPainter>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QScrollArea>
 #include <QShowEvent>
 #include <QSpinBox>
+#include <QSysInfo>
 #include <QTimer>
 #include <QVBoxLayout>
 
 namespace {
+// #647 (prototype, Machines): a row is the monitor icon with its status dot
+// (green connected, red not connected, grey off), the machine's label and a
+// line under it; the chosen row has an accent tint and edge.
+enum MachineRole { DirtyRole = Qt::UserRole + 1, StateRole };
 class MachineDelegate final : public QStyledItemDelegate {
 public:
     using QStyledItemDelegate::QStyledItemDelegate;
-    QSize sizeHint(const QStyleOptionViewItem &, const QModelIndex &) const override { return {220, 64}; }
+    QSize sizeHint(const QStyleOptionViewItem &, const QModelIndex &) const override { return {220, 52}; }
     void paint(QPainter *p, const QStyleOptionViewItem &o, const QModelIndex &index) const override {
-        p->save(); p->setClipRect(o.rect); const bool dark = o.widget->property("hgsDark").toBool();
-        IdentityBadges::paintRow(p, o, dark);
+        p->save(); p->setClipRect(o.rect); p->setRenderHint(QPainter::Antialiasing);
+        const bool dark = o.widget->property("hgsDark").toBool();
+        const bool selected = o.state & QStyle::State_Selected, hovered = o.state & QStyle::State_MouseOver;
+        const QRectF frame = QRectF(o.rect).adjusted(2.5, 2.5, -2.5, -2.5);
+        QColor accent = PageCards::token(dark, "accent");
+        if (selected) {
+            QColor fill = accent; fill.setAlphaF(dark ? .13 : .10); QColor edge = accent; edge.setAlphaF(.55);
+            p->setPen(QPen(edge, 1)); p->setBrush(fill); p->drawRoundedRect(frame, 8, 8);
+        } else if (hovered) { p->setPen(Qt::NoPen); p->setBrush(PageCards::token(dark, "hover")); p->drawRoundedRect(frame, 8, 8); }
         const QString text = index.data(Qt::DisplayRole).toString(), machine = text.section('\n', 0, 0);
-        const QRect r = o.rect.adjusted(13, 10, -13, -10);
-        const int badge = IdentityBadges::width(IdentityBadges::Machine, machine, o.font, r.width());
-        IdentityBadges::paint(p, QRect(r.x(), r.y(), badge, 18), IdentityBadges::Machine, machine, dark);
-        // U25 (spec 8): the amber dot of a machine with unsaved edits.
-        if (index.data(Qt::UserRole + 1).toBool()) {
-            p->setRenderHint(QPainter::Antialiasing); p->setPen(Qt::NoPen); p->setBrush(PageCards::token(dark, "warn"));
-            p->drawEllipse(QRectF(r.x() + badge + 7, r.y() + 5.5, 7, 7));
+        const QRect r = o.rect.adjusted(12, 7, -12, -7);
+        // The monitor in its tile, the state dot on the tile's corner.
+        const QRectF tile(r.x(), r.y() + (r.height() - 22) / 2.0, 22, 22);
+        p->setPen(QPen(PageCards::token(dark, "border"), 1)); p->setBrush(PageCards::token(dark, "surface")); p->drawRoundedRect(tile, 6, 6);
+        const QColor iconColor = PageCards::token(dark, "text2");
+        workspaceIcon("machines", iconColor).paint(p, tile.adjusted(4, 4, -4, -4).toRect());
+        const QString state = index.data(StateRole).toString();
+        if (!state.isEmpty()) {
+            const QColor dot = state == "ok" ? PageCards::token(dark, "accent") : state == "off" ? PageCards::token(dark, "danger")
+                             : state == "new" ? PageCards::token(dark, "warn") : PageCards::token(dark, "dim");
+            p->setPen(QPen(PageCards::token(dark, "page"), 1.5)); p->setBrush(dot);
+            p->drawEllipse(QRectF(tile.right() - 5.5, tile.bottom() - 5.5, 7.5, 7.5));
         }
-        QFont font = o.font; font.setPixelSize(11); p->setFont(font); p->setPen(QColor(dark ? "#a1adbb" : "#647386"));
-        p->drawText(QRect(r.x(), r.y() + 24, r.width(), 18), Qt::AlignVCenter, QFontMetrics(font).elidedText(text.section('\n', 1), Qt::ElideRight, r.width()));
+        const int left = r.x() + 32, width = r.right() - left;
+        const int badge = IdentityBadges::width(IdentityBadges::Machine, machine, o.font, width);
+        IdentityBadges::paint(p, QRect(left, r.y() + 1, badge, 18), IdentityBadges::Machine, machine, dark);
+        // U25 (spec 8): the amber dot of a machine with unsaved edits.
+        if (index.data(DirtyRole).toBool()) {
+            p->setPen(Qt::NoPen); p->setBrush(PageCards::token(dark, "warn"));
+            p->drawEllipse(QRectF(left + badge + 7, r.y() + 6.5, 7, 7));
+        }
+        QFont font = o.font; font.setPixelSize(11); p->setFont(font); p->setPen(PageCards::token(dark, "muted"));
+        p->drawText(QRect(left, r.y() + 21, width, 16), Qt::AlignVCenter, QFontMetrics(font).elidedText(text.section('\n', 1), Qt::ElideRight, width));
         p->restore();
     }
 };
+
+// The header's machine label: the label's own colors at the header's size.
+class MachineTitle final : public QLabel {
+public:
+    MachineTitle() { setObjectName("machineTitle"); setTextFormat(Qt::PlainText); setFixedHeight(26); setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Fixed); }
+    void setMachine(const QString &value, bool dark) { m_dark = dark; setText(value); setAccessibleName(value); setToolTip(value); updateGeometry(); update(); }
+    QSize sizeHint() const override { QFont f = font(); f.setPixelSize(14); f.setWeight(QFont::DemiBold); return {qMin(320, QFontMetrics(f).horizontalAdvance(text()) + 20), 26}; }
+    QSize minimumSizeHint() const override { return {qMin(sizeHint().width(), 60), 26}; }
+protected:
+    void paintEvent(QPaintEvent *) override {
+        if (text().isEmpty()) return;
+        QPainter p(this); p.setRenderHint(QPainter::Antialiasing);
+        const QColor color = MachineAppearance::color(text()); const bool bright = MachineAppearance::vivid(text());
+        p.setPen(Qt::NoPen); p.setBrush(MachineAppearance::backgroundColor(color, m_dark, bright)); p.drawRoundedRect(QRectF(rect()), 5, 5);
+        QFont f = font(); f.setPixelSize(14); f.setWeight(QFont::DemiBold); p.setFont(f);
+        p.setPen(MachineAppearance::textColor(color, m_dark, bright));
+        p.drawText(rect().adjusted(10, 0, -10, 0), Qt::AlignVCenter | Qt::AlignLeft, QFontMetrics(f).elidedText(text(), Qt::ElideMiddle, width() - 20));
+    }
+private:
+    bool m_dark = false;
+};
+
+// "Windows 11 · x64": the system as the GUI or a check found it.
+QString archName(QString arch)
+{
+    arch = arch.trimmed();
+    if (arch == "x86_64" || arch == "amd64" || arch == "AMD64") return QStringLiteral("x64");
+    if (arch == "aarch64") return QStringLiteral("arm64");
+    return arch;
+}
+QString osName(const QString &os)
+{
+    if (os == "Darwin" || os == "macos") return QStringLiteral("macOS");
+    if (os == "Windows_NT" || os == "windows") return QStringLiteral("Windows");
+    if (os == "linux") return QStringLiteral("Linux");
+    return os;
+}
 }
 
 MachinesPage::MachinesPage(const QString &path, QWidget *parent) : QWidget(parent), m_client(new HgsClient(path, this))
 {
     setObjectName("machinesPage");
-    auto *layout = new QVBoxLayout(this); layout->setContentsMargins(20, 18, 20, 18); layout->setSpacing(14);
-    auto *title = new QLabel(tr("Machines")); title->setObjectName("heading");
-    m_refresh = new QPushButton(tr("Refresh")); m_refresh->setObjectName("refreshMachineProfiles");
-    m_add = new QPushButton(tr("Add machine")); m_add->setObjectName("addMachine");
-    layout->addLayout(WorkspacePageHeader::row(title, m_refresh, m_add));
-    m_summary = new QLabel(tr("SSH connections and HGS setup")); m_summary->setObjectName("muted"); layout->addWidget(m_summary);
-    auto *body = new QHBoxLayout; body->setSpacing(24);
-    m_list = new WorkspaceList; m_list->setObjectName("machineProfiles"); m_list->setMinimumWidth(220); m_list->setMaximumWidth(300); m_list->setAccessibleName(tr("Machines")); body->addWidget(m_list, 1);
+    // #647 (prototype, Machines): the machine list is a column of its own with
+    // its title, Refresh, Add machine and the summary; the chosen machine's
+    // cards scroll beside it.
+    auto *layout = new QHBoxLayout(this); layout->setContentsMargins(0, 0, 0, 0); layout->setSpacing(0);
+    m_sidebar = new QFrame; m_sidebar->setObjectName("machinesSidebar"); m_sidebar->setFixedWidth(292);
+    auto *side = new QVBoxLayout(m_sidebar); side->setContentsMargins(8, 14, 8, 10); side->setSpacing(6);
+    auto *sideHead = new QHBoxLayout; sideHead->setContentsMargins(4, 0, 4, 0); sideHead->setSpacing(8);
+    auto *title = new QLabel(tr("Machines")); title->setObjectName("machinesHeading"); sideHead->addWidget(title, 1);
+    m_refresh = new QPushButton; m_refresh->setObjectName("refreshMachineProfiles"); m_refresh->setToolTip(tr("Refresh machines")); m_refresh->setAccessibleName(tr("Refresh machines"));
+    m_refresh->setFixedSize(26, 26); sideHead->addWidget(m_refresh);
+    m_add = new QPushButton(tr("Add machine")); m_add->setObjectName("addMachine"); m_add->setFixedHeight(26); sideHead->addWidget(m_add);
+    side->addLayout(sideHead);
+    m_summary = new QLabel(tr("SSH connections and HGS setup")); m_summary->setObjectName("muted"); m_summary->setWordWrap(true);
+    m_summary->setContentsMargins(4, 0, 4, 6); side->addWidget(m_summary);
+    m_list = new WorkspaceList; m_list->setObjectName("machineProfiles"); m_list->setAccessibleName(tr("Machines")); side->addWidget(m_list, 1);
     m_list->setItemDelegate(new MachineDelegate(m_list)); m_list->setMouseTracking(true); m_list->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_list->setStyleSheet("QListWidget#machineProfiles { background:transparent; border:0; outline:0; } QListWidget#machineProfiles::item { padding:0; border:0; }");
+    layout->addWidget(m_sidebar);
     auto *editorWidget = new QWidget; editorWidget->setObjectName("machineEditor");
-    auto *editor = new QVBoxLayout(editorWidget); editor->setContentsMargins(0, 0, 8, 0); editor->setSpacing(12);
-    // U25 (spec 8): the machine, a note (its system or "Unsaved connection")
-    // and its sessions and accounts on the right.
+    auto *editor = new QVBoxLayout(editorWidget); editor->setContentsMargins(22, 14, 22, 18); editor->setSpacing(10);
+    // U25 (spec 8), #647: the machine's label, its system ("Windows 11 · x64")
+    // and its sessions and accounts on the right; its state under them.
     auto *head = new QHBoxLayout; head->setSpacing(8);
-    m_title = new QLabel; m_title->setObjectName("heading"); m_title->setTextFormat(Qt::PlainText); head->addWidget(m_title);
-    m_titleNote = new QLabel; m_titleNote->setObjectName("muted"); m_titleNote->setTextFormat(Qt::PlainText); head->addWidget(m_titleNote); head->addStretch();
+    auto *titleChip = new MachineTitle; m_title = titleChip; head->addWidget(m_title);
+    m_titleNote = new QLabel; m_titleNote->setObjectName("machineSystem"); m_titleNote->setTextFormat(Qt::PlainText); head->addWidget(m_titleNote); head->addStretch();
     m_sessions = new QPushButton(tr("View sessions")); m_sessions->setObjectName("machineSessions"); head->addWidget(m_sessions);
     m_accounts = new QPushButton(tr("Agent accounts…")); m_accounts->setObjectName("machineAccounts"); head->addWidget(m_accounts);
     editor->addLayout(head);
-    m_origin = new QLabel; m_origin->setObjectName("muted"); m_origin->setWordWrap(true); m_origin->setTextFormat(Qt::PlainText); editor->addWidget(m_origin);
+    m_stateLine = new QLabel; m_stateLine->setObjectName("machineState"); m_stateLine->setTextFormat(Qt::PlainText); m_stateLine->setWordWrap(true); editor->addWidget(m_stateLine);
     m_localHost = new QLabel; m_localHost->setObjectName("localSessionHost"); m_localHost->setWordWrap(true); m_localHost->setTextFormat(Qt::PlainText); m_localHost->setTextInteractionFlags(Qt::TextSelectableByMouse); m_localHost->hide(); editor->addWidget(m_localHost);
+    m_hint = new QLabel; m_hint->setObjectName("machineHint"); m_hint->setWordWrap(true); m_hint->setTextFormat(Qt::PlainText); m_hint->hide(); editor->addWidget(m_hint);
     // The Label card: seven colors (and a custom one), Soft / Bright,
     // Automatic, the preview tag, and the effective connection under them.
     QBoxLayout *labelBox = nullptr; auto *labelCard = PageCards::card(QStringLiteral("machineLabelCard"), &labelBox);
@@ -118,10 +190,26 @@ MachinesPage::MachinesPage(const QString &path, QWidget *parent) : QWidget(paren
     m_colorHint = new QLabel(tr("Saved on this device")); m_colorHint->setObjectName("muted"); appearance->addWidget(m_colorHint); appearance->addStretch();
     labelBox->addLayout(appearance);
     m_effective = new QLabel; m_effective->setObjectName("effectiveMachineConnection"); m_effective->setProperty("pageMono", true); m_effective->setWordWrap(true); m_effective->setTextFormat(Qt::PlainText); m_effective->setTextInteractionFlags(Qt::TextSelectableByMouse); labelBox->addWidget(m_effective);
+    // #647: this computer is reached without SSH, and the card says so.
+    m_localLine = new QLabel(tr("Local machine — no SSH connection")); m_localLine->setObjectName("machineLocalConnection"); m_localLine->setProperty("pageMono", true);
+    m_localLine->setTextFormat(Qt::PlainText); m_localLine->hide(); labelBox->addWidget(m_localLine);
     editor->addWidget(labelCard);
+    // #647: This machine: how its sessions run, its session host test and,
+    // on a Windows control console, the offer to enable local sessions.
+    QBoxLayout *localBox = nullptr; m_localCard = PageCards::card(QStringLiteral("machineLocalCard"), &localBox);
+    auto *localTitle = new QLabel(tr("This machine")); localTitle->setObjectName("machineLocalTitle"); localTitle->setStyleSheet(QStringLiteral("font-weight:600;"));
+    localBox->addWidget(localTitle);
+    m_origin = new QLabel; m_origin->setObjectName("muted"); m_origin->setWordWrap(true); m_origin->setTextFormat(Qt::PlainText); localBox->addWidget(m_origin);
+    auto *localActions = new QHBoxLayout; localActions->setSpacing(8);
+    m_testHost = new QPushButton(tr("Test session host")); m_testHost->setObjectName("testSessionHost");
+    m_testHost->setToolTip(tr("Ask the session host on this computer whether it answers"));
+    m_enableLocal = new QPushButton(tr("Enable local sessions")); m_enableLocal->setObjectName("enableLocalSessions"); m_enableLocal->hide();
+    m_enableLocal->setToolTip(tr("Run agents on this computer too. Zerus stages the HGS CLI and a session host in your user profile."));
+    localActions->addWidget(m_testHost); localActions->addWidget(m_enableLocal); localActions->addStretch(); localBox->addLayout(localActions);
+    editor->addWidget(m_localCard);
     // The connection card: the editable form, its actions and the footer.
-    QBoxLayout *connectionBox = nullptr; auto *connectionCard = PageCards::card(QStringLiteral("machineConnectionCard"), &connectionBox);
-    auto *form = m_form = new QFormLayout; form->setSpacing(12); form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+    QBoxLayout *connectionBox = nullptr; auto *connectionCard = m_connectionCard = PageCards::card(QStringLiteral("machineConnectionCard"), &connectionBox);
+    auto *form = m_form = new QFormLayout; form->setHorizontalSpacing(12); form->setVerticalSpacing(8); form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     form->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
     auto *aliasRow = new QHBoxLayout; aliasRow->setSpacing(8);
     m_alias = new QLineEdit; m_alias->setObjectName("machineAlias"); m_alias->setPlaceholderText(tr("e.g. studio-mac")); aliasRow->addWidget(m_alias, 1);
@@ -139,9 +227,9 @@ MachinesPage::MachinesPage(const QString &path, QWidget *parent) : QWidget(paren
     form->addRow(tr("Linux HGS executable"), m_wslHgs);
     m_hostname = new QLineEdit; m_hostname->setObjectName("machineHostname"); m_hostname->setPlaceholderText(tr("Address or existing SSH alias")); form->addRow(tr("Hostname / IP"), m_hostname);
     m_user = new QLineEdit; m_user->setObjectName("machineUser"); m_user->setPlaceholderText(tr("Use SSH configuration")); form->addRow(tr("SSH user"), m_user);
-    m_port = new QSpinBox; m_port->setObjectName("machinePort"); m_port->setRange(0, 65535); m_port->setSpecialValueText(tr("SSH configuration (usually 22)")); form->addRow(tr("Port"), m_port);
+    m_port = new QSpinBox; m_port->setObjectName("machinePort"); m_port->setRange(0, 65535); m_port->setSpecialValueText(tr("SSH configuration (usually 22)")); m_port->setMaximumWidth(120); form->addRow(tr("Port"), m_port);
     auto *keyRow = new QHBoxLayout; m_key = new QLineEdit; m_key->setObjectName("machineKey"); m_key->setPlaceholderText(tr("Use SSH agent / configuration")); keyRow->addWidget(m_key, 1);
-    m_browse = new QPushButton(tr("Browse…")); m_browse->setObjectName("browseMachineKey"); keyRow->addWidget(m_browse); m_keyRow = new QWidget; keyRow->setContentsMargins(0,0,0,0); m_keyRow->setLayout(keyRow); form->addRow(tr("Private key path"), m_keyRow);
+    m_browse = new QPushButton(tr("Browse…")); m_browse->setObjectName("browseMachineKey"); keyRow->addWidget(m_browse); m_keyRow = new QWidget; keyRow->setContentsMargins(0,0,0,0); m_keyRow->setLayout(keyRow); form->addRow(tr("Private key"), m_keyRow);
     m_enabled = new QCheckBox(tr("Show sessions and include in background polling")); m_enabled->setObjectName("machineEnabled"); form->addRow(QString(), m_enabled); connectionBox->addLayout(form);
     // Save (only with changes), Discard changes / Discard draft, then the
     // actions that need a saved connection.
@@ -156,10 +244,6 @@ MachinesPage::MachinesPage(const QString &path, QWidget *parent) : QWidget(paren
     connectionBox->addLayout(actions);
     m_unsaved = new QLabel(tr("Unsaved changes — test, SSH and install are off until you save or discard."));
     m_unsaved->setObjectName("machineUnsavedNotice"); m_unsaved->setProperty("pageWarn", true); m_unsaved->setWordWrap(true); m_unsaved->hide(); connectionBox->addWidget(m_unsaved);
-    auto *setup = new QHBoxLayout;
-    m_enableLocal = new QPushButton(tr("Enable local sessions")); m_enableLocal->setObjectName("enableLocalSessions"); m_enableLocal->hide(); setup->addWidget(m_enableLocal);
-    m_enableLocal->setToolTip(tr("Run agents on this computer too. Zerus stages the HGS CLI and a session host in your user profile."));
-    setup->addStretch(); editor->addLayout(setup);
     m_status = new QLabel; m_status->setObjectName("machineNotice"); m_status->setTextFormat(Qt::PlainText); m_status->setWordWrap(true); m_status->setTextInteractionFlags(Qt::TextSelectableByMouse); editor->addWidget(m_status);
     m_log = new QPlainTextEdit; m_log->setObjectName("machineSetupLog"); m_log->setReadOnly(true); m_log->setMaximumBlockCount(1500); m_log->hide(); editor->addWidget(m_log, 1);
     auto *footer = new QHBoxLayout;
@@ -170,11 +254,11 @@ MachinesPage::MachinesPage(const QString &path, QWidget *parent) : QWidget(paren
     editor->insertWidget(editor->indexOf(labelCard) + 1, connectionCard);
     // Phones of every workspace this computer reaches, here or through a peer.
     QBoxLayout *phonesBox = nullptr; auto *phonesCard = PageCards::card(QStringLiteral("machinePhonesCard"), &phonesBox);
-    phonesBox->addWidget(new PhonePairing::Panel(path)); editor->addWidget(phonesCard);
+    m_phones = new PhonePairing::Panel(path); phonesBox->addWidget(m_phones); editor->addWidget(phonesCard);
     editor->addStretch();
     auto *scroll = new QScrollArea; scroll->setObjectName("machineEditorScroll"); scroll->setWidgetResizable(true); scroll->setFrameShape(QFrame::NoFrame); scroll->setWidget(editorWidget);
     scroll->setAutoFillBackground(false); scroll->viewport()->setAutoFillBackground(false); editorWidget->setAutoFillBackground(false);
-    body->addWidget(scroll, 3); layout->addLayout(body, 1);
+    layout->addWidget(scroll, 1);
     connect(m_color, &QPushButton::clicked, this, [this] {
         const auto machine = appearanceMachine(); if (m_new || machine.isEmpty()) return;
         WorkspaceColorDialog dialog(MachineAppearance::color(machine), this);
@@ -235,6 +319,10 @@ MachinesPage::MachinesPage(const QString &path, QWidget *parent) : QWidget(paren
     connect(m_ssh, &QPushButton::clicked, this, [this] { emit sshTerminalRequested(alias()); });
     connect(m_install, &QPushButton::clicked, this, &MachinesPage::install);
     connect(m_enableLocal, &QPushButton::clicked, this, &MachinesPage::enableLocalSessions);
+    connect(m_testHost, &QPushButton::clicked, this, [this] {
+        if (m_hostRequest || m_hostTest || m_installing) return;
+        report(tr("Testing the session host…")); m_hostTest = m_client->requestSessionHost(QStringLiteral("status")); updateControls();
+    });
     connect(m_sessions, &QPushButton::clicked, this, [this] { emit viewSessionsRequested(m_selected == "@local" ? QString() : alias()); });
     connect(m_accounts, &QPushButton::clicked, this, [this] { emit accountsRequested(m_selected == "@local" ? QString() : alias()); });
     for (auto *button : {m_remove, m_reset}) connect(button, &QPushButton::clicked, this, [this, button] {
@@ -270,6 +358,8 @@ MachinesPage::MachinesPage(const QString &path, QWidget *parent) : QWidget(paren
             renderRows(); loadSelection();
         }
         else if (operation == "check") {
+            // #647: the header names the system, HGS and tmux a check found.
+            if (const auto checked = data.value("alias").toString(); !checked.isEmpty() && data.value("ssh_ok").toBool(data.value("ok").toBool())) m_checks.insert(checked, data);
             if (data.value("transport").toString() == "wsl-local") {
                 report(data.value("ok").toBool()
                     ? tr("Connected to WSL %1 as %2: %3. OpenCode policy: existing-only.").arg(data.value("distribution").toString(), data.value("user").toString(), data.value("hgs").toString())
@@ -295,6 +385,16 @@ MachinesPage::MachinesPage(const QString &path, QWidget *parent) : QWidget(paren
         } else if (request == m_request) { m_request = 0; report(error, true); updateControls(); }
     });
     connect(m_client, &HgsClient::sessionHostReady, this, [this](quint64 request, const QJsonObject &data) {
+        if (request && request == m_hostTest) {
+            // #647: Test session host reports what the host answered now.
+            m_hostTest = 0;
+            const auto host = data.value("host").toObject();
+            const bool running = host.value("state").toString() == "running";
+            QString text = tr("Session host: %1").arg(hostFacts(host));
+            if (running && host.value("sessions").isDouble()) text += tr(", %1 sessions").arg(host.value("sessions").toInteger());
+            report(text, !running); updateControls();
+            return;
+        }
         if (request != m_hostRequest) return;
         m_hostRequest = 0; m_installing = false;
         const auto cli = data.value("cli").toObject().value("path").toString();
@@ -304,6 +404,7 @@ MachinesPage::MachinesPage(const QString &path, QWidget *parent) : QWidget(paren
         report(m_localNotice); updateControls(); emit machinesChanged();
     });
     connect(m_client, &HgsClient::sessionHostFailed, this, [this](quint64 request, const QString &error) {
+        if (request && request == m_hostTest) { m_hostTest = 0; report(tr("The session host did not answer: %1").arg(error), true); updateControls(); return; }
         if (request != m_hostRequest) return;
         m_hostRequest = 0; m_installing = false; report(error, true); updateControls();
     });
@@ -332,7 +433,7 @@ QJsonObject MachinesPage::connection() const {
     }
     return {{"hostname", m_hostname->text().trimmed()}, {"user", m_user->text().trimmed()}, {"port", m_port->value() ? QJsonValue(m_port->value()) : QJsonValue(QJsonValue::Null)}, {"identity_file", m_key->text().trimmed()}, {"enabled", m_enabled->isChecked()}};
 }
-void MachinesPage::report(const QString &text, bool error) { m_status->setText(text); m_status->setStyleSheet(error ? "color:#d37c69;" : QString()); }
+void MachinesPage::report(const QString &text, bool error) { m_status->setText(text); m_status->setStyleSheet(error ? "color:#d37c69;" : QString()); m_status->setVisible(!text.isEmpty()); }
 void MachinesPage::changed() { if (!m_loading) { m_dirty = true; if (!m_effectiveData.isEmpty()) showEffectiveConnection(m_effectiveData); updateControls(); } }
 
 bool MachinesPage::discardChanges() {
@@ -364,7 +465,30 @@ void MachinesPage::showEvent(QShowEvent *event)
 }
 void MachinesPage::setTheme(bool dark) {
     m_dark = dark;
-    setStyleSheet(PageCards::sheet(dark));
+    // #647: the prototype's compact controls on the machine's cards.
+    const auto c = [dark](const char *name) { return PageCards::token(dark, name).name(QColor::HexArgb); };
+    QColor primaryOff = PageCards::token(dark, "accent"); primaryOff.setAlphaF(.38);
+    QColor primaryTextOff = PageCards::token(dark, "accentText"); primaryTextOff.setAlphaF(.75);
+    QColor dangerOff = PageCards::token(dark, "danger"); dangerOff.setAlphaF(.5);
+    const QString editor = QStringLiteral(
+        "QWidget#machineEditor QPushButton{background:%1;color:%2;border:1px solid %3;border-radius:6px;padding:3px 10px;font-size:12px;min-height:18px;}"
+        "QWidget#machineEditor QPushButton:hover{background:%4;}"
+        "QWidget#machineEditor QPushButton:disabled{color:%5;}"
+        "QWidget#machineEditor QPushButton[pagePrimary=\"true\"]{background:%6;border-color:%6;color:%7;font-weight:600;}"
+        "QWidget#machineEditor QPushButton[pagePrimary=\"true\"]:hover{background:%8;border-color:%8;}"
+        "QWidget#machineEditor QPushButton[pagePrimary=\"true\"]:disabled{background:%9;border-color:transparent;color:%10;}"
+        "QWidget#machineEditor QPushButton[pageDanger=\"true\"]{color:%11;}"
+        "QWidget#machineEditor QPushButton[pageDanger=\"true\"]:disabled{color:%12;}"
+        "QWidget#machineEditor QPushButton[pageSegment=\"true\"]{border-radius:0;padding:3px 10px;font-size:11.5px;}"
+        "QWidget#machineEditor QPushButton[pageSegment=\"true\"][segmentEdge=\"first\"]{border-top-left-radius:7px;border-bottom-left-radius:7px;}"
+        "QWidget#machineEditor QPushButton[pageSegment=\"true\"][segmentEdge=\"last\"]{border-top-right-radius:7px;border-bottom-right-radius:7px;}"
+        "QWidget#machineEditor QPushButton[pageSegment=\"true\"]:checked{background:%13;color:%6;font-weight:600;}"
+        "QWidget#machineEditor QPushButton#resetMachineColor,QWidget#machineEditor QPushButton#resetMachine{background:transparent;border:0;font-weight:600;}"
+        "QWidget#machineEditor QPushButton#resetMachineColor:hover,QWidget#machineEditor QPushButton#resetMachine:hover{color:%6;}"
+        "QWidget#machineEditor QLineEdit,QWidget#machineEditor QSpinBox,QWidget#machineEditor QComboBox{min-height:20px;padding:2px 8px;font-size:12.5px;}")
+        .arg(c("surface"), c("fg"), c("border"), c("hover"), c("dim"), c("accent"), c("accentText"), c("accentHover"), primaryOff.name(QColor::HexArgb))
+        .arg(primaryTextOff.name(QColor::HexArgb), c("danger"), dangerOff.name(QColor::HexArgb), c("segOn"));
+    setStyleSheet(PageCards::sheet(dark) + editor);
     // The swatches: their color, a 2 px ring in the text color when chosen.
     for (auto *swatch : std::as_const(m_swatches))
         swatch->setStyleSheet(QStringLiteral("QPushButton{background:%1;border:2px solid transparent;border-radius:5px;padding:0;}"
@@ -375,7 +499,20 @@ void MachinesPage::setTheme(bool dark) {
         divider->setStyleSheet(QStringLiteral("background:%1;").arg(PageCards::token(dark, "border").name()));
     m_color->setStyleSheet(QStringLiteral("QPushButton{padding:0;border-radius:5px;font-weight:600;}"));
     m_list->setProperty("hgsDark", dark); m_list->viewport()->update();
-    WorkspacePageHeader::theme(m_refresh, m_add, tr("Refresh machines"), dark);
+    // #647: the list column has its own edge; its title, the icon Refresh and
+    // a small Add machine sit on one line; the header's notes are muted.
+    const auto token = [dark](const char *name) { return PageCards::token(dark, name).name(QColor::HexArgb); };
+    m_sidebar->setStyleSheet(QStringLiteral("QFrame#machinesSidebar{background:transparent;border:0;border-right:1px solid %1;}"
+                                            "QLabel#machinesHeading{font-size:17px;font-weight:700;color:%2;}").arg(token("border"), token("fg")));
+    const QString small = QStringLiteral("QPushButton{background:%1;color:%2;border:1px solid %3;border-radius:7px;padding:0 9px;font-size:12px;}"
+                                         "QPushButton:hover{background:%4;} QPushButton:disabled{color:%5;}")
+                              .arg(token("surface"), token("fg"), token("border"), token("hover"), token("dim"));
+    m_refresh->setStyleSheet(small + QStringLiteral("QPushButton{padding:0;}")); m_refresh->setIcon(workspaceIcon("refresh", PageCards::token(dark, "text2"))); m_refresh->setIconSize(QSize(15, 15));
+    m_add->setStyleSheet(small); m_add->setIcon(workspaceIcon("add", PageCards::token(dark, "text2"))); m_add->setIconSize(QSize(13, 13));
+    m_refresh->setCursor(Qt::PointingHandCursor); m_add->setCursor(Qt::PointingHandCursor);
+    for (auto *note : {m_titleNote, m_stateLine, m_localHost, m_hint}) note->setStyleSheet(QStringLiteral("color:%1;font-size:12px;").arg(token("muted")));
+    m_phones->setTheme(dark);
+    updateHeader();
 }
 void MachinesPage::setFleet(const FleetState &fleet) {
     // The origin text also names Enable local sessions while it is offered.
@@ -398,20 +535,28 @@ void MachinesPage::renderRows() {
     const bool console = !m_fleet.local().localSessions;
     m_list->clear(); int online = m_fleet.local().ok && !console ? 1 : 0;
     const auto localName = m_fleet.local().host.isEmpty() ? m_data.value("local").toString() : m_fleet.local().host;
-    auto *local = new QListWidgetItem(MachineAppearance::icon(localName), localName + (m_fleet.local().localSessions ? tr("\nThis machine") : tr("\nThis computer: control console")), m_list); local->setData(Qt::UserRole, "@local");
+    // #647: this machine's line counts its sessions, as the prototype's does.
+    const auto localSessions = m_fleet.local().sessions.size();
+    const QString localState = !m_fleet.local().localSessions ? tr("This computer: control console")
+        : localSessions == 1 ? tr("This machine · 1 session") : tr("This machine · %1 sessions").arg(localSessions);
+    auto *local = new QListWidgetItem(MachineAppearance::icon(localName), localName + '\n' + localState, m_list); local->setData(Qt::UserRole, "@local");
+    local->setData(StateRole, m_fleet.local().ok || m_data.isEmpty() ? QStringLiteral("ok") : QStringLiteral("off"));
     for (const auto &value : m_data.value("machines").toArray()) {
         const auto row = value.toObject(); const auto name = row.value("alias").toString(); const auto *box = m_fleet.peer(name);
         const bool live = box && box->ok && QDateTime::currentMSecsSinceEpoch() - m_fleet.peerPolledAt(name) < FleetState::kPeerStaleMs;
+        const bool enabled = row.value("enabled").toBool();
         if (live) ++online;
-        const QString state = !row.value("enabled").toBool() ? tr("Disabled") : !live ? tr("Not connected")
+        const QString state = !enabled ? tr("Disabled") : !live ? tr("Not connected")
             : box->sessions.size() == 1 ? tr("Connected, 1 session") : tr("Connected, %1 sessions").arg(box->sessions.size());
         auto *item = new QListWidgetItem(MachineAppearance::icon(name), name + '\n' + state, m_list); item->setData(Qt::UserRole, name);
+        item->setData(StateRole, !enabled ? QStringLiteral("disabled") : live ? QStringLiteral("ok") : QStringLiteral("off"));
     }
     const int savedCount=m_list->count()-(console?1:0);
-    if(m_new){auto *draft=new QListWidgetItem(tr("New machine\nUnsaved connection"),m_list);draft->setData(Qt::UserRole,"@new");draft->setToolTip(tr("This connection is a draft. Save it to add the machine to Zerus."));}
+    if(m_new){auto *draft=new QListWidgetItem(tr("New machine\nUnsaved connection"),m_list);draft->setData(Qt::UserRole,"@new");draft->setData(StateRole,QStringLiteral("new"));draft->setToolTip(tr("This connection is a draft. Save it to add the machine to Zerus."));}
     const auto selected=m_new?QStringLiteral("@new"):m_selected;
     for (int i = 0; i < m_list->count(); ++i) if (m_list->item(i)->data(Qt::UserRole).toString() == selected) m_list->setCurrentRow(i);
-    m_summary->setText(savedCount == 1 ? tr("%1 connected, 1 machine").arg(online) : tr("%1 connected, %2 machines").arg(online).arg(savedCount));
+    m_summary->setText(tr("SSH connections and HGS setup · %1").arg(savedCount == 1 ? tr("%1 connected, 1 machine").arg(online) : tr("%1 connected, %2 machines").arg(online).arg(savedCount)));
+    updateHeader();
     // N20: a fleet poll, an appearance click or a cancelled switch rebuilds
     // the rows; the edits are still unsaved.
     markUnsaved();
@@ -429,12 +574,6 @@ void MachinesPage::loadSelection() {
     if (!m_new && m_selected != "@local" && row.isEmpty()) { m_selected = "@local"; renderRows(); }
     const bool local = m_selected == "@local"; const auto c = row.value("connection").toObject();
     const auto localName = m_fleet.local().host.isEmpty() ? m_data.value("local").toString() : m_fleet.local().host;
-    m_title->setText(m_new ? tr("New machine") : local ? localName : m_selected);
-    // The note beside it: a draft is an unsaved connection; a saved machine
-    // says whether it is connected.
-    const auto *peer = local ? nullptr : m_fleet.peer(m_selected);
-    const bool live = peer && peer->ok && QDateTime::currentMSecsSinceEpoch() - m_fleet.peerPolledAt(m_selected) < FleetState::kPeerStaleMs;
-    m_titleNote->setText(m_new ? tr("Unsaved connection") : local ? tr("This machine") : live ? tr("Connected") : tr("Not connected"));
     m_alias->setText(m_new?QString():local ? localName : m_selected); m_hostname->setText(c.value("hostname").toString()); m_user->setText(c.value("user").toString());
     m_transport->setCurrentIndex(c.value("transport").toString() == "wsl-local" ? 1 : 0);
     const auto wsl = c.value("wsl").toObject();
@@ -443,13 +582,22 @@ void MachinesPage::loadSelection() {
     m_wslHgs->setText(wsl.value("hgs_path").toString());
     m_port->setValue(c.value("port").toInt()); m_key->setText(c.value("identity_file").toString()); m_enabled->setChecked(c.value("enabled").toBool(true));
     // A control-only computer (hgs.exe on Windows) runs no agents of its own.
-    m_origin->setText(m_new ? tr("Fill in the SSH alias or the host, then save.") : local ? (m_fleet.local().localSessions ? tr("This device runs Zerus. Add a remote machine to manage its agents over SSH.")
-                               : tr("This computer is a control console: agents run on the remote machines you add here, over SSH.")
-                                 + (LocalSessionHost::canEnable(m_fleet.local()) ? tr(" Enable local sessions to run them on this computer too.") : QString())) :
-        (row.value("source").toString() == "config" ? tr("This alias comes from HGS configuration. ") : QString()) +
-        tr("SSH supplies inherited values from your OpenSSH configuration and defaults. Fields below are Zerus overrides; blank fields keep the inherited value.") + (m_data.value("environment_override").toBool() ? tr(" HGS_PEERS in the environment overrides the list of monitored machines.") : QString()));
+    // #647: this computer's explanation is in its card; a draft's in a line
+    // under the header; a saved machine's on its effective connection.
+    const bool windowsLocal = MachinePlatform::of(m_fleet.local().metrics, true) == MachinePlatform::Style::Windows;
+    m_origin->setText(m_fleet.local().localSessions
+        ? (windowsLocal ? tr("Local sessions run through the Zerus session host. No SSH settings are needed.")
+                        : tr("This device runs Zerus. Add a remote machine to manage its agents over SSH."))
+        : tr("This computer is a control console: agents run on the remote machines you add here, over SSH.")
+            + (LocalSessionHost::canEnable(m_fleet.local()) ? tr(" Enable local sessions to run them on this computer too.") : QString()));
+    m_hint->setText(m_new ? tr("Fill in the SSH alias or the host, then save.") : QString());
+    m_hint->setVisible(m_new);
+    QString explain = (row.value("source").toString() == "config" ? tr("This alias comes from HGS configuration. ") : QString()) +
+        tr("SSH supplies inherited values from your OpenSSH configuration and defaults. Fields below are Zerus overrides; blank fields keep the inherited value.") + (m_data.value("environment_override").toBool() ? tr(" HGS_PEERS in the environment overrides the list of monitored machines.") : QString());
     if (!local && m_transport->currentData().toString() == "wsl-local")
-        m_origin->setText(tr("Local WSL uses the explicit distribution, user and Linux HGS executable. OpenCode must already be running; Zerus never starts or replaces it in this mode."));
+        explain = tr("Local WSL uses the explicit distribution, user and Linux HGS executable. OpenCode must already be running; Zerus never starts or replaces it in this mode.");
+    m_effective->setToolTip(local || m_new ? QString() : explain);
+    m_alias->setToolTip(local || m_new ? QString() : explain);
     m_dirty = false; m_loading = false; m_log->hide(); report(local ? m_localNotice : QString()); updateControls(); resolveConnection();
 }
 QString MachinesPage::appearanceMachine() const {
@@ -491,8 +639,9 @@ void MachinesPage::showEffectiveConnection(const QJsonObject &data) {
         return;
     }
     QStringList keys; for (const auto &key : data.value("identity_files").toArray()) keys << key.toString();
-    QStringList details{tr("%1: %2@%3, port %4").arg(m_dirty ? tr("Saved connection") : tr("Effective connection"), data.value("user").toString(), data.value("hostname").toString(), data.value("port").toString())};
-    if (!keys.isEmpty()) details << tr("Key paths: %1").arg(keys.join(", "));
+    // #647: the prototype's one line, "…, port 22 · key ~/.ssh/id_ed25519".
+    QStringList details{tr("%1: %2@%3, port %4").arg(m_dirty ? tr("Saved connection") : tr("Effective connection"), data.value("user").toString(), data.value("hostname").toString(), data.value("port").toString())
+                        + (keys.isEmpty() ? QString() : (keys.size() == 1 ? tr(" · key %1") : tr(" · keys %1")).arg(keys.join(", ")))};
     if (!data.value("proxy_jump").toString().isEmpty()) details << tr("Jump host: %1").arg(data.value("proxy_jump").toString());
     else if (data.value("proxy_command").toBool()) details << tr("Proxy command configured in OpenSSH");
     if (m_dirty) details << tr("Unsaved edits are not included. Save to refresh these values.");
@@ -557,6 +706,9 @@ void MachinesPage::updateControls() {
         m_form->setRowVisible(field, !console && !windows && wsl);
     for (QWidget *field : QList<QWidget *>{m_hostname, m_user, m_keyRow, m_port})
         m_form->setRowVisible(field, !console && !windows && !wsl);
+    // #647: a saved SSH machine shows the prototype's form; the connection
+    // type is chosen on a draft and shown for a WSL machine.
+    m_form->setRowVisible(m_transport, !console && !windows && (m_new || wsl));
     for (auto *button : {m_save, m_check, m_ssh, m_install, m_reset, m_remove}) button->setVisible(!console && !windows);
     m_discardDraft->setVisible(!console && !windows && (m_new || !local));
     if (console || windows) m_unsaved->hide();
@@ -568,18 +720,67 @@ void MachinesPage::updateControls() {
     const bool windowsHost = windows && !host.isEmpty();
     m_enableLocal->setVisible(local && !m_new && LocalSessionHost::canEnable(m_fleet.local())); m_enableLocal->setEnabled(!busy);
     m_localHost->setVisible(windowsHost);
-    if (windowsHost) {
-        const auto state = host.value("state").toString();
-        QStringList facts{state == "not-installed" ? tr("not installed") : state == "stopped" ? tr("stopped")
-                          : state == "running" ? tr("running") : state == "unavailable" ? tr("unavailable") : state};
-        if (host.value("pid").isDouble()) facts << tr("PID %1").arg(host.value("pid").toInteger());
-        if (!host.value("conpty").toString().isEmpty()) facts << tr("%1 ConPTY").arg(host.value("conpty").toString());
-        if (!host.value("integrity").toString().isEmpty()) facts << tr("%1 integrity").arg(host.value("integrity").toString());
-        if (host.value("windows_session").isDouble()) facts << tr("Windows session %1").arg(host.value("windows_session").toInteger());
-        const auto error = host.value("error").toString();
-        m_localHost->setText(tr("Session host: %1").arg(facts.join(", ")) + (error.isEmpty() ? QString() : ": " + error));
-    }
+    if (windowsHost) m_localHost->setText(tr("Session host: %1").arg(hostFacts(host)));
+    // #647: This machine has its own card; the SSH card shows only where it
+    // has a field, so no empty card stays under the label.
+    m_localCard->setVisible(local && !m_new);
+    m_testHost->setVisible(windowsHost && m_fleet.local().localSessions);
+    m_testHost->setEnabled(!busy && !m_hostTest);
+    m_connectionCard->setVisible(!console && !windows);
+    m_localLine->setVisible(local && !m_new);
+    updateHeader();
     updateAppearance();
+}
+
+QString MachinesPage::hostFacts(const QJsonObject &host) const
+{
+    const auto state = host.value("state").toString();
+    QStringList facts{state == "not-installed" ? tr("not installed") : state == "stopped" ? tr("stopped")
+                      : state == "running" ? tr("running") : state == "unavailable" ? tr("unavailable") : state};
+    if (host.value("pid").isDouble()) facts << tr("PID %1").arg(host.value("pid").toInteger());
+    if (!host.value("conpty").toString().isEmpty()) facts << tr("%1 ConPTY").arg(host.value("conpty").toString());
+    if (!host.value("integrity").toString().isEmpty()) facts << tr("%1 integrity").arg(host.value("integrity").toString());
+    if (host.value("windows_session").isDouble()) facts << tr("Windows session %1").arg(host.value("windows_session").toInteger());
+    const auto error = host.value("error").toString();
+    return facts.join(", ") + (error.isEmpty() ? QString() : ": " + error);
+}
+
+// #647: the label, its system and its state, as the prototype's header has them.
+void MachinesPage::updateHeader()
+{
+    const bool local = m_selected == "@local" && !m_new;
+    const auto localName = m_fleet.local().host.isEmpty() ? m_data.value("local").toString() : m_fleet.local().host;
+    const QString name = m_new ? tr("New machine") : local ? localName : m_selected;
+    static_cast<MachineTitle *>(m_title)->setMachine(name, m_dark);
+    QString system;
+    QString arch;
+    if (local) {
+        system = QSysInfo::productType() == QLatin1String("windows") ? QStringLiteral("Windows %1").arg(QSysInfo::productVersion())
+               : QSysInfo::productType() == QLatin1String("macos") ? QStringLiteral("macOS %1").arg(QSysInfo::productVersion())
+               : QSysInfo::prettyProductName();
+        arch = archName(QSysInfo::currentCpuArchitecture());
+    } else if (!m_new) {
+        const auto checked = m_checks.value(m_selected);
+        system = osName(checked.value("os").toString());
+        if (system.isEmpty()) system = osName(m_fleet.metricsOf(m_selected).value("platform").toString());
+        arch = archName(checked.value("arch").toString());
+    }
+    m_titleNote->setText(arch.isEmpty() || system.isEmpty() ? system : system + QStringLiteral(" · ") + arch);
+    m_titleNote->setVisible(!m_titleNote->text().isEmpty());
+    // A remote machine: whether it answers, its HGS and tmux.
+    QString state;
+    if (m_new) state = tr("Unsaved connection");
+    else if (!local) {
+        const auto *peer = m_fleet.peer(m_selected);
+        const bool live = peer && peer->ok && QDateTime::currentMSecsSinceEpoch() - m_fleet.peerPolledAt(m_selected) < FleetState::kPeerStaleMs;
+        QStringList parts{live ? tr("Connected") : tr("Not connected")};
+        if (live && !peer->hgsVersion.isEmpty()) parts << tr("hgs %1").arg(peer->hgsVersion);
+        const QString tmux = m_checks.value(m_selected).value("tmux").toString();
+        if (live && !tmux.isEmpty()) parts << tmux;
+        state = parts.join(QStringLiteral(" · "));
+    }
+    m_stateLine->setText(state);
+    m_stateLine->setVisible(!state.isEmpty());
 }
 void MachinesPage::save() {
     if (m_request || m_installing || (m_new && aliasExists())) return;

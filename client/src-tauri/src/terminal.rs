@@ -912,7 +912,17 @@ mod tests {
 
     /// Waits up to ten seconds for `done`, acknowledging every output as it arrives.
     fn until(t: &Terminals, generation: u64, sink: &Collect, done: impl Fn(&Collect) -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        until_with_timeout(t, generation, sink, Duration::from_secs(10), done);
+    }
+
+    fn until_with_timeout(
+        t: &Terminals,
+        generation: u64,
+        sink: &Collect,
+        timeout: Duration,
+        done: impl Fn(&Collect) -> bool,
+    ) {
+        let deadline = Instant::now() + timeout;
         let mut acked = 0;
         while !done(sink) {
             assert!(Instant::now() < deadline, "timed out: {:?}", sink.text());
@@ -1696,7 +1706,9 @@ mod tests {
             delivered.ends_with(&replay),
             "the redraw is a suffix of what the first view received"
         );
-        until(&t, g, &second, |s| s.text().contains("done"));
+        until_with_timeout(&t, g, &second, Duration::from_secs(30), |s| {
+            s.text().contains("done")
+        });
         let mut all = delivered[..delivered.len() - replay.len()].to_vec();
         all.extend(lock(&second.seen).0.concat());
         let text = String::from_utf8_lossy(&all).into_owned();

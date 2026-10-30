@@ -1,5 +1,6 @@
 //! Durable desktop service kernel. Pre-handoff it owns no fleet or effect writer.
 mod fanout;
+mod feed;
 mod handoff;
 mod import_evidence;
 mod presence_admission;
@@ -27,7 +28,7 @@ use std::{
 use store::{Location, Store};
 use transport::{Listener, Stream, TIMEOUT};
 
-const USAGE: &str = "usage: hgs desktop serve [--config-dir DIR --state-dir DIR] | status [--json] | watch --json | request --json | registration --json | revoke --json [--request-id UUID] [--reason rollback] | import-evidence --json | import-status --json --import-id UUID";
+const USAGE: &str = "usage: hgs desktop serve [--config-dir DIR --state-dir DIR] | status [--json] | watch --json | feed --json | request --json | registration --json | revoke --json [--request-id UUID] [--reason rollback] | import-evidence --json | import-status --json --import-id UUID";
 const HEARTBEAT: Duration = Duration::from_secs(10);
 pub const STARTUP_REFUSED: i32 = 78;
 
@@ -136,6 +137,7 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
                 Ok(())
             }
             ["watch", "--json"] => watch(&location),
+            ["feed", "--json"] => feed::proxy(&location),
             ["revoke", rest @ ..] => {
                 let command = revoke::cli(rest)?;
                 let result = match exchange(&location, "request", Some(revoke::payload(&command)?))
@@ -209,6 +211,7 @@ fn projection(
     epoch: &str,
     subscribers: usize,
     migration: &Value,
+    feed: &feed::Broker,
 ) -> Value {
     json!({"abi":ABI,"version":env!("CARGO_PKG_VERSION"),"schema":store::SCHEMA,
         "configuration":location.configuration,"generation":store.generation,"epoch":epoch,
@@ -216,13 +219,17 @@ fn projection(
         "upstreams":[],"complete":false,"subscribers":subscribers,"automatic_approvals":false,
         "pending":{"reads":store.read_status()["pending"],"posting":0,"approvals":0},"errors":[],"migration":migration,"effect_journal":store.effect_status(),"read_queue":store.read_status(),
         "catalog_projection":store.catalog_status(),
+        "passive_feed":feed.status(),
         "limits":{"subscribers":protocol::SUBSCRIBERS,"queue_bytes":protocol::QUEUE_BYTES,
-            "frame_bytes":protocol::FRAME_BYTES,"control_bytes":protocol::CONTROL_BYTES,"ingress_bytes":16<<20},
+            "frame_bytes":protocol::FRAME_BYTES,"control_bytes":protocol::CONTROL_BYTES,"ingress_bytes":feed::INGRESS_BYTES,
+            "feed_producers":1,"feed_frame_bytes":feed::LINE_BYTES,"connections":protocol::CONNECTIONS},
         "components":{"fleet":"awaiting_handoff","presence":"awaiting_handoff","reads":"awaiting_handoff","attention":"awaiting_handoff","approvals":"awaiting_handoff"}})
 }
 
 enum Event {
     Command(Hello, Arc<Queue>),
+    FeedOpen(Hello, mpsc::SyncSender<feed::Opened>),
+    FeedData(feed::Data),
     ListenerFailed,
 }
 struct Permit(Arc<AtomicUsize>);
@@ -251,11 +258,17 @@ fn serve(location: Location) -> Result<()> {
     .context(StartupRefused)?;
     let stopped = Arc::new(AtomicBool::new(false));
     let active = Arc::new(AtomicUsize::new(0));
-    // At most 16 bounded control lines, plus at most 12 bounded parsers. No
-    // upstream ingress exists before handoff; later sources share this actor.
+    let mut feed = feed::Broker::new(&epoch);
+    // At most16 queued controls/data, thirteen bounded parsers and one passive
+    // producer. No upstream reader starts here; later sources share this actor.
     let (send, receive) = mpsc::sync_channel(protocol::PENDING);
     let acceptor = {
-        let (listener, stopped, active) = (listener.clone(), stopped.clone(), active.clone());
+        let (listener, stopped, active, ingress) = (
+            listener.clone(),
+            stopped.clone(),
+            active.clone(),
+            feed.ingress.clone(),
+        );
         thread::Builder::new()
             .name("desktop-listener".into())
             .spawn(move || {
@@ -272,11 +285,12 @@ fn serve(location: Location) -> Result<()> {
                                 continue;
                             }
                             let permit = Permit(active.clone());
-                            let (send, stopped) = (send.clone(), stopped.clone());
+                            let (send, stopped, ingress) =
+                                (send.clone(), stopped.clone(), ingress.clone());
                             let _ = thread::Builder::new().name("desktop-client".into()).spawn(
                                 move || {
                                     let _permit = permit;
-                                    let _ = client(stream, send, stopped);
+                                    let _ = client(stream, send, stopped, ingress);
                                 },
                             );
                         }
@@ -301,7 +315,7 @@ fn serve(location: Location) -> Result<()> {
     while platform::shutdown_signal() == 0 {
         match receive.recv_timeout(Duration::from_millis(200)) {
             Ok(Event::Command(hello, queue)) => {
-                let value = projection(&location, &store, &epoch, fanout.len(), &migration);
+                let value = projection(&location, &store, &epoch, fanout.len(), &migration, &feed);
                 let mut streaming = false;
                 let reply = if hello.abi != ABI || hello.configuration != location.configuration {
                     frame(
@@ -336,11 +350,55 @@ fn serve(location: Location) -> Result<()> {
                     queue.close();
                 }
             }
+            Ok(Event::FeedOpen(hello, reply)) => {
+                let producer = if hello.abi == ABI
+                    && hello.configuration == location.configuration
+                    && hello.op == "feed"
+                {
+                    feed.open(hello.request.as_ref()).ok()
+                } else {
+                    None
+                };
+                let value = json!({"accepted":producer.is_some(),"durable":false,"feed_abi":feed::ABI,"display_only":true,
+                    "incarnation":producer.as_ref().map(|p|p.incarnation),"code":if producer.is_some(){"display_only"}else{"feed_unavailable"}});
+                let _ = reply.send(feed::Opened {
+                    producer,
+                    reply: frame(&epoch, seq, "feed", value),
+                });
+            }
+            Ok(Event::FeedData(data)) => {
+                let outcome = feed.apply(&mut store, &data.producer, &data.packet);
+                let accepted = outcome.is_ok();
+                if let Ok(Some(change)) = outcome {
+                    seq += 1;
+                    fanout.publish(
+                        protocol::encode(&frame(&epoch, seq, "catalog_changed", change))?.into(),
+                    );
+                }
+                if !accepted {
+                    feed.failed(&data.producer);
+                }
+                let value = json!({"accepted":accepted,"durable":false,"feed_abi":feed::ABI,"display_only":true,
+                    "incarnation":data.producer.incarnation,"code":if accepted{"observed"}else{"feed_item_refused"}});
+                let _ = data.reply.send(frame(&epoch, seq, "feed_receipt", value));
+            }
             Ok(Event::ListenerFailed) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                 failed = true;
                 break;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => (),
+        }
+        if feed.retire(&mut store).unwrap_or(false) {
+            seq += 1;
+            fanout.publish(
+                protocol::encode(&frame(
+                    &epoch,
+                    seq,
+                    "catalog_changed",
+                    json!({"display_only":true,"retired":true}),
+                ))?
+                .into(),
+            );
         }
         if Instant::now() >= collect_at {
             let delay = if store.collect_catalog() {
@@ -354,7 +412,7 @@ fn serve(location: Location) -> Result<()> {
             store.recover_effects(&epoch);
             seq += 1;
             migration = handoff::inspect(&location);
-            let value = projection(&location, &store, &epoch, fanout.len(), &migration);
+            let value = projection(&location, &store, &epoch, fanout.len(), &migration, &feed);
             fanout.publish(protocol::encode(&frame(&epoch, seq, "heartbeat", value))?.into());
             heartbeat = Instant::now() + HEARTBEAT;
         }
@@ -372,6 +430,7 @@ fn serve(location: Location) -> Result<()> {
     while active.load(Ordering::SeqCst) != 0 && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(10));
     }
+    feed.stop(&mut store)?;
     store.checkpoint()?;
     ensure!(!failed, "desktop listener failed");
     ensure!(
@@ -385,6 +444,7 @@ fn client(
     mut stream: Stream,
     send: mpsc::SyncSender<Event>,
     stopped: Arc<AtomicBool>,
+    ingress: Arc<feed::Ingress>,
 ) -> Result<()> {
     // Unix peer credentials require no input. Windows pipe impersonation can
     // require a completed read, so that authentication remains after the hello.
@@ -399,6 +459,9 @@ fn client(
     transport::authenticate(&stream)?;
     let hello: Hello = serde_json::from_slice(&bytes).context("invalid desktop hello")?;
     ensure!(!stopped.load(Ordering::SeqCst), "desktop is stopping");
+    if hello.op == "feed" {
+        return feed::client(stream, reader, hello, send, stopped, ingress);
+    }
     let watching = hello.op == "watch";
     let queue = Arc::new(Queue::default());
     send.try_send(Event::Command(hello, queue.clone()))

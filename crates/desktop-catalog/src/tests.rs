@@ -541,3 +541,43 @@ fn storage_limit_refuses_entire_frame_and_keeps_visible_generation() {
     assert_eq!(visible(&db), vec![item(1).row]);
     assert_eq!(status(&db, "peer").unwrap().stored_rows, 1);
 }
+
+#[test]
+fn batch_retirement_is_exact_atomic_and_bounded() {
+    let (mut db, source) = setup();
+    put(&mut db, &source, &snapshot(2, 0, true, 1, vec![item(1)]));
+    let mut replacement = source.clone();
+    replacement.incarnation += 1;
+    connect(&mut db, &replacement, &hello()).unwrap();
+    put(
+        &mut db,
+        &replacement,
+        &snapshot(2, 0, true, 2, vec![item(2)]),
+    );
+    let mut other = source.clone();
+    other.computer = "other".into();
+    connect(&mut db, &other, &hello()).unwrap();
+    put(&mut db, &other, &snapshot(2, 0, false, 1, vec![item(3)]));
+    // A late validation failure rolls back even the earlier exact retirement.
+    let mut invalid = source.clone();
+    invalid.generation = 0;
+    assert!(disconnect_many(&mut db, &[replacement.clone(), invalid]).is_err());
+    assert!(status(&db, "peer").unwrap().complete);
+    assert!(disconnect_many(&mut db, &vec![source.clone(); MAX_SOURCES as usize + 1]).is_err());
+    disconnect_many(&mut db, &[source, other.clone()]).unwrap();
+    assert!(
+        status(&db, "peer").unwrap().complete,
+        "stale tuple retired replacement"
+    );
+    assert_eq!(visible(&db), vec![item(2).row]);
+    assert!(!state(&db, "other").unwrap().unwrap().active);
+    assert!(state(&db, "other").unwrap().unwrap().staged.is_none());
+    disconnect_many(&mut db, &[other, replacement.clone()]).unwrap();
+    disconnect_many(&mut db, &[replacement]).unwrap();
+    assert!(!status(&db, "peer").unwrap().complete);
+    assert_eq!(
+        visible(&db),
+        vec![item(2).row],
+        "last-known display must survive"
+    );
+}

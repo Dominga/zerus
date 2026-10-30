@@ -9,7 +9,7 @@ pub const CONTROL_BYTES: usize = zerus_watch_protocol::CONTROL_LINE_BYTES;
 pub const FRAME_BYTES: usize = zerus_watch_protocol::MAX_FRAME_BYTES + 4096;
 pub const QUEUE_BYTES: usize = 4 << 20;
 pub const SUBSCRIBERS: usize = 8;
-pub const CONNECTIONS: usize = SUBSCRIBERS + 4;
+pub const CONNECTIONS: usize = SUBSCRIBERS + 4 + 1; // one passive producer
 pub const PENDING: usize = 16;
 
 #[derive(Deserialize)]

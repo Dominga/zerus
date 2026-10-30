@@ -2,7 +2,7 @@
 
 `zerus-desktop-catalog` is the private SQLite projection of raw watch-v1 catalog
 rows. Root desktop schema 6 includes source metadata in its storage budget and
-resets coverage at every service start. This passive slice starts no source or effect worker. Client delegation,
+resets coverage at every service start. The [passive owner feed](desktop-passive-feed.md) can supply display data; it starts no source or effect worker. Client delegation,
 runtime freshness and native delivery remain separate work.
 
 The actor owns one connection on its background thread. It retains each source

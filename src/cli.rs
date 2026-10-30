@@ -50,12 +50,14 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs desktop serve|status [--json]   per-user background desktop service
        hgs desktop revoke --json          revoke desktop writers before Qt rollback
        hgs desktop watch|request --json    private local desktop-v1 IPC
+       hgs desktop feed --json             passive owner source data, no reader launch
        hgs desktop registration --json    preview this user's passive service definition
        hgs desktop import-evidence --json private staged migration input on stdin
        hgs desktop import-status --json --import-id UUID  read one import manifest
        Desktop service ABI: desktop-v1
         Desktop revoke ABI: desktop-revoke-v1
         Desktop import ABI: desktop-import-v1
+        Desktop source feed ABI: desktop-source-feed-v1
        hgs mobile-peer --json         guarded direct-peer native request from JSON stdin
        hgs [@host] voice <session> --json  send and inspect persistent voice messages (JSON stdin; voice-video-v1)
        hgs [@host] speech --json      host speech providers and durable jobs (JSON stdin)

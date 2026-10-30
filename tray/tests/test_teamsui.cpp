@@ -837,6 +837,8 @@ private slots:
     void planEditorPicksATasksPipeline();
     void heatTintsGraphAndBoardByTimeOrTokens();
     void heldByFromTheStatusOnTheBoard();
+    void aPollThatChangesNothingDrawnRebuildsNothing();
+    void aPhaseGraphThatFitsShowsNoSidewaysBar();
 private:
     QString script() const { return m_dir.filePath("hgs"); }
     void setTeam(const QJsonObject &value) { QVERIFY(FakeCli::replace(script() + ".status", QJsonDocument(value).toJson(QJsonDocument::Compact))); }
@@ -5043,6 +5045,9 @@ void TestTeamsUi::graphHoverLightSurvivesPolls()
     const auto poll = [&](QJsonObject next) {
         QPointer<TeamUi::TaskView> old = graph();
         next["revision"] = ++revision;
+        // #693: a poll that changes nothing drawn rebuilds nothing; this one
+        // carries a change, so the views are rebuilt.
+        next["description"] = QStringLiteral("poll %1").arg(revision);
         setTeam(next);
         controller.refresh();
         QTRY_VERIFY(!old && graph() && graph()->nodeRect(4).width() > 0);
@@ -5162,12 +5167,14 @@ void TestTeamsUi::graphEdgesAreEditedByHandleAndSelection()
     QVERIFY(!build->editable && !build->canEdit(5) && !build->linked);
     QVERIFY(!draft->editable && draft->canEdit(7) && draft->canEdit(8) && draft->canEdit(9));
     const auto at = [&](const QPointF &point) { return QPoint(int(std::round(point.x() * draft->zoom)), int(std::round(point.y() * draft->zoom))); };
-    // #465 N18: a poll rebuilds every view; the owner's half-made link and
-    // selected edge come back in the new one.
+    // #465 N18: a poll that changes the team rebuilds every view; the owner's
+    // half-made link and selected edge come back in the new one.
     int revision = 21;
     const auto poll = [&] {
         QPointer<TeamUi::TaskView> old = draft;
         auto next = graphTeam(); next["revision"] = ++revision;
+        // #693: a change, so the views are rebuilt.
+        next["description"] = QStringLiteral("poll %1").arg(revision);
         setTeam(next);
         controller.refresh();
         QTRY_VERIFY(!old && (draft = phaseGraphOf(&workspace, 3)) && draft->nodeRect(8).width() > 0);
@@ -5298,7 +5305,8 @@ void TestTeamsUi::graphNodesInTwoLinesWithDraftEdits()
     // #465 (spec 1.2): the phase scrolls sideways under the thin 8 px bar.
     auto *sideways = qobject_cast<QScrollArea *>(phaseScrollOf(&workspace, 2)->findChild<QWidget *>("teamPhaseGraphArea"));
     QVERIFY(sideways);
-    QTRY_VERIFY(sideways->horizontalScrollBar()->isVisible());
+    // #693: at 1500 px the graph fits, so no bar (one used to flash on each
+    // rebuild); the narrow window below shows it.
     QCOMPARE(sideways->horizontalScrollBar()->sizeHint().height(), 8);
     // Owner, 2026-10-28: the place survives the rebuild of a poll. A render
     // rebuilds the phase, so the area is looked up each time.
@@ -5309,7 +5317,7 @@ void TestTeamsUi::graphNodesInTwoLinesWithDraftEdits()
         };
         // A narrow window, so the phase graph needs its sideways bar.
         workspace.resize(760, 900);
-        QTRY_VERIFY(area() && area()->horizontalScrollBar()->maximum() > 0);
+        QTRY_VERIFY(area() && area()->horizontalScrollBar()->maximum() > 0 && area()->horizontalScrollBar()->isVisible());
         const int place = qMin(120, area()->horizontalScrollBar()->maximum());
         area()->horizontalScrollBar()->setValue(place);
         QCOMPARE(area()->horizontalScrollBar()->value(), place);
@@ -10650,11 +10658,12 @@ void TestTeamsUi::boardScrollsInsteadOfSqueezingColumns()
     const auto xs = positions();
     QVERIFY(xs.size() >= 2);
     for (const auto &list : xs) QCOMPARE(list, xs.first());
-    // The horizontal place survives a poll with a new revision and a phase collapsed.
+    // The horizontal place survives a poll that rebuilds (#693: one with a
+    // change; a new revision alone rebuilds nothing) and a phase collapsed.
     area()->horizontalScrollBar()->setValue(120);
     QCOMPARE(area()->horizontalScrollBar()->value(), 120);
     auto *before = area();
-    auto next = prototypeTeam(); next["revision"] = 21; setTeam(next);
+    auto next = prototypeTeam(); next["revision"] = 21; next["description"] = "changed"; setTeam(next);
     controller.refresh();
     QTRY_VERIFY(area() && area() != before);
     QTRY_COMPARE(area()->horizontalScrollBar()->value(), 120);
@@ -10716,7 +10725,8 @@ void TestTeamsUi::planningBoardScrollsInsteadOfSqueezingColumns()
     QTRY_VERIFY(area()->horizontalScrollBar()->isVisible());
     area()->horizontalScrollBar()->setValue(90);
     auto *before = area();
-    auto next = planning; next["revision"] = planning["revision"].toInt() + 1; setTeam(next);
+    // #693: a poll with a change rebuilds; the place stays.
+    auto next = planning; next["revision"] = planning["revision"].toInt() + 1; next["description"] = "changed"; setTeam(next);
     controller.refresh();
     QTRY_VERIFY(area() && area() != before);
     QTRY_COMPARE(area()->horizontalScrollBar()->value(), 90);
@@ -11327,6 +11337,179 @@ void TestTeamsUi::heldByFromTheStatusOnTheBoard()
     shot(&workspace, "u687-held-by-review-dark");
     workspace.setTheme(false);
     lightShot(&workspace, "u687-held-by-review-light");
+}
+
+// #693: the Board stops shaking. A poll that changes only what the views do not
+// draw (the revision, the updated time, a running task's growing seconds and
+// waits, the minutes of a health warning) or the session list naming the same
+// team again rebuilds nothing; the running time, the header's elapsed time and
+// a stage's minutes tick in place; a real change rebuilds and keeps the
+// scroll, the open phases and the open task.
+void TestTeamsUi::aPollThatChangesNothingDrawnRebuildsNothing()
+{
+    QSettings().setValue("workspace/skin", "whitewh");
+    double now = stageNow();
+    TeamUi::workedClock() = [&now] { return now; };
+    const auto restore = qScopeGuard([] {
+        QSettings().remove("workspace/skin"); darkPalette();
+        TeamUi::workedClock() = [] { return double(QDateTime::currentSecsSinceEpoch()); };
+    });
+    const auto tick = [] { QVERIFY(QMetaObject::invokeMethod(&TeamUi::workedTicker(), "timeout")); };
+    // #2 runs since 1800003000; a health warning names idle minutes.
+    const auto poll = [&](int revision, double updated, int worked, int deps, int idle, const QString &secondStatus = QStringLiteral("in_progress")) {
+        auto json = pipelineTeam();
+        json["revision"] = revision; json["updated"] = updated;
+        json["health"] = QJsonObject{{"starved", QJsonArray{QJsonObject{{"member", "secretary"}, {"minutes", idle}}}},
+                                     {"warnings", QJsonArray{QStringLiteral("starved: Secretary idle %1 min without a ready task").arg(idle)}}};
+        auto tasks = json["tasks"].toArray();
+        for (int i = 0; i < tasks.size(); ++i) {
+            auto t = tasks[i].toObject();
+            if (t["id"].toInt() == 2) {
+                t["status"] = secondStatus;
+                t["timing"] = QJsonObject{{"worked_s", worked}, {"running_since", 1800003000.0},
+                                          {"waits", QJsonObject{{"deps_s", deps}, {"member_s", 0}, {"lead_s", 0}}},
+                                          {"attempts", QJsonArray{QJsonObject{{"n", 2}, {"member", "backend"}, {"state", "delivered"}, {"from", 1800003000.0},
+                                                                              {"to", QJsonValue()}, {"worked_s", worked}}}}};
+            }
+            tasks[i] = t;
+        }
+        json["tasks"] = tasks;
+        return json;
+    };
+    setTeam(poll(40, 1800003900, 1000, 300, 44));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    darkPalette(); workspace.setTheme(true);
+    workspace.resize(1700, 640); workspace.show();
+    controller.refresh(); panel.showTeam("team-1"); workspace.showTeam("team-1");
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceView"));
+    for (auto *b : workspace.findChild<QWidget *>("teamWorkspaceView")->findChildren<QPushButton *>()) if (b->property("segment") == "board") b->click();
+    const auto area = [&] { return workspace.findChild<QScrollArea *>("teamWorkspaceBoard"); };
+    QTRY_VERIFY(area() && boardCard(area(), 4) && controller.watched() && controller.watched()->revision == 40);
+    TestWait::settle();
+    const auto statusReads = [&] { return calls(script(), "status").size(); };
+    QPointer<QScrollArea> canvas = area();
+    QPointer<QFrame> card = boardCard(area(), 4);
+    QPointer<QWidget> members = workspace.findChild<QWidget *>("teamWorkspaceSide");
+    // Polls that move only the revision, the updated time, #2's seconds and
+    // waits and the health minutes: the same widgets stay.
+    for (int i = 1; i <= 3; ++i) {
+        setTeam(poll(40 + i, 1800003900 + 60 * i, 1000 + 60 * i, 300 + 60 * i, 44 + i));
+        const int before = statusReads();
+        controller.refresh();
+        QTRY_VERIFY(statusReads() > before && controller.watched()->revision == 40 + i);
+        QTest::qWait(150);
+        QVERIFY2(canvas && canvas == area(), qPrintable(QStringLiteral("poll %1 rebuilt the Board").arg(i)));
+        QVERIFY(card && card == boardCard(area(), 4));
+        QVERIFY(members && members == workspace.findChild<QWidget *>("teamWorkspaceSide"));
+    }
+    // The session list names the same team after its own polls: nothing.
+    workspace.showTeam("team-1");
+    QTest::qWait(100);
+    QVERIFY(canvas && canvas == area());
+    // Running times and ages tick in place: #2's time, the header's elapsed
+    // time and the tester's minutes in its stage.
+    auto *worked = boardCard(area(), 2)->findChild<QLabel *>("teamBoardWorked");
+    QVERIFY(worked);
+    QCOMPARE(worked->text(), QStringLiteral("16m"));
+    auto *elapsed = workspace.findChild<QLabel *>("teamHeaderElapsedText");
+    QVERIFY(elapsed);
+    const QString elapsedBefore = elapsed->text();
+    QLabel *stageTitle = nullptr;
+    for (auto *card : workspace.findChildren<QFrame *>("teamWorkspaceMember"))
+        if (card->property("teamMember") == "tester") stageTitle = card->findChild<QLabel *>("teamMemberStageQueueTitle");
+    QVERIFY(stageTitle);
+    QCOMPARE(stageTitle->text(), QStringLiteral("Stage queue empty · 12 min in this stage"));
+    now += 600;
+    tick();
+    QCOMPARE(worked->text(), QStringLiteral("26m"));
+    QCOMPARE(stageTitle->text(), QStringLiteral("Stage queue empty · 22 min in this stage"));
+    // The fixture's team is weeks old: a day later its elapsed time moves.
+    now += 86400;
+    tick();
+    QVERIFY2(elapsed->text() != elapsedBefore, qPrintable(elapsed->text()));
+    now -= 86400;
+    tick();
+    QVERIFY(canvas && canvas == area() && card == boardCard(area(), 4));
+    // A real change rebuilds, and keeps where the owner was: the Board's
+    // scroll, the finished phase 1 the owner opened and the open task.
+    if (!phaseOpen(&workspace, 1)) togglePhase(&workspace, 1);
+    QTRY_VERIFY(phaseOpen(&workspace, 1));
+    workspace.resize(1700, 420);
+    QTRY_VERIFY(area() && area()->verticalScrollBar()->maximum() > 40);
+    area()->verticalScrollBar()->setValue(40);
+    QTest::mouseClick(boardCard(area(), 4), Qt::LeftButton, {}, QPoint(boardCard(area(), 4)->width() / 2, 8));
+    auto *drawer = static_cast<TeamTaskCard *>(workspace.findChild<QWidget *>("teamWorkspaceDrawer"));
+    QTRY_VERIFY(drawer->isVisible() && drawer->task() == 4);
+    TestWait::settle();
+    canvas = area();
+    setTeam(poll(50, 1800004500, 1000, 300, 50, QStringLiteral("submitted")));
+    controller.refresh();
+    QTRY_VERIFY(controller.watched()->revision == 50);
+    QTRY_VERIFY(!canvas || canvas != area());   // rebuilt
+    QTRY_COMPARE(columnOf(area(), 2), QString("submitted"));
+    QTRY_COMPARE(area()->verticalScrollBar()->value(), 40);
+    QVERIFY(phaseOpen(&workspace, 1));
+    QVERIFY(drawer->isVisible() && drawer->task() == 4);
+    shot(&workspace, "u693-board-after-change-dark");
+    workspace.setTheme(false);
+    lightShot(&workspace, "u693-board-after-change-light");
+}
+
+// #693 (the lead's note): a phase graph's sideways bar is decided after its
+// layout, never in a rebuild's first pass, and not flipped by the other bar:
+// a graph that fits shows none across rebuilds and resizes; one wider than
+// its column keeps it.
+void TestTeamsUi::aPhaseGraphThatFitsShowsNoSidewaysBar()
+{
+    TeamUi::workedClock() = &stageNow;
+    const auto restore = qScopeGuard([] { TeamUi::workedClock() = [] { return double(QDateTime::currentSecsSinceEpoch()); }; });
+    setTeam(pipelineTeam());
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(2000, 900); workspace.show();
+    controller.refresh(); panel.showTeam("team-1"); workspace.showTeam("team-1");
+    // Phase 1 is done and folded: the open phase 2's graph.
+    const auto graphArea = [&]() -> QScrollArea * {
+        for (auto *area : workspace.findChildren<QScrollArea *>("teamPhaseGraphArea")) if (area->isVisible()) return area;
+        return nullptr;
+    };
+    QTRY_VERIFY(graphArea());
+    TestWait::settle();
+    const auto fits = [&] { auto *a = graphArea(); return a->widget()->minimumWidth() <= a->width(); };
+    QVERIFY2(fits(), "the phase graph fits a 2000 px window");
+    // Rebuilds (a real change each time) and resizes: the bar never shows,
+    // not even before the new graph's layout.
+    for (int i = 0; i < 4; ++i) {
+        workspace.render();
+        QCOMPARE(graphArea()->horizontalScrollBarPolicy(), Qt::ScrollBarAlwaysOff);
+        TestWait::settle();
+        QVERIFY(!graphArea()->horizontalScrollBar()->isVisible());
+        workspace.resize(2000 - 20 * i, 900 - 10 * i);
+        TestWait::settle();
+        QVERIFY(fits());
+        QVERIFY2(!graphArea()->horizontalScrollBar()->isVisible(), qPrintable(QStringLiteral("resize %1").arg(i)));
+    }
+    // Narrow, at full zoom: wider than its column, the bar stays.
+    workspace.resize(760, 900);
+    for (int i = 0; i < 4; ++i) {
+        QTRY_VERIFY(workspace.findChild<QPushButton *>("teamWorkspaceZoomIn"));
+        workspace.findChild<QPushButton *>("teamWorkspaceZoomIn")->click();
+        TestWait::settle();
+    }
+    QTRY_VERIFY(!fits());
+    QTRY_VERIFY(graphArea()->horizontalScrollBar()->isVisible());
+    for (int i = 0; i < 3; ++i) {
+        workspace.render();
+        TestWait::settle();
+        QVERIFY(graphArea()->horizontalScrollBar()->isVisible());
+    }
 }
 
 // U36: the inspector's Pipeline section: the flow, where the test works, what

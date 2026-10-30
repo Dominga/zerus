@@ -100,6 +100,7 @@ const PROVIDER_GLYPH: Record<AgentKind, string> = {
   opencode: `<path d="M4 3L1 6L4 9M8 3L11 6L8 9"/>`,
   codex: `<path d="M2 3L5 6L2 9M7 9H10"/>`,
   deepseek: `<path d="M2 3L5 6L2 9M7 9H10"/>`,
+  sh: `<path d="M2 3L5 6L2 9M7 9H10"/>`,
 };
 
 /** The provider glyph alone (IdentityBadges::paint), for menus and filter chips. */

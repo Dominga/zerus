@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createComputed, createRoot } from "solid-js";
-import { createCatalog, rowId, statusOf, toSession } from "./catalog";
+import { agentKind, createCatalog, rowId, statusOf, toSession } from "./catalog";
 import { createMarks, marks as appMarks } from "./marks";
 import { emptyBatch, type Batch, type RowOut, type ViewRow } from "../types";
 
@@ -13,6 +13,13 @@ const row = (key: string, name: string, extra: Partial<ViewRow> = {}, computer =
 const batchOf = (part: Partial<Batch>): Batch => ({ ...emptyBatch(), ...part });
 
 describe("applyBatch", () => {
+  it("keeps sh as Qt's Shell presentation rather than a Claude provider", () => {
+    expect(agentKind("sh")).toBe("sh"); expect(agentKind("SH")).toBe("sh");
+    const shell = toSession("", "run:shell", view("sh/example/probe", { agent: "sh", model: "", effort: null }));
+    expect(shell.agent).toBe("sh"); expect(shell.cmd).toBe("sh"); expect(shell.model).toBe("");
+    for (const provider of ["claude", "codex", "kimi", "opencode", "deepseek"] as const) expect(agentKind(provider)).toBe(provider);
+    expect(agentKind("dsh")).toBe("deepseek");
+  });
   it("updates a linked worktree chip and clears it when later metadata is absent", () => {
     const c = createCatalog();
     c.applyBatch(batchOf({ upserts: [row("run:chip", "codex/sample/one", { worktree: "api-work" })] }));
@@ -159,7 +166,7 @@ describe("toSession", () => {
     expect(Object.values(s).some((v) => typeof v === "object" && v !== null)).toBe(false);
     expect(toSession("", "run:a", view("a", { allowed_actions: null })).allowed).toBeUndefined();
     expect(toSession("", "run:a", view("a", { allowed_actions: [] })).allowed).toBe("");
-    expect(toSession("", "run:a", view("x/a", { agent: "sh" }))).toMatchObject({ agent: "claude", cmd: "sh" });
+    expect(toSession("", "run:a", view("x/a", { agent: "sh" }))).toMatchObject({ agent: "sh", cmd: "sh" });
   });
 });
 

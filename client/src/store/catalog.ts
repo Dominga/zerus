@@ -33,9 +33,9 @@ export interface CatalogState {
 }
 
 const KINDS = new Set<Status>(["attention", "working", "background", "scheduled", "ready", "error", "offline", "paused", "waiting", "starting", "ended"]);
-const AGENTS = new Set<AgentKind>(["claude", "codex", "kimi", "deepseek", "opencode"]);
+const AGENTS = new Set<AgentKind>(["claude", "codex", "kimi", "deepseek", "opencode", "sh"]);
 
-/** The agent kind of a view row; DeepSeek's command is `dsh`. Unknown agents draw as Claude. */
+/** The presentation kind of a view row; Qt gives `sh` its own Shell badge. */
 export function agentKind(agent: string | undefined): AgentKind {
   const a = (agent ?? "").toLowerCase();
   if (a === "dsh") return "deepseek";

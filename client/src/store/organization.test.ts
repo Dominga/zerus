@@ -7,7 +7,7 @@ import { rowOut } from "./testing";
 import { emptyBatch, type Batch, type GroupingOut } from "../types";
 
 vi.mock("../bridge", () => ({
-  moveToProject: vi.fn(), createProject: vi.fn(), renameProject: vi.fn(), deleteProject: vi.fn(),
+  moveToProject: vi.fn(), createProject: vi.fn(), renameProject: vi.fn(), setProjectColor: vi.fn(), deleteProject: vi.fn(),
   moveProject: vi.fn(), sortProject: vi.fn(), setProjectCollapsed: vi.fn(() => Promise.resolve()),
 }));
 vi.mock("./actions", () => ({ notify: vi.fn(), clearNotice: vi.fn() }));
@@ -33,6 +33,7 @@ beforeEach(() => {
   mocked.moveToProject.mockReset();
   mocked.createProject.mockReset();
   mocked.renameProject.mockReset();
+  mocked.setProjectColor.mockReset();
   mocked.deleteProject.mockReset();
   mocked.moveProject.mockReset();
   mocked.sortProject.mockReset();
@@ -256,4 +257,17 @@ it("reads a loaded archived row's current group without growing the live assignm
   group = "beta";
   expect(org.groupOf("archive")).toBe("beta");
   expect(Object.keys(org.groups)).toEqual([]);
+});
+
+
+it("routes only color through the existing organization writer and refuses missing projects", async () => {
+  await createRoot(async (dispose) => {
+    const { org } = setup();
+    mocked.setProjectColor.mockResolvedValue({ outcome: "done", conflicts: 0 });
+    expect((await org.setProjectColor("alpha", "#abcdef")).outcome).toBe("done");
+    expect(mocked.setProjectColor).toHaveBeenCalledWith("alpha", "#abcdef");
+    expect((await org.setProjectColor("missing", "#abcdef")).outcome).toBe("refused");
+    expect(mocked.setProjectColor).toHaveBeenCalledTimes(1);
+    dispose();
+  });
 });

@@ -261,6 +261,17 @@ pub fn find(name: &str) -> Option<Key> {
         })
         .or_else(|| update_family(name))
         .or_else(|| machine_family(name))
+        .or_else(|| project_family(name))
+}
+
+// Project IDs are flat JSON keys, never filesystem paths or machine aliases.
+fn project_family(name: &str) -> Option<Key> {
+    let id = name.strip_prefix("projects/vivid/")?;
+    (!id.is_empty() && id.len() <= 256 && !id.chars().any(char::is_control)).then_some(Key {
+        name: "projects/vivid/",
+        kind: Kind::Flag(false),
+        seeded: false,
+    })
 }
 
 fn machine_family(name: &str) -> Option<Key> {

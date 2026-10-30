@@ -51,6 +51,8 @@ pub enum Intent {
         name: String,
         style: crate::paths::Style,
     },
+    /// Shared color only; vivid fill remains a device-local preference.
+    Color { project: String, color: String },
     /// renameGroup (147-152).
     Rename { project: String, name: String },
     /// removeGroup (154-166): its members and the listed rows it showed go
@@ -190,6 +192,16 @@ pub fn apply(organization: &Value, intent: &Intent) -> Result<Value, String> {
                 folders.push(json!({"id": id, "machine": machine,
                     "path": clean, "name": name.trim().chars().take(NAME_CHARS).collect::<String>()}));
             }
+        }
+        Intent::Color { project, color } => {
+            if color.len() != 7
+                || !color.starts_with('#')
+                || !color.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
+            {
+                return Err("Choose a color in #RRGGBB format.".into());
+            }
+            let at = position(&next, project).ok_or(GONE)?;
+            projects_mut(&mut next).ok_or(GONE)?[at]["color"] = json!(color.to_ascii_lowercase());
         }
         Intent::Rename { project, name } => {
             let name = clean_name(name).ok_or(NAME_NEEDED)?;
@@ -363,6 +375,56 @@ mod tests {
             project: project.into(),
             before: None,
         }
+    }
+
+    #[test]
+    fn project_color_changes_only_that_shared_field_and_rejects_unsafe_values() {
+        let original = org();
+        let changed = apply(
+            &original,
+            &Intent::Color {
+                project: "alpha".into(),
+                color: "#ABCDEF".into(),
+            },
+        )
+        .unwrap();
+        let mut expected = original.clone();
+        expected["projects"][0]["color"] = json!("#abcdef");
+        assert_eq!(changed, expected);
+        assert!(
+            changed["projects"][0].get("vivid").is_none(),
+            "vivid never enters the shared intent"
+        );
+        assert!(apply(
+            &original,
+            &Intent::Color {
+                project: "gone".into(),
+                color: "#abcdef".into()
+            }
+        )
+        .is_err());
+        for color in ["red", "#abc", "#ffffff; background:red", "#ZZZZZZ", ""] {
+            assert!(apply(
+                &original,
+                &Intent::Color {
+                    project: "alpha".into(),
+                    color: color.into()
+                }
+            )
+            .is_err());
+        }
+        assert_eq!(
+            apply(
+                &changed,
+                &Intent::Color {
+                    project: "alpha".into(),
+                    color: "#abcdef".into()
+                }
+            )
+            .unwrap(),
+            changed,
+            "same color has no shared difference"
+        );
     }
 
     #[test]

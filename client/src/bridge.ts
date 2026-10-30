@@ -354,6 +354,11 @@ export async function createProject(name: string, members: string[]): Promise<Ed
   return invoke<EditOutcome>("create_project", { name, members });
 }
 
+export async function setProjectColor(project: string, color: string): Promise<EditOutcome> {
+  if (!inTauri()) return refusedOutside();
+  return invoke<EditOutcome>("set_project_color", { project, color });
+}
+
 export async function renameProject(project: string, name: string): Promise<EditOutcome> {
   if (!inTauri()) return refusedOutside();
   return invoke<EditOutcome>("rename_project", { project, name });

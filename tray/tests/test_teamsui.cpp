@@ -82,6 +82,7 @@
 #include <QTableWidget>
 #include <QInputDialog>
 #include "support/FakeCli.h"
+#include "support/DialogTheme.h"
 #include "TeamProfile.h"
 
 using namespace Teams;
@@ -848,6 +849,7 @@ private slots:
     void planEditorPicksATasksPipeline();
     void heatTintsGraphAndBoardByTimeOrTokens();
     void aHeatReadThatDrawsTheSameRebuildsNothing();
+    void teamDialogsDrawTheThemeNotTheSystem();
     void heldByFromTheStatusOnTheBoard();
     void aPollThatChangesNothingDrawnRebuildsNothing();
     void aPhaseGraphThatFitsShowsNoSidewaysBar();
@@ -14057,6 +14059,73 @@ void TestTeamsUi::aHeatReadThatDrawsTheSameRebuildsNothing()
     QTRY_VERIFY(!view || view != graph());
     QTRY_COMPARE(node(483).heat, QStringLiteral("lost 3h 58m"));
     QVERIFY2(node(483).tooltip.contains("Top loss: Waited for the lead (decision 1h 42m, questions 20m), 2h 02m"), qPrintable(node(483).tooltip));
+}
+
+// #737: the team's dialogs draw the workspace theme on a system palette of
+// the other one: Team settings, the plan-mode switch and the account move.
+void TestTeamsUi::teamDialogsDrawTheThemeNotTheSystem()
+{
+    const QPalette before = QApplication::palette();
+    const auto restore = qScopeGuard([before] { QApplication::setPalette(before); });
+    for (const bool dark : {true, false}) {
+        const QString theme = dark ? QStringLiteral("dark") : QStringLiteral("light");
+        QApplication::setPalette(DialogTheme::system(!dark));
+        const auto check = [&](QWidget *dialog) {
+            QTest::qWait(150);
+            const QString found = DialogTheme::problem(dialog, dark);
+            if (const auto shots = qEnvironmentVariable("ZERUS_TEAM_SHOTS"); !shots.isEmpty())
+                dialog->grab().save(QDir(shots).filePath("u737-" + dialog->objectName() + "-" + theme + ".png"));
+            QVERIFY2(found.isEmpty(), qPrintable(theme + ": " + found));
+        };
+        // The lead asks to switch to free planning: the dialog pops up.
+        auto running = phasedTeam();
+        running["plan_mode"] = "standard";
+        running["proposals"] = QJsonArray{QJsonObject{{"id", "p5"}, {"kind", "switch-plan-mode"}, {"by", "Lead"}, {"at", 1800000000.0}, {"state", "open"},
+                                                      {"mode", "free"}, {"hash", QStringLiteral("7f3a2c19e0d84b1c9a5e6f7081a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4")},
+                                                      {"reason", "The QA bot files small fixes every day."}}};
+        setTeam(running);
+        {
+            HgsClient client(FakeCli::program(script()));
+            TeamController controller(&client);
+            TeamPanel panel(&controller);
+            TeamWorkspace workspace(&controller, &panel);
+            workspace.setTheme(dark); workspace.setLive(live);
+            workspace.resize(1400, 860); workspace.show();
+            controller.refresh(); panel.showTeam("team-1"); workspace.showTeam("team-1");
+            QDialog *dialog = nullptr;
+            QTRY_VERIFY((dialog = workspace.findChild<QDialog *>("teamSwitchModeDialog")) && dialog->isVisible());
+            check(dialog);
+            if (QTest::currentTestFailed()) return;
+            dialog->close();
+            // Team settings, as the toolbar opens it.
+            QTRY_VERIFY(controller.team("team-1"));
+            TeamSettingsDialog settings(&controller, *controller.team("team-1"), dark, &workspace);
+            settings.show();
+            QVERIFY(QTest::qWaitForWindowExposed(&settings));
+            check(&settings);
+            if (QTest::currentTestFailed()) return;
+        }
+        // Move to another account, from a member's menu.
+        setTeam(moveTeam());
+        QVERIFY(FakeCli::replace(script() + ".accounts", moveAccounts));
+        {
+            HgsClient client(FakeCli::program(script()));
+            TeamController controller(&client);
+            TeamPanel panel(&controller);
+            TeamWorkspace workspace(&controller, &panel);
+            workspace.setTheme(dark); workspace.setLive(live);
+            workspace.resize(1300, 820); workspace.show();
+            controller.refresh(); panel.showTeam("team-1"); workspace.showTeam("team-1");
+            QTRY_COMPARE(cardAccount(&workspace, "backend"), QStringLiteral("Work"));
+            chooseMenuAction("teamWorkspaceMemberMoveAccount");
+            memberCard(&workspace, "backend")->findChild<QToolButton *>("teamWorkspaceMemberMenu")->click();
+            QDialog *dialog = nullptr;
+            QTRY_VERIFY((dialog = workspace.findChild<QDialog *>("teamMoveAccountDialog")) && dialog->isVisible());
+            check(dialog);
+            if (QTest::currentTestFailed()) return;
+            dialog->close();
+        }
+    }
 }
 
 #include "test_teamsui.moc"

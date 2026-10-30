@@ -1,7 +1,7 @@
 import { createSignal } from "solid-js";
 import * as bridge from "../bridge";
 import { toast } from "./notices";
-export interface WorktreeReviewRow { id: number; path: string; branch: string; state: string; details: string; selectable: boolean; checked: boolean }
+export interface WorktreeReviewRow { id: number; path: string; branch: string; state: string; brief: string; details: string; selectable: boolean; checked: boolean }
 export interface WorktreeReview { id: string; revision: number; computer: string; machine: string; repository: string; focus: string; rows: WorktreeReviewRow[]; busy: boolean; summary: string; unknown: boolean }
 export interface WorktreeConfirmation { id: string; paths: string[]; branches: string[]; ignored: string[]; missing: boolean; consent: string | null; process_warning: string | null; button: string; machine: string }
 export const [worktreeReviewDialog, setWorktreeReviewDialog] = createSignal<{ origin?: HTMLElement; focus: string; machine: string }>();

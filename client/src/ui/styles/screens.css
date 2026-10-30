@@ -216,6 +216,8 @@
 
 @layer components {
   .wc-table th:nth-child(1) { width: 34px; }
+  /* The checkbox fills the narrow column; the cell's ellipsis would clip it to "…". */
+  .wc-table td:first-child { padding-right: 0; text-overflow: clip; }
   .wc-table th:nth-child(3) { width: 160px; }
   .wc-table td { height: 46px; }
   .wc-table tr.blocked td { color: var(--z-color-muted); }

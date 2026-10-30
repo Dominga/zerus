@@ -190,7 +190,7 @@ impl Model {
                 } else if entry.status == Some(Status::Kept) {
                     job.cleanup.retained_reason().unwrap_or_default()
                 } else {
-                    review::summary(&entry.row).join(" ")
+                    review::summary_line(&entry.row)
                 };
                 let r = if job.manual_review {
                     job.cleanup.required()

@@ -1373,6 +1373,14 @@ pub(crate) struct StageRun {
     /// #630 N7: the hand-off's delivery was not confirmed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unconfirmed: bool,
+    /// #581 N1: the steps taken for this stage's hand-out (model, context), in
+    /// order, as an attempt's prepare carries them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prepare: Vec<PrepareStep>,
+    /// #581 N1: a context action this stage hand-out started and waits for;
+    /// the stage is reserved for its member until it confirms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<TaskWait>,
 }
 
 /// U36: a task's pipeline snapshot and progress.

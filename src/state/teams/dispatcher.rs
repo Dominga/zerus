@@ -3710,17 +3710,146 @@ fn hand_out_now(
 /// U36: gives the task's waiting stage to `member` and sends the stage
 /// hand-off. The run is recorded before the send, so a crash leaves it with its
 /// member; a refused send puts it back to wait, and its checkout goes.
+/// U36 stage delivery. #581 N1: like a task hand-out it runs the model step
+/// (when the stage's role lists models) and the context step, waiting for each
+/// as a task does; it never runs the branch step.
 fn stage_hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, host: &str) -> anyhow::Result<()> {
-    let team = store.load(team_id)?.context("unknown team")?;
+    let team = store.load(team_id)?.with_context(|| format!("Unknown team {team_id}"))?;
     anyhow::ensure!(team.status == TeamStatus::Running, "the team is not running");
-    let session = team.member(member_id).and_then(|m| m.session.clone()).context("no session")?;
-    let member_host = team.member(member_id).map(|m| m.computer.clone()).unwrap_or_default();
+    let member = team.member(member_id).cloned().with_context(|| format!("Unknown member {member_id}"))?;
+    let session = member.session.clone().context("no session")?;
+    let member_host = member.computer.clone();
+    let (run_id, stage_role) = {
+        let task = team.task(task_id).context("unknown task")?;
+        let pipeline = task.pipeline_run.as_ref().context("The task has no pipeline")?;
+        let run = pipeline.open_run().filter(|run| run.state == StageState::Waiting).context("no waiting stage")?;
+        let stage = pipeline.stages.get(run.stage).context("no such stage")?;
+        (run.id.clone(), stage.role.clone())
+    };
+    let mut steps: Vec<PrepareStep> = Vec::new();
+    // #581 N1: a context action this stage started earlier: one look, then the
+    // hand-out or the failure.
+    let mut conversation: Option<(String, String)> = None;
+    // #581 N1: a context action this stage already ran and saw confirm is this
+    // hand-out's step; it is not started again.
+    let mut context_done = false;
+    if let Some(wait) = stage_run(&team, task_id, &run_id).and_then(|run| run.context.clone()) {
+        let request = ContextRequest {
+            action: wait.action.clone(),
+            request_id: wait.request_id.clone(),
+            run_id: wait.run_id.clone(),
+            conversation: wait.conversation.clone(),
+            started_at: wait.started_at,
+        };
+        match check_context(&session, &request) {
+            ContextCheck::Waiting => return Ok(()),
+            ContextCheck::Done { conversation: new } => {
+                steps.push(context_step(&request.action, now()));
+                stage_clear_context(store, &team, task_id, &run_id)?;
+                conversation = new.map(|new| (request.run_id.clone(), new));
+                context_done = true;
+            }
+            ContextCheck::Refused(reason) => {
+                let step = context_failure(context_step(&request.action, now()), "refused", reason.clone());
+                stage_record_step(store, &team, task_id, &run_id, &step, "stage_prepare_failed")?;
+                stage_clear_context(store, &team, task_id, &run_id)?;
+                steps.push(step);
+            }
+            ContextCheck::Uncertain(reason) => {
+                let step = context_failure(context_step(&request.action, now()), "uncertain", reason.clone());
+                stage_record_step(store, &team, task_id, &run_id, &step, "stage_prepare_failed")?;
+                stage_clear_context(store, &team, task_id, &run_id)?;
+                steps.push(step);
+            }
+        }
+    }
+    // #581 N1: a model switch this stage started earlier waits for the session
+    // record to show the new model, as a task hand-out does.
+    if let Some(pending) = stage_pending_model(&team, task_id) {
+        let (model, effort) = session_model(&member, &session);
+        if super::models::confirmed(&pending, &model, &effort) {
+            let step = stage_mark_model(store, &team, task_id, &run_id, "done", "")?;
+            steps.push(step);
+        } else if now() - pending.at >= super::models::CONFIRM_SECONDS {
+            let reason = format!("The switch to {} was not confirmed within {} s", pending.to, super::models::CONFIRM_SECONDS as u64);
+            let step = stage_mark_model(store, &team, task_id, &run_id, "uncertain", &reason)?;
+            stage_feed(store, &team, task_id, &run_id, &step, "stage_prepare_failed")?;
+            steps.push(step);
+        } else {
+            return Ok(());
+        }
+    }
+    // #581 N1: step 3 for the stage member - the models the stage's role lists.
+    let role_models = super::catalog::models_for(&stage_role);
+    if !role_models.is_empty() {
+        let (model, effort) = session_model(&member, &session);
+        let wanted = Task {
+            models: role_models.iter().map(|choice| super::models::label(&choice.model, &choice.effort)).collect(),
+            ..Default::default()
+        };
+        match super::models::fit(&member, &wanted, (&model, &effort)) {
+            Some(super::models::Fit::Switch(choice)) => {
+                let from = super::models::label(&model, &effort);
+                stage_switch_model(store, &team, task_id, &run_id, &member, &session, &from, &choice)?;
+                return Ok(());
+            }
+            Some(super::models::Fit::Ready) => {}
+            None => {
+                // The member cannot switch: the step is skipped, and the stage
+                // runs on the model it has (the lead sees it in the feed).
+                let step = PrepareStep {
+                    step: "model".into(),
+                    member: member.id.clone(),
+                    from: super::models::label(&model, &effort),
+                    to: "none".into(),
+                    at: now(),
+                    result: "skipped".into(),
+                    reason: format!(
+                        "{} cannot switch to the stage role's models {}",
+                        agent_label(&member.agent),
+                        role_models.iter().map(|choice| super::models::label(&choice.model, &choice.effort)).collect::<Vec<_>>().join(", ")
+                    ),
+                };
+                stage_record_step(store, &team, task_id, &run_id, &step, "stage_prepare_skipped")?;
+                steps.push(step);
+            }
+        }
+    }
+    // #581 N1: step 4 for the stage member - the context action its role or it
+    // asks for.
+    let action = context_before_task(&team, &member);
+    if !action.is_empty() && !context_done {
+        match run_context(&member, &session, &action) {
+            ContextStart::Done { step, conversation: new } => {
+                steps.push(step);
+                if let Some((at, new)) = new.map(|new| (session.run_id.clone(), new)) {
+                    conversation = Some((at, new));
+                }
+            }
+            ContextStart::Started(request) => {
+                stage_context_wait(store, &team, task_id, &run_id, member_id, &request)?;
+                return Ok(());
+            }
+            ContextStart::Failed { step } => {
+                steps.push(step.clone());
+                stage_record_step(store, &team, task_id, &run_id, &step, "stage_prepare_failed")?;
+            }
+        }
+    }
+    if let Some((run, new)) = &conversation {
+        stage_conversation(store, &team, member_id, run, new)?;
+    }
     // The folder, the checkout and the file states, outside the store's lock.
     let prepared = super::stages::prepare(&team, task_id)?;
     let mut message = None;
     let recorded = change(store, team_id, |team, events| {
         let run_id = super::pipeline::give_stage(team, task_id, member_id)?;
         super::stages::record(team, task_id, &run_id, &prepared);
+        if let Some(run) = stage_run_mut(team, task_id, &run_id) {
+            // #581 N1: the steps this hand-out took go with its stage run.
+            run.prepare = steps.clone();
+            run.context = None;
+        }
         let task = team.task(task_id).context("unknown task")?;
         let run = task.pipeline_run.as_ref().and_then(|run| run.open_run()).context("no open stage")?;
         let report_host = if member_host.is_empty() { String::new() } else { host.to_owned() };
@@ -3780,6 +3909,168 @@ fn stall_stage_command(store: &mut Store, team: &Team, task_id: u32, run_id: &st
     }
     change(store, &team.id, |team, events| {
         super::pipeline::stall_stage(team, task_id, run_id, reason, events);
+        Ok(())
+    })
+}
+
+/// #581 N1: the open stage run with this id, mutably.
+fn stage_run_mut<'a>(team: &'a mut Team, task_id: u32, run_id: &str) -> Option<&'a mut StageRun> {
+    team.task_mut(task_id)?.pipeline_run.as_mut()?.runs.iter_mut().find(|run| run.id == run_id)
+}
+
+/// #581 N1: the open stage run with this id.
+fn stage_run<'a>(team: &'a Team, task_id: u32, run_id: &str) -> Option<&'a StageRun> {
+    team.task(task_id)?.pipeline_run.as_ref()?.runs.iter().find(|run| run.id == run_id)
+}
+
+/// #581 N1: a stage's model switch still waiting for its session record.
+fn stage_pending_model(team: &Team, task_id: u32) -> Option<PrepareStep> {
+    let run = team.task(task_id)?.pipeline_run.as_ref()?.open_run()?;
+    run.prepare.iter().rev().find(|step| step.step == "model" && step.result == "pending").cloned()
+}
+
+/// #581 N1: the session's model and effort, or the member's launch ones.
+fn session_model(member: &Member, session: &SessionRef) -> (String, String) {
+    let record = inspect_reply(session).ok();
+    let model = record.as_ref().and_then(|record| record["model"].as_str()).unwrap_or_default().to_owned();
+    let effort = record.as_ref().and_then(|record| record["effort"].as_str()).unwrap_or_default().to_owned();
+    if model.is_empty() {
+        let (model, effort) = super::models::launch_model(member);
+        (model.to_owned(), effort.to_owned())
+    } else {
+        (model, effort)
+    }
+}
+
+/// #581 N1: records a step on a stage run and its feed event.
+fn stage_record_step(store: &mut Store, team: &Team, task_id: u32, run_id: &str, step: &PrepareStep, event: &'static str) -> anyhow::Result<()> {
+    change(store, &team.id, |team, events| {
+        let Some(run) = stage_run_mut(team, task_id, run_id) else { return Ok(()) };
+        run.prepare.push(step.clone());
+        let extra = run.prepare.len().saturating_sub(20);
+        run.prepare.drain(..extra);
+        events.push(Event::new(
+            event,
+            json!({"task":task_id,"stage":run.kind,"round":run.round,"step":step.step,"result":step.result,"reason":step.reason}),
+        ));
+        Ok(())
+    })
+}
+
+/// #581 N1: one feed line for a stage step already on its run.
+fn stage_feed(store: &mut Store, team: &Team, task_id: u32, run_id: &str, step: &PrepareStep, event: &'static str) -> anyhow::Result<()> {
+    change(store, &team.id, |team, events| {
+        let Some(run) = stage_run_mut(team, task_id, run_id) else { return Ok(()) };
+        events.push(Event::new(
+            event,
+            json!({"task":task_id,"stage":run.kind,"round":run.round,"step":step.step,"result":step.result,"reason":step.reason}),
+        ));
+        Ok(())
+    })
+}
+
+/// #581 N1: records the model step of a stage as pending and runs `hgs settings`
+/// for it; the next tick waits for the session record to show the model.
+#[allow(clippy::too_many_arguments)]
+fn stage_switch_model(
+    store: &mut Store,
+    team: &Team,
+    task_id: u32,
+    run_id: &str,
+    member: &Member,
+    session: &SessionRef,
+    from: &str,
+    choice: &super::model::ModelChoice,
+) -> anyhow::Result<()> {
+    let to = super::models::label(&choice.model, &choice.effort);
+    let role = team.role_of(&member.id);
+    change(store, &team.id, |team, events| {
+        let Some(run) = stage_run_mut(team, task_id, run_id) else { return Ok(()) };
+        run.prepare.push(PrepareStep {
+            step: "model".into(),
+            member: member.id.clone(),
+            from: from.to_owned(),
+            to: to.clone(),
+            at: now(),
+            result: "pending".into(),
+            reason: String::new(),
+        });
+        run.member = member.id.clone();
+        events.push(Event::new("stage_model_switch", json!({"task":task_id,"stage":run.kind,"round":run.round,"member":role,"from":from,"to":to})));
+        Ok(())
+    })?;
+    let mut input = json!({"request_id":uuid::Uuid::new_v4().to_string(),"expected_run_id":session.run_id,
+        "expected_conversation_id":session.conversation_id,"model":choice.model});
+    if !choice.effort.is_empty() {
+        input["effort"] = json!(choice.effort);
+    }
+    let outcome = match hgs(&session.host, &["settings", &session.name, "--json"], Some(&input), Duration::from_secs(120)) {
+        Ok(output) if output.status.success() => return Ok(()),
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let line = stderr.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or("the settings change was refused");
+            ("refused", line.chars().take(300).collect::<String>())
+        }
+        Err(error) => ("uncertain", error.to_string().chars().take(300).collect()),
+    };
+    let step = stage_mark_model(store, team, task_id, run_id, outcome.0, &outcome.1)?;
+    stage_feed(store, team, task_id, run_id, &step, "stage_prepare_failed")
+}
+
+/// #581 N1: ends the stage's pending model step with a result; returns it.
+fn stage_mark_model(store: &mut Store, team: &Team, task_id: u32, run_id: &str, result: &str, reason: &str) -> anyhow::Result<PrepareStep> {
+    let mut marked = None;
+    change(store, &team.id, |team, _| {
+        let Some(run) = stage_run_mut(team, task_id, run_id) else { return Ok(()) };
+        if let Some(step) = run.prepare.iter_mut().rev().find(|step| step.step == "model" && step.result == "pending") {
+            step.result = result.into();
+            step.reason = reason.to_owned();
+            marked = Some(step.clone());
+        }
+        Ok(())
+    })?;
+    Ok(marked.unwrap_or_default())
+}
+
+/// #581 N1: reserves the stage for the member whose context action it started.
+fn stage_context_wait(store: &mut Store, team: &Team, task_id: u32, run_id: &str, member_id: &str, request: &ContextRequest) -> anyhow::Result<()> {
+    change(store, &team.id, |team, _| {
+        let Some(run) = stage_run_mut(team, task_id, run_id) else { return Ok(()) };
+        run.member = member_id.to_owned();
+        run.context = Some(TaskWait {
+            waits_for: "context".into(),
+            on: vec!["context".into()],
+            state: "waiting".into(),
+            action: request.action.clone(),
+            request_id: request.request_id.clone(),
+            run_id: request.run_id.clone(),
+            conversation: request.conversation.clone(),
+            started_at: request.started_at,
+            ..Default::default()
+        });
+        Ok(())
+    })
+}
+
+/// #581 N1: the stage's context action ended or failed; its wait is over.
+fn stage_clear_context(store: &mut Store, team: &Team, task_id: u32, run_id: &str) -> anyhow::Result<()> {
+    change(store, &team.id, |team, _| {
+        if let Some(run) = stage_run_mut(team, task_id, run_id) {
+            run.context = None;
+        }
+        Ok(())
+    })
+}
+
+/// U46: a clear may name a new conversation; the member follows it before the
+/// stage's hand-out, so its identity checks keep the member.
+fn stage_conversation(store: &mut Store, team: &Team, member_id: &str, run_id: &str, conversation: &str) -> anyhow::Result<()> {
+    change(store, &team.id, |team, _| {
+        if let Some(member) = team.members.iter_mut().find(|member| member.id == member_id) {
+            if let Some(session) = member.session.as_mut().filter(|session| session.run_id == run_id) {
+                session.conversation_id = conversation.to_owned();
+            }
+        }
         Ok(())
     })
 }
@@ -12414,6 +12705,136 @@ mod tests {
                 .map(|entries| entries.flatten().filter(|entry| entry.path().is_dir()).count())
                 .unwrap_or(0);
             assert_eq!(leftovers, 0, "the prepared checkout is cleaned: {error}");
+            set_fake_hgs(None);
+        });
+    }
+
+    /// #581 N1: a stage hand-out runs the context step before the stage, and
+    /// waits for its confirmation as a task hand-out does.
+    #[test]
+    fn a_stage_hand_out_runs_the_context_action_before_the_stage() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let folder = dir.path().join("proj");
+            std::fs::create_dir_all(&folder).unwrap();
+            let mut t = staged(&folder.display().to_string());
+            t.members.iter_mut().find(|member| member.id == "rev").unwrap().context_before_task = "compact".into();
+            let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+            store.create("11111111-1111-4111-8111-111111111701", &json!({}), t.clone(), vec![]).unwrap();
+            let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+            let request = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+            let (seen, seen_request) = (calls.clone(), request.clone());
+            let observed = request.clone();
+            set_fake_hgs(Some(Box::new(move |_, args: &[&str], input: Option<&Value>| {
+                let call = args.first().copied().unwrap_or_default().to_owned();
+                seen.borrow_mut().push(call.clone());
+                match call.as_str() {
+                    "compact-context" => {
+                        let id = input.unwrap()["request_id"].as_str().unwrap().to_owned();
+                        *seen_request.borrow_mut() = id.clone();
+                        Ok(fake_output(0, &json!({"request_id":id,"status":"submitted"}).to_string(), ""))
+                    }
+                    "send" => Ok(fake_output(0, r#"{"status":"submitted"}"#, "")),
+                    other => panic!("unexpected hgs {other}"),
+                }
+            })));
+            // The first tick starts the compaction and hands nothing out.
+            stage_hand_out(&mut store, &t.id, 1, "rev", "").unwrap();
+            assert_eq!(*calls.borrow(), ["compact-context"], "the compaction starts before the stage");
+            let saved = store.load(&t.id).unwrap().unwrap();
+            let run = saved.task(1).unwrap().pipeline_run.as_ref().unwrap().open_run().unwrap();
+            assert!(run.context.is_some() && run.delivered_at.is_none(), "{run:?}");
+            assert_eq!(run.member, "rev", "the stage is reserved for its member");
+            // It still compacts: the stage waits.
+            inspect_override(Some(json!({"run_id":"r2","conversation_id":"","activity":"idle",
+                "compact_context_request":{"request_id":observed.borrow().clone(),"run_id":"r2","status":"compacting"}})));
+            stage_hand_out(&mut store, &t.id, 1, "rev", "").unwrap();
+            assert_eq!(*calls.borrow(), ["compact-context"], "still waiting");
+            // It completed: the stage is handed out, with the context step.
+            inspect_override(Some(json!({"run_id":"r2","conversation_id":"","activity":"idle",
+                "compact_context_request":{"request_id":observed.borrow().clone(),"run_id":"r2","status":"completed"}})));
+            stage_hand_out(&mut store, &t.id, 1, "rev", "").unwrap();
+            assert_eq!(*calls.borrow(), ["compact-context", "send"], "{:?}", calls.borrow());
+            let saved = store.load(&t.id).unwrap().unwrap();
+            let run = saved.task(1).unwrap().pipeline_run.as_ref().unwrap().open_run().unwrap();
+            assert_eq!(run.state, StageState::Delivered);
+            assert!(run.context.is_none());
+            assert_eq!(
+                run.prepare.iter().map(|step| (step.step.as_str(), step.result.as_str())).collect::<Vec<_>>(),
+                [("context", "done")]
+            );
+            inspect_override(None);
+            set_fake_hgs(None);
+        });
+    }
+
+    /// #581 N1: a stage hand-out switches the member to a model the stage's role
+    /// lists, and waits for the session record before the stage.
+    #[test]
+    fn a_stage_hand_out_switches_to_a_model_the_stage_role_lists() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let folder = dir.path().join("proj");
+            std::fs::create_dir_all(&folder).unwrap();
+            // The catalog's reviewer role lists one model.
+            let mut catalog = super::super::catalog::load().unwrap_or_else(|_| super::super::catalog::builtin());
+            let version = catalog.version;
+            let reviewer = catalog.roles.iter_mut().find(|role| role.id == "reviewer").unwrap();
+            reviewer.models = vec![crate::state::teams::model::ModelChoice { model: "gpt-5.5".into(), effort: "high".into() }];
+            super::super::catalog::run("set", &json!({"catalog":catalog,"version":version}), true).unwrap();
+            let mut t = staged(&folder.display().to_string());
+            {
+                let rev = t.members.iter_mut().find(|member| member.id == "rev").unwrap();
+                rev.agent = "claude".into();
+                rev.model = "gpt-5".into();
+                rev.effort = "medium".into();
+                rev.models = vec![
+                    crate::state::teams::model::ModelChoice { model: "gpt-5".into(), effort: "medium".into() },
+                    crate::state::teams::model::ModelChoice { model: "gpt-5.5".into(), effort: "high".into() },
+                ];
+            }
+            let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+            store.create("11111111-1111-4111-8111-111111111702", &json!({}), t.clone(), vec![]).unwrap();
+            let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+            let record = calls.clone();
+            set_fake_hgs(Some(Box::new(move |_, args: &[&str], input: Option<&Value>| {
+                let call = args.first().copied().unwrap_or_default().to_owned();
+                record.borrow_mut().push(call.clone());
+                match call.as_str() {
+                    "settings" => {
+                        assert_eq!(input.unwrap()["model"], "gpt-5.5");
+                        Ok(fake_output(0, r#"{"status":"applied"}"#, ""))
+                    }
+                    "send" => Ok(fake_output(0, r#"{"status":"submitted"}"#, "")),
+                    other => panic!("unexpected hgs {other}"),
+                }
+            })));
+            inspect_override(Some(json!({"run_id":"r2","conversation_id":"","activity":"idle","model":"gpt-5","effort":"medium"})));
+            // The first tick switches the member and hands nothing out.
+            stage_hand_out(&mut store, &t.id, 1, "rev", "").unwrap();
+            assert_eq!(*calls.borrow(), ["settings"], "the switch runs before the stage");
+            let saved = store.load(&t.id).unwrap().unwrap();
+            let run = saved.task(1).unwrap().pipeline_run.as_ref().unwrap().open_run().unwrap();
+            assert_eq!(run.member, "rev", "the stage is reserved for its member");
+            assert_eq!(
+                run.prepare.iter().map(|step| (step.step.as_str(), step.result.as_str(), step.to.as_str())).collect::<Vec<_>>(),
+                [("model", "pending", "gpt-5.5@high")]
+            );
+            // The session still shows the old model: the stage waits.
+            stage_hand_out(&mut store, &t.id, 1, "rev", "").unwrap();
+            assert_eq!(*calls.borrow(), ["settings"], "still waiting for the record");
+            // It shows the new model: the stage is handed out with the step done.
+            inspect_override(Some(json!({"run_id":"r2","conversation_id":"","activity":"idle","model":"gpt-5.5","effort":"high"})));
+            stage_hand_out(&mut store, &t.id, 1, "rev", "").unwrap();
+            assert_eq!(*calls.borrow(), ["settings", "send"]);
+            let saved = store.load(&t.id).unwrap().unwrap();
+            let run = saved.task(1).unwrap().pipeline_run.as_ref().unwrap().open_run().unwrap();
+            assert_eq!(run.state, StageState::Delivered);
+            assert_eq!(
+                run.prepare.iter().map(|step| (step.step.as_str(), step.result.as_str())).collect::<Vec<_>>(),
+                [("model", "done")]
+            );
+            inspect_override(None);
             set_fake_hgs(None);
         });
     }

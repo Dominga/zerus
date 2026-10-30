@@ -7354,6 +7354,20 @@ mod tests {
         };
         set_running(&mut running, json!({"id":"dev","context_before_task":"clear"})).unwrap();
         assert_eq!(running.member("dev").unwrap().context_before_task, "clear");
+        // #581 L7: even on a running member only the owner sets the context.
+        let mut events = Vec::new();
+        let error = apply(
+            &mut running,
+            "settings",
+            &json!({"members_update":[{"id":"dev","context_before_task":"compact"}]}),
+            &Actor::Member("lead".into()),
+            &BTreeSet::new(),
+            &mut events,
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(error, "Only you set a member's context before a task");
+        assert_eq!(running.member("dev").unwrap().context_before_task, "clear");
         let error = set_running(&mut running, json!({"id":"dev","role":"API","context_before_task":"compact"})).unwrap_err().to_string();
         assert_eq!(error, "A running team changes only members without a session");
         let error = set_running(&mut running, json!({"id":"dev","role":"API"})).unwrap_err().to_string();

@@ -25,12 +25,16 @@ class SearchIndex(unittest.TestCase):
                     if not key.startswith(("HGS_", "ZERUS_CLIENT_")) and key not in ("TMUX", "TMUX_PANE")}
         self.env.update(HOME=str(self.root), HGS_STATE_DIR=str(self.state),
                         HGS_CONFIG_DIR=str(self.root / "config"), HGS_SELF="fixture", HGS_PEERS="")
+        if os.name == "nt":
+            # The existing override admits __state for an isolated state only;
+            # this suite never installs or starts a session host.
+            self.env.update(USERPROFILE=str(self.root), HGS_HOST_ALLOW_UNSTAGED="1")
 
     def invoke(self, flag, request=None, check=True):
         flags = flag if isinstance(flag, list) else [flag]
         result = subprocess.run([str(HGS), "__state", "search", *flags], env=self.env,
                                 input=json.dumps(request) if request is not None else "",
-                                text=True, capture_output=True, timeout=5)
+                                text=True, encoding="utf-8", capture_output=True, timeout=5)
         if check:
             self.assertEqual(result.returncode, 0, result.stderr)
             return json.loads(result.stdout)

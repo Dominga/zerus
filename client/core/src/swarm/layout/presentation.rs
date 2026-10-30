@@ -2,7 +2,7 @@
 //! All values and the handled record commit in the existing Layout writer.
 use super::{Layout, MAX_BYTES, MAX_MEMBERS};
 use crate::settings::{family_metadata, qt::QtValue, valid_family_metadata, QtSnapshot, QtStore};
-use serde_json::{Map, Value};
+use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
 const FAMILY: &str = "organization-presentation";
@@ -40,13 +40,7 @@ fn decode(
             Some(QtValue::Text(text)) => text.as_bytes(),
             _ => return Err(REFUSED.into()),
         };
-        if bytes.len() > 16 << 20 {
-            return Err(REFUSED.into());
-        }
-        let root: Map<String, Value> = serde_json::from_slice(bytes).map_err(|_| REFUSED)?;
-        if root.get("version").is_some_and(|v| v != 1 && v != 2) || root.contains_key("groups") {
-            return Err(REFUSED.into());
-        }
+        let root = crate::swarm::qt_import::decode(bytes).map_err(|_| REFUSED)?;
         let projects = root
             .get("projects")
             .and_then(Value::as_array)

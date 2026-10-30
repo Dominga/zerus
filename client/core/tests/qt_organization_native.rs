@@ -53,9 +53,9 @@ fn real_cli_recovers_missing_catalogs_and_preserves_existing_fields_and_tombston
         std::env::var_os("HGS_ORGANIZATION_TEST_BIN").expect("select the built isolated test CLI"),
     );
     assert!(hgs.is_absolute());
-    for existing in [false, true] {
+    for (existing, legacy) in [(false, false), (true, false), (false, true), (true, true)] {
         let root = std::env::temp_dir().join(format!(
-            "zerus-g3-organization-native-{}-{existing}",
+            "zerus-g3-organization-native-{}-{existing}-{legacy}",
             std::process::id()
         ));
         fs::create_dir(&root).unwrap();
@@ -97,7 +97,20 @@ fn real_cli_recovers_missing_catalogs_and_preserves_existing_fields_and_tombston
             String::new()
         };
         let qt = scratch.0.join("synthetic-qt.plist");
-        let organization = json!({"version":2,"projects":[project("alpha","Qt old value"),project("beta","Recovered Qt project")],"future_private":"retain"});
+        let mut organization = json!({"version":2,"projects":[project("alpha","Qt old value"),project("beta","Recovered Qt project")],"future_private":"retain"});
+        if legacy {
+            let mut projects = organization
+                .as_object_mut()
+                .unwrap()
+                .remove("projects")
+                .unwrap();
+            projects.as_array_mut().unwrap().push(
+                json!({"id":"pinned","name":"Pinned","sessions":["peer\ncodex/example/restored"]}),
+            );
+            organization["groups"] = projects;
+            organization["default_project"] = json!("alpha");
+            organization["before_pin"] = json!({"peer\ncodex/example/restored":"beta"});
+        }
         let data = STANDARD.encode(serde_json::to_vec(&organization).unwrap());
         let original=format!("<plist version=\"1.0\"><dict><key>workspace.organization</key><data>{data}</data></dict></plist>").into_bytes();
         fs::write(&qt, &original).unwrap();
@@ -133,6 +146,19 @@ fn real_cli_recovers_missing_catalogs_and_preserves_existing_fields_and_tombston
         assert!(ops.values().any(|op| op["key"]["id"] == "beta"
             && op["key"]["field"] == "name"
             && op["value"] == "Recovered Qt project"));
+        if legacy {
+            let assignment = ops
+                .values()
+                .find(|op| op["key"]["session"] == "codex/example/restored")
+                .unwrap();
+            assert_eq!(assignment["value"], "beta");
+            assert!(ops
+                .values()
+                .any(|op| op["key"]["id"] == assignment["key"]["machine"]
+                    && op["key"]["field"] == "name"
+                    && op["value"] == "peer"));
+            assert!(!ops.values().any(|op| op["key"]["id"] == "pinned"));
+        }
         assert_eq!(fs::read(&qt).unwrap(), original);
         assert_eq!(fs::metadata(&qt).unwrap().modified().unwrap(), mtime);
         let saved: Value = serde_json::from_slice(&fs::read(&settings_file).unwrap()).unwrap();

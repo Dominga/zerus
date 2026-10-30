@@ -402,8 +402,10 @@ existing causal values and tombstones win. The separate first-G3 local
 and default project together in the existing local layout writer. Only these
 three fields may fill empty/null Next defaults under the coordinator's explicit
 2026-10-30 cosmetic exception; nonempty Next fields win, and handled families
-and the earlier run-memory seed never repeat. Legacy groups/pinned recovery,
-project vivid state and local Windows folders remain separate.
+and the earlier run-memory seed never repeat. Both decoders share Qt's bounded
+legacy `groups` and `before_pin` restoration rules, preserving exact project
+and session identities without generating missing folder IDs or discarding an
+ambiguous bucket. Project vivid state and local Windows folders remain separate.
 
 The design owner's 2026-10-30 ruling retains `projectFolderSplit` and
 `tasks/inspectorSplit` as private typed evidence, with no Qt splitter decoding

@@ -146,6 +146,188 @@ fn unsupported_or_ambiguous_sources_never_become_an_empty_success() {
     assert_eq!(shared(None, NODE).unwrap()["projects"][0]["id"], INBOX);
 }
 
+fn legacy_organization() -> Value {
+    json!({"version":1,"default_project":"beta","before_pin":{
+        "peer\ncodex/example/two":"alpha","peer\ncodex/example/three":"missing",
+        "peer\ncodex/example/four":"pinned"},
+        "unassigned_sessions":["peer\ncodex/example/two"],
+        "groups":[
+            {"id":"alpha","name":"Alpha","collapsed":true,"sessions":["peer\ncodex/example/one"]},
+            {"id":"pinned","name":"Pinned","sessions":["peer\ncodex/example/two","peer\ncodex/example/three","peer\ncodex/example/four"]},
+            {"id":"beta","name":"Beta"}],"private_extension":{"keep":true},
+        "runs":{"original":"token"},"run_groups":{"original":"pinned"}})
+}
+
+#[test]
+fn legacy_groups_restore_pins_to_recorded_or_default_projects_without_losing_order() {
+    for current_spelling in [false, true] {
+        let mut value = legacy_organization();
+        if current_spelling {
+            let groups = value.as_object_mut().unwrap().remove("groups").unwrap();
+            value["projects"] = groups;
+        }
+        let source = snapshot(&value);
+        let before = source.values.clone();
+        let normalized = decode(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(normalized["default_project"], "beta");
+        assert_eq!(normalized["private_extension"], value["private_extension"]);
+        assert_eq!(normalized["runs"], value["runs"]);
+        assert_eq!(normalized["run_groups"], value["run_groups"]);
+        let shared = shared(Some(&source), NODE).unwrap();
+        assert_eq!(shared["project_order"], json!(["alpha", "beta"]));
+        assert_eq!(
+            shared["projects"][0]["sessions"],
+            json!(["peer\ncodex/example/one", "peer\ncodex/example/two"])
+        );
+        assert_eq!(
+            shared["projects"][1]["sessions"],
+            json!(["peer\ncodex/example/three", "peer\ncodex/example/four"])
+        );
+        assert_eq!(shared["projects"][0]["color"], "#64b5f6");
+        assert!(shared["projects"][0]["folders"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert_eq!(source.values, before);
+    }
+}
+
+#[test]
+fn legacy_default_selection_matches_qt_and_never_invents_folder_identities() {
+    let mut value = legacy_organization();
+    value.as_object_mut().unwrap().remove("default_project");
+    let decoded = decode(&serde_json::to_vec(&value).unwrap()).unwrap();
+    assert_eq!(decoded["default_project"], INBOX);
+    assert_eq!(decoded["projects"][2]["id"], INBOX);
+    assert_eq!(
+        decoded["projects"][2]["sessions"],
+        json!(["peer\ncodex/example/three", "peer\ncodex/example/four"])
+    );
+    for default in ["missing", "pinned"] {
+        value["default_project"] = json!(default);
+        let decoded = decode(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(decoded["default_project"], "alpha");
+        assert_eq!(decoded["projects"].as_array().unwrap().len(), 2);
+    }
+    let mut only_pin =
+        json!({"groups":[{"id":"pinned","name":"Pinned","sessions":["peer\ncodex/example/one"]}]});
+    let decoded = shared(Some(&snapshot(&only_pin)), NODE).unwrap();
+    assert_eq!(decoded["project_order"], json!([INBOX]));
+    assert_eq!(
+        decoded["projects"][0]["sessions"],
+        only_pin["groups"][0]["sessions"]
+    );
+    only_pin["default_project"] = json!("pinned");
+    assert!(
+        shared(Some(&snapshot(&only_pin)), NODE).is_err(),
+        "Qt would lose these pins with no surviving project"
+    );
+    let mut value = legacy_organization();
+    value["groups"][0]["folders"] =
+        json!([{"machine":"peer","path":"/srv/example","name":"Original"}]);
+    assert!(
+        shared(Some(&snapshot(&value)), NODE).is_err(),
+        "never create a missing folder UUID"
+    );
+}
+
+#[test]
+fn malformed_legacy_members_pin_references_or_discarded_folders_refuse_as_a_family() {
+    let mut candidates = Vec::new();
+    for field in ["sessions", "folders", "id", "default_project", "before_pin"] {
+        let mut value = legacy_organization();
+        if ["default_project", "before_pin"].contains(&field) {
+            value[field] = Value::Null;
+        } else {
+            value["groups"][1][field] = Value::Null;
+        }
+        candidates.push(value);
+    }
+    let mut value = legacy_organization();
+    value["groups"][1]["folders"] = json!([{"id":"cannot-discard"}]);
+    candidates.push(value);
+    let mut value = legacy_organization();
+    value["groups"][1]["sessions"][0] = json!("peer\ncodex/example/one");
+    candidates.push(value);
+    let mut value = legacy_organization();
+    value["before_pin"]["peer\ncodex/example/two"] = json!(17);
+    candidates.push(value);
+    let mut value = legacy_organization();
+    value["groups"][2]["id"] = json!("alpha");
+    candidates.push(value);
+    for value in candidates {
+        assert!(shared(Some(&snapshot(&value)), NODE).is_err());
+    }
+    let mut value = organization();
+    value["groups"] = json!({"unused":"extension"});
+    assert_eq!(
+        shared(Some(&snapshot(&value)), NODE).unwrap(),
+        shared(Some(&snapshot(&organization())), NODE).unwrap(),
+        "Qt chooses current projects when both spellings exist"
+    );
+}
+
+#[test]
+fn legacy_import_keeps_original_source_hash_and_never_reseeds_after_rollback() {
+    let scratch = Scratch::new();
+    scratch.write(&legacy_organization());
+    let source = scratch.source();
+    let original = fs::read(source.path()).unwrap();
+    let mtime = fs::metadata(source.path()).unwrap().modified().unwrap();
+    let settings = scratch.settings();
+    recover_with(&source, &settings, NODE, |read_only, request| {
+        if read_only {
+            Ok(status(true, true))
+        } else {
+            assert_eq!(
+                request["organization"]["projects"][0]["sessions"],
+                json!(["peer\ncodex/example/one", "peer\ncodex/example/two"])
+            );
+            Ok(receipt(&request))
+        }
+    })
+    .unwrap();
+    let saved = scratch.saved();
+    assert_eq!(
+        saved["g3"]["families"]["shared-organization"]["sha256"],
+        zerus_desktop_migration::sha256(&original)
+    );
+    assert_eq!(fs::read(source.path()).unwrap(), original);
+    assert_eq!(
+        fs::metadata(source.path()).unwrap().modified().unwrap(),
+        mtime
+    );
+    scratch.write(&json!({"version":99}));
+    recover_with(&source, &settings, NODE, |_, _| {
+        panic!("handled legacy family never reseeds")
+    })
+    .unwrap();
+    assert_eq!(scratch.saved(), saved);
+}
+
+#[test]
+fn legacy_constructor_defaults_do_not_bypass_project_or_member_caps() {
+    let mut value = json!({"groups":(0..MAX_PROJECTS).map(|n|
+        json!({"id":format!("p{n}"),"name":"Project"})).collect::<Vec<_>>()});
+    assert!(
+        shared(Some(&snapshot(&value)), NODE).is_err(),
+        "adding General would exceed the cap"
+    );
+    value["default_project"] = json!("p0");
+    assert_eq!(
+        shared(Some(&snapshot(&value)), NODE).unwrap()["projects"]
+            .as_array()
+            .unwrap()
+            .len(),
+        MAX_PROJECTS
+    );
+    let mut value = legacy_organization();
+    value["groups"][1]["sessions"] = json!((0..=super::super::layout::MAX_MEMBERS)
+        .map(|n| format!("peer\ncodex/example/{n}"))
+        .collect::<Vec<_>>());
+    assert!(shared(Some(&snapshot(&value)), NODE).is_err());
+}
+
 #[test]
 fn import_is_reserved_durably_before_the_call_and_completed_in_the_existing_settings_journal() {
     let scratch = Scratch::new();

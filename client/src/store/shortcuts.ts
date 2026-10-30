@@ -38,7 +38,7 @@ export const COMMANDS: readonly Command[] = [
   { id: "tab.next", group: "Session view", title: "Next tab", scope: "window" },
   { id: "tab.previous", group: "Session view", title: "Previous tab", scope: "window" },
   { id: "tab.terminal", group: "Session view", title: "Switch between Activity and Terminal", scope: "window" },
-  { id: "panel.toggle", group: "Session view", title: "Toggle side panel", scope: "window" },
+  { id: "panel.toggle", group: "Session view", title: "Show or hide the side panel", scope: "window" },
   { id: "focus.next", group: "Session view", title: "Next area", scope: "window" },
   { id: "focus.previous", group: "Session view", title: "Previous area", scope: "window" },
   { id: "message.send", group: "Messages", title: "Send message", scope: "composer" },

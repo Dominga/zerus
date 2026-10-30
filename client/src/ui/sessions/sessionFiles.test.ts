@@ -46,6 +46,8 @@ describe("session file dialogs", () => {
     expect(calls.dialog).toHaveBeenCalledWith("peer", "run:1", "/remote/report.md", "/remote/work");
     actOnSessionFile("open_file");
     expect(calls.act).toHaveBeenCalledWith(7, "open_file");
+    actOnSessionFile("open_ssh");
+    expect(calls.act).toHaveBeenCalledWith(7, "open_ssh");
     downloadSessionFile(true);
     expect(calls.download).toHaveBeenCalledWith(7, true);
   });

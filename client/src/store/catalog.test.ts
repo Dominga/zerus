@@ -108,6 +108,12 @@ describe("toSession", () => {
     expect(toSession("", "k", view("a", { agent: "opencode", bulk_lifecycle_supported: true })).bulkLifecycle).toBe(true);
     expect(toSession("", "k", view("a", { agent: "claude", bulk_lifecycle_supported: false })).bulkLifecycle).toBe(false);
   });
+  it("reads the canonical folder only when the core sends one (view.rs skips an empty one)", () => {
+    const sent = toSession("", "k", view("a", { cwd_canonical: "/srv/example/project", git_root: "/srv/example/project" }));
+    expect([sent.cwdCanonical, sent.gitRoot]).toEqual(["/srv/example/project", "/srv/example/project"]);
+    const absent = toSession("", "k", view("a", { git_root: "" }));
+    expect([absent.cwdCanonical, absent.gitRoot]).toEqual(["", ""]);
+  });
   it("derives the presentation status from status kinds and raw phases", () => {
     expect(statusOf(view("a", { status: "working" }))).toBe("working");
     expect(statusOf(view("a", { status: "", phase: "approval" }))).toBe("attention");

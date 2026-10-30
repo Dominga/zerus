@@ -87,6 +87,125 @@ env -u DISPLAY WAYLAND_DISPLAY=zerus-none GDK_BACKEND=x11 ZERUS_CLIENT_HEADLESS=
   sh -c 'RUSTUP_TOOLCHAIN=1.99.1 ZERUS_CLIENT_REPLAY=$PWD/fixtures/replay.ndjson npx tauri dev'
 ```
 
+## New session
+
+The New session dialog (`src/store/newSession.ts`, `src/ui/sessions/NewSessionDialog.tsx`)
+ports Qt's `NewSessionDialog`: direct folders, None or Auto worktrees, an existing
+or manually created worktree, a Git repository clone, account and agent choice,
+and OpenCode model and effort. It opens from the Rail, the Sessions header,
+project and folder menus, and `session.new` (Ctrl+N, or Command+N on macOS).
+`src-tauri/src/newsession.rs` derives the form and plan through the core. The
+creation host (`src-tauri/src/creations.rs`) owns background work, its journal,
+binding and project placement. `src/store/creations.ts` renders creation rows,
+the progress panel, the status menu and strip tiles; no card opens a composer or
+touches drafts.
+
+Opening, browsing and choosing send only reads: `account ls` and usage inspects,
+`worktrees --path` and `dirs` listings, and the folder/model reads. Creating calls
+happen only after the click that names them: `creation_submit` after Start,
+`worktrees create`, `dirs --create`, `account start` or `account favorite`.
+Nothing creates a worktree while the dialog opens or is inspected. Start submits
+once, and an unknown result is never replayed. Every guarded creation call checks
+the expected machine. A capable watch stream binds by exact launch id, raw agent
+and tag; older peers retain the bounded `ls --json` poll.
+
+Creation cards offer Continue setup, Check result, Stop, Edit choices and Hide.
+Check reads the original result and never repeats a step. A bound card adopts its
+exact online session row, even if the bound event arrives first. Creation titles
+and menus use the D6 layout without dot separators; older creations get headings
+every 50, and a search matches card details in place. The D7 remembered choices
+are `workspace/launchAgent`, `workspace/launchOpenTerminal` and
+`workspace/launchAccounts` in `settings.json`, seeded once read-only from Qt.
+Placement follows Q6: acceptance into the durable organization Controller draft
+is enough, without waiting for `swarm apply`. A pre-launch refusal fails the step;
+after binding, at most one AddFolder and one Move wait for readiness or member
+arrival, and quit drops them without blocking.
+
+State stays under the app data directory: `worktree-snapshots.json`,
+`creations.json`, and those three remembered choices in `settings.json`. Replay
+uses separate files. Bounds include 256 account rows, 10,000 OpenCode models
+(5 MiB) with 64 favorites and 500 shown rows, four OpenCode catalogs, 64 verified
+worktree catalogs, 128 creations and notices, 32 ended launches, 65,536 detail
+characters, 200 folders per project and 512 saved-project placements. Watch and
+listing reads stay bounded, and idle passes do not copy listings.
+
+### New session smoke run
+
+`ZERUS_CLIENT_QUERY=newsession-smoke=1` runs three passes with the replay and a
+fake `hgs`: open plus read-only Cancel, None through Ctrl+N and Enter, then Auto
+on a verified Git catalog. It needs replay mode, an explicit `ZERUS_CLIENT_HGS`
+and `ZERUS_CLIENT_PERF`, and runs only headless. The fake appends ordinary calls
+to `log.ndjson` and `[unix_ms, argv]` to `stamped.ndjson`; its receipts remember
+the launch id and the created worktree's branch and destination so binding and
+verification use dynamic identities.
+
+Build the app, then run and assert:
+
+```sh
+S=$(mktemp -d)
+cp core/tests/support/fake_hgs_creation.py "$S/hgs"
+cp core/tests/fixtures/newsession-smoke.json "$S/config.json"
+cp core/tests/fixtures/newsession-smoke-replay.ndjson "$S/replay.ndjson"
+chmod +x "$S/hgs"
+env -u DISPLAY WAYLAND_DISPLAY=zerus-none GDK_BACKEND=x11 ZERUS_CLIENT_HEADLESS=1 \
+  WEBKIT_DISABLE_DMABUF_RENDERER=1 XDG_DATA_HOME="$S/data" \
+  ZERUS_CLIENT_REPLAY="$S/replay.ndjson" ZERUS_CLIENT_HGS="$S/hgs" \
+  ZERUS_CLIENT_QUERY=newsession-smoke=1 ZERUS_CLIENT_PERF=smoke \
+  xvfb-run -a -s "-screen 0 1440x900x24" src-tauri/target/release/zerus-client \
+  > "$S/app.log" 2>&1
+python3 - "$S" <<'PY'
+import json, re, sys
+from pathlib import Path
+S = Path(sys.argv[1])
+text = (S / "app.log").read_text()
+marks = {}
+for p, kind, ms in re.findall(r"newsession-smoke (\d) (begin|start|end) (\d+)", text):
+    marks.setdefault(int(p), {})[kind] = int(ms)
+assert set(marks) == {1, 2, 3}, marks
+for p in (1, 2, 3):
+    assert {"begin", "end"} <= set(marks[p]), marks[p]
+for p in (2, 3):
+    assert "start" in marks[p], marks[p]
+calls = [tuple(row) for row in map(json.loads, (S / "stamped.ndjson").read_text().splitlines())]
+def between(p, start="begin", end="end"):
+    lo, hi = marks[p][start], marks[p][end]
+    return [args for ts, args in calls if lo <= ts <= hi]
+def worktree(args, action):
+    return (len(args) > 1 and args[:2] == ["worktrees", action]) or \
+        (len(args) > 3 and args[0] == "--expect-machine" and args[2:4] == ["worktrees", action])
+first = between(1)
+for args in first:
+    assert args[0] not in {"clone", "swarm"}, args
+    assert not worktree(args, "create"), args
+    assert args[:2] not in (["dirs", "--create"], ["account", "start"], ["account", "favorite"]), args
+    assert "--new" not in args, args
+second = between(2)
+assert sum(worktree(args, "create") for args in second) == 0
+assert sum(args[:2] == ["dirs", "--creation"] for args in second) == 1
+assert sum("--expect-machine" in args and "--new" in args for args in second) == 1
+assert sum(args[:2] == ["ls", "--json"] for args in second) >= 1
+third = between(3, "start")
+assert sum(worktree(args, "--creation") for args in third) == 2
+assert sum(worktree(args, "create") for args in third) == 1
+assert sum(worktree(args, "status") for args in third) == 1
+assert sum("--expect-machine" in args and "--new" in args for args in third) == 1
+assert sum(args[:2] == ["ls", "--json"] for args in third) >= 1
+assert sum(worktree(args, "create") for _, args in calls) == 1
+assert '"run":"session.new"' in text
+assert text.count("bound row-present true adopted true machine workstation") == 2
+print("PASS open+Cancel read-only; no worktree before Start; two catalogs/create/receipt/launch/binding")
+print(f"executed stamped calls {len(calls)}; pass1 {len(first)}; pass2 {len(second)}; pass3-after-start {len(third)}")
+PY
+```
+
+Pass 1 permits only reads: no clone, `swarm`, `worktrees create`, `dirs --create`,
+`account start`, `account favorite` or argv containing `--new`. Pass 2 adds one
+`dirs --creation`, one guarded launch and a binding `ls --json`, with no worktree
+creation. Pass 3 adds two catalog reads (initial and verification), exactly one
+`worktrees create`, its receipt read, one launch and a binding read. The log also
+proves Ctrl+N routes to `session.new`, and both bound events adopt the exact row
+with matching `machine`.
+
 ## Actions
 
 The session menus, the header and the Rename and Terminate dialogs run guarded
@@ -430,7 +549,7 @@ live catalog.
   drops the pages and loads the first. Pages load only while the Archive filter
   shows the Sessions list and are kept when it is left, as Qt keeps them.
   Leaving the filter, a change of the computers or their names, a change of
-  the search text, a change of the date range and Refresh archive cancel the
+  the search text, a change of the project filter or date range and Refresh archive cancel the
   reads that are running, also one sent before the cancel that has not started
   yet; an answer that arrives afterwards is dropped. Each read carries the
   store's request number, so a late older read never cancels a newer one.
@@ -450,8 +569,12 @@ live catalog.
   count chip of the filter shows "…" while some computer's total is unknown and
   no archived row is counted, otherwise the count with a "+" while more can be
   loaded; its tooltip says how many are loaded.
-- The list shows the loaded archived rows as flat cards, newest archived first
-  (Qt groups them by project: `zerus-5wmh.40`). Selecting one shows its header
+- The list groups loaded archive identities by project, in organization order,
+  newest archived first inside each project (SessionsWindow.cpp:3238-3242).
+  Machine and project choices count the loaded archive rows inside the date
+  range before their corresponding filter applies (SessionsWindowRows.cpp:266-284).
+  Machine choices come from the fleet, including machines with no loaded rows.
+  Selecting an archived row shows its header
   and its details, read with `inspect --archive ID`, and its recorded Activity
   (below). Restore session, Forget archived session, the copy entries and
   Rename work on a loaded archived row (see Actions).
@@ -751,8 +874,9 @@ setup, never against a real `hgs` directory. The same guard pins the composer
 clock to fixture time, so the deterministic warm cache has not expired;
 production always uses the real clock.
 
-The Part A steps are Terminal output, draft navigation, attach, one Send,
-cold-cache full-context Send, Resume and send, process groups and output, and
+The Part A steps are Terminal output, Saved drafts first-open focus and focus
+return, draft navigation, attach, one Send, cold-cache full-context Send,
+Resume and send, process groups and output, and
 attachment fetch plus a decoded `convertFileSrc` thumbnail. The A2 steps answer
 the question, Approve once after its review delay and Send now, checking exact
 ids and receipts in `log.ndjson`. Additional WebKitGTK checks paste a PNG and
@@ -831,6 +955,23 @@ python3 -c 'import collections, json, sys; print(collections.Counter(" ".join(js
 ```
 
 The screenshots stay in `$S`; they are never committed.
+
+### Updates replay screenshots
+
+With `ZERUS_CLIENT_REPLAY`, the update worker never starts and makes no network
+requests. `ZERUS_CLIENT_UPDATES_FIXTURE` may name one JSON `UpdatesView` of at
+most 64 KiB; `updates_view` returns it and the service publishes it once. The
+screenshot driver uses this seam for unchecked, available, cached-with-error
+and restart-required states in both built-in themes. It checks the real
+controls before each capture:
+
+```sh
+npm run build && RUSTUP_TOOLCHAIN=1.99.1 npx tauri build --no-bundle
+S=$(mktemp -d)
+python3 scripts/updates-smoke.py --scratch "$S/artifacts"
+```
+
+The eight PNGs and per-case logs stay in `$S/artifacts`; they are never committed.
 
 ## Projects in the Sessions list
 
@@ -940,16 +1081,24 @@ Deviations from Qt (the plan's Decisions):
 3. No `swarm initialize`: a computer without the Qt GUI's import keeps edits
    disabled.
 4. Edits made before the first ready catalog are refused, not queued.
-5. Renames made while the client was closed are not followed yet (Qt follows
-   them by persisted run tokens).
-6. Archived sessions are not placed in projects yet: Qt keys them by their
-   archive identity, `machine\narchive\n<archive id>`, which `zerus-5wmh.40`
-   ports. Until then, the Archive view and its
-   count ignore the project filter (it holds project IDs), Clear archive takes
-   no row while a project filter is set, and Move to project is disabled for an
-   archived row ("Archived sessions keep their project until the Archive view
-   groups by project."), so the client never writes the live-name member
-   `host\nname` for an archived session.
+5. Persisted live-run identities follow closed-client renames (`zerus-5wmh.47`);
+   their separate file is bounded at 100,000 tokens and 24 MiB.
+
+Archive placement follows Qt's archive identity, `machine\narchive\n<archive id>`.
+The page reply carries its group and rank; later `Batch.groups` deltas carry
+`archive_request`, so the archive store applies shown-request deltas immediately,
+holds at most 50 for the in-flight request (newest per key), and merges those
+after its reply. Other request tags are discarded. The live assignment store
+never retains archive identities. Project edits, default-project changes and
+verified post-Terminate placement keep the loaded window current.
+
+Leaving Archive only cancels in-flight reads and keeps loaded placements live.
+Scope changes and Refresh use `reset_archive_pages` to clear both sides. An empty
+next page raises "Archive changed. Refresh to start a new view." while keeping
+the shown rows and their placement updates, as ArchiveBrowser.cpp:37 does.
+Clear archive respects the project filter and resets after the confirmed batch;
+Move to project and drag-and-drop use archive identities, including a destination
+row's archive identity, so a live session with the same name stays in place.
 
 ### Organization smoke run
 

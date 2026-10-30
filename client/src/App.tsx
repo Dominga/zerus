@@ -2,10 +2,12 @@ import { For, Match, Show, Suspense, Switch, createEffect, createMemo, lazy, onC
 import { Rail } from "./ui/components/Rail";
 import { MenuLayer, Toasts } from "./ui/components/Overlays";
 import { ActionDialogs, ActionNotices } from "./ui/sessions/ActionDialogs";
+import { newSessionFromShortcut, newSessionOpened } from "./ui/sessions/newsession-view";
 import { OrganizationDialogs } from "./ui/sessions/OrganizationDialogs";
 import { SessionList } from "./ui/sessions/SessionList";
 import { SessionDetail } from "./ui/sessions/SessionDetail";
-import { PerfHost } from "./ui/PerfHost";
+import { CreationPanel } from "./ui/sessions/CreationPanel";
+import { selectedCreation } from "./store/creations";
 import { OverviewScreen } from "./ui/screens/Overview";
 import { MachinesScreen } from "./ui/screens/Machines";
 import { AccountsScreen } from "./ui/screens/Accounts";
@@ -15,6 +17,9 @@ import { catalog } from "./store/catalog";
 import { contentScale, page, setContentScale, setPage, toast } from "./store/ui";
 import { num, setSetting } from "./store/settings";
 import { installShortcutRouter, onCommand } from "./store/shortcuts";
+import { updateCommands, updates } from "./store/updates";
+import { openUpdates } from "./store/desk";
+import { ZerusLogo } from "./ui/components/ZerusLogo";
 import type { BridgeMode } from "./bridge";
 
 // The client shell: the rail, the pages and the status bar.
@@ -22,6 +27,10 @@ import type { BridgeMode } from "./bridge";
 // Settings and its sections load the first time Settings opens; their
 // state lives in their modules, so it stays once loaded.
 const SettingsScreen = lazy(() => import("./ui/screens/Settings").then((m) => ({ default: m.SettingsScreen })));
+// New session and its child dialogs load the first time it opens
+// (`newSessionOpened`), and stay mounted from then on.
+const NewSessionDialog = lazy(() => import("./ui/sessions/NewSessionDialog").then((m) => ({ default: m.NewSessionDialog })));
+const PerfHost = lazy(() => import("./ui/PerfHost").then((m) => ({ default: m.PerfHost })));
 
 const STATE_TEXT: Record<string, string> = {
   probing: "checking",
@@ -50,6 +59,19 @@ function StatusBar(props: { mode: () => BridgeMode | "starting" }) {
         <span class="chip-accent" title="Synthetic data from the replay fixture; no hgs is running">Replay</span>
       </Show>
       <span class="grow" />
+      <Show when={!updates().quiet && updates().available}>
+        <button type="button" class="btn ghost small status-update" title={`Zerus ${updates().version} is available. Open Updates.`}
+          aria-label={`Zerus ${updates().version} is available. Open Updates.`} onClick={openUpdates}>
+          <ZerusLogo attention={false} motion="spin" size={14} />New version
+        </button>
+      </Show>
+      <Show when={!updates().quiet && updates().restart_required}>
+        <button type="button" class="btn ghost small status-restart" title="Zerus was updated on disk. Drafts are kept; sessions keep running."
+          aria-label="Zerus was updated on disk. Drafts are kept; sessions keep running."
+          onClick={() => { void updateCommands.restart().catch((error) => toast("Updates", String(error))); }}>
+          <ZerusLogo attention={false} motion="spin" size={14} />Restart to finish update
+        </button>
+      </Show>
     </footer>
   );
 }
@@ -76,6 +98,8 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
     ["go.machines", () => setPage("machines")],
     ["go.accounts", () => setPage("accounts")],
     ["go.settings", () => setPage("settings")],
+    // session.new (Shortcuts.cpp:29, 58): New session from every page.
+    ["session.new", newSessionFromShortcut],
     ["zoom.in", () => zoomBy(0.1)],
     ["zoom.out", () => zoomBy(-0.1)],
     ["zoom.reset", () => zoom(1)],
@@ -92,7 +116,7 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
           <Match when={page() === "sessions"}>
             <div class="sessions-page" classList={{ "layout-right": skin().layout["sessions-pane"] === "right" }}>
               <SessionList />
-              <SessionDetail />
+              <Show when={selectedCreation() !== undefined} fallback={<SessionDetail />}><CreationPanel /></Show>
             </div>
           </Match>
           <Match when={page() === "dashboard"}><OverviewScreen /></Match>
@@ -106,9 +130,10 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
       <MenuLayer />
       <Toasts />
       <ActionDialogs />
+      <Show when={newSessionOpened()}><Suspense><NewSessionDialog /></Suspense></Show>
       <OrganizationDialogs />
       <ActionNotices />
-      <PerfHost />
+      <Suspense><PerfHost /></Suspense>
     </div>
   );
 }

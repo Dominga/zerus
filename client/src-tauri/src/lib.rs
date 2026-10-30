@@ -16,6 +16,8 @@ mod commands;
 #[cfg(feature = "live")]
 mod composer;
 #[cfg(feature = "live")]
+mod creations;
+#[cfg(feature = "live")]
 mod desk;
 mod display;
 #[cfg(feature = "live")]
@@ -30,6 +32,8 @@ mod lifecycle;
 mod metrics;
 #[cfg(feature = "live")]
 mod mobile;
+#[cfg(feature = "live")]
+mod newsession;
 #[cfg(feature = "live")]
 mod notifier;
 #[cfg(feature = "live")]
@@ -56,6 +60,8 @@ mod signals;
 mod speech_settings;
 #[cfg(feature = "live")]
 mod terminal;
+#[cfg(feature = "live")]
+mod updates;
 #[cfg(feature = "media")]
 mod voice;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -214,6 +220,9 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
     };
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
+        // Opened from Rust only (the composer's `composer_pick` and New
+        // session's `pick_local_folder`): the capabilities grant the webview
+        // none of its permissions.
         .plugin(tauri_plugin_dialog::init())
         // Rust opens attachments; the webview's links stay its own (no injected click handler).
         .plugin(
@@ -316,6 +325,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(actions::ActivityReads::default());
                 app.manage(actions::Attention::new(dir.join(actions::attention_file(replay))));
                 let pump = app.state::<commands::AppState>().pump();
+                app.state::<actions::Actions>().set_termination_pump(pump.clone());
                 let allowed = actions::actions_allowed(
                     std::env::var("ZERUS_CLIENT_REPLAY").ok().as_deref(),
                     std::env::var("ZERUS_CLIENT_HGS").ok().as_deref(),
@@ -334,7 +344,11 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     allowed,
                     dir.join(organization::layout_file(replay)),
                     draft_path,
+                    replay,
                 );
+                organization.seed_runs(organization::run_seed_source(
+                    &app.state::<identity::Identity>().bundle_id, replay,
+                ));
                 // Before any start of the source (the menu bar's below, or the webview's).
                 app.state::<commands::AppState>().set_organization(organization.clone());
                 let screens = screens::Screens::tauri(app.handle().clone(), pump.clone());
@@ -347,6 +361,12 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 }));
                 app.manage(organization);
                 app.manage(screens);
+                app.manage(newsession::NewSession::tauri(Some(dir.join(if replay {
+                    "worktree-snapshots-replay.json"
+                } else { "worktree-snapshots.json" }))));
+                let creations = creations::start(app.handle(), &dir, replay, allowed);
+                app.state::<commands::AppState>().set_creations(creations.clone());
+                app.manage(creations);
                 app.manage(terminal::Terminals::new(zerus_client_core::default_hgs(), allowed));
                 // A replay never touches the real drafts either.
                 let drafts = std::sync::Arc::new(zerus_client_core::drafts::DraftStore::open(
@@ -420,6 +440,12 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                                 actions.session_write(computer, name, || {
                                     (pump.row_named(computer, name), pump.online(computer))
                                 })
+                            })
+                        },
+                        reconnect: {
+                            let app = app.handle().clone();
+                            std::sync::Arc::new(move |computer| {
+                                app.state::<commands::AppState>().reconnect(computer);
                             })
                         },
                         inspect: {
@@ -551,6 +577,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                         }
                     }
                 }
+                app.manage(updates::start(app.handle()));
                 if menu_bar {
                     lifecycle::start_fleet(|| app.state::<commands::AppState>().start_source());
                 }
@@ -770,6 +797,7 @@ pub(crate) fn exit_work(app: &AppHandle) {
             drafts.0.flush();
         }
     });
+    creations::flush_on_exit(app);
     actions::flush_on_exit(app);
 }
 
@@ -903,6 +931,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         actions::archive_page,
         actions::archived_activity,
         actions::cancel_archive_pages,
+        actions::reset_archive_pages,
         clipboard::copy_text,
         clipboard::copy_verbatim,
         organization::move_to_project,
@@ -912,12 +941,37 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         organization::move_project,
         organization::sort_project,
         organization::set_project_collapsed,
+        organization::project_folders,
         screens::screen_visible,
         screens::accounts_view,
         screens::machines_view,
         screens::machine_resolve,
         screens::machine_check,
         screens::projects_view,
+        screens::launch_accounts,
+        screens::launch_account_rows,
+        screens::launch_accounts_close,
+        newsession::new_session_context,
+        creations::creation_submit,
+        creations::creations_view,
+        creations::creation_details,
+        creations::creation_action,
+        creations::creation_plan,
+        newsession::new_session_form,
+        newsession::new_session_start,
+        newsession::new_session_plan,
+        newsession::launch_warning,
+        newsession::repository_fields,
+        newsession::worktree_snapshot,
+        newsession::worktree_catalog,
+        newsession::create_worktree,
+        newsession::list_directories,
+        newsession::create_directory,
+        newsession::pick_local_folder,
+        newsession::local_folder_exists,
+        newsession::opencode_models,
+        newsession::opencode_favorite,
+        newsession::opencode_start,
         terminal::terminal_connect,
         terminal::terminal_write,
         terminal::terminal_resize,
@@ -936,6 +990,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         composer::composer_undo_remove,
         composer::composer_allow_retry,
         composer::composer_refresh,
+        composer::composer_clear_control,
         composer::composer_tab,
         drops::dropped_files,
         composer::fetch::attachment_fetch,
@@ -970,6 +1025,13 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         composer::questions::question_decide,
         composer::questions::question_skip,
         composer::questions::question_cold,
+        updates::updates_view,
+        updates::updates_check,
+        updates::updates_set_channel,
+        updates::updates_set_automatic,
+        updates::updates_open,
+        updates::updates_copy_command,
+        updates::updates_restart,
         #[cfg(feature = "media")]
         voice::voice_open,
         #[cfg(feature = "media")]
@@ -1100,6 +1162,7 @@ mod tests {
                 clock: Arc::new(|| 1_793_000_100.0),
                 rows: Arc::new(|_, _, _| None),
                 facts: Arc::new(|_, _| None),
+                reconnect: std::sync::Arc::new(|_| {}),
                 inspect: Arc::new(|_, _| Err("timed out".into())),
                 dispatch: Arc::new(|_, _, _| Err("no call in these tests".into())),
             },

@@ -2660,6 +2660,7 @@ pub(crate) mod tests {
             Some(&a),
             "A's entry stays A's"
         );
+        until(&c, |_| tries.load(Ordering::SeqCst) == 1);
         // A still owns the lane: another Skip stays refused and keeps B's
         // definite notice instead of replacing A's in-flight entry.
         assert_eq!(c.question_skip(&b), QuestionReply::Busy);

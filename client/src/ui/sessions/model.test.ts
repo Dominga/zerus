@@ -86,6 +86,14 @@ describe("grouped rows", () => {
       expect(counts([off(1, reply)])).toEqual({ attention: 0, unread: 1, working: 0 });
     });
 
+    it("shows an offline computer's unread reply even while its last reply was in progress", () => {
+      const online = { ...on(1, { unread: false }), unreadReply: true, unreadCandidate: false };
+      const offline = { ...off(2, { unread: false }), unreadReply: true, unreadCandidate: false };
+      expect(counts([online])).toEqual({ attention: 0, unread: 0, working: 0 });
+      expect(counts([offline])).toEqual({ attention: 0, unread: 1, working: 0 });
+      expect(counts([{ ...offline, muted: true }])).toEqual({ attention: 0, unread: 0, working: 0 });
+    });
+
     it("counts work and background jobs only while online", () => {
       expect(counts([on(1, { status: "working" }), on(2, { status: "background" })]).working).toBe(2);
       expect(counts([off(1, { status: "working" }), off(2, { status: "background" })]).working).toBe(0);

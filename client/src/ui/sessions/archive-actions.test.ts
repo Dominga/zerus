@@ -10,6 +10,7 @@ vi.hoisted(() => {
 });
 vi.mock("../../bridge", () => ({
   archivePage: vi.fn(),
+  resetArchivePages: vi.fn(async () => {}),
   cancelArchivePages: vi.fn(async () => {}),
   runAction: vi.fn(),
   inspectSession: vi.fn(async () => null),
@@ -25,15 +26,15 @@ vi.mock("../../bridge", () => ({
 
 import * as bridge from "../../bridge";
 import { applyBatch, catalog } from "../../store/catalog";
-import { archive } from "../../store/archive";
+import { archive, archiveCount } from "../../store/archive";
 import { notices } from "../../store/actions";
 import { bindBatchConfirm } from "../../store/batch";
-import { selected, selectedKey, setSelectedKey, setStateFilter, stateFilter } from "../../store/ui";
+import { selected, selectedKey, setSelectedKey, setStateFilter, setProjectFilter, stateFilter } from "../../store/ui";
 import { actionEntries, renameSession } from "./ActionDialogs";
 import { snapshotOf } from "./actions-ui";
 import { clearArchiveMenuEntry, selectionCount } from "./selection-live";
 import type { BatchConfirmation } from "./selection";
-import { emptyBatch, type ArchivePage, type Outcome, type ViewRow } from "../../types";
+import { emptyBatch, type ArchivePage, type ArchiveRow, type Outcome, type ViewRow } from "../../types";
 
 // Restore session, Forget archived session and Clear archive through the
 // app's stores: the archive pages, the guarded calls and the batch.
@@ -42,16 +43,16 @@ const mocked = vi.mocked(bridge);
 const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
 const uuid = (n: number) => `20000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const done = (): Outcome => ({ outcome: "done", receipt: {}, cleanup: null });
-const archived = (n: number): ViewRow => ({
+const archived = (n: number, group = "ungrouped"): ArchiveRow => ({ group, rank: 0,
   name: `codex/example/r${n}`, agent: "codex", state: "archived", status: "ended", archive_id: uuid(n), archived_at: 100 + n,
   run_id: `run-r${n}`, conversation_id: `conv-r${n}`, resumable: true,
 });
 const key = (n: number) => `\narchive:${uuid(n)}`;
 const texts = () => notices().map((n) => n.text);
 const pages: ((p: ArchivePage) => void)[] = [];
-const page = (...rows: ViewRow[]): ArchivePage => ({ rows, next_cursor: "", previous_cursor: null, total: rows.length, position: 0 });
+const page = (...rows: ArchiveRow[]): ArchivePage => ({ rows, next_cursor: "", previous_cursor: null, total: rows.length, position: 0 });
 
-async function loadArchive(...rows: ViewRow[]) {
+async function loadArchive(...rows: ArchiveRow[]) {
   setStateFilter("archived");
   await flush();
   pages.splice(0).forEach((answer) => answer(page(...rows)));
@@ -70,6 +71,7 @@ beforeEach(async () => {
   confirmAnswer = true;
   bindBatchConfirm(async (copy) => { copies.push(copy); return confirmAnswer; });
   setStateFilter("all");
+  setProjectFilter([]);
   setSelectedKey(undefined);
   applyBatch({ ...emptyBatch(), computers: [{ computer: "", status: "live", attempt: 0 }], replaces: [{ computer: "", rows: [{ computer: "", key: "run:keep", row: { name: "codex/example/keep", agent: "codex", state: "paused", resumable: true, machine: "box", run_id: "run-keep", conversation_id: "conv-keep" } }] }] });
   await flush();
@@ -241,4 +243,33 @@ describe("Clear archive (Qt SessionSelection.cpp 171-181, 226-235)", () => {
     await flush();
     expect(clearArchiveMenuEntry()).toMatchObject({ disabled: true });
   });
+});
+
+it("Clear archive under a project filter confirms only that project's loaded identities and resets after the batch", async () => {
+  setProjectFilter(["alpha"]);
+  await loadArchive(archived(20, "alpha"), archived(21, "beta"));
+  const resets = mocked.resetArchivePages.mock.calls.length;
+  expect(archiveCount()).toBe("1");
+  const entry = clearArchiveMenuEntry();
+  expect(entry).toMatchObject({ disabled: false });
+  mocked.runAction.mockResolvedValue(done());
+  if ("action" in entry) entry.action!();
+  await flush();
+  expect(copies[0].details).toEqual(["box / codex/example/r20"]);
+  expect(mocked.runAction.mock.calls.map((c) => c[1])).toEqual([{ kind: "forget_archive", archive_id: uuid(20) }]);
+  expect(mocked.resetArchivePages.mock.calls.length).toBeGreaterThan(resets);
+  expect(archive.rows()).toEqual([]);
+});
+
+it("Cancel in filtered Clear archive keeps the rows and their backend placement", async () => {
+  setProjectFilter(["alpha"]);
+  await loadArchive(archived(22, "alpha"), archived(23, "beta"));
+  const resets = mocked.resetArchivePages.mock.calls.length;
+  confirmAnswer = false;
+  const entry = clearArchiveMenuEntry();
+  if ("action" in entry) entry.action!();
+  await flush();
+  expect(mocked.runAction).not.toHaveBeenCalled();
+  expect(mocked.resetArchivePages.mock.calls.length).toBe(resets);
+  expect(archive.rows()).toHaveLength(2);
 });

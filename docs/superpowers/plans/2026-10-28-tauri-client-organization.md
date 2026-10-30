@@ -32,7 +32,7 @@
 >   This device's choice changes only when Delete project removes the default project (`SessionOrganization::removeGroup`). Setting a default is 3c.
 > - **Local layout:** the collapsed state, the order of sessions inside a project and the default project are local, as in Qt. They live in `organization-layout.json` in the app data directory, because Qt's QSettings cannot be shared (deviation 1 below). The project order is shared (`project_order`).
 > - **Edits run while the catalog is ready.** Before that, the entries show disabled with the reason. Qt queues edits made before its first reply. This client refuses them until its first state, also on top of a draft restored from the last run (deviation 4).
-> - **Never `swarm initialize`.** This client has no GUI cache to import. An initialize from it would mark the catalog imported and skip the Qt GUI's one-time import (`src/swarm/mod.rs:212-215`, `SwarmController.cpp:86-88`). With `initialized: false`, edits stay disabled. Task 10 files the follow-up for computers without the Qt GUI.
+> - **The client never calls `swarm initialize`.** It has no GUI cache to import (`SwarmController.cpp:86-88`). With `initialized: false`, edits stay disabled. For `zerus-5wmh.48`, the owner approved hgs-side bootstrap of an empty, name-free catalog only when Qt's settings store is definitely absent (2026-10-29). A `swarm get` or first read of an explicit organization subscription uses one idempotent operation under the existing catalog lock when `imported` is false. Existing operations, peers, bindings and machine names are preserved; no creator provenance or digest is needed. Get retains its existing locked load, self-binding and machine-name refresh, save and stable uninitialized node identity. Only steady-state organization watch reads stay lock-free. Hello remains unchanged and may create an uninitialized catalog, but never bootstraps. Store presence or uncertainty prevents bootstrap and keeps the Qt import path unchanged; a watch retries that probe only on a new subscription. Before the catalog save, hgs writes a separate node-bound `gui-import-pending.json`, retaining `imported=true` for old callers. A later `initialize` with that marker imports only missing fields, saves the catalog, then clears the marker. Existing values, tombstones and concurrent heads survive; imported catalogs without a matching marker remain a no-op. Qt stores, catalog and replica wire formats stay unchanged. See `docs/reference.md` for the platform probes, crash ordering and compatibility boundary.
 > - **A failed or timed-out apply is sent again, as in Qt** (coordinator ruling, 2026-10-28; it withdraws this plan's first "never sent again" rule):
 >   - **Qt:** a failure leaves `m_base`, `m_desired` and `m_versions` as they were (`SwarmController.cpp:67-73`), and so does a reply of another schema (194-196). The next 5 s `refresh` sends `apply` again from them (55, 96-101; `send` 102-110). An edit made meanwhile restarts the 120 ms flush (94), which sends the same base and versions with the newer desired state.
 >   - **Why this is not a replay:** it is reconciliation toward a desired state, not the repeat of a side effect. `swarm apply` writes each field that differs between base and desired, with the observed versions as parents (`src/swarm/model.rs:126-201`; `catalog.rs:418-444`). A duplicate of a diff that already landed adds a head with the same value, and the snapshot reports conflicts only for differing values (`model.rs:298-312`), so it is a no-op for the list. A stale base surfaces as a conflict instead of clobbering anything. The spec's never-replay rule covers non-idempotent actions (send, interrupt, terminate), and dropping the user's move on a network blip would regress from Qt.
@@ -45,7 +45,13 @@
 >   - **Here:** the controller's base, desired state and versions go to `organization-draft.json` in the app data directory, beside `organization-layout.json` (`organization-draft-replay.json` in a replay). The file is written atomically, through a temporary file and a rename, as `client/core/src/readmarks.rs:117-140` does. The hub writes it whenever pending edits change, before their apply runs, and removes it when they settle.
 >   - **On start:** the hub loads the draft, and the list shows it at once. Nothing is sent before the first organization state. That state is not adopted under the draft; it makes the controller ready and starts the 120 ms flush. Then one apply carries the saved base, desired state and versions, so a catalog that changed meanwhile surfaces as a conflict through `swarm apply`'s merge, never as an overwrite. After that, the rules above apply.
 >   - A replay starts from the fixture's catalog, so it removes a leftover replay draft at start.
-> - **A rename keeps the project.** While the client runs, the same run under a new name moves the old name's explicit membership to the new name, as Qt's `renameSession` does. It is one apply, and only when the old name was explicit. With Qt and this client side by side, both migrate the same rename (Qt on its own rename, `SessionsWindow.cpp:1942`, and on observed ones by run token, `SessionOrganization::observe`, `SessionOrganization.cpp:223-230`). Task 4 tests that the second migration is a no-op or a clean merge. Qt also follows renames made while it was closed, by persisted run tokens; that is a follow-up (Task 10).
+> - **A rename keeps the project.** While the client runs, the same run under a new name moves the old name's explicit membership to the new name, as Qt's `renameSession` does. It is one apply, and only when the old name was explicit. With Qt and this client side by side, both migrate the same rename (Qt on its own rename, `SessionsWindow.cpp:1942`, and on observed ones by run token, `SessionOrganization::observe`, `SessionOrganization.cpp:223-230`). Task 4 tests that the second migration is a no-op or a clean merge. The client also follows renames made while it was closed through the persisted live-run tokens specified below (`zerus-5wmh.47`).
+>   - **Persisted live run identities (`zerus-5wmh.47`, webui rulings, 2026-10-29).** `swarm::runs::Runs` records `machine\nrun -> member`, as Qt's `m_runs` (`SessionOrganization.cpp:59, 223-231, 336`). Tokens are bounded by both 100,000 entries and `swarm::layout::MAX_BYTES` (24 MiB) of encoded JSON, with exact escaped-byte accounting. Oldest-written entries are evicted until both bounds hold; an unchanged observation does not refresh age. Archives and empty identities are excluded. Qt never evicts: these count and byte caps are the bounded-state difference. No per-component length limits are added. Tokens live separately in `organization-runs.json` (`organization-runs-replay.json` for an explicit replay flag), beside the layout, so a collapse or local order change never rewrites them.
+>   - **Rename acknowledgement (`.47`).** A known run under a new name enters `Intent::Renamed`; only an explicit old member causes an apply. The old persisted member stays until that rename's pending draft is durably saved. A failed or uncertain save leaves it old, so the next start discovers the rename again. An authoritative membership check that needs no edit acknowledges immediately; an absence caused by our own pending draft waits until every pending draft change is written. A no-op queued behind an already durable pending draft acknowledges without requiring another write. A migration another writer already made sends nothing. Observed names suppress duplicate intents independently of persisted names; indexed acknowledgement handles chained renames in order. At most 100,000 pending acknowledgements are held; dropping an old one conservatively leaves its old token for rediscovery.
+>   - **Independent token writer (`.47`).** Startup reads use typed structs off main, with the same 24 MiB read limit, never truncate-parsing. Malformed JSON or a wrong shape at a supported/missing version starts from this run's observations and is replaced by the next save. A complete parseable object with a version greater than 1 stays untouched for the whole run, including exit; typed version probing also protects a newer file whose runs shape changed. Other I/O errors leave observations in memory, prevent replacement of the unreadable history, and retry the load later. The 24 MiB limit takes precedence over version protection (owner ruling, 2026-10-29): oversized history resets without parsing its version, even if it claims a newer one. Only complete parseable files within the bound receive newer-version protection. Successful late loads retain newly observed tokens, even after their rows leave. A dedicated `RunsWriter` thread atomically checkpoints changes at most once per second; its coalescing mailbox never grows with requests. It takes a bounded snapshot of shared strings under the pump lock, then serializes and writes without that lock or the organization worker. Applies, drafts and renames never wait on token serialization or I/O. Qt's store is never written.
+>   - **Token checkpoint on exit (`.47`).** The existing `Organization::flush` requests a forced checkpoint from that same background writer and waits at most 500 ms, then flushes the draft and layout independently. No token serialization or file I/O runs on main. `Writer` owns the worker handle; code copies it briefly under `Shared.writer`, releases that lock, then requests a pass. Only the dedicated token thread takes `RunsWriter`; those locks are never held together. A stuck token write cannot stop the draft/layout checkpoint. A token first seen inside the final debounce can miss the checkpoint when this bounded wait expires; unacknowledged renames retain the old saved member for safe rediscovery.
+
+
 > - **Move to project takes a set of members.** It is one `swarm apply` from one snapshot. The session menu passes one member; the batch menu of `zerus-5wmh.20` passes the selection.
 > - **Sort sessions by name** compares titles case-folded, then as written, then by member (deviation 2).
 > - **Headers and colours:** a header's colour is the project's `color`, else its palette slot, as on 3a's Projects screen. The vivid style and local colours are 3c.
@@ -57,11 +63,8 @@
 >   2. Sort sessions by name folds case, then compares as written, then by member. Qt uses `QString::localeAwareCompare` (`SessionsWindow.cpp:2603-2608`), which has no equivalent in the core.
 >   3. No `swarm initialize` (above).
 >   4. Edits made before the first ready catalog are refused, not queued (above).
->   5. Renames made while the client was closed are not followed yet (Task 10 follow-up).
->   6. Closed by `zerus-5wmh.40` (coordinator ruling, 2026-10-29): archived sessions are placed as Qt places them. An archived row is keyed by its archive identity, `machine\narchive\n<archive id>` (`SessionOrganization.cpp:225`); its project is the shared organization's entry for that identity, else its run's remembered project (deviation 1's run memory), else the default project, unassigned. After a verified Terminate whose run is archived, the archive identity moves into the live session's project in one swarm apply (`SessionsWindow.cpp:3106-3125`). The Archive view groups by project (newest archived first, `3238-3242`), the project filter and counts apply under Archive, Clear archive works under a project filter, and Move to project moves the archive identity. Split: the placement, the run memory, the post-Terminate intent and the `archive_page` group and rank go to the core owner; the Archive view and `zerus-5wmh.45` to the UI. Until it lands the interim refusals stay:
->      - the Archive view and its count ignore the project filter (`store/archive.ts` `inScope`);
->      - Clear archive takes no row while a project filter is set, and says why;
->      - Move to project is disabled for an archived row, and the store refuses one.
+>   5. Implemented by `zerus-5wmh.47`: persisted live-run identities follow renames made while the client was closed, with the acknowledgement and bounded token storage above. Qt never evicts its `m_runs`; the client evicts oldest-written entries to satisfy both the 100,000-token and 24 MiB bounds (repository rule: no unbounded per-session state).
+>   6. Closed by `zerus-5wmh.40` (coordinator ruling, 2026-10-29): archived sessions are placed as Qt places them. An archived row is keyed by its archive identity, `machine\narchive\n<archive id>` (`SessionOrganization.cpp:225`); its project is the shared organization's entry for that identity, else its run's remembered project (deviation 1's run memory), else the default project, unassigned. After a verified Terminate whose run is archived, the archive identity moves into the live session's project in one swarm apply (`SessionsWindow.cpp:3106-3125`). The Archive view groups by project (newest archived first, `3238-3242`), the project filter and counts apply under Archive, Clear archive works under a project filter, and Move to project moves the archive identity. Implementation: core owns the backend and the UI half after the coordinator's reassignment. The UI uses the existing headers and cards. Request-tagged deltas for the shown reply apply immediately; those for the in-flight reply are held (50 per computer, newest per key) and merged after the snapshot; other tags are dropped. Hiding Archive only cancels reads and preserves loaded placement. Filter, project, query and date changes, Refresh and the confirmed Clear archive batch reset both sides through `reset_archive_pages`. An empty next reply keeps the old rows, identities and shown request live while showing Archive changed (ArchiveBrowser.cpp:37); its separate answered watermark rejects older replies. The interim project-filter, Clear archive and Move refusals are removed by `.40`/`.45`.
 
 **Tech Stack:** Rust 1.99.1 (`client/core`, `client/src-tauri`, Tauri 2), SolidJS 1.9 + TypeScript + Vite, vitest, Python 3 stdlib for the fake `hgs`.
 
@@ -5041,3 +5044,52 @@ git commit -m "docs(client): the shared organization in the Sessions list, its s
 | The vivid style and this device's project colours | 3c, `zerus-5wmh.25` |
 | New session… in the header menu | phase 5 |
 | Renames while the client was closed, a catalog without the Qt GUI, card colours and the background menu | the Task 10 follow-ups |
+
+## As built: persisted live-run identities (`zerus-5wmh.47`)
+
+`swarm::runs::Runs` keeps Qt's persisted `m_runs` identity contract
+(`SessionOrganization.cpp:223-231, 336`), with the separate files and count/byte
+bounds in Decisions. `Runs::from_json` and `Pump::load_runs` return
+`runs::DecodeError::Newer(version)` or `Invalid(error)`. The dedicated writer
+replaces oversized or malformed supported history from this start's observations,
+leaves a complete newer-version file within the bound untouched for the whole
+run, and retries other I/O failures without overwriting history. The owner ruled
+that the 24 MiB size limit comes first: an oversized file's version is never
+parsed, including a claimed newer version.
+
+`Runs` separates observed and saved members; `Snapshot::to_json` runs only on the
+token writer's thread. `Grouping::acknowledge_rename` advances the saved token
+after a durable draft or authoritative no-op. `Organization::save_draft` releases
+queued acknowledgements only once every draft change is durable; this also
+handles a no-op behind an already saved pending draft without another write.
+A failed save retains all acknowledgements. The existing exit path bounds the
+token checkpoint at 500 ms before the independent draft/layout flush. Regression
+tests cover restart after a failed draft, corrupt and oversized replacement,
+newer-version preservation across saves and exit, I/O retry, concurrent layout
+saves, and both oversized version 1 and version 2 files.
+
+## As built: CLI-side catalog bootstrap (`zerus-5wmh.48`)
+
+`swarm::bootstrap::maybe` is the shared operation for get and the initial
+organization read, called with the existing catalog lock held. It changes only
+`imported` plus the separate node-bound pending GUI-import marker; the marker is
+durable first. Uninitialized catalogs created by older get calls or watch hello
+are eligible, with all existing metadata retained. Get keeps its ordinary
+loader and save; it still persists an uninitialized identity when Qt settings
+exist. The watch job marks only an explicit subscription as eligible; changed-file
+and safety refreshes never probe again or take the write lock. A new subscription
+can retry a previously undecidable probe. Hello is unchanged.
+
+Pending initialize imports only absent fields through `Store::import_missing`,
+keeping tombstones and every concurrent head. It saves the catalog before
+removing the marker. Crash tests pin both persistence boundaries and the
+missing-field retry. Qt's `SwarmController.cpp:76-88` remains the first-start
+import reference; the explicit empty CLI bootstrap is the owner-approved change.
+The catalog Store and replica wire formats stay unchanged. `docs/reference.md`
+records the platform probes and older-CLI compatibility boundary.
+
+An unreadable, malformed or unsupported pending marker blocks only bootstrap.
+Get and the first organization read still return the uninitialized state without
+replacing the marker; one stderr note per process avoids repeated watch noise.
+Explicit initialize keeps refusing the unknown import state. Unit and real CLI
+get/watch regressions pin the preserved catalog, marker and once-only note.

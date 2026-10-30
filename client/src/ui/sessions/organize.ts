@@ -1,8 +1,10 @@
 import { batch, createSignal } from "solid-js";
 import { listRows, type Row } from "./model";
+import { archive } from "../../store/archive";
 import { catalog } from "../../store/catalog";
 import { grouping, groupOf, headerOf, INBOX, moveProject, moveToProject } from "../../store/organization";
 import { multi, setMulti, selectedKey } from "../../store/ui";
+import { projectOf } from "./creations-ui";
 
 // Bulk selection and drag-and-drop organisation of the session list, after
 // tray/src/SessionList.cpp (mousePressEvent, selectRange, placement, dropEvent).
@@ -60,7 +62,8 @@ export function placement(rows: Row[], offsets: number[], heights: number[], ove
   // A subagent row is not a target of its own: the whole family is one session.
   while (i > 0 && rows[i].type === "child") i--;
   const over = rows[i];
-  const group = over.type === "header" ? over.project : over.type === "card" ? groupOf(over.session.key) : groupOf(over.parent.key);
+  const group = over.type === "header" ? over.project : over.type === "card" ? groupOf(over.session.key)
+    : over.type === "creation" ? projectOf(over.creation, grouping()) : groupOf(over.parent.key);
   const top = offsets[i];
   let bottom = top + heights[i];
   if (item.kind === "session") for (let n = i + 1; n < rows.length && rows[n].type === "child"; n++) bottom = offsets[n] + heights[n];
@@ -89,8 +92,8 @@ export function placement(rows: Row[], offsets: number[], heights: number[], ove
 export function applyDrop(item: DragItem, d: Drop) {
   if (d.before === item.id) return;
   if (item.kind === "group") { void moveProject(item.id, d.before); return; }
-  const moving = catalog.rows[item.id];
+  const moving = catalog.rows[item.id] ?? archive.row(item.id);
   // Qt's moveSession ignores a project that is not listed (SessionOrganization.cpp:188-189), such as the Inbox once it is deleted.
   if (!moving || (grouping().loaded && !headerOf(d.group))) return;
-  void moveToProject([moving], d.group, d.before ? catalog.rows[d.before] : undefined);
+  void moveToProject([moving], d.group, d.before ? catalog.rows[d.before] ?? archive.row(d.before) : undefined);
 }

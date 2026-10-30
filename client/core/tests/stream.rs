@@ -174,13 +174,18 @@ fn a_fatal_error_ends_the_stream_and_the_next_one_goes_live() {
     let fake = FakeHgs::new(
         "stream_fatal",
         json!({"": {"runs": [
-            [{"file": "fatal.ndjson"}, {"serve": true}],
+            [{"file": "fatal.ndjson"}, {"sleep": 0.6}, {"serve": true}],
             [{"lines": [hello("workstation"), catalog(&[("r2", "codex/sample-project/tests")])]}, {"serve": true}]
         ]}}),
     );
     let (tx, rx) = channel();
     let mut seen = Seen::new(rx);
-    let handle = stream::spawn(&fake.path(), &ComputerId::local(), quick(), tx);
+    let timing = Timing {
+        // The fake must see EOF before close may kill it, even on a loaded host.
+        stop_grace: common::WAIT + Duration::from_secs(1),
+        ..quick()
+    };
+    let handle = stream::spawn(&fake.path(), &ComputerId::local(), timing, tx);
     let failed = seen.until("reconnecting", |event| reconnecting(event, 1));
     // The client closed the failed stream itself.
     common::eventually("EOF of the failed stream", || fake.eofs("") >= 1);

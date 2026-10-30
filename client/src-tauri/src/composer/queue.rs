@@ -826,6 +826,7 @@ mod tests {
                     ))
                 }),
                 facts: Arc::new(|_, _| None),
+                reconnect: Arc::new(|_| {}),
                 inspect: Arc::new(|_, _| Err("timed out".into())),
                 dispatch: Arc::new(move |target, action, id| {
                     lock(&recorded).push((target, action.clone(), id.clone()));

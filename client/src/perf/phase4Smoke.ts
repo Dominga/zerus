@@ -115,6 +115,33 @@ async function terminalStep() {
   setDetailTab("activity");
 }
 
+async function savedDraftsDialogStep(goToSession = false) {
+  const opener = document.querySelector<HTMLButtonElement>('button[aria-label="Saved drafts"]');
+  if (!opener) throw new Error("the Saved drafts button is missing");
+  opener.click();
+  const dialog = () => document.querySelector<HTMLDialogElement>("dialog.saved-drafts");
+  await until(() => dialog()?.open === true, 10_000, "Saved drafts did not open");
+  if (!goToSession) {
+    await until(() => document.activeElement === dialog()?.querySelector("[data-initial]"), 1000, "Saved drafts did not focus Close");
+    button("Close", dialog()!).click();
+    await until(() => dialog()?.open === false && document.activeElement === opener, 1000, "Saved drafts did not return focus");
+    return;
+  }
+  await until(() => button("Go to session", dialog()!).getAttribute("aria-disabled") !== "true", 5000, "Go to session did not become available");
+  button("Go to session", dialog()!).click();
+  await until(() => dialog()?.open === false && document.activeElement === document.querySelector(".cmp-editor"), 5000, "Go to session did not focus the editor");
+  const reopened = document.querySelector<HTMLButtonElement>('button[aria-label="Saved drafts"]');
+  if (!reopened) throw new Error("the Saved drafts button is missing after Go to session");
+  reopened.click();
+  await until(() => dialog()?.open === true, 10_000, "Saved drafts did not reopen");
+  button("Close", dialog()!).click();
+  await until(() => dialog()?.open === false && document.activeElement === reopened, 1000, "Saved drafts did not return focus")
+    .catch((error) => {
+      const active = document.activeElement;
+      throw new Error(`${error.message}; ${JSON.stringify({ active: active?.outerHTML.slice(0, 500), openerConnected: reopened.isConnected, dialogOpen: dialog()?.open, composerKey: composer.view()?.key, composerLoaded: composer.view()?.loaded })}`);
+    });
+}
+
 async function draftsStep() {
   await select(API);
   type("phase 4 smoke");
@@ -303,7 +330,9 @@ export async function phase4Smoke(allowed: boolean, smokeFile?: string) {
   }
   const steps: [string, () => Promise<void>][] = [
     ["terminal", terminalStep],
+    ["saved-drafts-dialog", () => savedDraftsDialogStep()],
     ["drafts", draftsStep],
+    ["saved-drafts-go-to", () => savedDraftsDialogStep(true)],
     ["attach", () => attachStep(smokeFile!)],
     ["send", () => sendStep(smokeFile!)],
     ["cold", coldStep],

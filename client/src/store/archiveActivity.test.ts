@@ -10,6 +10,7 @@ vi.mock("../bridge", () => ({
   ARCHIVED_ACTIVITY_BUSY: "busy",
   archivedActivity: vi.fn(() => new Promise(() => {})),
   archivePage: vi.fn(() => new Promise(() => {})),
+  resetArchivePages: vi.fn(async () => {}),
   cancelArchivePages: vi.fn(async () => {}),
   runAction: vi.fn(),
   inspectSession: vi.fn(async () => null),

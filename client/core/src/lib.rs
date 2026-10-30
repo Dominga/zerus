@@ -60,6 +60,7 @@ pub mod terminal;
 pub mod terminal_launch;
 pub mod termination_cleanup;
 pub mod trayicon;
+pub mod updates;
 pub mod view;
 pub mod views;
 pub mod voice;

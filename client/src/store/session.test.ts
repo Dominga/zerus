@@ -1,14 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
 import { createComputed, createRoot } from "solid-js";
+import * as bridge from "../bridge";
+import { archive } from "./archive";
 import { receive } from "./session";
 import { composer } from "./composer";
 import { questions } from "./questions";
 import { notices } from "./actions";
-import { detailTab, setDetailTab } from "./ui";
+import { detailTab, setDetailTab, setStateFilter } from "./ui";
 import { catalog } from "./catalog";
-import { grouping, groupOf } from "./organization";
+import { grouping, groupOf, groups } from "./organization";
 import { rowOut } from "./testing";
-import { emptyBatch, type GroupingOut } from "../types";
+import { emptyBatch, type GroupingOut, type ArchivePage } from "../types";
 
 // The wiring reads the page's query (`?select=`, store/ui.ts); the tests run without a page.
 vi.hoisted(() => { vi.stubGlobal("location", new URL("http://localhost/")); });
@@ -76,4 +78,22 @@ describe("composer events and the question card", () => {
     composer.apply(view("studio\nclaude/sample-project/review"));
     expect(questions.view()).toBeUndefined();
   });
+});
+
+it("routes archived placement through receive without retaining it in live groups", async () => {
+  let answer!: (p: ArchivePage) => void;
+  const read = vi.spyOn(bridge, "archivePage").mockImplementation(() => new Promise((resolve) => { answer = resolve; }));
+  receive({ ...emptyBatch(), computers: [{ computer: "", status: "live", attempt: 0 }] });
+  setStateFilter("archived");
+  archive.refresh();
+  const request = read.mock.calls.at(-1)![5];
+  const key = "archive:10000000-0000-4000-8000-000000000001";
+  receive({ ...emptyBatch(), groups: [{ computer: "", key, group: "alpha", rank: 30, archive_request: request }] });
+  answer({ rows: [{ name: "codex/sample-project/review", state: "archived", archive_id: key.slice(8), group: "ungrouped", rank: 0 }], total: 1, position: 0, next_cursor: "", previous_cursor: null });
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  expect(archive.row(`\n${key}`)).toMatchObject({ group: "alpha", rank: 30 });
+  expect(groups[`\n${key}`]).toBeUndefined();
+  expect(groupOf(`\n${key}`)).toBe("alpha");
+  setStateFilter("all");
+  read.mockRestore();
 });

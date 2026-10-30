@@ -376,17 +376,16 @@ mod tests {
     /// A fake `hgs`: prints `help` for `--help`, else `reply`.
     #[cfg(unix)]
     fn fake_hgs(dir: &Path, help: &[u8], reply: &[u8]) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(dir.join("help"), help).unwrap();
         std::fs::write(dir.join("reply"), reply).unwrap();
         let script = dir.join("hgs");
-        std::fs::write(
+        let _ = std::fs::remove_file(&script);
+        std::os::unix::fs::symlink(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/fake_hgs_worktree_policy.sh"),
             &script,
-            "#!/bin/sh\nhere=$(dirname \"$0\")\necho \"$*\" >> \"$here/calls\"\ncase \"$*\" in *--help*) cat \"$here/help\"; exit 0;; esac\ncat >/dev/null\ncat \"$here/reply\"\n",
         )
         .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         script
     }
 

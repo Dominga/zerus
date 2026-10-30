@@ -16,6 +16,7 @@ vi.mock("../../bridge", () => ({
   archivedActivity: vi.fn(() => new Promise(() => {})),
   activityPort: { follow: vi.fn(async () => {}), unfollow: vi.fn(async () => {}) },
   archivePage: vi.fn(() => new Promise(() => {})),
+  resetArchivePages: vi.fn(async () => {}),
   cancelArchivePages: vi.fn(async () => {}),
   runAction: vi.fn(),
   inspectSession: vi.fn(async () => null),
@@ -62,13 +63,13 @@ import { applyBatch, toSession } from "../../store/catalog";
 import { restoreSession } from "../../store/restores";
 import { selected, setPage, setSelectedKey, setStateFilter } from "../../store/ui";
 import { snapshotOf } from "./actions-ui";
-import { emptyBatch, type ActivityEvent, type ArchivePage, type ArchivedActivity, type ViewRow } from "../../types";
+import { emptyBatch, type ActivityEvent, type ArchivePage, type ArchiveRow, type ArchivedActivity, type ViewRow } from "../../types";
 
 const mocked = vi.mocked(bridge);
 const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
 const uuid = (n: number) => `10000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const ev = (seq: number, type: string, detail: string): ActivityEvent => ({ seq, type, source: "codex", detail, at: 1_793_000_000 + seq });
-const archivedRow = (n: number): ViewRow => ({ name: `codex/example/a${n}`, agent: "codex", state: "archived", status: "ended", archive_id: uuid(n), archived_at: 100 + n, run_id: `run-a${n}`, conversation_id: `conv-a${n}` });
+const archivedRow = (n: number): ArchiveRow => ({ group: "ungrouped", rank: 0, name: `codex/example/a${n}`, agent: "codex", state: "archived", status: "ended", archive_id: uuid(n), archived_at: 100 + n, run_id: `run-a${n}`, conversation_id: `conv-a${n}` });
 const liveRow = (status: string, extra: Partial<ViewRow> = {}) => toSession("", "run:run-live", { name: "codex/example/live", agent: "codex", state: "running", status, run_id: "run-live", conversation_id: "conv-live", summary: "cargo test", ...extra });
 
 /** A read-only source as the archived store gives it: recorded events, no older pages, no end. */

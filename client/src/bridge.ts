@@ -1,8 +1,10 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type Batch, type ComputerId, type Details, type EditOutcome, type Outcome, type ReadMark, type Target, type TerminalConnected, type TerminalFacts, type TerminalFinished, type TerminalStatus, type TerminalTarget, type ArchivePage, type ArchivedActivity, type ProcessTarget, type Answer, type ComposerTab, type ComposerView, type Inspect, type SendReply, type SessionRef, type AttachmentRef, type Fetched, type ConflictsPage, type DraftSource, type SavedDraftDetail, type SavedDraftsPage, type QuestionEdit, type QuestionReply } from "./types";
+import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type Batch, type ComputerId, type Details, type EditOutcome, type Outcome, type ReadMark, type Target, type TerminalConnected, type TerminalFacts, type TerminalFinished, type TerminalStatus, type TerminalTarget, type ArchivePage, type ArchivedActivity, type ProcessTarget, type Answer, type ComposerTab, type ComposerView, type Inspect, type SendReply, type SessionRef, type AttachmentRef, type Fetched, type ConflictsPage, type DraftSource, type SavedDraftDetail, type SavedDraftsPage, type QuestionEdit, type QuestionReply, type ClearControl } from "./types";
+import type { CreatedWorktree, CreationAction, CreationAdmission, CreationCard, CreationEvent, FolderOut, LaunchAccounts, LaunchChoices, LaunchPlan, LaunchStart, MachineMeta, NewSessionContext, NewSessionFormInput, NewSessionFormView, PathStyle, RepositoryFields } from "./types";
 import type { ActivityPort, FollowRequest } from "./store/activity";
 import { documentVisibility, type PageVisibility } from "./store/visibility";
+import { emptyUpdatesView, type UpdateChannel, type UpdatesView } from "./types";
 
 // The one path from the Rust side to the stores. The frontend asks for the next
 // batch from requestAnimationFrame with one call in flight; `next_batch`
@@ -274,6 +276,12 @@ export async function cancelArchivePages(through: number): Promise<void> {
   await invoke<null>("cancel_archive_pages", { through }).catch(() => {});
 }
 
+/** Resets the loaded placement identities as well as cancelling reads through this request. */
+export async function resetArchivePages(through: number): Promise<void> {
+  if (!inTauri()) return;
+  await invoke<null>("reset_archive_pages", { through }).catch(() => {});
+}
+
 /** Puts text on the clipboard: from Rust in the app, the page's clipboard in a browser. */
 export async function copyText(text: string): Promise<void> {
   if (inTauri()) return invoke<void>("copy_text", { text });
@@ -333,6 +341,15 @@ export async function sortProject(project: string): Promise<EditOutcome> {
   return invoke<EditOutcome>("sort_project", { project });
 }
 
+/**
+ * A project's folders in the organization the Sessions list shows, at most 200 (New session's copy,
+ * SessionsWindow.cpp:2923). A read of what the app holds, never `hgs`; outside the app there are none.
+ */
+export async function projectFolders(project: string): Promise<FolderOut[]> {
+  if (!inTauri()) return [];
+  return invoke<FolderOut[]>("project_folders", { project });
+}
+
 /** Expand or collapse a project: this device's layout, no `hgs`. */
 export async function setProjectCollapsed(project: string, collapsed: boolean): Promise<void> {
   if (!inTauri()) return;
@@ -383,6 +400,97 @@ export function onScreensChanged(listener: (screen: Screen) => void): () => void
   let stop: (() => void) | undefined;
   let stopped = false;
   void listen<string>("screens-changed", (event) => listener(event.payload as Screen)).then((unlisten) => {
+    if (stopped) unlisten();
+    else stop = unlisten;
+  });
+  return () => {
+    stopped = true;
+    stop?.();
+  };
+}
+
+// New session (client/src-tauri `newsession.rs`, and `screens.rs` for the
+// accounts). In the browser build every command answers a failure.
+
+const NEW_SESSION_DESKTOP_ONLY = "New session needs the desktop app.";
+
+async function desktopNewSession<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  if (!inTauri()) throw NEW_SESSION_DESKTOP_ONLY;
+  return invoke<T>(command, args);
+}
+
+/** The generated branch, this process's Windows session and the remembered choices. */
+export const newSessionContext = () => desktopNewSession<NewSessionContext>("new_session_context");
+/** The form's view: the core's `launch::shown` with Auto, its path and the project worktree derived. */
+export const newSessionForm = (input: NewSessionFormInput) => desktopNewSession<NewSessionFormView>("new_session_form", { input });
+/** What Start does now; asked again at the click. */
+export const newSessionStart = (input: NewSessionFormInput, submitted: boolean) => desktopNewSession<LaunchStart>("new_session_start", { input, submitted });
+/** The plan at the click: the form's fields and what the core derives from them come from `input`, as Start reads them. */
+export const newSessionPlan = (input: NewSessionFormInput, choices: LaunchChoices) => desktopNewSession<LaunchPlan>("new_session_plan", { input, choices });
+/**
+ * Background creation's admission (Task 5's `creation_submit`): `{ admitted: id }` or `{ refused: text }`. A
+ * rejected call is a lost answer, an unknown outcome: never sent again.
+ */
+export const creationSubmit = (plan: LaunchPlan) => desktopNewSession<CreationAdmission>("creation_submit", { plan });
+/** Every unbound creation's card, newest first, at most 128 (Task 5's `creations_view`); a read. */
+export const creationsView = () => desktopNewSession<CreationCard[]>("creations_view");
+/** The operation's details text (`creation::details` with Qt's stamps); null once it is gone. A read. */
+export const creationDetails = (id: string) => desktopNewSession<string | null>("creation_details", { id });
+/** One action on the exact operation; a rejection is the host's text (the operation is gone or bound). Never sent again. */
+export const creationAction = (id: string, action: CreationAction) => desktopNewSession<void>("creation_action", { id, action });
+/** Edit choices…: the operation while it can still be edited, else null. A read. */
+export const creationPlan = (id: string) => desktopNewSession<Record<string, unknown> | null>("creation_plan", { id });
+
+/**
+ * `creations`: each changed card, or `{ id, removed: true }` for an evicted operation; resolves with the stop
+ * once listening, so the cards read after it miss no change.
+ */
+export const onCreations = (listener: (event: CreationEvent) => void) => onEvent<CreationEvent>("creations", listener);
+/** The Windows-session warning's text when Start must ask first; `computer` is "" for this one. */
+export const launchWarning = (local: MachineMeta, computer: ComputerId) => desktopNewSession<string | null>("launch_warning", { local, computer });
+/** The repository fields; `fresh` (the old record's folder name, kept even when empty) starts them anew on another computer or style. */
+export const repositoryFields = (url: string, destination: string, style: PathStyle, custom: boolean, fresh: string | null = null) =>
+  desktopNewSession<RepositoryFields>("repository_fields", { url, destination, style, custom, fresh });
+/** The folder's saved catalog, `{}` without one. */
+export const worktreeSnapshot = (computer: ComputerId, path: string) => desktopNewSession<Record<string, unknown>>("worktree_snapshot", { computer, path });
+/** The folder's catalog: a fresh snapshot, or `hgs worktrees --path`; a rejection is its error. */
+export const worktreeCatalog = (computer: ComputerId, path: string, refresh: boolean) => desktopNewSession<Record<string, unknown>>("worktree_catalog", { computer, path, refresh });
+/**
+ * Create worktree: the new checkout and `catalog` (the folder's catalog the dialog opened with, naming the repository)
+ * listing it as verified; a rejection is Qt's text. Never retried.
+ */
+export const createWorktree = (computer: ComputerId, path: string, catalog: Record<string, unknown>, branch: string, base: string, destination: string) =>
+  desktopNewSession<CreatedWorktree>("create_worktree", { computer, path, catalog, branch, base, destination });
+export const listDirectories = (computer: ComputerId, path: string, hidden: boolean) => desktopNewSession<Record<string, unknown>>("list_directories", { computer, path, hidden });
+/** New folder in the folder browser: its receipt. A lost one is read again, never sent again. */
+export const createDirectory = (computer: ComputerId, path: string) => desktopNewSession<Record<string, unknown>>("create_directory", { computer, path });
+/** The system folder dialog on this computer; null when cancelled. */
+export const pickLocalFolder = (start: string) => desktopNewSession<string | null>("pick_local_folder", { start });
+export const localFolderExists = (path: string) => desktopNewSession<boolean>("local_folder_exists", { path });
+/** The folder's OpenCode model catalog; `name` words an older computer's update text. */
+export const openCodeModels = (computer: ComputerId, folder: string, name: string) => desktopNewSession<Record<string, unknown>>("opencode_models", { computer, folder, name });
+/** One star: one request identity, never sent again. */
+export const openCodeFavorite = (computer: ComputerId, value: string, favorite: boolean, name: string) =>
+  desktopNewSession<Record<string, unknown>>("opencode_favorite", { computer, value, favorite, name });
+/** Start OpenCode on {computer}. */
+export const openCodeStart = (computer: ComputerId) => desktopNewSession<Record<string, unknown>>("opencode_start", { computer });
+/**
+ * One computer's account rows, on the dialog's open, a computer change (`refresh` false) and Refresh: reads its catalog
+ * (sharing a running read), then asks for limits. `agent` is the dialog's requested agent.
+ */
+export const launchAccounts = (computer: ComputerId, refresh: boolean, agent: string | null = null) =>
+  desktopNewSession<LaunchAccounts>("launch_accounts", { computer, refresh, agent });
+/** The rows again, reading nothing; the grouping stays the last catalog's. */
+export const launchAccountRows = (computer: ComputerId) => desktopNewSession<LaunchAccounts>("launch_account_rows", { computer });
+/** The dialog closed: its computer's replies stop sending `launch-accounts-changed`. */
+export const launchAccountsClose = () => desktopNewSession<void>("launch_accounts_close");
+
+/** Calls `listener` with the computer whose catalog or limits changed while a dialog reads it; returns the stop. */
+export function onLaunchAccountsChanged(listener: (computer: ComputerId) => void): () => void {
+  if (!inTauri()) return () => {};
+  let stop: (() => void) | undefined;
+  let stopped = false;
+  void listen<string>("launch-accounts-changed", (event) => listener(event.payload)).then((unlisten) => {
     if (stopped) unlisten();
     else stop = unlisten;
   });
@@ -463,10 +571,10 @@ export const windowVisibility: PageVisibility = {
 
 /** A session the menu bar or a notification opens: its computer and catalog key. */
 /** `attention`: a clicked notification's session, shown on its Activity tab (Qt's `showAttentionSession`). */
-export type OpenSession = { computer: ComputerId; key: string; attention?: boolean };
+export type OpenSession = { computer: ComputerId; key: string; attention?: boolean; preserveFilters?: boolean };
 /** A notice for the window. */
 export type DeskNotice = { title: string; text: string };
-export type DeskPending = { open: OpenSession | null; notices: DeskNotice[] };
+export type DeskPending = { open: OpenSession | null; notices: DeskNotice[]; updates?: boolean };
 
 /** Listens to `name`; resolves with the stop once the listener is registered. */
 function onEvent<T>(name: string, listener: (payload: T) => void): Promise<() => void> {
@@ -476,8 +584,22 @@ function onEvent<T>(name: string, listener: (payload: T) => void): Promise<() =>
 
 /** `open-session`: the menu bar or a notification opens a session; resolves with the stop once listening. */
 export const onOpenSession = (listener: (target: OpenSession) => void) => onEvent<OpenSession>("open-session", listener);
+/** `open-updates`: an update notice or menu item opens Settings > Updates. */
+export const onOpenUpdates = (listener: () => void) => onEvent<void>("open-updates", listener);
 /** `desk-notice`: a notice for the window; resolves with the stop once listening. */
 export const onDeskNotice = (listener: (notice: DeskNotice) => void) => onEvent<DeskNotice>("desk-notice", listener);
+
+const UPDATES_DESKTOP_ONLY = "Updates need the desktop app.";
+export const updatesView = () => inTauri() ? invoke<UpdatesView>("updates_view") : Promise.resolve(emptyUpdatesView());
+export const updatesCheck = () => inTauri() ? invoke<void>("updates_check") : Promise.resolve();
+export const updatesSetChannel = (channel: UpdateChannel) => inTauri() ? invoke<void>("updates_set_channel", { channel }) : Promise.resolve();
+export const updatesSetAutomatic = (on: boolean) => inTauri() ? invoke<void>("updates_set_automatic", { on }) : Promise.resolve();
+export const updatesOpen = (target: "release" | "download" | "instructions") =>
+  inTauri() ? invoke<void>("updates_open", { target }) : Promise.reject(UPDATES_DESKTOP_ONLY);
+export const updatesCopyCommand = () => inTauri() ? invoke<void>("updates_copy_command") : Promise.reject(UPDATES_DESKTOP_ONLY);
+export const updatesRestart = () => inTauri() ? invoke<void>("updates_restart") : Promise.reject(UPDATES_DESKTOP_ONLY);
+/** `updates-changed`: the native worker's latest snapshot; resolves once listening. */
+export const onUpdates = (listener: (view: UpdatesView) => void) => onEvent<UpdatesView>("updates-changed", listener);
 
 /** Rust asks every mounted composer to flush before its bounded quit. */
 export const onExitFlush = (listener: (nonce: string) => void) => onEvent<string>("exit-flush", listener);
@@ -553,6 +675,9 @@ export const questionSkip = (card: string) => desktop<QuestionReply>("question_s
 export const questionCold = (token: number, proceed: boolean) => desktop<QuestionReply>("question_cold", { token, proceed });
 /** The status line's Refresh: the open session is read again (Qt's sessionRefreshRequested). */
 export const composerRefresh = (handle: number) => desktop<void>("composer_refresh", { handle });
+/** Clear session for an unselected menu row, using that row's own inspection. */
+export const composerClearControl = (session: SessionRef) =>
+  desktop<ClearControl | null>("composer_clear_control", { session });
 /** The detail tab that shows: Terminal and Native UI retry a failed read at Qt's background interval. */
 export const composerTab = (tab: ComposerTab) => (inTauri() ? invoke<void>("composer_tab", { tab }) : Promise.resolve());
 export const sendMessage = (handle: number, rev: number, epoch: number, text: string, position: number, anchor: number) =>

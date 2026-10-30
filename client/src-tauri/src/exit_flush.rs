@@ -204,10 +204,10 @@ pub fn exit_flush_ack(window: WebviewWindow, flush: State<'_, ExitFlush>, nonce:
 #[cfg(target_os = "macos")]
 pub(crate) const QUIT_ID: &str = "zerus.quit-with-flush";
 
-/// Tauri's own menu and item instances, with just Cocoa's terminate: replaced.
+/// Tauri's own menu and item instances, with Cocoa's Show All and terminate: replaced.
 #[cfg(target_os = "macos")]
 pub(crate) fn app_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
-    use tauri::menu::{Menu, MenuItem, MenuItemKind};
+    use tauri::menu::{Menu, MenuItem, MenuItemKind, PredefinedMenuItem};
     let menu = Menu::default(app)?;
     let before = menu_snapshot(&menu)?;
     let items = menu.items()?;
@@ -220,6 +220,9 @@ pub(crate) fn app_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri
         .len()
         .checked_sub(1)
         .ok_or_else(|| std::io::Error::other("Default application menu is empty"))?;
+    let show_all_position = position
+        .checked_sub(1)
+        .ok_or_else(|| std::io::Error::other("Default Quit separator is missing"))?;
     let MenuItemKind::Predefined(quit) = &entries[position] else {
         return Err(std::io::Error::other("Default Quit item is missing").into());
     };
@@ -228,10 +231,16 @@ pub(crate) fn app_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri
         return Err(std::io::Error::other("Default Quit caption changed").into());
     }
     let replacement = MenuItem::with_id(app, QUIT_ID, &caption, true, Some("CmdOrCtrl+Q"))?;
+    let show_all = PredefinedMenuItem::show_all(app, None)?;
+    let show_all_id = show_all.id().clone();
     application.remove(quit)?;
-    application.insert(&replacement, position)?;
-    if !same_menu_except_quit(&before, &menu_snapshot(&menu)?, position, QUIT_ID) {
-        return Err(std::io::Error::other("Default menu changed beyond Quit").into());
+    application.insert(&show_all, show_all_position)?;
+    application.insert(&replacement, position + 1)?;
+    let expected =
+        expected_menu_with_show_all_and_quit(&before, position, show_all_id.as_ref(), QUIT_ID)
+            .ok_or_else(|| std::io::Error::other("Default application menu changed"))?;
+    if expected != menu_snapshot(&menu)? {
+        return Err(std::io::Error::other("Default menu changed beyond Show All and Quit").into());
     }
     Ok(menu)
 }
@@ -259,23 +268,25 @@ fn menu_snapshot(menu: &tauri::menu::Menu<tauri::Wry>) -> tauri::Result<serde_js
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn same_menu_except_quit(
+fn expected_menu_with_show_all_and_quit(
     before: &serde_json::Value,
-    after: &serde_json::Value,
-    position: usize,
-    id: &str,
-) -> bool {
+    quit_position: usize,
+    show_all_id: &str,
+    quit_id: &str,
+) -> Option<serde_json::Value> {
+    let show_all_position = quit_position.checked_sub(1)?;
     let mut expected = before.clone();
-    let Some(quit) = expected
-        .get_mut(0)
-        .and_then(|app| app.get_mut("children"))
-        .and_then(|items| items.get_mut(position))
-    else {
-        return false;
-    };
-    quit["id"] = id.into();
+    let entries = expected.get_mut(0)?.get_mut("children")?.as_array_mut()?;
+    let mut quit = entries.get(quit_position)?.clone();
+    quit["id"] = quit_id.into();
     quit["kind"] = "item".into();
-    &expected == after
+    entries.remove(quit_position);
+    entries.insert(
+        show_all_position,
+        serde_json::json!({"id":show_all_id,"kind":"predefined","caption":"Show All","children":null}),
+    );
+    entries.insert(quit_position + 1, quit);
+    Some(expected)
 }
 
 #[cfg(test)]
@@ -373,15 +384,17 @@ mod tests {
         );
     }
     #[test]
-    fn default_menu_structure_changes_only_the_one_quit_item() {
+    fn default_menu_structure_adds_only_show_all_and_replaces_quit() {
         use serde_json::json;
         let before = json!([
             {"id":"application","kind":"submenu","caption":"Zerus","children":[
                 {"id":"about","kind":"predefined","caption":"About Zerus","children":null},
+                {"id":"separator-1","kind":"predefined","caption":"","children":null},
                 {"id":"services","kind":"predefined","caption":"Services","children":null},
+                {"id":"separator-2","kind":"predefined","caption":"","children":null},
                 {"id":"hide","kind":"predefined","caption":"Hide Zerus","children":null},
                 {"id":"hide-others","kind":"predefined","caption":"Hide Others","children":null},
-                {"id":"show-all","kind":"predefined","caption":"Show All","children":null},
+                {"id":"separator-3","kind":"predefined","caption":"","children":null},
                 {"id":"default-quit","kind":"predefined","caption":"Quit Zerus","children":null}]},
             {"id":"edit","kind":"submenu","caption":"Edit","children":[
                 {"id":"undo","kind":"predefined","caption":"Undo","children":null},
@@ -392,17 +405,39 @@ mod tests {
                 {"id":"select-all","kind":"predefined","caption":"Select All","children":null}]},
             {"id":"window","kind":"submenu","caption":"Window","children":[]}
         ]);
-        let mut after = before.clone();
-        after[0]["children"][5]["id"] = "quit".into();
-        after[0]["children"][5]["kind"] = "item".into();
-        assert!(same_menu_except_quit(&before, &after, 5, "quit"));
-        assert!(!same_menu_except_quit(&before, &after, 4, "quit"));
-        assert!(!same_menu_except_quit(&before, &after, 50, "quit"));
+        let after = json!([
+            {"id":"application","kind":"submenu","caption":"Zerus","children":[
+                {"id":"about","kind":"predefined","caption":"About Zerus","children":null},
+                {"id":"separator-1","kind":"predefined","caption":"","children":null},
+                {"id":"services","kind":"predefined","caption":"Services","children":null},
+                {"id":"separator-2","kind":"predefined","caption":"","children":null},
+                {"id":"hide","kind":"predefined","caption":"Hide Zerus","children":null},
+                {"id":"hide-others","kind":"predefined","caption":"Hide Others","children":null},
+                {"id":"show-all","kind":"predefined","caption":"Show All","children":null},
+                {"id":"separator-3","kind":"predefined","caption":"","children":null},
+                {"id":"quit","kind":"item","caption":"Quit Zerus","children":null}]},
+            {"id":"edit","kind":"submenu","caption":"Edit","children":[
+                {"id":"undo","kind":"predefined","caption":"Undo","children":null},
+                {"id":"redo","kind":"predefined","caption":"Redo","children":null},
+                {"id":"cut","kind":"predefined","caption":"Cut","children":null},
+                {"id":"copy","kind":"predefined","caption":"Copy","children":null},
+                {"id":"paste","kind":"predefined","caption":"Paste","children":null},
+                {"id":"select-all","kind":"predefined","caption":"Select All","children":null}]},
+            {"id":"window","kind":"submenu","caption":"Window","children":[]}
+        ]);
+        let expected = expected_menu_with_show_all_and_quit(&before, 7, "show-all", "quit")
+            .expect("the Tauri 2.12.5 application menu has eight entries");
+        assert_eq!(expected, after);
+        assert!(expected_menu_with_show_all_and_quit(&before, 50, "show-all", "quit").is_none());
+        let mut old_order = after.clone();
+        old_order[0]["children"].as_array_mut().unwrap().swap(6, 7);
+        assert_ne!(expected, old_order);
         let mut missing = after.clone();
         missing[1]["children"].as_array_mut().unwrap().remove(2);
-        assert!(!same_menu_except_quit(&before, &missing, 5, "quit"));
-        after[0]["children"][5]["caption"] = "Quit something else".into();
-        assert!(!same_menu_except_quit(&before, &after, 5, "quit"));
+        assert_ne!(expected, missing);
+        let mut changed_quit = after;
+        changed_quit[0]["children"][8]["caption"] = "Quit something else".into();
+        assert_ne!(expected, changed_quit);
     }
 
     #[test]

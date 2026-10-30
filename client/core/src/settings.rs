@@ -35,6 +35,8 @@ pub enum Kind {
     Long { default: i64, min: i64 },
     /// `toString()`.
     Text(&'static str),
+    /// `toByteArray()`, held as UTF-8 JSON text (the verified update catalogs).
+    Bytes,
     /// `toStringList()`: the shortcut group, one list of portable chord
     /// strings per command id, an empty list meaning no chord.
     Chords,
@@ -117,6 +119,12 @@ pub const KEYS: &[Key] = &[
     key("workspace/showCompletedSubagents", Kind::Flag(false)),
     key("workspace/reduceMotion", Kind::Flag(false)),
     key("notifications/optionalQuestions", Kind::Flag(false)),
+    // New session's remembered choices (NewSessionDialog.cpp:845-851,
+    // SessionCreationController.cpp:244-249). launchAccounts is compact JSON
+    // stored by Qt as a QByteArray, read as text by the single Qt seed.
+    key("workspace/launchAgent", Kind::Text("")),
+    key("workspace/launchOpenTerminal", Kind::Flag(false)),
+    key("workspace/launchAccounts", Kind::Text("")),
     // Processes (ProcessSettings.h), web client phase 4 Task 11.
     key("processes/enabled", Kind::Flag(false)),
     key(
@@ -193,7 +201,8 @@ pub const KEYS: &[Key] = &[
     client("client/overviewFullWidth", Kind::Flag(false)),
 ];
 
-/// The setting called `name`: a listed key, or a shortcut override.
+/// The setting called `name`: a listed key, a shortcut override, or one of
+/// UpdateController's per-channel and per-notification records.
 pub fn find(name: &str) -> Option<Key> {
     KEYS.iter()
         .copied()
@@ -206,6 +215,31 @@ pub fn find(name: &str) -> Option<Key> {
                 seeded: true,
             })
         })
+        .or_else(|| update_family(name))
+}
+
+fn update_family(name: &str) -> Option<Key> {
+    let channel = |prefix: &str| {
+        name.strip_prefix(prefix)
+            .is_some_and(|channel| crate::updates::Channel::parse(channel).is_some())
+    };
+    let kind = if channel("updates/lastAttempt/") || channel("updates/lastSuccess/") {
+        Kind::Long { default: 0, min: 0 }
+    } else if channel("updates/catalog/") {
+        Kind::Bytes
+    } else if name
+        .strip_prefix("updates/notified/")
+        .is_some_and(crate::updates::is_update_token)
+    {
+        Kind::Flag(false)
+    } else {
+        return None;
+    };
+    Some(Key {
+        name: "updates/",
+        kind,
+        seeded: true,
+    })
 }
 
 /// A setting's value when nothing is stored.
@@ -216,6 +250,7 @@ pub fn default_value(kind: Kind) -> Value {
         Kind::Real { default, .. } => json!(default),
         Kind::Whole { default, .. } | Kind::Long { default, .. } => Value::from(default),
         Kind::Text(text) => Value::from(text),
+        Kind::Bytes => Value::from(""),
         Kind::Chords => Value::Array(Vec::new()),
     }
 }
@@ -242,6 +277,7 @@ pub fn effective(kind: Kind, value: Option<&Value>) -> Value {
         }
         Kind::Long { default, min } => Value::from(value.as_i64().map_or(default, |n| n.max(min))),
         Kind::Text(text) => Value::from(value.as_str().unwrap_or(text)),
+        Kind::Bytes => Value::from(value.as_str().unwrap_or("")),
         Kind::Chords => Value::Array(
             value
                 .as_array()
@@ -261,7 +297,7 @@ pub fn effective(kind: Kind, value: Option<&Value>) -> Value {
 pub fn from_qt(kind: Kind, value: &QtValue) -> Value {
     let stored = match kind {
         Kind::Flag(_) => Value::Bool(value.to_bool()),
-        Kind::Choice(_) | Kind::Text(_) => Value::from(value.to_text()),
+        Kind::Choice(_) | Kind::Text(_) | Kind::Bytes => Value::from(value.to_text()),
         Kind::Real { .. } => {
             let (number, _) = value.to_double();
             json!(if number.is_nan() { 0.0 } else { number })
@@ -409,7 +445,8 @@ pub fn seed_values(values: &BTreeMap<String, QtValue>, names: &[&str]) -> BTreeM
     seeded
 }
 
-/// The names a seed considers: every seeded key plus Qt's shortcut overrides.
+/// The names a seed considers: every seeded key plus Qt's shortcut overrides
+/// and update records under their recognized channel/token names.
 fn seed_names(values: &BTreeMap<String, QtValue>) -> Vec<String> {
     KEYS.iter()
         .filter(|key| key.seeded)
@@ -417,7 +454,7 @@ fn seed_names(values: &BTreeMap<String, QtValue>) -> Vec<String> {
         .chain(
             values
                 .keys()
-                .filter(|name| find(name).is_some_and(|key| key.kind == Kind::Chords))
+                .filter(|name| find(name).is_some_and(|key| key.seeded))
                 .cloned(),
         )
         .collect()
@@ -547,6 +584,11 @@ impl Settings {
         effective(key.kind, state.contents.values.get(name))
     }
 
+    /// Whether this key is stored, rather than only supplied by its default.
+    pub fn contains(&self, name: &str) -> bool {
+        find(name).is_some() && self.loaded().contents.values.contains_key(name)
+    }
+
     pub fn flag(&self, name: &str) -> bool {
         self.get(name).as_bool().unwrap_or(false)
     }
@@ -559,7 +601,7 @@ impl Settings {
         self.get(name).as_str().unwrap_or_default().to_owned()
     }
 
-    /// Every listed setting and every shortcut override, as Qt reads them.
+    /// Every listed setting, shortcut override and update record, as Qt reads them.
     pub fn all(&self) -> Map<String, Value> {
         self.all_tracked().0
     }
@@ -578,8 +620,10 @@ impl Settings {
             })
             .collect();
         for (name, value) in &state.contents.values {
-            if name.starts_with(SHORTCUTS) && find(name).is_some() {
-                all.insert(name.clone(), effective(Kind::Chords, Some(value)));
+            if let Some(key) =
+                find(name).filter(|_| name.starts_with(SHORTCUTS) || name.starts_with("updates/"))
+            {
+                all.insert(name.clone(), effective(key.kind, Some(value)));
             }
         }
         (all, state.revision)
@@ -601,7 +645,7 @@ impl Settings {
         let stored = match (&key.kind, &value) {
             (Kind::Chords, Value::Null) => None,
             (Kind::Flag(_), Value::Bool(_))
-            | (Kind::Choice(_) | Kind::Text(_), Value::String(_))
+            | (Kind::Choice(_) | Kind::Text(_) | Kind::Bytes, Value::String(_))
             | (Kind::Chords, Value::Array(_)) => Some(effective(key.kind, Some(&value))),
             (Kind::Real { .. }, Value::Number(_)) => Some(effective(key.kind, Some(&value))),
             (Kind::Whole { .. } | Kind::Long { .. }, Value::Number(number))

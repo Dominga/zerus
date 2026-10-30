@@ -44,6 +44,7 @@ def log(entry):
     entry["at"] = time.time()
     with open(os.path.join(HERE, "log.ndjson"), "a", encoding="utf-8") as handle:
         handle.write(json.dumps(entry) + "\n")
+        handle.flush()
 
 
 def previous_watches(host):
@@ -156,6 +157,9 @@ def main():
         return watch(host, spec, config)
     reply = os.path.join(HERE, "%s-" + (host or "local") + ".json")
     if args == ["ls", "--json"]:
+        if spec.get("listing_wait_file"):
+            while not os.path.exists(os.path.join(HERE, spec["listing_wait_file"])):
+                time.sleep(0.01)
         if not os.path.exists(reply % "ls"):
             return 2
         with open(reply % "ls", encoding="utf-8") as handle:

@@ -299,9 +299,9 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
     hintTimer = timers.later(() => { hintTimer = undefined; setHint(undefined); }, HINT_MS);
   }
 
-  /** Opens the Clear session dialog with the control shown now, while Rust allows the clear (Qt's clearContext checks). */
-  function openClear() {
-    const control = view()?.clear;
+  /** Opens the Clear session dialog with the control shown now or an unselected row's inspected control. */
+  function openClear(inspected?: ClearControl) {
+    const control = inspected ?? view()?.clear;
     if (control?.enabled && !dialog()) setDialog({ kind: "clear", control: { ...control } });
   }
 

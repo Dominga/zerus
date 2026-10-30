@@ -4,7 +4,6 @@ import * as bridge from "../bridge";
 import { rowId } from "./catalog";
 import { clearNotice, notify } from "./actions";
 import type { Batch, EditOutcome, GroupingOut, HeaderOut } from "../types";
-import { ARCHIVED_MOVE } from "../ui/sessions/organization-ui";
 import type { Session } from "../ui/sessions/types";
 
 // The shared project organization in the Sessions list: each row's project
@@ -29,14 +28,14 @@ export const emptyGrouping = (): GroupingOut => ({
   busy: false, status: "", status_error: false, conflicts: 0,
 });
 
-/** A session's member key, as the catalog names it (`swarm::member`): the row's own machine, "" before this computer's hello. */
-export const memberOf = (s: Pick<Session, "rawMachine" | "name">) => `${s.rawMachine}\n${s.name}`;
+/** Qt's live and archive member identities (SessionOrganization.cpp:225). */
+export const memberOf = (s: Row) => s.state === "archived" ? `${s.rawMachine}\narchive\n${s.archiveId ?? ""}` : `${s.rawMachine}\n${s.name}`;
 
 type Say = (tone: "error" | "warn" | "info", text: string, sticky?: boolean, key?: string) => void;
-type Row = Pick<Session, "rawMachine" | "name"> & Partial<Pick<Session, "state">>;
+type Row = Pick<Session, "rawMachine" | "name"> & Partial<Pick<Session, "state" | "archiveId">>;
 export type Assignment = { group: string; rank: number };
 
-export function createOrganization(say: Say, unsay: (key: string) => void = () => {}) {
+export function createOrganization(say: Say, unsay: (key: string) => void = () => {}, archived: (key: string) => string | undefined = () => undefined) {
   const [grouping, setGrouping] = createSignal<GroupingOut>(emptyGrouping());
   const [groups, setGroups] = createStore<Record<string, Assignment | undefined>>({});
   const defaultProject = createMemo(() => grouping().default_project);
@@ -67,11 +66,11 @@ export function createOrganization(say: Say, unsay: (key: string) => void = () =
         for (const id of Object.keys(s)) if (id.startsWith(prefix) && !kept.has(id)) delete s[id];
       }
       for (const k of b.removes) delete s[rowId(k.computer, k.key)];
-      for (const g of assigned) s[rowId(g.computer, g.key)] = { group: g.group, rank: g.rank };
+      for (const g of assigned) if (g.archive_request === undefined) s[rowId(g.computer, g.key)] = { group: g.group, rank: g.rank };
     }));
   }
 
-  const groupOf = (id: string) => groups[id]?.group ?? defaultProject();
+  const groupOf = (id: string) => groups[id]?.group ?? archived(id) ?? defaultProject();
   const headerOf = (project: string): HeaderOut | undefined => grouping().headers.find((h) => h.id === project);
 
   /** Why an edit cannot run now (the disabled entries' reason). */
@@ -105,16 +104,16 @@ export function createOrganization(say: Say, unsay: (key: string) => void = () =
     return out;
   }
 
-  /** An archived row's member is its archive identity, not `memberOf` (ARCHIVED_MOVE): it never moves. */
-  const archivedIn = (rows: readonly Row[]) => (rows.some((r) => r.state === "archived") ? ARCHIVED_MOVE : undefined);
+  const invalidArchive = (rows: readonly Row[]) => rows.some((r) => r.state === "archived" && !r.archiveId)
+    ? "Invalid archived session identity. Refresh the archive." : undefined;
 
   /** Move to project: one call for every row, as one `swarm apply` (zerus-5wmh.18, .20). */
   function moveToProject(rows: readonly Row[], projectId: string, before?: Row): Promise<EditOutcome> {
     if (!rows.length) return Promise.resolve({ outcome: "refused", detail: "Choose the sessions to move." });
-    return run(archivedIn(rows) ?? refusal(projectId), () => bridge.moveToProject(rows.map(memberOf), projectId, before ? memberOf(before) : null));
+    return run(invalidArchive(before ? [...rows, before] : rows) ?? refusal(projectId), () => bridge.moveToProject(rows.map(memberOf), projectId, before ? memberOf(before) : null));
   }
   const createProject = (name: string, rows: readonly Row[] = []) =>
-    run(archivedIn(rows) ?? refusal(), () => bridge.createProject(name, rows.map(memberOf)));
+    run(invalidArchive(rows) ?? refusal(), () => bridge.createProject(name, rows.map(memberOf)));
   const renameProject = (projectId: string, name: string) => run(refusal(projectId), () => bridge.renameProject(projectId, name));
   const deleteProject = (projectId: string, destination: string) =>
     run(refusal(projectId, destination), () => bridge.deleteProject(projectId, destination));
@@ -129,7 +128,11 @@ export function createOrganization(say: Say, unsay: (key: string) => void = () =
 
 export type Organization = ReturnType<typeof createOrganization>;
 
-const app = createOrganization(notify, clearNotice);
+let archivedGroup: (key: string) => string | undefined = () => undefined;
+/** Loaded archive rows own their bounded placement assignments. */
+export function bindArchivedGroups(lookup: (key: string) => string | undefined) { archivedGroup = lookup; }
+
+const app = createOrganization(notify, clearNotice, (key) => archivedGroup(key));
 export const { grouping, groups, defaultProject, applyGrouping, groupOf, headerOf, moveToProject, createProject,
                renameProject, deleteProject, moveProject, sortProject, setProjectCollapsed } = app;
 

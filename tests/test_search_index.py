@@ -81,6 +81,16 @@ class SearchIndex(unittest.TestCase):
                         dict(abi="content-search-index-v1", targets=[{**identity, "extra": "rejected"}])]:
             self.assertNotEqual(self.invoke("--index-step", request, check=False).returncode, 0)
 
+    def test_catchup_is_bounded_and_reports_live_fallback(self):
+        self.fixture()
+        reply = self.invoke("--index-catchup")
+        progress = reply["catchup"]
+        self.assertEqual(progress["visited_paths"], 1)
+        self.assertLessEqual(progress["ingestion"]["records"], 128)
+        self.assertLessEqual(progress["ingestion"]["bytes"], 4 << 20)
+        self.assertEqual(reply["status"]["catalog"]["fallback_sources"], 1)
+        self.assertNotEqual(reply["status"]["coverage"]["state"], "ready")
+
     def test_discovery_queues_paths_without_reading_or_claiming_indexed_content(self):
         _, binding, _ = self.fixture()
         binding.write_text("PRIVATE_BINDING_BODY_NEVER_STAGED")

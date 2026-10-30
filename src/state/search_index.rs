@@ -637,6 +637,7 @@ impl Store {
 
     fn retire(&self, key: &str) -> Result<()> {
         self.index.retire(key).map_err(|e| e.to_string())?;
+        self.mark_retired_references(key)?;
         self.index
             .connection()
             .execute("DELETE FROM input_cursors WHERE source=?", [key])
@@ -801,8 +802,11 @@ fn binding(
     if bytes.len() > RECORD_BYTES {
         return Err("Binding exceeds the index metadata budget".into());
     }
-    let record: Value =
+    let mut record: Value =
         serde_json::from_slice(&bytes).map_err(|_| "Binding is incomplete or invalid")?;
+    if !identity.archive_id.is_empty() {
+        rename::normalize_archive(&mut record)?;
+    }
     if record["version"] != 1
         || record["rename_shadow"] == true
         || record["name"] != identity.name
@@ -835,7 +839,13 @@ fn sample(
 pub(super) fn dispatch(args: &[String]) -> Option<Result<i32>> {
     let mode = match args {
         [mode]
-            if ["--index-status", "--index-step", "--index-discover"].contains(&mode.as_str()) =>
+            if [
+                "--index-status",
+                "--index-step",
+                "--index-discover",
+                "--index-catchup",
+            ]
+            .contains(&mode.as_str()) =>
         {
             mode
         }
@@ -851,16 +861,21 @@ pub(super) fn dispatch(args: &[String]) -> Option<Result<i32>> {
             return Ok(0);
         }
         let mut store = Store::open(&directory)?;
-        if mode == "--index-discover" {
+        if mode == "--index-discover" || mode == "--index-catchup" {
             lower_own_priority();
             let progress: DiscoveryProgress = store.discover(
                 &root(),
                 &DiscoveryBudget::interactive(),
                 &AtomicBool::new(false),
             )?;
+            let ingestion = if mode == "--index-catchup" {
+                Some(store.consume(&root(), &Budget::interactive(), &AtomicBool::new(false))?)
+            } else {
+                None
+            };
             println!(
                 "{}",
-                json!({"abi":ABI,"discovery":progress,"status":store.status()?})
+                json!({"abi":ABI,"discovery":progress,"catchup":ingestion,"status":store.status()?})
             );
             return Ok(0);
         }

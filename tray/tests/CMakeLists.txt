@@ -276,9 +276,10 @@ add_executable(test_sloweventlog test_sloweventlog.cpp)
 target_include_directories(test_sloweventlog PRIVATE ../src)
 target_link_libraries(test_sloweventlog PRIVATE Qt6::Test hgs-tray-core)
 zerus_add_test(sloweventlog test_sloweventlog)
-# The GUI profile of the main screens (#704), run by hand (test_guiprofile.cpp):
-# not a ctest, since its sessions scene still crashes the tray under load
-# (the #704 report) and offscreen's FreeType crashes it at exit.
+# The GUI profile of the main screens (#704), run by hand (test_guiprofile.cpp).
+# #723: its sessions scene (fleet refresh, select, scroll), shortened, is also
+# a ctest; it once corrupted the heap through the test's own dangling
+# temporary, which a crash or an AddressSanitizer report would show again.
 add_executable(test_guiprofile test_guiprofile.cpp ../resources.qrc)
 target_include_directories(test_guiprofile PRIVATE ../src)
 target_compile_definitions(test_guiprofile PRIVATE HGS_TRAY_VERSION="${PROJECT_VERSION}")
@@ -288,6 +289,9 @@ if(MSVC)
     # A PDB of public symbols, so a crash's stack names its functions.
     target_link_options(test_guiprofile PRIVATE /DEBUG)
 endif()
+zerus_add_test(guiprofile_sessions test_guiprofile sessionsListAndInspector)
+set_tests_properties(guiprofile_sessions PROPERTIES TIMEOUT 300 ENVIRONMENT
+    "QT_QPA_PLATFORM=offscreen;ZERUS_GUI_PROFILE_SECONDS=10;ZERUS_GUI_PROFILE_SESSIONS=400;ZERUS_GUI_PROFILE_OUT=${CMAKE_CURRENT_BINARY_DIR}/gui-profile-ctest")
 
 add_executable(test_processrunner test_processrunner.cpp)
 target_include_directories(test_processrunner PRIVATE ../src)

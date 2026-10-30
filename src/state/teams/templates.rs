@@ -725,6 +725,11 @@ fn clean_test_name(name: &str) -> Option<String> {
 /// (the worker is not confined): TEMP inside the folder, Qt offscreen, bounded
 /// time and output (U21). The whole process tree ends with the run (C2).
 pub(crate) fn execute(plan: &Plan, folder: &Path, timeout: Duration, env: &[(&str, String)]) -> Outcome {
+    execute_as(plan, folder, timeout, env, &super::isolation::Person::current())
+}
+
+/// `execute` with the person's own folders given, as a test gives synthetic ones.
+pub(crate) fn execute_as(plan: &Plan, folder: &Path, timeout: Duration, env: &[(&str, String)], person: &super::isolation::Person) -> Outcome {
     let temp = folder.join(".zerus-team").join("tmp");
     let _ = std::fs::create_dir_all(&temp);
     let mut command = Command::new(&plan.program);
@@ -736,6 +741,18 @@ pub(crate) fn execute(plan: &Plan, folder: &Path, timeout: Duration, env: &[(&st
         .env("QT_QPA_PLATFORM", "offscreen")
         // The worker's own build dir is Zerus', never the member's.
         .env_remove("CARGO_TARGET_DIR");
+    // U62 (#720): a test runs with its own home, data, temporary and XDG
+    // folders in a run folder (the project's .zerus/tests.toml).
+    let isolated = super::isolation::prepare(&plan.template, &plan.program, folder, person);
+    if let Some(run) = &isolated {
+        for name in &run.remove {
+            command.env_remove(name);
+        }
+        for (key, value) in &run.env {
+            command.env(key, value);
+        }
+        super::isolation::quiet_crashes();
+    }
     for (key, value) in template_environment(plan, folder) {
         command.env(key, value);
     }
@@ -743,7 +760,42 @@ pub(crate) fn execute(plan: &Plan, folder: &Path, timeout: Duration, env: &[(&st
         command.env(key, value);
     }
     let stdin = plan.commit.as_ref().map(|payload| serde_json::to_vec(payload).unwrap_or_default());
-    run_tree(&mut command, timeout, stdin)
+    let before = isolated.as_ref().map(super::isolation::Run::fingerprint);
+    let mut outcome = run_tree(&mut command, timeout, stdin);
+    if let (Some(run), Some(before)) = (&isolated, before) {
+        checked(&mut outcome, run, &before, folder);
+    }
+    outcome
+}
+
+/// U62 (#720): the second line. A run whose trace reached the person's own
+/// paths fails, with the paths named; a crash is noted in the run folder.
+fn checked(outcome: &mut Outcome, run: &super::isolation::Run, before: &super::isolation::Fingerprint, folder: &Path) {
+    let mut lines = Vec::new();
+    if let Some(note) = &run.note {
+        lines.push(note.clone());
+    }
+    if super::isolation::crashed(outcome.exit) && !run.folder.as_os_str().is_empty() {
+        let code = outcome.exit.map(|code| format!("{:#x}", code as u32)).unwrap_or_default();
+        let _ = std::fs::write(run.folder.join("crash.txt"), format!("exit {code}\n{}", outcome.tail));
+        lines.push(format!("The test crashed (exit {code}); its note is in {}", run.folder.display()));
+    }
+    let changes = run.changes(before, folder);
+    if !changes.is_empty() {
+        lines.push(format!("Isolation: the run touched the person's own paths: {}", changes.join("; ")));
+        if outcome.exit == Some(0) {
+            outcome.exit = Some(1);
+        }
+        if outcome.error.is_empty() {
+            outcome.error = "the run touched the person's own paths".into();
+        }
+    }
+    if !lines.is_empty() {
+        if !outcome.tail.is_empty() && !outcome.tail.ends_with('\n') {
+            outcome.tail.push('\n');
+        }
+        outcome.tail.push_str(&lines.join("\n"));
+    }
 }
 
 /// How long a pipe reader may take after the tree ended: a process that escaped

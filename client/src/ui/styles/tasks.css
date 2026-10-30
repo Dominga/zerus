@@ -236,3 +236,17 @@
   .tv-empty.danger svg { color: var(--z-color-danger); }
   .tv-loading { display: flex; flex-direction: column; gap: 10px; padding: 18px 0; }
 }
+
+@layer components {
+  .tv-composer.describing { border-color: var(--z-color-accent-muted); }
+  .tv-mode { max-width: 380px; min-width: 0; }
+  .tv-mode:disabled { opacity: .6; cursor: default; }
+  .tv-send { width: 36px; padding: 0; }
+  .tv-note-error { margin-top: 6px; color: var(--z-color-danger); font-size: var(--fs-xs); white-space: pre-line; }
+  .tv-draft-files { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+
+}
+
+@layer components {
+  .tv-draft-files .att-chip { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border-radius: var(--z-radius-md); border: 1px solid var(--z-color-border); background: var(--z-color-surface); font-size: var(--fs-xs); }
+}

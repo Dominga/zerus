@@ -17,6 +17,9 @@ const state = (change: Partial<DropState> = {}): DropState => ({
 const terminalOn = { tab: "terminal" as const, terminal: { connected: true, generation: 4 } };
 
 describe("where a drop goes (SessionsWindow.cpp:1595-1601, 2618-2622)", () => {
+  it("never attaches Task View files to the session agent's draft", () => {
+    expect(routeDrop(state({ tab: "taskview" }))).toEqual({ kind: "none" });
+  });
   it("goes to the Terminal while it shows, connected to an online session", () => {
     expect(routeDrop(state(terminalOn))).toEqual({ kind: "terminal", key: "\nrun:a\n4" });
     expect(routeDrop(state({ ...terminalOn, online: false }))).toEqual({ kind: "none" });

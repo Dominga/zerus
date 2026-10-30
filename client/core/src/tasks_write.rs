@@ -555,18 +555,27 @@ pub mod outbox {
     pub fn pending(root: &Path, project: &str, task: &str) -> Result<Option<Value>, String> {
         let file = path(root, project, task);
         let marker = marker(&file);
-        let unavailable = || "The original message reservation could not be verified. Nothing was submitted.".to_owned();
+        let unavailable = || {
+            "The original message reservation could not be verified. Nothing was submitted."
+                .to_owned()
+        };
         let exists = |p: &Path| match fs::symlink_metadata(p) {
             Ok(meta) if meta.is_file() => Ok(true),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
             _ => Err(unavailable()),
         };
         let (has_record, has_marker) = (exists(&file)?, exists(&marker)?);
-        if !has_record && !has_marker { return Ok(None); }
-        if !has_record || !has_marker { return Err(unavailable()); }
+        if !has_record && !has_marker {
+            return Ok(None);
+        }
+        if !has_record || !has_marker {
+            return Err(unavailable());
+        }
         let record = read(&file)?;
         let mut bytes = Vec::new();
-        fs::File::open(marker).and_then(|f| f.take(129).read_to_end(&mut bytes)).map_err(|_| unavailable())?;
+        fs::File::open(marker)
+            .and_then(|f| f.take(129).read_to_end(&mut bytes))
+            .map_err(|_| unavailable())?;
         if bytes.len() > 128 || record["id"].as_str().map(str::as_bytes) != Some(bytes.as_slice()) {
             return Err(unavailable());
         }
@@ -949,19 +958,32 @@ mod outbox_tests {
     #[test]
     fn pending_requires_the_exact_original_marker_and_record() {
         let root = scratch("pending-pair");
-        assert_eq!(outbox::pending(&root.0,"example","task").unwrap(),None);
-        let intent=message_intent("Note",&[],"note","");
-        outbox::reserve(&root.0,"example","task",&intent,ID).unwrap();
-        assert_eq!(outbox::pending(&root.0,"example","task").unwrap().unwrap()["id"],ID);
-        let file=outbox::path(&root.0,"example","task"); let marker=file.with_extension("marker");
-        std::fs::write(&marker,OTHER).unwrap();
-        assert!(outbox::pending(&root.0,"example","task").is_err());
-        assert!(file.exists() && marker.exists(),"mismatched evidence is kept");
-        std::fs::write(&marker,ID).unwrap();
+        assert_eq!(outbox::pending(&root.0, "example", "task").unwrap(), None);
+        let intent = message_intent("Note", &[], "note", "");
+        outbox::reserve(&root.0, "example", "task", &intent, ID).unwrap();
+        assert_eq!(
+            outbox::pending(&root.0, "example", "task")
+                .unwrap()
+                .unwrap()["id"],
+            ID
+        );
+        let file = outbox::path(&root.0, "example", "task");
+        let marker = file.with_extension("marker");
+        std::fs::write(&marker, OTHER).unwrap();
+        assert!(outbox::pending(&root.0, "example", "task").is_err());
+        assert!(
+            file.exists() && marker.exists(),
+            "mismatched evidence is kept"
+        );
+        std::fs::write(&marker, ID).unwrap();
         std::fs::remove_file(&file).unwrap();
-        assert!(outbox::pending(&root.0,"example","task").is_err());
-        std::fs::write(&file,serde_json::json!({"id":ID,"intent":intent,"schema":2}).to_string()).unwrap();
-        assert!(outbox::pending(&root.0,"example","task").is_err());
+        assert!(outbox::pending(&root.0, "example", "task").is_err());
+        std::fs::write(
+            &file,
+            serde_json::json!({"id":ID,"intent":intent,"schema":2}).to_string(),
+        )
+        .unwrap();
+        assert!(outbox::pending(&root.0, "example", "task").is_err());
     }
 
     #[test]

@@ -737,23 +737,43 @@ impl DraftStore {
         expected: Draft,
         done: impl FnOnce(Result<bool, String>) + Send + 'static,
     ) {
+        self.settle_if_unchanged(key, expected, true, done);
+    }
+
+    /// Ends a verified attempt only if its saved content still matches.
+    /// Recovery of an older note may preserve the newer draft's content.
+    pub fn settle_if_unchanged(
+        &self,
+        key: &str,
+        expected: Draft,
+        clear: bool,
+        done: impl FnOnce(Result<bool, String>) + Send + 'static,
+    ) {
         let (root, owned) = (self.root.clone(), key.to_owned());
-        self.writer.enqueue(key, false, Box::new(move || {
-            let (mut current, valid) = load_once(&root, &owned);
-            let result = if !valid {
-                Err(NOT_RESTORED.to_owned())
-            } else if current.draft.text != expected.text || current.draft.attachments != expected.attachments {
-                Ok(false)
-            } else {
-                current.draft = Draft::default();
-                current.position = 0;
-                current.anchor = 0;
-                current.sending = false;
-                current.uncertain = false;
-                save_direct(&root, &owned, &current).map(|()| true)
-            };
-            done(result);
-        }));
+        self.writer.enqueue(
+            key,
+            false,
+            Box::new(move || {
+                let (mut current, valid) = load_once(&root, &owned);
+                let result = if !valid {
+                    Err(NOT_RESTORED.to_owned())
+                } else if current.draft.text != expected.text
+                    || current.draft.attachments != expected.attachments
+                {
+                    Ok(false)
+                } else {
+                    if clear {
+                        current.draft = Draft::default();
+                        current.position = 0;
+                        current.anchor = 0;
+                    }
+                    current.sending = false;
+                    current.uncertain = false;
+                    save_direct(&root, &owned, &current).map(|()| true)
+                };
+                done(result);
+            }),
+        );
     }
 
     /// One page of Saved drafts, after every save queued before it.

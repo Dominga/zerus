@@ -14,7 +14,12 @@ pub fn document_call(project: &str, task: &str) -> Result<TaskCall, String> {
     page_call(project, task, 1, None)
 }
 
-fn page_call(project: &str, task: &str, limit: usize, before: Option<&str>) -> Result<TaskCall, String> {
+fn page_call(
+    project: &str,
+    task: &str,
+    limit: usize,
+    before: Option<&str>,
+) -> Result<TaskCall, String> {
     if project.is_empty()
         || project.len() > 128
         || project.chars().any(char::is_control)

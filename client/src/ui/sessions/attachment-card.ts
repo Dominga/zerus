@@ -6,7 +6,7 @@ import type { ItemAttachment } from "./types";
 // (SessionsWindow.cpp:1093-1102), apart from the view so they can be tested.
 
 /** What a card reads its file by: none for a file its message saved no reference to, or while no conversation shows. */
-export function cardTarget(file: ItemAttachment, scope: AttachmentScope | undefined): { computer: string; ref: AttachmentRef } | undefined {
+export function cardTarget(file: Pick<ItemAttachment, "request_id" | "index">, scope: AttachmentScope | undefined): { computer: string; ref: AttachmentRef } | undefined {
   if (!scope || !file.request_id) return undefined;
   return {
     computer: scope.computer,

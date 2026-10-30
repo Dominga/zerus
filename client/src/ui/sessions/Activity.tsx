@@ -3,9 +3,12 @@ import { activityReadingRows, createActivityAnchor } from "./activity-anchor";
 import { searchPreview, clearSearchPreview } from "../../store/searchSelection";
 import { SearchHighlight } from "./SearchHighlight";
 import { For, Show, batch, createContext, createEffect, createMemo, createSignal, on, onCleanup, onMount, useContext } from "solid-js";
-import { attachmentFetch, attachmentOpen, copyVerbatim } from "../../bridge";
+import { attachmentFetch, attachmentMedia, attachmentOpen, copyVerbatim } from "../../bridge";
 import { notify } from "../../store/actions";
 import { previews } from "../../store/attachments";
+import { mediaPlayback } from "../../store/mediaPlayback";
+import { pageHidden } from "../../store/visibility";
+import { recordingBlob } from "./voice-playback";
 import { cardTarget, createOpen, readCards } from "./attachment-card";
 import { createStore, reconcile } from "solid-js/store";
 import { Icon } from "../lib/icons";
@@ -212,9 +215,6 @@ const mediaTime = (ms: number) => {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 };
 
-// One recording plays at a time, as with the view's single media player.
-const [playing, setPlaying] = createSignal<string>();
-
 /** Delivery state glyph (18 px); media state never claims reading or completion. */
 function DeliveryGlyph(props: { item: MediaMessage }) {
   const s = props.item.state;
@@ -258,29 +258,74 @@ function Waveform(props: { values: number[] }) {
   return <>{layer("rest")}{layer("played")}</>;
 }
 
-function MediaCard(props: { item: MediaMessage }) {
+function MediaCard(props: { item: MediaMessage; scope?: AttachmentScope }) {
   const it = props.item;
-  const [transcript, toggleTranscript] = layoutDisclosure();
-  const [position, setPosition] = createSignal(0);
-  let timer: number | undefined;
-  const stop = () => { clearInterval(timer); timer = undefined; if (playing() === it.id) setPlaying(undefined); };
-  const play = () => {
-    if (position() >= it.durationMs) setPosition(0);
-    setPlaying(it.id);
-    clearInterval(timer);
-    timer = window.setInterval(() => {
-      const next = position() + 100;
-      if (next >= it.durationMs) { setPosition(it.durationMs); stop(); } else setPosition(next);
-    }, 100);
-  };
-  createEffect(() => { if (playing() !== it.id && timer) { clearInterval(timer); timer = undefined; } });
-  onCleanup(stop);
-  const isPlaying = () => playing() === it.id;
-  const seek = (e: MouseEvent) => {
-    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    setPosition(Math.round(clamp((e.clientX - r.left) / r.width, 0, 1) * it.durationMs));
-  };
   const video = it.media === "video";
+  const [transcript, toggleTranscript] = layoutDisclosure();
+  const held = useContext(ActivityLayoutHeld);
+  const [position, setPosition] = createSignal(0);
+  const [duration, setDuration] = createSignal(it.durationMs);
+  const [isPlaying, setPlaying] = createSignal(false);
+  const [loading, setLoading] = createSignal(false);
+  const [url, setUrl] = createSignal("");
+  const [error, setError] = createSignal("");
+  const visibleError = createMemo((previous: string) => held() ? previous : error() || it.error || "", "");
+  const target = createMemo(() => it.file ? cardTarget(it.file, props.scope) : undefined,
+    undefined, { equals: (a, b) => JSON.stringify(a) === JSON.stringify(b) });
+  let player: HTMLMediaElement | undefined, objectUrl = "";
+  let claim: ReturnType<typeof mediaPlayback.take> | undefined;
+  let pendingSeek: number | undefined;
+  const clear = () => {
+    claim?.release(); claim = undefined;
+    player?.pause(); setPlaying(false); setLoading(false);
+    if (player) { player.removeAttribute("src"); player.load(); }
+    if (objectUrl) URL.revokeObjectURL(objectUrl);
+    objectUrl = ""; pendingSeek = undefined; setUrl(""); setPosition(0);
+  };
+  createEffect(on(target, () => { clear(); setPosition(0); setDuration(it.durationMs); setError(""); }));
+  createEffect(() => { if (pageHidden()) clear(); });
+  onCleanup(clear);
+  const ratio = () => duration() > 0 ? clamp(position() / duration(), 0, 1) : 0;
+  const play = async (seekTo?: number) => {
+    const current = target();
+    if (!current || loading()) return;
+    if (!claim?.current()) claim = mediaPlayback.take(clear, () => { if (loading()) clear(); else player?.pause(); });
+    const mine = claim;
+    if (seekTo !== undefined) { pendingSeek = seekTo; setPosition(seekTo); }
+    setError("");
+    try {
+      if (!objectUrl) {
+        setLoading(true);
+        const bytes = await attachmentMedia(current.computer, current.ref, video);
+        if (!mine.current() || target() !== current) return;
+        objectUrl = URL.createObjectURL(recordingBlob(bytes, video));
+        setUrl(objectUrl);
+      }
+      await Promise.resolve();
+      if (mine.current() && target() === current && player) await player.play();
+    } catch (failure) { if (mine.current()) { setError(`Could not play recording: ${String(failure)}`); setPlaying(false); } }
+    finally { if (mine.current()) setLoading(false); }
+  };
+  const pause = () => { player?.pause(); setPlaying(false); };
+  const loaded = (event: Event) => {
+    if (!claim?.current() || !objectUrl) return;
+    const media = event.currentTarget as HTMLMediaElement;
+    if (Number.isFinite(media.duration) && media.duration > 0) setDuration(Math.round(media.duration * 1000));
+    if (pendingSeek !== undefined) { media.currentTime = Math.min(pendingSeek, duration()) / 1000; pendingSeek = undefined; }
+  };
+  const moved = (event: Event) => { if (claim?.current() && objectUrl) setPosition(Math.round((event.currentTarget as HTMLMediaElement).currentTime * 1000)); };
+  const failed = (event: Event) => {
+    if (!claim?.current() || !objectUrl) return;
+    setPlaying(false); setLoading(false);
+    setError(`Could not play recording: ${(event.currentTarget as HTMLMediaElement).error?.message || "Recording is unavailable."}`);
+  };
+  const seek = (e: MouseEvent) => {
+    if (!target() || !duration()) return;
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const next = Math.round(clamp((e.clientX - r.left) / r.width, 0, 1) * duration());
+    if (objectUrl && player && claim?.current()) { player.currentTime = next / 1000; setPosition(next); }
+    else void play(next);
+  };
   return (
     <article class="act-msg k-user media" id={`item-${it.id}`}>
       <header>
@@ -291,9 +336,9 @@ function MediaCard(props: { item: MediaMessage }) {
       </header>
       <Show when={video} fallback={
         <div class="vm-row">
-          <div class="vp" style={{ "--p": String(position() / it.durationMs) }}>
-            <button class="vp-btn" aria-label={`Play or pause voice message (${mediaTime(it.durationMs)})`} aria-pressed={isPlaying()}
-              onClick={() => (isPlaying() ? stop() : play())}>
+          <div class="vp" style={{ "--p": String(ratio()) }}>
+            <button class="vp-btn" aria-label={`Play or pause voice message (${mediaTime(duration())})`} aria-pressed={isPlaying()}
+              disabled={!target() || loading()} title={!target() ? "Recording is unavailable." : undefined} aria-busy={loading()} onClick={() => { if (isPlaying()) pause(); else void play(); }}>
               <svg width="44" height="44" viewBox="0 0 44 44" aria-hidden="true">
                 <Show when={isPlaying()} fallback={<path d="M17 12L31 22L17 32Z" />}>
                   <rect x="15" y="13" width="5" height="18" rx="1" /><rect x="24" y="13" width="5" height="18" rx="1" />
@@ -301,10 +346,10 @@ function MediaCard(props: { item: MediaMessage }) {
               </svg>
             </button>
             <div class="vp-side">
-              <div class="vp-wave" role="slider" tabindex="-1" aria-label="Seek" aria-valuemin={0} aria-valuemax={it.durationMs} aria-valuenow={position()} onClick={seek}>
+              <div class="vp-wave" role="slider" tabindex="-1" aria-label="Seek" aria-valuemin={0} aria-valuemax={duration()} aria-valuenow={position()} onClick={seek}>
                 <Waveform values={it.waveform} />
               </div>
-              <span class="vp-caption tabular">{mediaTime(position())} / {mediaTime(it.durationMs)}</span>
+              <span class="vp-caption tabular">{mediaTime(position())} / {mediaTime(duration())}</span>
             </div>
           </div>
           <Show when={it.transcript}><TranscriptButton open={transcript()} onToggle={toggleTranscript} /></Show>
@@ -312,26 +357,31 @@ function MediaCard(props: { item: MediaMessage }) {
       }>
         {/* The round video plays in place: click plays or pauses; a ring shows progress. */}
         <div class="vm-row video">
-          <button class="vm-poster" classList={{ playing: isPlaying(), started: position() > 0 && position() < it.durationMs }}
-            style={{ "--p": String(position() / it.durationMs) }} aria-pressed={isPlaying()}
-            aria-label={`${isPlaying() ? "Pause" : "Play"} video message (${mediaTime(it.durationMs)})`} onClick={() => (isPlaying() ? stop() : play())}>
-            <span class="vm-frames" aria-hidden="true" />
+          <button class="vm-poster" classList={{ playing: isPlaying(), started: position() > 0 && position() < duration() }}
+            style={{ "--p": String(ratio()) }} aria-pressed={isPlaying()}
+            aria-label={`${isPlaying() ? "Pause" : "Play"} video message (${mediaTime(duration())})`} disabled={!target() || loading()} title={!target() ? "Recording is unavailable." : undefined} aria-busy={loading()} onClick={() => { if (isPlaying()) pause(); else void play(); }}>
+            <span class="vm-frames" classList={{ real: !!url() }} aria-hidden="true">
+              <Show when={url()}><video ref={(el) => { player = el; }} src={url()} playsinline preload="metadata"
+                onLoadedMetadata={loaded} onTimeUpdate={moved} onPlaying={() => setPlaying(true)} onPause={() => setPlaying(false)} onEnded={() => setPlaying(false)} onError={failed} /></Show>
+            </span>
             <svg class="vm-ring" viewBox="0 0 200 200" aria-hidden="true">
               <circle class="vm-ring-track" cx="100" cy="100" r="97" pathLength="100" />
-              <circle class="vm-ring-done" cx="100" cy="100" r="97" pathLength="100" style={{ "stroke-dashoffset": String(100 - (100 * position()) / it.durationMs) }} />
+              <circle class="vm-ring-done" cx="100" cy="100" r="97" pathLength="100" style={{ "stroke-dashoffset": String(100 - 100 * ratio()) }} />
             </svg>
             <span class="vm-play" aria-hidden="true">
               <svg width="48" height="48" viewBox="0 0 48 48">
                 <Show when={isPlaying()} fallback={<path d="M18 12L36 24L18 36Z" />}><rect x="15" y="13" width="6" height="22" rx="1.5" /><rect x="27" y="13" width="6" height="22" rx="1.5" /></Show>
               </svg>
             </span>
-            <span class="vm-time tabular">{position() > 0 ? `${mediaTime(position())} / ` : ""}{mediaTime(it.durationMs)}</span>
+            <span class="vm-time tabular">{position() > 0 ? `${mediaTime(position())} / ` : ""}{mediaTime(duration())}</span>
           </button>
           <Show when={it.transcript}><TranscriptButton open={transcript()} onToggle={toggleTranscript} /></Show>
         </div>
       </Show>
       <Show when={transcript() && it.transcript}><p class="vm-text">{it.transcript}</p></Show>
-      <Show when={it.error}><p class="vm-error">{it.error}</p></Show>
+      <Show when={!video}><audio ref={(el) => { player = el; }} src={url() || undefined} preload="none"
+        onLoadedMetadata={loaded} onTimeUpdate={moved} onPlaying={() => setPlaying(true)} onPause={() => setPlaying(false)} onEnded={() => setPlaying(false)} onError={failed} /></Show>
+      <Show when={visibleError()}><p class="vm-error">{visibleError()}</p></Show>
     </article>
   );
 }
@@ -507,7 +557,7 @@ function EchoBody(props: { item: ActivityItem; scope?: AttachmentScope }) {
 function Item(props: { item: TranscriptItem; scope?: AttachmentScope }) {
   const [open, toggleOpen] = layoutDisclosure();
   const it = props.item;
-  if (it.kind === "media") return <MediaCard item={it} />;
+  if (it.kind === "media") return <MediaCard item={it} scope={props.scope} />;
   if (it.kind === "context") return <div class="act-label eyebrow" id={`item-${it.id}`}>{it.body}</div>;
   if (it.kind === "thinking") return <div class="act-thinking" id={`item-${it.id}`}><span class="eyebrow">Thinking</span><p>{it.body}</p></div>;
   if (it.kind === "report")

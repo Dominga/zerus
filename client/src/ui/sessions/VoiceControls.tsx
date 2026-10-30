@@ -5,6 +5,7 @@ import { flag, setSetting } from "../../store/settings";
 import { toast } from "../../store/notices";
 import type { SessionVoice } from "../../store/voice";
 import { recordingBlob } from "./voice-playback";
+import { mediaPlayback } from "../../store/mediaPlayback";
 
 const icon = (name: string) => ({ microphone: "mic", stop: "square" }[name] ?? name);
 
@@ -48,11 +49,14 @@ export function VoicePreview(props: { voice: SessionVoice }) {
   const voice = props.voice, shown = voice.shown;
   let player: HTMLMediaElement | undefined;
   let objectUrl = "", generation = 0, busy = false;
+  let claim: ReturnType<typeof mediaPlayback.take> | undefined;
   const [playing, setPlaying] = createSignal(false);
   const [videoFile, setVideoFile] = createSignal("");
   const [jpeg, setJpeg] = createSignal("");
   const clear = () => {
+    claim?.release(); claim = undefined;
     generation++; player?.pause(); setPlaying(false);
+    if (player) { player.removeAttribute("src"); player.load(); }
     if (objectUrl) URL.revokeObjectURL(objectUrl);
     objectUrl = "";
     setVideoFile("");
@@ -76,6 +80,7 @@ export function VoicePreview(props: { voice: SessionVoice }) {
     if (playing()) { player?.pause(); return; }
     const id = shown()?.id;
     if (!id) return;
+    if (!claim?.current()) claim = mediaPlayback.take(clear);
     const mine = generation;
     busy = true;
     try {
@@ -86,7 +91,7 @@ export function VoicePreview(props: { voice: SessionVoice }) {
       }
       if (shown()?.video_preview) setVideoFile(objectUrl);
       await Promise.resolve();
-      if (mine === generation && player) { if (player.src !== objectUrl) player.src = objectUrl; await player.play(); }
+      if (mine === generation && claim?.current() && player) { if (player.src !== objectUrl) player.src = objectUrl; await player.play(); }
     } catch (failure) { if (mine === generation) { state(false); toast("Voice notice", `Could not play recording: ${String(failure)}`, "error", true); } }
     finally { busy = false; }
   };

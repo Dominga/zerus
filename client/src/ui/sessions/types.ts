@@ -231,6 +231,8 @@ export interface MediaMessage {
   durationMs: number;
   /** Exactly 64 integer amplitudes 0-255; anything else draws a flat line. */
   waveform: number[];
+  /** Public receipt identity, never a path on the recording's host. */
+  file?: { request_id: string; index: number };
   transcript?: string;
   error?: string;
 }

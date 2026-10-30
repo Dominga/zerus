@@ -539,6 +539,7 @@ pub(crate) fn strip_stage_facts(value: &mut Value) {
                 for run in runs {
                     if let Some(run) = run.as_object_mut() {
                         run.remove("awaiting_run");
+                        run.remove("stalled_member");
                         run.remove("prepare");
                         run.remove("context");
                     }
@@ -824,6 +825,11 @@ pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<
             value["queue"] = json!(member_queue(team, &member.id));
             if let Some(held) = captured_hold(team, &member.id) {
                 value["captured_hold"] = held;
+            }
+            // #635 N4: the task and stage whose hold keeps this member's folder,
+            // so the desktop and Android need not derive the hold from text.
+            if let Some((task, stage)) = super::stages::held_by(team, &member.id) {
+                value["held_by"] = json!({"task":task,"stage":stage});
             }
             // U36: the stage it has, then the waiting stages it may take.
             value["stage_queue"] = json!(super::stages::queue(team, &member.id));
@@ -7286,6 +7292,45 @@ mod tests {
         // The session list carries the same queue.
         let listed = summary(&team, true);
         assert_eq!(listed["members"].as_array().unwrap().iter().find(|member| member["id"] == "dev").unwrap()["queue"], expected);
+    }
+
+    /// #635 N4: status names the task and stage that hold each member's folder,
+    /// so clients need not derive the hold from inbox text.
+    #[test]
+    fn status_gives_each_member_the_task_and_stage_that_hold_its_folder() {
+        use crate::state::teams::model::{PipelineRun, PipelineStage, StageRun, StageState};
+        let mut team = running_team();
+        let member = |value: &Value, id: &str| value["members"].as_array().unwrap().iter().find(|member| member["id"] == id).unwrap().clone();
+        assert!(member(&view_with(&team, &[], None), "dev").get("held_by").is_none(), "nothing holds dev yet");
+        let task = team.task_mut(1).unwrap();
+        task.status = TaskStatus::InTest;
+        task.attempts = vec![Attempt { n: 1, id: "A1".into(), member: "dev".into(), state: AttemptState::Reported, ..Default::default() }];
+        task.pipeline_run = Some(PipelineRun {
+            id: "code".into(),
+            name: "Code".into(),
+            stages: vec![PipelineStage { kind: "test".into(), role: "tester".into(), ..Default::default() }],
+            max_rounds: 3,
+            folder: "hold".into(),
+            accept: "lead".into(),
+            round: 1,
+            runs: vec![StageRun {
+                id: "s".into(),
+                stage: 0,
+                kind: "test".into(),
+                round: 1,
+                attempt: 1,
+                member: "qa".into(),
+                state: StageState::Delivered,
+                holds: true,
+                at: 1.0,
+                delivered_at: Some(2.0),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let value = view_with(&team, &[], None);
+        assert_eq!(member(&value, "dev")["held_by"], json!({"task":1,"stage":"test"}));
+        assert!(member(&value, "lead").get("held_by").is_none());
     }
 
     #[test]

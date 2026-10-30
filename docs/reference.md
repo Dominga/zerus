@@ -1561,6 +1561,15 @@ the same commit twice in a row is marked `flaky` and goes to the lead; a timeout
 returns "timed out after N min". The plan chooses a preset, never a command:
 only the owner's catalog writes it.
 
+A stage member that ends its turn without a verdict, with no stage question
+open, gives the lead one stalled item while the stage stays its own. An
+unconfirmed hand-off is not retried on a timer: the lead hears it stalled only
+with evidence that it did not arrive (the member stayed idle and free since
+delivery, with no question and no run claim under the stage's id), and the
+member's late verdict is still accepted while the stage waits. A stage whose
+own run is still going when it goes back to Waiting keeps its folder and
+checkout until that run ends; the next member's work never races it.
+
 A `land` stage runs once every earlier stage passed and is the preset's last
 stage. Its `exits` map an exit code to `accepted` (Zerus accepts the task,
 `decided_by` is Zerus, and the feed names the stage), `returned` (back to the

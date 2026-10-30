@@ -1123,6 +1123,10 @@ pub(crate) struct Attempt {
     /// Commits Zerus made for this attempt (B4), newest last, at most 20.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub commits: Vec<CommitRef>,
+    /// #538 N5: the reported files' state at the report itself, so a later stage
+    /// hashes the report's moment rather than its own delivery.
+    #[serde(default, skip_serializing)]
+    pub report_files: Vec<Value>,
     /// U21: the built-in command templates Zerus ran for this attempt, newest
     /// last, at most 20.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1344,6 +1348,10 @@ pub(crate) struct StageRun {
     /// U48: what a land stage's exit code meant (accepted, returned, held).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub outcome: String,
+    /// #538 N4: the stage closed while a run it started may still go in
+    /// its folder; the folder and the checkout stay held until that run ends.
+    #[serde(default, skip_serializing)]
+    pub awaiting_run: bool,
 }
 
 /// U36: a task's pipeline snapshot and progress.
@@ -1362,6 +1370,10 @@ pub(crate) struct PipelineRun {
     /// more after each return or send-back.
     #[serde(default = "first_round")]
     pub round: u32,
+    /// #538 N5: the folder is held from the report, because a test stage
+    /// ahead may need it (the hold rule, or a checkout that will fall back).
+    #[serde(default, skip_serializing)]
+    pub hold_from_report: bool,
     /// Every stage run, oldest first, at most 64.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runs: Vec<StageRun>,

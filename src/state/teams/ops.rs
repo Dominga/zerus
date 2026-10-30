@@ -6256,6 +6256,7 @@ mod tests {
                 folder: "hold".into(),
                 accept: "lead".into(),
                 round: 1,
+                hold_from_report: false,
                 runs: Vec::new(),
             });
         }

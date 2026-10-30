@@ -66,6 +66,7 @@ pub(crate) fn resolve(catalog: &Catalog, team: &Team, task: &Task) -> Option<Pip
         folder: if preset.folder.is_empty() { "hold".into() } else { preset.folder.clone() },
         accept: if preset.accept.is_empty() { "lead".into() } else { preset.accept.clone() },
         round: 1,
+        hold_from_report: false,
         runs: Vec::new(),
     })
 }
@@ -119,8 +120,16 @@ fn implementers(task: &Task) -> Vec<String> {
 /// to the final acceptance when the preset has none. None without a pipeline
 /// (the caller keeps today's Submitted).
 pub(crate) fn on_report(team: &mut Team, id: u32, events: &mut Vec<Event>) -> anyhow::Result<Option<Value>> {
+    // #538 N5: from the report the folder is held when a test stage may need
+    // it, and the reported files are hashed at the report itself.
+    let hold = super::stages::hold_from_report(team, id);
+    let files = team.task(id).map(|task| super::stages::report_files(team, task)).unwrap_or_default();
     let Some(task) = team.task_mut(id) else { return Ok(None) };
     let Some(run) = task.pipeline_run.as_mut() else { return Ok(None) };
+    run.hold_from_report = hold;
+    if let Some(attempt) = task.attempts.iter_mut().rev().find(|attempt| attempt.state == AttemptState::Reported) {
+        attempt.report_files = files;
+    }
     // Each report the pipeline reads is one round.
     run.round = run.runs.iter().map(|stage| stage.round).max().map_or(1, |round| round + 1);
     if run.stages.is_empty() {
@@ -219,11 +228,16 @@ fn final_acceptance(team: &mut Team, id: u32, events: &mut Vec<Event>) -> anyhow
 /// Ends the open stage run (if any) with `state`, by whom and why.
 fn close_run(task: &mut Task, state: StageState, by: &str, text: &str, findings: Vec<String>) -> Option<StageRun> {
     let run = task.pipeline_run.as_mut()?.open_run_mut()?;
+    // #538 N4: the stage's rights end with it, but a run it started may still go
+    // in its folder: the folder (and its checkout) stays held until it ends.
+    let started = run.state == StageState::Delivered;
+    let may_run = matches!(run.kind.as_str(), "test" | "command" | "land");
     run.state = state;
     run.ended_at = Some(now());
     run.by = by.to_owned();
     run.text = text.to_owned();
     run.findings = findings;
+    run.awaiting_run = started && may_run;
     Some(run.clone())
 }
 

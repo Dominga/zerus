@@ -13,6 +13,7 @@ export type ComputerId = string;
  */
 export interface ViewRow {
   name: string;
+  launch_id?: string | null;
   title?: string;
   agent?: string;
   status?: string;
@@ -93,6 +94,8 @@ export type ComputerStatus = "probing" | "unsupported" | "live" | "polled" | "re
 export interface ComputerOut { computer: ComputerId; status: ComputerStatus | string; attempt: number }
 export type ActivityKind = "events" | "replace" | "event" | "state" | "ended";
 export interface ActivityOut { computer: ComputerId; key: string; kind: ActivityKind | string; payload: unknown }
+/** The existing watch tasks topic; a list replaces the open project's board. */
+export interface TasksOut { computer: ComputerId; key: string; kind: string; payload: unknown }
 
 // The Sessions list's grouping by the shared project organization
 // (client/core `swarm/grouping.rs`). The Rust side keeps the organization;
@@ -139,6 +142,7 @@ export interface Batch {
   computers: ComputerOut[];
   machines?: MachineOut[];
   activity: ActivityOut[];
+  tasks?: TasksOut[];
   /** Each row's project and rank, for the rows whose grouping changed. */
   groups?: GroupOut[];
   /** The headers and the edit state, when they changed. */
@@ -207,7 +211,7 @@ export const emptyBatch = (): Batch => ({ upserts: [], removes: [], replaces: []
 /** A batch with nothing to apply. A composer view or a draft key set is content: Rust sends each once. */
 export const isEmptyBatch = (b: Batch) =>
   !b.upserts.length && !b.removes.length && !b.replaces.length && !b.computers.length && !b.machines?.length && !b.activity.length
-  && !b.groups?.length && !b.grouping && !b.processes_view && !b.composer && !b.draft_keys && !b.composer_events?.length;
+  && !b.tasks?.length && !b.groups?.length && !b.grouping && !b.processes_view && !b.composer && !b.draft_keys && !b.composer_events?.length;
 
 /** One Activity event as `inspect` returns it; unknown fields are kept. */
 export interface ActivityEvent {

@@ -23,6 +23,11 @@ let source: Source | undefined;
 
 export const inTauri = () => typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
+export async function followTasks(project: string | null): Promise<void> {
+  if (!inTauri()) { if (project) throw new Error("Tasks need a live hgs event stream."); return; }
+  await invoke("tasks_follow", { project });
+}
+
 /** `next_batch` answers with raw JSON bytes (`ipc::Response`), so large batches skip script evaluation. */
 function decodeBatch(reply: unknown): Batch {
   if (reply instanceof ArrayBuffer) return JSON.parse(new TextDecoder().decode(reply)) as Batch;

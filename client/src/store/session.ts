@@ -3,6 +3,7 @@ import { activityPort, composerTab, processesFollow, processesShown, windowVisib
 import { applyBatch, catalog, computerFresh, computerOffline, onReplaced, orderedRows, setDraftKeys } from "./catalog";
 import { composer } from "./composer";
 import { sessionModels, bindModelNotice } from "./sessionModels";
+import { tasks } from "./tasks";
 import { terminal } from "./terminal";
 import { flag, num } from "./settings";
 import { bindActivity, bindSelection, followedFor, notify, updating } from "./actions";
@@ -39,6 +40,7 @@ export function receive(b: Batch) {
   });
   observeMarks(b);
   if (b.activity.length) activity.applyActivity(b.activity);
+  if (b.tasks?.length) tasks.apply(b.tasks);
   if (b.processes_view) processes.apply(b.processes_view);
   if (b.composer) composer.receive(b.composer);
   if (b.draft_keys) setDraftKeys(b.draft_keys);

@@ -119,6 +119,8 @@ pub const KEYS: &[Key] = &[
     key("workspace/showCompletedSubagents", Kind::Flag(false)),
     key("workspace/reduceMotion", Kind::Flag(false)),
     key("notifications/optionalQuestions", Kind::Flag(false)),
+    // TasksView's local scope switch.
+    key("tasks/onlySession", Kind::Flag(false)),
     // New session's remembered choices (NewSessionDialog.cpp:845-851,
     // SessionCreationController.cpp:244-249). launchAccounts is compact JSON
     // stored by Qt as a QByteArray, read as text by the single Qt seed.

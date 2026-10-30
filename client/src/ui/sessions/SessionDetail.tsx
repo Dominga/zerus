@@ -27,6 +27,8 @@ import { QueuePanel } from "./QueuePanel";
 import { onCommand } from "../../store/shortcuts";
 import { composer } from "../../store/composer";
 import { createSubagentIdentity } from "../../store/subagentIdentity";
+import { openTasks } from "../../store/taskNavigation";
+import { groupOf, INBOX } from "../../store/organization";
 
 // The session header and its Activity with the composer under it, after
 // design/webui SessionDetail. Processes and the side panel move in with later
@@ -216,6 +218,8 @@ export function SessionDetail() {
                 <button class="tab" role="tab" classList={{ on: detailTab() === t.id }} aria-selected={detailTab() === t.id} onClick={() => { if (t.id === "terminal") terminal.opened(); setDetailTab(t.id); }}>{t.label}</button>
               )}</For>
               <span class="grow" />
+              <button class="btn ghost small" disabled={selected()!.state === "archived" || groupOf(selected()!.key) === INBOX}
+                title="Open this session's project tasks" onClick={() => openTasks(groupOf(selected()!.key), selected()!.key)}><Icon name="list-todo" size={14} />Tasks</button>
             </div>
             <div class="tab-body">
               <Switch>

@@ -125,6 +125,7 @@ mod live {
         source: Mutex<Option<Source>>,
         pub organization: OnceLock<Organization>,
         pub creations: OnceLock<crate::creations::CreationHost>,
+        tasks_project: Mutex<Option<String>>,
     }
 
     /// Follows this computer's organization: the catalog is shared, so its
@@ -145,6 +146,33 @@ mod live {
     }
 
     impl Live {
+        /// The board follows one local replica project, including across reconnects.
+        pub fn follow_tasks(&self, project: Option<String>) -> Result<(), String> {
+            if project
+                .as_deref()
+                .is_some_and(|p| !zerus_client_core::tasks::valid_project(p))
+            {
+                return Err("Invalid task project.".into());
+            }
+            let source = self.source.lock().unwrap_or_else(PoisonError::into_inner);
+            let Some(Source::Fleet(fleet)) = source.as_ref() else {
+                return Err("Tasks need a live hgs event stream.".into());
+            };
+            let mut current = self
+                .tasks_project
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if let Some(old) = current.take() {
+                fleet.unfollow_tasks(&ComputerId::local(), &old);
+            }
+            if let Some(next) = project {
+                fleet
+                    .follow_tasks(&ComputerId::local(), &next)
+                    .map_err(|e| e.to_string())?;
+                *current = Some(next);
+            }
+            Ok(())
+        }
         pub fn reconnect(&self, computer: &str) -> bool {
             match self
                 .source
@@ -579,6 +607,24 @@ pub async fn unfollow(
     }
 }
 
+/// Starts/stops the Tasks board's one project subscription; no list poller.
+#[tauri::command]
+pub async fn tasks_follow(
+    state: State<'_, AppState>,
+    project: Option<String>,
+) -> Result<(), String> {
+    #[cfg(feature = "live")]
+    {
+        let live = Arc::clone(&state.live);
+        blocking(move || live.follow_tasks(project)).await
+    }
+    #[cfg(not(feature = "live"))]
+    {
+        let _ = (&state, project);
+        Err(NO_LIVE.into())
+    }
+}
+
 /// The measurement run mode from the environment: `ZERUS_CLIENT_PERF` (`auto`
 /// runs the Diagnostics scenarios, saves the report and exits),
 /// `ZERUS_CLIENT_PERF_OUT` (where the report goes), `ZERUS_CLIENT_PERF_LABEL`
@@ -796,6 +842,19 @@ pub fn metrics(window_ms: Option<u64>) -> Value {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "live")]
+    #[test]
+    fn task_board_checks_the_project_and_needs_the_existing_live_source() {
+        let live = super::live::Live::default();
+        assert_eq!(
+            live.follow_tasks(Some("bad\nproject".into())).unwrap_err(),
+            "Invalid task project."
+        );
+        assert_eq!(
+            live.follow_tasks(Some("project-1".into())).unwrap_err(),
+            "Tasks need a live hgs event stream."
+        );
+    }
     #[test]
     fn build_info_answers_what_the_command_line_prints() {
         let info = super::build_info();

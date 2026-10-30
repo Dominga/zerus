@@ -963,6 +963,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         actions::set_notifications,
         actions::inspect_session,
         actions::inspect_subagent_identity,
+        commands::tasks_follow,
         actions::pending_read_marks,
         actions::queue_read_marks,
         actions::attention_marks,

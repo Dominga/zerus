@@ -3928,9 +3928,11 @@ Choose a server's API and model for a new session with
 `hgs codex DIRECTORY --new -n TAG --model-server lab --model small`. The launch
 carries this session's provider settings only. Codex gets a session-scoped
 custom provider, `-c model_providers.hgs-lab={name,base_url,env_key,wire_api}`
-and `-c model_provider=hgs-lab` with `--model small`: it speaks the server's
-chat-completions API and reads its key from `HGS_MODEL_SERVER_KEY`, so neither
-the built-in OpenAI provider (the Responses API) nor a ChatGPT login is used.
+and `-c model_provider=hgs-lab` with `--model small`: its `wire_api` follows
+the installed Codex (`chat` before 0.100, `responses` from then on, where
+`chat` is deprecated and removed from the newest releases), and it reads its
+key from `HGS_MODEL_SERVER_KEY`, so neither the built-in OpenAI provider nor a
+ChatGPT login is used.
 Claude Code gets `ANTHROPIC_BASE_URL` (the root) and its model variables, with
 the token in `ANTHROPIC_AUTH_TOKEN`. OpenCode is not offered for a model server
 until it has a per-session provider contract; a global provider entry would

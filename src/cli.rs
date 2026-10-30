@@ -2565,10 +2565,6 @@ fn launch(
     if !model_server_name.is_empty() {
         environment.push(format!("HGS_MODEL_SERVER={model_server_name}"));
         environment.push(format!("HGS_MODEL_SERVER_MODEL={}", options.model.as_deref().unwrap_or_default()));
-        if !options.dry && !model_server_secrets.is_empty() {
-            let path = crate::state::model_servers::write_secret_file(&config.state, &model_server_secrets)?;
-            environment.push(format!("HGS_MODEL_SERVER_ENV={}", path.display()));
-        }
     }
     environment.extend(hint_environment);
     environment.extend(platform::gui_env());
@@ -2612,6 +2608,16 @@ fn launch(
         println!("{}", terminal().describe(&DryRun::Launch(&spec)));
         return Ok(0);
     }
+    // U60 (#709 L1): the key file is written only here, right before the
+    // backend launch, and removed if that launch fails; `hgs --run` removes it
+    // on success. The resume branch above returned before this point, and a
+    // dry-run returned before it too, so neither leaves a file.
+    let mut secret_path: Option<std::path::PathBuf> = None;
+    if !model_server_secrets.is_empty() {
+        let path = crate::state::model_servers::write_secret_file(&config.state, &model_server_secrets)?;
+        spec.env.push(format!("HGS_MODEL_SERVER_ENV={}", path.display()));
+        secret_path = Some(path);
+    }
     if matches!(command_name.as_str(), "claude" | "codex" | "kimi")
         && env::var("HGS_TRACKING").as_deref() != Ok("0")
     {
@@ -2641,7 +2647,15 @@ fn launch(
         }
     }
     if options.detached {
-        let rc = terminal().launch(&spec)?.code;
+        let rc = match terminal().launch(&spec) {
+            Ok(exit) => exit.code,
+            Err(error) => {
+                if let Some(path) = &secret_path {
+                    let _ = std::fs::remove_file(path);
+                }
+                return Err(error);
+            }
+        };
         if rc == 0 {
             if let Some(id) = &options.launch_id {
                 // A session that ends before a listing shows it still ends
@@ -2656,7 +2670,15 @@ fn launch(
     }
     let _tab = TabGuard::begin(config, &session, &platform::tab_color(config, "local"));
     let start = Instant::now();
-    let exit = terminal().launch(&spec)?;
+    let exit = match terminal().launch(&spec) {
+        Ok(exit) => exit,
+        Err(error) => {
+            if let Some(path) = &secret_path {
+                let _ = std::fs::remove_file(path);
+            }
+            return Err(error);
+        }
+    };
     let rc = exit.code;
     if !report_startup_failure(&session)
         && !exit.server_died

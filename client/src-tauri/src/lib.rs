@@ -1139,7 +1139,8 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
 }
 
 fn app_navigation_allowed(url: &tauri::Url) -> bool {
-    if url.path() != "/" && url.path() != "/index.html" {
+    // `tauri://localhost` is a non-special URL: its root path parses as "" rather than "/".
+    if !matches!(url.path(), "" | "/" | "/index.html") {
         return false;
     }
     matches!(
@@ -1216,6 +1217,8 @@ mod navigation_tests {
             "http://127.0.0.1:1420/",
             "http://127.0.0.1:1420/index.html?perf=auto",
             "tauri://localhost/index.html",
+            "tauri://localhost",
+            "tauri://localhost/",
             "http://tauri.localhost/index.html",
         ] {
             assert!(

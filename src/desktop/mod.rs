@@ -3,6 +3,7 @@ mod fanout;
 mod handoff;
 mod protocol;
 mod registration;
+mod revoke;
 mod store;
 mod transport;
 
@@ -23,7 +24,7 @@ use std::{
 use store::{Location, Store};
 use transport::{Listener, Stream, TIMEOUT};
 
-const USAGE: &str = "usage: hgs desktop serve [--config-dir DIR --state-dir DIR] | status [--json] | watch --json | request --json | registration --json";
+const USAGE: &str = "usage: hgs desktop serve [--config-dir DIR --state-dir DIR] | status [--json] | watch --json | request --json | registration --json | revoke --json [--request-id UUID] [--reason rollback]";
 const HEARTBEAT: Duration = Duration::from_secs(10);
 pub const STARTUP_REFUSED: i32 = 78;
 
@@ -124,6 +125,37 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
                 Ok(())
             }
             ["watch", "--json"] => watch(&location),
+            ["revoke", rest @ ..] => {
+                let command = revoke::cli(rest)?;
+                let result = match exchange(&location, "request", Some(revoke::payload(&command)?))
+                    .with_context(|| {
+                        format!(
+                            "revoke request {} has no settled receipt; keep Qt stopped",
+                            command.id()
+                        )
+                    })? {
+                    Some(result) => result,
+                    None => revoke::offline(&location, &command).with_context(|| {
+                        format!(
+                            "revoke request {} was not settled; keep Qt stopped",
+                            command.id()
+                        )
+                    })?,
+                };
+                println!("{result}");
+                let settled = result["accepted"] == true
+                    && result["durable"] == true
+                    && result["revoked"] == true
+                    && result["checkpointed"] == true;
+                let absent = result["applicable"] == false
+                    && result["handoff"] == "none"
+                    && result["revoked"] == true
+                    && result["nothing_written"] == true;
+                ensure!((settled || absent) && result["request_id"] == command.id()
+                        && result["configuration"] == location.configuration,
+                    "desktop revocation is not settled; keep Qt stopped and inspect the same request_id");
+                Ok(())
+            }
             ["request", "--json"] => {
                 let mut bytes = Vec::new();
                 std::io::stdin()
@@ -273,7 +305,9 @@ fn serve(location: Location) -> Result<()> {
                 } else if hello.op == "status" && hello.request.is_none() {
                     frame(&epoch, seq, "status", value)
                 } else if hello.op == "request" {
-                    frame(&epoch, seq, "response", request(hello.request.as_ref()))
+                    let result = request(&location, &mut store, hello.request.as_ref());
+                    migration = handoff::inspect(&location);
+                    frame(&epoch, seq, "response", result)
                 } else {
                     frame(
                         &epoch,
@@ -382,7 +416,7 @@ fn client(
     written
 }
 
-fn request(value: Option<&Value>) -> Value {
+fn request(location: &Location, store: &mut Store, value: Option<&Value>) -> Value {
     let id = value
         .and_then(|v| v["request_id"].as_str())
         .filter(|id| uuid::Uuid::parse_str(id).is_ok_and(|uuid| uuid.to_string() == *id));
@@ -390,10 +424,11 @@ fn request(value: Option<&Value>) -> Value {
         return json!({"accepted":false,"code":"invalid_request_id"});
     };
     let op = value.and_then(|v| v["op"].as_str()).unwrap_or("");
-    // Only a read-only ping is admitted in the kernel. No durable request is
-    // accepted before the single-writer handoff and journal exist.
+    // Revocation only reduces authority. Every positive effect remains fenced.
     if op == "ping" {
         json!({"request_id":id,"accepted":true,"durable":false,"op":"pong"})
+    } else if matches!(op, "revoke" | "revoke_status") {
+        revoke::request(location, store, value.expect("validated request"))
     } else {
         json!({"request_id":id,"accepted":false,"code":"handoff_required"})
     }
@@ -416,9 +451,17 @@ fn connection(location: &Location, op: &str, request: Option<Value>) -> Result<O
     Ok(Some(stream))
 }
 fn exchange(location: &Location, op: &str, request: Option<Value>) -> Result<Option<Value>> {
+    let revoking = request
+        .as_ref()
+        .is_some_and(|value| matches!(value["op"].as_str(), Some("revoke" | "revoke_status")));
     let Some(stream) = connection(location, op, request)? else {
         return Ok(None);
     };
+    // Revocation includes a bounded SQLite busy wait and durable filesystem I/O.
+    // A timeout remains an unknown result, never permission to start Qt.
+    if revoking {
+        stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    }
     let bytes = protocol::line(&mut BufReader::new(stream), protocol::FRAME_BYTES)?
         .context("desktop service disconnected")?;
     let response: Value = serde_json::from_slice(&bytes)?;

@@ -1,9 +1,13 @@
-//! Bounded read-only import diagnostics. Structure never grants writer authority.
-use super::store::Location;
+//! Bounded import diagnostics and revocation. Structure never grants authority.
+use super::store::{HandoffLock, Location};
 use crate::platform;
 use anyhow::{ensure, Result};
 use serde_json::{json, Value};
-use std::{fs, io::Read, path::Path};
+use std::{
+    fs,
+    io::{Read, Write},
+    path::Path,
+};
 use zerus_desktop_migration::{
     Evidence, Handoff, ImportRecord, Phase, HANDOFF_FILE, MAX_HANDOFF_BYTES,
     MAX_IMPORT_RECORD_BYTES,
@@ -26,6 +30,50 @@ fn read_private(path: &Path, limit: usize) -> Result<Vec<u8>> {
     file.take(limit as u64 + 1).read_to_end(&mut bytes)?;
     ensure!(bytes.len() <= limit, "import file too large");
     Ok(bytes)
+}
+
+pub fn marker(location: &Location, lock: &HandoffLock) -> Result<Option<Handoff>> {
+    lock.verify(location)?;
+    location.check_existing()?;
+    let bytes = match read_private(&location.root.join(HANDOFF_FILE), MAX_HANDOFF_BYTES) {
+        Ok(bytes) => bytes,
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            return Ok(None)
+        }
+        Err(error) => return Err(error),
+    };
+    Ok(Some(Handoff::parse(&bytes, &location.configuration)?))
+}
+
+/// Authority reduction only: preserve every imported identity/reference and
+/// refuse malformed/newer input. The actor already fenced policy and drained
+/// its owned workers before this durable phase transition.
+pub fn write_revoked(location: &Location, lock: &HandoffLock, marker: &Handoff) -> Result<()> {
+    lock.verify(location)?;
+    location.check_existing()?;
+    marker.validate(&location.configuration)?;
+    let mut revoked = marker.clone();
+    revoked.phase = Phase::Revoked;
+    let bytes = serde_json::to_vec(&revoked)?;
+    ensure!(
+        bytes.len() <= MAX_HANDOFF_BYTES,
+        "handoff exceeds its byte limit"
+    );
+    let mut temporary = tempfile::NamedTempFile::new_in(&location.root)?;
+    platform::make_private(temporary.as_file())?;
+    ensure!(
+        platform::verify_private_file(temporary.as_file())?,
+        "unsafe handoff temporary file"
+    );
+    temporary.write_all(&bytes)?;
+    temporary.as_file().sync_all()?;
+    platform::persist(temporary, location.root.join(HANDOFF_FILE)).map_err(|error| error.error)?;
+    platform::sync_dir(&location.root)?;
+    Ok(())
 }
 
 fn evidence(location: &Location) -> Result<(Handoff, ImportRecord)> {

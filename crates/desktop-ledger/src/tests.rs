@@ -224,7 +224,7 @@ fn revocation_blocks_new_reservations_but_accepts_exact_in_flight_receipt() {
     let intent = ready(&mut db, "edge");
     let req = request(&intent, 1);
     reserve(&mut db, &req).unwrap();
-    revoke(&mut db, "manual_rollback").unwrap();
+    revoke(&db, "manual_rollback").unwrap();
     let other = put_intent(&mut db, &identity("other"), 1, &json!({})).unwrap();
     assert!(reserve(&mut db, &request(&other, 2)).is_err());
     finish(&mut db, &req, State::Delivered, &json!({})).unwrap();

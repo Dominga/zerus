@@ -232,11 +232,16 @@ fn client(
     send: mpsc::SyncSender<Event>,
     stopped: Arc<AtomicBool>,
 ) -> Result<()> {
+    // Unix peer credentials require no input. Windows pipe impersonation can
+    // require a completed read, so that authentication remains after the hello.
+    #[cfg(unix)]
+    transport::authenticate(&stream)?;
     stream.set_read_timeout(Some(TIMEOUT))?;
     stream.set_write_timeout(Some(TIMEOUT))?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let bytes =
         protocol::line(&mut reader, protocol::CONTROL_BYTES)?.context("missing desktop hello")?;
+    #[cfg(windows)]
     transport::authenticate(&stream)?;
     let hello: Hello = serde_json::from_slice(&bytes).context("invalid desktop hello")?;
     ensure!(!stopped.load(Ordering::SeqCst), "desktop is stopping");

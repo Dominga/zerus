@@ -91,13 +91,19 @@ mod native {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => (),
                 Err(error) => return Err(error.into()),
             }
+            // The enclosing desktop directory is verified 0700 before bind;
+            // other users cannot reach the socket before its mode becomes 0600.
             let socket = UnixListener::bind(&path)?;
             fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
             socket.set_nonblocking(true)?;
             Ok(Self { socket, path })
         }
         pub fn accept(&self) -> io::Result<Stream> {
-            self.socket.accept().map(|(stream, _)| stream)
+            let (stream, _) = self.socket.accept()?;
+            // BSD/macOS accept inherits O_NONBLOCK; reads/writes below use
+            // blocking operations with explicit timeouts on every platform.
+            stream.set_nonblocking(false)?;
+            Ok(stream)
         }
         pub fn close(&self) {}
     }

@@ -97,7 +97,7 @@ class Desktop(unittest.TestCase):
                 file.close()
 
         self.addCleanup(close)
-        return process, frames.get(timeout=5)
+        return process, frames.get(timeout=5), frames
 
     def test_status_is_read_only_and_does_not_start_service(self):
         status = self.cli('desktop', 'status', '--json')
@@ -140,8 +140,8 @@ class Desktop(unittest.TestCase):
 
     def test_two_clients_share_epoch_and_eof_detaches_only_one(self):
         service, status = self.serve()
-        first, a = self.watch()
-        second, b = self.watch()
+        first, a, _ = self.watch()
+        second, b, _ = self.watch()
         self.assertEqual(a['epoch'], status['epoch'])
         self.assertEqual(b['epoch'], a['epoch'])
         self.assertEqual((a['t'], b['t']), ('hello', 'hello'))
@@ -161,12 +161,26 @@ class Desktop(unittest.TestCase):
     def test_subscriber_limit_preserves_status_lane(self):
         self.serve()
         for _ in range(8):
-            _, hello = self.watch()
+            _, hello, _ = self.watch()
             self.assertEqual(hello['t'], 'hello')
-        ninth, refusal = self.watch()
+        ninth, refusal, _ = self.watch()
         self.assertEqual(refusal['value']['code'], 'subscriber_limit')
         ninth.wait(timeout=5)
         self.assertEqual(self.cli('desktop', 'status', '--json')['subscribers'], 8)
+
+    def test_watch_stays_attached_across_two_heartbeats(self):
+        service, status = self.serve()
+        watcher, hello, frames = self.watch()
+        for sequence in (hello['seq'] + 1, hello['seq'] + 2):
+            heartbeat = frames.get(timeout=13)
+            self.assertEqual(heartbeat['t'], 'heartbeat')
+            self.assertEqual(heartbeat['epoch'], status['epoch'])
+            self.assertEqual(heartbeat['seq'], sequence)
+            self.assertIsNone(watcher.poll(), watcher.stderr.read() if watcher.poll() is not None else '')
+            self.assertEqual(self.cli('desktop', 'status', '--json')['subscribers'], 1)
+        self.stop(service)
+        watcher.wait(timeout=5)
+        self.assertEqual(watcher.returncode, 0)
 
     def test_newer_schema_is_preserved(self):
         self.desktop.mkdir(mode=0o700, parents=True)

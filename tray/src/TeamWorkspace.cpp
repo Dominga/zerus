@@ -1100,35 +1100,15 @@ bool TeamWorkspace::approvePhase(const QString &id, int phase)
 {
     const auto *team = currentTeam(id);
     if (!team || m_phaseAct || phaseDecided(*team, phase)) return false;
-    int count = 0;
-    for (const auto &group : phaseGroups(*team)) if (group.n == phase) count = group.tasks.size();
-    // F12/N40: a draft approved while an earlier phase runs runs alongside it;
-    // the owner is warned of what that costs before anything is sent.
-    const int alongside = alongsidePhase(*team, phase);
-    bool barrier = false;
-    for (const auto &group : phaseGroups(*team)) if (group.n == phase) barrier = group.barrier;
-    if (alongside) {
-        // N6: a barrier phase's tasks wait for the earlier phase however it is
-        // approved, so its confirmation says that instead of promising them now.
-        if (!m_panel->confirm("teamApproveAlongsideConfirm", tr("Approve phase %1 now?").arg(phase),
-                              barrier ? tr("Phase %1 is a barrier: its tasks start only when phase %2 is finished, so approving it "
-                                           "now just locks the plan. Are you sure?").arg(phase).arg(alongside)
-                                      : tr("If you approve phase %1 now, the lead can send members to its tasks while phase %2 still runs, "
-                                           "but can no longer edit this phase. Are you sure?").arg(phase).arg(alongside),
-                              tr("Approve now")))
-            return false;
-    } else if (!m_panel->confirm("teamApprovePhaseConfirm", tr("Approve phase?"),
-                                 tr("Hand phase %1's %2 tasks to the members?").arg(phase).arg(count),
-                                 tr("Approve phase")))
-        return false;
+    // #724: the same question as Waiting for you's Approve (Teams::phaseApproval).
+    const auto approval = phaseApproval(*team, phase);
+    if (!m_panel->confirm(approval.name, approval.title, approval.text, approval.action)) return false;
     // The team may have been refreshed while the dialog was open: read it again.
     team = currentTeam(id);
     if (!team || m_phaseAct || phaseDecided(*team, phase)) return false;
     const QString key = markPhaseDecided(*team, phase);
-    // N6: the confirmed alongside approval really hands the tasks out; a
-    // barrier phase keeps its U25 queue because its barrier holds it anyway.
-    QJsonObject request{{"team", id}, {"phase", phase}};
-    if (alongside && !barrier) request["alongside"] = true;
+    QJsonObject request = approval.input;
+    request.insert("team", id);
     m_panel->act("approve-phase", request, [this, key](bool ok, const QString &message) { phaseSent(key, ok, message); });
     return true;
 }
@@ -1458,13 +1438,27 @@ private:
     {
         if (m_fitting) return;
         const QScopedValueRollback<bool> once(m_fitting, true);
-        int level = 0;
-        for (; level < 3; ++level) {
-            apply(level);
-            if (sizeHint().width() <= width()) break;
+        // whitewh-115: the shortened toolbar jumped between two steps at the
+        // boundaries because a step's own hiding changed the row it was
+        // measured from. Measure every step with its own controls first, from
+        // the same width, then choose: the step it was decided from never
+        // depends on the step currently applied.
+        int need[4] = {0, 0, 0, 0};
+        for (int step = 0; step < 4; ++step) {
+            apply(step);
+            need[step] = sizeHint().width();
         }
-        if (level == 3) apply(3);
+        const int room = width();
+        int level = m_level < 0 ? 0 : qBound(0, m_level, 3);
+        while (level < 3 && need[level] > room) ++level;
+        // Hysteresis: widening needs a little slack beyond the narrower step's
+        // own measure, so a poll or a refit exactly at the boundary keeps the
+        // step it is on instead of flipping back and forth.
+        while (level > 0 && need[level - 1] <= room - kGrowSlack) --level;
+        apply(level);
     }
+    /// The slack a refit needs before it widens the toolbar by one step.
+    static constexpr int kGrowSlack = 8;
     void apply(int level)
     {
         if (level == m_level) { if (level == 3) fitCompactSpacing(); return; }

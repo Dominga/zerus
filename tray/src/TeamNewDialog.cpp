@@ -3,11 +3,13 @@
 #include "TeamController.h"
 #include "TeamTemplateList.h"
 #include "TeamWidgets.h"
+#include <QAbstractItemView>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDir>
 #include <QFileDialog>
 #include <QFormLayout>
+#include <QJsonArray>
 #include <QLineEdit>
 #include <QPlainTextEdit>
 #include <QPointer>
@@ -35,11 +37,36 @@ void fillAgents(QComboBox *box, const QString &agent, const QColor &text)
     for (const auto &a : agents) box->addItem(workspaceIcon(a, text), agentNames.value(a), a);
     box->setCurrentIndex(qMax(0, box->findData(agent.isEmpty() ? QStringLiteral("claude") : agent)));
 }
-void fillEfforts(QComboBox *box, const QString &effort)
+// #738: a model item keeps the efforts its catalog names for it.
+constexpr int EffortsRole = Qt::UserRole + 1;
+void fillEfforts(QComboBox *box, const QString &effort, const QStringList &efforts = {})
 {
+    const QSignalBlocker block(box);
+    box->clear();
     box->addItem(QStringLiteral("—"), QString());
-    for (const auto &e : {"low", "medium", "high", "xhigh"}) box->addItem(QString::fromLatin1(e), QString::fromLatin1(e));
+    const QStringList shown = efforts.isEmpty() ? QStringList{"low", "medium", "high", "xhigh"} : efforts;
+    for (const auto &e : shown) box->addItem(e, e);
     box->setCurrentIndex(qMax(0, box->findData(effort)));
+}
+// The catalogs `account model-settings` reads for these agents; OpenCode's
+// comes with its account row.
+bool modelSettings(const QString &agent)
+{
+    return agent == "claude" || agent == "codex" || agent == "kimi" || agent == "dsh";
+}
+QList<TeamNewDialog::ModelOption> parseModels(const QJsonArray &models)
+{
+    QList<TeamNewDialog::ModelOption> options;
+    for (const auto &value : models) {
+        const auto model = value.toObject();
+        const QString id = model.value("value").toString(model.value("id").toString());
+        if (id.isEmpty() || options.size() >= 256) continue;
+        QStringList efforts;
+        for (const auto &effort : model.value("effort_options").toArray())
+            if (const QString e = effort.toString(); !e.isEmpty() && !efforts.contains(e)) efforts << e;
+        options.append({id, model.value("label").toString(), efforts});
+    }
+    return options;
 }
 void fillPermissions(QComboBox *box, const QString &permissions)
 {
@@ -125,7 +152,10 @@ TeamNewDialog::TeamNewDialog(TeamController *teams, HgsClient *client, const QLi
     auto *leadRow = new QHBoxLayout;
     m_leadAgent = combo("teamNewLeadAgent", 130); fillAgents(m_leadAgent, "claude", colorsFor(m_dark).fg);
     m_leadAccount = combo("teamNewLeadAccount", 130);
-    m_leadModel = combo("teamNewLeadModel", 120); m_leadModel->setEditable(true); m_leadModel->lineEdit()->setPlaceholderText(tr("default model"));
+    // #738: the lead's model takes the row's room; catalog ids such as
+    // kimi-code/k3.1-pro-highspeed are long.
+    m_leadModel = combo("teamNewLeadModel"); m_leadModel->setMinimumWidth(160); m_leadModel->setEditable(true);
+    m_leadModel->lineEdit()->setPlaceholderText(tr("default model"));
     m_leadEffort = combo("teamNewLeadEffort", 80); fillEfforts(m_leadEffort, "high");
     leadRow->addWidget(m_leadAgent); leadRow->addWidget(m_leadAccount); leadRow->addWidget(m_leadModel, 1); leadRow->addWidget(m_leadEffort);
     form->addRow(tr("Lead"), leadRow);
@@ -173,8 +203,10 @@ TeamNewDialog::TeamNewDialog(TeamController *teams, HgsClient *client, const QLi
 
     connect(m_name, &QLineEdit::textChanged, this, [this] { validate(); });
     connect(m_folder, &QLineEdit::textChanged, this, [this] { validate(); });
-    connect(m_leadAgent, &QComboBox::currentIndexChanged, this, [this] { fillAccounts(m_leadAccount, m_leadAgent->currentData().toString(), {}); validate(); });
-    connect(m_leadAccount, &QComboBox::currentIndexChanged, this, [this] { validate(); });
+    connect(m_leadAgent, &QComboBox::currentIndexChanged, this, [this] {
+        fillAccounts(m_leadAccount, m_leadAgent->currentData().toString(), {}); refillLeadModels(); validate(); });
+    connect(m_leadAccount, &QComboBox::currentIndexChanged, this, [this] { refillLeadModels(); validate(); });
+    connect(m_leadModel, &QComboBox::currentTextChanged, this, [this] { fillEffortsFor(m_leadModel, m_leadEffort); });
     connect(m_useExisting, &QCheckBox::toggled, this, [this](bool on) {
         m_existingLead->setEnabled(on);
         for (auto *w : {static_cast<QWidget *>(m_leadAgent), static_cast<QWidget *>(m_leadAccount), static_cast<QWidget *>(m_leadModel), static_cast<QWidget *>(m_leadEffort)})
@@ -184,17 +216,40 @@ TeamNewDialog::TeamNewDialog(TeamController *teams, HgsClient *client, const QLi
     connect(m_worktrees, &QCheckBox::toggled, this, [this](bool on) { for (auto *r : m_rowList) r->worktree->setChecked(on); });
     // Accounts per computer, for the account combos and the signed-in check.
     if (m_client) {
-        connect(m_client, &HgsClient::accountsReady, this, [this](quint64, const QString &host, const QJsonObject &result) {
+        connect(m_client, &HgsClient::accountsReady, this, [this](quint64 request, const QString &host, const QJsonObject &result) {
+            // #738: an account's model catalog; only the pickers it serves refill.
+            if (m_modelRequests.contains(request)) {
+                const QString key = m_modelRequests.take(request);
+                m_modelPending.remove(key);
+                m_models.insert(key, parseModels(result.value("models").toArray()));
+                if (modelKey(m_leadAgent->currentData().toString(), {}, m_leadAccount->currentData().toString()) == key) refillLeadModels();
+                for (auto *r : m_rowList)
+                    if (modelKey(r->agent->currentData().toString(), r->computer->currentData().toString(), r->account->currentData().toString()) == key)
+                        refillRowModels(r);
+                return;
+            }
             QList<Account> list;
             for (const auto &value : result.value("profiles").toArray()) {
                 const auto p = value.toObject();
                 const auto status = p.value("account_status").toObject().value("status").toString();
                 list.append({p.value("id").toString(), p.value("provider").toString(), p.value("label").toString(), status != "signed_out"});
+                // OpenCode lists its models in its account row (model_options).
+                if (p.value("provider").toString() == "opencode" && p.value("model_options").isArray())
+                    m_models.insert(host + QLatin1Char('\n') + p.value("id").toString(), parseModels(p.value("model_options").toArray()));
             }
             m_accounts.insert(host, list);
             fillAccounts(m_leadAccount, m_leadAgent->currentData().toString(), {});
             for (auto *r : m_rowList) fillAccounts(r->account, r->agent->currentData().toString(), r->computer->currentData().toString(), r->account->currentData().toString());
+            refillLeadModels();
+            for (auto *r : m_rowList) refillRowModels(r);
             validate();
+        });
+        connect(m_client, &HgsClient::accountsFailed, this, [this](quint64 request, const QString &, const QString &) {
+            // A catalog that could not be read leaves the known models; it is not asked again.
+            if (!m_modelRequests.contains(request)) return;
+            const QString key = m_modelRequests.take(request);
+            m_modelPending.remove(key);
+            m_models.insert(key, {});
         });
         m_client->requestAccounts({});
         for (const auto &c : computers) if (!c.alias.isEmpty() && c.online) m_client->requestAccounts(c.alias);
@@ -203,6 +258,7 @@ TeamNewDialog::TeamNewDialog(TeamController *teams, HgsClient *client, const QLi
     const auto &routing = teams->catalog().routing;
     Q_UNUSED(routing);
     fillAccounts(m_leadAccount, "claude", {});
+    refillLeadModels();
     applyTemplate();
     m_templateList->selected = [this](const QString &id) { m_templateId = id; applyTemplate(); };
 }
@@ -231,6 +287,62 @@ void TeamNewDialog::fillAccounts(QComboBox *box, const QString &agent, const QSt
     box->setCurrentIndex(qMax(0, box->findData(keep)));
 }
 
+QString TeamNewDialog::modelKey(const QString &agent, const QString &host, const QString &account)
+{
+    // The default account reads the agent's native profile, as the role editor does.
+    const QString a = agent.isEmpty() ? QStringLiteral("claude") : agent;
+    return host + QLatin1Char('\n') + (account.isEmpty() ? QStringLiteral("native-") + a : account);
+}
+
+void TeamNewDialog::requestModels(const QString &agent, const QString &host, const QString &account)
+{
+    if (!m_client || !modelSettings(agent)) return;
+    const QString key = modelKey(agent, host, account);
+    if (m_models.contains(key) || m_modelPending.contains(key)) return;
+    m_modelPending.insert(key);
+    m_modelRequests.insert(m_client->requestAccounts(host, {"model-settings", key.section(QLatin1Char('\n'), 1), "--json"}), key);
+}
+
+void TeamNewDialog::fillModels(QComboBox *model, QComboBox *effort, const QString &agent, const QString &host, const QString &account)
+{
+    requestModels(agent, host, account);
+    {
+        const QSignalBlocker block(model);
+        const QString keep = model->currentText().trimmed();
+        model->clear();
+        const auto options = m_models.value(modelKey(agent, host, account));
+        if (options.isEmpty()) for (const auto &id : Teams::knownModels(agent)) model->addItem(id, id);
+        for (const auto &option : options) {
+            if (model->findData(option.id) >= 0) continue;
+            model->addItem(option.id, option.id);
+            model->setItemData(model->count() - 1, option.efforts, EffortsRole);
+            if (!option.label.isEmpty() && option.label != option.id) model->setItemData(model->count() - 1, option.label, Qt::ToolTipRole);
+        }
+        // The model stays as chosen or typed; none keeps the agent's default.
+        model->setCurrentIndex(model->findText(keep));
+        if (model->currentIndex() < 0) model->setEditText(keep);
+    }
+    fillEffortsFor(model, effort);
+}
+
+void TeamNewDialog::fillEffortsFor(QComboBox *model, QComboBox *effort)
+{
+    const int index = model->findText(model->currentText().trimmed());
+    const QStringList efforts = index >= 0 ? model->itemData(index, EffortsRole).toStringList() : QStringList();
+    fillEfforts(effort, effort->currentData().toString(), efforts);
+}
+
+void TeamNewDialog::refillLeadModels()
+{
+    fillModels(m_leadModel, m_leadEffort, m_leadAgent->currentData().toString(), {}, m_leadAccount->currentData().toString());
+}
+
+void TeamNewDialog::refillRowModels(Row *row)
+{
+    fillModels(row->model, row->effort, row->agent->currentData().toString(), row->computer->currentData().toString(),
+               row->account->currentData().toString());
+}
+
 TeamNewDialog::Row *TeamNewDialog::addRow(const Role *role, const QString &roleName)
 {
     auto *row = new Row;
@@ -248,6 +360,7 @@ TeamNewDialog::Row *TeamNewDialog::addRow(const Role *role, const QString &roleN
     fillAccounts(row->account, row->agent->currentData().toString(), row->computer->currentData().toString(), role ? role->account : QString());
     row->model = combo("teamNewModel", 104); row->model->setEditable(true); row->model->setCurrentText(role ? role->model : QString());
     row->model->lineEdit()->setPlaceholderText(tr("default"));
+    row->model->view()->setMinimumWidth(260);   // #738: the catalog's long ids read whole in the list
     row->effort = combo("teamNewEffort", 66); fillEfforts(row->effort, role ? role->effort : QString());
     row->permissions = combo("teamNewPermissions", 70); fillPermissions(row->permissions, role ? role->permissions : QString());
     row->worktree = new QCheckBox; row->worktree->setObjectName("teamNewWorktree"); row->worktree->setToolTip(tr("Own worktree"));
@@ -264,11 +377,13 @@ TeamNewDialog::Row *TeamNewDialog::addRow(const Role *role, const QString &roleN
     m_rows->insertWidget(m_rows->count() - 1, row->box);
     row->box->show();   // rows come and go while the dialog shows
     m_rowList.append(row);
+    refillRowModels(row);
     connect(row->agent, &QComboBox::currentIndexChanged, this, [this, row] {
-        fillAccounts(row->account, row->agent->currentData().toString(), row->computer->currentData().toString()); validate(); });
+        fillAccounts(row->account, row->agent->currentData().toString(), row->computer->currentData().toString()); refillRowModels(row); validate(); });
     connect(row->computer, &QComboBox::currentIndexChanged, this, [this, row] {
-        fillAccounts(row->account, row->agent->currentData().toString(), row->computer->currentData().toString()); validate(); });
-    connect(row->account, &QComboBox::currentIndexChanged, this, [this] { validate(); });
+        fillAccounts(row->account, row->agent->currentData().toString(), row->computer->currentData().toString()); refillRowModels(row); validate(); });
+    connect(row->account, &QComboBox::currentIndexChanged, this, [this, row] { refillRowModels(row); validate(); });
+    connect(row->model, &QComboBox::currentTextChanged, this, [row] { fillEffortsFor(row->model, row->effort); });
     connect(row->role, &QComboBox::currentTextChanged, this, [this, row](const QString &text) {
         if (const auto *r = m_teams->catalog().roleNamed(text)) row->prompt = r->prompt;
         validate();

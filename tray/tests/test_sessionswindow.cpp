@@ -2466,7 +2466,7 @@ void TestSessionsWindow::leadSessionAnswersAProposalOnItsCard()
         QCOMPARE(card->property("proposal").toString(), QStringLiteral("p1"));
         QCOMPARE(card->findChild<QLabel *>("teamProposalWhat")->text(), QStringLiteral("Add 2 members"));
         QStringList lines; for (auto *line : card->findChildren<QLabel *>("teamProposalChange")) lines << line->text();
-        QCOMPARE(lines, (QStringList{"Designer (claude · sonnet)", "Designer (claude · sonnet)"}));
+        QCOMPARE(lines, (QStringList{"Designer (claude, sonnet)", "Designer (claude, sonnet)"}));
         QVERIFY(card->findChild<QLabel *>("teamProposalBy")->text().startsWith("Lead asks, "));
         QVERIFY(card->findChild<QLabel *>("teamProposalReason")->text().contains("need a designer each"));
         // Above the composer, in the Activity column.

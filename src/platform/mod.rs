@@ -27,6 +27,35 @@ pub use windows::*;
 /// A completed process roster may still contain protected Linux processes whose
 /// paths the OS refuses to disclose. Keep these separate from readable paths:
 /// they require personal confirmation, never automatic cleanup authority.
+/// Whether a process has a file open, as the host can report it: `Unknown` when
+/// the host's holder lookup does not work (on Windows, the Restart Manager did
+/// not start), so a caller can take the conservative path instead of a wrong
+/// "not held".
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OpenFiles {
+    Held,
+    NotHeld,
+    /// The host cannot read the file's holders; `reason` says why.
+    Unknown(String),
+}
+
+#[cfg(test)]
+pub(crate) mod open_files_test {
+    use std::sync::Mutex;
+    /// A forced "unknown" reason for tests that exercise the conservative path.
+    pub(crate) static FORCED: Mutex<Option<String>> = Mutex::new(None);
+}
+
+#[cfg(test)]
+pub(crate) fn forced_open_files_unknown() -> Option<String> {
+    open_files_test::FORCED.lock().unwrap().clone()
+}
+
+#[cfg(test)]
+pub(crate) fn set_forced_open_files_unknown(reason: Option<&str>) {
+    *open_files_test::FORCED.lock().unwrap() = reason.map(str::to_owned);
+}
+
 #[derive(Default)]
 pub struct WorktreeProcesses {
     pub paths: Vec<(u32, PathBuf, String)>,

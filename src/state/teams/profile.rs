@@ -25,10 +25,23 @@ const BUSY: &[&str] = &["work", "rework", "stage", "question", "permission", "ba
 const SPENDING: &[&str] = &["work", "rework", "question", "permission", "background"];
 
 /// What one part of a task (an attempt, or one stage of one round) spent.
+/// #736: uncached input and output are the billable total the totals and
+/// rankings count; cache reads and writes are shown apart, never folded in.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct Tokens {
     pub total: u64,
+    pub uncached_input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
     pub cost_usd: f64,
+}
+
+impl Tokens {
+    /// The total a ranking uses: the fresh input and the output.
+    fn billable(&self) -> u64 {
+        self.uncached_input.saturating_add(self.output)
+    }
 }
 
 /// The tokens of each (task, part); None is unknown, never zero.
@@ -40,8 +53,10 @@ pub(crate) struct Ask {
     pub task: u32,
     pub part: String,
     pub member: String,
-    pub from: f64,
-    pub to: f64,
+    /// #736: the part's own spending spans, disjoint and ordered, not their
+    /// first-to-last envelope: a member's work on another task in between is
+    /// not this part's.
+    pub windows: Vec<(f64, f64)>,
 }
 
 /// What the caller asks for: the page sizes and the cursors of each list.
@@ -71,11 +86,15 @@ fn part_of(span: &Value) -> Option<String> {
     }
 }
 
-/// The token windows of the timelines: each attempt from its first to its last
-/// spending span, each stage round over its stage span, with the member whose
-/// session spent them. In task and part order.
+/// The member and own windows of each (task, part) while `asks` collects them.
+type WindowMap = BTreeMap<(u32, String), (String, Vec<(f64, f64)>)>;
+
+/// The token windows of the timelines: each attempt's and each stage round's
+/// own spending spans, with the member whose session spent them. #736: not the
+/// envelope from the first to the last span, so the member's other work between
+/// them is never counted here. In task and part order.
 pub(crate) fn asks(timelines: &[Value], now: f64) -> Vec<Ask> {
-    let mut windows: BTreeMap<(u32, String), (String, f64, f64)> = BTreeMap::new();
+    let mut windows: WindowMap = BTreeMap::new();
     for timeline in timelines {
         let Some(task) = timeline["task"].as_u64() else { continue };
         for span in timeline["spans"].as_array().into_iter().flatten() {
@@ -89,12 +108,16 @@ pub(crate) fn asks(timelines: &[Value], now: f64) -> Vec<Ask> {
                 continue;
             }
             let to = to_of(span, now);
-            let entry = windows.entry((task as u32, part)).or_insert_with(|| (member.to_owned(), from, to));
-            entry.1 = entry.1.min(from);
-            entry.2 = entry.2.max(to);
+            if to <= from {
+                continue;
+            }
+            windows.entry((task as u32, part)).or_insert_with(|| (member.to_owned(), Vec::new())).1.push((from, to));
         }
     }
-    windows.into_iter().map(|((task, part), (member, from, to))| Ask { task, part, member, from, to }).collect()
+    windows
+        .into_iter()
+        .map(|((task, part), (member, windows))| Ask { task, part, member, windows: union(windows) })
+        .collect()
 }
 
 /// The sum of the known tokens of `parts`, and how many were unknown.
@@ -105,6 +128,10 @@ fn sum(tokens: &TokenMap, task: u32, parts: impl Iterator<Item = String>) -> (Op
         match tokens.get(&(task, part)).copied().flatten() {
             Some(found) => {
                 total.total += found.total;
+                total.uncached_input += found.uncached_input;
+                total.output += found.output;
+                total.cache_read += found.cache_read;
+                total.cache_write += found.cache_write;
                 total.cost_usd += found.cost_usd;
                 known += 1;
             }
@@ -116,7 +143,15 @@ fn sum(tokens: &TokenMap, task: u32, parts: impl Iterator<Item = String>) -> (Op
 
 fn tokens_value(tokens: Option<Tokens>, unknown: usize) -> Value {
     match tokens {
-        Some(found) => json!({"total":found.total,"cost_usd":(found.cost_usd * 10000.0).round() / 10000.0,"partial":unknown > 0}),
+        Some(found) => json!({
+            "total":found.total,
+            "uncached_input":found.uncached_input,
+            "output":found.output,
+            "cache_read":found.cache_read,
+            "cache_write":found.cache_write,
+            "cost_usd":(found.cost_usd * 10000.0).round() / 10000.0,
+            "partial":unknown > 0
+        }),
         None if unknown > 0 => json!({"unknown":true}),
         None => Value::Null,
     }
@@ -213,10 +248,30 @@ fn loss(kind: &str, key: &str, s: i64, tokens: Option<Tokens>, mut value: Value)
     Loss { id, s, tokens: tokens.map(|found| found.total), value }
 }
 
+/// #736: a task's wait for its member, minus the moments that member worked on
+/// any task of the team (another phase, or one moved between phases): that time
+/// is the member's real work, not an idle wait.
+fn wait_for_member(task: &Task, timeline: &Value, busy: &BTreeMap<String, Vec<(f64, f64)>>, now: f64) -> i64 {
+    let member = task.attempts.first().map(|attempt| attempt.member.as_str()).unwrap_or(task.assignee.as_str());
+    if member.is_empty() {
+        return 0;
+    }
+    let Some(mine) = busy.get(member) else {
+        return timeline["totals"]["member"].as_i64().unwrap_or(0);
+    };
+    let mut s = 0.0;
+    for span in timeline["spans"].as_array().into_iter().flatten().filter(|span| span["kind"] == "member") {
+        let Some(from) = span["from"].as_f64() else { continue };
+        let to = to_of(span, now);
+        s += length(&minus(&[(from, to)], mine));
+    }
+    seconds(s)
+}
+
 /// The losses one task's timeline shows: rework, waits on the lead and on
 /// permissions, a blocked chain, a wait for a free member, long tests, merges
 /// and conflicts.
-fn task_losses(task: &Task, timeline: &Value, tokens: &TokenMap, now: f64, out: &mut Vec<Loss>) {
+fn task_losses(task: &Task, timeline: &Value, tokens: &TokenMap, busy: &BTreeMap<String, Vec<(f64, f64)>>, now: f64, out: &mut Vec<Loss>) {
     let id = task.id;
     let spans: Vec<&Value> = timeline["spans"].as_array().into_iter().flatten().filter(|span| !span["from"].is_null()).collect();
     let total = |kinds: &[&str]| -> i64 {
@@ -263,7 +318,7 @@ fn task_losses(task: &Task, timeline: &Value, tokens: &TokenMap, now: f64, out: 
         let by: BTreeSet<u64> = spans.iter().filter(|span| span["kind"] == "folder_held").filter_map(|span| span["held_by"].as_u64()).collect();
         out.push(loss("blocked_chain", &id.to_string(), deps + held, None, json!({"task":id,"deps_s":deps,"folder_held_s":held,"on":on,"held_by":by})));
     }
-    let member = total(&["member"]);
+    let member = wait_for_member(task, timeline, busy, now);
     if member > 0 {
         out.push(loss("member_wait", &id.to_string(), member, None, json!({"task":id,"member":task.assignee})));
     }
@@ -376,24 +431,16 @@ fn real_path(tasks: &[&Task], extents: &BTreeMap<u32, (f64, f64)>) -> (Vec<u32>,
 
 /// The profile of `tasks` (the scope, in id order) from their `timelines` in
 /// the same order and the tokens the caller read for `asks`.
-pub(crate) fn profile(team: &Team, tasks: &[&Task], timelines: &[Value], tokens: &TokenMap, page: &Page, now: f64) -> Value {
+pub(crate) fn profile(team: &Team, tasks: &[&Task], timelines: &[Value], all: &[Value], tokens: &TokenMap, page: &Page, now: f64) -> Value {
     let limit = page.limit.clamp(1, LOSS_PAGE_MAX);
     let mut losses: Vec<Loss> = Vec::new();
     let mut extents: BTreeMap<u32, (f64, f64)> = BTreeMap::new();
     let mut totals: BTreeMap<String, i64> = BTreeMap::new();
     let mut rows: Vec<Value> = Vec::new();
-    // Each member's busy moments and the parts its session spent in.
+    // #736: each member's busy moments across every phase, and the parts its
+    // session spent in this scope.
     let mut busy: BTreeMap<String, Vec<(f64, f64)>> = BTreeMap::new();
-    let mut parts: BTreeMap<String, Vec<(u32, String)>> = BTreeMap::new();
-    for (task, timeline) in tasks.iter().zip(timelines) {
-        task_losses(task, timeline, tokens, now, &mut losses);
-        if let Some(extent) = extent(timeline, now) {
-            extents.insert(task.id, extent);
-        }
-        for (kind, s) in timeline["totals"].as_object().into_iter().flatten() {
-            *totals.entry(kind.clone()).or_default() += s.as_i64().unwrap_or(0);
-        }
-        let mut own: BTreeSet<String> = BTreeSet::new();
+    for timeline in all {
         for span in timeline["spans"].as_array().into_iter().flatten() {
             let (Some(member), Some(from)) = (span["member"].as_str(), span["from"].as_f64()) else { continue };
             if member.is_empty() {
@@ -401,6 +448,33 @@ pub(crate) fn profile(team: &Team, tasks: &[&Task], timelines: &[Value], tokens:
             }
             if BUSY.contains(&span["kind"].as_str().unwrap_or_default()) {
                 busy.entry(member.to_owned()).or_default().push((from, to_of(span, now)));
+            }
+        }
+    }
+    for list in busy.values_mut() {
+        *list = union(std::mem::take(list));
+    }
+    let mut parts: BTreeMap<String, Vec<(u32, String)>> = BTreeMap::new();
+    for (task, timeline) in tasks.iter().zip(timelines) {
+        task_losses(task, timeline, tokens, &busy, now, &mut losses);
+        if let Some(extent) = extent(timeline, now) {
+            extents.insert(task.id, extent);
+        }
+        // The member's wait is a loss only where that member was not working on
+        // any other task; the member sees the real busy time in its row.
+        let idle_wait = wait_for_member(task, timeline, &busy, now);
+        for (kind, s) in timeline["totals"].as_object().into_iter().flatten() {
+            if kind == "member" {
+                continue;
+            }
+            *totals.entry(kind.clone()).or_default() += s.as_i64().unwrap_or(0);
+        }
+        *totals.entry("member".into()).or_default() += idle_wait;
+        let mut own: BTreeSet<String> = BTreeSet::new();
+        for span in timeline["spans"].as_array().into_iter().flatten() {
+            let Some(member) = span["member"].as_str() else { continue };
+            if member.is_empty() {
+                continue;
             }
             if let Some(part) = part_of(span) {
                 if own.insert(part.clone()) {
@@ -413,8 +487,16 @@ pub(crate) fn profile(team: &Team, tasks: &[&Task], timelines: &[Value], tokens:
         let (rework, _) = sum(tokens, task.id, rework_parts.into_iter());
         let elapsed = extents.get(&task.id).map_or(0, |(from, to)| seconds(to - from));
         let kind_s = |kinds: &[&str]| kinds.iter().map(|kind| timeline["totals"][*kind].as_i64().unwrap_or(0)).sum::<i64>();
+        let started = task.attempts.iter().any(|attempt| attempt.started_at.is_some()) || !own.is_empty();
         let mut row = json!({"task":task.id,"title":task.title,"status":task.status,"phase":task.phase,"elapsed_s":elapsed,
-            "worked_s":kind_s(&["work","rework","stage"]),"rework_s":kind_s(&["rework"]),"tokens":tokens_value(spent, unknown)});
+            "worked_s":kind_s(&["work","rework","stage"]),"rework_s":kind_s(&["rework"]),"started":started});
+        if started {
+            row["tokens"] = tokens_value(spent, unknown);
+        } else {
+            // #736: never started is not unknown: no tokens were spent and no
+            // provider read is missing.
+            row["tokens"] = json!({"not_started":true});
+        }
         if let (Some(rework), Some(spent)) = (rework, spent.filter(|spent| spent.total > 0)) {
             row["rework_tokens"] = json!(rework.total);
             row["rework_share"] = json!(((rework.total as f64 / spent.total as f64) * 1000.0).round() / 1000.0);
@@ -431,7 +513,7 @@ pub(crate) fn profile(team: &Team, tasks: &[&Task], timelines: &[Value], tokens:
     for member in team.members.iter().filter(|member| member.id != team.lead) {
         let mine = union(busy.remove(&member.id).unwrap_or_default());
         let listed = parts.remove(&member.id).unwrap_or_default();
-        if mine.is_empty() && listed.is_empty() && !assignees.contains(member.id.as_str()) {
+        if listed.is_empty() && !assignees.contains(member.id.as_str()) {
             continue;
         }
         // Before it joined a member was not idle.
@@ -451,6 +533,10 @@ pub(crate) fn profile(team: &Team, tasks: &[&Task], timelines: &[Value], tokens:
             match tokens.get(&(*task, part.clone())).copied().flatten() {
                 Some(found) => {
                     spent.total += found.total;
+                    spent.uncached_input += found.uncached_input;
+                    spent.output += found.output;
+                    spent.cache_read += found.cache_read;
+                    spent.cache_write += found.cache_write;
                     spent.cost_usd += found.cost_usd;
                     known += 1;
                 }
@@ -506,6 +592,10 @@ pub(crate) fn profile(team: &Team, tasks: &[&Task], timelines: &[Value], tokens:
             match found {
                 Some(found) => {
                     whole.total += found.total;
+                    whole.uncached_input += found.uncached_input;
+                    whole.output += found.output;
+                    whole.cache_read += found.cache_read;
+                    whole.cache_write += found.cache_write;
                     whole.cost_usd += found.cost_usd;
                     known += 1;
                 }
@@ -585,12 +675,14 @@ pub(crate) fn read_tokens(team: &Team, asks: &[Ask]) -> (TokenMap, bool) {
         let record = session.and_then(|session| {
             records.entry(session.name.clone()).or_insert_with(|| super::super::storage::read(&session.name).ok()).clone()
         });
-        out.insert(key, record.and_then(|record| known(&super::super::usage::span(&record, ask.from, ask.to))));
+        out.insert(key, record.and_then(|record| known(&super::super::usage::span_many(&record, &ask.windows))));
     }
     (out, asks.len() > TOKEN_READS)
 }
 
-/// The total tokens and cost of a known `usage::span` answer.
+/// The total tokens and cost of a known `usage::span` answer. #736: the
+/// provider's buckets are kept apart; `total` is the billable fresh input and
+/// output, and a bucket the provider does not report counts zero.
 fn known(span: &Value) -> Option<Tokens> {
     if span["status"] != "ok" {
         return None;
@@ -599,9 +691,20 @@ fn known(span: &Value) -> Option<Tokens> {
     for provider in span["providers"].as_array().into_iter().flatten() {
         found.cost_usd += provider["cost_usd"].as_f64().unwrap_or(0.0);
         for model in provider["models"].as_array().into_iter().flatten() {
-            found.total += model["tokens"]["total"].as_u64().unwrap_or(0);
+            let tokens = &model["tokens"];
+            let count = |key: &str| tokens[key].as_u64().unwrap_or(0);
+            // Codex reports `input` (its cached part apart); the others
+            // `uncached_input`.
+            let uncached = if tokens.get("uncached_input").is_some() { count("uncached_input") } else { count("input") };
+            let output = count("output");
+            found.uncached_input += uncached;
+            found.output += output;
+            found.cache_read += count("cache_read");
+            found.cache_write += count("cache_write");
+            found.total += uncached.saturating_add(output);
         }
     }
+    found.total = found.billable();
     Some(found)
 }
 

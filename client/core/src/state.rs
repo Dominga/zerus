@@ -659,12 +659,22 @@ impl CatalogState {
             _ => 1,
         };
         self.last_failure = Some(now);
-        vec![Change::Computer {
+        let mut changes = vec![Change::Computer {
             computer: computer.clone(),
             status: ComputerStatus::Reconnecting {
                 attempt: self.failures,
             },
-        }]
+        }];
+        let keys: Vec<String> = self.tasks.keys().cloned().collect();
+        for key in keys {
+            changes.extend(self.tasks.unavailable(
+                computer,
+                &key,
+                "disconnected",
+                "The task connection was interrupted. Reconnecting…",
+            ));
+        }
+        changes
     }
 
     /// Whether this attempt has ended.

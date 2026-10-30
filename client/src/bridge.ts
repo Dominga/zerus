@@ -172,7 +172,7 @@ export function normalize(b: Partial<Batch>): Batch {
   const e = emptyBatch();
   return {
     upserts: b.upserts ?? e.upserts, removes: b.removes ?? e.removes, replaces: b.replaces ?? e.replaces, computers: b.computers ?? e.computers,
-    machines: b.machines ?? [], activity: b.activity ?? e.activity, groups: b.groups ?? [], grouping: b.grouping ?? undefined,
+    machines: b.machines ?? [], activity: b.activity ?? e.activity, tasks: b.tasks ?? [], groups: b.groups ?? [], grouping: b.grouping ?? undefined,
     processes_view: b.processes_view ?? undefined,
     composer: b.composer ?? undefined, draft_keys: b.draft_keys ?? undefined, composer_events: b.composer_events ?? undefined,
   };

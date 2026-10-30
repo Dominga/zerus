@@ -2,7 +2,7 @@
 //!
 //! A follow is keyed by `(computer, project ID as subscribed)`. Its stream
 //! subscribes it only when `hello.topics` lists `tasks`, within
-//! `hello.limits.tasks_subscriptions`; a CLI without the topic stays quiet.
+//! `hello.limits.tasks_subscriptions`; a CLI without the topic reports a failure.
 //! The server sends each list whole, as `snapshot` pages whose last page's
 //! `value` is `{project, damaged, digest}`; the pages are staged and the last
 //! one gives one [`TasksUpdate::List`]. A list with the digest the view
@@ -111,6 +111,26 @@ impl TasksState {
         }
     }
 
+    /// Retains the follow, but invalidates its digest so a reconnect can clear
+    /// the visible error even when the task list itself did not change.
+    pub(crate) fn unavailable(
+        &mut self,
+        computer: &ComputerId,
+        key: &str,
+        code: &str,
+        message: &str,
+    ) -> Option<Change> {
+        self.follows.get_mut(key)?.digest = None;
+        Some(change(
+            computer,
+            key,
+            TasksUpdate::Failed {
+                code: code.into(),
+                message: message.into(),
+            },
+        ))
+    }
+
     /// A `snapshot` page of the topic.
     pub(crate) fn snapshot(
         &mut self,
@@ -170,20 +190,13 @@ impl TasksState {
     /// A non-fatal `error` frame of the topic.
     pub(crate) fn error(&mut self, computer: &ComputerId, error: &ErrorFrame) -> Option<Change> {
         let key = error.key.as_deref()?;
-        if !self.is_followed(key) || error.code == "unsupported_topic" {
+        if !self.is_followed(key) {
             return None;
         }
         if ENDED.contains(&error.code.as_str()) {
             return self.end(computer, key);
         }
-        Some(change(
-            computer,
-            key,
-            TasksUpdate::Failed {
-                code: error.code.clone(),
-                message: error.message.clone(),
-            },
-        ))
+        self.unavailable(computer, key, &error.code, &error.message)
     }
 
     /// Ends a followed project; None when it was not followed.
@@ -283,15 +296,15 @@ mod tests {
             state.error(&local, &error("tasks_failed", Some("p1"))),
             Some(Change::Tasks { update: TasksUpdate::Failed { ref code, .. }, .. }) if code == "tasks_failed"
         ));
-        assert_eq!(state.digest("p1"), Some("d1"));
+        assert_eq!(state.digest("p1"), None);
         assert_eq!(
             state.error(&local, &error("tasks_failed", Some("p9"))),
             None
         );
-        assert_eq!(
+        assert!(matches!(
             state.error(&local, &error("unsupported_topic", Some("p1"))),
-            None
-        );
+            Some(Change::Tasks { update: TasksUpdate::Failed { ref code, .. }, .. }) if code == "unsupported_topic"
+        ));
         assert!(matches!(
             state.error(&local, &error("too_many_subscriptions", Some("p1"))),
             Some(Change::Tasks {

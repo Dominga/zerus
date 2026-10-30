@@ -1098,6 +1098,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::next_batch,
         commands::follow,
         commands::unfollow,
+        commands::tasks_follow,
         commands::metrics,
         commands::perf_config,
         commands::save_perf,

@@ -15,7 +15,7 @@ import type { ActivitySource, AttachmentScope } from "../../store/activitySource
 import { composer, draftKey } from "../../store/composer";
 import { terminal } from "../../store/terminal";
 import type { LocalMessage } from "../../types";
-import { createActivityEnd, newLocalSends } from "./activity-end";
+import { animationFrames, createActivityEnd, newLocalSends } from "./activity-end";
 import { buildTranscript, VOICE_STATE_LABEL, voiceStateDetail, voiceStateIssue } from "./transcript";
 import { DELETE_TEXT, DELETE_TITLE, retryReason, routeInspect } from "./local-actions";
 import { inlineParts } from "./markdown";
@@ -526,6 +526,7 @@ const [following, setFollowing] = createSignal(true);
 const [unseen, setUnseen] = createSignal(0);
 /** The mounted transcript's scroller (one Activity view shows at a time). */
 let liveScroller: HTMLDivElement | undefined;
+let liveEnd: ReturnType<typeof createActivityEnd> | undefined;
 export { following, unseen };
 
 /**
@@ -543,6 +544,7 @@ export function jumpToLatest() {
   if (searchPreview()) { clearSearchPreview(); return; }
   setFollowing(true);
   setUnseen(0);
+  liveEnd?.pin();
   liveScroller?.scrollTo({ top: liveScroller.scrollHeight, behavior: "instant" });
 }
 
@@ -605,24 +607,38 @@ export function ActivityView(props: { source?: ActivitySource }) {
   let anchor: { height: number; top: number } | undefined;
   /** The newest event's seq the view has seen, for the count of new ones. */
   let newest: number | undefined;
+  const selectionInside = () => {
+    const selection = document.getSelection();
+    if (!selection || selection.isCollapsed) return false;
+    return [selection.anchorNode, selection.focusNode].some((node) => !!node && scroller.contains(node));
+  };
   const end = createActivityEnd(
     () => ({ top: scroller.scrollTop, height: scroller.scrollHeight, viewport: scroller.clientHeight }),
     () => scroller.scrollTo({ top: scroller.scrollHeight, behavior: "instant" }),
+    animationFrames,
+    () => !selectionInside(),
   );
   let manualAway = false;
   let touchY: number | undefined;
   const scrollAway = () => { end.release(); manualAway = true; setFollowing(false); };
   onMount(() => {
     liveScroller = scroller;
+    liveEnd = end;
+    const selectionChanged = () => end.changed();
+    document.addEventListener("selectionchange", selectionChanged);
     // Content includes Markdown, images and tool disclosures; the viewport
     // also resizes when the composer or a question card changes height.
     const resize = new ResizeObserver(() => end.changed());
     resize.observe(scroller);
     const column = scroller.querySelector(".act-col");
     if (column) resize.observe(column);
-    onCleanup(() => resize.disconnect());
+    onCleanup(() => { document.removeEventListener("selectionchange", selectionChanged); resize.disconnect(); });
   });
-  onCleanup(() => { end.dispose(); if (liveScroller === scroller) liveScroller = undefined; });
+  onCleanup(() => {
+    end.dispose();
+    if (liveScroller === scroller) liveScroller = undefined;
+    if (liveEnd === end) liveEnd = undefined;
+  });
   const onScroll = () => {
     // A first render or a resize can emit scroll before the pin's frame.
     // It must not turn following off or trigger an older-page read.

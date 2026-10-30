@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { createActivityEnd, newLocalSends, type ScrollGeometry } from "./activity-end";
 
-function fixture() {
+function fixture(canWrite?: () => boolean) {
   const geometry: ScrollGeometry = { top: 0, height: 2000, viewport: 500 };
   const queued = new Map<number, () => void>();
   let serial = 0, writes = 0;
   const end = createActivityEnd(() => ({ ...geometry }), () => { writes++; geometry.top = Math.max(0, geometry.height - geometry.viewport); }, {
     request: (callback) => { const id = ++serial; queued.set(id, callback); return id; }, cancel: (id) => { queued.delete(id); },
-  });
+  }, canWrite);
   const frame = () => { const callbacks = [...queued.values()]; queued.clear(); callbacks.forEach((callback) => callback()); };
   return { end, geometry, queued, frame, writes: () => writes };
 }
@@ -68,6 +68,24 @@ describe("Activity end settling", () => {
     f.geometry.top = 20; f.geometry.height += 1000; f.geometry.top += 1000;
     f.end.changed(); f.frame();
     expect(f.geometry.top).toBe(1020);
+  });
+  it("a send after scrolling up re-pins later reply and layout growth", () => {
+    const f = fixture(); f.end.pin(); f.frame(); f.frame(); f.end.release(); f.geometry.top = 200;
+    f.end.pin(); f.frame(); f.frame();
+    f.geometry.height += 700; f.end.changed(); f.frame(); f.frame();
+    expect(f.geometry.top).toBe(2200); expect(f.end.active()).toBe(true);
+  });
+  it("a transcript selection pauses follow writes and clearing it resumes", () => {
+    let selected = true;
+    const f = fixture(() => !selected);
+    f.end.pin(); f.frame();
+    expect(f.geometry.top).toBe(0);
+    selected = false; f.end.changed(); f.frame(); f.frame();
+    expect(f.geometry.top).toBe(1500);
+    selected = true; f.geometry.height += 700; f.end.changed(); f.frame();
+    expect(f.geometry.top).toBe(1500);
+    selected = false; f.end.changed(); f.frame(); f.frame();
+    expect(f.geometry.top).toBe(2200);
   });
   it("coalesces a resize burst into two frames and stops after disposal", () => {
     const f = fixture(); f.end.pin();

@@ -74,6 +74,8 @@ describe("usage windows (inventory 8.4, gaps 1-4 and 7)", () => {
     expect(summaryText(usageOf({ status: "signed_out" }))).toBe("Sign in required");
     expect(summaryText(usageOf({ status: "expired" }))).toBe("Sign-in expired");
     expect(summaryText(usageOf({ status: "loading" }))).toBe("Unavailable");
+    expect(summaryText(usageOf({ status: "unavailable" }))).toBe("limits n/a");
+    expect(summaryText(usageOf({ status: "ok", refresh_error: true }))).toBe("limits n/a");
     expect(stateText(usageOf({ status: "loading" }))).toBe("Loading account details…");
     expect(stateText(usageOf({ status: "ok", offline: true }))).toBe("Machine is offline. Showing the last available account data.");
     expect(stateText(usageOf({ status: "signed_out", provider: "dsh" })))

@@ -134,6 +134,7 @@ export function summaryText(u: Usage) {
   if (u.status === "configured") return u.provider === "opencode" ? "Configured" : "API key";
   if (u.status === "signed_out") return "Sign in required";
   if (u.status === "expired") return "Sign-in expired";
+  if (u.status === "unavailable" || u.refresh_error || u.offline) return "limits n/a";
   return "Unavailable";
 }
 

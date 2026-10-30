@@ -24,8 +24,8 @@ use std::time::Duration;
 
 use tauri::State;
 use zerus_client_core::actions::{
-    change_notifications, classify, invocation, parse_reference, reference_invocation,
-    ALREADY_ANSWERING, ALREADY_SENDING,
+    change_notifications, classify, invocation, parse_reference, recovery_preflight,
+    reference_invocation, ALREADY_ANSWERING, ALREADY_SENDING,
 };
 use zerus_client_core::details::{
     details_invocation, parse_details, parse_subagent_identity, subagent_identity_invocation,
@@ -855,7 +855,7 @@ async fn dispatch_with(
     target: Target,
     action: Action,
     request_id: String,
-    runner: impl FnOnce(&std::path::Path, &zerus_client_core::Invocation) -> zerus_client_core::Exit
+    runner: impl Fn(&std::path::Path, &zerus_client_core::Invocation) -> zerus_client_core::Exit
         + Send
         + 'static,
 ) -> Result<Outcome, String> {
@@ -911,6 +911,11 @@ async fn dispatch_with(
         })
         .flatten();
     let ran = tauri::async_runtime::spawn_blocking(move || {
+        if matches!(call_action, Action::Recovery { .. }) {
+            let inspection = details_invocation(&call_target, None);
+            let fresh = runner(&hgs, &inspection);
+            recovery_preflight(&call_target, &call_action, fresh)?;
+        }
         let inv = invocation(&call_target, &call_action, &request_id)?;
         let exit = runner(&hgs, &inv);
         Ok::<_, String>((inv, exit))
@@ -1465,6 +1470,70 @@ mod tests {
     }
 
     #[test]
+    fn recovery_rechecks_the_fresh_job_before_qts_action() {
+        const JOB: &str = "11111111-1111-4111-8111-111111111111";
+        let actions = Actions::new(std::env::temp_dir().join(format!(
+            "zerus-recovery-preflight-{}.json",
+            std::process::id()
+        )));
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&calls);
+        let outcome = tauri::async_runtime::block_on(dispatch_with(
+            &actions,
+            review(),
+            Action::Recovery {
+                job_id: JOB.into(),
+                action: zerus_client_core::actions::RecoveryControl::Now,
+            },
+            "request-1".into(),
+            move |_, invocation| {
+                recorded.lock().unwrap().push(invocation.args.clone());
+                let value = if invocation.args.iter().any(|arg| arg == "inspect") {
+                    serde_json::json!({"run_id": "run-1", "conversation_id": "conv-1", "recovery": {"id": JOB, "name": "claude/sample-project/review", "state": "waiting"}})
+                } else {
+                    serde_json::json!({"id": JOB, "name": "claude/sample-project/review", "state": "waiting", "due_at": 123})
+                };
+                zerus_client_core::Exit::Code {
+                    code: 0,
+                    stdout: value.to_string().into_bytes(),
+                    stderr: String::new(),
+                }
+            },
+        ));
+        assert!(matches!(outcome, Ok(Outcome::Done { .. })));
+        let calls = calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0][1], "inspect");
+        assert_eq!(calls[1], ["@studio", "recovery", "action"]);
+
+        let actions = Actions::new(
+            std::env::temp_dir().join(format!("zerus-recovery-stale-{}.json", std::process::id())),
+        );
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&calls);
+        let outcome = tauri::async_runtime::block_on(dispatch_with(
+            &actions,
+            review(),
+            Action::Recovery {
+                job_id: JOB.into(),
+                action: zerus_client_core::actions::RecoveryControl::Now,
+            },
+            "request-2".into(),
+            move |_, invocation| {
+                recorded.lock().unwrap().push(invocation.args.clone());
+                let value = serde_json::json!({"run_id": "run-2", "conversation_id": "conv-1", "recovery": {"id": JOB, "name": "claude/sample-project/review", "state": "waiting"}});
+                zerus_client_core::Exit::Code {
+                    code: 0,
+                    stdout: value.to_string().into_bytes(),
+                    stderr: String::new(),
+                }
+            },
+        ));
+        assert!(matches!(outcome, Ok(Outcome::Failed { .. })));
+        assert_eq!(calls.lock().unwrap().len(), 1, "a stale job never mutates");
+    }
+
+    #[test]
     fn a_dispatched_write_marks_its_kind_until_it_ends() {
         let actions = Actions::new(std::env::temp_dir().join("zerus-begin-test-marks.json"));
         let target = review();
@@ -1784,7 +1853,7 @@ mod tests {
                 target.clone(),
                 action,
                 uuid::Uuid::new_v4().to_string(),
-                move |_, _| exit,
+                move |_, _| exit.clone(),
             ))
             .unwrap();
             assert!(pump.archive_termination_ids(&computer).is_empty());
@@ -1859,7 +1928,7 @@ mod tests {
                                 .push((inv.request_id.clone(), asked.clone()));
                             let receipt = serde_json::json!({
                                 "status": "submitted",
-                                "request_id": echo.unwrap_or(asked),
+                                "request_id": echo.clone().unwrap_or(asked),
                                 "name": "claude/sample-project/review",
                                 "run_id": "run-1",
                                 "conversation_id": "conv-1",

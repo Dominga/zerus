@@ -2,12 +2,16 @@
 //! deliver Linux primary clicks. Keep the shared Desk/Bar, including its menu
 //! tracking gate, and export those models directly (the approved Linux path).
 use std::collections::HashMap;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::task::{Context as TaskContext, Poll, Wake, Waker};
+use std::time::{Duration, Instant};
 
 use gtk::cairo::{Context, FontSlant, FontWeight, Format, ImageSurface};
 use tauri::{AppHandle, Manager};
-use zbus::blocking::{Connection, Proxy};
+use zbus::blocking::{Connection, MessageIterator, Proxy};
+use zbus::export::futures_core::Stream;
 use zbus::zvariant::{ObjectPath, OwnedValue, Structure, Value};
 use zerus_client_core::menubar::{Apply, Entry, Face, OpenMode};
 use zerus_client_core::trayicon::{self, Rect, Rgb, Step};
@@ -20,6 +24,10 @@ const PATH: &str = "/StatusNotifierItem";
 const MENU: &str = "/MenuBar";
 const DBUSMENU: &str = "com.canonical.dbusmenu";
 const WATCHER: &str = "org.kde.StatusNotifierWatcher";
+const BADGE: &str = "com.canonical.Unity.LauncherEntry";
+const BADGE_PATH: &str = "/org/hgdev/Zerus/LauncherEntry";
+const LAUNCHER: &str = "application://hgs-tray.desktop";
+const SHELLS: [&str; 2] = ["com.canonical.Unity", "org.kde.plasmashell"];
 type Props = HashMap<String, OwnedValue>;
 type Layout = (i32, Props, Vec<OwnedValue>);
 type Sink = Arc<dyn Fn(MenuAction, Option<String>) + Send + Sync>;
@@ -96,6 +104,9 @@ struct Tray {
     custom_terminal: bool,
     tracking: bool,
     activation: Option<String>,
+    badge_count: i64,
+    badge_sent: bool,
+    badge_stopped: bool,
     sink: Sink,
 }
 fn lock<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -120,6 +131,9 @@ impl Tray {
             custom_terminal: false,
             tracking: false,
             activation: None,
+            badge_count: 0,
+            badge_sent: false,
+            badge_stopped: false,
             sink,
         }
     }
@@ -220,6 +234,37 @@ impl Tray {
             _ => {}
         }
         false
+    }
+}
+
+fn badge_properties(count: i64) -> Props {
+    HashMap::from([
+        ("count".into(), count.into()),
+        ("count-visible".into(), (count > 0).into()),
+    ])
+}
+fn publish_badge(connection: &Connection, tray: &mut Tray, force: bool) {
+    if tray.badge_stopped || (!force && tray.badge_sent) {
+        return;
+    }
+    tray.badge_sent = connection
+        .emit_signal(
+            None::<&str>,
+            BADGE_PATH,
+            BADGE,
+            "Update",
+            &(LAUNCHER, badge_properties(tray.badge_count)),
+        )
+        .is_ok();
+}
+#[derive(Clone)]
+struct BadgeService(Arc<Mutex<Tray>>);
+#[zbus::interface(name = "com.canonical.Unity.LauncherEntry")]
+impl BadgeService {
+    #[zbus(out_args("application_uri", "properties"))]
+    fn query(&self) -> (String, Props) {
+        let tray = lock(&self.0);
+        (LAUNCHER.into(), badge_properties(tray.badge_count))
     }
 }
 
@@ -415,11 +460,33 @@ impl MenuService {
 struct Native {
     connection: Connection,
     tray: Arc<Mutex<Tray>>,
-    stop: std::sync::mpsc::Sender<()>,
+    wake: std::sync::mpsc::SyncSender<()>,
+    stopped: Arc<AtomicBool>,
+}
+impl Native {
+    fn clear_badge(&self) {
+        self.stopped.store(true, Ordering::Release);
+        let _ = self.wake.try_send(());
+        let mut tray = lock(&self.tray);
+        if !tray.badge_stopped && tray.badge_count > 0 {
+            tray.badge_count = 0;
+            publish_badge(&self.connection, &mut tray, true);
+        }
+        tray.badge_stopped = true;
+    }
 }
 impl Drop for Native {
     fn drop(&mut self) {
-        let _ = self.stop.send(());
+        self.clear_badge();
+    }
+}
+struct WorkerWake(std::sync::mpsc::SyncSender<()>);
+impl Wake for WorkerWake {
+    fn wake(self: Arc<Self>) {
+        let _ = self.0.try_send(());
+    }
+    fn wake_by_ref(self: &Arc<Self>) {
+        let _ = self.0.try_send(());
     }
 }
 fn start(foreground: Rgb, sink: Sink, address: Option<&str>) -> zbus::Result<Native> {
@@ -434,51 +501,127 @@ fn start(foreground: Rgb, sink: Sink, address: Option<&str>) -> zbus::Result<Nat
         .method_timeout(Duration::from_secs(5))
         .serve_at(PATH, ItemService(tray.clone()))?
         .serve_at(MENU, MenuService(tray.clone()))?
+        .serve_at(BADGE_PATH, BadgeService(tray.clone()))?
         .build()?;
-    // Login can precede Plasma's watcher. Re-register after its owner changes;
-    // never involve the real user manager or restart any process.
+    // One existing worker handles SNI registration and Qt's one-second
+    // coalesced launcher republish. Bounded owner streams wake it directly;
+    // no second thread, polling source or unbounded event queue is added.
+    let mut owners = Vec::with_capacity(3);
+    for service in [WATCHER, SHELLS[0], SHELLS[1]] {
+        let rule = zbus::MatchRule::builder()
+            .msg_type(zbus::message::Type::Signal)
+            .sender("org.freedesktop.DBus")?
+            .path("/org/freedesktop/DBus")?
+            .interface("org.freedesktop.DBus")?
+            .member("NameOwnerChanged")?
+            .add_arg(service)?
+            .build();
+        owners.push(MessageIterator::for_match_rule(rule, &connection, Some(2))?.into_inner());
+    }
     let bus = connection.clone();
-    let (stop, stopped) = std::sync::mpsc::channel();
+    let state = tray.clone();
+    let (wake, incoming) = std::sync::mpsc::sync_channel(1);
+    let waker = Waker::from(Arc::new(WorkerWake(wake.clone())));
+    let stopped = Arc::new(AtomicBool::new(false));
+    let stop = stopped.clone();
     std::thread::spawn(move || {
         let mut registered = String::new();
-        loop {
-            if let Ok(dbus) = zbus::blocking::fdo::DBusProxy::new(&bus) {
-                let owner = dbus
-                    .get_name_owner(WATCHER.try_into().unwrap())
-                    .map(|s| s.to_string())
-                    .unwrap_or_default();
-                if owner.is_empty() {
-                    registered.clear();
-                } else if owner != registered {
-                    if let Ok(watcher) =
-                        Proxy::new(&bus, WATCHER, "/StatusNotifierWatcher", WATCHER)
-                    {
-                        if watcher
-                            .call::<_, _, ()>("RegisterStatusNotifierItem", &(name.as_str(),))
-                            .is_ok()
-                        {
-                            registered = owner;
+        let mut register_at = Some(Instant::now());
+        let mut republish_at = None;
+        'worker: loop {
+            if stop.load(Ordering::Acquire) {
+                break;
+            }
+            let mut context = TaskContext::from_waker(&waker);
+            for stream in &mut owners {
+                for index in 0..8 {
+                    match Pin::new(&mut *stream).poll_next(&mut context) {
+                        Poll::Ready(Some(Ok(message))) => {
+                            if message.header().sender().map(|s| s.as_str())
+                                != Some("org.freedesktop.DBus")
+                            {
+                                continue;
+                            }
+                            let Ok((service, _, owner)) =
+                                message.body().deserialize::<(String, String, String)>()
+                            else {
+                                continue;
+                            };
+                            if service == WATCHER {
+                                registered.clear();
+                                register_at = (!owner.is_empty()).then(Instant::now);
+                            } else if SHELLS.contains(&service.as_str()) && !owner.is_empty() {
+                                republish_at = Some(Instant::now() + Duration::from_secs(1));
+                            }
                         }
+                        Poll::Pending => break,
+                        Poll::Ready(_) => break 'worker,
+                    }
+                    // Preserve bounded work if a service churns continuously.
+                    if index == 7 {
+                        waker.wake_by_ref();
                     }
                 }
             }
-            if stopped.recv_timeout(Duration::from_secs(5))
-                != Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-            {
-                break;
+            if register_at.is_some_and(|at| Instant::now() >= at) {
+                register_at = Some(Instant::now() + Duration::from_secs(5));
+                if let Ok(dbus) = zbus::blocking::fdo::DBusProxy::new(&bus) {
+                    match dbus.get_name_owner(WATCHER.try_into().unwrap()) {
+                        Ok(owner) => {
+                            let owner = owner.to_string();
+                            if owner == registered
+                                || Proxy::new(
+                                    &bus,
+                                    owner.as_str(),
+                                    "/StatusNotifierWatcher",
+                                    WATCHER,
+                                )
+                                .and_then(|watcher| {
+                                    watcher.call::<_, _, ()>(
+                                        "RegisterStatusNotifierItem",
+                                        &(name.as_str(),),
+                                    )
+                                })
+                                .is_ok()
+                            {
+                                registered = owner;
+                                register_at = None;
+                            }
+                        }
+                        Err(zbus::fdo::Error::NameHasNoOwner(_)) => register_at = None,
+                        Err(_) => {}
+                    }
+                }
+            }
+            if republish_at.is_some_and(|at| Instant::now() >= at) {
+                publish_badge(&bus, &mut lock(&state), true);
+                republish_at = None;
+            }
+            let deadline = register_at.into_iter().chain(republish_at).min();
+            match deadline {
+                Some(at) => {
+                    let _ = incoming.recv_timeout(at.saturating_duration_since(Instant::now()));
+                }
+                None => {
+                    if incoming.recv().is_err() {
+                        break;
+                    }
+                }
             }
         }
     });
     Ok(Native {
         connection,
         tray,
-        stop,
+        wake,
+        stopped,
     })
 }
 #[derive(Default)]
 struct Running {
     native: Option<Native>,
-    pending: Option<(Face, String, Vec<Entry>)>,
+    pending: Option<(Face, String, Vec<Entry>, Option<String>)>,
+    stopped: bool,
 }
 pub struct TrayState(Mutex<Running>);
 pub fn install(app: &AppHandle, conf: Option<&str>) {
@@ -502,9 +645,18 @@ pub fn install(app: &AppHandle, conf: Option<&str>) {
                 lock(&native.tray).custom_terminal = custom_terminal;
                 let state = app.state::<TrayState>();
                 let mut state = lock(&state.0);
+                if state.stopped {
+                    return;
+                }
                 state.native = Some(native);
-                if let Some((face, tooltip, entries)) = state.pending.take() {
-                    offer_native(state.native.as_ref().unwrap(), face, tooltip, entries);
+                if let Some((face, tooltip, entries, badge)) = state.pending.take() {
+                    offer_native(
+                        state.native.as_ref().unwrap(),
+                        face,
+                        tooltip,
+                        entries,
+                        badge,
+                    );
                 }
             }
             Err(error) => {
@@ -518,18 +670,33 @@ pub fn install(app: &AppHandle, conf: Option<&str>) {
         }
     });
 }
-pub fn offer(app: &AppHandle, face: Face, tooltip: String, entries: Vec<Entry>) {
+pub fn offer(
+    app: &AppHandle,
+    face: Face,
+    tooltip: String,
+    entries: Vec<Entry>,
+    badge: Option<String>,
+) {
     let Some(state) = app.try_state::<TrayState>() else {
         return;
     };
     let mut running = lock(&state.0);
+    if running.stopped {
+        return;
+    }
     let Some(native) = running.native.as_ref() else {
-        running.pending = Some((face, tooltip, entries));
+        running.pending = Some((face, tooltip, entries, badge));
         return;
     };
-    offer_native(native, face, tooltip, entries);
+    offer_native(native, face, tooltip, entries, badge);
 }
-fn offer_native(native: &Native, face: Face, tooltip: String, mut entries: Vec<Entry>) {
+fn offer_native(
+    native: &Native,
+    face: Face,
+    tooltip: String,
+    mut entries: Vec<Entry>,
+    badge: Option<String>,
+) {
     if let Some(index) = entries
         .iter()
         .position(|entry| matches!(entry, Entry::Quit))
@@ -538,9 +705,20 @@ fn offer_native(native: &Native, face: Face, tooltip: String, mut entries: Vec<E
     }
     let (changed, revision) = {
         let mut tray = lock(&native.tray);
-        let changes = tray.bar.offer(face, tooltip, entries, None).changes;
-        let changed = !changes.is_empty();
-        tray.apply(changes);
+        if tray.badge_stopped {
+            return;
+        }
+        let offered = tray.bar.offer(face, tooltip, entries, badge);
+        if let Some(count) = offered.badge {
+            tray.badge_count = count
+                .and_then(|s| s.parse::<i64>().ok())
+                .unwrap_or(0)
+                .max(0);
+            tray.badge_sent = false;
+        }
+        publish_badge(&native.connection, &mut tray, false);
+        let changed = !offered.changes.is_empty();
+        tray.apply(offered.changes);
         (changed, tray.revision)
     };
     if changed {
@@ -556,6 +734,16 @@ fn offer_native(native: &Native, face: Face, tooltip: String, mut entries: Vec<E
             "LayoutUpdated",
             &(revision, 0_i32),
         );
+    }
+}
+pub fn clear_badge(app: &AppHandle) {
+    if let Some(state) = app.try_state::<TrayState>() {
+        let mut state = lock(&state.0);
+        state.stopped = true;
+        state.pending = None;
+        if let Some(native) = state.native.as_ref() {
+            native.clear_badge();
+        }
     }
 }
 fn dispatch(app: &AppHandle, action: MenuAction, token: Option<String>) {
@@ -757,6 +945,165 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
 
+    fn badge_updates(connection: &Connection, owner: &str) -> zbus::MessageStream {
+        let rule = zbus::MatchRule::builder()
+            .msg_type(zbus::message::Type::Signal)
+            .sender(owner)
+            .unwrap()
+            .path(BADGE_PATH)
+            .unwrap()
+            .interface(BADGE)
+            .unwrap()
+            .member("Update")
+            .unwrap()
+            .build();
+        MessageIterator::for_match_rule(rule, connection, Some(2))
+            .unwrap()
+            .into_inner()
+    }
+    fn next_badge(stream: &mut zbus::MessageStream, timeout: Duration) -> Option<(String, Props)> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            match Pin::new(&mut *stream).poll_next(&mut TaskContext::from_waker(Waker::noop())) {
+                Poll::Ready(Some(Ok(message))) => {
+                    return Some(message.body().deserialize().unwrap())
+                }
+                Poll::Ready(_) => return None,
+                Poll::Pending if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(1))
+                }
+                Poll::Pending => return None,
+            }
+        }
+    }
+    fn expect_badge(value: (String, Props), count: i64) {
+        assert_eq!(value.0, LAUNCHER);
+        assert_eq!(value.1.len(), 2);
+        assert_eq!(i64::try_from(&value.1["count"]).unwrap(), count);
+        assert_eq!(
+            bool::try_from(&value.1["count-visible"]).unwrap(),
+            count > 0
+        );
+    }
+
+    #[test]
+    fn launcher_badge_query_and_updates_follow_attention_even_while_the_menu_is_open() {
+        let bus = crate::platform::linux_test_bus::Bus::new();
+        let native = start(
+            Rgb::new(255, 255, 255),
+            Arc::new(|_, _| {}),
+            Some(&bus.address),
+        )
+        .unwrap();
+        let client = bus.connect();
+        let owner = native.connection.unique_name().unwrap().to_string();
+        let badge = Proxy::new(&client, owner.as_str(), BADGE_PATH, BADGE).unwrap();
+        let mut updates = badge_updates(&client, &owner);
+        expect_badge(badge.call("Query", &()).unwrap(), 0);
+        offer_native(
+            &native,
+            Face::counts(4, 2, false),
+            "initial".into(),
+            entries("claude/p/a"),
+            Some("2".into()),
+        );
+        expect_badge(next_badge(&mut updates, Duration::from_secs(3)).unwrap(), 2);
+        expect_badge(badge.call("Query", &()).unwrap(), 2);
+
+        lock(&native.tray).opened();
+        offer_native(
+            &native,
+            Face::counts(9, 7, false),
+            "new".into(),
+            entries("codex/p/b"),
+            Some("7".into()),
+        );
+        expect_badge(next_badge(&mut updates, Duration::from_secs(3)).unwrap(), 7);
+        expect_badge(badge.call("Query", &()).unwrap(), 7);
+        assert_eq!(lock(&native.tray).tooltip, "initial");
+        lock(&native.tray).event(0, "closed");
+        assert_eq!(lock(&native.tray).tooltip, "new");
+        offer_native(
+            &native,
+            Face::counts(9, 7, false),
+            "new".into(),
+            entries("codex/p/b"),
+            Some("7".into()),
+        );
+        assert!(
+            next_badge(&mut updates, Duration::from_millis(80)).is_none(),
+            "unchanged count does not publish again"
+        );
+        offer_native(
+            &native,
+            Face::counts(9, 0, false),
+            "unavailable".into(),
+            entries("codex/p/b"),
+            None,
+        );
+        expect_badge(next_badge(&mut updates, Duration::from_secs(3)).unwrap(), 0);
+        expect_badge(badge.call("Query", &()).unwrap(), 0);
+        offer_native(
+            &native,
+            Face::counts(9, 3, false),
+            "three".into(),
+            entries("codex/p/b"),
+            Some("3".into()),
+        );
+        expect_badge(next_badge(&mut updates, Duration::from_secs(3)).unwrap(), 3);
+        drop(native);
+        expect_badge(next_badge(&mut updates, Duration::from_secs(3)).unwrap(), 0);
+    }
+
+    #[test]
+    fn shell_registration_coalesces_a_republish_without_a_new_attention_count() {
+        let bus = crate::platform::linux_test_bus::Bus::new();
+        let native = start(
+            Rgb::new(255, 255, 255),
+            Arc::new(|_, _| {}),
+            Some(&bus.address),
+        )
+        .unwrap();
+        let client = bus.connect();
+        let mut updates = badge_updates(&client, native.connection.unique_name().unwrap().as_str());
+        offer_native(
+            &native,
+            Face::counts(8, 4, false),
+            "four".into(),
+            entries("claude/p/a"),
+            Some("4".into()),
+        );
+        expect_badge(next_badge(&mut updates, Duration::from_secs(3)).unwrap(), 4);
+        let shell = bus.connect();
+        shell.request_name(SHELLS[0]).unwrap();
+        shell.request_name(SHELLS[1]).unwrap();
+        expect_badge(next_badge(&mut updates, Duration::from_secs(3)).unwrap(), 4);
+        assert!(
+            next_badge(&mut updates, Duration::from_millis(100)).is_none(),
+            "both registrations use one coalesced publication"
+        );
+        shell.release_name(SHELLS[1]).unwrap();
+        shell.request_name(SHELLS[1]).unwrap();
+        expect_badge(next_badge(&mut updates, Duration::from_secs(3)).unwrap(), 4);
+        native.clear_badge();
+        expect_badge(next_badge(&mut updates, Duration::from_secs(3)).unwrap(), 0);
+        offer_native(
+            &native,
+            Face::counts(9, 8, false),
+            "late".into(),
+            entries("codex/p/b"),
+            Some("8".into()),
+        );
+        let owner = native.connection.unique_name().unwrap().to_string();
+        let badge = Proxy::new(&client, owner.as_str(), BADGE_PATH, BADGE).unwrap();
+        expect_badge(badge.call("Query", &()).unwrap(), 0);
+        assert!(
+            next_badge(&mut updates, Duration::from_millis(100)).is_none(),
+            "shutdown cannot revive the badge"
+        );
+        drop(native);
+    }
+
     fn entries(name: &str) -> Vec<Entry> {
         vec![
             Entry::Open,
@@ -881,6 +1228,7 @@ mod tests {
             Face::counts(1, 1, false),
             "1 needs attention\n1 here".into(),
             entries("claude/p/a"),
+            None,
         );
         let connection = bus.connect();
         let item = Proxy::new(&connection, name.as_str(), PATH, SNI).unwrap();
@@ -912,6 +1260,7 @@ mod tests {
             Face::counts(2, 0, false),
             "changed".into(),
             entries("codex/p/b"),
+            None,
         );
         let (held, _): (u32, Layout) = menu
             .call("GetLayout", &(0_i32, -1_i32, Vec::<String>::new()))

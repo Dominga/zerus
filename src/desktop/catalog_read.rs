@@ -1,6 +1,6 @@
 //! Bounded display reads. Internal numeric cursors never cross private IPC.
 use super::{feed, protocol, store::Store};
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
@@ -13,6 +13,15 @@ pub const ABI: &str = "desktop-catalog-v1";
 pub const WALKS: usize = 64;
 const IDLE: Duration = Duration::from_secs(120);
 const LIFETIME: Duration = Duration::from_secs(600);
+
+#[derive(Debug)]
+struct WalkCapacity;
+impl std::fmt::Display for WalkCapacity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("catalog walk capacity")
+    }
+}
+impl std::error::Error for WalkCapacity {}
 
 #[derive(Clone)]
 struct Walk {
@@ -105,6 +114,7 @@ impl Reader {
         }
         match self.page(store, feed, epoch, &request, old, now) {
             Ok(value) => value,
+            Err(e) if e.is::<WalkCapacity>() => refused("catalog_walk_capacity"),
             Err(_) => refused("catalog_read_refused"),
         }
     }
@@ -127,10 +137,9 @@ impl Reader {
             idle: now + IDLE,
             until: old.as_ref().map_or(now + LIFETIME, |w| w.until),
         });
-        ensure!(
-            next.is_none() || self.walks.len() < WALKS,
-            "catalog walk capacity"
-        );
+        if next.is_some() && self.walks.len() >= WALKS {
+            return Err(WalkCapacity.into());
+        }
         let rows = page
             .rows
             .into_iter()

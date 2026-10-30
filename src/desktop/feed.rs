@@ -19,8 +19,8 @@ mod io;
 pub(super) use io::{client, proxy};
 pub const ABI: &str = "desktop-source-feed-v1";
 pub const LINE_BYTES: usize = watch::MAX_FRAME_BYTES + 2048;
-pub const INGRESS_BYTES: usize = 16 << 20;
-pub const INGRESS_ITEMS: usize = 1024;
+pub const INGRESS_BYTES: usize = zerus_client_core::source::INGRESS_BYTES;
+pub const INGRESS_ITEMS: usize = zerus_client_core::source::INGRESS_ITEMS;
 
 #[derive(Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case", deny_unknown_fields)]

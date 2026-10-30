@@ -50,7 +50,9 @@ The actor keeps at most 64 small continuation records for the entire
 configuration. They expire after 120 seconds idle or ten minutes from the
 original walk, whichever is earlier; continuing refreshes only the idle bound.
 A continuation rotates in its existing capacity slot. New walks needing
-continuation refuse when capacity is full. A single-page read needs no slot.
+continuation return `catalog_walk_capacity` when capacity is full. Close an
+unused walk or back off; restarting immediately cannot create capacity. A
+single-page read needs no slot.
 Expired records are pruned on the next read/close; retained metadata never
 exceeds the fixed cap. Status exposes these bounds and `retained_walks`.
 

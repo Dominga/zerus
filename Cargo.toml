@@ -39,6 +39,7 @@ zerus-desktop-migration = { path = "crates/desktop-migration" }
 zerus-desktop-ledger = { path = "crates/desktop-ledger" }
 zerus-desktop-catalog = { path = "crates/desktop-catalog" }
 zerus-content-search = { path = "crates/content-search" }
+zerus-client-core = { path = "client/core", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [

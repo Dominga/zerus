@@ -1527,6 +1527,47 @@ fn clear_restarted(store: &mut Store, team_id: &str, member_id: &str, role: &str
     })
 }
 
+/// U62 (#717): one test-queue tick. An empty queue costs no load read; a read
+/// is at least 30 s after the previous one; the night window comes from the
+/// project's `[schedule]`; each result becomes one notice for the lead's card.
+fn test_queue_tick(store: &mut Store, team_id: &str, now: f64) -> anyhow::Result<()> {
+    use chrono::Timelike;
+    let team = store.load(team_id)?.with_context(|| format!("Unknown team {team_id}"))?;
+    if team.status != TeamStatus::Running {
+        return Ok(());
+    }
+    let project = std::path::Path::new(&team.folder);
+    let loaded = crate::test_discipline::load(project, Some(&team.id)).map_err(|error| anyhow::anyhow!("{error}"))?;
+    let classes = loaded.config.resources.clone();
+    let night = loaded.config.schedule.clone();
+    let database = super::test_queue::TestStore::open(false)?;
+    let hour = chrono::Local::now().hour();
+    let (records, read) = super::test_queue::tick(
+        &database,
+        project,
+        &team.id,
+        &classes,
+        &night,
+        hour,
+        team.test_load_at,
+        now,
+        super::test_queue::load_now,
+    )?;
+    if !read {
+        return Ok(());
+    }
+    change(store, team_id, |team, events| {
+        super::test_queue::record_notices(team, &records, now);
+        for record in &records {
+            events.push(Event::new(
+                "test_result",
+                json!({"suite":record.suite,"status":record.status,"record":record.id,"asked_by":record.asked_by}),
+            ));
+        }
+        Ok(())
+    })
+}
+
 /// U31: the tasks of the next draft phase an idle member may work ahead on: a
 /// task (not a check) still waiting for its phase, whose dependencies are all
 /// accepted (#511 N2: a dependency inside a draft or queued phase counts too)
@@ -6382,6 +6423,11 @@ pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
             if let Err(error) = run_step(store, team, &step, host) {
                 eprintln!("hgs team worker: {}: {step:?}: {error}", team.name);
             }
+        }
+        // U62 (#717): the team's test queue. An empty queue is a no-op (no load
+        // read); a read is at most once per 30 s, and results become notices.
+        if let Err(error) = test_queue_tick(store, &team.id, now()) {
+            eprintln!("hgs team worker: {}: test queue: {error}", team.name);
         }
     }
     Ok(true)

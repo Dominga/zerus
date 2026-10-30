@@ -234,6 +234,77 @@ fn long(request: &Request) -> bool {
     request.seconds > request.budget_minutes.max(0.0) * 60.0
 }
 
+/// U62 (#717): records the tick's load time and one notice per result (newest
+/// last, at most 50); the results themselves stay in the database.
+pub(crate) fn record_notices(team: &mut super::model::Team, records: &[Record], now: f64) {
+    team.test_load_at = now;
+    for record in records {
+        team.test_notices.push(super::model::TestNotice {
+            record: record.id.clone(),
+            suite: record.suite.clone(),
+            status: record.status.clone(),
+            duration_ms: record.duration_ms,
+            asked_by: record.asked_by.clone(),
+            at: record.at,
+        });
+    }
+    let extra = team.test_notices.len().saturating_sub(50);
+    team.test_notices.drain(0..extra);
+}
+
+/// U62 (#717): the machine's real free resources. The scheduler reads them at
+/// most once per 30 s (see `tick`) and never when the queue is empty.
+pub(crate) fn load_now() -> Load {
+    let cpu_free = std::thread::available_parallelism().map(|count| count.get() as u32).unwrap_or(1);
+    Load { cpu_free, ram_free_mb: free_memory_mb().unwrap_or(0), gpu_free: true, at_night: false }
+}
+
+#[cfg(windows)]
+fn free_memory_mb() -> Option<u32> {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    let mut status = MEMORYSTATUSEX { dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32, ..Default::default() };
+    (unsafe { GlobalMemoryStatusEx(&mut status) } != 0).then_some((status.ullAvailPhys / (1024 * 1024)) as u32)
+}
+
+#[cfg(unix)]
+fn free_memory_mb() -> Option<u32> {
+    let text = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let kb: u64 = text
+        .lines()
+        .find(|line| line.starts_with("MemAvailable:"))?
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()?;
+    Some((kb / 1024) as u32)
+}
+
+/// U62 (#717): one worker tick. An empty queue costs no load read; after a read
+/// the next is 30 s away (the returned bool says a read happened); the night
+/// window comes from the project's `[schedule]`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn tick(
+    store: &TestStore,
+    project: &Path,
+    team: &str,
+    classes: &Classes,
+    night: &config::Schedule,
+    local_hour: u32,
+    last_load_at: f64,
+    now: f64,
+    read_load: impl FnOnce() -> Load,
+) -> anyhow::Result<(Vec<Record>, bool)> {
+    let queued = store.queued(team)?;
+    if queued.is_empty() || now - last_load_at < 30.0 {
+        return Ok((Vec::new(), false));
+    }
+    let mut load = read_load();
+    load.at_night = config::is_night(local_hour, night);
+    let chosen = schedule(&queued, classes, &load);
+    let records = run_due(store, project, &chosen, now)?;
+    Ok((records, true))
+}
+
 /// The requests a tick runs, in order: forced first, then short before long,
 /// then by age; a long suite waits for the night (or the CI) unless forced, and
 /// never two heavy suites at once. The machine's free CPU, RAM and GPU must fit.
@@ -365,6 +436,80 @@ mod tests {
             commit: "c".into(), input_hash: "h".into(), asked_by: "dev".into(), forced, at: 1.0,
             seconds, budget_minutes: 10.0, resources: resources.into(), command: String::new(),
         }
+    }
+
+    #[test]
+    fn the_worker_tick_reads_the_load_only_for_a_queue_and_once_in_thirty_seconds() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TestStore::open_at(&dir.path().join("tests.sqlite3"), false).unwrap();
+        let classes = Classes::new();
+        let night = config::Schedule::default();
+        let reads = std::cell::Cell::new(0u32);
+        let load = || {
+            reads.set(reads.get() + 1);
+            Load { cpu_free: 8, ram_free_mb: 8000, gpu_free: true, at_night: false }
+        };
+        // An empty queue: no read at all.
+        let (records, read) = tick(&store, dir.path(), "t", &classes, &night, 12, 0.0, 100.0, load).unwrap();
+        assert!(records.is_empty() && !read && reads.get() == 0, "an empty queue reads no load");
+        let mut queued = request("r1", "unit", 10.0, false, "small");
+        queued.command = if cfg!(windows) { "cmd /d /s /c exit 0".into() } else { "true".into() };
+        store.enqueue(&queued).unwrap();
+        // The last read was a moment ago: no second read.
+        let (records, read) = tick(&store, dir.path(), "t", &classes, &night, 12, 90.0, 100.0, load).unwrap();
+        assert!(records.is_empty() && !read && reads.get() == 0, "a read waits 30 s");
+        // Enough time passed and the queue has work: one read, one run.
+        let (records, read) = tick(&store, dir.path(), "t", &classes, &night, 12, 0.0, 100.0, load).unwrap();
+        assert!(read && reads.get() == 1, "the tick read the load once");
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].status, "passed");
+        assert!(load_now().cpu_free >= 1, "the real load reader sees the CPUs");
+    }
+
+    #[test]
+    fn the_night_window_wraps_midnight_and_excludes_the_day() {
+        let night = config::Schedule { night_start: 22, night_end: 6 };
+        assert!(config::is_night(23, &night) && config::is_night(0, &night) && config::is_night(5, &night));
+        assert!(!config::is_night(6, &night) && !config::is_night(12, &night) && !config::is_night(21, &night));
+        let day = config::Schedule { night_start: 9, night_end: 17 };
+        assert!(config::is_night(10, &day) && !config::is_night(18, &day));
+        assert!(!config::is_night(3, &config::Schedule { night_start: 5, night_end: 5 }));
+    }
+
+    #[test]
+    fn a_result_leaves_one_notice_and_the_inbox_card_links_it() {
+        use crate::state::teams::model::{Team, TeamStatus};
+        let mut team = Team { status: TeamStatus::Running, ..Default::default() };
+        let record = Record {
+            id: "r1".into(),
+            team: "t".into(),
+            suite: "unit".into(),
+            commit: "c".into(),
+            input_hash: "h".into(),
+            status: "passed".into(),
+            duration_ms: 1500,
+            excerpt: "the log".into(),
+            asked_by: "dev".into(),
+            at: 10.0,
+            affected: Vec::new(),
+        };
+        record_notices(&mut team, std::slice::from_ref(&record), 100.0);
+        assert_eq!(team.test_load_at, 100.0);
+        let items = super::super::inbox::items(&team);
+        let item = items.iter().find(|item| item.kind == "test_result").expect("a test result card");
+        assert!(
+            item.summary.contains("unit") && item.summary.contains("passed") && item.summary.contains("r1"),
+            "{}",
+            item.summary
+        );
+        assert!(item.command.contains("test results"), "{}", item.command);
+        assert!(item.detail.contains("r1") && item.detail.contains("dev"), "{}", item.detail);
+        assert!(!item.detail.contains("the log"), "the card links the record, never the log");
+        // The notice list is bounded.
+        for n in 0..60 {
+            record_notices(&mut team, &[Record { id: format!("x{n}"), ..record.clone() }], 100.0);
+        }
+        assert_eq!(team.test_notices.len(), 50);
     }
 
     #[test]

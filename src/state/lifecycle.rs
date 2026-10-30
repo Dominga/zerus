@@ -411,7 +411,12 @@ fn pause_check(name: &str, snapshot: &Snapshot) -> Result<Value> {
     Ok(record)
 }
 
-fn pause_one(record: &Value, scope: Option<&session_action::Scope>) -> Result<()> {
+pub(super) fn pause_one(record: &Value, scope: Option<&session_action::Scope>) -> Result<()> {
+    pause_one_quiet(record, scope, false)
+}
+
+/// `pause_one` without its report, for a caller that prints its own receipt.
+pub(super) fn pause_one_quiet(record: &Value, scope: Option<&session_action::Scope>, quiet: bool) -> Result<()> {
     let name = string(record, "name");
     {
         let _guard = lock(None)?;
@@ -488,7 +493,7 @@ fn pause_one(record: &Value, scope: Option<&session_action::Scope>) -> Result<()
             backend::current().kill_pane(string(record, "pane"))?;
         }
     }
-    if let Some(scope)=scope {scope.result(name,string(record,"run_id"),string(record,"conversation_id"),None);} else {println!("hgs: paused {name}");}
+    if let Some(scope)=scope {scope.result(name,string(record,"run_id"),string(record,"conversation_id"),None);} else if !quiet {println!("hgs: paused {name}");}
     Ok(())
 }
 
@@ -562,7 +567,7 @@ pub(super) fn pause_scoped(names: &[String], dry: bool, scope: Option<&session_a
     Ok(0)
 }
 
-fn resume_spec(
+pub(super) fn resume_spec(
     record: &Value,
     run_id: &str,
     archive_id: Option<&str>,

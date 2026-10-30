@@ -13,6 +13,7 @@
 #include <QTemporaryDir>
 #include "HgsClient.h"
 #include "TeamController.h"
+#include "TeamAccountMove.h"
 #include "TeamModel.h"
 #include "TeamPanel.h"
 #include "TeamStages.h"
@@ -139,6 +140,7 @@ class TestTeams : public QObject {
     Q_OBJECT
 private slots:
     void initTestCase();
+    void accountMoveReadsAccountsBlocksAndSteps();
     void subLeadsFormTheMemberTree();
     void pipelineFixtureReadsEveryStageState();
     void stageDeliveryFixtureReadsTheDeliveredStage();
@@ -1878,6 +1880,100 @@ void TestTeams::stageQueuesStatesAndFeedLines()
     QCOMPARE(line.text, QString("Out of rounds · #4 API goes to the lead after 3 returns"));
     QCOMPARE(feed("stages_passed", {{"task", 2}, {"title", "API"}, {"to", "Lead"}}).text, QString("Every stage passed · #2 API waits for Lead"));
     QCOMPARE(feed("stage_passed", {{"task", 2}, {"title", "API"}, {"stage", "test"}, {"round", 1}}).text, QString("Test passed #2 API · round 1"));
+}
+
+// U54: the account a member's session really runs on (session_account), the
+// members a move takes (the lead included, the default account under any of
+// its names), what keeps a member from its move or launch, and each member's
+// step from Moving to its result.
+void TestTeams::accountMoveReadsAccountsBlocksAndSteps()
+{
+    using namespace Teams::AccountMove;
+    const auto team = parse(QJsonDocument::fromJson(R"({"id":"t","name":"T","status":"running","lead":"lead","members":[
+      {"id":"lead","role":"Lead","agent":"claude","account":"","session_account":"work","session":{"host":"","name":"claude/x/lead","run_id":"r1"}},
+      {"id":"dev","role":"Backend","agent":"claude","account":"work","session_account":"native-claude","session":{"host":"","name":"claude/x/dev","run_id":"r2"}},
+      {"id":"rev","role":"Reviewer","agent":"claude","account":"","session_account":"","session":{"host":"","name":"claude/x/rev","run_id":"r3"}},
+      {"id":"qa","role":"QA","agent":"codex","account":"","session_account":"work","session":{"host":"","name":"codex/x/qa"}},
+      {"id":"far","role":"Far","agent":"claude","computer":"gb10","session_account":"work","session":{"host":"gb10","name":"claude/x/far"}},
+      {"id":"new","role":"New","agent":"claude","account":"second","state":"not_created"},
+      {"id":"old","role":"Old","agent":"claude","account":"work","session":{"host":"","name":"claude/x/old"}}]})").object());
+    // The default account under each of its names.
+    QCOMPARE(accountOf("claude", ""), QStringLiteral("native-claude"));
+    QCOMPARE(accountOf("claude", "native"), QStringLiteral("native-claude"));
+    QCOMPARE(accountOf("codex", "native-codex"), QStringLiteral("native-codex"));
+    QCOMPARE(accountOf("claude", "work"), QStringLiteral("work"));
+    // The session's account, not the roster's; the roster's before a session, or from an older hgs.
+    QCOMPARE(memberAccount(*team.member("lead")), QStringLiteral("work"));
+    QCOMPARE(memberAccount(*team.member("dev")), QStringLiteral("native-claude"));
+    QCOMPARE(memberAccount(*team.member("rev")), QStringLiteral("native-claude"));
+    QCOMPARE(memberAccount(*team.member("new")), QStringLiteral("second"));
+    QVERIFY(!team.member("old")->sessionAccountKnown);
+    QCOMPARE(memberAccount(*team.member("old")), QStringLiteral("work"));
+    const QList<QJsonObject> profiles{QJsonObject{{"id", "work"}, {"label", "Work"}}, QJsonObject{{"id", "native-claude"}, {"label", "Default"}}};
+    QCOMPARE(labelOf(profiles, "claude", "work"), QStringLiteral("Work"));
+    QCOMPARE(labelOf(profiles, "claude", ""), QStringLiteral("Default"));
+    QCOMPARE(labelOf({}, "claude", "native-claude"), QStringLiteral("Default account"));
+    QCOMPARE(labelOf({}, "claude", "elsewhere"), QStringLiteral("elsewhere"));
+    // A move takes the agent's local sessions on that account, the lead included.
+    QCOMPARE(affected(team, "claude", "work"), (QStringList{"lead", "old"}));
+    QCOMPARE(affected(team, "claude", ""), (QStringList{"dev", "rev"}));
+    QCOMPARE(affected(team, "claude", "native-claude"), (QStringList{"dev", "rev"}));
+    QCOMPARE(affected(team, "codex", "work"), QStringList{"qa"});
+    QCOMPARE(agents(team), (QStringList{"claude", "codex"}));
+    QCOMPARE(fromAccounts(team, "claude"), (QStringList{"work", "native-claude"}));
+    QVERIFY(!movable("kimi") && movable("codex"));
+    // What keeps a member: #619's folder errors, a busy old session, an unconfirmed switch.
+    Teams::Member member;
+    member.error = "D:/w/dev is on team/t/dev-3, not team/t/dev; team/t/dev-3 is not merged into team/t/dev. Merge it, then check out team/t/dev in the folder.";
+    auto block = blockOf(member);
+    QCOMPARE(block.kind, Block::FolderBranch);
+    QCOMPARE(block.folder, QStringLiteral("D:/w/dev"));
+    QCOMPARE(block.current, QStringLiteral("team/t/dev-3"));
+    QCOMPARE(block.own, QStringLiteral("team/t/dev"));
+    member.error = "C:/Users/a b/dev is on team/t/dev-3, not team/t/dev; it has uncommitted changes, so Zerus did not switch it.";
+    QCOMPARE(blockOf(member).folder, QStringLiteral("C:/Users/a b/dev"));
+    member.error = "D:/w/dev is on team/t/dev-3, not team/t/dev, and Zerus could not switch it: locked";
+    QCOMPARE(blockOf(member).own, QStringLiteral("team/t/dev"));
+    member.error = "the account switch is rolled_back; waiting for the old session to finish its turn";
+    QCOMPARE(blockOf(member).kind, Block::OldSession);
+    member.error = "the account switch is uncertain; the old session was not paused: gone";
+    QCOMPARE(blockOf(member).kind, Block::Uncertain);
+    member.error = "launch refused";
+    QCOMPARE(blockOf(member).kind, Block::None);
+    // The member state says so; another error is still a failed start.
+    QCOMPARE(memberStatus(team, member, {}).kind, QStringLiteral("failed"));
+    member.error = "the account switch is rolled_back; waiting for the old session to finish its turn";
+    QCOMPARE(memberStatus(team, member, {}).text, QStringLiteral("Waiting for its old session"));
+    // Steps: moving while it runs (resumed once the session's account changed),
+    // then each result from the receipt and the team.
+    Move move;
+    move.team = "t"; move.agent = "claude"; move.from = "work"; move.to = "second"; move.toLabel = "Second";
+    move.members = {"lead", "old"}; move.runs = {{"lead", "r1"}, {"old", ""}}; move.running = true;
+    QCOMPARE(stepOf(team, move, "lead").state, QStringLiteral("moving"));
+    QCOMPARE(stepOf(team, move, "lead").text, QStringLiteral("Moving to Second"));
+    auto later = team;
+    for (auto &m : later.members) if (m.id == "lead") m.sessionAccount = "second";
+    QCOMPARE(stepOf(later, move, "lead").state, QStringLiteral("resumed"));
+    move.running = false; move.finished = true;
+    move.receipt = QJsonDocument::fromJson(R"({"status":"swapped","members":[{"member":"lead"},{"member":"old"}],"fresh":["old"]})").object();
+    QCOMPARE(stepOf(later, move, "lead").text, QStringLiteral("Resumed on Second in the same conversation"));
+    // The fresh one: its session is cleared, then a new one starts.
+    for (auto &m : later.members) if (m.id == "old") { m.session.clear(); m.runId.clear(); }
+    QCOMPARE(stepOf(later, move, "old").state, QStringLiteral("fresh"));
+    observe(move, later);
+    QVERIFY(move.cleared.contains("old"));
+    for (auto &m : later.members) if (m.id == "old") m.session = "claude/x/old";
+    QCOMPARE(stepOf(later, move, "old").state, QStringLiteral("launched"));
+    // Not in the receipt: the member's error says why.
+    move.receipt = QJsonDocument::fromJson(R"({"status":"swapped","members":[{"member":"lead"}],"fresh":[]})").object();
+    for (auto &m : later.members) if (m.id == "old") m.error = "the account switch is rolled_back; waiting for the old session to finish its turn";
+    QCOMPARE(stepOf(later, move, "old").state, QStringLiteral("waiting"));
+    for (auto &m : later.members) if (m.id == "old") m.error = "the account switch is uncertain; the old session was not paused: gone";
+    QCOMPARE(stepOf(later, move, "old").state, QStringLiteral("uncertain"));
+    // A refused call: nothing moved, with its reason.
+    move.error = "No member of team T could move to account second";
+    QCOMPARE(stepOf(later, move, "lead").state, QStringLiteral("failed"));
+    QVERIFY(stepOf(later, move, "lead").text.contains(move.error));
 }
 
 QTEST_MAIN(TestTeams)

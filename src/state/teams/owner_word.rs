@@ -41,6 +41,9 @@ pub(crate) const SWAP_VERBS: &[&str] = &[
 /// N15: what the owner says when raising the member cap, English and Russian.
 pub(crate) const MAX_VERBS: &[&str] = &["max", "maximum", "limit", "cap", "лимит", "максимум", "макс", "предел"];
 
+/// U54: what the owner says to relaunch a member's session.
+pub(crate) const RELAUNCH_VERBS: &[&str] = &["relaunch", "restart", "start", "запусти", "запустите", "перезапусти", "перезапустить"];
+
 /// U49: the words that ask a member to drain, English and Russian.
 pub(crate) const DRAIN_PHRASES: &[&str] = &["drain", "remove", "вывед", "убери", "убрать"];
 

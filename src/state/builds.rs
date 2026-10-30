@@ -289,6 +289,13 @@ pub(super) fn running(at: f64) -> Vec<Value> {
         .collect()
 }
 
+/// U53: whether a build runs as this exact session's work now.
+pub(super) fn active_for(name: &str, run_id: &str) -> bool {
+    running(now())
+        .iter()
+        .any(|claim| claim["session"]["name"] == name && claim["session"]["run_id"] == run_id)
+}
+
 /// The calling session's newest runs, running ones first.
 fn list() -> Result<Value> {
     let caller = caller().ok_or("hgs run --list reads the calling session's runs: run it from inside a Zerus session")?;

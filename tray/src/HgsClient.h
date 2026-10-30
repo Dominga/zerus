@@ -253,9 +253,16 @@ public:
     quint64 requestSwarm(const QStringList &arguments = {QStringLiteral("get")}, const QJsonObject &input = {});
     // WhiteWh fork: `hgs [@host] team <operation> --json` with `input` on stdin
     // (agent teams). A change carries its own request_id; none is retried.
-    quint64 requestTeam(const QString &host, const QString &operation, const QJsonObject &input);
+    // `timeoutMs` 0 keeps the usual bound; a bulk account move (U54) waits
+    // for each member's switch and gets a longer one.
+    quint64 requestTeam(const QString &host, const QString &operation, const QJsonObject &input, int timeoutMs = 0);
     // The draft in the agent's own Terminal input (owner, 2026-10-28): read it,
     // or with submitHash press Enter only while it is still exactly that draft.
+    // WhiteWh fork, U53: `hgs [@host] switch-account <name> --account ID
+    // --request-id UUID`, the owner's choice from the composer. Its receipt
+    // (switched, rolled_back, uncertain) arrives even when hgs exits 1; a
+    // refusal comes as `error` with nothing changed. Never retried.
+    quint64 requestSwitchAccount(const QString &host, const QString &name, const QString &account);
     quint64 requestTerminalDraft(const QString &host, const QString &name, const QString &run, const QString &conversation,
                                  const QString &submitHash = {});
     // `hgs task <arguments>` on this computer, whose replica holds the project's
@@ -452,6 +459,7 @@ signals:
     void teamFailed(quint64 request, const QString &host, const QString &operation, const QString &error);
     void terminalDraftReady(quint64 request, const QJsonObject &result);
     void terminalDraftFailed(quint64 request, const QString &error);
+    void switchAccountFinished(quint64 request, const QString &host, const QString &name, const QJsonObject &receipt, const QString &error);
     void taskReady(quint64 request, const QJsonObject &result);
     void taskFailed(quint64 request, const QString &error);
     void sessionHostReady(quint64 request, const QJsonObject &result);
@@ -572,6 +580,7 @@ private:
     quint64 m_swarmRequest = 0;
     quint64 m_teamRequest = 0;
     quint64 m_terminalDraftRequest = 0;
+    quint64 m_switchAccountRequest = 0;
     quint64 m_taskRequest = 0;
     quint64 m_sessionHostRequest = 0;
     quint64 m_wslFileProofRequest = 0;

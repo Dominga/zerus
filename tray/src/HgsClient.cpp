@@ -835,19 +835,45 @@ quint64 HgsClient::requestSwarm(const QStringList &arguments, const QJsonObject 
 
 // WhiteWh fork: agent teams. Every operation reads one JSON object on stdin,
 // so even a read sends one: an empty input would leave stdin open.
-quint64 HgsClient::requestTeam(const QString &host, const QString &operation, const QJsonObject &input)
+quint64 HgsClient::requestTeam(const QString &host, const QString &operation, const QJsonObject &input, int timeoutMs)
 {
     const quint64 request = ++m_teamRequest;
     // A catalog operation is two words: "catalog get".
     QStringList args{QStringLiteral("team")};
     args << operation.split(' ', Qt::SkipEmptyParts) << QStringLiteral("--json");
     if (!host.isEmpty()) args.prepend('@' + host);
-    runHgsParsed(m_hgs, args, host.isEmpty() ? 15000 : 45000, this, parseObject,
+    runHgsParsed(m_hgs, args, timeoutMs > 0 ? timeoutMs : host.isEmpty() ? 15000 : 45000, this, parseObject,
         [this, request, host, operation](const ObjectReply &data) {
             if (!data.ok()) emit teamFailed(request, host, operation, tr("Invalid team response"));
             else emit teamReady(request, host, operation, data.object);
         }, [this, request, host, operation](const QString &, const QString &error) { emit teamFailed(request, host, operation, error); },
         QJsonDocument(input).toJson(QJsonDocument::Compact));
+    return request;
+}
+
+quint64 HgsClient::requestSwitchAccount(const QString &host, const QString &name, const QString &account)
+{
+    const quint64 request = ++m_switchAccountRequest;
+    QStringList args{QStringLiteral("switch-account"), name, QStringLiteral("--account"), account,
+                     QStringLiteral("--request-id"), QUuid::createUuid().toString(QUuid::WithoutBraces)};
+    if (!host.isEmpty()) args.prepend('@' + host);
+    // The switch waits for the agent to stop, copies the conversation and
+    // waits up to 30 seconds for the resumed one to confirm. Stopping hgs in
+    // the middle could leave the agent stopped, so the bound is far past that.
+    auto process = processRequest(m_hgs, args); process.timeoutMs = 600000;
+    ProcessRunner::run(std::move(process), this, [](ProcessRunner::Result result) { return parsedResult(std::move(result)); },
+                       [this, request, host, name](const ParsedResult &parsed) {
+        const auto &result = parsed.result;
+        const auto fail = [&](const QString &error) { emit switchAccountFinished(request, host, name, {}, error); };
+        if (result.outcome == ProcessRunner::Result::TimedOut)
+            return fail(tr("The switch did not answer in time. Check the session and its account before choosing again."));
+        if (result.outcome == ProcessRunner::Result::FailedToStart) return fail(result.errorString);
+        // rolled_back and uncertain exit 1 with their receipt.
+        if (parsed.reply.ok() && parsed.reply.object.value("status").isString())
+            return emit switchAccountFinished(request, host, name, parsed.reply.object, {});
+        const auto error = QString::fromUtf8(result.standardError).trimmed().left(2000);
+        fail(error.isEmpty() ? tr("The switch ended without a receipt (exit code %1).").arg(result.exitCode) : error);
+    });
     return request;
 }
 

@@ -77,6 +77,7 @@ mod subagents;
 mod subagents_confirm;
 mod session_upload;
 mod session_state;
+mod switch_account;
 mod builds;
 mod native_subagents;
 mod supervisor;
@@ -593,6 +594,15 @@ fn finish_rows(sessions: &mut [Value], marks: &Value, names: &BTreeMap<String, S
         }
     }
 
+    // U53: every row names its account, label included; the catalog is read once.
+    let labels = crate::config::Config::load().ok().map(|config| crate::accounts::labels(&config));
+    for session in sessions.iter_mut() {
+        if session.get("account_label").is_none() && session.get("account_id").is_some() {
+            let id = string(session, "account_id").to_owned();
+            let label = labels.as_ref().and_then(|labels| labels.get(&id).cloned()).unwrap_or_else(|| id.clone());
+            session["account_label"] = json!(label);
+        }
+    }
     // The pane folders are read after the lock is released, when a session may
     // have been renamed since `snapshot`. They go by the session IDs, which a
     // rename keeps, to the names that `snapshot` listed (zerus-18u1).
@@ -842,6 +852,8 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     let Some((command, args)) = args.split_first() else {
         return Err("missing state operation".into());
     };
+    // U53: the owner moves one running session to another account of its agent.
+    if command == "switch-account" { return switch_account::dispatch(args); }
     // WhiteWh fork: `hgs run`, a build Zerus tracks as the session's work (U30).
     if command == "build" { return builds::dispatch(args); }
     if command == "worktrees" { return worktrees::dispatch(args); }

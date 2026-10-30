@@ -2559,7 +2559,9 @@ fn expect(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
 /// (the lead included). The member keeps its id, role, tasks, folder and
 /// branch; the old session keeps running and is listed for the owner. An open
 /// attempt is revoked (`swapped`) and handed again to the new session with the
-/// previous attempt's report and open questions as a continuation.
+/// previous attempt's report and open questions as a continuation. U54: a bulk
+/// request (`members` plus `bulk`) moves each named member with one account
+/// change and keeps its session, conversation and attempt.
 fn swap_member(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     // N9: the lead swaps on the owner's verified word; the owner directly.
     ensure!(
@@ -2571,9 +2573,41 @@ fn swap_member(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<E
         matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused),
         "Only a planning, running or paused team swaps a member"
     );
+    if let Some(ids) = input["members"].as_array().filter(|ids| !ids.is_empty()) {
+        // U54: one owner action moves every selected member; each is reported.
+        // A member whose account switch did not confirm keeps its binding and
+        // carries the reason.
+        for failure in input["failed"].as_array().into_iter().flatten() {
+            if let Some(member) = team.members.iter_mut().find(|member| member.id == text(failure, "member")) {
+                member.error = text(failure, "error").to_owned();
+            }
+        }
+        // A member the switch could not move falls back to a fresh session; the
+        // old one was paused and renamed, and the feed says so.
+        let fresh: Vec<String> = input["fresh"]
+            .as_array()
+            .map(|ids| ids.iter().filter_map(|id| id.as_str()).map(str::to_owned).collect())
+            .unwrap_or_default();
+        for note in input["notes"].as_array().into_iter().flatten() {
+            events.push(Event::new(
+                "member_retired",
+                json!({"member":team.role_of(text(note, "member")),"note":text(note, "note")}),
+            ));
+        }
+        let mut swapped = Vec::new();
+        for id in ids.iter().filter_map(|id| id.as_str()) {
+            let keep = input["bulk"].as_bool() == Some(true) && !fresh.iter().any(|fresh| fresh == id);
+            swapped.push(swap_one(team, input, id, keep, actor, events)?);
+        }
+        return Ok(json!({"status":"swapped","members":swapped,"fresh":fresh}));
+    }
     let id = text(input, "member").to_owned();
     ensure!(!id.is_empty(), "A member id is required");
-    let state = team.member(&id).map(|member| member.state).with_context(|| format!("Unknown member {id}"))?;
+    swap_one(team, input, &id, false, actor, events)
+}
+
+fn swap_one(team: &mut Team, input: &Value, id: &str, keep_session: bool, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    let state = team.member(id).map(|member| member.state).with_context(|| format!("Unknown member {id}"))?;
     // N31: a removed member stays removed (and outside max_members); a
     // paused one is resumed first, so a swap never lifts its pause.
     ensure!(state != MemberState::Removed, "This member was removed");
@@ -2582,18 +2616,19 @@ fn swap_member(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<E
         Some(value) if value.is_object() => Some(serde_json::from_value(value.clone()).context("Invalid session")?),
         _ => None,
     };
-    let role = team.role_of(&id);
+    let role = team.role_of(id);
     let lead = id == team.lead;
     let at = now();
     let mut handed = Vec::new();
-    for task in &mut team.tasks {
-        let Some(attempt) = task.open_attempt() else { continue };
-        if attempt.member != id {
-            continue;
-        }
-        if !lead {
-            let report = attempt.report.as_ref().map(|report| report.text.chars().take(2000).collect()).unwrap_or_default();
-            let questions: Vec<String> = attempt
+    if !keep_session {
+        for task in &mut team.tasks {
+            let Some(attempt) = task.open_attempt() else { continue };
+            if attempt.member != id {
+                continue;
+            }
+            if !lead {
+                let report = attempt.report.as_ref().map(|report| report.text.chars().take(2000).collect()).unwrap_or_default();
+                let questions: Vec<String> = attempt
                 .questions
                 .iter()
                 .filter(|question| question.open())
@@ -2608,12 +2643,15 @@ fn swap_member(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<E
         task.status = TaskStatus::Pending;
         task.decided_by = None;
         handed.push(task.id);
+        }
     }
     let mut from = String::new();
     let mut changed = Vec::new();
     {
         let member = team.members.iter_mut().find(|member| member.id == id).unwrap();
-        if let Some(old) = member.session.take() {
+        if keep_session {
+            from = member.session.as_ref().map(|session| session.name.clone()).unwrap_or_default();
+        } else if let Some(old) = member.session.take() {
             from = old.name;
         }
         let fields =
@@ -2632,9 +2670,13 @@ fn swap_member(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<E
                 member.folder = folder;
             }
         }
-        member.session = session;
-        member.launch_after_swap = member.session.is_none();
-        member.state = if member.session.is_some() { MemberState::Active } else { MemberState::NotCreated };
+        if !keep_session {
+            member.session = session;
+            member.launch_after_swap = member.session.is_none();
+            member.state = if member.session.is_some() { MemberState::Active } else { MemberState::NotCreated };
+        } else {
+            member.launch_after_swap = false;
+        }
         member.launch_id.clear();
         member.error.clear();
         member.seen = None;
@@ -2645,14 +2687,24 @@ fn swap_member(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<E
         // pass withdraws the recovery request for the old session by name.
         member.limited = None;
     }
-    let agent = team.member(&id).map(|member| member.agent.clone()).unwrap_or_default();
-    let to = team.member(&id).and_then(|member| member.session.as_ref()).map(|session| session.name.clone()).unwrap_or_default();
-    team.swapped.push(json!({"member":role,"old":from,"at":at,"by":"You"}));
+    let agent = team.member(id).map(|member| member.agent.clone()).unwrap_or_default();
+    let to = team.member(id).and_then(|member| member.session.as_ref()).map(|session| session.name.clone()).unwrap_or_default();
+    // U54: the new lead's brief names the previous lead's conversation and
+    // transcript; the old session's own record has them, when it can be read.
+    let previous = if lead && !keep_session {
+        crate::state::storage::read(&from).ok()
+    } else {
+        None
+    };
+    let conversation = previous.as_ref().and_then(|record| record["conversation_id"].as_str()).unwrap_or_default().to_owned();
+    let transcript = previous.as_ref().and_then(|record| record["transcript"].as_str()).unwrap_or_default().to_owned();
+    team.swapped.push(json!({"member":role,"old":from,"at":at,"by":"You",
+        "conversation":conversation,"transcript":transcript}));
     let excess = team.swapped.len().saturating_sub(20);
     team.swapped.drain(..excess);
     // The lead's open task stays in its inbox and the new lead session gets
     // the one brief that names the team and `hgs team inbox` (H6, U8).
-    if lead {
+    if lead && !keep_session {
         team.brief = Notice::Pending;
         team.brief_id.clear();
     }
@@ -3690,7 +3742,11 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
         "expect" => expect(team, input, actor, events),
         "swap-member" => swap_member(team, input, actor, events),
         "relaunch" => {
-            ensure!(matches!(actor, Actor::Human), "Only you relaunch a member");
+            // U54: the owner relaunches directly; the lead on its verified word.
+            ensure!(
+                matches!(actor, Actor::Human) || (actor.is_lead(team) && input["roster_word"].as_bool() == Some(true)),
+                "Only you relaunch a member; the lead needs your word"
+            );
             let id = text(input, "member").to_owned();
             let member = team.members.iter_mut().find(|m| m.id == id).context("Unknown member")?;
             ensure!(member.session.is_none() && !member.error.is_empty(), "This member's session did not fail to start");

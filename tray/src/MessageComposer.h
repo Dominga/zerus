@@ -122,6 +122,8 @@ public:
     QPlainTextEdit *editor() const { return m_editor; }
     // Notices and attachments above the field; the window adds its own chips.
     ComposerToolbar *toolbar() const { return m_toolbar; }
+    // U53: the session's account beside the model; its owner fills it.
+    class AccountSwitchChip *accountChip() const { return m_account; }
     // A required question replaces the field and its actions; the toolbar stays.
     void setInputVisible(bool visible);
     bool isInputVisible() const;
@@ -243,6 +245,7 @@ private:
     QPushButton *m_settingsTerminal;
     bool m_settingsTerminalAvailable = false;
     QPushButton *m_settings, *m_applySettings;
+    class AccountSwitchChip *m_account = nullptr;
     QJsonArray m_modelOptions;
     bool m_modelDefaultEffort = false;
     QString m_model, m_effort, m_pendingModel, m_pendingEffort, m_settingsReason, m_applyWhen, m_popupKey, m_settingsNotice;

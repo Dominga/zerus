@@ -153,7 +153,27 @@ TeamWorkspace::TeamWorkspace(TeamController *teams, TeamPanel *panel, QWidget *p
         return team ? m_panel->problemActions(*team, member, status) : nullptr;
     };
     QObject::connect(m_teams, &TeamController::teamsChanged, this, [this] { scheduleRender(); });
-    QObject::connect(m_teams, &TeamController::watchedChanged, this, [this] { scheduleRender(); });
+    QObject::connect(m_teams, &TeamController::watchedChanged, this, [this] {
+        if (const auto *team = m_teams->watched()) Teams::AccountMove::observe(m_move, *team);
+        renderAccountMove();
+        scheduleRender();
+    });
+    QObject::connect(m_teams->client(), &HgsClient::accountsReady, this, [this](quint64 request, const QString &host, const QJsonObject &result) {
+        if (request != m_accountsRequest || !host.isEmpty()) return;
+        m_accountsRequest = 0; m_accountsRead = true;
+        QList<QJsonObject> profiles;
+        for (const auto &value : result.value("profiles").toArray()) { auto profile = value.toObject(); profile["host"] = host; profiles << profile; }
+        // The same accounts again change nothing on screen.
+        const bool same = profiles == m_accountProfiles;
+        m_accountProfiles = profiles;
+        renderAccountMove();
+        if (!same) scheduleRender();
+    });
+    QObject::connect(m_teams->client(), &HgsClient::accountsFailed, this, [this](quint64 request, const QString &host, const QString &) {
+        if (request != m_accountsRequest || !host.isEmpty()) return;
+        m_accountsRequest = 0; m_accountsRead = true;
+        renderAccountMove();
+    });
     QObject::connect(m_teams, &TeamController::feedChanged, this, [this] { scheduleRender(); });
     QObject::connect(m_teams, &TeamController::inboxChanged, this, [this] { scheduleRender(); });
     QObject::connect(qApp, &QApplication::focusChanged, this, [this](QWidget *, QWidget *now) {
@@ -2749,6 +2769,21 @@ QWidget *TeamWorkspace::members(const Team &team)
         }
         if (state.attention) { auto *q = label(QStringLiteral("?1"), c.warn, 10, true); q->setToolTip(tr("A question waits in its session")); top->addWidget(q); }
         top->addWidget(elided(m.model.isEmpty() ? agentNames.value(m.agent, m.agent) : m.model, c.text3, 11), 1);
+        // U54: the account its session really runs on, not only the configured one.
+        if (team.status != "draft") {
+            const QString account = Teams::AccountMove::memberAccount(m);
+            // It keeps its width beside the model, up to 120 pixels.
+            auto *shown = label(accountLabel(m), c.muted, 11, false, "teamWorkspaceMemberAccount");
+            shown->setText(shown->fontMetrics().elidedText(accountLabel(m), Qt::ElideRight, 120));
+            shown->setProperty("account", account);
+            QString tip = m.session.isEmpty() || !m.sessionAccountKnown ? tr("Account: %1").arg(accountLabel(m))
+                                                                         : tr("Its session runs on %1").arg(accountLabel(m));
+            if (m.sessionAccountKnown && !m.session.isEmpty() && Teams::AccountMove::accountOf(m.agent, m.account) != account)
+                tip += QLatin1Char('\n') + tr("The roster names %1; the session runs on another account.")
+                                               .arg(Teams::AccountMove::labelOf(m_accountProfiles, m.agent, m.account));
+            shown->setToolTip(tip);
+            top->addWidget(shown);
+        }
         col->addLayout(top);
         int done = 0, total = 0, open = 0;
         for (const auto &t : team.tasks) if (t.assignee == m.id) { ++total; done += t.status == "accepted"; open += !t.finished(); }
@@ -2776,6 +2811,9 @@ QWidget *TeamWorkspace::members(const Team &team)
             state->setProperty("phase", mark.phase);
             col->addWidget(state);
         }
+        // U54: its step in a move this desktop runs, or what keeps it from its
+        // move or launch, with the review action.
+        if (auto *block = memberBlock(team, m)) col->addWidget(block);
         // U36: the stages it has and may take.
         if (team.status == "running" || team.status == "paused")
             if (auto *stages = memberStageQueue(team, m, c, workedClock()(), [this](int task) { m_drawerTask = task; scheduleRender(); }))
@@ -3107,6 +3145,21 @@ void TeamWorkspace::memberMenu(const Team &team, const Member &member, const QPo
         });
         swap->setObjectName("teamWorkspaceMemberSwap");
         swap->setToolTip(tr("Keeps its role, tasks, folder and branch; an open task goes to the new session with what was done so far"));
+        // U54: every member of this agent on one account moves at once.
+        auto *move = menu.addAction(tr("Move to another account…"), this, [this, teamId = team.id, id = member.id] {
+            QTimer::singleShot(0, this, [this, teamId, id] {
+                const auto *current = currentTeam(teamId);
+                if (const auto *found = current ? current->member(id) : nullptr) accountMoveDialog(*current, *found);
+            });
+        });
+        move->setObjectName("teamWorkspaceMemberMoveAccount");
+        const bool movable = Teams::AccountMove::movable(member.agent) && member.host.isEmpty() && !member.session.isEmpty();
+        move->setEnabled(movable && !m_move.running);
+        move->setToolTip(m_move.running ? tr("A move is running; wait for it")
+                         : !Teams::AccountMove::movable(member.agent) ? tr("Only Claude and Codex members change account in place")
+                         : !member.host.isEmpty() ? tr("Its session runs on another computer")
+                         : member.session.isEmpty() ? tr("It has no session yet; its account applies when it starts")
+                         : tr("Moves every %1 member on its account to another one, the lead included").arg(agentNames.value(member.agent, member.agent)));
     }
     menu.setToolTipsVisible(true);
     // The menu runs its own event loop: a poll under it must not rebuild the
@@ -3506,6 +3559,8 @@ void TeamWorkspace::renderCoordinator(const Team &team)
     }
     // U35: the coordinator has no quick-ask chips; the owner writes to the lead.
     m_conversation->setSession(lead ? lead->host : QString(), lead ? lead->session : QString());
+    // U53: the lead is a member; its account changes only with swap-member.
+    m_conversation->setAccountLocked(tr("The lead of %1: its account changes with Swap member in the team's Members.").arg(team.name));
 }
 
 QWidget *TeamWorkspace::feed(const Team &team)

@@ -776,6 +776,10 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
             .unwrap()
             .clone(),
     );
+    // U53: the account's label beside its id, which a move reads back.
+    if let Ok(config) = crate::config::Config::load() {
+        output["account_label"] = json!(crate::accounts::label(&config, string(&output, "account_id")));
+    }
     // The compact list preview must not shorten the existing inspector field.
     if !user_prompt(&record).is_null() {
         output["prompt"] = record["prompt"].clone();

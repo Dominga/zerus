@@ -52,6 +52,7 @@ private slots:
     void readMarksUseStdinAndAcceptOnlyHostAnswers();
     void taskCommandsUseStdinAndReportFailures();
     void terminalDraftsPreserveIdentityAndReportReceipts();
+    void switchAccountReadsReceiptsAndRefusals();
     void sendsAndCancelsWaitForAnotherComputer();
     void cliVersionUsesConfiguredExecutableAndRefreshes();
     void parsesSavedSessions();
@@ -2328,6 +2329,54 @@ void TestHgsClient::parsesSharedReadState()
     QCOMPARE(box.sessions[0].readReplyId, QString("7:100.5")); QVERIFY(box.sessions[0].readAttentionSignature.isEmpty());
     QVERIFY(box.sessions[1].sharedRead); QVERIFY(box.sessions[1].readReplyId.isEmpty());
     QVERIFY(!box.sessions[2].sharedRead);
+}
+
+// U53: switch-account names the session, the account and a new request id;
+// its receipt arrives whether hgs exits 0 (switched) or 1 (rolled_back), and a
+// refusal on stderr arrives as its reason.
+void TestHgsClient::switchAccountReadsReceiptsAndRefusals()
+{
+    QTemporaryDir fixture; QVERIFY(fixture.isValid());
+    const auto program = fixture.filePath("hgs");
+    QVERIFY(FakeCli::install(program, R"PY(#!/usr/bin/env python3
+import json,os,sys
+here=__file__
+open(here+'.args','a').write(json.dumps(sys.argv[1:])+'\n')
+mode=open(here+'.mode').read().strip()
+if mode=='refuse':
+ sys.stderr.write('hgs: claude/p/s: the session is not idle; a turn is running\n');sys.exit(1)
+print(json.dumps({'status':mode,'session':'claude/p/s','from':{'account_id':'work','label':'Work'},'to':{'account_id':'second','label':'Second'}}))
+sys.exit(0 if mode=='switched' else 1)
+)PY"));
+    const auto mode = [&](const char *value) { QFile file(program + ".mode"); QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Truncate)); file.write(value); };
+    HgsClient client(FakeCli::program(program));
+    QSignalSpy finished(&client, &HgsClient::switchAccountFinished);
+    mode("switched");
+    const auto first = client.requestSwitchAccount("box", "claude/p/s", "second");
+    QTRY_COMPARE(finished.size(), 1);
+    QCOMPARE(finished[0][0].toULongLong(), first);
+    QCOMPARE(finished[0][1].toString(), QStringLiteral("box")); QCOMPARE(finished[0][2].toString(), QStringLiteral("claude/p/s"));
+    QCOMPARE(finished[0][3].toJsonObject()["status"].toString(), QStringLiteral("switched")); QVERIFY(finished[0][4].toString().isEmpty());
+    mode("rolled_back");
+    client.requestSwitchAccount({}, "claude/p/s", "second");
+    QTRY_COMPARE(finished.size(), 2);
+    QCOMPARE(finished[1][3].toJsonObject()["status"].toString(), QStringLiteral("rolled_back")); QVERIFY(finished[1][4].toString().isEmpty());
+    mode("refuse");
+    client.requestSwitchAccount({}, "claude/p/s", "second");
+    QTRY_COMPARE(finished.size(), 3);
+    QVERIFY(finished[2][3].toJsonObject().isEmpty());
+    QCOMPARE(finished[2][4].toString(), QStringLiteral("hgs: claude/p/s: the session is not idle; a turn is running"));
+    QList<QStringList> calls; QFile file(program + ".args"); QVERIFY(file.open(QIODevice::ReadOnly));
+    for (const auto &line : file.readAll().split('\n')) if (!line.isEmpty()) {
+        QStringList args; for (const auto &value : QJsonDocument::fromJson(line).array()) args << value.toString(); calls << args;
+    }
+    QCOMPARE(calls.size(), 3);
+    QCOMPARE(calls[0].mid(0, 6), (QStringList{"@box", "switch-account", "claude/p/s", "--account", "second", "--request-id"}));
+    QCOMPARE(calls[1].mid(0, 5), (QStringList{"switch-account", "claude/p/s", "--account", "second", "--request-id"}));
+    // A canonical UUID, new for every request: none is a retry.
+    const QRegularExpression uuid("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
+    QVERIFY(uuid.match(calls[0].last()).hasMatch()); QVERIFY(uuid.match(calls[1].last()).hasMatch());
+    QVERIFY(calls[0].last() != calls[1].last() && calls[1].last() != calls[2].last());
 }
 
 void TestHgsClient::terminalDraftsPreserveIdentityAndReportReceipts()

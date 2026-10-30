@@ -1,4 +1,5 @@
 #include "TeamModel.h"
+#include "TeamAccountMove.h"
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QJsonValue>
@@ -385,6 +386,7 @@ Team parse(const QJsonObject &v)
         member.id = str(m, "id"); member.role = str(m, "role"); member.agent = str(m, "agent"); member.model = str(m, "model");
         member.computer = str(m, "computer"); member.state = str(m, "state"); member.error = str(m, "error");
         member.account = str(m, "account"); member.effort = str(m, "effort"); member.permissions = str(m, "permissions");
+        member.sessionAccountKnown = m.contains("session_account"); member.sessionAccount = str(m, "session_account");
         member.folder = str(m, "folder"); member.directory = str(m, "directory"); member.prompt = str(m, "prompt");
         const auto session = m.value("session").toObject();
         member.host = str(session, "host"); member.session = str(session, "name");
@@ -1028,7 +1030,17 @@ Status memberStatus(const Team &team, const Member &member, const Live &live)
     if (team.status == "planning")
         return member.session.isEmpty() ? make("not_created", tr("Created on approval"), tr("Planned"), Tone::Dim)
                                         : make("planning", tr("Planning"), tr("Planning"), Tone::Planning);
-    if (!member.error.isEmpty()) return make("failed", tr("Failed to start"), tr("Failed"), Tone::Danger, 0, true);
+    if (!member.error.isEmpty()) {
+        // U54: a move or launch that waits for its old session, a folder left
+        // on another branch and an unconfirmed switch say so.
+        switch (AccountMove::blockOf(member).kind) {
+        case AccountMove::Block::OldSession: return make("paused", tr("Waiting for its old session"), tr("Waiting"), Tone::Warn, 0, true);
+        case AccountMove::Block::FolderBranch: return make("failed", tr("Folder on another branch"), tr("Branch"), Tone::Danger, 0, true);
+        case AccountMove::Block::Uncertain: return make("stuck", tr("Account switch unconfirmed"), tr("Unconfirmed"), Tone::Warn, 0, true);
+        case AccountMove::Block::None: break;
+        }
+        return make("failed", tr("Failed to start"), tr("Failed"), Tone::Danger, 0, true);
+    }
     if (member.session.isEmpty()) return make("not_started", tr("Not started"), tr("Not started"), Tone::Dim);
     if (member.state == "paused") return make("paused", tr("Paused"), tr("Paused"), Tone::Muted);
     // The member's open attempt, if any.

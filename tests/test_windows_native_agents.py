@@ -86,7 +86,9 @@ WAIT = 120
 CLEARED_PREFIXES = ("CLAUDE", "ANTHROPIC_", "CODEX_", "OPENAI_", "KIMI_", "VSCODE_", "TERM_", "WT_", "CONEMU",
                     "ACTIONS_")
 CLEARED = {"COLORTERM", "FORCE_COLOR", "NO_COLOR", "GITHUB_TOKEN", "GH_TOKEN", "HTTP_PROXY", "HTTPS_PROXY",
-           "ALL_PROXY", "NO_PROXY", "NODE_OPTIONS"}
+           "ALL_PROXY", "NO_PROXY", "NODE_OPTIONS",
+           # A runner inside a Zerus session must not lend it to the case.
+           "HGS_SESSION", "HGS_RUN_ID", "HGS_AGENT", "HGS_ACCOUNT_ID", "HGS_EXPECTED_ID", "HGS_REQUESTED_ID"}
 # Messages `hgs send` must deliver exactly: plain, non-ASCII, ending in a backslash
 # (which Claude reads as a line continuation before Enter), and multiline.
 MESSAGES = ("Plain fixture message.", "Привет, ünïcödé ✓ 漢字.", "Continue the fixture\\",
@@ -147,6 +149,8 @@ class NativeAgent:
     # The glyph that starts the agent's composer row.
     COMPOSER = None
     CLEARS_WITH_KEYS = False
+    # The flag that keeps an agent from asking to review the hooks hgs installs.
+    NO_HOOK_REVIEW = None
 
     def setUp(self):
         # Handles on the agents and supervisors this case saw running, by (PID, start), and
@@ -159,6 +163,8 @@ class NativeAgent:
         self.project_parent = Path(tempfile.mkdtemp(prefix="hgs-native-", dir=project_parent())).resolve()
         self.project = self.project_parent / "project"
         self.agent_home = self.root / f"{self.AGENT}-home"
+        # The account a switch moved the session to, once the case made it.
+        self.second_home = None
         self.api_root = self.root / "api"
         for folder in (self.project, self.agent_home, self.api_root, *(self.root / name for name in
                                                                          ("appdata", "localappdata", "temp"))):
@@ -171,7 +177,7 @@ class NativeAgent:
                         HGS_SELF="test", HGS_PEERS="", HGS_TAB="0")
         self.api_url = f"http://127.0.0.1:{self.start_api()}"
         self.env.update(
-            ANTHROPIC_BASE_URL=self.api_url, ANTHROPIC_API_KEY=KEY, OPENAI_API_KEY=KEY,
+            ANTHROPIC_BASE_URL=self.api_url, ANTHROPIC_API_KEY=KEY, OPENAI_API_KEY=KEY, FIXTURE_API_KEY=KEY,
             CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1", DISABLE_AUTOUPDATER="1", DISABLE_UPDATES="1",
             DISABLE_INSTALLATION_CHECKS="1", CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL="1",
             DISABLE_TELEMETRY="1", DISABLE_ERROR_REPORTING="1",
@@ -230,6 +236,10 @@ class NativeAgent:
         """The agent's private home, as a user who has finished onboarding left it."""
         raise NotImplementedError
 
+    def prepare_account(self, folder):
+        """A second, signed-in account of the same agent in its own profile folder (U53)."""
+        raise NotImplementedError
+
     # hgs and what it reports.
 
     def hgs(self, *args, input=None, rc=0):
@@ -279,12 +289,28 @@ class NativeAgent:
                           rc=None)
         return json.loads(result.stdout)["ok"]["text"] if result.returncode == 0 else f"(no capture: {result.stderr})"
 
+    def pane(self, name):
+        """The host's pane facts, including where its caret is, in cells."""
+        result = self.hgs("__host", "call", json.dumps({"op": "pane_info", "target": {"name": name}}), rc=None)
+        return json.loads(result.stdout)["ok"] if result.returncode == 0 else {}
+
     def describe(self):
-        """The screens, the listing, the host's log and the fake model's requests, for failure messages."""
+        """The screens, the caret, the listing, the host's log and the fake model's requests, for
+        failure messages."""
         parts = []
         for name in self.names:
             try:
                 parts.append(f"screen of {name}:\n{self.capture(name)}")
+                pane = self.pane(name)
+                parts.append(f"pane of {name}: " + json.dumps(
+                    {key: pane.get(key) for key in ("width", "height", "cursor_x", "cursor_y", "dead")}))
+                styled = self.hgs("__host", "call", json.dumps(
+                    {"op": "capture", "target": {"name": name}, "styled": True}), rc=None)
+                rows = (json.loads(styled.stdout)["ok"]["text"].splitlines()
+                        if styled.returncode == 0 else [])
+                cursor_y = pane.get("cursor_y")
+                if isinstance(cursor_y, int) and 0 <= cursor_y < len(rows):
+                    parts.append(f"styled row {cursor_y} of {name}: {rows[cursor_y]!r}")
                 parts.append(f"record of {name}: " + json.dumps(
                     {key: self.record(name).get(key) for key in ("activity", "phase", "conversation_id", "run_id",
                                                                "expected_id", "error", "input_pending_at",
@@ -604,6 +630,81 @@ class NativeAgent:
                          dict(state="archived", runtime_state="stopped", conversation_id=row["conversation_id"]))
         self.until("the terminated agent to exit", lambda: not self.alive(*process))
 
+    # Changing the account of a running session (U53).
+
+    def second_account(self):
+        """A second account of this agent, signed in on this computer, and its folder."""
+        self.hgs("account", "add", "second", "--provider", self.AGENT, "--label", "Second", "--json")
+        folder = self.home / ".config" / "hgs" / "accounts" / "second"
+        self.assertTrue(folder.is_dir(), "the account profile folder is missing")
+        self.prepare_account(folder)
+        self.second_home = folder
+        return folder
+
+    def check_switch_account(self, tag):
+        """`hgs switch-account` moves the running session to another account of the same
+        agent: the same conversation, folder and name, copied into the new account's native
+        store, and the agent resumes it there; the old account keeps its own copy."""
+        name = self.launch(tag, *([self.NO_HOOK_REVIEW] if self.NO_HOOK_REVIEW else []))
+        # A refused send names which empty-composer check refused and where the
+        # caret is (Claude 2.1.312 parks it outside the prompt row).
+        self.env["HGS_INPUT_TRACE"] = "1"
+        # A real turn first: Claude writes its transcript only after the first prompt, and
+        # Codex names it in the record only then.
+        self.deliver(name, MESSAGES[0])
+        row = self.ready(name)
+        conversation = row["conversation_id"]
+        before = self.record(name)
+        transcript = Path(before["transcript"])
+        self.assertTrue(transcript.is_file(), before)
+        original = transcript.read_bytes()
+        folder = self.second_account()
+        receipt = self.json("switch-account", name, "--account", "second",
+                            "--request-id", str(uuid.uuid4()))
+        self.assertEqual(receipt["status"], "switched", receipt)
+        self.assertEqual((receipt["conversation_id"], receipt["from"]["account_id"],
+                          receipt["to"]["account_id"]), (conversation, "native-" + self.AGENT, "second"))
+        # The same conversation, folder and name, on the new account.
+        switched = self.record(name)
+        self.assertEqual((switched["name"], switched["launch_dir"], switched["conversation_id"],
+                          switched["account_id"], switched["agent_home"]),
+                         (name, str(self.project), conversation, "second", str(folder)))
+        self.assertNotEqual(switched["run_id"], before["run_id"])
+        # A resumed Codex is a deferred resume until its first turn: its own
+        # supervisor keeps the expected id equal to the conversation. Claude's
+        # SessionStart confirms the resume and clears it. Neither may name
+        # another conversation.
+        expected = switched.get("expected_id")
+        if self.AGENT == "codex":
+            self.assertIn(expected, (None, "", conversation), expected)
+        else:
+            self.assertFalse(expected, expected)
+        # The copy is in the new account's store and starts with the conversation's
+        # records: the resumed agent may append to it. The old account's file is
+        # final only after its agent stops: it may grow past the snapshot taken
+        # before the switch (Claude appends its cost-state record while stopping),
+        # and the copy holds those final bytes.
+        copy = next(folder.rglob(f"*{conversation}.jsonl"))
+        copied = copy.read_bytes()
+        old_final = transcript.read_bytes()
+        self.assertTrue(old_final.startswith(original), "the old account's records were rewritten")
+        self.assertTrue(copied.startswith(old_final), "the copy does not hold the old file's final records")
+        self.assertTrue(transcript.is_file())
+        # The listing and the inspection both name the account.
+        self.assertEqual((self.row(name)["account_id"], self.row(name)["account_label"]),
+                         ("second", "Second"))
+        inspected = self.inspect(name)
+        self.assertEqual((inspected["account_id"], inspected["account_label"]), ("second", "Second"))
+        # The resumed agent answers a second prompt in that exact conversation.
+        self.pin_session(name)
+        text = "After the account switch."
+        self.deliver(name, text)
+        self.assertEqual(self.row(name)["conversation_id"], conversation)
+        self.assertEqual(self.accepted(name, text, conversation), 1, self.describe())
+        self.assertEqual(self.accepted(name, MESSAGES[0], conversation), 1, self.describe())
+        self.until(f"{text!r} at the model", lambda: any(
+            text in json.dumps(request) for request in api.requests(self.api_root)))
+
 
 @unittest.skipUnless(CLAUDE and HGS_SET, "set HGS_TEST_BIN and HGS_CLAUDE_TEST_BIN to run real Claude Code")
 class NativeWindowsClaude(NativeAgent, host.HostCase):
@@ -624,8 +725,30 @@ class NativeWindowsClaude(NativeAgent, host.HostCase):
                                                        encoding="utf-8")
         self.env["CLAUDE_CONFIG_DIR"] = str(self.agent_home)
 
+    def prepare_account(self, folder):
+        """A managed account's session blanks ANTHROPIC_* (accounts::select); its own
+        settings carry the fixture's base URL and key, as a signed-in account's
+        preferences carry its own configuration."""
+        projects = {form: {"hasTrustDialogAccepted": True, "allowedTools": []} for form in path_forms(self.project)}
+        (folder / ".claude.json").write_text(json.dumps({
+            "hasCompletedOnboarding": True, "theme": "dark", "autoUpdates": False,
+            "customApiKeyResponses": {"approved": [KEY[-20:]], "rejected": []},
+            "officialMarketplaceAutoInstallAttempted": True, "hasSeenAutoDefaultNudge": True,
+            "projects": projects}), encoding="utf-8")
+        (folder / "settings.json").write_text(json.dumps({
+            "permissions": {"defaultMode": "default"}, "theme": "dark",
+            "env": {"ANTHROPIC_BASE_URL": self.api_url, "ANTHROPIC_API_KEY": KEY,
+                    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}}), encoding="utf-8")
+
     def transcript_rows(self, conversation_id):
-        paths = list((self.agent_home / "projects").glob(f"*/{conversation_id}.jsonl"))
+        # After a switch the conversation lives in the new account's store; the
+        # old account keeps only its own copy of the same rows.
+        homes = ([self.second_home] if self.second_home else []) + [self.agent_home]
+        paths = []
+        for home in homes:
+            paths = list((home / "projects").glob(f"*/{conversation_id}.jsonl"))
+            if paths:
+                break
         rows = []
         for path in paths:
             for line in path.read_text(encoding="utf-8").splitlines():
@@ -862,6 +985,38 @@ class NativeWindowsClaude(NativeAgent, host.HostCase):
         name = self.launch("lifecycle")
         self.check_lifecycle(name)
 
+    def test_a_switch_to_another_account_keeps_the_conversation_folder_and_name(self):
+        self.check_switch_account("switch")
+
+    def test_a_team_swap_moves_the_lead_through_u53(self):
+        """U54: one owner action moves a team's lead to another account through the
+        same U53 switch, keeping its session, conversation and name."""
+        name = self.launch("swap")
+        self.deliver(name, MESSAGES[0])
+        conversation = self.ready(name)["conversation_id"]
+        self.second_account()
+        team = self.json("team", "create", input=json.dumps({
+            "request_id": str(uuid.uuid4()), "name": "Swap", "by": "human",
+            "lead": {"id": "lead", "role": "Lead", "agent": "claude",
+                     "session": {"name": name, "host": ""}}}))
+        receipt = self.json("team", "swap-member", input=json.dumps({
+            "request_id": str(uuid.uuid4()), "team": team["team"], "by": "human",
+            "from_account": "native-claude", "to_account": "second", "provider": "claude"}))
+        self.assertEqual(receipt["status"], "swapped", receipt)
+        self.assertEqual([entry["member"] for entry in receipt["members"]], ["lead"], receipt)
+        # The same session, conversation and name, now on the second account.
+        switched = self.record(name)
+        self.assertEqual((switched["name"], switched["conversation_id"], switched["account_id"]),
+                         (name, conversation, "second"))
+        # The roster reads the real account from the session.
+        status = self.json("team", "status", input=json.dumps({"team": team["team"], "by": "human"}))
+        lead = next(member for member in status["members"] if member["id"] == "lead")
+        self.assertEqual(lead["session_account"], "second", lead)
+        # The moved lead still answers in that conversation.
+        text = "After the team swap."
+        self.deliver(name, text)
+        self.assertEqual(self.accepted(name, text, conversation), 1, self.describe())
+
     def test_input_keys_reach_claude_through_the_host(self):
         self.check_keys(self.launch("keys"))
 
@@ -941,9 +1096,24 @@ class NativeWindowsCodex(NativeAgent, host.HostCase):
             "stream_max_retries = 0", "", *trusted]), encoding="utf-8")
         self.env["CODEX_HOME"] = str(self.agent_home)
 
+    def prepare_account(self, folder):
+        """A managed account's session drops OPENAI_API_KEY (accounts::select), so its
+        provider reads the fixture's key from a variable that is its own."""
+        config = (self.agent_home / "config.toml").read_text(encoding="utf-8")
+        (folder / "config.toml").write_text(
+            config.replace('env_key = "OPENAI_API_KEY"', 'env_key = "FIXTURE_API_KEY"'), encoding="utf-8")
+
     def transcript_rows(self, conversation_id):
+        # After a switch the conversation lives in the new account's store; the
+        # old account keeps only its own copy of the same rows.
+        homes = ([self.second_home] if self.second_home else []) + [self.agent_home]
+        paths = []
+        for home in homes:
+            paths = sorted((home / "sessions").rglob(f"rollout-*{conversation_id}.jsonl"))
+            if paths:
+                break
         rows = []
-        for path in sorted((self.agent_home / "sessions").rglob(f"rollout-*{conversation_id}.jsonl")):
+        for path in paths:
             for line in path.read_text(encoding="utf-8").splitlines():
                 try:
                     rows.append(json.loads(line))
@@ -1060,6 +1230,9 @@ class NativeWindowsCodex(NativeAgent, host.HostCase):
     def test_pause_resume_and_terminate(self):
         name = self.launch("lifecycle", self.NO_HOOK_REVIEW)
         self.check_lifecycle(name)
+
+    def test_a_switch_to_another_account_keeps_the_conversation_folder_and_name(self):
+        self.check_switch_account("switch")
 
     def test_input_keys_reach_codex_through_the_host(self):
         self.check_keys(self.launch("keys", self.NO_HOOK_REVIEW))

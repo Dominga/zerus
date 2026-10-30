@@ -58,6 +58,10 @@ inline const char *prototypeIconPath(const QString &name)
         {"eye", "M2.5 12s3.5-6.5 9.5-6.5 9.5 6.5 9.5 6.5-3.5 6.5-9.5 6.5S2.5 12 2.5 12zM9 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0"},
         {"pencil", "M4 20l1-4L16 5l3 3L8 19zM14 7l3 3"},
         {"warning", "M12 4l9 16H3zM12 10v4M12 17v.5"},
+        // U60 (#656): the Model servers rail button and page, Up and Down, Logs.
+        {"server", "M4 3h16a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1zM4 13h16a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1zM7 7h.01M7 17h.01"},
+        {"power", "M12 3v9M17.7 6.3a8 8 0 1 1-11.4 0"},
+        {"logs", "M6 3h9l4 4v14H6zM14 3v5h5M9 12h7M9 16h7"},
         // #648: the Tasks card's subagent row (the prototype's users).
         {"users", "M16 20v-1.5a3.5 3.5 0 0 0-3.5-3.5h-6A3.5 3.5 0 0 0 3 18.5V20M6 8a3.5 3.5 0 1 0 7 0a3.5 3.5 0 1 0 -7 0M21 20v-1.5a3.5 3.5 0 0 0-2.6-3.4M15.5 4.6a3.5 3.5 0 0 1 0 6.8"},
         // U50: the rail's Waiting for you page, an inbox tray.

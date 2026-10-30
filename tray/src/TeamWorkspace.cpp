@@ -154,6 +154,7 @@ TeamWorkspace::TeamWorkspace(TeamController *teams, TeamPanel *panel, QWidget *p
     QObject::connect(m_split, &QSplitter::splitterMoved, this, [this] { QSettings().setValue("teams/workspaceSplit", m_split->saveState()); });
     QObject::connect(m_sideSplit, &QSplitter::splitterMoved, this, [this] { QSettings().setValue("teams/workspaceSideSplit", m_sideSplit->saveState()); });
     m_membersOpen = QSettings().value("teams/membersOpen", true).toBool();
+    m_hideFinished = QSettings().value("teams/hideFinished", false).toBool();
     m_drawer = new TeamTaskCard(this);
     m_drawer->setObjectName("teamWorkspaceDrawer");
     m_drawer->hide();
@@ -371,7 +372,10 @@ void TeamWorkspace::render()
         }
         // U58: Graph, Board and Layers leave out cancelled tasks and the phases
         // they emptied unless Show cancelled is on; edits read the whole team.
-        lv->addWidget(canvas(m_teams->showCancelled() ? *team : withoutCancelled(*team)), 1);
+        // Owner, 2026-10-30: Hide finished leaves out the phases whose tasks are
+        // all decided.
+        const Team shown = m_teams->showCancelled() ? *team : withoutCancelled(*team);
+        lv->addWidget(canvas(m_hideFinished ? withoutFinished(shown) : shown), 1);
         if (const auto &items = m_teams->inbox(); !items.isEmpty()) lv->addWidget(inboxStrip(*team, items));
         lv->addWidget(feed(*team));
         if (m_left) { m_leftHost->removeWidget(m_left); retire(m_left); }
@@ -1261,6 +1265,8 @@ private:
         m_level = level;
         const bool compact = level == 2;
         for (auto *l : findChildren<QLabel *>()) if (l->property("compactHide").toBool()) l->setVisible(level == 0);
+        // A view preference (Hide finished) leaves the icon-only row; it stays set.
+        for (auto *w : findChildren<QWidget *>()) if (w->property("compactDrop").toBool()) w->setVisible(level < 2);
         // Icon-only buttons take their icon's width, not the style's text
         // minimum, and the row draws its groups closer together.
         if (auto *row = qobject_cast<QHBoxLayout *>(layout())) {
@@ -1353,6 +1359,21 @@ QWidget *TeamWorkspace::toolbar(const Team &team)
                                      .arg(alpha(c.folder, .13).name(QColor::HexArgb), c.folder.name(), alpha(c.folder, .6).name(QColor::HexArgb)));
             QObject::connect(count, &QPushButton::clicked, this, [this, first] { showPhase(first); });
             h->addWidget(count);
+        }
+        // Owner, 2026-10-30: hide the phases whose tasks are all decided.
+        if (const int finished = finishedPhases(team); finished || m_hideFinished) {
+            auto *hideSwitch = new ToggleSwitch(c); hideSwitch->setObjectName("teamWorkspaceHideFinished"); hideSwitch->setChecked(m_hideFinished);
+            hideSwitch->setProperty("compactDrop", true);
+            hideSwitch->setAccessibleName(tr("Hide finished"));
+            hideSwitch->setToolTip(finished == 1 ? tr("1 phase has every task decided") : tr("%1 phases have every task decided").arg(finished));
+            QObject::connect(hideSwitch, &QAbstractButton::clicked, this, [this](bool on) {
+                m_hideFinished = on;
+                QSettings().setValue("teams/hideFinished", on);
+                scheduleRender();
+            });
+            h->addWidget(hideSwitch);
+            auto *hideLabel = label(tr("Hide finished"), c.text3, 11); hideLabel->setProperty("compactHide", true);
+            h->addWidget(hideLabel);
         }
         auto *autoSwitch = new ToggleSwitch(c); autoSwitch->setObjectName("teamWorkspaceAutoAccept"); autoSwitch->setChecked(team.autoAccept);
         autoSwitch->setAccessibleName(tr("Auto-accept drafts"));

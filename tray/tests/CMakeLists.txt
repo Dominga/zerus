@@ -728,12 +728,18 @@ target_include_directories(test_teams PRIVATE ../src)
 target_link_libraries(test_teams PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
 zerus_add_test(teams test_teams)
 set_tests_properties(teams PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
-# WhiteWh fork: agent teams M3–M6 (task card, planning, New team, catalog, designer, workspace).
-add_executable(test_teamsui test_teamsui.cpp)
-target_include_directories(test_teamsui PRIVATE ../src)
-target_link_libraries(test_teamsui PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui hgs-speech)
-zerus_add_test(teamsui test_teamsui)
-set_tests_properties(teamsui PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+# WhiteWh fork: agent teams in the desktop, one suite per area (#713, U62): the
+# Graph, Board and Layers views; member cards and the task card; the plan and its
+# phases; New team and the designer; the catalog and pipelines; settings and
+# accounts; the profile and heat; what waits (permissions, the waiting page,
+# proposals, the coordinator). They share support/TeamsUiFixture.h.
+foreach(area workspace members plan newteam catalog settings profile waiting)
+    add_executable(test_teamsui_${area} test_teamsui_${area}.cpp)
+    target_include_directories(test_teamsui_${area} PRIVATE ../src)
+    target_link_libraries(test_teamsui_${area} PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui hgs-speech)
+    zerus_add_test(teamsui_${area} test_teamsui_${area})
+    set_tests_properties(teamsui_${area} PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+endforeach()
 # WhiteWh fork: Claude desktop app sessions continued in Zerus.
 add_executable(test_claudeappsessions test_claudeappsessions.cpp)
 target_include_directories(test_claudeappsessions PRIVATE ../src)

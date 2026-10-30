@@ -360,11 +360,53 @@
       "seconds": 2.606,
       "tests": 37
     },
-    "tray/test_teamsui": {
-      "recorded": "2026-10-28",
+    "tray/test_teamsui_catalog": {
+      "recorded": "2026-10-31",
       "runs": 1,
-      "seconds": 115.825,
-      "tests": 157
+      "seconds": 17.315,
+      "tests": 23
+    },
+    "tray/test_teamsui_members": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 19.526,
+      "tests": 21
+    },
+    "tray/test_teamsui_newteam": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 14.743,
+      "tests": 21
+    },
+    "tray/test_teamsui_plan": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 59.665,
+      "tests": 29
+    },
+    "tray/test_teamsui_profile": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 6.561,
+      "tests": 5
+    },
+    "tray/test_teamsui_settings": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 16.623,
+      "tests": 11
+    },
+    "tray/test_teamsui_waiting": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 34.03,
+      "tests": 21
+    },
+    "tray/test_teamsui_workspace": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 51.991,
+      "tests": 35
     },
     "tray/test_terminalbackend": {
       "recorded": "2026-10-28",

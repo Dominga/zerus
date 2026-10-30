@@ -1,0 +1,63 @@
+{
+  "teams": [
+    {
+      "name": "standard",
+      "plan_mode": "standard",
+      "plan_mode_offer": null,
+      "plan_mode_reason": "",
+      "free_phase": null
+    },
+    {
+      "name": "free-open",
+      "plan_mode": "free",
+      "plan_mode_offer": null,
+      "plan_mode_reason": "",
+      "free_phase": {
+        "phase": 2,
+        "state": "open",
+        "running": [7, 8],
+        "accepted": 5,
+        "accepted_since": 2,
+        "last_build_at": 1793300000.0,
+        "close_pending": null
+      }
+    },
+    {
+      "name": "free-idle",
+      "plan_mode": "free",
+      "plan_mode_offer": null,
+      "plan_mode_reason": "",
+      "free_phase": {
+        "phase": 1,
+        "state": "idle",
+        "running": [],
+        "accepted": 9,
+        "accepted_since": 0,
+        "last_build_at": 0.0,
+        "close_pending": null
+      }
+    },
+    {
+      "name": "free-offer",
+      "plan_mode": "standard",
+      "plan_mode_offer": "free",
+      "plan_mode_reason": "a stream of small support requests",
+      "free_phase": null
+    },
+    {
+      "name": "free-pending-close",
+      "plan_mode": "free",
+      "plan_mode_offer": null,
+      "plan_mode_reason": "",
+      "free_phase": {
+        "phase": 3,
+        "state": "open",
+        "running": [12],
+        "accepted": 4,
+        "accepted_since": 4,
+        "last_build_at": 1793200000.0,
+        "close_pending": 3
+      }
+    }
+  ]
+}

@@ -186,6 +186,8 @@ private slots:
     void constrainedHeightDoesNotOverlapQuestionActions_data();
     void constrainedHeightDoesNotOverlapQuestionActions();
     void currentQuestionAndOtherAnswerResizeTheForm();
+    void theOwnersLongQuestionStaysWholeAndRetries();
+    void aPanelTerminalCannotShowSaysSoBeforeSubmit();
     void reviewCountdownAndNextNavigation();
     void nativeCountdownPreservesScrollChoiceAndReview();
     void terminalOnlyChoicesDoNotPretendToAcceptAnswers();
@@ -1609,11 +1611,13 @@ void TestQuestionCard::contentHeightPreservesActivityAndPinsFreeformAnswer()
     QTRY_COMPARE(scroll->verticalScrollBar()->maximum(), 0);
     question["question"] = QString("Long question with enough text to wrap and scroll.\n").repeated(80);
     data["questions"] = QJsonArray{question}; setQuestionReady(*card, "fixture", data);
-    editor = text(*card, "free"); scroll = card->findChild<QScrollArea *>("questionContent");
+    editor = text(*card, "free");
+    // #740: the long question scrolls in its own area above the answer.
+    scroll = card->findChild<QScrollArea *>("questionPromptScroll"); QVERIFY(scroll);
     QTRY_VERIFY(scroll->verticalScrollBar()->maximum() > 0);
     QTRY_COMPARE(card->height(), activity.height() * 60 / 100);
     QTRY_VERIFY(history->height() >= activity.height() * 40 / 100);
-    // The prompt never scrolls by itself: the wheel over it scrolls the card.
+    // The prompt never scrolls by itself: the wheel over it scrolls its area.
     auto *prompt = card->findChild<MarkdownText *>("questionPrompt"); QVERIFY(prompt);
     QCOMPARE(scroll->verticalScrollBar()->value(), 0);
     QWheelEvent wheel(QPointF(20, 20), prompt->viewport()->mapToGlobal(QPointF(20, 20)), QPoint(), QPoint(0, -120),
@@ -1657,7 +1661,8 @@ void TestQuestionCard::currentQuestionAndOtherAnswerResizeTheForm()
     data["questions"] = questions; setQuestionReady(*card, "fixture", data); activity.show();
     auto *tabs = card->findChild<QTabBar *>("questionTabs");
     auto *pages = card->findChild<QStackedWidget *>("questionPages");
-    QTRY_VERIFY(pages->currentWidget()->findChild<QScrollArea *>("questionContent")->verticalScrollBar()->maximum() > 0);
+    // #740: the long question scrolls in its own area; the choices stay below it.
+    QTRY_VERIFY(pages->currentWidget()->findChild<QScrollArea *>("questionPromptScroll")->verticalScrollBar()->maximum() > 0);
     QTRY_COMPARE(card->height(), 600);
     const int longHeight = card->height();
     tabs->setCurrentIndex(1);
@@ -1691,6 +1696,107 @@ void TestQuestionCard::preview()
         plan.show(); QTest::qWait(25);
         QVERIFY(plan.grab().save(directory + (dark ? "/question-dark-plan.png" : "/question-light-plan.png")));
     }
+}
+
+namespace {
+// #740: the shape of the lead's question of 2026-10-31 01:23 (about 600
+// characters, four described options and Other), in English.
+QJsonObject ownersCase()
+{
+    const QString words = QStringLiteral(
+        "Install sccache and ccache on this computer so that every member folder of the team shares one build cache "
+        "(task #721)? Today each of the nine members compiles Rust and Qt again in its own folder. The machine is "
+        "overloaded because of it, and tests fail by timeout. With a cache, building the same code again in another "
+        "folder takes the ready object files. Both install with winget into your profile, without administrator rights: "
+        "Mozilla.sccache 0.18.0 for Rust and Ccache.Ccache 4.14.1 for Qt and C++. They uninstall with winget uninstall. "
+        "The cache takes disk space up to a set limit.");
+    const auto described = [](const QString &id, const QString &label, const QString &description) {
+        return QJsonObject{{"id", id}, {"label", label}, {"description", description}};
+    };
+    auto data = request("toolu_cache", "hash-cache");
+    data["questions"] = QJsonArray{QJsonObject{{"id", "q_0"}, {"header", "Build cache"}, {"question", words}, {"multi_select", false},
+        {"allow_other", true}, {"options", QJsonArray{
+            described("opt_0_0", "Yes, cache on D: (Recommended)", "Install both. The cache lives in a folder on D: with a limit of 20 GB "
+                      "(10 GB for Rust and 10 GB for C++); then the frontend measures the gain and the cache is turned on for the tests."),
+            described("opt_0_1", "Yes, the default cache on C:", "Install both. The cache lives in the profile on C: with the standard limits."),
+            described("opt_0_2", "Only sccache (Rust)", "A cache for Rust only. Qt and C++ still build in each folder on their own."),
+            described("opt_0_3", "No", "Install nothing. The mechanism stays off and builds run as they do now.")}}}};
+    return data;
+}
+}
+
+// #740 (owner, 2026-10-31 01:23): the question stays whole above the choices
+// while Other is chosen and typed into; Submit sends the typed answer; a
+// refusal because Terminal shows only part of the panel keeps the answer and
+// offers Retry beside Open Terminal.
+void TestQuestionCard::theOwnersLongQuestionStaysWholeAndRetries()
+{
+    const QString shots = qEnvironmentVariable("ZERUS_TEAM_SHOTS");
+    QWidget activity; activity.resize(940, 1100);
+    auto *layout = new QVBoxLayout(&activity); layout->setContentsMargins(0, 0, 0, 0); layout->setSpacing(0);
+    layout->addWidget(new QTextBrowser, 1);
+    auto *card = new QuestionCard; layout->addWidget(card);
+    setQuestionReady(*card, "lead", ownersCase()); activity.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&activity));
+    auto *promptArea = card->findChild<QScrollArea *>("questionPromptScroll"); QVERIFY(promptArea);
+    auto *prompt = card->findChild<MarkdownText *>("questionPrompt"); QVERIFY(prompt);
+    auto *choices = card->findChild<QScrollArea *>("questionContent"); QVERIFY(choices);
+    QVERIFY(!choices->isAncestorOf(prompt));
+    // The whole question shows: its area needs no scroll at this size.
+    QTRY_VERIFY(promptArea->height() > prompt->fontMetrics().height() * 3);
+    QTRY_COMPARE(promptArea->verticalScrollBar()->maximum(), 0);
+    // Other, typed into, with the choices scrolled to their end: the question
+    // still shows from its first line to its last.
+    other(*card, "q_0")->click();
+    QTRY_VERIFY(text(*card, "q_0")->isVisible());
+    const QString typed = QStringLiteral("Install on D:, but what do we offer users with our test system?");
+    text(*card, "q_0")->setText(typed);
+    choices->verticalScrollBar()->setValue(choices->verticalScrollBar()->maximum());
+    QTRY_COMPARE(prompt->visibleRegion().boundingRect().height(), prompt->height());
+    QCOMPARE(promptArea->verticalScrollBar()->value(), 0);
+    if (!shots.isEmpty()) {
+        card->setTheme(true); QTest::qWait(50); QVERIFY(card->grab().save(shots + "/u740-question-long-dark.png"));
+        card->setTheme(false); QTest::qWait(50); QVERIFY(card->grab().save(shots + "/u740-question-long-light.png"));
+        card->setTheme(true);
+    }
+    // Submit sends the typed words as Other.
+    QSignalSpy sent(card, &QuestionCard::answerRequested);
+    QTRY_VERIFY(submit(*card)->isEnabled());
+    QCOMPARE(submit(*card)->text(), QStringLiteral("Submit answer"));
+    submit(*card)->click();
+    QTRY_COMPARE(sent.size(), 1);
+    auto answer = sent.first()[2].toJsonArray().first().toObject();
+    QCOMPARE(answer.value("text").toString(), typed);
+    QCOMPARE(answer.value("selected_option_ids").toArray(), QJsonArray());
+    // The server refuses before any key: Terminal shows only part of the panel.
+    card->setError("lead", "toolu_cache", "Claude's question is not fully visible. Open Terminal to check it.");
+    QTRY_VERIFY(submit(*card)->isEnabled());
+    QCOMPARE(submit(*card)->text(), QStringLiteral("Retry"));
+    const auto *status = card->findChild<QLabel *>("questionStatus"); QVERIFY(status);
+    QVERIFY2(status->text().contains("Nothing was sent") && status->text().contains("Enlarge Terminal"), qPrintable(status->text()));
+    QCOMPARE(text(*card, "q_0")->text(), typed);
+    QVERIFY(other(*card, "q_0")->isChecked());
+    if (!shots.isEmpty()) {
+        QTest::qWait(50); QVERIFY(card->grab().save(shots + "/u740-question-retry-dark.png"));
+        card->setTheme(false); QTest::qWait(50); QVERIFY(card->grab().save(shots + "/u740-question-retry-light.png"));
+        card->setTheme(true);
+    }
+    // Retry sends the same answer again, once.
+    submit(*card)->click();
+    QTRY_COMPARE(sent.size(), 2);
+    QCOMPARE(sent.last()[2].toJsonArray(), sent.first()[2].toJsonArray());
+}
+
+// #740: an answerable card whose panel the server cannot read whole says so
+// before Submit, beside Open Terminal.
+void TestQuestionCard::aPanelTerminalCannotShowSaysSoBeforeSubmit()
+{
+    QuestionCard card; card.resize(700, 600); card.show();
+    auto data = ownersCase();
+    data["answer_unavailable_reason"] = "Claude's question is not fully visible. Open Terminal to check it.";
+    setQuestionReady(card, "lead", data);
+    const auto *status = card.findChild<QLabel *>("questionStatus"); QVERIFY(status);
+    QTRY_VERIFY2(status->text().contains("not fully visible"), qPrintable(status->text()));
 }
 
 QTEST_MAIN(TestQuestionCard)

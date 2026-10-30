@@ -4,7 +4,9 @@
 #include <QDateTime>
 #include <QLineEdit>
 #include <QMessageBox>
+#include <QButtonGroup>
 #include <QPointer>
+#include <QRadioButton>
 #include <QScrollArea>
 #include <QTimer>
 #include <QScopedValueRollback>
@@ -23,6 +25,7 @@ QString kindLabel(const QString &kind)
     if (kind == "add-to-phase") return TeamProposalCards::tr("Tasks");
     if (kind == "cancel-tasks") return TeamProposalCards::tr("Cancel");
     if (kind == "discard-phase") return TeamProposalCards::tr("Phase");
+    if (kind == "question") return TeamProposalCards::tr("Question");
     return kind;
 }
 
@@ -72,7 +75,8 @@ void TeamProposalCards::fit()
     const int width = qMax(200, m_scroll->viewport()->width());
     const int wanted = m_inner->hasHeightForWidth() ? m_inner->heightForWidth(width) : m_inner->sizeHint().height();
     const int room = parentWidget() ? parentWidget()->height() / 2 : 360;
-    const int height = qMax(80, qMin(wanted, qMax(160, room)));
+    // #724/#740: one proposal's card in Waiting for you shows whole.
+    const int height = m_only.isEmpty() ? qMax(80, qMin(wanted, qMax(160, room))) : wanted;
     if (height != this->height() || minimumHeight() != height) setFixedHeight(height);
 }
 
@@ -87,6 +91,11 @@ QList<TeamProposalCards::View> TeamProposalCards::viewsOf(const Teams::Team &tea
         view.reason = proposal.reason; view.at = proposal.at;
         view.what = Teams::proposalText(team, proposal);
         view.lines = Teams::proposalChanges(team, proposal);
+        if (proposal.kind == "question") {
+            const auto change = proposal.change.toObject();
+            for (const auto &option : change.value("options").toArray()) view.options << option.toString();
+            view.recommended = change.value("recommended").toString();
+        }
         views << view;
     }
     return views;
@@ -188,6 +197,10 @@ QWidget *TeamProposalCards::cardFor(const View &view, bool gone)
         return box;
     }
     const bool sending = m_sending.contains(view.id);
+    if (view.kind == "question") {
+        questionCard(view, v);
+        return box;
+    }
     auto *reasonEdit = new QLineEdit(m_reasons.value(view.id)); reasonEdit->setObjectName("teamProposalDenyReason");
     reasonEdit->setProperty("proposal", view.id);
     reasonEdit->setPlaceholderText(tr("Why deny? The lead receives this"));
@@ -213,6 +226,90 @@ QWidget *TeamProposalCards::cardFor(const View &view, bool gone)
     answers->addWidget(deny); answers->addWidget(allow);
     v->addLayout(answers);
     return box;
+}
+
+void TeamProposalCards::questionCard(const View &view, QVBoxLayout *v)
+{
+    // #740: the options as the lead offers them, its recommended one marked,
+    // and Other with the owner's own words; Answer sends the one chosen.
+    const bool sending = m_sending.contains(view.id);
+    auto *group = new QButtonGroup(v->parentWidget());
+    for (const auto &option : view.options) {
+        auto *pick = new QRadioButton(option == view.recommended ? tr("%1 (recommended)").arg(option) : option);
+        pick->setObjectName("teamProposalQuestionOption"); pick->setProperty("option", option);
+        pick->setChecked(!m_ownWords.contains(view.id) && m_picked.value(view.id) == option);
+        pick->setEnabled(!sending);
+        group->addButton(pick);
+        v->addWidget(pick);
+        QObject::connect(pick, &QRadioButton::toggled, this, [this, id = view.id, option](bool on) {
+            if (!on) return;
+            m_picked.insert(id, option); m_ownWords.remove(id);
+            QTimer::singleShot(0, this, [this] { render(); });
+        });
+    }
+    auto *other = new QRadioButton(view.options.isEmpty() ? tr("Your answer") : tr("Other"));
+    other->setObjectName("teamProposalQuestionOther");
+    other->setChecked(view.options.isEmpty() || m_ownWords.contains(view.id));
+    other->setEnabled(!sending);
+    group->addButton(other);
+    v->addWidget(other);
+    QObject::connect(other, &QRadioButton::toggled, this, [this, id = view.id](bool on) {
+        if (!on) return;
+        m_ownWords.insert(id);
+        QTimer::singleShot(0, this, [this] { render(); });
+    });
+    auto *answers = row(6);
+    const bool own = view.options.isEmpty() || m_ownWords.contains(view.id);
+    auto *send = button(tr("Answer"), "teamProposalAnswer", true);
+    if (own) {
+        auto *words = new QLineEdit(m_reasons.value(view.id)); words->setObjectName("teamProposalAnswerText");
+        words->setProperty("proposal", view.id);
+        words->setPlaceholderText(tr("Your answer, for the lead"));
+        words->setMaxLength(4000); words->setEnabled(!sending);
+        QObject::connect(words, &QLineEdit::textChanged, this, [this, id = view.id, send](const QString &text) {
+            m_reasons.insert(id, text);
+            send->setEnabled(!text.trimmed().isEmpty() && decide);
+        });
+        QObject::connect(words, &QLineEdit::returnPressed, this, [this, view] { answerQuestion(view); });
+        answers->addWidget(words, 1);
+    } else answers->addStretch();
+    const bool ready = own ? !m_reasons.value(view.id).trimmed().isEmpty() : !m_picked.value(view.id).isEmpty();
+    send->setEnabled(ready && !sending && decide);
+    QObject::connect(send, &QPushButton::clicked, this, [this, view] { answerQuestion(view); });
+    answers->addWidget(send);
+    v->addLayout(answers);
+}
+
+void TeamProposalCards::answerQuestion(const View &view)
+{
+    if (!decide || m_sending.contains(view.id) || m_asking) return;
+    const bool own = view.options.isEmpty() || m_ownWords.contains(view.id);
+    const QString answer = (own ? m_reasons.value(view.id) : m_picked.value(view.id)).trimmed();
+    if (answer.isEmpty()) return;
+    const QString id = view.id;
+    QPointer<TeamProposalCards> guard(this);
+    // The question as it is now: a changed or decided one sends nothing.
+    if (current) if (const auto *team = current(); team && team->id == m_team) setTeam(team);
+    const auto now = std::find_if(m_views.cbegin(), m_views.cend(), [&id](const View &shown) { return shown.id == id; });
+    if (now == m_views.cend() || now->hash != view.hash) {
+        if (now == m_views.cend()) m_staleViews.insert(id, view);
+        m_notices.insert(id, tr("The lead changed or withdrew this question; nothing was sent."));
+        QTimer::singleShot(0, this, [this] { render(); });
+        return;
+    }
+    m_sending.insert(id); m_notices.remove(id);
+    QTimer::singleShot(0, this, [this] { render(); });
+    decide(QJsonObject{{"team", m_team}, {"proposal", id}, {"accept", true}, {"expected_hash", view.hash}, {"answer", answer}},
+           [guard, id](bool ok, const QString &message) {
+        if (!guard) return;
+        auto *self = guard.data();
+        if (!ok) {
+            self->m_sending.remove(id);
+            self->m_notices.insert(id, message.contains(QLatin1String("changed"))
+                                           ? tr("The question changed; nothing was sent. Read it again and answer.") : message);
+        }
+        QTimer::singleShot(0, self, [self] { self->render(); });
+    });
 }
 
 bool TeamProposalCards::ask(const View &view)

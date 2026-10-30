@@ -1348,6 +1348,8 @@ QString proposalText(const Team &team, const Team::Proposal &proposal)
         return count == 1 ? tr("Cancel 1 task") : tr("Cancel %1 tasks").arg(count);
     }
     if (proposal.kind == "discard-phase") return tr("Discard %1").arg(phaseName(team, change.value("phase").toInt()));
+    // #740: the lead's question to the owner, whole.
+    if (proposal.kind == "question") return change.value("question").toString();
     return proposal.kind;
 }
 

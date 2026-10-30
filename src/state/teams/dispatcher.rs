@@ -904,8 +904,10 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     }
     // A member's native question or permission request goes to the mailbox,
     // not to a message of its own (C2); one already answered is cleared.
+    // #740: the lead's own question (its AskUserQuestion) is read the same
+    // way; it is the owner's to answer, from Waiting for you.
     for member in &team.members {
-        if member.id == team.lead || member.state == MemberState::Removed {
+        if member.state == MemberState::Removed {
             continue;
         }
         let Some(session) = member.session.as_ref() else { continue };
@@ -2210,6 +2212,12 @@ pub(crate) fn permission_record(pending: &PendingQuestion) -> Value {
     let answer = permission_answer(&pending.card);
     let mut record = json!({"question_id":pending.question_id,"question_hash":pending.question_hash,"tool":tool,"command":command,
         "command_source":source,"reason":reason,"asked_at":pending.at});
+    // #740: a question (not a permission) carries its questions, options and
+    // Other, so the owner answers it from Waiting for you as on the session's
+    // card. Bounded: a record over 32 KiB keeps only its summary.
+    if !pending.approval && pending.card["questions"].is_array() && pending.card["questions"].to_string().len() <= 32 * 1024 {
+        record["questions"] = pending.card["questions"].clone();
+    }
     if let Some(answer) = answer {
         record["answer"] = answer;
     }

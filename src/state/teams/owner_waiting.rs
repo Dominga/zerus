@@ -106,6 +106,8 @@ fn team_items(team: &Team, now: f64, out: &mut Vec<Value>) {
                 let member = attention["member"].as_str().unwrap_or_default().to_owned();
                 let mut found = item(team, "permission_escalated", &member, summary, at, "answer_permission");
                 found["member"] = json!(member);
+                // #740: the member's id, which the desktop's answer is bound to.
+                found["member_id"] = attention["member_id"].clone();
                 out.push(found);
             }
             // N17: a replan pauses the team for the owner's word on the proposal.
@@ -123,7 +125,13 @@ fn team_items(team: &Team, now: f64, out: &mut Vec<Value>) {
         let key = proposal["id"].as_str().unwrap_or_default();
         let kind = proposal["kind"].as_str().unwrap_or("change").replace('-', " ");
         let reason = proposal["reason"].as_str().unwrap_or_default();
-        let title = if reason.is_empty() { format!("The lead proposes: {kind}") } else { format!("The lead proposes: {kind} \u{2014} {reason}") };
+        // #740: a question names itself.
+        let asked = proposal["change"]["question"].as_str().filter(|_| proposal["kind"] == "question");
+        let title = match asked {
+            Some(question) => format!("The lead asks: {}", question.split_whitespace().collect::<Vec<_>>().join(" ")),
+            None if reason.is_empty() => format!("The lead proposes: {kind}"),
+            None => format!("The lead proposes: {kind} \u{2014} {reason}"),
+        };
         let mut found = item(team, "owner_word_asked", &format!("proposal-{key}"), title, proposal["at"].as_f64().unwrap_or_default(), "decide_proposal");
         found["proposal"] = json!(key);
         out.push(found);

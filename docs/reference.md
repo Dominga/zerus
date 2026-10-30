@@ -1471,6 +1471,24 @@ missing or different `expected_hash` is refused ("reload the dialog and answer
 again"). Allow sets `plan_mode` and emits `plan_mode_switched`; Deny keeps
 standard, keeps the reason and emits `plan_mode_denied` for the lead.
 
+Every proposal is checked when the lead makes it, on a copy of the team, by the
+code Allow runs: one Allow could not apply (a task the plan cannot parse, work
+that does not exist) is refused at once. A question to the owner is a proposal
+too, never only prose in a reply:
+
+```sh
+{"request_id":"<uuid>","team":"<id>","kind":"question","question":"Install the cache on D:?",
+ "options":["Yes","No"],"recommended":"Yes"} | hgs team propose --json
+{"team":"<id>","proposal":"p4","accept":true,"expected_hash":"<sha256>",
+ "answer":"Yes, with a 30 GB limit"} | hgs team decide-proposal --json
+```
+
+At most eight options; the recommended one is among them. The answer is an
+option or the owner's own words; the proposal becomes `answered` with `answer`,
+and the lead's inbox carries it with the question. Waiting for you lists the
+question and answers it in place, as it does a lead's own open AskUserQuestion
+(`hgs team answer` with the question's id and hash).
+
 Integration and a build are ordinary lead tasks, not a phase barrier. The owner
 or the lead adds the build for the open phase (`hgs team integrate-build`) and
 it is handed out and accepted like any task; accepting it sets `last_build_at`

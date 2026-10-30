@@ -4,8 +4,11 @@
 #include "TeamController.h"
 #include "TeamProposalCard.h"
 #include "TeamWidgets.h"
+#include <QCheckBox>
 #include <QJsonArray>
 #include <QLineEdit>
+#include <QRadioButton>
+#include <QTimer>
 #include <QMessageBox>
 #include <QScopedValueRollback>
 #include <QVBoxLayout>
@@ -125,8 +128,9 @@ QString TeamWaitingAnswer::staleReason(const Team &team) const
         return tr("This addition was confirmed, replaced or expired meanwhile; nothing was sent.");
     }
     if (action == QLatin1String("answer_permission")) {
-        const auto *member = team.member(m_item.member);
-        const auto *question = member && member->permission.permission() && !member->permission.answered() ? &member->permission : nullptr;
+        const auto *member = memberOf(team);
+        const auto *question = member && (member->permission.permission() || !member->permission.record.value("questions").toArray().isEmpty())
+            && !member->permission.answered() ? &member->permission : nullptr;
         if (question && (m_shownQuestion.isEmpty() || (question->id == m_shownQuestion && question->hash == m_shownHash))) return {};
         return tr("The member's question was answered or changed meanwhile; nothing was sent.");
     }
@@ -140,6 +144,59 @@ QString TeamWaitingAnswer::staleReason(const Team &team) const
         return tr("The plan no longer waits for your approval; nothing was sent.");
     }
     return {};
+}
+
+const Teams::Member *TeamWaitingAnswer::memberOf(const Team &team) const
+{
+    if (const auto *found = team.member(m_item.memberId.isEmpty() ? m_item.member : m_item.memberId)) return found;
+    for (const auto &member : team.members)
+        if (team.roleOf(member.id) == m_item.member || member.id == m_item.member) return &member;
+    return nullptr;
+}
+
+QJsonArray TeamWaitingAnswer::questionAnswers(const QJsonArray &questions, bool *complete) const
+{
+    // The session card's answer: each question's chosen option ids and, with
+    // Other, its text (QuestionCard::answers).
+    QJsonArray result;
+    bool all = !questions.isEmpty();
+    for (const auto &value : questions) {
+        const auto question = value.toObject();
+        const QString id = question.value("id").toString();
+        QJsonArray selected;
+        for (const auto &option : question.value("options").toArray())
+            if (const QString optionId = option.toObject().value("id").toString(); m_chosen.value(id).contains(optionId)) selected.append(optionId);
+        const QString text = m_otherOn.contains(id) ? m_otherText.value(id).trimmed() : QString();
+        if ((selected.isEmpty() && text.isEmpty()) || (m_otherOn.contains(id) && text.isEmpty())) all = false;
+        result.append(QJsonObject{{"question_id", id}, {"selected_option_ids", selected}, {"text", text}});
+    }
+    if (complete) *complete = all;
+    return result;
+}
+
+void TeamWaitingAnswer::sendQuestion()
+{
+    if (busy() || m_reading || m_done || !m_team) return;
+    bool complete = false;
+    const QJsonArray answers = questionAnswers(memberOf(*m_team)->permission.record.value("questions").toArray(), &complete);
+    if (!complete) return;
+    m_notice.clear();
+    read([this, answers](const Team *team) {
+        if (!team) return;
+        if (const QString stale = staleReason(*team); !stale.isEmpty()) { m_notice = stale; render(); return; }
+        // hgs team answer: the session's own question id and hash, once.
+        const auto *member = memberOf(*team);
+        const QJsonObject input{{"team", m_item.team}, {"member", member->id}, {"question_id", member->permission.id},
+                                {"expected_question_hash", member->permission.hash}, {"answers", answers}};
+        m_sending = true; render();
+        QPointer<TeamWaitingAnswer> guard(this);
+        m_teams->act(QStringLiteral("answer"), input, [guard](bool ok, const QString &message) {
+            if (!guard) return;
+            guard->m_sending = false;
+            if (ok) guard->finish();
+            else { guard->m_notice = message; guard->render(); }
+        });
+    });
 }
 
 bool TeamWaitingAnswer::ask(const Teams::Approval &approval)
@@ -211,8 +268,9 @@ void TeamWaitingAnswer::sendPermission(bool allow)
         if (!team) return;
         if (const QString stale = staleReason(*team); !stale.isEmpty()) { m_notice = stale; render(); return; }
         // TeamWorkspace's member card: the question id, its hash and the native answer.
-        const auto &question = team->member(m_item.member)->permission;
-        const QJsonObject input{{"team", m_item.team}, {"member", m_item.member}, {"question_id", question.id},
+        const auto *member = memberOf(*team);
+        const auto &question = member->permission;
+        const QJsonObject input{{"team", m_item.team}, {"member", member->id}, {"question_id", question.id},
                                 {"expected_question_hash", question.hash},
                                 {"answers", QJsonArray{QJsonObject{{"question_id", question.native.questionId},
                                                                    {"selected_option_ids", QJsonArray{allow ? question.native.allow : question.native.deny}},
@@ -334,8 +392,87 @@ void TeamWaitingAnswer::render()
         answers->addWidget(typed, 1); answers->addWidget(cancel); answers->addWidget(add);
         v->addLayout(answers);
         m_layout->addWidget(box);
+    } else if (action == QLatin1String("answer_permission") && !memberOf(team)->permission.record.value("questions").toArray().isEmpty()) {
+        // #740: a session's question: each prompt whole, its options and Other.
+        const auto &asked = memberOf(team)->permission;
+        if (m_shownQuestion.isEmpty()) { m_shownQuestion = asked.id; m_shownHash = asked.hash; }
+        auto *box = new QFrame; box->setObjectName("teamWaitingQuestion");
+        box->setProperty("question", asked.id); box->setProperty("questionHash", asked.hash);
+        box->setStyleSheet(QStringLiteral("QFrame#teamWaitingQuestion{background:%1;border:1px solid %2;border-radius:7px;}")
+                               .arg(alpha(c.warn, .10).name(QColor::HexArgb), alpha(c.warn, .40).name(QColor::HexArgb)));
+        auto *v = new QVBoxLayout(box); v->setContentsMargins(8, 6, 8, 6); v->setSpacing(4);
+        const auto questions = asked.record.value("questions").toArray();
+        for (const auto &value : questions) {
+            const auto question = value.toObject();
+            const QString id = question.value("id").toString();
+            const bool multi = question.value("multi_select").toBool();
+            if (const QString header = question.value("header").toString(); !header.isEmpty()) {
+                auto *head = row(6); head->addWidget(new Pill(header, c.warn)); head->addStretch(); v->addLayout(head);
+            }
+            auto *prompt = label(question.value("question").toString(), c.fg, 12, true, "teamWaitingQuestionPrompt");
+            prompt->setWordWrap(true); prompt->setTextInteractionFlags(Qt::TextSelectableByMouse);
+            v->addWidget(prompt);
+            for (const auto &optionValue : question.value("options").toArray()) {
+                const auto option = optionValue.toObject();
+                const QString optionId = option.value("id").toString();
+                QAbstractButton *pick = multi ? static_cast<QAbstractButton *>(new QCheckBox(option.value("label").toString()))
+                                              : new QRadioButton(option.value("label").toString());
+                pick->setObjectName("teamWaitingQuestionOption");
+                pick->setProperty("questionId", id); pick->setProperty("optionId", optionId);
+                pick->setChecked(m_chosen.value(id).contains(optionId));
+                pick->setEnabled(!waiting);
+                v->addWidget(pick);
+                if (const QString description = option.value("description").toString(); !description.isEmpty()) {
+                    auto *detail = label(description, c.text3, 11, false, "teamWaitingQuestionDescription");
+                    detail->setWordWrap(true); detail->setContentsMargins(22, 0, 0, 2);
+                    v->addWidget(detail);
+                }
+                QObject::connect(pick, &QAbstractButton::toggled, this, [this, id, optionId, multi](bool on) {
+                    if (on && !multi) { m_chosen[id].clear(); m_otherOn.remove(id); }
+                    if (on) m_chosen[id].insert(optionId); else m_chosen[id].remove(optionId);
+                    QTimer::singleShot(0, this, [this] { render(); });
+                });
+            }
+            // Other, as the session's card offers it (allow_other).
+            if (question.value("allow_other").toBool(true)) {
+                QAbstractButton *other = multi ? static_cast<QAbstractButton *>(new QCheckBox(tr("Other"))) : new QRadioButton(tr("Other"));
+                other->setObjectName("teamWaitingQuestionOther"); other->setProperty("questionId", id);
+                other->setChecked(m_otherOn.contains(id)); other->setEnabled(!waiting);
+                v->addWidget(other);
+                QObject::connect(other, &QAbstractButton::toggled, this, [this, id, multi](bool on) {
+                    if (on && !multi) m_chosen[id].clear();
+                    if (on) m_otherOn.insert(id); else m_otherOn.remove(id);
+                    QTimer::singleShot(0, this, [this] { render(); });
+                });
+                if (m_otherOn.contains(id)) {
+                    auto *text = new QLineEdit(m_otherText.value(id)); text->setObjectName("teamWaitingQuestionOtherText");
+                    text->setProperty("questionId", id);
+                    text->setPlaceholderText(tr("Write your answer")); text->setMaxLength(4000); text->setEnabled(!waiting);
+                    QObject::connect(text, &QLineEdit::textChanged, this, [this, id](const QString &typed) {
+                        m_otherText.insert(id, typed);
+                        if (auto *send = findChild<QPushButton *>(QStringLiteral("teamWaitingQuestionAnswer"))) {
+                            bool complete = false;
+                            questionAnswers(m_team ? memberOf(*m_team)->permission.record.value("questions").toArray() : QJsonArray(), &complete);
+                            send->setEnabled(complete && !m_reading && !m_sending);
+                        }
+                    });
+                    QObject::connect(text, &QLineEdit::returnPressed, this, [this] { sendQuestion(); });
+                    v->addWidget(text);
+                }
+            }
+        }
+        auto *answers = row(6);
+        answers->addStretch();
+        auto *send = button(tr("Answer"), "teamWaitingQuestionAnswer", true);
+        bool complete = false;
+        questionAnswers(questions, &complete);
+        send->setEnabled(complete && !waiting);
+        QObject::connect(send, &QPushButton::clicked, this, [this] { sendQuestion(); });
+        answers->addWidget(send);
+        v->addLayout(answers);
+        m_layout->addWidget(box);
     } else if (action == QLatin1String("answer_permission")) {
-        const auto &question = team.member(m_item.member)->permission;
+        const auto &question = memberOf(team)->permission;
         if (m_shownQuestion.isEmpty()) { m_shownQuestion = question.id; m_shownHash = question.hash; }
         auto *box = new QFrame; box->setObjectName("teamWaitingPermission");
         box->setProperty("question", question.id); box->setProperty("questionHash", question.hash);

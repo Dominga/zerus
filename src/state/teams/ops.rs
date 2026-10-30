@@ -3782,11 +3782,12 @@ fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
     let kind = text(input, "kind").to_owned();
     ensure!(
         ["add-member", "remove-member", "swap-member", "next-goal", "switch-plan-mode",
-         "add-to-phase", "cancel-tasks", "discard-phase"].contains(&kind.as_str()),
-        "A proposal adds or removes members, adds tasks to a running phase, cancels tasks, discards a phase, starts the next goal or switches the plan mode"
+         "add-to-phase", "cancel-tasks", "discard-phase", "question"].contains(&kind.as_str()),
+        "A proposal adds or removes members, adds tasks to a running phase, cancels tasks, discards a phase, starts the next goal, switches the plan mode or asks you a question"
     );
     let reason = clean(text(input, "reason").trim(), 2000, "A proposal reason")?;
-    ensure!(!reason.is_empty(), "A proposal needs its reason");
+    // #740: a question carries its own words; any other proposal its reason.
+    ensure!(!reason.is_empty() || kind == "question", "A proposal needs its reason");
     // U59: a plan-mode proposal names the mode.
     let mut mode = String::new();
     if kind == "switch-plan-mode" {
@@ -3825,6 +3826,7 @@ fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
             let phase = input["phase"].as_u64().context("The discard-phase proposal names its phase")?;
             json!({"phase":phase})
         }
+        "question" => question_change(input)?,
         _ => Value::Null,
     };
     ensure!(change.to_string().len() <= 64 * 1024, "A proposal's change has at most 64 KiB");
@@ -3844,6 +3846,17 @@ fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
         }
     }
     ensure!(member.to_string().len() <= 8192, "A proposal's member has at most 8 KiB");
+    // #740: the change is checked now, on a copy of the team, by the code
+    // Allow runs: a proposal Allow could not apply (a task the plan cannot
+    // parse, an unknown member or phase) is refused here, not left as a card
+    // the owner cannot allow. A next goal and a question apply nothing; a
+    // swap is checked by the swap itself when it runs.
+    if matches!(kind.as_str(), "add-member" | "remove-member" | "add-to-phase" | "cancel-tasks" | "discard-phase" | "switch-plan-mode") {
+        let mut trial = team.clone();
+        let mut ignored = Vec::new();
+        run_proposal(&mut trial, &kind, &member, &change, &mode, "", "", &BTreeSet::new(), &mut ignored)
+            .map_err(|error| anyhow::anyhow!("Allow could not apply this proposal: {error:#}"))?;
+    }
     let id = format!("p{}", team.proposals.len() + 1);
     // N3: accepting the proposal runs the change under this one request id, so
     // a retried or interrupted decision replays it instead of running twice.
@@ -3894,7 +3907,52 @@ fn decide_proposal(team: &mut Team, input: &Value, actor: &Actor, offline: &BTre
     }
     let member = team.proposals[at]["member"].clone();
     let change = team.proposals[at]["change"].clone();
-    let result = match kind.as_str() {
+    if kind == "question" {
+        // #740: the owner's answer, an offered option or words of the owner's
+        // own, reaches the lead's inbox with the question.
+        let answer = clean(text(input, "answer").trim(), 4000, "An answer")?;
+        ensure!(!answer.is_empty(), "Answer the question: pick an option or write your own");
+        team.proposals[at]["state"] = json!("answered");
+        team.proposals[at]["decided_at"] = json!(super::super::now());
+        team.proposals[at]["answer"] = json!(answer);
+        team.proposals[at]["note"] = json!(answer);
+        events.push(Event::new("proposal_decided", json!({"id":id,"accept":true,"kind":kind,"answer":answer})));
+        return Ok(json!({"status":"answered","proposal":id,"answer":answer}));
+    }
+    let mode = team.proposals[at]["mode"].as_str().unwrap_or_default().to_owned();
+    let reason_of = team.proposals[at]["reason"].as_str().unwrap_or_default().to_owned();
+    let result = run_proposal(team, &kind, &member, &change, &mode, &id, &reason_of, offline, events)?;
+    team.proposals[at]["state"] = json!("accepted");
+    team.proposals[at]["decided_at"] = json!(super::super::now());
+    team.proposals[at]["note"] = json!(reason);
+    events.push(Event::new("proposal_decided", json!({"id":id,"accept":true,"kind":kind})));
+    Ok(json!({"status":"accepted","proposal":id,"result":result}))
+}
+
+/// #740: a question to the owner: its words, the options offered (at most
+/// eight) and the one the lead recommends, which must be among them.
+fn question_change(input: &Value) -> anyhow::Result<Value> {
+    let question = clean(text(input, "question").trim(), 4000, "A question")?;
+    ensure!(!question.is_empty(), "A question proposal carries its \"question\"");
+    let mut options: Vec<String> = Vec::new();
+    for value in input["options"].as_array().into_iter().flatten() {
+        let label = clean(value.as_str().or_else(|| value["label"].as_str()).unwrap_or_default().trim(), 200, "An option")?;
+        ensure!(!label.is_empty(), "Every option has words");
+        ensure!(!options.contains(&label), "The option {label:?} is offered twice");
+        options.push(label);
+    }
+    ensure!(options.len() <= 8, "A question offers at most eight options");
+    let recommended = clean(text(input, "recommended").trim(), 200, "A recommended option")?;
+    ensure!(recommended.is_empty() || options.contains(&recommended), "The recommended option is one of the options");
+    Ok(json!({"question":question,"options":options,"recommended":recommended}))
+}
+
+/// The change Allow applies for a proposal, on `team`: run by the owner's
+/// decision and, on a copy, when the lead proposes (#740).
+#[allow(clippy::too_many_arguments)]
+fn run_proposal(team: &mut Team, kind: &str, member: &Value, change: &Value, mode: &str, id: &str, reason: &str,
+                offline: &BTreeSet<String>, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    let result = match kind {
         "add-member" => {
             let members: Vec<Value> = change["members"].as_array().cloned().unwrap_or_else(|| vec![member.clone()]);
             let mut applied = Vec::new();
@@ -3914,8 +3972,10 @@ fn decide_proposal(team: &mut Team, input: &Value, actor: &Actor, offline: &BTre
             let phase = change["phase"].as_u64().context("The add-to-phase proposal carries its phase")?;
             let tasks = change["tasks"].clone();
             let first = apply(team, "add-to-phase", &json!({"phase":phase,"tasks":tasks}), &Actor::Human, offline, events)?;
-            if let Some(confirm) = first["confirm"].as_str().filter(|id| !id.is_empty()) {
-                apply(team, "add-to-phase", &json!({"phase":phase,"tasks":change["tasks"],"confirm":confirm}), &Actor::Human, offline, events)?
+            // The warning's receipt names its pending id; the owner's Allow is the confirmation.
+            if let Some(confirm) = first["confirm"].as_str().or_else(|| first["pending"].as_str()).filter(|id| !id.is_empty()) {
+                apply(team, "add-to-phase", &json!({"phase":phase,"tasks":change["tasks"],"confirm":confirm,"confirmation":"add"}),
+                      &Actor::Human, offline, events)?
             } else {
                 first
             }
@@ -3932,21 +3992,16 @@ fn decide_proposal(team: &mut Team, input: &Value, actor: &Actor, offline: &BTre
             apply(team, "discard-phase", &json!({"phase":phase}), &Actor::Human, offline, events)?
         }
         "switch-plan-mode" => {
-            let mode = team.proposals[at]["mode"].as_str().unwrap_or_default().to_owned();
             team.plan_mode = if mode == "free" { PlanMode::Free } else { PlanMode::Standard };
             events.push(Event::new(
                 "plan_mode_switched",
-                json!({"by":"You","mode":mode,"proposal":id,"reason":team.proposals[at]["reason"]}),
+                json!({"by":"You","mode":mode,"proposal":id,"reason":reason}),
             ));
             json!({"status":"switched","plan_mode":mode})
         }
         _ => bail!("A next-goal proposal is accepted with hgs team next-goal"),
     };
-    team.proposals[at]["state"] = json!("accepted");
-    team.proposals[at]["decided_at"] = json!(super::super::now());
-    team.proposals[at]["note"] = json!(reason);
-    events.push(Event::new("proposal_decided", json!({"id":id,"accept":true,"kind":kind})));
-    Ok(json!({"status":"accepted","proposal":id,"result":result}))
+    Ok(result)
 }
 
 /// #630 N7: the stage runs given to `member` go back to Waiting when its

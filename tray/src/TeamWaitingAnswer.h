@@ -1,5 +1,8 @@
 #pragma once
+#include <QHash>
+#include <QJsonArray>
 #include <QPointer>
+#include <QSet>
 #include <QWidget>
 #include <functional>
 #include <optional>
@@ -64,6 +67,15 @@ private:
     QString staleReason(const Teams::Team &team) const;
     void sendPermission(bool allow);
     void sendAddition();
+    // #740: the member the item names: by id, else (an older hgs) by role.
+    const Teams::Member *memberOf(const Teams::Team &team) const;
+    // #740: a session's question (the lead's AskUserQuestion, a member's
+    // question): its options and Other, answered as on the session's card.
+    QJsonArray questionAnswers(const QJsonArray &questions, bool *complete) const;
+    void sendQuestion();
+    QHash<QString, QSet<QString>> m_chosen;   // by question id
+    QHash<QString, QString> m_otherText;
+    QSet<QString> m_otherOn;
     TeamController *m_teams;
     Item m_item;
     std::optional<Teams::Team> m_team;

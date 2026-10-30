@@ -49,17 +49,26 @@ private:
     struct View {
         QString id, hash, kind, by, reason, what;
         QStringList lines;
+        // #740: a question's options and the one the lead recommends.
+        QStringList options;
+        QString recommended;
         double at = 0;
         bool operator==(const View &other) const
         {
             return id == other.id && hash == other.hash && kind == other.kind && by == other.by && reason == other.reason
-                && what == other.what && lines == other.lines && at == other.at;
+                && what == other.what && lines == other.lines && options == other.options && recommended == other.recommended
+                && at == other.at;
         }
     };
     static QList<View> viewsOf(const Teams::Team &team);
     void render();
     QWidget *cardFor(const View &view, bool gone);
     void answer(const View &view, bool allow);
+    // #740: a question's card: an option or the owner's own words, Answer.
+    void questionCard(const View &view, QVBoxLayout *v);
+    void answerQuestion(const View &view);
+    QHash<QString, QString> m_picked;   // by proposal: the chosen option, or empty for Other
+    QSet<QString> m_ownWords;           // proposals answered with the owner's own words
     bool ask(const View &view);
     class QScrollArea *m_scroll;
     QWidget *m_inner;

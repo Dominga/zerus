@@ -229,6 +229,10 @@ fn a_lead_starts_the_next_goal_only_after_an_accepted_proposal() {
 fn the_team_list_carries_the_open_proposals_for_their_cards() {
     let mut team = running_team();
     let lead = Actor::Member("lead".into());
+    // #740: a proposal is checked when it is made: #2 and phase 2 exist.
+    ops::apply(&mut team, "extend", &json!({"phase_title":"Next","tasks":[{"id":2,"title":"Later","assignee":"dev"}]}), &lead,
+               &BTreeSet::new(), &mut Vec::new())
+        .unwrap();
     for input in [
         json!({"kind":"cancel-tasks","reason":"drop","tasks":[2]}),
         json!({"kind":"discard-phase","reason":"nothing started","phase":2}),
@@ -283,7 +287,8 @@ fn an_allow_applies_the_proposed_change_once_and_a_changed_card_is_refused() {
     // Deny records its reason for the lead and runs nothing.
     store
         .mutate(None, "t", None, |team, events| {
-            ops::apply(team, "propose", &json!({"kind":"cancel-tasks","reason":"drop","tasks":[2]}), &Actor::Member("lead".into()), &BTreeSet::new(), events)
+            // #740: a proposal names work that exists (it is checked when made).
+            ops::apply(team, "propose", &json!({"kind":"cancel-tasks","reason":"drop","tasks":[1]}), &Actor::Member("lead".into()), &BTreeSet::new(), events)
         })
         .unwrap();
     let team = store.load("t").unwrap().unwrap();

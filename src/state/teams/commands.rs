@@ -1493,6 +1493,7 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
     )?;
     let reason = text(input, "reason").trim().to_owned();
     ensure!(reason.chars().count() <= 2000, "A reason has at most 2000 characters");
+    let kind = team.proposals[at]["kind"].as_str().unwrap_or_default().to_owned();
     // U57: the owner's Allow is bound to this id and the proposal's content
     // hash; a changed proposal never applies. An older proposal without a hash
     // stays decidable.
@@ -1520,7 +1521,24 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
         })?;
         return Ok(json!({"status":"rejected","proposal":id}));
     }
-    let kind = team.proposals[at]["kind"].as_str().unwrap_or_default().to_owned();
+    if kind == "question" {
+        // #740: the owner's answer to the lead's question, an offered option or
+        // words of the owner's own, reaches the lead's inbox with it.
+        let answer = text(input, "answer").trim().to_owned();
+        ensure!(!answer.is_empty(), "Answer the question: \"answer\" is an offered option or your own words");
+        ensure!(answer.chars().count() <= 4000, "An answer has at most 4000 characters");
+        store.mutate(None, &team_id, None, |team, events| {
+            if let Some(proposal) = team.proposals.iter_mut().find(|proposal| proposal["id"] == id) {
+                proposal["state"] = json!("answered");
+                proposal["decided_at"] = json!(super::super::now());
+                proposal["answer"] = json!(answer);
+                proposal["note"] = json!(answer);
+            }
+            events.push(Event::new("proposal_decided", json!({"proposal":id,"accept":true,"kind":"question","answer":answer})));
+            Ok(Value::Null)
+        })?;
+        return Ok(json!({"status":"answered","proposal":id,"answer":answer}));
+    }
     let member = team.proposals[at]["member"].clone();
     let change = team.proposals[at]["change"].clone();
     let goal = team.proposals[at]["goal"].as_str().unwrap_or_default().to_owned();
@@ -2005,7 +2023,7 @@ fn answer(input: &Value) -> anyhow::Result<Value> {
     // N20: the lead's own permission request goes to the owner, never into the
     // mailbox the lead answers; a lead that answered itself would also decide
     // the whole subagent group it was asked to confirm.
-    ensure!(member_id != team.lead, "The lead's own permission request is the owner's to answer");
+    ensure!(member_id != team.lead || matches!(&by, Actor::Human), "The lead's own permission request is the owner's to answer");
     let session = member.session.clone().context("The member has no session")?;
     let (question, hash) = (text(input, "question_id").to_owned(), text(input, "expected_question_hash").to_owned());
     ensure!(!question.is_empty() && !hash.is_empty() && input["answers"].is_array(), "question_id, expected_question_hash and answers are required");

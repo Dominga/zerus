@@ -1787,3 +1787,75 @@ fn a_full_test_run_needs_the_teams_policy_or_the_owners_grant() {
     assert_eq!(value["full_tests"], "ask");
     assert_eq!(value["full_tests_grant"]["release"], "v1.57.0");
 }
+
+/// #740: a proposal is checked when the lead makes it, by the code Allow
+/// runs. p6 wrote a dependency as a bare number: propose took it and Allow
+/// failed with "Invalid task", leaving a card nobody could allow.
+#[test]
+fn a_proposal_allow_could_not_apply_is_refused_when_made() {
+    let mut team = running_team();
+    let lead = Actor::Member("lead".into());
+    let bare = json!({"kind":"add-to-phase","reason":"p6","phase":1,
+        "tasks":[{"id":2,"title":"Follow-up","assignee":"dev","deps":[1]}]});
+    let error = ops::apply(&mut team, "propose", &bare, &lead, &BTreeSet::new(), &mut Vec::new()).unwrap_err();
+    let error = format!("{error:#}");
+    assert!(error.contains("Allow could not apply") && error.contains("Invalid task"), "{error}");
+    assert!(team.proposals.is_empty(), "nothing was proposed");
+    // Unknown work is refused too.
+    let unknown = json!({"kind":"cancel-tasks","reason":"drop","tasks":[99]});
+    assert!(ops::apply(&mut team, "propose", &unknown, &lead, &BTreeSet::new(), &mut Vec::new()).is_err());
+    // The same dependency as the plan writes it is proposed and allowed.
+    let good = json!({"kind":"add-to-phase","reason":"p6","phase":1,
+        "tasks":[{"id":2,"title":"Follow-up","assignee":"dev","deps":[{"task":1}]}]});
+    ops::apply(&mut team, "propose", &good, &lead, &BTreeSet::new(), &mut Vec::new()).unwrap();
+    assert_eq!(team.proposals.len(), 1);
+    assert!(team.task(2).is_none(), "the check ran on a copy");
+    let hash = team.proposals[0]["hash"].as_str().unwrap().to_owned();
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+    store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+    let receipt = decide_proposal_in(&mut store, &json!({"team":"t","proposal":"p1","accept":true,"by":"human","expected_hash":hash}), &Actor::Human)
+        .unwrap();
+    assert_eq!(receipt["status"], "accepted", "{receipt}");
+}
+
+/// #740: the lead asks the owner a question with options and a recommended
+/// one; the owner's answer, an option or words of the owner's own, goes to
+/// the lead's inbox with the question.
+#[test]
+fn the_lead_asks_the_owner_a_question() {
+    let mut team = running_team();
+    let lead = Actor::Member("lead".into());
+    let bad = json!({"kind":"question","question":"Where?","options":["D:","C:"],"recommended":"E:"});
+    assert!(ops::apply(&mut team, "propose", &bad, &lead, &BTreeSet::new(), &mut Vec::new()).is_err(), "the recommended one is offered");
+    assert!(ops::apply(&mut team, "propose", &json!({"kind":"question","options":["D:"]}), &lead, &BTreeSet::new(), &mut Vec::new()).is_err());
+    let input = json!({"kind":"question","question":"Install the build cache on D:?","options":["Yes, on D:","Yes, on C:","No"],
+        "recommended":"Yes, on D:"});
+    let receipt = ops::apply(&mut team, "propose", &input, &lead, &BTreeSet::new(), &mut Vec::new()).unwrap();
+    assert_eq!(receipt["change"]["recommended"], "Yes, on D:");
+    assert_eq!(team.proposals[0]["change"]["options"], json!(["Yes, on D:","Yes, on C:","No"]));
+    let hash = team.proposals[0]["hash"].as_str().unwrap().to_owned();
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+    store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+    // Waiting for you shows the question itself.
+    let listed = super::super::owner_waiting::items(&[store.load("t").unwrap().unwrap()], super::super::super::now());
+    assert!(listed.iter().any(|item| item["title"] == "The lead asks: Install the build cache on D:?"), "{listed:?}");
+    let error = decide_proposal_in(&mut store, &json!({"team":"t","proposal":"p1","accept":true,"expected_hash":hash}), &Actor::Human)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("answer"), "an answer is required: {error}");
+    let answered = decide_proposal_in(
+        &mut store,
+        &json!({"team":"t","proposal":"p1","accept":true,"expected_hash":hash,"answer":"Yes, on D:, but 30 GB"}),
+        &Actor::Human,
+    )
+    .unwrap();
+    assert_eq!(answered["status"], "answered", "{answered}");
+    let team = store.load("t").unwrap().unwrap();
+    assert_eq!((team.proposals[0]["state"].as_str(), team.proposals[0]["answer"].as_str()), (Some("answered"), Some("Yes, on D:, but 30 GB")));
+    let items = super::super::inbox::items(&team);
+    let told = items.iter().find(|item| item.kind == "proposal_decided").expect("the answer reaches the lead");
+    assert!(told.summary.contains("answered your question p1"), "{}", told.summary);
+    assert_eq!(told.detail, "Yes, on D:, but 30 GB");
+}

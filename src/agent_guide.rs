@@ -139,6 +139,10 @@ mod tests {
         assert!(lead.contains("hgs team start-ahead --json"), "{lead}");
         assert!(lead.contains("members are idle") && lead.contains("independent"), "{lead}");
         assert!(lead.contains("Review drafts") && lead.contains("need the owner"), "{lead}");
+        // #740: a question to the owner is a proposal, never only prose.
+        assert!(lead.contains("a question for the owner is a proposal, never only"), "{lead}");
+        let propose = pages().into_iter().find(|(name, _)| *name == "team-propose").unwrap().1;
+        assert!(propose.contains(r#"{"kind":"question","question""#) && propose.contains("never only in your reply"), "{propose}");
         assert!(lead.contains("Work ahead is for review drafts"), "{lead}");
     }
 

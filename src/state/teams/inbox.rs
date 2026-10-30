@@ -359,7 +359,7 @@ fn all_items(team: &Team) -> Vec<Item> {
     let mut decided: Vec<&Value> = team
         .proposals
         .iter()
-        .filter(|proposal| matches!(proposal["state"].as_str(), Some("accepted") | Some("rejected")))
+        .filter(|proposal| matches!(proposal["state"].as_str(), Some("accepted") | Some("rejected") | Some("answered")))
         .collect();
     let decided_at = |proposal: &Value| proposal["decided_at"].as_f64().or(proposal["at"].as_f64()).unwrap_or_default();
     decided.sort_by(|a, b| decided_at(b).total_cmp(&decided_at(a)));
@@ -369,6 +369,13 @@ fn all_items(team: &Team) -> Vec<Item> {
         let kind = proposal["kind"].as_str().unwrap_or_default();
         let note = proposal["note"].as_str().unwrap_or_default();
         let why = if note.is_empty() { String::new() } else { format!(": {note}") };
+        // #740: the owner's answer to the lead's question, with the question.
+        let text = if state == "answered" {
+            let question = proposal["change"]["question"].as_str().unwrap_or_default();
+            format!("The owner answered your question {id} ({question}): {note}")
+        } else {
+            format!("The owner {state} your {kind} proposal {id}{why}")
+        };
         items.push(Item {
             subagents: Value::Null,
             kind: "proposal_decided",
@@ -376,7 +383,7 @@ fn all_items(team: &Team) -> Vec<Item> {
             task: None,
             member: "owner".into(),
             since: decided_at(proposal),
-            summary: summary(&format!("The owner {state} your {kind} proposal {id}{why}")),
+            summary: summary(&text),
             command: format!("{} | hgs team status --json", json!({"request_id":PLACEHOLDER,"team":team.id})),
             detail: proposal["note"].as_str().unwrap_or_default().to_owned(),
         });
@@ -589,6 +596,10 @@ fn all_items(team: &Team) -> Vec<Item> {
     // The permission requests the dispatcher read from the members' sessions
     // (C2): each is answerable by its own question id and hash.
     for member in &team.members {
+        // #740: the lead's own question is the owner's, never its own mailbox's.
+        if member.id == team.lead {
+            continue;
+        }
         let Some(pending) = &member.pending else { continue };
         let asked = pending.card_question();
         items.push(Item {
@@ -920,11 +931,13 @@ pub(crate) fn attention(team: &Team, now: f64) -> Vec<Value> {
     // U18: a member's permission request the lead has not answered for
     // `remind_owner_permission_minutes` goes to the owner, with the member, the
     // command and its age; the owner may answer it from here.
-    if permission_minutes > 0 {
+    if permission_minutes > 0 || team.members.iter().any(|member| member.id == team.lead && member.pending.is_some()) {
         for member in &team.members {
             let Some(pending) = &member.pending else { continue };
             let waited = (now - pending.at).max(0.0);
-            if waited < permission_minutes as f64 * 60.0 {
+            // #740: the lead's own question waits for the owner from the start.
+            let lead = member.id == team.lead;
+            if !lead && (permission_minutes == 0 || waited < permission_minutes as f64 * 60.0) {
                 continue;
             }
             let role = team.role_of(&member.id);
@@ -1427,5 +1440,38 @@ mod tests {
         team.settings.remind_owner_minutes = 60;
         team.task_mut(1).unwrap().status = TaskStatus::Accepted;
         assert!(attention(&team, 100_000.0).is_empty());
+    }
+
+    /// #740: the lead's own question (its AskUserQuestion) waits for the owner
+    /// at once, with its questions and the member's id, and never in the
+    /// lead's own mailbox.
+    #[test]
+    fn the_leads_own_question_waits_for_the_owner_at_once() {
+        let mut team = team();
+        let now = 5_000.0;
+        let card = json!({"questions":[{"id":"q_0","header":"Cache","question":"Install the build cache?","multi_select":false,
+            "allow_other":true,"options":[{"id":"1","label":"Yes, on D:"},{"id":"2","label":"No"}]}]});
+        let lead = team.lead.clone();
+        team.members.iter_mut().find(|member| member.id == lead).unwrap().pending =
+            Some(PendingQuestion { question_id: "toolu_1".into(), question_hash: "h1".into(), approval: false, at: now - 5.0, card: card.clone() });
+        // Not the lead's mailbox.
+        assert!(!super::items(&team).iter().any(|item| item.kind == "permission"), "the lead's question is not its own item");
+        // The owner's attention, five seconds after it was asked.
+        let attention = super::attention(&team, now);
+        let asked: Vec<&Value> = attention.iter().filter(|item| item["kind"] == "permission").collect();
+        assert_eq!(asked.len(), 1, "{attention:?}");
+        assert_eq!(asked[0]["member_id"], json!(lead));
+        assert!(asked[0]["summary"].as_str().unwrap().contains("Install the build cache?"), "{}", asked[0]);
+        // Even with the members' reminder off.
+        team.settings.remind_owner_permission_minutes = 0;
+        assert!(super::attention(&team, now).iter().any(|item| item["kind"] == "permission"));
+        // Waiting for you lists it, bound to the lead's id.
+        let waiting = super::super::owner_waiting::items(&[team.clone()], now);
+        let found = waiting.iter().find(|item| item["kind"] == "permission_escalated").expect("the lead's question waits for you");
+        assert_eq!(found["member_id"], json!(lead));
+        assert_eq!(found["action"], "answer_permission");
+        // The record the desktop answers from carries the questions and Other.
+        let record = super::super::dispatcher::permission_record(team.member(&lead).unwrap().pending.as_ref().unwrap());
+        assert_eq!(record["questions"], card["questions"]);
     }
 }

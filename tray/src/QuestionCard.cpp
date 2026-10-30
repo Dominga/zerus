@@ -5,6 +5,7 @@
 #include "MarkdownText.h"
 #include "SessionFileReference.h"
 
+#include <algorithm>
 #include <QAbstractButton>
 #include <QApplication>
 #include <QButtonGroup>
@@ -142,6 +143,18 @@ public:
     }
 private:
     int m_preferredHeight = 0;
+};
+
+// #740: the question's own area above the choices: it asks for the height
+// sizeToContent gave it (its maximum) and gives way when the card is squeezed.
+class PromptArea final : public QScrollArea {
+public:
+    QSize sizeHint() const override
+    {
+        auto size = QScrollArea::sizeHint();
+        if (maximumHeight() < QWIDGETSIZE_MAX) size.setHeight(maximumHeight());
+        return size;
+    }
 };
 
 class Choice final : public QFrame {
@@ -484,7 +497,11 @@ void QuestionCard::setError(const QString &sessionKey, const QString &questionId
         draft.sending = false; saveDraft(key); m_sendingKeys.remove(identity(sessionKey, questionId)); updateControls(); return;
     }
     draft.sending = false; draft.error = true; draft.uncertain = uncertain;
-    draft.notice = uncertain ? tr("Delivery is not confirmed. Check Terminal before retrying. %1").arg(detail) : detail;
+    draft.notice = uncertain ? tr("Delivery is not confirmed. Check Terminal before retrying. %1").arg(detail)
+        // #740: nothing was sent; the answer stays for Retry once Terminal shows the question whole.
+        : detail.contains(QLatin1String("not fully visible")) || detail.contains(QLatin1String("Enlarge Terminal"))
+            ? tr("%1 Nothing was sent; your answer is kept. Enlarge Terminal, then Retry.").arg(detail)
+            : detail;
     saveDraft(key); m_sendingKeys.remove(identity(sessionKey, questionId)); updateControls();
 }
 
@@ -586,11 +603,27 @@ void QuestionCard::rebuild()
         scroll->setFrameShape(QFrame::NoFrame); scroll->setWidgetResizable(true);
         scroll->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Ignored);
         scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-        formLayout->addWidget(scroll, 1);
         auto *page = new QWidget; page->setObjectName("questionPage");
         auto *column = new QVBoxLayout(page); column->setContentsMargins(0, 0, 7, 0); column->setSpacing(7);
         const QString promptText = question.value("question").toString();
         const bool subagents = SubagentRequest::is(m_question);
+        // #740 (owner, 2026-10-31: a long question showed only its last line
+        // once the choices scrolled): the question stays whole above the
+        // choices, in an area of its own that scrolls when long. Its body
+        // scrolls with the choices, as before; an approval (a short prompt
+        // over its command) keeps its whole form in one scroll.
+        QVBoxLayout *promptColumn = column;
+        if (!subagents && !m_question.value("approval").toBool()) {
+            auto *promptScroll = new PromptArea; promptScroll->setObjectName("questionPromptScroll");
+            promptScroll->setFrameShape(QFrame::NoFrame); promptScroll->setWidgetResizable(true);
+            promptScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+            promptScroll->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+            auto *promptPage = new QWidget; promptPage->setObjectName("questionPromptPage");
+            promptColumn = new QVBoxLayout(promptPage); promptColumn->setContentsMargins(0, 0, 7, 0); promptColumn->setSpacing(7);
+            promptScroll->setWidget(promptPage);
+            formLayout->addWidget(promptScroll);
+        }
+        formLayout->addWidget(scroll, 1);
         if (subagents) {
             // U19 (#520): one row per subagent: its type, model, effort when
             // known, and its task; Allow all and Deny answer the card.
@@ -625,8 +658,14 @@ void QuestionCard::rebuild()
             auto *prompt = new QLabel(promptText); prompt->setObjectName("questionPrompt");
             prompt->setTextFormat(Qt::PlainText); prompt->setWordWrap(true); prompt->setTextInteractionFlags(Qt::TextSelectableByMouse);
             prompt->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-            column->addWidget(prompt);
-        } else column->addWidget(markdownText("questionPrompt", promptText));
+            promptColumn->addWidget(prompt);
+        } else promptColumn->addWidget(markdownText("questionPrompt", promptText));
+        if (promptColumn != column) {
+            promptColumn->addStretch();
+            // Its first height before the card measures it (sizeToContent).
+            if (auto *promptScroll = formPage->findChild<QScrollArea *>("questionPromptScroll"))
+                promptScroll->setMaximumHeight(promptScroll->widget()->sizeHint().height());
+        }
         const QString body = question.value("body").toString();
         if (!subagents && !body.isEmpty() && body != promptText) {
             if (literal) {
@@ -858,6 +897,8 @@ void QuestionCard::updateControls()
         && (!choices || m_reviewSeconds == 0));
     m_submit->setText(draft.submitted && !draft.answered ? tr("Submitted") : draft.sending || inFlight ? tr("Submitting…")
         : choices && m_reviewSeconds > 0 ? tr("Submit answer (%1)").arg(m_reviewSeconds) : confirming ? tr("Confirm")
+        // #740: a refusal that sent nothing keeps the answer for a retry.
+        : draft.error && !draft.uncertain ? tr("Retry")
         : m_forms.size() == 1 ? tr("Submit answer") : tr("Submit answers"));
     m_retry->setVisible(draft.uncertain && !locked);
     const int page=m_tabs->currentIndex();
@@ -911,6 +952,9 @@ void QuestionCard::updateControls()
     }
     // A disabled Submit always says why, even when an older host sends no reason.
     if (notice.isEmpty() && !supported) notice = tr("Answer this request in Terminal.");
+    // #740: an answerable card whose panel the server cannot read whole (a
+    // tall question in a short Terminal) says so before Submit.
+    if (notice.isEmpty() && supported) notice = m_question.value("answer_unavailable_reason").toString().trimmed();
     if (notice.isEmpty() && m_loadingKeys.contains(m_key)) notice = tr("Loading your saved answer…");
     if (notice.isEmpty()) for (const auto &form : m_forms) {
         const auto answer = draft.answers.value(form.id);
@@ -959,7 +1003,24 @@ void QuestionCard::sizeToContent()
     layout()->activate();
     const int chrome = layout()->totalHeightForWidth(width()) - m_pages->sizeHint().height();
     const int limit = parentWidget() ? qMin(600, parentWidget()->height() * 60 / 100) : 600;
-    const int bodyHeight = qMin(contentHeight + editorHeight, qMax(editorHeight + 40, limit - chrome));
+    // #740: the question above the choices: whole when the card has room,
+    // else at least two fifths of it (more when the choices are short) with
+    // its own scroll bar; never more than leaves the answer editor and a
+    // glimpse of the choices.
+    int promptHeight = 0;
+    if (auto *prompt = page->findChild<QScrollArea *>("questionPromptScroll"); prompt && prompt->widget()) {
+        const int available = limit - chrome, spacing = page->layout()->spacing();
+        auto *promptLayout = prompt->widget()->layout();
+        const int wanted = promptLayout->hasHeightForWidth() ? promptLayout->totalHeightForWidth(contentWidth) : promptLayout->totalSizeHint().height();
+        const int room = qMax(available * 2 / 5, available - contentHeight - editorHeight - spacing);
+        const int glimpse = qMin(contentHeight, 40);   // the choices, or as much of them as 40 px shows
+        const int shown = qMax(0, std::min({wanted, room, available - editorHeight - glimpse - spacing}));
+        // A card squeezed by its window keeps two lines of the question.
+        const int least = qMin(shown, prompt->fontMetrics().lineSpacing() * 2 + 4);
+        if (prompt->maximumHeight() != shown || prompt->minimumHeight() != least) { prompt->setMinimumHeight(least); prompt->setMaximumHeight(shown); }
+        promptHeight = shown + spacing;
+    }
+    const int bodyHeight = qMin(promptHeight + contentHeight + editorHeight, qMax(promptHeight + editorHeight + 40, limit - chrome));
     static_cast<QuestionPages *>(m_pages)->setBodyHeight(bodyHeight, qMin(bodyHeight, editorHeight + 40));
 }
 
@@ -1040,7 +1101,7 @@ void QuestionCard::setTheme(bool dark)
     styleSubagentRows(this, colors);
     setStyleSheet(QString(R"(
         QWidget#questionCard { background:%1; border:1px solid %3; border-radius:10px; }
-        QWidget#questionPage, QScrollArea { background:transparent; border:0; }
+        QWidget#questionPage, QWidget#questionPromptPage, QScrollArea { background:transparent; border:0; }
         QLabel { color:%2; border:0; }
         QLabel#questionHeading { color:%5; font-size:%9px; font-weight:600; }
         QLabel#questionAskedAt, QLabel#questionPendingCount, QLabel#questionProgress, QLabel#questionMode, QLabel#questionBody, QLabel#questionChoiceDescription { color:%7; font-size:%10px; }

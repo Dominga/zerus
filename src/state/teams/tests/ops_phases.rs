@@ -199,6 +199,9 @@ fn a_proposal_stores_the_exact_change_and_its_content_hash() {
     let mut team = running_team();
     let mut events = Vec::new();
     let lead = Actor::Member("lead".into());
+    // #740: a proposal is checked when it is made, so phase 2 is a real draft.
+    apply(&mut team, "extend", &json!({"phase_title":"Next","tasks":[{"id":3,"title":"Later","assignee":"dev"}]}), &lead, &BTreeSet::new(), &mut events)
+        .unwrap();
     let cases = [
         (json!({"kind":"add-member","reason":"needs two",
             "members":[{"id":"x","role":"Ops","agent":"claude"},{"id":"y","role":"Ops","agent":"claude"}]}), "add-member"),

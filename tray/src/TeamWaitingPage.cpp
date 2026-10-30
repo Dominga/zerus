@@ -50,6 +50,7 @@ TeamWaitingPage::Item TeamWaitingPage::parse(const QJsonObject &item)
     out.id = item["id"].toString(); out.team = item["team"].toString(); out.teamName = item["team_name"].toString();
     out.kind = item["kind"].toString(); out.title = item["title"].toString(); out.action = item["action"].toString();
     out.member = item["member"].toString(); out.proposal = item["proposal"].toString(); out.since = item["since"].toDouble();
+    out.memberId = item["member_id"].toString();
     out.phase = item["phase"].toInt(); out.task = item["task"].toInt();
     if (out.teamName.isEmpty()) out.teamName = out.team;
     return out;

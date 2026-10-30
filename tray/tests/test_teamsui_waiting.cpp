@@ -139,6 +139,7 @@ QJsonArray answerItems(double now)
 class TestTeamsUiWaiting : public QObject, public TeamsUiFixture {
     Q_OBJECT
 private slots:
+    void aLeadsQuestionIsAnsweredFromWaitingForYou();
     void initTestCase()
     {
         setUpCase();
@@ -1978,6 +1979,98 @@ void TestTeamsUiWaiting::aWaitingReadThatChangesNothingRedrawsNothing()
     feed.refresh();
     QTRY_COMPARE(changed.count(), 2);
     QCOMPARE(feed.total(), int(items.size()));
+}
+
+// #740 (owner, 2026-10-31): the lead's own question (its AskUserQuestion)
+// and its question proposal wait in Waiting for you and are answered there:
+// the session's options and Other, sent once with the question's id and hash;
+// the proposal's options with the recommended one marked, or the owner's own
+// words, sent with its hash. Each leaves at once.
+void TestTeamsUiWaiting::aLeadsQuestionIsAnsweredFromWaitingForYou()
+{
+    QSettings().setValue("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([] { QSettings().remove("workspace/skin"); darkPalette(); });
+    const double now = double(QDateTime::currentSecsSinceEpoch());
+    auto team = answerTeam();
+    auto members = team["members"].toArray();
+    auto lead = members[0].toObject();
+    lead["question"] = QJsonObject{{"question_id", "toolu_cache"}, {"question_hash", "hash-cache"}, {"tool", "Build cache"},
+        {"command", ""}, {"reason", ""}, {"asked_at", now - 30},
+        {"questions", QJsonArray{QJsonObject{{"id", "q_0"}, {"header", "Build cache"}, {"question", "Install the shared build cache?"},
+            {"multi_select", false}, {"allow_other", true}, {"options", QJsonArray{
+                QJsonObject{{"id", "1"}, {"label", "Yes, on D: (Recommended)"}, {"description", "A folder on D: with a 20 GB limit."}},
+                QJsonObject{{"id", "2"}, {"label", "No"}, {"description", "Builds run as they do now."}}}}}}}};
+    members[0] = lead;
+    team["members"] = members;
+    auto proposals = team["proposals"].toArray();
+    proposals.append(QJsonObject{{"id", "p3"}, {"kind", "question"}, {"by", "Lead"}, {"at", now - 20}, {"state", "open"}, {"reason", ""},
+        {"hash", "h3"}, {"change", QJsonObject{{"question", "Which cache size?"}, {"options", QJsonArray{"10 GB", "20 GB"}}, {"recommended", "20 GB"}}}});
+    team["proposals"] = proposals;
+    setTeam(team);
+    auto asked = waitingItem("Lead", "permission_escalated", "answer_permission", "lead (Lead) waits for your answer: Install the shared build cache?", now - 30);
+    asked["member"] = "Lead"; asked["member_id"] = "lead";
+    auto proposal = waitingItem("proposal-p3", "owner_word_asked", "decide_proposal", "The lead asks: Which cache size?", now - 20);
+    proposal["proposal"] = "p3";
+    QVERIFY(writeWaiting(script() + ".waiting", QJsonArray{proposal, asked}));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamWaitingPage page(&controller);
+    QStringList answered;
+    page.answered = [&](const TeamWaitingPage::Item &item) { answered << item.id; };
+    darkPalette(); page.setDark(true);
+    page.resize(900, 760); page.show();
+    const auto row = [&](const QString &id) -> QFrame * {
+        for (auto *frame : page.findChildren<QFrame *>("teamWaitingRow")) if (frame->property("itemId") == id) return frame;
+        return nullptr;
+    };
+    const QString leadItem = asked["id"].toString(), proposalItem = proposal["id"].toString();
+    QTRY_VERIFY(row(leadItem) && row(proposalItem));
+    row(leadItem)->findChild<QPushButton *>("teamWaitingAnswerToggle")->click();
+    row(proposalItem)->findChild<QPushButton *>("teamWaitingAnswerToggle")->click();
+    QTRY_VERIFY(row(leadItem)->findChild<QLabel *>("teamWaitingQuestionPrompt") && row(proposalItem)->findChild<QRadioButton *>("teamProposalQuestionOption"));
+    // The session's question whole, its options and Other.
+    QCOMPARE(row(leadItem)->findChild<QLabel *>("teamWaitingQuestionPrompt")->text(), QStringLiteral("Install the shared build cache?"));
+    QStringList offered;
+    for (auto *option : row(leadItem)->findChildren<QAbstractButton *>("teamWaitingQuestionOption")) offered << option->text();
+    QCOMPARE(offered, (QStringList{"Yes, on D: (Recommended)", "No"}));
+    auto *send = row(leadItem)->findChild<QPushButton *>("teamWaitingQuestionAnswer");
+    QVERIFY(!send->isEnabled());
+    // The proposal's options, the recommended one marked.
+    QStringList choices;
+    for (auto *option : row(proposalItem)->findChildren<QRadioButton *>("teamProposalQuestionOption")) choices << option->text();
+    QCOMPARE(choices, (QStringList{"10 GB", "20 GB (recommended)"}));
+    // Other with the owner's words.
+    row(leadItem)->findChild<QAbstractButton *>("teamWaitingQuestionOther")->click();
+    QTRY_VERIFY(row(leadItem)->findChild<QLineEdit *>("teamWaitingQuestionOtherText"));
+    row(leadItem)->findChild<QLineEdit *>("teamWaitingQuestionOtherText")->setText("Yes, on D:, but 30 GB");
+    TestWait::settle();
+    shot(&page, "u740-waiting-questions-dark");
+    page.setDark(false);
+    lightShot(&page, "u740-waiting-questions-light");
+    darkPalette(); page.setDark(true);
+    QTRY_VERIFY(row(leadItem)->findChild<QPushButton *>("teamWaitingQuestionAnswer")->isEnabled());
+    row(leadItem)->findChild<QPushButton *>("teamWaitingQuestionAnswer")->click();
+    QTRY_COMPARE(calls(script(), "answer").size(), 1);
+    auto sent = calls(script(), "answer").first();
+    QCOMPARE(sent["member"].toString(), QStringLiteral("lead"));
+    QCOMPARE(sent["question_id"].toString(), QStringLiteral("toolu_cache"));
+    QCOMPARE(sent["expected_question_hash"].toString(), QStringLiteral("hash-cache"));
+    QCOMPARE(sent["answers"].toArray(), (QJsonArray{QJsonObject{{"question_id", "q_0"}, {"selected_option_ids", QJsonArray()},
+                                                                {"text", "Yes, on D:, but 30 GB"}}}));
+    QTRY_VERIFY(!row(leadItem));
+    // The proposal: the recommended option, sent with its hash.
+    for (auto *option : row(proposalItem)->findChildren<QRadioButton *>("teamProposalQuestionOption"))
+        if (option->property("option") == "20 GB") option->click();
+    QTRY_VERIFY(row(proposalItem)->findChild<QPushButton *>("teamProposalAnswer")->isEnabled());
+    row(proposalItem)->findChild<QPushButton *>("teamProposalAnswer")->click();
+    QTRY_COMPARE(calls(script(), "decide-proposal").size(), 1);
+    sent = calls(script(), "decide-proposal").first();
+    QCOMPARE(sent["proposal"].toString(), QStringLiteral("p3"));
+    QCOMPARE(sent["accept"].toBool(), true);
+    QCOMPARE(sent["expected_hash"].toString(), QStringLiteral("h3"));
+    QCOMPARE(sent["answer"].toString(), QStringLiteral("20 GB"));
+    QTRY_VERIFY(!row(proposalItem));
+    QCOMPARE(answered, (QStringList{leadItem, proposalItem}));
 }
 
 QTEST_MAIN(TestTeamsUiWaiting)

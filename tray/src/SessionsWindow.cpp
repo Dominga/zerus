@@ -2876,6 +2876,7 @@ void SessionsWindow::applyTheme()
     if (m_teamWaitingPage) m_teamWaitingPage->setDark(m_dark);
     if (m_modelServersPage) m_modelServersPage->setDark(m_dark);
     if (m_modelServerSettings) m_modelServerSettings->setDark(m_dark);
+    if (m_settingsPage) m_settingsPage->setDark(m_dark);   // #650 N1: its Phones panel
     for (auto *banner : {m_waitingBanner, m_teamWaitingBanner}) if (banner) banner->setDark(m_dark);
     if (m_teamNewForm) m_teamNewForm->setDark(m_dark);
     m_processes->setTheme(m_dark);

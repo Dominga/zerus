@@ -35,7 +35,7 @@
 namespace PhonePairing {
 namespace {
 constexpr int QuietZone = 4;
-enum Role { KindRole = Qt::UserRole, IdRole, HostRole, WorkspaceRole, TargetRole, WorkspaceIdRole, ServerRole };
+enum Role { KindRole = Qt::UserRole, IdRole, HostRole, WorkspaceRole, TargetRole, WorkspaceIdRole, ServerRole, ChosenRole };
 QString hostName(const QString &host) { return host.isEmpty() ? QCoreApplication::translate("PhonePairing", "this computer") : host; }
 QString full(const QJsonValue &seconds) {
     if (!seconds.isDouble() || seconds.toDouble() <= 0) return {};
@@ -149,7 +149,9 @@ Dialog::Dialog(const QString &executable, const QList<Target> &targets, int sele
     auto *body = new QWidget;
     body->setAutoFillBackground(false);
     auto *content = new QVBoxLayout(body); content->setContentsMargins(0, 0, 0, 0); content->setSpacing(12);
-    m_scroll->setWidget(body); layout->addWidget(m_scroll, 1);
+    // QScrollArea::setWidget turns autoFillBackground on again; the body must
+    // stay transparent over the dialog's own (themed) background (#651 QA).
+    m_scroll->setWidget(body); body->setAutoFillBackground(false); layout->addWidget(m_scroll, 1);
     if (m_targets.size() > 1) {
         m_workspace = new QComboBox; m_workspace->setObjectName("phonePairingWorkspace"); m_workspace->setAccessibleName(tr("Workspace"));
         m_workspace->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon); m_workspace->setMinimumContentsLength(20);
@@ -326,15 +328,24 @@ Panel::Panel(const QString &executable, QWidget *parent, std::function<bool(cons
     m_revoke = new QPushButton(tr("Revoke…")); m_revoke->setObjectName("revokePhone");
     m_refresh = new QPushButton(tr("Refresh")); m_refresh->setObjectName("refreshPhones");
     buttons->addWidget(m_revoke); buttons->addWidget(m_refresh); buttons->addStretch(); layout->addLayout(buttons);
-    setTheme(false);
+    // #650 N1: until a page gives it the theme, the panel takes the window's.
+    setTheme(palette().color(QPalette::Window).lightness() < 128);
     m_pair->setEnabled(false); m_revoke->setEnabled(false);
     connect(m_pair, &QPushButton::clicked, this, [this] { pair(); });
     connect(m_revoke, &QPushButton::clicked, this, [this] { revoke(); });
     connect(m_refresh, &QPushButton::clicked, this, [this] { m_notice.clear(); refresh(); });
     connect(m_tree, &QTreeWidget::itemSelectionChanged, this, [this] {
         const auto *item = m_tree->currentItem();
-        m_revoke->setEnabled(!m_revoking && !m_pairRequested && !m_machines && m_pending.isEmpty()
-                             && item && item->data(0, KindRole).toString() == QLatin1String("phone"));
+        const bool phone = item && item->data(0, KindRole).toString() == QLatin1String("phone");
+        m_revoke->setEnabled(!m_revoking && !m_pairRequested && !m_machines && m_pending.isEmpty() && phone);
+        if (phone) chooseWorkspace(item->data(0, TargetRole).toInt());
+    });
+    // #650 L6: a workspace row is not selected like a phone, but a click on it
+    // (one with no phones too) makes it Pair a phone…'s workspace.
+    connect(m_tree, &QTreeWidget::itemClicked, this, [this](QTreeWidgetItem *item) {
+        if (!item || item->data(0, KindRole).toString() != QLatin1String("workspace")) return;
+        m_tree->clearSelection();
+        chooseWorkspace(item->data(0, TargetRole).toInt());
     });
     connect(m_client, &HgsClient::machinesReady, this, [this](quint64 request, const QJsonObject &result) {
         if (request != m_machines) return;
@@ -433,6 +444,8 @@ void Panel::render() {
         }
     }
     m_tree->expandAll();
+    if (m_chosen >= m_targets.size()) m_chosen = 0;
+    paintGroups();
     static_cast<PhoneTable *>(m_tree)->fit();
     m_tree->setVisible(!m_lists.isEmpty());
     QStringList lines;
@@ -468,6 +481,8 @@ void Panel::setTheme(bool dark) {
     const auto hex = [&token](const char *name) { return token(name).name(QColor::HexArgb); };
     m_groupFill = token("hover"); m_warnColor = token("warn");
     QColor selected = token("accent"); selected.setAlphaF(dark ? .16 : .12);
+    m_chosenFill = selected;
+    m_dark = dark;
     findChild<QLabel *>(QStringLiteral("phonesIntro"))->setStyleSheet(QStringLiteral("color:%1;font-size:11.5px;").arg(hex("muted")));
     m_count->setStyleSheet(QStringLiteral("color:%1;font-size:12px;").arg(hex("muted")));
     m_status->setStyleSheet(QStringLiteral("color:%1;font-size:11.5px;").arg(hex("text2")));
@@ -481,7 +496,7 @@ void Panel::setTheme(bool dark) {
         "QTreeWidget#linkedPhones QHeaderView::section{background:transparent;color:%5;border:0;border-bottom:1px solid %2;"
         "padding:5px 6px 5px 8px;font-size:11.5px;font-weight:400;}")
         .arg(hex("fg"), hex("border"), hex("hover"), selected.name(QColor::HexArgb), hex("muted")));
-    for (int i = 0; i < m_tree->topLevelItemCount(); ++i) m_tree->topLevelItem(i)->setBackground(0, m_groupFill);
+    paintGroups();
     for (auto *line : findChildren<QLabel *>(QStringLiteral("phonesProblem")))
         line->setStyleSheet(QStringLiteral("color:%1;font-size:11.5px;").arg(m_warnColor.name()));
 }
@@ -497,6 +512,9 @@ void Panel::revoke() {
         QMessageBox box(QMessageBox::Warning, tr("Revoke %1?").arg(phone),
             tr("%1 loses access to every computer of %2 at once, and its queued requests are cancelled. "
                "Pair it again to restore access.").arg(phone, workspace), QMessageBox::Cancel, this);
+        // #651 QA: a window does not inherit its parent's palette; the dark
+        // theme's light text needs the window's dark one.
+        box.setPalette(window()->palette());
         auto *revoke = box.addButton(tr("Revoke"), QMessageBox::DestructiveRole);
         box.setDefaultButton(QMessageBox::Cancel); box.exec();
         return box.clickedButton() == revoke;
@@ -507,10 +525,28 @@ void Panel::revoke() {
     m_revoking = m_client->requestMobile(host, pinned(QStringLiteral("revoke-phone"), id, workspaceId, server));
 }
 
+void Panel::chooseWorkspace(int index) {
+    m_chosen = qBound(0, index, qMax(0, int(m_targets.size()) - 1));
+    paintGroups();
+}
+
+void Panel::paintGroups() {
+    // The chosen workspace's row is tinted with the accent; the others keep
+    // the group fill.
+    for (int i = 0; i < m_tree->topLevelItemCount(); ++i) {
+        auto *top = m_tree->topLevelItem(i);
+        const bool chosen = m_targets.size() > 1 && top->data(0, TargetRole).toInt() == m_chosen;
+        top->setBackground(0, chosen ? m_chosenFill : m_groupFill);
+        top->setData(0, ChosenRole, chosen);
+    }
+}
+
 void Panel::pair() {
     if (m_pairRequested || m_targets.isEmpty()) return;
+    // A selected phone's workspace, else the workspace row clicked last.
     const auto *item = m_tree->currentItem();
-    m_pairTarget = m_targets.value(item ? item->data(0, TargetRole).toInt() : 0);
+    const bool phone = item && item->data(0, KindRole).toString() == QLatin1String("phone");
+    m_pairTarget = m_targets.value(phone ? item->data(0, TargetRole).toInt() : m_chosen);
     m_pairRequested = true;
     refresh();
 }
@@ -524,6 +560,8 @@ void Panel::openPairing() {
     for (int i = 0; i < m_targets.size(); ++i)
         if (m_targets[i].workspaceId == m_pairTarget.workspaceId && origin(m_targets[i].serverUrl) == origin(m_pairTarget.serverUrl)) { selected = i; break; }
     Dialog dialog(m_executable, m_targets, selected, this);
+    // #651 QA: the window's palette, as for Revoke (a window does not inherit it).
+    dialog.setPalette(window()->palette());
     dialog.exec();
     m_notice.clear(); refresh();
 }

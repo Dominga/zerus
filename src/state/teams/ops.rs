@@ -1082,6 +1082,7 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
         owner_word: None,
         changes: Vec::new(),
         urgent,
+        start_ahead: false,
         reason: String::new(),
         note: String::new(),
         rejection: None,
@@ -1684,9 +1685,10 @@ fn send_back(team: &mut Team, op: &str, input: &Value, actor: &Actor, events: &m
     }
 }
 
-/// U25: with auto_accept on, every draft that can be accepted now is, in
-/// order; the first that cannot (an earlier draft, a plan error, a send-back)
-/// stops the walk, since the later ones open only after it.
+/// U61: with auto_accept on, a draft stays a draft until its first task is
+/// handed out; that hand-out accepts it, in its own change
+/// (accept_phase_on_hand_out). A draft whose work already started is accepted
+/// here so an older record keeps today's state.
 fn auto_accept(team: &mut Team, offline: &BTreeSet<String>, events: &mut Vec<Event>) {
     if !team.settings.auto_accept || !matches!(team.status, TeamStatus::Running | TeamStatus::Paused) {
         return;
@@ -1695,7 +1697,14 @@ fn auto_accept(team: &mut Team, offline: &BTreeSet<String>, events: &mut Vec<Eve
     order.sort_by_key(|at| (team.phases[*at].order(), team.phases[*at].n));
     for at in order {
         if team.phases[at].state != PhaseState::Draft || accept_blockers(team, at, offline).is_err() {
-            return;
+            continue;
+        }
+        let started = team.phases[at]
+            .tasks
+            .iter()
+            .any(|id| team.task(*id).is_some_and(|task| !task.attempts.is_empty() || task.status == TaskStatus::InProgress));
+        if !started {
+            continue;
         }
         let state = accept_phase(team, at, "Auto", false);
         let record = &team.phases[at];
@@ -1703,7 +1712,31 @@ fn auto_accept(team: &mut Team, offline: &BTreeSet<String>, events: &mut Vec<Eve
             "phase_auto_accepted",
             json!({"phase":record.n,"title":record.title,"tasks":record.tasks.len(),"state":state}),
         ));
+        team.phases[at].start_ahead = false;
     }
+}
+
+/// U61: the first hand-out of a task in an auto-accepted draft fixes the phase
+/// by Auto, in the same change that hands the task out.
+pub(crate) fn accept_phase_on_hand_out(team: &mut Team, task_id: u32, events: &mut Vec<Event>) {
+    if !team.settings.auto_accept {
+        return;
+    }
+    let Some(task) = team.task(task_id) else { return };
+    let Some(at) = team
+        .phases
+        .iter()
+        .position(|phase| phase.n == task.phase && phase.state.is_draft() && phase.approval == Approval::Auto)
+    else {
+        return;
+    };
+    let state = accept_phase(team, at, "Auto", false);
+    let record = &team.phases[at];
+    events.push(Event::new(
+        "phase_auto_accepted",
+        json!({"phase":record.n,"title":record.title,"tasks":record.tasks.len(),"state":state}),
+    ));
+    team.phases[at].start_ahead = false;
 }
 
 /// U59: adds the free phase's ordinary build task (assigned to the lead), one
@@ -4307,6 +4340,35 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
         // U59: the owner closes a free phase explicitly; the team continues in
         // standard mode. Integration and a build are ordinary lead tasks, so the
         // close creates none and is never a barrier.
+        "start-ahead" => {
+            // U61: the lead lets idle members start an auto-accepted draft now;
+            // its first hand-out accepts the phase, so it is undoable only
+            // before any task is handed out.
+            ensure!(human_or_lead, "Only the lead or you start a phase ahead");
+            ensure!(
+                team.settings.auto_accept,
+                "Start-ahead needs Auto-accept: the phase is accepted at its first hand-out"
+            );
+            let n = phase_number(input)?;
+            let undo = input["undo"].as_bool() == Some(true);
+            let at = team
+                .phases
+                .iter()
+                .position(|phase| phase.n == n)
+                .with_context(|| format!("Unknown phase {n}"))?;
+            let record = &team.phases[at];
+            ensure!(record.state.is_draft(), "Phase {n} is not a draft");
+            ensure!(record.approval == Approval::Auto, "Phase {n} is a review draft: the owner approves it");
+            ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "Only a running or paused team starts a phase ahead");
+            let handed = record.tasks.iter().any(|id| team.task(*id).is_some_and(|task| !task.attempts.is_empty()));
+            ensure!(!handed, "Phase {n} has a handed-out task: it is accepted and stays");
+            team.phases[at].start_ahead = !undo;
+            events.push(Event::new(
+                if undo { "phase_start_ahead_undone" } else { "phase_started_ahead" },
+                json!({"phase":n,"by":actor.label(team)}),
+            ));
+            Ok(json!({"status":if undo {"undone"} else {"started"},"phase":n,"start_ahead":!undo}))
+        }
         "close-phase" => {
             ensure!(matches!(actor, Actor::Human), "Only you close a free phase");
             ensure!(team.plan_mode == PlanMode::Free, "The team is not planning in free mode");
@@ -8871,39 +8933,82 @@ mod tests {
         assert_eq!(receipt["phase_state"], "running");
     }
 
+    /// U61: with Auto-accept on, a draft is not accepted when drafted: it stays
+    /// the lead's to edit until its first hand-out fixes it by Auto.
     #[test]
-    fn auto_accept_takes_error_free_drafts_on_enabling_and_later() {
+    fn a_draft_is_not_auto_accepted_until_its_first_hand_out() {
         let mut team = running_team();
+        team.settings.approval = Approval::Auto;
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        let lead = Actor::Member("lead".into());
+        apply(&mut team, "settings", &json!({"settings":{"auto_accept":true}}), &Actor::Human, &none, &mut events).unwrap();
+        events.clear();
+        team.phases.push(Phase {
+            n: 2,
+            order: 2,
+            title: "Next".into(),
+            barrier: true,
+            approval: Approval::Auto,
+            state: PhaseState::Draft,
+            tasks: vec![3],
+            ..Default::default()
+        });
+        team.tasks.push(Task { id: 3, title: "Next".into(), phase: 2, status: TaskStatus::Pending, assignee: "dev".into(), ..Default::default() });
+        auto_accept(&mut team, &none, &mut events);
+        assert_eq!(team.phases[0].state, PhaseState::Draft);
+        assert!(!events.iter().any(|event| event.kind == "phase_auto_accepted"), "{events:?}");
+        // It stays editable, even after the draft ahead is accepted.
+        apply(&mut team, "edit-draft", &json!({"phase":2,"tasks_update":[{"id":3,"assignee":"qa"}]}), &lead, &none, &mut events).unwrap();
+        assert_eq!(team.phases[0].state, PhaseState::Draft);
+        assert_eq!(team.task(3).unwrap().assignee, "qa");
+        // The lead starts it ahead for idle members; the first hand-out fixes it.
+        let started = apply(&mut team, "start-ahead", &json!({"phase":2}), &lead, &none, &mut events).unwrap();
+        assert_eq!(started["start_ahead"], json!(true));
+        let summary = plan::phase_summary(&team);
+        let phase = summary.iter().find(|phase| phase["n"] == 2).unwrap();
+        assert_eq!(
+            (phase["state"].as_str(), phase["auto"].as_bool(), phase["start_ahead"].as_bool()),
+            (Some("draft"), Some(true), Some(true))
+        );
+        events.clear();
+        accept_phase_on_hand_out(&mut team, 3, &mut events);
+        assert!(team.phases[0].state.is_accepted(), "{:?}", team.phases[0].state);
+        assert_eq!(team.phases[0].decided_by, "Auto");
+        assert!(!team.phases[0].start_ahead);
+        let auto: Vec<&Event> = events.iter().filter(|event| event.kind == "phase_auto_accepted").collect();
+        assert_eq!((auto.len(), &auto[0].payload["phase"]), (1, &json!(2)));
+    }
+
+    #[test]
+    fn start_ahead_needs_an_auto_draft_and_the_lead_and_can_be_undone_before_a_hand_out() {
+        let mut team = running_team();
+        team.settings.auto_accept = true;
         team.settings.approval = Approval::Review;
         let mut events = Vec::new();
         let none = BTreeSet::new();
         let lead = Actor::Member("lead".into());
-        // Phase 1 keeps one open task, so accepted phases queue behind it.
-        apply(&mut team, "cancel", &json!({"task":2}), &Actor::Human, &none, &mut events).unwrap();
-        extend(&mut team, &json!({"tasks":[{"id":3,"title":"Fix","assignee":"dev"}]}), &lead, &none, &mut events).unwrap();
-        extend(&mut team, &json!({"tasks":[{"id":4,"title":"Retest","assignee":"qa"}]}), &lead, &none, &mut events).unwrap();
-        // The setting is the owner's.
-        let error = apply(&mut team, "settings", &json!({"settings":{"auto_accept":true}}), &lead, &none, &mut events).unwrap_err();
-        assert_eq!(error.to_string(), "Only you change the team's auto_accept");
-        // Phase 3 has an error now: enabling accepts phase 2 only.
-        team.members.iter_mut().find(|member| member.id == "qa").unwrap().state = MemberState::Removed;
-        events.clear();
-        apply(&mut team, "settings", &json!({"settings":{"auto_accept":true}}), &Actor::Human, &none, &mut events).unwrap();
-        assert!(team.settings.auto_accept);
-        assert_eq!(team.phases.iter().map(|phase| phase.state).collect::<Vec<_>>(), vec![PhaseState::Queued, PhaseState::Draft]);
-        let auto: Vec<&Event> = events.iter().filter(|event| event.kind == "phase_auto_accepted").collect();
-        assert_eq!((auto.len(), &auto[0].payload["phase"], &auto[0].payload["state"]), (1, &json!(2), &json!("queued")));
-        assert_eq!(team.phases[0].decided_by, "Auto");
-        // Fixed by the lead, the draft is accepted on that change.
-        apply(&mut team, "edit-draft", &json!({"phase":3,"tasks_update":[{"id":4,"assignee":"dev"}]}), &lead, &none, &mut events).unwrap();
-        assert_eq!(team.phases[1].state, PhaseState::Queued);
-        // A new draft is accepted at once; a send-back is never auto-accepted.
-        apply(&mut team, "extend", &json!({"tasks":[{"id":5,"title":"Docs","assignee":"dev"}]}), &lead, &none, &mut events).unwrap();
-        assert_eq!(team.phases[2].state, PhaseState::Queued);
+        extend(&mut team, &json!({"tasks":[{"id":3,"title":"Review","assignee":"dev"}]}), &lead, &none, &mut events).unwrap();
+        // A review draft is the owner's, so the lead cannot start it ahead.
+        let error = apply(&mut team, "start-ahead", &json!({"phase":2}), &lead, &none, &mut events).unwrap_err().to_string();
+        assert!(error.contains("review draft"), "{error}");
+        // An Auto draft, but a member is not the lead.
+        team.phases[0].approval = Approval::Auto;
+        let error = apply(&mut team, "start-ahead", &json!({"phase":2}), &Actor::Member("dev".into()), &none, &mut events).unwrap_err().to_string();
+        assert!(error.contains("lead"), "{error}");
+        // Auto-accept must be on: it is what accepts the phase at its hand-out.
         team.settings.auto_accept = false;
-        extend(&mut team, &json!({"tasks":[{"id":6,"title":"More","assignee":"dev"}]}), &lead, &none, &mut events).unwrap();
-        apply(&mut team, "reject-phase", &json!({"phase":5,"comment":"Not yet"}), &Actor::Human, &none, &mut events).unwrap();
-        apply(&mut team, "settings", &json!({"settings":{"auto_accept":true}}), &Actor::Human, &none, &mut events).unwrap();
-        assert_eq!(team.phases[3].state, PhaseState::Rejected);
+        let error = apply(&mut team, "start-ahead", &json!({"phase":2}), &lead, &none, &mut events).unwrap_err().to_string();
+        assert!(error.contains("Auto-accept"), "{error}");
+        team.settings.auto_accept = true;
+        let started = apply(&mut team, "start-ahead", &json!({"phase":2}), &lead, &none, &mut events).unwrap();
+        assert_eq!(started["status"], json!("started"));
+        let undone = apply(&mut team, "start-ahead", &json!({"phase":2,"undo":true}), &lead, &none, &mut events).unwrap();
+        assert_eq!((undone["status"].clone(), team.phases[0].start_ahead), (json!("undone"), false));
+        // Once a task is handed out, the phase is accepted and stays.
+        apply(&mut team, "start-ahead", &json!({"phase":2}), &lead, &none, &mut events).unwrap();
+        team.task_mut(3).unwrap().attempts.push(Attempt { n: 1, id: "a1".into(), member: "dev".into(), ..Default::default() });
+        let error = apply(&mut team, "start-ahead", &json!({"phase":2,"undo":true}), &lead, &none, &mut events).unwrap_err().to_string();
+        assert!(error.contains("handed-out"), "{error}");
     }
 }

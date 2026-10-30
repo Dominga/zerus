@@ -161,6 +161,13 @@ pub(crate) struct Settings {
     /// conversation, at most three times an hour; off by default.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub restart_crashed: bool,
+    /// U56: minutes a busy member may go without a session event before Zerus
+    /// marks it stuck; 0 (unset) reads the default of 10.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub stuck_minutes: u32,
+    /// U56: the lead may interrupt or relaunch a stuck member; the owner sets it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lead_restarts_stuck: bool,
 }
 
 /// U48: the name of a task's branch: `{id}`, `{member}` and `{team8}` are
@@ -248,6 +255,8 @@ impl Default for Settings {
             branch_per_task: None,
             base_branch: String::new(),
             restart_crashed: false,
+            stuck_minutes: 0,
+            lead_restarts_stuck: false,
         }
     }
 }
@@ -422,6 +431,19 @@ pub(crate) struct Member {
     /// derives `stopped` from it without a listing of its own (L3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seen: Option<MemberSeen>,
+    /// U56: the member's session phase and activity as the dispatcher last saw
+    /// them, and when it last reported an event: status shows them without a
+    /// listing of its own.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub seen_phase: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub seen_activity: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seen_event_at: Option<f64>,
+    /// U56: a busy member with no session event for stuck_minutes, with the
+    /// reason and the phase it was in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stuck: Option<MemberStuck>,
     /// The permission request the lead last heard about (B1): the exact
     /// command, where it came from and the agent's reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -570,6 +592,16 @@ pub(crate) struct CommitRef {
 pub(crate) struct MemberSeen {
     pub at: f64,
     pub live: bool,
+}
+
+/// U56: why Zerus marks a member stuck: no session event while it is busy.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct MemberStuck {
+    pub at: f64,
+    /// `compaction_timeout` (its phase was compacting) or `no_progress`.
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub phase: String,
 }
 
 impl Member {

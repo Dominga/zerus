@@ -877,7 +877,7 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
 /// C4: the settings that decide who approves, how far a team may grow and
 /// what runs without the owner stay the owner's; the lead changes the rest.
 /// Spec 6.1 lets the lead set resume_after_limits too.
-pub(crate) const OWNER_SETTINGS: [&str; 15] = [
+pub(crate) const OWNER_SETTINGS: [&str; 16] = [
     "approval",
     "phase_approval",
     "max_members",
@@ -896,6 +896,8 @@ pub(crate) const OWNER_SETTINGS: [&str; 15] = [
     "base_branch",
     // U52: only the owner lets Zerus launch a crashed member again.
     "restart_crashed",
+    // U56: only the owner lets the lead restart a stuck member.
+    "lead_restarts_stuck",
 ];
 
 fn ensure_lead_settings(old: &Settings, new: &Settings, actor: &Actor, on_word: bool) -> anyhow::Result<()> {
@@ -1725,6 +1727,12 @@ fn add_build_task(team: &mut Team, phase: u32, by: &str, events: &mut Vec<Event>
     }
     events.push(Event::new("phase_build_added", json!({"phase":phase,"task":id,"by":by})));
     Ok(id)
+}
+
+/// U56: how long a busy member may go without a session event; unset reads 10.
+pub(crate) fn stuck_minutes(team: &Team) -> f64 {
+    let minutes = team.settings.stuck_minutes;
+    if minutes == 0 { 10.0 } else { f64::from(minutes) }
 }
 
 /// U59: the open phase of a free team: the latest approved phase, or phase 1
@@ -4328,11 +4336,17 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
         }
         "relaunch" => {
             // U54: the owner relaunches directly; the lead on its verified word.
+            // U56: on the owner's setting, the lead also relaunches a member
+            // Zerus marks stuck.
+            let member_id = text(input, "member").to_owned();
+            let stuck = team.member(&member_id).is_some_and(|member| member.stuck.is_some());
             ensure!(
-                matches!(actor, Actor::Human) || (actor.is_lead(team) && input["roster_word"].as_bool() == Some(true)),
-                "Only you relaunch a member; the lead needs your word"
+                matches!(actor, Actor::Human)
+                    || (actor.is_lead(team)
+                        && (input["roster_word"].as_bool() == Some(true) || (team.settings.lead_restarts_stuck && stuck))),
+                "Only you relaunch a member; the lead needs your word, or the owner's setting lead_restarts_stuck for a stuck member (hgs team settings with {{\"lead_restarts_stuck\":true}})"
             );
-            let id = text(input, "member").to_owned();
+            let id = member_id;
             let member = team.members.iter_mut().find(|m| m.id == id).context("Unknown member")?;
             ensure!(member.session.is_none() && !member.error.is_empty(), "This member's session did not fail to start");
             member.error.clear();
@@ -6560,6 +6574,23 @@ mod tests {
         worded["owner_word_checked"] = json!({"text":"Please add one more backend to the roster"});
         apply(&mut team, "scale", &worded, &Actor::Member("lead".into()), &none, &mut events).unwrap();
         assert!(team.member("backend3").unwrap().added.is_some(), "the roster says the lead added it on your word");
+    }
+
+    /// U56: the lead relaunches a stuck member only on the owner's setting;
+    /// otherwise the refusal names the command that sets it.
+    #[test]
+    fn a_stuck_member_is_relaunched_by_the_lead_only_with_the_owners_setting() {
+        let mut team = running_team();
+        let lead = Actor::Member("lead".into());
+        let none = BTreeSet::new();
+        let mut events = Vec::new();
+        team.members.iter_mut().find(|member| member.id == "qa").unwrap().stuck =
+            Some(MemberStuck { at: 1.0, reason: "no_progress".into(), phase: "tool".into() });
+        let error = apply(&mut team, "relaunch", &json!({"member":"qa"}), &lead, &none, &mut events).unwrap_err().to_string();
+        assert!(error.contains("lead_restarts_stuck"), "{error}");
+        team.settings.lead_restarts_stuck = true;
+        let error = apply(&mut team, "relaunch", &json!({"member":"qa"}), &lead, &none, &mut events).unwrap_err().to_string();
+        assert!(error.contains("did not fail to start"), "the gate passes and the session check speaks: {error}");
     }
 
     #[test]

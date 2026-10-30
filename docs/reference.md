@@ -3795,12 +3795,20 @@ Each server row has a `name`; the API `base_url`
 `kind` (`openai` or `anthropic`); an optional `key` (stored only in this private
 file, never shown by a listing); an optional `ssh` host, either one of this
 computer's Machines or an SSH alias, always reached through hgs's own SSH
-transport (BatchMode, never a piped `ssh.exe` on Windows); and optional control
-commands as argv templates for `status`, `up`, `down` and `logs`. `{model}` is
-the only input a command receives and `{server}` its server name. Commands are
-argv lists, never shell lines: locally hgs starts the program itself and over
-SSH it quotes each argument for the peer's login shell. `up_minutes` bounds a
-detached `up` (30 by default, 1 to 240).
+transport (BatchMode, `-n`, never a piped `ssh.exe` on Windows); and optional
+control commands as argv templates for `status`, `up`, `down` and `logs`.
+`{model}` is the only input a command receives and `{server}` its server name.
+Commands are argv lists, never shell lines: locally hgs starts the program
+itself and over SSH it quotes each argument for the peer's login shell. A
+Windows Machine has no POSIX login shell, so its control commands are refused
+with a message naming it. `up_minutes` bounds a detached `up` (30 by default, 1
+to 240).
+
+`base_url` names the server root, without `/v1`: the root is stored and each
+consumer derives its own URL from it — `GET root/v1/models` for the model list,
+`root/v1` for an OpenAI-compatible client, `root` for Claude Code (which appends
+`/v1/messages` itself). Both spellings, with and without `/v1`, are accepted and
+name the same server; the trailing `/v1` is not stored.
 
 ```json
 {"version":1,"servers":[
@@ -3811,7 +3819,7 @@ detached `up` (30 by default, 1 to 240).
 ]}
 ```
 
-Without control commands the server is read only: `status` reads `GET /v1/models`
+Without control commands the server is read only: `status` reads `root/v1/models`
 (with `Authorization: Bearer` for an OpenAI kind, `x-api-key` for Anthropic) and
 lists the models it returns. An `http://` server is read by hgs itself; an
 `https://` server is read through the system `curl` (`curl.exe` on Windows 10+,
@@ -3824,7 +3832,10 @@ work because the agents speak TLS themselves. A control command may print the
 Zerus JSON contract
 `{"models":[{"name":"small","state":"running"}],"memory":{"free":12.5,"total":64}}`
 or plain lines `NAME: STATE`, with an optional `memory: FREE/TOTAL GB` line;
-any other line is kept as raw text. States are shown lowercased.
+any other line is kept as raw text. States are shown lowercased. A `NAME: STATE`
+line splits at the last `": "`, so a model named with a tag (`coder-a:q4:
+running`) keeps its whole name and `Down` targets exactly that model; a name
+starting with `-` is offered by no list and refused by `up` and `down`.
 
 Commands (all local to the configured computer; `--json` is available on `list`
 and `status`):
@@ -3847,20 +3858,21 @@ under `was`, and `"key":null` removes it. Every error names the server and the
 field, nothing is written on an error, and the receipt lists the servers as
 `list --json` does, never with a key. `test --json` takes one server as
 Settings shows it, saved or not (an absent `key` means the stored key of
-`was`), runs `status` once and prints what `status --json` would, saving
-nothing. The key travels only in the stdin JSON, never in an argument. Settings
-tests the status and logs commands only; `up` and `down` belong to the Model
-servers tab with its confirmations. `list --json` also carries each server's
-command templates in `argv`.
+`was`, kept only while its root is unchanged — a test with another root never
+sends the stored key), runs `status` once and prints what `status --json`
+would, saving nothing. Settings tests the status and logs commands only; `up`
+and `down` belong to the Model servers tab with its confirmations. `list --json`
+also carries each server's command templates in `argv`.
 
 `list` shows `name`, `base_url`, `kind`, its SSH host and which control commands
 exist, never the key. `up` and `down` accept only a validated model name (letters,
-digits and `-_.:/@+`) and return a receipt; `up --detach` starts the command as a
-detached `hgs run` with the server's time limit, so the receipt carries its
-`request_id`. A server may be shared, so `down` asks first and says so: without
-`--yes` it returns `{"status":"confirm",...}` and runs nothing. `logs` keeps the
-last `--lines` lines (200 by default, at most 2000) within a fixed time and
-output bound.
+digits and `-_.:/@+`, no leading `-`) and return a receipt; `up --detach` starts
+the command as a detached `hgs run` with the server's time limit, so the receipt
+carries its `request_id`. The run receives an argv, not a shell line, so a
+Windows path or a quoted remote command arrives as one argument. A server may be
+shared, so `down` asks first and says so: without `--yes` it returns
+`{"status":"confirm",...}` and runs nothing. `logs` keeps the last `--lines`
+lines (200 by default, at most 2000) within a fixed time and output bound.
 
 Unreachable (the SSH host or API address does not answer), refused (the command
 or the API answered with a failure), timed out (the fixed limit passed) and
@@ -3870,12 +3882,27 @@ retries on its own.
 
 Choose a server's API and model for a new session with
 `hgs codex DIRECTORY --new -n TAG --model-server lab --model small`. The launch
-carries this session's provider settings only: Codex's OpenAI-compatible
-`OPENAI_BASE_URL`/`OPENAI_API_KEY` and `--model`, Claude Code's
-`ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` and model variables (an Anthropic
-server), and OpenCode's provider configuration in `OPENCODE_CONFIG_CONTENT`
-plus a `hgs-lab/small` provider model. The user's global agent configuration is
-never changed, and resuming a saved conversation keeps its original provider.
+carries this session's provider settings only. Codex gets a session-scoped
+custom provider, `-c model_providers.hgs-lab={name,base_url,env_key,wire_api}`
+and `-c model_provider=hgs-lab` with `--model small`: it speaks the server's
+chat-completions API and reads its key from `HGS_MODEL_SERVER_KEY`, so neither
+the built-in OpenAI provider (the Responses API) nor a ChatGPT login is used.
+Claude Code gets `ANTHROPIC_BASE_URL` (the root) and its model variables, with
+the token in `ANTHROPIC_AUTH_TOKEN`. OpenCode is not offered for a model server
+until it has a per-session provider contract; a global provider entry would
+break the session scope. The user's global agent configuration is never
+changed.
+
+The key never travels on a command line: the launch leaves the session's secret
+environment in a private file and passes only its path to `hgs --run`, which
+reads it, gives it to the agent and removes the file. It is therefore absent
+from the tmux start command, from the session's environment listing and from
+`--dry-run` (which prints `NAME=***` for a secret). Only the agent's own
+environment inherits it.
+
+A session records its model server and model. `hgs resume` applies those
+settings again; when the server is no longer configured the resume is refused
+with a message naming it instead of falling back to the cloud account.
 
 <a id="deepseek"></a>
 

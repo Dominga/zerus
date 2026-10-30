@@ -244,6 +244,29 @@ pub(crate) struct LaunchSpec {
     pub detached: bool,
 }
 
+/// Environment variables whose value is a secret: `--dry-run` prints the name
+/// and `***`, never the value, even if a caller puts one in a `LaunchSpec`
+/// (U60 #658 N3).
+pub(crate) const SECRET_ENV: &[&str] = &[
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "CODEX_ACCESS_TOKEN",
+    "HGS_MODEL_SERVER_KEY",
+    "OPENCODE_CONFIG_CONTENT",
+    "KIMI_API_KEY",
+    "MOONSHOT_API_KEY",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+];
+
+/// One `KEY=VALUE` for a dry-run: a secret's value is masked.
+pub(crate) fn masked(value: &str) -> String {
+    match value.split_once('=') {
+        Some((key, _)) if SECRET_ENV.contains(&key) => format!("{key}=***"),
+        _ => value.to_owned(),
+    }
+}
+
 /// How an interactive client ended: its exit code, and whether the terminal
 /// server died (the terminal is then already restored and the user told).
 pub(crate) struct ClientExit {

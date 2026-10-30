@@ -160,6 +160,35 @@ decoding. It runs once on exhaustion and refuses changed hashes or read errors
 before a final manifest. G1 still checks source identity and its current drain;
 this callback creates no runtime authority. Unsupported/oversized sources stay
 unchanged and unhandled. These APIs do not imply a complete production import.
+Source metadata is available through `SourceStream::identity()`; chunks and
+recheck state cannot be replaced after construction.
+
+`migration::transport::Publisher::probe(selected_hgs, environment)` connects
+this producer to G1's [desktop-import-v1 transport](desktop-import-transport.md)
+using the existing core child-process runner. It bounds the exact help-marker
+probe to five seconds/256 KiB, then obtains the configuration from supported
+read-only desktop status. It keeps the selected executable/environment and
+rechecks capability/configuration before publication or fixed-ID inspection.
+Call every probe, source decoder, stream and wait off the GUI thread.
+
+Build the bundle with `publisher.configuration()` and a durably retained import
+UUID. `publisher.publish(bundle)` accepts only an untouched bundle with a fresh
+recheck attached to every source, within the 64 MiB wire budget. It writes one
+bounded body at a time and closes stdin after the final Staged record. Both
+publisher output pipes have a hard 16 KiB capture limit; overflow or the
+130-second child deadline stops only that owned child. A `StagedReceipt` is
+accepted only when its configuration, UUID, manifest digest, evidence, byte and
+snapshot/page counts match exactly what was sent. No report contains bodies or
+source paths. This API has no startup hook and does not select source families.
+
+Failures retain `PublishFailure.import_id`. They never generate another UUID,
+retry publication or overwrite evidence. Explicit `publisher.status(id)` checks
+only that retained manifest and reports absent or its body-free digest/evidence.
+Absent also covers incomplete publication and never authorizes reuse. Present
+does not establish current drain, sync durability, delegation or effect authority.
+The opt-in `migration_publisher_native` integration test exercises the real
+selected CLI with synthetic sources and isolated HGS directories; run it with
+`HGS_IMPORT_TEST_BIN` and `--ignored`. It starts no service or native agent.
 
 `qt_task_forms(&QtSnapshot)` preserves `tasks/newCard/*/title|request`,
 `titleDraft`, `noteDraft` and `messageRequest` in private entries

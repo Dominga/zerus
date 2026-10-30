@@ -384,15 +384,20 @@ private quarantine metadata and retries for failed families. Row density keeps
 Qt's bounded packed hashes, matches exact host/raw-command/archive/conversation
 identity and persists new choices without rereading a handled Qt family.
 `client/core::migration` supplies bounded staged evidence over the existing
-creation/read decoders; original states and identities are preserved without
-replay. The shared handoff contract lives in `crates/desktop-migration`; G1 owns
-the executable transport, secure publisher, marker phases and current drain.
+creation/read decoders and task forms/delivery records; original states and
+identities are preserved without replay. Its transport client streams to G1's
+selected publisher with exact capability/configuration checks, bounded pipes
+and source rechecks; it has no startup hook. The shared handoff contract lives
+in `crates/desktop-migration`; G1 owns the executable transport, secure publisher,
+marker phases and current drain. The first-G3 `task-preferences` family also
+imports a previously unhandled missing `tasks/onlySession` value once.
 
 Remaining source coverage includes `projectFolderSplit`,
 `removeWorktreeAfterTermination`, worktree snapshots, `pendingLaunches`,
-repository-clone pending state, `swarm/observed*`, `tray.conf`, `tasks/*` forms,
-`.zerus-files.json`, task-delivery snapshots and the rest of the interim stores
-listed below. Creation/pending-read adapters do not by themselves publish
+repository-clone pending state, `swarm/observed*`, `tray.conf`, task inspector
+geometry, `.zerus-files.json` and the rest of the interim stores listed below.
+Source discovery and production integration remain separate; adapters do not
+by themselves publish
 eligible evidence or transfer writer authority. Approval-reset evidence must
 still inspect both prior Qt and interim policy; former consent never migrates.
 

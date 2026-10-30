@@ -1,6 +1,6 @@
 //! Bounded G3 bundle assembly over the existing source decoders. This module
-//! opens/writes no files, calls no CLI and delivers no effects. G1 owns the
-//! authenticated executable transport, private immutable publication and drain.
+//! opens/writes no source files and delivers no effects. `transport` connects
+//! bundles to G1's selected CLI publisher; G1 owns private publication and drain.
 //!
 //! Consume each yielded Read stream before asking for another item. Metadata
 //! pages are body-free; only private snapshots hold source details. A record
@@ -18,6 +18,7 @@ use zerus_desktop_migration::{
 };
 
 pub mod sources;
+pub mod transport;
 
 /// Redacted failures; source payloads and filesystem paths never enter errors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,8 +51,9 @@ pub type SourceResult<T> = Result<T, SourceError>;
 /// schema and exact identity/hash, and yield an error on unknown/partial data.
 /// An individual value must already be bounded; do not load a whole journal.
 pub struct SourceStream {
-    pub identity: SourceRecord,
-    pub chunks: Box<dyn Iterator<Item = SourceResult<Value>> + Send>,
+    identity: SourceRecord,
+    chunks: Box<dyn Iterator<Item = SourceResult<Value>> + Send>,
+    rechecked: bool,
 }
 
 impl SourceStream {
@@ -62,7 +64,12 @@ impl SourceStream {
         Self {
             identity,
             chunks: Box::new(chunks),
+            rechecked: false,
         }
+    }
+
+    pub fn identity(&self) -> &SourceRecord {
+        &self.identity
     }
 
     /// Recheck the exact source after its decoder finishes. The caller uses
@@ -99,7 +106,11 @@ impl SourceStream {
             verify: Some(verify),
             ended: false,
         };
-        Self::new(self.identity, chunks)
+        Self {
+            identity: self.identity,
+            chunks: Box::new(chunks),
+            rechecked: true,
+        }
     }
 }
 
@@ -131,6 +142,7 @@ pub struct Bundle {
     admitted_bytes: u64,
     emitted_bytes: u64,
     ended: bool,
+    publication_checks: bool,
 }
 
 impl Bundle {
@@ -175,6 +187,7 @@ impl Bundle {
         if admitted_bytes == 0 {
             return Err(SourceError::TooLarge);
         }
+        let publication_checks = sources.iter().all(|source| source.rechecked);
         Ok(Self {
             record,
             sources: sources.into_iter(),
@@ -184,6 +197,7 @@ impl Bundle {
             admitted_bytes,
             emitted_bytes: 0,
             ended: false,
+            publication_checks,
         })
     }
 

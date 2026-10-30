@@ -196,3 +196,20 @@
   dialog.su-dlg .dlg-head h2 { min-width: 0; }
   .dlg-body > .su-table { margin: 10px 0; border: 1px solid var(--z-color-card-border); border-radius: var(--z-radius-lg); }
 }
+
+@layer components {
+  /* Project color popup */
+  .pc-body { display: flex; flex-direction: column; gap: 12px; }
+  .pc-preview { height: 36px; }
+  .pc-swatches { display: grid; grid-template-columns: repeat(6, 44px); gap: 8px; }
+  .pc-sw { width: 44px; height: 32px; border-radius: var(--z-radius-md); border: 1px solid var(--z-color-border); transition: scale var(--z-motion-fast) var(--ease); }
+  .pc-sw:hover { scale: 1.06; }
+  .pc-sw.on { outline: 2px solid var(--z-color-text); outline-offset: 2px; }
+  .pc-body .form-row { margin: 0; grid-template-columns: 60px 1fr; }
+  .pc-hex { width: 120px; }
+  .pc-more { align-self: flex-start; }
+  .pc-picker { display: grid; gap: 6px; padding: 10px; border-radius: var(--z-radius-md); background: var(--z-color-field); border: 1px solid var(--z-color-border); }
+  .pc-picker label { display: grid; grid-template-columns: 80px 1fr; align-items: center; font-size: var(--fs-xs); color: var(--z-color-label); }
+  .pc-picker input { accent-color: var(--z-color-accent); }
+
+}

@@ -123,6 +123,7 @@ export function createOrganization(say: Say, unsay: (key: string) => void = () =
   }
   const createProject = (name: string, rows: readonly Row[] = []) =>
     run(invalidArchive(rows) ?? refusal(), () => bridge.createProject(name, rows.map(memberOf)));
+  const setProjectColor = (projectId: string, color: string) => run(refusal(projectId), () => bridge.setProjectColor(projectId, color));
   const renameProject = (projectId: string, name: string) => run(refusal(projectId), () => bridge.renameProject(projectId, name));
   const deleteProject = (projectId: string, destination: string) =>
     run(refusal(projectId, destination), () => bridge.deleteProject(projectId, destination));
@@ -132,7 +133,7 @@ export function createOrganization(say: Say, unsay: (key: string) => void = () =
   const setProjectCollapsed = (projectId: string, collapsed: boolean) => { void bridge.setProjectCollapsed(projectId, collapsed).catch(() => {}); };
 
   return { grouping, groups, defaultProject, applyGrouping, groupOf, headerOf, moveToProject, createProject,
-           renameProject, deleteProject, moveProject, sortProject, setProjectCollapsed };
+           renameProject, setProjectColor, deleteProject, moveProject, sortProject, setProjectCollapsed };
 }
 
 export type Organization = ReturnType<typeof createOrganization>;
@@ -143,7 +144,7 @@ export function bindArchivedGroups(lookup: (key: string) => string | undefined) 
 
 const app = createOrganization(notify, clearNotice, (key) => archivedGroup(key));
 export const { grouping, groups, defaultProject, applyGrouping, groupOf, headerOf, moveToProject, createProject,
-               renameProject, deleteProject, moveProject, sortProject, setProjectCollapsed } = app;
+               renameProject, setProjectColor, deleteProject, moveProject, sortProject, setProjectCollapsed } = app;
 
 /** Project settings… asks the Projects screen to show this project. */
 export const [projectToShow, setProjectToShow] = createSignal<string | undefined>();

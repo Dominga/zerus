@@ -1381,6 +1381,16 @@ pub async fn create_project(
     .await
 }
 
+/// Uses the existing shared organization writer; local vivid never enters it.
+#[tauri::command]
+pub async fn set_project_color(
+    state: State<'_, Organization>,
+    project: String,
+    color: String,
+) -> Result<EditOutcome, String> {
+    edit(state, move |_| Intent::Color { project, color }).await
+}
+
 #[tauri::command]
 pub async fn rename_project(
     state: State<'_, Organization>,

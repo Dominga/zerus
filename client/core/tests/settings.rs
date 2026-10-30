@@ -1087,3 +1087,30 @@ fn termination_default_imports_once_and_explicit_next_false_always_wins() {
     let saved: Value = serde_json::from_slice(&fs::read(kept).unwrap()).unwrap();
     assert!(saved["g3"]["families"].get("termination-default").is_some());
 }
+
+#[test]
+fn project_vivid_is_exact_local_boolean_state_and_never_an_old_switch_seed() {
+    let scratch = Scratch::new("project-vivid");
+    let path = scratch.0.join("settings.json");
+    let store = Settings::open(path.clone(), None);
+    for id in ["alpha", "nested/project", "project\\id"] {
+        let key = format!("projects/vivid/{id}");
+        assert!(!find(&key).unwrap().seeded);
+        assert!(!store.contains(&key));
+        assert_eq!(store.set(&key, json!(true)).unwrap(), json!(true));
+        assert_eq!(store.set(&key, json!(false)).unwrap(), json!(false));
+    }
+    for key in [
+        "projects/vivid/".into(),
+        "projects/vivid/bad\nidentity".into(),
+        format!("projects/vivid/{}", "a".repeat(257)),
+    ] {
+        assert!(find(&key).is_none());
+    }
+    assert!(store.flush_within(FLUSH));
+    drop(store);
+    let store = Settings::open(path, None);
+    assert!(store.contains("projects/vivid/alpha"));
+    assert!(!store.flag("projects/vivid/alpha"));
+    assert!(!store.contains("projects/vivid/other"));
+}

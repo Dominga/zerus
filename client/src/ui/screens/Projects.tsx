@@ -1,34 +1,27 @@
+import { ProjectLabel } from "../components/ProjectLabel";
+import ProjectColorDialog from "./ProjectColorDialog";
 import { For, Show, createMemo, createResource, createSignal, onCleanup, untrack } from "solid-js";
 import { Icon } from "../lib/icons";
 import { MachineLabel } from "../components/MachineLabel";
 import type { Folder, Project } from "../../types";
 import { projectToShow, setProjectToShow } from "../../store/organization";
 import { projectsPage } from "../../store/projects";
-import { flag, setSetting } from "../../store/settings";
+import { flag, setSetting, settingsLoaded } from "../../store/settings";
 import { setMenu, type MenuEntry } from "../../store/ui";
 import { PROJECT_EDITING, WORKTREE_FLOWS } from "./reasons";
 import { machineCards } from "../../store/machines";
 import { folderButton, folderExists, folderLaunch, folderMenuEntry, newSessionInFolder } from "../sessions/newsession-view";
 import { copy } from "../../store/actions";
 import { openTasks } from "../../store/taskNavigation";
-import { nextSort, projectColor, showAskedProject, shownProjects, sortFolders, type Sort, type SortColumn } from "./projects-ui";
+import { nextSort, showAskedProject, shownProjects, sortFolders, type Sort, type SortColumn } from "./projects-ui";
 
 // Projects (ProjectsDialog.cpp), ported from design/webui/src/screens/Projects.tsx:
 // the shared project catalog the Sessions list groups by (the organization
 // topic, with this device's default project and the project sync status), its
-// folders on each computer. Editing (names, colours, defaults, folders, order,
+// folders on each computer. The color popup uses the shared catalog writer and
+// local presentation settings. Editing (names, defaults, folders, order,
 // deleting, the swarm connection) arrives with project editing (3c), New
 // session with phase 5, and the Worktrees panel with phase 5.
-
-function ProjectLabel(props: { project: Project; class?: string }) {
-  return (
-    <span class={`su-plabel entity ${props.class ?? ""}`} style={{ "--entity": projectColor(props.project) }}>
-      <Icon name={props.project.id === "ungrouped" ? "layers" : "folder"} size={14} stroke={1.8} />
-      <span class="ell">{props.project.name}</span>
-      <Show when={props.project.is_default}><span class="su-pldefault">Default</span></Show>
-    </span>
-  );
-}
 
 const [selectedProject, setSelectedProject] = createSignal<string | undefined>();
 const [selectedFolder, setSelectedFolder] = createSignal(0);
@@ -41,6 +34,7 @@ const NO_FOLDER: Folder = { id: "", key: "", name: "", path: "", computer: "", m
 
 export function ProjectsScreen() {
   const view = projectsPage;
+  const [colorProject, setColorProject] = createSignal<{ project: Project; origin: HTMLElement }>();
   const [sort, setSort] = createSignal<Sort>({ column: "name", ascending: true });
   const projects = createMemo(() => shownProjects(view(), allSwarm()));
   const project = () => projects().find((p) => p.id === selectedProject()) ?? projects().find((p) => p.accessible);
@@ -177,7 +171,7 @@ export function ProjectsScreen() {
                 <label>Color</label>
                 <div class="row">
                   <ProjectLabel project={p()} class="proj-preview" />
-                  <button class="btn" disabled title={PROJECT_EDITING}><Icon name="palette" size={14} />Edit color…</button>
+                  <button class="btn" disabled={!p().accessible || !settingsLoaded()} onClick={(event) => setColorProject({ project: { ...p() }, origin: event.currentTarget })}><Icon name="palette" size={14} />Edit color…</button>
                 </div>
               </div>
               <label class="check proj-default" title={PROJECT_EDITING}>
@@ -222,6 +216,7 @@ export function ProjectsScreen() {
           )}</Show>
         </div>
       </div>
+      <Show when={colorProject()}>{(p) => <ProjectColorDialog project={p().project} origin={p().origin} close={() => setColorProject(undefined)} />}</Show>
     </div>
   );
 }

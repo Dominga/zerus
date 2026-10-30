@@ -86,7 +86,13 @@ function machinePreference(key: string, value: unknown): SettingValue | undefine
   return typeof value === "string" && /^#(?:[\da-f]{3}|[\da-f]{6})$/iu.test(value) ? value : undefined;
 }
 
-const typed = (key: string, value: unknown) => sameType(key, value) ?? shortcut(key, value) ?? machinePreference(key, value);
+function projectPreference(key: string, value: unknown): boolean | undefined {
+  const prefix = "projects/vivid/";
+  if (!key.startsWith(prefix)) return undefined;
+  const id = key.slice(prefix.length);
+  return id && new TextEncoder().encode(id).length <= 256 && !/[\u0000-\u001f\u007f-\u009f]/u.test(id) && typeof value === "boolean" ? value : undefined;
+}
+const typed = (key: string, value: unknown) => sameType(key, value) ?? shortcut(key, value) ?? machinePreference(key, value) ?? projectPreference(key, value);
 
 function typedObject(raw: Record<string, unknown>, keys?: readonly string[]): Settings {
   const values: Settings = {};

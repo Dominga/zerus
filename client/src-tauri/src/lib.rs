@@ -1054,6 +1054,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         organization::move_to_project,
         organization::create_project,
         organization::rename_project,
+        organization::set_project_color,
         organization::delete_project,
         organization::move_project,
         organization::sort_project,

@@ -1,6 +1,7 @@
 //! Durable desktop service kernel. Pre-handoff it owns no fleet or effect writer.
 mod fanout;
 mod handoff;
+mod import_evidence;
 mod protocol;
 mod registration;
 mod revoke;
@@ -24,7 +25,7 @@ use std::{
 use store::{Location, Store};
 use transport::{Listener, Stream, TIMEOUT};
 
-const USAGE: &str = "usage: hgs desktop serve [--config-dir DIR --state-dir DIR] | status [--json] | watch --json | request --json | registration --json | revoke --json [--request-id UUID] [--reason rollback]";
+const USAGE: &str = "usage: hgs desktop serve [--config-dir DIR --state-dir DIR] | status [--json] | watch --json | request --json | registration --json | revoke --json [--request-id UUID] [--reason rollback] | import-evidence --json | import-status --json --import-id UUID";
 const HEARTBEAT: Duration = Duration::from_secs(10);
 pub const STARTUP_REFUSED: i32 = 78;
 
@@ -106,6 +107,14 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
             }
             ["registration", "--json"] => {
                 println!("{}", registration::preview(config, &location)?);
+                Ok(())
+            }
+            ["import-evidence", "--json"] => {
+                println!("{}", import_evidence::cli(&location)?);
+                Ok(())
+            }
+            ["import-status", "--json", "--import-id", id] => {
+                println!("{}", import_evidence::status(&location, id)?);
                 Ok(())
             }
             ["status", "--json"] => {

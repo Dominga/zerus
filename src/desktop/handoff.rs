@@ -13,7 +13,7 @@ use zerus_desktop_migration::{
     MAX_IMPORT_RECORD_BYTES,
 };
 
-fn read_private(path: &Path, limit: usize) -> Result<Vec<u8>> {
+pub(super) fn read_private(path: &Path, limit: usize) -> Result<Vec<u8>> {
     let mut options = fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]

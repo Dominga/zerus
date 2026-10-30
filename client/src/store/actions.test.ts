@@ -254,7 +254,10 @@ describe("perform", () => {
       mocked.runAction.mockResolvedValueOnce({ outcome: "failed", detail: "kept" });
       await a.perform(session(), { kind: "pause" });
       mocked.runAction.mockResolvedValue(done());
+      // A repeated passing result shows once (the bus coalesces it).
       for (let i = 0; i < 6; i++) await a.perform(session(), { kind: "pause" });
+      expect(a.notices().map((n) => n.text)).toEqual(["kept", "Session updated. Refreshing…"]);
+      for (let i = 0; i < 6; i++) a.notify("info", `passing ${i}`);
       expect(a.notices()).toHaveLength(5);
       expect(a.notices()[0]).toMatchObject({ text: "kept", sticky: true });
       mocked.runAction.mockResolvedValue({ outcome: "failed", detail: "x" });
@@ -319,7 +322,8 @@ describe("targets", () => {
         expect((await a.perform(row, action)).outcome).toBe("failed");
       }
       expect(mocked.runAction).not.toHaveBeenCalled();
-      expect(a.notices().map((n) => n.text)).toEqual(Array(3).fill("This session changed. Open its actions again."));
+      // Each refusal says so; the repeated passing notice shows once.
+      expect(a.notices().map((n) => n.text)).toEqual(["This session changed. Open its actions again."]);
       dispose();
     });
   });

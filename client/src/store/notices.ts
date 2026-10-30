@@ -38,13 +38,18 @@ export function createNoticeBus(): NoticeBus {
 
   /**
    * Adds a notice and returns its id. A notice with a key first takes the
-   * place of the one with that key. Over the cap, the oldest other non-sticky
-   * one goes first, then the oldest other; the new one stays.
+   * place of the one with that key; a passing one without takes the place of
+   * the same passing message, as Qt's one notice line shows a repeat once
+   * (several sessions updated together). Over the cap, the oldest other
+   * non-sticky one goes first, then the oldest other; the new one stays.
    */
   function notify(tone: Notice["tone"], text: string, sticky = false, key?: string, title?: string): number {
     const id = nextId++;
+    const replaced = (n: Notice) => key === undefined
+      ? !sticky && n.key === undefined && !n.sticky && n.tone === tone && n.title === title && n.text === text
+      : n.key === key;
     setList((all) => {
-      const next = [...(key === undefined ? all : all.filter((n) => n.key !== key)), { id, tone, title, text, sticky, key }];
+      const next = [...all.filter((n) => !replaced(n)), { id, tone, title, text, sticky, key }];
       while (next.length > MAX_NOTICES) {
         // Never the notice being added: it is the last entry.
         const others = next.slice(0, -1);

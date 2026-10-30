@@ -1716,8 +1716,61 @@ fn auto_accept(team: &mut Team, offline: &BTreeSet<String>, events: &mut Vec<Eve
     }
 }
 
+/// U61: the auto-accepted drafts whose phases ahead are done and whose plan has
+/// no blocker: the dispatcher accepts them by Auto, and the ordinary ready path
+/// then hands out (launch, rebalance, role routing).
+pub(crate) fn drafts_ready_to_auto_accept(team: &Team, offline: &BTreeSet<String>) -> Vec<u32> {
+    if !team.settings.auto_accept || !matches!(team.status, TeamStatus::Running | TeamStatus::Paused) {
+        return Vec::new();
+    }
+    team.phases
+        .iter()
+        .filter(|phase| phase.state.is_draft() && phase.approval == Approval::Auto)
+        .filter(|phase| {
+            let ahead_done = team
+                .tasks
+                .iter()
+                .filter(|task| task.phase == phase.n)
+                .all(|task| super::plan::barrier_blockers(team, task).is_empty());
+            ahead_done
+        })
+        .filter(|phase| {
+            let at = team.phases.iter().position(|found| found.n == phase.n).unwrap_or(0);
+            accept_blockers(team, at, offline).is_ok()
+        })
+        .map(|phase| phase.n)
+        .collect()
+}
+
+/// U61: accepts one auto draft by Auto in its own change; false when it is no
+/// longer a draft or its plan has a blocker.
+pub(crate) fn accept_auto_draft(team: &mut Team, phase: u32, offline: &BTreeSet<String>, events: &mut Vec<Event>) -> bool {
+    if !team.settings.auto_accept {
+        return false;
+    }
+    let Some(at) = team
+        .phases
+        .iter()
+        .position(|found| found.n == phase && found.state.is_draft() && found.approval == Approval::Auto)
+    else {
+        return false;
+    };
+    if accept_blockers(team, at, offline).is_err() {
+        return false;
+    }
+    let state = accept_phase(team, at, "Auto", false);
+    let record = &team.phases[at];
+    events.push(Event::new(
+        "phase_auto_accepted",
+        json!({"phase":record.n,"title":record.title,"tasks":record.tasks.len(),"state":state}),
+    ));
+    team.phases[at].start_ahead = false;
+    true
+}
+
 /// U61: the first hand-out of a task in an auto-accepted draft fixes the phase
-/// by Auto, in the same change that hands the task out.
+/// by Auto, in the same change that hands the task out; a plan blocker keeps it
+/// a draft, as auto_accept does.
 pub(crate) fn accept_phase_on_hand_out(team: &mut Team, task_id: u32, events: &mut Vec<Event>) {
     if !team.settings.auto_accept {
         return;
@@ -1730,6 +1783,9 @@ pub(crate) fn accept_phase_on_hand_out(team: &mut Team, task_id: u32, events: &m
     else {
         return;
     };
+    if accept_blockers(team, at, &BTreeSet::new()).is_err() {
+        return;
+    }
     let state = accept_phase(team, at, "Auto", false);
     let record = &team.phases[at];
     events.push(Event::new(

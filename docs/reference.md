@@ -2553,6 +2553,7 @@ hgs task add --project orchard --title "Task title" --request-id UUID < descript
 hgs task rename orchard/T-a1b2c3 < title.txt
 hgs task list --project orchard [--stage todo]
 hgs task get orchard/T-a1b2c3
+hgs task get TASK_UUID --project orchard --history-limit 80 [--history-before CURSOR]
 hgs task send orchard/T-a1b2c3 [--session codex/api [--host ALIAS]]
 hgs task handoff orchard/T-a1b2c3 --session codex/worker [--host ALIAS]
 hgs task start orchard/T-a1b2c3
@@ -2567,6 +2568,17 @@ hgs task target orchard/T-a1b2c3 new-session|subagent --parent codex/api [--host
 hgs task worker orchard/T-a1b2c3 --subagent CHILD_ID --request-id SENT_REQUEST_ID
 hgs task settings --project orchard [--set < settings.json]
 ```
+
+Plain `task get` retains the complete journal for existing clients. The optional
+`--history-limit` (1–80) returns only one chronological history page, the canonical
+task document, `log_total`, `start_confirmed`, `history_schema: 1` and
+`history_next`. Pass that opaque cursor as `--history-before` for the previous
+page; a null cursor marks the beginning. Use the task UUID from the list to avoid
+a project-wide short-ID lookup. Cursors bind the project, task and immutable
+history entry, so new records and receipt refinements preserve an older page.
+Omit the cursor to return to the latest page. The local indexed projection keeps
+one task per project and is rebuilt when its source changes; it is never
+replicated and does not change the task document format.
 
 Send pastes the task prompt into its session through the same input path as
 `hgs send`; the task becomes In progress, and Zerus does not

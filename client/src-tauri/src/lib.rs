@@ -617,6 +617,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 };
                 app.manage(session_files::SessionFiles::new(
                     app.handle().clone(),
+                    dir.clone(),
                     zerus_client_core::default_hgs(),
                     opener.clone(),
                     std::sync::Arc::new(|job: composer::Job| {

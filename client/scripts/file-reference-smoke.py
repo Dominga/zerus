@@ -10,7 +10,7 @@ from pathlib import Path
 repo=Path(__file__).resolve().parents[2]
 worker=len(sys.argv)>1 and sys.argv[1]=='--worker'
 if not worker:
- parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--app',type=Path,required=True)
+ parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--app',type=Path,required=True);parser.add_argument('--ssh',action='store_true')
  args=parser.parse_args();app_path=args.app.resolve()
  if not app_path.is_file():parser.error('build the selected app first')
  root=Path(tempfile.mkdtemp(prefix='zerus-file-dialog-walk-'))
@@ -23,6 +23,11 @@ import json,os,sys,tempfile,time
 from pathlib import Path
 root=Path(__file__).resolve().parent.parent
 args=sys.argv[1:]
+if args==['machine','ls']:
+ with (root/'machine-reads.jsonl').open('a') as f:f.write(json.dumps(args)+'\\n')
+ count=len((root/'machine-reads.jsonl').read_text().splitlines())
+ if count==2:(root/'home/.config/hgs/tray.conf').write_text('terminal='+str(root/'bin/missing-terminal')+' {cmd}\\n')
+ print(json.dumps({'local':'example-host','revision':'synthetic','machines':[] if count==3 else [{'alias':'example-peer','enabled':False}]}));sys.exit(0)
 if len(args)==6 and args[:3]==['@example-peer','download','--path'] and args[4]=='--output':
  remote,out=args[3],Path(args[5]);assert out.is_relative_to(root)
  with (root/'downloads.jsonl').open('a') as f:f.write(json.dumps({'remote':remote,'output':str(out)})+'\\n')
@@ -41,16 +46,36 @@ from pathlib import Path
 root=Path(__file__).resolve().parent.parent
 with (root/'opened.jsonl').open('a') as f:f.write(json.dumps(sys.argv[1:])+'\\n')
 ''');opener.chmod(0o700)
+ if args.ssh:
+  conf=root/'home/.config/hgs/tray.conf';conf.parent.mkdir(parents=True);conf.write_text('terminal='+str(root/'bin/example-terminal')+' {cmd}\n')
+  terminal=root/'bin/example-terminal';terminal.write_text('''#!/usr/bin/python3
+import json,sys
+from pathlib import Path
+root=Path(__file__).resolve().parent.parent
+with (root/'terminal.jsonl').open('a') as f:f.write(json.dumps(sys.argv[1:])+'\\n')
+''');terminal.chmod(0o700)
+  frames=[
+   {'v':1,'seq':1,'t':'hello','machine_id':'22222222-2222-4222-8222-222222222222','host':'example-peer','hgs_version':'1.56.0','stream':'synthetic-ssh','heartbeat_ms':10000,'max_frame_bytes':1048576,'topics':['catalog','catalog.meta'],'limits':{'activity_subscriptions':16,'page_bytes':524288,'queue_bytes':4194304,'activity_tail':100,'activity_read':200,'control_line_bytes':65536}},
+   {'v':1,'seq':2,'t':'snapshot','topic':'catalog','items':[{'key':'run:synthetic-file','row':{'name':'sh/example/file','cmd':'sh','agent':'sh','project':'example','tag':'file','run_id':'synthetic-file','conversation_id':'synthetic-conversation','cwd':'/srv/example','tracked':True,'resumable':True,'state':'running','runtime_state':'live','phase':'idle','activity':'idle'}}],'page':0,'last':True,'cursor':1},
+   {'v':1,'seq':3,'t':'snapshot','topic':'catalog.meta','value':{'host':'example-peer','ok':True,'hgs_version':'1.56.0','projects':{},'peers':[]},'page':0,'last':True,'cursor':1},
+   {'v':1,'seq':4,'t':'heartbeat','at':1793000000.0},
+  ]
+  (root/'peer.ndjson').write_text(''.join(json.dumps(f)+'\n' for f in frames))
  (root/'bus.conf').write_text('<busconfig><type>session</type><listen>unix:tmpdir='+str(root/'runtime')+'</listen><auth>EXTERNAL</auth><policy context="default"><allow send_destination="*"/><allow receive_sender="*"/><allow own="*"/></policy></busconfig>')
  env={'PATH':str(root/'bin')+':/usr/bin:/bin','LANG':'C.UTF-8','HOME':str(root/'home'),'XDG_CONFIG_HOME':str(root/'config'),'XDG_DATA_HOME':str(root/'data'),'XDG_CACHE_HOME':str(root/'cache'),'XDG_RUNTIME_HOME':str(root/'runtime'),'TMPDIR':str(root/'temp'),'TMUX_TMPDIR':str(root/'tmux'),'HGS_CONFIG_DIR':str(root/'config'),'HGS_STATE_DIR':str(root/'state'),'GDK_BACKEND':'x11','WAYLAND_DISPLAY':'zerus-nonexistent','WEBKIT_DISABLE_DMABUF_RENDERER':'1','NO_AT_BRIDGE':'1','GSETTINGS_BACKEND':'memory','ZERUS_CLIENT_HEADLESS':'1','ZERUS_CLIENT_REPLAY':str(repo/'client/fixtures/replay.ndjson'),'ZERUS_CLIENT_HGS':str(fake),'ZERUS_CLIENT_QUERY':'page=sessions&skin=zerus-light&file-reference-smoke=1','ZERUS_CLIENT_PERF':'smoke'}
+ if args.ssh:
+  env['ZERUS_CLIENT_REPLAY']+=':example-peer='+str(root/'peer.ndjson')
+  env['ZERUS_CLIENT_QUERY']='page=sessions&skin=zerus-light&file-ssh-smoke=1'
  print('Private file dialog walk:',root,flush=True)
- command=['/usr/bin/dbus-run-session','--config-file',str(root/'bus.conf'),'--','/usr/bin/xvfb-run','-a','-s','-screen 0 1440x900x24','/usr/bin/python3',str(Path(__file__).resolve()),'--worker',str(root),str(app_path)]
+ command=['/usr/bin/dbus-run-session','--config-file',str(root/'bus.conf'),'--','/usr/bin/xvfb-run','-a','-s','-screen 0 1440x900x24','/usr/bin/python3',str(Path(__file__).resolve()),'--worker',str(root),str(app_path),*(['--ssh'] if args.ssh else [])]
  process=subprocess.Popen(command,env=env,start_new_session=True)
  try:code=process.wait(timeout=90)
  except subprocess.TimeoutExpired:
   # The process group was created here and contains only this private test.
   os.killpg(process.pid,signal.SIGTERM);process.wait(timeout=5);raise
  print('Private file dialog walk exit:',code);raise SystemExit(code)
+ssh='--ssh' in sys.argv
+prefix='file-ssh-smoke: ' if ssh else 'file-reference-smoke: '
 root=Path(sys.argv[2]);app_path=Path(sys.argv[3]);assert os.environ['HOME']==str(root/'home')
 # Mock only the native OS effects, on this private bus. No real file manager opens.
 import gi
@@ -106,10 +131,17 @@ with (root/'app.log').open('wb') as log:
   while time.monotonic()<deadline:
    output=(root/'app.log').read_text()
    for stage in ('INITIAL','SAVED','FAILED'):
-    if 'file-reference-smoke: '+stage in output and stage not in stages:
+    if prefix+stage in output and stage not in stages:
      stages.add(stage);time.sleep(.2);subprocess.run(['/usr/bin/import','-window','root',str(root/(stage.lower()+'.png'))],check=True,env=env)
+   if ssh and prefix+'INITIAL' in output and 'no-launch' not in stages:
+    assert not (root/'terminal.jsonl').exists() and not (root/'machine-reads.jsonl').exists(),'dialog opening launched SSH'
+    stages.add('no-launch')
+   if ssh:
+    for stage in ('ESCAPE_FAILURE','ESCAPE_REFUSED'):
+     if prefix+stage in output and stage not in stages:press('Escape');stages.add(stage)
    if 'file-reference-smoke: SAVE_DIALOG' in output and 'save' not in stages:
     candidates=[(wid,title) for wid,title in windows(main) if 'Save local copy' in title]
+    candidates=[(wid,title) for wid,title in candidates if 'Map State: IsViewable' in subprocess.run(['/usr/bin/xwininfo','-id',str(wid)],env=env,capture_output=True,text=True,timeout=2).stdout]
     if candidates:
      wid,title=candidates[-1];x.XSetInputFocus(display,wid,1,0);x.XFlush(display);time.sleep(.25)
      chord('Control_L','l');time.sleep(.15);chord('Control_L','a');text(str(root/'Downloads/saved.md'));press('Return');stages.add('save')
@@ -118,8 +150,15 @@ with (root/'app.log').open('wb') as log:
    if app.poll() is not None:break
    time.sleep(.05)
   else:raise RuntimeError('walk timeout')
-  print('\n'.join(line for line in output.splitlines() if 'file-reference-smoke:' in line))
+  print('\n'.join(line for line in output.splitlines() if prefix in line))
   assert app.returncode==0,output
+  if ssh:
+   starts=[json.loads(line) for line in (root/'terminal.jsonl').read_text().splitlines()]
+   assert starts==[[str(root/'bin/fake-hgs')+' machine ssh example-peer']],starts
+   assert len((root/'machine-reads.jsonl').read_text().splitlines())==3
+   assert not (root/'downloads.jsonl').exists() and not (root/'opened.jsonl').exists()
+   print('PASS no launch/read on open; exact configured local hgs machine ssh alias; failure and forgotten-alias refusal; real Escape/focus; private recording terminal only')
+   raise SystemExit(0)
   downloads=[json.loads(line) for line in (root/'downloads.jsonl').read_text().splitlines()]
   assert len(downloads)==5,downloads
   assert all(Path(d['output']).is_relative_to(root) for d in downloads)

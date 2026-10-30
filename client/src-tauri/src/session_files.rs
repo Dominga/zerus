@@ -12,9 +12,10 @@ use tauri::{AppHandle, Emitter, Manager};
 use zerus_client_core::download_cache::{self, Source};
 use zerus_client_core::external_file::{self, Origin, Outcome};
 use zerus_client_core::paths::{self, Style};
-use zerus_client_core::{file_download, session_file_reference};
+use zerus_client_core::{file_download, session_file_reference, terminal_launch, ComputerId};
 mod downloads;
 use downloads::{Answer, Downloads};
+mod ssh;
 
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -53,11 +54,16 @@ struct Dialog {
     picking: bool,
     hint: String,
     error: String,
+    ssh: Option<ssh::Identity>,
+    opening_ssh: bool,
 }
 pub struct SessionFiles {
     app: AppHandle,
     opener: Opener,
     spawn: Spawn,
+    hgs: PathBuf,
+    dir: PathBuf,
+    terminal: Mutex<terminal_launch::Launcher>,
     downloads: Arc<Downloads>,
     cache: crate::files::Files,
     next: AtomicU64,
@@ -80,12 +86,19 @@ fn readable(path: &Path) -> bool {
     path.is_file() && std::fs::File::open(path).is_ok()
 }
 impl SessionFiles {
-    pub fn new(app: AppHandle, hgs: PathBuf, opener: Opener, spawn: Spawn) -> Arc<Self> {
+    pub fn new(
+        app: AppHandle,
+        dir: PathBuf,
+        hgs: PathBuf,
+        opener: Opener,
+        spawn: Spawn,
+    ) -> Arc<Self> {
         let cache = app.state::<crate::files::Files>().inner().clone();
         let allowed = crate::actions::actions_allowed(
             std::env::var("ZERUS_CLIENT_REPLAY").ok().as_deref(),
             std::env::var("ZERUS_CLIENT_HGS").ok().as_deref(),
         );
+        let download_hgs = hgs.clone();
         let downloads = Downloads::new(
             cache.clone(),
             spawn.clone(),
@@ -93,7 +106,7 @@ impl SessionFiles {
                 if !allowed {
                     return Err(crate::actions::REPLAY_NEEDS_HGS.into());
                 }
-                file_download::download(&hgs, &[], host, path, output)
+                file_download::download(&download_hgs, &[], host, path, output)
             }),
         );
         let (trim, timer) = mpsc::sync_channel(1);
@@ -101,6 +114,9 @@ impl SessionFiles {
             app,
             opener,
             spawn,
+            hgs,
+            dir,
+            terminal: Mutex::new(terminal_launch::Launcher::new(Default::default())),
             downloads,
             cache,
             next: AtomicU64::new(1),
@@ -215,6 +231,12 @@ impl SessionFiles {
         } else {
             "Open with your default application, or copy the path.".into()
         };
+        let pump = self.app.state::<crate::commands::AppState>().pump();
+        let ssh = ssh::Identity::capture(
+            &computer,
+            pump.row(&computer, &key).as_ref(),
+            pump.machine(&ComputerId(computer.clone())).as_ref(),
+        );
         let mut dialogs = lock(&self.dialogs);
         // Closed dialogs never retain transfer state here; callbacks own their
         // finite completion independently. Bound abandoned open-dialog handles.
@@ -246,6 +268,8 @@ impl SessionFiles {
                 } else {
                     String::new()
                 },
+                ssh,
+                opening_ssh: false,
             },
         );
         drop(dialogs);
@@ -472,16 +496,7 @@ impl SessionFiles {
     }
     fn act(self: &Arc<Self>, id: u64, action: &str) -> Option<SessionFileView> {
         if action == "open_ssh" {
-            let computer = lock(&self.dialogs).get(&id)?.computer.clone();
-            if computer.is_empty() {
-                return self.view(id, false);
-            }
-            if let Err(error) = crate::settings::open_url(&format!("ssh://{computer}")) {
-                lock(&self.dialogs).get_mut(&id)?.error =
-                    format!("Could not open the SSH terminal: {error}");
-                self.emit(id);
-            }
-            return self.view(id, false);
+            return self.open_ssh(id);
         }
         let d = lock(&self.dialogs).get(&id)?.clone();
         if d.downloading || d.picking {
@@ -534,6 +549,70 @@ impl SessionFiles {
             reveal,
         );
         Some(closed)
+    }
+    // Called only by the explicit button command, off the GUI thread. Offline
+    // peers remain usable for host-key/login repair, as in Qt: no remote probe.
+    fn open_ssh(&self, id: u64) -> Option<SessionFileView> {
+        let (computer, key, identity) = {
+            let mut dialogs = lock(&self.dialogs);
+            let d = dialogs.get_mut(&id)?;
+            if d.computer.is_empty() || d.opening_ssh {
+                drop(dialogs);
+                return self.view(id, false);
+            }
+            d.opening_ssh = true;
+            (d.computer.clone(), d.key.clone(), d.ssh.clone())
+        };
+        let result = (|| {
+            if crate::actions::blocked() {
+                return Err(crate::actions::REPLAY_NEEDS_HGS.to_owned());
+            }
+            // Resolve only the saved alias, never a webview-supplied host/path.
+            let machines = zerus_client_core::reads::read(
+                &self.hgs,
+                &ComputerId::local(),
+                &zerus_client_core::reads::Read::Machines,
+            )
+            .map_err(|error| error.to_string())?;
+            let mut terminal = lock(&self.terminal);
+            terminal.set_settings(crate::desk::terminal_settings(&self.dir));
+            let pump = self.app.state::<crate::commands::AppState>().pump();
+            let row = pump.row(&computer, &key);
+            let machine = pump.machine(&ComputerId(computer.clone()));
+            if !ssh::current(identity.as_ref(), row.as_ref(), machine.as_ref())
+                || !ssh::configured(&computer, &machines)
+            {
+                return Err("The session state changed. Open its actions again.".into());
+            }
+            // Closing during the bounded local read cancels this unissued click.
+            if !lock(&self.dialogs).contains_key(&id) {
+                return Err("The file reference is unavailable.".into());
+            }
+            ssh::open(&mut terminal, &self.hgs, &computer)
+        })();
+        match result {
+            Ok(advisory) => {
+                if let Some(text) = advisory {
+                    crate::desk::window_notice(&self.app, terminal_launch::ADVISORY_TITLE, &text);
+                }
+                let mut view = self.view(id, true)?;
+                view.revision += 1;
+                self.close(id);
+                Some(view)
+            }
+            Err(error) => {
+                let text = format!("Could not open the SSH terminal: {error}");
+                if let Some(d) = lock(&self.dialogs).get_mut(&id) {
+                    d.opening_ssh = false;
+                    d.error = text.clone();
+                    d.revision += 1;
+                } else {
+                    self.notice(text, true);
+                }
+                self.emit(id);
+                self.view(id, false)
+            }
+        }
     }
     fn close(&self, id: u64) {
         lock(&self.dialogs).remove(&id);

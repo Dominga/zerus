@@ -394,14 +394,17 @@ class Desktop(unittest.TestCase):
             db.execute('PRAGMA user_version=1')
         database.chmod(0o600)
         process, status = self.serve()
-        self.assertEqual(status['schema'], 3)
+        self.assertEqual(status['schema'], 4)
         self.assertEqual(status['generation'], 8)
         self.assertEqual(status['configuration'], configuration)
         self.assertTrue(status['effect_journal']['revoked'])
         self.assertEqual(status['effect_journal']['attempts']['reserved'], 0)
+        self.assertEqual(status['read_queue']['pending'], 0)
+        self.assertTrue(status['read_queue']['admissions_paused'])
+        self.assertFalse(status['read_queue']['recovery_error'])
         self.stop(process)
         with closing(sqlite3.connect(database)) as db:
-            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 3)
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 4)
             self.assertEqual(db.execute('SELECT configuration FROM service').fetchone()[0], configuration)
 
     def test_revoke_without_handoff_or_service_writes_nothing(self):

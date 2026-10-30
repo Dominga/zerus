@@ -9,7 +9,7 @@ use std::{
 };
 use zerus_desktop_migration::{canonical, configuration, HANDOFF_LOCK};
 
-pub const SCHEMA: i64 = 3;
+pub const SCHEMA: i64 = 4;
 pub struct HandoffLock {
     _lock: platform::FileLock,
     root: PathBuf,
@@ -182,6 +182,7 @@ pub struct Store {
     pub(super) db: Connection,
     pub generation: u64,
     recovery_error: bool,
+    read_recovery_error: bool,
 }
 impl Store {
     pub fn open(location: &Location, epoch: &str) -> Result<Self> {
@@ -244,9 +245,21 @@ impl Store {
             )?;
             tx.commit()?;
         }
+        if version < 4 {
+            let tx = db.transaction()?;
+            zerus_desktop_ledger::reads::migrate(&tx)?;
+            tx.execute_batch("PRAGMA user_version=4;")?;
+            tx.commit()?;
+        }
         // No marker or previous policy re-enables a worker after restart.
         zerus_desktop_ledger::begin_service(&mut db, epoch)?;
         zerus_desktop_ledger::recover_batch(&mut db, epoch)?;
+        let read_recovery_error = zerus_desktop_ledger::reads::recover(
+            &mut db,
+            epoch,
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .is_err();
         let tx = db.transaction()?;
         tx.execute(
             "UPDATE service SET generation=generation+1, epoch=?1 WHERE id=1",
@@ -261,6 +274,7 @@ impl Store {
             db,
             generation,
             recovery_error: false,
+            read_recovery_error,
         })
     }
     pub fn checkpoint(&self) -> Result<()> {
@@ -283,14 +297,92 @@ impl Store {
         }
         status
     }
+    pub fn read_status(&self) -> serde_json::Value {
+        let mut status = zerus_desktop_ledger::reads::status(&self.db).unwrap_or_else(|_| {
+            serde_json::json!({"pending":null,"in_flight":null,"error":"read_queue_unavailable"})
+        });
+        status["admissions_paused"] = true.into();
+        status["recovery_error"] = self.read_recovery_error.into();
+        status
+    }
     pub fn recover_effects(&mut self, epoch: &str) {
         self.recovery_error = zerus_desktop_ledger::recover_batch(&mut self.db, epoch).is_err();
+        self.read_recovery_error = zerus_desktop_ledger::reads::recover(
+            &mut self.db,
+            epoch,
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .is_err();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn read_queue_recovers_under_a_new_service_epoch_and_fails_locally() {
+        use zerus_desktop_ledger::reads;
+        let temp = tempfile::tempdir().unwrap();
+        let location = Location {
+            root: canonical(&temp.path().join("state/desktop")).unwrap(),
+            configuration: "fixture".into(),
+        };
+        location.prepare().unwrap();
+        let _owner = location.lock().unwrap();
+        let first = uuid::Uuid::new_v4().to_string();
+        let mut store = Store::open(&location, &first).unwrap();
+        let epoch = uuid::Uuid::new_v4().to_string();
+        zerus_desktop_ledger::authorize(&mut store.db, &epoch, &first).unwrap();
+        let mark = reads::ReadMark {
+            computer: "peer".into(),
+            name: "session".into(),
+            run_id: "run".into(),
+            conversation_id: "conversation".into(),
+            reply_id: Some("reply".into()),
+            attention_signature: None,
+        };
+        reads::enqueue(&mut store.db, &uuid::Uuid::new_v4().to_string(), &mark, 0).unwrap();
+        let sent = reads::reserve(
+            &mut store.db,
+            &epoch,
+            &first,
+            &uuid::Uuid::new_v4().to_string(),
+            0,
+        )
+        .unwrap()
+        .unwrap();
+        drop(store);
+        let second = uuid::Uuid::new_v4().to_string();
+        let mut store = Store::open(&location, &second).unwrap();
+        assert_eq!(store.read_status()["pending"], 1);
+        assert_eq!(store.read_status()["in_flight"], 0);
+        assert_eq!(store.read_status()["admissions_paused"], true);
+        assert!(reads::finish(&mut store.db, &sent, reads::Outcome::NotSent, 0).is_err());
+        // A fresh in-flight job lets recovery exercise its indexed lookup.
+        zerus_desktop_ledger::authorize(&mut store.db, &epoch, &second).unwrap();
+        reads::reserve(
+            &mut store.db,
+            &epoch,
+            &second,
+            &uuid::Uuid::new_v4().to_string(),
+            i64::MAX,
+        )
+        .unwrap()
+        .unwrap();
+        store
+            .db
+            .execute_batch("ALTER TABLE desktop_read_attempts RENAME TO broken_read_attempts")
+            .unwrap();
+        store.recover_effects(&second);
+        assert_eq!(store.read_status()["recovery_error"], true);
+        assert!(store.effect_status()["error"].is_null());
+        store
+            .db
+            .execute_batch("ALTER TABLE broken_read_attempts RENAME TO desktop_read_attempts")
+            .unwrap();
+        store.recover_effects(&second);
+        assert_eq!(store.read_status()["recovery_error"], false);
+    }
     #[test]
     fn ledger_recovery_failure_is_component_local_and_clears_after_repair() {
         let temp = tempfile::tempdir().unwrap();

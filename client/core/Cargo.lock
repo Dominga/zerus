@@ -374,6 +374,7 @@ dependencies = [
  "time",
  "windows-sys",
  "zerus-desktop-migration",
+ "zerus-desktop-read-policy",
  "zerus-watch-protocol",
 ]
 
@@ -384,6 +385,14 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "zerus-desktop-read-policy"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

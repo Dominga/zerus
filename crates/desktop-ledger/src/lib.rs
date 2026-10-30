@@ -1,7 +1,9 @@
 //! Transactional guards for the service actor's native effects. No native I/O,
-//! approval authority, read-mark store, clock or frontend lives here. The actor
+//! approval authority, clock or frontend lives here. Read intent is in `reads`. The actor
 //! must verify current delegation and lease freshness before calling `reserve`.
 //! A returned existing reservation never authorizes another delivery.
+pub mod reads;
+
 use anyhow::{ensure, Result};
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};

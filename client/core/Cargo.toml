@@ -10,6 +10,7 @@ publish = false
 # Pure Rust and fast to test: no Tauri, no async runtime. The Tauri app in
 # client/src-tauri depends on this crate by path.
 [dependencies]
+zerus-desktop-read-policy = { path = "../../crates/desktop-read-policy" }
 base64 = "0.22"
 infer = { version = "0.22", default-features = false, features = ["alloc"] }
 # Reading Qt's macOS preference plist once, at the switch (settings).

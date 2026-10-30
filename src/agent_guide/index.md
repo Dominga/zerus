@@ -17,6 +17,7 @@ Session names look like provider/project/tag. [@h] marks an optional @alias.
   hgs guide team-tree         lead a sub-team and pass work up
   hgs guide team-run          run a routine command outside the sandbox
   hgs guide team-safe         allow a member's routine request without asking
+  hgs guide team-propose      propose a change the owner answers on a card
   hgs guide run               start a build or long test so it shows as your work
   hgs guide designer          propose roles and templates for agent teams
   hgs guide launch            start a session, here or on a peer

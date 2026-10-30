@@ -1,7 +1,7 @@
 use super::*;
 use serde_json::json;
 
-fn setup() -> (Connection, Source) {
+pub(super) fn setup() -> (Connection, Source) {
     let mut db = Connection::open_in_memory().unwrap();
     migrate(&db).unwrap();
     begin_service(&mut db, "actor-1").unwrap();
@@ -17,7 +17,7 @@ fn setup() -> (Connection, Source) {
 fn frame(seq: u64, body: Body) -> Frame {
     Frame { v: 1, seq, body }
 }
-fn hello() -> Frame {
+pub(super) fn hello() -> Frame {
     frame(
         1,
         Body::Hello(watch::Hello {
@@ -32,13 +32,19 @@ fn hello() -> Frame {
         }),
     )
 }
-fn item(n: usize) -> watch::CatalogItem {
+pub(super) fn item(n: usize) -> watch::CatalogItem {
     watch::CatalogItem {
         key: format!("run:run-{n}"),
         row: json!({"name":format!("codex/example/session-{n}"),"run_id":format!("run-{n}"),"conversation_id":format!("conversation-{n}"),"process_work":{"count":3,"future":true},"unknown":{"kept":"exact"}}),
     }
 }
-fn snapshot(seq: u64, page: u32, last: bool, cursor: i64, items: Vec<watch::CatalogItem>) -> Frame {
+pub(super) fn snapshot(
+    seq: u64,
+    page: u32,
+    last: bool,
+    cursor: i64,
+    items: Vec<watch::CatalogItem>,
+) -> Frame {
     frame(
         seq,
         Body::Snapshot(watch::Snapshot {
@@ -74,13 +80,13 @@ fn delta(seq: u64, cursor: i64, upsert: Vec<watch::CatalogItem>, remove: &[usize
         }),
     )
 }
-fn heartbeat(seq: u64) -> Frame {
+pub(super) fn heartbeat(seq: u64) -> Frame {
     frame(seq, Body::Heartbeat(watch::Heartbeat { at: 1.0 }))
 }
-fn put(db: &mut Connection, source: &Source, frame: &Frame) -> Applied {
+pub(super) fn put(db: &mut Connection, source: &Source, frame: &Frame) -> Applied {
     apply(db, source, frame).unwrap()
 }
-fn visible(db: &Connection) -> Vec<Value> {
+pub(super) fn visible(db: &Connection) -> Vec<Value> {
     page(db, "peer", None)
         .unwrap()
         .rows

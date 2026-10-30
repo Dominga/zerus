@@ -3,7 +3,7 @@
 `zerus-desktop-catalog` is the private SQLite projection of raw watch-v1 catalog
 rows. Root desktop schema 5 creates it and resets coverage at every service
 start. This passive slice starts no source or effect worker. Client delegation,
-legacy adaptation, runtime freshness and native delivery remain separate work.
+runtime freshness and native delivery remain separate work.
 
 The actor owns one connection on its background thread. It retains each source
 ingress item until its transaction finishes. `connect` pins the selected alias,
@@ -26,6 +26,35 @@ The final page swaps the visible pointer in the same transaction. A crash or
 restart keeps last-known visible rows but never promotes partial staging. Raw
 JSON, unknown fields and background-work counts remain unchanged. Projection
 and attention/read policies reuse their existing shared decoders later.
+
+Typed older-peer events use `legacy::begin`, `legacy::page` and
+`legacy::complete`, without synthesizing watch frames or a peer hello. The
+caller first verifies the configured computer from the source's bounded
+top-level metadata and admits a new incarnation/generation. Begin records
+declared row/page counts and provisional metadata; numbered pages use the same
+indexed staging rows, canonical unique keys, transactional counters and storage
+budgets. Each input page has at most 128 rows and one frame of encoded data.
+Declarations allow at most 250,000 rows and require at least one page; an empty
+replacement has exactly one empty page. Metadata is at most 512 KiB and cannot
+contain the sessions array.
+
+Only a separate complete call, after verified source spool replay, can publish
+the rows and metadata together. Both exact declared counts must match. A late
+error, missing page, duplicate key or failed count check retires that exact
+source and abandons staging, retaining last-known rows and metadata. A stale
+callback cannot retire a replacement. Restart discards partial legacy staging
+through the same bounded collection path as watch snapshots. A switch between
+legacy and watch requires a new source generation; mixed-mode callbacks refuse.
+
+The private schema remains version 5. A nonempty `stream` identifies watch;
+watch hello admission already refuses an empty token. Typed legacy uses the
+reserved empty token, with `seq` holding declared pages, `cursor` declared rows
+and `next_page` received pages. Its `hello` column holds provisional metadata
+until completion copies it into `meta` and clears the provisional copy. These
+are internal SQLite fields, not another wire protocol. Both paths reuse the
+same row store, generation limits, paging and garbage collection. Neither
+complete coverage nor a local completion timestamp grants freshness or effect
+authority; the actor retains the original pre-spawn observation time.
 
 `complete` describes catalog coverage, never source freshness or effect authority.
 The actor must separately retain monotonic receive timestamps, current ownership,
@@ -67,3 +96,6 @@ Focused tests walk 100,000 synthetic rows, check query plans without scans or
 temporary sorting, replace snapshots, collect obsolete rows in bounded steps,
 and cover callback fences, restart, malformed input, exact identities, byte and
 metadata admission limits, stable cursors and aggregate-counter updates.
+Legacy cases additionally cover explicit completion, atomic metadata, exact
+counts, empty replacements, stale/mixed callbacks, restart, storage pressure and
+100,000 rows across 782 bounded indexed pages.

@@ -231,6 +231,96 @@ fn manifests_are_bounded_and_only_reference_fixed_digest_page_names() {
 }
 
 #[test]
+fn snapshot_references_are_bounded_digest_names_and_verify_exact_bytes() {
+    let snapshot = SnapshotRef {
+        sha256: sha256(b"{}"),
+        bytes: 2,
+    };
+    assert_eq!(
+        snapshot.relative_path(IMPORT).unwrap(),
+        Path::new("imports")
+            .join(IMPORT)
+            .join("snapshots")
+            .join(format!("{}.json", snapshot.sha256))
+    );
+    snapshot.verify(b"{}").unwrap();
+    assert!(snapshot.verify(b"[]").is_err());
+    assert!(snapshot.verify(b"{} ").is_err());
+    assert!(snapshot.relative_path("../outside").is_err());
+    for bad in [
+        SnapshotRef {
+            sha256: "../outside".into(),
+            ..snapshot.clone()
+        },
+        SnapshotRef {
+            sha256: "A".repeat(64),
+            ..snapshot.clone()
+        },
+        SnapshotRef {
+            bytes: 0,
+            ..snapshot.clone()
+        },
+        SnapshotRef {
+            bytes: MAX_SNAPSHOT_BYTES + 1,
+            ..snapshot.clone()
+        },
+    ] {
+        assert!(bad.validate().is_err());
+        assert!(bad.relative_path(IMPORT).is_err());
+        assert!(bad.verify(b"{}").is_err());
+    }
+}
+
+#[test]
+fn snapshot_metadata_must_match_its_manifest_source_and_exact_page() {
+    let mut manifest = record();
+    let page = SnapshotPage {
+        version: VERSION,
+        family: manifest.sources[0].family.clone(),
+        schema: manifest.sources[0].schema,
+        source_sha256: manifest.sources[0].sha256.clone(),
+        index: 0,
+        snapshot: SnapshotRef {
+            sha256: sha256(b"{}"),
+            bytes: 2,
+        },
+    };
+    let data = bytes(&page);
+    let reference = PageRef {
+        sha256: sha256(&data),
+        bytes: data.len() as u64,
+    };
+    manifest.pages = vec![reference.clone()];
+    assert_eq!(manifest.snapshot_page(&reference, &data).unwrap(), page);
+    assert!(manifest.snapshot_page(&reference, b"{}").is_err());
+    for (key, value) in [
+        ("version", json!(2)),
+        ("family", json!("unknown-family")),
+        ("schema", json!(2)),
+        ("source_sha256", json!("b".repeat(64))),
+        ("body", json!({"private":"details"})),
+        (
+            "snapshot",
+            json!({"sha256":sha256(b"{}"),"bytes":2,"path":"../outside"}),
+        ),
+    ] {
+        let mut changed = serde_json::to_value(&page).unwrap();
+        changed[key] = value;
+        let data = bytes(&changed);
+        let reference = PageRef {
+            sha256: sha256(&data),
+            bytes: data.len() as u64,
+        };
+        // Matching the page's own digest cannot cure wrong metadata identity.
+        manifest.pages = vec![reference.clone()];
+        assert!(manifest.snapshot_page(&reference, &data).is_err(), "{key}");
+    }
+    let mut large = bytes(&page);
+    large.resize(MAX_SNAPSHOT_BYTES as usize + 1, b' ');
+    assert!(SnapshotPage::parse(&large).is_err());
+}
+
+#[test]
 fn canonical_ids_do_not_accept_paths_unicode_uppercase_or_trailing_data() {
     assert!(canonical_uuid(IMPORT));
     for bad in [

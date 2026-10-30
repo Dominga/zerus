@@ -53,14 +53,16 @@ source records with distinct family names and 1024 distinct page references.
 
 Each page reference has only `sha256` and `bytes` (1 to 1 MiB) and resolves to
 `desktop/imports/<import_id>/pages/<sha256>.json`. `verify_page` checks exact
-length/digest. Private pages carry bounded family metadata, source paths, schema
+length/digest. Private pages carry bounded family metadata, schema
 and snapshot/quarantine references. The manifest and handoff marker contain no
 message, question, token or session arrays. No credentials are copied from their
 privileged stores. Snapshots and quarantine details are never repository data.
 
-G3 stages read-only snapshots through the existing importers. Before old writers
-drain, evidence is explicitly `staged` and ineligible for takeover. G3 publishes
-immutable `drained` evidence only after the drain; it never changes a committed
+G3 assembles read-only snapshots through the existing importers. Its evidence is
+always explicitly `staged` and ineligible for takeover. G1 owns the executable
+publication boundary and immutable `drained` publication after a fresh drain.
+The producer must run after that drain and recheck source identity/hash; a stale
+pre-drain bundle cannot simply be relabelled. Neither owner changes a committed
 import. These fields describe a past import, not current process ownership.
 Automatic-approval reset evidence must inspect both Qt's former choice and
 Next's interim policy. Neither carries consent to the service.
@@ -75,8 +77,9 @@ never re-seed after rollback.
 ## Locks and live proof
 
 G1 retains `desktop/owner.lock` for its process lifetime. G3 never takes it.
-`desktop/handoff.lock` is a separate OS-backed exclusive lock: G3 holds it only
-to commit immutable evidence and refuses/retries while G1 holds it. G1 rereads
+`desktop/handoff.lock` is a separate OS-backed exclusive lock. G1's publication
+helper holds it briefly to commit immutable evidence and refuses/retries while
+an active writer holds it. G3 has no filesystem committer. G1 rereads
 the exact import UUID and digest under that lock, owns all marker transitions
 (`imported`, `quiesced`, `complete`, `revoked`), and retains the lock while any migrated
 writer runs. Commits use atomic replacement with durable file/directory flushes.
@@ -100,6 +103,43 @@ that order, each native encoded byte string prefixed by its little-endian u64
 length. Missing descendants are resolved without creating directories. G1 and
 G3 must call this same helper; lexical paths or independently approximated hashes
 cannot establish configuration identity.
+
+## Producer API
+
+`zerus_client_core::migration::Bundle` is a Rust-side bounded iterator over
+existing source decoders. It accepts validated `SourceStream` metadata and lazy
+chunks, the production identity, configuration fingerprint, canonical import
+UUID, time and an explicit total byte budget. Development identities, replay and
+duplicate source families are refused before a decoder is read.
+
+Each decoder checks its supported source schema and exact identity/hash and
+yields bounded JSON values. It must refuse an oversized individual source item
+before allocating it; it must not load a complete unbounded journal. Unknown,
+partial, changed or unreadable data ends the bundle without a final record.
+The source remains unchanged and its family stays unhandled for retry.
+
+`BundleItem` yields a private `Snapshot { reference, reader }`, then a body-free
+`Page { reference, reader }`, followed by exactly one final `Record` after all
+sources succeed. Consume each `Read` before requesting another item. At most
+one current body and one small pending metadata page are retained by assembly;
+each serialized body is at most 1 MiB. The total budget includes unique bodies,
+pages and the final manifest. The manifest retains at most 1024 page references,
+not source values. Repeated snapshot bodies are emitted once by digest.
+
+The shared `SnapshotRef` contains only `sha256` and `bytes` (1 to 1 MiB) and
+resolves only to `desktop/imports/<import_id>/snapshots/<sha256>.json`.
+`SnapshotPage` v1 contains `family`, `schema`, `source_sha256`, `index` and that
+reference. `ImportRecord::snapshot_page` verifies the page's membership, exact
+bytes and matching source family/schema/hash. `SnapshotRef::verify` checks the
+private body's exact bytes. No caller supplies a final filesystem path.
+
+This iterator cannot itself cross the core-to-hgs process boundary. G1 owns the
+bounded authenticated transport and secure publisher, reusing its existing
+platform file/Location/lock code: no-follow private single-link regular files,
+create-new UUID directory, fixed digest names, hash/length rechecks, durable
+file/directory flushes and atomic final record publication. Existing UUIDs,
+held locks and partial/newer/mismatched bundles refuse publication. G3 writes no
+service files and has no marker, drain or effect authority.
 
 ## Delivery boundary
 

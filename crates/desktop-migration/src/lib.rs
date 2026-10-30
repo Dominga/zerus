@@ -3,7 +3,8 @@
 //! These types validate structure and identity only. No deserialized field
 //! proves writer quiescence or grants writer authority. G1 alone transitions
 //! the marker under the OS-backed handoff lock and fresh instance/delegation
-//! proof; G3 only publishes immutable evidence after old writers drain.
+//! proof; G3 assembles staged evidence and G1 owns immutable publication after
+//! old writers drain.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -11,6 +12,9 @@ use std::{
     fmt, io,
     path::{Component, Path, PathBuf},
 };
+
+mod snapshot;
+pub use snapshot::{SnapshotPage, SnapshotRef, MAX_SNAPSHOT_BYTES};
 
 pub const VERSION: u32 = 1;
 pub const SOURCE: &str = "com.hgdev.hgs-tray";
@@ -157,6 +161,23 @@ pub struct SourceRecord {
     pub build: Option<String>,
 }
 
+impl SourceRecord {
+    pub fn validate(&self) -> Result<()> {
+        if !name(&self.family)
+            || !name(&self.format)
+            || self.schema == 0
+            || !lower_hex(&self.sha256, 64)
+            || self
+                .build
+                .as_ref()
+                .is_some_and(|s| s.len() > 256 || s.chars().any(char::is_control))
+        {
+            return Err(Invalid("invalid import source metadata"));
+        }
+        Ok(())
+    }
+}
+
 /// A page resolves to imports/<import_id>/pages/<sha256>.json only.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -194,17 +215,9 @@ impl ImportRecord {
         }
         let mut families = std::collections::BTreeSet::new();
         for source in &self.sources {
-            if !name(&source.family)
-                || !name(&source.format)
-                || !families.insert(&source.family)
-                || source.schema == 0
-                || !lower_hex(&source.sha256, 64)
-                || source
-                    .build
-                    .as_ref()
-                    .is_some_and(|s| s.len() > 256 || s.chars().any(char::is_control))
-            {
-                return Err(Invalid("invalid import source metadata"));
+            source.validate()?;
+            if !families.insert(&source.family) {
+                return Err(Invalid("duplicate import source family"));
             }
         }
         let mut pages = std::collections::BTreeSet::new();
@@ -236,6 +249,20 @@ impl ImportRecord {
             return Err(Invalid("import page length or digest mismatch"));
         }
         Ok(())
+    }
+
+    pub fn snapshot_page(&self, reference: &PageRef, bytes: &[u8]) -> Result<SnapshotPage> {
+        self.verify_page(reference, bytes)?;
+        let page = SnapshotPage::parse(bytes)?;
+        let source = self
+            .sources
+            .iter()
+            .find(|s| s.family == page.family)
+            .ok_or(Invalid("snapshot page names an unknown source family"))?;
+        if source.schema != page.schema || source.sha256 != page.source_sha256 {
+            return Err(Invalid("snapshot page source identity mismatch"));
+        }
+        Ok(page)
     }
 }
 

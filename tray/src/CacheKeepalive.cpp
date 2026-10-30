@@ -23,7 +23,14 @@ QString CacheKeepalive::message()
 
 int CacheKeepalive::hours(const QString &host, const SessionInfo &session)
 {
-    return std::clamp(saved().value(id(host, session)).toInt(), 0, MaxHours);
+    return hours(saved(), host, session);
+}
+
+QJsonObject CacheKeepalive::savedHours() { return saved(); }
+
+int CacheKeepalive::hours(const QJsonObject &saved, const QString &host, const SessionInfo &session)
+{
+    return saved.isEmpty() ? 0 : std::clamp(saved.value(id(host, session)).toInt(), 0, MaxHours);
 }
 
 void CacheKeepalive::setHours(const QString &host, const SessionInfo &session, int hours)

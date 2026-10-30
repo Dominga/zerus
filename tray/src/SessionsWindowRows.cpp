@@ -3,6 +3,7 @@
 // prepareRows() runs on the shared preparation thread, and applyRows() writes
 // the newest result, touching only rows whose digest changed.
 #include "SessionsWindow.h"
+#include "SlowEventLog.h"
 
 #include "AccountFilter.h"
 #include "ArchiveBrowser.h"
@@ -143,8 +144,11 @@ SessionsWindow::RowInputs SessionsWindow::rowInputs() const
     }
     inputs.collapsedTeams = m_collapsedTeams;
     inputs.sessionLeads = SessionLeads::all();
-    for (const auto &entry : std::as_const(m_entries))
-        if (const int hours = CacheKeepalive::hours(entry.host, entry.session)) inputs.keepWarmHours.insert(entry.key, hours);
+    // #705: the saved hours are read once (each read went through QSettings:
+    // about 40 ms with 400 sessions on every row update).
+    if (const auto saved = CacheKeepalive::savedHours(); !saved.isEmpty())
+        for (const auto &entry : std::as_const(m_entries))
+            if (const int hours = CacheKeepalive::hours(saved, entry.host, entry.session)) inputs.keepWarmHours.insert(entry.key, hours);
     return inputs;
 }
 
@@ -211,7 +215,8 @@ void SessionsWindow::postRows()
     // the inspection of a newly selected session (user report: up to 40 s).
     if (m_rowPreparing) { ++m_rowGeneration; m_rowsPending = true; m_rowsAgain = true; return; }
     m_rowPreparing = true; ++m_postedRowPreparations;
-    auto inputs = rowInputs(); inputs.generation = ++m_rowGeneration;
+    auto inputs = [this] { const SlowEventLog::Scope scope(this, "row inputs"); return rowInputs(); }();
+    inputs.generation = ++m_rowGeneration;
     m_rowsPending = true;
     ProcessRunner::post(this, [inputs = std::move(inputs)] { return prepareRows(inputs); },
         [this](const PreparedRows &prepared) {
@@ -797,6 +802,8 @@ void SessionsWindow::applyRows(const PreparedRows &prepared)
     const bool creationPlaced = std::exchange(m_rowCreationPlaced, false);
     const auto &counts = prepared.counts;
 
+    // #705: each part of applying rows ranks on its own in the slow-event log.
+    std::optional<SlowEventLog::Scope> part(std::in_place, this, "rows: filters");
     m_heading->setText(m_filter == "archived" ? tr("Archive") : tr("Sessions"));
     const int unreadCount = prepared.unreadReplies;
     m_markAllReadAction->setEnabled(unreadCount > 0);
@@ -831,6 +838,7 @@ void SessionsWindow::applyRows(const PreparedRows &prepared)
     { const QSignalBlocker block(m_accountFilter); m_accountFilter->setSelection(m_accountFilters); m_accountFilter->setAccounts(prepared.accounts);
         m_accountFilter->setSessionCounts(prepared.accountCounts, countCaption + (m_hostFilters.isEmpty() ? QString() : tr(" / selected machines")) + (m_projectFilters.isEmpty() ? QString() : tr(" / selected projects"))); }
 
+    part.emplace(this, "rows: list");
     const int scroll = m_sessions->verticalScrollBar()->value();
     applyListRows(prepared);
     int selectedRow = -1;
@@ -840,6 +848,7 @@ void SessionsWindow::applyRows(const PreparedRows &prepared)
             : row.kind == PreparedRow::Child ? row.parentKey == requestedSelection && row.child == m_subagentId
             : row.kind == PreparedRow::Session && row.key == requestedSelection) selectedRow = i;
     }
+    part.emplace(this, "rows: selection");
     // Live streams take their folders first; the others are polled.
     updateGitWatch();
     for (const auto &[host, path] : prepared.gitReads) m_client.requestGitStatus(host, path);
@@ -878,6 +887,7 @@ void SessionsWindow::applyRows(const PreparedRows &prepared)
     m_rebuilding = false;
     updateSelectionActions();
     m_sessions->syncActivityAnimation();
+    part.emplace(this, "rows: details");
     // A vanished target also clears while search results own the list.
     if ((selectedRow < 0 && !preserveConversation) || (selectedRow >= 0 && (!m_searchResults->active() || creationPlaced))) selectSession(); else renderDetails();
     // A fork opens its terminal once selected; a revealed row is shown now.
@@ -885,6 +895,7 @@ void SessionsWindow::applyRows(const PreparedRows &prepared)
         const auto key = std::exchange(m_forkTerminalKey, {});
         QTimer::singleShot(0, this, [this, key] { if (m_selectedKey == key) { m_detailTabs->setCurrentWidget(m_terminal); m_terminal->connectSession(); } });
     }
+    part.reset();
     revealPendingRow();
     emit rowsApplied(prepared.generation);
 }

@@ -56,6 +56,9 @@ QByteArray bytes(const QString &key);
 bool contains(const QString &key);
 // Waits until the files' writer has written every store (quit, tests).
 void flush();
+// How often key was read since the start, for tests that bound a hot path's
+// reads (#705).
+quint64 readCount(const QString &key);
 // Drops the recorded value, so the next read reads the stored one (tests).
 void forget(const QString &key);
 // Removes every file key's file and recorded value, as QSettings::clear()

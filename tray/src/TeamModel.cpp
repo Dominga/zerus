@@ -1506,6 +1506,44 @@ Team withoutCancelled(const Team &team)
     return shown;
 }
 
+bool phaseFinished(const Team &team, int phase)
+{
+    if (const auto *record = team.phase(phase); record && record->state == QLatin1String("discarded")) return false;
+    if (team.freeMode() && team.freePhase.known && team.freePhase.phase == phase) return false;
+    bool any = false, cancelledOnly = true;
+    for (const auto &task : team.tasks) {
+        if (task.phase != phase) continue;
+        if (!task.finished()) return false;
+        any = true;
+        cancelledOnly = cancelledOnly && task.status == QLatin1String("cancelled");
+    }
+    return any && !cancelledOnly;
+}
+
+int finishedPhases(const Team &team)
+{
+    QSet<int> phases;
+    for (const auto &task : team.tasks) if (!phases.contains(task.phase) && phaseFinished(team, task.phase)) phases.insert(task.phase);
+    return int(phases.size());
+}
+
+Team withoutFinished(const Team &team)
+{
+    QSet<int> phases;
+    for (const auto &task : team.tasks) if (phaseFinished(team, task.phase)) phases.insert(task.phase);
+    if (phases.isEmpty()) return team;
+    Team shown = team;
+    shown.cancelledHidden = true;
+    QSet<int> gone;
+    for (const auto &task : team.tasks) if (phases.contains(task.phase)) gone.insert(task.id);
+    shown.tasks.erase(std::remove_if(shown.tasks.begin(), shown.tasks.end(), [&gone](const Task &task) { return gone.contains(task.id); }), shown.tasks.end());
+    shown.phases.erase(std::remove_if(shown.phases.begin(), shown.phases.end(), [&phases](const Phase &phase) { return phases.contains(phase.n); }), shown.phases.end());
+    shown.phaseSummary.erase(std::remove_if(shown.phaseSummary.begin(), shown.phaseSummary.end(), [&phases](const Team::PhaseSummary &summary) { return phases.contains(summary.n); }),
+                             shown.phaseSummary.end());
+    for (int id : gone) { shown.layers.remove(id); shown.cycle.remove(id); shown.ready.removeAll(id); }
+    return shown;
+}
+
 bool taskStarted(const Task &task)
 {
     return std::any_of(task.attempts.cbegin(), task.attempts.cend(), [](const Attempt &attempt) { return attempt.state != QLatin1String("refused"); });

@@ -1465,6 +1465,20 @@ phase 37. Lanes are balanced by volume and cost (U28 rule 9), not by count.
   lead's decision, per phase; its reports need no owner approval, as the
   phase is auto-accepted.
 
+## Test discipline (owner, 2026-10-30)
+
+- U62: the big suites are cut into small pieces by area, so a task runs only
+  the tests of what it touches. A member runs the tests its task touches;
+  a phase's integration runs the tests of everything the phase touched.
+- The full run is the owner's call: only before a release (the owner said to
+  publish or release a version), and only after the lead asks the owner to
+  confirm it with how long it takes, unless the owner gave an explicit
+  standing permission. Nobody runs the full suites otherwise.
+- Zerus carries the rule: a test map from source areas to test targets and
+  filters, a command that names the affected tests of a change with their
+  time, a testing policy in every hand-off and the lead's guide, and full-run
+  templates that need the owner's grant.
+
 ## Order of work (proposal)
 
 1. Delivery and reports: A1-A6, H5.

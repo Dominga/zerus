@@ -3,10 +3,11 @@ import { activityReadingRows, createActivityAnchor } from "./activity-anchor";
 import { searchPreview, clearSearchPreview } from "../../store/searchSelection";
 import { SearchHighlight } from "./SearchHighlight";
 import { For, Show, batch, createContext, createEffect, createMemo, createSignal, on, onCleanup, onMount, useContext } from "solid-js";
+import { createVirtualizer, elementScroll, type Range } from "@tanstack/solid-virtual";
 import { attachmentFetch, attachmentMedia, attachmentOpen, copyVerbatim } from "../../bridge";
 import { notify } from "../../store/actions";
 import { previews } from "../../store/attachments";
-import { mediaPlayback } from "../../store/mediaPlayback";
+import { mediaPlayback, playingId, setPlayingId } from "../../store/mediaPlayback";
 import { pageHidden } from "../../store/visibility";
 import { recordingBlob } from "./voice-playback";
 import { cardTarget, createOpen, readCards } from "./attachment-card";
@@ -24,6 +25,7 @@ import { animationFrames, createActivityEnd, newLocalSends } from "./activity-en
 import { buildTranscript, createTranscriptProjection, VOICE_STATE_LABEL, voiceStateDetail, voiceStateIssue } from "./transcript";
 import { DELETE_TEXT, DELETE_TITLE, retryReason, routeInspect } from "./local-actions";
 import { inlineParts, markdownBlocks } from "./markdown";
+import { activityAll, activityRange, activitySelectionText, activityText, activityTexts, activityVirtualOffset, selectActivityAll, selectionCoversActivity } from "./activity-virtual";
 import { openExternal, openSessionFile } from "./sessionFiles";
 import { SessionFileDialog } from "./SessionFileDialog";
 import { statusOf } from "./SessionCard";
@@ -133,12 +135,12 @@ function ColumnEdge(props: { right?: boolean }) {
 function activityMenu(e: MouseEvent) {
   if ((e.target as HTMLElement).closest("button, a, input, textarea, .col-edge")) return;
   e.preventDefault();
-  const scroller = e.currentTarget as HTMLElement;
-  const text = getSelection()?.toString() ?? "";
+  const scroller = e.currentTarget as HTMLDivElement;
+  const text = activitySelectionText(scroller);
   setMenu({
     x: e.clientX, y: e.clientY, items: [
       { label: "Copy", icon: "copy", kbd: "Ctrl+C", disabled: !text, action: text ? () => copyText(text, "The selected text is on the clipboard") : undefined },
-      { label: "Select All", kbd: "Ctrl+A", action: () => { const col = scroller.querySelector(".act-col"); if (col) getSelection()?.selectAllChildren(col); } },
+      { label: "Select All", kbd: "Ctrl+A", action: () => selectActivityAll(scroller) },
       { separator: true },
       ...columnMenuItems(),
     ],
@@ -161,11 +163,16 @@ const ActivityLayoutHeld = createContext<() => boolean>(() => false);
 /** Keep disclosure geometry while a gesture or persistent selection owns
  * layout. In particular, shrinking offscreen content would clamp WebKit's
  * scrollTop even without an application scroll write (zerus-5wmh.85). */
-function layoutDisclosure() {
+function layoutDisclosure(expanded: () => boolean | undefined = () => undefined, onExpanded?: (open: boolean) => void) {
   const held = useContext(ActivityLayoutHeld);
   const [wanted, setWanted] = createSignal(false);
-  const open = createMemo((previous: boolean) => held() ? previous : wanted(), false);
-  return [open, () => setWanted((value) => !value)] as const;
+  const open = createMemo((previous: boolean) => held() ? previous : expanded() ?? wanted(), false);
+  const toggle = () => {
+    const next = !open();
+    setWanted(next);
+    onExpanded?.(next);
+  };
+  return [open, toggle] as const;
 }
 
 function inline(text: string, session?: () => Session | undefined) {
@@ -258,10 +265,10 @@ function Waveform(props: { values: number[] }) {
   return <>{layer("rest")}{layer("played")}</>;
 }
 
-function MediaCard(props: { item: MediaMessage; scope?: AttachmentScope }) {
+function MediaCard(props: { item: MediaMessage; scope?: AttachmentScope; expanded?: boolean; onExpanded?: (open: boolean) => void }) {
   const it = props.item;
   const video = it.media === "video";
-  const [transcript, toggleTranscript] = layoutDisclosure();
+  const [transcript, toggleTranscript] = layoutDisclosure(() => props.expanded, props.onExpanded);
   const held = useContext(ActivityLayoutHeld);
   const [position, setPosition] = createSignal(0);
   const [duration, setDuration] = createSignal(it.durationMs);
@@ -276,6 +283,7 @@ function MediaCard(props: { item: MediaMessage; scope?: AttachmentScope }) {
   let claim: ReturnType<typeof mediaPlayback.take> | undefined;
   let pendingSeek: number | undefined;
   const clear = () => {
+    if (claim?.current() && playingId() === it.id) setPlayingId(undefined);
     claim?.release(); claim = undefined;
     player?.pause(); setPlaying(false); setLoading(false);
     if (player) { player.removeAttribute("src"); player.load(); }
@@ -291,6 +299,7 @@ function MediaCard(props: { item: MediaMessage; scope?: AttachmentScope }) {
     if (!current || loading()) return;
     if (!claim?.current()) claim = mediaPlayback.take(clear, () => { if (loading()) clear(); else player?.pause(); });
     const mine = claim;
+    setPlayingId(it.id);
     if (seekTo !== undefined) { pendingSeek = seekTo; setPosition(seekTo); }
     setError("");
     try {
@@ -303,7 +312,7 @@ function MediaCard(props: { item: MediaMessage; scope?: AttachmentScope }) {
       }
       await Promise.resolve();
       if (mine.current() && target() === current && player) await player.play();
-    } catch (failure) { if (mine.current()) { setError(`Could not play recording: ${String(failure)}`); setPlaying(false); } }
+    } catch (failure) { if (mine.current()) { setError(`Could not play recording: ${String(failure)}`); setPlaying(false); if (playingId() === it.id) setPlayingId(undefined); } }
     finally { if (mine.current()) setLoading(false); }
   };
   const pause = () => { player?.pause(); setPlaying(false); };
@@ -317,6 +326,7 @@ function MediaCard(props: { item: MediaMessage; scope?: AttachmentScope }) {
   const failed = (event: Event) => {
     if (!claim?.current() || !objectUrl) return;
     setPlaying(false); setLoading(false);
+    if (playingId() === it.id) setPlayingId(undefined);
     setError(`Could not play recording: ${(event.currentTarget as HTMLMediaElement).error?.message || "Recording is unavailable."}`);
   };
   const seek = (e: MouseEvent) => {
@@ -554,10 +564,10 @@ function EchoBody(props: { item: ActivityItem; scope?: AttachmentScope }) {
   </>;
 }
 
-function Item(props: { item: TranscriptItem; scope?: AttachmentScope }) {
-  const [open, toggleOpen] = layoutDisclosure();
+function Item(props: { item: TranscriptItem; scope?: AttachmentScope; expanded?: boolean; onExpanded?: (open: boolean) => void }) {
+  const [open, toggleOpen] = layoutDisclosure(() => props.expanded, props.onExpanded);
   const it = props.item;
-  if (it.kind === "media") return <MediaCard item={it} scope={props.scope} />;
+  if (it.kind === "media") return <MediaCard item={it} scope={props.scope} expanded={props.expanded} onExpanded={props.onExpanded} />;
   if (it.kind === "context") return <div class="act-label eyebrow" id={`item-${it.id}`}>{it.body}</div>;
   if (it.kind === "thinking") return <div class="act-thinking" id={`item-${it.id}`}><span class="eyebrow">Thinking</span><p>{it.body}</p></div>;
   if (it.kind === "report")
@@ -684,8 +694,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
   let scroller!: HTMLDivElement;
   const [placed, setPlaced] = createSignal(false);
   const [layoutHeld, setLayoutHeld] = createSignal(false);
-  // Items keep their identity while events append: the list reconciles by id,
-  // so a growing tool group updates in place and older pages only add nodes.
+  // Items keep their identity while events append, including across the virtual window.
   const [view, setView] = createStore<{ items: TranscriptItem[]; expired: boolean; loaded: boolean; pane: ReturnType<typeof paneStates>; tool: string }>({ items: [], expired: false, loaded: false, pane: paneStates(source(), s()), tool: "" });
   const local = createMemo(() => localRows(source(), s()), undefined, { equals: (a, b) => a === b || (a.length === 0 && b.length === 0) });
   const projection = createTranscriptProjection();
@@ -709,23 +718,73 @@ export function ActivityView(props: { source?: ActivitySource }) {
       reading.changed(); end.changed();
     });
   });
-
+  const [expanded, setExpanded] = createStore<Record<string, boolean>>({});
+  let olderQueued = false;
   // Keep a named row and its offset while the end pin is released.
-  /** The newest event's seq the view has seen, for the count of new ones. */
-  let newest: number | undefined;
   const selectionInside = () => {
     const selection = document.getSelection();
     if (!selection || selection.isCollapsed) return false;
     return [selection.anchorNode, selection.focusNode].some((node) => !!node && scroller.contains(node));
   };
+  const playingIndex = createMemo(() => {
+    const id = playingId();
+    return id ? view.items.findIndex((item) => item.id === id) : -1;
+  });
+  const virtualizer = createVirtualizer({
+    get count() { return view.items.length; },
+    onChange: () => settleReading(),
+    scrollToFn: (offset, options, instance) => {
+      const write = () => elementScroll(offset, { ...options, behavior: options.behavior ?? "instant" }, instance);
+      const top = offset + (options.adjustments ?? 0);
+      const element = instance.scrollElement;
+      if (!element || top <= element.scrollHeight - element.clientHeight) { write(); return; }
+      // Solid commits the new sizer after _willUpdate; defer a write it would clamp.
+      const target = source().target()?.id;
+      queueMicrotask(() => { if (target === source().target()?.id) write(); });
+    },
+    getScrollElement: () => (scroller?.isConnected ? scroller : null),
+    estimateSize: () => 96,
+    getItemKey: (index) => view.items[index]?.id ?? index,
+    rangeExtractor: (range: Range) => activityRange(range, playingIndex()),
+    overscan: 8,
+    gap: 10,
+  });
+  virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, _delta, instance) => {
+    if (!end.active() || selectionInside()) return false;
+    const offset = (instance.scrollOffset ?? 0) + instance.scrollAdjustments;
+    return instance.itemSizeCache.has(item.key)
+      ? item.end <= offset && instance.scrollDirection !== "backward"
+      : item.start < offset;
+  };
+  const virtualItems = createMemo(() => virtualizer.getVirtualItems());
+  const virtualKeys = createMemo<string[]>(() => placed() ? virtualItems().map((item) => String(item.key)) : [], [], { equals: (a, b) => a.length === b.length && a.every((key, index) => key === b[index]) });
+  const byId = createMemo(() => new Map(view.items.map((item) => [item.id, item])));
+  const indexOf = createMemo(() => new Map(virtualItems().map((item) => [String(item.key), item.index])));
+  const startOf = createMemo(() => new Map(virtualItems().map((item) => [String(item.key), item.start])));
+
+  // Stay at the bottom while it is in view; keep the reading position when an older page lands above.
+  /** The newest event's seq the view has seen, for the count of new ones. */
+  let newest: number | undefined;
   const end = createActivityEnd(
     () => ({ top: scroller.scrollTop, height: scroller.scrollHeight, viewport: scroller.clientHeight }),
     () => scroller.scrollTo({ top: scroller.scrollHeight, behavior: "instant" }),
     animationFrames,
     () => !motion.active() && !selectionInside(),
-    () => { if (view.loaded || view.items.length) setPlaced(true); },
+    () => {
+      if (!view.loaded && !view.items.length) return;
+      const target = source().target()?.id;
+      requestAnimationFrame(() => { if (target === source().target()?.id && !placed() && (view.loaded || view.items.length)) setPlaced(true); });
+    },
   );
   let latestAfterScroll = false;
+  const measuredOffset = (key: string) => {
+    const mounted = activityReadingRows(scroller).offset(key);
+    if (mounted !== undefined) return mounted;
+    const index = view.items.findIndex((item) => `item-${item.id}` === key);
+    const start = virtualizer.measurementsCache[index]?.start, virtual = scroller.querySelector<HTMLElement>(".act-virtual");
+    if (index < 0 || start === undefined || !virtual) return undefined;
+    return activityVirtualOffset(scroller, virtual, start);
+  };
   const motion = createActivityScroll(() => scroller.scrollTop, (flush) => {
     const atEnd = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= 1;
     const pinned = end.active();
@@ -736,7 +795,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
   });
   const reading = createActivityAnchor({
     visible: () => activityReadingRows(scroller).visible(),
-    offset: (key) => activityReadingRows(scroller).offset(key),
+    offset: measuredOffset,
     adjust: (delta) => activityReadingRows(scroller).adjust(delta),
   }, () => !end.active() && !preview(), animationFrames, () => !motion.active() && !selectionInside());
   const holdSelection = () => {
@@ -759,7 +818,9 @@ export function ActivityView(props: { source?: ActivitySource }) {
     const pointerEnded = () => motion.release();
     window.addEventListener("pointerup", pointerEnded); window.addEventListener("pointercancel", pointerEnded); window.addEventListener("blur", pointerEnded);
     onCleanup(() => { window.removeEventListener("pointerup", pointerEnded); window.removeEventListener("pointercancel", pointerEnded); window.removeEventListener("blur", pointerEnded); });
+    activityTexts.set(scroller, () => activityText(view.items, expanded));
     const selectionChanged = () => {
+      if (!selectionCoversActivity(scroller)) activityAll.delete(scroller);
       const inside = selectionInside();
       if (inside) setLayoutHeld(true);
       motion.selection(inside);
@@ -783,13 +844,22 @@ export function ActivityView(props: { source?: ActivitySource }) {
   });
   onCleanup(() => {
     end.dispose(); reading.dispose(); motion.dispose();
+    activityTexts.delete(scroller);
+    activityAll.delete(scroller);
     if (liveScroller === scroller) liveScroller = undefined;
     if (liveLatest === latest) liveLatest = undefined;
   });
   const onScroll = () => {
     if (motion.active()) {
       motion.moved(); reading.remember();
-      if (!preview() && scroller.scrollTop < OLDER_EDGE && readsOlder(source())) source().loadOlder();
+      if (!olderQueued && !preview() && scroller.scrollTop < OLDER_EDGE && readsOlder(source())) {
+        const target = source().target()?.id;
+        olderQueued = true;
+        queueMicrotask(() => {
+          olderQueued = false;
+          if (target === source().target()?.id && scroller.scrollTop < OLDER_EDGE && readsOlder(source())) source().loadOlder();
+        });
+      }
       return;
     }
     if (end.scrolled()) return;
@@ -805,7 +875,11 @@ export function ActivityView(props: { source?: ActivitySource }) {
     // first new projection, so a held range cannot defer a cached first page.
     if (selectionInside()) document.getSelection()?.removeAllRanges();
     sendIds = undefined; setPlaced(false);
-    motion.reset(); setLayoutHeld(false); latestAfterScroll = false; setFollowing(true); setUnseen(0); reading.reset(); newest = undefined;
+    motion.reset(); setLayoutHeld(false); latestAfterScroll = false;
+    activityAll.delete(scroller);
+    setExpanded({});
+    virtualizer.measure();
+    setFollowing(true); setUnseen(0); reading.reset(); newest = undefined;
     // Selection changes must place even when the next page has the same row count.
     end.pin();
   };
@@ -833,7 +907,6 @@ export function ActivityView(props: { source?: ActivitySource }) {
     if (last !== undefined) newest = last;
   }));
 
-
   const scope = createMemo(() => source().attachmentScope?.(), undefined, { equals: (a, b) => JSON.stringify(a) === JSON.stringify(b) });
   const liveTool = () => view.tool;
   const states = () => view.pane;
@@ -855,8 +928,19 @@ export function ActivityView(props: { source?: ActivitySource }) {
       <SessionFileDialog />
       <div class="act-scroll" ref={scroller} tabindex="-1" onContextMenu={activityMenu} onScroll={onScroll} style={{ "overflow-anchor": "none" }}
         onWheel={scrollIntent}
-        onKeyDown={(e) => { if (!e.defaultPrevented && ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(e.key)
-          && !(e.target as HTMLElement).closest("input,textarea,select,[contenteditable=true]") && !(e.key === " " && (e.target as HTMLElement).closest("button,a"))) { scrollIntent(); } }}
+        onKeyDown={(e) => {
+          if (e.defaultPrevented || (e.target as HTMLElement).closest("input,textarea,select,[contenteditable=true]")) return;
+          const key = e.key.toLowerCase(), command = (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey;
+          if (command && key === "a") { e.preventDefault(); selectActivityAll(scroller); return; }
+          if (command && key === "c" && activityAll.get(scroller) && selectionCoversActivity(scroller)) {
+            e.preventDefault();
+            const text = activitySelectionText(scroller);
+            if (text) copyText(text, "The selected text is on the clipboard");
+            return;
+          }
+          if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(e.key)
+            && !(e.key === " " && (e.target as HTMLElement).closest("button,a"))) scrollIntent();
+        }}
         onPointerDown={(e) => { if (e.button === 0 && !(e.target as HTMLElement).closest("button,a,input,textarea,.col-edge")) {
           // The scrollbar releases follow. Selecting text merely pauses it;
           // the persistent range keeps ownership after pointerup.
@@ -890,7 +974,17 @@ export function ActivityView(props: { source?: ActivitySource }) {
           <Show when={!states().archived} fallback={<div class="notice"><Icon name="archive" size={14} /><div>This conversation is archived.</div></div>}>
             <Show when={view.loaded || view.items.length} fallback={<div class="act-older hint">Reading activity…</div>}>
               <Show when={view.items.length} fallback={<div class="act-older hint">No recorded activity yet.</div>}>
-                <For each={view.items}>{(it) => <Item item={it} scope={scope()} />}</For>
+                <div class="act-virtual" style={{ height: `${virtualizer.getTotalSize()}px` }}>
+                  <For each={virtualKeys()}>{(id) => {
+                    const item = () => byId().get(id);
+                    return (
+                      <div class="act-virtual-row" data-index={indexOf().get(id) ?? 0} ref={virtualizer.measureElement}
+                        style={{ transform: `translateY(${startOf().get(id) ?? 0}px)` }}>
+                        <Show when={item()}>{(it) => <Item item={it()} scope={scope()} expanded={!!expanded[id]} onExpanded={(open) => setExpanded(id, open)} />}</Show>
+                      </div>
+                    );
+                  }}</For>
+                </div>
               </Show>
             </Show>
             <Show when={states().working && liveTool()}>

@@ -22,7 +22,7 @@ fixture_config = RUNNER.fixture_config
 
 class FixtureTests(unittest.TestCase):
     def test_phase4_config_has_the_driven_states(self):
-        config = fixture_config()
+        config = fixture_config(CLIENT / "fixtures/replay.ndjson")
         self.assertEqual(len(config["inspect"]), 29)
         docs = config["inspect"]["claude/sample-project/docs-pass"]["pending_questions"][0]
         approval = config["inspect"]["kimi/sample-project/flaky-test"]["pending_questions"][0]
@@ -39,6 +39,21 @@ class FixtureTests(unittest.TestCase):
         self.assertEqual(resumed["runtime_state"], "live")
         self.assertTrue(resumed["run_id"].endswith("-resumed"))
         self.assertEqual(base64.b64decode(config["attachments"]["req-fixture-image"]["data_base64"]), base64.b64decode(PNG))
+
+    def test_private_environment_refuses_inherited_display_and_bus(self):
+        scratch = Path("/tmp/zerus-phase4-env-test")
+        env = RUNNER.private_environment(scratch, scratch / "replay.ndjson", scratch / "hgs", scratch / "notes.txt")
+        self.assertEqual(env["TMUX_TMPDIR"], str(scratch / "tmp"))
+        self.assertNotIn("DBUS_SESSION_BUS_ADDRESS", env)
+        inherited = {**env, "DISPLAY": ":0", "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus"}
+        result = subprocess.run([sys.executable, str(CLIENT / "scripts/phase4-smoke.py"), "--guard", "/bin/true", str(scratch)],
+                                env=inherited, capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        with self.assertRaises(RuntimeError):
+            RUNNER.assert_private_environment(inherited, scratch)
+        with self.assertRaises(RuntimeError):
+            RUNNER.assert_private_environment({**env, "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus"}, scratch)
+        RUNNER.assert_private_environment({**env, "DBUS_SESSION_BUS_ADDRESS": "unix:abstract=/tmp/dbus-private-fixture"}, scratch)
 
     def test_catalog_rows_keep_hgs_tracking(self):
         rows = []
@@ -73,7 +88,7 @@ class FakeTests(unittest.TestCase):
         root = Path(self.dir.name)
         self.hgs = root / "hgs"
         shutil.copy2(CLIENT / "src-tauri/tests/support/fake_hgs_phase4.py", self.hgs)
-        self.config = fixture_config()
+        self.config = fixture_config(CLIENT / "fixtures/replay.ndjson")
         self.config["delays"] = {}
         (root / "config.json").write_text(json.dumps(self.config), encoding="utf-8")
 

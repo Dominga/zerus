@@ -55,7 +55,7 @@ export function activityReadingRows(scroller: HTMLElement): ReadingRows {
   return {
     visible() {
       const column = scroller.querySelector(".act-col");
-      const rows = column?.querySelectorAll<HTMLElement>(":scope > [id^='item-']");
+      const rows = column?.querySelectorAll<HTMLElement>("[id^='item-']");
       if (!rows?.length) return [];
       const edge = top(), bottom = edge + scroller.clientHeight;
       let lo = 0, hi = rows.length;

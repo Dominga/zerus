@@ -53,6 +53,7 @@ pub mod session_file_reference;
 pub mod session_usage;
 pub mod settings;
 pub mod shell;
+pub mod source;
 pub mod speech_settings;
 pub mod state;
 pub mod stream;

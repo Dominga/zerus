@@ -180,16 +180,34 @@ pub(crate) fn hgs_command(hgs: &Path, computer: &ComputerId, args: &[&str]) -> C
 
 /// Runs `hgs [@host] -h` and looks for [`HELP_MARKER`].
 pub fn probe(hgs: &Path, computer: &ComputerId, timeout: Duration) -> Probe {
-    probe_until(hgs, computer, timeout, &AtomicBool::new(false))
+    probe_until(hgs, computer, timeout, &AtomicBool::new(false), None)
 }
 
-fn probe_until(hgs: &Path, computer: &ComputerId, timeout: Duration, stop: &AtomicBool) -> Probe {
+fn probe_until(
+    hgs: &Path,
+    computer: &ComputerId,
+    timeout: Duration,
+    stop: &AtomicBool,
+    source: Option<&crate::source::Endpoint>,
+) -> Probe {
+    let reader_slot = if let Some(source) = source {
+        let Some(slot) = source.reader() else {
+            return Probe::Failed("previous source reader is still open".into());
+        };
+        Some(slot)
+    } else {
+        None
+    };
     let mut command = hgs_command(hgs, computer, &["-h"]);
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    let mut child = match command.spawn() {
+    let mut child = match if let Some(source) = source {
+        source.spawn(&mut command)
+    } else {
+        command.spawn()
+    } {
         Ok(child) => child,
         Err(error) => return Probe::Failed(format!("cannot start hgs: {error}")),
     };
@@ -198,6 +216,9 @@ fn probe_until(hgs: &Path, computer: &ComputerId, timeout: Duration, stop: &Atom
         thread::spawn(move || {
             let mut text = Vec::new();
             let _ = stdout.take(PROBE_BYTES).read_to_end(&mut text);
+            // Release before waking launch, which uses the same per-alias
+            // guard for its stdout/stderr readers.
+            drop(reader_slot);
             let _ = tx.send(text);
         });
     }
@@ -222,10 +243,18 @@ fn probe_until(hgs: &Path, computer: &ComputerId, timeout: Duration, stop: &Atom
         return Probe::Failed(format!("hgs -h exited with {status}"));
     }
     let text = rx.recv_timeout(Duration::from_secs(1)).unwrap_or_default();
-    if String::from_utf8_lossy(&text).contains(HELP_MARKER) {
+    if help_marker(&String::from_utf8_lossy(&text), source.is_some()) {
         Probe::Supported
     } else {
         Probe::Unsupported
+    }
+}
+
+fn help_marker(text: &str, raw: bool) -> bool {
+    if raw {
+        text.lines().any(|line| line.trim() == HELP_MARKER)
+    } else {
+        text.contains(HELP_MARKER)
     }
 }
 
@@ -322,6 +351,8 @@ enum Input {
     Line {
         generation: u64,
         line: String,
+        received_at: Instant,
+        permit: Option<crate::source::Permit>,
     },
     Closed {
         generation: u64,
@@ -750,6 +781,25 @@ pub fn spawn(
     timing: Timing,
     sink: Sender<StreamEvent>,
 ) -> StreamHandle {
+    spawn_with(hgs, computer, timing, Some(sink), None).expect("start a stream supervisor")
+}
+
+pub(crate) fn spawn_source(
+    hgs: &Path,
+    computer: &ComputerId,
+    timing: Timing,
+    source: crate::source::Endpoint,
+) -> io::Result<StreamHandle> {
+    spawn_with(hgs, computer, timing, None, Some(source))
+}
+
+fn spawn_with(
+    hgs: &Path,
+    computer: &ComputerId,
+    timing: Timing,
+    sink: Option<Sender<StreamEvent>>,
+    source: Option<crate::source::Endpoint>,
+) -> io::Result<StreamHandle> {
     let (tx, rx) = mpsc::sync_channel(QUEUE_LINES);
     let follows = Follows::default();
     let processes = ProcessFollows::default();
@@ -765,6 +815,8 @@ pub fn spawn(
         computer: computer.clone(),
         timing,
         sink,
+        source,
+        connection: None,
         rx,
         tx: tx.clone(),
         follows: follows.clone(),
@@ -785,6 +837,9 @@ pub fn spawn(
         stdin: None,
         greeted: false,
         last_frame: Instant::now(),
+        launched: Instant::now(),
+        source_seq: None,
+        reader_stop: None,
     };
     let name = match computer.alias() {
         Some(alias) => format!("hgs-watch-{alias}"),
@@ -792,9 +847,8 @@ pub fn spawn(
     };
     let thread = thread::Builder::new()
         .name(name)
-        .spawn(move || supervisor.run())
-        .expect("start a stream supervisor");
-    StreamHandle {
+        .spawn(move || supervisor.run())?;
+    Ok(StreamHandle {
         computer: computer.clone(),
         tx,
         follows,
@@ -807,7 +861,7 @@ pub fn spawn(
         stop,
         retry,
         thread: Some(thread),
-    }
+    })
 }
 
 #[derive(PartialEq)]
@@ -820,7 +874,9 @@ struct Supervisor {
     hgs: PathBuf,
     computer: ComputerId,
     timing: Timing,
-    sink: Sender<StreamEvent>,
+    sink: Option<Sender<StreamEvent>>,
+    source: Option<crate::source::Endpoint>,
+    connection: Option<crate::source::Connection>,
     rx: Receiver<Input>,
     tx: SyncSender<Input>,
     follows: Follows,
@@ -847,6 +903,9 @@ struct Supervisor {
     /// The running stream sent its `hello`.
     greeted: bool,
     last_frame: Instant,
+    launched: Instant,
+    source_seq: Option<u64>,
+    reader_stop: Option<Arc<AtomicBool>>,
 }
 
 impl Supervisor {
@@ -859,11 +918,33 @@ impl Supervisor {
             // A retry is in flight now; extra Refresh presses coalesce with it.
             self.retry.begin();
             self.state.begin();
+            if let Some(source) = &self.source {
+                self.connection = source.connect(&self.stop);
+                if self.connection.is_none() {
+                    break;
+                }
+            }
             let timeout = self.timing.probe_timeout(&self.computer);
-            match probe_until(&self.hgs, &self.computer, timeout, &self.stop) {
+            match probe_until(
+                &self.hgs,
+                &self.computer,
+                timeout,
+                &self.stop,
+                self.source.as_ref(),
+            ) {
                 Probe::Supported => {
                     self.legacy = None;
                     self.legacy_windows.clear();
+                }
+                Probe::Unsupported if self.source.is_some() => {
+                    // Raw legacy conversion is a separate bounded adapter. Do
+                    // not silently start the UI's whole-catalog poll/cache.
+                    self.connection = None;
+                    self.status(ComputerStatus::Unsupported);
+                    if self.wait(self.timing.reprobe) {
+                        continue;
+                    }
+                    break;
                 }
                 Probe::Unsupported => {
                     // Polled already: the status stays until a listing fails.
@@ -930,7 +1011,13 @@ impl Supervisor {
                 self.retry.begin();
             }
         }
-        let _ = self.sink.send(StreamEvent::Change(change));
+        if let Some(sink) = &self.sink {
+            let _ = sink.send(StreamEvent::Change(change));
+        } else if let (Some(source), Change::Computer { status, .. }) = (&self.source, change) {
+            if !source.status(self.generation, status, &self.stop) {
+                self.stop.store(true, Ordering::Relaxed);
+            }
+        }
     }
 
     fn status(&self, status: ComputerStatus) {
@@ -943,6 +1030,7 @@ impl Supervisor {
     /// Reports the failure of this attempt and waits out its delay; false
     /// when the stream was stopped meanwhile.
     fn fail(&mut self) -> bool {
+        self.connection = None;
         for change in self.state.end(&self.computer, Instant::now()) {
             self.emit(change);
         }
@@ -955,6 +1043,9 @@ impl Supervisor {
         self.sync_poller();
         let deadline = Instant::now() + time;
         loop {
+            if self.stop.load(Ordering::Relaxed) {
+                return false;
+            }
             if self.retry.requested() {
                 return true;
             }
@@ -991,6 +1082,9 @@ impl Supervisor {
         self.sync_poller();
         let deadline = Instant::now() + time;
         loop {
+            if self.stop.load(Ordering::Relaxed) {
+                return false;
+            }
             let now = Instant::now();
             if now >= deadline {
                 return true;
@@ -1107,10 +1201,12 @@ impl Supervisor {
                 // This computer's listing names the peers, as its meta would.
                 if computer.is_local() {
                     if let Some(peers) = self.state.peers() {
-                        let _ = self.sink.send(StreamEvent::Peers {
-                            computer: computer.clone(),
-                            peers,
-                        });
+                        if let Some(sink) = &self.sink {
+                            let _ = sink.send(StreamEvent::Peers {
+                                computer: computer.clone(),
+                                peers,
+                            });
+                        }
                     }
                 }
                 if first {
@@ -1189,20 +1285,45 @@ impl Supervisor {
     }
 
     fn launch(&mut self) -> io::Result<()> {
+        let reader_slot = if let Some(source) = &self.source {
+            let slot = source.reader().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "previous source reader is still open",
+                )
+            })?;
+            Some(Arc::new(slot))
+        } else {
+            None
+        };
+
         let mut command = hgs_command(&self.hgs, &self.computer, &["watch", "--json"]);
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child = command.spawn()?;
+        let mut child = if let Some(source) = &self.source {
+            source.spawn(&mut command)?
+        } else {
+            command.spawn()?
+        };
         self.generation += 1;
         let generation = self.generation;
         if let Some(stdout) = child.stdout.take() {
             let tx = self.tx.clone();
-            thread::spawn(move || read_stream(stdout, generation, tx));
+            let source = self.source.clone();
+            let stop = Arc::new(AtomicBool::new(false));
+            self.reader_stop = Some(stop.clone());
+            let slot = reader_slot.clone();
+            thread::spawn(move || {
+                let _slot = slot;
+                read_stream(stdout, generation, tx, source, stop);
+            });
         }
         if let Some(mut stderr) = child.stderr.take() {
+            let slot = reader_slot.clone();
             thread::spawn(move || {
+                let _slot = slot;
                 let _ = io::copy(&mut stderr, &mut io::sink());
             });
         }
@@ -1210,25 +1331,46 @@ impl Supervisor {
         self.child = Some(child);
         self.greeted = false;
         self.last_frame = Instant::now();
+        self.launched = self.last_frame;
+        self.source_seq = None;
         Ok(())
     }
 
     /// Runs the stream until it ends or the handle stops it.
     fn pump(&mut self) -> Outcome {
         loop {
-            let left = self
+            if self.stop.load(Ordering::Relaxed) {
+                return Outcome::Stopped;
+            }
+            let mut left = self
                 .timing
                 .silence
                 .saturating_sub(self.last_frame.elapsed());
+            if self.source.is_some() && !self.greeted {
+                left = left.min(self.timing.silence.saturating_sub(self.launched.elapsed()));
+            }
             if left.is_zero() {
                 return Outcome::Ended;
             }
             match self.rx.recv_timeout(left) {
-                Ok(Input::Line { generation, line }) if generation == self.generation => {
-                    self.last_frame = Instant::now();
+                Ok(Input::Line {
+                    generation,
+                    line,
+                    received_at,
+                    permit,
+                }) if generation == self.generation => {
+                    self.last_frame = if self.source.is_some() {
+                        received_at
+                    } else {
+                        Instant::now()
+                    };
                     match classify(&line) {
                         Line::Frame(frame) => {
-                            self.handle(&frame);
+                            if self.source.is_some() {
+                                self.handle_source(frame, received_at, permit);
+                            } else {
+                                self.handle(&frame);
+                            }
                             if self.state.failed() {
                                 return Outcome::Ended;
                             }
@@ -1279,6 +1421,58 @@ impl Supervisor {
                 Ok(Input::Stop) | Err(RecvTimeoutError::Disconnected) => return Outcome::Stopped,
                 Err(RecvTimeoutError::Timeout) => {}
             }
+        }
+    }
+
+    /// Forward catalog frames without ever applying them to CatalogState.
+    /// That empty state supplies only the existing lifecycle/backoff policy.
+    fn handle_source(
+        &mut self,
+        frame: Box<Frame>,
+        received_at: Instant,
+        permit: Option<crate::source::Permit>,
+    ) {
+        let hello = matches!(&frame.body, Body::Hello(_));
+        if hello == self.greeted || self.source_seq.is_some_and(|seq| frame.seq <= seq) {
+            self.state.end(&self.computer, Instant::now());
+            if let (Some(source), Some(permit)) = (&self.source, permit) {
+                if !source.status_reserved(
+                    self.generation,
+                    ComputerStatus::Reconnecting {
+                        attempt: self.state.attempt(),
+                    },
+                    permit,
+                ) {
+                    self.stop.store(true, Ordering::Relaxed);
+                }
+            }
+            return;
+        }
+        self.source_seq = Some(frame.seq);
+        let live = matches!(&frame.body, Body::Snapshot(snapshot) if snapshot.topic == topic::CATALOG && snapshot.last);
+        let changes = source_lifecycle(&mut self.state, &self.computer, &frame);
+        if hello {
+            self.greeted = true;
+            self.connection = None;
+        }
+        let Some(permit) = permit else {
+            self.stop.store(true, Ordering::Relaxed);
+            return;
+        };
+        let sent = self
+            .source
+            .as_ref()
+            .is_some_and(|source| source.frame(self.generation, frame, received_at, permit));
+        if !sent {
+            self.stop.store(true, Ordering::Relaxed);
+        }
+        // The frame is now consumer-owned, so a full ingress cannot deadlock
+        // while an additional lifecycle status waits for space.
+        for change in changes {
+            self.emit(change);
+        }
+        if live {
+            self.status(ComputerStatus::Live);
         }
     }
 
@@ -1355,10 +1549,12 @@ impl Supervisor {
                     && self.computer.is_local() =>
             {
                 if let Some(peers) = self.state.peers() {
-                    let _ = self.sink.send(StreamEvent::Peers {
-                        computer: self.computer.clone(),
-                        peers,
-                    });
+                    if let Some(sink) = &self.sink {
+                        let _ = sink.send(StreamEvent::Peers {
+                            computer: self.computer.clone(),
+                            peers,
+                        });
+                    }
                 }
             }
             _ => {}
@@ -1604,36 +1800,89 @@ impl Supervisor {
     fn close(&mut self) {
         self.stdin = None;
         self.greeted = false;
+        if let Some(stop) = self.reader_stop.take() {
+            stop.store(true, Ordering::Relaxed);
+        }
         self.sync_poller();
-        let Some(mut child) = self.child.take() else {
-            return;
-        };
-        let deadline = Instant::now() + self.timing.stop_grace;
-        loop {
-            match child.try_wait() {
-                Ok(Some(_)) => return,
-                Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
-                _ => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return;
+        if let Some(mut child) = self.child.take() {
+            let deadline = Instant::now() + self.timing.stop_grace;
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) => break,
+                    Ok(None) if Instant::now() < deadline => {
+                        thread::sleep(Duration::from_millis(5))
+                    }
+                    _ => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break;
+                    }
                 }
             }
+        }
+        self.connection = None;
+        if self.source.is_some() {
+            // Release stale-generation ingress before reserving a reconnect
+            // status. Otherwise a full input queue could hold every permit.
+            while self.rx.try_recv().is_ok() {}
         }
     }
 }
 
-fn read_stream(stdout: impl io::Read, generation: u64, tx: SyncSender<Input>) {
+/// Raw output shares lifecycle policy, never the per-session projection path.
+pub(crate) fn source_lifecycle(
+    state: &mut CatalogState,
+    computer: &ComputerId,
+    frame: &Frame,
+) -> Vec<Change> {
+    match &frame.body {
+        Body::Hello(_) => state.apply(computer, frame),
+        Body::Error(error) if error.fatal => state.end(computer, Instant::now()),
+        _ => Vec::new(),
+    }
+}
+
+fn read_stream(
+    stdout: impl io::Read,
+    generation: u64,
+    tx: SyncSender<Input>,
+    source: Option<crate::source::Endpoint>,
+    stop: Arc<AtomicBool>,
+) {
     let mut reader = BufReader::with_capacity(64 << 10, stdout);
     let mut line = Vec::new();
     loop {
+        if source.is_some() && stop.load(Ordering::Relaxed) {
+            return;
+        }
         match read_line(&mut reader, &mut line, MAX_FRAME_BYTES) {
             Ok(LineRead::Line) => {
-                let text = String::from_utf8_lossy(&line).into_owned();
+                let received_at = Instant::now();
+                let permit = if let Some(source) = &source {
+                    let Some(permit) = source.reserve(line.len() + 1 + 1024, &stop) else {
+                        return;
+                    };
+                    Some(permit)
+                } else {
+                    None
+                };
+                let text = if source.is_some() {
+                    match std::str::from_utf8(&line) {
+                        Ok(text) => text.to_owned(),
+                        Err(_) => {
+                            let _ = tx.send(Input::Closed { generation });
+                            return;
+                        }
+                    }
+                } else {
+                    String::from_utf8_lossy(&line).into_owned()
+                };
                 if tx
                     .send(Input::Line {
                         generation,
                         line: text,
+                        received_at,
+                        permit,
                     })
                     .is_err()
                 {
@@ -1651,6 +1900,14 @@ fn read_stream(stdout: impl io::Read, generation: u64, tx: SyncSender<Input>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_help_admission_needs_a_whole_marker_line() {
+        assert!(help_marker(&format!("help\n  {HELP_MARKER}\n"), true));
+        assert!(!help_marker(&format!("unsupported: {HELP_MARKER}"), true));
+        assert!(help_marker(&format!("prefix {HELP_MARKER}"), false));
+        assert!(!help_marker("old CLI", true));
+    }
 
     #[test]
     fn a_reconnect_is_coalesced_and_still_pending_when_the_input_queue_is_full() {

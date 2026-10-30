@@ -22,7 +22,7 @@ impl Fixture {
         let path = temp
             .path()
             .join(format!("{}.jsonl", identity.conversation_id));
-        let record = json!({"version":1,"name":identity.name,"run_id":identity.run_id,"conversation_id":identity.conversation_id,"agent":"codex","transcript":path,"cwd":"/work/example"});
+        let record = json!({"version":1,"name":identity.name,"run_id":identity.run_id,"conversation_id":identity.conversation_id,"agent":"codex","transcript":path,"cwd":state});
         let binding = state.join(format!(
             "{:x}.json",
             Sha256::digest(identity.name.as_bytes())

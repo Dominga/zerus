@@ -12,7 +12,6 @@ use std::{
     time::{Duration, Instant},
 };
 use zerus_content_search::{Index, Message, Role, Target, DEFAULT_FILE_BYTES, DOCUMENT_BYTES};
-const WINDOWS_UNAVAILABLE: &str = "Indexed content search is not available on Windows yet";
 mod catalog;
 mod query;
 mod wire;
@@ -125,12 +124,6 @@ pub(crate) struct Store {
 }
 impl Store {
     pub fn open(directory: &Path) -> Result<Self> {
-        // Discovery and ingestion have never been verified on Windows: the
-        // catalog stages nothing there. Refuse before creating any file, so
-        // `--indexed` fails plainly and the legacy `hgs search` stays the path.
-        if cfg!(windows) {
-            return Err(WINDOWS_UNAVAILABLE.into());
-        }
         private_dir(directory)?;
         if !crate::platform::verify_private(directory, crate::platform::Private::Directory)
             .map_err(|e| e.to_string())?
@@ -962,18 +955,29 @@ fn lower_own_priority() {
     }
 }
 
-// The index never opens on Windows (Store::open); its suites run on Unix.
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests;
 
 #[cfg(all(test, windows))]
 mod windows_tests {
+    use super::*;
+
     #[test]
-    fn indexed_search_refuses_before_creating_anything() {
+    fn indexed_search_opens_and_discovers_a_windows_fixture() {
         let temp = tempfile::tempdir().unwrap();
-        let directory = temp.path().join("content-search-v1");
-        let refused = super::Store::open(&directory).err();
-        assert_eq!(refused.as_deref(), Some(super::WINDOWS_UNAVAILABLE));
-        assert!(!directory.exists());
+        let state = temp.path().join("state");
+        fs::create_dir(&state).unwrap();
+        fs::write(state.join(format!("{:064x}.json", 1)), "{}").unwrap();
+        let store = Store::open(&state.join("content-search-v1")).unwrap();
+        let progress = store
+            .discover(
+                &state,
+                &DiscoveryBudget::interactive(),
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        assert!(progress.complete);
+        assert_eq!(progress.staged, 1);
+        assert_eq!(store.status().unwrap()["catalog"]["queued_paths"], 1);
     }
 }

@@ -28,7 +28,7 @@ impl Fixture {
         fs::create_dir_all(wire.parent().unwrap()).unwrap();
         fs::create_dir(home.join("sessions/workspace-b")).unwrap();
         let record = json!({"version":1,"name":identity.name,"run_id":identity.run_id,
-            "conversation_id":identity.conversation_id,"agent":"kimi","agent_home":home,"cwd":"/work/example"});
+            "conversation_id":identity.conversation_id,"agent":"kimi","agent_home":home,"cwd":state});
         let binding = state.join(format!(
             "{:x}.json",
             Sha256::digest(identity.name.as_bytes())

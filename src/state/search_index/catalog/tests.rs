@@ -154,6 +154,67 @@ fn cancellation_expiry_and_invalid_budgets_cannot_claim_a_catalog() {
 }
 
 #[test]
+fn failed_schema_migration_rolls_back_and_can_be_retried() {
+    let fixture = Fixture::new(1);
+    let db = fixture.store.index.connection();
+    // An interrupted/restored old schema cannot leave a half-created queue if
+    // its migration fails. Discovery must remain unknown until a valid retry.
+    db.execute_batch("CREATE TABLE catalog_totals(id INTEGER PRIMARY KEY)")
+        .unwrap();
+    assert!(fixture.store.catalog_schema().is_err());
+    assert!(db.is_autocommit());
+    let queue_exists: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='catalog_queue')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(!queue_exists);
+    db.execute_batch("DROP TABLE catalog_totals").unwrap();
+    let progress = fixture
+        .store
+        .discover(
+            &fixture.state,
+            &Fixture::budget(100),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    assert!(progress.complete);
+    assert_eq!(fixture.totals(), (1, 1));
+}
+
+#[test]
+fn cancellation_during_schema_commit_keeps_setup_for_the_next_pass() {
+    let fixture = Fixture::new(1);
+    let cancel = std::sync::Arc::new(AtomicBool::new(false));
+    let on_commit = cancel.clone();
+    fixture.store.index.connection().commit_hook(Some(move || {
+        on_commit.store(true, Ordering::Relaxed);
+        false
+    }));
+    let stopped = fixture
+        .store
+        .discover(&fixture.state, &Fixture::budget(100), &cancel)
+        .unwrap();
+    assert!(!stopped.complete);
+    assert_eq!(stopped.entries, 0);
+    assert_eq!(fixture.totals(), (0, 0));
+    fixture
+        .store
+        .index
+        .connection()
+        .commit_hook(None::<fn() -> bool>);
+    cancel.store(false, Ordering::Relaxed);
+    let retry = fixture
+        .store
+        .discover(&fixture.state, &Fixture::budget(100), &cancel)
+        .unwrap();
+    assert!(retry.complete);
+    assert_eq!(fixture.totals(), (1, 1));
+}
+
+#[test]
 fn routed_bindings_archives_and_native_bindings_share_one_bounded_queue() {
     let fixture = Fixture::new(2);
     for folder in ["bindings", "archives", "dsh/bindings"] {

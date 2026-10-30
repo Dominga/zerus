@@ -311,5 +311,5 @@ impl Store {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests;

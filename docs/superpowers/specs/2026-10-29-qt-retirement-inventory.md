@@ -405,9 +405,16 @@ three fields may fill empty/null Next defaults under the coordinator's explicit
 and the earlier run-memory seed never repeat. Legacy groups/pinned recovery,
 project vivid state and local Windows folders remain separate.
 
-Remaining source coverage includes `projectFolderSplit`,
-`removeWorktreeAfterTermination`, `tray.conf`, task inspector geometry,
-downloaded content and the rest of the interim stores listed below.
+The design owner's 2026-10-30 ruling retains `projectFolderSplit` and
+`tasks/inspectorSplit` as private typed evidence, with no Qt splitter decoding
+or seed, including when Next's Projects splitter lands. Tasks has no equivalent
+splitter; never map it onto a different inspector panel. The remembered
+`removeWorktreeAfterTermination` value also stays private evidence until the
+Terminate dialog owner (`.10`) may prefill its checkbox once, with explicit
+confirmation every time, never automatic-maintenance consent.
+
+Remaining source coverage includes `tray.conf`, downloaded content and the
+rest of the interim stores listed below.
 Source discovery and production integration remain separate; adapters do not
 by themselves publish eligible evidence or transfer writer authority. The
 `approval_policies` adapter inspects Qt and interim Next choices together,

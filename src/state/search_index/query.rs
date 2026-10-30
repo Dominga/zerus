@@ -1,4 +1,4 @@
-//! Cursor pages contain only freshly verified archive hits. Live and incomplete
+//! Cursor pages contain freshly verified public history hits. Live/incomplete
 //! histories retain the existing bounded scan, separately from the index cursor.
 use super::*;
 use regex::RegexBuilder;
@@ -8,6 +8,11 @@ const QUERY_ABI: &str = "content-search-query-v1";
 const CANDIDATE_BUDGET: usize = 512;
 const INDEX_REPLY_BYTES: usize = 2 << 20;
 const FALLBACK_REPLY_BYTES: usize = 5 << 20;
+
+enum SourceProof {
+    Current(Target),
+    Appended,
+}
 
 pub(in crate::state) fn read(query: &str, limit: usize, cursor: Option<&str>) -> Result<Value> {
     if query.chars().count() < 2 || !(1..=100).contains(&limit) {
@@ -136,9 +141,9 @@ impl Store {
             let Some(mut hit) = page.hits.into_iter().next() else {
                 continue;
             };
-            // Native/live histories remain fresh through legacy search. The
-            // first indexed adapter publishes immutable archive targets only.
-            if hit.target.archive_id.is_empty() {
+            // Unsupported adapters retain native/legacy reads. They cannot
+            // acquire a retirement tombstone merely for lacking a fingerprint.
+            if !["codex", "claude"].contains(&hit.target.agent.as_str()) {
                 continue;
             }
             let key = hit.target.key().map_err(|e| e.to_string())?;
@@ -155,9 +160,14 @@ impl Store {
                     conversation_id: hit.target.conversation_id.clone(),
                     archive_id: hit.target.archive_id.clone(),
                 };
-                let proof = self.verify_archive(state, &identity, &key, &mut progress, budget);
+                let proof = self.verify_source(state, &identity, &key, &mut progress, budget);
                 let target = match proof {
-                    Ok(target) => Some(target),
+                    Ok(SourceProof::Current(target)) => Some(target),
+                    Ok(SourceProof::Appended) => {
+                        self.revisit(&key)?;
+                        rejected += 1;
+                        None
+                    }
                     Err(_) => {
                         self.retire(&key)?;
                         rejected += 1;
@@ -198,14 +208,40 @@ impl Store {
         )
     }
 
-    fn verify_archive(
+    fn revisit(&self, key: &str) -> Result<()> {
+        self.index
+            .source_progress(key, false, false)
+            .map_err(|e| e.to_string())?;
+        let catalog: bool = self
+            .index
+            .connection()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='catalog_source')",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if catalog {
+            self.index
+                .connection()
+                .execute(
+                    "UPDATE catalog_queue SET done=0,fallback=1 WHERE id IN
+                (SELECT id FROM catalog_queue WHERE source=? ORDER BY id LIMIT 16)",
+                    [key],
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    fn verify_source(
         &self,
         state: &Path,
         identity: &Identity,
         key: &str,
         progress: &mut Progress,
         budget: &Budget,
-    ) -> Result<Target> {
+    ) -> Result<SourceProof> {
         let record = binding(state, identity, progress, budget)?;
         let encoded: String = self
             .index
@@ -228,11 +264,11 @@ impl Store {
         let (identity, metadata) =
             crate::platform::FileIdentity::with_metadata(&file).map_err(|e| e.to_string())?;
         if !metadata.is_file()
-            || metadata.len() != stamp.len
+            || metadata.len() < stamp.len
             || identity.device != stamp.device
             || identity.inode != stamp.inode
-            || identity.modified != stamp.modified
-            || identity.modified_nanos != stamp.nanos
+            || (metadata.len() == stamp.len
+                && (identity.modified != stamp.modified || identity.modified_nanos != stamp.nanos))
         {
             return Err("Source fingerprint changed".into());
         }
@@ -247,7 +283,13 @@ impl Store {
         if stamp.head != head || stamp.tail != tail {
             return Err("Source text changed".into());
         }
-        Ok(record_target(&record))
+        if metadata.len() > stamp.len {
+            // The indexed prefix still has the same identity/fingerprints.
+            // Do not fence a healthy append forever: make its saved input
+            // cursor pending, and let the next bounded demand ingest it.
+            return Ok(SourceProof::Appended);
+        }
+        Ok(SourceProof::Current(record_target(&record)))
     }
 }
 

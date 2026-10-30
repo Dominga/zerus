@@ -43,8 +43,8 @@ Live histories retain the fresh legacy read even after cache ingestion.
 
 `hgs search --indexed --query TEXT --limit 1..100 [--cursor CURSOR]` advertises
 `content-search-query-v1` in help. It publishes at most 100 freshly verified
-archive hits and 2 MiB per page, with a separate `next_cursor`, `index_coverage`
-and optional `fallback` legacy reply. Each first page performs at most one
+public-history hits and 2 MiB per page, with a separate `next_cursor`,
+`index_coverage` and optional `fallback` legacy reply. Each first page performs at most one
 bounded discovery/catch-up call; continuations schedule no indexing. Publication
 visits at most 512 posting candidates with a 500 ms deadline, 128 source opens
 and 8 MiB of metadata/fingerprints. Every distinct returned target needs a fresh
@@ -62,8 +62,15 @@ its existing 100-hit host bound. The UI keeps one stable row per session and
 names unavailable computers inline, including cold index coverage.
 An unsafe or unavailable cache fails back to the existing search on the first
 page. A stale/mismatched cursor requires a new query. No new UI is introduced.
-Live/native queries still use legacy history reads; extending fresh indexed
-coverage to those sources remains a separate adapter/invalidation step.
+Live Codex/Claude histories can also publish indexed hits after the same fresh
+binding and transcript proof. A growing transcript with unchanged identity and
+indexed-prefix fingerprints is left active and queued for the next bounded
+catch-up; it is never permanently retired just for appending. The current query
+uses fresh fallback while that prefix catches up. Existing query cursors retain
+their insertion high-water mark. Unsupported native adapters remain delegated,
+without receiving a retirement fence merely for lacking a fingerprint. Live and
+native queries still retain the existing history scan for freshness; replacing
+that scan completely needs the remaining revision/native adapter work.
 
 The adapter refuses copied/restored loose directory, database or auxiliary-file
 permissions and links. New index directories are 0700, database and rollback

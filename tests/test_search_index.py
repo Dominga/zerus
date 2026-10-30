@@ -135,7 +135,7 @@ class SearchIndex(unittest.TestCase):
     def test_indexed_live_queries_keep_the_current_bounded_scan_and_new_messages(self):
         _, _, transcript = self.fixture()
         first = self.indexed()
-        self.assertEqual(first["results"], [])
+        self.assertEqual(first["results"][0]["message_id"], "public-one")
         self.assertIsNotNone(first["fallback"])
         self.assertEqual(first["fallback"]["results"][0]["message_id"], "public-one")
         with transcript.open("a") as stream:
@@ -143,6 +143,10 @@ class SearchIndex(unittest.TestCase):
                          payload=dict(type="agent_message", id="new-turn", message="needle new turn"))) + "\n")
         second = self.indexed()
         self.assertEqual(second["fallback"]["results"][0]["message_id"], "new-turn")
+        self.assertEqual(second["results"], [])
+        third = self.indexed()
+        self.assertEqual(third["results"][0]["message_id"], "new-turn")
+        self.assertEqual(third["fallback"]["results"][0]["message_id"], "new-turn")
 
     @unittest.skipIf(os.name == "nt", "Unix private file permissions")
     def test_an_unsafe_copied_index_is_refused_and_uses_legacy_fallback(self):

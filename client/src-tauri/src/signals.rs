@@ -164,6 +164,39 @@ mod tests {
     }
 
     #[test]
+    fn a_signal_uses_the_same_page_flush_as_native_quit() {
+        let _turn = turn();
+        let _saved = Saved::set(libc::SIGUSR1, libc::SIG_DFL);
+        let flush = crate::exit_flush::ExitFlush::default();
+        let requested = flush.clone();
+        let (asks, asked) = std::sync::mpsc::channel();
+        let (ends, ended) = std::sync::mpsc::channel();
+        install_for(&[libc::SIGUSR1], move |signal| {
+            requested.quit(
+                0,
+                true,
+                |nonce| {
+                    asks.send((signal, nonce.to_owned())).unwrap();
+                },
+                move |code| {
+                    ends.send(code).unwrap();
+                },
+            );
+        })
+        .unwrap();
+        // SAFETY: this test owns SIGUSR1 under INSTALLS and restores it on drop.
+        unsafe { libc::raise(libc::SIGUSR1) };
+        let (signal, nonce) = asked.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(signal, libc::SIGUSR1);
+        assert!(ended.try_recv().is_err());
+        // The page command accepts only the main window's matching nonce.
+        assert!(flush.acknowledge(&nonce, crate::MAIN_WINDOW));
+        assert_eq!(ended.recv_timeout(Duration::from_secs(2)).unwrap(), 0);
+        assert!(flush.consume(Some(0)));
+        assert_eq!(action(libc::SIGUSR1).sa_sigaction, libc::SIG_DFL);
+    }
+
+    #[test]
     fn a_handler_set_at_start_is_taken_over() {
         let _turn = turn();
         let _saved = Saved::set(libc::SIGUSR1, theirs as *const () as libc::sighandler_t);

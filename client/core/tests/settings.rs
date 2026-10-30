@@ -163,6 +163,34 @@ fn every_key_has_qt_s_default_and_range() {
 }
 
 #[test]
+fn update_families_seed_only_recognized_channels_and_tokens() {
+    let scratch = Scratch::new("update-families");
+    let qt = scratch.0.join("hgs-tray.conf");
+    fs::write(
+        &qt,
+        b"[updates]\nlastAttempt/dev=20\nlastSuccess/dev=19\ncatalog/dev=@ByteArray(catalog)\nlastAttempt/other=99\nnotified/zerus-update:v2:dev:1=true\nnotified/other=true\n",
+    )
+    .unwrap();
+    let settings = Settings::open(scratch.0.join("settings.json"), Some(QtStore::Ini(qt)));
+    assert_eq!(settings.get("updates/lastAttempt/dev"), 20);
+    assert_eq!(settings.get("updates/lastSuccess/dev"), 19);
+    assert_eq!(settings.get("updates/catalog/dev"), "catalog");
+    assert!(settings.flag("updates/notified/zerus-update:v2:dev:1"));
+    assert!(settings.get("updates/lastAttempt/other").is_null());
+    assert!(settings.get("updates/notified/other").is_null());
+    assert!(!settings.contains("updates/channel"));
+    settings.set("updates/channel", json!("dev")).unwrap();
+    assert!(settings.contains("updates/channel"));
+    settings
+        .set("updates/lastSuccess/nightly", json!(50))
+        .unwrap();
+    let all = settings.all();
+    assert_eq!(all["updates/lastSuccess/nightly"], 50);
+    assert_eq!(all["updates/catalog/dev"], "catalog");
+    assert!(settings.flush_within(FLUSH));
+}
+
+#[test]
 fn qt_values_convert_with_qt_s_readers() {
     let kind = |name: &str| find(name).unwrap().kind;
     // toDouble fails to 0, which ContentScale::clamp lifts to 75%.

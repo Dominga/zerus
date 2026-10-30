@@ -147,18 +147,23 @@ pub struct LockedStore {
 
 impl LockedStore {
     pub fn load(config: &Config) -> Result<Self> {
-        Self::load_with(config, false, false)
+        Self::load_with(config, false, false, true)
+    }
+    /// First-use bootstrap creates only the catalog identity, without inferring
+    /// machine names, bindings, projects or session placement from a read.
+    pub(super) fn load_bootstrap(config: &Config) -> Result<Self> {
+        Self::load_with(config, false, false, false)
     }
     /// An existing catalog for one scoped metadata operation. Do not stage the
     /// ordinary loader's machine-name/binding refresh as another shared edit.
     pub fn load_scoped(config: &Config) -> Result<Self> {
-        Self::load_with(config, true, false)
+        Self::load_with(config, true, false, false)
     }
     /// Optional launch metadata must not wait behind a sync or user edit.
     pub fn try_load_scoped(config: &Config) -> Result<Self> {
-        Self::load_with(config, true, true)
+        Self::load_with(config, true, true, false)
     }
-    fn load_with(config: &Config, scoped: bool, nonblocking: bool) -> Result<Self> {
+    fn load_with(config: &Config, scoped: bool, nonblocking: bool, refresh: bool) -> Result<Self> {
         let dir = config.dir.join("swarm");
         if scoped {
             ensure!(
@@ -240,7 +245,7 @@ impl LockedStore {
             outdated_original,
             replica_outdated_original,
         };
-        if !scoped {
+        if refresh {
             let node = loaded.data.node_id.clone();
             for alias in &config.selves {
                 loaded.data.bindings.insert(

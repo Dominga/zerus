@@ -292,6 +292,10 @@ pub fn tray_conf_value(text: &str, key: &str) -> Option<String> {
 pub enum Entry {
     /// "Open Zerus".
     Open,
+    /// "Update available: Zerus <version>".
+    Update(String),
+    /// "Restart to finish update".
+    Restart,
     Separator,
     /// A line that cannot be chosen: a computer's header or its state.
     Label(String),
@@ -330,9 +334,21 @@ pub fn session_text(row: &ViewRow) -> String {
 pub struct Desk {
     computers: BTreeMap<ComputerId, Computer>,
     marks: DeviceMarks,
+    update_version: Option<String>,
+    restart_required: bool,
 }
 
 impl Desk {
+    /// The update entries shown between Open Zerus and the fleet.
+    pub fn set_updates(&mut self, version: Option<String>, restart_required: bool) -> bool {
+        if self.update_version == version && self.restart_required == restart_required {
+            return false;
+        }
+        self.update_version = version;
+        self.restart_required = restart_required;
+        true
+    }
+
     /// Applies one change; returns the computer whose state it may change.
     pub fn observe(&mut self, change: &Change) -> Option<ComputerId> {
         match change {
@@ -516,9 +532,16 @@ impl Desk {
         lines.join("\n")
     }
 
-    /// The menu Qt builds, without Refresh and the update entries.
+    /// The menu Qt builds, without Refresh.
     pub fn menu(&self, mode: OpenMode) -> Vec<Entry> {
-        let mut menu = vec![Entry::Open, Entry::Separator];
+        let mut menu = vec![Entry::Open];
+        if let Some(version) = &self.update_version {
+            menu.push(Entry::Update(version.clone()));
+        }
+        if self.restart_required {
+            menu.push(Entry::Restart);
+        }
+        menu.push(Entry::Separator);
         let local = self.local();
         let local_section = local.is_none_or(|computer| computer.local_sessions);
         if local_section {
@@ -1331,6 +1354,25 @@ mod tests {
             ]
         );
         assert!(gate.menu_closed().is_empty());
+    }
+
+    #[test]
+    fn update_entries_follow_open_zerus_and_precede_the_fleet() {
+        let mut desk = Desk::default();
+        assert!(desk.set_updates(Some("0.47.0".into()), true));
+        assert!(!desk.set_updates(Some("0.47.0".into()), true));
+        assert_eq!(
+            &desk.menu(OpenMode::Terminal)[..5],
+            &[
+                Entry::Open,
+                Entry::Update("0.47.0".into()),
+                Entry::Restart,
+                Entry::Separator,
+                Entry::Label("this box".into()),
+            ]
+        );
+        assert!(desk.set_updates(None, false));
+        assert_eq!(desk.menu(OpenMode::Terminal)[1], Entry::Separator);
     }
 
     #[test]

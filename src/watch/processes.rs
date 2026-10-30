@@ -2,8 +2,8 @@
 //! session's processes, its `processes` inventory and `process_work` sample,
 //! sent as `state` keyed like Activity. Worker threads run the inspection, so
 //! the stream's loop never waits for `ps` or a native host. A session is read
-//! again when its catalog row changes and at least every 10 s, at most every
-//! 2 s. `state` goes out only when the value changed apart from its sampling
+//! again when its catalog row changes and at its requested interval (10 s
+//! by default), at most every 1 s. `state` goes out only when the value changed apart from its sampling
 //! times.
 use super::catalog::{self, Digest32};
 use serde_json::{json, Value};
@@ -12,11 +12,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// Every session is read at least this often, for what its catalog row does
-/// not show, such as a background job that ended.
+/// Default interval for changes the catalog does not show, such as a
+/// background job that ended. Each subscription may choose another interval.
 pub(super) const SAFETY: Duration = Duration::from_secs(10);
 /// Reads of one session start at least this far apart.
-pub(super) const GAP: Duration = Duration::from_secs(2);
+pub(super) const GAP: Duration = Duration::from_secs(1);
 /// Threads that run inspections.
 pub(super) const WORKERS: usize = 2;
 /// Fields that change on every read.
@@ -98,6 +98,7 @@ struct Session {
     /// Its row changed while a read ran: read again.
     again: bool,
     started: Instant,
+    interval: Duration,
     due: Option<Instant>,
     /// The catalog listed it at least once, and its row's digest then.
     listed: bool,
@@ -158,6 +159,7 @@ impl Processes {
                 running: false,
                 again: false,
                 started: now,
+                interval: SAFETY,
                 due: None,
                 listed: row.is_some(),
                 row,
@@ -167,6 +169,32 @@ impl Processes {
             },
         );
         self.job(key, now).expect("the session was just inserted")
+    }
+
+    /// Changes scheduling without replacing the subscription, its running
+    /// read, pending inventory or revision. Explicit refreshes coalesce with
+    /// catalog changes and respect the minimum gap.
+    pub(super) fn configure(
+        &mut self,
+        key: &str,
+        interval_ms: Option<u64>,
+        refresh: bool,
+        now: Instant,
+    ) -> bool {
+        let Some(session) = self.sessions.get_mut(key) else {
+            return false;
+        };
+        if let Some(interval_ms) = interval_ms {
+            session.interval = Duration::from_millis(interval_ms.clamp(1_000, 600_000));
+        }
+        if refresh {
+            if session.running {
+                session.again = true;
+            } else {
+                session.due = Some(now.max(session.started + GAP));
+            }
+        }
+        true
     }
 
     pub(super) fn unsubscribe(&mut self, key: &str) -> bool {
@@ -214,7 +242,7 @@ impl Processes {
             .sessions
             .iter()
             .filter(|(_, session)| {
-                !session.running && (session.due.is_some_and(|due| now >= due) || now >= session.started + SAFETY)
+                !session.running && (session.due.is_some_and(|due| now >= due) || now >= session.started + session.interval)
             })
             .map(|(key, _)| key.clone())
             .collect();
@@ -325,16 +353,105 @@ mod tests {
     }
 
     #[test]
-    fn catalog_changes_read_again_at_most_every_two_seconds_and_removals_end_subscriptions() {
+    fn an_interval_change_keeps_the_inventory_and_revision() {
+        let start = Instant::now();
+        let mut processes = Processes::new();
+        let first = processes.subscribe("run:r", "codex/p/t", Some("r".into()), None, start);
+        processes.done(result(&first, inventory("r", 1, 1.0)));
+        let mut revisions = Vec::new();
+        processes.flush(|_, _, rev| {
+            revisions.push(rev);
+            true
+        });
+        assert!(processes.configure("run:r", Some(2_500), false, start));
+        assert!(processes
+            .pulse(start + Duration::from_millis(2_499))
+            .is_empty());
+        let next = processes
+            .pulse(start + Duration::from_millis(2_500))
+            .pop()
+            .unwrap();
+        processes.done(result(&next, inventory("r", 2, 2.0)));
+        processes.flush(|_, _, rev| {
+            revisions.push(rev);
+            true
+        });
+        assert_eq!(revisions, [1, 2]);
+        assert!(processes.configure("run:r", Some(30_000), false, start + SECOND * 3));
+        assert!(processes.pulse(start + SECOND * 32).is_empty());
+        assert_eq!(
+            processes.pulse(start + Duration::from_millis(32_500)).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn refresh_is_one_read_after_the_gap_and_coalesces_while_a_read_runs() {
+        let start = Instant::now();
+        let mut processes = Processes::new();
+        let first = processes.subscribe("run:r", "codex/p/t", None, None, start);
+        assert!(processes.configure("run:r", None, true, start));
+        assert!(processes.configure("run:r", None, true, start));
+        assert!(
+            processes.pulse(start + SECOND * 2).is_empty(),
+            "one inventory is already running"
+        );
+        processes.done(result(&first, inventory("r", 1, 1.0)));
+        assert!(processes
+            .pulse(start + Duration::from_millis(999))
+            .is_empty());
+        let refreshed = processes.pulse(start + SECOND).pop().unwrap();
+        processes.done(result(&refreshed, inventory("r", 1, 2.0)));
+        assert!(
+            processes.pulse(start + SECOND * 2).is_empty(),
+            "the refresh is consumed once"
+        );
+        // A stop can also answer while no inventory read is running.
+        processes.configure("run:r", None, true, start + Duration::from_millis(1_100));
+        processes.configure("run:r", None, true, start + Duration::from_millis(1_200));
+        assert!(processes.pulse(start + Duration::from_millis(1_999)).is_empty());
+        let idle_refresh = processes.pulse(start + SECOND * 2).pop().unwrap();
+        processes.done(result(&idle_refresh, inventory("r", 1, 3.0)));
+        assert!(processes.pulse(start + SECOND * 3).is_empty());
+        assert!(!processes.configure("missing", Some(1_000), true, start));
+    }
+
+    #[test]
+    fn intervals_are_bounded_from_one_second_to_ten_minutes() {
+        for (requested, clamped) in [
+            (0, 1_000),
+            (1, 1_000),
+            (600_001, 600_000),
+            (u64::MAX, 600_000),
+        ] {
+            let start = Instant::now();
+            let mut processes = Processes::new();
+            let first = processes.subscribe("run:r", "codex/p/t", None, None, start);
+            processes.configure("run:r", Some(requested), false, start);
+            processes.done(result(&first, inventory("r", 1, 1.0)));
+            assert!(processes
+                .pulse(start + Duration::from_millis(clamped - 1))
+                .is_empty());
+            assert_eq!(
+                processes
+                    .pulse(start + Duration::from_millis(clamped))
+                    .len(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn catalog_changes_read_again_at_most_every_second_and_removals_end_subscriptions() {
         let start = Instant::now();
         let mut processes = Processes::new();
         let first = processes.subscribe("run:r", "codex/p/t", None, Some([1; 32]), start);
-        // A row change during the read reads again two seconds after it started.
+        // A row change during the read reads again one second after it started.
         let rows = |digest: [u8; 32]| move |key: &str| (key == "run:r").then(|| ("codex/p/renamed".to_owned(), digest));
         assert!(processes.follow(rows([2; 32]), start).is_empty());
         processes.done(result(&first, inventory("r", 1, 1.0)));
-        assert!(processes.pulse(start + SECOND).is_empty());
-        let again = processes.pulse(start + SECOND * 2).pop().unwrap();
+        assert!(processes.pulse(start + Duration::from_millis(999)).is_empty());
+        let again = processes.pulse(start + SECOND).pop().unwrap();
         assert_eq!(again.name, "codex/p/renamed");
         processes.done(result(&again, inventory("r", 1, 2.0)));
         // A later change is read at once when the gap has passed.

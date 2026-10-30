@@ -6,6 +6,7 @@
 //! [`super::schedule`].
 use super::usage::{self, Identity, Usage};
 use super::{flag, items, number, text, FleetEntry};
+use crate::paths::{self, Style};
 use crate::ComputerId;
 use serde::Serialize;
 use serde_json::Value;
@@ -244,11 +245,22 @@ pub fn hosts(fleet: &[FleetEntry]) -> Vec<Host> {
         .collect()
 }
 
-/// The local Windows computer runs neither DeepSeek nor OpenCode (AccountCatalog::launchable).
-fn launchable(entry: &FleetEntry, provider: &str) -> bool {
-    !(entry.computer.is_local()
-        && entry.platform.as_deref() == Some("windows")
-        && matches!(provider, "dsh" | "opencode"))
+/// The local Windows computer runs neither DeepSeek nor OpenCode
+/// (AccountCatalog::launchable). Its folder style is the computer's
+/// (`paths::of`, MachinePlatform::of): this computer before it reports a
+/// platform is the build's, a peer POSIX.
+pub fn launchable(entry: &FleetEntry, provider: &str) -> bool {
+    launchable_for(entry, provider, paths::build())
+}
+
+/// [`launchable`] with the build platform given, so both are tested anywhere.
+fn launchable_for(entry: &FleetEntry, provider: &str, build: Style) -> bool {
+    let local = entry.computer.is_local();
+    let style = match entry.platform.as_deref() {
+        None | Some("") if local => build,
+        platform => paths::of(platform, local),
+    };
+    style == Style::Posix || !matches!(provider, "dsh" | "opencode")
 }
 
 fn usage_ref(host: &ComputerId, raw: &Value) -> UsageRef {
@@ -565,6 +577,96 @@ fn profile(entry: &FleetEntry, raw: &Value, state: &AccountsState) -> Profile {
     }
 }
 
+/// AccountUsageStore::data, then NewSessionDialog::cachedUsage (971-978):
+/// the profile's inspect, or `loading` (`offline` away from its computer)
+/// before one answers; the catalog's cached `account_status` stands in while
+/// that loads or is offline, or when it was checked later. Unlike the
+/// Accounts page, a failed first inspect stays `loading` with its error.
+fn launch_usage(entry: &FleetEntry, raw: &Value, r: &UsageRef, state: &AccountsState) -> Usage {
+    let slot = state.usage.get(&r.key());
+    let data = slot
+        .filter(|slot| r.auth_revision.is_empty() || slot.auth_revision == r.auth_revision)
+        .and_then(|slot| slot.data.as_ref())
+        .filter(|data| data.as_object().is_some_and(|data| !data.is_empty()));
+    let reachable = reachable(entry);
+    let mut u = match data {
+        Some(data) => usage::usage(data),
+        None => Usage {
+            status: if reachable { "loading" } else { "offline" }.to_owned(),
+            provider: r.provider.clone(),
+            ..Usage::default()
+        },
+    };
+    let label = text(raw, "label");
+    if !label.is_empty() {
+        u.label = label;
+    }
+    u.refreshing = slot.is_some_and(|slot| slot.pending);
+    u.refresh_error = slot.is_some_and(|slot| slot.failed);
+    u.offline = !reachable;
+    let cached = raw
+        .get("account_status")
+        .filter(|cached| cached.as_object().is_some_and(|cached| !cached.is_empty()));
+    if let Some(cached) = cached {
+        let cached = usage::usage(cached);
+        if u.status == "loading"
+            || u.status == "offline"
+            || cached.checked_at.unwrap_or(0.0) > u.checked_at.unwrap_or(0.0)
+        {
+            u = Usage {
+                seeded: true,
+                ..cached
+            };
+        }
+    }
+    u
+}
+
+/// One computer's launchable profiles for New session, each with its raw
+/// `account ls` row (NewSessionDialog::updateAccounts 883-896): `agents` in
+/// their order, then any other provider the catalog lists, skipping the
+/// shell, rows without an ID and what the computer does not start
+/// ([`launchable`]); at most 256 rows of the catalog. Each carries the
+/// dialog's usage (cachedUsage), so [`group`] gives its account rows.
+pub fn host_profiles(
+    entry: &FleetEntry,
+    catalog: &Value,
+    state: &AccountsState,
+    agents: &[&str],
+) -> Vec<(Profile, Value)> {
+    let rows: Vec<&Value> = items(catalog, "profiles")
+        .iter()
+        .take(PROFILES_PER_HOST)
+        .collect();
+    let mut providers: Vec<String> = agents
+        .iter()
+        .filter(|provider| launchable(entry, provider))
+        .map(|provider| (*provider).to_owned())
+        .collect();
+    for raw in &rows {
+        let provider = text(raw, "provider");
+        if !provider.is_empty()
+            && provider != "sh"
+            && !providers.contains(&provider)
+            && launchable(entry, &provider)
+        {
+            providers.push(provider);
+        }
+    }
+    let mut out = Vec::new();
+    for provider in &providers {
+        for raw in &rows {
+            if text(raw, "provider") != *provider || text(raw, "id").is_empty() {
+                continue;
+            }
+            let mut p = profile(entry, raw, state);
+            p.usage = launch_usage(entry, raw, &usage_ref(&entry.computer, raw), state);
+            out.push((p, (*raw).clone()));
+        }
+    }
+    out
+}
+
 /// AccountCatalog::named.
 fn named(label: &str) -> bool {
     !label.is_empty() && label != "Default account" && label != "Native DeepSeek account"
@@ -714,6 +816,50 @@ pub fn group(profiles: &[Profile]) -> Vec<Account> {
         (group.identity_lines, group.identity_note) = identity_lines(&group.label, &group.usage);
     }
     groups
+}
+
+/// NewSessionDialog::refreshUsage (990-1000): the groups of an earlier
+/// [`group`] with their members' current projections (by profile key) and
+/// each group's best usage of them; labels, keys and membership stay, even
+/// when the new usage would join two groups (the next catalog does). A member
+/// that is gone leaves its group, and an empty group goes.
+pub fn refresh_groups(groups: &[Account], profiles: &[Profile]) -> Vec<Account> {
+    let current: HashMap<&str, &Profile> = profiles.iter().map(|p| (p.key.as_str(), p)).collect();
+    let mut out = Vec::new();
+    for old in groups {
+        let members: Vec<Profile> = old
+            .members
+            .iter()
+            .filter_map(|member| current.get(member.key.as_str()).map(|p| (*p).clone()))
+            .collect();
+        let Some(first) = members.first() else {
+            continue;
+        };
+        let mut usage = first.usage.clone();
+        let mut machines: Vec<String> = Vec::new();
+        for member in &members {
+            if better(&member.usage, &usage) {
+                usage = member.usage.clone();
+            }
+            if !machines.contains(&member.machine) {
+                machines.push(member.machine.clone());
+            }
+        }
+        let (identity_lines, identity_note) = identity_lines(&old.label, &usage);
+        out.push(Account {
+            key: old.key.clone(),
+            label: old.label.clone(),
+            provider: old.provider.clone(),
+            installed: members.iter().any(|m| m.installed),
+            machines,
+            permission: permission_label(&account_permission(&members)).into(),
+            usage,
+            identity_lines,
+            identity_note,
+            members,
+        });
+    }
+    out
 }
 
 /// A native profile awaiting its identity is not another account on the
@@ -1336,6 +1482,293 @@ mod tests {
         );
         let late = project(std::slice::from_ref(&local), &state, &mut display);
         assert!(late.snapshot && late.no_hosts.is_none() && !late.accounts.is_empty());
+    }
+
+    /// One computer's catalog with an `account_status` per row, as `account ls` caches it.
+    fn launch_catalog(rows: &[(&str, &str)]) -> Value {
+        let profiles: Vec<Value> = rows
+            .iter()
+            .map(|(id, provider)| {
+                json!({"id": id, "provider": provider, "label": "", "home": format!("/home/example/{id}"),
+                       "installed": true, "account_status": {"status": "ok", "checked_at": 100.0,
+                       "identity": {"email": format!("{id}@example.com")}}})
+            })
+            .collect();
+        json!({ "profiles": profiles })
+    }
+
+    fn ids(profiles: &[(Profile, Value)]) -> Vec<String> {
+        profiles.iter().map(|(p, _)| p.id.clone()).collect()
+    }
+
+    // G3: NewSessionDialog::updateAccounts (883-896) groups only the selected
+    // computer's launchable profiles, the dialog's agents first in their order.
+    #[test]
+    fn a_computers_launch_profiles_follow_the_dialogs_agent_order() {
+        let catalog = launch_catalog(&[
+            ("kimi-a", "kimi"),
+            ("gemini-a", "gemini"),
+            ("native-codex", "codex"),
+            ("claude-work", "claude"),
+            ("shell", "sh"),
+            ("", "claude"),
+            ("nameless", ""),
+            ("native-dsh", "dsh"),
+            ("native-opencode", "opencode"),
+            ("claude-copy", "claude"),
+        ]);
+        let agents = ["codex", "claude", "kimi", "dsh", "opencode"];
+        let state = AccountsState::default();
+        let local = entry("", "live", 0);
+        let profiles = host_profiles(&local, &catalog, &state, &agents);
+        assert_eq!(
+            ids(&profiles),
+            [
+                "native-codex",
+                "claude-work",
+                "claude-copy",
+                "kimi-a",
+                "native-dsh",
+                "native-opencode",
+                "gemini-a"
+            ]
+        );
+        // Each comes with its raw row, for the OpenCode fields.
+        assert_eq!(profiles[5].1["id"], "native-opencode");
+        assert_eq!(profiles[0].0.key, "\u{1f}native-codex");
+        // The local Windows computer starts neither DeepSeek nor OpenCode; a peer does.
+        let mut windows = entry("", "live", 0);
+        windows.platform = Some("windows".into());
+        assert!(!launchable(&windows, "dsh") && !launchable(&windows, "opencode"));
+        assert!(launchable(&windows, "codex"));
+        let shown = ids(&host_profiles(&windows, &catalog, &state, &agents));
+        assert!(
+            !shown.contains(&"native-dsh".to_owned())
+                && !shown.contains(&"native-opencode".to_owned())
+        );
+        let mut peer = entry("studio", "live", 0);
+        peer.platform = Some("windows".into());
+        assert!(ids(&host_profiles(&peer, &catalog, &state, &agents))
+            .contains(&"native-dsh".to_owned()));
+        // At most 256 rows of a catalog.
+        let many: Vec<(String, &str)> = (0..300).map(|n| (format!("p{n}"), "kimi")).collect();
+        let rows: Vec<(&str, &str)> = many.iter().map(|(id, p)| (id.as_str(), *p)).collect();
+        assert_eq!(
+            host_profiles(&local, &launch_catalog(&rows), &state, &agents).len(),
+            256
+        );
+        assert!(host_profiles(&local, &json!({}), &state, &agents).is_empty());
+    }
+
+    // AccountCatalog::launchable with NewSessionDialog's folderStyle (108-110)
+    // and MachinePlatform::of (33-39): this computer without a platform takes
+    // the build's; a peer is POSIX.
+    #[test]
+    fn this_computer_without_a_platform_follows_the_build() {
+        let mut bare = entry("", "live", 0);
+        bare.platform = None;
+        for provider in ["dsh", "opencode"] {
+            assert!(
+                !launchable_for(&bare, provider, Style::Windows),
+                "{provider}"
+            );
+            assert!(launchable_for(&bare, provider, Style::Posix), "{provider}");
+        }
+        assert!(launchable_for(&bare, "codex", Style::Windows));
+        let mut linux = entry("", "live", 0);
+        linux.platform = Some("linux".into());
+        assert!(
+            launchable_for(&linux, "dsh", Style::Windows),
+            "a reported platform wins"
+        );
+        let mut windows = entry("", "live", 0);
+        windows.platform = Some("windows".into());
+        assert!(!launchable_for(&windows, "opencode", Style::Posix));
+        let mut peer = entry("studio", "live", 0);
+        peer.platform = None;
+        assert!(
+            launchable_for(&peer, "dsh", Style::Windows),
+            "a peer is POSIX"
+        );
+        peer.platform = Some("windows".into());
+        assert!(launchable_for(&peer, "opencode", Style::Windows));
+        assert_eq!(
+            launchable(&bare, "dsh"),
+            launchable_for(&bare, "dsh", crate::paths::build())
+        );
+    }
+
+    // NewSessionDialog::m_agents (221-222): a requested agent the list lacks
+    // follows the dialog's agents, before other providers of the catalog.
+    #[test]
+    fn a_requested_agent_follows_the_dialogs_agents() {
+        let catalog = launch_catalog(&[
+            ("alpha-a", "alpha"),
+            ("zeta-a", "zeta"),
+            ("native-codex", "codex"),
+        ]);
+        let local = entry("", "live", 0);
+        let state = AccountsState::default();
+        let order = |agents: &[&str]| ids(&host_profiles(&local, &catalog, &state, agents));
+        assert_eq!(
+            order(&["codex", "zeta"]),
+            ["native-codex", "zeta-a", "alpha-a"]
+        );
+        assert_eq!(order(&["codex"]), ["native-codex", "alpha-a", "zeta-a"]);
+    }
+
+    // NewSessionDialog::refreshUsage (990-1000): later limits refresh the
+    // rows of the catalog's grouping, even when they show two rows to be one
+    // account; each row takes its members' best usage.
+    #[test]
+    fn later_limits_refresh_the_groups_without_joining_them() {
+        let catalog = launch_catalog(&[("claude-a", "claude"), ("claude-b", "claude")]);
+        let agents = ["claude"];
+        let local = entry("", "live", 0);
+        let mut state = AccountsState::default();
+        let members = |state: &AccountsState| -> Vec<Profile> {
+            host_profiles(&local, &catalog, state, &agents)
+                .into_iter()
+                .map(|(p, _)| p)
+                .collect()
+        };
+        let grouped = group(&members(&state));
+        assert_eq!(grouped.len(), 2, "two emails, two accounts");
+        let inspect = |id: &str, at: f64, used: f64| {
+            json!({"id": id, "home": format!("/home/example/{id}"), "provider": "claude", "status": "ok",
+                   "checked_at": at, "identity": {"email": "same@example.com"},
+                   "windows": [{"id": "five_hour", "label": "5h", "used_percent": used, "window_minutes": 300, "resets_at": null}],
+                   "balances": []})
+        };
+        inspected(
+            &mut state,
+            "",
+            "claude-a",
+            "/home/example/claude-a",
+            "",
+            inspect("claude-a", 200.0, 10.0),
+        );
+        inspected(
+            &mut state,
+            "",
+            "claude-b",
+            "/home/example/claude-b",
+            "",
+            inspect("claude-b", 300.0, 40.0),
+        );
+        let now = members(&state);
+        assert_eq!(group(&now).len(), 1, "a fresh grouping would join them");
+        let refreshed = refresh_groups(&grouped, &now);
+        let shape: Vec<Vec<&str>> = refreshed
+            .iter()
+            .map(|g| g.members.iter().map(|m| m.id.as_str()).collect())
+            .collect();
+        assert_eq!(shape, [vec!["claude-a"], vec!["claude-b"]]);
+        assert_eq!(refreshed[0].key, grouped[0].key);
+        assert_eq!(refreshed[0].label, grouped[0].label);
+        assert_eq!(
+            refreshed[0].members[0].usage.identity.email,
+            "same@example.com"
+        );
+        assert_eq!(
+            refreshed[1].usage.checked_at,
+            Some(300.0),
+            "the row's best usage"
+        );
+        // A member the catalog no longer lists leaves its row.
+        let only_a: Vec<Profile> = now.iter().filter(|p| p.id == "claude-a").cloned().collect();
+        assert_eq!(refresh_groups(&grouped, &only_a).len(), 1);
+    }
+
+    // G3: NewSessionDialog::cachedUsage (971-978): the store's usage, unless it
+    // loads, is offline or is older than the catalog's cached status.
+    #[test]
+    fn a_launch_profile_shows_the_cached_status_until_a_newer_inspect() {
+        let catalog = launch_catalog(&[("claude-work", "claude")]);
+        let agents = ["claude"];
+        let local = entry("", "live", 0);
+        let usage = |state: &AccountsState, at: &FleetEntry| {
+            host_profiles(at, &catalog, state, &agents)[0]
+                .0
+                .usage
+                .clone()
+        };
+        let mut state = AccountsState::default();
+        let cached = usage(&state, &local);
+        assert_eq!(
+            (
+                cached.status.as_str(),
+                cached.identity.email.as_str(),
+                cached.checked_at
+            ),
+            ("ok", "claude-work@example.com", Some(100.0)),
+            "loading: the cached status stands in"
+        );
+        assert!(cached.seeded && !cached.offline && !cached.refreshing);
+        let inspect = |at: f64| {
+            json!({"id": "claude-work", "home": "/home/example/claude-work", "provider": "claude", "status": "ok",
+                   "checked_at": at, "identity": {"email": "fresh@example.com"}, "windows": [], "balances": []})
+        };
+        inspected(
+            &mut state,
+            "",
+            "claude-work",
+            "/home/example/claude-work",
+            "",
+            inspect(200.0),
+        );
+        let fresh = usage(&state, &local);
+        assert_eq!(
+            fresh.identity.email, "fresh@example.com",
+            "the newer inspect"
+        );
+        assert!(!fresh.seeded);
+        inspected(
+            &mut state,
+            "",
+            "claude-work",
+            "/home/example/claude-work",
+            "",
+            inspect(50.0),
+        );
+        assert_eq!(
+            usage(&state, &local).identity.email,
+            "claude-work@example.com",
+            "an older inspect"
+        );
+        // Without a cached status the store's own answer shows: loading, or offline.
+        let bare = json!({"profiles": [{"id": "claude-work", "provider": "claude", "home": "/home/example/claude-work", "installed": true}]});
+        let none = AccountsState::default();
+        let loading = &host_profiles(&local, &bare, &none, &agents)[0].0.usage;
+        assert_eq!(
+            (loading.status.as_str(), loading.offline),
+            ("loading", false)
+        );
+        let away = entry("studio", "ended", 0);
+        let offline = &host_profiles(&away, &bare, &none, &agents)[0].0.usage;
+        assert_eq!(
+            (offline.status.as_str(), offline.offline),
+            ("offline", true)
+        );
+        let mut failing = AccountsState::default();
+        failing.usage.insert(
+            (
+                ComputerId::local(),
+                "claude-work".into(),
+                "/home/example/claude-work".into(),
+            ),
+            UsageSlot {
+                attempted: Some(1),
+                failed: true,
+                ..UsageSlot::default()
+            },
+        );
+        let failed = &host_profiles(&local, &bare, &failing, &agents)[0].0.usage;
+        assert_eq!(
+            (failed.status.as_str(), failed.refresh_error),
+            ("loading", true),
+            "the store's data, not the Accounts page's settled state"
+        );
     }
 
     #[test]

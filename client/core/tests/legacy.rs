@@ -171,6 +171,17 @@ fn a_peer_without_the_stream_is_polled_like_the_qt_client() {
 }
 
 #[test]
+fn fake_hgs_log_ignores_an_unterminated_last_line() {
+    let fake = FakeHgs::new("log_partial", json!({}));
+    std::fs::write(
+        fake.dir.join("log.ndjson"),
+        "{\"host\":\"studio\"}\n{\"host\":",
+    )
+    .unwrap();
+    assert_eq!(fake.log(), vec![json!({"host": "studio"})]);
+}
+
+#[test]
 fn this_computer_without_the_stream_names_its_peers_from_its_listing() {
     let fake = FakeHgs::new("legacy_local", json!({"": {"marker": false}}));
     let mut local = listing(&["r1"]);

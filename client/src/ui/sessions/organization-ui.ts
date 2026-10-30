@@ -10,13 +10,6 @@ import type { Session } from "./types";
 
 export interface Entry { enabled: boolean; reason?: string }
 
-/**
- * Why an archived row cannot move. Qt keys an archived session by its archive
- * identity (`machine\narchive\n<id>`, SessionOrganization.cpp:225), which
- * this client does not port yet (zerus-5wmh.40); its live-name member
- * (`host\nname`) would move the live session of that name instead.
- */
-export const ARCHIVED_MOVE = "Archived sessions keep their project until the Archive view groups by project.";
 interface HeaderMenuState {
   collapse: "Expand project" | "Collapse project";
   edit: Entry;
@@ -48,6 +41,8 @@ export function headerMenuState(g: GroupingOut, project: string): HeaderMenuStat
 
 /** What the header menu's entries do; `collapse` gets the new state, `move` the project to go before. */
 export interface HeaderActions {
+  /** New session on this project (showGroupMenu 2572-2573). */
+  newSession: () => void;
   filter: () => void;
   collapse: (collapsed: boolean) => void;
   rename: () => void;
@@ -63,8 +58,7 @@ export function headerEntries(g: GroupingOut, project: string, act: HeaderAction
   if (!m) return [];
   const hint = (e: Entry) => (e.enabled ? undefined : e.reason);
   return [
-    // Phase 5 brings New session.
-    { label: "New session…", icon: "plus", disabled: true },
+    { label: "New session…", icon: "plus", action: act.newSession },
     { separator: true },
     { label: "Filter this project", icon: "funnel", action: act.filter },
     { separator: true },
@@ -197,9 +191,9 @@ export function createOrgDialogs(org: OrgStore) {
     void org.deleteProject(d.project, destination);
   }
 
-  /** The session menu's Move to project entry; an archived row keeps its project (ARCHIVED_MOVE). */
+  /** The session menu's Move to project entry, also for archive identities. */
   function moveEntry(s: Session): MenuEntry {
-    const e = s.state === "archived" ? { enabled: false, reason: ARCHIVED_MOVE } : editEntry(org.grouping());
+    const e = editEntry(org.grouping());
     return { label: "Move to project…", icon: "folder", disabled: !e.enabled, hint: e.reason, action: () => openMove([s]) };
   }
 

@@ -3,10 +3,12 @@ import * as bridge from "../bridge";
 import { bindArchivedRows as bindActionRows } from "./actions";
 import { catalog, toSession, type ComputerState } from "./catalog";
 import type { RowMarks } from "./marks";
-import { bindArchivedRows as bindSelectedRows, compactRows, machineFilter, page, search, stateFilter } from "./ui";
+import { bindArchivedRows as bindSelectedRows, compactRows, machineFilter, page, projectFilter, search, stateFilter } from "./ui";
 import { initialRange, rangeBounds, type DateRange } from "../ui/sessions/archive-dates";
-import type { ArchivePage, ComputerId, ViewRow } from "../types";
-import type { Row } from "../ui/sessions/model";
+import { bindArchivedGroups, emptyGrouping, grouping } from "./organization";
+import { groupRows, type Row } from "../ui/sessions/group-rows";
+import { machineCards } from "./machines";
+import type { ArchivePage, ArchiveRow, ComputerId, GroupingOut, GroupOut, MachineMeta, ViewRow } from "../types";
 import type { Session } from "../ui/sessions/types";
 
 // The Archive view's pages, after tray/src/ArchiveBrowser.cpp: one bounded
@@ -32,7 +34,7 @@ const SUPERSEDED = "superseded";
 export interface PagingComputer { computer: ComputerId; machine: string }
 
 /** An archived row: a Session keyed by computer and archive id, and when it was archived. */
-export type ArchivedSession = Session & { archivedAt: number };
+export type ArchivedSession = Session & { archivedAt: number; group: string; rank: number };
 
 export interface Page {
   rows: ArchivedSession[];
@@ -41,6 +43,8 @@ export interface Page {
   error: string;
   /** The request in flight (the store's token), 0 when none. */
   request: number;
+  /** The reply whose rows are shown, also while Archive changed is shown. */
+  shownRequest: number;
   total: number;
   /** The window's first row in the whole archive, -1 when not reported. */
   position: number;
@@ -48,7 +52,7 @@ export interface Page {
   newer: boolean;
 }
 
-export const emptyPage = (): Page => ({ rows: [], cursor: "", previous: "", error: "", request: 0, total: 0, position: -1, loaded: false, newer: false });
+export const emptyPage = (): Page => ({ rows: [], cursor: "", previous: "", error: "", request: 0, shownRequest: 0, total: 0, position: -1, loaded: false, newer: false });
 
 export interface ArchiveStatus {
   summary: string;
@@ -130,9 +134,9 @@ const HOST_VALUES: Pick<RowMarks, "overlay"> = {
 };
 
 /** One archived row as a Session: keyed `archive:<archive id>` on its computer, named as the paging computer names it. */
-export function archivedSession(computer: ComputerId, machine: string, row: ViewRow): ArchivedSession {
+export function archivedSession(computer: ComputerId, machine: string, row: ViewRow & Partial<Pick<ArchiveRow, "group" | "rank">>): ArchivedSession {
   const s = toSession(computer, `archive:${row.archive_id ?? ""}`, { ...row, machine: row.machine || machine }, HOST_VALUES);
-  return Object.assign(s, { archivedAt: typeof row.archived_at === "number" ? row.archived_at : 0 });
+  return Object.assign(s, { archivedAt: typeof row.archived_at === "number" ? row.archived_at : 0, group: row.group ?? "ungrouped", rank: row.rank ?? 0 });
 }
 
 /** Newest first; then by computer, name and archive id (Qt's entry key). */
@@ -142,62 +146,48 @@ function newestFirst(a: ArchivedSession, b: ArchivedSession): number {
   return x < y ? -1 : x > y ? 1 : 0;
 }
 
-/**
- * The paging computers: every computer whose stream is live and whose machine
- * is inside the machine filter, named as its rows name it (by id otherwise).
- * `rows` is read only until every live computer has a name.
- */
-export function pagingComputers(computers: Readonly<Record<string, ComputerState>>, rows: Iterable<Pick<Session, "computer" | "machine">>, machines: readonly string[]): PagingComputer[] {
-  const live = Object.keys(computers).filter((id) => computers[id]?.status === "live").sort();
-  const wanted = new Set(live);
+/** Configured fleet choices, named from rows or the hello metadata even with an empty catalog. */
+export function fleetComputers(computers: Readonly<Record<string, ComputerState>>, rows: Iterable<Pick<Session, "computer" | "machine">>,
+                               metadata: Readonly<Record<string, Partial<Pick<MachineMeta, "host" | "local_sessions">>>> = {}): PagingComputer[] {
+  const ids = Object.keys(computers).filter((id) => computers[id]?.status !== "ended" && (id !== "" || metadata[id]?.local_sessions !== false)).sort();
   const names = new Map<string, string>();
-  if (wanted.size) {
-    for (const r of rows) {
-      if (!wanted.has(r.computer) || names.has(r.computer)) continue;
-      names.set(r.computer, r.machine);
-      if (names.size === wanted.size) break;
-    }
+  const wanted = new Set(ids);
+  for (const row of rows) {
+    if (wanted.has(row.computer) && !names.has(row.computer)) names.set(row.computer, row.machine);
+    if (names.size === wanted.size) break;
   }
-  const out: PagingComputer[] = [];
-  for (const computer of live) {
-    const machine = names.get(computer) || computer || "this computer";
-    if (!machines.length || machines.includes(machine)) out.push({ computer, machine });
-  }
-  return out;
+  return ids.map((computer) => ({ computer, machine: names.get(computer) || computer || metadata[computer]?.host || "this computer" }));
 }
 
-/**
- * What the Archive filter's list and count follow besides the pages. Qt's
- * also follow the project filter, matching each archived row by the project
- * of its archive identity (`groupFor`). The project filter here holds the
- * organization's project IDs, and archived rows have no organization project
- * until zerus-5wmh.40 ports Qt's archive identities (`machine\narchive\n<id>`,
- * SessionOrganization.cpp:225), so the list and its count ignore it rather
- * than compare an ID with a session name's project segment.
- */
+export function pagingComputers(computers: Readonly<Record<string, ComputerState>>, rows: Iterable<Pick<Session, "computer" | "machine">>, machines: readonly string[],
+                                metadata: Readonly<Record<string, Partial<Pick<MachineMeta, "host" | "local_sessions">>>> = {}): PagingComputer[] {
+  return fleetComputers(computers, rows, metadata).filter((h) => computers[h.computer]?.status === "live" && (!machines.length || machines.includes(h.machine)));
+}
+
+/** The machine, project and date scopes of the loaded archive window. */
 export interface ListScope {
   machines: readonly string[];
-  /** Inside the date range (ArchiveBrowser::includes). */
+  projects?: readonly string[];
   includes(archivedAt: number): boolean;
   compact(key: string): boolean;
 }
 
-/** In the machine filter (what Qt's Archive count follows, without the project filter: see ListScope). */
 export const inScope = (s: Pick<Session, "machine">, scope: Pick<ListScope, "machines">) =>
   !scope.machines.length || scope.machines.includes(s.machine);
 
-/**
- * The Archive filter's rows (SessionsWindowRows.cpp 270-271): flat cards in
- * the order given, inside the date range and the filters. Qt groups them by
- * project; that is zerus-5wmh.40.
- */
-export function archiveListRows(rows: readonly ArchivedSession[], scope: ListScope): Row[] {
-  const out: Row[] = [];
+/** Qt's archived grouping uses the archive identity, never the tag's project (SessionsWindowRows.cpp:266-300). */
+export function archiveListRows(rows: readonly ArchivedSession[], scope: ListScope, organization: GroupingOut = emptyGrouping()): Row[] {
+  const members = new Map<string, Session[]>();
+  // The store supplies newest archived first (SessionsWindow.cpp:3238-3242).
   for (const s of rows) {
-    if (!scope.includes(s.archivedAt) || !inScope(s, scope)) continue;
-    out.push({ type: "card", id: s.key, session: s, expandable: false, expanded: false, compactRow: scope.compact(s.key) });
+    const list = members.get(s.group);
+    if (list) list.push(s); else members.set(s.group, [s]);
   }
-  return out;
+  return groupRows({
+    grouping: organization, members, projects: scope.projects ?? [],
+    visible: (s) => scope.includes((s as ArchivedSession).archivedAt) && inScope(s, scope), online: () => false,
+    expanded: () => false, compact: scope.compact, children: false,
+  });
 }
 
 export interface ArchiveDeps {
@@ -211,6 +201,10 @@ export interface ArchiveDeps {
    * (Qt's cancelArchivePages); their answers are discarded by token anyway.
    */
   cancel(through: number): void;
+  /** Clears the backend's retained identities as well as cancelling reads. */
+  reset(through: number): void;
+  /** Changing the project scope starts a new archive window. */
+  projects?(): readonly string[];
   /** The Archive filter shows the list. */
   active(): boolean;
   /** The search text; the archive query is it trimmed. */
@@ -238,12 +232,33 @@ export function createArchive(deps: ArchiveDeps) {
   let delay: ReturnType<typeof setTimeout> | undefined;
   /** The highest request number issued (Qt's m_archiveRequest). */
   let requests = deps.firstRequest ?? 0;
+  // Only the current in-flight request per computer can hold deltas: at most
+  // one page (50 identities), newest per key. Shown rows own their placements.
+  const held = new Map<ComputerId, Map<string, Pick<GroupOut, "group" | "rank">>>();
 
   const bounds = () => rangeBounds(range(), now());
   const includes = (at: number) => { const [from, until] = bounds(); return at >= from && at < until; };
   const put = (computer: string, page: Page) => setPages((all) => ({ ...all, [computer]: page }));
   /** Drops every page; their answers in flight no longer match. */
-  const dropPages = () => setPages({});
+  const dropPages = () => { held.clear(); setPages({}); };
+
+  function applyGroups(groups: readonly GroupOut[]) {
+    batch(() => {
+      for (const g of groups) {
+        if (g.archive_request === undefined) continue;
+        const p = untrack(pages)[g.computer];
+        if (!p) continue;
+        if (g.archive_request === p.shownRequest && p.shownRequest !== 0) {
+          const rows = p.rows.map((s) => s.catalogKey === g.key ? { ...s, group: g.group, rank: g.rank } : s);
+          put(g.computer, { ...p, rows });
+        } else if (g.archive_request === p.request && p.request !== 0) {
+          let pending = held.get(g.computer);
+          if (!pending) held.set(g.computer, pending = new Map());
+          if (pending.has(g.key) || pending.size < 50) pending.set(g.key, { group: g.group, rank: g.rank });
+        }
+      }
+    });
+  }
 
   /** Older (false) or Newer (true) for every paging computer that has a page that way. */
   function navigate(newer: boolean) {
@@ -259,6 +274,7 @@ export function createArchive(deps: ArchiveDeps) {
         const cursor = newer ? p.previous : p.cursor;
         if (p.request || (newer && !cursor) || (!newer && p.loaded && !cursor)) continue;
         const id = ++requests;
+        held.delete(computer);
         all[computer] = { ...p, error: "", newer, request: id };
         calls.push([computer, id, cursor]);
       }
@@ -275,11 +291,18 @@ export function createArchive(deps: ArchiveDeps) {
     const p = untrack(pages)[computer];
     if (!p || p.request !== id) return;
     const machine = machineOf(untrack(hosts), computer);
-    const rows = page.rows.map((row) => archivedSession(computer, machine, row));
+    const pending = held.get(computer);
+    held.delete(computer);
+    // Rust computes the reply placement before retaining identities. A later
+    // delta can arrive before this RPC reply; merge it after that snapshot.
+    const rows = page.rows.map((row) => {
+      const s = archivedSession(computer, machine, row);
+      return Object.assign(s, pending?.get(s.catalogKey));
+    });
     if (!rows.length && p.rows.length) { put(computer, { ...p, request: 0, error: ARCHIVE_CHANGED }); return; }
     batch(() => {
       put(computer, {
-        ...p, request: 0, error: "", loaded: true, rows, cursor: page.next_cursor ?? "", previous: page.previous_cursor ?? "",
+        ...p, request: 0, shownRequest: id, error: "", loaded: true, rows, cursor: page.next_cursor ?? "", previous: page.previous_cursor ?? "",
         total: page.total ?? 0, position: typeof page.position === "number" ? page.position : -1,
       });
       setWindowChanges((n) => n + 1);
@@ -289,6 +312,7 @@ export function createArchive(deps: ArchiveDeps) {
   function fail(computer: ComputerId, id: number, error: unknown) {
     const p = untrack(pages)[computer];
     if (!p || p.request !== id) return;
+    held.delete(computer);
     const text = errorText(error);
     put(computer, { ...p, request: 0, error: text === SUPERSEDED ? "" : text });
   }
@@ -296,7 +320,7 @@ export function createArchive(deps: ArchiveDeps) {
   function refresh() {
     clearTimeout(delay);
     delay = undefined;
-    deps.cancel(requests);
+    deps.reset(requests);
     dropPages();
     navigate(false);
   }
@@ -304,7 +328,7 @@ export function createArchive(deps: ArchiveDeps) {
   function setQuery(text: string) {
     if (text === query) return;
     query = text;
-    deps.cancel(requests);
+    deps.reset(requests);
     dropPages();
     clearTimeout(delay);
     delay = setTimeout(() => { delay = undefined; refresh(); }, QUERY_DELAY_MS);
@@ -320,11 +344,12 @@ export function createArchive(deps: ArchiveDeps) {
     batch(() => {
       if (!show && active) {
         deps.cancel(requests);
+        held.clear();
         setPages((all) => Object.fromEntries(Object.entries(all).map(([id, p]) => [id, p.request ? { ...p, request: 0 } : p])));
       }
       active = show;
       if (different) {
-        deps.cancel(requests);
+        deps.reset(requests);
         setHosts(next);
         dropPages();
       }
@@ -347,6 +372,9 @@ export function createArchive(deps: ArchiveDeps) {
   const showing = createMemo(() => deps.active());
   createEffect(on([scope, showing], ([next, show]) => configure(next, show)));
 
+  const projects = createMemo(() => (deps.projects?.() ?? []).join("\n"));
+  createEffect(on(projects, () => refresh(), { defer: true }));
+
   const rows = createMemo(() => {
     const all = pages();
     const list: ArchivedSession[] = [];
@@ -358,6 +386,7 @@ export function createArchive(deps: ArchiveDeps) {
 
   return {
     pages,
+    applyGroups,
     /** Every loaded archived row, newest first. */
     rows,
     /** A loaded archived row by key. */
@@ -401,17 +430,20 @@ export const { archive, archiveRows, archiveCount, archiveTip } = createRoot(() 
   const archive = createArchive({
     read: (computer, from, until, cursor, query, request) => bridge.archivePage(computer, from, until, cursor, query, request),
     cancel: (through) => { void bridge.cancelArchivePages(through); },
+    reset: (through) => { void bridge.resetArchivePages(through); },
+    projects: projectFilter,
     firstRequest: Date.now(),
     active: () => stateFilter() === "archived" && page() === "sessions",
     query: search,
-    computers: () => pagingComputers(catalog.computers, catalogRows(), machineFilter()),
+    computers: () => pagingComputers(catalog.computers, catalogRows(), machineFilter(), machineCards),
   });
   const archiveRows = createMemo(() => archiveListRows(archive.rows(), {
-    machines: machineFilter(), includes: archive.includes, compact: (key) => !!compactRows[key],
-  }));
+    machines: machineFilter(), projects: projectFilter(), includes: archive.includes, compact: (key) => !!compactRows[key],
+  }, grouping()));
   const counted = createMemo(() => {
     const scope = { machines: machineFilter() };
-    return archive.rows().filter((s) => inScope(s, scope)).length;
+    const projects = projectFilter();
+    return archive.rows().filter((s) => inScope(s, scope) && (!projects.length || projects.includes(s.group))).length;
   });
   return { archive, archiveRows, archiveCount: () => archive.countText(counted()), archiveTip: () => archive.tipText("Archive", counted()) };
 });
@@ -426,3 +458,5 @@ export function bindRetainedRows(lookup: (key: string) => Session | undefined) {
 
 bindSelectedRows((key) => archive.row(key) ?? retained(key));
 bindActionRows(archive.row);
+
+bindArchivedGroups((key) => archive.row(key)?.group);

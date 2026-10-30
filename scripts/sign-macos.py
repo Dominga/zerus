@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 from macos_stapler import run_stapler
 
@@ -109,8 +110,18 @@ def create_disk_image(app, image):
         staging.mkdir()
         subprocess.run(["ditto", str(app), str(staging / "Zerus.app")], check=True)
         (staging / "Applications").symlink_to("/Applications")
-        subprocess.run(["hdiutil", "create", "-volname", "Zerus", "-fs", "HFS+", "-format", "UDZO",
-                        "-srcfolder", str(staging), str(image)], check=True)
+        command = ["hdiutil", "create", "-volname", "Zerus", "-fs", "HFS+", "-format", "UDZO",
+                   "-srcfolder", str(staging), str(image)]
+        for delay in (2, 5, None):
+            result = subprocess.run(command, capture_output=True, text=True)
+            print(result.stdout, end="")
+            print(result.stderr, end="", file=sys.stderr)
+            if result.returncode == 0:
+                break
+            if delay is None or "Resource busy" not in result.stdout + result.stderr:
+                result.check_returncode()
+            image.unlink(missing_ok=True)
+            time.sleep(delay)
 
 
 def notary_credentials(key_file, key_id, issuer):

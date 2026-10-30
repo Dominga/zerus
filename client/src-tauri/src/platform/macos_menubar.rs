@@ -213,6 +213,12 @@ pub fn menu_event(app: &AppHandle, id: &str) {
                 eprintln!("zerus-client: could not open the window: {error}");
             }
         }
+        Some(MenuAction::Updates) => crate::updates::open_page(app),
+        Some(MenuAction::Restart) => {
+            if let Err(error) = crate::updates::restart_app(app) {
+                eprintln!("zerus-client: could not restart into the installed bundle: {error}");
+            }
+        }
         Some(MenuAction::Session {
             computer,
             key,
@@ -233,7 +239,7 @@ pub fn menu_event(app: &AppHandle, id: &str) {
             }
             crate::desk::set_mode(app, mode);
         }
-        Some(MenuAction::Quit) => app.exit(0),
+        Some(MenuAction::Quit) => crate::exit_flush::quit_with_flush(app, 0),
         None => {}
     }
 }

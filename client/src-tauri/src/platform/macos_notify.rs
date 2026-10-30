@@ -73,7 +73,13 @@ define_class!(
         ) {
             if let Some(token) = clicked_token(response) {
                 let _ = self.ivars().app.run_on_main_thread(activate);
-                let _ = self.ivars().desk.send(DeskInput::Clicked(token));
+                if zerus_client_core::updates::is_update_token(&token) {
+                    if crate::updates::notification_current(&self.ivars().app, &token) {
+                        crate::updates::open_page(&self.ivars().app);
+                    }
+                } else {
+                    let _ = self.ivars().desk.send(DeskInput::Clicked(token));
+                }
             }
             completion.call(());
         }

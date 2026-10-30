@@ -160,13 +160,24 @@ class WatchStream(unittest.TestCase):
         expected = next(row for row in listing['sessions'] if row['name'] == self.name)
         self.assertEqual(steady(rows[self.key()]), steady(expected))
         self.assertNotIn('sessions', meta['value'])
-        self.assertEqual(set(meta['value']), set(listing) - {'sessions'})
+        self.assertEqual(set(meta['value']), (set(listing) - {'sessions'}) | {'ended_launches'})
+        self.assertEqual(meta['value']['ended_launches'], listing.get('ended_launches', []))
         self.assertEqual(meta['value']['host'], 'test')
         self.assertTrue(all(len(line.encode()) <= 1 << 20 for line in stream.raw))
         started = time.monotonic()
         self.assertEqual(stream.close(), 0)
         self.assertLess(time.monotonic() - started, 3)
         self.assertEqual(stream.process.stderr.read(), '')
+
+    def test_launch_identity_is_additive_and_empty_results_advertise_support(self):
+        launch = str(uuid.uuid4())
+        self.record['launch_id'] = launch
+        self.write_record()
+        stream, _, snapshot, meta = self.start()
+        row = next(item['row'] for item in snapshot['items'] if item['key'] == self.key())
+        self.assertEqual(row['launch_id'], launch)
+        self.assertEqual(meta['value']['ended_launches'], [])
+        self.assertEqual(stream.close(), 0)
 
     def test_binding_changes_and_a_rename_are_upserts_on_the_run_key(self):
         stream, *_ = self.start()
@@ -308,6 +319,17 @@ class WatchStream(unittest.TestCase):
             return {key: {k: v for k, v in value[key].items() if k != 'sampled_at'} for key in ('processes', 'process_work')}
         self.assertEqual(set(state['value']), {'processes', 'process_work'})
         self.assertEqual(steady_value(state['value']), steady_value(inspection))
+        # A pre-extension client can still resubscribe to recover its first state.
+        stream.send(op='subscribe', topic='processes', session=self.session())
+        again = stream.next(lambda f: f['t'] == 'state' and f['topic'] == 'processes', timeout=10)
+        self.assertEqual(again['rev'], 1)
+        # Reconfigure and refresh this subscription without dropping the last
+        # inventory or resetting its revision. Older servers reset and resend 1.
+        stream.send(op='subscribe', topic='processes', session=self.session(),
+                    interval_ms=2500, refresh=True)
+        stream.send(op='ping', id='processes-configured')
+        stream.next(lambda f: f['t'] == 'pong' and f['id'] == 'processes-configured')
+        stream.quiet(lambda f: f['t'] == 'state' and f['topic'] == 'processes' and f['rev'] == 1, 1.25)
         # A recorded background job in the binding is read again and sent.
         self.record['shell_jobs'] = {'job-1': dict(id='job-1', status='running', background=True, observed=True,
                                                    run_id=self.run_id, command='sleep 600', started_at=time.time(), source='hooks')}

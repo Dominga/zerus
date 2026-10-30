@@ -30,8 +30,11 @@ if sys.argv[1:] == ['--build-info']:
     # 'unverifiable' reports itself as a build, never once installed.
     if VARIANT == 'unverifiable' and pathlib.Path(sys.argv[0]).parent.name == 'bin':
         sys.exit(1)
-    print(json.dumps({{'version': '0.42.0', 'versionName': VARIANT, 'devBuildNumber': int(VARIANT[4:]) if VARIANT.startswith('dev-') else 0,
-                      'sourceCommit': VARIANT.ljust(40, '0'), 'sourceDirty': False}}))
+    info = {{'version': '0.42.0', 'versionName': VARIANT, 'devBuildNumber': int(VARIANT[4:]) if VARIANT.startswith('dev-') else 0,
+             'sourceCommit': VARIANT.ljust(40, '0'), 'sourceDirty': False}}
+    if VARIANT.startswith('client-'):
+        info.update(CFBundleIdentifier='com.hgdev.hgs-tray', ZerusGUI='tauri')
+    print(json.dumps(info))
     sys.exit(0)
 if VARIANT == 'broken':
     sys.exit(1)
@@ -89,6 +92,16 @@ if sys.argv[1:] == ['--user', 'start', 'hgs-tray.service']:
 elif sys.argv[1:] in (['--user', 'is-active', 'hgs-tray.service'],
                       ['--user', 'is-enabled', 'hgs-tray.service']):
     print('active' if sys.argv[2] == 'is-active' else 'enabled')
+'''
+NPM = r'''#!{python}
+import json, os, pathlib, shutil, sys
+root = pathlib.Path(os.environ['TRAY_FIXTURE'])
+with (root / 'npm.json').open('a') as log:
+    log.write(json.dumps(sys.argv[1:]) + '\n')
+if sys.argv[1:4] == ['exec', '--', 'tauri']:
+    output = root / 'client/src-tauri/target/release/hgs-tray'
+    output.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(os.environ['TRAY_CLIENT_BUILD'], output)
 '''
 
 
@@ -303,6 +316,56 @@ class TrayUpdate(unittest.TestCase):
         self.script(self.bin / 'cmake', f'#!/bin/sh\nif [ "$1" = --build ]; then mkdir -p "$2/plugins" && cp "{build}" "$2/hgs-tray" && {step}; fi\n')
         return tray / 'install.sh'
 
+    def client_installer(self, build, gstreamer=True):
+        install = self.installer(build)
+        tauri = self.root / 'client/src-tauri'
+        tauri.mkdir(parents=True, exist_ok=True)
+        (tauri / 'Cargo.toml').write_text('[features]\nmedia = []\nvideo = []\n')
+        shutil.copy2(REPO / 'client/src-tauri/tauri.switch.linux.conf.json',
+                     tauri / 'tauri.switch.linux.conf.json')
+        self.script(self.bin / 'npm', NPM.format(python=sys.executable))
+        self.script(self.bin / 'pkg-config', '#!/bin/sh\nexit "${TRAY_GSTREAMER_OK:-1}"\n')
+        self.env['TRAY_CLIENT_BUILD'] = str(build)
+        self.env['TRAY_GSTREAMER_OK'] = '0' if gstreamer else '1'
+        return install
+
+    def test_client_install_is_prefix_private_and_stays_selected(self):
+        install = self.client_installer(self.build('client-1'))
+        prefix = self.root / 'prefix'
+        plugin = prefix / 'lib/hgs-tray/plugins/libhgs-tray-native-ui.so'
+        plugin.parent.mkdir(parents=True)
+        plugin.write_bytes(b'for the Qt rollback')
+        env = dict(self.env, HGS_LINUX_GUI='client', HGS_INSTALL_PREFIX=str(prefix))
+        result = subprocess.run(['bash', str(install)], env=env, capture_output=True, text=True, timeout=90)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        binary = prefix / 'bin/hgs-tray'
+        self.assertTrue(binary.is_file())
+        self.assertIn("'client-1'", binary.read_text())
+        unit = prefix / 'lib/systemd/user/hgs-tray.service'
+        self.assertIn(f'ExecStart={binary}', unit.read_text())
+        self.assertNotIn('--sessions', unit.read_text())
+        desktop = (prefix / 'share/applications/hgs-tray.desktop').read_text()
+        self.assertIn(f'Exec={binary} --sessions', desktop)
+        self.assertEqual(plugin.read_bytes(), b'for the Qt rollback')
+        self.assertFalse((self.root / 'systemctl').exists(), 'a scratch prefix never reaches systemd')
+        self.assertIn('no service-manager action', result.stdout)
+        env.pop('HGS_LINUX_GUI')
+        result = subprocess.run(['bash', str(install)], env=env, capture_output=True, text=True, timeout=90)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = [json.loads(line) for line in (self.root / 'npm.json').read_text().splitlines()]
+        self.assertEqual(len(calls), 4, 'npm ci and the Tauri build on each install')
+        for call in calls[1::2]:
+            self.assertEqual(call[-2:], ['--features', 'video'])
+
+    def test_client_install_without_gstreamer_keeps_media_only(self):
+        install = self.client_installer(self.build('client-1'), gstreamer=False)
+        env = dict(self.env, HGS_LINUX_GUI='client', HGS_INSTALL_PREFIX=str(self.root / 'prefix'))
+        result = subprocess.run(['bash', str(install)], env=env, capture_output=True, text=True, timeout=90)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('media only, without round video', result.stdout)
+        calls = [json.loads(line) for line in (self.root / 'npm.json').read_text().splitlines()]
+        self.assertEqual(calls[-1][-2:], ['--features', 'media'])
+
     def test_installer_places_and_removes_the_native_ui_plugin(self):
         installed = self.home / '.local/lib/hgs-tray/plugins/libhgs-tray-native-ui.so'
         build = self.build('first', self.installed)
@@ -345,6 +408,46 @@ class TrayUpdate(unittest.TestCase):
         self.assertIn("'second'", (self.home / '.local/share/hgs/desktop-previous/hgs-tray').read_text())
         self.assertEqual(json.loads((self.drafts / 'kept/draft.json').read_text())['text'], 'unsent text')
         self.assertEqual((self.root / 'activations').read_text(), 'sessions\nsessions\n')
+
+    def test_client_updates_keep_qt_as_the_rollback_copy(self):
+        prefix = self.root / 'prefix'
+        self.env['HGS_INSTALL_PREFIX'] = str(prefix)
+        self.installed = prefix / 'bin/hgs-tray'
+        self.launch('first')
+        self.draft('kept', 'from Qt')
+        result = self.update(self.build('client-1'))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([variant for variant, _ in self.running()], ['client-1'])
+        slot = prefix / 'share/hgs/desktop-previous/hgs-tray'
+        self.assertIn("'first'", slot.read_text())
+        client_drafts = prefix / 'share/com.hgdev.hgs-tray/drafts'
+        (client_drafts / 'kept').mkdir(parents=True)
+        (client_drafts / 'kept/draft.json').write_text(json.dumps({'key': 'kept', 'text': 'from the client'}))
+        result = self.update(self.build('client-2'))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([variant for variant, _ in self.running()], ['client-2'])
+        self.assertIn("'first'", slot.read_text(), 'later client updates retain the original Qt')
+        self.assertEqual(json.loads((client_drafts / 'kept/draft.json').read_text())['text'], 'from the client')
+        self.assertEqual(list(self.installed.parent.glob('.hgs-tray-kept-*')), [])
+        kind = subprocess.run([sys.executable, str(UPDATER), '--installed-gui', str(self.installed)],
+                              env=self.env, capture_output=True, text=True, timeout=30)
+        self.assertEqual((kind.returncode, kind.stdout.strip()), (0, 'tauri'), kind.stderr)
+        result = self.rollback()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([variant for variant, _ in self.running()], ['first'])
+        self.assertIn("'client-2'", slot.read_text())
+        self.assertEqual(json.loads((client_drafts / 'kept/draft.json').read_text())['text'], 'from the client')
+        kind = subprocess.run([sys.executable, str(UPDATER), '--installed-gui', str(self.installed)],
+                              env=self.env, capture_output=True, text=True, timeout=30)
+        self.assertEqual((kind.returncode, kind.stdout.strip()), (0, 'qt'), kind.stderr)
+
+    def test_an_on_disk_client_switch_needs_the_live_update(self):
+        self.build('first', self.installed)
+        result = subprocess.run([sys.executable, str(UPDATER), '--check', str(self.build('client-1')),
+                                 str(self.installed)], env=self.env, capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('needs the live update', result.stderr)
+        self.assertIn("'first'", self.installed.read_text())
 
     def test_rollback_without_a_copy_changes_nothing(self):
         self.build('first', self.installed)
@@ -405,7 +508,7 @@ class InstallerOrder(unittest.TestCase):
         self.assertLess(check, mac.index('rm -rf "${APP_DEST}"'))
         self.assertLess(check, script.index('printf \'%s\\n\' "${NEW_PLIST}" > "${PLIST_DEST}"'))
         linux = script[script.index('# --- 2. binary'):]
-        self.assertLess(linux.index('update-installed.py" --check'), linux.index('install -Dm755'))
+        self.assertLess(linux.index('update-installed.py" "${CHECK[@]}"'), linux.index('install -Dm755'))
 
 
 if __name__ == '__main__':

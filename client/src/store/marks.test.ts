@@ -5,7 +5,7 @@ import { CAP, attentionKey, byCodePoint, createMarks, fallbackKey, replyKey, typ
 import { snapshotOf } from "../ui/sessions/actions-ui";
 import { emptyBatch, type Batch, type ReadMark, type RowOut, type ViewRow } from "../types";
 import overlayFixture from "../../core/tests/fixtures/marks-overlay.json";
-import { attentionNeeded, needsAttention } from "./attention";
+import { attentionNeeded, needsAttention, visibleUnreadReply } from "./attention";
 
 // The marks store against Qt's FleetState (updateUnread, markSessionRead,
 // setReviewLater, unreadReplies, markRepliesRead, legacyReadMarks), with a
@@ -188,6 +188,7 @@ describe("the shared overlay fixture", () => {
     expect: {
       review_later: boolean; unread_reply: boolean; unread: boolean; acknowledged: boolean;
       needs_attention: boolean; counts: boolean; counts_stale: boolean; window: boolean; window_stale: boolean;
+      visible?: boolean; visible_stale?: boolean;
     };
   }
   const cases = (overlayFixture as unknown as { cases: OverlayCase[] }).cases;
@@ -199,8 +200,10 @@ describe("the shared overlay fixture", () => {
     const s = await setup([{ computer: c.computer, key: "k", row: c.view as ViewRow }], fakePort({ marks: c.marks, replies: c.replies }, c.pending), memoryStorage([c.computer]));
     const row = s.row("k", c.computer);
     expect(s.marks.readState(row)).toEqual({ reviewLater: c.expect.review_later, unreadReply: c.expect.unread_reply, unread: c.expect.unread, ack: c.expect.acknowledged });
-    expect({ reviewLater: row.reviewLater, unread: row.unread, attentionNeeded: attentionNeeded(row) })
-      .toEqual({ reviewLater: c.expect.review_later, unread: c.expect.unread, attentionNeeded: c.expect.needs_attention });
+    expect({ reviewLater: row.reviewLater, unread: row.unread, unreadReply: row.unreadReply, attentionNeeded: attentionNeeded(row) })
+      .toEqual({ reviewLater: c.expect.review_later, unread: c.expect.unread, unreadReply: c.expect.unread_reply, attentionNeeded: c.expect.needs_attention });
+    if (c.expect.visible !== undefined) expect(visibleUnreadReply(row, true)).toBe(c.expect.visible);
+    if (c.expect.visible_stale !== undefined) expect(visibleUnreadReply(row, false)).toBe(c.expect.visible_stale);
     // A project header's request part (SessionsWindowRows.cpp:400-401): needsAction() && !attentionAcknowledged.
     expect(row.actionNeeded).toBe(!!c.view.needs_action && !c.expect.acknowledged);
     // FleetState::attentionSessions, as menubar::Desk::attention counts a row.

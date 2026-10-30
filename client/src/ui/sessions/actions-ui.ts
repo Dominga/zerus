@@ -295,6 +295,8 @@ export function detailsFromInspection(value: unknown): Details | undefined {
     auth_required: v.auth_required === true,
     expected_id: text(v.expected_id),
     resume_message_can_send: v.resume_message_can_send === true,
+    fork_supported: v.fork_supported === true,
+    fork_reason: text(v.fork_reason),
     allowed_actions: Array.isArray(v.allowed_actions) ? v.allowed_actions.filter((a): a is string => typeof a === "string") : null,
     action_reasons: reasons,
     interrupt_supported: v.interrupt_supported === true,
@@ -319,7 +321,7 @@ export function terminal(s: Pick<ActionRow, "cmd" | "terminalSupported" | "termi
 }
 
 /** The selected child identity, when its conversation has been inspected. */
-export interface ChildIdentity { id: string; conversationId?: string }
+export interface ChildIdentity { id: string; conversationId?: string; cwd?: string }
 
 /** Qt's header and Details identity (SessionsWindow.cpp:4163-4173). */
 export function sessionIdentity(s: Pick<ActionRow, "runId" | "conversationId">, details?: Pick<Details, "run_id" | "conversation_id">, child?: ChildIdentity) {
@@ -406,10 +408,11 @@ export function forgetOpening(menuRow: ActionRow, live: ActionRow, details?: Det
   return { row, bound: { binding, run: details ? details.run_id : row.runId ?? "", conversation: details ? details.conversation_id : row.conversationId ?? "" } };
 }
 
-export type DialogKind = "rename" | "terminate" | "fresh" | "forget" | "batch";
+export type DialogKind = "rename" | "terminate" | "fresh" | "forget" | "batch" | "fork";
 /** What a forget dialog named: whether it forgets an OpenCode binding, and the run and conversation then in view. */
 export interface ForgetScope { binding: boolean; run: string; conversation: string }
 export type DialogOpen =
+  | { kind: "fork"; row: ActionRow; details: Details }
   | { kind: "rename" | "terminate" | "fresh"; row: ActionRow }
   | { kind: "forget"; row: ActionRow; bound: ForgetScope }
   /** A selection's Forget or Terminate: `answer` gets true for the confirm button, false otherwise. */
@@ -421,6 +424,7 @@ export type DialogEvent = ({ type: "open" } & DialogOpen) | { type: "close" };
 export function dialogReducer(_state: DialogState, event: DialogEvent): DialogState {
   if (event.type !== "open") return undefined;
   if (event.kind === "batch") return { kind: "batch", copy: event.copy, answer: event.answer };
+  if (event.kind === "fork") return { kind: "fork", row: event.row, details: event.details };
   return event.kind === "forget" ? { kind: "forget", row: event.row, bound: event.bound } : { kind: event.kind, row: event.row };
 }
 

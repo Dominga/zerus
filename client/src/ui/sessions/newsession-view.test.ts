@@ -70,6 +70,10 @@ describe("loading the store (its own chunk)", () => {
 });
 
 describe("the entry points (each Qt's showNewSession call)", () => {
+  it("uses the Worktrees tab's exact computer, checkout and project without starting a session", async () => {
+    await view.newSessionFromWorktree("project-id", "example-peer", "/srv/example/selected-worktree");
+    expect(store.openNewSession).toHaveBeenCalledWith({ project: "project-id", computer: "example-peer", path: "/srv/example/selected-worktree" });
+  });
   it("opens from the rail and the Sessions header with the selected computer filter", async () => {
     await view.newSessionFromRail();
     await view.newSessionFromPanel();

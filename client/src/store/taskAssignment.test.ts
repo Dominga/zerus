@@ -43,3 +43,12 @@ describe("guarded task assignment", () => {
    taskDrop(e, "example", row); await Promise.resolve(); expect(assignTask).not.toHaveBeenCalled();
  });
 });
+
+it("planned executor modes pin the exact parent and never turn a missing parent into Any", async () => {
+  await assign("example", task, { ...row }, "subagent");
+  await assign("example", task, { ...row }, "new_session");
+  expect(vi.mocked(assignTask).mock.calls.map(c => c[5])).toEqual(["subagent", "new_session"]);
+  expect(vi.mocked(assignTask).mock.calls[1].slice(0,5)).toEqual(["example", task.uuid, { computer: "peer", name: row.name, run_id: "run", conversation_id: "conversation" }, "run:one", "launch_id:launch"]);
+  await assign("example", task, undefined, "new_session");
+  expect(assignTask).toHaveBeenCalledTimes(2);
+});

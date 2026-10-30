@@ -3,7 +3,7 @@ import type { Reply } from "../../types";
 // catalog store's row: the Rust view row plus the presentation fields derived
 // from it once per upsert (store/catalog.ts `toSession`).
 
-export type AgentKind = "claude" | "codex" | "kimi" | "deepseek" | "opencode";
+export type AgentKind = "claude" | "codex" | "kimi" | "deepseek" | "opencode" | "sh";
 
 /** Presentation status, in the existing precedence order (design/webui). */
 export type Status =
@@ -231,6 +231,8 @@ export interface MediaMessage {
   durationMs: number;
   /** Exactly 64 integer amplitudes 0-255; anything else draws a flat line. */
   waveform: number[];
+  /** Public receipt identity, never a path on the recording's host. */
+  file?: { request_id: string; index: number };
   transcript?: string;
   error?: string;
 }

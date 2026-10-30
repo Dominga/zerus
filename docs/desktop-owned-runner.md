@@ -48,6 +48,55 @@ messages. Missing retained input and unknown runtime identity stay review-only.
 The passive [operation store](desktop-operation-store.md) cannot infer this proof
 from imported records or a marker phase.
 
+## Inherited custody descriptor
+
+`run::custody::InheritedLock` is available on Linux and macOS. It accepts an
+already host-verified private `File`, without opening paths, creating a journal
+or granting recovery authority. `try_lock` takes a nonblocking exclusive flock
+and keeps a close-on-exec descriptor above standard input/output/error.
+`inherit` installs the intended helper's final pre-exec hook. The parent's flags
+stay unchanged, including during concurrent ordinary spawns.
+
+The child marks every other non-stdio descriptor close-on-exec, then clears that
+flag only for custody. Linux uses `close_range(CLOSE_RANGE_CLOEXEC)` with a bounded
+fcntl fallback; macOS uses the fallback. Marking flags preserves Rust's internal
+exec-error pipe until exec succeeds. The hook performs no allocation or locking.
+Before fork, the module checks only this process's descriptor roster (at most
+8192) and soft limit (at most 1048576). Existing descriptors above a reduced soft
+limit are included. Unsupported or incomplete coverage refuses inheritance.
+The host must use its guarded spawn turn, must not concurrently raise the limit,
+and must not add later hooks that alter inheritance. This is background work.
+
+The guard never calls `LOCK_UN`. Duplicated/forked descriptors refer to the same
+lock, and an explicit unlock would release it for all holders. See the
+[Linux flock contract](https://man7.org/linux/man-pages/man2/flock.2.html) and
+[Apple flock contract](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/flock.2.html).
+The host must keep the same Arc with the child loop and all three pipe workers;
+a bounded return or parent close cannot unlock a still-inherited description.
+The child may pass it to descendants, which conservatively extends custody.
+
+This primitive has no production caller. The future actor must first durably
+bind a prepared custody file to the exact operation ticket and its private file
+identity, then spawn with the diagnostic attempt environment marker. It must
+durably register helper identity before returning Child to `run_owned`. A failure
+after spawning does not prove exit, even if the hook returns an error. Recovery
+must verify the same existing file and its binding before acquiring its lock,
+and hold that acquisition through the exact drain commit. A held, missing,
+replaced, altered or otherwise unverifiable file remains charged; custody files
+must never be deleted while charged. No outcome, timer, environment scan or
+imported phase substitutes for that proof. Windows remains unsupported here.
+
+The existing `hgs task start-deliver ... --recover-only` dispatch reads and
+parses its complete bounded stdin before opening task state or performing any
+task effect. This ordering is a required custody invariant: a crash before the
+registration commit cannot deliver input through `run_owned`. EOF or partial
+input exits without task effects. `tests/test_desktop_custody.py` pins this with
+the actual isolated CLI, including retention of an inherited lock while waiting
+for the rest of a partial input. `client/core/tests/run_custody.rs` separately
+checks the spawn whitelist, close-only lifetime, reduced descriptor limits,
+failed exec, parent exit before registration and an output worker retaining
+custody. These mechanism tests do not qualify actor/journal recovery or reboot.
+
 `client/core/tests/run_owned.rs` executes only private synthetic children. It
 covers exact UTF-8 input, cap boundaries, guarded refusal, successful-child input
 failure, independent output overflow, cancellation and timeout, plus inherited

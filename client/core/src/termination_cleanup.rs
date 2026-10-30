@@ -17,6 +17,9 @@ use crate::worktree_review::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod capture;
+pub use capture::Capture;
+
 /// The Terminate dialog's removal option and its texts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemovalOption {
@@ -121,9 +124,15 @@ impl Entry {
             forgotten: false,
         };
         if let Some(reported) = reported {
-            if reported.common_dir != common_dir || reported.status != "kept" {
+            if reported.path != root
+                || reported.common_dir != common_dir
+                || reported.status != "kept"
+            {
                 entry.status = Some(
-                    if reported.common_dir == common_dir && reported.status == "removed" {
+                    if reported.path == root
+                        && reported.common_dir == common_dir
+                        && reported.status == "removed"
+                    {
                         Status::Removed
                     } else {
                         Status::Unconfirmed
@@ -753,7 +762,7 @@ mod tests {
     fn the_termination_s_own_report_is_respected() {
         let reported = |status: &str, common_dir: &str| WorktreeCleanup {
             status: status.into(),
-            path: "/home/example/repo-work-1".into(),
+            path: "/r-w".into(),
             common_dir: common_dir.into(),
             reason: Some("policy".into()),
         };

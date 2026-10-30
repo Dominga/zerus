@@ -1,3 +1,8 @@
+import { selected as selectedSession } from "../../store/ui";
+import { writingTask } from "../../store/taskBoard";
+import { openTaskAssignment } from "../../store/taskAssignment";
+import { pendingExecutor, taskExecutors, setTaskExecutorReview } from "../../store/taskExecutors";
+import { onTaskExecutors } from "../../bridge";
 import { taskStarts, supportsTaskStart, taskStartBlocker, pendingStart, reviewTaskStart } from "../../store/taskStart";
 import { PAUSE_REASON } from "../../store/taskCancel";
 import { For, Show, createEffect, createMemo, createSignal, on, onCleanup } from "solid-js";
@@ -13,7 +18,7 @@ import { TaskInput } from "./TaskInput";
 import { setMenu } from "../../store/ui";
 import { Icon } from "../lib/icons";
 import { Body } from "../sessions/Activity";
-import { assignmentLabel, STAGE_LABEL, type Stage, type Task } from "./tasks-ui";
+import { assignmentText, assignmentLabel, STAGE_LABEL, type Stage, type Task } from "./tasks-ui";
 import { deliveryError, deliveryText, historyAction } from "./task-history-ui";
 
 function TaskFiles(props: { files: Fetched[] }) {
@@ -60,7 +65,10 @@ export function TaskInspector(props: { project: string; task: Task; presentation
   createEffect(on(identity, () => { setTab("Task"); setCount(8); setDescribing(false); setRenaming(false); }));
   createEffect(() => { const request = taskRenameRequest(); if (request?.project === props.project && request.uuid === props.task.uuid) { setTaskRenameRequest(undefined); setRenaming(true); } });
   createEffect(() => { const request = taskDescriptionRequest(); if (request?.project === props.project && request.uuid === props.task.uuid) { setTaskDescriptionRequest(undefined); if (["todo", "backlog"].includes(props.task.stage)) setDescribing(true); } });
-  createEffect(on(identity, () => taskStarts.follow(props.project, props.task.uuid)));
+  createEffect(on(identity, () => { taskStarts.follow(props.project, props.task.uuid); taskExecutors.follow(props.project, props.task.uuid); }));
+  let executorUnlisten: (() => void) | undefined, executorClosed = false;
+  void onTaskExecutors(() => taskExecutors.refresh()).then((stop) => { if (executorClosed) stop(); else { executorUnlisten = stop; taskExecutors.refresh(); } }).catch(() => {});
+  onCleanup(() => { executorClosed = true; executorUnlisten?.(); taskExecutors.follow(); });
   onCleanup(() => { taskDetails.select(); taskStarts.follow(); });
   const detail = taskDetails.data;
   const item = () => props.presentation ?? props.task;
@@ -68,8 +76,8 @@ export function TaskInspector(props: { project: string; task: Task; presentation
   const discussion = () => detail()?.log.filter((e) => e.kind === "message" || e.kind === "comment") ?? [];
   return <>
     <div class="tv-col"><header class="tv-head"><div class="tv-title-row"><TaskTitle project={props.project} task={item()} title={detail()?.title || item().title || "Untitled task"} renaming={renaming()} setRenaming={setRenaming} saved={taskDetails.refresh} /><button class="icon-btn tv-more" aria-label="Task actions" title="Task actions" aria-haspopup="menu" onClick={(e) => { const box = e.currentTarget.getBoundingClientRect(); setMenu({ x: box.left, y: box.bottom, items: [{ label: "Rename task", icon: "pencil", disabled: !item().writable, action: (): void => { setRenaming(true); } }, { separator: true }, ...TABS.map((name) => ({ label: name === "Task" ? "Task and discussion" : name, checked: tab() === name, action: () => setTab(name) }))] }); }}><Icon name="ellipsis" size={17} /></button></div>
-      <div class="tv-context"><span class={`tv-stage st-${item().stage}`}><span class={`tk-glyph st-${item().stage}`} /><span>{STAGE_LABEL[item().stage as Stage] ?? item().stage}</span></span><span class="mono tv-id">{item().id}</span><button class="tchip tv-assign" disabled={!props.executorAvailable} onClick={props.openExecutor} title="Open executor Activity">{assignmentLabel(item())}</button><span class="grow" /><TaskWorkflow project={props.project} task={item()} /></div>
-      <Show when={supportsTaskStart(item()) && ["todo", "backlog"].includes(item().stage) && taskStartBlocker(props.project, item())}>{(reason) => <div class="tv-blocker"><Icon name="triangle-alert" size={13} /><span>Cannot start: {reason()}</span><span class="grow" /><Show when={pendingStart(props.project, item())}><button class="btn small" onClick={(e) => reviewTaskStart(props.project, item(), e.currentTarget)}><Icon name="eye" size={12} />Review task start</button></Show></div>}</Show>
+      <div class="tv-context"><span class={`tv-stage st-${item().stage}`}><span class={`tk-glyph st-${item().stage}`} /><span>{STAGE_LABEL[item().stage as Stage] ?? item().stage}</span></span><span class="mono tv-id">{item().id}</span><button class="tchip tv-assign" aria-label="Task executor" disabled={["todo", "backlog"].includes(item().stage) ? !item().writable || !!writingTask() : !props.executorAvailable} onClick={(e) => { if (["todo", "backlog"].includes(item().stage)) openTaskAssignment(props.project, item(), e.currentTarget); else props.openExecutor(); }} title={`${assignmentText(item(), selectedSession())}\n${["todo", "backlog"].includes(item().stage) ? "Change executor assignment" : "Open executor Activity"}`}><Icon name={["todo", "backlog"].includes(item().stage) ? "user-round-cog" : "bot"} size={12} /><span class="ell">{assignmentText(item(), selectedSession())}</span><Icon name={["todo", "backlog"].includes(item().stage) ? "chevron-down" : "arrow-up-right"} size={12} /></button><span class="grow" /><TaskWorkflow project={props.project} task={item()} /></div>
+      <Show when={supportsTaskStart(item()) && ["todo", "backlog"].includes(item().stage) && taskStartBlocker(props.project, item())}>{(reason) => <div class="tv-blocker"><Icon name="triangle-alert" size={13} /><span>Cannot start: {reason()}</span><span class="grow" /><Show when={pendingExecutor(props.project, item().uuid)}>{(launch) => <button class="btn small" onClick={(e) => setTaskExecutorReview({ task: { ...item() }, view: { ...launch() }, origin: e.currentTarget })}><Icon name="eye" size={12} />Review executor launch</button>}</Show><Show when={pendingStart(props.project, item())}><button class="btn small" onClick={(e) => reviewTaskStart(props.project, item(), e.currentTarget)}><Icon name="eye" size={12} />Review task start</button></Show></div>}</Show>
       <Show when={item().stage === "active"}><div class="tv-blocker quiet"><Icon name="info" size={13} /><span>{PAUSE_REASON}</span></div></Show>
     </header></div><div class="tv-scroll"><div class="tv-col tv-content">
     <Show when={tab() !== "Task"}><div class="tv-section"><span class="eyebrow">{tab()}</span><span class="grow" /><button class="link tv-back" onClick={() => setTab("Task")}><Icon name="chevron-left" size={12} />Task and discussion</button></div></Show>

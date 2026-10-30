@@ -38,6 +38,7 @@ mod login_item;
 mod metrics;
 #[cfg(feature = "live")]
 mod mobile;
+pub mod native_ui;
 #[cfg(feature = "live")]
 mod newsession;
 #[cfg(feature = "live")]
@@ -61,6 +62,8 @@ mod screens;
 #[cfg(feature = "live")]
 mod session_files;
 #[cfg(feature = "live")]
+mod session_folders;
+#[cfg(feature = "live")]
 pub mod settings;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod signals;
@@ -71,6 +74,8 @@ mod task_details;
 #[cfg(feature = "live")]
 mod task_editor;
 #[cfg(feature = "live")]
+mod task_executor;
+#[cfg(feature = "live")]
 mod task_forms;
 #[cfg(feature = "live")]
 mod task_settings;
@@ -78,6 +83,8 @@ mod task_settings;
 mod task_start;
 #[cfg(feature = "live")]
 mod terminal;
+#[cfg(feature = "live")]
+mod termination_cleanup;
 #[cfg(feature = "live")]
 mod updates;
 #[cfg(feature = "media")]
@@ -87,6 +94,8 @@ mod watchdog;
 #[cfg(feature = "live")]
 mod window_layer;
 mod window_visibility;
+#[cfg(feature = "live")]
+mod worktree_cleanup;
 #[cfg(feature = "live")]
 mod worktree_policy;
 
@@ -144,6 +153,8 @@ pub struct Startup {
     /// The claimed single-instance socket and the activations it receives.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub instance: Option<instance::Claimed>,
+    #[cfg(all(feature = "live", any(target_os = "linux", target_os = "macos")))]
+    pub desktop_responder: Option<std::sync::Arc<zerus_client_core::desktop::Responder>>,
 }
 
 /// Parses Qt's command line and answers `--help`, `--version` and
@@ -184,6 +195,8 @@ pub fn run() {
     }
     let identity = identity::current(&context.config().identifier);
     let opens_sessions = options.opens_sessions(identity.is_switch());
+    #[cfg(all(feature = "live", any(target_os = "linux", target_os = "macos")))]
+    let mut desktop_responder = None;
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let instance = match identity.instance_name(identity::flag("ZERUS_CLIENT_SINGLE_INSTANCE")) {
         None => None,
@@ -202,7 +215,10 @@ pub fn run() {
             match instance::claim(&name, identity.launchd_label(), activation, reply) {
                 instance::Claim::Claimed(claimed) => {
                     #[cfg(feature = "live")]
-                    desktop_hello::configure(responder, identity.is_switch());
+                    {
+                        desktop_hello::configure(responder.clone(), identity.is_switch());
+                        desktop_responder = Some(responder);
+                    }
                     Some(claimed)
                 }
                 instance::Claim::Forwarded => {
@@ -225,6 +241,8 @@ pub fn run() {
             opens_sessions,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             instance,
+            #[cfg(all(feature = "live", any(target_os = "linux", target_os = "macos")))]
+            desktop_responder,
         },
     );
 }
@@ -343,6 +361,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
         })
         .setup(move |app| {
             use tauri::Manager;
+            app.manage(MainWindow::default());
             // The one source of the client's data directory (Decision 5).
             app.manage(identity);
             #[cfg(feature = "live")]
@@ -352,6 +371,8 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 let replay = std::env::var_os("ZERUS_CLIENT_REPLAY").is_some_and(|list| !list.is_empty());
                 app.manage(settings::open(app.handle(), &dir, replay));
                 app.manage(speech_settings::SpeechPage::default());
+                app.manage(termination_cleanup::TerminationCleanup::default());
+                app.manage(worktree_cleanup::WorktreeCleanup::default());
                 app.manage(recovery::start(app.handle()));
                 app.manage(files::start());
                 app.manage(analytics::start(app.handle()));
@@ -360,7 +381,19 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(mobile::start(app.handle()));
                 // A replay never touches the real read or attention marks.
                 let actions = actions::Actions::new(dir.join(actions::marks_file(replay)));
-                readsync::start(actions.clone());
+                let notice_app = app.handle().clone();
+                app.manage(readsync::start(actions.clone(), std::sync::Arc::new(move |health, saturated| {
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    if let Some(responder) = &startup.desktop_responder {
+                        responder.read_delivery(health);
+                    }
+                    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                    let _ = health;
+                    if saturated {
+                        desk::window_notice(&notice_app, "Read marks paused",
+                            "All four read-delivery slots are waiting for child processes or pipes to close. See hgs desktop status for details.");
+                    }
+                })));
                 app.manage(actions);
                 app.manage(actions::ArchiveReads::default());
                 app.manage(content_search::Searches::default());
@@ -534,6 +567,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     },
                 ));
                 // A write mark shows in the composer at once.
+                app.manage(task_executor::TaskExecutors::start(app.handle()));
                 let composers = app.state::<composer::Composers>();
                 app.state::<actions::Actions>().on_writes(composers.changed_hook());
                 // The composer's session part once a second (the cache chip)
@@ -583,12 +617,14 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 };
                 app.manage(session_files::SessionFiles::new(
                     app.handle().clone(),
+                    dir.clone(),
                     zerus_client_core::default_hgs(),
                     opener.clone(),
                     std::sync::Arc::new(|job: composer::Job| {
                         tauri::async_runtime::spawn_blocking(job);
                     }),
                 ));
+                app.manage(session_folders::SessionFolders::new(dir.clone(), opener.clone()));
                 app.manage(opener);
                 // The menu-bar item, before the fleet starts so its first catalog reaches it.
                 #[cfg(target_os = "macos")]
@@ -959,6 +995,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         exit_flush::exit_flush_ack,
         commands::perf_away,
         commands::build_info,
+        commands::voice_support,
         renderer::renderer_frame,
         content_search::content_search,
         content_search::cancel_content_search,
@@ -1003,6 +1040,8 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         actions::set_notifications,
         actions::inspect_session,
         actions::inspect_subagent_identity,
+        session_folders::session_folder_status,
+        session_folders::session_folder_open,
         commands::tasks_follow,
         task_details::task_details,
         task_details::task_assign,
@@ -1011,6 +1050,9 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         task_start::task_start_open,
         task_start::task_start,
         task_start::task_start_release,
+        task_executor::task_executor_open,
+        task_executor::task_executor_submit,
+        task_executor::task_executor_release,
         task_settings::task_settings,
         task_editor::task_editor_open,
         task_editor::task_editor_edit,
@@ -1038,6 +1080,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         organization::move_to_project,
         organization::create_project,
         organization::rename_project,
+        organization::set_project_color,
         organization::delete_project,
         organization::move_project,
         organization::sort_project,
@@ -1097,10 +1140,25 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         composer::composer_tab,
         drops::dropped_files,
         composer::fetch::attachment_fetch,
+        composer::fetch::attachment_media,
         composer::fetch::attachment_pin,
         composer::fetch::attachment_unpin,
         composer::fetch::attachment_open,
         composer::fetch::attachment_open_draft,
+        termination_cleanup::termination_cleanup_inspect,
+        termination_cleanup::termination_cleanup_view,
+        termination_cleanup::termination_cleanup_offer,
+        termination_cleanup::termination_cleanup_cancel,
+        termination_cleanup::termination_cleanup_confirm,
+        termination_cleanup::termination_cleanup_check,
+        termination_cleanup::termination_cleanup_remove,
+        termination_cleanup::termination_cleanup_keep,
+        worktree_cleanup::worktree_cleanup_open,
+        worktree_cleanup::worktree_cleanup_view,
+        worktree_cleanup::worktree_cleanup_refresh,
+        worktree_cleanup::worktree_cleanup_prepare,
+        worktree_cleanup::worktree_cleanup_confirm,
+        worktree_cleanup::worktree_cleanup_close,
         session_files::session_file_dialog,
         session_files::session_file_check,
         session_files::session_file_download,
@@ -1150,6 +1208,12 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         #[cfg(feature = "media")]
         voice::voice_close,
         #[cfg(feature = "media")]
+        voice::voice_preview,
+        #[cfg(feature = "media")]
+        voice::voice_permission,
+        #[cfg(feature = "media")]
+        voice::voice_open_settings,
+        #[cfg(feature = "media")]
         voice::voice_microphones,
         #[cfg(feature = "media")]
         voice::voice_video,
@@ -1180,6 +1244,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         exit_flush::exit_flush_ack,
         commands::perf_away,
         commands::build_info,
+        commands::voice_support,
         renderer::renderer_frame,
         clipboard::copy_text,
         clipboard::copy_verbatim,
@@ -1200,9 +1265,33 @@ fn app_navigation_allowed(url: &tauri::Url) -> bool {
     )
 }
 
+#[derive(Default)]
+struct MainWindow(std::sync::Mutex<Option<WebviewWindow>>);
+
+/// Tauri's get_webview_window only recognizes windows with exactly one
+/// matching webview. Retain the original main pair when native children are
+/// attached. A cached pair must still answer both native window and webview
+/// queries; a destroyed resource can never authorize reuse of its old handle.
+pub(crate) fn main_window(app: &AppHandle) -> Option<WebviewWindow> {
+    use tauri::Manager;
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+        return Some(window);
+    }
+    app.try_state::<MainWindow>()
+        .and_then(|state| {
+            state
+                .0
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone()
+        })
+        .filter(|window| window.is_visible().is_ok() && window.url().is_ok())
+}
+
 /// Creates the main window and applies the platform display-rate preference:
 /// macOS before the webview is built, Linux through its public settings API.
 pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
+    use tauri::Manager;
     // ZERUS_CLIENT_QUERY opens a given state (`select=<session name>`) for
     // headless screenshots and scripted measurements, as the mockup's URL
     // parameters do; ZERUS_CLIENT_PERF=auto adds `perf=auto`.
@@ -1239,6 +1328,9 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         }
     }
     let window = builder.build()?;
+    if let Some(state) = app.try_state::<MainWindow>() {
+        *state.0.lock().unwrap_or_else(|error| error.into_inner()) = Some(window.clone());
+    }
     #[cfg(target_os = "linux")]
     if !keep_default_preference() {
         window.with_webview(|webview| {

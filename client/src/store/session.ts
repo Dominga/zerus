@@ -3,6 +3,7 @@ import { activityPort, composerTab, processesFollow, processesShown, windowVisib
 import { applyBatch, catalog, computerFresh, computerOffline, onReplaced, orderedRows, setDraftKeys } from "./catalog";
 import { composer } from "./composer";
 import { sessionModels, bindModelNotice } from "./sessionModels";
+import { bindForkSession } from "./sessionForks";
 import { tasks } from "./tasks";
 import { terminal } from "./terminal";
 import { flag, num } from "./settings";
@@ -30,6 +31,10 @@ export const activity = createActivity(activityPort);
 bindActivity(activity);
 bindModelNotice((message) => notify("error", message, true));
 bindSelection(() => ({ key: selectedKey(), subagent: subagentOpen() }));
+bindForkSession({
+  busy: (row) => sessionModels.changing() || (composer.view()?.key === `${row.computer}\n${row.name}` && (!!composer.view()?.sending || !!composer.view()?.waiting)),
+  terminal: () => { terminal.opened(); setDetailTab("terminal"); },
+});
 
 /** Applies one batch from the bridge: its rows and their grouping are one reactive update. */
 export function receive(b: Batch) {

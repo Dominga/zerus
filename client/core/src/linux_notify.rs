@@ -110,5 +110,8 @@ pub fn escape_body(body: &str) -> String {
         .replace('"', "&quot;")
 }
 
+#[cfg(all(target_os = "linux", feature = "linux-native-notify"))]
+pub mod transport;
+
 #[cfg(test)]
 mod tests;

@@ -125,6 +125,12 @@ pub const KEYS: &[Key] = &[
     key("workspace/showCompletedSubagents", Kind::Flag(false)),
     key("workspace/reduceMotion", Kind::Flag(false)),
     key("notifications/optionalQuestions", Kind::Flag(false)),
+    // A remembered Terminate checkbox, never maintenance/removal consent.
+    Key {
+        name: "workspace/removeWorktreeAfterTermination",
+        kind: Kind::Flag(false),
+        seeded: false,
+    },
     // TasksView's local scope switch.
     // A first-G3 family also covers clients whose original seed predates Tasks.
     Key {
@@ -255,6 +261,17 @@ pub fn find(name: &str) -> Option<Key> {
         })
         .or_else(|| update_family(name))
         .or_else(|| machine_family(name))
+        .or_else(|| project_family(name))
+}
+
+// Project IDs are flat JSON keys, never filesystem paths or machine aliases.
+fn project_family(name: &str) -> Option<Key> {
+    let id = name.strip_prefix("projects/vivid/")?;
+    (!id.is_empty() && id.len() <= 256 && !id.chars().any(char::is_control)).then_some(Key {
+        name: "projects/vivid/",
+        kind: Kind::Flag(false),
+        seeded: false,
+    })
 }
 
 fn machine_family(name: &str) -> Option<Key> {

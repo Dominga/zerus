@@ -859,6 +859,40 @@ async fn dispatch_with(
         + Send
         + 'static,
 ) -> Result<Outcome, String> {
+    dispatch_with_plan(state, target, action, request_id, runner, None).await
+}
+
+/// Optional cleanup uses the same write lane and completion hooks as Terminate.
+/// Its source was captured before confirmation; only a fresh scoped receipt
+/// admits the separate background review after this dispatcher returns.
+pub(crate) async fn dispatch_cleanup(
+    state: &Actions,
+    capture: zerus_client_core::termination_cleanup::Capture,
+) -> Result<Outcome, String> {
+    if blocked() {
+        return Ok(failed(REPLAY_NEEDS_HGS));
+    }
+    dispatch_with_plan(
+        state,
+        capture.target.clone(),
+        Action::Terminate,
+        uuid::Uuid::new_v4().to_string(),
+        run,
+        Some(capture),
+    )
+    .await
+}
+
+async fn dispatch_with_plan(
+    state: &Actions,
+    target: Target,
+    action: Action,
+    request_id: String,
+    runner: impl Fn(&std::path::Path, &zerus_client_core::Invocation) -> zerus_client_core::Exit
+        + Send
+        + 'static,
+    cleanup: Option<zerus_client_core::termination_cleanup::Capture>,
+) -> Result<Outcome, String> {
     if let Some(refusal) = refused_before_claim(&target, &action) {
         return Ok(failed(refusal));
     }
@@ -910,13 +944,33 @@ async fn dispatch_with(
                 .capture_termination(&target)
         })
         .flatten();
+    let cleanup_receipt = cleanup.clone();
     let ran = tauri::async_runtime::spawn_blocking(move || {
+        if let Some(capture) = &cleanup {
+            crate::termination_cleanup::probe(&hgs, &capture.target, &runner)?;
+            let fresh = crate::termination_cleanup::inspection(
+                &hgs,
+                &capture.target,
+                &capture.machine,
+                &runner,
+            )?;
+            if !capture.recheck(&fresh) {
+                return Err(zerus_client_core::termination_cleanup::STATE_CHANGED.into());
+            }
+        }
         if matches!(call_action, Action::Recovery { .. }) {
             let inspection = details_invocation(&call_target, None);
             let fresh = runner(&hgs, &inspection);
             recovery_preflight(&call_target, &call_action, fresh)?;
         }
-        let inv = invocation(&call_target, &call_action, &request_id)?;
+        let mut inv = if let Some(capture) = &cleanup {
+            capture.invocation(&request_id)?
+        } else {
+            invocation(&call_target, &call_action, &request_id)?
+        };
+        if let Some(capture) = &cleanup {
+            zerus_client_core::worktrees::guard(&mut inv.args, &capture.machine);
+        }
         let exit = runner(&hgs, &inv);
         Ok::<_, String>((inv, exit))
     })
@@ -924,7 +978,11 @@ async fn dispatch_with(
     .map_err(|error| error.to_string())?;
     match ran {
         Ok((inv, exit)) => {
-            let outcome = classify(&target, &action, &inv, exit);
+            let outcome = if let Some(capture) = &cleanup_receipt {
+                capture.completed(&inv, exit)
+            } else {
+                classify(&target, &action, &inv, exit)
+            };
             state.finished(&target, &action, &outcome);
             if matches!(outcome, Outcome::Done { .. }) {
                 if let (Some(pump), Some(capture)) = (
@@ -1389,6 +1447,70 @@ pub fn update_attention_marks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cleanup_terminate_rechecks_after_claim_and_requires_the_exact_archive_receipt() {
+        use serde_json::json;
+        use zerus_client_core::{termination_cleanup::Capture, Exit};
+        for scenario in [
+            "ok",
+            "source-changed",
+            "legacy-help",
+            "wrong-archive",
+            "unknown",
+        ] {
+            let actions = Actions::new(
+                std::env::temp_dir()
+                    .join(format!("zerus-cleanup-test-{}.json", uuid::Uuid::new_v4())),
+            );
+            let target = review();
+            let source = json!({"name":target.name,"run_id":target.run_id,"conversation_id":target.conversation_id,"state":"running","tracked":true,"cmd":"claude","git_worktree":true,"git_root":"/srv/example/work","git_common_dir":"/srv/example/.git","worktree_owner_id":"owner-1"});
+            let capture =
+                Capture::from_inspection(&target, "11111111-1111-4111-8111-111111111111", &source)
+                    .unwrap()
+                    .unwrap();
+            let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let seen = Arc::clone(&count);
+            let state = actions.clone();
+            let scope = target.clone();
+            let out=tauri::async_runtime::block_on(dispatch_with_plan(&actions,target,Action::Terminate,uuid::Uuid::new_v4().to_string(),move|_,inv|{
+                assert!(state.begin(Lane::key(&scope,&Action::Terminate),&Action::Terminate).is_none(),"same write lane held before every preflight");
+                if inv.args.last().is_some_and(|a|a=="--help") {
+                    return Exit::Code{code:0,stdout:if scenario=="legacy-help"{b"guarded-create-v1".to_vec()}else{b"guarded-create-v1 scoped native lifecycle action".to_vec()},stderr:String::new()};
+                }
+                assert!(inv.args.windows(2).any(|a|a==["--expect-machine","11111111-1111-4111-8111-111111111111"]));
+                let value=if inv.args.iter().any(|a|a=="inspect") {
+                    let mut value=source.clone();if scenario=="source-changed"{value["worktree_owner_id"]=json!("replacement")}value
+                } else {
+                    seen.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
+                    let req:serde_json::Value=serde_json::from_slice(inv.stdin.as_ref().unwrap()).unwrap();
+                    assert_eq!(req["action"],"terminate");
+                    if scenario=="unknown"{return Exit::TimedOut}
+                    json!({"request_id":req["request_id"],"name":scope.name,"run_id":scope.run_id,"conversation_id":scope.conversation_id,"status":"completed","result_target":{"name":scope.name,"run_id":scope.run_id,"conversation_id":scope.conversation_id,"archive_id":if scenario=="wrong-archive"{"invalid"}else{"22222222-2222-4222-8222-222222222222"}}})
+                };
+                Exit::Code{code:0,stdout:serde_json::to_vec(&value).unwrap(),stderr:String::new()}
+            },Some(capture))).unwrap();
+            assert_eq!(
+                matches!(out, Outcome::Done { .. }),
+                scenario == "ok",
+                "{scenario}: {out:?}"
+            );
+            assert_eq!(
+                count.load(std::sync::atomic::Ordering::Relaxed),
+                usize::from(!matches!(scenario, "source-changed" | "legacy-help")),
+                "no legacy fallback or automatic replay"
+            );
+            assert!(actions
+                .begin(
+                    Lane::key(&scope_for_test(), &Action::Terminate),
+                    &Action::Terminate
+                )
+                .is_some());
+        }
+        fn scope_for_test() -> Target {
+            review()
+        }
+    }
 
     #[test]
     fn recorded_question_replies_are_annotated() {

@@ -5,13 +5,20 @@ use crate::{
     run::run_streamed,
 };
 use serde::{Deserialize, Serialize};
-use std::{path::Path, sync::OnceLock, time::Duration};
+use std::{
+    path::Path,
+    sync::{Mutex, OnceLock},
+    time::{Duration, Instant},
+};
 use zerus_desktop_migration::canonical_uuid;
+
+pub mod drain;
+pub mod producer;
 
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
-pub use unix::{probe_at, same_user, temporary_dir_from};
+pub use unix::{probe_at, probe_producer_at, same_user, temporary_dir_from};
 
 pub const ABI: &str = "desktop-delegation-v1";
 pub const HELP_MARKER: &str = "Desktop owner ABI: desktop-delegation-v1";
@@ -95,6 +102,7 @@ pub struct Responder {
     live: bool,
     replay: bool,
     configuration: OnceLock<String>,
+    producer: Mutex<producer::Cached>,
 }
 impl Responder {
     pub fn new(
@@ -111,17 +119,26 @@ impl Responder {
             live,
             replay,
             configuration: OnceLock::new(),
+            producer: Mutex::default(),
         }
     }
     pub fn configure_once(&self, configuration: String) -> bool {
         digest(&configuration) && self.configuration.set(configuration).is_ok()
     }
     pub fn reply(&self, line_without_lf: &[u8]) -> Option<Vec<u8>> {
+        if let Some(nonce) = producer::query_nonce(line_without_lf) {
+            return self.producer_reply(nonce, Instant::now());
+        }
         let nonce = query_nonce(line_without_lf)?;
         if !canonical_uuid(&self.instance_epoch) {
             return None;
         }
-        let mut bytes = serde_json::to_vec(&Hello {
+        let mut bytes = serde_json::to_vec(&self.hello(nonce)).ok()?;
+        bytes.push(b'\n');
+        (bytes.len() <= REPLY_BYTES).then_some(bytes)
+    }
+    fn hello(&self, nonce: &str) -> Hello {
+        Hello {
             abi: ABI.into(),
             version: 1,
             nonce: nonce.into(),
@@ -133,10 +150,7 @@ impl Responder {
             configuration: self.configuration.get().cloned(),
             live: self.live,
             replay: self.replay,
-        })
-        .ok()?;
-        bytes.push(b'\n');
-        (bytes.len() <= REPLY_BYTES).then_some(bytes)
+        }
     }
 }
 

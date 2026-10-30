@@ -1,4 +1,4 @@
-import { For, Match, Show, Suspense, Switch, createEffect, createMemo, createRoot, createSignal, lazy, on, onCleanup } from "solid-js";
+import { For, Match, Show, Suspense, Switch, createEffect, createMemo, createRoot, createResource, createSignal, lazy, on, onCleanup } from "solid-js";
 import * as bridge from "../../bridge";
 import { terminal } from "../../store/terminal";
 import { TerminalTab } from "./Terminal";
@@ -17,7 +17,7 @@ import { archiveActivity } from "../../store/archiveActivity";
 import { computerOffline } from "../../store/catalog";
 import { copyIdentity, detailsFor, followedFor } from "../../store/actions";
 import { headerClearSlot, sessionIdentity } from "./actions-ui";
-import { actionEntries, freshActionEntry } from "./ActionDialogs";
+import { actionEntries, copyEntries, freshActionEntry } from "./ActionDialogs";
 import { snapshotOf } from "./actions-ui";
 import { markEntry } from "./mark-entries";
 import { Composer } from "./Composer";
@@ -32,6 +32,8 @@ import { Inspector } from "./Inspector";
 import { followProjectTasks } from "../../store/taskContext";
 import { inspectorOpen, setInspectorOpen, openInspector, inspectorHint } from "../../store/inspector";
 import { sessionGoal } from "./inspector-data";
+
+import { folderEntries, folderRequest } from "../../store/sessionFolders";
 
 const TaskView = lazy(() => import("../screens/TaskView"));
 
@@ -68,10 +70,18 @@ function Header() {
       target: { computer: row.computer, name: row.name, run_id: d?.run_id || row.runId || "", conversation_id: d?.conversation_id || row.conversationId || "" } } : undefined);
   });
   onCleanup(() => childDetails.follow(undefined));
-  const child = childDetails.child;
+  const child = () => childDetails.child() ?? (subagentOpen() ? { id: subagentOpen()! } : undefined);
   const identity = () => sessionIdentity(s(), details(), child());
+  const folderScope = createMemo(() => JSON.stringify(folderRequest(s(), details(), child())));
+  const [folderStatus] = createResource(folderScope, async (scope) => {
+    const request = JSON.parse(scope) as ReturnType<typeof folderRequest>;
+    return { scope, status: await bridge.sessionFolderStatus(request.target.computer, request.directory).catch(() => undefined) };
+  });
+  const folders = () => folderEntries(s(), folderRequest(s(), details(), child()), folderStatus()?.scope === folderScope() ? folderStatus()?.status : undefined);
+
   const copyId = () => { void copyIdentity(snapshotOf(s()), details(), child()); };
   const act = createMemo(() => actionEntries(s(), details()));
+  const copies = createMemo(() => copyEntries(s(), details()));
   const mark = createMemo(() => markEntry(s()));
   const slot = () => headerClearSlot(!subagentOpen(), s().state);
   const fresh = createMemo(() => freshActionEntry(s(), true));
@@ -81,14 +91,14 @@ function Header() {
     label: "Clear session…", icon: "clear", disabled: !clear()?.enabled, hint: clear()?.reason || undefined, action: () => composer.openClear(),
   });
   const actions = (): MenuEntry[] => [
-    { label: "Open folder", icon: "folder-open", disabled: true },
-    { label: "Open shell in session folder", icon: "square-terminal", disabled: true },
+    folders().folder,
+    folders().shell,
     { label: identity().caption, icon: "copy", disabled: !identity().value, action: copyId },
     { separator: true },
     act().rename,
-    { label: "Fork session…", icon: "git-fork", disabled: true },
+    act().fork,
     { separator: true },
-    { label: "Copy connect command", icon: "link", disabled: true },
+    copies().command,
     act().change,
     ...(mark() ? [mark()!] : []),
     { separator: true },
@@ -103,8 +113,8 @@ function Header() {
         <Show when={s().computer !== "" && statusOf(s()) === "working" && !activity.loaded()}><span class="busy-arc" title="Waiting for the remote read" /></Show>
         <span class="grow" />
         <span class={`hbadge t-${tone()}`}>{headerCaption()}</span>
-        <button class="icon-btn" data-tip="Open session folder in file manager" disabled><Icon name="folder-open" size={16} /></button>
-        <button class="icon-btn" data-tip="Open shell in session folder" disabled><Icon name="square-terminal" size={16} /></button>
+        <button class="icon-btn" data-tip={folders().folder.hint} aria-label="Open session folder in file manager" disabled={folders().folder.disabled} onClick={() => folders().folder.action?.()}><Icon name="folder-open" size={16} /></button>
+        <button class="icon-btn" data-tip="Open shell in session folder" aria-label="Open shell in session folder" disabled={folders().shell.disabled} onClick={() => folders().shell.action?.()}><Icon name="square-terminal" size={16} /></button>
         <button class="icon-btn" data-tip={identity().caption} aria-label={identity().caption} disabled={!identity().value} onClick={copyId}><Icon name="copy" size={15} /></button>
         <Show when={slot() === "clear"}>
           <button class="icon-btn" data-tip={clear()?.reason || "Clear session"}

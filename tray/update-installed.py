@@ -997,6 +997,26 @@ def revoke_configuration():
     return result['configuration']
 
 
+def revocation_refusal(request_id, receipt=None):
+    """Bounded exact-identity diagnostics, with no manager action or new ID."""
+    message = f'desktop revocation is not settled; keep Qt stopped and inspect request {request_id}'
+    detail = receipt.get('resource_custody') if isinstance(receipt, dict) and receipt.get('request_id') == request_id else None
+    if isinstance(detail, dict) and detail.get('revoke_request_id') == request_id:
+        attempt = detail.get('attempt_id')
+        try:
+            exact = isinstance(attempt, str) and str(uuid.UUID(attempt)) == attempt
+        except (ValueError, AttributeError):
+            exact = False
+        state = detail.get('helper_state')
+        pid = detail.get('helper_pid')
+        if exact and state in ('running', 'exited', 'unavailable'):
+            helper = str(pid) if type(pid) is int and 0 < pid <= 2147483647 else 'unavailable'
+            message += f'; operation attempt {attempt}, helper {helper} is {state}'
+    return (message + '. Check hgs desktop status --json. Wait for the named helper, or stop only that helper yourself. '
+            'Then restart only hgs-desktop through its service manager and retry the original revoke request. '
+            'Reboot only as a last resort.')
+
+
 def revoke_before_qt():
     """Revoke migrated writers before any Qt start, with one retained request ID."""
     configuration = revoke_configuration()
@@ -1014,7 +1034,7 @@ def revoke_before_qt():
         except ValueError as error:
             raise UpdateError(f'desktop revocation returned malformed JSON; keep Qt stopped: {error}')
         if not revocation_receipt(receipt, request_id, configuration):
-            raise UpdateError('desktop revocation has a mismatched or pending receipt; keep Qt stopped')
+            raise UpdateError(revocation_refusal(request_id, receipt))
         say(f'desktop writers revoked before Qt starts (request {request_id})')
         return
     # An uncertain invocation never gets a new ID. The exact read may find the
@@ -1027,7 +1047,7 @@ def revoke_before_qt():
     except (OSError, ValueError, subprocess.TimeoutExpired):
         query = receipt = None
     if query is None or query.returncode != 0 or not revocation_receipt(receipt, request_id, configuration):
-        raise UpdateError(f'desktop revocation is not settled; keep Qt stopped and inspect request {request_id}')
+        raise UpdateError(revocation_refusal(request_id, receipt))
     say(f'desktop writers revoked before Qt starts (request {request_id})')
 
 

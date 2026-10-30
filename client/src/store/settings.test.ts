@@ -388,3 +388,15 @@ describe("the browser dev mode", () => {
     expect((await backend.save("workspace/compact", true)).value).toBe(true);
   });
 });
+
+
+describe("local project style", () => {
+  it("loads exact flat project IDs including false and rejects malformed keys/values", async () => {
+    const backend = storageBackend(memoryStorage({ [STORAGE_KEY]: JSON.stringify({
+      "projects/vivid/alpha": false, "projects/vivid/nested/project": true,
+      "projects/vivid/": true, "projects/vivid/bad\nidentity": true,
+      "projects/vivid/not-a-flag": "true", ["projects/vivid/" + "a".repeat(257)]: true,
+    }) }));
+    expect((await backend.load()).values).toEqual({ "projects/vivid/alpha": false, "projects/vivid/nested/project": true });
+  });
+});

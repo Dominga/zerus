@@ -14,18 +14,24 @@ use zerus_client_core::{attachments, reads::CachedAttachment, task_details, task
 
 #[derive(Clone, Default)]
 pub struct TaskReads(Arc<AtomicBool>);
-pub(crate) struct Permit(TaskReads);
+pub(crate) struct Permit(TaskReads, Option<Idle>);
 impl TaskReads {
     pub(crate) fn begin(&self) -> Result<Permit, String> {
         self.0
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .map_err(|_| "Task details are already loading.".to_owned())?;
-        Ok(Permit(self.clone()))
+        Ok(Permit(self.clone(), None))
     }
 }
 impl Drop for Permit {
     fn drop(&mut self) {
         self.0 .0.store(false, Ordering::SeqCst);
+        if let Some(idle) = &self.1 {
+            let callback = crate::composer::lock(idle).clone();
+            if let Some(callback) = callback {
+                callback();
+            }
+        }
     }
 }
 
@@ -114,13 +120,23 @@ mod tests {
 
 /// Task writes have a separate, nonqueued lane. Unknown outcomes are returned
 /// once to the caller; there is no retry or intent replay.
+type Idle = Arc<std::sync::Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>;
 #[derive(Clone, Default)]
-pub struct TaskWrites(TaskReads);
+pub struct TaskWrites {
+    lane: TaskReads,
+    idle: Idle,
+}
 impl TaskWrites {
+    pub(crate) fn on_idle(&self, callback: Arc<dyn Fn() + Send + Sync>) {
+        *crate::composer::lock(&self.idle) = Some(callback);
+    }
     pub(crate) fn begin(&self) -> Result<Permit, String> {
-        self.0
+        let mut permit = self
+            .lane
             .begin()
-            .map_err(|_| "Another task change is still in progress.".to_owned())
+            .map_err(|_| "Another task change is still in progress.".to_owned())?;
+        permit.1 = Some(self.idle.clone());
+        Ok(permit)
     }
 }
 
@@ -179,16 +195,76 @@ pub(crate) fn assignment_target(
     })
 }
 
-#[tauri::command]
-pub async fn task_assign(
-    state: State<'_, TaskWrites>,
-    app: State<'_, crate::commands::AppState>,
+fn assignment_receipt(
+    project: &str,
+    task: &str,
+    assignment: &tasks_write::TaskTarget,
+    machine: &str,
+    result: &serde_json::Map<String, Value>,
+) -> Result<(), String> {
+    let error = "Task assignment unconfirmed. Refresh the task before changing it again.";
+    let returned = result.get("task").ok_or(error)?;
+    if returned["uuid"] != task || returned["project"] != project {
+        return Err(error.into());
+    }
+    let actual = &returned["target"];
+    if assignment.session.is_empty() {
+        return if actual["kind"] == "any" {
+            Ok(())
+        } else {
+            Err(error.into())
+        };
+    }
+    let kind = if assignment.mode.is_empty() {
+        "session"
+    } else {
+        &assignment.mode
+    };
+    let owner = if kind == "session" {
+        actual
+    } else {
+        &actual["parent"]
+    };
+    if machine.is_empty()
+        || actual["kind"] != kind
+        || owner["machine"] != machine
+        || owner["host"].as_str().unwrap_or("") != assignment.host
+        || owner["session"] != assignment.session
+        || owner["session_id"] != assignment.session_id
+    {
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssignmentChange {
     project: String,
     task: String,
     target: Option<zerus_client_core::actions::Target>,
     catalog_key: Option<String>,
     session_id: Option<String>,
+    mode: Option<String>,
+}
+#[tauri::command]
+pub async fn task_assign(
+    state: State<'_, TaskWrites>,
+    app: State<'_, crate::commands::AppState>,
+    input: AssignmentChange,
 ) -> Result<(), String> {
+    let AssignmentChange {
+        project,
+        task,
+        target,
+        catalog_key,
+        session_id,
+        mode,
+    } = input;
+    let mode = mode.unwrap_or_else(|| "session".into());
+    if !matches!(mode.as_str(), "session" | "subagent" | "new_session") {
+        return Err("Invalid task assignment.".into());
+    }
     if crate::actions::blocked() {
         return Err(crate::screens::REPLAY_NEEDS_HGS.into());
     }
@@ -204,27 +280,21 @@ pub async fn task_assign(
         if !matches!(detail["stage"].as_str(), Some("todo" | "backlog")) || detail["writable"] == false {
             return Err("Assignment can be edited in To do or Backlog. Nothing was changed.".into());
         }
-        let assignment = if let Some(target) = target {
+        let (assignment, machine) = if let Some(target) = target {
             let key = catalog_key.as_deref().ok_or("The selected session is unavailable.")?;
             let row = pump.row(&target.computer, key).ok_or("The selected session is unavailable.")?;
             if !pump.online(&target.computer) || !pump.members_of(&project).iter().any(|(member, _)| member == &format!("{}\n{}", row.machine, row.name)) {
                 return Err("The selected session is offline or belongs to another project. Nothing was changed.".into());
             }
-            assignment_target(&row, &target, session_id.as_deref().unwrap_or(""))?
+            let mut assignment=assignment_target(&row, &target, session_id.as_deref().unwrap_or(""))?;
+            if mode!="session" {assignment.mode=mode.clone();}(assignment,row.machine)
         } else {
-            if catalog_key.is_some() || session_id.is_some() { return Err("Invalid task assignment.".into()); }
-            tasks_write::TaskTarget::default()
+            if catalog_key.is_some() || session_id.is_some() || mode!="session" { return Err("Invalid task assignment.".into()); }
+            (tasks_write::TaskTarget::default(), String::new())
         };
         let call = tasks_write::TaskCall::target(&project, &task, &assignment);
         let result = tasks_write::run(&zerus_client_core::default_hgs(), &call)?;
-        let returned = result.get("task").ok_or("Task assignment unconfirmed. Refresh the task before changing it again.")?;
-        if returned["uuid"].as_str() != Some(task.as_str()) || returned["project"].as_str() != Some(project.as_str()) {
-            return Err("Task assignment unconfirmed. Refresh the task before changing it again.".into());
-        }
-        let actual = &returned["target"];
-        let matches = if assignment.session.is_empty() { actual["kind"] == "any" }
-            else { actual["session"].as_str() == Some(assignment.session.as_str()) && actual["session_id"].as_str() == Some(assignment.session_id.as_str()) };
-        if !matches { return Err("Task assignment unconfirmed. Refresh the task before changing it again.".into()); }
+        assignment_receipt(&project, &task, &assignment, &machine, &result)?;
         Ok(())
     }).await.map_err(|e| e.to_string())?
 }
@@ -241,6 +311,64 @@ mod assignment_tests {
         assert!(shared.begin().is_err());
         drop(first);
         assert!(shared.begin().is_ok());
+    }
+    #[test]
+    fn releasing_a_write_wakes_the_executor_after_the_shared_lane_is_idle() {
+        let writes = TaskWrites::default();
+        let lane = writes.lane.0.clone();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let called = calls.clone();
+        writes.on_idle(Arc::new(move || {
+            assert!(!lane.load(Ordering::SeqCst));
+            called.fetch_add(1, Ordering::SeqCst);
+        }));
+        let permit = writes.begin().unwrap();
+        assert!(writes.begin().is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        drop(permit);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        drop(writes.begin().unwrap());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+    #[test]
+    fn planned_assignment_receipts_pin_parent_machine_host_and_session_identity() {
+        let assignment = tasks_write::TaskTarget {
+            host: "peer".into(),
+            session: "codex/example/parent".into(),
+            session_id: "launch_id:parent".into(),
+            mode: "new_session".into(),
+        };
+        let reply = json!({"task":{"uuid":"task","project":"project","target":{"kind":"new_session","parent":{"host":"peer","machine":"workstation","session":"codex/example/parent","session_id":"launch_id:parent"}}}});
+        assert!(assignment_receipt(
+            "project",
+            "task",
+            &assignment,
+            "workstation",
+            reply.as_object().unwrap()
+        )
+        .is_ok());
+        for key in ["host", "machine", "session", "session_id"] {
+            let mut changed = reply.clone();
+            changed["task"]["target"]["parent"][key] = json!("other");
+            assert!(assignment_receipt(
+                "project",
+                "task",
+                &assignment,
+                "workstation",
+                changed.as_object().unwrap()
+            )
+            .is_err());
+        }
+        let mut changed = reply;
+        changed["task"]["target"]["kind"] = json!("subagent");
+        assert!(assignment_receipt(
+            "project",
+            "task",
+            &assignment,
+            "workstation",
+            changed.as_object().unwrap()
+        )
+        .is_err());
     }
     #[test]
     fn assignment_checks_run_conversation_and_stable_launch() {

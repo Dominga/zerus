@@ -173,19 +173,23 @@ impl CatalogState {
             Body::Hello(hello) => {
                 self.hello = Some(hello.clone());
                 self.begin();
-                // Archive pages need the local machine identity even with an
-                // empty catalog, before (or without) catalog.meta. Keep card
-                // facts across reconnects; hello only supplies the host name.
+                // Retain display facts across reconnects, but bind the physical
+                // identity to this hello. An unknown/legacy hello clears it,
+                // including when the new host caption is absent.
+                let mut machine = self.machine.clone().unwrap_or_default();
                 if !hello.host.is_empty() {
-                    let mut machine = self.machine.clone().unwrap_or_default();
                     machine.host = Some(hello.host.clone());
-                    if self.machine.as_ref() != Some(&machine) {
-                        self.machine = Some(machine.clone());
-                        changes.push(Change::Machine {
-                            computer: computer.clone(),
-                            machine,
-                        });
-                    }
+                }
+                machine.machine_id = hello
+                    .machine_id
+                    .clone()
+                    .filter(|id| crate::creation::canonical_uuid(id));
+                if self.machine.as_ref() != Some(&machine) {
+                    self.machine = Some(machine.clone());
+                    changes.push(Change::Machine {
+                        computer: computer.clone(),
+                        machine,
+                    });
                 }
             }
             Body::Snapshot(snapshot) if snapshot.topic == topic::CATALOG => {
@@ -469,6 +473,12 @@ impl CatalogState {
     /// Keeps a `catalog.meta` value; a changed machine card is a change.
     fn set_meta(&mut self, computer: &ComputerId, meta: Value) -> Option<Change> {
         let mut machine = crate::MachineMeta::project(&meta);
+        if let Some(hello) = &self.hello {
+            machine.machine_id = hello
+                .machine_id
+                .clone()
+                .filter(|id| crate::creation::canonical_uuid(id));
+        }
         if machine.host.as_deref().is_none_or(str::is_empty) {
             machine.host = self
                 .hello
@@ -1010,6 +1020,46 @@ mod tests {
     use super::*;
     use serde_json::json;
     use zerus_watch_protocol::decode;
+
+    #[test]
+    fn physical_computer_identity_survives_metadata_without_becoming_a_host_alias() {
+        let computer = ComputerId::local();
+        let mut state = CatalogState::new();
+        let mut hello = fixture("basic.ndjson").remove(0);
+        let Body::Hello(value) = &mut hello.body else {
+            panic!("hello")
+        };
+        value.machine_id = Some("11111111-1111-4111-8111-111111111111".into());
+        state.apply(&computer, &hello);
+        let mut meta = serde_json::json!({"host":"display-alias","ok":true});
+        state.set_meta(&computer, meta.clone());
+        assert_eq!(
+            state.machine.as_ref().unwrap().machine_id.as_deref(),
+            Some("11111111-1111-4111-8111-111111111111")
+        );
+        let Body::Hello(value) = &mut hello.body else {
+            unreachable!()
+        };
+        value.machine_id = Some("22222222-2222-4222-8222-222222222222".into());
+        state.apply(&computer, &hello);
+        state.set_meta(&computer, meta.clone());
+        assert_eq!(
+            state.machine.as_ref().unwrap().machine_id.as_deref(),
+            Some("22222222-2222-4222-8222-222222222222")
+        );
+        let Body::Hello(value) = &mut hello.body else {
+            unreachable!()
+        };
+        value.machine_id = None;
+        value.host.clear();
+        state.apply(&computer, &hello);
+        meta["machine_id"] = serde_json::json!("11111111-1111-4111-8111-111111111111");
+        state.set_meta(&computer, meta);
+        assert!(
+            state.machine.as_ref().unwrap().machine_id.is_none(),
+            "a legacy/unknown hello cannot retain the previous peer identity"
+        );
+    }
 
     #[test]
     fn raw_lifecycle_does_not_stage_or_retain_a_large_catalog() {

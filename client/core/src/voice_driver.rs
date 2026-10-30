@@ -133,6 +133,10 @@ pub enum Input {
 }
 
 enum Message {
+    Preview(
+        String,
+        Box<dyn FnOnce(Option<crate::voice_composer::Preview>) + Send>,
+    ),
     Input(Input),
     Recorder(RecorderEvent),
     Loaded(u64, crate::drafts::StoredDraft),
@@ -194,6 +198,15 @@ impl VoiceDriver {
 
     pub fn input(&self, input: Input) {
         let _ = self.inbox.send(Message::Input(input));
+    }
+
+    /// Read-only native playback request; a changed recording is refused.
+    pub fn preview(
+        &self,
+        id: String,
+        reply: impl FnOnce(Option<crate::voice_composer::Preview>) + Send + 'static,
+    ) {
+        let _ = self.inbox.send(Message::Preview(id, Box::new(reply)));
     }
 
     /// Cancels a recording under way and waits until the driver's thread
@@ -341,6 +354,10 @@ impl Loop {
     fn handle(&mut self, message: Message) -> Vec<Effect> {
         let composer = &mut self.composer;
         match message {
+            Message::Preview(id, reply) => {
+                reply(composer.preview(&id));
+                Vec::new()
+            }
             Message::Input(input) => match input {
                 Input::Update {
                     target,

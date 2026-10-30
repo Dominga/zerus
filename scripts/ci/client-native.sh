@@ -29,6 +29,9 @@ case "$platform:$stage" in
             xvfb-run -a -s "-screen 0 1440x900x24" \
             cargo +1.99.1 test --locked --manifest-path client/src-tauri/Cargo.toml
         cargo +1.99.1 clippy --locked --manifest-path client/src-tauri/Cargo.toml --all-targets --features video -- -D warnings
+        # The default-off Linux notification transport compiles nowhere else.
+        cargo +1.99.1 clippy --locked --manifest-path client/core/Cargo.toml --all-targets --features linux-native-notify -- -D warnings
+        dbus-run-session -- cargo +1.99.1 test --locked --manifest-path client/core/Cargo.toml --features linux-native-notify linux_notify
         ;;
     macos:all)
         core_tests

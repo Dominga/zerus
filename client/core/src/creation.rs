@@ -1437,7 +1437,29 @@ impl Creations {
     /// operation: Ok with its ID (also its first launch ID), or why not.
     /// Settled, hidden operations are evicted first, oldest first, while 96
     /// or more are kept.
-    pub fn submit(&mut self, mut plan: Value) -> (Result<String, String>, Vec<Effect>) {
+    pub fn submit(&mut self, plan: Value) -> (Result<String, String>, Vec<Effect>) {
+        self.submit_plan(plan, None)
+    }
+
+    /// Task executors reserve their exact launch ID before admitting creation.
+    /// This entry never reuses an existing or retired identity.
+    pub fn submit_reserved(
+        &mut self,
+        plan: Value,
+        id: &str,
+    ) -> (Result<String, String>, Vec<Effect>) {
+        if !canonical_uuid(id) || self.operations.contains_key(id) || self.retired.contains_key(id)
+        {
+            return (Err(INVALID_IDENTITY.into()), Vec::new());
+        }
+        self.submit_plan(plan, Some(id))
+    }
+
+    fn submit_plan(
+        &mut self,
+        mut plan: Value,
+        reserved: Option<&str>,
+    ) -> (Result<String, String>, Vec<Effect>) {
         self.admission_message.clear();
         if flag(&plan, "repository") && !safe_repository_url(text(&plan, "url")) {
             self.admission_message = UNSAFE_URL.into();
@@ -1485,7 +1507,7 @@ impl Creations {
         if !plan.is_object() {
             plan = json!({});
         }
-        let id = self.uuid();
+        let id = reserved.map(str::to_owned).unwrap_or_else(|| self.uuid());
         plan["id"] = Value::from(id.clone());
         plan["creation_schema"] = Value::from(1);
         plan["created"] = Value::from(self.now());

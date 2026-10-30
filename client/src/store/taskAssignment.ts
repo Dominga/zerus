@@ -19,7 +19,7 @@ export function taskDragStart(e: DragEvent, task: Task) {
   setDraggedTask({ project, uuid: task.uuid }); e.dataTransfer.effectAllowed = "move";
   e.dataTransfer.setData(TASK_MIME, JSON.stringify({ project, uuid: task.uuid }));
 }
-export async function assign(project: string, task: Task, row?: Session) {
+export async function assign(project: string, task: Task, row?: Session, mode: "session" | "subagent" | "new_session" = "session") {
   if (assigningTask()) return;
   const freshTask = tasks.project() === project ? tasks.tasks().find((t) => t.uuid === task.uuid) : undefined;
   const freshRow = row ? catalog.rows[row.key] : undefined;
@@ -28,7 +28,7 @@ export async function assign(project: string, task: Task, row?: Session) {
   const target = freshRow ? { computer: freshRow.computer, name: freshRow.name, run_id: freshRow.runId ?? "", conversation_id: freshRow.conversationId ?? "" } : null;
   const key = freshRow?.catalogKey ?? null, id = freshRow ? sessionIdentity(freshRow) : null;
   setAssigningTask(task.uuid);
-  try { await assignTask(project, task.uuid, target, key, id); notify("info", target ? `Task assigned to ${target.name}` : "Task assigned to Any session"); }
+  try { if (mode === "session") await assignTask(project, task.uuid, target, key, id); else { if (!target) throw new Error("Choose a parent with a confirmed computer and session identity."); await assignTask(project, task.uuid, target, key, id, mode); } notify("info", target ? `Task assigned to ${target.name}` : "Task assigned to Any session"); }
   catch (error) { notify("error", String(error)); }
   finally { setAssigningTask(undefined); }
 }
@@ -54,4 +54,9 @@ export function taskDrop(e: DragEvent, project: string, row?: Session) {
   e.preventDefault(); e.stopPropagation();
   const task = readTaskDrag(e, project); setDraggedTask(undefined);
   if (task) void assign(project, task, row);
+}
+
+export const [taskAssignmentPopover, setTaskAssignmentPopover] = createSignal<{ project: string; task: Task; origin: HTMLElement }>();
+export function openTaskAssignment(project: string, task: Task, origin: HTMLElement) {
+  if (canAssign(task, project) && !writingTask()) setTaskAssignmentPopover({ project, task: { ...task, target: { ...task.target } }, origin });
 }

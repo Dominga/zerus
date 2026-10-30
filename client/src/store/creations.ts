@@ -303,7 +303,7 @@ export function createCreations(deps: CreationsDeps) {
 
   return {
     creations, selectedCreation, selectedCard, revealed, adopted, cardVersion: (id: string) => versions[id] ?? 0,
-    start, apply, selectCreation, choose, act, editChoices, returnToFilters, admitted,
+    start, apply, selectCreation, choose, act, editChoices, returnToFilters, admitted, adopt,
     withCreations, creationCount: shownCount, creationFooter, creationStatusMenu,
     hideCreation: (id: string) => act(id, "hide"),
     details: (id: string) => deps.bridge.creationDetails(id),
@@ -352,6 +352,8 @@ export const runCreationAction = app.act;
 export const hideCreation = app.hideCreation;
 export const editChoices = app.editChoices;
 export const returnToFilters = app.returnToFilters;
+/** A verified creation or fork reveals one session without discarding the user's filters. */
+export const adoptSession = app.adopt;
 export const creationDetailsText = app.details;
 /** New session's admission (newSession.ts calls it): reveal the new card. */
 export const creationAdmitted = app.admitted;

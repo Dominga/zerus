@@ -37,6 +37,10 @@ mod attention;
 pub use attention::{next_attention_observed, qt_attention_observed};
 mod local_reads;
 pub use local_reads::{next_local_read_marks, qt_local_read_marks};
+mod linux_notifications;
+pub use linux_notifications::{next_linux_notifications, qt_linux_notifications};
+mod recovery;
+pub use recovery::recovery_policy_caches;
 
 #[derive(Clone, Copy)]
 pub enum Origin {

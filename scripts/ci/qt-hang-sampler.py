@@ -3,6 +3,7 @@
 import argparse
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 
@@ -31,28 +32,71 @@ def main():
         args.command = args.command[1:]
     if not args.command:
         parser.error("a test command is required")
-    child = subprocess.Popen(args.command)
-    try:
-        child.wait(timeout=args.after)
-        return child.returncode
-    except subprocess.TimeoutExpired:
-        pass
-    command = stack_command(child.pid)
-    if command is None:
-        payload = f"Qt hang sampler: {args.name} is still running as PID {child.pid} after {args.after:g} seconds; no supported stack tool is available."
-    else:
-        print(f"Qt hang sampler: {args.name} is still running as PID {child.pid} after {args.after:g} seconds; capturing all-thread stacks.", flush=True)
+    child = None
+    received_signal = None
+
+    def forward(signum, _frame):
+        nonlocal received_signal
+        if received_signal is None:
+            received_signal = signum
+        if child is None:
+            return
         try:
-            result = subprocess.run(command, capture_output=True, text=True, errors="replace")
-            payload = f"$ {' '.join(command)}\n{result.stdout}{result.stderr}"
-        except Exception as error:
-            payload = f"Qt hang sampler could not capture PID {child.pid}: {error}"
-    if args.log:
-        log = Path(args.log)
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text(payload + "\n", encoding="utf-8")
-    print(payload, flush=True)
-    return child.wait()
+            child.terminate()
+        except ProcessLookupError:
+            return
+        try:
+            child.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            try:
+                child.kill()
+            except ProcessLookupError:
+                pass
+
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(signum, forward)
+    result = None
+    try:
+        child = subprocess.Popen(args.command)
+        try:
+            child.wait(timeout=args.after)
+            result = child.returncode
+        except subprocess.TimeoutExpired:
+            pass
+        if result is None:
+            command = stack_command(child.pid)
+            if command is None:
+                payload = f"Qt hang sampler: {args.name} is still running as PID {child.pid} after {args.after:g} seconds; no supported stack tool is available."
+            else:
+                print(f"Qt hang sampler: {args.name} is still running as PID {child.pid} after {args.after:g} seconds; capturing all-thread stacks.", flush=True)
+                try:
+                    answer = subprocess.run(command, capture_output=True, text=True, errors="replace")
+                    payload = f"$ {' '.join(command)}\n{answer.stdout}{answer.stderr}"
+                except Exception as error:
+                    payload = f"Qt hang sampler could not capture PID {child.pid}: {error}"
+            if args.log:
+                log = Path(args.log)
+                log.parent.mkdir(parents=True, exist_ok=True)
+                log.write_text(payload + "\n", encoding="utf-8")
+            print(payload, flush=True)
+            result = child.wait()
+    finally:
+        if child is not None and child.poll() is None:
+            try:
+                child.kill()
+            except ProcessLookupError:
+                pass
+            try:
+                child.wait()
+            except ChildProcessError:
+                pass
+    if received_signal is not None:
+        signal.signal(received_signal, signal.SIG_DFL)
+        signal.raise_signal(received_signal)
+    if result is not None and result < 0:
+        signal.signal(-result, signal.SIG_DFL)
+        signal.raise_signal(-result)
+    return result
 
 
 if __name__ == "__main__":

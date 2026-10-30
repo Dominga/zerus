@@ -387,7 +387,9 @@ identity and persists new choices without rereading a handled Qt family.
 creation/read/task/launch decoders, separate repository-clone checkpoints,
 download indexes, organization observations/backups/drafts, provider operations
 and non-authoritative worktree caches, plus original draft-operation manifests
-and attachment references through the existing draft decoder. Qt and interim
+and attachment references through the existing draft decoder. Historical Qt
+and Next recovery-policy caches use the existing envelope decoder, retaining
+policy/order/unknown fields without reconciliation or execution. Qt and interim
 Next attention-observed history also has private bounded evidence through the
 existing seed parser, without notification delivery, withdrawal or token replay.
 Qt and Next local attention marks/read replies also retain original keys,
@@ -410,9 +412,15 @@ three fields may fill empty/null Next defaults under the coordinator's explicit
 and the earlier run-memory seed never repeat. Both decoders share Qt's bounded
 legacy `groups` and `before_pin` restoration rules, preserving exact project
 and session identities without generating missing folder IDs or discarding an
-ambiguous bucket. Project vivid state remains private evidence until the UI
-consumer (`.66.2.30`, G3 dependent `.66.5.3.9`) lands; the approved future local
-setting is `projects/vivid/<exact-project-id>` with existing Next values winning.
+ambiguous bucket. With the approved Soft/Bright fill UI consumer (`.66.2.30`)
+merged, first-G3 `project-vivid` (`.66.5.3.9`, schema 1) uses that same decoder
+and Settings writer to seed explicit boolean flags once into local
+`projects/vivid/<exact-project-id>`. Existing Next values including false win;
+missing flags do not create defaults. The atomic family record keeps the
+original organization key and Qt store hash/path/time/mtime condition. Invalid
+or ambiguous candidates retry without a partial family or a handled record;
+handled families never repeat after rollback. Original private evidence stays
+unchanged and vivid never enters shared organization or local layout.
 Local Windows folders remain private evidence until the Windows Next Projects
 model (`.66.2.31`, G3 dependent `.66.5.3.10`) exists. Neither creates a new
 organization-layout field or an independent G3 folder stack.
@@ -421,16 +429,22 @@ The design owner's 2026-10-30 ruling retains `projectFolderSplit` and
 `tasks/inspectorSplit` as private typed evidence, with no Qt splitter decoding
 or seed, including when Next's Projects splitter lands. Tasks has no equivalent
 splitter; never map it onto a different inspector panel. The remembered
-`removeWorktreeAfterTermination` value also stays private evidence until the
-Terminate dialog owner (`.10`) may prefill its checkbox once, with explicit
-confirmation every time, never automatic-maintenance consent.
+`removeWorktreeAfterTermination` value is retained as private evidence and now
+prefills the `.10.17` Terminate checkbox through one `termination-default` G3
+family. Import only when Next has no stored value: a current false wins. The
+family uses the same source hash, mtime, key and one-time handled record as the
+existing importer. Every Terminate still needs explicit confirmation, and this
+remembered default never authorizes automatic maintenance or a removal alone.
 
 The shared `tray.conf` also has bounded private evidence through its existing
 key parser; it preserves the original text without changing the selected CLI,
-terminal, polling or service settings. Remaining source coverage includes
-downloaded content and the rest of the interim stores listed below. Linux
-notification owner/token sources await the native worker/lease ownership seam;
-the existing native reader and one-time seed remain unchanged.
+terminal, polling or service settings. Downloaded content stays untouched in
+its existing shared cache folder; migration copies no content or edited/unknown
+files. Remaining production integration covers the interim stores listed below. Linux
+notification owner/token and Next unknown-delivery data also have bounded
+private evidence through G4's shared Saved decoder/validator, retaining original
+fields separately from the typed projection. The existing secure native reader
+and one-time seed remain unchanged; runtime worker/lease admission stays separate.
 Source discovery and production integration remain separate; adapters do not
 by themselves publish eligible evidence or transfer writer authority. The
 `approval_policies` adapter inspects Qt and interim Next choices together,

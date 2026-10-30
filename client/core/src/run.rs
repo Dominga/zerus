@@ -9,6 +9,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod custody;
+
 /// A noisy child keeps no more than this much of its standard error.
 const STDERR_CAP: usize = 64 * 1024;
 /// How long to wait for the readers once the child has exited.
@@ -102,6 +105,49 @@ pub fn run_cancellable(
     )
 }
 
+/// Opt-in lifetime accounting around the existing cancellable runner. Exit,
+/// input-error, output and deadline semantics remain those of run_cancellable;
+/// completion of this call does not claim real pipe completion. Copies of the
+/// supplied charge live with the child, input writer and both output readers.
+/// A retained pipe keeps its copy after this bounded call returns. Unverified
+/// child exit pins a copy until host exit; the host must cap admissions.
+/// No journal, execution authorization or effect retry is provided here.
+pub fn run_accounted(
+    hgs: &Path,
+    inv: &Invocation,
+    parent_env: &[(&str, &str)],
+    stdout_cap: usize,
+    cancel: &AtomicBool,
+    resources: Arc<dyn Send + Sync>,
+) -> Result<Exit, Stopped> {
+    if cancel.load(Ordering::Acquire) {
+        return Err(Stopped::Cancelled);
+    }
+    let child_exited = Arc::new(AtomicBool::new(false));
+    let _child = ChildCharge {
+        resources: Some(resources.clone()),
+        exited: child_exited.clone(),
+    };
+    let result = run_inner(
+        hgs,
+        inv,
+        parent_env,
+        &[],
+        stdout_cap,
+        Some(cancel),
+        Pipes {
+            readers: Some(resources),
+            retain_all: true,
+            child_exited: Some(child_exited.clone()),
+            ..Pipes::default()
+        },
+    );
+    if matches!(result, Ok(Exit::StartFailed(_))) {
+        child_exited.store(true, Ordering::Release);
+    }
+    result
+}
+
 /// [`run_limited`] of another program (a connector) that also leaves out
 /// the variables in `remove`, such as the terminal's, even when
 /// `parent_env` sets them.
@@ -142,6 +188,7 @@ struct Pipes {
     readers: Option<Arc<dyn Send + Sync>>,
     stop: Option<Arc<AtomicBool>>,
     require_complete: bool,
+    retain_all: bool,
     stderr_cap: Option<usize>,
     child_exited: Option<Arc<AtomicBool>>,
 }
@@ -396,6 +443,7 @@ fn run_inner(
     pipes: Pipes,
 ) -> Result<Exit, Stopped> {
     let consumed = pipes.output.is_some();
+    let retain_all = pipes.require_complete || pipes.retain_all;
     let strict_outputs = pipes.input.is_some() || consumed || pipes.require_complete;
     let stderr_cap = pipes.stderr_cap.unwrap_or(if strict_outputs {
         stdout_cap
@@ -441,7 +489,7 @@ fn run_inner(
     let stdin = child.stdin.take();
     let input = inv.stdin.clone();
     let (write_tx, write_rx) = mpsc::channel();
-    let input_guard = if pipes.require_complete {
+    let input_guard = if retain_all {
         pipes.readers.clone()
     } else {
         None
@@ -487,7 +535,7 @@ fn run_inner(
             },
             done_tx.clone(),
             limit,
-            if pipes.require_complete {
+            if retain_all {
                 pipes.readers.clone()
             } else {
                 None

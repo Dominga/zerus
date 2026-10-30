@@ -845,6 +845,32 @@ class TaskDelivery(DeliveryFixture):
         self.assertEqual(refusal["state"], "refused")
         self.assertEqual(self.received(), "")
 
+    def test_new_session_start_requires_exact_launch_and_preserves_parent_target(self):
+        self.agent("codex/planner")
+        task = self.add("An exact new-session executor")
+        self.hgs("target", task["ref"], "new-session", "--parent", "codex/planner")
+        record = json.loads(self.record_path.read_text())
+        current = self.hgs("get", task["ref"])["task"]
+        wrong = dict(host="", name=self.name, session_id="run_id:" + self.run_id,
+                     run_id=self.run_id, conversation_id=record["conversation_id"])
+        request = dict(schema=1, id=str(uuid.uuid4()), stage_at=current["stage_at"], target=current["target"], selection=wrong)
+        self.assertIn("changed", self.hgs("start-plan", task["ref"], text=json.dumps(request), ok=False))
+        self.assertEqual(self.received(), "")
+        launch = str(uuid.uuid4())
+        record["launch_id"] = launch
+        self.record_path.write_text(json.dumps(record))
+        selected = dict(wrong, session_id="launch_id:" + launch)
+        plan = self.start_plan(task, selection=selected)
+        self.assertEqual(plan["target"]["kind"], "new_session")
+        self.assertEqual(self.received(), "")
+        sent = self.hgs("start-deliver", task["ref"], text=json.dumps(plan))
+        self.assertEqual(sent["state"], "submitted")
+        self.assertEqual(sent["task"]["session"]["session_id"], "launch_id:" + launch)
+        self.assertEqual(sent["task"]["target"], current["target"])
+        self.wait_received("An exact new-session executor")
+        self.assertEqual(self.hgs("start-deliver", task["ref"], "--recover-only", text=json.dumps(plan))["state"], "submitted")
+        self.assertEqual(self.received().count("An exact new-session executor"), 1)
+
     def test_start_recovery_settles_native_receipt_without_pasting_again(self):
         task = self.add("Recover native acknowledgement", "--target", self.name)
         plan = self.start_plan(task)

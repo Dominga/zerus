@@ -12,6 +12,7 @@ vi.hoisted(() => {
   vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener: () => {}, removeEventListener: () => {} }));
 });
 vi.mock("../../bridge", () => ({
+  inTauri: () => false,
   ARCHIVED_ACTIVITY_BUSY: "busy",
   archivedActivity: vi.fn(() => new Promise(() => {})),
   activityPort: { follow: vi.fn(async () => {}), unfollow: vi.fn(async () => {}) },
@@ -49,6 +50,7 @@ vi.mock("../../bridge", () => ({
   localRetry: vi.fn(), localDelete: vi.fn(async () => {}), localInspect: vi.fn(async () => null),
   // The File reference dialog (SessionFileDialog) listens with Activity.
   onSessionFileChanged: vi.fn(async () => () => {}),
+  onSessionFileNotice: vi.fn(async () => () => {}),
   // The session side panel's Tasks tab reads task details through the bridge.
   onExitFlush: vi.fn(async () => () => {}), acknowledgeExitFlush: vi.fn(async () => {}),
   readTaskDetails: vi.fn(async () => null),

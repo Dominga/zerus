@@ -486,7 +486,6 @@ pub async fn task_editor_pick(
     start: usize,
     end: usize,
 ) -> Result<View, String> {
-    use tauri::Manager;
     use tauri_plugin_dialog::DialogExt;
     // The lane stays reserved while the native picker is open; a stale handle
     // cannot append its files to another task's draft.
@@ -494,7 +493,7 @@ pub async fn task_editor_pick(
     let editor = state.inner().clone();
     let composers = composers.inner().clone();
     let fetcher = Arc::clone(fetcher.inner());
-    let parent = app.get_webview_window(crate::MAIN_WINDOW);
+    let parent = crate::main_window(&app);
     tauri::async_runtime::spawn_blocking(move || {
         let _permit = permit;
         {

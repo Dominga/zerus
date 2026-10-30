@@ -32,8 +32,13 @@ class Desktop(unittest.TestCase):
         self.desktop = self.state / 'desktop'
         self.config = self.root / 'config'
         self.config.mkdir(mode=0o700)
+        private_tmp = self.root / 'tmp'
+        private_tmux = self.root / 'tmux'
+        private_tmp.mkdir(mode=0o700)
+        private_tmux.mkdir(mode=0o700)
         self.env = {k: v for k, v in os.environ.items() if not k.startswith('HGS_') and k not in ('TMUX', 'TMUX_PANE')}
         self.env.update(HOME=str(self.root), USERPROFILE=str(self.root),
+                        TMPDIR=str(private_tmp), TMUX_TMPDIR=str(private_tmux),
                         HGS_CONFIG_DIR=str(self.config), HGS_STATE_DIR=str(self.state),
                         HGS_SELF='example', HGS_PEERS='peer.example')
         if os.name != 'nt':
@@ -397,7 +402,7 @@ class Desktop(unittest.TestCase):
             db.execute('PRAGMA user_version=1')
         database.chmod(0o600)
         process, status = self.serve()
-        self.assertEqual(status['schema'], 7)
+        self.assertEqual(status['schema'], 8)
         self.assertEqual(status['generation'], 8)
         self.assertEqual(status['configuration'], configuration)
         self.assertTrue(status['effect_journal']['revoked'])
@@ -407,7 +412,7 @@ class Desktop(unittest.TestCase):
         self.assertFalse(status['read_queue']['recovery_error'])
         self.stop(process)
         with closing(sqlite3.connect(database)) as db:
-            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 7)
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 8)
             self.assertEqual(db.execute('SELECT rows,bytes FROM desktop_catalog_totals').fetchone(), (0, 0))
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_catalog_sources').fetchone()[0], 0)
             self.assertEqual(db.execute('SELECT configuration FROM service').fetchone()[0], configuration)
@@ -424,12 +429,13 @@ class Desktop(unittest.TestCase):
                 db.execute(f'DROP TRIGGER desktop_catalog_source_{suffix}')
             db.execute('INSERT INTO desktop_catalog_sources(computer,epoch,incarnation,generation,stream,seq,hello,meta) VALUES(?,?,?,?,?,?,?,?)',
                        ('peer', str(uuid.uuid4()), 1, 1, 'old-watch', 1, hello, meta))
-            for table in ('desktop_operation_attempts', 'desktop_operations', 'desktop_operation_totals'):
+            db.execute('DROP INDEX desktop_commands_pending')
+            for table in ('desktop_operation_custody', 'desktop_operation_attempts', 'desktop_operations', 'desktop_operation_totals'):
                 db.execute(f'DROP TABLE {table}')
             db.execute('PRAGMA user_version=5')
         for _ in range(2):
             process, status = self.serve()
-            self.assertEqual(status['schema'], 7)
+            self.assertEqual(status['schema'], 8)
             self.assertEqual(status['catalog_projection']['stored_bytes'], expected)
             self.assertEqual(status['catalog_projection']['stored_rows'], 0)
             self.stop(process)
@@ -443,7 +449,8 @@ class Desktop(unittest.TestCase):
         self.stop(process)
         database = self.desktop / 'state.sqlite3'
         with closing(sqlite3.connect(database)) as db, db:
-            for table in ('desktop_operation_attempts', 'desktop_operations', 'desktop_operation_totals'):
+            db.execute('DROP INDEX desktop_commands_pending')
+            for table in ('desktop_operation_custody', 'desktop_operation_attempts', 'desktop_operations', 'desktop_operation_totals'):
                 db.execute(f'DROP TABLE {table}')
             db.execute('PRAGMA user_version=6')
             db.execute('CREATE TABLE desktop_operation_totals (fixture TEXT)')
@@ -453,9 +460,31 @@ class Desktop(unittest.TestCase):
             self.assertEqual(db.execute("SELECT count(*) FROM sqlite_schema WHERE name='desktop_operations'").fetchone()[0], 0)
             db.execute('DROP TABLE desktop_operation_totals')
         process, status = self.serve()
-        self.assertEqual(status['schema'], 7)
-        self.assertEqual(status['operation_queue'], dict(unsettled=0, undrained=0, admissions_paused=True, recovery_error=False))
+        self.assertEqual(status['schema'], 8)
+        self.assertEqual({key:status['operation_queue'][key] for key in ('unsettled','undrained','admissions_paused','recovery_error')}, dict(unsettled=0, undrained=0, admissions_paused=True, recovery_error=False))
         self.assertFalse(status['writers_enabled'])
+        self.stop(process)
+
+    def test_schema_seven_custody_migration_is_atomic_and_creates_no_lock_files(self):
+        process, _ = self.serve()
+        self.stop(process)
+        database = self.desktop / 'state.sqlite3'
+        with closing(sqlite3.connect(database)) as db, db:
+            db.execute('DROP TABLE desktop_operation_custody')
+            db.execute('DROP INDEX desktop_commands_pending')
+            db.execute('PRAGMA user_version=7')
+            db.execute('CREATE INDEX desktop_commands_pending ON desktop_commands(request_id)')
+        self.failed_serve()
+        with closing(sqlite3.connect(database)) as db, db:
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 7)
+            self.assertEqual(db.execute("SELECT count(*) FROM sqlite_schema WHERE name='desktop_operation_custody'").fetchone()[0], 0)
+            self.assertEqual(db.execute("SELECT count(*) FROM sqlite_schema WHERE name LIKE 'desktop_custody_%'").fetchone()[0], 0)
+            db.execute('DROP INDEX desktop_commands_pending')
+        process, status = self.serve()
+        self.assertEqual(status['schema'], 8)
+        self.assertEqual(status['operation_queue']['undrained'], 0)
+        self.assertTrue(status['operation_queue']['admissions_paused'])
+        self.assertFalse((self.desktop / 'operation-custody').exists())
         self.stop(process)
 
     def test_catalog_collection_progresses_without_a_frontend(self):

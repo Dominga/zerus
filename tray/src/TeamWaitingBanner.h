@@ -1,5 +1,6 @@
 #pragma once
 #include <QFrame>
+#include <QHash>
 #include <QJsonObject>
 #include <QPointer>
 #include <QTimer>
@@ -10,6 +11,7 @@
 
 class QVBoxLayout;
 class TeamController;
+class TeamWaitingAnswer;
 
 // WhiteWh fork, U55: what waits for the owner (U50's `hgs team waiting`)
 // shown where the owner looks. One feed per window reads the list while the
@@ -29,10 +31,17 @@ public:
     const QList<TeamWaitingPage::Item> &items() const { return m_items; }
     int total() const { return m_total; }
     static constexpr int MaxItems = 200;   // the server's page bound
+    TeamController *teams() const { return m_teams; }
+    // #724: the owner answered the item in place: it leaves the banners at
+    // once (dropped), and its notifications, the waiting one and the team
+    // attention one that covers it, are withdrawn.
+    void answered(const TeamWaitingPage::Item &item);
 signals:
     void changed();
     // A desktop notification: the tray shows it; a click opens the team.
     void notify(const QString &token, const QString &title, const QString &body);
+    void dropped(const QString &id);
+    void withdrawn(const QStringList &tokens);
 private:
     TeamController *m_teams;
     QTimer m_poll;
@@ -50,8 +59,11 @@ public:
     explicit TeamWaitingBanner(TeamWaitingFeed *feed, QWidget *parent = nullptr);
     QFrame *frame() const { return m_frame; }
     void setDark(bool dark);
-    // Open, Approve..., Accept...: the team at the item; nothing is decided here.
+    // Open team and Accept...: the team at the item. #724: Approve… and
+    // Answer decide in the banner's row (TeamWaitingAnswer).
     std::function<void(const TeamWaitingPage::Item &item)> openItem;
+    // The answer of an item, open in its row; null when none is.
+    TeamWaitingAnswer *answerOf(const QString &id) const;
     // More items than the banner lists: the U50 page.
     std::function<void()> openAll;
     bool expanded() const { return m_expanded; }
@@ -63,6 +75,9 @@ public:
 private:
     void render();
     QWidget *rowFor(const TeamWaitingPage::Item &item, bool first);
+    TeamWaitingAnswer *answer(const TeamWaitingPage::Item &item);
+    void closeAnswer(const QString &id);
+    QHash<QString, QPointer<TeamWaitingAnswer>> m_answers;
     QPointer<TeamWaitingFeed> m_feed;
     QFrame *m_frame;
     QVBoxLayout *m_layout;

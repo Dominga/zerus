@@ -823,6 +823,9 @@ jobs:
           echo "$RUNNER_TEMP/dsh/node_modules/.bin" >> "$GITHUB_PATH"
           echo "ZERUS_TEST_DSH_RECEIPT=$GITHUB_WORKSPACE/artifacts/test-results/dsh-fixture/installed.json" >> "$GITHUB_ENV"
       - run: bash scripts/ci/cli.sh
+      # U62: every test file and every source area is in .zerus/test-map.json.
+      - name: The test map is current
+        run: target/debug/hgs test map --check
       - name: Save Rust cache
         if: inputs.save_caches && steps.rust-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

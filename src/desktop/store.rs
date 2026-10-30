@@ -9,7 +9,7 @@ use std::{
 };
 use zerus_desktop_migration::{canonical, configuration, HANDOFF_LOCK};
 
-pub const SCHEMA: i64 = 1;
+pub const SCHEMA: i64 = 2;
 pub struct Location {
     pub root: PathBuf,
     pub configuration: String,
@@ -82,6 +82,7 @@ fn private_file(path: &Path) -> Result<fs::File> {
 pub struct Store {
     db: Connection,
     pub generation: u64,
+    recovery_error: bool,
 }
 impl Store {
     pub fn open(location: &Location, epoch: &str) -> Result<Self> {
@@ -139,7 +140,16 @@ impl Store {
             configuration == location.configuration,
             "desktop state belongs to another configuration"
         );
-        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA max_page_count=131072; PRAGMA journal_size_limit=67108864;")?;
+        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA max_page_count=131072; PRAGMA journal_size_limit=67108864;")?;
+        if version < 2 {
+            let tx = db.transaction()?;
+            zerus_desktop_ledger::migrate(&tx)?;
+            tx.execute_batch("PRAGMA user_version=2;")?;
+            tx.commit()?;
+        }
+        // No marker or previous policy re-enables a worker after restart.
+        zerus_desktop_ledger::begin_service(&mut db, epoch)?;
+        zerus_desktop_ledger::recover_batch(&mut db, epoch)?;
         let tx = db.transaction()?;
         tx.execute(
             "UPDATE service SET generation=generation+1, epoch=?1 WHERE id=1",
@@ -150,17 +160,53 @@ impl Store {
         })?;
         tx.commit()?;
         platform::sync_dir(&location.root)?;
-        Ok(Self { db, generation })
+        Ok(Self {
+            db,
+            generation,
+            recovery_error: false,
+        })
     }
     pub fn checkpoint(&self) -> Result<()> {
         self.db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
         Ok(())
+    }
+    pub fn effect_status(&self) -> serde_json::Value {
+        let mut status = zerus_desktop_ledger::status(&self.db).unwrap_or_else(|_| serde_json::json!({"revoked":null,"admissions_paused":true,"error":"ledger_unavailable"}));
+        if self.recovery_error {
+            status["admissions_paused"] = true.into();
+            status["error"] = "ledger_recovery_failed".into();
+        }
+        status
+    }
+    pub fn recover_effects(&mut self, epoch: &str) {
+        self.recovery_error = zerus_desktop_ledger::recover_batch(&mut self.db, epoch).is_err();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ledger_recovery_failure_is_component_local_and_clears_after_repair() {
+        let temp = tempfile::tempdir().unwrap();
+        let location = Location {
+            root: temp.path().join("state/desktop"),
+            configuration: "fixture".into(),
+        };
+        location.prepare().unwrap();
+        let _owner = location.lock().unwrap();
+        let epoch = uuid::Uuid::new_v4().to_string();
+        let mut store = Store::open(&location, &epoch).unwrap();
+        let other = Connection::open(location.root.join("state.sqlite3")).unwrap();
+        other.execute_batch("BEGIN IMMEDIATE").unwrap();
+        store.recover_effects(&epoch);
+        assert_eq!(store.effect_status()["error"], "ledger_recovery_failed");
+        assert_eq!(store.effect_status()["revoked"], true);
+        other.execute_batch("ROLLBACK").unwrap();
+        store.recover_effects(&epoch);
+        assert!(store.effect_status()["error"].is_null());
+        assert_eq!(store.effect_status()["attempts"]["unknown"], 0);
+    }
     #[test]
     #[cfg(unix)]
     fn handoff_lock_never_creates_a_leaf_through_a_replaced_root() {

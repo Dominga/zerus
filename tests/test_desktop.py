@@ -383,6 +383,44 @@ class Desktop(unittest.TestCase):
         _, second = self.serve()
         self.assertEqual(second['generation'], first['generation'] + 1)
 
+    def test_schema_one_migration_preserves_configuration_and_generation(self):
+        configuration = self.cli('desktop', 'status', '--json')['configuration']
+        self.desktop.mkdir(mode=0o700, parents=True)
+        self.state.chmod(0o700)
+        database = self.desktop / 'state.sqlite3'
+        with closing(sqlite3.connect(database)) as db, db:
+            db.execute('CREATE TABLE service (id INTEGER PRIMARY KEY CHECK(id=1), configuration TEXT NOT NULL, generation INTEGER NOT NULL, epoch TEXT NOT NULL)')
+            db.execute('INSERT INTO service VALUES(1,?,7,?)', (configuration, str(uuid.uuid4())))
+            db.execute('PRAGMA user_version=1')
+        database.chmod(0o600)
+        process, status = self.serve()
+        self.assertEqual(status['schema'], 2)
+        self.assertEqual(status['generation'], 8)
+        self.assertEqual(status['configuration'], configuration)
+        self.assertTrue(status['effect_journal']['revoked'])
+        self.assertEqual(status['effect_journal']['attempts']['reserved'], 0)
+        self.stop(process)
+        with closing(sqlite3.connect(database)) as db:
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 2)
+            self.assertEqual(db.execute('SELECT configuration FROM service').fetchone()[0], configuration)
+
+    def test_service_restart_fences_prior_effects_and_keeps_manual_revocation(self):
+        process, _ = self.serve()
+        self.stop(process)
+        database = self.desktop / 'state.sqlite3'
+        with closing(sqlite3.connect(database)) as db, db:
+            db.execute("INSERT INTO desktop_intents VALUES(?,'{}',1,'{}',0,0)", ('a' * 64,))
+            db.execute("INSERT INTO desktop_attempts(request_id,fingerprint,intent_id,revision,epoch,service_epoch,adapter,lease,state) VALUES(?,?,?,1,?,?,?,?,'reserved')",
+                       (str(uuid.uuid4()), 'b' * 64, 'a' * 64, *[str(uuid.uuid4()) for _ in range(4)]))
+            db.execute("UPDATE desktop_writer SET reason='manual_rollback',revoked=1")
+        _, status = self.serve()
+        self.assertTrue(status['effect_journal']['revoked'])
+        self.assertEqual(status['effect_journal']['reason'], 'manual_rollback')
+        self.assertEqual(status['effect_journal']['attempts']['unknown'], 1)
+        self.assertEqual(status['effect_journal']['attempts']['reserved'], 0)
+        self.assertFalse(status['writers_enabled'])
+        self.assertFalse((self.root / 'unexpected-tool').exists())
+
     @unittest.skipIf(os.name == 'nt', 'Unix socket and mode checks')
     def test_unsafe_files_and_socket_targets_are_preserved(self):
         self.desktop.mkdir(mode=0o700, parents=True)

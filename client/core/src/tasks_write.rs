@@ -528,11 +528,58 @@ pub mod outbox {
         fs::File::open(file)
             .and_then(|f| f.take(MAX_RECORD + 1).read_to_end(&mut bytes))
             .map_err(|_| unavailable())?;
-        let record: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-        if !record["id"].as_str().is_some_and(uuid) || !record["intent"].is_object() {
+        decode(&bytes)
+    }
+
+    /// The same bounded record decoder, without opening a store, reserving an
+    /// identity, releasing a marker or checking/submitting a delivery.
+    pub fn decode(bytes: &[u8]) -> Result<Value, String> {
+        if bytes.len() as u64 > MAX_RECORD {
+            return Err("The original message recovery snapshot exceeds its byte limit. Nothing was submitted.".into());
+        }
+        let record: Value = serde_json::from_slice(bytes).unwrap_or(Value::Null);
+        if !record["id"].as_str().is_some_and(uuid)
+            || !record["intent"].is_object()
+            || ["version", "schema"]
+                .iter()
+                .any(|key| record.get(key).is_some_and(|version| version != 1))
+        {
             return Err("The message recovery snapshot is invalid. Nothing was submitted.".into());
         }
         Ok(record)
+    }
+
+    /// The pending record only when its exact reservation marker agrees.
+    /// Missing, mismatched or future evidence stays intact and authorizes no
+    /// recovery call. This read never reserves, releases or submits anything.
+    pub fn pending(root: &Path, project: &str, task: &str) -> Result<Option<Value>, String> {
+        let file = path(root, project, task);
+        let marker = marker(&file);
+        let unavailable = || {
+            "The original message reservation could not be verified. Nothing was submitted."
+                .to_owned()
+        };
+        let exists = |p: &Path| match fs::symlink_metadata(p) {
+            Ok(meta) if meta.is_file() => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            _ => Err(unavailable()),
+        };
+        let (has_record, has_marker) = (exists(&file)?, exists(&marker)?);
+        if !has_record && !has_marker {
+            return Ok(None);
+        }
+        if !has_record || !has_marker {
+            return Err(unavailable());
+        }
+        let record = read(&file)?;
+        let mut bytes = Vec::new();
+        fs::File::open(marker)
+            .and_then(|f| f.take(129).read_to_end(&mut bytes))
+            .map_err(|_| unavailable())?;
+        if bytes.len() > 128 || record["id"].as_str().map(str::as_bytes) != Some(bytes.as_slice()) {
+            return Err(unavailable());
+        }
+        Ok(Some(record))
     }
 
     fn write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -907,6 +954,37 @@ mod outbox_tests {
 
     const ID: &str = "11111111-1111-4111-8111-111111111111";
     const OTHER: &str = "22222222-2222-4222-8222-222222222222";
+
+    #[test]
+    fn pending_requires_the_exact_original_marker_and_record() {
+        let root = scratch("pending-pair");
+        assert_eq!(outbox::pending(&root.0, "example", "task").unwrap(), None);
+        let intent = message_intent("Note", &[], "note", "");
+        outbox::reserve(&root.0, "example", "task", &intent, ID).unwrap();
+        assert_eq!(
+            outbox::pending(&root.0, "example", "task")
+                .unwrap()
+                .unwrap()["id"],
+            ID
+        );
+        let file = outbox::path(&root.0, "example", "task");
+        let marker = file.with_extension("marker");
+        std::fs::write(&marker, OTHER).unwrap();
+        assert!(outbox::pending(&root.0, "example", "task").is_err());
+        assert!(
+            file.exists() && marker.exists(),
+            "mismatched evidence is kept"
+        );
+        std::fs::write(&marker, ID).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        assert!(outbox::pending(&root.0, "example", "task").is_err());
+        std::fs::write(
+            &file,
+            serde_json::json!({"id":ID,"intent":intent,"schema":2}).to_string(),
+        )
+        .unwrap();
+        assert!(outbox::pending(&root.0, "example", "task").is_err());
+    }
 
     #[test]
     fn a_message_is_reserved_recovered_and_released() {

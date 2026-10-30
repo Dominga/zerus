@@ -1,3 +1,5 @@
+import { searchPreview, clearSearchPreview } from "../../store/searchSelection";
+import { SearchHighlight } from "./SearchHighlight";
 import { For, Show, createContext, createEffect, createMemo, createSignal, on, onCleanup, onMount, useContext } from "solid-js";
 import { attachmentOpen } from "../../bridge";
 import { notify } from "../../store/actions";
@@ -13,6 +15,7 @@ import type { ActivitySource, AttachmentScope } from "../../store/activitySource
 import { composer, draftKey } from "../../store/composer";
 import { terminal } from "../../store/terminal";
 import type { LocalMessage } from "../../types";
+import { animationFrames, createActivityEnd, newLocalSends } from "./activity-end";
 import { buildTranscript, VOICE_STATE_LABEL, voiceStateDetail, voiceStateIssue } from "./transcript";
 import { DELETE_TEXT, DELETE_TITLE, retryReason, routeInspect } from "./local-actions";
 import { inlineParts } from "./markdown";
@@ -141,7 +144,7 @@ function activityMenu(e: MouseEvent) {
 // Transcript
 
 const copyText = (text: string, what: string) => {
-  void navigator.clipboard?.writeText(text).then(() => toast("Copied", what), () => toast("Not copied", "The clipboard is unavailable"));
+  void navigator.clipboard?.writeText(text).then(() => toast("Copied", what), () => toast("Not copied", "The clipboard is unavailable", "error"));
 };
 
 // Inline Markdown stays text except its links: HTTP(S) uses the system
@@ -523,6 +526,7 @@ const [following, setFollowing] = createSignal(true);
 const [unseen, setUnseen] = createSignal(0);
 /** The mounted transcript's scroller (one Activity view shows at a time). */
 let liveScroller: HTMLDivElement | undefined;
+let liveEnd: ReturnType<typeof createActivityEnd> | undefined;
 export { following, unseen };
 
 /**
@@ -537,8 +541,10 @@ export function focusTranscript(): boolean {
 
 /** Scrolls to the newest item and follows it again. */
 export function jumpToLatest() {
+  if (searchPreview()) { clearSearchPreview(); return; }
   setFollowing(true);
   setUnseen(0);
+  liveEnd?.pin();
   liveScroller?.scrollTo({ top: liveScroller.scrollHeight, behavior: "instant" });
 }
 
@@ -583,6 +589,10 @@ export function paneStates(source: ActivitySource, s: Session | undefined) {
 
 export function ActivityView(props: { source?: ActivitySource }) {
   const s = () => selected();
+  const preview = () => {
+    const p = searchPreview(), row = s();
+    return p && row && p.key === row.key && p.run === (row.runId ?? "") && p.conversation === (row.conversationId ?? "") && !subagentOpen() ? p : undefined;
+  };
   /** The live follow unless the detail passes another source (an archived row's). */
   const source = (): ActivitySource => props.source ?? activity;
   let scroller!: HTMLDivElement;
@@ -597,10 +607,44 @@ export function ActivityView(props: { source?: ActivitySource }) {
   let anchor: { height: number; top: number } | undefined;
   /** The newest event's seq the view has seen, for the count of new ones. */
   let newest: number | undefined;
-  onMount(() => { liveScroller = scroller; });
-  onCleanup(() => { if (liveScroller === scroller) liveScroller = undefined; });
+  const selectionInside = () => {
+    const selection = document.getSelection();
+    if (!selection || selection.isCollapsed) return false;
+    return [selection.anchorNode, selection.focusNode].some((node) => !!node && scroller.contains(node));
+  };
+  const end = createActivityEnd(
+    () => ({ top: scroller.scrollTop, height: scroller.scrollHeight, viewport: scroller.clientHeight }),
+    () => scroller.scrollTo({ top: scroller.scrollHeight, behavior: "instant" }),
+    animationFrames,
+    () => !selectionInside(),
+  );
+  let manualAway = false;
+  let touchY: number | undefined;
+  const scrollAway = () => { end.release(); manualAway = true; setFollowing(false); };
+  onMount(() => {
+    liveScroller = scroller;
+    liveEnd = end;
+    const selectionChanged = () => end.changed();
+    document.addEventListener("selectionchange", selectionChanged);
+    // Content includes Markdown, images and tool disclosures; the viewport
+    // also resizes when the composer or a question card changes height.
+    const resize = new ResizeObserver(() => end.changed());
+    resize.observe(scroller);
+    const column = scroller.querySelector(".act-col");
+    if (column) resize.observe(column);
+    onCleanup(() => { document.removeEventListener("selectionchange", selectionChanged); resize.disconnect(); });
+  });
+  onCleanup(() => {
+    end.dispose();
+    if (liveScroller === scroller) liveScroller = undefined;
+    if (liveEnd === end) liveEnd = undefined;
+  });
   const onScroll = () => {
-    const atBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < STICK_EDGE;
+    // A first render or a resize can emit scroll before the pin's frame.
+    // It must not turn following off or trigger an older-page read.
+    if (end.scrolled()) return;
+    const atBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < (manualAway ? 1 : STICK_EDGE);
+    if (atBottom) manualAway = false;
     if (atBottom !== following()) setFollowing(atBottom);
     if (atBottom && unseen()) setUnseen(0);
     if (scroller.scrollTop < OLDER_EDGE && readsOlder(source())) {
@@ -608,7 +652,24 @@ export function ActivityView(props: { source?: ActivitySource }) {
       source().loadOlder();
     }
   };
-  createEffect(on(() => source().target()?.id, () => { setFollowing(true); setUnseen(0); anchor = undefined; newest = undefined; }));
+  let sendIds: Set<string> | undefined;
+  createEffect(on(() => source().target()?.id, () => {
+    sendIds = undefined;
+    setFollowing(true); setUnseen(0); anchor = undefined; newest = undefined; manualAway = false;
+    // Selection changes must place even when the next page has the same row count.
+    end.pin();
+  }));
+  createEffect(on(local, (rows) => {
+    const sends = newLocalSends(sendIds, rows.map((row) => row.id));
+    sendIds = sends.baseline;
+    if (sends.added.length) jumpToLatest();
+  }));
+  createEffect(on(preview, (match) => {
+    if (match) {
+      end.release(); manualAway = true; setFollowing(false);
+      requestAnimationFrame(() => scroller.querySelector(".search-preview mark")?.scrollIntoView({ block: "center" }));
+    } else { manualAway = false; setFollowing(true); end.pin(); }
+  }));
   // Events after the newest one seen count as new while the view does not follow (Qt's m_unseen).
   createEffect(on(() => source().events(), (events) => {
     const last = events.at(-1)?.seq;
@@ -626,7 +687,8 @@ export function ActivityView(props: { source?: ActivitySource }) {
         const grown = scroller.scrollHeight - anchor.height;
         if (grown > 0) scroller.scrollTo({ top: anchor.top + grown, behavior: "instant" });
         anchor = undefined;
-      } else if (following()) scroller.scrollTo({ top: scroller.scrollHeight, behavior: "instant" });
+      } else if (end.active()) end.changed();
+      else if (following()) scroller.scrollTo({ top: scroller.scrollHeight, behavior: "instant" });
     });
   }));
 
@@ -643,7 +705,13 @@ export function ActivityView(props: { source?: ActivitySource }) {
     <div class="activity">
       <LocalDeleteDialog />
       <SessionFileDialog />
-      <div class="act-scroll" ref={scroller} tabindex="-1" onContextMenu={activityMenu} onScroll={onScroll}>
+      <div class="act-scroll" ref={scroller} tabindex="-1" onContextMenu={activityMenu} onScroll={onScroll}
+        onWheel={(e) => { if (e.deltaY < 0) scrollAway(); }}
+        onKeyDown={(e) => { if (!e.defaultPrevented && ["ArrowUp", "PageUp", "Home"].includes(e.key)
+          && !(e.target as HTMLElement).closest("input,textarea,select")) scrollAway(); }}
+        onPointerDown={(e) => { if (e.target === scroller) scrollAway(); }}
+        onTouchStart={(e) => { touchY = e.touches[0]?.clientY; }}
+        onTouchMove={(e) => { const y = e.touches[0]?.clientY; if (y !== undefined && touchY !== undefined && y > touchY) scrollAway(); touchY = y; }}>
         <div class="act-col">
           <Show when={!fullWidth()}><ColumnEdge /><ColumnEdge right /></Show>
           <Show when={subagentOpen()}>
@@ -653,6 +721,12 @@ export function ActivityView(props: { source?: ActivitySource }) {
               <span class="hint">Showing recent activity. Read only: this agent is managed by the parent conversation.</span>
             </div>
           </Show>
+          <Show when={preview()}>{(p) => <section class="search-preview" aria-label="Search result">
+            <div class="act-label eyebrow">SEARCH RESULT — Saved message</div>
+            <Show when={p().hit.content_truncated}><div class="hint">Excerpt around the match. This message is too long to display in full.</div></Show>
+            <div class="search-preview-body"><SearchHighlight text={String(p().hit.event.detail ?? "")} query={p().query} /></div>
+          </section>}</Show>
+          <Show when={!preview()}>
           <div class="act-label eyebrow">Recorded activity — messages and tool excerpts</div>
           <Show when={source().loadingOlder()}><div class="act-older hint">Reading earlier activity…</div></Show>
           <Show when={source().olderDone() && source().events().length > 0 && summary()?.history_truncated === true}>
@@ -682,6 +756,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
             <Show when={states().failure}>
               <div class="notice danger"><Icon name="circle-alert" size={14} /><div>{states().failure}</div></div>
             </Show>
+          </Show>
           </Show>
         </div>
       </div>

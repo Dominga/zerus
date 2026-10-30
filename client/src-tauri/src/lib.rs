@@ -16,6 +16,8 @@ mod commands;
 #[cfg(feature = "live")]
 mod composer;
 #[cfg(feature = "live")]
+mod content_search;
+#[cfg(feature = "live")]
 mod creations;
 #[cfg(feature = "live")]
 mod desk;
@@ -61,6 +63,10 @@ mod signals;
 #[cfg(feature = "live")]
 mod speech_settings;
 #[cfg(feature = "live")]
+mod task_details;
+#[cfg(feature = "live")]
+mod task_editor;
+#[cfg(feature = "live")]
 mod terminal;
 #[cfg(feature = "live")]
 mod updates;
@@ -68,6 +74,8 @@ mod updates;
 mod voice;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod watchdog;
+#[cfg(feature = "live")]
+mod window_layer;
 mod window_visibility;
 #[cfg(feature = "live")]
 mod worktree_policy;
@@ -133,6 +141,7 @@ pub struct Startup {
 /// activation to the running instance and returns, and runs the app.
 pub fn run() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
     let options = match cli::parse(&args) {
         Ok(cli::Command::Run(options)) => options,
         Ok(cli::Command::Help) => {
@@ -145,10 +154,7 @@ pub fn run() {
         }
         Ok(cli::Command::BuildInfo) => {
             #[cfg(target_os = "linux")]
-            let info = {
-                let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
-                cli::build_info_for(&cli::BUILD, &context.config().identifier)
-            };
+            let info = cli::build_info_for(&cli::BUILD, &context.config().identifier);
             #[cfg(not(target_os = "linux"))]
             let info = cli::build_info(&cli::BUILD);
             println!("{info}");
@@ -166,7 +172,6 @@ pub fn run() {
     if let Some(hgs) = &options.hgs {
         std::env::set_var("ZERUS_CLIENT_HGS", hgs);
     }
-    let context = tauri::generate_context!();
     let identity = identity::current(&context.config().identifier);
     let opens_sessions = options.opens_sessions(identity.is_switch());
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -218,10 +223,12 @@ pub(crate) fn data_dir(app: &tauri::AppHandle) -> std::path::PathBuf {
 fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
     let identity = startup.identity;
     let opens_sessions = startup.opens_sessions;
-    // Only the macOS build has a menu-bar item in this phase; Linux keeps Qt.
-    // The item lists the live fleet, so a build without the data source has
+    // Linux and macOS keep the live fleet in the tray/menu bar. A build without the data source has
     // none and keeps its window as the way back.
-    let menu_bar = cfg!(all(target_os = "macos", feature = "live"));
+    let menu_bar = cfg!(all(
+        any(target_os = "macos", target_os = "linux"),
+        feature = "live"
+    ));
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let (listening, activations) = match startup.instance {
         Some(claimed) => (Some(claimed.listening), Some(claimed.activations)),
@@ -296,6 +303,11 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
             }
         })
         .on_window_event(|window, event| {
+            #[cfg(all(target_os = "linux", feature = "live"))]
+            if window.label() == MAIN_WINDOW {
+                use tauri::Manager;
+                if let tauri::WindowEvent::Focused(focused) = event { desk::set_focused(window.app_handle(), *focused); }
+            }
             if window.label() == MAIN_WINDOW
                 && matches!(event, tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Focused(_) | tauri::WindowEvent::Moved(_))
             {
@@ -317,7 +329,8 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
             {
                 let dir = data_dir(app.handle());
                 std::fs::create_dir_all(&dir)?;
-                app.manage(settings::open(app.handle(), &dir));
+                let replay = std::env::var_os("ZERUS_CLIENT_REPLAY").is_some_and(|list| !list.is_empty());
+                app.manage(settings::open(app.handle(), &dir, replay));
                 app.manage(speech_settings::SpeechPage::default());
                 app.manage(recovery::start(app.handle()));
                 app.manage(files::start());
@@ -326,11 +339,14 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(worktree_policy::start(app.handle()));
                 app.manage(mobile::start(app.handle()));
                 // A replay never touches the real read or attention marks.
-                let replay = std::env::var_os("ZERUS_CLIENT_REPLAY").is_some_and(|list| !list.is_empty());
                 let actions = actions::Actions::new(dir.join(actions::marks_file(replay)));
                 readsync::start(actions.clone());
                 app.manage(actions);
                 app.manage(actions::ArchiveReads::default());
+                app.manage(content_search::Searches::default());
+                app.manage(task_details::TaskReads::default());
+                app.manage(task_details::TaskWrites::default());
+                app.manage(task_editor::TaskEditor::default());
                 app.manage(actions::ActivityReads::default());
                 app.manage(actions::Attention::new(dir.join(actions::attention_file(replay))));
                 let pump = app.state::<commands::AppState>().pump();
@@ -384,7 +400,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 // The switch build takes Qt's and the dev app's drafts once,
                 // as the store's first job (zerus-5wmh.13.1); the dev identity
                 // and a replay never import.
-                if !replay && app.state::<identity::Identity>().is_switch() {
+                if app.state::<identity::Identity>().seeds_qt(replay) {
                     zerus_client_core::drafts::import_at_start(&drafts);
                 }
                 #[cfg(feature = "media")]
@@ -595,6 +611,25 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                         }
                     }
                 }
+                #[cfg(target_os = "linux")]
+                {
+                    let conf = desk::tray_conf();
+                    platform::linux_tray::install(app.handle(), conf.as_deref());
+                    let identity = app.state::<identity::Identity>().inner().clone();
+                    let posts = identity.notifications(identity::flag("ZERUS_CLIENT_NOTIFICATIONS"), replay);
+                    let switch = identity.is_switch();
+                    let attention = posts.then(|| {
+                        let path = dir.join(desk::ATTENTION_FILE);
+                        Box::new(move || desk::Attention::load(path, || {
+                            switch.then(|| platform::linux_notify::qt_values().ok().flatten()
+                                .and_then(|values| values.get("attention/observed").map(|v| v.to_text().into_bytes()))).flatten()
+                        })) as desk::LoadAttention
+                    });
+                    desk::start(app.handle(), &pump, dir.clone(), desk::load_linux_mode(&dir, conf.as_deref()), attention);
+                    if posts {
+                        if let Some(sender) = desk::sender(app.handle()) { platform::linux_notify::install(app.handle(), dir.clone(), switch, sender); }
+                    }
+                }
                 app.manage(updates::start(app.handle()));
                 if menu_bar {
                     lifecycle::start_fleet(|| app.state::<commands::AppState>().start_source());
@@ -615,7 +650,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
             // Keep above is decided once from the display; the stored value
             // applies when the main window is created (`lifecycle::show_main`).
             #[cfg(feature = "live")]
-            settings::init_window_layer(display.as_deref());
+            window_layer::init(app.handle(), display.as_deref());
             if lifecycle::window_at_start(opens_sessions, menu_bar) {
                 let window = lifecycle::show_main(app.handle())?;
                 // An unattended measurement needs frames: keep its window in front
@@ -900,10 +935,12 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::perf_away,
         commands::build_info,
         renderer::renderer_frame,
+        content_search::content_search,
+        content_search::cancel_content_search,
         settings::settings_get,
         settings::settings_set,
         desk::desk_take_pending,
-        settings::window_layer_supported,
+        window_layer::window_layer_state,
         settings::hgs_version,
         settings::open_repository,
         speech_settings::speech_input,
@@ -940,6 +977,17 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         actions::run_action,
         actions::set_notifications,
         actions::inspect_session,
+        actions::inspect_subagent_identity,
+        commands::tasks_follow,
+        task_details::task_details,
+        task_details::task_assign,
+        task_details::task_board_action,
+        task_editor::task_editor_open,
+        task_editor::task_editor_edit,
+        task_editor::task_editor_files,
+        task_editor::task_editor_pick,
+        task_editor::task_editor_submit,
+        task_details::task_attachment_open,
         actions::pending_read_marks,
         actions::queue_read_marks,
         actions::attention_marks,
@@ -961,6 +1009,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         organization::set_project_collapsed,
         organization::project_folders,
         screens::screen_visible,
+        screens::session_usage,
         screens::accounts_view,
         screens::machines_view,
         screens::machine_resolve,
@@ -1083,6 +1132,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::next_batch,
         commands::follow,
         commands::unfollow,
+        commands::tasks_follow,
         commands::metrics,
         commands::perf_config,
         commands::save_perf,
@@ -1137,6 +1187,7 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .on_navigation(app_navigation_allowed)
         .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
         .title("Zerus Next")
+        .visible(false)
         .inner_size(1440.0, 900.0)
         .min_inner_size(900.0, 560.0);
     // Page rendering at the display rate, not near 60 fps: the preference is set

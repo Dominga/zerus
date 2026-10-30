@@ -21,6 +21,41 @@ stops or replaces the installed Zerus GUI, CLI, agents or services.
 On the Mac the client also builds as Zerus itself, the switch bundle that takes
 over `com.hgdev.hgs-tray`; see `docs/macos-distribution.md#tauri-client-switch`.
 
+The installed Linux and Windows switch uses the same identifier,
+`com.hgdev.hgs-tray`, and the `hgs-tray` executable/instance name. Settings seed
+once from Qt's `~/.config/hgdev/hgs-tray.conf` on Linux (an absolute
+`XDG_CONFIG_HOME` replaces `~/.config`) or `%APPDATA%/hgdev/hgs-tray.ini` on
+Windows. The destination is the platform data directory under
+`com.hgdev.hgs-tray/settings.json`. Existing client choices win. The saved seed
+record prevents a second import after rollback; Qt's files are never changed.
+Development identities never seed, and a replay uses `settings-replay.json`
+without reading Qt, including when launched from the installed switch.
+
+G3 adds one versioned first import for each previously unhandled preference
+family. Machine color/vivid choices, Projects' All swarm projects preference,
+per-conversation collapsed session rows and Tasks' Only this session filter
+use the same settings reader and writer, including on a switch that already has
+its original seed record. Existing Next values win. `settings.json` keeps private
+`g3.families` metadata (family/schema/source path/time/key names/exact byte hash)
+and a source-mtime observation relative to the original switch. The timestamp
+observation does not prove that bytes stayed unchanged. A failed family has only
+private quarantine metadata pointing to its untouched source, stays unhandled
+and retries next start. Handled families do not reread Qt after rollback. The
+original settings seed, draft seed and run-layout seed retain their own existing
+one-time records. Newer settings/G3 schemas are preserved without reseeding.
+Keys recorded by the original switch seed stay handled even if a Next value is
+later removed. A newly added family never imports those keys again.
+
+Collapsed row preferences keep Qt's packed SHA-256 identities as at most 50,000
+hex keys in the existing settings store. Rust projects exact/fallback keys using
+the configured peer alias (empty for local), raw command, archive and conversation
+identity; a displayed machine name never substitutes for them. A matching
+conversation-less fallback upgrades only when that row is observed. Compact and
+Expand choices persist through the same writer, and Expand all also clears
+unloaded/filtered hashes. Malformed packing leaves this family unhandled for
+retry, and an existing empty Next choice wins. Settings writes that would exceed
+the store's read bound are refused before changing existing values.
+
 ## Menu bar, single instance and notifications (macOS)
 
 | Piece | Where | Qt source it follows |
@@ -39,6 +74,37 @@ identifier: `~/Library/Application Support/dev.zerus.next/` for the dev app,
 switch bundle does not see what the dev app saved there. The attachment cache
 follows the same rule with Tauri's `app_cache_dir` formula
 (`Identity::cache_dir_now`): `~/Library/Caches/<identifier>/` on the Mac.
+
+## Linux tray
+
+Live Linux builds keep the same desk and menu models behind a native
+StatusNotifierItem and DBusMenu (`src-tauri/src/platform/linux_tray.rs`). Tauri's
+AppIndicator backend does not report primary clicks on Linux, so this adapter
+exports the protocols directly, as specified in the approved design. It keeps
+Qt's tile sizes, attention colour, tooltip and menu texts; updates wait while
+the menu is open, and its actions keep their captured session identities.
+
+`--background` starts without a window, `--sessions` presents the existing
+window, and closing it keeps the tray alive. Single-instance names and the
+`show`/`sessions` handshake stay in `instance.rs`. The Open in submenu offers
+Automatic, Tab, Window and Clipboard, reads `open-mode`/`terminal` from
+`tray.conf`, and saves changes in the client's own `menubar.json`.
+Native protocol tests create a private D-Bus daemon and fake Plasma watcher;
+they never connect to the desktop's bus.
+
+Linux attention uses `org.freedesktop.Notifications`, with Qt's literal body
+escaping, action labels, icon and hints. The existing desk decides attention;
+the adapter adds no fleet reader or detector. It stores native IDs in
+`linux-notifications.json`, bound to the notification daemon's unique owner,
+and seeds Qt's `attention/linuxOwner` and `attention/linuxTokens` read-only on
+the switch identity's first start. `attention/observed` supplies the existing
+edge seed, so historical alerts are not reposted. Expired Plasma notifications
+stay clickable in history; withdrawal removes their exact token's IDs, and
+late replies to a withdrawn post are closed. Clicks preserve the activation
+token and use the desk's guarded session resolution; update clicks verify the
+current update token separately. Unconfirmed native deliveries remain reserved
+across restart instead of being posted again. Invalid client state is preserved
+and posting stays disabled until it can be reviewed.
 
 ## Build and run
 
@@ -526,12 +592,13 @@ clipboard. They are not writes: they need no row lock and show no "Updating…".
 - The reference takes the run and conversation of the selected session's
   details, else the row's. A reply must be a `zerus://session?` URI of at most
   8192 characters; otherwise the notice says "Could not read a session
-  reference. Update hgs on this computer." Success shows "Session reference
-  copied".
+  reference. Update hgs on this computer." Success shows the toast "Copied",
+  "The session reference is on the clipboard".
 - The clipboard is written from Rust (tauri-plugin-clipboard-manager). A text
   that is empty or holds a line break is refused with Qt's texts. A failure
-  shows "Zerus: could not copy" with the error. A success shows no notice,
-  except for Copy session reference. The browser build (no Tauri) copies
+  shows the sticky toast "Not copied" with the error. A success shows no
+  notice, except for Copy session reference and the header's ID copy ("Copied",
+  as the design's toasts carry a title). The browser build (no Tauri) copies
   through `navigator.clipboard` with the same two checks.
 - Each copy rechecks its row when it runs, as Qt does: a session that is gone
   or whose conversation changed copies nothing and shows "This session is no
@@ -553,8 +620,10 @@ live catalog.
   reads that are running, also one sent before the cancel that has not started
   yet; an answer that arrives afterwards is dropped. Each read carries the
   store's request number, so a late older read never cancels a newer one.
-- The search text is the archive query, applied 300 ms after the last change.
-  It does not filter the loaded rows.
+- The archive metadata query is applied 300 ms after the last text change.
+  Public-content search adds matching message excerpts after 350 ms; while it
+  is active, the date picker stays visible and content results replace the
+  metadata page controls. Clearing the query returns to the paged archive.
 - The date picker offers All dates (the default), Today, Last 7 days, Last 30
   days and a custom range, which starts at the last 30 days. A range whose
   start is not before its end loads nothing.
@@ -792,6 +861,26 @@ in replay mode, shared with voice. The previous Qt store is read but never
 written, including recovery. The one exit hook closes voice and the composers,
 then flushes this store on quit and termination signals. A send whose durable
 save has not started cannot dispatch during shutdown.
+
+## Account usage and automatic recovery
+
+The session header shows the bound account's usage meters and Refresh action.
+The screens worker reads `hgs [@host] account inspect --session NAME --refresh`
+on the same five-minute schedule and two-slot queue as profile usage, retaining
+at most 64 run-scoped snapshots. The composer's Usage limit chip shows exhausted
+limits and the current Claude recovery notice; its popover keeps cached values
+visible during refresh and offline states. The Context chip opens the Session
+usage section in a popover, with no side panel required.
+
+The Recovery chip and panel use only the followed inspection's recovery job and
+provider error. Immediately before Retry now or Cancel retry, the action lane
+reads a fresh full inspection and refuses unless it still names the exact
+session, run, conversation and waiting job. It then makes Qt's
+`hgs [@host] recovery action` call with `{name, id, action}` and accepts only
+the matching updated job. A failed, uncertain, timed-out or malformed outcome is
+never replayed. Attempts, Open Terminal, Refresh usage and Settings follow Qt's paths.
+No additional background poller runs for these chips; the durable fanout remains
+G1's work.
 
 ## Attachments
 
@@ -1196,7 +1285,45 @@ no frame; a batch that arrives meanwhile waits, the Rust side keeps folding
 changes into the next one, and the first frame after the window returns applies
 it. The Working clocks stop too, as Qt stops its timers when a window hides.
 
+## Session content search
+
+Session search shows immediate name, metadata and identity matches and reads
+public message contents after 350 ms with two or more characters. Live and
+archive excerpts share the virtual list, with state, machine, project and
+archive-date scopes. Click, arrow navigation and Enter open the exact matched
+run/conversation/archive, with a clearable highlighted preview. A stale result
+never falls back to the latest session of the same name.
+
+The parity path uses Qt's existing `hgs search --query … --limit 100` contract;
+older peers are help-gated before that verb is sent. Four cancellable CLI reads
+run at most, including children of a retired query until they exit. Replies are
+limited to 8 MiB and 100 hits per computer, with 32 computers, 200 retained
+content hits and 500 visible metadata/content rows overall, plus one selected
+archive/excerpt. Exceeding coverage shows “Limited history searched”; offline,
+unsupported or failed computers stay explicit. There are no transcript caches
+per session. The cursor-backed content index is tracked by
+`zerus-5wmh.66.2.2.1`; the current CLI's own scan limits remain visible meanwhile.
+The `content-search-smoke=1` replay query requires an explicit fake hgs and
+`ZERUS_CLIENT_PERF`; run it only under isolated data, Xvfb and a private D-Bus
+session, as the other native replay smokes.
+
 ## Settings and motion
+
+The Rail pin and Appearance's “Keep Zerus above other windows” checkbox share
+`workspace/alwaysOnTop`. Native confirmation drives both controls, including
+changes from KDE's window menu. macOS, X11 and Windows apply the saved native
+level before the first show. KDE Wayland uses Qt's temporary KWin script path:
+one normal window matched by PID, application ID and caption, then its UUID;
+no global window rules or installed scripts. Unsupported desktops show Qt's
+explanation, and refusals use the sticky notice bus. Pending changes leave the
+focused controls enabled. GTK publishes the app identifier for this exact scope.
+
+The opt-in replay query `window-layer-smoke=first` exercises both controls,
+focus and hint geometry, then leaves the preference on; `window-layer-smoke=restart`
+verifies the next launch restores it and clears it. Use a private data directory,
+Xvfb, `GDK_BACKEND=x11`, a nonexistent `WAYLAND_DISPLAY`, a private D-Bus session
+and `ZERUS_CLIENT_PERF=1`, as for the other native replay smokes. Ordinary
+KWin protocol tests create their own fake compositor bus.
 
 The Settings screen has, so far, the two motion settings of the Qt GUI with its
 QSettings keys and defaults: Animate working sessions

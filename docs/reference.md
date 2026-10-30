@@ -2553,6 +2553,7 @@ hgs task add --project orchard --title "Task title" --request-id UUID < descript
 hgs task rename orchard/T-a1b2c3 < title.txt
 hgs task list --project orchard [--stage todo]
 hgs task get orchard/T-a1b2c3
+hgs task get TASK_UUID --project orchard --history-limit 80 [--history-before CURSOR]
 hgs task send orchard/T-a1b2c3 [--session codex/api [--host ALIAS]]
 hgs task handoff orchard/T-a1b2c3 --session codex/worker [--host ALIAS]
 hgs task start orchard/T-a1b2c3
@@ -2567,6 +2568,20 @@ hgs task target orchard/T-a1b2c3 new-session|subagent --parent codex/api [--host
 hgs task worker orchard/T-a1b2c3 --subagent CHILD_ID --request-id SENT_REQUEST_ID
 hgs task settings --project orchard [--set < settings.json]
 ```
+
+Plain `task get` retains the complete journal for existing clients. The optional
+`--history-limit` (1–80) returns only one chronological history page, the canonical
+task document, `log_total`, `start_confirmed`, `history_schema: 1` and
+`history_next`. Pass that opaque cursor as `--history-before` for the previous
+page; a null cursor marks the beginning. Use the task UUID from the list to avoid
+a project-wide short-ID lookup. Cursors bind the project, task and immutable
+history entry, so new records and receipt refinements preserve an older page.
+Omit the cursor to return to the latest page. The local indexed projection keeps
+one task per project and is rebuilt when its source changes; it is never
+replicated and does not change the task document format.
+Task list rows also include a bounded `history_revision` token. A journal-only
+note or delivery receipt changes it, so the existing task stream can refresh the
+selected inspector without transferring the journal or adding a polling loop.
 
 Send pastes the task prompt into its session through the same input path as
 `hgs send`; the task becomes In progress, and Zerus does not
@@ -4071,6 +4086,179 @@ reply. Saved receipts make identical requests idempotent. An uncertain result
 needs manual inspection before another request. `agent_id` is supported only for
 verified DeepSeek continuable children. Questions carry request identity/hash
 through `pending_questions`; answers use the exact unchanged request.
+
+### Desktop background service
+
+```sh
+hgs desktop serve
+hgs desktop status --json
+hgs desktop watch --json
+```
+
+The existing `hgs presence set --json` payload and success output remain
+compatible. Its writes now hold a scoped `desktop-presence.lock`. Before any
+handoff, a passive service leaves that legacy producer available. A supported
+non-revoked marker or active service policy refuses legacy writes and names
+`hgs desktop revoke --json`; unknown/newer/mismatched state also refuses without
+repair. Revoked, inactive policy allows the legacy path again. Future service
+epoch activation and presence writes must use this same scoped fence. This
+admission guard enables no sampler, producer lease or service writer. Presence
+listings read at most 4 KiB of a private regular leaf; malformed, oversized or
+special files provide no presence evidence.
+
+The private `desktop-v1` service kernel is local to one user and canonical
+configuration/state identity. It is **passive until the writer handoff is
+implemented**: it starts no fleet readers, presence/read workers, notifications
+or automatic approvals. It does not register itself with an OS service manager.
+Existing desktop clients retain their current owners. This kernel alone does
+not establish Qt retirement or native platform acceptance.
+
+`status` is read-only and never starts a service or creates state. Its JSON
+reports `running`, `ownership`, `configuration`, executable `version`, schema,
+generation/epoch, pending counts, component state and incomplete upstream
+coverage. IPC connectivity does not establish peer freshness. An absent service
+reports `running:false`; an unsafe or incompatible endpoint is an error.
+
+`serve` holds an exclusive OS file lock under `HGS_STATE_DIR/desktop`, opens the
+private versioned `state.sqlite3` and serves a same-user Unix socket or Windows
+named pipe. A newer schema is refused without migrating/resetting it. Changing
+configuration with the same state refuses reuse; canonical path aliases share
+ownership. There is no agent/terminal/process shutdown operation. SIGTERM or
+SIGHUP on Unix stops admissions, detaches clients and checkpoints only desktop
+state. Native Windows graceful shutdown qualification remains separate.
+
+Schema 2 adds the hgs-owned native-effect ledger. Schema 1 migrates
+transactionally after the configuration check. Its writer policy starts revoked
+and every process restart fences it again; manual revocation reasons survive.
+`effect_journal` reports policy, a reason code and four maintained attempt counts.
+Recovery marks at most 256 prior-process reservations unknown at startup and per
+heartbeat. Neither reserved nor unknown work becomes a fresh delivery after a
+restart. Recovery failure reports a component error and pauses admissions while
+the passive service keeps serving IPC. The ledger library has no native I/O,
+automatic-approval consent or read-mark authority. The current service exposes
+no reservation, native adapter or writer-takeover command yet.
+
+Schema 3 adds the indexed revocation command journal. Before a maintained Qt
+rollback or Qt installation starts its GUI, the installer must obtain a settled
+receipt from this exact configuration:
+
+```sh
+hgs desktop revoke --json --request-id UUID --reason rollback
+```
+
+Before invoking it, probe `hgs --help` for the exact capability marker
+`Desktop revoke ABI: desktop-revoke-v1`; a desktop-v1 kernel alone need not
+support revoke. An older selected CLI must never be called speculatively.
+The installer generates and retains a canonical UUID for this attempt. A
+settled receipt requires exit zero and `accepted`, `durable`, `revoked` and
+`checkpointed` all true, with the same `request_id` and configuration. When
+there is no desktop database and no handoff marker, exit zero instead returns
+`applicable:false`, `handoff:"none"`, `revoked:true`, `nothing_written:true`
+and the exact request/configuration identity. This explicit no-op preserves
+plain rollback without creating directories, locks or a database; an existing
+live owner is still refused. It claims no durable command reservation. Failure, timeout or missing
+receipt keeps Qt stopped. The command contacts the existing actor; when no
+service endpoint exists it instead takes the real exclusive service and handoff
+locks and opens only the desktop journal. It starts no service manager, listener,
+agent or GUI. An unreachable owner holding its lock cannot be bypassed.
+This CLI primitive does not yet wire the maintained installer rollback hook.
+If `owner.lock` is held but IPC does not answer, keep Qt stopped. Stop only
+`hgs-desktop` through its owning service manager (Linux `hgs-desktop.service`,
+macOS `com.hgdev.hgs-desktop`, Windows task `hgs-desktop`), then retry the same
+request in the same configuration. Never stop native agents, tmux servers,
+process groups, recovery, voice or mobile connector services. An unmanaged or
+uncertain owner requires operator inspection; its lock is never bypassed.
+
+Revocation commits its private audit reservation and revoked writer policy
+before draining owned work, atomically changes only a supported marker's phase
+to `revoked`, syncs it and verifies SQLite checkpoint completion. No marker is
+created when none exists. Unknown/newer/malformed or mismatched markers are
+preserved and refused. A busy checkpoint or failed drain leaves a durable
+pending command, never a successful receipt. The current passive kernel has no
+effect workers to drain; later native dispatchers must provide lease cancellation
+and owned-worker drain before takeover is enabled.
+
+A repeated command must keep the exact UUID and reason. Its reservation pins
+the original writer epoch; it cannot revoke a different later handoff or return
+an old success for newly authorized writers. A running service can inspect a
+result with `hgs desktop request --json` and stdin
+`{"op":"revoke_status","request_id":"UUID"}`. The query never resumes a
+pending transition. Explicitly repeating the same revoke may reconcile that
+same pending authority reduction; it cannot deliver native effects. An unknown
+result never permits the installer to start Qt or invent a fresh request ID.
+The journal keeps reason/history privately; the marker payload stays unchanged.
+
+Every IPC connection begins with one bounded JSON line containing `abi`,
+`configuration`, `op` (`status`, `watch` or `request`) and optional `request`.
+The CLI adds this private handshake. Frames contain `abi`, random service
+`epoch`, broadcast `seq`, `t` and `value`. A watch begins with `hello` at the
+current broadcast watermark; subsequent ten-second heartbeats advance `seq`.
+Unary answers do not advance the broadcast watermark. A new epoch invalidates
+subscriptions; it never authorizes replay. EOF on a watch's stdin detaches that
+client. Control requests use a separate connection, not the display stream.
+
+`hgs desktop request --json` reads a JSON object from stdin with `op` and a
+canonical UUID `request_id`. `ping` returns an exact-ID, read-only `pong` with
+`durable:false`.
+`revoke` reduces authority through the durable command journal described below;
+`revoke_status` reads its exact request ID without resuming it. Positive effect
+requests return `accepted:false` and `handoff_required` before acceptance.
+No positive command is queued for later replay or delegation implied.
+
+Control lines including framing are capped at 64 KiB. Output frames allow
+watch-v1's 1 MiB plus 4 KiB envelope metadata. Eight subscribers each have at most
+4 MiB/1,024 queued frames; overflow disconnects only that subscriber. Four
+additional connections preserve the unary request/status lane. Admission holds
+at most sixteen control lines and twelve parsers, below the proposed 16 MiB
+ingress budget. The kernel has no upstream ingress or per-session cache.
+
+The service and the read-only importer share the configuration fingerprint from
+`zerus-desktop-migration`. A running service reports a small `migration` summary
+in status/watch frames. It checks at startup and each ten-second heartbeat,
+under the separate `desktop/handoff.lock`; status requests use that cached
+summary. The marker (64 KiB maximum) and fixed import manifest (256 KiB maximum)
+must be private single-link regular files beneath private directories. Links,
+malformed/newer/mismatched input and bad digests stay unchanged and keep the
+service passive. Import pages are not scanned by this diagnostic probe.
+
+`import_not_drained`, `handoff_incomplete` and `revoked` describe historical
+import state. Even a complete, drained marker reports `delegation_required`: it
+cannot enable writers or approvals without the later live delegation, effect
+guards and revocation protocol. The kernel writes no takeover marker. See the
+exact [migration contract](desktop-migration.md).
+
+`hgs desktop registration --json` previews the current platform's per-user
+definition and exact configuration identity. It creates no files, contacts no
+service manager and enables no writer. Its `operation:preview` identifies this
+render-only operation; it makes no claim about OS registration. Maintained installer
+ownership checks and delegation are separate steps before using the definition.
+
+The proposed service names are `hgs-desktop.service` (systemd user),
+`com.hgdev.hgs-desktop` (LaunchAgent), and `hgs-desktop` (per-user Windows logon
+task). Definitions invoke the selected stable CLI with `desktop serve
+--config-dir DIR --state-dir DIR`; this exact local form pins those directories
+before configuration loading, including on Windows. All three paths must be
+absolute for the target platform. Bare `desktop serve` keeps
+existing `HGS_*` configuration selection. Nothing registers nondefault or dev
+configurations automatically. Windows definitions use the current SID,
+`InteractiveToken`, `LeastPrivilege`, one instance and at most three failure
+restarts one minute apart (the [Task Scheduler schema minimum](https://learn.microsoft.com/en-us/windows/win32/taskschd/taskschedulerschema-interval-restarttype-element)).
+Paths with environment-variable markers are refused on Windows because Task
+Scheduler expands them even inside quoted arguments. Linux permits three starts
+within five minutes and does not restart a startup refusal (exit 78). macOS adds
+the private `--launchd` argument to the exact registered form: permanent startup
+refusals print a diagnostic and exit successfully, so
+[`SuccessfulExit=false`](https://github.com/apple-oss-distributions/launchd/blob/main/man/launchd.plist.5)
+does not restart them; failures after startup still return nonzero. A refused
+service needs explicit repair and another maintained start. Native installation,
+windowless startup and Windows runtime qualification remain outstanding.
+
+`hgs desktop import-evidence --json` publishes bounded private **Staged**
+import evidence from G3's inherited-stdio stream. It reads no source store,
+starts no service and grants no writer authority. Probe the exact
+`Desktop import ABI: desktop-import-v1` help marker first. Input deadlines,
+fixed digest paths, immutable UUID commits and the read-only `import-status`
+lookup are specified in the [desktop import transport](desktop-import-transport.md).
 
 ### Event stream
 

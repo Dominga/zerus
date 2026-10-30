@@ -1,3 +1,5 @@
+import { groupOf } from "../../store/organization";
+import { taskDragOver, taskDrop } from "../../store/taskAssignment";
 import { For, Show, Suspense, createMemo, createEffect, createSignal, lazy, on, onCleanup } from "solid-js";
 import { createVirtualizer } from "@tanstack/solid-virtual";
 import { Icon } from "../lib/icons";
@@ -28,7 +30,7 @@ import { CreationCard, CreationTile } from "./CreationCard";
 import { creationCount, creationFooter, creationStatusMenu } from "../../store/creations";
 import {
   selectedKey, setSelectedKey, setExpandedChildren, expandedChildren,
-  setCompactRows, compactRows, stateFilter, setStateFilter, counts, search, setSearch, stripMode, setStripMode,
+  setCompactRows, compactRows, expandCompactRows, hasCompactRows, stateFilter, setStateFilter, counts, search, setSearch, stripMode, setStripMode,
   setMenu, machineFilter, setMachineFilter, projectFilter, setProjectFilter, setPage,
   multi, setMulti, peek, setPeek, setSubagentOpen, sessionsWidth, setSessionsWidth, menu, subagentOpen,
   revealing, setRevealing, setDetailTab,
@@ -40,6 +42,9 @@ import { motionReduced } from "../motion";
 import { composer } from "../../store/composer";
 import { composerClearControl } from "../../bridge";
 import { bulkSelect, clearMulti, multiCount, setAnchor, dragItem, setDragItem, drop, setDrop, endDrag, placement, applyDrop, SESSION_MIME, type DragItem } from "./organize";
+
+import { SearchResults } from "./SearchResults";
+import "../styles/content-search.css";
 
 const SavedDraftsDialog = lazy(() => import("./SavedDrafts").then((m) => ({ default: m.SavedDraftsDialog })));
 
@@ -179,7 +184,7 @@ export function sessionMenu(s: Session): MenuEntry[] {
   const commands = runningCommandsEntry(s, () => computerFresh(s.computer), () => flag("processes/enabled"), () => { setSelectedKey(s.key); setDetailTab("processes"); });
   return [
     { label: compactRows[s.key] ? "Expand session row" : "Compact session row", icon: compactRows[s.key] ? "expand-row" : "compact-row", action: () => setRowCompact(s.key, !compactRows[s.key]) },
-    { label: "Expand all collapsed", icon: "expand-row", disabled: !Object.values(compactRows).some(Boolean), action: () => Object.keys(compactRows).forEach((k) => setCompactRows(k, false)) },
+    { label: "Expand all collapsed", icon: "expand-row", disabled: !hasCompactRows(), action: expandCompactRows },
     { separator: true },
     // An archived row has no terminal, and no Mute or Mark group (Qt's `if (!archived)`).
     ...(archived ? [] : [s.agent === "deepseek" ? { label: "Open native DeepSeek UI", icon: "external-link", disabled: LATER } : { label: "Open terminal", icon: "square-terminal", disabled: LATER }]),
@@ -221,7 +226,7 @@ function headerMenu(project: string): MenuEntry[] {
 function batchMenu(): MenuEntry[] {
   return [
     ...machineMenu(),
-    { label: "Expand all collapsed", icon: "expand-row", action: () => Object.keys(compactRows).forEach((k) => setCompactRows(k, false)) },
+    { label: "Expand all collapsed", icon: "expand-row", action: expandCompactRows },
     markAllEntry(),
     clearArchiveMenuEntry(),
   ];
@@ -232,7 +237,7 @@ function Header(props: { row: Extract<Row, { type: "header" }> }) {
   const name = () => props.row.name;
   const open = () => !props.row.collapsed;
   return (
-    <button class="group-band entity" style={{ "--entity": projectColor(props.row) }} draggable="true" onDragStart={(e) => startDrag(e, { kind: "group", id: props.row.project })}
+    <button onDragOver={(e) => taskDragOver(e, props.row.project)} onDrop={(e) => taskDrop(e, props.row.project)} class="group-band entity" style={{ "--entity": projectColor(props.row) }} draggable="true" onDragStart={(e) => startDrag(e, { kind: "group", id: props.row.project })}
       aria-expanded={open()} onClick={() => setProjectCollapsed(props.row.project, !props.row.collapsed)}
       onContextMenu={(e) => openMenu(e, headerMenu(props.row.project))}
       title={`${name()}: ${props.row.total} shown, ${props.row.attention} need a response, ${props.row.working} working, ${props.row.unread} unread replies. Click to collapse or expand; drag to reorder.`}>
@@ -494,9 +499,15 @@ export function SessionList() {
           <button class="icon-btn hd" data-tip="Session and machine actions" onClick={(e) => openMenu(e, batchMenu())}><Icon name="more" size={18} /></button>
         </header>
         <div class="sp-search">
-          <input class="field" type="search" placeholder={stateFilter() === "archived" ? "Search archive names and IDs…" : "Search sessions and IDs…"} value={search()}
+          <input class="field" type="search" maxLength={256} placeholder={stateFilter() === "archived" ? "Search archive names and IDs…" : "Search sessions, IDs and messages…"} value={search()}
             onInput={(e) => setSearch(e.currentTarget.value)} onFocus={() => setSearchFocused(true)} onBlur={() => setSearchFocused(false)}
-            onKeyDown={(e) => e.key === "Escape" && setSearch("")} aria-label="Search sessions" />
+            onKeyDown={(e) => {
+              if (e.key === "Escape") setSearch("");
+              else if (e.key === "ArrowDown" && search().trim()) {
+                e.preventDefault(); const results = document.querySelector<HTMLElement>(".content-search-list");
+                results?.focus(); results?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+              }
+            }} aria-label="Search sessions" />
         </div>
         <div class="sp-filters" role="toolbar" aria-label="State filter">
           <For each={FILTERS}>
@@ -513,7 +524,8 @@ export function SessionList() {
         </div>
         <FilterChips />
 
-        <Show when={stateFilter() === "archived"}><ArchiveBar /></Show>
+        <Show when={stateFilter() === "archived"}><ArchiveBar contentSearch={!!search().trim()} /></Show>
+        <Show when={search().trim()} fallback={<>
           <Show when={catalog.order.length > 0 || creationCount() > 0 || stateFilter() === "archived"} fallback={<ListPlaceholder />}>
             <div class="sp-scroll" classList={{ morphing: morphing(), organizing: !!dragItem() }} ref={list.ref} tabindex="0" onKeyDown={onKey} role="tree"
               onDragOver={(e) => organizeOver(e, list)} onDrop={(e) => organizeDrop(e)} onDragLeave={(e) => { if (!(e.currentTarget as Element).contains(e.relatedTarget as Node)) setDrop(undefined); }}
@@ -526,9 +538,12 @@ export function SessionList() {
               </Show>
             </div>
           </Show>
-        <SelectionBar />
+        </>}>
+          <SearchResults />
+        </Show>
+        <Show when={!search().trim()}><SelectionBar /></Show>
         <footer class="sp-foot">
-          <span class="tabular ell">{shownSummary().shown ? `${shownSummary().shown} shown, ${shownSummary().working} working, ${shownSummary().attention} attention${creationFooter(true)}` : creationFooter(false) || (catalog.order.length ? "No matching sessions" : "")}</span>
+          <span class="tabular ell">{search().trim() ? "" : shownSummary().shown ? `${shownSummary().shown} shown, ${shownSummary().working} working, ${shownSummary().attention} attention${creationFooter(true)}` : creationFooter(false) || (catalog.order.length ? "No matching sessions" : "")}</span>
           <span class="grow" />
           <button class="icon-btn small" data-tip="Session creation status" onClick={(e) => openMenu(e, creationStatusMenu())}><Icon name="clock" size={16} /></button>
           <button class="icon-btn small" title={markAllTip(markAllEntry())} disabled={markAllEntry().disabled} onClick={() => runMarkAll()}><Icon name="read-all" size={16} /></button>
@@ -626,7 +641,7 @@ function ListRow(props: { id: string; list: RowSource }) {
       <Show when={row()?.type === "creation" ? (row() as Extract<Row, { type: "creation" }>) : undefined}>{(v) => <CreationCard card={v().creation} />}</Show>
       <Show when={row()?.type === "card" ? (row() as Extract<Row, { type: "card" }>) : undefined}>
         {(v) => (
-          <div class="rowhit" classList={{ "has-kids-open": v().expanded && !v().compactRow, multi: !!multi[v().session.key], dragged: dragItem()?.id === v().session.key }}
+          <div onDragOver={(e) => taskDragOver(e, groupOf(v().session.key), v().session)} onDrop={(e) => taskDrop(e, groupOf(v().session.key), v().session)} class="rowhit" classList={{ "has-kids-open": v().expanded && !v().compactRow, multi: !!multi[v().session.key], dragged: dragItem()?.id === v().session.key }}
             draggable="true" onDragStart={(e) => startDrag(e, { kind: "session", id: v().session.key })}
             onMouseDown={(e) => { if (e.shiftKey) e.preventDefault(); }} onClick={(e) => selectSession(v().session.key, e)}
             onContextMenu={(e) => {

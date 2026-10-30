@@ -1,7 +1,8 @@
 import { For, Show, createEffect, onCleanup } from "solid-js";
 import { Icon } from "../lib/icons";
 import { menuItemActivates } from "../sessions/actions-ui";
-import { menu, setMenu, toasts } from "../../store/ui";
+import { menu, setMenu } from "../../store/ui";
+import { dismissNotice, notices } from "../../store/notices";
 
 /** Context and dropdown menus share one positioned popover. */
 export function MenuLayer() {
@@ -63,14 +64,20 @@ export function MenuLayer() {
   );
 }
 
+/**
+ * The window's one notice bus, in the design's bottom-right corner: copies,
+ * action results, updates and refusals. Notices let clicks through to the
+ * controls under them; only a sticky notice's Dismiss takes a click.
+ */
 export function Toasts() {
   return (
     <div class="toasts" aria-live="polite">
-      <For each={toasts.items}>
-        {(t) => (
-          <div class="toast">
-            <b>{t.title}</b>
-            <span class="muted">{t.text}</span>
+      <For each={notices()}>
+        {(n) => (
+          <div class={`toast ${n.tone}`} classList={{ sticky: n.sticky }}>
+            <Show when={n.sticky}><button class="icon-btn dismiss" aria-label="Dismiss" onClick={() => dismissNotice(n.id)}><Icon name="x" size={14} /></button></Show>
+            <Show when={n.title}><b>{n.title}</b></Show>
+            <span class="note" classList={{ muted: !!n.title }}>{n.text}</span>
           </div>
         )}
       </For>

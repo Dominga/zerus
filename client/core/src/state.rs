@@ -200,7 +200,7 @@ impl CatalogState {
                     else {
                         continue;
                     };
-                    staged.insert(key.to_owned(), project(row, &machine));
+                    staged.insert(key.to_owned(), project(row, &machine, computer));
                 }
                 if snapshot.last {
                     let rows = self.staged.take().unwrap_or_default();
@@ -248,7 +248,7 @@ impl CatalogState {
                 let mut upserts: Vec<(&String, ViewRow)> = delta
                     .upsert
                     .iter()
-                    .map(|item| (&item.key, project(&item.row, &machine)))
+                    .map(|item| (&item.key, project(&item.row, &machine, computer)))
                     .collect();
                 // The rows before this frame are Qt's `before`, read once per frame.
                 Before::index(&self.rows, upserts.iter().map(|(_, row)| row))
@@ -501,7 +501,7 @@ impl CatalogState {
             .filter_map(|row| {
                 let name = row["name"].as_str()?;
                 let key = zerus_watch_protocol::key_for(row["run_id"].as_str(), name);
-                Some((key, project(row, &machine)))
+                Some((key, project(row, &machine, computer)))
             })
             .collect();
         let mut changes = self.replace_rows(computer, rows);
@@ -980,9 +980,10 @@ impl<'a> Before<'a> {
     }
 }
 
-fn project(row: &Value, machine: &str) -> ViewRow {
+fn project(row: &Value, machine: &str, computer: &ComputerId) -> ViewRow {
     let mut view = view::row(row);
     view.machine = machine.to_owned();
+    view.compact_keys = crate::row_preferences::keys(&computer.0, &view);
     view
 }
 
@@ -999,6 +1000,26 @@ mod tests {
     use super::*;
     use serde_json::json;
     use zerus_watch_protocol::decode;
+
+    #[test]
+    fn raw_lifecycle_does_not_stage_or_retain_a_large_catalog() {
+        let mut state = CatalogState::new();
+        let computer = ComputerId::local();
+        for n in 0..50_000 {
+            let page = frame(json!({"v":1,"seq":n+1,"t":"snapshot","topic":"catalog",
+                "page":n,"last":n==49_999,"cursor":1,"items":[{"key":format!("run:{n}"),
+                "row":{"name":format!("s-{n}"),"run_id":format!("r-{n}")}}]}));
+            assert!(crate::stream::source_lifecycle(&mut state, &computer, &page).is_empty());
+        }
+        assert!(state.rows.is_empty());
+        assert!(state.staged.is_none());
+        assert!(state.activity.is_empty());
+        let fatal = frame(json!({"v":1,"seq":50001,"t":"error","code":"failed",
+            "message":"fixture","topic":"organization","fatal":true}));
+        crate::stream::source_lifecycle(&mut state, &computer, &fatal);
+        assert!(state.failed());
+        println!("raw lifecycle: 50000 source rows, zero resident or staged catalog rows");
+    }
 
     fn fixture(name: &str) -> Vec<Frame> {
         let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));

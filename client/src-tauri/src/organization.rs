@@ -106,9 +106,7 @@ pub fn run_seed_source(
     identifier: &str,
     replay: bool,
 ) -> Option<zerus_client_core::settings::QtStore> {
-    (!replay)
-        .then(|| crate::settings::seed_source(identifier))
-        .flatten()
+    crate::settings::seed_source(identifier, replay)
 }
 
 #[derive(Default)]
@@ -155,6 +153,8 @@ struct Shared {
     hgs: PathBuf,
     allowed: bool,
     layout: PathBuf,
+    /// Unsupported/unreadable originals are retained until a fresh startup.
+    layout_writable: bool,
     draft: PathBuf,
     clock: Instant,
     /// One Qt seed read at a time; failed reads leave the persisted mark unset.
@@ -184,12 +184,18 @@ impl Organization {
         draft_path: PathBuf,
         replay: bool,
     ) -> Self {
-        // Read with the draft's size limit; a layout that cannot be read is
-        // started afresh, and the next save replaces it.
-        match zerus_client_core::swarm::layout::read(&layout) {
+        // An absent layout may be created. An unreadable/unsupported original
+        // is preserved: neither the Qt seed nor a later UI save replaces it.
+        let loaded = match zerus_client_core::swarm::layout::read(&layout) {
             Ok(Some(bytes)) => pump.load_layout(&bytes),
-            Ok(None) => {}
-            Err(error) => eprintln!("zerus-client: the project layout was not loaded: {error}"),
+            Ok(None) => Ok(()),
+            Err(_) => Err("the project layout could not be read"),
+        };
+        let layout_writable = loaded.is_ok();
+        if let Err(error) = loaded {
+            eprintln!(
+                "zerus-client: {error}; the original is retained and layout saves are paused"
+            );
         }
         // A blocked replay sends nothing, so it takes up no draft either.
         let saved = if allowed {
@@ -214,6 +220,7 @@ impl Organization {
             hgs,
             allowed,
             layout,
+            layout_writable,
             draft: draft_path,
             clock: Instant::now(),
             seed_started: std::sync::atomic::AtomicBool::new(false),
@@ -251,7 +258,10 @@ impl Organization {
         read: impl FnOnce() -> Result<serde_json::Map<String, Value>, String> + Send + 'static,
     ) -> Option<std::thread::JoinHandle<()>> {
         use std::sync::atomic::Ordering::SeqCst;
-        if self.0.pump.runs_seeded() || self.0.seed_started.swap(true, SeqCst) {
+        if !self.0.layout_writable
+            || self.0.pump.runs_seeded()
+            || self.0.seed_started.swap(true, SeqCst)
+        {
             return None;
         }
         let shared = Arc::downgrade(&self.0);
@@ -382,6 +392,7 @@ impl Organization {
     fn view(&self, hub: &Hub) -> SyncView {
         let mut view = hub.sync.view();
         view.notice = hub.notice.clone();
+        view.layout_save_paused = !self.0.layout_writable;
         if !self.0.allowed {
             view.ready = false;
             view.reason = Some(REPLAY_NEEDS_HGS.into());
@@ -612,7 +623,7 @@ impl Organization {
         let mut writer = self.writer();
         let hub = self.save_draft(self.lock(), &mut writer);
         self.release(hub);
-        writer.save_layout(&self.0.pump, &self.0.layout);
+        writer.save_layout(&self.0.pump, &self.0.layout, self.0.layout_writable);
     }
 
     fn settle(hub: &mut Hub, settled: Vec<(Ticket, EditOutcome)>) {
@@ -690,7 +701,7 @@ impl Organization {
         }
         self.release(hub);
         if writer.saved.elapsed() >= SAVE_EVERY {
-            writer.save_layout(&self.0.pump, &self.0.layout);
+            writer.save_layout(&self.0.pump, &self.0.layout, self.0.layout_writable);
         }
         drop(writer);
         let hub = self.lock();
@@ -933,8 +944,11 @@ impl Writer {
     }
 
     /// Saves a changed layout through a temporary file and a rename.
-    fn save_layout(&mut self, pump: &Pump, path: &Path) {
+    fn save_layout(&mut self, pump: &Pump, path: &Path, writable: bool) {
         self.saved = Instant::now();
+        if !writable {
+            return;
+        }
         let bytes = match pump.take_layout() {
             // Newer than any layout kept from a failed write, which goes.
             Some(bytes) => {
@@ -1468,7 +1482,7 @@ mod tests {
         assert!(run_seed_source(crate::settings::SWITCH_IDENTITY, true).is_none());
         assert_eq!(
             run_seed_source(crate::settings::SWITCH_IDENTITY, false),
-            crate::settings::seed_source(crate::settings::SWITCH_IDENTITY)
+            crate::settings::seed_source(crate::settings::SWITCH_IDENTITY, false)
         );
     }
 
@@ -1575,6 +1589,83 @@ mod tests {
             &std::fs::read(fake.layout()).unwrap(),
         );
         assert_eq!(saved.run_project("workstation", "old"), Some("alpha"));
+        fake.finish(organization);
+    }
+
+    #[test]
+    fn layout_refusal_preserves_original_and_blocks_seed_and_later_saves() {
+        for original in [
+            b"not json".as_slice(),
+            br#"{"version":99,"private_extension":"retain"}"#,
+        ] {
+            let fake = Fake::landing();
+            std::fs::write(fake.layout(), original).unwrap();
+            let before = std::fs::metadata(fake.layout())
+                .unwrap()
+                .modified()
+                .unwrap();
+            let pump = Pump::default();
+            let organization = fake.organization(&pump, false);
+            assert!(!organization.0.layout_writable);
+            assert!(
+                organization
+                    .view(&organization.0.hub.lock().unwrap())
+                    .layout_save_paused
+            );
+            assert!(organization
+                .seed_runs_with(|| panic!("blocked target never reads Qt"))
+                .is_none());
+            pump.set_collapsed("alpha", true);
+            organization.flush();
+            assert_eq!(std::fs::read(fake.layout()).unwrap(), original);
+            assert_eq!(
+                std::fs::metadata(fake.layout())
+                    .unwrap()
+                    .modified()
+                    .unwrap(),
+                before
+            );
+            fake.finish(organization);
+        }
+        let fake = Fake::landing();
+        std::fs::create_dir(fake.layout()).unwrap();
+        std::fs::write(fake.layout().join("unknown"), b"retained").unwrap();
+        let pump = Pump::default();
+        let organization = fake.organization(&pump, false);
+        pump.set_collapsed("alpha", true);
+        organization.flush();
+        assert_eq!(
+            std::fs::read(fake.layout().join("unknown")).unwrap(),
+            b"retained"
+        );
+        fake.finish(organization);
+    }
+
+    #[test]
+    fn layout_extensions_survive_an_ordinary_presentation_save() {
+        let fake = Fake::landing();
+        let original = json!({"version":1,"collapsed":["alpha"],"future":{"private":"retained"}});
+        std::fs::write(fake.layout(), serde_json::to_vec(&original).unwrap()).unwrap();
+        let pump = Pump::default();
+        let organization = fake.organization(&pump, false);
+        assert!(organization.0.layout_writable);
+        assert!(
+            !organization
+                .view(&organization.0.hub.lock().unwrap())
+                .layout_save_paused
+        );
+        pump.set_collapsed("beta", true);
+        organization.flush();
+        let saved: Value = serde_json::from_slice(&std::fs::read(fake.layout()).unwrap()).unwrap();
+        assert_eq!(saved["future"], original["future"]);
+        assert!(saved["collapsed"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("alpha")));
+        assert!(saved["collapsed"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("beta")));
         fake.finish(organization);
     }
 

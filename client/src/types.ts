@@ -13,6 +13,7 @@ export type ComputerId = string;
  */
 export interface ViewRow {
   name: string;
+  launch_id?: string | null;
   title?: string;
   agent?: string;
   status?: string;
@@ -27,6 +28,8 @@ export interface ViewRow {
   notification_revision?: number | null;
   /** `created`, in whole seconds (it keys a conversation-less attention mark). */
   created?: number;
+  /** Exact/fallback Qt row-density hashes with this computer's configured identity. */
+  compact_keys?: [string, string];
   /** What a local attention mark compares (Qt's `attentionFingerprint`). */
   attention_fingerprint?: string;
   /** The session needs the person's action (approval, input, error, recovery). */
@@ -79,6 +82,8 @@ export interface ViewRow {
   cwd_canonical?: string;
   /** The checkout's root, "" outside Git (the worktree picker's session counts). */
   git_root?: string;
+  /** Verified linked checkout name; absent for main or unknown checkouts. */
+  worktree?: string | null;
   terminal_supported?: boolean;
   terminal_reported?: boolean;
   terminal_attach_supported?: boolean;
@@ -93,6 +98,8 @@ export type ComputerStatus = "probing" | "unsupported" | "live" | "polled" | "re
 export interface ComputerOut { computer: ComputerId; status: ComputerStatus | string; attempt: number }
 export type ActivityKind = "events" | "replace" | "event" | "state" | "ended";
 export interface ActivityOut { computer: ComputerId; key: string; kind: ActivityKind | string; payload: unknown }
+/** The existing watch tasks topic; a list replaces the open project's board. */
+export interface TasksOut { computer: ComputerId; key: string; kind: string; payload: unknown }
 
 // The Sessions list's grouping by the shared project organization
 // (client/core `swarm/grouping.rs`). The Rust side keeps the organization;
@@ -125,6 +132,8 @@ export interface GroupingOut {
   conflicts: number;
   /** A one-time warning, such as saved project changes that could not be applied; absent when there is none. */
   notice?: string;
+  /** The saved layout is retained and layout changes cannot persist this startup. */
+  layout_save_paused?: boolean;
 }
 /** How a project edit ended (client/core `swarm::sync::EditOutcome`). */
 export type EditOutcome =
@@ -139,6 +148,7 @@ export interface Batch {
   computers: ComputerOut[];
   machines?: MachineOut[];
   activity: ActivityOut[];
+  tasks?: TasksOut[];
   /** Each row's project and rank, for the rows whose grouping changed. */
   groups?: GroupOut[];
   /** The headers and the edit state, when they changed. */
@@ -207,7 +217,7 @@ export const emptyBatch = (): Batch => ({ upserts: [], removes: [], replaces: []
 /** A batch with nothing to apply. A composer view or a draft key set is content: Rust sends each once. */
 export const isEmptyBatch = (b: Batch) =>
   !b.upserts.length && !b.removes.length && !b.replaces.length && !b.computers.length && !b.machines?.length && !b.activity.length
-  && !b.groups?.length && !b.grouping && !b.processes_view && !b.composer && !b.draft_keys && !b.composer_events?.length;
+  && !b.tasks?.length && !b.groups?.length && !b.grouping && !b.processes_view && !b.composer && !b.draft_keys && !b.composer_events?.length;
 
 /** One Activity event as `inspect` returns it; unknown fields are kept. */
 export interface ActivityEvent {
@@ -234,6 +244,7 @@ export interface ActivityEvent {
 export interface Target { computer: ComputerId; name: string; run_id: string; conversation_id: string }
 
 export type Action =
+  | { kind: "settings"; model: string; effort: string; expected_pending_id?: string; without_terminal: boolean }
   | { kind: "interrupt"; turn_started: number }
   | { kind: "mark_read"; reply_id: string | null; attention_signature: string | null }
   | { kind: "pause" }
@@ -249,13 +260,15 @@ export type Action =
   | { kind: "forget_archive"; archive_id: string }
   /** Computer-wide: the target's session name is empty and ignored. */
   | { kind: "pause_all"; count: number }
-  | { kind: "resume_all"; count: number };
+  | { kind: "resume_all"; count: number }
+  | { kind: "recovery"; job_id: string; action: "now" | "cancel" };
 
 export interface WorktreeCleanup { status: string; path: string; common_dir: string; reason?: string | null }
 
 export type Outcome =
   | { outcome: "done"; receipt: unknown; cleanup: WorktreeCleanup | null }
-  | { outcome: "failed"; detail: string };
+  | { outcome: "failed"; detail: string }
+  | { outcome: "uncertain"; detail: string };
 
 /** The inspect fields that enable header actions (client/core `details.rs`). */
 export interface Details {
@@ -329,6 +342,8 @@ export type Screen = "overview" | "projects" | "machines" | "accounts";
 export interface ProjectedWindow { id: string; label: string; used: number; minutes: number | null; resets_at: number | null }
 export interface Identity { email: string; name: string; plan: string; organization: string; account_id: string; auth_method: string }
 export interface Usage {
+  /** The account profile id, when the source reports one. */
+  id?: string;
   status: string;
   provider: string;
   label: string;
@@ -344,6 +359,12 @@ export interface Usage {
   refresh_error: boolean;
   offline: boolean;
 }
+export interface SessionUsageRef { host: ComputerId; name: string; run_id: string }
+export const emptyUsage = (provider = ""): Usage => ({
+  status: "loading", provider, label: "", auth_status: "", checked_at: null, seeded: false,
+  identity: { email: "", name: "", plan: "", organization: "", account_id: "", auth_method: "" },
+  windows: [], balances: [], credits: null, refreshing: false, refresh_error: false, offline: false,
+});
 export type MemberState = "ready" | "offline" | "not-installed" | "apikey" | "signed-out" | "keychain" | "desktop" | "unavailable" | "expired" | "checking" | "unknown";
 export interface OpenCodeInfo { providers: { label: string; connection: string; models: string }[]; truncated: boolean; stale_catalog_at: number | null; stopped: boolean }
 export interface Profile {
@@ -561,6 +582,9 @@ export interface LaunchAccounts {
 export interface TerminalTarget { computer: ComputerId; name: string; run_id: string; machine: string }
 export interface TerminalConnected { generation: number; status: string; reused: boolean }
 export interface TerminalStatus { supported: boolean; available: boolean; reason: string; idle: string; connecting: string; disconnected: string }
+/** The next raw output is history; parse it before accepting input. */
+export interface TerminalReplay { kind: "replay" }
+export type TerminalEvent = ArrayBuffer | TerminalFinished | TerminalReplay;
 export interface TerminalFinished { kind: "finished"; code: number; status: string }
 /** The core's `TerminalFacts`: a row's terminal fields. */
 export interface TerminalFacts {
@@ -655,7 +679,7 @@ export interface CardView { heading: string; progress: string; pending: string; 
  * grows with every change of the answers from Rust, each revision's included:
  * the fields take Rust's values again, and an edit names the epoch it is based on.
  */
-export interface QuestionView { card: string; revision: number; epoch: number; asked: string; asked_tip: string; terminal_label: string; view: CardView }
+export interface QuestionView { answering?: boolean; card: string; revision: number; epoch: number; asked: string; asked_tip: string; terminal_label: string; view: CardView }
 export type QuestionEdit = { kind: "option"; item: string; option: string; checked: boolean } | { kind: "other"; item: string; checked: boolean } | { kind: "text"; item: string; text: string };
 export interface ColdAnswer { title: string; text: string; proceed: string }
 export type QuestionReply = { kind: "sending" } | { kind: "busy" } | { kind: "cold"; token: number; prompt: ColdAnswer } | { kind: "notice"; text: string };

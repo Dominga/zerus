@@ -4,6 +4,7 @@ mod analytics;
 mod approval_log;
 mod cli;
 mod config;
+mod desktop;
 mod download;
 mod host;
 mod machines;

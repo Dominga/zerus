@@ -1,7 +1,7 @@
 import { For, Match, Show, Suspense, Switch, createEffect, createMemo, lazy, onCleanup, onMount } from "solid-js";
 import { Rail } from "./ui/components/Rail";
 import { MenuLayer, Toasts } from "./ui/components/Overlays";
-import { ActionDialogs, ActionNotices } from "./ui/sessions/ActionDialogs";
+import { ActionDialogs } from "./ui/sessions/ActionDialogs";
 import { newSessionFromShortcut, newSessionOpened } from "./ui/sessions/newsession-view";
 import { OrganizationDialogs } from "./ui/sessions/OrganizationDialogs";
 import { SessionList } from "./ui/sessions/SessionList";
@@ -17,13 +17,12 @@ import { catalog } from "./store/catalog";
 import { contentScale, page, selectedKey, setContentScale, setPage, toast } from "./store/ui";
 import { num, setSetting } from "./store/settings";
 import { installShortcutRouter, onCommand } from "./store/shortcuts";
-import { openGoTo, openShortcutHelp } from "./store/goTo";
+import { openGoTo, openShortcutHelp, goToOrigin, shortcutHelpOrigin } from "./store/goTo";
 import { rememberRecentSession } from "./ui/sessions/goTo";
-import { GoToDialog } from "./ui/sessions/GoToDialog";
-import { ShortcutHelpDialog } from "./ui/sessions/ShortcutHelpDialog";
 import { updateCommands, updates } from "./store/updates";
 import { openUpdates } from "./store/desk";
 import { ZerusLogo } from "./ui/components/ZerusLogo";
+import { SessionUsageStrip } from "./ui/components/SessionUsageStrip";
 import type { BridgeMode } from "./bridge";
 
 // The client shell: the rail, the pages and the status bar.
@@ -34,6 +33,8 @@ const SettingsScreen = lazy(() => import("./ui/screens/Settings").then((m) => ({
 // New session and its child dialogs load the first time it opens
 // (`newSessionOpened`), and stay mounted from then on.
 const NewSessionDialog = lazy(() => import("./ui/sessions/NewSessionDialog").then((m) => ({ default: m.NewSessionDialog })));
+const GoToDialog = lazy(() => import("./ui/sessions/GoToDialog").then((m) => ({ default: m.GoToDialog })));
+const ShortcutHelpDialog = lazy(() => import("./ui/sessions/ShortcutHelpDialog").then((m) => ({ default: m.ShortcutHelpDialog })));
 const PerfHost = lazy(() => import("./ui/PerfHost").then((m) => ({ default: m.PerfHost })));
 
 const STATE_TEXT: Record<string, string> = {
@@ -72,10 +73,11 @@ function StatusBar(props: { mode: () => BridgeMode | "starting" }) {
       <Show when={!updates().quiet && updates().restart_required}>
         <button type="button" class="btn ghost small status-restart" title="Zerus was updated on disk. Drafts are kept; sessions keep running."
           aria-label="Zerus was updated on disk. Drafts are kept; sessions keep running."
-          onClick={() => { void updateCommands.restart().catch((error) => toast("Updates", String(error))); }}>
+          onClick={() => { void updateCommands.restart().catch((error) => toast("Updates", String(error), "error", true)); }}>
           <ZerusLogo attention={false} motion="spin" size={14} />Restart to finish update
         </button>
       </Show>
+      <SessionUsageStrip />
     </footer>
   );
 }
@@ -137,11 +139,10 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
       <MenuLayer />
       <Toasts />
       <ActionDialogs />
-      <GoToDialog />
-      <ShortcutHelpDialog />
+      <Show when={goToOrigin()}><Suspense><GoToDialog /></Suspense></Show>
+      <Show when={shortcutHelpOrigin()}><Suspense><ShortcutHelpDialog /></Suspense></Show>
       <Show when={newSessionOpened()}><Suspense><NewSessionDialog /></Suspense></Show>
       <OrganizationDialogs />
-      <ActionNotices />
       <Suspense><PerfHost /></Suspense>
     </div>
   );

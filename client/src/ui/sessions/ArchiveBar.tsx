@@ -17,7 +17,7 @@ const [open, setOpen] = createSignal(false);
  */
 export const datePanelOpen = open;
 
-export function ArchiveBar() {
+export function ArchiveBar(props: { contentSearch?: boolean } = {}) {
   const [width, setWidth] = createSignal(0);
   const observe = (el: HTMLElement) => {
     const ro = new ResizeObserver(() => setWidth(el.clientWidth));
@@ -35,7 +35,7 @@ export function ArchiveBar() {
           <Icon name="refresh" size={16} />
         </button>
       </div>
-      <div class="archive-bar">
+      <Show when={!props.contentSearch}><div class="archive-bar">
         <span class="archive-status ell" title={status().hint} aria-description={status().hint}>{status().summary}</span>
         <Show when={status().newer.visible}>
           <button class="btn small archive-nav" title="Newer sessions" aria-label="Newer sessions" disabled={!status().newer.enabled} onClick={() => archive.newer()}>
@@ -48,7 +48,8 @@ export function ArchiveBar() {
           </button>
         </Show>
       </div>
-      <Show when={status().error}>
+      </Show>
+      <Show when={status().error && !props.contentSearch}>
         <div class="archive-error" title={status().errorHint}>{status().error}</div>
       </Show>
     </div>

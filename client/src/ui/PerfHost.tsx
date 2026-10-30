@@ -975,6 +975,14 @@ export function PerfHost() {
       const { updatesSmoke } = await import("../perf/updatesSmoke");
       void updatesSmoke(!!config().replay);
     }
+    if (new URLSearchParams(location.search).has("window-layer-smoke") && inTauri()) {
+      const { windowLayerSmoke } = await import("../perf/windowLayerSmoke");
+      void windowLayerSmoke(!!config().replay);
+    }
+    if (new URLSearchParams(location.search).has("content-search-smoke") && inTauri()) {
+      const { contentSearchSmoke } = await import("../perf/contentSearchSmoke");
+      void contentSearchSmoke(!!config().actions_smoke);
+    }
     if (config().mode === "auto") {
       setOpen(true);
       void autoRun(config());

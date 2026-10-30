@@ -49,6 +49,9 @@ vi.mock("../../bridge", () => ({
   localRetry: vi.fn(), localDelete: vi.fn(async () => {}), localInspect: vi.fn(async () => null),
   // The File reference dialog (SessionFileDialog) listens with Activity.
   onSessionFileChanged: vi.fn(async () => () => {}),
+  // The session side panel's Tasks tab reads task details through the bridge.
+  onExitFlush: vi.fn(async () => () => {}), acknowledgeExitFlush: vi.fn(async () => {}),
+  readTaskDetails: vi.fn(async () => null),
 }));
 
 import * as bridge from "../../bridge";

@@ -282,7 +282,7 @@ impl Fetcher {
     }
 
     /// The view's description of a copy the read stored.
-    fn described(&self, cached: CachedAttachment) -> Answer {
+    pub(crate) fn described(&self, cached: CachedAttachment) -> Answer {
         let path = attachments::cached_at(self.cache.root(), &cached.local_path)
             .ok_or_else(|| "Could not save the attachment.".to_owned())?;
         let relative = path
@@ -339,7 +339,7 @@ impl Fetcher {
 /// Opens or reveals a copy and says what happened. The path loses
 /// Windows's `\\?\` prefix first, which canonical paths carry and which
 /// neither a notice nor an opener should see.
-fn opened(
+pub(crate) fn opened(
     path: &Path,
     origin: Origin,
     opener: &Opener,

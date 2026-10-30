@@ -22,9 +22,11 @@ export function fixedShortcutRows(on: Platform = platform): ShortcutHelpRow[] {
   ];
 }
 
+const GROUPS: Record<string, string> = { "Go to": "Navigation", Sessions: "Sessions", "Session view": "Sessions", Messages: "Composer", "Content scale": "Composer" };
+
 export function shortcutHelpRows(on: Platform = platform): ShortcutHelpRow[] {
   return [
-    ...COMMANDS.map((command) => ({ group: command.group, title: command.title, chord: keys(command.id, on).map((key) => nativeText(key, on)).join(", ") })),
+    ...COMMANDS.map((command) => ({ group: GROUPS[command.group] ?? command.group, title: command.title, chord: keys(command.id, on).map((key) => nativeText(key, on)).join(", ") })),
     ...fixedShortcutRows(on),
   ];
 }

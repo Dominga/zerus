@@ -322,3 +322,84 @@ fn archived_activity_refusals_and_failures_use_qt_texts() {
     }
     assert_eq!(fake.calls().len(), before, "refused before any call");
 }
+
+fn search_reply() -> Value {
+    json!({"query":"needle","results":[{"name":"codex/example/search","run_id":"run-one",
+        "conversation_id":"conversation-one","message_id":"message-one","at":42,
+        "role":"event","snippet":"needle","event":{"type":"tool","detail":"needle public event"}}]})
+}
+
+#[test]
+fn content_search_probes_before_selecting_the_additive_indexed_argv() {
+    use std::sync::atomic::AtomicBool;
+    use zerus_client_core::content_search;
+    let reply = search_reply();
+    let old = Fake::new(json!({
+        "@studio --help":{"stdout":"hgs [@host] search --query"},
+        "@studio search --query needle --limit 100":{"stdout":reply.to_string()},
+    }));
+    let result = content_search::read(
+        &old.hgs,
+        &ComputerId::from("studio"),
+        "needle",
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(result.results[0].role, "event");
+    assert_eq!(old.calls().len(), 2);
+    assert_eq!(
+        old.calls()[1]["argv"],
+        json!(["@studio", "search", "--query", "needle", "--limit", "100"])
+    );
+    let mut indexed = reply.clone();
+    indexed["abi"] = json!("content-search-query-v1");
+    indexed["index_coverage"] = json!({"state":"indexing"});
+    indexed["next_cursor"] = Value::Null;
+    indexed["fallback"] = reply;
+    let new = Fake::new(json!({
+        "@studio --help":{"stdout":"hgs [@host] search --query\ncontent-search-query-v1"},
+        "@studio search --indexed --query needle --limit 100":{"stdout":indexed.to_string()},
+    }));
+    let result = content_search::read(
+        &new.hgs,
+        &ComputerId::from("studio"),
+        "needle",
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(
+        result.results.len(),
+        1,
+        "one exact public message across both channels"
+    );
+    assert!(result.truncated);
+    assert_eq!(
+        new.calls()[1]["argv"],
+        json!([
+            "@studio",
+            "search",
+            "--indexed",
+            "--query",
+            "needle",
+            "--limit",
+            "100"
+        ])
+    );
+}
+
+#[test]
+fn content_search_never_sends_an_unknown_verb_to_an_older_peer() {
+    use std::sync::atomic::AtomicBool;
+    use zerus_client_core::content_search;
+    let old = Fake::new(json!({"--help":{"stdout":"older CLI without search"}}));
+    assert!(matches!(
+        content_search::read(
+            &old.hgs,
+            &ComputerId::local(),
+            "needle",
+            &AtomicBool::new(false)
+        ),
+        Err(ReadError::Unsupported)
+    ));
+    assert_eq!(old.calls().len(), 1);
+}

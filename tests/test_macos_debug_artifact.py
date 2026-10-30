@@ -348,7 +348,7 @@ class WorkflowContracts(unittest.TestCase):
     def test_selected_and_full_suite_gate_requires_new_native_even_if_aggregate_is_faked_success(self):
         body=security.job(self.checks,'gate');code=compile(security.inline_python(body),'suite-results','exec')
         mac=('cli-macos-debug','cli-macos-core','cli-macos-native','cli-macos','connector-macos','mac-desktop')
-        always=('source','quick','relay','connector','android')
+        always=('source','quick','client-frontend','relay','connector','android')
         for linux,macos in itertools.product((False,True),repeat=2):
             results={name:{'result':'success'} for name in always}
             results.update({name:{'result':'success' if macos else 'skipped'} for name in mac})

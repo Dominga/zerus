@@ -17,15 +17,26 @@ const MAX_SESSIONS: usize = 500;
 const MAX_JOURNAL_ROWS: usize = 50_000;
 
 pub(super) fn dispatch(args: &[String]) -> Result<i32> {
+    if let Some(result) = search_index::dispatch(args) {
+        return result;
+    }
     let mut query = None;
     let mut limit = 80;
+    let mut indexed = false;
+    let mut cursor = None;
     let mut index = 0;
     while index < args.len() {
+        if args[index] == "--indexed" && !indexed {
+            indexed = true;
+            index += 1;
+            continue;
+        }
         let value = args
             .get(index + 1)
             .ok_or("usage: hgs search --query <text> [--limit 1..200]")?;
         match args[index].as_str() {
             "--query" if query.is_none() => query = Some(value.as_str()),
+            "--cursor" if cursor.is_none() => cursor = Some(value.as_str()),
             "--limit" => limit = value.parse::<usize>().map_err(|_| "invalid search limit")?,
             _ => return Err("usage: hgs search --query <text> [--limit 1..200]".into()),
         }
@@ -38,6 +49,18 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     if !(1..=200).contains(&limit) {
         return Err("search limit must be between 1 and 200".into());
     }
+    if indexed {
+        println!("{}", search_index::indexed(query, limit, cursor)?);
+    } else {
+        if cursor.is_some() {
+            return Err("search cursors require --indexed".into());
+        }
+        println!("{}", legacy(query, limit)?);
+    }
+    Ok(0)
+}
+
+pub(super) fn legacy(query: &str, limit: usize) -> Result<Value> {
     let mut bindings = records()?;
     let archives = archive::records()?;
     bindings.retain(|record| !archive::equivalent(record, &archives));
@@ -49,8 +72,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     }
     // Prefer recent sessions when the explicit scan budget is exhausted.
     bindings.sort_by(|a, b| number(b, "updated").total_cmp(&number(a, "updated")));
-    println!("{}", search(&root(), bindings, query, limit)?);
-    Ok(0)
+    search(&root(), bindings, query, limit)
 }
 
 fn number(value: &Value, key: &str) -> f64 {
@@ -375,6 +397,29 @@ fn search(directory: &Path, mut bindings: Vec<Value>, query: &str, limit: usize)
     )
 }
 
+/// Reuse the legacy excerpt and archive navigation shape for typed index data.
+pub(super) fn indexed_hit(pattern: Regex, hit: zerus_content_search::Hit) -> Option<Value> {
+    let record = serde_json::to_value(hit.target).ok()?;
+    let message = hit.message;
+    let role = match message.role {
+        zerus_content_search::Role::User => "user",
+        zerus_content_search::Role::Assistant => "assistant",
+        zerus_content_search::Role::Tool => "tool",
+        zerus_content_search::Role::Event => "event",
+    };
+    let mut formatter = Search {
+        pattern, results: Vec::new(), limit: 1, bytes_left: 0,
+        rows_left: 0, truncated: false, unavailable: BTreeSet::new(),
+    };
+    formatter.accept(
+        &record,
+        json!({"type":message.kind,"source":message.source,"message_id":message.id,
+            "seq":message.seq,"at":message.at,"detail":message.text}),
+        role,
+    );
+    formatter.results.pop()
+}
+
 fn equivalent_excerpt(left: &str, right: &str) -> bool {
     if left == right {
         return true;
@@ -383,7 +428,7 @@ fn equivalent_excerpt(left: &str, right: &str) -> bool {
         || (right.ends_with('…') && left.starts_with(right.trim_end_matches('…')))
 }
 
-fn journal_role(event: &Value) -> &'static str {
+pub(super) fn journal_role(event: &Value) -> &'static str {
     if string(event, "agent_id").is_empty() && !event["origin"].is_string() {
         match string(event, "type") {
             "UserPromptSubmit" | "UserPromptQueued" | "TurnStarted" | "QuestionAnswered" => {

@@ -4,7 +4,7 @@ import type { FitAddon } from "@xterm/addon-fit";
 import { Icon } from "../lib/icons";
 import { contentScale } from "../../store/ui";
 import { skin } from "../../skin/runtime";
-import { terminal } from "../../store/terminal";
+import { terminal, type Screen } from "../../store/terminal";
 
 // xterm.js 6 loads when Terminal first opens. Linux keeps the DOM renderer;
 // macOS and Windows add the WebGL addon and fall back to DOM when its
@@ -71,14 +71,15 @@ export function TerminalTab() {
     if (gone) { term.dispose(); return; }
     const measure = () => { if (host.clientWidth > 0 && host.clientHeight > 0) fit.fit(); };
     measure();
-    term.onData((data) => terminal.input(encoder.encode(data)));
-    term.onBinary((data) => terminal.input(Uint8Array.from(data, (c) => c.charCodeAt(0) & 255)));
+    const screen: Screen = { write: (bytes, done) => term.write(bytes, done), paste: (text) => term.paste(text), reset: () => term.reset(), size: () => ({ cols: term.cols, rows: term.rows }) };
+    term.onData((data) => terminal.input(encoder.encode(data), screen));
+    term.onBinary((data) => terminal.input(Uint8Array.from(data, (c) => c.charCodeAt(0) & 255), screen));
     term.onResize(({ cols, rows }) => terminal.resized(cols, rows));
     const observer = new ResizeObserver(measure);
     observer.observe(host);
     teardown = () => { terminal.hide(); observer.disconnect(); term.dispose(); };
     setLive({ term, measure });
-    terminal.show({ write: (bytes, done) => term.write(bytes, done), paste: (text) => term.paste(text), reset: () => term.reset(), size: () => ({ cols: term.cols, rows: term.rows }) });
+    terminal.show(screen);
     term.focus();
   });
 

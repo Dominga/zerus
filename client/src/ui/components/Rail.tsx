@@ -1,9 +1,10 @@
-import { For, Show, createSignal } from "solid-js";
+import { For, Show } from "solid-js";
 import { Icon } from "../lib/icons";
 import { ZerusLogo } from "./ZerusLogo";
-import { page, setPage, counts, setMenu, toast, logoMotion, type Page } from "../../store/ui";
+import { page, setPage, counts, setMenu, logoMotion, type Page } from "../../store/ui";
 import { markAllEntry } from "../sessions/mark-entries";
 import { expandAllCollapsedEntry } from "../sessions/background-menu";
+import { windowLayer, setWindowLayer } from "../../store/windowLayer";
 import { skin } from "../../skin/runtime";
 import { newSessionFromRail } from "../sessions/newsession-view";
 
@@ -19,7 +20,7 @@ const ITEMS: { id: Page; icon: string; label: string; tip: string }[] = [
   { id: "machines", icon: "machines", label: "Machines", tip: "Machines and connection status" },
   { id: "accounts", icon: "accounts", label: "Accounts", tip: "Agent accounts" },
 ];
-const [pinned, setPinned] = createSignal(false);
+
 
 /** "0.1.0" -> "0.1 Dev": the rail shows major.minor and the channel. */
 const short = __APP_VERSION__.split(".").slice(0, 2).join(".");
@@ -39,6 +40,7 @@ export function Rail() {
       <For each={ITEMS}>
         {(item) => (
           <button class="rail-btn" classList={{ on: page() === item.id }} aria-current={page() === item.id ? "page" : undefined}
+            aria-label={item.label}
             data-tip={labeled() ? undefined : item.tip} data-tip-pos="right" onClick={() => setPage(item.id)}
             onContextMenu={(e) => { if (item.id !== "sessions") return; e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY, items: [markAllEntry(), expandAllCollapsedEntry()] }); }}>
             <Icon name={item.icon} size={24} />
@@ -50,9 +52,10 @@ export function Rail() {
         )}
       </For>
       <div class="grow" />
-      <button class="rail-btn pin" classList={{ pinned: pinned() }} data-tip={pinned() ? "Unpin Zerus" : "Keep Zerus above other windows"} data-tip-pos="right"
-        onClick={() => { setPinned(!pinned()); toast(pinned() ? "Pinned" : "Unpinned", "Keeping the window above others arrives with the platform integrations."); }}>
-        <Icon name={pinned() ? "pinned" : "unpinned"} size={24} />
+      <button class="rail-btn pin" classList={{ pinned: windowLayer().on }} aria-pressed={windowLayer().on} aria-label="Keep Zerus above other windows" disabled={!windowLayer().supported}
+        data-tip={!windowLayer().supported ? windowLayer().hint : windowLayer().on ? "Unpin Zerus" : "Keep Zerus above other windows"} data-tip-pos="right"
+        onClick={() => void setWindowLayer(!windowLayer().on)}>
+        <Icon name={windowLayer().on ? "pinned" : "unpinned"} size={24} />
       </button>
       <button class="rail-btn" classList={{ on: page() === "settings" }} data-tip={labeled() ? undefined : "Settings"} data-tip-pos="right" onClick={() => setPage("settings")}>
         <Icon name="settings" size={24} />

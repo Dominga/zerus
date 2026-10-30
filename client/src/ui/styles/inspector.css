@@ -1,0 +1,78 @@
+@layer components {
+  .inspector { --insp-motion: calc((var(--z-motion-base) + var(--z-motion-slow)) / 2);
+    position: relative; width: 400px; min-width: 240px; flex: 0 1 auto; display: flex; flex-direction: column; margin: 0 8px 8px 0;
+    border: 1px solid var(--z-color-divider); border-radius: var(--z-radius-dialog); background: var(--z-color-pane); overflow: hidden;
+    animation: insp-in var(--insp-motion) var(--ease) both; }
+  .inspector.leaving { position: absolute; z-index: 2; top: 0; right: 0; bottom: 8px; pointer-events: none; animation: insp-out var(--insp-motion) var(--ease) both; }
+  :root[data-skin] .app:has(.layout-right) .inspector { margin-left: 0; }
+  /* Width handle: the panel's left 8 px; only the centred grip shows (shared
+     rule with the session list's handle in sessions.css). */
+  .insp-resize { position: absolute; z-index: 3; top: 0; bottom: 0; left: 0; width: 8px; cursor: col-resize; touch-action: none; outline: none; }
+  .insp-resize > i { left: 1px; }
+  .insp-resize:hover > i, .insp-resize:focus-visible > i, .insp-resize.dragging > i { opacity: 1; }
+  .insp-resize.dragging > i { transition: none; }
+  .inspector.leaving .insp-resize { display: none; }
+  .insp-tabs { padding: 0 6px 0 8px; border-bottom: 1px solid var(--z-color-divider); align-items: center; height: 34px; }
+  .insp-tabs .tab { font-size: var(--fs-xs); padding: 0 7px; }
+  .insp-scroll { flex: 1; min-height: 0; overflow-y: auto; }
+  .insp-scroll.tasks { overflow: hidden; display: flex; flex-direction: column; }
+  .insp-body { padding: 10px; display: flex; flex-direction: column; gap: 8px; font-size: calc(var(--fs-base) * .92); }
+  .insp-h { display: flex; align-items: center; gap: 8px; min-height: 26px; padding: 0 4px 0 2px; font-size: var(--fs-md); }
+  .insp-body > .hint { padding: 0 2px; margin-top: -4px; }
+
+  .icard { flex: none; display: flex; flex-direction: column; border: 1px solid var(--z-color-card-border); border-radius: var(--z-radius-dialog); background: var(--z-color-card); animation: rise var(--z-motion-slow) var(--ease) both; }
+  .icard-head { display: flex; align-items: center; gap: 6px; min-height: 34px; padding-right: 12px; }
+  .icard-toggle { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; min-height: 34px; padding: 6px 8px 6px 12px; border-radius: var(--z-radius-dialog); color: var(--z-color-text); text-align: left; transition: background var(--z-motion-fast); }
+  .icard-toggle:hover { background: var(--z-color-hover); }
+  .icard-title { min-width: 0; font-size: var(--fs-md); font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .icard-chev { flex: none; color: var(--z-color-muted); transition: rotate var(--z-motion-base) var(--ease); }
+  .icard.closed .icard-chev { rotate: -90deg; }
+  .icard-aside { flex: none; max-width: 60%; overflow: hidden; display: inline-flex; align-items: center; gap: 6px; min-width: 0; font-size: var(--fs-xs); white-space: nowrap; }
+  .icard-body { display: flex; flex-direction: column; padding: 0 12px 10px; animation: fadeIn var(--z-motion-base) both; }
+  .icard-body > .hint { margin-top: 4px; }
+  .icard-text { margin: 2px 0 4px; line-height: 1.45; color: var(--z-color-text); }
+
+  .irow { display: flex; align-items: center; gap: 10px; min-width: 0; min-height: 30px; color: var(--z-color-text-2); text-align: left; }
+  .irow-ico { flex: none; width: 16px; height: 16px; display: grid; place-items: center; color: var(--z-color-muted); }
+  .irow-ico .state-dot { margin: 0; }
+  .irow-val { flex: 1; min-width: 0; }
+  .irow-val.mono { font-size: .94em; }
+  .irow-label { flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--z-color-dim); }
+  .irow .icon-btn.small { flex: none; margin-right: -4px; }
+  .irow.done .irow-ico { color: var(--z-color-accent); }
+  .irow.doing .irow-ico { color: var(--z-color-warn); }
+  .irow.agent.working .irow-label { color: var(--z-color-status-working); }
+  .irow.agent.attention .irow-label { color: var(--z-color-status-attention); }
+  .selectable { user-select: text; }
+  button.irow { width: 100%; border-radius: var(--z-radius-md); margin: 0 -6px; padding: 0 6px; width: calc(100% + 12px); transition: background var(--z-motion-fast); }
+  button.irow:hover { background: var(--z-color-hover); }
+  .icard.wt.on { border-color: var(--z-color-card-selected-border); background: var(--z-color-card-selected); }
+  .icard.wt.gone .icard-title { color: var(--z-color-muted); }
+  .wt-branch { font-weight: 400; color: var(--z-color-text-2); }
+
+  .state-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--z-color-status-ready); flex: none; margin-right: 6px; }
+  .state-dot.working { background: var(--z-color-status-working); animation: pulse var(--z-motion-pulse) ease-in-out infinite; }
+  .state-dot.attention { background: var(--z-color-status-attention); }
+  .state-dot.ready { background: var(--z-color-accent-muted); }
+  .link { color: var(--z-color-accent); text-align: left; }
+  .link:hover { text-decoration: underline; }
+  .link:disabled { color: var(--z-color-muted); text-decoration: none; cursor: default; }
+  .kv { display: grid; grid-template-columns: 130px 1fr; gap: 8px; padding: 3px 0; font-size: var(--fs-sm); border-bottom: 1px solid color-mix(in srgb, var(--z-color-divider) 60%, transparent); }
+  .kv > span:first-child { color: var(--z-color-label); }
+  .kv > span:last-child { min-width: 0; overflow-wrap: anywhere; }
+  .usage { width: 100%; border-collapse: collapse; font-size: var(--fs-xs); }
+  .usage td { height: 26px; padding: 0; border-bottom: 1px solid color-mix(in srgb, var(--z-color-divider) 60%, transparent); color: var(--z-color-text-2); }
+  .usage tr:last-child td { border-bottom: 0; }
+  .usage td:last-child { text-align: right; color: var(--z-color-text); }
+  .insp-foot { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 2px 2px 0; }
+
+  .inspector { flex-shrink: 0; }
+  .inspector.floating { position: absolute; z-index: 12; top: 0; right: 0; bottom: 0; box-shadow: var(--z-shadow-popover); }
+  .insp-tabs { flex: none; min-width: 0; overflow-x: auto; }
+  .insp-tabs .tab { flex: none; white-space: nowrap; }
+  .insp-resize > i { position: absolute; top: 35%; bottom: 35%; width: 3px; border-radius: 2px; background: var(--z-color-accent); opacity: 0; }
+  .inspector .usage { user-select: text; }
+  .work-main { min-width: min(360px, 100%); }
+}
+@keyframes insp-in { from { opacity: 0; translate: 24px 0; } }
+@media (prefers-reduced-motion: reduce) { .inspector, .icard, .icard-body { animation: none !important; } .icard-chev { transition: none; } }

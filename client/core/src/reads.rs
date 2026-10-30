@@ -54,6 +54,9 @@ pub enum Read {
     Accounts,
     /// `hgs [@host] account inspect ID --refresh`: one account's usage.
     AccountUsage { id: String },
+    /// `hgs [@host] account inspect --session NAME --refresh`: the usage of
+    /// the account a session is bound to.
+    SessionAccountUsage { name: String },
     /// `hgs [@host] recovery get`.
     Recovery,
     /// `hgs --version`: the version as a JSON string.
@@ -119,6 +122,7 @@ impl Read {
             Self::Projects
                 | Self::Accounts
                 | Self::AccountUsage { .. }
+                | Self::SessionAccountUsage { .. }
                 | Self::Recovery
                 | Self::Analytics { .. }
                 | Self::ProcessOutput { .. }
@@ -285,6 +289,19 @@ pub fn invocation(computer: &ComputerId, read: &Read) -> Result<Invocation, Read
             }
             (
                 arguments(computer, &["account", "inspect", id, "--refresh"]),
+                None,
+                timeout(25, 25, computer),
+            )
+        }
+        Read::SessionAccountUsage { name } => {
+            if !valid_id(name) {
+                return Err(bad("not a session name"));
+            }
+            (
+                arguments(
+                    computer,
+                    &["account", "inspect", "--session", name, "--refresh"],
+                ),
                 None,
                 timeout(25, 25, computer),
             )
@@ -690,7 +707,11 @@ pub fn archive_page_cancellable(
     if let Some(error) = archive_failure(hgs, &exit) {
         return Err(error);
     }
-    Ok(page(&decode(&request, exit)?))
+    let mut page = page(&decode(&request, exit)?);
+    for row in &mut page.rows {
+        row.compact_keys = crate::row_preferences::keys(&computer.0, row);
+    }
+    Ok(page)
 }
 
 /// Standard error an archive page failure shows, at most (Qt's `left(4000)`).
@@ -1209,6 +1230,21 @@ mod tests {
                 },
                 peer(),
                 vec!["@studio", "account", "inspect", "claude-1", "--refresh"],
+                25,
+            ),
+            (
+                Read::SessionAccountUsage {
+                    name: "claude/sample-project/review".into(),
+                },
+                peer(),
+                vec![
+                    "@studio",
+                    "account",
+                    "inspect",
+                    "--session",
+                    "claude/sample-project/review",
+                    "--refresh",
+                ],
                 25,
             ),
             (

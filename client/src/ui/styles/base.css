@@ -224,12 +224,13 @@
   [data-tip-pos="left"]:hover::after { left: auto; right: calc(100% + 8px); top: 50%; translate: 0 -50%; }
 
   /* Toast */
-  .toasts { position: fixed; right: 16px; bottom: 40px; z-index: 70; display: flex; flex-direction: column; gap: 8px; }
+  /* Notices never block a control: clicks pass through, except a sticky notice's Dismiss. */
+  .toasts { position: fixed; right: 16px; bottom: 40px; z-index: 70; display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
   .toast { min-width: 260px; max-width: 380px; padding: 10px 12px; border-radius: var(--z-radius-lg); background: var(--z-color-raised); border: 1px solid var(--z-color-border); box-shadow: var(--z-shadow-popover); font-size: var(--fs-sm); animation: slideL var(--z-motion-base) var(--ease) both; }
   .toast b { display: block; margin-bottom: 2px; }
   .toast.error { border-color: color-mix(in srgb, var(--z-color-danger) 45%, transparent); }
   .toast.warn { border-color: var(--z-color-border); }
-  .toast .dismiss { float: right; margin: -4px -6px 0 8px; }
+  .toast .dismiss { float: right; margin: -4px -6px 0 8px; pointer-events: auto; }
   .toast .note { white-space: pre-line; }
   .dlg-input { width: 100%; box-sizing: border-box; padding: 6px 8px; border: 1px solid var(--z-color-border); border-radius: var(--z-radius-sm); background: var(--z-color-pane); }
   .dlg-error { margin-top: 6px; color: var(--z-color-danger); font-size: var(--fs-sm); }

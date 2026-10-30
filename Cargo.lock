@@ -769,6 +769,10 @@ dependencies = [
  "unicode-width",
  "uuid",
  "windows-sys",
+ "zerus-content-search",
+ "zerus-desktop-catalog",
+ "zerus-desktop-ledger",
+ "zerus-desktop-migration",
  "zerus-replica",
  "zerus-watch-protocol",
 ]
@@ -2286,6 +2290,61 @@ name = "zeroize"
 version = "1.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
+
+[[package]]
+name = "zerus-content-search"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "regex",
+ "regex-syntax",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "uuid",
+]
+
+[[package]]
+name = "zerus-desktop-catalog"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rusqlite",
+ "serde_json",
+ "zerus-watch-protocol",
+]
+
+[[package]]
+name = "zerus-desktop-ledger"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "uuid",
+ "zerus-desktop-read-policy",
+]
+
+[[package]]
+name = "zerus-desktop-migration"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "zerus-desktop-read-policy"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "zerus-replica"

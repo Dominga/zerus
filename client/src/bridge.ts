@@ -1,6 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type Batch, type ComputerId, type Details, type EditOutcome, type Outcome, type ReadMark, type Target, type TerminalConnected, type TerminalFacts, type TerminalFinished, type TerminalStatus, type TerminalTarget, type ArchivePage, type ArchivedActivity, type ProcessTarget, type Answer, type ComposerTab, type ComposerView, type Inspect, type SendReply, type SessionRef, type AttachmentRef, type Fetched, type ConflictsPage, type DraftSource, type SavedDraftDetail, type SavedDraftsPage, type QuestionEdit, type QuestionReply, type ClearControl } from "./types";
+import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type Batch, type ComputerId, type Details, type EditOutcome, type Outcome, type ReadMark, type Target, type TerminalConnected, type TerminalFacts, type TerminalEvent, type TerminalStatus, type TerminalTarget, type ArchivePage, type ArchivedActivity, type ProcessTarget, type Answer, type ComposerTab, type ComposerView, type Inspect, type SendReply, type SessionRef, type AttachmentRef, type Fetched, type ConflictsPage, type DraftSource, type SavedDraftDetail, type SavedDraftsPage, type QuestionEdit, type QuestionReply, type ClearControl, emptyUsage, type TerminalFinished, type SessionUsageRef, type Usage } from "./types";
 import type { CreatedWorktree, CreationAction, CreationAdmission, CreationCard, CreationEvent, FolderOut, LaunchAccounts, LaunchChoices, LaunchPlan, LaunchStart, MachineMeta, NewSessionContext, NewSessionFormInput, NewSessionFormView, PathStyle, RepositoryFields } from "./types";
 import type { ActivityPort, FollowRequest } from "./store/activity";
 import { documentVisibility, type PageVisibility } from "./store/visibility";
@@ -22,6 +22,21 @@ export interface Source extends ActivityPort {
 let source: Source | undefined;
 
 export const inTauri = () => typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+export async function followTasks(project: string | null): Promise<void> {
+  if (!inTauri()) { if (project) throw new Error("Tasks need a live hgs event stream."); return; }
+  await invoke("tasks_follow", { project });
+}
+
+export const taskEditorOpen = (target: import("./store/taskEditor").TaskEditorTarget) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_open", { ...target });
+export const taskEditorEdit = (input: Pick<import("./store/taskEditor").TaskEditorView, "handle" | "rev" | "text" | "position" | "anchor">) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_edit", { input });
+export const taskEditorPick = (handle: number, start: number, end: number) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_pick", { handle, start, end });
+export const taskEditorRemove = (handle: number, index: number) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_files", { handle, change: { kind: "remove", index } });
+export const taskEditorSubmit = (handle: number, rev: number, recover: boolean) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_submit", { handle, rev, recover });
+export const taskBoardAction = (project: string, task: string, expectedStage: string, action: import("./store/taskBoard").BoardAction) => desktop<void>("task_board_action", { project, task, expectedStage, action });
+export const assignTask = (project: string, task: string, target: { computer: string; name: string; run_id: string; conversation_id: string } | null, catalogKey: string | null, sessionId: string | null) => desktop<void>("task_assign", { project, task, target, catalogKey, sessionId });
+export const readTaskDetails = (project: string, task: string, before: string | null) => desktop<unknown>("task_details", { project, task, before });
+export const openTaskAttachment = (path: string) => desktop<string | null>("task_attachment_open", { path });
 
 /** `next_batch` answers with raw JSON bytes (`ipc::Response`), so large batches skip script evaluation. */
 function decodeBatch(reply: unknown): Batch {
@@ -183,6 +198,12 @@ export async function setNotifications(target: Target, muted: boolean, expectedR
 export async function inspectSession(target: Target, archiveId: string | null): Promise<Details | null> {
   if (!inTauri()) return null;
   return (await invoke<Details | null>("inspect_session", { target, archiveId })) ?? null;
+}
+
+/** Child identity from its own inspection, read once when it opens. */
+export async function inspectSubagentIdentity(target: Target, archiveId: string | null, agentId: string): Promise<{ agent_id: string; conversation_id: string } | null> {
+  if (!inTauri()) return null;
+  return (await invoke<{ agent_id: string; conversation_id: string } | null>("inspect_subagent_identity", { target, archiveId, agentId })) ?? null;
 }
 
 /** Read marks whose delivery has not been confirmed yet; undefined outside the app, which keeps no list. */
@@ -365,6 +386,27 @@ export async function screenVisible(screen: Screen, visible: boolean): Promise<v
   await invoke("screen_visible", { screen, visible }).catch((error) => console.warn("Zerus Next: screen_visible failed", error));
 }
 
+/** The selected session's account usage; null stops later reads. */
+export async function sessionUsage(target: SessionUsageRef | null, force = false): Promise<Usage> {
+  if (!inTauri()) return emptyUsage();
+  return invoke<Usage>("session_usage", { target, force });
+}
+
+/** Calls `listener` when the selected session's usage changes; returns the stop. */
+export function onSessionUsage(listener: () => void): () => void {
+  if (!inTauri()) return () => {};
+  let stop: (() => void) | undefined;
+  let stopped = false;
+  void listen<void>("session-usage-changed", listener).then((unlisten) => {
+    if (stopped) unlisten();
+    else stop = unlisten;
+  });
+  return () => {
+    stopped = true;
+    stop?.();
+  };
+}
+
 /** The Accounts and Overview account data; `force` is Refresh. */
 export async function accountsView(force = false): Promise<AccountsView> {
   if (!inTauri()) return emptyAccounts([DESKTOP_ONLY]);
@@ -502,9 +544,9 @@ export function onLaunchAccountsChanged(listener: (computer: ComputerId) => void
 
 const DESKTOP_TERMINAL = "Terminal needs the desktop app.";
 
-export async function terminalConnect(view: string, target: TerminalTarget, cols: number, rows: number, onEvent: (m: ArrayBuffer | TerminalFinished) => void): Promise<TerminalConnected> {
+export async function terminalConnect(view: string, target: TerminalTarget, cols: number, rows: number, onEvent: (m: TerminalEvent) => void): Promise<TerminalConnected> {
   if (!inTauri()) throw DESKTOP_TERMINAL;
-  const channel = new Channel<ArrayBuffer | TerminalFinished>();
+  const channel = new Channel<TerminalEvent>();
   channel.onmessage = onEvent;
   return invoke<TerminalConnected>("terminal_connect", { view, target, cols, rows, on_event: channel });
 }
@@ -746,7 +788,7 @@ export const sessionFileCheck = (id: number) => desktop<SessionFileView>("sessio
 export const sessionFileDownload = (id: number, open: boolean) => desktop<SessionFileView>("session_file_download", { id, open });
 export const sessionFileSave = (id: number) => desktop<SessionFileView>("session_file_save", { id });
 export const sessionFileExternal = (url: string) => desktop<void>("session_file_external", { url });
-export const sessionFileAct = (id: number, action: "open_file" | "open_folder" | "open_copy" | "show_file") =>
+export const sessionFileAct = (id: number, action: "open_file" | "open_folder" | "open_copy" | "show_file" | "open_ssh") =>
   desktop<SessionFileView>("session_file_act", { id, action });
 export const sessionFileClose = (id: number) => desktop<void>("session_file_close", { id });
 export const onSessionFileChanged = (listener: (view: SessionFileView) => void) => onEvent<SessionFileView>("session-file-changed", listener);

@@ -700,7 +700,9 @@ pub fn start(app: &AppHandle) -> Updates {
         Arc::new(move |notice| {
             #[cfg(target_os = "macos")]
             crate::platform::macos_notify::deliver(&app, Vec::new(), vec![notice]);
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(target_os = "linux")]
+            crate::platform::linux_notify::deliver(&app, Vec::new(), vec![notice]);
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
             let _ = (&app, notice);
         })
     };

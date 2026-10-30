@@ -77,6 +77,18 @@ pub struct AccountsState {
     pub(crate) warmed: BTreeSet<ComputerId>,
 }
 
+impl AccountsState {
+    /// Claims one of the two shared usage-read slots, including a selected
+    /// session's inspect. The matching completion is filed through the same hub.
+    pub fn claim_usage_slot(&mut self) -> bool {
+        if self.running >= 2 {
+            return false;
+        }
+        self.running += 1;
+        true
+    }
+}
+
 /// A profile's state on its machine, as the mockup's machine tags show it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]

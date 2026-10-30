@@ -134,6 +134,7 @@ export function summaryText(u: Usage) {
   if (u.status === "configured") return u.provider === "opencode" ? "Configured" : "API key";
   if (u.status === "signed_out") return "Sign in required";
   if (u.status === "expired") return "Sign-in expired";
+  if (u.status === "unavailable" || u.refresh_error || u.offline) return "limits n/a";
   return "Unavailable";
 }
 
@@ -193,4 +194,62 @@ export function accountTooltip(u: Usage, now: number) {
   if (!u.windows.length && !u.balances.length) lines.push(stateText(u));
   lines.push("Updates every 5 minutes. Open account details.");
   return lines.join("\n");
+}
+
+/** AccountUsage::limitRecoveryNotice: a fresh below-limit snapshot may explain
+ * an early reset, but never acknowledges the failed native turn. */
+export function limitRecoveryNotice(u: Usage, failureAt: number, now: number) {
+  const checked = u.checked_at ?? 0;
+  if (failureAt <= 0 || u.status !== "ok" || u.offline || u.refresh_error || checked <= failureAt || checked > now + 5 || now - checked > 300) return "";
+  let session = false, week = false;
+  for (const p of u.windows) {
+    const w = fromProjected(p, now);
+    if (!Number.isFinite(w.used) || w.used < 0 || w.used >= 100 || p.resets_at === null || p.resets_at <= now) return "";
+    session ||= p.minutes === 300;
+    week ||= p.minutes === 10080;
+  }
+  return session && week
+    ? "Latest account usage is below the limit. Answer any open usage-limit choice in Activity or Terminal, then send a message to continue."
+    : "";
+}
+
+/** AccountUsage::exhausted, including the cached/offline explanation. */
+export function exhausted(u: Usage, now: number) {
+  const lines: string[] = [];
+  for (const p of u.windows) {
+    if (p.used < 100) continue;
+    const w = fromProjected(p, now);
+    lines.push(!current(w) ? `${period(w)} limit window ended; refresh usage`
+      : p.resets_at !== null ? `${period(w)} limit reached. Resets in ${remaining(w.resetsIn)}`
+      : `${period(w)} limit reached. Reset time is unavailable`);
+  }
+  const text = lines.join("\n");
+  return text && (u.offline || u.refresh_error) ? `Last reported usage: ${text}. Refresh to check current limits.` : text;
+}
+
+export interface ExhaustedSummary { label: string; shortLabel: string; remaining: string }
+
+/** The Usage limit chip. Its reset is a separate value, never a dot-separated suffix. */
+export function exhaustedSummary(u: Usage, now: number): ExhaustedSummary | undefined {
+  let nearest: number | undefined, reached = false, ended = false;
+  for (const p of u.windows) {
+    if (p.used < 100) continue;
+    const w = fromProjected(p, now);
+    if (!current(w)) { ended = true; continue; }
+    reached = true;
+    if (p.resets_at !== null && (nearest === undefined || p.resets_at < nearest)) nearest = p.resets_at;
+  }
+  if (reached) return { label: "Limit reached", shortLabel: "Limit", remaining: nearest === undefined ? "" : remaining((nearest - now) / 60) };
+  return ended ? { label: "Refresh usage", shortLabel: "Limit", remaining: "" } : undefined;
+}
+
+/** The mockup's usage chip shows the highest current percentage from 50%. */
+export function usageChipPercent(u: Usage, now: number): number | undefined {
+  let highest: number | undefined;
+  for (const p of u.windows) {
+    const w = fromProjected(p, now);
+    if (!current(w) || !Number.isFinite(w.used) || w.used < 50) continue;
+    highest = Math.max(highest ?? 0, w.used);
+  }
+  return highest === undefined ? undefined : Math.round(highest);
 }

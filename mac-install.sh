@@ -51,14 +51,20 @@ ssh -o BatchMode=yes "$host" 'mkdir -p ~/.local/bin ~/.local/src/hgs/.rust-build
 # Replace these entries rather than unpacking over them: a file deleted or moved
 # here (src/platform.rs became src/platform/mod.rs) would otherwise stay on the Mac
 # and break its build. target/ is kept for incremental builds.
-# The mobile connector, the relay and crypto libraries it links and the replica crate are
-# named file by file, so no Linux target/ of theirs travels either.
+# The mobile connector, the relay and crypto libraries it links, the replica crate and
+# the desktop crates hgs takes by path are named file by file, so no Linux target/ of
+# theirs travels either.
 sources=(Cargo.toml Cargo.lock build.rs .cargo src scripts install.sh hgs hgs_state.py tests README.md LICENSE THIRD_PARTY_NOTICES.md docs mac-install.sh tmux.conf .gitignore
   services/mobile/connector/Cargo.toml services/mobile/connector/Cargo.lock services/mobile/connector/.cargo
   services/mobile/connector/src services/mobile/relay/Cargo.toml services/mobile/relay/src
   services/mobile/crypto/Cargo.toml services/mobile/crypto/src
   crates/replica/Cargo.toml crates/replica/Cargo.lock crates/replica/.cargo crates/replica/src
-  crates/watch-protocol/Cargo.toml crates/watch-protocol/Cargo.lock crates/watch-protocol/.cargo crates/watch-protocol/src)
+  crates/watch-protocol/Cargo.toml crates/watch-protocol/Cargo.lock crates/watch-protocol/.cargo crates/watch-protocol/src
+  crates/content-search/Cargo.toml crates/content-search/src
+  crates/desktop-catalog/Cargo.toml crates/desktop-catalog/src
+  crates/desktop-ledger/Cargo.toml crates/desktop-ledger/src
+  crates/desktop-migration/Cargo.toml crates/desktop-migration/src
+  crates/desktop-read-policy/Cargo.toml crates/desktop-read-policy/src)
 tar czf - -C "$here" "${sources[@]}" \
   | ssh -o BatchMode=yes "$host" "cd ~/.local/src/hgs/.rust-build && rm -rf ${sources[*]} && tar xzf -"
 # install.sh builds the mobile connector only on request (HGS_MOBILE_CONNECTOR=1)
@@ -128,14 +134,17 @@ REMOTE
 # DEV_VERSION sits beside tray/: its CMake reads the Dev base version from there.
 # The Tauri client's sources travel too, so tray/install.sh can build it
 # (HGS_MAC_GUI=client, or a Mac whose installed Zerus is already the client), with
-# VERSION and crates/watch-protocol, which client/core and client/src-tauri take by
-# path. Source folders are replaced; their build caches stay. A numbered Dev build
-# needs a clean Git checkout on the Mac instead (docs/macos-distribution.md).
+# VERSION, crates/watch-protocol and the desktop read-policy and migration crates,
+# which client/core and client/src-tauri take by path. Source folders are replaced;
+# their build caches stay. A numbered Dev build needs a clean Git checkout on the
+# Mac instead (docs/macos-distribution.md).
 tar czf - -C "$here" --exclude='tray/build' --exclude='tray/.cache' \
   --exclude='client/node_modules' --exclude='client/dist' --exclude='client/*/target' \
   --exclude='client/src-tauri/gen' \
-  tray client crates/watch-protocol/Cargo.toml crates/watch-protocol/src DEV_VERSION VERSION \
-  | ssh -o BatchMode=yes "$host" 'mkdir -p ~/.local/src/hgs && cd ~/.local/src/hgs && rm -rf client/src client/core/src client/media/src client/src-tauri/src client/src-tauri/capabilities crates/watch-protocol/src && tar xzf -'
+  tray client crates/watch-protocol/Cargo.toml crates/watch-protocol/src \
+  crates/desktop-read-policy/Cargo.toml crates/desktop-read-policy/src \
+  crates/desktop-migration/Cargo.toml crates/desktop-migration/src DEV_VERSION VERSION \
+  | ssh -o BatchMode=yes "$host" 'mkdir -p ~/.local/src/hgs && cd ~/.local/src/hgs && rm -rf client/src client/core/src client/media/src client/src-tauri/src client/src-tauri/capabilities crates/watch-protocol/src crates/desktop-read-policy/src crates/desktop-migration/src && tar xzf -'
 # PATH неинтерактивного ssh на маке — без Homebrew; cmake/brew tray/install.sh ищет сам
 # (find_tool в его маковской ветке). Signing uses the Mac's existing keychain;
 # an optional exact identity selector travels as one literal environment value.

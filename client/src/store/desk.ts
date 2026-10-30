@@ -1,4 +1,4 @@
-import { deskPage, deskTakePending, onDeskNotice, onOpenSession, onOpenUpdates, type OpenSession } from "../bridge";
+import { deskPage, deskTakePending, onDeskNotice, onOpenSession, onOpenUpdates, type DeskNotice, type OpenSession } from "../bridge";
 import { catalog, rowId } from "./catalog";
 import { groupOf, headerOf, setProjectCollapsed } from "./organization";
 import {
@@ -41,11 +41,21 @@ export function openSession(target: OpenSession, options: OpenSessionOptions = {
   revealRow(id);
 }
 
+/**
+ * A tray or menu-bar notice. "Zerus: ..." titles (a terminal that did not
+ * open, a mode not saved, an open that was not the way asked) carry what to
+ * do by hand, so they stay until dismissed; plain "Zerus" ones pass.
+ */
+export function showDeskNotice(notice: DeskNotice): void {
+  const advisory = notice.title !== "Zerus";
+  toast(notice.title, notice.text, advisory ? "warn" : "info", advisory);
+}
+
 /** Opens Updates without putting the lazy Settings chunk in the main bundle. */
 export function openUpdates(): void {
   void import("../ui/screens/settings/sections")
     .then(({ openSettings }) => openSettings("updates"))
-    .catch((error) => toast("Updates", String(error)));
+    .catch((error) => toast("Updates", String(error), "error", true));
 }
 
 /**
@@ -56,7 +66,7 @@ export async function startDesk(): Promise<() => void> {
   const stops = await Promise.all([
     onOpenSession(openSession),
     onOpenUpdates(openUpdates),
-    onDeskNotice((notice) => toast(notice.title, notice.text)),
+    onDeskNotice(showDeskNotice),
   ]);
   void deskPage()
     .then(deskTakePending)
@@ -64,7 +74,7 @@ export async function startDesk(): Promise<() => void> {
       (pending) => {
         if (pending.open) openSession(pending.open);
         if (pending.updates) openUpdates();
-        for (const notice of pending.notices) toast(notice.title, notice.text);
+        for (const notice of pending.notices) showDeskNotice(notice);
       },
       (error) => console.warn("Zerus Next: desk_take_pending failed", error),
     );

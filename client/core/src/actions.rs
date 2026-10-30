@@ -23,9 +23,34 @@ pub struct Target {
     pub conversation_id: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryControl {
+    Now,
+    Cancel,
+}
+
+impl RecoveryControl {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Now => "now",
+            Self::Cancel => "cancel",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Action {
+    /// Qt's guarded `hgs settings NAME --json`, including pending applies.
+    Settings {
+        model: String,
+        effort: String,
+        #[serde(default)]
+        expected_pending_id: Option<String>,
+        #[serde(default)]
+        without_terminal: bool,
+    },
     Interrupt {
         turn_started: f64,
     },
@@ -123,6 +148,12 @@ pub enum Action {
     Answer {
         question: Value,
         answers: Vec<questions::AnswerItem>,
+    },
+    /// `hgs recovery action --scoped-json`: Retry now or Cancel retry for the
+    /// current waiting job of this exact run and conversation.
+    Recovery {
+        job_id: String,
+        action: RecoveryControl,
     },
     /// `hgs kill NAME` as Forget saved session; its own kind so notices and
     /// logs tell it from Terminate's Kill (`killSession`).
@@ -327,6 +358,36 @@ pub fn invocation(
         target.name.clone()
     };
     let (mut args, stdin, local, peer, request) = match action {
+        Action::Settings {
+            model,
+            effort,
+            expected_pending_id,
+            ..
+        } => {
+            if model.is_empty()
+                || model.len() > 256
+                || effort.len() > 80
+                || model.chars().chain(effort.chars()).any(char::is_control)
+                || target.run_id.is_empty()
+            {
+                return Err("Refresh the session before changing model settings.".into());
+            }
+            let mut input = json!({"request_id":request_id,"expected_run_id":target.run_id,
+                "expected_conversation_id":target.conversation_id,"model":model});
+            if !effort.is_empty() {
+                input["effort"] = json!(effort);
+            }
+            if let Some(id) = expected_pending_id {
+                input["expected_pending_id"] = json!(id);
+            }
+            (
+                vec!["settings".into(), name, "--json".into()],
+                Some(serde_json::to_vec(&input).map_err(|e| e.to_string())?),
+                20,
+                35,
+                Some(request_id.to_owned()),
+            )
+        }
         Action::Interrupt { turn_started } => {
             let input = json!({
                 "request_id": request_id,
@@ -357,6 +418,29 @@ pub fn invocation(
                 Some(serde_json::to_vec(&input).map_err(|error| error.to_string())?),
                 15,
                 35,
+                None,
+            )
+        }
+        Action::Recovery { job_id, action } => {
+            if target.name.is_empty()
+                || target.run_id.is_empty()
+                || target.conversation_id.is_empty()
+                || !uuid_shaped(job_id)
+                || job_id.to_ascii_lowercase() != *job_id
+                || job_id.chars().all(|c| c == '0' || c == '-')
+            {
+                return Err("Recovery needs its exact session, run, conversation and job.".into());
+            }
+            let input = json!({
+                "name": target.name,
+                "id": job_id,
+                "action": action.as_str(),
+            });
+            (
+                vec!["recovery".to_owned(), "action".to_owned()],
+                Some(serde_json::to_vec(&input).map_err(|error| error.to_string())?),
+                10,
+                25,
                 None,
             )
         }
@@ -989,8 +1073,42 @@ fn trimmed_stderr(stderr: &str) -> Option<String> {
     (!text.is_empty()).then(|| text.chars().take(STDERR_CHARS).collect())
 }
 
+/// Qt's recovery action is admitted only after a fresh full inspection still
+/// names the same session, run, conversation and waiting job.
+pub fn recovery_preflight(target: &Target, action: &Action, exit: Exit) -> Result<(), String> {
+    let Action::Recovery { job_id, .. } = action else {
+        return Ok(());
+    };
+    let Exit::Code {
+        code: 0, stdout, ..
+    } = exit
+    else {
+        return Err(
+            "Recovery state could not be confirmed. Reload its state before trying again.".into(),
+        );
+    };
+    let details: Value = serde_json::from_slice(&stdout).unwrap_or(Value::Null);
+    let job = &details["recovery"];
+    if details["run_id"] == target.run_id
+        && details["conversation_id"] == target.conversation_id
+        && job["name"] == target.name
+        && job["id"] == *job_id
+        && job["state"] == "waiting"
+    {
+        Ok(())
+    } else {
+        Err("This scheduled recovery is no longer current; nothing was changed".into())
+    }
+}
+
 pub fn classify(target: &Target, action: &Action, invocation: &Invocation, exit: Exit) -> Outcome {
     match action {
+        Action::Settings {
+            model,
+            effort,
+            without_terminal,
+            ..
+        } => classify_settings(target, invocation, model, effort, *without_terminal, exit),
         Action::Interrupt { .. } | Action::CompactContext => {
             classify_session_action(target, invocation, exit, &["submitted"], None)
         }
@@ -1016,11 +1134,57 @@ pub fn classify(target: &Target, action: &Action, invocation: &Invocation, exit:
         Action::Answer { question, answers } => {
             classify_answer(target, invocation, question, answers, exit)
         }
+        Action::Recovery { job_id, action } => {
+            classify_recovery(target, invocation, job_id, *action, exit)
+        }
         Action::ForgetBinding => classify_forget_binding(target, invocation, exit),
         Action::MarkRead { .. } => classify_read(target, exit),
         Action::Archive | Action::Terminate => classify_write(exit, true),
         _ => classify_write(exit, false),
     }
+}
+
+fn classify_settings(
+    target: &Target,
+    invocation: &Invocation,
+    model: &str,
+    effort: &str,
+    without_terminal: bool,
+    exit: Exit,
+) -> Outcome {
+    let check = if without_terminal {
+        "the session"
+    } else {
+        "Terminal"
+    };
+    let reason = match exit {
+        Exit::StartFailed(error) => return failed(error),
+        Exit::TimedOut => format!("Settings change timed out. Check {check} before retrying."),
+        Exit::WriteFailed => format!("Settings transfer failed. Check {check} before retrying."),
+        Exit::Code {
+            code: 0, stdout, ..
+        } => {
+            let receipt: Value = serde_json::from_slice(&stdout).unwrap_or(Value::Null);
+            let text = |key| receipt.get(key).and_then(Value::as_str);
+            if matches!(text("status"), Some("applied" | "scheduled"))
+                && invocation.request_id.is_some()
+                && text("request_id") == invocation.request_id.as_deref()
+                && text("name") == Some(target.name.as_str())
+                && text("run_id") == Some(target.run_id.as_str())
+                && text("conversation_id") == Some(target.conversation_id.as_str())
+                && text("model") == Some(model)
+                && (effort.is_empty() || text("effort") == Some(effort))
+            {
+                return done(receipt, None);
+            }
+            format!("Invalid settings acknowledgement. Check {check} before retrying.")
+        }
+        Exit::Code { stderr, .. } | Exit::Abnormal { stderr } => trimmed_stderr(&stderr)
+            .unwrap_or_else(|| {
+                format!("Could not confirm session settings. Check {check} before retrying.")
+            }),
+    };
+    failed(reason)
 }
 
 /// `runSessionAction`: the receipt must echo this exact request and session,
@@ -1275,6 +1439,48 @@ fn classify_send_now(
                 done(receipt, None)
             } else {
                 uncertain("Invalid queue acknowledgement. Check Terminal before retrying.")
+            }
+        }
+    }
+}
+
+/// Qt's recovery edit returns the updated job. Its identity and resulting
+/// state must match; an unknown outcome is never replayed.
+fn classify_recovery(
+    target: &Target,
+    _invocation: &Invocation,
+    job_id: &str,
+    action: RecoveryControl,
+    exit: Exit,
+) -> Outcome {
+    match exit {
+        Exit::StartFailed(error) => failed(error),
+        Exit::WriteFailed => {
+            uncertain("Recovery transfer failed. Reload its state before trying again.")
+        }
+        Exit::TimedOut => {
+            uncertain("Recovery request timed out. Reload its state before trying again.")
+        }
+        Exit::Abnormal { stderr } => uncertain(trimmed_stderr(&stderr).unwrap_or_else(|| {
+            "Recovery ended abnormally. Reload its state before trying again.".into()
+        })),
+        Exit::Code { code, stderr, .. } if code != 0 => failed(
+            trimmed_stderr(&stderr)
+                .unwrap_or_else(|| "Could not update recovery. Reload its state.".into()),
+        ),
+        Exit::Code { stdout, .. } => {
+            let job: Value = serde_json::from_slice(&stdout).unwrap_or(Value::Null);
+            let identity = job["id"] == job_id && job["name"] == target.name;
+            let settled = match action {
+                RecoveryControl::Now => {
+                    job["state"] == "waiting" && job["due_at"].as_f64().is_some_and(f64::is_finite)
+                }
+                RecoveryControl::Cancel => job["state"] == "cancelled",
+            };
+            if identity && settled {
+                done(job, None)
+            } else {
+                uncertain("Invalid recovery response. Reload its state before trying again.")
             }
         }
     }
@@ -1604,6 +1810,91 @@ mod tests {
     }
     const UNCONFIRMED: &str =
         "The shared notification change was not confirmed. Refresh the session before trying again.";
+
+    #[test]
+    fn settings_pin_native_identity_pending_change_and_timeout() {
+        let action = Action::Settings {
+            model: "model-a".into(),
+            effort: "high".into(),
+            expected_pending_id: Some("pending-1".into()),
+            without_terminal: false,
+        };
+        for (computer, seconds) in [("", 20), ("mac", 35)] {
+            let t = target(computer);
+            let call = invocation(&t, &action, "request-1").unwrap();
+            assert_eq!(call.timeout.as_secs(), seconds);
+            let input: Value = serde_json::from_slice(call.stdin.as_ref().unwrap()).unwrap();
+            assert_eq!(
+                input,
+                json!({"request_id":"request-1","expected_run_id":"run-1","expected_conversation_id":"conv-1","model":"model-a","effort":"high","expected_pending_id":"pending-1"})
+            );
+            assert!(call
+                .args
+                .ends_with(&["settings".into(), t.name, "--json".into()]));
+        }
+    }
+
+    #[test]
+    fn settings_receipts_must_echo_every_requested_field() {
+        let t = target("");
+        let action = Action::Settings {
+            model: "model-a".into(),
+            effort: "high".into(),
+            expected_pending_id: None,
+            without_terminal: false,
+        };
+        let call = invocation(&t, &action, "request-1").unwrap();
+        let receipt = json!({"status":"scheduled","request_id":"request-1","name":t.name,"run_id":t.run_id,"conversation_id":t.conversation_id,"model":"model-a","effort":"high","pending_settings_id":"pending-1"});
+        assert!(matches!(
+            classify(
+                &t,
+                &action,
+                &call,
+                exit0(&serde_json::to_vec(&receipt).unwrap(), "")
+            ),
+            Outcome::Done { .. }
+        ));
+        for key in [
+            "status",
+            "request_id",
+            "name",
+            "run_id",
+            "conversation_id",
+            "model",
+            "effort",
+        ] {
+            let mut wrong = receipt.clone();
+            wrong[key] = json!("different");
+            assert!(
+                matches!(
+                    classify(
+                        &t,
+                        &action,
+                        &call,
+                        exit0(&serde_json::to_vec(&wrong).unwrap(), "")
+                    ),
+                    Outcome::Failed { .. }
+                ),
+                "{key}"
+            );
+        }
+        let native = Action::Settings {
+            model: "provider/model".into(),
+            effort: String::new(),
+            expected_pending_id: None,
+            without_terminal: true,
+        };
+        let call = invocation(&t, &native, "request-2").unwrap();
+        let input: Value = serde_json::from_slice(call.stdin.as_ref().unwrap()).unwrap();
+        assert!(
+            input.get("effort").is_none(),
+            "OpenCode default follows Qt's absent effort field"
+        );
+        assert_eq!(
+            classify(&t, &native, &call, Exit::TimedOut),
+            failed("Settings change timed out. Check the session before retrying.")
+        );
+    }
 
     #[test]
     fn the_help_probe_is_local_short_and_needs_the_exact_marker() {
@@ -3646,5 +3937,65 @@ mod tests {
         assert!(!draft.sending && draft.uncertain);
         draft.allow_retry();
         assert!(!draft.uncertain);
+    }
+
+    #[test]
+    fn recovery_actions_use_qt_payload_preflight_and_updated_job() {
+        const JOB: &str = "11111111-1111-4111-8111-111111111111";
+        const REQUEST: &str = "22222222-2222-4222-8222-222222222222";
+        let target = target("studio");
+        let action = Action::Recovery {
+            job_id: JOB.into(),
+            action: RecoveryControl::Now,
+        };
+        let inv = invocation(&target, &action, REQUEST).unwrap();
+        assert_eq!(inv.args, ["@studio", "recovery", "action"]);
+        assert_eq!(inv.timeout, Duration::from_secs(25));
+        assert_eq!(inv.request_id, None);
+        let input: Value = serde_json::from_slice(inv.stdin.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            input,
+            json!({"name": target.name, "id": JOB, "action": "now"})
+        );
+
+        let fresh = json!({
+            "run_id": "run-1", "conversation_id": "conv-1",
+            "recovery": {"id": JOB, "name": target.name, "state": "waiting"},
+        });
+        assert_eq!(
+            recovery_preflight(&target, &action, reply_exit(&fresh)),
+            Ok(())
+        );
+        let stale = json!({
+            "run_id": "run-2", "conversation_id": "conv-1",
+            "recovery": {"id": JOB, "name": target.name, "state": "waiting"},
+        });
+        assert!(recovery_preflight(&target, &action, reply_exit(&stale)).is_err());
+        let already_cancelled = json!({
+            "run_id": "run-1", "conversation_id": "conv-1",
+            "recovery": {"id": JOB, "name": target.name, "state": "cancelled"},
+        });
+        assert!(recovery_preflight(&target, &action, reply_exit(&already_cancelled)).is_err());
+        assert!(recovery_preflight(&target, &action, Exit::TimedOut).is_err());
+
+        let updated = json!({"id": JOB, "name": target.name, "state": "waiting", "due_at": 123});
+        assert!(matches!(
+            classify(&target, &action, &inv, reply_exit(&updated)),
+            Outcome::Done { .. }
+        ));
+        let wrong = json!({"id": JOB, "name": target.name, "state": "waiting", "due_at": "later"});
+        assert!(matches!(
+            classify(&target, &action, &inv, reply_exit(&wrong)),
+            Outcome::Uncertain { .. }
+        ));
+        assert!(matches!(
+            classify(&target, &action, &inv, Exit::TimedOut),
+            Outcome::Uncertain { .. }
+        ));
+        let bad = Action::Recovery {
+            job_id: "not-a-job".into(),
+            action: RecoveryControl::Cancel,
+        };
+        assert!(invocation(&target, &bad, REQUEST).is_err());
     }
 }

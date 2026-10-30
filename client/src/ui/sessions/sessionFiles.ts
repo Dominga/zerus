@@ -37,7 +37,7 @@ export function closeSessionFile() {
   if (current) void sessionFileClose(current.id).catch(report);
 }
 
-export function actOnSessionFile(action: "open_file" | "open_folder" | "open_copy" | "show_file") {
+export function actOnSessionFile(action: "open_file" | "open_folder" | "open_copy" | "show_file" | "open_ssh") {
   const current = sessionFile();
   if (current) void sessionFileAct(current.id, action).then(setSessionFile).catch(report);
 }

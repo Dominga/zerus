@@ -22,7 +22,7 @@ export interface ModelPickerActions {
 }
 
 /** The grouped list with search, stars, All models and its notice (OpenCodeModelPicker). */
-function ModelList(props: { view: () => PickerView; act: ModelPickerActions }) {
+export function ModelList(props: { view: () => PickerView; act: ModelPickerActions; disabled?: boolean }) {
   let list!: HTMLDivElement;
   let search!: HTMLInputElement;
   const view = props.view;
@@ -51,7 +51,7 @@ function ModelList(props: { view: () => PickerView; act: ModelPickerActions }) {
     timer = setTimeout(() => { timer = undefined; props.act.search(value); }, SEARCH_PAUSE_MS);
   };
   const listKey = (e: KeyboardEvent) => {
-    if (e.target !== list) return;
+    if (props.disabled || e.target !== list) return;
     const by = e.key === "ArrowDown" ? 1 : e.key === "ArrowUp" ? -1 : e.key === "PageDown" ? 10 : e.key === "PageUp" ? -10
       : e.key === "Home" ? -Infinity : e.key === "End" ? Infinity : 0;
     if (by !== 0) {
@@ -77,7 +77,7 @@ function ModelList(props: { view: () => PickerView; act: ModelPickerActions }) {
   };
   return (
     <div class="ocm">
-      <input ref={search} class="field" type="search" placeholder="Search models" aria-label="Search models" maxLength={SEARCH_LIMIT} value={text()}
+      <input ref={search} disabled={props.disabled} class="field" type="search" placeholder="Search models" aria-label="Search models" maxLength={SEARCH_LIMIT} value={text()}
         onInput={(e) => onSearch(e.currentTarget.value)}
         onKeyDown={(e) => {
           // Escape closes the popup, as Qt's: WebKit's search field would only clear itself.
@@ -88,21 +88,24 @@ function ModelList(props: { view: () => PickerView; act: ModelPickerActions }) {
           <div role="group" aria-label={group().label}>
             <div class="ocm-group" aria-hidden="true">{group().label}</div>
             <Index each={group().models}>{(row) => (
-              <div class="ocm-row" id={`ocm-o-${index().get(row().value)}`} role="option" aria-selected={row().value === view().selected} aria-disabled={row().unavailable}
+              <div class="ocm-row" id={`ocm-o-${index().get(row().value)}`} role="option" aria-selected={row().value === view().selected} aria-disabled={props.disabled || row().unavailable}
                 classList={{ on: row().value === view().selected, active: row().value === focused(), gone: row().unavailable }} title={row().tooltip}
-                onClick={() => { setFocused(row().value); props.act.click(row().value, false); }}>
+                onClick={() => { setFocused(row().value); if (!props.disabled) props.act.click(row().value, false); }}>
                 <span class="ocm-name ell">{row().label}</span>
                 <Show when={row().marks}><span class="ocm-marks">{row().marks}</span></Show>
                 <span class="ocm-star" role="button" aria-label={row().starTooltip} title={row().starTooltip}
-                  classList={{ on: row().favorite, off: !view().favoritesAvailable }}
-                  onClick={(e) => { e.stopPropagation(); props.act.click(row().value, true); }}>{starText(row())}</span>
+                  tabindex={view().favoritesAvailable && !props.disabled ? 0 : -1}
+                  aria-disabled={props.disabled || !view().favoritesAvailable}
+                  classList={{ on: row().favorite, off: props.disabled || !view().favoritesAvailable }}
+                  onKeyDown={(e) => { if ((e.key === "Enter" || e.key === " ") && !props.disabled) { e.preventDefault(); e.stopPropagation(); props.act.click(row().value, true); } }}
+                  onClick={(e) => { e.stopPropagation(); if (!props.disabled) props.act.click(row().value, true); }}>{starText(row())}</span>
               </div>
             )}</Index>
           </div>
         )}</Index>
       </div>
       <div class="ocm-foot">
-        <button type="button" class="btn small" aria-pressed={view().all.checked} classList={{ on: view().all.checked }} disabled={!view().all.enabled}
+        <button type="button" class="btn small" aria-pressed={view().all.checked} classList={{ on: view().all.checked }} disabled={props.disabled || !view().all.enabled}
           title={view().all.tooltip} onClick={() => props.act.toggleAll()}>All models</button>
         <Show when={view().notice}><span class="ocm-notice" role="status">{view().notice}</span></Show>
       </div>

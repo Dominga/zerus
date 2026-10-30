@@ -1,7 +1,7 @@
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, untrack } from "solid-js";
 import { Icon } from "../lib/icons";
 import { catalog, computerOffline } from "../../store/catalog";
-import { GONE, change, copyCommand, copyFolder, copyName, copyReference, dismiss, end, forget, interrupting, notices, notify, perform, stillListed, pendingNotifications, toggleMute, updating } from "../../store/actions";
+import { GONE, change, copyCommand, copyFolder, copyName, copyReference, end, forget, interrupting, notify, perform, stillListed, pendingNotifications, toggleMute, updating } from "../../store/actions";
 import { bindBatchConfirm, running } from "../../store/batch";
 import { cancelRestoreFollow, forgetArchived, refreshArchiveWhenDone, restoreSession } from "../../store/restores";
 import type { MenuEntry } from "../../store/ui";
@@ -11,8 +11,8 @@ import { FRESH_CHANGED, STATE_CHANGED, archiveNameOccupied, canStartStopped, FRE
 import type { BatchConfirmation } from "./selection";
 
 // The guarded session actions: the entries both menus share, the Rename,
-// Terminate, Forget (saved or archived), Start fresh and selection dialogs,
-// and the notices the action store raises. An archived row's change entry is
+// Terminate, Forget (saved or archived), Start fresh and selection dialogs.
+// Their notices go to the window's notice bus (store/notices.ts). An archived row's change entry is
 // Restore session (store/restores.ts). While a selection batch runs
 // (store/batch.ts, Qt's m_pending) every write entry here is off. A
 // successful Rename or Move to archive reloads the archive pages (Qt's
@@ -295,21 +295,5 @@ export function ActionDialogs() {
           : p.kind === "batch" ? <BatchDialog copy={p.copy} answer={p.answer} close={closeDialog} /> : p.kind === "terminate" ? <TerminateDialog row={p.row} close={closeDialog} /> : null)}
       </Show>
     </dialog>
-  );
-}
-
-/** The action store's notices, as toasts. Errors and warnings stay until dismissed. */
-export function ActionNotices() {
-  return (
-    <div class="toasts" aria-live="polite" style={{ bottom: "auto", top: "16px" }}>
-      <For each={notices()}>
-        {(n) => (
-          <div class={`toast ${n.tone}`}>
-            <Show when={n.sticky}><button class="icon-btn dismiss" aria-label="Dismiss" onClick={() => dismiss(n.id)}><Icon name="x" size={14} /></button></Show>
-            <span class="note">{n.text}</span>
-          </div>
-        )}
-      </For>
-    </div>
   );
 }

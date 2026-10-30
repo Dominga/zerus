@@ -382,6 +382,17 @@ impl SessionFiles {
     }
 
     fn act(&self, id: u64, action: &str) -> Option<SessionFileView> {
+        if action == "open_ssh" {
+            let computer = lock(&self.dialogs).get(&id)?.computer.clone();
+            if computer.is_empty() {
+                return self.view(id, false);
+            }
+            if let Err(error) = crate::settings::open_url(&format!("ssh://{computer}")) {
+                lock(&self.dialogs).get_mut(&id)?.error = format!("Could not open the SSH terminal: {error}");
+                self.emit(id, false);
+            }
+            return self.view(id, false);
+        }
         let (path, origin) = {
             let dialogs = lock(&self.dialogs);
             let dialog = dialogs.get(&id)?;

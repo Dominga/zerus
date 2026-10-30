@@ -4,7 +4,8 @@ import * as bridge from "../bridge";
 import { catalog as appCatalog, computerOffline, type CatalogState } from "./catalog";
 import { marks as appMarks, type Marks } from "./marks";
 import { activityReadOnly } from "./activitySource";
-import { copyState, detailsFromInspection, MUTE_PENDING, STATE_CHANGED, forgetsBindingOnly, notificationsStillAllowed, snapshotOf, terminates, type ActionRow, type ForgetScope, type PendingNotifications } from "../ui/sessions/actions-ui";
+import { bus as appBus, createNoticeBus, type NoticeBus } from "./notices";
+import { copyState, sessionIdentity, detailsFromInspection, MUTE_PENDING, STATE_CHANGED, forgetsBindingOnly, notificationsStillAllowed, snapshotOf, terminates, type ActionRow, type ChildIdentity, type ForgetScope, type PendingNotifications } from "../ui/sessions/actions-ui";
 import type { Action, Details, Outcome, Target } from "../types";
 import type { Session } from "../ui/sessions/types";
 
@@ -19,17 +20,11 @@ import type { Session } from "../ui/sessions/types";
 // changes are tracked apart too. There is no read lane here: the Rust worker
 // claims the Read lane when it delivers a mark.
 
-export interface Notice {
-  id: number; tone: "error" | "warn" | "info"; text: string; sticky: boolean;
-  /** Notices with one key replace each other, as one status line does. */
-  key?: string;
-}
+export type { Notice } from "./notices";
 
 /** The followed session's Activity `state` value, and whether its subscription has answered. */
 export interface Followed { value: Record<string, unknown> | undefined; settled: boolean }
 
-const MAX_NOTICES = 5;
-const INFO_MS = 6000;
 const CHANGED = "This session changed. Open its actions again.";
 const MUTE_CHANGED = "The shared notification setting changed while this request was pending. Refresh the session.";
 export const GONE = "This session is no longer available. Open its actions again.";
@@ -59,37 +54,13 @@ export function createActions(
   online: (computer: string) => boolean = () => true,
   selection: () => Selection = () => ({}),
   notificationMarks: Pick<Marks, "currentNotificationRow" | "applyNotifications" | "notificationRevisionOf"> = appMarks,
+  /** Where notices show: the window's bus for the app, a private one in tests. */
+  bus: NoticeBus = createNoticeBus(),
 ) {
   /** The write in flight per session (its kind), and whether an interrupt is. */
   const [writes, setWrites] = createStore<Record<string, Action["kind"] | undefined>>({});
   const [interrupts, setInterrupts] = createStore<Record<string, boolean>>({});
-  const [list, setList] = createSignal<Notice[]>([]);
-  let nextId = 1;
-
-  function dismiss(id: number) { setList((all) => all.filter((n) => n.id !== id)); }
-  /** Dismisses the notice with this key, if one shows. */
-  function clearNotice(key: string) { setList((all) => all.filter((n) => n.key !== key)); }
-
-  /**
-   * Adds a notice and returns its id. A notice with a key first takes the
-   * place of the one with that key. Over the cap, the oldest other non-sticky
-   * one goes first, then the oldest other; the new one stays.
-   */
-  function notify(tone: Notice["tone"], text: string, sticky = false, key?: string): number {
-    const id = nextId++;
-    setList((all) => {
-      const next = [...(key === undefined ? all : all.filter((n) => n.key !== key)), { id, tone, text, sticky, key }];
-      while (next.length > MAX_NOTICES) {
-        // Never the notice being added: it is the last entry.
-        const others = next.slice(0, -1);
-        const loose = others.findIndex((n) => !n.sticky);
-        next.splice(loose < 0 ? 0 : loose, 1);
-      }
-      return next;
-    });
-    if (!sticky) setTimeout(() => dismiss(id), INFO_MS);
-    return id;
-  }
+  const { notices: list, notify, dismiss, clearNotice } = bus;
 
   const updating = (computer: string, name: string) => !!writes[sessionId(computer, name)];
   const interrupting = (computer: string, name: string) => !!interrupts[sessionId(computer, name)];
@@ -342,7 +313,7 @@ export function createActions(
   /** Copies text; a failure is a sticky notice, a success shows nothing. */
   async function copy(text: string): Promise<Outcome> {
     try { await bridge.copyText(text); copied = text; return { outcome: "done", receipt: null, cleanup: null }; } catch (error) {
-      notify("error", `Zerus: could not copy\n${errorText(error)}`, true);
+      notify("error", errorText(error), true, undefined, "Not copied");
       return failed(errorText(error));
     }
   }
@@ -364,6 +335,19 @@ export function createActions(
   async function copyName(row: ActionRow): Promise<Outcome> {
     const live = current(row);
     return live ? copy(live.name) : failed(GONE);
+  }
+
+  /** The header copies the selected conversation, run or child ID and names it. */
+  async function copyIdentity(row: ActionRow, details?: Details, child?: ChildIdentity): Promise<Outcome> {
+    const live = current(row);
+    if (!live) return failed(GONE);
+    const sel = selection();
+    if (live.runId !== row.runId || (sel.key && sel.key !== live.key) || sel.subagent !== child?.id) return failed(CHANGED);
+    const identity = sessionIdentity(live, details ?? selectedDetails(live), child);
+    if (!identity.value) return failed("nothing to copy");
+    const out = await copy(identity.value);
+    if (out.outcome === "done") notify("info", `The ${identity.title.charAt(0).toLowerCase()}${identity.title.slice(1)} is on the clipboard`, false, undefined, "Copied");
+    return out;
   }
 
   /** Copy folder path: the selected row's current details folder, else the live row's; nothing when empty. */
@@ -403,11 +387,11 @@ export function createActions(
       return failed(errorText(error));
     }
     const out = await copy(uri);
-    if (out.outcome === "done") notify("info", "Session reference copied");
+    if (out.outcome === "done") notify("info", "The session reference is on the clipboard", false, undefined, "Copied");
     return out;
   }
 
-  return { perform, performComputer, end, forget, toggleMute, stillListed, pendingNotifications, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices: list, dismiss, notify, clearNotice };
+  return { perform, performComputer, end, forget, toggleMute, stillListed, pendingNotifications, copy, copyName, copyIdentity, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices: list, dismiss, notify, clearNotice };
 }
 
 type FollowSource = { target(): { id: string } | undefined; summary(): Record<string, unknown> | undefined; loaded(): boolean; ended(): boolean; error(): unknown };
@@ -438,8 +422,11 @@ export function withArchived(catalog: Pick<CatalogState, "rows">, archived: (key
 }
 
 let archivedRow: (key: string) => Session | undefined = () => undefined;
+let searchRow: (key: string) => Session | undefined = () => undefined;
+/** One selected archive from a checked search reply; normal action preflights still apply. */
+export function bindSearchActionRow(lookup: (key: string) => Session | undefined) { searchRow = lookup; }
 /** Hands the store the loaded archived rows (store/archive.ts), which this module cannot import: archive.ts reads ui.ts. */
 export function bindArchivedRows(lookup: (key: string) => Session | undefined) { archivedRow = lookup; }
 
-const app = createActions(withArchived(appCatalog, (key) => archivedRow(key)), (computer) => !computerOffline(computer), () => selection());
-export const { perform, performComputer, end, forget, toggleMute, stillListed, pendingNotifications, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices, dismiss, notify, clearNotice } = app;
+const app = createActions(withArchived(appCatalog, (key) => archivedRow(key) ?? searchRow(key)), (computer) => !computerOffline(computer), () => selection(), appMarks, appBus);
+export const { perform, performComputer, end, forget, toggleMute, stillListed, pendingNotifications, copy, copyName, copyIdentity, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices, dismiss, notify, clearNotice } = app;

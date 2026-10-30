@@ -4,11 +4,13 @@ import { MachineLabel } from "../components/MachineLabel";
 import type { Folder, Project } from "../../types";
 import { projectToShow, setProjectToShow } from "../../store/organization";
 import { projectsPage } from "../../store/projects";
+import { flag, setSetting } from "../../store/settings";
 import { setMenu, type MenuEntry } from "../../store/ui";
 import { PROJECT_EDITING, WORKTREE_FLOWS } from "./reasons";
 import { machineCards } from "../../store/machines";
 import { folderButton, folderExists, folderLaunch, folderMenuEntry, newSessionInFolder } from "../sessions/newsession-view";
 import { copy } from "../../store/actions";
+import { openTasks } from "../../store/taskNavigation";
 import { nextSort, projectColor, showAskedProject, shownProjects, sortFolders, type Sort, type SortColumn } from "./projects-ui";
 
 // Projects (ProjectsDialog.cpp), ported from design/webui/src/screens/Projects.tsx:
@@ -30,7 +32,8 @@ function ProjectLabel(props: { project: Project; class?: string }) {
 
 const [selectedProject, setSelectedProject] = createSignal<string | undefined>();
 const [selectedFolder, setSelectedFolder] = createSignal(0);
-const [allSwarm, setAllSwarm] = createSignal(false);
+const allSwarm = () => flag("workspace/allSwarmProjects");
+const setAllSwarm = (value: boolean) => { void setSetting("workspace/allSwarmProjects", value); };
 
 const disabled = (label: string, icon: string, hint: string): MenuEntry => ({ label, icon, disabled: true, hint });
 /** No folder selected: Qt's selectedFolder() is an empty folder. */
@@ -212,6 +215,7 @@ export function ProjectsScreen() {
                 </div>
               </div>
               <div class="row proj-foot">
+                <button class="btn" disabled={!p().accessible} onClick={() => openTasks(p().id)}><Icon name="list-todo" size={14} />Tasks</button>
                 <button class="btn danger" disabled title={PROJECT_EDITING}><Icon name="trash" size={14} />Delete project…</button>
               </div>
             </section>

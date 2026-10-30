@@ -87,7 +87,10 @@ export interface Session {
   /** Seconds since the Unix epoch when the current turn started (the Working clock). */
   turnStarted?: number;
   runId?: string;
+  launchId?: string;
   conversationId?: string;
+  /** Exact/fallback device-local density identity, calculated in Rust. */
+  compactKeys?: [string, string];
   // What the guarded actions read, copied flat from the core's row: a nested
   // row in the store would double the cost of reconciling a large catalog.
   /** The agent as the core reports it (`deepseek` for `dsh`); `agent` draws unknown agents as Claude. */

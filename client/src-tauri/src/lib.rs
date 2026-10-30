@@ -969,6 +969,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         exit_flush::exit_flush_ack,
         commands::perf_away,
         commands::build_info,
+        commands::voice_support,
         renderer::renderer_frame,
         content_search::content_search,
         content_search::cancel_content_search,
@@ -1173,6 +1174,12 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         #[cfg(feature = "media")]
         voice::voice_close,
         #[cfg(feature = "media")]
+        voice::voice_preview,
+        #[cfg(feature = "media")]
+        voice::voice_permission,
+        #[cfg(feature = "media")]
+        voice::voice_open_settings,
+        #[cfg(feature = "media")]
         voice::voice_microphones,
         #[cfg(feature = "media")]
         voice::voice_video,
@@ -1203,6 +1210,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         exit_flush::exit_flush_ack,
         commands::perf_away,
         commands::build_info,
+        commands::voice_support,
         renderer::renderer_frame,
         clipboard::copy_text,
         clipboard::copy_verbatim,

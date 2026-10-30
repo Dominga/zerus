@@ -1,0 +1,43 @@
+{
+  "bead": "zerus-5wmh.9.38",
+  "source": "feature/next-composer-voice after integration rebase",
+  "fixture": "Synthetic capture and CLI; built embedded-assets Tauri app; private D-Bus, Xvfb, HOME, XDG, TMPDIR, TMUX_TMPDIR. No microphone, camera or owner desktop used. Private null audio sink.",
+  "reference": "Mockup Sessions Composer record slot, design/webui/src/screens/sessions/Composer.tsx:90-98. Qt-only preview row and dialogs follow the explicit webui-ac ruling; fast-send preference follows its correction.",
+  "walk": {
+    "fast_send_default": "Send (0:03); Space/Escape keeps preview; chip sends after cold-cache confirmation",
+    "preview_preference": "Stop (0:03); chip keeps preview without dispatch",
+    "provider": "Selected second provider and refreshed; explicit provider output persisted",
+    "discard": "Escape preserved the recording and returned focus; confirmed Discard removed preview",
+    "permission": "Microphone access dialog with native platform text and focused Close; Escape returned to composer",
+    "playback": "Real audio and round-video decoding through raw IPC preview and one revocable Blob; 3 native playing notifications in the shipping walk; video frames change from the live poster",
+    "delivery": {
+      "voice": 1,
+      "video": 1,
+      "duplicate_request_ids": 0,
+      "all_durable_checkpoints_before_dispatch": true,
+      "final_state": "idle"
+    },
+    "phase4": "16/16 steps pass, including persistent selection and send-follow"
+  },
+  "checks": {
+    "frontend": "check, full Vitest 1999 passed / 1 skipped, build",
+    "entry_bytes": 469363,
+    "budget_bytes": 500000,
+    "core": "all-target Clippy, Windows MSVC cross-Clippy, 19 voice composer and 2 voice driver tests pass",
+    "tauri": "all-target Clippy with default, media, video, no-default-features; focused recording lock test; embedded-assets video build",
+    "privacy": "0 findings",
+    "ui_separators": "pass"
+  },
+  "scope": {
+    "root_src_changed": false,
+    "new_poller": false,
+    "protocol_permission_change": false,
+    "csp": "blob: added only to media-src; no script, navigation or file scope expansion"
+  },
+  "captures": [
+    "composer-voice-fast-send.png",
+    "composer-voice-preview-mode.png",
+    "composer-voice-round-playback.png",
+    "composer-voice-permission.png"
+  ]
+}

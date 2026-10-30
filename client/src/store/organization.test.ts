@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createRoot } from "solid-js";
 import * as bridge from "../bridge";
-import { createOrganization, memberOf, SYNC_NOTICE } from "./organization";
+import { createOrganization, memberOf, SYNC_NOTICE, LAYOUT_NOTICE_TITLE, LAYOUT_NOTICE_TEXT } from "./organization";
 import { toSession } from "./catalog";
 import { rowOut } from "./testing";
 import { emptyBatch, type Batch, type GroupingOut } from "../types";
@@ -41,6 +41,15 @@ beforeEach(() => {
 });
 
 describe("the organization store", () => {
+  it("shows a refused layout once as a titled sticky warning through the window bus", () => createRoot((dispose) => {
+    const { org, say } = setup(ready({ layout_save_paused: true }));
+    expect(say).toHaveBeenCalledExactlyOnceWith("warn", LAYOUT_NOTICE_TEXT, true, undefined, LAYOUT_NOTICE_TITLE);
+    org.applyGrouping(batchOf({ grouping: ready({ layout_save_paused: true }) }));
+    org.applyGrouping(batchOf({ grouping: ready() }));
+    org.applyGrouping(batchOf({ grouping: ready({ layout_save_paused: true }) }));
+    expect(say).toHaveBeenCalledTimes(1);
+    dispose();
+  }));
   it("assigns rows from batches and falls back to the default project", () => createRoot((dispose) => {
     const { org } = setup();
     org.applyGrouping(batchOf({ groups: [{ computer: "", key: "run:1", group: "alpha", rank: 1048576 }] }));

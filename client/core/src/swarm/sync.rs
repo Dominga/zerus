@@ -328,6 +328,7 @@ impl Controller {
             status_error,
             conflicts: self.conflicts,
             notice: None,
+            layout_save_paused: false,
         }
     }
 

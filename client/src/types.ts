@@ -132,6 +132,8 @@ export interface GroupingOut {
   conflicts: number;
   /** A one-time warning, such as saved project changes that could not be applied; absent when there is none. */
   notice?: string;
+  /** The saved layout is retained and layout changes cannot persist this startup. */
+  layout_save_paused?: boolean;
 }
 /** How a project edit ended (client/core `swarm::sync::EditOutcome`). */
 export type EditOutcome =

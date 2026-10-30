@@ -392,6 +392,7 @@ impl Organization {
     fn view(&self, hub: &Hub) -> SyncView {
         let mut view = hub.sync.view();
         view.notice = hub.notice.clone();
+        view.layout_save_paused = !self.0.layout_writable;
         if !self.0.allowed {
             view.ready = false;
             view.reason = Some(REPLAY_NEEDS_HGS.into());
@@ -1606,6 +1607,11 @@ mod tests {
             let pump = Pump::default();
             let organization = fake.organization(&pump, false);
             assert!(!organization.0.layout_writable);
+            assert!(
+                organization
+                    .view(&organization.0.hub.lock().unwrap())
+                    .layout_save_paused
+            );
             assert!(organization
                 .seed_runs_with(|| panic!("blocked target never reads Qt"))
                 .is_none());
@@ -1643,6 +1649,11 @@ mod tests {
         let pump = Pump::default();
         let organization = fake.organization(&pump, false);
         assert!(organization.0.layout_writable);
+        assert!(
+            !organization
+                .view(&organization.0.hub.lock().unwrap())
+                .layout_save_paused
+        );
         pump.set_collapsed("beta", true);
         organization.flush();
         let saved: Value = serde_json::from_slice(&std::fs::read(fake.layout()).unwrap()).unwrap();

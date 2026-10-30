@@ -10,14 +10,14 @@ use super::store::{self, canonical_uuid, Event, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|move-task|add-to-phase|approve-phase|discard-phase|return-to-draft|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|spans|profile|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|close-phase|integrate-build|run|templates|safe-action|reports-to|sub-lead --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|move-task|add-to-phase|approve-phase|discard-phase|return-to-draft|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|spans|profile|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|close-phase|integrate-build|start-ahead|run|templates|safe-action|reports-to|sub-lead --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
 
 const MUTATIONS: &[&str] = &[
     "plan", "extend", "edit-draft", "move-phase", "move-task", "add-to-phase", "approve-phase", "discard-phase", "return-to-draft", "reject-phase", "undo-reject-phase",
     "rework-phase", "reports-to", "sub-lead", "finish", "approve", "commit", "discard", "pause", "resume", "stop",
     "archive", "report", "ask", "reply", "hold", "release", "accept", "reject", "skip-stage", "send-back", "reassign", "take-over", "cancel",
     "retry", "check", "expect", "swap-member", "use-last-reply", "relaunch", "add-member", "scale", "drain", "pause-member", "resume-member", "remove-member", "settings", "finding",
-    "draft", "propose", "close-phase", "integrate-build",
+    "draft", "propose", "close-phase", "integrate-build", "start-ahead",
 ];
 
 fn text<'a>(input: &'a Value, key: &str) -> &'a str {
@@ -8413,7 +8413,37 @@ mod tests {
         });
     }
 
-    /// U51/U52: a team stored before this phase carries none of the new fields,
+    /// U61 #709 N2: start-ahead is a CLI mutation for the lead and the owner.
+    #[test]
+    fn the_lead_or_the_owner_starts_an_auto_draft_ahead_through_the_cli() {
+        use crate::state::teams::model::{Approval, Phase, PhaseState, Task, TaskStatus};
+        let (mut team, _, _) = review_team();
+        team.settings.auto_accept = true;
+        team.phases.push(Phase {
+            n: 9,
+            order: 9,
+            title: "Next".into(),
+            approval: Approval::Auto,
+            state: PhaseState::Draft,
+            tasks: vec![99],
+            ..Default::default()
+        });
+        team.tasks.push(Task { id: 99, title: "Next".into(), phase: 9, status: TaskStatus::Draft, assignee: "dev".into(), ..Default::default() });
+        with_review_team(&team, || {
+            // The lead, through the CLI's mutation list.
+            let started = as_lead(|| call("start-ahead", json!({"phase":9}))).unwrap();
+            assert_eq!(started["start_ahead"], json!(true));
+            assert!(stored().phases.iter().find(|phase| phase.n == 9).unwrap().start_ahead);
+            // The owner undoes it before any hand-out.
+            let undone = call("start-ahead", json!({"phase":9,"undo":true,"by":"human"})).unwrap();
+            assert_eq!(undone["status"], json!("undone"));
+            // The owner starts it too.
+            let again = call("start-ahead", json!({"phase":9,"by":"human"})).unwrap();
+            assert_eq!(again["status"], json!("started"));
+        });
+    }
+
+    /// U61/U52: a team stored before this phase carries none of the new fields,
     /// loads with today's defaults and writes none of them back.
     #[test]
     fn a_stored_team_without_the_new_fields_loads_and_behaves_as_today() {

@@ -1789,6 +1789,46 @@ The lead's phase report names the phase's top three losses by time
 (`roles[]`: utilization and tokens per accepted task) of the last finished
 phase.
 
+### Test isolation
+
+A test template that Zerus runs for a member (`cargo-test`, `qt-test` and
+`android-test` unless the project names others) runs in a run folder of the
+member's own folder, `.zerus-team/runs/<template>-<time>`, with its own
+`HOME`, `TEMP`/`TMP`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`,
+`XDG_CACHE_HOME` and, on Windows, `APPDATA` and `LOCALAPPDATA` (on Unix also
+`TMPDIR` and `XDG_RUNTIME_DIR`). `ZERUS_TEST_RUN` names the run folder.
+`CARGO_HOME` and `RUSTUP_HOME` keep the person's toolchain, the person's
+`.gitconfig` is copied into the run's home, and Zerus's own state variables
+(`HGS_STATE_DIR`, `HGS_CONFIG_DIR`, `HGS_TRAY_HOME`, `HGS_TRAY_LOCK_DIR`) are
+removed. The newest five run folders are kept. On Windows the run shows no
+error box, so a crash leaves no dump in the person's `CrashDumps`; a crash
+exit is noted in the run folder's `crash.txt` and in the result.
+
+The second line is a fingerprint of the person's own paths before and after
+the run. The run fails, with the paths named in its output, when:
+
+- a watched log or registry (Zerus's `private-stores.json` always) gains a
+  mention of the run folder;
+- a new entry in the person's temporary folder, or a watched folder, starts
+  with the test program's name or a project prefix;
+- a new crash dump in `%LOCALAPPDATA%\CrashDumps` belongs to a program found
+  in the member's folder or with a project prefix;
+- a watched file changes at all.
+
+The project configures it in `.zerus/tests.toml`, `[isolation]`, with
+`[isolation.windows]` and `[isolation.unix]` tables over it: `templates`,
+`env` (variable to a folder below the run folder; `""` unsets a default),
+`keep` (variable to a path below the person's home, used when unset),
+`remove`, `copy`, `prefixes`, `logs`, `files`, `folders` and `enabled`.
+`enabled = false` turns the run folders off but not the fingerprint, and the
+file adds watched paths without removing the built-in ones. A file that cannot
+be read keeps the defaults and says so in the result. Without the file the
+defaults above apply.
+
+Rust tests that set no state folder, or inherit one outside their temporary
+and build folders, use one per test process beside the test binary
+(`target/<profile>/deps/hgs-test-state/<pid>`), never the person's.
+
 <a id="activity"></a>
 
 ## Activity, messages and native controls
@@ -3944,9 +3984,11 @@ Choose a server's API and model for a new session with
 `hgs codex DIRECTORY --new -n TAG --model-server lab --model small`. The launch
 carries this session's provider settings only. Codex gets a session-scoped
 custom provider, `-c model_providers.hgs-lab={name,base_url,env_key,wire_api}`
-and `-c model_provider=hgs-lab` with `--model small`: it speaks the server's
-chat-completions API and reads its key from `HGS_MODEL_SERVER_KEY`, so neither
-the built-in OpenAI provider (the Responses API) nor a ChatGPT login is used.
+and `-c model_provider=hgs-lab` with `--model small`: its `wire_api` follows
+the installed Codex (`chat` before 0.100, `responses` from then on, where
+`chat` is deprecated and removed from the newest releases), and it reads its
+key from `HGS_MODEL_SERVER_KEY`, so neither the built-in OpenAI provider nor a
+ChatGPT login is used.
 Claude Code gets `ANTHROPIC_BASE_URL` (the root) and its model variables, with
 the token in `ANTHROPIC_AUTH_TOKEN`. OpenCode is not offered for a model server
 until it has a per-session provider contract; a global provider entry would

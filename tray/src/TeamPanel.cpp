@@ -6,6 +6,7 @@
 #include "TeamWidgets.h"
 #include <QStackedWidget>
 #include "NewSessionDense.h"
+#include "SlowEventLog.h"
 #include "TeamController.h"
 #include "WorkspaceIcons.h"
 #include "WorkspaceSkin.h"
@@ -74,10 +75,10 @@ TeamPanel::TeamPanel(TeamController *controller, QWidget *parent) : QWidget(pare
         const auto *team = m_controller->watched();
         return team ? problemActions(*team, member, status) : nullptr;
     };
-    QObject::connect(m_controller, &TeamController::teamsChanged, this, [this] { scheduleRender(); });
-    QObject::connect(m_controller, &TeamController::watchedChanged, this, [this] { scheduleRender(); });
+    QObject::connect(m_controller, &TeamController::teamsChanged, this, [this] { pollRender(); });
+    QObject::connect(m_controller, &TeamController::watchedChanged, this, [this] { pollRender(); });
     QObject::connect(m_controller, &TeamController::showCancelledChanged, this, [this] { scheduleRender(); });
-    QObject::connect(m_controller, &TeamController::feedChanged, this, [this] { scheduleRender(); });
+    QObject::connect(m_controller, &TeamController::feedChanged, this, [this] { pollRender(); });
     render();
 }
 
@@ -130,9 +131,56 @@ void TeamPanel::showTeam(const QString &team)
 
 void TeamPanel::scheduleRender()
 {
+    m_forced = true;
+    queueRender();
+}
+
+void TeamPanel::pollRender()
+{
+    queueRender();
+}
+
+void TeamPanel::queueRender()
+{
     if (m_pending) return;
     m_pending = true;
-    QTimer::singleShot(0, this, [this] { m_pending = false; render(); });
+    QTimer::singleShot(0, this, [this] {
+        m_pending = false;
+        if (std::exchange(m_forced, false)) render(); else refresh();
+    });
+}
+
+void TeamPanel::refresh()
+{
+    // An owner's change waiting in the queue renders anyway.
+    if (m_forced) return;
+    if (!m_renderedKey.isEmpty() && renderKey() == m_renderedKey) return;
+    render();
+}
+
+QByteArray TeamPanel::renderKey() const
+{
+    const Team *team = m_controller->watched();
+    if (!team && !m_team.isEmpty()) team = m_controller->team(m_team);
+    // A plan is rebuilt on every refresh, as it always was: it shows the
+    // window's free sessions and the catalog besides the team.
+    if (!team || team->status == "planning") return {};
+    QByteArray key = m_team.toUtf8() + '\n' + team->id.toUtf8() + ' ' + char('0' + team->full) + char('0' + (width() < 400)) + char('0' + m_dark)
+                     + char('0' + m_controller->showCancelled()) + ' ' + QByteArray::number(m_openTask) + ' ' + m_notice.toUtf8() + '\n'
+                     + m_controller->shapeOf(team->id) + '\n';
+    // The summary's age, "2h 05m", changes once a minute.
+    if (team->created > 0) key += duration(QDateTime::currentSecsSinceEpoch() - team->created).toUtf8() + '\n';
+    const auto feed = m_controller->feed();
+    key += QByteArray::number(feed.size()) + ' ' + QByteArray::number(feed.isEmpty() ? 0 : feed.first().value("seq").toInteger()) + '\n';
+    // The summary reads only whether a member is offline or asks (and what);
+    // working and idle change nothing in it.
+    if (m_live)
+        for (const auto &member : team->members) {
+            const Live live = m_live(member);
+            key += member.id.toUtf8() + ' ' + char('0' + live.offline) + char('0' + live.attention)
+                   + ' ' + (live.attention ? live.attentionText.toUtf8() : QByteArray()) + '\n';
+        }
+    return key;
 }
 
 void TeamPanel::resizeEvent(QResizeEvent *event)
@@ -327,6 +375,8 @@ void TeamPanel::showEvent(QShowEvent *event)
 
 void TeamPanel::render()
 {
+    const SlowEventLog::Scope scope(this, "render");
+    m_renderedKey.clear();
     // A hidden tab renders once it is shown; polls keep coming meanwhile.
     if (!isVisible() && m_content) { m_dirty = true; return; }
     if (m_confirming) return;
@@ -397,6 +447,7 @@ void TeamPanel::render()
         m_card->setTask(*team, m_openTask, live, m_dark);
         m_stack->setCurrentWidget(m_card);
     } else m_stack->setCurrentWidget(m_scroll);
+    m_renderedKey = renderKey();
 }
 
 QWidget *TeamPanel::emptyState(bool narrow)

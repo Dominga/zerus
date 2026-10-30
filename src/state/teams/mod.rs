@@ -5,6 +5,7 @@ pub(crate) mod catalog;
 pub(crate) mod commands;
 pub(crate) mod dispatcher;
 pub(crate) mod inbox;
+pub(crate) mod isolation;
 pub(crate) mod model;
 pub(crate) mod models;
 pub(crate) mod ops;

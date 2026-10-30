@@ -817,15 +817,91 @@ fn placeholders(raw: &str) -> Vec<String> {
 pub(crate) struct Outcome {
     pub exit: Option<i32>,
     pub tail: String,
+    /// #717: the failing test names the output named, so a nonzero exit without
+    /// a readable tail still says what failed.
+    pub failures: Vec<String>,
+    /// #717: a bounded excerpt around the first failure, kept in the record.
+    pub excerpt: String,
     pub ms: u64,
     pub timed_out: bool,
     pub error: String,
+}
+
+/// #717: the failing test names an output names, and a bounded excerpt around
+/// the first one. Qt's `FAIL!`, cargo's `test ... FAILED`, pytest's `FAILED`
+/// and CTest's `(Failed)` lines are read; an unknown format yields no names,
+/// never a guess.
+pub(crate) fn failures_in(output: &str) -> (Vec<String>, String) {
+    let lines: Vec<&str> = output.lines().collect();
+    let mut failures: Vec<String> = Vec::new();
+    let mut first = None;
+    for (index, line) in lines.iter().enumerate() {
+        let Some(name) = failing_test(line) else { continue };
+        if first.is_none() {
+            first = Some(index);
+        }
+        if failures.len() < 20 && !failures.contains(&name) {
+            failures.push(name);
+        }
+    }
+    let excerpt = first
+        .map(|index| {
+            let start = index.saturating_sub(6);
+            let end = (index + 12).min(lines.len());
+            last_chars(&lines[start..end].join("\n"), FAILURE_EXCERPT_BYTES)
+        })
+        .unwrap_or_default();
+    (failures, excerpt)
+}
+
+/// #717: how much of the output around a failure a record keeps.
+pub(crate) const FAILURE_EXCERPT_BYTES: usize = 4000;
+
+fn failing_test(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    // Qt Test: "FAIL!  : SlowEventLog::a_case() ..."
+    if let Some(rest) = trimmed.strip_prefix("FAIL!") {
+        let rest = rest.trim_start_matches([':', ' ']).trim();
+        return clean_test_name(rest.split_whitespace().next().unwrap_or_default());
+    }
+    // cargo: "test some::case ... FAILED"
+    if let Some(rest) = trimmed.strip_prefix("test ") {
+        if let Some(name) = rest.strip_suffix(" ... FAILED") {
+            return clean_test_name(name);
+        }
+    }
+    // pytest: "FAILED path/test_x.py::test_case - assertion"
+    if let Some(rest) = trimmed.strip_prefix("FAILED ") {
+        return clean_test_name(rest.split(" - ").next().unwrap_or(rest));
+    }
+    // CTest: "  12 - name (Failed)"
+    if let Some(before) = trimmed.strip_suffix("(Failed)") {
+        let before = before.trim();
+        return clean_test_name(before.split(" - ").last().unwrap_or(before));
+    }
+    // Gradle: "> Task :app:testDebugUnitTest FAILED", or a test name.
+    if let Some(before) = trimmed.strip_suffix(" FAILED") {
+        if let Some(task) = before.strip_prefix("> Task ") {
+            return clean_test_name(task);
+        }
+    }
+    None
+}
+
+fn clean_test_name(name: &str) -> Option<String> {
+    let name = name.trim().trim_matches([':', '"', '\'']);
+    (!name.is_empty() && name.chars().count() <= 200 && !name.chars().any(char::is_control)).then(|| name.to_owned())
 }
 
 /// Runs a validated plan in the member's folder, outside the member's sandbox
 /// (the worker is not confined): TEMP inside the folder, Qt offscreen, bounded
 /// time and output (U21). The whole process tree ends with the run (C2).
 pub(crate) fn execute(plan: &Plan, folder: &Path, timeout: Duration, env: &[(&str, String)]) -> Outcome {
+    execute_as(plan, folder, timeout, env, &super::isolation::Person::current())
+}
+
+/// `execute` with the person's own folders given, as a test gives synthetic ones.
+pub(crate) fn execute_as(plan: &Plan, folder: &Path, timeout: Duration, env: &[(&str, String)], person: &super::isolation::Person) -> Outcome {
     let temp = folder.join(".zerus-team").join("tmp");
     let _ = std::fs::create_dir_all(&temp);
     let mut command = Command::new(&plan.program);
@@ -837,6 +913,18 @@ pub(crate) fn execute(plan: &Plan, folder: &Path, timeout: Duration, env: &[(&st
         .env("QT_QPA_PLATFORM", "offscreen")
         // The worker's own build dir is Zerus', never the member's.
         .env_remove("CARGO_TARGET_DIR");
+    // U62 (#720): a test runs with its own home, data, temporary and XDG
+    // folders in a run folder (the project's .zerus/tests.toml).
+    let isolated = super::isolation::prepare(&plan.template, &plan.program, folder, person);
+    if let Some(run) = &isolated {
+        for name in &run.remove {
+            command.env_remove(name);
+        }
+        for (key, value) in &run.env {
+            command.env(key, value);
+        }
+        super::isolation::quiet_crashes();
+    }
     let base = template_environment(plan, folder);
     let cache = cache_use(&plan.template, folder);
     for (key, value) in base.iter().chain(cache.env.iter()) {
@@ -868,12 +956,47 @@ pub(crate) fn execute(plan: &Plan, folder: &Path, timeout: Duration, env: &[(&st
         }
     }
     let stdin = plan.commit.as_ref().map(|payload| serde_json::to_vec(payload).unwrap_or_default());
+    let before = isolated.as_ref().map(super::isolation::Run::fingerprint);
     let mut outcome = run_tree(&mut command, timeout.saturating_sub(started.elapsed()).max(Duration::from_secs(1)), stdin);
     outcome.ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    if let (Some(run), Some(before)) = (&isolated, before) {
+        checked(&mut outcome, run, &before, folder);
+    }
     if !cache.note.is_empty() {
-        outcome.tail = last_chars(&format!("{}\n{}", cache.note, outcome.tail), TAIL_BYTES);
+        outcome.tail = last_chars(&format!("{}
+{}", cache.note, outcome.tail), TAIL_BYTES);
     }
     outcome
+}
+
+/// U62 (#720): the second line. A run whose trace reached the person's own
+/// paths fails, with the paths named; a crash is noted in the run folder.
+fn checked(outcome: &mut Outcome, run: &super::isolation::Run, before: &super::isolation::Fingerprint, folder: &Path) {
+    let mut lines = Vec::new();
+    if let Some(note) = &run.note {
+        lines.push(note.clone());
+    }
+    if super::isolation::crashed(outcome.exit) && !run.folder.as_os_str().is_empty() {
+        let code = outcome.exit.map(|code| format!("{:#x}", code as u32)).unwrap_or_default();
+        let _ = std::fs::write(run.folder.join("crash.txt"), format!("exit {code}\n{}", outcome.tail));
+        lines.push(format!("The test crashed (exit {code}); its note is in {}", run.folder.display()));
+    }
+    let changes = run.changes(before, folder);
+    if !changes.is_empty() {
+        lines.push(format!("Isolation: the run touched the person's own paths: {}", changes.join("; ")));
+        if outcome.exit == Some(0) {
+            outcome.exit = Some(1);
+        }
+        if outcome.error.is_empty() {
+            outcome.error = "the run touched the person's own paths".into();
+        }
+    }
+    if !lines.is_empty() {
+        if !outcome.tail.is_empty() && !outcome.tail.ends_with('\n') {
+            outcome.tail.push('\n');
+        }
+        outcome.tail.push_str(&lines.join("\n"));
+    }
 }
 
 /// How long a pipe reader may take after the tree ended: a process that escaped
@@ -937,13 +1060,27 @@ pub(crate) fn run_tree(command: &mut Command, timeout: Duration, stdin: Option<V
         }
         tail.push_str(&stderr);
     }
+    let (failures, excerpt) = failures_in(&tail);
     Outcome {
         exit: status.and_then(|status| status.code()).filter(|_| !timed_out),
         tail: last_chars(&tail, TAIL_BYTES),
+        failures,
+        excerpt,
         ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         timed_out,
         error: if timed_out { format!("the command did not finish in {} s and was stopped", timeout.as_secs()) } else { String::new() },
     }
+}
+
+/// #717: a suite's next time bound from its recorded duration: no record keeps
+/// the template's own bound; a record gets `factor` times its last duration plus
+/// `grace_secs`, never below `floor_secs` or above `ceiling_secs`. The queue
+/// passes the configured values, so no policy or repository value is built in.
+#[allow(dead_code)] // #717's queue passes its configured values once it lands.
+pub(crate) fn recorded_bound(template_secs: u64, recorded_ms: Option<u64>, factor: u32, grace_secs: u64, floor_secs: u64, ceiling_secs: u64) -> u64 {
+    let Some(ms) = recorded_ms.filter(|ms| *ms > 0) else { return template_secs };
+    let bound = (ms / 1000).saturating_mul(u64::from(factor.max(1))).saturating_add(grace_secs);
+    bound.clamp(floor_secs.max(1), ceiling_secs.max(floor_secs.max(1)))
 }
 
 /// C2: waits at most `JOIN_BOUND` for a drained stream. A reader still blocked
@@ -1471,5 +1608,51 @@ mod tests {
         assert_eq!(configured_launcher(dir.path()).as_deref(), Some(""));
         std::fs::write(gui.join("CMakeCache.txt"), "CMAKE_CXX_COMPILER_LAUNCHER:STRING=C:/tools/ccache.exe\n").unwrap();
         assert_eq!(configured_launcher(dir.path()).as_deref(), Some("C:/tools/ccache.exe"));
+    }
+
+    #[test]
+    fn a_run_that_fails_records_the_failing_test_names() {
+        // #717: the record of a failed run carries what failed, not just the tail.
+        let mut command = if cfg!(windows) {
+            let mut command = std::process::Command::new("cmd");
+            command.args(["/D", "/S", "/C", "echo FAIL!  : SlowEventLog::a_case() & exit /b 1"]);
+            command
+        } else {
+            let mut command = std::process::Command::new("sh");
+            command.args(["-c", "echo 'FAIL!  : SlowEventLog::a_case()'; exit 1"]);
+            command
+        };
+        let outcome = run_tree(&mut command, Duration::from_secs(30), None);
+        assert_eq!(outcome.exit, Some(1), "{outcome:?}");
+        assert_eq!(outcome.failures, ["SlowEventLog::a_case()"], "{outcome:?}");
+        assert!(outcome.excerpt.contains("FAIL!  : SlowEventLog::a_case()"), "{outcome:?}");
+    }
+
+    #[test]
+    fn a_failed_run_names_its_tests_and_keeps_the_context_around_them() {
+        // #717: Qt, cargo, pytest and CTest failure lines name the tests.
+        let qt = "********* Start testing of SlowEventLog *********\nPASS   : SlowEventLog::initTestCase()\nFAIL!  : SlowEventLog::a_slow_case() Compared values are not the same\n   Actual (1): 1\n   Expected (2): 2\nFAIL!  : SlowEventLog::b_case() timeout\nTotals: 2 failed\n";
+        let (names, excerpt) = failures_in(qt);
+        assert_eq!(names, ["SlowEventLog::a_slow_case()", "SlowEventLog::b_case()"]);
+        assert!(excerpt.contains("FAIL!  : SlowEventLog::a_slow_case()") && excerpt.contains("Expected (2): 2"), "{excerpt}");
+        assert!(excerpt.chars().count() <= FAILURE_EXCERPT_BYTES);
+        let (names, _) = failures_in("test teams::mod::a_case ... FAILED\ntest teams::mod::b_case ... ok\n");
+        assert_eq!(names, ["teams::mod::a_case"]);
+        let (names, _) = failures_in("FAILED tests/test_api.py::test_page - assert 1 == 2\n");
+        assert_eq!(names, ["tests/test_api.py::test_page"]);
+        let (names, _) = failures_in("The following tests FAILED:\n\t12 - test_sloweventlog (Failed)\n");
+        assert_eq!(names, ["test_sloweventlog"]);
+        assert_eq!(failures_in("all good\n"), (Vec::new(), String::new()));
+    }
+
+    #[test]
+    fn a_suite_bound_follows_its_recorded_duration_within_the_configured_limits() {
+        // #717: no record keeps the template's own bound; a record scales with
+        // the configured factor, grace, floor and ceiling.
+        assert_eq!(recorded_bound(1800, None, 2, 60, 60, 7200), 1800);
+        assert_eq!(recorded_bound(1800, Some(0), 2, 60, 60, 7200), 1800);
+        assert_eq!(recorded_bound(1800, Some(300_000), 2, 60, 60, 7200), 660);
+        assert_eq!(recorded_bound(1800, Some(10_000), 2, 60, 120, 7200), 120, "the floor");
+        assert_eq!(recorded_bound(1800, Some(3_600_000), 2, 60, 60, 7200), 7200, "the ceiling");
     }
 }

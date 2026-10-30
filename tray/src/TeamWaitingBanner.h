@@ -1,5 +1,6 @@
 #pragma once
 #include <QFrame>
+#include <QJsonObject>
 #include <QPointer>
 #include <QTimer>
 #include <functional>
@@ -37,6 +38,7 @@ private:
     QTimer m_poll;
     QList<TeamWaitingPage::Item> m_items;
     int m_total = 0;
+    QJsonObject m_last;   // #706: an unchanged read changes nothing
     quint64 m_read = 0;
     bool m_inFlight = false;
 };

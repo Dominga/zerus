@@ -1065,10 +1065,14 @@ pub(crate) fn session_settings(config: &Config, server_name: &str, agent: &str, 
             // A session-scoped provider: the built-in openai provider speaks the
             // Responses API and may use the ChatGPT login, so a local
             // chat-completions server gets its own provider with its own key
-            // variable. The global Codex configuration is not touched.
+            // variable. The global Codex configuration is not touched. The wire
+            // API follows the installed Codex (#709 L7): chat is deprecated in
+            // recent releases and removed from the newest ones, where a session
+            // using it would fail at its first turn.
             let provider = provider_id(&server);
+            let wire = wire_api_for(installed_codex_version());
             let table = format!(
-                "{{name={},base_url={},env_key=\"HGS_MODEL_SERVER_KEY\",wire_api=\"chat\"}}",
+                "{{name={},base_url={},env_key=\"HGS_MODEL_SERVER_KEY\",wire_api=\"{wire}\"}}",
                 toml_string(&server.name),
                 toml_string(&openai_base(&server)),
             );
@@ -1090,17 +1094,87 @@ pub(crate) fn session_settings(config: &Config, server_name: &str, agent: &str, 
     Ok(settings)
 }
 
-/// The settings a resume needs for a saved session: its non-secret environment
-/// and, when it has a key, the private file `hgs --run` reads and removes. A
-/// server that is no longer configured is an error that names it (#658 N4).
-pub(crate) fn resume_settings(config: &Config, server: &str, agent: &str, model: &str) -> Result<(Vec<String>, Option<PathBuf>)> {
-    let settings = session_settings(config, server, agent, model)?;
-    let path = if settings.secrets.is_empty() {
-        None
-    } else {
-        Some(write_secret_file(&config.state, &settings.secrets)?)
+/// The installed Codex's version from `codex --version` (warnings may come
+/// first on stderr; the version line is on stdout). None when Codex is absent.
+fn installed_codex_version() -> Option<(u64, u64, u64)> {
+    let mut command = Command::new("codex");
+    command.arg("--version");
+    let out = platform::output_until(&mut command, Duration::from_secs(10)).ok()?;
+    parse_version(&format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    ))
+}
+
+/// The first `MAJOR.MINOR.PATCH` in `text`; a line naming `codex-cli` wins over
+/// a version-looking number in a warning.
+fn parse_version(text: &str) -> Option<(u64, u64, u64)> {
+    let version = |line: &str| {
+        line.split(|ch: char| !ch.is_ascii_digit() && ch != '.')
+            .filter(|part| part.contains('.'))
+            .find_map(|part| {
+                let mut numbers = part.split('.').filter(|number| !number.is_empty());
+                let major = numbers.next()?.parse().ok()?;
+                let minor = numbers.next()?.parse().ok()?;
+                let patch = numbers.next().unwrap_or("0").parse().ok()?;
+                Some((major, minor, patch))
+            })
     };
-    Ok((settings.env, path))
+    text.lines()
+        .filter(|line| line.to_ascii_lowercase().contains("codex-cli"))
+        .find_map(version)
+        .or_else(|| text.lines().find_map(version))
+}
+
+/// The version from which Codex deprecates `chat` in favour of `responses`.
+const RESPONSES_FROM: (u64, u64, u64) = (0, 100, 0);
+
+/// Codex's wire API for a version: `chat` before `RESPONSES_FROM`, `responses`
+/// from then on. An unknown Codex gets `responses`: that is the current
+/// default, and the newest releases no longer serve `chat` at all (#709 L7).
+fn wire_api_for(version: Option<(u64, u64, u64)>) -> &'static str {
+    match version {
+        Some(version) if version < RESPONSES_FROM => "chat",
+        _ => "responses",
+    }
+}
+
+/// The settings a resume needs for a saved session: its non-secret environment
+/// and its secret lines, which are written to a private file only right before
+/// the backend launch (#709 L1). A server that is no longer configured is an
+/// error that names it (#658 N4).
+pub(crate) fn resume_environment(config: &Config, server: &str, agent: &str, model: &str) -> Result<(Vec<String>, Vec<String>)> {
+    let settings = session_settings(config, server, agent, model)?;
+    Ok((settings.env, settings.secrets))
+}
+
+/// How long an unread secret file may stay before a sweep removes it: a launch
+/// whose `hgs --run` never read it (a failed start, a crash) leaves one behind.
+const SECRET_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Removes the session secret files a launch left unread (older than
+/// `SECRET_MAX_AGE`), so a failed start cannot pile them up (#709 L1).
+pub(crate) fn sweep_secret_files(state_dir: &Path) {
+    let dir = state_dir.join("model-servers");
+    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("session-") || !(name.ends_with(".env") || name.contains(".env.")) {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age > SECRET_MAX_AGE);
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// Writes the session's secret environment to a private file and returns its
@@ -1108,6 +1182,7 @@ pub(crate) fn resume_settings(config: &Config, server: &str, agent: &str, model:
 /// the key never appears on a command line, in the tmux start command or in
 /// `--dry-run`.
 pub(crate) fn write_secret_file(state_dir: &Path, secrets: &[String]) -> Result<PathBuf> {
+    sweep_secret_files(state_dir);
     let dir = state_dir.join("model-servers");
     platform::private_dir(&dir).map_err(|error| Error::new(1, error.to_string()))?;
     let path = dir.join(format!("session-{}.env", uuid::Uuid::new_v4()));
@@ -1799,14 +1874,53 @@ mod tests {
         let mut server = server();
         server.kind = "anthropic".into();
         save(&config, &[server]).unwrap();
-        let (env, path) = resume_settings(&config, "lab", "claude", "small").unwrap();
+        let (env, secrets) = resume_environment(&config, "lab", "claude", "small").unwrap();
         assert!(env.iter().any(|line| line == "ANTHROPIC_BASE_URL=http://127.0.0.1:8080"), "{env:?}");
-        let path = path.expect("a key is a private file");
+        assert_eq!(secrets, ["ANTHROPIC_AUTH_TOKEN=sk-test"]);
+        assert!(!config.state.join("model-servers").exists(), "building the resume spec writes no key file (#709 L1)");
+        // Only the launch writes it, right before the backend start.
+        let path = write_secret_file(&config.state, &secrets).unwrap();
         assert!(path.starts_with(&config.state), "{path:?}");
         assert!(std::fs::read_to_string(&path).unwrap().contains("ANTHROPIC_AUTH_TOKEN=sk-test"));
         // A server that is gone refuses the resume by name.
-        let error = resume_settings(&config, "gone", "claude", "small").unwrap_err().to_string();
+        let error = resume_environment(&config, "gone", "claude", "small").unwrap_err().to_string();
         assert!(error.contains("Unknown model server gone"), "{error}");
+    }
+
+    #[test]
+    fn unread_secret_files_are_swept_after_an_hour() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = write_secret_file(dir.path(), &["K=v".into()]).unwrap();
+        let fresh = write_secret_file(dir.path(), &["K=v".into()]).unwrap();
+        let earlier = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 60 * 60);
+        std::fs::File::options().write(true).open(&old).unwrap().set_modified(earlier).unwrap();
+        sweep_secret_files(dir.path());
+        assert!(!old.exists(), "an unread key file older than an hour is removed");
+        assert!(fresh.exists(), "a fresh key file stays for its launch");
+    }
+
+    #[test]
+    fn the_codex_wire_api_follows_the_installed_cli() {
+        // The mapping: chat before the deprecation, responses from then on and
+        // when the CLI is unknown (the newest releases no longer serve chat).
+        assert_eq!(wire_api_for(None), "responses");
+        assert_eq!(wire_api_for(Some((0, 99, 9))), "chat");
+        assert_eq!(wire_api_for(Some((0, 100, 0))), "responses");
+        assert_eq!(wire_api_for(Some((0, 164, 0))), "responses");
+        assert_eq!(parse_version("codex-cli 0.164.0"), Some((0, 164, 0)));
+        assert_eq!(parse_version("warning: path codex-arg0 1.2.3\ncodex-cli 0.164.0"), Some((0, 164, 0)));
+        // The installed CLI decides: the provider table carries its wire API.
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(dir.path());
+        save(&config, &[server()]).unwrap();
+        let codex = session_settings(&config, "lab", "codex", "small").unwrap();
+        let installed = installed_codex_version();
+        let expected = wire_api_for(installed);
+        assert!(codex.args[1].contains(&format!("wire_api=\"{expected}\"")), "{:?}", codex.args);
+        if let Some(version) = installed {
+            assert!(version >= RESPONSES_FROM, "the installed Codex is recent enough for responses: {version:?}");
+            assert_eq!(expected, "responses");
+        }
     }
 
     #[test]
@@ -1850,7 +1964,7 @@ mod tests {
         assert_eq!(codex.args[0], "-c");
         assert!(codex.args[1].starts_with("model_providers.hgs-lab={name=\"lab\",base_url=\"http://127.0.0.1:8080/v1\""), "{:?}", codex.args);
         assert!(codex.args[1].contains("env_key=\"HGS_MODEL_SERVER_KEY\""));
-        assert!(codex.args[1].contains("wire_api=\"chat\""));
+        assert!(codex.args[1].contains(&format!("wire_api=\"{}\"", wire_api_for(installed_codex_version()))));
         assert_eq!(&codex.args[2..], ["-c", "model_provider=hgs-lab", "--model", "small"]);
         // N1: OpenCode has no per-session provider; it is not offered.
         let error = session_settings(&config, "lab", "opencode", "small").unwrap_err().to_string();

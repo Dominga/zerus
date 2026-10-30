@@ -176,6 +176,94 @@ private slots:
         const auto layout=ForkUpdater::layoutFor(root.filePath("app-7/hgs-tray.exe"));
         QVERIFY(!layout.versioned);QVERIFY(layout.superseded);
     }
+    void forkLinuxSourceInstallIsOnlyThePerUserLayout(){
+        QTemporaryDir root;QVERIFY(root.isValid());
+        const QString bin=root.filePath(".local/bin");QVERIFY(QDir().mkpath(bin));
+        const QString gui=bin+"/hgs-tray";tool(gui,"");tool(bin+"/hgs","");
+#ifdef Q_OS_LINUX
+        QVERIFY(ForkUpdater::linuxSourceInstall(gui,root.path()));
+        QVERIFY(!ForkUpdater::linuxSourceInstall(root.filePath("hgs-tray"),root.path()));
+        QFile::remove(bin+"/hgs");
+        QVERIFY(!ForkUpdater::linuxSourceInstall(gui,root.path()));
+#else
+        QVERIFY(!ForkUpdater::linuxSourceInstall(gui,root.path()));
+#endif
+    }
+#ifdef Q_OS_LINUX
+    void forkLinuxPrepareChecksTheCommitAndBuildsInTheStage(){
+        QTemporaryDir root;QVERIFY(root.isValid());
+        const QString bin=root.filePath("bin");QVERIFY(QDir().mkpath(bin));
+        tool(bin+"/git",R"(#!/bin/bash
+echo "git $*" >> "$LOG"
+if [ "$1" = clone ]; then
+    for target; do :; done
+    mkdir -p "$target"
+elif [ "$1" = -C ] && [ "$3" = rev-parse ]; then
+    echo "$EXPECT"
+fi
+)");
+        tool(bin+"/cargo",R"(#!/bin/bash
+echo "cargo $*" >> "$LOG"
+)");
+        tool(bin+"/cmake",R"(#!/bin/bash
+echo "cmake $*" >> "$LOG"
+)");
+        const auto path=qgetenv("PATH"),home=qgetenv("HOME"),prefix=qgetenv("CMAKE_PREFIX_PATH");
+        qputenv("PATH",bin.toLocal8Bit()+":"+path);qputenv("HOME",root.path().toLocal8Bit());qunsetenv("CMAKE_PREFIX_PATH");
+        QVERIFY(QDir().mkpath(root.filePath(".local/share/zerus/kf6-test")));
+        const auto restore=qScopeGuard([&]{qputenv("PATH",path);qputenv("HOME",home);qputenv("CMAKE_PREFIX_PATH",prefix);});
+        qputenv("LOG",root.filePath("calls").toLocal8Bit());
+        const QString commit(40,'a');qputenv("EXPECT",commit.toLocal8Bit());
+        const QString stage=root.filePath("stage");
+        QProcess process;process.setProgram("/bin/bash");
+        process.setArguments({QStringLiteral(ZERUS_LINUX_UPDATE_HELPER),"prepare",stage,commit,"7"});
+        ChildProcess::inheritStdioOnly(process);process.start();QVERIFY(process.waitForFinished(10000));
+        QCOMPARE(process.exitStatus(),QProcess::NormalExit);QCOMPARE(process.exitCode(),0);
+        QFile calls(root.filePath("calls"));QVERIFY(calls.open(QIODevice::ReadOnly));const QByteArray first=calls.readAll();
+        QVERIFY(first.contains("clone --filter=blob:none --no-checkout --branch whitewh/main https://github.com/WhiteWh/zerus.git"));
+        QVERIFY(first.contains("checkout --detach "+commit.toLocal8Bit()));
+        QVERIFY(first.contains("cargo build --manifest-path "+stage.toLocal8Bit()+"/source/Cargo.toml --locked --release"));
+        QVERIFY(first.contains("-DBUILD_TESTING=OFF"));
+        QVERIFY(first.contains("-DCMAKE_PREFIX_PATH="+root.filePath(".local/share/zerus/kf6-test").toLocal8Bit()));
+        QVERIFY(first.contains("--target hgs-tray"));
+        calls.close();QVERIFY(calls.open(QIODevice::WriteOnly|QIODevice::Truncate));calls.close();
+        qputenv("EXPECT",QByteArray(40,'b'));
+        QProcess wrong;wrong.setProgram("/bin/bash");
+        wrong.setArguments({QStringLiteral(ZERUS_LINUX_UPDATE_HELPER),"prepare",root.filePath("wrong"),commit,"7"});
+        ChildProcess::inheritStdioOnly(wrong);wrong.start();QVERIFY(wrong.waitForFinished(10000));
+        QVERIFY(wrong.exitCode()!=0);
+        QVERIFY(calls.open(QIODevice::ReadOnly));const QByteArray second=calls.readAll();QVERIFY(!second.contains("cargo build"));
+    }
+    void forkLinuxInstallUsesTheMaintainedInstallers(){
+        QTemporaryDir root;QVERIFY(root.isValid());
+        const QString bin=root.filePath("bin"),source=root.filePath("stage/source");
+        QVERIFY(QDir().mkpath(bin));QVERIFY(QDir().mkpath(source+"/tray"));
+        tool(bin+"/git",R"(#!/bin/bash
+if [ "$1" = -C ] && [ "$3" = rev-parse ]; then echo "$EXPECT"; fi
+)");
+        tool(source+"/install.sh",R"(#!/bin/bash
+echo "root $HGS_INSTALL_PREFIX $CARGO_TARGET_DIR $ZERUS_FORK_BUILD ${HGS_STATE_DIR:-unset}" >> "$LOG"
+)");
+        tool(source+"/tray/install.sh",R"(#!/bin/bash
+echo "gui $HGS_TRAY_RESTART $ZERUS_DEV_BUILD_NUMBER $ZERUS_FORK_FEED_URL" >> "$LOG"
+)");
+        const auto path=qgetenv("PATH"),home=qgetenv("HOME"),prefix=qgetenv("HGS_INSTALL_PREFIX"),state=qgetenv("HGS_STATE_DIR");
+        qputenv("PATH",bin.toLocal8Bit()+":"+path);qputenv("HOME",root.path().toLocal8Bit());
+        qputenv("HGS_INSTALL_PREFIX","/elsewhere");qputenv("HGS_STATE_DIR","/elsewhere");
+        qputenv("LOG",root.filePath("calls").toLocal8Bit());
+        const QString commit(40,'a');qputenv("EXPECT",commit.toLocal8Bit());
+        const auto restore=qScopeGuard([&]{qputenv("PATH",path);qputenv("HOME",home);qputenv("HGS_INSTALL_PREFIX",prefix);qputenv("HGS_STATE_DIR",state);});
+        QProcess process;process.setProgram("/bin/bash");
+        process.setArguments({QStringLiteral(ZERUS_LINUX_UPDATE_HELPER),"install",root.filePath("stage"),commit,"7"});
+        ChildProcess::inheritStdioOnly(process);process.start();QVERIFY(process.waitForFinished(10000));
+        QCOMPARE(process.exitStatus(),QProcess::NormalExit);QCOMPARE(process.exitCode(),0);
+        QFile calls(root.filePath("calls"));QVERIFY(calls.open(QIODevice::ReadOnly));const QByteArray text=calls.readAll();
+        QVERIFY(text.contains("root "+root.path().toLocal8Bit()+"/.local "+source.toLocal8Bit()+"/target 7 unset"));
+        QVERIFY(text.contains("gui 1 7 https://github.com/WhiteWh/zerus/releases/latest/download/zerus-fork-feed.json"));
+        QFile result(root.filePath("stage/install.exit"));QVERIFY(result.open(QIODevice::ReadOnly));
+        QCOMPARE(result.readAll().trimmed(),QByteArray("0"));
+    }
+#endif
     // #511 N10: a local or experimental build has no number (0); any release
     // used to count as newer and replaced it unasked.
     void forkFeedIsComparedWithTheRunningCommit(){

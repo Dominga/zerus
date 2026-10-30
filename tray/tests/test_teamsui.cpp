@@ -493,6 +493,54 @@ QJsonObject proposalsTeam(double resetsAt)
     return t;
 }
 
+// U59: a running team in free mode. Phase 1 closed in standard mode; phase 2,
+// Support stream, is the open free phase: #3 and #6 are accepted (one since
+// the last build at 10:00 today), #4 runs and #7 waits for it.
+QJsonObject freeTeam()
+{
+    auto t = team();
+    t["settings"] = QJsonObject{{"all_hard", false}, {"approval", "review"}, {"phase_approval", "review"}};
+    t["waiting_for_lead"] = false;
+    t["plan_mode"] = "free";
+    t["phases"] = QJsonArray{
+        QJsonObject{{"n", 1}, {"title", "Analysis"}, {"state", "approved"}, {"tasks", QJsonArray{1, 2}}},
+        QJsonObject{{"n", 2}, {"title", "Support stream"}, {"state", "approved"}, {"tasks", QJsonArray{3, 4, 6, 7}}}};
+    const auto task = [](int id, int phase, const char *title, const char *assignee, const char *status, const QJsonArray &deps = {}) {
+        return QJsonObject{{"id", id}, {"phase", phase}, {"title", title}, {"assignee", assignee}, {"status", status}, {"deps", deps}};
+    };
+    t["tasks"] = QJsonArray{
+        task(1, 1, "Requirements", "lead", "accepted"),
+        task(2, 1, "Checkout design", "backend", "accepted"),
+        task(3, 2, "Coupon field loses focus", "backend", "accepted"),
+        [&task] {
+            auto running = task(4, 2, "Refund webhook retries", "backend", "in_progress");
+            running["attempts"] = QJsonArray{QJsonObject{{"n", 1}, {"id", "a4"}, {"member", "backend"}, {"state", "delivered"}, {"sent_at", 1600.0}}};
+            return running;
+        }(),
+        task(6, 2, "Currency in receipts", "backend", "accepted"),
+        task(7, 2, "Empty cart crash", "tester", "pending", QJsonArray{QJsonObject{{"task", 4}}})};
+    t["layers"] = QJsonObject{{"1", 0}, {"2", 0}, {"3", 0}, {"4", 0}, {"6", 0}, {"7", 1}};
+    t["ready"] = QJsonArray();
+    t["validation"] = QJsonObject{{"errors", QJsonArray()}, {"warnings", QJsonArray()}};
+    const double tenToday = double(QDateTime(QDate::currentDate(), QTime(10, 0)).toSecsSinceEpoch());
+    t["free_phase"] = QJsonObject{{"phase", 2}, {"state", "open"}, {"running", QJsonArray{4, 7}}, {"accepted", 2},
+                                  {"accepted_since", 1}, {"last_build_at", tenToday}, {"close_pending", QJsonValue()}};
+    return t;
+}
+
+// The same team once #4 and #7 are accepted: phase 2 is open and idle.
+QJsonObject idleFreeTeam()
+{
+    auto t = freeTeam();
+    auto tasks = t["tasks"].toArray();
+    for (int i = 0; i < tasks.size(); ++i) { auto k = tasks[i].toObject(); k["status"] = "accepted"; k.remove("attempts"); tasks[i] = k; }
+    t["tasks"] = tasks;
+    auto free = t["free_phase"].toObject();
+    free["state"] = "idle"; free["running"] = QJsonArray(); free["accepted"] = 4; free["accepted_since"] = 3;
+    t["free_phase"] = free;
+    return t;
+}
+
 void armConfirm(TeamPanel *panel, bool cancel, int tries = 300)
 {
     QTimer::singleShot(0, panel, [panel, cancel, tries] {
@@ -692,10 +740,14 @@ private slots:
     void draftUpdateRetriesAStaleRevision();
     void draftCreateSavesFirstAndShowsBlockersInRed();
     void templatesAreCompactWithSearchAndFavourites();
+    void templateListHidesItsOldRowsAtOnce();
     void dialogTemplateListAppliesOnlyWhenChosen();
     void designerSessionKeepsItsNameAndLeadsNoTeam();
     void nextGoalFromADoneTeam();
     void proposalsAreAcceptedOrRejectedOnce();
+    void planModeIsChosenWhenThePlanIsApproved();
+    void switchToFreeOpensOneDialogBoundToTheRequest();
+    void freePhaseReadsIdleBuildsAndClosesOnConfirmation();
     void swapMemberAsksFirstAndListsTheOldSession();
     void memberMenuWorksBeforeTheStatusReadLands();
     void limitedAndSharedHostMembersAreMarked();
@@ -4374,6 +4426,28 @@ void TestTeamsUi::draftCreateSavesFirstAndShowsBlockersInRed()
     QCOMPARE(sent.last()["action"].toString(), QStringLiteral("create"));
 }
 
+// Owner, 2026-10-30 (Debian 13, KDE): New team showed the empty list's "No
+// template" row over the first template. A refill hides the old rows at once,
+// before their deferred delete, which a dialog's own event loop postpones.
+void TestTeamsUi::templateListHidesItsOldRowsAtOnce()
+{
+    const QJsonArray roster{QJsonObject{{"role", "backend"}, {"count", 1}}};
+    auto catalogObject = catalog()["catalog"].toObject();
+    catalogObject["templates"] = QJsonArray{
+        QJsonObject{{"id", "bugfix"}, {"name", "Bugfix"}, {"description", "One bug, one fix"}, {"roster", roster}},
+        QJsonObject{{"id", "feature"}, {"name", "Feature delivery"}, {"description", "Full feature"}, {"roster", roster}}};
+    const auto parsed = Teams::parseCatalog(QJsonObject{{"catalog", catalogObject}});
+    TeamTemplateList list;
+    list.resize(380, 320); list.show();
+    QCOMPARE(list.visibleIds(), QStringList{"-"});
+    // No event is processed in between, as inside a dialog's exec().
+    list.setCatalog(parsed);
+    QStringList shown;
+    for (auto *row : list.findChildren<QWidget *>("teamTemplateRow")) if (row->isVisibleTo(&list)) shown << row->property("template").toString();
+    shown.sort();
+    QCOMPARE(shown, (QStringList{"-", "bugfix", "feature"}));
+}
+
 // F6: many templates in a compact list with a search field and favourites; the
 // big card is not part of the list.
 void TestTeamsUi::templatesAreCompactWithSearchAndFavourites()
@@ -5620,7 +5694,7 @@ void TestTeamsUi::designerPageStartsOrOpensTheDesigner()
 // the column empty below "+ Role".
 // Owner, 2026-10-28: Settings > About names the fork as the active repository
 // beside upstream, and offers the update from the fork's releases. Outside a
-// portable Windows folder (this test) the button stays off and says why.
+// supported installation (this test) the button stays off and says why.
 void TestTeamsUi::aboutNamesTheForkAndItsUpdate()
 {
     SettingsPage page(FakeCli::program(script()));
@@ -8327,6 +8401,364 @@ void TestTeamsUi::proposalsAreAcceptedOrRejectedOnce()
     rowOf("p3")->findChild<QPushButton *>("teamProposalAccept")->click();
     QTRY_COMPARE(calls(script(), "decide-proposal").size(), 3);
     QCOMPARE(calls(script(), "decide-proposal").last()["proposal"].toString(), QStringLiteral("p3"));
+}
+
+// U59: Start planning shows the lead's proposed mode and its reason; the owner
+// chooses one of the two. With no choice the approval sends no mode (the team
+// plans standard); a choice goes with the approval and shows on the button
+// and the planned phase.
+void TestTeamsUi::planModeIsChosenWhenThePlanIsApproved()
+{
+    auto planning = team("planning");
+    auto tasks = planning["tasks"].toArray();
+    auto extra = tasks.last().toObject(); extra["assignee"] = "tester"; tasks[tasks.size() - 1] = extra;
+    planning["tasks"] = tasks;
+    planning["validation"] = QJsonObject{{"errors", QJsonArray()}, {"warnings", QJsonArray()}};
+    planning["plan_mode"] = "standard";
+    planning["plan_mode_offer"] = "free";
+    planning["plan_mode_reason"] = "Support after 2.4 is a stream of small independent fixes from the QA bot, with no release date.";
+    setTeam(planning);
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(1400, 860); workspace.show();
+    controller.refresh();
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    QTRY_VERIFY(workspace.findChild<QFrame *>("teamPlanModeCard"));
+    auto *card = workspace.findChild<QFrame *>("teamPlanModeCard");
+    // The lead's proposal and its reason; no choice reads Standard.
+    auto *offer = card->findChild<QLabel *>("teamPlanModeOffer");
+    QVERIFY(offer);
+    QVERIFY(offer->text().contains("Lead proposes Free"));
+    QVERIFY(offer->text().contains("stream of small independent fixes"));
+    QCOMPARE(card->property("selected").toString(), QStringLiteral("standard"));
+    const auto option = [&](const QString &mode) -> QFrame * {
+        for (auto *frame : workspace.findChildren<QFrame *>("teamPlanModeOption")) if (frame->property("mode") == mode) return frame;
+        return nullptr;
+    };
+    QVERIFY(option("standard") && option("standard")->property("selected").toBool());
+    QVERIFY(option("free") && !option("free")->property("selected").toBool());
+    QStringList tags; for (auto *tag : option("free")->findChildren<QLabel *>("teamPlanModeTag")) tags << tag->text();
+    QCOMPARE(tags, QStringList{"Lead proposes"});
+    QTRY_VERIFY(workspace.findChild<QPushButton *>("teamWorkspaceApprove") && workspace.findChild<QPushButton *>("teamWorkspaceApprove")->isEnabled());
+    QCOMPARE(workspace.findChild<QPushButton *>("teamWorkspaceApprove")->text(), QStringLiteral("Approve && Run"));
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamPhaseMode"));
+    QCOMPARE(workspace.findChild<QWidget *>("teamPhaseMode")->property("mode").toString(), QStringLiteral("standard"));
+    // No dots as separators in what the card says.
+    for (auto *text : card->findChildren<QLabel *>()) QVERIFY2(!text->text().contains(QChar(0x00b7)), qPrintable(text->text()));
+    // No choice: the approval carries no mode, and hgs keeps standard.
+    armConfirm(&panel, false);
+    workspace.findChild<QPushButton *>("teamWorkspaceApprove")->click();
+    QTRY_COMPARE(calls(script(), "approve").size(), 1);
+    QVERIFY(!calls(script(), "approve").first().contains("plan_mode"));
+    // The owner picks Free: the card, the button and the planned phase say so.
+    option("free")->findChild<QRadioButton *>("teamPlanModeRadio")->click();
+    QTRY_COMPARE(workspace.findChild<QFrame *>("teamPlanModeCard")->property("selected").toString(), QStringLiteral("free"));
+    QTRY_COMPARE(workspace.findChild<QPushButton *>("teamWorkspaceApprove")->text(), QStringLiteral("Approve && Run in free mode"));
+    QTRY_COMPARE(workspace.findChild<QWidget *>("teamPhaseMode")->property("mode").toString(), QStringLiteral("free"));
+    shot(&workspace, "u59-start-dark");
+    workspace.setTheme(false); workspace.render();
+    lightShot(&workspace, "u59-start-light");
+    darkPalette();
+    workspace.setTheme(true); workspace.render();
+    // The panel's footer offers the same choice and button.
+    panel.setLive(live);
+    panel.resize(420, 1200); panel.show();
+    QTRY_VERIFY(panel.findChild<QComboBox *>("teamPlanModeChoice"));
+    QCOMPARE(panel.findChild<QComboBox *>("teamPlanModeChoice")->currentData().toString(), QStringLiteral("free"));
+    QCOMPARE(panel.findChild<QPushButton *>("teamApprove")->text(), QStringLiteral("Approve && Run in free mode"));
+    QString name, text;
+    armConfirmRecord(&panel, false, &name, &text);
+    QTRY_VERIFY(workspace.findChild<QPushButton *>("teamWorkspaceApprove"));
+    workspace.findChild<QPushButton *>("teamWorkspaceApprove")->click();
+    QTRY_COMPARE(calls(script(), "approve").size(), 2);
+    QCOMPARE(calls(script(), "approve").last()["plan_mode"].toString(), QStringLiteral("free"));
+    QVERIFY2(text.contains("free planning"), qPrintable(text));
+    // Back to Standard from the footer: the choice is sent as made.
+    auto *combo = panel.findChild<QComboBox *>("teamPlanModeChoice");
+    combo->setCurrentIndex(0); emit combo->activated(0);
+    QCOMPARE(panel.planModeChoice("team-1"), QStringLiteral("standard"));
+    armConfirm(&panel, false);
+    QTRY_VERIFY(workspace.findChild<QPushButton *>("teamWorkspaceApprove"));
+    workspace.render();
+    workspace.findChild<QPushButton *>("teamWorkspaceApprove")->click();
+    QTRY_COMPARE(calls(script(), "approve").size(), 3);
+    QCOMPARE(calls(script(), "approve").last()["plan_mode"].toString(), QStringLiteral("standard"));
+    // An hgs without plan modes shows no card and sends no mode.
+    planning.remove("plan_mode"); planning.remove("plan_mode_offer"); planning.remove("plan_mode_reason");
+    setTeam(planning);
+    QTRY_VERIFY(([&] { controller.refresh(); auto *t = controller.team("team-1"); return t && !t->planModeKnown; })());
+    workspace.render();
+    QTRY_VERIFY(!workspace.findChild<QFrame *>("teamPlanModeCard"));
+}
+
+// U59: the lead's request to switch to free opens one pop-up dialog with its
+// reason, what changes, an optional reason and Switch to free / Keep standard;
+// the answer is bound to the request's id and hash.
+void TestTeamsUi::switchToFreeOpensOneDialogBoundToTheRequest()
+{
+    auto running = phasedTeam();
+    running["plan_mode"] = "standard";
+    const QString hash = QStringLiteral("7f3a2c19e0d84b1c9a5e6f7081a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4");
+    const double asked = double(QDateTime(QDate::currentDate(), QTime(11, 41)).toSecsSinceEpoch());
+    running["proposals"] = QJsonArray{
+        QJsonObject{{"id", "p5"}, {"kind", "switch-plan-mode"}, {"by", "Lead"}, {"at", asked}, {"state", "open"}, {"mode", "free"}, {"hash", hash},
+                    {"reason", "The QA bot files 3-5 small fixes a day. Planning a phase for each costs more than the fixes."}}};
+    setTeam(running);
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(1400, 860); workspace.show();
+    controller.refresh();
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    // It pops up by itself, once, however often the workspace renders.
+    QTRY_VERIFY(workspace.findChild<QDialog *>("teamSwitchModeDialog"));
+    workspace.render(); workspace.render();
+    QTest::qWait(100);
+    QCOMPARE(workspace.findChildren<QDialog *>("teamSwitchModeDialog").size(), 1);
+    auto *dialog = workspace.findChild<QDialog *>("teamSwitchModeDialog");
+    QTRY_VERIFY(dialog->isVisible());
+    QCOMPARE(dialog->property("proposal").toString(), QStringLiteral("p5"));
+    QVERIFY(dialog->findChild<QLabel *>("teamSwitchModeRequest")->text().contains("Planning a phase for each"));
+    QVERIFY(dialog->findChild<QLabel *>("teamSwitchModeRequest")->text().contains("Lead asks, 11:41"));
+    QCOMPARE(dialog->findChildren<QWidget *>("teamSwitchModeChange").size(), 4);
+    QVERIFY2(dialog->findChild<QLabel *>("teamSwitchModeUnchanged")->text().contains("the queued phase 3 stays as it is")
+             || dialog->findChild<QLabel *>("teamSwitchModeUnchanged")->text().startsWith("Unchanged"),
+             qPrintable(dialog->findChild<QLabel *>("teamSwitchModeUnchanged")->text()));
+    QVERIFY(dialog->findChild<QLabel *>("teamSwitchModeBound")->text().contains("p5 (7f3a2c19)"));
+    QVERIFY(dialog->findChild<QLineEdit *>("teamSwitchModeReason"));
+    QVERIFY(dialog->findChild<QPushButton *>("teamSwitchModeKeep"));
+    QCOMPARE(dialog->findChild<QPushButton *>("teamSwitchModeSwitch")->text(), QStringLiteral("Switch to free"));
+    for (auto *text : dialog->findChildren<QLabel *>()) QVERIFY2(!text->text().contains(QChar(0x00b7)), qPrintable(text->text()));
+    // The strip answers only through the dialog.
+    QTRY_VERIFY(workspace.findChild<QPushButton *>("teamProposalOpen"));
+    QVERIFY(!workspace.findChild<QPushButton *>("teamProposalAccept"));
+    // The header names the mode beside the phase.
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamHeaderPlanMode"));
+    QCOMPARE(workspace.findChild<QWidget *>("teamHeaderPlanMode")->property("mode").toString(), QStringLiteral("standard"));
+    shot(dialog, "u59-switch-dark");
+    // Closed without an answer it stays closed; Answer… opens it again.
+    dialog->reject();
+    QTRY_VERIFY(!workspace.findChild<QDialog *>("teamSwitchModeDialog"));
+    workspace.render();
+    QTest::qWait(100);
+    QVERIFY(!workspace.findChild<QDialog *>("teamSwitchModeDialog"));
+    workspace.setTheme(false); workspace.render();
+    lightPalette();
+    QTRY_VERIFY(workspace.findChild<QPushButton *>("teamProposalOpen"));
+    workspace.findChild<QPushButton *>("teamProposalOpen")->click();
+    QTRY_VERIFY(workspace.findChild<QDialog *>("teamSwitchModeDialog"));
+    dialog = workspace.findChild<QDialog *>("teamSwitchModeDialog");
+    QTRY_VERIFY(dialog->isVisible());
+    lightShot(dialog, "u59-switch-light");
+    darkPalette();
+    workspace.setTheme(true); workspace.render();
+    // Keep standard with a reason: bound to p5 and its whole hash.
+    dialog->findChild<QLineEdit *>("teamSwitchModeReason")->setText("We ship 2.5 next week");
+    dialog->findChild<QPushButton *>("teamSwitchModeKeep")->click();
+    QTRY_COMPARE(calls(script(), "decide-proposal").size(), 1);
+    auto input = calls(script(), "decide-proposal").first();
+    QCOMPARE(input["proposal"].toString(), QStringLiteral("p5"));
+    QVERIFY(!input["accept"].toBool());
+    QCOMPARE(input["expected_hash"].toString(), hash);
+    QCOMPARE(input["reason"].toString(), QStringLiteral("We ship 2.5 next week"));
+    QTRY_VERIFY(!workspace.findChild<QDialog *>("teamSwitchModeDialog"));
+    // A new request pops its own dialog; Switch to free sends it without a reason.
+    auto proposals = running["proposals"].toArray();
+    auto first = proposals[0].toObject(); first["state"] = "rejected"; proposals[0] = first;
+    const QString second = QStringLiteral("0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c");
+    proposals.append(QJsonObject{{"id", "p6"}, {"kind", "switch-plan-mode"}, {"by", "Lead"}, {"at", asked + 600}, {"state", "open"}, {"mode", "free"},
+                                 {"hash", second}, {"reason", "Three more fixes came in."}});
+    running["proposals"] = proposals;
+    setTeam(running);
+    QTRY_VERIFY(([&] {
+        controller.refresh();
+        auto *open = workspace.findChild<QDialog *>("teamSwitchModeDialog");
+        return open && open->property("proposal").toString() == "p6";
+    })());
+    workspace.findChild<QDialog *>("teamSwitchModeDialog")->findChild<QPushButton *>("teamSwitchModeSwitch")->click();
+    QTRY_COMPARE(calls(script(), "decide-proposal").size(), 2);
+    input = calls(script(), "decide-proposal").last();
+    QCOMPARE(input["proposal"].toString(), QStringLiteral("p6"));
+    QVERIFY(input["accept"].toBool());
+    QCOMPARE(input["expected_hash"].toString(), second);
+    QVERIFY(!input.contains("reason"));
+    QTRY_VERIFY(!workspace.findChild<QDialog *>("teamSwitchModeDialog"));
+}
+
+// U59: the mode shows beside the phase in the header, Graph and Board. The
+// open free phase folds its accepted tasks, reads idle (not done) when its
+// queue is empty, adds a build task on request and closes only after the
+// owner confirms, building first when work was accepted since the last build.
+void TestTeamsUi::freePhaseReadsIdleBuildsAndClosesOnConfirmation()
+{
+    setTeam(freeTeam());
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(1400, 860); workspace.show();
+    controller.refresh();
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    QTRY_VERIFY(phaseScrollOf(&workspace, 2) && workspace.findChild<QWidget *>("teamHeaderBuild"));
+    const auto modeOf = [&](int phase) {
+        auto *frame = phaseScrollOf(&workspace, phase);
+        auto *mode = frame ? frame->findChild<QWidget *>("teamPhaseMode") : nullptr;
+        return mode ? mode->property("mode").toString() : QString();
+    };
+    const auto badgeOf = [&](int phase) {
+        auto *frame = phaseScrollOf(&workspace, phase);
+        auto *badge = frame ? dynamic_cast<TeamUi::PhaseBadge *>(frame->findChild<QWidget *>("teamPhaseBadge")) : nullptr;
+        return badge ? badge->text() : QString();
+    };
+    // The header: Free, the last build and what was accepted since.
+    QCOMPARE(workspace.findChild<QWidget *>("teamHeaderPlanMode")->property("mode").toString(), QStringLiteral("free"));
+    QCOMPARE(workspace.findChild<QLabel *>("teamHeaderBuild")->text(), QStringLiteral("Last build 10:00, 1 accepted since"));
+    // The phases: the closed one Standard, the open one Free and running.
+    QCOMPARE(modeOf(1), QStringLiteral("standard"));
+    QCOMPARE(modeOf(2), QStringLiteral("free"));
+    QCOMPARE(badgeOf(2), QStringLiteral("Open, running"));
+    QCOMPARE(phaseScrollOf(&workspace, 2)->property("state").toString(), QStringLiteral("running"));
+    QVERIFY(!phaseScrollOf(&workspace, 2)->findChild<QToolButton *>("teamPhaseMore"));
+    // Its accepted tasks fold into one line; Show brings them back.
+    auto *fold = phaseScrollOf(&workspace, 2)->findChild<QWidget *>("teamFreeAccepted");
+    QVERIFY(fold);
+    QCOMPARE(fold->property("tasks").toInt(), 2);
+    QCOMPARE(fold->findChild<QLabel *>("teamFreeAcceptedIds")->text(), QStringLiteral("#3 #6"));
+    QCOMPARE(phaseNodeIds(phaseScrollOf(&workspace, 2)), (QList<int>{4, 7}));
+    phaseAction(&workspace, 2, "teamFreeAcceptedShow")->click();
+    QTRY_COMPARE(phaseNodeIds(phaseScrollOf(&workspace, 2)), (QList<int>{3, 4, 6, 7}));
+    phaseAction(&workspace, 2, "teamFreeAcceptedShow")->click();
+    QTRY_COMPARE(phaseNodeIds(phaseScrollOf(&workspace, 2)), (QList<int>{4, 7}));
+    // Close phase waits for the running tasks and names them.
+    auto *close = workspace.findChild<QPushButton *>("teamWorkspaceClosePhase");
+    QVERIFY(close && !close->isEnabled());
+    QCOMPARE(close->toolTip(), QStringLiteral("Phase 2 still has #4, #7 running; close it when they are decided"));
+    // An empty queue is never "finished": no Finish, no "waiting for you to finish".
+    QVERIFY(!workspace.findChild<QPushButton *>("teamWorkspaceFinish"));
+    shot(&workspace, "u59-graph-dark");
+    workspace.setTheme(false); workspace.render();
+    lightShot(&workspace, "u59-graph-light");
+    darkPalette();
+    workspace.setTheme(true); workspace.render();
+    // Integrate & build adds the build task, once.
+    QTRY_VERIFY(workspace.findChild<QPushButton *>("teamWorkspaceIntegrateBuild"));
+    auto *build = workspace.findChild<QPushButton *>("teamWorkspaceIntegrateBuild");
+    QVERIFY(build->isEnabled());
+    build->click();
+    QTRY_COMPARE(calls(script(), "integrate-build").size(), 1);
+    QCOMPARE(calls(script(), "integrate-build").first()["team"].toString(), QStringLiteral("team-1"));
+    // The Board folds the same way and carries the mode.
+    for (auto *b : workspace.findChild<QWidget *>("teamWorkspaceView")->findChildren<QPushButton *>()) if (b->property("segment") == "board") { b->click(); break; }
+    QTRY_VERIFY(workspace.findChild<QScrollArea *>("teamWorkspaceBoard"));
+    QTRY_VERIFY(phaseScrollOf(&workspace, 2) && phaseScrollOf(&workspace, 2)->findChild<QWidget *>("teamFreeAccepted"));
+    QCOMPARE(modeOf(2), QStringLiteral("free"));
+    QList<int> cards;
+    for (auto *card : phaseScrollOf(&workspace, 2)->findChildren<QFrame *>("teamBoardCard")) cards << card->property("task").toInt();
+    std::sort(cards.begin(), cards.end());
+    QCOMPARE(cards, (QList<int>{4, 7}));
+    shot(&workspace, "u59-board-dark");
+    workspace.setTheme(false); workspace.render();
+    lightShot(&workspace, "u59-board-light");
+    darkPalette();
+    workspace.setTheme(true); workspace.render();
+    for (auto *b : workspace.findChild<QWidget *>("teamWorkspaceView")->findChildren<QPushButton *>()) if (b->property("segment") == "graph") { b->click(); break; }
+    // Every task accepted: the phase is open and idle, not done.
+    setTeam(idleFreeTeam());
+    QTRY_VERIFY(([&] { controller.refresh(); return badgeOf(2) == QStringLiteral("Open, idle"); })());
+    QCOMPARE(phaseScrollOf(&workspace, 2)->property("state").toString(), QStringLiteral("idle"));
+    QVERIFY(phaseScrollOf(&workspace, 2)->findChild<QFrame *>("teamFreeIdleCard"));
+    QVERIFY(!workspace.findChild<QPushButton *>("teamWorkspaceFinish"));
+    QVERIFY(!workspace.findChild<QPushButton *>("teamHeaderFinishWaits"));
+    QCOMPARE(workspace.findChild<QLabel *>("teamHeaderBuild")->text(), QStringLiteral("Last build 10:00, 3 accepted since"));
+    QTRY_VERIFY(workspace.findChild<QPushButton *>("teamWorkspaceClosePhase")->isEnabled());
+    shot(&workspace, "u59-idle-dark");
+    workspace.setTheme(false); workspace.render();
+    lightShot(&workspace, "u59-idle-light");
+    darkPalette();
+    workspace.setTheme(true); workspace.render();
+    // A task joins the open phase at once: no warning, no typed confirmation.
+    QTRY_VERIFY(phaseAction(&workspace, 2, "teamFreeIdleAdd"));
+    phaseAction(&workspace, 2, "teamFreeIdleAdd")->click();
+    QTRY_VERIFY(workspace.findChild<QDialog *>("teamAddLateDialog"));
+    auto *add = workspace.findChild<QDialog *>("teamAddLateDialog");
+    QVERIFY(add->property("free").toBool());
+    QVERIFY(!add->findChild<QPushButton *>("teamAddLateAdd")->isEnabled());
+    add->findChild<QLineEdit *>("teamAddLateTitle")->setText("Tax rounding");
+    add->findChild<QPushButton *>("teamAddLateAdd")->click();
+    QTRY_COMPARE(calls(script(), "extend").size(), 1);
+    QCOMPARE(calls(script(), "extend").first()["tasks"].toArray().first().toObject()["title"].toString(), QStringLiteral("Tax rounding"));
+    QCOMPARE(calls(script(), "add-to-phase").size(), 0);
+    QTRY_VERIFY(!workspace.findChild<QDialog *>("teamAddLateDialog"));
+    // Close phase asks first: integrate and build is on, as work was accepted
+    // since the last build; Cancel sends nothing.
+    QTRY_VERIFY(workspace.findChild<QPushButton *>("teamWorkspaceClosePhase"));
+    workspace.findChild<QPushButton *>("teamWorkspaceClosePhase")->click();
+    QTRY_VERIFY(workspace.findChild<QDialog *>("teamClosePhaseDialog"));
+    auto *closeDialog = workspace.findChild<QDialog *>("teamClosePhaseDialog");
+    QTRY_VERIFY(closeDialog->isVisible());
+    auto *integrate = closeDialog->findChild<QCheckBox *>("teamClosePhaseIntegrate");
+    QVERIFY(integrate->isChecked() && integrate->isEnabled());
+    QCOMPARE(closeDialog->findChild<QPushButton *>("teamClosePhaseConfirm")->text(), QStringLiteral("Build and close"));
+    QCOMPARE(closeDialog->findChild<QLabel *>("teamClosePhaseTitle")->text(), QStringLiteral("Close Phase 2: Support stream?"));
+    QCOMPARE(closeDialog->findChild<QLabel *>("teamClosePhaseTasks")->text(), QStringLiteral("4 accepted, none running or pending"));
+    for (auto *text : closeDialog->findChildren<QLabel *>()) QVERIFY2(!text->text().contains(QChar(0x00b7)), qPrintable(text->text()));
+    shot(closeDialog, "u59-close-dark");
+    integrate->setChecked(false);
+    QCOMPARE(closeDialog->findChild<QPushButton *>("teamClosePhaseConfirm")->text(), QStringLiteral("Close phase"));
+    integrate->setChecked(true);
+    closeDialog->findChild<QPushButton *>("teamClosePhaseCancel")->click();
+    QTRY_VERIFY(!workspace.findChild<QDialog *>("teamClosePhaseDialog"));
+    QCOMPARE(calls(script(), "close-phase").size(), 0);
+    workspace.setTheme(false); workspace.render();
+    lightPalette();
+    QTRY_VERIFY(workspace.findChild<QPushButton *>("teamWorkspaceClosePhase"));
+    workspace.findChild<QPushButton *>("teamWorkspaceClosePhase")->click();
+    QTRY_VERIFY(workspace.findChild<QDialog *>("teamClosePhaseDialog"));
+    closeDialog = workspace.findChild<QDialog *>("teamClosePhaseDialog");
+    QTRY_VERIFY(closeDialog->isVisible());
+    lightShot(closeDialog, "u59-close-light");
+    darkPalette();
+    workspace.setTheme(true); workspace.render();
+    closeDialog->findChild<QPushButton *>("teamClosePhaseConfirm")->click();
+    QTRY_COMPARE(calls(script(), "close-phase").size(), 1);
+    QVERIFY(calls(script(), "close-phase").first()["integrate"].toBool());
+    QTRY_VERIFY(!workspace.findChild<QDialog *>("teamClosePhaseDialog"));
+    // The close waits for its build task: the header says so and Close phase is off.
+    auto pending = idleFreeTeam();
+    auto tasks = pending["tasks"].toArray();
+    tasks.append(QJsonObject{{"id", 8}, {"phase", 2}, {"title", "Build phase 2"}, {"assignee", "lead"}, {"status", "pending"}, {"phase_build", true}});
+    pending["tasks"] = tasks;
+    auto free = pending["free_phase"].toObject();
+    free["state"] = "open"; free["running"] = QJsonArray{8}; free["close_pending"] = 2;
+    pending["free_phase"] = free;
+    setTeam(pending);
+    QTRY_VERIFY(([&] { controller.refresh(); return workspace.findChild<QLabel *>("teamHeaderClosePending") != nullptr; })());
+    QCOMPARE(workspace.findChild<QLabel *>("teamHeaderClosePending")->text(), QStringLiteral("Phase 2 closes when its build #8 is accepted"));
+    QVERIFY(!workspace.findChild<QPushButton *>("teamWorkspaceClosePhase")->isEnabled());
+    QVERIFY(!workspace.findChild<QPushButton *>("teamWorkspaceIntegrateBuild")->isEnabled());
+    // Nothing accepted since the last build: the close is immediate, no build.
+    auto quiet = idleFreeTeam();
+    auto quietFree = quiet["free_phase"].toObject(); quietFree["accepted_since"] = 0; quiet["free_phase"] = quietFree;
+    setTeam(quiet);
+    QTRY_VERIFY(([&] { controller.refresh(); auto *b = workspace.findChild<QPushButton *>("teamWorkspaceClosePhase"); return b && b->isEnabled(); })());
+    workspace.findChild<QPushButton *>("teamWorkspaceClosePhase")->click();
+    QTRY_VERIFY(workspace.findChild<QDialog *>("teamClosePhaseDialog"));
+    closeDialog = workspace.findChild<QDialog *>("teamClosePhaseDialog");
+    QVERIFY(!closeDialog->findChild<QCheckBox *>("teamClosePhaseIntegrate")->isChecked());
+    QVERIFY(!closeDialog->findChild<QCheckBox *>("teamClosePhaseIntegrate")->isEnabled());
+    closeDialog->findChild<QPushButton *>("teamClosePhaseConfirm")->click();
+    QTRY_COMPARE(calls(script(), "close-phase").size(), 2);
+    QVERIFY(!calls(script(), "close-phase").last()["integrate"].toBool());
+    QTRY_VERIFY(!workspace.findChild<QDialog *>("teamClosePhaseDialog"));
 }
 
 // H6: Swap from the member menu, a new session or an existing one, confirmed;

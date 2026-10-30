@@ -354,7 +354,7 @@ private:
     // Spec D5: asks before resuming or restoring this selected session starts its
     // agent in a session host of another Windows session. False after Cancel, or
     // when the selection changed while the warning was open.
-    bool confirmLocalStart(Entry original);
+    bool confirmLocalStart(const Entry original);
     void terminateSession();
     // F7: a member session a Done/Stopped team left running. The Team tab has
     // already confirmed; this selects it and runs the terminate flow without

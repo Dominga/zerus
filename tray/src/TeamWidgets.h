@@ -186,6 +186,23 @@ inline void glyph(QPainter &p, const QRectF &r, const QColor &color, const QStri
             p.drawLine(m + QPointF(-s * .3, -s * .2), m + QPointF(s * .2, s * .3));
             p.drawLine(m + QPointF(-s * .3, s * .3), m + QPointF(s * .2, -s * .2));
         }
+    } else if (kind == "plan_free") {
+        // U59: free planning, an infinity sign.
+        QPainterPath loop;
+        loop.moveTo(m);
+        loop.cubicTo(m + QPointF(s * .45, -s * .75), m + QPointF(s * 1.05, -s * .45), m + QPointF(s, 0));
+        loop.cubicTo(m + QPointF(s * 1.05, s * .45), m + QPointF(s * .45, s * .75), m);
+        loop.cubicTo(m + QPointF(-s * .45, -s * .75), m + QPointF(-s * 1.05, -s * .45), m + QPointF(-s, 0));
+        loop.cubicTo(m + QPointF(-s * 1.05, s * .45), m + QPointF(-s * .45, s * .75), m);
+        p.drawPath(loop);
+    } else if (kind == "plan_standard") {
+        // U59: standard planning, phases as steps up to a goal.
+        QPainterPath steps;
+        steps.moveTo(c.left(), c.bottom());
+        steps.lineTo(m.x() - s * .35, c.bottom()); steps.lineTo(m.x() - s * .35, m.y());
+        steps.lineTo(m.x() + s * .3, m.y()); steps.lineTo(m.x() + s * .3, c.top() + s * .3);
+        steps.lineTo(c.right(), c.top() + s * .3);
+        p.drawPath(steps);
     } else if (kind == "stopped") {
         p.setPen(Qt::NoPen); p.setBrush(color);
         p.drawRoundedRect(QRectF(c.left() + s * .15, c.top() + s * .15, c.width() - s * .3, c.height() - s * .3), 1.5, 1.5);

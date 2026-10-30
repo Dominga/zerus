@@ -29,8 +29,8 @@
 :root[data-animate-activity="0"] .typing i { animation: none; }
 
 /* Reduce motion: the working indicators above, the Zerus mark, the loading
-   shimmer and spinner, the connecting machine's ring, the recording chip and
-   the playing video note. */
+   shimmer and spinner, the connecting machine's ring, the recording chip, the
+   composer's compaction bar and the playing video note. */
 :root[data-reduce-motion="1"] .sbadge.k-working .sb-mark::after,
 :root[data-reduce-motion="1"] .gb-count.working,
 :root[data-reduce-motion="1"] .status.working .dot,
@@ -41,6 +41,7 @@
 :root[data-reduce-motion="1"] .su-spin,
 :root[data-reduce-motion="1"] .set-spinner,
 :root[data-reduce-motion="1"] .tchip.rec svg,
+:root[data-reduce-motion="1"] .cmp-progress::after,
 :root[data-reduce-motion="1"] .vm-frames { animation: none !important; }
 :root[data-reduce-motion="1"] .mtile.s-connecting .mtile-dot::after { animation: none; opacity: .6; }
 :root[data-reduce-motion="1"] .zlogo, :root[data-reduce-motion="1"] .zlogo * { animation: none !important; transition: none; }

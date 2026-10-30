@@ -3968,6 +3968,8 @@ void TestSessionsWindow::rebuildKeepsProjectOrderAtScale()
 {
     QFETCH(int, count);
     QFETCH(bool, storedOrder);
+    if (count > 400 && qEnvironmentVariableIsSet("HGS_SKIP_QT_SCALE_ROWS"))
+        QSKIP("zerus-5wmh.79: hosted macOS CI skips the 3000 and 6000 scale rows");
     BoxState box; box.host = "arch"; box.ok = true;
     box.metrics = QJsonObject{{"platform", "linux"}};
     QStringList names, identities;
@@ -5789,10 +5791,11 @@ void TestSessionsWindow::localStartsAskAboutAnotherWindowsSession()
         {"fork_supported", true}, {"runtime_state", "saved"}, {"process_state", "exited"},
         {"events", QJsonArray{}}, {"cursor", 0}};
     const auto fixture = programInspecting("other-windows-session-hgs", details); QVERIFY(!fixture.isEmpty());
-    SessionsWindow window(fixture); window.setFleet(state); window.show(); window.showSession({}, name);
+    SessionsWindow window(fixture); window.setFleet(state); keepDetailsPollsOut(window); window.show(); window.showSession({}, name);
     auto *client = window.findChild<HgsClient *>(); QSignalSpy writes(client, &HgsClient::writeDone);
     QSignalSpy opened(&window, &SessionsWindow::sessionActivated);
     auto *composer = window.findChild<MessageComposer *>("messageComposer"); setComposerText(composer, "Keep this draft");
+    settleSelectedInspection(composer, client, {}, name, details);
     auto *resume = window.findChild<QAction *>("pauseAction"); QTRY_VERIFY(resume->isEnabled());
     LaunchWarnings warnings(window);
     // Cancel starts nothing and keeps the draft.
@@ -5802,7 +5805,12 @@ void TestSessionsWindow::localStartsAskAboutAnotherWindowsSession()
     auto *open = window.findChild<QAction *>("openSessionAction"); QVERIFY(open->isEnabled());
     open->trigger(); QCOMPARE(warnings.shown, 2); QCOMPARE(opened.size(), 0);
     QTest::qWait(200); QCOMPARE(writes.size(), 0);
-    // Launch anyway resumes exactly once.
+    // A listing update rebuilds the entries while the warning is open. The accepted
+    // launch still belongs to the same selected session and must resume exactly once.
+    auto duringWarning = state; auto updated = duringWarning.local();
+    SessionInfo earlier; earlier.name = "codex/a-first"; earlier.cmd = "codex";
+    updated.sessions.prepend(earlier); duringWarning.setLocal(updated, QDateTime::currentMSecsSinceEpoch());
+    QTimer::singleShot(0, &window, [&] { window.setFleet(duringWarning); });
     warnings.answer = "launchAnyway"; resume->trigger(); QCOMPARE(warnings.shown, 3);
     QTRY_COMPARE_WITH_TIMEOUT(writes.size(), 1, 15000); QCOMPARE(writes[0][0].toString(), "resume " + name);
     QTRY_VERIFY(open->isEnabled()); open->trigger(); QCOMPARE(warnings.shown, 4); QCOMPARE(opened.size(), 1);

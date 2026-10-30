@@ -267,7 +267,10 @@ fn all_items(team: &Team) -> Vec<Item> {
                     items.push(Item {
                         subagents: Value::Null,
                         kind: "report",
-                        key: format!("report:{}:{}", task.id, attempt.id),
+                        // A replaced report (A6: the member's own report after a
+                        // captured reply) is a new item: the key carries how many
+                        // texts it replaced, so the digest tells the lead again.
+                        key: format!("report:{}:{}:{}", task.id, attempt.id, report.replaced.len()),
                         task: Some(task.id),
                         member: team.role_of(&attempt.member),
                         since: report.at,
@@ -275,6 +278,8 @@ fn all_items(team: &Team) -> Vec<Item> {
                         // the owner's approval of that phase.
                         summary: if attempt.worked_ahead {
                             format!("worked ahead of phase {}: {}", task.phase, summary(&report.text))
+                        } else if !report.replaced.is_empty() {
+                            format!("replaces the earlier report: {}", summary(&report.text))
                         } else {
                             summary(&report.text)
                         },
@@ -571,7 +576,7 @@ pub(crate) fn waits(team: &Team, task: &Task, ready: bool) -> Option<Value> {
     // U36: a test holds the assignee's folder; its next task waits for it.
     if matches!(task.status, TaskStatus::Pending) {
         if let Some(held) = super::stages::held(team, &task.assignee).filter(|held| *held != task.id) {
-            return Some(json!({"for":"folder","on":[format!("#{held}")],"unblock":format!("folder held by the test of #{held}")}));
+            return Some(json!({"for":"folder","on":[format!("#{held}")],"unblock":format!("folder held by the stage of #{held}")}));
         }
     }
     if task.status == TaskStatus::Submitted {
@@ -1058,6 +1063,37 @@ mod tests {
         }
         let text = super::text(&many, &super::items(&many), 40.0);
         assert!(text.contains("[20 more item(s)") || text.contains("more item(s)"), "{text}");
+    }
+
+    #[test]
+    fn a_report_that_replaces_a_captured_one_is_told_again() {
+        // Owner, 2026-10-30: the member's own report replaced the reply Zerus
+        // had captured, and the lead never heard of it: both had one key.
+        let mut team = team();
+        submitted(&mut team, 1, 100.0);
+        team.task_mut(1).unwrap().attempts.last_mut().unwrap().report.as_mut().unwrap().captured = true;
+        let first = super::items(&team);
+        let mut told = Vec::new();
+        let open: BTreeSet<String> = first.iter().map(|item| item.key.clone()).collect();
+        mark_told(&mut told, &first, &open);
+        let (attempt, member) = {
+            let attempt = team.task(1).unwrap().attempts.last().unwrap();
+            (attempt.id.clone(), attempt.member.clone())
+        };
+        let replaced = ops::apply(
+            &mut team,
+            "report",
+            &serde_json::json!({"task":1,"attempt":attempt,"text":"Done: the real report."}),
+            &Actor::Member(member),
+            &BTreeSet::new(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(replaced["status"], "submitted");
+        let items = super::items(&team);
+        let report = items.iter().find(|item| item.kind == "report").unwrap();
+        assert!(!told.contains(&report.key), "the replacement must be a new item: {told:?} {}", report.key);
+        assert!(report.summary.starts_with("replaces the earlier report"), "{}", report.summary);
     }
 
     #[test]

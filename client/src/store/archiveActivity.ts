@@ -68,6 +68,8 @@ export function createArchiveActivity(deps: ArchiveActivityDeps) {
   let cursor = 0;
   /** The conversation shown (Qt's m_details conversation_id); unknown before the first answer. */
   let conversation: string | undefined;
+  /** The same conversation, reactive, for the attachments' scope. */
+  const [shownConversation, setShownConversation] = createSignal("");
   /** Counts the drops: an answer to a read started before the last one does not apply. */
   let generation = 0;
   let reading = false;
@@ -87,6 +89,7 @@ export function createArchiveActivity(deps: ArchiveActivityDeps) {
     stopTimer();
     cursor = 0;
     conversation = undefined;
+    setShownConversation("");
     batch(() => { setEvents([]); setSummary(undefined); setLoaded(false); setError(undefined); });
   }
 
@@ -113,11 +116,13 @@ export function createArchiveActivity(deps: ArchiveActivityDeps) {
       // previous conversation's cursor never skips the new history.
       cursor = 0;
       conversation = id;
+      setShownConversation(id);
       batch(() => { setEvents(capped([...list])); setSummary(r.summary); setLoaded(true); });
       read();
       return;
     }
     conversation = id;
+    setShownConversation(id);
     const shown = untrack(events);
     let merged: readonly ActivityEvent[] = shown;
     if (r.replace_events) merged = capped([...list]);
@@ -169,6 +174,11 @@ export function createArchiveActivity(deps: ArchiveActivityDeps) {
 
   const source = {
     target, events, summary, loaded, error,
+    /** The archived row's conversation, as its last read named it. */
+    attachmentScope: () => {
+      const t = target();
+      return t ? { computer: t.computer, name: t.name, conversation_id: shownConversation(), archive_id: t.archiveId } : undefined;
+    },
     loadingOlder: () => false,
     olderDone: () => true,
     ended: () => false,

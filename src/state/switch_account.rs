@@ -345,9 +345,14 @@ fn plan_copies(record: &Value, old_home: &Path, new_home: &Path, conversation: &
         None => find_codex_rollout(old_home, conversation)
             .ok_or_else(|| "the conversation's Codex session file is missing; nothing was changed".to_owned())?,
     };
+    // transcript_of answers a canonical path; the account folder may be named
+    // otherwise (a Windows 8.3 short name, as on CI runners).
+    let canonical_home = crate::platform::canonical(old_home).ok();
     let relative = source
         .strip_prefix(old_home)
-        .map_err(|_| "the conversation file is outside the session's account folder; nothing was changed")?;
+        .ok()
+        .or_else(|| canonical_home.as_deref().and_then(|home| source.strip_prefix(home).ok()))
+        .ok_or("the conversation file is outside the session's account folder; nothing was changed")?;
     let target = new_home.join(relative);
     let mut copies = vec![Copy { from: source.clone(), to: target.clone() }];
     // Claude keeps a conversation's subagent transcripts in the folder beside it.

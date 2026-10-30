@@ -20,6 +20,10 @@ pub struct ViewRow {
     pub name: String,
     /// The card title: the tag, else the name after its project, else the project.
     pub title: String,
+    /// Qt's full project / tag title (`SessionPresentation.h:196-203`),
+    /// projected before the original tag and project fields are lost.
+    #[serde(default)]
+    pub display_title: String,
     /// `claude`, `codex`, `kimi`, `deepseek`, `opencode`, `sh` or what `hgs` reports.
     pub agent: String,
     /// The presentation status: `attention`, `error`, `working`, `background`,
@@ -89,6 +93,8 @@ pub struct ViewRow {
     /// When the current turn, compaction or background job started, for the
     /// Working clock.
     pub turn_started: Option<f64>,
+    /// The creation that launched this session (HgsClient.cpp:184).
+    pub launch_id: Option<String>,
     pub run_id: Option<String>,
     pub conversation_id: Option<String>,
     /// The raw `state` (`running`, `paused`, `stopped`, `archived`, ...);
@@ -112,6 +118,13 @@ pub struct ViewRow {
     pub action_reasons: BTreeMap<String, String>,
     /// The raw working directory (`folder` is the name people know it by).
     pub cwd: String,
+    /// The canonical working directory (`cwd_canonical`), empty when the row
+    /// has none, and then not sent. New session's prefill opens on it.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub cwd_canonical: String,
+    /// The checkout's root (`git_root`), empty outside Git. The worktree
+    /// picker counts sessions by it.
+    pub git_root: String,
     /// The row's `terminal_supported`, else true unless the agent is
     /// `dsh` or `opencode` (`HgsClient.cpp:217`).
     pub terminal_supported: bool,
@@ -705,6 +718,24 @@ impl<'a> Session<'a> {
         }
     }
 
+    fn display_title(&self) -> String {
+        let project = self.project();
+        if project.is_empty() {
+            return self.name.to_owned();
+        }
+        let tag = text(self.row, "tag");
+        let tag = if tag.is_empty() {
+            section(self.name, 2)
+        } else {
+            tag
+        };
+        if tag.is_empty() {
+            project
+        } else {
+            format!("{project} / {tag}")
+        }
+    }
+
     fn title(&self) -> String {
         let tag = text(self.row, "tag");
         let tag = if tag.is_empty() {
@@ -1096,6 +1127,7 @@ pub fn row(value: &Value) -> ViewRow {
     ViewRow {
         name: session.name.to_owned(),
         title: session.title(),
+        display_title: session.display_title(),
         agent: if agent == "dsh" { "deepseek" } else { agent }.to_owned(),
         status: status.to_owned(),
         caption,
@@ -1136,6 +1168,7 @@ pub fn row(value: &Value) -> ViewRow {
         updated_at: number(value, "last_event_at").filter(|at| *at > 0.0),
         archived_at: number(value, "archived_at"),
         turn_started: session.turn_started(),
+        launch_id: some(text(value, "launch_id")),
         run_id: some(session.run_id),
         conversation_id: some(session.conversation_id),
         // A live row lists no state; Qt reads it as running (`HgsClient.cpp`).
@@ -1170,6 +1203,8 @@ pub fn row(value: &Value) -> ViewRow {
             })
             .unwrap_or_default(),
         cwd: text(value, "cwd").to_owned(),
+        cwd_canonical: text(value, "cwd_canonical").to_owned(),
+        git_root: text(value, "git_root").to_owned(),
         terminal_supported: flag("terminal_supported").unwrap_or(cmd != "dsh" && cmd != "opencode"),
         terminal_reported: flag("terminal_supported").is_some(),
         terminal_attach_supported: flag("terminal_attach_supported").unwrap_or(false),
@@ -1393,6 +1428,47 @@ mod tests {
             "an error without recovery needs attention"
         );
         assert_eq!(row(&error).status, "error", "while its status stays");
+    }
+
+    #[test]
+    fn display_titles_keep_qt_s_original_project_and_tag_fallbacks() {
+        for (source, expected) in [
+            (json!({"name": "claude/project/tag"}), "project / tag"),
+            (json!({"name": "claude/project/a/b"}), "project / a/b"),
+            (json!({"name": "sh/project"}), "project"),
+            (json!({"name": "shell"}), "shell"),
+            (json!({"name": "shell", "tag": "custom"}), "shell"),
+            (json!({"name": "shell", "project": "project"}), "project"),
+            (
+                json!({"name": "shell", "project": "project", "tag": "project"}),
+                "project / project",
+            ),
+            (
+                json!({"name": "shell", "project": "project", "tag": "custom"}),
+                "project / custom",
+            ),
+            (
+                json!({"name": "claude/old/fallback", "project": "new", "tag": "explicit"}),
+                "new / explicit",
+            ),
+            (
+                json!({"name": "claude/old/fallback", "project": "new", "tag": ""}),
+                "new / fallback",
+            ),
+            (
+                json!({"name": "claude/project/tag", "project": null, "tag": 7}),
+                "project / tag",
+            ),
+            (json!({"name": "claude//tag"}), "claude//tag"),
+            (json!({}), ""),
+        ] {
+            assert_eq!(row(&source).display_title, expected, "{source}");
+        }
+        let repeated = row(&json!({"name": "shell", "project": "project", "tag": "project"}));
+        assert_eq!(repeated.title, "project", "the card title is unchanged");
+        let old: ViewRow = serde_json::from_value(json!({"name": "old", "title": "kept"})).unwrap();
+        assert_eq!(old.display_title, "", "old saved projections still load");
+        assert_eq!(old.title, "kept");
     }
 
     #[test]
@@ -1753,6 +1829,32 @@ mod tests {
         let attach = row(&json!({"terminal_attach_supported": true, "terminal_supported": "yes"}));
         assert!(attach.terminal_attach_supported && attach.terminal_attach_reported);
         assert!(!attach.terminal_reported);
+    }
+
+    // G1: the New session prefill opens on the canonical folder (SessionsWindow
+    // 2924), and the worktree picker counts sessions by checkout and folder
+    // (WorktreePanel.h:135-139).
+    #[test]
+    fn the_checkout_and_the_canonical_folder_are_kept_raw() {
+        let view = row(
+            &json!({"cwd": "/home/example/link/project", "cwd_canonical": "/srv/example/project",
+            "git_root": "/srv/example/project"}),
+        );
+        assert_eq!(view.cwd_canonical, "/srv/example/project");
+        assert_eq!(view.git_root, "/srv/example/project");
+        let plain = row(&json!({"cwd": "/home/example/notes", "git_root": 1}));
+        assert_eq!(
+            (plain.git_root.as_str(), plain.cwd_canonical.as_str()),
+            ("", "")
+        );
+        // Every row carries `git_root`; `cwd_canonical` only when it has one.
+        let sent = serde_json::to_value(&plain).unwrap();
+        assert_eq!(sent["git_root"], json!(""));
+        assert!(sent.get("cwd_canonical").is_none());
+        let sent = serde_json::to_value(&view).unwrap();
+        assert_eq!(sent["cwd_canonical"], json!("/srv/example/project"));
+        let back: ViewRow = serde_json::from_value(serde_json::to_value(&plain).unwrap()).unwrap();
+        assert_eq!(back.cwd_canonical, "");
     }
 
     #[test]

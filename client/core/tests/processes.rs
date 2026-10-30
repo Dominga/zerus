@@ -179,6 +179,10 @@ fn a_cli_without_the_topic_stays_quiet() {
         fleet.follow_processes(&local, session("r1", "claude/sample-project/review")),
         Ok("run:r1".into())
     );
+    fleet
+        .set_processes_interval(&local, "run:r1", 2_500)
+        .unwrap();
+    fleet.refresh_processes(&local, "run:r1").unwrap();
     // A ping written after the follow shows the stream read past it.
     assert!(fleet.send(
         &local,
@@ -241,5 +245,98 @@ fn a_new_stream_with_a_lower_limit_ends_only_the_follows_beyond_it() {
         processes(change, "run:r1") != Some(&ProcessesUpdate::Ended)
             && processes(change, "run:r2") != Some(&ProcessesUpdate::Ended)
     }));
+    fleet.stop();
+}
+
+#[test]
+fn interval_and_refresh_controls_preserve_the_follow_and_reconnect_cadence() {
+    let rows = [("r1", "codex/sample-project/one")];
+    let value = json!({"processes": {"items": [], "active_count": 1}, "process_work": null});
+    let fake = FakeHgs::new(
+        "processes_interval",
+        json!({"": {"runs": [
+            [
+                {"lines": [hello_with_processes(16), catalog(&rows)]},
+                {"await_file": "followed"},
+                {"lines": [{"t": "state", "topic": "processes", "key": "run:r1", "value": value, "rev": 7}]},
+                {"serve": true, "until_file": "reconnect"}
+            ],
+            [{"lines": [hello_with_processes(16), catalog(&rows)]}, {"serve": true}]
+        ]}}),
+    );
+    let (tx, rx) = channel();
+    let mut seen = Seen::new(rx);
+    let fleet = Fleet::start_local(fake.path(), tx, quick());
+    let local = ComputerId::local();
+    seen.until("live", live);
+    fleet
+        .follow_processes(&local, session("r1", "codex/sample-project/one"))
+        .unwrap();
+    fake.touch("followed");
+    eventually("the original follow", || controls(&fake).len() == 1);
+    seen.until("the current inventory", |change| {
+        matches!(
+            processes(change, "run:r1"),
+            Some(ProcessesUpdate::State { rev: 7, .. })
+        )
+    });
+    fleet
+        .set_processes_interval(&local, "run:r1", 2_500)
+        .unwrap();
+    eventually("the active cadence", || {
+        fake.stdin("")
+            .iter()
+            .any(|line| line["interval_ms"] == 2_500)
+    });
+    fleet.refresh_processes(&local, "run:r1").unwrap();
+    eventually("one refresh", || {
+        fake.stdin("").iter().any(|line| {
+            line["topic"] == "processes" && line["refresh"] == true && line["interval_ms"] == 2_500
+        })
+    });
+    fleet
+        .set_processes_interval(&local, "run:r1", u64::MAX)
+        .unwrap();
+    eventually("the bounded cadence", || {
+        fake.stdin("")
+            .iter()
+            .any(|line| line["interval_ms"] == 600_000)
+    });
+    fleet
+        .follow_processes(&local, session("r1", "codex/sample-project/renamed"))
+        .unwrap();
+    eventually("the renamed reference keeps its cadence", || {
+        fake.stdin("").iter().any(|line| {
+            line["session"]["name"] == "codex/sample-project/renamed"
+                && line["interval_ms"] == 600_000
+        })
+    });
+    assert_eq!(fleet.followed_processes(&local), ["run:r1"]);
+    seen.drain_for(Duration::from_millis(50));
+    assert!(!seen
+        .all
+        .iter()
+        .any(|change| processes(change, "run:r1") == Some(&ProcessesUpdate::Ended)));
+    assert!(controls(&fake).iter().all(|(op, _)| op == "subscribe"));
+    fake.touch("reconnect");
+    eventually("the cadence after reconnect", || {
+        fake.stdin("")
+            .iter()
+            .filter(|line| line["interval_ms"] == 600_000)
+            .count()
+            >= 2
+    });
+    assert_eq!(
+        fleet.set_processes_interval(&local, "missing", 1_000),
+        Err(FollowError::KeyMismatch)
+    );
+    assert_eq!(
+        fleet.refresh_processes(&local, "missing"),
+        Err(FollowError::KeyMismatch)
+    );
+    assert_eq!(
+        fleet.refresh_processes(&ComputerId::from("missing"), "run:r1"),
+        Err(FollowError::UnknownComputer)
+    );
     fleet.stop();
 }

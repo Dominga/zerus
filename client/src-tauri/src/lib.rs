@@ -16,8 +16,13 @@ mod commands;
 #[cfg(feature = "live")]
 mod composer;
 #[cfg(feature = "live")]
+mod creations;
+#[cfg(feature = "live")]
 mod desk;
 mod display;
+#[cfg(feature = "live")]
+mod drops;
+mod exit_flush;
 #[cfg(feature = "live")]
 mod files;
 mod identity;
@@ -28,10 +33,14 @@ mod metrics;
 #[cfg(feature = "live")]
 mod mobile;
 #[cfg(feature = "live")]
+mod newsession;
+#[cfg(feature = "live")]
 mod notifier;
 #[cfg(feature = "live")]
 mod organization;
 mod platform;
+#[cfg(feature = "live")]
+mod processes;
 #[cfg(feature = "live")]
 mod pump;
 #[cfg(feature = "live")]
@@ -44,6 +53,8 @@ mod replay;
 #[cfg(feature = "live")]
 mod screens;
 #[cfg(feature = "live")]
+mod session_files;
+#[cfg(feature = "live")]
 pub mod settings;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod signals;
@@ -51,6 +62,8 @@ mod signals;
 mod speech_settings;
 #[cfg(feature = "live")]
 mod terminal;
+#[cfg(feature = "live")]
+mod updates;
 #[cfg(feature = "media")]
 mod voice;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -131,7 +144,14 @@ pub fn run() {
             return;
         }
         Ok(cli::Command::BuildInfo) => {
-            println!("{}", cli::build_info(&cli::BUILD));
+            #[cfg(target_os = "linux")]
+            let info = {
+                let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
+                cli::build_info_for(&cli::BUILD, &context.config().identifier)
+            };
+            #[cfg(not(target_os = "linux"))]
+            let info = cli::build_info(&cli::BUILD);
+            println!("{info}");
             return;
         }
         Err(error) => {
@@ -209,10 +229,28 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
     };
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
+        // Opened from Rust only (the composer's `composer_pick` and New
+        // session's `pick_local_folder`): the capabilities grant the webview
+        // none of its permissions.
         .plugin(tauri_plugin_dialog::init())
+        // Rust opens attachments; the webview's links stay its own (no injected click handler).
+        .plugin(
+            tauri_plugin_opener::Builder::new()
+                .open_js_links_on_click(false)
+                .build(),
+        )
         .manage(commands::AppState::default())
         .manage(window_visibility::Visibility::default())
-        .manage(lifecycle::Lifecycle { menu_bar });
+        .manage(lifecycle::Lifecycle { menu_bar })
+        .manage(exit_flush::ExitFlush::default());
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .menu(exit_flush::app_menu)
+        .on_menu_event(|app, event| {
+            if event.id().as_ref() == exit_flush::QUIT_ID {
+                exit_flush::quit_with_flush(app, 0);
+            }
+        });
     // tao activates the app when it finishes launching, taking the focus from
     // the app in front; a menu-bar build activates only to show its window.
     #[cfg(target_os = "macos")]
@@ -296,6 +334,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(actions::ActivityReads::default());
                 app.manage(actions::Attention::new(dir.join(actions::attention_file(replay))));
                 let pump = app.state::<commands::AppState>().pump();
+                app.state::<actions::Actions>().set_termination_pump(pump.clone());
                 let allowed = actions::actions_allowed(
                     std::env::var("ZERUS_CLIENT_REPLAY").ok().as_deref(),
                     std::env::var("ZERUS_CLIENT_HGS").ok().as_deref(),
@@ -314,7 +353,11 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     allowed,
                     dir.join(organization::layout_file(replay)),
                     draft_path,
+                    replay,
                 );
+                organization.seed_runs(organization::run_seed_source(
+                    &app.state::<identity::Identity>().bundle_id, replay,
+                ));
                 // Before any start of the source (the menu bar's below, or the webview's).
                 app.state::<commands::AppState>().set_organization(organization.clone());
                 let screens = screens::Screens::tauri(app.handle().clone(), pump.clone());
@@ -327,6 +370,12 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 }));
                 app.manage(organization);
                 app.manage(screens);
+                app.manage(newsession::NewSession::tauri(Some(dir.join(if replay {
+                    "worktree-snapshots-replay.json"
+                } else { "worktree-snapshots.json" }))));
+                let creations = creations::start(app.handle(), &dir, replay, allowed);
+                app.state::<commands::AppState>().set_creations(creations.clone());
+                app.manage(creations);
                 app.manage(terminal::Terminals::new(zerus_client_core::default_hgs(), allowed));
                 // A replay never touches the real drafts either.
                 let drafts = std::sync::Arc::new(zerus_client_core::drafts::DraftStore::open(
@@ -345,15 +394,41 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 let notify_pump = app.state::<commands::AppState>().pump();
                 // A replay never touches the real attachment cache either.
                 let cache = attachments_root(&cache_dir(app.handle()), replay);
+                let smoke_clock = crate::actions::smoke_env_allowed()
+                    .then(|| {
+                        std::env::var("ZERUS_CLIENT_SMOKE_NOW")
+                            .ok()
+                            .and_then(|value| value.parse::<f64>().ok())
+                    })
+                    .flatten()
+                    .map(|now| (now, std::time::Instant::now()));
+                // Saved drafts reads Qt's store and the dev app's, never
+                // writing to them; a replay lists neither.
+                let qt_drafts = composer::qt_store(
+                    drafts.root(),
+                    (!replay).then(zerus_client_core::drafts::qt_root).flatten(),
+                );
+                let dev_drafts = if replay {
+                    Vec::new()
+                } else {
+                    composer::dev_stores(drafts.root(), zerus_client_core::drafts::dev_roots())
+                };
                 app.manage(composer::Composers::new(
                     drafts,
-                    composer::Config { cache },
+                    composer::Config {
+                        cache,
+                        qt_drafts,
+                        dev_drafts,
+                    },
                     composer::Deps {
                         spawn: std::sync::Arc::new(|job: composer::Job| {
                             tauri::async_runtime::spawn_blocking(job);
                         }),
                         notify: std::sync::Arc::new(move || notify_pump.poke()),
-                        clock: std::sync::Arc::new(|| {
+                        clock: std::sync::Arc::new(move || {
+                            if let Some((base, started)) = smoke_clock {
+                                return base + started.elapsed().as_secs_f64();
+                            }
                             std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .map_or(0.0, |d| d.as_secs_f64())
@@ -361,7 +436,8 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                         rows: {
                             let pump = app.state::<commands::AppState>().pump();
                             std::sync::Arc::new(move |computer: &str, key: &str, name: &str| {
-                                pump.row(computer, key)
+                                composer::archived_row(key, name)
+                                    .or_else(|| pump.row(computer, key))
                                     .or_else(|| pump.row_named(computer, name))
                                     .map(|row| (row, pump.online(computer)))
                             })
@@ -373,6 +449,12 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                                 actions.session_write(computer, name, || {
                                     (pump.row_named(computer, name), pump.online(computer))
                                 })
+                            })
+                        },
+                        reconnect: {
+                            let app = app.handle().clone();
+                            std::sync::Arc::new(move |computer| {
+                                app.state::<commands::AppState>().reconnect(computer);
                             })
                         },
                         inspect: {
@@ -417,6 +499,57 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 // The composer's session part once a second (the cache chip)
                 // and the inspect fallback; it sleeps while no composer is open.
                 composers.start_ticker();
+                app.manage(processes_hub(app.handle(), allowed));
+                // Activity attachments share the composers' cache: one root,
+                // one set of pins and one prune lane, which keeps Retry's files.
+                let retry = std::sync::Arc::downgrade(&composers.0);
+                composers.cache().set_extra(std::sync::Arc::new(move || {
+                    retry
+                        .upgrade()
+                        .map(|shared| composer::Composers(shared).retry_files())
+                        .unwrap_or_default()
+                }));
+                app.manage(composer::fetch::Fetcher::new(
+                    composers.cache(),
+                    {
+                        // A replay without an explicit ZERUS_CLIENT_HGS never reaches the real CLI.
+                        let allowed = actions::actions_allowed(
+                            std::env::var("ZERUS_CLIENT_REPLAY").ok().as_deref(),
+                            std::env::var("ZERUS_CLIENT_HGS").ok().as_deref(),
+                        );
+                        let hgs = zerus_client_core::default_hgs();
+                        std::sync::Arc::new(move |computer: &zerus_client_core::ComputerId, file: &zerus_client_core::reads::AttachmentRef, root: &std::path::Path| {
+                            if !allowed {
+                                return Err(actions::REPLAY_NEEDS_HGS.to_owned());
+                            }
+                            zerus_client_core::reads::fetch_attachment(&hgs, computer, file, root)
+                        })
+                    },
+                    std::sync::Arc::new(|job: composer::Job| {
+                        tauri::async_runtime::spawn_blocking(job);
+                    }),
+                ));
+                let opener = {
+                    use tauri_plugin_opener::OpenerExt;
+                    let (open, reveal) = (app.handle().clone(), app.handle().clone());
+                    composer::fetch::Opener {
+                        open: std::sync::Arc::new(move |path: &std::path::Path| {
+                            open.opener().open_path(path.to_string_lossy(), None::<&str>).is_ok()
+                        }),
+                        reveal: std::sync::Arc::new(move |path: &std::path::Path| {
+                            reveal.opener().reveal_item_in_dir(path).is_ok()
+                        }),
+                    }
+                };
+                app.manage(session_files::SessionFiles::new(
+                    app.handle().clone(),
+                    zerus_client_core::default_hgs(),
+                    opener.clone(),
+                    std::sync::Arc::new(|job: composer::Job| {
+                        tauri::async_runtime::spawn_blocking(job);
+                    }),
+                ));
+                app.manage(opener);
                 // The menu-bar item, before the fleet starts so its first catalog reaches it.
                 #[cfg(target_os = "macos")]
                 {
@@ -462,6 +595,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                         }
                     }
                 }
+                app.manage(updates::start(app.handle()));
                 if menu_bar {
                     lifecycle::start_fleet(|| app.state::<commands::AppState>().start_source());
                 }
@@ -506,6 +640,99 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
     app.run(|app, event| {
         lifecycle::on_event(app, &event);
     });
+}
+
+/// The Processes tab's hub (`processes.rs`): the topic through the data
+/// source, output reads through the CLI, stops through the guarded
+/// dispatcher, and the five settings from the app's one settings store, now
+/// and after each change. Its ticker runs while the tab shows a session.
+#[cfg(feature = "live")]
+fn processes_hub(app: &AppHandle, allowed: bool) -> processes::ProcessHub {
+    use std::sync::Arc;
+    use tauri::Manager;
+    let pump = app.state::<commands::AppState>().pump();
+    let start = std::time::Instant::now();
+    let follows = app.clone();
+    let unfollows = app.clone();
+    let intervals = app.clone();
+    let refreshes = app.clone();
+    let actions = app.state::<actions::Actions>().inner().clone();
+    let hgs = zerus_client_core::default_hgs();
+    let hub = processes::ProcessHub::new(
+        processes::ProcessDeps {
+            spawn: Arc::new(|job: processes::Job| {
+                tauri::async_runtime::spawn_blocking(job);
+            }),
+            notify: Arc::new(move || pump.poke()),
+            clock_ms: Arc::new(move || start.elapsed().as_millis() as u64),
+            epoch: Arc::new(|| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0.0, |d| d.as_secs_f64())
+            }),
+            follow: Arc::new(move |target: &processes::ProcessTarget| {
+                follows
+                    .state::<commands::AppState>()
+                    .follow_processes(target)
+            }),
+            unfollow: Arc::new(move |target: &processes::ProcessTarget| {
+                unfollows
+                    .state::<commands::AppState>()
+                    .unfollow_processes(target)
+            }),
+            set_interval: Arc::new(move |target, ms| {
+                let _ = intervals
+                    .state::<commands::AppState>()
+                    .set_processes_interval(target, ms);
+            }),
+            refresh: Arc::new(move |target| {
+                let _ = refreshes
+                    .state::<commands::AppState>()
+                    .refresh_processes(target);
+            }),
+            read: Arc::new(
+                move |computer: &zerus_client_core::ComputerId, read: &zerus_client_core::Read| {
+                    zerus_client_core::reads::read(&hgs, computer, read)
+                        .map_err(|error| error.to_string())
+                },
+            ),
+            // One request id per stop: a stop is never sent twice.
+            stop: Arc::new(
+                move |target: zerus_client_core::Target, action: zerus_client_core::Action| {
+                    tauri::async_runtime::block_on(actions::dispatch_as(
+                        &actions,
+                        target,
+                        action,
+                        uuid::Uuid::new_v4().to_string(),
+                    ))
+                },
+            ),
+        },
+        allowed,
+    );
+    // Every change of a `processes/*` setting reads the five again; the
+    // first read waits for the store to load, off the setup thread.
+    let changed = hub.clone();
+    let store = app.clone();
+    app.state::<settings::Store>()
+        .0
+        .subscribe(Box::new(move |key, _, _| {
+            if key.starts_with("processes/") {
+                if let Some(store) = store.try_state::<settings::Store>() {
+                    changed.settings_from(&store.0);
+                }
+            }
+        }));
+    let first = hub.clone();
+    let store = app.state::<settings::Store>().0.clone();
+    let started = std::thread::Builder::new()
+        .name("zerus-processes-settings".into())
+        .spawn(move || first.settings_from(&store));
+    if let Err(error) = started {
+        eprintln!("zerus-client: the Processes settings were not read: {error}");
+    }
+    hub.start_ticker();
+    hub
 }
 
 /// A `sessions` line from a later start opens and raises the window; `show`
@@ -563,8 +790,9 @@ fn start_watchdog() -> std::io::Result<watchdog::Watchdog> {
 /// Before the app quits (`lifecycle::exit`, before the socket goes): the
 /// last settings change gets a bounded wait, pending project edits and the
 /// layout reach the disk, recordings under way are cancelled, the hubs take
-/// no more changes, every draft save already queued reaches the disk, and
-/// the unsent read marks and the attention marks are saved (a bounded wait).
+/// no more changes (unsent process stops are dropped), every draft save
+/// already queued reaches the disk, and the unsent read marks and the
+/// attention marks are saved (a bounded wait).
 #[cfg(feature = "live")]
 pub(crate) fn exit_work(app: &AppHandle) {
     use tauri::Manager;
@@ -573,6 +801,9 @@ pub(crate) fn exit_work(app: &AppHandle) {
     }
     if let Some(organization) = app.try_state::<organization::Organization>() {
         organization.flush();
+    }
+    if let Some(processes) = app.try_state::<processes::ProcessHub>() {
+        processes.close();
     }
     #[cfg(feature = "media")]
     if let Some(voices) = app.try_state::<voice::Voices>() {
@@ -584,6 +815,7 @@ pub(crate) fn exit_work(app: &AppHandle) {
             drafts.0.flush();
         }
     });
+    creations::flush_on_exit(app);
     actions::flush_on_exit(app);
 }
 
@@ -598,8 +830,8 @@ fn close_drafts(composers: Option<&composer::Composers>, flush_store: impl FnOnc
 }
 
 /// SIGTERM, SIGINT or SIGHUP (`signals.rs`, Qt's `TerminationSignals`):
-/// the app quits as Qt's posted quit does. `app.exit` ends in
-/// `RunEvent::Exit`, where the one exit hook runs once, on the main thread.
+/// the app quits as Qt's posted quit does, through the page flush helper
+/// before `RunEvent::Exit` runs the one final exit hook.
 /// Should the process not end within five seconds, the fallback ends it.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn exit_on_signals(app: AppHandle) {
@@ -612,7 +844,7 @@ fn exit_on_signals(app: AppHandle) {
                 || std::process::exit(0),
             )
         });
-        app.exit(0);
+        exit_flush::quit_with_flush(&app, 0);
     });
     if let Err(error) = installed {
         eprintln!("zerus-client: termination signals keep their default action: {error}");
@@ -660,8 +892,11 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::perf_config,
         commands::save_perf,
         commands::perf_log,
+        commands::smoke_log,
+        commands::smoke_resume,
         commands::display_hz,
         commands::exit_app,
+        exit_flush::exit_flush_ack,
         commands::perf_away,
         commands::build_info,
         renderer::renderer_frame,
@@ -714,7 +949,9 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         actions::archive_page,
         actions::archived_activity,
         actions::cancel_archive_pages,
+        actions::reset_archive_pages,
         clipboard::copy_text,
+        clipboard::copy_verbatim,
         organization::move_to_project,
         organization::create_project,
         organization::rename_project,
@@ -722,12 +959,37 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         organization::move_project,
         organization::sort_project,
         organization::set_project_collapsed,
+        organization::project_folders,
         screens::screen_visible,
         screens::accounts_view,
         screens::machines_view,
         screens::machine_resolve,
         screens::machine_check,
         screens::projects_view,
+        screens::launch_accounts,
+        screens::launch_account_rows,
+        screens::launch_accounts_close,
+        newsession::new_session_context,
+        creations::creation_submit,
+        creations::creations_view,
+        creations::creation_details,
+        creations::creation_action,
+        creations::creation_plan,
+        newsession::new_session_form,
+        newsession::new_session_start,
+        newsession::new_session_plan,
+        newsession::launch_warning,
+        newsession::repository_fields,
+        newsession::worktree_snapshot,
+        newsession::worktree_catalog,
+        newsession::create_worktree,
+        newsession::list_directories,
+        newsession::create_directory,
+        newsession::pick_local_folder,
+        newsession::local_folder_exists,
+        newsession::opencode_models,
+        newsession::opencode_favorite,
+        newsession::opencode_start,
         terminal::terminal_connect,
         terminal::terminal_write,
         terminal::terminal_resize,
@@ -735,6 +997,8 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         terminal::terminal_disconnect,
         terminal::terminal_retarget,
         terminal::terminal_status,
+        terminal::terminal_drop,
+        terminal::terminal_shown,
         composer::composer_open,
         composer::composer_edit,
         composer::composer_pick,
@@ -743,7 +1007,30 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         composer::composer_remove,
         composer::composer_undo_remove,
         composer::composer_allow_retry,
+        composer::composer_refresh,
+        composer::composer_clear_control,
+        composer::composer_tab,
+        drops::dropped_files,
+        composer::fetch::attachment_fetch,
+        composer::fetch::attachment_pin,
+        composer::fetch::attachment_unpin,
+        composer::fetch::attachment_open,
+        composer::fetch::attachment_open_draft,
+        session_files::session_file_dialog,
+        session_files::session_file_check,
+        session_files::session_file_download,
+        session_files::session_file_save,
+        session_files::session_file_external,
+        session_files::session_file_act,
+        session_files::session_file_close,
+        composer::saved::saved_drafts,
+        composer::saved::saved_draft,
+        composer::saved::draft_conflicts,
+        composer::saved::draft_recover,
+        composer::saved::draft_restore,
         composer::send::send_message,
+        composer::queue::queue_send_now,
+        composer::queue::send_push,
         composer::send::send_answer,
         composer::send::local_retry,
         composer::send::local_delete,
@@ -751,6 +1038,25 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         composer::send::send_cancel,
         composer::send::send_interrupted,
         composer::send::clear_context,
+        composer::questions::question_edit,
+        composer::questions::question_page,
+        composer::questions::question_navigate,
+        composer::questions::question_allow_retry,
+        processes::processes_follow,
+        processes::processes_shown,
+        processes::processes_select,
+        processes::processes_stop,
+        composer::questions::question_submit,
+        composer::questions::question_decide,
+        composer::questions::question_skip,
+        composer::questions::question_cold,
+        updates::updates_view,
+        updates::updates_check,
+        updates::updates_set_channel,
+        updates::updates_set_automatic,
+        updates::updates_open,
+        updates::updates_copy_command,
+        updates::updates_restart,
         #[cfg(feature = "media")]
         voice::voice_open,
         #[cfg(feature = "media")]
@@ -783,12 +1089,26 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::perf_log,
         commands::display_hz,
         commands::exit_app,
+        exit_flush::exit_flush_ack,
         commands::perf_away,
         commands::build_info,
         renderer::renderer_frame,
         clipboard::copy_text,
+        clipboard::copy_verbatim,
         desk_take_pending,
     ]
+}
+
+fn app_navigation_allowed(url: &tauri::Url) -> bool {
+    if url.path() != "/" && url.path() != "/index.html" {
+        return false;
+    }
+    matches!(
+        (url.scheme(), url.host_str(), url.port()),
+        ("tauri", Some("localhost"), None)
+            | ("http", Some("tauri.localhost"), None)
+            | ("http", Some("127.0.0.1"), Some(1420))
+    )
 }
 
 /// Creates the main window and applies the platform display-rate preference:
@@ -813,6 +1133,8 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     };
     #[allow(unused_mut)]
     let mut builder = WebviewWindowBuilder::new(app, MAIN_WINDOW, WebviewUrl::App(page.into()))
+        .on_navigation(app_navigation_allowed)
+        .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
         .title("Zerus Next")
         .inner_size(1440.0, 900.0)
         .min_inner_size(900.0, 560.0);
@@ -844,6 +1166,38 @@ pub fn keep_default_preference() -> bool {
     std::env::var("ZERUS_CLIENT_PERF_PREFERENCE").is_ok_and(|value| value == "default")
 }
 
+#[cfg(test)]
+mod navigation_tests {
+    use super::app_navigation_allowed;
+
+    #[test]
+    fn navigation_stays_on_the_app_entry() {
+        for url in [
+            "http://127.0.0.1:1420/",
+            "http://127.0.0.1:1420/index.html?perf=auto",
+            "tauri://localhost/index.html",
+            "http://tauri.localhost/index.html",
+        ] {
+            assert!(
+                app_navigation_allowed(&tauri::Url::parse(url).unwrap()),
+                "{url}"
+            );
+        }
+        for url in [
+            "https://example.com/",
+            "http://127.0.0.1:1420/remote/file",
+            "http://localhost:1420/",
+            "tauri://localhost/remote/file",
+            "file:///tmp/remote-file",
+        ] {
+            assert!(
+                !app_navigation_allowed(&tauri::Url::parse(url).unwrap()),
+                "{url}"
+            );
+        }
+    }
+}
+
 #[cfg(all(test, feature = "live"))]
 mod tests {
     use super::*;
@@ -865,6 +1219,8 @@ mod tests {
             Arc::clone(&store),
             composer::Config {
                 cache: root.join("cache"),
+                qt_drafts: None,
+                dev_drafts: Vec::new(),
             },
             Deps {
                 spawn: Arc::new(|job: Job| {
@@ -877,6 +1233,7 @@ mod tests {
                 clock: Arc::new(|| 1_793_000_100.0),
                 rows: Arc::new(|_, _, _| None),
                 facts: Arc::new(|_, _| None),
+                reconnect: std::sync::Arc::new(|_| {}),
                 inspect: Arc::new(|_, _| Err("timed out".into())),
                 dispatch: Arc::new(|_, _, _| Err("no call in these tests".into())),
             },

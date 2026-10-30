@@ -22,16 +22,17 @@ import type { Action, Outcome } from "../types";
 // moves to that row if it carries the restored conversation, or clears with a
 // sticky notice if it carries another. Writes are never repeated.
 //
-// The client has no saved drafts before phase 4 (zerus-5wmh.9), so the
-// follow-up moves no draft and the notice has Qt's first sentence only. Qt's
-// restored-inspection set (awaitingRestoredInspection) has no counterpart:
-// the details only enable controls when they name the row's run and
-// conversation (store/actions.ts detailsFor).
+// The follow-up moves no draft: the archived draft stays under its archive
+// key, where Saved drafts lists it, and the notice says so (Qt 3331, owner
+// ruling in zerus-5wmh.9). Qt's restored-inspection set
+// (awaitingRestoredInspection) has no counterpart: the details only enable
+// controls when they name the row's run and conversation (store/actions.ts
+// detailsFor).
 
 export const RESTORE_LIMIT = 64;
 const errorText = (error: unknown) => (typeof error === "string" ? error : error instanceof Error ? error.message : String(error));
 export const RESTORES_PENDING = "Finish or refresh the earlier restores before restoring another session.";
-export const RESTORE_UNVERIFIED = "The restored conversation could not be verified.";
+export const RESTORE_UNVERIFIED = "The restored conversation could not be verified. Your archived draft remains in Saved drafts.";
 /** Qt's selectSessionEntry refusal after a confirmation. */
 export const NO_LONGER_AVAILABLE = "This session is no longer available. Refresh the list and open its actions again.";
 

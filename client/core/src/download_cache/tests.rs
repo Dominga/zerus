@@ -50,18 +50,17 @@ fn index(root: &Path) -> Value {
 
 #[test]
 fn the_folder_follows_the_setting_then_the_downloads_folder() {
-    let home = Path::new("/srv/home/example");
+    let home = Path::new(env!("CARGO_MANIFEST_DIR")).join("srv/home/example");
+    let downloads = home.join("Загрузки");
     assert_eq!(
-        folder("", Some(Path::new("/srv/home/example/Загрузки")), home),
-        PathBuf::from("/srv/home/example/Загрузки/Zerus Files")
+        folder("", Some(&downloads), &home),
+        downloads.join("Zerus Files")
     );
+    assert_eq!(folder("", None, &home), home.join("Downloads/Zerus Files"));
+    let configured = home.join("shared/../files/./cache");
     assert_eq!(
-        folder("", None, home),
-        PathBuf::from("/srv/home/example/Downloads/Zerus Files")
-    );
-    assert_eq!(
-        folder("/srv/shared/../files/./cache", None, home),
-        PathBuf::from("/srv/files/cache")
+        folder(configured.to_str().unwrap(), None, &home),
+        home.join("files/cache")
     );
 }
 

@@ -209,6 +209,12 @@ void TeamPanel::approvePlan(const Team &team)
                                               : tr("It starts %1 member sessions: %2.").arg(sessions.size()).arg(sessions.join(QStringLiteral(", ")));
     // The question names the team; the answer goes to that team, whatever shows by then.
     const QString id = team.id;
+    // U59: the owner's mode goes with the approval; with no choice, none (standard).
+    const QString mode = planModeChoice(id);
+    QJsonObject input{{"team", id}};
+    if (!mode.isEmpty()) input.insert("plan_mode", mode);
+    const QString runs = mode == "free" ? tr(" It runs in free planning: one open phase that takes tasks as they come until you close it.")
+                       : mode == "standard" ? tr(" It runs in standard planning.") : QString();
     if (!team.widenings.isEmpty()) {
         QStringList lines;
         for (const auto &widening : team.widenings) {
@@ -217,17 +223,25 @@ void TeamPanel::approvePlan(const Team &team)
         }
         if (!confirm("teamWideningConfirm", tr("Widen permissions?"),
                      tr("This plan widens the permissions of its members beyond the template:\n\n%1\n\n"
-                        "Approve it only if they need it.").arg(lines.join(QStringLiteral("\n"))) + QStringLiteral("\n\n") + starts,
+                        "Approve it only if they need it.").arg(lines.join(QStringLiteral("\n"))) + QStringLiteral("\n\n") + starts + runs,
                      tr("Confirm and approve")))
             return;
-        act("approve", {{"team", id}, {"confirm_widening", true}});
+        input.insert("confirm_widening", true);
+        act("approve", input);
         return;
     }
     if (!confirm("teamApproveConfirm", tr("Approve plan and run?"),
-                 tr("Approve the plan of %1 and run it? %2 Ready tasks are handed out at once.").arg(team.name, starts),
+                 tr("Approve the plan of %1 and run it? %2 Ready tasks are handed out at once.").arg(team.name, starts) + runs,
                  tr("Approve and run")))
         return;
-    act("approve", {{"team", id}});
+    act("approve", input);
+}
+
+void TeamPanel::choosePlanMode(const QString &team, const QString &mode)
+{
+    if (team.isEmpty() || m_planModes.value(team) == mode) return;
+    m_planModes.insert(team, mode);
+    scheduleRender();
 }
 
 void TeamPanel::act(const QString &operation, const QJsonObject &input, const std::function<void(bool, const QString &)> &done)

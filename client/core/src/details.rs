@@ -28,6 +28,9 @@ pub struct Details {
     /// The session's working directory (the raw `cwd`); None when it is not a
     /// string, while a present empty string stays empty (as Qt reads it).
     pub cwd: Option<String>,
+    /// The canonical working directory, None when it is not a string; the
+    /// row's form stands in then (`SessionsWindow.cpp:2924`).
+    pub cwd_canonical: Option<String>,
     /// `terminal_supported` and `terminal_attach_supported`, None when the
     /// inspection has no boolean.
     pub terminal_supported: Option<bool>,
@@ -116,6 +119,10 @@ pub fn parse_details(target: &Target, exit: Exit) -> Option<Details> {
             .unwrap_or(0.0),
         phase: text(&value, "phase"),
         cwd: value.get("cwd").and_then(Value::as_str).map(str::to_owned),
+        cwd_canonical: value
+            .get("cwd_canonical")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         terminal_supported: value.get("terminal_supported").and_then(Value::as_bool),
         terminal_attach_supported: value
             .get("terminal_attach_supported")
@@ -314,5 +321,34 @@ mod tests {
         assert_eq!(empty.cwd.as_deref(), Some(""));
         assert_eq!(some.terminal_supported, Some(false));
         assert_eq!(some.terminal_attach_supported, Some(true));
+    }
+
+    // G1: Qt reads `m_details.value("cwd_canonical").toString(row's)`: the
+    // row's form stands in only when the inspection has no string.
+    #[test]
+    fn the_canonical_folder_comes_from_the_inspection_when_it_is_a_string() {
+        let t = Target {
+            computer: String::new(),
+            name: "n".into(),
+            run_id: "r".into(),
+            conversation_id: "c".into(),
+        };
+        let exit = |json: &str| Exit::Code {
+            code: 0,
+            stdout: json.as_bytes().to_vec(),
+            stderr: String::new(),
+        };
+        let some = parse_details(
+            &t,
+            exit(r#"{"run_id":"r","conversation_id":"c","cwd_canonical":"/srv/example/x"}"#),
+        )
+        .unwrap();
+        assert_eq!(some.cwd_canonical.as_deref(), Some("/srv/example/x"));
+        let none = parse_details(
+            &t,
+            exit(r#"{"run_id":"r","conversation_id":"c","cwd_canonical":2}"#),
+        )
+        .unwrap();
+        assert_eq!(none.cwd_canonical, None);
     }
 }

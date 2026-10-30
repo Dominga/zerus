@@ -19,9 +19,11 @@ tray/install.sh runs this whenever its build differs from the installed GUI.
    was verified: running, or, when no GUI was running and none is started,
    by its signature and its own --build-info. Then the replaced GUI becomes
    the rollback copy, or, once the Tauri client replaced the Qt GUI, goes
-   while Qt stays that copy. A replaced bundle without its identity,
-   executable or valid signature never becomes the rollback copy, and a Zerus
-   process started meanwhile stops the change; both keep the replaced GUI. A
+   while a verified complete Qt stays that copy. When Qt's rollback copy
+   cannot be verified as complete, the replaced client is kept too. A replaced
+   bundle without its identity, executable or valid signature never becomes
+   the rollback copy, and a Zerus process started meanwhile stops the change;
+   both keep the replaced GUI. A
    failure or interrupt restores the replaced GUI or keeps it in a
    .hgs-tray-kept-* folder and prints where. `--rollback`
    reinstalls the rollback copy through the same steps. Links at the
@@ -68,12 +70,14 @@ import time
 
 MAC = sys.platform == 'darwin'
 HOME = Path.home()
-SHARE = HOME / '.local/share/hgs'
+INSTALL_PREFIX = None if MAC else os.environ.get('HGS_INSTALL_PREFIX')
+SHARE = (Path(INSTALL_PREFIX) / 'share/hgs') if INSTALL_PREFIX else (HOME / '.local/share/hgs')
 ROLLBACK = SHARE / 'desktop-previous'
 PROVENANCE = SHARE / 'build-provenance.json'
-SNAPSHOTS = HOME / '.local/state/hgs/desktop-update'
-CLI = HOME / '.local/bin/hgs'
-HELPER = HOME / '.local/bin/hgs_state.py'
+SNAPSHOTS = ((Path(INSTALL_PREFIX) / 'state/hgs/desktop-update') if INSTALL_PREFIX
+             else (HOME / '.local/state/hgs/desktop-update'))
+CLI = (Path(INSTALL_PREFIX) / 'bin/hgs') if INSTALL_PREFIX else (HOME / '.local/bin/hgs')
+HELPER = (Path(INSTALL_PREFIX) / 'bin/hgs_state.py') if INSTALL_PREFIX else (HOME / '.local/bin/hgs_state.py')
 LABEL = 'com.hgdev.hgs-tray'
 PLIST = HOME / f'Library/LaunchAgents/{LABEL}.plist'
 UNIT = 'hgs-tray.service'
@@ -374,15 +378,25 @@ def bundle_info(bundle):
 
 
 def gui_kind(info):
-    """'tauri' for the Tauri client's switch bundle (Info.plist ZerusGUI), else 'qt'."""
+    """'tauri' for the Tauri client's identity (Info.plist or --build-info), else 'qt'."""
     return 'tauri' if info.get('ZerusGUI') == 'tauri' else 'qt'
 
 
 def bundle_kind(bundle):
-    """The GUI kind of a bundle whose Info.plist names it; None for a missing
-    or half-deleted one, which must not count as Qt."""
-    info = bundle_info(bundle)
-    return gui_kind(info) if info.get('CFBundleIdentifier') else None
+    """The GUI kind, or None for a missing or incomplete artifact. A macOS
+    bundle needs its Info.plist identity; a Linux Tauri binary needs the
+    identity in --build-info, while an ordinary Qt binary has neither field."""
+    if MAC or Path(bundle).is_dir():
+        info = bundle_info(bundle)
+        return gui_kind(info) if info.get('CFBundleIdentifier') else None
+    if not Path(bundle).is_file():
+        return None
+    try:
+        info = build_info(bundle)
+    except UpdateError:
+        return None
+    kind = gui_kind(info)
+    return kind if kind == 'qt' or info.get('CFBundleIdentifier') else None
 
 
 def keeps_slot(installed_kind, slot_kind, new_kind):
@@ -398,6 +412,8 @@ def client_drafts_root(identifier):
     app_data_dir formula with the running bundle's identifier."""
     if MAC:
         return HOME / 'Library/Application Support' / identifier / 'drafts'
+    if INSTALL_PREFIX:
+        return Path(INSTALL_PREFIX) / 'share' / identifier / 'drafts'
     return Path(os.environ.get('XDG_DATA_HOME') or str(HOME / '.local/share')) / identifier / 'drafts'
 
 
@@ -668,8 +684,17 @@ def take_slot(previous, progress):
         for folder in (incoming.parent, replaced.parent if replaced is not None else None):
             if folder is not None and folder.is_dir() and not any(folder.iterdir()):
                 folder.rmdir()
-        where = [str(path) for path in (incoming, previous) if path.exists()]
-        say(f'the rollback copy {slot} did not change; the replaced GUI is kept in {" and ".join(where)}')
+        # keep_aside() may still rename previous's update folder. Only a
+        # completed move leaves incoming as the sole complete recovery copy;
+        # an interrupted cross-filesystem copy leaves the original for the
+        # final recovery line and may also leave a partial incoming copy.
+        if not previous.exists() and incoming.exists():
+            kept = f'the replaced GUI is kept in {incoming}'
+        else:
+            kept = 'the replaced GUI remains with this update for recovery'
+            if incoming.exists():
+                kept += f'; a copy in {incoming.parent} may be partial'
+        say(f'the rollback copy {slot} did not change; {kept}')
         raise
     incoming.parent.rmdir()
     unregister(slot)
@@ -701,6 +726,20 @@ def complete_bundle(bundle):
     return True
 
 
+def complete_gui(gui):
+    """The platform's runnable-artifact check: a signed macOS bundle, or a
+    Linux executable that reports a valid build identity."""
+    if MAC:
+        return complete_bundle(gui)
+    if not Path(gui).is_file() or not os.access(gui, os.X_OK):
+        return False
+    try:
+        build_info(gui)
+    except UpdateError:
+        return False
+    return True
+
+
 def settle(previous, keep, progress):
     """Only after the new GUI was verified: the GUI it replaced becomes the
     rollback copy, or goes when the slot keeps a complete Qt (a superseded
@@ -710,14 +749,14 @@ def settle(previous, keep, progress):
     interrupt leaves partial."""
     if previous is None:
         return 'nothing was installed before'
-    if MAC and not complete_bundle(previous):
+    if not complete_gui(previous):
         # Never removed: a check that failed for another reason must not cost a GUI.
-        return ('the replaced bundle is incomplete (no identity, executable or valid signature), '
+        return ('the replaced bundle could not be verified as complete (identity, executable or signature check), '
                 'so it did not become the rollback copy')
     if keep:
-        if not complete_bundle(ROLLBACK / previous.name):
+        if not complete_gui(ROLLBACK / previous.name):
             # take_slot would set the slot's copy aside for good: keep both.
-            return (f'the rollback copy in {ROLLBACK} is incomplete, so the replaced GUI was kept '
+            return (f'the rollback copy in {ROLLBACK} could not be verified as complete, so the replaced GUI was kept '
                     'rather than removed')
         progress['removing'] = True
         remove(previous)
@@ -798,15 +837,15 @@ def numbered_refusal(installed_info, new_info):
 def check_replace(built, installed, live=False):
     """Before tray/install.sh changes anything: the numbered Dev guard, and,
     for an install that replaces the GUI on disk without the live update
-    (HGS_TRAY_RESTART=0, not `live`), no change between Qt and the client on
-    macOS, which only the live update may make."""
+    (HGS_TRAY_RESTART=0, not `live`), no change between Qt and the client,
+    which only the live update may make."""
     built, installed = Path(built).resolve(), Path(installed).absolute()
     if not installed.exists():
         return 0
     refusal = numbered_refusal(installed_build_info(installed), build_info(built))
     if refusal:
         raise UpdateError(refusal + ' Nothing was replaced.')
-    if not live and MAC and bundle_kind(built) != bundle_kind(installed):
+    if not live and bundle_kind(built) != bundle_kind(installed):
         raise UpdateError('switching between the Qt GUI and the Tauri client needs the live update; '
                           'run tray/install.sh without HGS_TRAY_RESTART=0. Nothing was replaced.')
     return 0
@@ -889,10 +928,10 @@ def update(built, installed, rollback=False):
     refuse_links(installed)
     info = build_info(built)
     slot = ROLLBACK / installed.name
-    new_info = bundle_info(built) if MAC else {}
-    old_info = bundle_info(installed) if MAC else {}
-    old_kind = bundle_kind(installed) if MAC else None
-    new_kind = bundle_kind(built) if MAC else None
+    new_info = bundle_info(built) if MAC else info
+    old_info = (bundle_info(installed) if MAC else build_info(installed)) if installed.exists() else {}
+    old_kind = bundle_kind(installed)
+    new_kind = bundle_kind(built)
     if not rollback and installed.exists():
         refusal = numbered_refusal(installed_build_info(installed), info)
         if refusal:
@@ -904,7 +943,7 @@ def update(built, installed, rollback=False):
     to_qt = MAC and old_kind == 'tauri' and new_kind == 'qt'
     to_client = MAC and new_kind == 'tauri'
     # A rollback installs from the slot, whose copy stays until the new GUI runs.
-    keep = not rollback and keeps_slot(old_kind, bundle_kind(slot) if MAC else None, new_kind)
+    keep = not rollback and keeps_slot(old_kind, bundle_kind(slot), new_kind)
     roots = draft_roots(old_info, new_info)
     name = info.get('versionName', info['version'])
     report_kept(installed)
@@ -1084,7 +1123,7 @@ def main():
             return check_replace(*args.check, live=args.live)
         elif len(args.paths) == 2 and not chosen:
             return update(*args.paths)
-    except UpdateError as error:
+    except (UpdateError, subprocess.SubprocessError) as error:
         print(f'hgs-tray update failed: {error}', file=sys.stderr)
         return 1
     print(usage, file=sys.stderr)

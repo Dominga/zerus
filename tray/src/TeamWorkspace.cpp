@@ -324,6 +324,8 @@ void TeamWorkspace::render()
         if (!team->widenings.isEmpty()) tv->addWidget(wideningStrip(*team));
         // F8: the lead's open membership proposals.
         if (auto *proposals = proposalsStrip(*team)) tv->addWidget(proposals);
+        // U59: a request to switch to free opens its own dialog, once.
+        popSwitchRequest(*team);
         // C4: the owner's attention list is the first group of the side
         // column; the lead's inbox (C2) is a drawer under the canvas.
         if (!m_error.isEmpty()) tv->addWidget(errorStrip());
@@ -335,6 +337,13 @@ void TeamWorkspace::render()
         auto *left = new QWidget; left->setObjectName("teamWorkspaceLeft");
         auto *lv = new QVBoxLayout(left); lv->setContentsMargins(0, 0, 0, 0); lv->setSpacing(0);
         lv->addWidget(toolbar(*team));
+        // U59: the lead's proposed plan mode and the owner's choice.
+        if (team->status == "planning" && team->planModeKnown) {
+            auto *modes = new QWidget; modes->setObjectName("teamPlanModeRow");
+            auto *mv = new QVBoxLayout(modes); mv->setContentsMargins(12, 4, 12, 6); mv->setSpacing(0);
+            mv->addWidget(planModeCard(*team));
+            lv->addWidget(modes);
+        }
         lv->addWidget(canvas(*team), 1);
         if (const auto &items = m_teams->inbox(); !items.isEmpty()) lv->addWidget(inboxStrip(*team, items));
         lv->addWidget(feed(*team));
@@ -472,6 +481,27 @@ QWidget *TeamWorkspace::headerStatusContent(const Team &team, const QString &sta
     badge->setObjectName("teamHeaderStatus"); badge->setProperty("status", status);
     badge->setToolTip(tr("Team %1 · %2").arg(team.name, statusLabel(status)));
     row->add(badge, 0);
+    // U59: the plan mode beside the phase; a free phase's last build and what
+    // was accepted since, and a close that waits for its build.
+    if (team.planModeKnown && team.status != "planning" && team.status != "draft") {
+        const bool free = team.freeMode();
+        auto *mode = new PhaseBadge(free ? tr("Free") : tr("Standard"), free ? c.violet : c.text3,
+                                    free ? QStringLiteral("plan_free") : QStringLiteral("plan_standard"), false);
+        mode->setObjectName("teamHeaderPlanMode"); mode->setProperty("mode", team.planMode);
+        mode->setToolTip(free ? tr("Free planning: phase %1 stays open and takes tasks as they come until you close it").arg(team.freePhase.phase)
+                              : tr("Standard planning: each phase is planned, approved and closed with its build"));
+        row->add(mode, 0);
+        if (free && team.freePhase.known) {
+            auto *build = small(label(freeBuildLine(team), team.freePhase.acceptedSince > 0 ? c.warn : c.muted, 11, false, "teamHeaderBuild"),
+                                team.freePhase.acceptedSince > 0 ? c.warn : c.muted);
+            build->setToolTip(tr("The last integration and build of the open phase, and the tasks accepted since"));
+            row->add(build, 4);
+            if (team.freePhase.closePending > 0) {
+                auto *pending = small(label(closeBlocked(team), c.accent, 11, false, "teamHeaderClosePending"), c.accent);
+                row->add(pending, 4);
+            }
+        }
+    }
     // The phase draft that waits for the owner, as a link to it (not while planning).
     if (team.pendingPhase > 0 && team.status != "planning") {
         const auto drafts = team.draftPhases();
@@ -704,7 +734,9 @@ QWidget *TeamWorkspace::headerActionsContent(const Team &team)
             });
         });
         back->setToolTip(tr("Ask the coordinator to change the plan")); iconFor(back, "arrow-left");
-        auto *approve = add(tr("Approve && Run"), "teamWorkspaceApprove", true, [this, id = team.id] {
+        // U59: the owner's free choice shows on the button.
+        const bool free = team.planModeKnown && m_panel->planModeChoice(team.id) == "free";
+        auto *approve = add(free ? tr("Approve && Run in free mode") : tr("Approve && Run"), "teamWorkspaceApprove", true, [this, id = team.id] {
             if (const auto *current = currentTeam(id)) approveTeam(*current);
         });
         iconFor(approve, "play");
@@ -728,6 +760,25 @@ QWidget *TeamWorkspace::headerActionsContent(const Team &team)
     } else if (team.status == "paused") {
         auto *resume = add(tr("Resume"), "teamWorkspaceResume", true, [this] { m_panel->act("resume", {}); });
         resume->setToolTip(tr("Hand out tasks again")); iconFor(resume, "play");
+    }
+    // U59: the open free phase builds when asked and closes on your word.
+    if (team.freeMode() && team.freePhase.known && (team.status == "running" || team.status == "paused")) {
+        auto *build = add(tr("Integrate && build"), "teamWorkspaceIntegrateBuild", false, [this, id = team.id] {
+            if (const auto *current = currentTeam(id)) integrateBuild(*current);
+        });
+        const int open = openBuildTask(team);
+        build->setEnabled(!open && !m_buildSent.contains(team.id));
+        build->setToolTip(open ? tr("#%1 builds the phase").arg(open) : tr("Add a lead task that integrates the accepted work and runs the build"));
+        iconFor(build, "terminal");
+        auto *close = add(tr("Close phase…"), "teamWorkspaceClosePhase", false, [this, id = team.id] {
+            // The dialog is asked from the workspace, never from this button,
+            // which a poll may rebuild meanwhile.
+            QTimer::singleShot(0, this, [this, id] { if (const auto *current = currentTeam(id)) closePhaseDialog(*current); });
+        });
+        const QString blocked = closeBlocked(team);
+        close->setEnabled(blocked.isEmpty());
+        close->setToolTip(blocked.isEmpty() ? tr("Close the free phase; the team returns to standard planning") : blocked);
+        iconFor(close, "stop");
     }
     if (team.status == "running" || team.status == "paused") {
         auto *stop = add(tr("Stop…"), "teamWorkspaceStop", false, [this, name = team.name, team] {
@@ -1880,7 +1931,10 @@ QWidget *TeamWorkspace::phaseColumn(const Team &team)
 QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
 {
     const Colors c = colorsFor(m_dark);
-    const QString state = ownerPhaseState(team, group);
+    // U59: the open free phase is running while its tasks run and idle when its
+    // queue is empty, never done.
+    const bool freeOpen = freeOpenPhase(team, group.n);
+    const QString state = freeOpen ? (team.freePhase.idle() ? QStringLiteral("idle") : QStringLiteral("running")) : ownerPhaseState(team, group);
     const bool open = m_panel->phaseOpen(team, group);
     const Phase *record = team.phase(group.n);
     const auto problemsByTask = problemTasks(team);
@@ -1917,9 +1971,12 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
     h->addWidget(title);
     const QString kind = state == "draft" || state == "planned" ? QStringLiteral("draft") : state == "running" ? QStringLiteral("running")
                        : state == "done" ? QStringLiteral("accepted") : state == "rejected" ? QStringLiteral("rejected") : QStringLiteral("pending");
-    auto *badge = new PhaseBadge(phaseStateBadge(state), tone, kind, state == "draft" || state == "planned");
+    auto *badge = freeOpen ? new PhaseBadge(state == "idle" ? tr("Open, idle") : tr("Open, running"), state == "idle" ? c.text2 : tone,
+                                            state == "idle" ? QStringLiteral("delivered") : QStringLiteral("running"), false)
+                           : new PhaseBadge(phaseStateBadge(state), tone, kind, state == "draft" || state == "planned");
     badge->setObjectName("teamPhaseBadge"); badge->setProperty("state", state);
     h->addWidget(badge);
+    if (auto *mode = phaseModeBadge(team, group.n)) h->addWidget(mode);
     // A cancelled task is not work the phase still owes: a Done phase with one
     // cancelled task reads 7/7, not 7/8 (owner, 2026-10-28).
     int accepted = 0, owed = 0;
@@ -1935,6 +1992,11 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
     // Open, it takes what the title and the actions leave; collapsed, the summary does.
     if (open) info->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
     h->addWidget(info, open ? 1 : 0);
+    // U59: the open free phase's last build and what was accepted since.
+    if (freeOpen) {
+        auto *build = label(freeBuildLine(team), c.dim, 11, false, "teamPhaseFreeInfo"); build->setAttribute(Qt::WA_TransparentForMouseEvents);
+        info->add(build, 2);
+    }
     // Proposed by (a draft) or the phase's health (running, queued).
     if ((state == "draft" || state == "rejected") && record && !record->addedBy.isEmpty()) {
         QString text = tr("proposed by %1").arg(record->addedBy);
@@ -2080,7 +2142,8 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
     } else if (state == "running" && (team.status == "running" || team.status == "paused")) {
         // U29: a running phase takes a task only on your word, after a warning.
         auto *add = button(tr("Add task…"), "teamPhaseAddLate"); add->setProperty("ghost", true); add->setProperty("phase", group.n);
-        add->setToolTip(tr("Add a task to this running phase: Zerus warns first, then you confirm"));
+        add->setToolTip(freeOpen ? tr("Add a task to the open phase: it starts when its member is free")
+                                 : tr("Add a task to this running phase: Zerus warns first, then you confirm"));
         QObject::connect(add, &QPushButton::clicked, this, [this, id = team.id, phase = group.n] { if (const auto *t = currentTeam(id)) addLateDialog(*t, phase); });
         h->addWidget(add);
     } else if (state == "queued") {
@@ -2091,7 +2154,7 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
     // U39 (owner, 2026-10-28): an accepted phase can be discarded, or (U42)
     // returned to a draft, while its work has not started; hgs refuses it
     // otherwise and names the tasks.
-    if ((state == "queued" || state == "running") && team.status != "planning") {
+    if ((state == "queued" || state == "running") && team.status != "planning" && !freeOpen) {
         auto *more = new QToolButton; more->setObjectName("teamPhaseMore"); more->setProperty("phase", group.n);
         more->setIcon(workspaceIcon("more", c.muted)); more->setAutoRaise(true); more->setToolTip(tr("Phase actions"));
         QObject::connect(more, &QToolButton::clicked, this, [this, id = team.id, phase = group.n, more] {
@@ -2145,11 +2208,26 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
         // Typing survives the workspace's re-renders: the text, and the focus it had.
         if (m_rejectFocus) { m_rejectFocus = false; QTimer::singleShot(0, edit, [edit] { edit->setFocus(Qt::OtherFocusReason); }); }
     }
-    QWidget *body = laneSections(team, group);
-    auto *bodyBox = new QWidget; bodyBox->setObjectName("teamPhaseBody"); bodyBox->setProperty("phase", group.n);
-    auto *bv = new QVBoxLayout(bodyBox); bv->setContentsMargins(6, 6, 6, 8); bv->setSpacing(0);
-    bv->addWidget(body);
-    fv->addWidget(bodyBox);
+    // U59: the open free phase folds its accepted tasks into one line (Show
+    // brings them back) and, when idle, offers its next steps.
+    PhaseGroup shown = group;
+    if (freeOpen) {
+        QList<int> accepted;
+        for (int id : group.tasks) if (const auto *task = team.task(id); task && task->status == "accepted") accepted << id;
+        if (!accepted.isEmpty()) {
+            fv->addWidget(freeAcceptedFold(team, group.n, accepted));
+            if (!m_freeUnfolded.contains(QStringLiteral("%1/%2").arg(team.id).arg(group.n)))
+                shown.tasks.removeIf([&accepted](int id) { return accepted.contains(id); });
+        }
+    }
+    if (!shown.tasks.isEmpty()) {
+        QWidget *body = laneSections(team, shown);
+        auto *bodyBox = new QWidget; bodyBox->setObjectName("teamPhaseBody"); bodyBox->setProperty("phase", group.n);
+        auto *bv = new QVBoxLayout(bodyBox); bv->setContentsMargins(6, 6, 6, 8); bv->setSpacing(0);
+        bv->addWidget(body);
+        fv->addWidget(bodyBox);
+    }
+    if (freeOpen && state == "idle") fv->addWidget(freeIdleCard(team, group.n));
     return frame;
 }
 
@@ -3233,6 +3311,19 @@ QWidget *TeamWorkspace::proposalsStrip(const Team &team)
         h->addWidget(label(what, c.fg, 12, true, "teamProposalText"));
         auto *reason = elided(proposal.reason, c.text2, 11); reason->setToolTip(proposal.reason); h->addWidget(reason, 1);
         const bool sent = m_decidedProposals.contains(proposal.id);
+        // U59: a plan-mode switch is answered only in its own dialog, bound to
+        // the request's id and hash.
+        if (proposal.kind == "switch-plan-mode") {
+            auto *openDialog = button(tr("Answer…"), "teamProposalOpen", true);
+            openDialog->setEnabled(!sent);
+            openDialog->setToolTip(tr("Open the request's dialog"));
+            QObject::connect(openDialog, &QPushButton::clicked, this, [this, id = team.id, proposal = proposal.id] {
+                QTimer::singleShot(0, this, [this, id, proposal] { if (const auto *current = currentTeam(id)) switchModeDialog(*current, proposal); });
+            });
+            h->addWidget(openDialog);
+            v->addWidget(line);
+            continue;
+        }
         auto *reject = button(tr("Reject"), "teamProposalReject");
         auto *accept = button(tr("Accept"), "teamProposalAccept", true);
         reject->setEnabled(!sent); accept->setEnabled(!sent);
@@ -3325,11 +3416,16 @@ void TeamWorkspace::addLateDialog(const Team &team, int phase)
     auto *dialog = new QDialog(this);
     dialog->setObjectName("teamAddLateDialog");
     dialog->setAttribute(Qt::WA_DeleteOnClose);
-    dialog->setWindowTitle(tr("Add a task to running phase %1").arg(phase));
+    // U59: the open free phase takes a task as it comes: no warning, no typed
+    // confirmation; it starts when its member is free.
+    const bool free = freeOpenPhase(team, phase);
+    dialog->setProperty("free", free);
+    dialog->setWindowTitle(free ? tr("Add a task to open phase %1").arg(phase) : tr("Add a task to running phase %1").arg(phase));
     dialog->resize(520, 420);
     dialog->setStyleSheet(QStringLiteral("QDialog{background:%1;} QLabel{background:transparent;}").arg(c.bg.name()));
     auto *v = new QVBoxLayout(dialog);
-    auto *intro = label(tr("Phase %1 is running. The task joins it only after Zerus warns what changes and you confirm.").arg(phase), c.text2, 12);
+    auto *intro = label(free ? tr("Phase %1 is open. The task joins it and starts when its member is free.").arg(phase)
+                             : tr("Phase %1 is running. The task joins it only after Zerus warns what changes and you confirm.").arg(phase), c.text2, 12);
     intro->setWordWrap(true); v->addWidget(intro);
     v->addWidget(label(tr("Title"), c.muted, 11));
     auto *title = new QLineEdit; title->setObjectName("teamAddLateTitle"); title->setMaxLength(200);
@@ -3361,6 +3457,25 @@ void TeamWorkspace::addLateDialog(const Team &team, int phase)
     v->addWidget(buttons);
     next->setEnabled(false);
     QObject::connect(title, &QLineEdit::textChanged, dialog, [next, title] { next->setEnabled(!title->text().trimmed().isEmpty()); });
+    if (free) {
+        next->hide(); add->show(); add->setEnabled(false);
+        QObject::connect(title, &QLineEdit::textChanged, dialog, [add, title] { add->setEnabled(!title->text().trimmed().isEmpty()); });
+        int top = 0; for (const auto &task : team.tasks) top = qMax(top, task.id);
+        QObject::connect(add, &QPushButton::clicked, dialog, [this, dialog, title, description, assignee, error, add, id = team.id, taskId = top + 1] {
+            add->setEnabled(false);
+            const QJsonObject task{{"id", taskId}, {"title", title->text().trimmed()}, {"description", description->toPlainText().trimmed()},
+                                   {"assignee", assignee->currentData().toString()}};
+            m_teams->call(QStringLiteral("extend"), {{"team", id}, {"tasks", QJsonArray{task}}},
+                [guard = QPointer<QDialog>(dialog), error, add](bool ok, const QJsonObject &, const QString &message) {
+                    if (!guard) return;
+                    if (!ok) { error->setText(message); error->show(); add->setEnabled(true); return; }
+                    guard->accept();
+                });
+        });
+        QObject::connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
+        dialog->show();
+        return;
+    }
     QObject::connect(confirm, &QLineEdit::textChanged, dialog, [add, confirm, phase] {
         const QString typed = confirm->text().trimmed().toLower();
         add->setEnabled(typed == QLatin1String("add") || typed == QString::number(phase));

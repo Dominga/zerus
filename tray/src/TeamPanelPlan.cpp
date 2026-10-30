@@ -387,8 +387,30 @@ QWidget *TeamPanel::planFooter(const Team &team)
         word->setWordWrap(true);
         v->addWidget(word);
     }
+    // U59: the lead's proposed plan mode and the owner's choice; no choice
+    // keeps standard.
+    const QString chosen = planModeChoice(team.id);
+    if (team.planModeKnown) {
+        auto *modes = row(6);
+        modes->addWidget(label(tr("Plan mode"), c.text3, 12, true));
+        auto *mode = new QComboBox; mode->setObjectName("teamPlanModeChoice");
+        mode->addItem(tr("Standard"), QStringLiteral("standard"));
+        mode->addItem(tr("Free"), QStringLiteral("free"));
+        mode->setCurrentIndex(chosen == "free" ? 1 : 0);
+        QObject::connect(mode, &QComboBox::activated, this, [this, mode, id = team.id](int at) { choosePlanMode(id, mode->itemData(at).toString()); });
+        modes->addWidget(mode);
+        if (!team.planModeOffer.isEmpty()) {
+            auto *offer = label(tr("Lead proposes %1: %2").arg(team.planModeOffer == "free" ? tr("Free") : tr("Standard"), team.planModeReason),
+                                c.text2, 11, false, "teamPlanModeOfferLine");
+            offer->setWordWrap(true);
+            modes->addWidget(offer, 1);
+        } else {
+            modes->addStretch();
+        }
+        v->addLayout(modes);
+    }
     auto *buttons = row(6);
-    auto *approve = button(tr("Approve && Run"), "teamApprove", true);
+    auto *approve = button(team.planModeKnown && chosen == "free" ? tr("Approve && Run in free mode") : tr("Approve && Run"), "teamApprove", true);
     approve->setEnabled(team.errors.isEmpty() && !team.tasks.isEmpty());
     approve->setToolTip(team.tasks.isEmpty() ? tr("The plan has no tasks yet")
                         : team.errors.isEmpty() ? tr("Start the members and hand out the first tasks")

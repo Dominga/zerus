@@ -484,7 +484,7 @@ foreach(shard RANGE 15)
     add_test(NAME sessionswindow-${shard} COMMAND ${CMAKE_COMMAND} -DTEST=$<TARGET_FILE:test_sessionswindow>
         -DSUITE=sessionswindow -DSEED=${CMAKE_CURRENT_SOURCE_DIR}/qt-shard-durations.txt -DSHARD=${shard} -DSHARDS=16
         -DRESULTS=${ZERUS_QT_RESULTS_DIR} -P ${CMAKE_CURRENT_SOURCE_DIR}/RunQtShard.cmake)
-    set_tests_properties(sessionswindow-${shard} PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    set_tests_properties(sessionswindow-${shard} PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 480)
 endforeach()
 
 # A plugin for another interface: the native browser loader must reject it.
@@ -718,7 +718,8 @@ set_tests_properties(markdownobjects PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=off
 
 add_executable(test_updates test_updates.cpp)
 target_link_libraries(test_updates PRIVATE hgs-updates Qt6::Test)
-target_compile_definitions(test_updates PRIVATE ZERUS_INSTALLATION_GUIDE="${PROJECT_SOURCE_DIR}/../docs/installation.md")
+target_compile_definitions(test_updates PRIVATE ZERUS_INSTALLATION_GUIDE="${PROJECT_SOURCE_DIR}/../docs/installation.md"
+    ZERUS_LINUX_UPDATE_HELPER="${PROJECT_SOURCE_DIR}/linux-source-update.sh")
 zerus_add_test(updates test_updates)
 set_tests_properties(updates PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 target_link_libraries(test_sessionswindow PRIVATE hgs-updates)

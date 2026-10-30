@@ -1924,15 +1924,15 @@ void TestTeams::accountMoveReadsAccountsBlocksAndSteps()
     QVERIFY(!movable("kimi") && movable("codex"));
     // What keeps a member: #619's folder errors, a busy old session, an unconfirmed switch.
     Teams::Member member;
-    member.error = "D:/w/dev is on team/t/dev-3, not team/t/dev; team/t/dev-3 is not merged into team/t/dev. Merge it, then check out team/t/dev in the folder.";
+    member.error = "D:/work/dev is on team/t/dev-3, not team/t/dev; team/t/dev-3 is not merged into team/t/dev. Merge it, then check out team/t/dev in the folder.";
     auto block = blockOf(member);
     QCOMPARE(block.kind, Block::FolderBranch);
-    QCOMPARE(block.folder, QStringLiteral("D:/w/dev"));
+    QCOMPARE(block.folder, QStringLiteral("D:/work/dev"));
     QCOMPARE(block.current, QStringLiteral("team/t/dev-3"));
     QCOMPARE(block.own, QStringLiteral("team/t/dev"));
-    member.error = "C:/Users/a b/dev is on team/t/dev-3, not team/t/dev; it has uncommitted changes, so Zerus did not switch it.";
-    QCOMPARE(blockOf(member).folder, QStringLiteral("C:/Users/a b/dev"));
-    member.error = "D:/w/dev is on team/t/dev-3, not team/t/dev, and Zerus could not switch it: locked";
+    member.error = "C:/Users/test user/dev is on team/t/dev-3, not team/t/dev; it has uncommitted changes, so Zerus did not switch it.";
+    QCOMPARE(blockOf(member).folder, QStringLiteral("C:/Users/test user/dev"));
+    member.error = "D:/work/dev is on team/t/dev-3, not team/t/dev, and Zerus could not switch it: locked";
     QCOMPARE(blockOf(member).own, QStringLiteral("team/t/dev"));
     member.error = "the account switch is rolled_back; waiting for the old session to finish its turn";
     QCOMPARE(blockOf(member).kind, Block::OldSession);

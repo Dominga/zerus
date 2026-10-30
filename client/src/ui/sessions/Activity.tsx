@@ -1,10 +1,10 @@
 import { searchPreview, clearSearchPreview } from "../../store/searchSelection";
 import { SearchHighlight } from "./SearchHighlight";
 import { For, Show, createContext, createEffect, createMemo, createSignal, on, onCleanup, onMount, useContext } from "solid-js";
-import { attachmentOpen } from "../../bridge";
+import { attachmentFetch, attachmentOpen } from "../../bridge";
 import { notify } from "../../store/actions";
 import { previews } from "../../store/attachments";
-import { cardTarget, createOpen } from "./attachment-card";
+import { cardTarget, createOpen, readCards } from "./attachment-card";
 import { createStore, reconcile } from "solid-js/store";
 import { Icon } from "../lib/icons";
 import { selected, toast, contentScale, subagentOpen, setSubagentOpen, setMenu, setDetailTab, type MenuEntry } from "../../store/ui";
@@ -22,7 +22,7 @@ import { inlineParts, markdownBlocks } from "./markdown";
 import { openExternal, openSessionFile } from "./sessionFiles";
 import { SessionFileDialog } from "./SessionFileDialog";
 import { statusOf } from "./SessionCard";
-import type { ItemAttachment, LocalItem, MediaMessage, Session, TranscriptItem } from "./types";
+import type { ActivityItem, ItemAttachment, LocalItem, MediaMessage, Session, TranscriptItem } from "./types";
 
 // ---------------------------------------------------------------------------
 // Reading column (ActivityWidth.h): 900 px at 100% content scale, 480–2400,
@@ -434,6 +434,70 @@ function LocalDeleteDialog() {
   );
 }
 
+function ItemBody(props: { item: ActivityItem; scope?: AttachmentScope }) {
+  const it = props.item;
+  return (
+    <div class="act-body">
+      <Show when={it.kind === "user"} fallback={<Body text={it.body ?? ""} />}>
+        {/* A Codex question reply reads as Question and Your answer blocks (ActivityView.cpp:347-363). */}
+        <Show when={it.replies?.length} fallback={<p>{it.body}</p>}>
+          <For each={it.replies}>{(r) => (
+            <div class="act-reply">
+              <div class="act-reply-q">Question</div>
+              <p class="wrap-pre">{r.question}</p>
+              <div class="act-reply-a"><b>Your answer</b><p class="wrap-pre">{r.answer}</p></div>
+            </div>
+          )}</For>
+        </Show>
+      </Show>
+      <Show when={it.local?.error}><p class="act-error">{it.local!.error}</p></Show>
+      <Show when={it.code}><pre class="act-code mono">{it.code}</pre></Show>
+      <Show when={it.attachments}>
+        <div class="act-attachments">
+          <For each={it.attachments}>{(a, i) => (
+            // A local row's file without its request or cached copy only names itself (ActivityView.cpp:765, 780);
+            // the others are Qt's attachment card.
+            <Show when={!it.local || it.local.available[i()]} fallback={<span class="att-card">Attachment: {a.name}</span>}>
+              <AttachmentCard file={a} scope={props.scope} />
+            </Show>
+          )}</For>
+        </div>
+      </Show>
+      <Show when={it.local?.actions.length}><LocalActions local={it.local!} /></Show>
+    </div>
+  );
+}
+
+function EchoBody(props: { item: ActivityItem; scope?: AttachmentScope }) {
+  const request = createMemo(() => {
+    const files = props.item.attachments;
+    if (!props.scope || !files?.length) return undefined;
+    return { scope: props.scope, files };
+  }, undefined, { equals: (a, b) => JSON.stringify(a) === JSON.stringify(b) });
+  const [answer, setAnswer] = createSignal<{ current?: { scope: AttachmentScope; files: ItemAttachment[] }; done: boolean; ok: boolean }>({ done: false, ok: false });
+  createEffect(on(request, (current) => {
+    if (!current) { setAnswer({ current, done: true, ok: false }); return; }
+    let live = true;
+    setAnswer({ current, done: false, ok: false });
+    void readCards(current.files, current.scope, attachmentFetch).then((files) => {
+      if (live) setAnswer({ current, done: true, ok: !!files });
+    });
+    onCleanup(() => { live = false; });
+  }));
+  const state = () => {
+    const current = request();
+    if (!current) return "raw";
+    const now = answer();
+    if (now.current !== current || !now.done) return "loading";
+    return now.ok ? "cards" : "raw";
+  };
+  return <>
+    <Show when={state() === "cards"}><ItemBody {...props} /></Show>
+    <Show when={state() === "raw"}><ItemBody {...props} item={{ ...props.item, body: props.item.echoBody, attachments: undefined }} /></Show>
+    <Show when={state() === "loading"}><ItemBody {...props} item={{ ...props.item, attachments: undefined }} /></Show>
+  </>;
+}
+
 function Item(props: { item: TranscriptItem; scope?: AttachmentScope }) {
   const [open, setOpen] = createSignal(false);
   const it = props.item;
@@ -474,34 +538,9 @@ function Item(props: { item: TranscriptItem; scope?: AttachmentScope }) {
           <span class="grow" />
           <Show when={it.kind === "agent"}><button class="icon-btn small act-copy" title="Copy as Markdown" onClick={() => copyText(it.body ?? "", "The reply is on the clipboard")}><Icon name="copy" size={12} /></button></Show>
         </header>
-        <div class="act-body">
-          <Show when={it.kind === "user"} fallback={<Body text={it.body ?? ""} />}>
-            {/* A Codex question reply reads as Question and Your answer blocks (ActivityView.cpp:347-363). */}
-            <Show when={it.replies?.length} fallback={<p>{it.body}</p>}>
-              <For each={it.replies}>{(r) => (
-                <div class="act-reply">
-                  <div class="act-reply-q">Question</div>
-                  <p class="wrap-pre">{r.question}</p>
-                  <div class="act-reply-a"><b>Your answer</b><p class="wrap-pre">{r.answer}</p></div>
-                </div>
-              )}</For>
-            </Show>
-          </Show>
-          <Show when={it.local?.error}><p class="act-error">{it.local!.error}</p></Show>
-          <Show when={it.code}><pre class="act-code mono">{it.code}</pre></Show>
-          <Show when={it.attachments}>
-            <div class="act-attachments">
-              <For each={it.attachments}>{(a, i) => (
-                // A local row's file without its request or cached copy only names itself (ActivityView.cpp:765, 780);
-                // the others are Qt's attachment card.
-                <Show when={!it.local || it.local.available[i()]} fallback={<span class="att-card">Attachment: {a.name}</span>}>
-                  <AttachmentCard file={a} scope={props.scope} />
-                </Show>
-              )}</For>
-            </div>
-          </Show>
-          <Show when={it.local?.actions.length}><LocalActions local={it.local!} /></Show>
-        </div>
+        <Show when={it.echoBody} fallback={<ItemBody item={it} scope={props.scope} />}>
+          <EchoBody item={it} scope={props.scope} />
+        </Show>
       </article>
     </Show>
   );

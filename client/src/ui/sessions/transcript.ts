@@ -92,6 +92,74 @@ export function attachments(e: ActivityEvent): ActivityItem["attachments"] {
   });
 }
 
+interface AttachmentEcho {
+  reference: string;
+  kind: "Image" | "File";
+  path: string;
+}
+
+/** The numbered terminal echoes produced by attachments::terminal_text. */
+export function attachmentEchoes(text: string): AttachmentEcho[] {
+  const pattern = /\[(Image|File) #([1-9][0-9]{0,8})\] ?\((Inspect the attached image at|Read the attached file at) ("(?:[^"\\]|\\.)*") ?\)/g;
+  const echoes: AttachmentEcho[] = [];
+  for (const found of text.matchAll(pattern)) {
+    const kind = found[1] as AttachmentEcho["kind"];
+    if ((kind === "Image") !== (found[3] === "Inspect the attached image at")) continue;
+    try {
+      const path = JSON.parse(found[4]);
+      if (typeof path === "string") echoes.push({ reference: found[0].slice(0, found[0].indexOf("]") + 1), kind, path });
+    } catch { /* A malformed path stays ordinary message text. */ }
+  }
+  return echoes;
+}
+
+function echoMatchesFiles(text: string, files: ActivityEvent["attachments"]): boolean {
+  const echoes = attachmentEchoes(text);
+  if (!files?.length || echoes.length !== files.length) return false;
+  return echoes.every((echo, index) => {
+    const file = files[index];
+    const name = typeof file?.name === "string" ? file.name : "";
+    const reference = typeof file?.reference === "string" ? file.reference : "";
+    const mime = typeof file?.mime === "string" ? file.mime : "";
+    const filename = `${String(index + 1).padStart(2, "0")}-${name.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 100)}`;
+    const path = echo.path.replaceAll("\\", "/");
+    return echo.reference === reference && (echo.kind === "Image") === mime.startsWith("image/")
+      && /(?:^|\/)attachments\/message-[A-Za-z0-9]+\/[^/]+$/.test(path) && path.split("/").at(-1) === filename;
+  });
+}
+
+/**
+ * Reconciles a native numbered prompt echo with its one exact delivery receipt.
+ * Public receipt metadata supplies the request and index; an echoed host path
+ * is never used to read a file. Unknown or ambiguous echoes stay untouched.
+ */
+export function mergeAttachmentMessages(given: readonly ActivityEvent[], summary?: Record<string, unknown>): readonly ActivityEvent[] {
+  const receipts = Array.isArray(summary?.attachment_messages) ? summary.attachment_messages as ActivityEvent[] : [];
+  if (!receipts.length) return given;
+  const events = [...given];
+  let changed = false;
+  for (const receipt of receipts) {
+    const files = Array.isArray(receipt.attachments) ? receipt.attachments : [];
+    const submitted = typeof receipt.submitted_text === "string" ? receipt.submitted_text.trim() : "";
+    if (receipt.source !== "hgs_delivery" || !files.length || !submitted || !echoMatchesFiles(submitted, files)) continue;
+    if (receipts.filter((other) => typeof other.submitted_text === "string" && other.submitted_text.trim() === submitted).length !== 1) continue;
+    const exact: number[] = [];
+    events.forEach((event, index) => {
+      if (event.source !== "hgs_voice" && !event.agent_id && !event.attachments?.length && PROMPTS.has(event.type ?? "")
+        && (event.detail ?? "").trim() === submitted) exact.push(index);
+    });
+    if (exact.length !== 1) continue;
+    const at = exact[0];
+    const event = events[at];
+    events[at] = {
+      ...event, detail: typeof receipt.detail === "string" ? receipt.detail : "", attachments: files,
+      attachment_echo: event.detail, attachment_request_id: receipt.message_id, attachment_submitted_text: receipt.submitted_text,
+    };
+    changed = true;
+  }
+  return changed ? events : given;
+}
+
 function media(e: ActivityEvent, id: string): MediaMessage {
   const voice = (e.voice ?? {}) as Record<string, unknown>;
   const audio = (voice.audio ?? {}) as Record<string, unknown>;
@@ -324,7 +392,7 @@ export function buildTranscript(given: readonly ActivityEvent[], summary?: Recor
   const provider = mergeProvider(given, summary);
   if (!provider.length && !local.length) return recordedContext(summary);
   const items: TranscriptItem[] = provider.length ? [] : recordedContext(summary);
-  const events = local.length ? mergeLocal(provider, local) : provider;
+  const events = mergeAttachmentMessages(local.length ? mergeLocal(provider, local) : provider, summary);
   for (let i = 0; i < events.length;) {
     const e = events[i];
     const id = eventKey(e);
@@ -369,7 +437,9 @@ export function buildTranscript(given: readonly ActivityEvent[], summary?: Recor
       // Qt's order: a queued prompt first, then an answer (ActivityView.cpp:1036-1038).
       const label = role !== "user" ? undefined : e.type === "UserPromptQueued" ? "You (queued)"
         : e.type === "QuestionAnswered" || replies ? "You (answer)" : undefined;
-      items.push({ id, kind: role === "user" ? "user" : "agent", at, body: e.detail ?? "", attachments: attachments(e), receipt, label, replies });
+      items.push({ id, kind: role === "user" ? "user" : "agent", at, body: e.detail ?? "",
+        echoBody: typeof e.attachment_echo === "string" ? e.attachment_echo : undefined,
+        attachments: attachments(e), receipt, label, replies });
       i++; continue;
     }
     // Adjacent operational events form one group; messages and attention stay boundaries.

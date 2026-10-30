@@ -183,6 +183,7 @@ pub struct Store {
     pub generation: u64,
     recovery_error: bool,
     read_recovery_error: bool,
+    catalog_collection_error: bool,
 }
 impl Store {
     pub fn open(location: &Location, epoch: &str) -> Result<Self> {
@@ -282,6 +283,7 @@ impl Store {
             generation,
             recovery_error: false,
             read_recovery_error,
+            catalog_collection_error: false,
         })
     }
     pub fn checkpoint(&self) -> Result<()> {
@@ -312,6 +314,34 @@ impl Store {
         status["recovery_error"] = self.read_recovery_error.into();
         status
     }
+    pub fn catalog_status(&self) -> serde_json::Value {
+        match zerus_desktop_catalog::totals(&self.db) {
+            Ok(totals) => serde_json::json!({
+                "retained_sources":totals.retained_sources,"stored_rows":totals.stored_rows,
+                "stored_bytes":totals.stored_bytes,"obsolete_generations":totals.obsolete_generations,
+                "admissions_paused":true,"collection_error":self.catalog_collection_error,
+            }),
+            Err(_) => serde_json::json!({
+                "retained_sources":null,"stored_rows":null,"stored_bytes":null,
+                "obsolete_generations":null,"admissions_paused":true,
+                "collection_error":self.catalog_collection_error,"error":"catalog_unavailable",
+            }),
+        }
+    }
+    /// One indexed batch, never a loop over all retained rows. False backs off
+    /// both idle and failed collection; failure affects only this component.
+    pub fn collect_catalog(&mut self) -> bool {
+        match zerus_desktop_catalog::collect(&mut self.db) {
+            Ok(progress) => {
+                self.catalog_collection_error = false;
+                progress.is_some()
+            }
+            Err(_) => {
+                self.catalog_collection_error = true;
+                false
+            }
+        }
+    }
     pub fn recover_effects(&mut self, epoch: &str) {
         self.recovery_error = zerus_desktop_ledger::recover_batch(&mut self.db, epoch).is_err();
         self.read_recovery_error = zerus_desktop_ledger::reads::recover(
@@ -326,6 +356,99 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::params;
+    #[test]
+    fn catalog_collection_yields_and_failure_is_local_and_recoverable() {
+        let temp = tempfile::tempdir().unwrap();
+        let location = Location {
+            root: canonical(&temp.path().join("state/desktop")).unwrap(),
+            configuration: "a".repeat(64),
+        };
+        location.prepare().unwrap();
+        let _owner = location.lock().unwrap();
+        let epoch = uuid::Uuid::new_v4().to_string();
+        let mut store = Store::open(&location, &epoch).unwrap();
+        let baseline = zerus_desktop_ledger::put_baseline(
+            &mut store.db,
+            &zerus_desktop_ledger::Identity {
+                kind: zerus_desktop_ledger::Kind::Post,
+                target: zerus_desktop_ledger::Target::Session {
+                    computer: "peer".into(),
+                    run: "run-1".into(),
+                    conversation: "conversation-1".into(),
+                },
+                edge: "edge-1".into(),
+            },
+            1,
+            &serde_json::json!({"token":"synthetic"}),
+        )
+        .unwrap();
+        zerus_desktop_ledger::reads::enqueue(
+            &mut store.db,
+            &uuid::Uuid::new_v4().to_string(),
+            &zerus_desktop_ledger::reads::ReadMark {
+                computer: "peer".into(),
+                name: "codex/example/session".into(),
+                run_id: "run-1".into(),
+                conversation_id: "conversation-1".into(),
+                reply_id: Some("reply-1".into()),
+                attention_signature: None,
+            },
+            0,
+        )
+        .unwrap();
+        let tx = store.db.transaction().unwrap();
+        tx.execute(
+            "INSERT INTO desktop_catalog_generations(computer,obsolete) VALUES('peer',1)",
+            [],
+        )
+        .unwrap();
+        let obsolete = tx.last_insert_rowid();
+        tx.execute(
+            "INSERT INTO desktop_catalog_generations(computer) VALUES('peer')",
+            [],
+        )
+        .unwrap();
+        let visible = tx.last_insert_rowid();
+        for n in 0..385 {
+            tx.execute(
+                "INSERT INTO desktop_catalog_rows(generation,key,json,bytes) VALUES(?1,?2,'{}',64)",
+                params![
+                    if n == 384 { visible } else { obsolete },
+                    format!("run:{n}")
+                ],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+        assert!(store.collect_catalog());
+        assert_eq!(store.catalog_status()["stored_rows"], 129);
+        assert!(store.collect_catalog());
+        assert_eq!(store.catalog_status()["stored_rows"], 1);
+        assert_eq!(store.catalog_status()["obsolete_generations"], 0);
+        assert!(!store.collect_catalog());
+        store
+            .db
+            .execute_batch(
+                "ALTER TABLE desktop_catalog_generations RENAME TO broken_catalog_generations",
+            )
+            .unwrap();
+        assert!(!store.collect_catalog());
+        assert_eq!(store.catalog_status()["collection_error"], true);
+        assert_eq!(store.catalog_status()["error"], "catalog_unavailable");
+        assert_eq!(store.read_status()["pending"], 1);
+        assert!(store.effect_status()["error"].is_null());
+        assert!(zerus_desktop_ledger::current(&store.db, &baseline, 1).unwrap());
+        store
+            .db
+            .execute_batch(
+                "ALTER TABLE broken_catalog_generations RENAME TO desktop_catalog_generations",
+            )
+            .unwrap();
+        assert!(!store.collect_catalog());
+        assert_eq!(store.catalog_status()["collection_error"], false);
+        assert_eq!(store.catalog_status()["stored_rows"], 1);
+    }
     #[test]
     fn read_queue_recovers_under_a_new_service_epoch_and_fails_locally() {
         use zerus_desktop_ledger::reads;

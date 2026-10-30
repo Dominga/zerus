@@ -58,6 +58,8 @@ inline const char *prototypeIconPath(const QString &name)
         {"eye", "M2.5 12s3.5-6.5 9.5-6.5 9.5 6.5 9.5 6.5-3.5 6.5-9.5 6.5S2.5 12 2.5 12zM9 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0"},
         {"pencil", "M4 20l1-4L16 5l3 3L8 19zM14 7l3 3"},
         {"warning", "M12 4l9 16H3zM12 10v4M12 17v.5"},
+        // #648: the Tasks card's subagent row (the prototype's users).
+        {"users", "M16 20v-1.5a3.5 3.5 0 0 0-3.5-3.5h-6A3.5 3.5 0 0 0 3 18.5V20M6 8a3.5 3.5 0 1 0 7 0a3.5 3.5 0 1 0 -7 0M21 20v-1.5a3.5 3.5 0 0 0-2.6-3.4M15.5 4.6a3.5 3.5 0 0 1 0 6.8"},
         // U50: the rail's Waiting for you page, an inbox tray.
         {"inbox", "M4 13l2.5-7.5A1.5 1.5 0 0 1 7.9 4.5h8.2a1.5 1.5 0 0 1 1.4 1L20 13v5.5a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18.5zM4 13h4.5l1.5 2.5h4l1.5-2.5H20"}};
     return paths.value(name);

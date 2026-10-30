@@ -10,8 +10,8 @@
 
 // WhiteWh fork: the selected session's place among the sessions of its
 // project, in Details. A subordinate shows its lead with Open, Send report and
-// Detach; a lead lists its subordinates with Release; any other session can be
-// set to report to one of the project's sessions.
+// Detach; a lead lists its subordinates with Release; any other session has
+// one "Reports to" row whose select sets its lead (#648, as the prototype).
 class SessionLeadPanel : public QWidget {
 public:
     using Session = QPair<QString, QString>;   // identity, name
@@ -20,11 +20,9 @@ public:
         setObjectName("sessionLeadPanel");
         setAttribute(Qt::WA_StyledBackground, true);
         m_layout = new QVBoxLayout(this);
-        m_layout->setContentsMargins(8, 6, 8, 8);
+        m_layout->setContentsMargins(0, 6, 0, 0);
         m_layout->setSpacing(5);
-        auto *title = new QLabel(tr("Hierarchy"));
-        title->setObjectName("inspectorPanelTitle");
-        m_layout->addWidget(title);
+        // The Tasks card's last row: no title of its own.
         m_body = new QVBoxLayout;
         m_body->setSpacing(5);
         m_layout->addLayout(m_body);
@@ -89,11 +87,16 @@ public:
             return;
         }
         auto *rowWidget = new QWidget; auto *row = new QHBoxLayout(rowWidget); row->setContentsMargins(0, 0, 0, 0); row->setSpacing(6);
+        auto *label = new QLabel(tr("Reports to")); label->setObjectName("sessionLeadLabel");
         auto *choice = new QComboBox; choice->setObjectName("sessionLeadChoice"); choice->setAccessibleName(tr("Lead session"));
+        choice->addItem(tr("nobody"), QString());
         for (const auto &session : candidates) choice->addItem(session.second, session.first);
-        auto *link = button(tr("Report to"), "linkSessionLead");
-        connect(link, &QPushButton::clicked, this, [this, choice] { if (setLead) setLead(m_identity, choice->currentData().toString()); });
-        row->addWidget(link); row->addWidget(choice, 1);
+        label->setBuddy(choice);
+        connect(choice, &QComboBox::activated, this, [this, choice](int index) {
+            const auto lead = choice->itemData(index).toString();
+            if (!lead.isEmpty() && setLead) setLead(m_identity, lead);
+        });
+        row->addWidget(label); row->addWidget(choice, 1);
         add(rowWidget);
     }
 

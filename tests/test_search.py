@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Read-only content search, isolated bindings/transcripts and no agent processes."""
+from contextlib import closing
 import hashlib
 import json
 import os
@@ -25,12 +26,16 @@ class ContentSearch(unittest.TestCase):
                         HGS_STATE_DIR=str(self.state), HGS_SELF="fixture", HGS_PEERS="")
         for key in ("TMUX", "TMUX_PANE", "HGS_RUN_ID", "HGS_SESSION"):
             self.env.pop(key, None)
+        if os.name == "nt":
+            # Admit __state only for this explicitly isolated fixture. No host
+            # is installed or started, and the real Windows profile stays out.
+            self.env.update(USERPROFILE=str(self.root), HGS_HOST_ALLOW_UNSTAGED="1")
 
     def binding(self, name, text, archive=False, agent="codex"):
         sid = str(uuid.uuid4())
         path = self.root / (sid + ".jsonl")
         path.write_text(json.dumps({"type": "event_msg", "timestamp": "2026-01-01T10:00:00Z",
-                                   "payload": {"type": "agent_message", "message": text}}, ensure_ascii=False) + "\n")
+                                   "payload": {"type": "agent_message", "message": text}}, ensure_ascii=False) + "\n", encoding="utf-8")
         record = dict(version=1, name=name, agent=agent, cwd="/work/project", run_id=str(uuid.uuid4()),
                       conversation_id=sid, transcript=str(path), updated=42)
         if archive:
@@ -45,7 +50,7 @@ class ContentSearch(unittest.TestCase):
 
     def run_search(self, *args, check=True):
         result = subprocess.run([str(HGS), "__state", "search", *args], env=self.env,
-                                capture_output=True, text=True, timeout=8)
+                                capture_output=True, text=True, encoding="utf-8", timeout=8)
         if check:
             self.assertEqual(result.returncode, 0, result.stderr)
             return json.loads(result.stdout)
@@ -70,7 +75,7 @@ class ContentSearch(unittest.TestCase):
 
     def test_journal_and_provider_duplicate_are_one_public_message(self):
         record, _ = self.binding("codex/project", "Резервная копия успешно завершена")
-        with sqlite3.connect(self.state / "events.sqlite3") as db:
+        with closing(sqlite3.connect(self.state / "events.sqlite3")) as db, db:
             db.execute("CREATE TABLE events (seq INTEGER PRIMARY KEY, name TEXT, conversation TEXT, payload TEXT)")
             payload = dict(type="Stop", at=1767261601, detail="Резервная копия успешно…", agent_id="")
             db.execute("INSERT INTO events(name,conversation,payload) VALUES (?,?,?)",

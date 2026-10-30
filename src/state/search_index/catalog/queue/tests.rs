@@ -8,7 +8,7 @@ fn fixture(archive: bool) -> (tempfile::TempDir, PathBuf, Store) {
     let transcript = temp.path().join(format!("{conversation}.jsonl"));
     let rows=(1..=6).map(|id|json!({"type":"event_msg","timestamp":id,"payload":{"type":"agent_message","id":format!("m{id}"),"message":format!("needle {id}"),"phase":"final"}}).to_string()+"\n").collect::<String>();
     fs::write(&transcript, rows).unwrap();
-    let mut record = json!({"version":1,"name":"codex/example/search","run_id":"fixture-run","conversation_id":conversation,"agent":"codex","cwd":"/work/example","transcript":transcript,"updated":42});
+    let mut record = json!({"version":1,"name":"codex/example/search","run_id":"fixture-run","conversation_id":conversation,"agent":"codex","cwd":state,"transcript":transcript,"updated":42});
     let path = if archive {
         let id = uuid::Uuid::new_v4().to_string();
         record["archive_id"] = json!(id);

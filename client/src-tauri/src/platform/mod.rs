@@ -4,7 +4,7 @@
 pub mod linux;
 #[cfg(all(target_os = "linux", feature = "live"))]
 pub mod linux_notify;
-#[cfg(all(test, target_os = "linux", feature = "live"))]
+#[cfg(all(test, target_os = "linux"))]
 pub(crate) mod linux_test_bus;
 #[cfg(all(target_os = "linux", feature = "live"))]
 pub mod linux_tray;

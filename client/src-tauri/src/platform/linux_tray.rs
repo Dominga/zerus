@@ -619,18 +619,21 @@ pub fn open_running(app: &AppHandle, computer: &ComputerId, name: &str) {
         zerus_client_core::shell::current_shell(),
     );
     if mode == OpenMode::Clipboard {
-        use tauri_plugin_clipboard_manager::ClipboardExt;
-        if let Err(error) = zerus_client_core::shell::copyable(&command).and_then(|()| {
-            app.clipboard()
-                .write_text(command.clone())
-                .map_err(|e| e.to_string())
-        }) {
-            crate::desk::window_notice(
-                app,
-                "Zerus: the terminal did not open",
-                &zerus_client_core::terminal_launch::not_opened(&error, &command),
-            );
-        }
+        let app = app.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            match crate::clipboard::copy_text(app.clone(), command.clone()) {
+                Ok(()) => crate::desk::window_notice(
+                    &app,
+                    "Zerus: copied to the clipboard",
+                    &zerus_client_core::shell::notification_text(&command),
+                ),
+                Err(error) => crate::desk::window_notice(
+                    &app,
+                    "Zerus: the terminal did not open",
+                    &zerus_client_core::terminal_launch::not_opened(&error, &command),
+                ),
+            }
+        });
         return;
     }
     let mut launcher = Launcher::new(Settings {

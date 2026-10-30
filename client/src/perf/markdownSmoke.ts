@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { catalog } from "../store/catalog";
 import { activity } from "../store/session";
+import { notices } from "../store/notices";
 import { setDetailTab, setPage, setSearch, setSelectedKey, setStateFilter } from "../store/ui";
 import { INLINE_TABLE, SCREENSHOT_TABLE, WIDE_TABLE } from "./fixtures/markdownTables";
 
@@ -56,6 +57,13 @@ export async function markdownSmoke(allowed: boolean) {
     await sleep(150);
     const header = document.querySelector(".act-table th")!;
     require(header.getBoundingClientRect().top >= scroll.getBoundingClientRect().top, "the reported table header is outside the viewport");
+    const beforeCopy = Math.max(0, ...notices().map((n) => n.id));
+    const copy = document.querySelector<HTMLButtonElement>(".act-copy");
+    require(!!copy, "Copy as Markdown control is missing");
+    copy!.click();
+    await until(() => notices().some((n) => n.id > beforeCopy), "copy did not report its result");
+    require(notices().some((n) => n.id > beforeCopy && n.title === "Copied" && n.tone !== "error"), "Copy as Markdown was refused");
+    await log("COPIED (exact multiline table through the native clipboard bridge)");
     await log("PASS (Russian rows, wrapping, wide scrolling, alignment, bold/code/guarded links, escaped pipes, literal HTML and fences)");
     await sleep(500);
     await invoke("exit_app", { code: 0 });

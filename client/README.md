@@ -594,7 +594,14 @@ clipboard. They are not writes: they need no row lock and show no "Updating…".
   8192 characters; otherwise the notice says "Could not read a session
   reference. Update hgs on this computer." Success shows the toast "Copied",
   "The session reference is on the clipboard".
-- The clipboard is written from Rust (tauri-plugin-clipboard-manager). A text
+- The clipboard is written from Rust. Linux tries Klipper's
+  `org.kde.klipper.klipper.setClipboardContents`, then `wl-copy`, then the
+  native clipboard plugin with exact read-back. Calls run off GTK's thread;
+  Klipper and the front helper have Qt's three-second timeout. The helper
+  gets exact text on anonymous memory-backed stdin, including leading dashes
+  and trailing newlines for verbatim copies; no copied body goes to argv or
+  disk. Its donor keeps null output streams and survives until the next
+  clipboard selection. No Qt clipboard or service is required. A text
   that is empty or holds a line break is refused with Qt's texts. A failure
   shows the sticky toast "Not copied" with the error. A success shows no
   notice, except for Copy session reference and the header's ID copy ("Copied",

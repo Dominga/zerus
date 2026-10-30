@@ -1892,9 +1892,12 @@ pub(crate) fn brief_text(team: &Team) -> String {
             "[Zerus team \u{b7} from: Zerus \u{b7} brief]\nYou are now the lead of the team {} ({}). \
              Its reports, questions, permission requests and your own tasks wait in one inbox: \
              {{\"team\":\"{}\"}} | hgs team inbox --json. The team state is in hgs team status --json; \
-             hgs guide team-lead has the rest.\n",
+             hgs guide team-lead has the rest. Before you report or finish a phase, \
+             {{\"team\":\"{}\",\"phase\":N}} | hgs team profile --json ranks its losses: name the phase's top three \
+             by time in the phase report.\n",
             team.name,
             if team.status == TeamStatus::Running { "running" } else { "paused" },
+            team.id,
             team.id
         );
         // U54: a lead swapped to another conversation gets the previous lead's
@@ -1965,7 +1968,8 @@ pub(crate) fn brief_text(team: &Team) -> String {
          Keep these members unless the goal needs others; nothing runs until the owner approves. \
          Once it runs, answer a member's question with hgs team reply --json, keep a returned task back with \
          hgs team hold --json and give it out again with hgs team release --json; new work goes in a new phase and \
-         you finish the team (hgs guide team-lead). \
+         you finish the team (hgs guide team-lead). Weigh lanes with hgs team profile's roles[] (utilization and \
+         tokens per accepted task) from the last finished phase. \
          Reports, questions, permission requests and your own tasks wait in one inbox \
          ({{\"team\":\"{}\"}} | hgs team inbox --json): decide a report with hgs team accept --json, and report \
          and accept your own task in one step with \"accept\":true in hgs team report --json.\n\
@@ -7549,6 +7553,8 @@ mod tests {
         assert!(brief.contains("Ship it") && brief.contains("Your role: Plan well") && brief.contains("\"assignee\":\"dev\""));
         assert!(brief.contains("Team protocol:\nRun the waves in order"));
         assert!(brief.contains("(hgs guide team-lead)"));
+        // U38: the planning brief weighs lanes with the profile's per-role numbers.
+        assert!(brief.contains("hgs team profile") && brief.contains("roles[]"), "{brief}");
         // The brief names the reply, hold and release routes (H5), and the
         // inbox with the lead's own report-and-accept route (C1, C2).
         assert!(brief.contains("hgs team reply --json"), "{brief}");
@@ -12515,6 +12521,8 @@ mod tests {
         running.brief = Notice::Pending;
         let brief = brief_text(&running);
         assert!(brief.contains("hgs team inbox --json") && brief.contains(&running.id), "{brief}");
+        // U38: the running brief points at the profile for the phase report.
+        assert!(brief.contains("hgs team profile --json") && brief.contains("top three"), "{brief}");
     }
 
     /// U47/U48: one git command in a test repository, which must succeed.

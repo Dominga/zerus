@@ -115,6 +115,17 @@ mod tests {
         assert!(custom.contains("keep_assignees (off)"));
     }
 
+    /// U38: the lead protocol names the profile, the top three losses and the
+    /// per-role numbers, and says unknown is never zero.
+    #[test]
+    fn the_lead_protocol_names_the_profile_and_its_top_three_losses() {
+        let lead = TOPICS.iter().find(|(name, _)| *name == "team-lead").unwrap().1;
+        assert!(lead.contains("hgs team profile --json"), "{lead}");
+        assert!(lead.contains("top three losses"), "{lead}");
+        assert!(lead.contains("tokens per accepted task"), "{lead}");
+        assert!(lead.contains("unknown, never zero"), "{lead}");
+    }
+
     #[test]
     fn topics_and_arguments_are_exact() {
         assert!(dispatch(&[]).is_ok());

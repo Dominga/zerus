@@ -310,7 +310,8 @@ word; the brief (tests, one real-agent contract test for the swap).
 `docs/reference.md` gets the JSON shapes above; the lead protocol (E) adds:
 write tasks for a role with `models` when the owner's catalog has model
 lists; clear-context roles get self-contained descriptions; a land stage is
-the owner's to configure.
+the owner's to configure; the phase report and the planning weights use the
+pipeline profile of section 14.
 
 ## 13. Examples: an outside pipeline
 
@@ -406,4 +407,50 @@ three times an hour, and returns its open attempt to the lead as `uncertain`;
 the fourth crash in an hour leaves it stopped for the owner to look at. The
 key's urgent phase is `Urgent: health watch`, approved at once, without a
 barrier and ahead of the other ready tasks; the key adds nothing else.
+
+## 14. The pipeline profile (U38)
+
+`hgs team profile` (`{"team":"ID","phase":N}`, `{"task":N}`, the plan, or
+`{"compare":[a,b]}`; pages by `limit`/`after_time`/`after_tokens`/
+`after_task`; `tokens:false` reads no session) is read only, computed on
+request from the same timelines as U37's `timing` and `usage::span` of the
+members' local session records, at most 200 reads. A draft has no timeline;
+canceled work stays, its time was spent.
+
+Spans: `work` and `rework` (a rejected or returned attempt), `deps`,
+`member`, `folder_held` (`held_by`), `hold` (`by`), `delivery`,
+`start_delay`, `lead`, `question` and `permission` (`by` is who answered),
+`stage_wait`, `stage` (`stage_kind`, `round`), `background`, `no_report`,
+`stop`, and `unknown` with null `from`/`to`/`s` where nothing was recorded
+(never guessed). Builds lie on top as `build` spans with `template` and
+`exit`. A past phase gets its spans from the timestamps its attempts kept.
+
+Losses: `rework` (cause rejected/returned, tokens, share of the task's
+tokens, `tokens_unknown`), `lead_wait` (`lead_s`, `question_s`),
+`permission_wait` (`answered_by`), `blocked_chain` (`deps_s`,
+`folder_held_s`, `on`, `held_by`), `member_wait`, `idle_member` (`open_s`,
+`from`, `to`; only after the member joined), `long_test` (a test stage or a
+test build of at least 300 s), `merge` and `conflict` (a `git-merge-lead` run
+whose exit is not 0, or a land stage that returned). `by_time` ranks every
+loss by seconds; `by_tokens` only the losses whose tokens are known.
+`critical_path` sets the planned chain (longest by task count, ties to the
+lower ids) against the real one (back from the task that ended last through
+the dependency that ended last each time), `off_plan` and `matches`. Per
+member, role and model: `busy_s`, `idle_s`, `utilization`, `accepted`,
+`tokens`, `tokens_unknown` and, where known, `tokens_per_accepted`. `tasks`
+is a page of rows; `events` and `token_reads` carry `read`/`truncated` bounds.
+
+Unknown is never zero: a member on another computer, a missing record, a
+provider without counters or a read past the bound leaves those tokens
+unknown, and `summary.tokens` says `partial` or `{"unknown":true}`; a
+`compare` answer's `delta.tokens` is null when either side is unknown.
+
+Lead protocol and docs: the running-team brief and `hgs guide team-lead` say
+the lead's phase report names the phase's top three losses by time, and the
+planning brief says lanes are weighed with the per-role numbers (`roles[]`:
+utilization, tokens per accepted task) of the last finished phase; the guide
+page stays at most 2400 bytes of ASCII. `docs/reference.md` carries the
+command, the span kinds, the loss kinds and unknown. The desktop Profile view
+and heat overlay are the frontend's (#658); this item covers the server
+command, the protocol and the docs only.
 

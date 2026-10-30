@@ -122,6 +122,62 @@ fn private_file(path: &Path, create: bool) -> Result<fs::File> {
     Ok(file)
 }
 
+/// Reused before opening SQLite in either the actor or a legacy admission probe.
+fn database_files(location: &Location) -> Result<()> {
+    for name in [
+        "state.sqlite3",
+        "state.sqlite3-wal",
+        "state.sqlite3-shm",
+        "state.sqlite3-journal",
+    ] {
+        match platform::verify_private(&location.root.join(name), platform::Private::File) {
+            Ok(true) => (),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            _ => anyhow::bail!("desktop database files must be private single-link regular files"),
+        }
+    }
+    Ok(())
+}
+
+/// Read one indexed policy row, without migration, restart or authority changes.
+/// None means no database; schema one predates effect owners and stays passive.
+pub(super) fn writer_active(location: &Location) -> Result<Option<bool>> {
+    location.check_existing()?;
+    match fs::symlink_metadata(location.root.join("state.sqlite3")) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        result => {
+            result?;
+        }
+    }
+    database_files(location)?;
+    let db = Connection::open_with_flags(
+        location.root.join("state.sqlite3"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    db.busy_timeout(Duration::from_millis(250))?;
+    let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    ensure!((1..=SCHEMA).contains(&version), "unknown desktop schema");
+    let configuration: String = db.query_row(
+        "SELECT substr(configuration,1,65) FROM service WHERE id=1",
+        [],
+        |r| r.get(0),
+    )?;
+    ensure!(
+        configuration == location.configuration,
+        "desktop configuration mismatch"
+    );
+    if version == 1 {
+        return Ok(Some(false));
+    }
+    let revoked: i64 = db.query_row("SELECT revoked FROM desktop_writer WHERE id=1", [], |r| {
+        r.get(0)
+    })?;
+    ensure!(matches!(revoked, 0 | 1), "invalid desktop writer policy");
+    Ok(Some(revoked == 0))
+}
+
 pub struct Store {
     pub(super) db: Connection,
     pub generation: u64,
@@ -130,21 +186,7 @@ pub struct Store {
 impl Store {
     pub fn open(location: &Location, epoch: &str) -> Result<Self> {
         let path = location.root.join("state.sqlite3");
-        // Check every existing SQLite leaf before SQLite can open its sidecars.
-        for name in [
-            "state.sqlite3",
-            "state.sqlite3-wal",
-            "state.sqlite3-shm",
-            "state.sqlite3-journal",
-        ] {
-            match platform::verify_private(&location.root.join(name), platform::Private::File) {
-                Ok(true) => (),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
-                _ => anyhow::bail!(
-                    "desktop database files must be private single-link regular files"
-                ),
-            }
-        }
+        database_files(location)?;
         let flags = OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_NOFOLLOW;
         // A newer schema is probed read-only before any PRAGMA or migration write.
         if path.try_exists()? {

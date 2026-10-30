@@ -2,6 +2,7 @@
 mod fanout;
 mod handoff;
 mod import_evidence;
+mod presence_admission;
 mod protocol;
 mod registration;
 mod revoke;
@@ -11,6 +12,7 @@ mod transport;
 use crate::{cli, config::Config, platform};
 use anyhow::{ensure, Context, Result};
 use fanout::{Fanout, Queue};
+pub(crate) use presence_admission::legacy as legacy_presence;
 use protocol::{Hello, ABI};
 use serde_json::{json, Value};
 use std::{

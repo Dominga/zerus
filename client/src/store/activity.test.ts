@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createRoot } from "solid-js";
 import { createActivity, type FollowRequest } from "./activity";
-import { buildTranscript } from "../ui/sessions/transcript";
+import { buildTranscript, mergeProvider } from "../ui/sessions/transcript";
 import type { ActivityEvent, ActivityOut } from "../types";
 
 const target = { id: "\nrun:a", computer: "", key: "run:a", name: "claude/sample-project/a" };
@@ -207,6 +207,39 @@ describe("provider messages in Activity", () => {
     });
     expect(items.map(body)).toEqual(["Done.", "Done."]);
     expect(items[0].id).not.toBe(items[1].id);
+  });
+
+  it("keeps an untimed journal event in sequence position when inserting provider rows", () => {
+    const given = [ev(1, "AgentMessage", { at: 10 }), ev(2, "AgentThinking", { at: undefined }), ev(3, "AgentMessage", { at: 30 })];
+    const merged = mergeProvider(given, { provider_messages: [message("progress", "Working.", 20)] });
+    expect(merged.filter((e) => e.seq).map((e) => e.seq)).toEqual([1, 2, 3]);
+    expect(merged[1]).toBe(given[1]);
+  });
+
+  it("preserves journal order when every provider message is already present or fills a Stop", () => {
+    const native = message("already-there", "Progress.", 20);
+    const given = [ev(1, "Stop", { at: 30, detail: "Done…" }), ev(2, "AgentThinking", { at: undefined }), native];
+    expect(mergeProvider(given, { provider_messages: [native] })).toEqual(given);
+    const filled = mergeProvider(given, { provider_messages: [message("final", "Done with checks.", 30, "final_answer")] });
+    expect(filled.map((e) => e.seq)).toEqual(given.map((e) => e.seq));
+    expect(filled[0].detail).toBe("Done with checks.");
+  });
+
+  it("breaks equal occurrence times by journal sequence", () => {
+    const merged = mergeProvider([ev(3, "AgentThinking", { at: 10 }), ev(1, "AgentThinking", { at: 10 })], {
+      provider_messages: [message("later", "Done.", 20)],
+    });
+    expect(merged.slice(0, 2).map((e) => e.seq)).toEqual([1, 3]);
+  });
+
+  it("indexes a long history once and only matches the nearby time window", () => {
+    let reads = 0;
+    const history = Array.from({ length: 2000 }, (_, i): ActivityEvent => ({
+      type: "Stop", detail: "Old reply", seq: i + 1, get at() { reads++; return i + 1; },
+    }));
+    const provider_messages = Array.from({ length: 100 }, (_, i) => message(`recent-${i}`, "New reply", 10000 + i));
+    expect(mergeProvider(history, { provider_messages })).toHaveLength(2100);
+    expect(reads).toBeLessThan(20000);
   });
 
   it("only projects the bounded provider window from the current summary", () => {

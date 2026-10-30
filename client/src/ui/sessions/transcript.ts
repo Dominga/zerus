@@ -250,33 +250,70 @@ const isExcerpt = (excerpt: string, full: string) => {
  * into the summary by the core. Keep journal cursors intact and project the
  * bounded provider window at render time, including progress between tools.
  */
-function mergeProvider(given: readonly ActivityEvent[], summary?: Record<string, unknown>): readonly ActivityEvent[] {
+export function mergeProvider(given: readonly ActivityEvent[], summary?: Record<string, unknown>): readonly ActivityEvent[] {
   if (!Array.isArray(summary?.provider_messages) || !summary.provider_messages.length) return given;
   const events = [...given];
   const matchedStops = new Set<number>();
+  const identities = new Set<string>();
+  const seconds = new Map<number, number[]>();
+  const nativeKey = (e: ActivityEvent) => e.message_id ? `${e.source}:${e.type}:${e.message_id}` : "";
+  const at = (e: ActivityEvent) => {
+    const value = e.at;
+    return typeof value === "number" && Number.isFinite(value) ? value : 0;
+  };
+  // Index only matching candidates once, rather than scanning every loaded
+  // journal page for each provider row on every streaming rebuild.
+  const index = (e: ActivityEvent, i: number) => {
+    if (e.agent_id || (e.type !== "Stop" && !PROVIDER_SOURCES.has(e.source ?? ""))) return;
+    const key = nativeKey(e);
+    if (key) identities.add(key);
+    const second = Math.floor(at(e));
+    const bucket = seconds.get(second);
+    if (bucket) bucket.push(i); else seconds.set(second, [i]);
+  };
+  events.forEach(index);
+  let inserted = false;
   for (const value of summary.provider_messages.slice(-100)) {
     if (!value || typeof value !== "object") continue;
     const message = value as ActivityEvent;
     if (!PROVIDER_SOURCES.has(message.source ?? "") || message.agent_id
       || (message.type !== "AgentMessage" && !(message.type === "AgentThinking" && message.source === "claude_transcript"))) continue;
-    const same = events.findIndex((e) => e.type === message.type && e.source === message.source && !e.agent_id
-      && (message.message_id && e.message_id ? message.message_id === e.message_id
-        : e.detail === message.detail && Math.abs((e.at ?? 0) - (message.at ?? 0)) < 3));
-    if (same >= 0) continue;
+    const key = nativeKey(message);
+    if (key && identities.has(key)) continue;
+    const when = at(message);
+    const nearby: number[] = [];
+    for (let offset = -3; offset <= 3; offset++) {
+      for (const i of seconds.get(Math.floor(when) + offset) ?? []) if (Math.abs(at(events[i]) - when) <= 3) nearby.push(i);
+    }
+    nearby.sort((a, b) => a - b);
+    const same = nearby.some((i) => {
+      const e = events[i];
+      return e.type === message.type && e.source === message.source
+        && !(message.message_id && e.message_id && message.message_id !== e.message_id)
+        && e.detail === message.detail && Math.abs(at(e) - when) < 3;
+    });
+    if (same) continue;
     // The hook's final excerpt and the provider's full response are one row.
     // An empty Stop never absorbs commentary immediately before completion.
-    const stop = message.type === "AgentMessage" ? events.findIndex((e, index) => !matchedStops.has(index) && e.type === "Stop" && !e.agent_id
-      && Math.abs((e.at ?? 0) - (message.at ?? 0)) <= 2
-      && (e.detail ? isExcerpt(e.detail, message.detail ?? "") : message.message_phase !== "commentary")) : -1;
-    if (stop >= 0) {
+    const stop = message.type === "AgentMessage" ? nearby.find((i) => !matchedStops.has(i) && events[i].type === "Stop"
+      && Math.abs(at(events[i]) - when) <= 2
+      && (events[i].detail ? isExcerpt(events[i].detail!, message.detail ?? "") : message.message_phase !== "commentary")) : undefined;
+    if (stop !== undefined) {
       matchedStops.add(stop);
       events[stop] = { ...events[stop], detail: message.detail, source: message.source, message_id: message.message_id };
+      if (key) identities.add(key);
+    } else {
+      index(message, events.length);
+      events.push(message);
+      inserted = true;
     }
-    else events.push(message);
   }
-  // Provider messages have no journal sequence. Stable occurrence-time order
-  // puts mid-turn commentary between the surrounding tool events.
-  return events.sort((a, b) => (a.at ?? 0) - (b.at ?? 0));
+  // Preserve journal order when no row was inserted, or occurrence times are
+  // incomplete. Fully timed rows use occurrence time with sequence tie breaks.
+  if (inserted && events.every((e) => at(e) > 0)) {
+    events.sort((a, b) => at(a) - at(b) || ((a.seq ?? 0) > 0 && (b.seq ?? 0) > 0 ? a.seq! - b.seq! : 0));
+  }
+  return events;
 }
 
 /**

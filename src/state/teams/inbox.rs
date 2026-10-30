@@ -181,6 +181,38 @@ fn all_items(team: &Team) -> Vec<Item> {
             detail: wait.reason.clone(),
         });
     }
+    // N3: a draining member whose tasks still keep it open is one item for the
+    // lead, naming them, so a drain never waits silently; when no same-role peer
+    // can take them, the item says that too.
+    for member in team.members.iter().filter(|_| active).filter(|member| member.draining && member.state != MemberState::Removed) {
+        let role = team.role_of(&member.id);
+        let waiting: Vec<u32> = team
+            .tasks
+            .iter()
+            .filter(|task| task.assignee == member.id && !task.status.finished())
+            .map(|task| task.id)
+            .collect();
+        if waiting.is_empty() {
+            continue;
+        }
+        let peer = team
+            .members
+            .iter()
+            .any(|other| other.id != member.id && other.state != MemberState::Removed && !other.draining && team.role_of(&other.id) == role);
+        let listed = waiting.iter().map(|id| format!("#{id}")).collect::<Vec<_>>().join(" ");
+        let why = if peer { "they wait for a decision".to_owned() } else { format!("no other {role} can take them") };
+        items.push(Item {
+            subagents: Value::Null,
+            kind: "drain_held",
+            key: format!("drain_held:{}", member.id),
+            task: waiting.first().copied(),
+            member: role.clone(),
+            since: crate::state::now(),
+            summary: summary(&format!("Draining {role}: {listed} still to decide; {why}")),
+            command: format!("{} | hgs team status --json", json!({"team":team.id})),
+            detail: format!("{role} is draining. {listed} keep it open: {why}."),
+        });
+    }
     // U52: a member whose session crashed too often this hour stays stopped
     // until the owner or the lead starts it again.
     for member in team.members.iter().filter(|member| member.id != team.lead && member.crash_told).filter(|_| active) {

@@ -1601,13 +1601,16 @@ owner and the lead change a plan, as before.
 `Settings.restart_crashed` (off by default, only the owner sets it) launches a
 member's session again into the same folder and conversation when its process
 exits on its own: not a pause, an archive, a usage limit, a swap, or a session
-Zerus has not seen running since its last restart. It happens at most three
-times an hour per member (`member.restarts`, the last 20 kept); each restart
-returns the member's open attempt to the lead as `uncertain` ("the session
-crashed at T; restarted") and records `member_restarted`. The fourth crash in
-an hour leaves the session stopped with one inbox item and `member_crashed`;
-pausing the team stops restarts, a member the team paused is never restarted,
-and a launch that fails records `restart_failed`.
+Zerus has not seen running since its last restart. An exit you type yourself in
+the member's terminal (for example `/exit`) counts as such an exit: turn the
+setting off before stopping a member by hand, or it is launched again. It
+happens at most three times an hour per member (`member.restarts`, the last 20
+kept); each restart returns the member's open attempt to the lead as
+`uncertain` ("the session crashed at T; restarted") and records
+`member_restarted`. The fourth crash in an hour leaves the session stopped with
+one inbox item and `member_crashed`; pausing the team stops restarts, a member
+the team paused is never restarted, and a launch that fails records
+`restart_failed`.
 
 <a id="activity"></a>
 

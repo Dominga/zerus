@@ -1108,18 +1108,36 @@ fn intake_phase(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSe
     ensure!(input.get("phase").is_none(), "An intake adds its own phase; it cannot name one");
     let values = input["tasks"].as_array().context("An intake carries \"tasks\"")?;
     ensure!((1..=5).contains(&values.len()), "An intake adds 1 to 5 tasks");
+    // L3: at most one open urgent phase per key, so a watcher in a loop cannot
+    // starve the plan with phase after phase.
+    let by = format!("Intake {label}");
+    if let Some(open) = team.phases.iter().find(|phase| {
+        phase.urgent
+            && phase.added_by == by
+            && phase.tasks.iter().any(|id| team.task(*id).is_some_and(|task| !task.status.finished()))
+    }) {
+        bail!("The key's urgent phase {} is still open; finish it before adding more", open.n);
+    }
     let last = team.tasks.iter().map(|task| task.id).max().unwrap_or(0);
     let next = last.checked_add(1).context("Task numbers are exhausted")?;
     let mut tasks = Vec::new();
     for (index, value) in values.iter().enumerate() {
-        let mut task = value.clone();
-        let object = task.as_object_mut().context("An intake task is an object")?;
-        object.insert("id".into(), json!(next + index as u32));
-        // An urgent task lands now: it queues behind nothing it cannot see.
-        object.remove("deps");
-        object.remove("check");
-        object.remove("kind");
-        tasks.push(task);
+        // N4: the key keeps only the plan fields U51 gives it - title,
+        // description, criteria, files and an assignee or a role. The owner's
+        // other plan fields (pipeline, models, pinned, lane, deps, check, kind)
+        // are not the key's: a "pipeline":"none" would skip the owner's gates.
+        let source = value.as_object().context("An intake task is an object")?;
+        let mut kept = serde_json::Map::new();
+        for key in ["title", "description", "criteria", "files", "assignee", "role"] {
+            if let Some(field) = source.get(key) {
+                kept.insert(key.to_owned(), field.clone());
+            }
+        }
+        if kept.contains_key("assignee") {
+            kept.remove("role");
+        }
+        kept.insert("id".into(), json!(next + index as u32));
+        tasks.push(Value::Object(kept));
     }
     let filled = json!({"urgent":true,"phase_title":format!("Urgent: {label}"),"tasks":tasks});
     let added = extend(team, &filled, actor, offline, events)?;
@@ -4275,7 +4293,42 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
                     json!({"by":by,"member":role,"owner_word":quote}),
                 ));
             }
-            Ok(json!({"status":if draining {"draining"} else {"draining_cancelled"},"member":id,"by":by}))
+            // N3: a drain moves the member's not-started tasks (a pinned one
+            // included) to same-role peers, so the drain ends; what cannot move
+            // is named in the answer and in the lead's inbox item.
+            if draining {
+                let peers: Vec<String> = team
+                    .members
+                    .iter()
+                    .filter(|other| other.id != id && other.state != MemberState::Removed && !other.draining)
+                    .filter(|other| team.role_of(&other.id) == role)
+                    .map(|other| other.id.clone())
+                    .collect();
+                let movable: Vec<u32> = team
+                    .tasks
+                    .iter()
+                    .filter(|task| task.assignee == id && matches!(task.status, TaskStatus::Draft | TaskStatus::Pending | TaskStatus::Assigned))
+                    .map(|task| task.id)
+                    .collect();
+                for (index, task_id) in movable.iter().enumerate() {
+                    let Some(to) = peers.get(index % peers.len().max(1)).cloned() else { break };
+                    let to_role = team.role_of(&to);
+                    if let Some(task) = team.task_mut(*task_id) {
+                        task.assignee = to;
+                        task.pinned = false;
+                        task.waits = None;
+                        task.prepare.clear();
+                    }
+                    events.push(Event::new("drain_moved", json!({"task":task_id,"from":role,"to":to_role})));
+                }
+            }
+            let waiting: Vec<u32> = team
+                .tasks
+                .iter()
+                .filter(|task| task.assignee == id && !task.status.finished())
+                .map(|task| task.id)
+                .collect();
+            Ok(json!({"status":if draining {"draining"} else {"draining_cancelled"},"member":id,"by":by,"waiting":waiting}))
         }
         _ => bail!("Unknown team operation {op}"),
     }?;
@@ -6240,6 +6293,45 @@ mod tests {
         team.status = TeamStatus::Done;
         let error = apply(&mut team, "drain", &json!({"draining":false,"member":"dev"}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
         assert!(error.contains("running or paused"), "{error}");
+    }
+
+    /// #581 N3: a drain moves the member's not-started tasks, a pinned one
+    /// included, to same-role peers, so it always ends.
+    #[test]
+    fn a_drain_moves_not_started_tasks_pinned_included_to_role_peers() {
+        let mut team = running_team();
+        team.members.push(Member { id: "qa2".into(), role: "Tester".into(), agent: "claude".into(), ..Default::default() });
+        {
+            let task = team.task_mut(2).unwrap();
+            task.pinned = true;
+            task.status = TaskStatus::Pending;
+        }
+        let mut events = Vec::new();
+        let receipt = apply(&mut team, "drain", &json!({"member":"qa"}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        assert_eq!((receipt["status"].as_str(), receipt["waiting"].clone()), (Some("draining"), json!([])));
+        let task = team.task(2).unwrap();
+        assert_eq!((task.assignee.as_str(), task.pinned), ("qa2", false));
+        assert!(events.iter().any(|event| event.kind == "drain_moved"));
+        assert!(crate::state::teams::inbox::items(&team).iter().all(|item| item.kind != "drain_held"));
+    }
+
+    /// #581 N3: with no same-role peer, the tasks that keep the drain open are
+    /// named in the answer and in one lead inbox item.
+    #[test]
+    fn a_drain_with_no_peer_names_the_tasks_that_keep_it_open() {
+        let mut team = running_team();
+        {
+            let task = team.task_mut(2).unwrap();
+            task.pinned = true;
+            task.status = TaskStatus::Pending;
+        }
+        let mut events = Vec::new();
+        let receipt = apply(&mut team, "drain", &json!({"member":"qa"}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        assert_eq!(receipt["waiting"], json!([2]));
+        let items = crate::state::teams::inbox::items(&team);
+        let item = items.iter().find(|item| item.kind == "drain_held").unwrap();
+        assert!(item.summary.contains("#2") && item.summary.contains("no other Tester"), "{}", item.summary);
+        assert!(item.detail.contains("#2"), "{}", item.detail);
     }
 
     #[test]

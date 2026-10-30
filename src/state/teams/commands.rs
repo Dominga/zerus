@@ -7823,6 +7823,52 @@ mod tests {
         });
     }
 
+    /// #581 N4/L3: an intake task keeps only the plan fields the key is given,
+    /// and a key has at most one open urgent phase.
+    #[test]
+    fn an_intake_task_keeps_only_its_plan_fields_and_one_phase_is_open_per_key() {
+        use crate::state::teams::model::TaskKind;
+        let (team, _, _) = review_team();
+        with_review_team(&team, || {
+            let created = run(
+                "intake-key",
+                &json!({"request_id":"11111111-2222-4333-8444-555555555552","team":"rv","label":"watch","by":"human"}),
+                false,
+            )
+            .unwrap();
+            let key = created["key"].as_str().unwrap().to_owned();
+            let added = call(
+                "intake",
+                json!({"key":key,"tasks":[{
+                    "title":"Fix","description":"d","criteria":["c"],"assignee":"dev",
+                    "pipeline":"none","pinned":true,"phase":9,"models":["m"],"kind":"check",
+                    "check":{"command":"true"},"deps":[{"task":1}],"lane":{"id":"x"},"files":["a"]}]}),
+            )
+            .unwrap();
+            let saved = stored();
+            let task = saved.task(added["tasks"][0].as_u64().unwrap() as u32).unwrap();
+            assert_eq!((task.title.as_str(), task.description.as_str()), ("Fix", "d"));
+            assert_eq!(task.criteria, vec!["c"]);
+            assert_eq!(task.assignee, "dev");
+            // The owner's plan fields are not the key's; the pipeline resolves
+            // as for a plan task with no choice.
+            assert!(task.pipeline.is_empty(), "pipeline: {}", task.pipeline);
+            assert!(!task.pinned && task.models.is_empty() && task.lane.is_none() && task.check.is_none());
+            assert!(task.deps.is_empty() && task.kind == TaskKind::Task);
+            assert_eq!(task.phase, saved.phases.last().unwrap().n);
+            // L3: the key's phase is still open, so it adds no second one.
+            let error = call("intake", json!({"key":key,"tasks":[{"title":"More","assignee":"dev"}]})).unwrap_err();
+            assert!(error.to_string().contains("still open"), "{error}");
+            // Once its work is decided, the key may add another urgent phase.
+            for id in added["tasks"].as_array().unwrap() {
+                let id = id.as_u64().unwrap() as u32;
+                call("cancel", json!({"task":id,"by":"human"})).unwrap();
+            }
+            let again = call("intake", json!({"key":key,"tasks":[{"title":"Later","assignee":"dev"}]})).unwrap();
+            assert_eq!(again["status"], json!("intake"));
+        });
+    }
+
     /// U51/U52: a team stored before this phase carries none of the new fields,
     /// loads with today's defaults and writes none of them back.
     #[test]

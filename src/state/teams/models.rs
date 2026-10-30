@@ -48,9 +48,21 @@ pub(crate) fn check_task(task: &mut Task) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `model@effort` as its model and effort; the effort may be empty.
-fn split(entry: &str) -> (&str, &str) {
-    entry.rsplit_once('@').unwrap_or((entry, ""))
+/// The effort words `model@effort` may carry. Any other suffix stays part of
+/// the model id: Vertex's `claude-sonnet-4-5@20250929` is one model, not a
+/// model with the effort "20250929".
+const EFFORTS: [&str; 9] = ["default", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
+
+/// `model@effort` as its model and effort, only when the part after `@` is a
+/// known effort word; otherwise the whole entry is the model id and its effort
+/// is empty. The effort may be empty.
+pub(crate) fn split(entry: &str) -> (&str, &str) {
+    match entry.rsplit_once('@') {
+        Some((model, effort)) if !model.is_empty() && EFFORTS.iter().any(|known| known.eq_ignore_ascii_case(effort)) => {
+            (model, effort)
+        }
+        _ => (entry, ""),
+    }
 }
 
 fn same(a: &str, b: &str) -> bool {

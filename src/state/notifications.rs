@@ -230,9 +230,12 @@ pub(super) fn enrich(session: &mut Value, store: Option<&Store>, owner: &str) {
         .map(|store| {
             let mut preference = preference(store, owner, conversation);
             // U43: a member of an active team without a recorded choice is muted
-            // by default on every device. A stored choice (revision > 0) wins;
-            // the lead of every active team is never muted by this default.
-            if preference.revision == 0 && !preference.muted && team_muted(string(session, "name")) {
+            // by default on every device here (N3: only a session on this
+            // computer; a member on another computer keeps its notifications
+            // there, as docs/reference.md states). A stored choice (revision >
+            // 0) wins; the lead of every active team is never muted by this
+            // default.
+            if preference.revision == 0 && !preference.muted && team_muted(string(session, "host"), string(session, "name")) {
                 preference.muted = true;
             }
             json!(preference)
@@ -241,24 +244,29 @@ pub(super) fn enrich(session: &mut Value, store: Option<&Store>, owner: &str) {
     session["notification_preferences"] = value;
 }
 
-/// U43: the team store identity and the non-lead member names read from it.
-type TeamMutedCache = Option<((PathBuf, u64, Option<SystemTime>), BTreeSet<String>)>;
+/// U43: the team store identity, its active revision, and the non-lead member
+/// sessions read from it.
+type TeamMutedCache = Option<((PathBuf, u64, Option<SystemTime>, i64), BTreeSet<(String, String)>)>;
 
-/// U43: whether this session name is a non-lead member of an active team. The
-/// cache key is the team store itself, so one listing that asks per session
-/// reads the teams once and a changed store is read again.
-fn team_muted(name: &str) -> bool {
-    if name.is_empty() {
+/// U43/N3/L2: whether this (host, name) is a non-lead member of an active team
+/// on this computer. The cache key is the team store file and the active
+/// teams' revision, so a member added and one removed between two equal-length
+/// writes still refreshes the set, and a listing that asks per session reads
+/// the teams once per change.
+fn team_muted(host: &str, name: &str) -> bool {
+    if name.is_empty() || !host.is_empty() {
+        // A session on another computer is never muted by this hgs's default.
         return false;
     }
     let Ok(metadata) = fs::metadata(super::teams::store::path()) else { return false };
-    let key = (root(), metadata.len(), metadata.modified().ok());
+    let revision = super::teams::store::Store::open(false).and_then(|store| store.active_revision()).unwrap_or(-1);
+    let key = (root(), metadata.len(), metadata.modified().ok(), revision);
     static TEAM_MUTED: Mutex<TeamMutedCache> = Mutex::new(None);
     let mut cache = TEAM_MUTED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if cache.as_ref().map(|(cached, _)| cached) != Some(&key) {
-        *cache = Some((key, super::teams::muted_member_names()));
+        *cache = Some((key, super::teams::muted_member_sessions()));
     }
-    cache.as_ref().is_some_and(|(_, names)| names.contains(name))
+    cache.as_ref().is_some_and(|(_, names)| names.contains(&(host.to_owned(), name.to_owned())))
 }
 
 /// Preserve the preference owner when a native provider renames its binding.
@@ -1087,6 +1095,68 @@ mod tests {
                 enrich(&mut row, Some(&store), owner);
                 assert_eq!(row["notification_preferences"]["muted"], false, "{name}: {row}");
             }
+            // #595 N3: only a session on this computer is muted by the default;
+            // a row carrying another host keeps its notifications there.
+            let mut remote_row = session();
+            remote_row["name"] = json!("dsh/x/dev");
+            remote_row["host"] = json!("mac");
+            enrich(&mut remote_row, Some(&store), "dsh/x/dev");
+            assert_eq!(remote_row["notification_preferences"]["muted"], false, "{remote_row}");
+            // A member on another computer is not in this host's set, so a local
+            // session with the same name does not read muted from it.
+            teams
+                .create(
+                    "33333333-3333-4333-8333-333333333333",
+                    &json!({}),
+                    Team {
+                        id: "33333333-3333-4333-8333-333333333333".into(),
+                        name: "Remote".into(),
+                        lead: "rlead".into(),
+                        status: TeamStatus::Running,
+                        members: vec![
+                            Member {
+                                id: "rlead".into(),
+                                role: "Lead".into(),
+                                agent: "claude".into(),
+                                session: Some(SessionRef { name: "claude/x/rlead".into(), run_id: "r0".into(), ..Default::default() }),
+                                ..Default::default()
+                            },
+                            Member {
+                                id: "rem".into(),
+                                role: "Backend".into(),
+                                agent: "dsh".into(),
+                                computer: "mac".into(),
+                                session: Some(SessionRef { host: "mac".into(), name: "dsh/x/remote".into(), run_id: "r1".into(), ..Default::default() }),
+                                ..Default::default()
+                            },
+                        ],
+                        ..Default::default()
+                    },
+                    vec![],
+                )
+                .unwrap();
+            let mut stranger = session();
+            stranger["name"] = json!("dsh/x/remote");
+            enrich(&mut stranger, Some(&store), "dsh/x/remote");
+            assert_eq!(stranger["notification_preferences"]["muted"], false, "{stranger}");
+            // #595 L2: a member added after the set was read is muted on the next
+            // read; the active revision is part of the cache key.
+            teams
+                .mutate(None, "running", None, |team, _| {
+                    team.members.push(Member {
+                        id: "newdev".into(),
+                        role: "Backend".into(),
+                        agent: "dsh".into(),
+                        session: Some(SessionRef { name: "dsh/x/new".into(), run_id: "r1".into(), ..Default::default() }),
+                        ..Default::default()
+                    });
+                    Ok(json!({}))
+                })
+                .unwrap();
+            let mut added = session();
+            added["name"] = json!("dsh/x/new");
+            enrich(&mut added, Some(&store), "dsh/x/new");
+            assert_eq!(added["notification_preferences"]["muted"], true, "{added}");
         });
     }
 }

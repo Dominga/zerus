@@ -792,15 +792,21 @@ old events when it reconnects. This does not mark the underlying work as read.
 muted or acknowledging pending work. Muted sessions remain available in the
 Needs attention filter.
 
-A team member is muted on every device by default. While a session is a
-non-lead member of an active team (planning, running or paused) and the owner
-has not recorded a choice, its host reports `notification_preferences.muted`
-true at revision 0, so every desktop and the phone follow one preference; the
-team's lead is never muted this way. The default is computed when the host is
-read and writes nothing. Unmuting records a choice at revision 1 or more, which
-wins on every device. A desktop whose host predates the shared default still
-mutes the member locally and says "Muted on this computer"; an updated host
-reports the shared mute, and the desktop says "Muted on all devices".
+A team member on this computer is muted on every device by default. While a
+session on this computer is a non-lead member of an active team (planning,
+running or paused) and the owner has not recorded a choice, its host reports
+`notification_preferences.muted` true at revision 0, so every desktop and the
+phone that follow this host see one preference; the team's lead is never muted
+this way. The default is computed when the host is read and writes nothing.
+Unmuting records a choice at revision 1 or more, which wins on every device. A
+desktop whose host predates the shared default still mutes the member locally
+and says "Muted on this computer"; an updated host reports the shared mute, and
+the desktop says "Muted on all devices". A member on another computer is not
+muted by this default there: its own hgs has no team record, so its
+notifications stay on and its desktop shows no team mute unless the owner
+records a choice on that host. "Muted on all devices" is true for the members on
+the computer that runs the team; the phone and the other desktops follow the
+preference that host reports.
 
 Notifications open Activity for the exact requesting run and conversation,
 including remote or renamed sessions. Polling and restarts do not repeat the same
@@ -1361,6 +1367,9 @@ covers one add per count it names: the same sentence cannot add a second
 member. `remove-member` and `swap-member` still need the member's id in the
 sentence, and a separate lead `settings` cap change still names the new cap.
 The team's roster and feed say "Added by Lead on your word" with the quote.
+A refusal is never the owner's word: a sentence carrying a negation ("Don't
+remove backend2", "не надо добавлять второго тестера") authorizes no roster,
+scale, drain or phase change in either language.
 
 ### Task pipelines and stage verdicts
 

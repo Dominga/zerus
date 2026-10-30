@@ -347,15 +347,44 @@ fn negated(lowered: &str) -> bool {
         .any(|form| lowered.contains(form))
 }
 
-/// C1: whether this sentence is a whole-sentence answer to the warning.
-fn starts_with(text: &str, word: &str) -> bool {
-    text.strip_prefix(word)
-        .is_some_and(|rest| rest.chars().next().is_none_or(|ch| !ch.is_alphanumeric()))
+/// C1/N2: the words a confirmation may add after its first one: the addition
+/// itself, politeness, and the phase this warning is about.
+const CONFIRM_WORDS: &[&str] = &[
+    "add", "confirm", "confirmed", "it", "now", "please", "the", "task", "to", "in", "current", "running", "this",
+    "да", "добавь", "подтверждаю", "ок", "ok", "okay", "окей", "в", "на", "текущую", "текущей", "эту", "этой", "идущ",
+];
+
+/// C1/N2: the rest of a confirmation may only name the addition, politeness and
+/// the phase itself; "add it to the next phase", "after the review", "later" or
+/// another number are not confirmations of this warning.
+fn confirmation_rest(words: &[&str], phase: u32) -> bool {
+    let number = phase.to_string();
+    let mut i = 0;
+    while i < words.len() {
+        let word = words[i];
+        if word == "phase" || word.starts_with("фаз") {
+            if words.get(i + 1).is_some_and(|next| *next == number.as_str()) {
+                i += 2;
+                continue;
+            }
+            if i > 0 && matches!(words[i - 1], "current" | "running" | "this" | "текущую" | "текущей" | "эту" | "этой" | "идущ") {
+                i += 1;
+                continue;
+            }
+            return false;
+        }
+        if word == number.as_str() || CONFIRM_WORDS.contains(&word) {
+            i += 1;
+            continue;
+        }
+        return false;
+    }
+    true
 }
 
 /// C1: a confirmation is a bare yes/да/ok/confirm/add, or a short sentence that
-/// starts with one. "No, don't add it" and "не добавляй" are refusals, and
-/// "ok, what's the status?" is not an answer to the warning.
+/// starts with one and names only the addition. "No, don't add it" and "не
+/// добавляй" are refusals, and "ok, what's the status?" is not an answer.
 fn confirms(lowered: &str, phase: u32) -> bool {
     let text = lowered.trim().trim_matches(|ch: char| ch.is_whitespace() || ".,!?;:\"'()[]{}…".contains(ch));
     if text.is_empty() || text.chars().count() > CONFIRM_CHARS || negated(text) {
@@ -372,17 +401,23 @@ fn confirms(lowered: &str, phase: u32) -> bool {
         "yes" | "да" | "ok" | "okay" | "ок" | "окей" | "sure" | "confirm" | "confirmed" | "add" | "add it" | "добавь"
             | "подтверждаю"
     );
-    bare
-        || starts_with(text, "yes")
-        || starts_with(text, "да")
-        || starts_with(text, "sure")
-        || starts_with(text, "confirm")
-        || starts_with(text, "confirmed")
-        || starts_with(text, "подтверждаю")
-        || starts_with(text, "add")
-        || starts_with(text, "добавь")
-        || ((starts_with(text, "ok") || starts_with(text, "okay") || starts_with(text, "ок") || starts_with(text, "окей"))
-            && (add || confirm))
+    if bare {
+        return true;
+    }
+    let words: Vec<&str> = text.split(|ch: char| !ch.is_alphanumeric()).filter(|word| !word.is_empty()).collect();
+    let Some(first) = words.first().copied() else { return false };
+    let prefix = matches!(
+        first,
+        "yes" | "да" | "sure" | "confirm" | "confirmed" | "подтверждаю" | "add" | "добавь" | "ok" | "okay" | "ок" | "окей"
+    );
+    if !prefix {
+        return false;
+    }
+    // "ok"/"ок" alone is an answer only with the addition named.
+    if matches!(first, "ok" | "okay" | "ок" | "окей") && !(add || confirm) {
+        return false;
+    }
+    confirmation_rest(&words[1..], phase)
 }
 
 /// U29: verifies the owner's request (or confirmation) for an addition to
@@ -438,8 +473,12 @@ const DISCARD_VERBS: &[&str] = &["discard", "drop", "remove", "delete", "scrap",
 /// The words of a return to a draft.
 const DRAFT_WORDS: &[&str] = &["draft", "drafts", "redraft", "черновик"];
 
-/// The owner's sentence names phase `phase` and the change.
+/// The owner's sentence names phase `phase` and the change; a refusal never
+/// authorizes a change (#595 C1).
 fn asks_phase_change(lowered: &str, phase: u32, change: PhaseChange) -> bool {
+    if negated(lowered) {
+        return false;
+    }
     let words = match change {
         PhaseChange::Discard => DISCARD_VERBS,
         PhaseChange::ToDraft => DRAFT_WORDS,
@@ -462,10 +501,11 @@ pub(crate) fn verify_phase_change(team: &Team, input: &Value, phase: u32, change
     verify_phase_change_in(&db, &session.name, &session.conversation_id, text, phase, change, now)
 }
 
-/// The fixture-testable phase change check.
+/// The fixture-testable phase change check. #595 C1: the quote is the owner's
+/// whole sentence, never a fragment of one that also refuses it.
 pub(crate) fn verify_phase_change_in(db: &Connection, name: &str, conversation: &str, text: &str, phase: u32, change: PhaseChange, now: f64) -> anyhow::Result<OwnerWord> {
     let accept = move |lowered: &str| asks_phase_change(lowered, phase, change);
-    verify_scan(db, name, conversation, text, now, ScanOptions { phrases: &[], needed: &[], exact: false, add: false, verbs: &[], names: &[], accept: Some(&accept), after: 0.0 })
+    verify_scan(db, name, conversation, text, now, ScanOptions { phrases: &[], needed: &[], exact: true, add: false, verbs: &[], names: &[], accept: Some(&accept), after: 0.0 })
         .with_context(|| match change {
             PhaseChange::Discard => format!("The owner has not asked to discard phase {phase} (the sentence names the phase and the discard)"),
             PhaseChange::ToDraft => format!("The owner has not asked to return phase {phase} to a draft (the sentence names the phase and the draft)"),
@@ -534,6 +574,11 @@ fn verify_scan(
             continue;
         }
         let lowered = detail.to_lowercase();
+        // #595 N1/C1: a refusal never authorizes any owner word, whatever the
+        // rule: "Don't remove backend2" and "не отменяй фазу 3" are not words.
+        if negated(&lowered) {
+            continue;
+        }
         let said = if let Some(accept) = options.accept {
             accept(&lowered)
         } else if options.add {
@@ -759,6 +804,49 @@ mod tests {
             let error = request(said).unwrap_err().to_string();
             assert!(error.contains("has not asked"), "{said}: {error}");
         }
+    }
+
+    /// #595 N2: a deferral or a redirection is not a confirmation, even when it
+    /// starts with yes/sure/add; the phase this warning is about may be named.
+    #[test]
+    fn a_deferral_never_confirms_a_phase_addition() {
+        let db = database();
+        for (at, said) in [
+            (2000.0, "Please add a task to phase 3"),
+            (2010.0, "Add it to the next phase instead"),
+            (2020.0, "Yes, but after the review"),
+            (2030.0, "sure, later"),
+            (2040.0, "yes, add it now"),
+            (2050.0, "yes, add it to phase 3"),
+            (2060.0, "да, добавь в текущую фазу"),
+        ] {
+            add(&db, "claude/x/lead", "c1", prompt(at, said));
+        }
+        let confirm = |text: &str| verify_phase_in(&db, "claude/x/lead", "c1", text, 3, PhaseWord::Confirm, 1990.0, 2100.0);
+        for said in ["Add it to the next phase instead", "Yes, but after the review", "sure, later"] {
+            let error = confirm(said).unwrap_err().to_string();
+            assert!(error.contains("has not confirmed"), "{said}: {error}");
+        }
+        for said in ["yes, add it now", "yes, add it to phase 3", "да, добавь в текущую фазу"] {
+            confirm(said).unwrap_or_else(|error| panic!("{said}: {error}"));
+        }
+    }
+
+    /// #595 N1: a refusal never authorizes a roster, scale or drain word in any
+    /// language, while the plain sentence still does.
+    #[test]
+    fn a_refusal_never_authorizes_a_roster_word() {
+        let db = database();
+        add(&db, "claude/x/lead", "c1", prompt(2000.0, "Don't remove backend2"));
+        add(&db, "claude/x/lead", "c1", prompt(2010.0, "Please remove backend2"));
+        let rule = member_rule(&["remove"], "backend2", "Backend");
+        let error = verify_roster_in(&db, "claude/x/lead", "c1", "Don't remove backend2", &rule, 2020.0).unwrap_err().to_string();
+        assert!(error.contains("owner's word"), "{error}");
+        assert!(verify_roster_in(&db, "claude/x/lead", "c1", "Please remove backend2", &rule, 2020.0).is_ok());
+        let db = database();
+        add(&db, "claude/x/lead", "c1", prompt(2000.0, "не надо добавлять второго тестера"));
+        let error = verify_roster_in(&db, "claude/x/lead", "c1", "не надо добавлять второго тестера", &add_rule(), 2010.0).unwrap_err().to_string();
+        assert!(error.contains("owner's word"), "{error}");
     }
 
     #[test]

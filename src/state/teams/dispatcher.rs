@@ -4419,7 +4419,14 @@ fn check_dsh_silent(store: &mut Store, team: &Team, task_id: u32, listing_last: 
     let Some(member) = team.member(&attempt.member) else { return Ok(()) };
     let Some(session) = member.session.clone() else { return Ok(()) };
     // A record from another run is not this member's activity.
-    let newest = inspect_reply(&session)
+    let inspected = inspect_reply(&session);
+    // #595 L3: when the events cannot be read (an offline computer, another
+    // run's record), the lead is told so instead of only "silent".
+    let unreadable = match &inspected {
+        Ok(record) => record["run_id"].as_str().unwrap_or_default() != session.run_id,
+        Err(_) => true,
+    };
+    let newest = inspected
         .ok()
         .filter(|record| record["run_id"].as_str().unwrap_or_default() == session.run_id)
         .and_then(|record| newest_event(&record));
@@ -4437,7 +4444,7 @@ fn check_dsh_silent(store: &mut Store, team: &Team, task_id: u32, listing_last: 
         Ok(())
     })?;
     if quiet >= SILENT_MINUTES * 60.0 {
-        tell_lead_silent(store, team, task_id, (quiet / 60.0).round().max(1.0) as u64)?;
+        tell_lead_silent(store, team, task_id, (quiet / 60.0).round().max(1.0) as u64, unreadable)?;
     }
     Ok(())
 }
@@ -4453,17 +4460,23 @@ fn newest_event(record: &Value) -> Option<f64> {
         .max_by(f64::total_cmp)
 }
 
-fn tell_lead_silent(store: &mut Store, team: &Team, task_id: u32, minutes: u64) -> anyhow::Result<()> {
+fn tell_lead_silent(store: &mut Store, team: &Team, task_id: u32, minutes: u64, unreadable: bool) -> anyhow::Result<()> {
     let task = team.task(task_id).context("unknown task")?;
     let attempt = task.open_attempt().context("no open attempt")?.clone();
     let member = team.member(&attempt.member).context("unknown member")?;
     let session = member.session.as_ref().map(|session| session.name.clone()).unwrap_or_default();
     let lead = team.member(&team.lead).and_then(|m| m.session.clone()).context("the lead has no session")?;
+    let seen = if unreadable {
+        "and Zerus could not read its events (its computer did not answer, or the record is from another run), \
+         so a question or Background work may be open"
+    } else {
+        "and Zerus sees no question or Background work"
+    };
     let text = format!(
         "[Zerus team \u{b7} from: Zerus \u{b7} task: #{} \u{b7} silent {minutes} min]\n\
-         {} is in its turn on #{} {} but has reported nothing for {minutes} min, and Zerus sees no question or \
-         Background work. A prompt Zerus cannot read (a permission of a subagent call, a dialog) may hold it: look at \
-         its terminal, or interrupt the turn with the owner's word (hgs interrupt {session} --json) and tell it how to go on.",
+         {} is in its turn on #{} {} but has reported nothing for {minutes} min, {seen}. A prompt Zerus cannot read \
+         (a permission of a subagent call, a dialog) may hold it: look at its terminal, or interrupt the turn with the \
+         owner's word (hgs interrupt {session} --json) and tell it how to go on.",
         task.id,
         team.role_of(&attempt.member),
         task.id,
@@ -5208,7 +5221,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
         Step::BudgetRed { member } => tell_lead_budget_red(store, team, member, false, String::new(), 0.0),
         Step::BackgroundRed { member, command, since } => tell_lead_budget_red(store, team, member, true, command.clone(), *since),
         Step::CheckSilent { task, last } => check_dsh_silent(store, team, *task, *last),
-        Step::Silent { task, minutes } => tell_lead_silent(store, team, *task, *minutes),
+        Step::Silent { task, minutes } => tell_lead_silent(store, team, *task, *minutes, false),
         Step::Quiet { member, session, muted, revision } => {
             if !*muted {
                 let input = json!({"run_id":session.run_id,"conversation_id":session.conversation_id,"muted":true,"expected_revision":revision});
@@ -9422,6 +9435,46 @@ mod tests {
         assert!(sent.borrow().contains("silent 25 min"), "{}", sent.borrow());
         let page = store.events(&t.id, None, 50).unwrap();
         assert!(page["items"].as_array().unwrap().iter().any(|event| event["kind"] == "member_silent"), "{page}");
+    }
+
+    /// #595 L3: an inspect that fails (here: a record from another run) does not
+    /// become a plain "silent": the lead hears that Zerus could not read it.
+    #[test]
+    fn a_dsh_member_whose_events_cannot_be_read_is_told_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        t.status = TeamStatus::Running;
+        {
+            let dev = t.members.iter_mut().find(|member| member.id == "dev").unwrap();
+            dev.agent = "dsh".into();
+            dev.session = Some(SessionRef { name: "dsh/x/dev".into(), run_id: "r1".into(), conversation_id: "c".into(), ..Default::default() });
+        }
+        {
+            let task = t.tasks.iter_mut().find(|task| task.assignee == "dev").unwrap();
+            task.attempts.push(Attempt { n: 1, id: "A1".into(), member: "dev".into(), state: AttemptState::Delivered,
+                sent_at: 10.0, delivered_at: Some(10.0), started_at: Some(11.0), ..Default::default() });
+            task.status = TaskStatus::InProgress;
+        }
+        let id = t.tasks.iter().find(|task| task.assignee == "dev").unwrap().id;
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+        let at = crate::state::now();
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+        let record = sent.clone();
+        inspect_override(Some(json!({"run_id":"another-run","conversation_id":"c","activity":"busy","phase":"tool","events":[]})));
+        set_fake_hgs(Some(Box::new(move |_, args: &[&str], input: Option<&Value>| match args.first().copied() {
+            Some("send") => {
+                *record.borrow_mut() = input.unwrap()["text"].as_str().unwrap_or_default().to_owned();
+                Ok(fake_output(0, r#"{"status":"submitted"}"#, ""))
+            }
+            other => panic!("unexpected hgs {other:?}"),
+        })));
+        run_step(&mut store, &t, &Step::CheckSilent { task: id, last: at - 25.0 * 60.0 }, "").unwrap();
+        set_fake_hgs(None);
+        inspect_override(None);
+        let text = sent.borrow().clone();
+        assert!(text.contains("could not read its events"), "{text}");
+        assert!(text.contains("silent 25 min"), "{text}");
     }
 
     /// N6: one NoReport step with a given `hgs inspect` record.

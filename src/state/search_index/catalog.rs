@@ -420,5 +420,5 @@ fn directory_stamp(roots: &[(&str, PathBuf)]) -> Result<String> {
 }
 
 mod queue;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

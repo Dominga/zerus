@@ -19,6 +19,15 @@ class QSettings;
 // (JsonParse.h, fatal in the Qt suites). It returns the value last parsed for
 // that key, or an empty one, and parses the stored bytes on the preparation
 // thread for the reads after it. Any other thread parses a changed value itself.
+//
+// WhiteWh fork (owner, 2026-10-30): the values too big for the INI (the worktree
+// snapshots, the organization and swarm's observed copies, 250 KB of a 275 KB
+// file) live in JSON files of their own beside it (filePath()). Each is read
+// once - at start by preload(), or by its first read - and is the truth from
+// then on; a store() writes it with QSaveFile on a worker thread. A value an
+// older build left in the INI moves into its file on that first read and
+// leaves the INI. Every other key is written through Settings::set(), so no
+// GUI-thread store waits for the INI's lock (Settings.h).
 namespace SettingsJson {
 
 // A stored value over maximumBytes (0: any size) reads as empty.
@@ -29,8 +38,29 @@ QJsonObject object(const QString &key, qsizetype maximumBytes = 0,
 QJsonArray array(const QString &key, const char *file = __builtin_FILE(), int line = __builtin_LINE());
 
 // Stores document, compact, under key and records it, so no read parses it.
+// The QSettings overload is kept for its callers; it writes through Settings.
 void store(QSettings &settings, const QString &key, const QJsonDocument &document);
 void store(const QString &key, const QJsonDocument &document);
+// Stores bytes already serialized from document.
+void store(const QString &key, const QByteArray &bytes, const QJsonDocument &document);
+// For a reservation (Settings::setNow): stores now, or nothing and false.
+bool storeNow(const QString &key, const QJsonDocument &document);
+// Removes key's value, from its file or the INI.
+void remove(const QString &key);
+
+// Whether key lives in a file of its own, and that file.
+bool inFile(const QString &key);
+QString filePath(const QString &key);
+// The stored bytes, unparsed, and whether there are any.
+QByteArray bytes(const QString &key);
+bool contains(const QString &key);
+// Waits until the files' writer has written every store (quit, tests).
+void flush();
+// Drops the recorded value, so the next read reads the stored one (tests).
+void forget(const QString &key);
+// Removes every file key's file and recorded value, as QSettings::clear()
+// does for the INI (tests).
+void reset();
 // A writer that has just stored bytes, serialized from document, under key
 // records them, so the next read needs no parse.
 void remember(const QString &key, const QByteArray &bytes, const QJsonDocument &document);

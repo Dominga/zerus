@@ -1,3 +1,4 @@
+#include "Settings.h"
 #include "SettingsJson.h"
 #include "SpeechSettings.h"
 #include "SpeechClient.h"
@@ -191,7 +192,7 @@ SpeechSettings::SpeechSettings(const QString &executable, QWidget *parent, std::
     auto *preview = new QCheckBox(tr("Preview before sending")); preview->setObjectName("speechPreviewBeforeSend");
     preview->setChecked(QSettings().value("speech/preview_before_send",false).toBool()); layout->addWidget(preview);
     layout->addWidget(label(tr("Show Stop instead of Send while recording audio or video. Stop retains a preview for review and a separate Send. This preference applies on this device.")));
-    connect(preview,&QCheckBox::toggled,this,[](bool checked){QSettings().setValue("speech/preview_before_send",checked);});
+    connect(preview,&QCheckBox::toggled,this,[](bool checked){Settings::set("speech/preview_before_send",checked);});
     layout->addWidget(label(tr("Manage recognition providers on a processing computer. Recording starts on this device; Send voice uses the provider selected beside your recording.")));
     layout->addWidget(label(tr("Configure providers on")));
     m_host = new QComboBox; m_host->setObjectName("speechComputer"); layout->addWidget(m_host);
@@ -218,9 +219,9 @@ SpeechSettings::SpeechSettings(const QString &executable, QWidget *parent, std::
     m_pending = SettingsJson::object(pendingKey);
     if (!validMachine(m_pending.value("machine_id").toString()) || QUuid(m_pending.value("request_id").toString()).isNull()) m_pending = {};
     setPeers({}); microphones(); controls();
-    connect(m_host, &QComboBox::currentIndexChanged, this, [this] { QSettings().setValue("speech/manage_host", m_host->currentData()); refresh(); });
+    connect(m_host, &QComboBox::currentIndexChanged, this, [this] { Settings::set("speech/manage_host", m_host->currentData()); refresh(); });
     connect(m_profiles, &QListWidget::currentRowChanged, this, [this] { controls(); });
-    connect(m_microphone, &QComboBox::currentIndexChanged, this, [this] { QSettings().setValue("speech/microphone", m_microphone->currentData()); });
+    connect(m_microphone, &QComboBox::currentIndexChanged, this, [this] { Settings::set("speech/microphone", m_microphone->currentData()); });
     connect(m_refresh, &QPushButton::clicked, this, &SpeechSettings::refresh);
     connect(m_add, &QPushButton::clicked, this, [this] { editProfile(true); }); connect(m_edit, &QPushButton::clicked, this, [this] { editProfile(false); });
     connect(m_remove, &QPushButton::clicked, this, &SpeechSettings::removeProfile); connect(m_test, &QPushButton::clicked, this, &SpeechSettings::testProfile);
@@ -312,7 +313,7 @@ void SpeechSettings::refresh()
 void SpeechSettings::useDefault()
 {
     const auto profile = selectedProfile(); if (!m_loaded || profile.isEmpty()) return;
-    QSettings settings; settings.setValue("speech/machine_id", m_machine); settings.setValue("speech/profile", profile.value("id").toString()); settings.setValue("speech/host", m_host->currentData()); settings.setValue("speech/profile_revision", profile.value("revision").toVariant()); controls();
+    Settings::set("speech/machine_id", m_machine); Settings::set("speech/profile", profile.value("id").toString()); Settings::set("speech/host", m_host->currentData()); Settings::set("speech/profile_revision", profile.value("revision").toVariant()); controls();
 }
 void SpeechSettings::editProfile(bool create)
 {
@@ -361,8 +362,8 @@ void SpeechSettings::operation(const QString &host, const QString &machine, QJso
     m_result->clear(); m_result->hide();
     const auto request = uuid(); payload["request_id"] = request; payload["expected_machine_id"] = machine;
     m_pending = {{"host", host}, {"computer", host.isEmpty() ? localComputerName() : host}, {"machine_id", machine}, {"request_id", request}, {"action", payload.value("action")}};
-    QSettings settings; SettingsJson::store(settings, QString::fromLatin1(pendingKey), QJsonDocument(m_pending)); settings.sync();
-    if (settings.status() != QSettings::NoError) { m_pending = {}; if (done) done({}, tr("Could not save the operation identity. No provider request was sent.")); controls(); return; }
+    // A reservation: stored now, or no provider request is sent (Settings.h).
+    if (!SettingsJson::storeNow(QString::fromLatin1(pendingKey), QJsonDocument(m_pending))) { m_pending = {}; if (done) done({}, tr("Could not save the operation identity. No provider request was sent.")); controls(); return; }
     m_operationDone = std::move(done); m_busy = true; m_waiting = false; m_statusPolls = 0; m_statusClock.start(); controls();
     m_client->request(host, payload, [this](const QJsonObject &reply, const QString &error) { operationResult(reply, error, true); });
 }
@@ -379,7 +380,7 @@ void SpeechSettings::operationResult(const QJsonObject &reply, const QString &er
     if (!notStarted && (!error.isEmpty() || reply.value("machine_id") != m_pending.value("machine_id") || reply.value("request_id") != m_pending.value("request_id")
         || (state != "completed" && state != "failed") || reply.value("error_code").toString() == "operation_not_found")) { controls(); return; }
     const auto pending = m_pending; auto done = std::move(m_operationDone); m_operationDone = {}; m_pending = {};
-    QSettings settings; settings.remove(pendingKey); settings.sync();
+    Settings::remove(QString::fromLatin1(pendingKey));
     const auto failure = notStarted ? error : state == "failed" ? reply.value("error").toString(tr("The provider request failed.")) : QString();
     if (done) done(reply, failure);
     if (pending.value("host").toString() == m_host->currentData().toString()) {

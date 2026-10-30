@@ -1,6 +1,7 @@
 // Window-scope keyboard commands of SessionsWindow: one QAction per command,
 // rebound from ShortcutRegistry. See Shortcuts.h and
 // docs/superpowers/specs/2026-10-15-keyboard-shortcuts-design.md.
+#include "Settings.h"
 #include "SessionsWindow.h"
 #include "InspectorCards.h"
 #include "TasksView.h"
@@ -439,7 +440,7 @@ void SessionsWindow::stepFocus(int direction)
 void SessionsWindow::stepContentScale(int direction)
 {
     const double scale = direction ? ContentScale::clamp(qRound((ContentScale::factor() + direction * 0.1) * 100) / 100.0) : ContentScale::Default;
-    QSettings().setValue("workspace/contentScale", scale);
+    Settings::set("workspace/contentScale", scale);
     applyContentScale(); m_settingsPage->syncContentScale();
     showNotice(tr("Content scale %1%").arg(qRound(scale * 100)));
 }

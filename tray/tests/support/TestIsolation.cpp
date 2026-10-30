@@ -51,6 +51,11 @@ void isolateSettings()
     QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, directory.path);
     QSettings::setPath(QSettings::IniFormat, QSettings::SystemScope, directory.path);
     QStandardPaths::setTestModeEnabled(true);
+    // Zerus's log (ForkLog.h) goes to this folder too: the fixtures' notices and
+    // errors once filled the person's zerus.log while a test ran (owner,
+    // 2026-10-30). A test that sets its own home still does.
+    if (qEnvironmentVariableIsEmpty("HGS_TRAY_HOME"))
+        qputenv("HGS_TRAY_HOME", QDir::toNativeSeparators(directory.path).toLocal8Bit());
     // ZERUS_FIXTURE_POOL=0 starts every fixture in a Python process of its own.
     if (qgetenv("ZERUS_FIXTURE_POOL") != "0")
         qputenv("ZERUS_FIXTURE_POOL", QByteArray::number(QCoreApplication::applicationPid()));

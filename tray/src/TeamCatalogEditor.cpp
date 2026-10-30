@@ -1,3 +1,4 @@
+#include "Settings.h"
 #include "JsonParse.h"
 #include "ProcessRunner.h"
 #include "TeamCatalogEditor.h"
@@ -252,7 +253,7 @@ QPlainTextEdit *area(const QString &text, const char *name, int minLines = 2, in
 // Remembered fold of a catalog block, under the one collapsible block's key
 // (spec 1.5); its header sits in the label column, as in the prototype.
 bool folded(const QString &key) { return !QSettings().value(CollapsibleBlock::settingsKey(QStringLiteral("catalog-") + key), true).toBool(); }
-void setFolded(const QString &key, bool on) { QSettings().setValue(CollapsibleBlock::settingsKey(QStringLiteral("catalog-") + key), !on); }
+void setFolded(const QString &key, bool on) { Settings::set(CollapsibleBlock::settingsKey(QStringLiteral("catalog-") + key), !on); }
 
 QString markText(const Teams::Proposal &p)
 {
@@ -1626,7 +1627,7 @@ QWidget *TeamCatalogEditor::templateEditor(int index)
                               "teamTemplateUnusedToggle");
         toggle->setProperty("ghost", true);
         connect(toggle, &QPushButton::clicked, this, [this, hideUnused] {
-            QSettings().setValue(QStringLiteral("ui/catalogHideUnusedRoles"), !hideUnused); rebuildEditor();
+            Settings::set(QStringLiteral("ui/catalogHideUnusedRoles"), !hideUnused); rebuildEditor();
         });
         foot->addWidget(toggle);
         auto *line2 = new QFrame; line2->setFrameShape(QFrame::HLine); line2->setStyleSheet(QStringLiteral("color:%1;").arg(c.border.name()));

@@ -1,3 +1,4 @@
+#include "Settings.h"
 #include "TasksView.h"
 #include <QUuid>
 #include "TaskStageFilter.h"
@@ -79,7 +80,7 @@ TasksView::TasksView(HgsClient *client, QWidget *parent) : QWidget(parent), m_cl
     m_only = square("taskOnlySession"); m_only->setCheckable(true);
     m_only->setChecked(QSettings().value("tasks/onlySession").toBool());
     connect(m_only, &QToolButton::toggled, this, [this](bool only) {
-        QSettings().setValue("tasks/onlySession", only);
+        Settings::set("tasks/onlySession", only);
         const auto colors = TaskColors::of(m_dark); m_only->setIcon(workspaceIcon(QStringLiteral("task-funnel"), only ? colors.accent : colors.muted));
         render();
     });

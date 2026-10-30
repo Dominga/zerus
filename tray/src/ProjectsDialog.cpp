@@ -1,3 +1,4 @@
+#include "Settings.h"
 #include "SettingsJson.h"
 #include "ProjectsDialog.h"
 #include "CloneRepositoryDialog.h"
@@ -332,7 +333,7 @@ ProjectsDialog::ProjectsDialog(HgsClient *client, QWidget *parent, bool embedded
     auto *catalogRow=new QHBoxLayout;catalogRow->setContentsMargins(6,4,6,0);catalogRow->addWidget(m_allProjects);catalogRow->addStretch();leftLayout->addLayout(catalogRow);
     m_swarmStatus=new QLabel; m_swarmStatus->setObjectName("projectSwarmStatus");m_swarmStatus->setTextFormat(Qt::PlainText);m_swarmStatus->setWordWrap(true);
     m_swarmStatus->setContentsMargins(6,0,6,0);leftLayout->addWidget(m_swarmStatus);
-    connect(m_allProjects,&QCheckBox::toggled,this,[this](bool checked){QSettings().setValue("workspace/allSwarmProjects",checked);refresh();});
+    connect(m_allProjects,&QCheckBox::toggled,this,[this](bool checked){Settings::set("workspace/allSwarmProjects",checked);refresh();});
     m_swarmConnectionPanel = new QWidget; m_swarmConnectionPanel->setObjectName("projectConnectionGuide");
     auto *connectionGuide = new QVBoxLayout(m_swarmConnectionPanel); connectionGuide->setContentsMargins(6,6,6,0); connectionGuide->setSpacing(6);
     m_swarmConnectionHint = new QLabel; m_swarmConnectionHint->setObjectName("projectConnectionHint");
@@ -428,7 +429,7 @@ ProjectsDialog::ProjectsDialog(HgsClient *client, QWidget *parent, bool embedded
     connect(m_folderSplitter,&QSplitter::splitterMoved,this,[this]{
         if(!m_folderSplitInitialized||!m_worktrees->isVisible())return;
         m_worktreeHeight=qMax(120,m_folderSplitter->sizes().value(1));
-        QSettings().setValue("workspace/projectFolderWorktrees",m_worktreeHeight);
+        Settings::set("workspace/projectFolderWorktrees",m_worktreeHeight);
         QTimer::singleShot(0,this,[this]{fitFolders();});
     });
     m_worktrees->filterRequested=[this](const QString &path,bool checkout){const auto folder=selectedFolder();emit folderSessionsRequested(folder.machine==m_fleet.local().host?QString():folder.machine,path,checkout);};
@@ -767,7 +768,7 @@ void ProjectsDialog::changed()
 {
     if (m_projects == &m_ownedProjects) {
         const QJsonDocument document(m_projects->toJson()); const auto bytes = document.toJson(QJsonDocument::Compact);
-        QSettings().setValue("workspace/organization", bytes); SettingsJson::remember("workspace/organization", bytes, document);
+        SettingsJson::store("workspace/organization", bytes, document);
     }
     emit organizationChanged(); refresh(); m_status->setText(tr("Saved"));
 }

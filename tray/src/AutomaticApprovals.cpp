@@ -1,10 +1,11 @@
+#include "Settings.h"
 #include "AutomaticApprovals.h"
 #include <QDateTime>
 #include <QSettings>
 
 namespace AutomaticApprovalPolicy {
 bool enabled() { return QSettings().value("automaticApprovals/enabled", false).toBool(); }
-void setEnabled(bool enabled) { QSettings().setValue("automaticApprovals/enabled", enabled); }
+void setEnabled(bool enabled) { Settings::set("automaticApprovals/enabled", enabled); }
 QString error() { return QSettings().value("automaticApprovals/error").toString(); }
 }
 namespace {
@@ -54,7 +55,7 @@ AutomaticApprovals::AutomaticApprovals(const QString &executable, QObject *paren
             if (m_finishes.contains(id)) {
                 const auto target = m_finishes.take(id);
                 if (!error.isEmpty()) failJournal(error);
-                else if (QDateTime::currentMSecsSinceEpoch() >= m_pausedUntil) QSettings().remove("automaticApprovals/error");
+                else if (QDateTime::currentMSecsSinceEpoch() >= m_pausedUntil) Settings::remove("automaticApprovals/error");
                 release(target); emit changed(target.host); return;
             }
             if (!m_reservations.contains(id)) return;
@@ -96,7 +97,7 @@ void AutomaticApprovals::release(const Target &target)
 void AutomaticApprovals::failJournal(const QString &error)
 {
     m_pausedUntil = QDateTime::currentMSecsSinceEpoch() + 60000;
-    QSettings().setValue("automaticApprovals/error", error);
+    Settings::set("automaticApprovals/error", error);
 }
 void AutomaticApprovals::finish(const Target &target, const QString &status, const QString &detail)
 {

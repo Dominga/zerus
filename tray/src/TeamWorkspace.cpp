@@ -1,3 +1,4 @@
+#include "Settings.h"
 #include "TeamWorkspace.h"
 #include "SubagentRequest.h"
 #include "TeamAttentionNotices.h"
@@ -153,8 +154,8 @@ TeamWorkspace::TeamWorkspace(TeamController *teams, TeamPanel *panel, QWidget *p
     QSettings settings;
     if (!m_split->restoreState(settings.value("teams/workspaceSplit").toByteArray())) m_split->setSizes({900, 520});
     if (!m_sideSplit->restoreState(settings.value("teams/workspaceSideSplit").toByteArray())) m_sideSplit->setSizes({420, 520});
-    QObject::connect(m_split, &QSplitter::splitterMoved, this, [this] { QSettings().setValue("teams/workspaceSplit", m_split->saveState()); });
-    QObject::connect(m_sideSplit, &QSplitter::splitterMoved, this, [this] { QSettings().setValue("teams/workspaceSideSplit", m_sideSplit->saveState()); });
+    QObject::connect(m_split, &QSplitter::splitterMoved, this, [this] { Settings::set("teams/workspaceSplit", m_split->saveState()); });
+    QObject::connect(m_sideSplit, &QSplitter::splitterMoved, this, [this] { Settings::set("teams/workspaceSideSplit", m_sideSplit->saveState()); });
     m_membersOpen = QSettings().value("teams/membersOpen", true).toBool();
     m_hideFinished = QSettings().value("teams/hideFinished", false).toBool();
     // U38 (#665): the Profile view's reads, kept across renders and teams.
@@ -1478,7 +1479,7 @@ QWidget *TeamWorkspace::toolbar(const Team &team)
             hideSwitch->setToolTip(finished == 1 ? tr("1 phase has every task decided") : tr("%1 phases have every task decided").arg(finished));
             QObject::connect(hideSwitch, &QAbstractButton::clicked, this, [this](bool on) {
                 m_hideFinished = on;
-                QSettings().setValue("teams/hideFinished", on);
+                Settings::set("teams/hideFinished", on);
                 scheduleRender();
             });
             h->addWidget(hideSwitch);
@@ -2444,7 +2445,7 @@ QWidget *TeamWorkspace::laneSections(const Team &team, const PhaseGroup &group)
                                              "QToolButton#teamLaneHeader:hover{color:%2;}")
                                   .arg(c.text2.name(), c.fg.name()));
         QObject::connect(header, &QToolButton::clicked, this, [this, key](bool) {
-            QSettings().setValue(key, !QSettings().value(key, false).toBool());
+            Settings::set(key, !QSettings().value(key, false).toBool());
             scheduleRender();
         });
         // U27: a lane is renamed in the plan and in a draft phase.
@@ -2977,7 +2978,7 @@ QWidget *TeamWorkspace::members(const Team &team)
     membersToggle->setAutoRaise(true); membersToggle->setObjectName("teamMembersToggle");
     membersToggle->setToolTip(m_membersOpen ? tr("Fold the members") : tr("Show the members"));
     QObject::connect(membersToggle, &QToolButton::clicked, this, [this] {
-        m_membersOpen = !m_membersOpen; QSettings().setValue("teams/membersOpen", m_membersOpen); scheduleRender();
+        m_membersOpen = !m_membersOpen; Settings::set("teams/membersOpen", m_membersOpen); scheduleRender();
     });
     title->addWidget(membersToggle);
     title->addWidget(label(tr("Members"), c.fg, 12, true)); title->addWidget(label(QString::number(active), c.muted, 12)); title->addStretch();
@@ -3111,7 +3112,7 @@ QWidget *TeamWorkspace::members(const Team &team)
             tasks->setAccessibleDescription(tasksOpen ? tr("Expanded") : tr("Collapsed"));
             tasks->setStyleSheet(QStringLiteral("QToolButton#teamMemberTasksToggle{color:%1;font-size:12px;border:0;padding:1px 4px;background:transparent;}"
                                                 "QToolButton#teamMemberTasksToggle:hover{color:%2;}").arg(c.text2.name(), c.fg.name()));
-            QObject::connect(tasks, &QToolButton::clicked, this, [this, key](bool open) { QSettings().setValue(key, open); scheduleRender(); });
+            QObject::connect(tasks, &QToolButton::clicked, this, [this, key](bool open) { Settings::set(key, open); scheduleRender(); });
             col->addWidget(tasks, 0, Qt::AlignLeft);
             if (tasksOpen) {
                 auto *queue = new QWidget; queue->setObjectName("teamMemberQueue"); queue->setProperty("member", m.id);
@@ -3288,7 +3289,7 @@ QWidget *TeamWorkspace::members(const Team &team)
             auto *summary = permissionToggle(m.permissionAnswers, c, open, "teamMemberPermissionsToggle");
             summary->setProperty("member", m.id);
             QObject::connect(summary, &QToolButton::clicked, this, [this, key](bool expanded) {
-                QSettings().setValue(key, expanded);
+                Settings::set(key, expanded);
                 scheduleRender();
             });
             col->addWidget(summary, 0, Qt::AlignLeft);

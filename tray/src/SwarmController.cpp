@@ -1,3 +1,4 @@
+#include "Settings.h"
 #include "SettingsJson.h"
 #include "SwarmController.h"
 #include <QJsonArray>
@@ -89,8 +90,7 @@ SwarmController::SwarmController(HgsClient *client, QObject *parent) : QObject(p
 void SwarmController::start(const QJsonObject &organization)
 {
     if(m_started)return;m_started=true;m_desired=organization;
-    QSettings settings;
-    if(!settings.contains("workspace/organizationBeforeSwarm"))settings.setValue("workspace/organizationBeforeSwarm",QJsonDocument(organization).toJson(QJsonDocument::Compact));
+    if(!QSettings().contains("workspace/organizationBeforeSwarm"))Settings::set("workspace/organizationBeforeSwarm",QJsonDocument(organization).toJson(QJsonDocument::Compact));
     m_base=SettingsJson::object("swarm/observedOrganization");
     m_versions=SettingsJson::object("swarm/observedVersions");
     m_ready=!m_base.isEmpty();
@@ -126,20 +126,14 @@ void SwarmController::persist()
     if (!m_ready) return;
     const auto organization = QJsonDocument(m_base).toJson(QJsonDocument::Compact);
     const auto versions = QJsonDocument(m_versions).toJson(QJsonDocument::Compact);
-    // Polls arrive even when the shared catalog is unchanged. Rewriting its
-    // settings would synchronously wait for storage on the GUI thread each
-    // time. Remember only successful checkpoints, so a failed write is retried.
+    // Polls arrive even when the shared catalog is unchanged: only a change is
+    // written, to the observed copies' own files on the files' writer
+    // (SettingsJson.h).
     if (organization == m_persistedOrganization && versions == m_persistedVersions) return;
-    QSettings settings;
-    settings.setValue("swarm/observedOrganization", organization);
-    settings.setValue("swarm/observedVersions", versions);
-    SettingsJson::remember("swarm/observedOrganization", organization, QJsonDocument(m_base));
-    SettingsJson::remember("swarm/observedVersions", versions, QJsonDocument(m_versions));
-    settings.sync();
-    if (settings.status() == QSettings::NoError) {
-        m_persistedOrganization = organization;
-        m_persistedVersions = versions;
-    }
+    SettingsJson::store("swarm/observedOrganization", organization, QJsonDocument(m_base));
+    SettingsJson::store("swarm/observedVersions", versions, QJsonDocument(m_versions));
+    m_persistedOrganization = organization;
+    m_persistedVersions = versions;
 }
 QJsonObject SwarmController::presentation(const QJsonObject &shared, const QJsonObject &local, const QString &node, bool pendingDrives)
 {
@@ -226,7 +220,7 @@ void SwarmController::received(quint64 id,const QJsonObject &result)
     const auto previous=m_desired;
     m_desired=presentation(organization,previous,node,upload);
     m_base=upload?presentation(organization,previous,node):m_desired;
-    if(upload)settings.setValue("swarm/driveFoldersShared",true);
+    if(upload)Settings::set("swarm/driveFoldersShared",true);
     persist();
     emit organizationReady(m_desired);
     emit snapshotChanged(result);

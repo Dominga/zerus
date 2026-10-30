@@ -4,6 +4,7 @@
 #include <QJsonDocument>
 #include <QSettings>
 #include <QTemporaryDir>
+#include "JsonSettings.h"
 #include "FakeCli.h"
 #include "SettingsJson.h"
 #include "SwarmController.h"
@@ -60,7 +61,7 @@ private slots:
         SwarmController::setPollInterval(60 * 60 * 1000);
     }
     void init() {
-        QSettings().clear();m_root=m_directory.path()+"/case-"+QString::number(QDateTime::currentMSecsSinceEpoch());QDir().mkpath(m_root);m_program=m_root+"/hgs";
+        clearSettings();m_root=m_directory.path()+"/case-"+QString::number(QDateTime::currentMSecsSinceEpoch());QDir().mkpath(m_root);m_program=m_root+"/hgs";
         const QByteArray script=R"PY(#!/usr/bin/env python3
 import json,pathlib,sys,time
 root=pathlib.Path(__file__).parent
@@ -416,17 +417,19 @@ print(json.dumps(result))
     void unchangedRefreshDoesNotRewriteSettings() {
         HgsClient client(FakeCli::program(m_program)); SwarmController controller(&client);
         controller.start(organization("Original")); QTRY_VERIFY(controller.settled());
-        const auto settingsPath = QSettings().fileName();
+        // The observed copies live in their own file (SettingsJson.h).
+        SettingsJson::flush();
+        const auto settingsPath = SettingsJson::filePath("swarm/observedOrganization");
         const auto checkpoint = QDateTime::fromSecsSinceEpoch(946684800, QTimeZone::UTC);
         QFile settingsFile(settingsPath); QVERIFY(settingsFile.open(QIODevice::ReadWrite));
         QVERIFY(settingsFile.setFileTime(checkpoint, QFileDevice::FileModificationTime)); settingsFile.close();
         controller.refresh(); QTRY_COMPARE(requests().size(), 2); QTRY_VERIFY(controller.settled());
-        QCoreApplication::sendPostedEvents();
+        QCoreApplication::sendPostedEvents(); SettingsJson::flush();
         QCOMPARE(QFileInfo(settingsPath).lastModified(), checkpoint);
         response("Changed catalog"); controller.refresh();
-        QTRY_COMPARE(requests().size(), 3); QTRY_VERIFY(controller.settled());
+        QTRY_COMPARE(requests().size(), 3); QTRY_VERIFY(controller.settled()); SettingsJson::flush();
         QVERIFY(QFileInfo(settingsPath).lastModified() > checkpoint);
-        const auto saved = QJsonDocument::fromJson(QSettings().value("swarm/observedOrganization").toByteArray()).object();
+        const auto saved = QJsonDocument::fromJson(jsonSetting("swarm/observedOrganization")).object();
         QCOMPARE(saved["projects"].toArray()[0].toObject()["name"].toString(), "Changed catalog");
     }
     void editDuringRefreshUsesVersionsTheUserSaw() {

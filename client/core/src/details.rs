@@ -83,6 +83,8 @@ pub fn subagent_identity_invocation(
 pub struct SubagentIdentity {
     pub agent_id: String,
     pub conversation_id: String,
+    /// The child's own directory; never substitute the parent's.
+    pub cwd: Option<String>,
 }
 
 /// Adopt only the requested child of this exact parent run/conversation.
@@ -115,6 +117,7 @@ pub fn parse_subagent_identity(
     Some(SubagentIdentity {
         agent_id: agent_id.into(),
         conversation_id,
+        cwd: value.get("cwd").and_then(Value::as_str).map(str::to_owned),
     })
 }
 

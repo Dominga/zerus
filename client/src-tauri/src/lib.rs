@@ -61,6 +61,8 @@ mod screens;
 #[cfg(feature = "live")]
 mod session_files;
 #[cfg(feature = "live")]
+mod session_folders;
+#[cfg(feature = "live")]
 pub mod settings;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod signals;
@@ -592,6 +594,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                         tauri::async_runtime::spawn_blocking(job);
                     }),
                 ));
+                app.manage(session_folders::SessionFolders::new(dir.clone(), opener.clone()));
                 app.manage(opener);
                 // The menu-bar item, before the fleet starts so its first catalog reaches it.
                 #[cfg(target_os = "macos")]
@@ -1006,6 +1009,8 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         actions::set_notifications,
         actions::inspect_session,
         actions::inspect_subagent_identity,
+        session_folders::session_folder_status,
+        session_folders::session_folder_open,
         commands::tasks_follow,
         task_details::task_details,
         task_details::task_assign,

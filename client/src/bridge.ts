@@ -216,9 +216,9 @@ export async function inspectSession(target: Target, archiveId: string | null): 
 }
 
 /** Child identity from its own inspection, read once when it opens. */
-export async function inspectSubagentIdentity(target: Target, archiveId: string | null, agentId: string): Promise<{ agent_id: string; conversation_id: string } | null> {
+export async function inspectSubagentIdentity(target: Target, archiveId: string | null, agentId: string): Promise<{ agent_id: string; conversation_id: string; cwd?: string | null } | null> {
   if (!inTauri()) return null;
-  return (await invoke<{ agent_id: string; conversation_id: string } | null>("inspect_subagent_identity", { target, archiveId, agentId })) ?? null;
+  return (await invoke<{ agent_id: string; conversation_id: string; cwd?: string | null } | null>("inspect_subagent_identity", { target, archiveId, agentId })) ?? null;
 }
 
 /** Read marks whose delivery has not been confirmed yet; undefined outside the app, which keeps no list. */
@@ -829,3 +829,7 @@ export const savedDraft = (source: DraftSource, key: string) => desktop<SavedDra
 export const draftRecover = (key: string) => desktop<void>("draft_recover", { key });
 /** Replaces the open composer's draft with the selected one; rejects with why not. */
 export const draftRestore = (handle: number, source: DraftSource, key: string) => desktop<void>("draft_restore", { handle, source, key });
+
+/** Availability is a local folder stat; opening does a fresh identity/directory check. */
+export const sessionFolderStatus = (computer: string, directory: string) => desktop<import("./store/sessionFolders").FolderStatus>("session_folder_status", { computer, directory });
+export const sessionFolderOpen = (input: import("./store/sessionFolders").FolderRequest, kind: "folder" | "shell") => desktop<string | null>("session_folder_open", { input, kind });

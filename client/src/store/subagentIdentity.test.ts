@@ -21,6 +21,15 @@ describe("open subagent identity", () => {
     expect(sessionIdentity(parent, undefined, store.child())).toEqual({ value: "child-conversation", title: "Session ID", caption: "Copy session ID" });
     store.follow(opened()); await tick(); expect(read).toHaveBeenCalledTimes(1);
   });
+  it("keeps the inspected child folder, including an explicit empty folder", async () => {
+    const read = vi.fn().mockResolvedValueOnce({ agent_id: "child", conversation_id: "child-conversation", cwd: "/srv/child" })
+      .mockResolvedValueOnce({ agent_id: "child", conversation_id: "child-conversation", cwd: "" });
+    const store = createSubagentIdentity(read);
+    store.follow(opened()); await tick();
+    expect(store.child()?.cwd).toBe("/srv/child");
+    store.follow(undefined); store.follow(opened()); await tick();
+    expect(store.child()?.cwd).toBe("");
+  });
   it("reads at most one child at a time and discards a late answer after switching", async () => {
     let resolve!: (value: unknown) => void;
     const read = vi.fn().mockImplementationOnce(() => new Promise((r) => { resolve = r; }))

@@ -319,7 +319,7 @@ export function terminal(s: Pick<ActionRow, "cmd" | "terminalSupported" | "termi
 }
 
 /** The selected child identity, when its conversation has been inspected. */
-export interface ChildIdentity { id: string; conversationId?: string }
+export interface ChildIdentity { id: string; conversationId?: string; cwd?: string }
 
 /** Qt's header and Details identity (SessionsWindow.cpp:4163-4173). */
 export function sessionIdentity(s: Pick<ActionRow, "runId" | "conversationId">, details?: Pick<Details, "run_id" | "conversation_id">, child?: ChildIdentity) {

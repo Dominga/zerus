@@ -1493,6 +1493,32 @@ phase 37. Lanes are balanced by volume and cost (U28 rule 9), not by count.
   the profiler and a task's drawer show its test runs.
 - A test that touches the user's own paths (settings, zerus.log, the temp or
   crash dump folders outside its own) fails a check.
+- Strengthened (owner, 2026-10-30, "take all"):
+  - The map comes from the build itself (CMake: which objects each test
+    binary links; Rust: the module graph, widened for shared modules) and is
+    checked against coverage weekly; an unmapped file widens to its area.
+  - Zerus, not the author, computes a task's affected set from its diff;
+    only the runner writes results, bound to the exact commit that merges.
+  - A crash (abnormal exit, a dump, a sanitizer report, heap corruption) is
+    never retried to green; a flaky quarantine is visible and expires.
+  - Qt results are reused by the test binary's hash and its data; Rust is not
+    cached (it runs in seconds when filtered).
+  - One shared build cache (sccache for Rust, ccache for MSVC) for every
+    worktree of the team: builds, not tests, cost the most today.
+  - A merge queue: each accepted report merges into the lead branch at once
+    and runs its affected tests there, so a phase integration is a formality.
+  - The release full run is the fork CI's run of the candidate, after the
+    owner confirms it; a nightly full run in the fork CI catches map gaps.
+  - Bloat guard: each report counts the test lines and functions it adds and
+    removes; suites have a time and size budget; a monthly coverage report
+    names tests without unique coverage.
+  - Isolation by construction: the runner gives every suite its own HOME,
+    APPDATA, LOCALAPPDATA, TEMP and XDG folders and keeps test crash dumps in
+    the run's folder; a fingerprint check of the user's paths is the second line.
+  - The scheduler reads the machine's real load and puts forced and short
+    suites first; long ones go to the night run or the CI.
+  - Later (phase 57): remote runners on the owner's other computers over
+    hgs's SSH for Linux, macOS and Android suites.
 
 ## Order of work (proposal)
 

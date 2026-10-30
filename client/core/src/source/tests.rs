@@ -15,6 +15,22 @@ fn endpoint(sender: &Sender, name: &str) -> Endpoint {
 }
 
 #[test]
+fn legacy_ingress_pressure_obeys_its_replay_deadline() {
+    let (sender, _receiver) = channel(Command::spawn);
+    let _full = sender.reserve(DATA_BYTES, &AtomicBool::new(false)).unwrap();
+    let began = Instant::now();
+    assert!(!endpoint(&sender, "").legacy(
+        1,
+        Legacy::Complete,
+        began,
+        &AtomicBool::new(false),
+        began + Duration::from_millis(100)
+    ));
+    assert!(began.elapsed() < Duration::from_secs(1));
+    assert_eq!(sender.usage().bytes, DATA_BYTES);
+}
+
+#[test]
 fn resnapshot_is_one_transient_request_for_an_exact_greeted_generation() {
     let reset = Resnapshot::default();
     assert!(!reset.request(0));

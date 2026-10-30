@@ -63,11 +63,15 @@ pub(crate) fn file(home: &str, conversation: &str) -> Option<PathBuf> {
 }
 
 /// What one bounded pass found: the record heads, the byte offset of the first
-/// frame not read yet (a frame boundary), and whether more waits behind it.
+/// frame not read yet (a frame boundary), and whether the store cannot be
+/// walked further (L1: a frame this reader does not know).
 #[derive(Debug, Default)]
 pub(crate) struct Tail {
     pub records: Vec<Value>,
     pub offset: u64,
+    /// A complete pass stopped at a frame this reader does not know; the caller
+    /// records the store as unverifiable instead of re-reading it forever.
+    pub unverifiable: bool,
 }
 
 /// Reads at most `MAX_BYTES` and `MAX_FRAMES` frames from the stored frame
@@ -80,7 +84,7 @@ pub(crate) fn read_tail(path: &Path, offset: u64) -> Result<Tail> {
     let length = handle.metadata().map_err(|error| error.to_string())?.len();
     let start = offset.min(length);
     if start > 0 && start == length {
-        return Ok(Tail { records: Vec::new(), offset: start });
+        return Ok(Tail { records: Vec::new(), offset: start, unverifiable: false });
     }
     handle.seek(SeekFrom::Start(start)).map_err(|error| error.to_string())?;
     let mut buffer = Vec::new();
@@ -108,7 +112,15 @@ pub(crate) fn read_tail(path: &Path, offset: u64) -> Result<Tail> {
         // offset always moves on. A frame that merely extends past this pass
         // waits for the next one, so none of its records is dropped.
         let frame_start = start + cursor as u64;
-        let Some(size) = frame_length(&mut handle, frame_start, length) else { break };
+        let Some(size) = frame_length(&mut handle, frame_start, length) else {
+            // L1: too few bytes left cannot identify the frame yet, so it waits
+            // for the next pass; a complete pass that cannot step past a frame
+            // it could identify marks the store unverifiable.
+            let left = length.saturating_sub(frame_start);
+            let incomplete = left < 5;
+            let complete = start + buffer.len() as u64 >= length;
+            return Ok(Tail { records, offset: frame_start, unverifiable: complete && !incomplete });
+        };
         let Some(end) = frame_start.checked_add(size) else { break };
         if end > length {
             break;
@@ -121,12 +133,12 @@ pub(crate) fn read_tail(path: &Path, offset: u64) -> Result<Tail> {
         }
         if end > start + buffer.len() as u64 {
             // The skipped frame reaches past the bytes this pass read.
-            return Ok(Tail { records, offset: end });
+            return Ok(Tail { records, offset: end, unverifiable: false });
         }
         cursor = (end - start) as usize;
         frames += 1;
     }
-    Ok(Tail { records, offset: start + cursor as u64 })
+    Ok(Tail { records, offset: start + cursor as u64, unverifiable: false })
 }
 
 /// N7: the total length of the zstd frame at `start`, walked through its frame
@@ -136,7 +148,22 @@ fn frame_length(handle: &mut fs::File, start: u64, length: u64) -> Option<u64> {
     const MAGIC: u32 = 0xFD2F_B528;
     let mut header = [0u8; 18];
     let read = read_at(handle, start, &mut header, length)?;
-    if read < 5 || u32::from_le_bytes([header[0], header[1], header[2], header[3]]) != MAGIC {
+    if read < 5 {
+        return None;
+    }
+    let magic = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
+    // L1: a zstd skippable frame carries its 4-byte size and that many bytes of
+    // user data, and no records; stepping over it keeps a store with one from
+    // stalling this reader.
+    if (0x184D_2A50..=0x184D_2A5F).contains(&magic) {
+        if read < 8 {
+            return None;
+        }
+        let size = u64::from(u32::from_le_bytes([header[4], header[5], header[6], header[7]]));
+        let end = start.checked_add(8)?.checked_add(size)?;
+        return (end <= length).then_some(end - start);
+    }
+    if magic != MAGIC {
         return None;
     }
     let descriptor = header[4];
@@ -462,5 +489,57 @@ mod tests {
         let second = read_tail(&file, first.offset).unwrap();
         assert_eq!(second.offset as usize, bytes.len());
         assert!(uploaded_after(&second.records, 1_500.0), "the record after the skipped frame is read");
+    }
+
+    /// #595 L1: a zstd skippable frame carries a size and no records; the reader
+    /// steps over it instead of stalling at it, so the record after it is found.
+    #[test]
+    fn a_skippable_frame_is_stepped_over_and_the_record_after_it_is_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("session.v4.jsonl.zstd");
+        let frame = |value: Value| ruzstd::encoding::compress_to_vec(value.to_string().as_bytes(), ruzstd::encoding::CompressionLevel::Fastest);
+        let mut bytes = frame(json!({"type":"session","seq":1,"time":1_000_000.0}));
+        let first_end = bytes.len();
+        // The skippable frame: magic 0x184D2A50, a 4-byte size and 4 bytes of data.
+        bytes.extend_from_slice(&0x184D_2A50u32.to_le_bytes());
+        bytes.extend_from_slice(&4u32.to_le_bytes());
+        bytes.extend_from_slice(b"skip");
+        let acceptance = json!({"type":"session-log-deepseek/delivery-accepted","seq":2,"time":2_000_500.0});
+        bytes.extend(frame(acceptance));
+        std::fs::write(&file, &bytes).unwrap();
+        let tail = read_tail(&file, 0).unwrap();
+        assert!(!tail.unverifiable, "a skippable frame is known, not a stall");
+        assert_eq!(tail.offset as usize, bytes.len(), "the reader steps past the skippable frame");
+        assert_eq!(tail.records.len(), 2, "{:?}", tail.records);
+        assert!(uploaded_after(&tail.records, 1_500.0), "the record after the skippable frame is read");
+        assert!(first_end > 0);
+    }
+
+    /// #595 L1: a complete pass that cannot step past an unknown frame marks the
+    /// store unverifiable instead of leaving the offset stalled forever.
+    #[test]
+    fn a_store_with_an_unknown_frame_is_marked_unverifiable() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("session.v4.jsonl.zstd");
+        let mut bytes = ruzstd::encoding::compress_to_vec(
+            json!({"type":"session","seq":1,"time":1_000_000.0}).to_string().as_bytes(),
+            ruzstd::encoding::CompressionLevel::Fastest,
+        );
+        let known = bytes.len();
+        // An unknown magic no reader can walk.
+        bytes.extend_from_slice(&[0x00, 0x01, 0x02, 0x03, 0x04]);
+        std::fs::write(&file, &bytes).unwrap();
+        let tail = read_tail(&file, 0).unwrap();
+        assert_eq!(tail.records.len(), 1);
+        assert_eq!(tail.offset as usize, known, "the reader stops where it cannot step");
+        assert!(tail.unverifiable, "a complete pass that cannot step marks the store");
+        // A half-written frame at the end still waits instead of marking the
+        // store: the next pass may read it whole.
+        let mut torn = bytes[..known].to_vec();
+        torn.extend_from_slice(&[0x28, 0xb5]);
+        std::fs::write(&file, &torn).unwrap();
+        let tail = read_tail(&file, 0).unwrap();
+        assert!(!tail.unverifiable, "a torn frame waits for the next pass");
+        assert_eq!(tail.offset as usize, known);
     }
 }

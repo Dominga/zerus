@@ -2,6 +2,8 @@
 #include "TeamAccountMove.h"
 #include <QCoreApplication>
 #include <QDateTime>
+#include <QJsonArray>
+#include <QJsonDocument>
 #include <QJsonValue>
 #include <QRegularExpression>
 #include <QSet>
@@ -1694,6 +1696,59 @@ bool leftMember(const Team &team, const QString &member)
 }
 
 // C2: one thing on the lead's desk, as `hgs team inbox` lists it.
+namespace {
+// A task's timing without what grows while it runs or waits: the worked
+// seconds of a running attempt, and the waits of a task not decided yet.
+QJsonObject steadyTiming(QJsonObject timing, bool decided)
+{
+    if (!timing.value("running_since").isNull() && timing.contains("running_since")) {
+        timing.remove("worked_s");
+        QJsonArray attempts;
+        for (const auto &value : timing.value("attempts").toArray()) {
+            auto attempt = value.toObject();
+            if (attempt.value("to").isNull()) { attempt.remove("worked_s"); attempt.remove("member_s"); attempt.remove("lead_s"); }
+            attempts.append(attempt);
+        }
+        timing["attempts"] = attempts;
+    }
+    if (!decided) timing.remove("waits");
+    return timing;
+}
+
+// Health and its warnings anywhere: "idle 44 min" reads as "idle N min".
+QJsonValue steadyHealth(const QJsonValue &value)
+{
+    static const QRegularExpression minutes(QStringLiteral("\\b\\d+ (min|h|s)\\b"));
+    if (value.isArray()) {
+        QJsonArray out;
+        for (const auto &item : value.toArray()) out.append(item.isString() ? QJsonValue(item.toString().replace(minutes, QStringLiteral("N \\1"))) : steadyHealth(item));
+        return out;
+    }
+    if (!value.isObject()) return value;
+    auto object = value.toObject();
+    object.remove("minutes");
+    for (auto it = object.begin(); it != object.end(); ++it) it.value() = steadyHealth(it.value());
+    return object;
+}
+}
+
+QByteArray visibleShape(QJsonObject status)
+{
+    status.remove("revision"); status.remove("updated");
+    QJsonArray tasks;
+    for (const auto &value : status.value("tasks").toArray()) {
+        auto task = value.toObject();
+        const QString state = task.value("status").toString();
+        const bool decided = state == "accepted" || state == "rejected" || state == "cancelled";
+        if (task.value("timing").isObject()) task["timing"] = steadyTiming(task.value("timing").toObject(), decided);
+        tasks.append(task);
+    }
+    if (status.contains("tasks")) status["tasks"] = tasks;
+    for (const char *key : {"health", "validation", "phases_health", "phase_summary"})
+        if (status.contains(key)) status[key] = steadyHealth(status.value(key));
+    return QJsonDocument(status).toJson(QJsonDocument::Compact);
+}
+
 QList<InboxItem> parseInbox(const QJsonObject &value)
 {
     QList<InboxItem> items;

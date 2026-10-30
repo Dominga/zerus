@@ -661,6 +661,13 @@ struct InboxItem {
     double since = 0;
 };
 QList<InboxItem> parseInbox(const QJsonObject &value);
+
+// #693: what of a `team status` (or a `team list` item) the views draw, as
+// compact JSON: without the revision and updated time every dispatcher write
+// moves, a running task's growing worked seconds and an open task's waits
+// (the views tick those on their own clock), and the minutes of the health
+// warnings. Two polls with the same shape need no rebuild.
+QByteArray visibleShape(QJsonObject status);
 // "Phase 2 · QA fixes · 3/5" (the title is left out when empty).
 QString phaseHeading(const PhaseGroup &group);
 // Layers by longest path inside one phase; dependencies outside it are ignored

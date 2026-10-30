@@ -2248,6 +2248,31 @@ inline QString duration(double seconds)
     return QCoreApplication::translate("TeamPanel", "%1w %2d").arg(days / 7).arg(days % 7);
 }
 
+// #693: a label that names an age keeps its start, its format ("%1 in this
+// stage") and its kind ("duration": 3h 12m, "age": 3 min) and is set again
+// in place on the minute timer (tickAged), so a poll needs no rebuild for it.
+inline QString agedText(const QString &format, const QString &kind, double since, double now)
+{
+    const QString value = kind == QLatin1String("duration") ? duration(now - since)
+                                                             : agoText(since, now).remove(QCoreApplication::translate("TeamPanel", " ago"));
+    return format.arg(value);
+}
+inline QLabel *aged(QLabel *label, const QString &format, const QString &kind, double since, double now = -1)
+{
+    label->setProperty("agedSince", since); label->setProperty("agedFormat", format); label->setProperty("agedKind", kind);
+    label->setText(agedText(format, kind, since, now < 0 ? workedClock()() : now));
+    return label;
+}
+inline void tickAged(QWidget *root, double now)
+{
+    for (auto *label : root->findChildren<QLabel *>()) {
+        const QVariant since = label->property("agedSince");
+        if (!since.isValid()) continue;
+        const QString text = agedText(label->property("agedFormat").toString(), label->property("agedKind").toString(), since.toDouble(), now);
+        if (text != label->text()) label->setText(text);
+    }
+}
+
 // The WhiteWh look of team surfaces: ghost buttons, accent primary ones,
 // segmented controls (a widget with property seg) and fields. Set on the
 // surface's top widget; children inherit it.

@@ -57,6 +57,12 @@ void TeamController::setShowCancelled(bool on)
     emit showCancelledChanged();
 }
 
+QByteArray TeamController::shapeOf(const QString &team) const
+{
+    if (watched() && m_watched.id == team && !m_watchedShape.isEmpty()) return m_watchedShape;
+    return m_listShapes.value(team);
+}
+
 const Teams::Team *TeamController::team(const QString &id) const
 {
     for (const auto &t : m_teams) if (t.id == id) return &t;
@@ -73,7 +79,7 @@ void TeamController::watch(const QString &team)
 {
     if (m_watch == team) return;
     m_watch = team;
-    m_watched = {}; m_lastStatus = {};
+    m_watched = {}; m_lastStatus = {}; m_watchedShape.clear(); m_inboxShape.clear();
     m_feed.clear(); m_feedCursor = QJsonValue();
     m_statusRequest = m_feedRequest = m_olderRequest = 0;
     m_inbox.clear(); m_lastInbox = {}; m_inboxRequest = 0;
@@ -234,6 +240,11 @@ void TeamController::received(quint64 request, const QString &operation, const Q
         if (result == m_lastList) return;
         m_lastList = result;
         m_teams = Teams::parseList(result);
+        m_listShapes.clear();
+        for (const auto &item : result.value("items").toArray()) {
+            const auto object = item.toObject();
+            m_listShapes.insert(object.value("id").toString(), Teams::visibleShape(object));
+        }
         emit teamsChanged();
     } else if (request == m_statusRequest) {
         m_statusRequest = 0;
@@ -241,11 +252,13 @@ void TeamController::received(quint64 request, const QString &operation, const Q
         if (team.id != m_watch || (result == m_lastStatus && m_watched.id == m_watch)) return;
         m_lastStatus = result;
         m_watched = team;
+        m_watchedShape = Teams::visibleShape(result);
         emit watchedChanged();
     } else if (request == m_inboxRequest) {
         m_inboxRequest = 0;
         if (result == m_lastInbox) return;
         m_lastInbox = result;
+        m_inboxShape = QJsonDocument(result).toJson(QJsonDocument::Compact);
         m_inbox = Teams::parseInbox(result);
         emit inboxChanged();
     } else if (request == m_feedRequest || request == m_olderRequest) {
@@ -282,7 +295,7 @@ void TeamController::failed(quint64 request, const QString &operation, const QSt
     if (request == m_listRequest) {
         m_listRequest = 0;
         // No teams yet (or an hgs without them): nothing to show.
-        if (m_available || !m_teams.isEmpty()) { m_teams.clear(); m_lastList = {}; emit teamsChanged(); }
+        if (m_available || !m_teams.isEmpty()) { m_teams.clear(); m_lastList = {}; m_listShapes.clear(); emit teamsChanged(); }
         m_available = false;
     } else if (request == m_statusRequest) m_statusRequest = 0;
     else if (request == m_inboxRequest) m_inboxRequest = 0;

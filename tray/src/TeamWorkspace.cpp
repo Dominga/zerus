@@ -175,13 +175,16 @@ TeamWorkspace::TeamWorkspace(TeamController *teams, TeamPanel *panel, QWidget *p
         const auto *team = currentTeam(m_team);
         return team ? m_panel->problemActions(*team, member, status) : nullptr;
     };
-    QObject::connect(m_teams, &TeamController::teamsChanged, this, [this] { scheduleRender(); });
+    // #693: polls rebuild only what they changed; the minute timer ticks the
+    // ages in place.
+    QObject::connect(m_teams, &TeamController::teamsChanged, this, [this] { pollRender(); });
     QObject::connect(m_teams, &TeamController::showCancelledChanged, this, [this] { scheduleRender(); });
     QObject::connect(m_teams, &TeamController::watchedChanged, this, [this] {
         if (const auto *team = m_teams->watched()) Teams::AccountMove::observe(m_move, *team);
         renderAccountMove();
-        scheduleRender();
+        pollRender();
     });
+    QObject::connect(&workedTicker(), &QTimer::timeout, this, [this] { tickInPlace(); });
     QObject::connect(m_teams->client(), &HgsClient::accountsReady, this, [this](quint64 request, const QString &host, const QJsonObject &result) {
         if (request != m_accountsRequest || !host.isEmpty()) return;
         m_accountsRequest = 0; m_accountsRead = true;
@@ -198,8 +201,8 @@ TeamWorkspace::TeamWorkspace(TeamController *teams, TeamPanel *panel, QWidget *p
         m_accountsRequest = 0; m_accountsRead = true;
         renderAccountMove();
     });
-    QObject::connect(m_teams, &TeamController::feedChanged, this, [this] { scheduleRender(); });
-    QObject::connect(m_teams, &TeamController::inboxChanged, this, [this] { scheduleRender(); });
+    QObject::connect(m_teams, &TeamController::feedChanged, this, [this] { pollRender(); });
+    QObject::connect(m_teams, &TeamController::inboxChanged, this, [this] { pollRender(); });
     QObject::connect(qApp, &QApplication::focusChanged, this, [this](QWidget *, QWidget *now) {
         // Losing focus during a rebuild is recoverable; choosing another field
         // cancels both the recovery and an Answer still waiting for its box.
@@ -271,8 +274,11 @@ void TeamWorkspace::showTeam(const QString &team)
         m_team = team; m_focus.clear(); m_drawerTask = 0; m_fit = true; if (m_popover) m_popover->hide();
         // N14/N15: another team's send-back words and blocker emphasis stay behind.
         m_rejectPhase.clear(); m_rejectText.clear(); m_showBlockers = false;
+        scheduleRender();
+        return;
     }
-    scheduleRender();
+    // #693: the session list names the same team after each of its polls.
+    pollRender();
 }
 
 QString TeamWorkspace::rejectKey(const Team &team, int phase)
@@ -285,9 +291,56 @@ QString TeamWorkspace::rejectKey(const Team &team, int phase)
 
 void TeamWorkspace::scheduleRender()
 {
+    m_forced = true;
+    queueRender();
+}
+
+void TeamWorkspace::pollRender()
+{
+    queueRender();
+}
+
+void TeamWorkspace::queueRender()
+{
     if (m_pending) return;
     m_pending = true;
-    QTimer::singleShot(0, this, [this] { m_pending = false; render(); });
+    QTimer::singleShot(0, this, [this] {
+        m_pending = false;
+        const bool forced = std::exchange(m_forced, false);
+        // #693: the same drawn content keeps every widget, its scroll and
+        // hover; the header's ages tick in place.
+        if (!forced && !m_renderedKey.isEmpty() && pollKey() == m_renderedKey) return;
+        render();
+    });
+}
+
+QByteArray TeamWorkspace::pollKey() const
+{
+    QByteArray key = m_team.toUtf8() + '\n' + m_teams->shapeOf(m_team) + '\n' + m_teams->inboxShape() + '\n';
+    const auto feed = m_teams->feed();
+    key += QByteArray::number(feed.size()) + ' ' + QByteArray::number(feed.isEmpty() ? 0 : feed.first().value("seq").toInteger()) + '\n';
+    const Team *team = m_teams->watched();
+    if (!team || team->id != m_team) team = m_teams->team(m_team);
+    if (team && m_live)
+        for (const auto &member : team->members) {
+            const Live live = m_live(member);
+            key += member.id.toUtf8() + ' ' + char('0' + live.known) + char('0' + live.offline) + char('0' + live.attention) + char('0' + live.working)
+                   + ' ' + live.attentionText.toUtf8() + '\n';
+        }
+    // G9: a phase decision stays marked until the revision moves.
+    if (team && !m_phasesDecided.isEmpty()) key += "revision " + QByteArray::number(team->revision);
+    return key;
+}
+
+void TeamWorkspace::tickInPlace()
+{
+    // #693: the ages a skipped rebuild leaves (the header's elapsed time, a
+    // stage queue's minutes) are set again where they are.
+    const double now = workedClock()();
+    tickAged(this, now);
+    if (m_headerStatus) tickAged(m_headerStatus, now);
+    // U38: a shown heat tint is read again a minute after its last read.
+    if (const auto *team = currentTeam(m_team); team && !heatShown(*team).isEmpty()) heat(*team);
 }
 
 void TeamWorkspace::showEvent(QShowEvent *event)
@@ -324,6 +377,8 @@ void TeamWorkspace::render()
 {
     const QScopedValueRollback<bool> rebuilding(m_answerRendering, true);
     renderHeader();
+    // #693: a skipped rebuild is made up by the next poll.
+    m_renderedKey.clear();
     if (!isVisible()) return;
     // A confirmation is open (TeamPanel::confirm): its asker stays alive.
     if (m_panel->confirming()) return;
@@ -442,6 +497,7 @@ void TeamWorkspace::render()
         m_drawer->show();
     } else m_drawer->hide();
     placePopover();
+    if (team) m_renderedKey = pollKey();
 }
 
 void TeamWorkspace::takeHeader()
@@ -621,8 +677,8 @@ QWidget *TeamWorkspace::headerStatusContent(const Team &team, const QString &sta
         auto *elapsed = new QWidget; elapsed->setObjectName("teamHeaderElapsed");
         auto *h = new QHBoxLayout(elapsed); h->setContentsMargins(0, 0, 0, 0); h->setSpacing(4);
         auto *clock = new QLabel; clock->setPixmap(workspaceIcon("clock", c.muted).pixmap(12, 12)); h->addWidget(clock);
-        const QString text = duration(QDateTime::currentSecsSinceEpoch() - team.created);
-        h->addWidget(small(label(text, c.muted, 11, false, "teamHeaderElapsedText"), c.muted));
+        // #693: it ticks in place on the minute timer.
+        h->addWidget(small(aged(label(QString(), c.muted, 11, false, "teamHeaderElapsedText"), QStringLiteral("%1"), QStringLiteral("duration"), team.created), c.muted));
         elapsed->setToolTip(tr("Elapsed"));
         row->add(elapsed, 3);
     }
@@ -1182,13 +1238,17 @@ public:
     {
         area->installEventFilter(this);
         content->installEventFilter(this);
-        fit();
+        // #693: never decided before the content is laid out: the area's
+        // first width is no room at all and showed the bar for a moment.
+        area->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        m_pending = true;
+        QMetaObject::invokeMethod(this, [this] { m_pending = false; fit(); }, Qt::QueuedConnection);
     }
     bool eventFilter(QObject *watched, QEvent *event) override
     {
         // Deferred: a resize or layout request can arrive while the area is
         // being destroyed; the queued call dies with this object.
-        if ((event->type() == QEvent::Resize || event->type() == QEvent::LayoutRequest) && !m_pending) {
+        if ((event->type() == QEvent::Resize || event->type() == QEvent::LayoutRequest || event->type() == QEvent::Show) && !m_pending) {
             m_pending = true;
             QMetaObject::invokeMethod(this, [this] { m_pending = false; fit(); }, Qt::QueuedConnection);
         }
@@ -1197,12 +1257,19 @@ public:
 private:
     void fit()
     {
-        if (!m_content) return;
-        const int vbar = m_area->verticalScrollBar()->isVisible() ? m_area->verticalScrollBar()->width() : 0;
+        if (!m_content || !m_area->isVisible() || m_area->width() <= 1) return;
+        // #693: the vertical bar's room is kept while the content is taller
+        // than the area, whether or not that bar shows yet, so the two bars
+        // never flip each other at the edge.
+        const int frame = 2 * m_area->frameWidth();
+        const int tall = qMax(m_content->minimumSizeHint().height(), m_content->minimumHeight());
+        const bool vertical = m_area->verticalScrollBarPolicy() == Qt::ScrollBarAlwaysOn
+                              || (m_area->verticalScrollBarPolicy() == Qt::ScrollBarAsNeeded && tall > m_area->height() - frame);
+        const int vbar = vertical ? m_area->verticalScrollBar()->sizeHint().width() : 0;
         // A view laid out by hand (the phase graph) has no size hint, only its
         // minimum width.
         const int want = qMax(m_content->minimumSizeHint().width(), m_content->minimumWidth());
-        const bool need = want > m_area->width() - vbar - 2 * m_area->frameWidth();
+        const bool need = want > m_area->width() - vbar - frame;
         const auto policy = need ? Qt::ScrollBarAlwaysOn : Qt::ScrollBarAlwaysOff;
         if (m_area->horizontalScrollBarPolicy() != policy) m_area->setHorizontalScrollBarPolicy(policy);
     }

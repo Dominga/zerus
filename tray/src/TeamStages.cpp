@@ -648,9 +648,11 @@ QWidget *memberStageQueue(const Team &team, const Member &member, const Colors &
     for (const auto &entry : queue) { if (entry.state == "delivered" && !current) current = &entry; else waiting << entry; }
     auto *head = row(6);
     auto *icon = new QLabel; icon->setPixmap(workspaceIcon("inbox", c.text3).pixmap(12, 12)); head->addWidget(icon);
-    QString title = waiting.isEmpty() ? tr("Stage queue empty") : tr("Stage queue %1").arg(waiting.size());
-    if (waiting.isEmpty() && current && current->since > 0) title += QStringLiteral(" · ") + tr("%1 in this stage").arg(agoText(current->since, now).remove(QStringLiteral(" ago")));
-    head->addWidget(label(title, c.text2, 11, false, "teamMemberStageQueueTitle"));
+    const QString title = waiting.isEmpty() ? tr("Stage queue empty") : tr("Stage queue %1").arg(waiting.size());
+    auto *titleLabel = label(title, c.text2, 11, false, "teamMemberStageQueueTitle");
+    // #693: the minutes in this stage tick in place.
+    if (waiting.isEmpty() && current && current->since > 0) aged(titleLabel, title + QStringLiteral(" · ") + tr("%1 in this stage"), QStringLiteral("age"), current->since, now);
+    head->addWidget(titleLabel);
     head->addStretch();
     v->addLayout(head);
     for (const auto &entry : waiting) {
@@ -662,7 +664,7 @@ QWidget *memberStageQueue(const Team &team, const Member &member, const Colors &
         h->addWidget(new StageChipWidget(StageChip{glyphOf(entry.stage), tr("%1 r%2").arg(stageName(entry.stage)).arg(qMax(1, entry.round)), {},
                                                    QStringLiteral("waiting"), stageColor(c, entry.stage)}));
         h->addWidget(elided(QStringLiteral("#%1 %2").arg(task->id).arg(task->title), c.fg, 11), 1);
-        if (entry.since > 0) h->addWidget(label(agoText(entry.since, now).remove(QStringLiteral(" ago")), c.muted, 10));
+        if (entry.since > 0) h->addWidget(aged(label(QString(), c.muted, 10, false, "teamMemberStageQueueAge"), QStringLiteral("%1"), QStringLiteral("age"), entry.since, now));
         line->setMinimumHeight(21);
         line->setStyleSheet(QStringLiteral("QPushButton#teamMemberStageQueueRow{border:none;background:transparent;text-align:left;}"));
         QObject::connect(line, &QPushButton::clicked, line, [open, id = entry.task] { if (open) open(id); });

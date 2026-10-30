@@ -46,13 +46,13 @@ export function settingsView(input: ModelContext, changing = false) {
   const shownModel = model || "Model", suffix = (effort ? `  ${effort}` : "") + (pending ? "  ◷" : "");
   let hint = reason || (applyWhen === "resume" ? "Saved for the next resume. The session stays stopped."
     : applyWhen === "ready" ? "Applies when the agent is ready. Messages sent while it is working use the current model." : "Applies to this session only.");
-  if (!reason && text(d?.settings_change_notice)) hint += `\n${text(d?.settings_change_notice)}`;
+  const changeNotice = text(d?.settings_change_notice) || (row.cmd === "claude" ? "Claude re-reads the conversation with the new model on its next turn." : "");
   if (pending) hint = `Pending: ${pendingModel || model}${pendingEffort ? `  ${pendingEffort}` : ""}\nCurrent: ${model}${effort ? `  ${effort}` : ""}\n${hint}`;
   let tooltip = `Current: ${shownModel}${effort ? `  ${effort}` : ""}`;
   if (pending) tooltip += `\nPending: ${pendingModel || model}${pendingEffort ? `  ${pendingEffort}` : ""}`;
   if (reason) tooltip += `\n${reason}`;
   return { model, effort, shownModel, suffix, tooltip, accessible: `Model and reasoning effort: ${shownModel}${suffix}`,
-    pending, pendingModel, pendingEffort, applyWhen, reason, hint, enabled: !reason,
+    pending, pendingModel, pendingEffort, applyWhen, reason, hint, changeNotice, enabled: !reason,
     intendedModel: pendingModel || model, intendedEffort: pending ? pendingEffort : effort,
     applyLabel: applyWhen === "resume" ? "Save for resume" : applyWhen === "ready" ? "Save change" : "Apply",
     openCode: row.cmd === "opencode", terminal: row.cmd === "claude" && online && row.state === "running" && !text(d?.expected_id),

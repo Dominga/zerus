@@ -1,4 +1,4 @@
-import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createSignal, onCleanup, onMount, Show } from "solid-js";
 import { AgentBadge } from "./SessionCard";
 import { Icon } from "../lib/icons";
 import { ChipPopover } from "./ChipPopover";
@@ -7,13 +7,14 @@ import { useNow } from "../../store/latest";
 import { followSessionUsage, refreshSessionUsage, sessionUsage, startSessionUsage, stopSessionUsage } from "../../store/sessionUsage";
 import { setAccountMachine, setRequestedProfile, loadAccounts } from "../../store/accounts";
 import { setPage } from "../../store/ui";
+import { openInspector } from "../../store/inspector";
 import { text } from "../../store/settings";
 import { composer } from "../../store/composer";
 import { computerOffline } from "../../store/catalog";
 import { followedFor } from "../../store/actions";
-import { accountTooltip, exhausted, exhaustedSummary, usageLoading, windowsAt } from "../lib/usage";
+import { accountTooltip, exhausted, exhaustedSummary, usageChipPercent, usageLoading, windowsAt } from "../lib/usage";
 import { recoveryInspection, recoveryUsageNotice } from "./recovery-ui";
-import { footerUsageSummary, sessionUsageView } from "./session-usage-ui";
+import { footerUsageSummary } from "./session-usage-ui";
 import type { Session } from "./types";
 
 const toneClass = (tone: string) => tone === "danger" ? "danger" : tone === "warning" ? "warn" : tone === "success" ? "ok" : "";
@@ -52,7 +53,7 @@ export function AccountUsageChip(props: { session: Session }) {
   );
 }
 
-/** The composer's Usage limit chip and its cached/offline warning popover. */
+/** The mockup's usage chip and the existing cached/offline warning popover. */
 export function UsageLimitChip(props: { session: Session; compact: boolean }) {
   const now = useNow(30_000);
   const [open, setOpen] = createSignal(false);
@@ -63,21 +64,25 @@ export function UsageLimitChip(props: { session: Session; compact: boolean }) {
   const exhaustedText = () => exhausted(u(), now());
   const notice = () => recoveryUsageNotice(props.session, details(), u(), !computerOffline(props.session.computer), now());
   const warning = () => exhaustedText() || notice();
+  const percent = () => usageChipPercent(u(), now());
   const summary = () => exhaustedSummary(u(), now());
-  createEffect(() => { if (!warning()) setOpen(false); });
+  const label = () => percent() !== undefined ? `Usage ${percent()}%` : summary()?.label ?? "Usage available";
+  createEffect(() => { if (percent() === undefined && !warning()) setOpen(false); });
   return (
-    <Show when={warning()}>
+    <Show when={percent() !== undefined || warning()}>
       <span class="att-anchor">
-        <button ref={chip} type="button" class={`tchip ${exhaustedText() ? "danger" : ""}`} classList={{ on: open() }} aria-haspopup="dialog" aria-expanded={open()}
-          aria-label={summary() ? `${summary()!.label}${summary()!.remaining ? ` ${summary()!.remaining}` : ""}` : "Usage available"} title={warning()}
+        <button ref={chip} type="button" class={`tchip ${percent() !== undefined ? "warn" : exhaustedText() ? "danger" : ""}`} classList={{ on: open() }} aria-haspopup="dialog" aria-expanded={open()}
+          aria-label={label()} title={warning() || label()}
           onClick={(event) => { setKeyboard(event.detail === 0); setOpen(!open()); }}>
-          <Icon name="attention" size={13} />
-          <Show when={props.compact} fallback={<>{(summary()?.label ?? "Usage available")}<Show when={summary()?.remaining}><span class="usage-reset">{summary()!.remaining}</span></Show></>}>
+          <Icon name={percent() !== undefined ? "gauge" : "attention"} size={13} />
+          <Show when={percent() !== undefined} fallback={<Show when={props.compact} fallback={<>{(summary()?.label ?? "Usage available")}<Show when={summary()?.remaining}><span class="usage-reset">{summary()!.remaining}</span></Show></>}>
             {summary()?.shortLabel ?? "Usage"}
+          </Show>}>
+            {props.compact ? `${percent()}%` : label()}
           </Show>
         </button>
         <ChipPopover open={open()} anchor={chip} label="Account usage limit" keyboard={keyboard()} class="usage-limit-pop" onClose={(focus) => { setOpen(false); if (focus) chip.focus(); }}>
-          <p class="usage-warning">{warning()}</p>
+          <p class="usage-warning">{warning() || label()}</p>
           <div class="cache-actions"><button type="button" class="btn small" disabled={computerOffline(props.session.computer) || u().refreshing} onClick={() => void refreshSessionUsage(true)}>Refresh usage</button></div>
         </ChipPopover>
       </span>
@@ -85,36 +90,18 @@ export function UsageLimitChip(props: { session: Session; compact: boolean }) {
   );
 }
 
-/** SessionUsage::ContextButton and the Details side panel's usage section. */
-export function SessionUsageChip(props: { session: Session }) {
-  const [open, setOpen] = createSignal(false);
-  const [keyboard, setKeyboard] = createSignal(false);
-  let chip!: HTMLButtonElement;
+/** Context opens the mockup's Details tab and its existing Session usage card. */
+export function SessionUsageChip() {
   const context = () => composer.view()?.context;
-  const raw = () => followedFor(props.session.key).value?.session_usage;
-  const panel = () => sessionUsageView(raw());
-  createEffect(() => { if (!context()?.visible) setOpen(false); });
   return (
     <Show when={context()?.visible}>
-      <span class="att-anchor">
-        <button ref={chip} type="button" class={`tchip ${toneClass(context()!.tone)}`} classList={{ on: open() }} aria-haspopup="dialog" aria-expanded={open()}
-          title={context()!.tooltip} aria-label={context()!.accessible_name}
-          onClick={(event) => { setKeyboard(event.detail === 0); setOpen(!open()); }}>
-          <Show when={!context()!.warning} fallback={<Icon name="context-warning" size={13} />}>
-            <span class="ctx-ring" style={{ "--p": `${Math.max(0, Math.min(100, context()!.percent ?? 0))}%` }} />
-          </Show>
-          {context()!.text}
-        </button>
-        <ChipPopover open={open()} anchor={chip} label="Session usage" keyboard={keyboard()} class="session-usage-pop" width={560} onClose={(focus) => { setOpen(false); if (focus) chip.focus(); }}>
-          <h3>Session usage</h3>
-          <Show when={!panel().status} fallback={<p class="muted">{panel().status}</p>}>
-            <table class="usage"><For each={panel().rows}>{(row) => <tr><td>{row.label}</td><td>{row.value}</td></tr>}</For></table>
-            <Show when={panel().costNote}><p class="session-usage-note">{panel().costNote}</p></Show>
-            <Show when={panel().context}><p><b>Latest context</b><br />{panel().context}</p></Show>
-            <p class="session-usage-note">{panel().footer}</p>
-          </Show>
-        </ChipPopover>
-      </span>
+      <button type="button" class={`tchip ${toneClass(context()!.tone)}`} title={context()!.tooltip} aria-label={context()!.accessible_name}
+        onClick={() => openInspector("details")}>
+        <Show when={!context()!.warning} fallback={<Icon name="context-warning" size={13} />}>
+          <span class="ctx-ring" style={{ "--p": `${Math.max(0, Math.min(100, context()!.percent ?? 0))}%` }} />
+        </Show>
+        {context()!.text}
+      </button>
     </Show>
   );
 }

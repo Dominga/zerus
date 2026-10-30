@@ -17,7 +17,7 @@ describe("recovery presentation", () => {
     expect(recoveryStatus(job, NOW)).toBe(`Waiting for reset at ${dayTime(NOW + 3600)}`);
     const view = recoveryView({ phase: "idle", recovery: job }, true, NOW, false, "", "");
     expect(view).toMatchObject({
-      active: true, failure: false, tone: "warning", shortLabel: `Reset ${clock(NOW + 3600)}`,
+      active: true, failure: false, tone: "warning", label: `Retry ${clock(NOW + 3600)}`, shortLabel: clock(NOW + 3600),
       detail: "Temporary rate limit", jobId: job.id,
       now: { visible: true, enabled: true }, cancel: { visible: true, enabled: true },
       history: { visible: true, enabled: true }, settingsVisible: true,
@@ -49,7 +49,8 @@ describe("recovery presentation", () => {
     expect(view.detail).toBe("Recovery timed out");
     expect(view.now.enabled).toBe(false);
     expect(view.cancel.enabled).toBe(false);
-    expect(view.shortLabel).toBe("20 s");
+    expect(view.label).toBe(`Retry ${clock(NOW + 20)}`);
+    expect(view.shortLabel).toBe(clock(NOW + 20));
   });
 
   it("hides a resumed job and rejects another run", () => {

@@ -94,13 +94,10 @@ export function recoveryView(details: Recovery, online: boolean, now: number, pe
   let label = "Automatic recovery is not scheduled", shortLabel = "Error", tone: "warning" | "danger" = "danger";
   if (failure) { label = "Provider error"; shortLabel = "Error"; }
   else if (waiting || state === "dispatching" || state === "retrying") {
-    label = recoveryStatus(job, now);
+    label = waiting ? `Retry ${clock(number(job.due_at))}` : recoveryStatus(job, now);
     tone = "warning";
-    if (waiting && reset) shortLabel = `Reset ${clock(number(job.due_at))}`;
-    else {
-      const remaining = Math.max(0, Math.ceil(number(job.due_at) - now));
-      shortLabel = waiting && remaining > 0 ? `${remaining} s` : "…";
-    }
+    if (waiting) shortLabel = clock(number(job.due_at));
+    else shortLabel = "…";
   } else if (state === "cancelled") { label = recoveryStatus(job, now); shortLabel = "Off"; tone = "warning"; }
   else label = recoveryStatus(job, now);
 

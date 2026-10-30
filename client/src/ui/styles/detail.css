@@ -287,15 +287,13 @@
   .cache-pop p { margin: 0; font-size: var(--fs-xs); line-height: 1.45; white-space: pre-line; color: var(--z-color-text-2); }
   .cache-pop .cache-warning { color: var(--z-color-warn); }
   .cache-actions { display: flex; justify-content: flex-end; gap: 8px; }
-  .att-pop.usage-limit-pop, .att-pop.recovery-pop, .att-pop.session-usage-pop { padding: 12px 14px; gap: 8px; max-height: min(70vh, 600px); overflow-y: auto; }
-  .usage-limit-pop p, .recovery-pop p, .session-usage-pop p { margin: 0; line-height: 1.45; }
+  .att-pop.usage-limit-pop, .att-pop.recovery-pop { padding: 12px 14px; gap: 8px; max-height: min(70vh, 600px); overflow-y: auto; }
+  .usage-limit-pop p, .recovery-pop p { margin: 0; line-height: 1.45; }
   .usage-warning { color: var(--z-color-danger); font-size: var(--fs-xs); white-space: pre-line; }
   .recovery-status { color: var(--z-color-text); font-size: var(--fs-sm); font-weight: 600; }
   .recovery-detail { color: var(--z-color-text-2); font-size: var(--fs-xs); white-space: pre-line; }
   .recovery-help { color: var(--z-color-muted); font-size: var(--fs-xs); white-space: pre-line; }
   .recovery-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
-  .session-usage-pop h3 { font-size: var(--fs-md); }
-  .session-usage-note { color: var(--z-color-muted); font-size: var(--fs-2xs); }
   .recovery-history-dialog { width: min(560px, calc(100vw - 32px)); }
   .recovery-history-dialog .dlg-body { display: flex; min-height: 0; }
   .recovery-history { width: 100%; height: 240px; resize: none; padding: 10px; border: 1px solid var(--z-color-border); border-radius: var(--z-radius-md); background: var(--z-color-field); color: var(--z-color-text-2); font: 12px/1.45 var(--z-font-mono); white-space: pre-wrap; }
@@ -485,12 +483,10 @@
   .cmp-model { min-width: 0; flex: 0 1 auto; }
   .cmp-model-name { min-width: 0; }
   .cmp-model-suffix, .cmp-model > svg { flex: none; white-space: pre; }
-  dialog.cmp-settings-pop { position: fixed; inset: auto; margin: 0; padding: 12px 14px; max-height: calc(100vh - 16px); overflow: auto; border: 1px solid var(--z-color-border); border-radius: var(--z-radius-lg); background: var(--z-color-raised); color: var(--z-color-text); box-shadow: var(--z-shadow-popover); }
-  dialog.cmp-settings-pop::backdrop { background: transparent; }
-  .cmp-settings-pop > label { display: block; margin: 8px 0; font-size: var(--fs-sm); }
-  .cmp-settings-pop > .field { width: 100%; }
+  dialog.cmp-settings-dialog { width: min(420px, calc(100vw - 24px)); max-width: calc(100vw - 24px); }
+  .cmp-settings-dialog .field { width: 100%; }
   .cmp-settings-models { border: 0; padding: 0; margin: 0; min-width: 0; }
   .cmp-settings-models .ocm-list { height: 240px; max-height: 320px; flex: none; }
-  .cmp-settings-hint { font-size: var(--fs-sm); color: var(--z-color-muted); white-space: pre-line; margin: 12px 0; }
-  .cmp-settings-actions { display: flex; align-items: center; gap: 8px; }
+  .cmp-settings-hint { white-space: pre-line; margin: 12px 0; }
+  .cmp-settings-notice { margin-top: 10px; }
 }

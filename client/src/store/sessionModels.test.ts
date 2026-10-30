@@ -34,6 +34,13 @@ describe("session model settings presentation", () => {
     expect(v.hint).toContain("Messages sent while it is working use the current model.");
     expect(settingsView(context({ settings_apply_when: "resume" })).applyLabel).toBe("Save for resume");
   });
+  it("separates the mockup's warning note from the settings hint", () => {
+    const native = settingsView(context({ settings_change_notice: "Native re-read note" }, "claude"));
+    expect(native.changeNotice).toBe("Native re-read note");
+    expect(native.hint).not.toContain("Native re-read note");
+    expect(settingsView(context({}, "claude")).changeNotice).toBe("Claude re-reads the conversation with the new model on its next turn.");
+    expect(settingsView(context()).changeNotice).toBe("");
+  });
   it("uses Qt's offline, busy and unsupported texts, with Terminal for Claude", () => {
     expect(settingsView({ ...context(), online: false }).reason).toBe("Machine unavailable. Reconnect to change model settings.");
     expect(settingsView(context(), true).reason).toBe("Updating model settings…");

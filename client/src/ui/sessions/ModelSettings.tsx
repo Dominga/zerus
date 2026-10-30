@@ -1,4 +1,4 @@
-import { For, Show, createEffect, onCleanup, onMount } from "solid-js";
+import { For, Show, onCleanup, onMount } from "solid-js";
 import { sessionModels as models } from "../../store/sessionModels";
 import { terminal } from "../../store/terminal";
 import { setDetailTab } from "../../store/ui";
@@ -6,30 +6,18 @@ import { ModelList } from "./ModelPicker";
 import { Icon } from "../lib/icons";
 import "../styles/newsession.css";
 
-function SettingsPopover(props: { anchor: () => HTMLButtonElement | undefined }) {
+function SettingsDialog(props: { anchor: () => HTMLButtonElement | undefined }) {
   let dialog!: HTMLDialogElement;
-  let mounted = false;
   const v = () => models.view()!;
   const native = () => v().terminal && !v().enabled;
-  const place = () => {
-    const anchor = props.anchor()?.getBoundingClientRect(); if (!anchor) return;
-    const width = Math.min(v().openCode ? 420 : 360, window.innerWidth - 24);
-    dialog.style.width = `${width}px`;
-    const height = dialog.getBoundingClientRect().height;
-    dialog.style.left = `${Math.max(8, Math.min(anchor.right - width, window.innerWidth - width - 8))}px`;
-    dialog.style.top = `${Math.max(8, Math.min(anchor.top - height - 7, window.innerHeight - height - 8))}px`;
-  };
   onMount(() => {
-    mounted = true; dialog.showModal(); place();
+    dialog.showModal();
     (dialog.querySelector<HTMLElement>(native() ? ".cmp-settings-terminal" : "input,select") ?? dialog.querySelector<HTMLElement>("button"))?.focus();
-    window.addEventListener("resize", place);
   });
   onCleanup(() => {
-    mounted = false; window.removeEventListener("resize", place);
     if (dialog.open) dialog.close();
     queueMicrotask(() => props.anchor()?.focus());
   });
-  createEffect(() => { models.catalogError(); models.model(); v().hint; if (mounted) queueMicrotask(place); });
   const outside = (e: PointerEvent) => {
     if (e.target !== dialog) return;
     const box = dialog.getBoundingClientRect();
@@ -42,31 +30,38 @@ function SettingsPopover(props: { anchor: () => HTMLButtonElement | undefined })
   };
   const effortEnabled = () => v().enabled && models.options().some((m) => m.id === models.model())
     && (v().openCode ? models.efforts().length > 1 : !!models.effort());
+  const openTerminal = () => { models.close(); terminal.opened(); setDetailTab("terminal"); };
   return (
-    <dialog ref={dialog} class="cmp-settings-pop" aria-label="Model and reasoning effort" onPointerDown={outside}
+    <dialog ref={dialog} class="dlg cmp-settings-dialog" aria-labelledby="cmp-settings-title" onPointerDown={outside}
       onCancel={(e) => { e.preventDefault(); models.close(); }}>
-      <Show when={!native()}>
-        <label for="session-model-choice">Model</label>
-        <Show when={v().openCode} fallback={
-          <select id="session-model-choice" class="field" aria-label="Model" value={models.model()} disabled={!v().enabled || choices().length < 2}
-            onChange={(e) => models.chooseModel(e.currentTarget.value)}>
-            <For each={choices()}>{(m) => <option value={m.id} selected={m.id === models.model()}>{m.label}</option>}</For>
-          </select>
-        }>
-          <fieldset disabled={!v().enabled} class="cmp-settings-models" aria-label="Model">
-            <ModelList view={models.picker} act={models.pickerActions} disabled={!v().enabled} />
-          </fieldset>
+      <div class="dlg-head"><Icon name="sparkles" size={18} class="accent" /><h2 id="cmp-settings-title">Model and effort</h2><span class="grow" />
+        <button type="button" class="icon-btn" aria-label="Close" title="Close" onClick={() => models.close()}><Icon name="x" size={16} /></button>
+      </div>
+      <div class="dlg-body">
+        <Show when={!native()}>
+          <div class="form-row"><label for="session-model-choice">Model</label><Show when={v().openCode} fallback={
+            <select id="session-model-choice" class="field" aria-label="Model" value={models.model()} disabled={!v().enabled || choices().length < 2}
+              onChange={(e) => models.chooseModel(e.currentTarget.value)}>
+              <For each={choices()}>{(m) => <option value={m.id} selected={m.id === models.model()}>{m.label}</option>}</For>
+            </select>
+          }>
+            <fieldset disabled={!v().enabled} class="cmp-settings-models" aria-label="Model">
+              <ModelList view={models.picker} act={models.pickerActions} disabled={!v().enabled} />
+            </fieldset>
+          </Show></div>
+          <div class="form-row"><label for="session-effort-choice">Reasoning effort</label>
+            <select id="session-effort-choice" class="field" aria-label="Reasoning effort" value={models.effort()} disabled={!effortEnabled()}
+              onChange={(e) => models.chooseEffort(e.currentTarget.value)}>
+              <For each={models.efforts()}>{(e) => <option value={e.value} selected={e.value === models.effort()}>{e.label}</option>}</For>
+            </select>
+          </div>
         </Show>
-        <label for="session-effort-choice">Reasoning effort</label>
-        <select id="session-effort-choice" class="field" aria-label="Reasoning effort" value={models.effort()} disabled={!effortEnabled()}
-          onChange={(e) => models.chooseEffort(e.currentTarget.value)}>
-          <For each={models.efforts()}>{(e) => <option value={e.value} selected={e.value === models.effort()}>{e.label}</option>}</For>
-        </select>
-      </Show>
-      <p class="cmp-settings-hint" role="status">{v().hint}<Show when={models.catalogError()}>{`\n${models.catalogError()}`}</Show></p>
-      <div class="cmp-settings-actions">
-        <Show when={native()}><button type="button" class="btn cmp-settings-terminal" onClick={() => { models.close(); terminal.opened(); setDetailTab("terminal"); }}>Open Terminal</button></Show>
-        <span class="grow" />
+        <p class="cmp-settings-hint hint" role="status">{v().hint}<Show when={models.catalogError()}>{`\n${models.catalogError()}`}</Show></p>
+        <Show when={v().changeNotice}><div class="notice warn cmp-settings-notice"><Icon name="info" size={14} /><div>{v().changeNotice}</div></div></Show>
+      </div>
+      <div class="dlg-foot">
+        <button type="button" class="btn ghost cmp-settings-terminal" onClick={openTerminal}>Open Terminal</button>
+        <span class="spacer" />
         <button type="button" class="btn" title="Close without applying changes" onClick={() => models.close()}>Cancel</button>
         <Show when={!native()}><button type="button" class="btn primary" disabled={!models.canApply()} onClick={() => { void models.apply(); }}>{v().applyLabel}</button></Show>
       </div>
@@ -81,6 +76,6 @@ export function ModelSettingsButton() {
       aria-haspopup="dialog" aria-expanded={models.opened()} onClick={() => models.open()}>
       <span class="ell cmp-model-name">{v().shownModel}</span><span class="dim cmp-model-suffix">{v().suffix}</span><Icon name="chevron-down" size={12} />
     </button>
-    <Show when={models.opened()}><SettingsPopover anchor={() => anchor} /></Show>
+    <Show when={models.opened()}><SettingsDialog anchor={() => anchor} /></Show>
   </>}</Show>;
 }

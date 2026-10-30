@@ -4350,7 +4350,23 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
                 "Only you relaunch a member; the lead needs your word, or the owner's setting lead_restarts_stuck for a stuck member (hgs team settings with {{\"lead_restarts_stuck\":true}})"
             );
             let id = member_id;
+            let lead_stuck = team.settings.lead_restarts_stuck && matches!(actor, Actor::Member(lead) if *lead == team.lead);
             let member = team.members.iter_mut().find(|m| m.id == id).context("Unknown member")?;
+            if member.stuck.is_some() && lead_stuck {
+                // U56/N2: the lead's real route for a stuck member: interrupt the
+                // session (the launch stops it) and relaunch it in its folder and
+                // conversation. The session reference stays, the mark goes.
+                member.error.clear();
+                member.launch_id.clear();
+                member.stuck = None;
+                member.seen = None;
+                member.seen_phase.clear();
+                member.seen_activity.clear();
+                member.seen_event_at = None;
+                events.push(Event::new("member_interrupted", json!({"by":"Lead","member":id})));
+                events.push(Event::new("member_relaunched", json!({"by":"Lead","member":id})));
+                return Ok(json!({"status":"relaunched","member":id}));
+            }
             ensure!(member.session.is_none() && !member.error.is_empty(), "This member's session did not fail to start");
             member.error.clear();
             member.launch_id.clear();
@@ -6621,8 +6637,10 @@ mod tests {
         let error = apply(&mut team, "relaunch", &json!({"member":"qa"}), &lead, &none, &mut events).unwrap_err().to_string();
         assert!(error.contains("lead_restarts_stuck"), "{error}");
         team.settings.lead_restarts_stuck = true;
-        let error = apply(&mut team, "relaunch", &json!({"member":"qa"}), &lead, &none, &mut events).unwrap_err().to_string();
-        assert!(error.contains("did not fail to start"), "the gate passes and the session check speaks: {error}");
+        let receipt = apply(&mut team, "relaunch", &json!({"member":"qa"}), &lead, &none, &mut events).unwrap();
+        assert_eq!((receipt["status"].as_str(), receipt["member"].as_str()), (Some("relaunched"), Some("qa")));
+        assert!(team.members.iter().find(|member| member.id == "qa").unwrap().stuck.is_none());
+        assert!(events.iter().any(|event| event.kind == "member_relaunched"));
     }
 
     #[test]

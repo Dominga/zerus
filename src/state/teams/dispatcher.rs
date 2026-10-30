@@ -703,7 +703,14 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     // changes, so status derives `stopped` without a listing of its own (L3).
     for member in &team.members {
         let Some(session) = member.session.as_ref() else { continue };
-        let Some(found) = seen.iter().find(|seen| seen.host == session.host && seen.name == session.name) else { continue };
+        // L4: a member its computer does not list is offline, not stuck: clear a
+        // mark instead of letting it grow.
+        let Some(found) = seen.iter().find(|seen| seen.host == session.host && seen.name == session.name) else {
+            if member.stuck.is_some() {
+                steps.push(Step::Unstuck { member: member.id.clone() });
+            }
+            continue;
+        };
         if member.seen.is_none_or(|recorded| recorded.live != found.live) {
             steps.push(Step::Liveness { member: member.id.clone(), live: found.live });
         }
@@ -719,9 +726,16 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         }
         // U56: the member's phase and activity feed status; a busy member with
         // no session event for stuck_minutes is marked stuck, once per episode.
-        // A question, a Zerus build or Background work is never stuck.
+        // A question, a Zerus build or Background work is never stuck; the lead
+        // is never stuck either (L1).
         if found.live {
-            if member.seen_phase != found.phase || member.seen_activity != found.activity || member.seen_event_at != found.last_event_at {
+            // L3: phase and activity on change, the event time at most once a
+            // minute (status rounds to minutes anyway).
+            let moved = match (member.seen_event_at, found.last_event_at) {
+                (None, None) => false,
+                (old, new) => new.is_none_or(|at| old.is_none_or(|old| (at - old).abs() >= 60.0)),
+            };
+            if member.seen_phase != found.phase || member.seen_activity != found.activity || moved {
                 steps.push(Step::Watch {
                     member: member.id.clone(),
                     phase: found.phase.clone(),
@@ -729,13 +743,39 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                     last_event_at: found.last_event_at,
                 });
             }
+            if member.id == team.lead {
+                continue;
+            }
+            // N1: a dsh listing's last_event_at does not advance with its native
+            // tool events; the open attempt's activity_at counts too (as the
+            // silent check does), and a dsh member is read once before it is
+            // called stuck.
+            let open = team
+                .tasks
+                .iter()
+                .find_map(|task| task.open_attempt().filter(|attempt| attempt.member == member.id).map(|attempt| (task.id, attempt)));
+            let listed = found.last_event_at;
+            let read = open.as_ref().and_then(|(_, attempt)| attempt.activity_at);
+            let last = match (listed, read) {
+                (Some(listed), Some(read)) => Some(listed.max(read)),
+                (listed, read) => listed.or(read),
+            };
             let busy = found.activity == "busy" || matches!(found.phase.as_str(), "working" | "tool" | "compacting");
-            let quiet = found.last_event_at.map(|at| now - at).unwrap_or(0.0);
+            let quiet = last.map(|at| now - at).unwrap_or(0.0);
             let limit = super::ops::stuck_minutes(team) * 60.0;
             let stuck = busy && !found.asking && !found.background && !found.building && quiet >= limit;
             if stuck && member.stuck.is_none() {
                 let reason = if found.phase == "compacting" { "compaction_timeout" } else { "no_progress" };
-                steps.push(Step::MarkStuck { member: member.id.clone(), reason: reason.into(), phase: found.phase.clone() });
+                let checked = open.as_ref().is_some_and(|(_, attempt)| attempt.told_lead.iter().any(|kind| kind == "silent"));
+                if member.agent == "dsh" && !checked {
+                    if let Some((task_id, _)) = open.as_ref() {
+                        steps.push(Step::CheckSilent { task: *task_id, last: listed.unwrap_or(0.0) });
+                    } else {
+                        steps.push(Step::MarkStuck { member: member.id.clone(), reason: reason.into(), phase: found.phase.clone() });
+                    }
+                } else {
+                    steps.push(Step::MarkStuck { member: member.id.clone(), reason: reason.into(), phase: found.phase.clone() });
+                }
             } else if !stuck && member.stuck.is_some() {
                 steps.push(Step::Unstuck { member: member.id.clone() });
             }
@@ -743,10 +783,11 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             steps.push(Step::Unstuck { member: member.id.clone() });
         }
     }
-    // U56: a pending task pinned to a stuck, stopped or offline member says so
-    // in its waits, so the lead sees why it never starts.
+    // U56: a pending task whose member is kept for it (pinned, or every planned
+    // assignee with keep_assignees) and who is stuck, stopped or offline says so
+    // in its waits, so the lead sees why it never starts (N4).
     for task in &team.tasks {
-        if !task.pinned || task.status != TaskStatus::Pending || task.assignee.is_empty() {
+        if task.status != TaskStatus::Pending || task.assignee.is_empty() || !team.keeps_assignee(task) {
             continue;
         }
         if task.waits.as_ref().is_some_and(|wait| wait.waits_for != "member") {
@@ -10106,12 +10147,64 @@ mod tests {
         assert_eq!((wait.waits_for.as_str(), wait.on.clone()), ("member", vec!["dev".to_owned()]));
         let items = super::inbox::items(&saved);
         let item = items.iter().find(|item| item.kind == "task_waits").expect("a waits item");
-        assert!(item.detail.contains("reassign") || item.detail.contains("resume"), "{}", item.detail);
-        assert!(item.command.contains("reassign") || item.command.contains("resume-member"), "{}", item.command);
+        // N3: the stopped session's command is its relaunch, in a whole sentence.
+        assert!(item.detail.contains("Relaunch"), "{}", item.detail);
+        assert!(item.command.contains("relaunch"), "{}", item.command);
         // A task pin to an available member frees the wait.
         run_step(&mut store, &saved, &Step::ReleaseWait { task: task_id }, "").unwrap();
         assert!(store.load(&t.id).unwrap().unwrap().task(task_id).unwrap().waits.is_none());
         assert!(!steps(&t, &[lead, session("codex/x/dev", "r1", true)], at).iter().any(|step| matches!(step, Step::WaitOnMember { .. })));
+        // N4: with keep_assignees a planned (not pinned) assignee is kept too.
+        let mut kept = team();
+        kept.settings.keep_assignees = true;
+        kept.members.iter_mut().find(|member| member.id == "dev").unwrap().stuck =
+            Some(MemberStuck { at: at - 15.0 * 60.0, reason: "no_progress".into(), phase: "tool".into() });
+        {
+            let task = kept.tasks.iter_mut().find(|task| task.assignee == "dev").unwrap();
+            task.status = TaskStatus::Pending;
+            task.pinned = false;
+        }
+        assert!(steps(&kept, &[session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", true)], at)
+            .iter()
+            .any(|step| matches!(step, Step::WaitOnMember { .. })));
+    }
+
+    /// N1: a dsh member's stale listing with a fresh native event in its open
+    /// attempt is not stuck; a stale attempt is read once, then marked.
+    #[test]
+    fn a_dsh_member_with_fresh_native_activity_is_not_stuck() {
+        let at = 10_000.0;
+        let mut t = team();
+        t.members.iter_mut().find(|member| member.id == "dev").unwrap().agent = "dsh".into();
+        let task = t.tasks.iter_mut().find(|task| task.assignee == "dev").unwrap();
+        task.status = TaskStatus::InProgress;
+        task.attempts.push(Attempt {
+            n: 1,
+            id: "a1".into(),
+            member: "dev".into(),
+            state: AttemptState::Delivered,
+            sent_at: 1.0,
+            delivered_at: Some(1.0),
+            activity_at: Some(at - 30.0),
+            ..Default::default()
+        });
+        let mut dev = session("codex/x/dev", "r1", true);
+        dev.agent = "dsh".into();
+        dev.activity = "busy".into();
+        dev.phase = "tool".into();
+        dev.last_event_at = Some(at - 20.0 * 60.0);
+        let lead = session("claude/x/lead", "r0", true);
+        let found = steps(&t, &[lead.clone(), dev.clone()], at);
+        assert!(!found.iter().any(|step| matches!(step, Step::MarkStuck { .. })), "a fresh native event is progress: {found:?}");
+        // The native event is stale too: the member is read once before the mark.
+        t.tasks.iter_mut().find(|task| task.assignee == "dev").unwrap().attempts[0].activity_at = Some(at - 20.0 * 60.0);
+        let found = steps(&t, &[lead.clone(), dev.clone()], at);
+        assert!(found.iter().any(|step| matches!(step, Step::CheckSilent { .. })), "one read first: {found:?}");
+        assert!(!found.iter().any(|step| matches!(step, Step::MarkStuck { .. })), "not before the read: {found:?}");
+        // After the read found nothing new, the mark is made.
+        t.tasks.iter_mut().find(|task| task.assignee == "dev").unwrap().attempts[0].told_lead.push("silent".into());
+        let found = steps(&t, &[lead, dev], at);
+        assert!(found.iter().any(|step| matches!(step, Step::MarkStuck { .. })), "{found:?}");
     }
 
     /// U56: marking a member stuck records it, the feed says so, and the lead's
@@ -10134,7 +10227,7 @@ mod tests {
         let items = super::inbox::items(&saved);
         let item = items.iter().find(|item| item.kind == "member_stuck").expect("a member_stuck item");
         assert!(item.summary.contains("dev (Backend)") && item.summary.contains("phase tool"), "{}", item.summary);
-        assert!(item.command.contains("pause-member"), "{}", item.command);
+        assert!(item.command.contains("settings"), "{}", item.command);
         let feed = store.events(&t.id, None, 20).unwrap().to_string();
         assert!(feed.contains("member_stuck"), "{feed}");
     }

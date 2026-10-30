@@ -686,6 +686,28 @@ impl Grouping {
         self.layout.runs_seeded()
     }
 
+    pub fn presentation_seeded(&self) -> Result<bool, &'static str> {
+        self.layout.presentation_seeded()
+    }
+
+    pub fn seed_presentation(
+        &mut self,
+        seed: super::layout::PresentationSeed,
+    ) -> Result<(), &'static str> {
+        if self.layout.seed_presentation(seed)? {
+            if let Some(default) = self
+                .layout
+                .default_project()
+                .filter(|id| self.listed.contains(*id))
+            {
+                self.default = default.into();
+            }
+            let layout = std::mem::take(&mut self.layout);
+            self.replace_layout(layout);
+        }
+        Ok(())
+    }
+
     /// Merge a seed read on a worker into the current layout, retaining newer
     /// native assignments. Reobserve live rows: implicit assignments made
     /// while the read was pending must remove their old Qt run memory again.

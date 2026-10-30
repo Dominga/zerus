@@ -310,6 +310,36 @@ This is shared project metadata recovery, not G1 evidence publication, a drain
 claim, a marker phase or effect authority. Local presentation families remain
 separate.
 
+## Retained Qt local project presentation
+
+The first-G3 `organization-presentation` family imports only local `collapsed`,
+`order` and `default_project` from the current Qt `workspace/organization`.
+The coordinator's explicit 2026-10-30 exception permits these three fields to
+fill absent or empty/null Next defaults (`[]`, `{}`, `null`): old Next writers
+always serialized those defaults. A nonempty current Next field wins,
+independently of the other two, including changes made during the Qt read.
+Every other family retains strict key-presence precedence. This exception may
+cause one cosmetic change; it never repeats after the family is handled.
+
+The existing production-switch recovery hook queues the read on the existing
+organization worker, even without an organization-topic update. No GUI, hub,
+pump or writer lock spans Qt I/O. The existing QtStore and G3 family metadata
+builder validate the bounded current source and freshly recheck its canonical
+path/raw hash; overlapping source/target, malformed/future/legacy groups or
+pinned shapes and duplicate/oversized identities refuse. Unsupported local
+layout files still pause all layout seeds and writes for that startup.
+
+Values and `g3_organization_presentation` commit together in the existing local
+`organization-layout.json` writer. The record uses the same family/schema/
+source path/time/key names/raw hash/mtime-after-switch shape as Settings G3
+records. Unknown layout extensions survive. A failed read, oversized target or
+failed file commit cannot leave a completed family on disk; the existing writer
+retries pending bytes, and an unhandled family retries at the next startup.
+A handled family skips Qt before reading it, across rollback and a second
+switch. This never seeds `run_groups`, run tokens, shared membership, project
+vivid state or local Windows folders; those retain their existing owners or
+separate unhandled families. No G1 evidence/marker or effect authority is added.
+
 ## Delivery boundary
 
 The shared crate validates no running process and offers no `ReadyForWrites`

@@ -37,6 +37,40 @@ struct FamilyRecord {
     source_mtime_after_switch: Option<bool>,
 }
 
+/// The same bounded metadata for a family committed by another existing
+/// client store. No source body or writer authority is included.
+pub(crate) fn family_metadata(
+    family: &str,
+    store: &QtStore,
+    snapshot: Option<&QtSnapshot>,
+    keys: Vec<String>,
+    seed_at: Option<u64>,
+) -> Result<Value, &'static str> {
+    let record = FamilyRecord {
+        version: VERSION,
+        family: family.into(),
+        schema: 1,
+        source: snapshot.map_or("none", |s| s.source).into(),
+        source_path: store.path().to_string_lossy().into(),
+        at: super::seconds(std::time::SystemTime::now()).unwrap_or(0),
+        keys,
+        sha256: snapshot.map(|s| s.sha256.clone()),
+        source_mtime_after_switch: snapshot
+            .and_then(|s| s.modified_at)
+            .zip(seed_at)
+            .map(|(mtime, seed)| mtime > seed),
+    };
+    if !valid_record(family, &record) {
+        return Err("unsupported G3 family metadata");
+    }
+    Ok(serde_json::to_value(record).unwrap())
+}
+
+pub(crate) fn valid_family_metadata(family: &str, value: &Value) -> bool {
+    serde_json::from_value::<FamilyRecord>(value.clone())
+        .is_ok_and(|record| valid_record(family, &record))
+}
+
 const SHARED_ORGANIZATION: &str = "shared-organization";
 const ORGANIZATION_PENDING: &str = "g3_shared_organization_pending";
 
@@ -112,27 +146,20 @@ pub(super) fn prepare_organization(
     if journal(contents)?.families.len() >= 256 {
         return Err("project import record limit reached");
     }
-    let at = super::seconds(std::time::SystemTime::now()).unwrap_or(0);
     let seed_at = contents.seed.as_ref().and_then(|s| s["at"].as_u64());
     let pending = PendingOrganization {
         version: VERSION,
         node_id: node_id.into(),
-        record: FamilyRecord {
-            version: VERSION,
-            family: SHARED_ORGANIZATION.into(),
-            schema: 1,
-            source: snapshot.map_or("none", |s| s.source).into(),
-            source_path: store.path().to_string_lossy().into(),
-            at,
-            keys: snapshot
+        record: serde_json::from_value(family_metadata(
+            SHARED_ORGANIZATION,
+            store,
+            snapshot,
+            snapshot
                 .filter(|s| s.values.contains_key("workspace/organization"))
                 .map_or_else(Vec::new, |_| vec!["workspace/organization".into()]),
-            sha256: snapshot.map(|s| s.sha256.clone()),
-            source_mtime_after_switch: snapshot
-                .and_then(|s| s.modified_at)
-                .zip(seed_at)
-                .map(|(mtime, seed)| mtime > seed),
-        },
+            seed_at,
+        )?)
+        .unwrap(),
     };
     contents.extra.insert(
         ORGANIZATION_PENDING.into(),

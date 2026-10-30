@@ -105,7 +105,7 @@ fn hierarchy(team: &mut Team, op: &str, input: &Value, actor: &Actor, events: &m
     }
     let sub = input["sub"].as_bool().context("sub is true or false")?;
     if !sub {
-        let reports: Vec<String> = team.reports_of(&id).iter().map(|member| member.role.clone()).collect();
+        let reports: Vec<String> = team.reports_of(&id).iter().map(|member| team.name_of(&member.id)).collect();
         ensure!(reports.is_empty(), "Move its reports to another lead first: {}", reports.join(", "));
     }
     let member = team.members.iter_mut().find(|member| member.id == id).context("Unknown member")?;
@@ -1351,8 +1351,12 @@ fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, of
     // erased. Only a plain draft waits for approval.
     let draft = team.phases.iter().any(|phase| phase.n == n && phase.state.is_draft());
     let accepted = !approve && team.phases.iter().any(|phase| phase.n == n && phase.state.is_accepted());
+    // U56: a phase left with no tasks (they were moved out, U58) holds no work,
+    // so the lead discards it without your word, a draft or an accepted one.
+    let empty = !approve
+        && team.phases.iter().any(|phase| phase.n == n && phase.tasks.is_empty() && (phase.state.is_draft() || phase.state.is_accepted()));
     if !approve {
-        if draft {
+        if draft || empty {
             ensure!(
                 matches!(actor, Actor::Human) || actor.is_lead(team) || parent_approves(team, actor),
                 "Only the lead or you discard a phase"
@@ -1376,9 +1380,8 @@ fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, of
             Some(_) if !approve => format!("Phase {n} cannot be discarded"),
             _ => format!("Phase {n} is not waiting for approval"),
         })?;
-    if accepted {
+    if accepted && !empty {
         let tasks = team.phases[at].tasks.clone();
-        ensure!(!tasks.is_empty(), "Phase {n} is done; a finished phase stays");
         // U57: a phase with no work done may be discarded even while it runs:
         // none of its tasks accepted and none delivered by a task that was not
         // cancelled. Its cancelled tasks do not keep it.
@@ -4371,7 +4374,7 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
             let role = team.role_of(&id);
             if pause {
                 // #630 N7: a paused member's stage goes back to the pool.
-                stall_stages_of(team, &id, &format!("{role} was paused"), events);
+                stall_stages_of(team, &id, &format!("{} was paused", team.name_of(&id)), events);
             }
             events.push(Event::new(if pause { "member_paused" } else { "member_resumed" }, json!({"by":label,"member":role})));
             Ok(json!({"status":if pause {"paused"} else {"resumed"},"member":id}))
@@ -4523,7 +4526,7 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
             );
             let id = text(input, "member").to_owned();
             ensure!(id != team.lead, "The lead cannot be removed");
-            let reports: Vec<String> = team.reports_of(&id).iter().map(|member| member.role.clone()).collect();
+            let reports: Vec<String> = team.reports_of(&id).iter().map(|member| team.name_of(&member.id)).collect();
             ensure!(reports.is_empty(), "Move its reports to another lead first: {}", reports.join(", "));
             // N10: a member whose only open tasks are drafts can still go when
             // the owner names the member that takes them (spec 4).
@@ -4566,7 +4569,7 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
             // U49: a member removed by hand is no longer draining.
             member.draining = false;
             // #630 N7: its stage runs go back to Waiting for a free member.
-            stall_stages_of(team, &id, &format!("{role} was removed"), events);
+            stall_stages_of(team, &id, &format!("{} was removed", team.name_of(&id)), events);
             let by = if input["roster_word"].as_bool() == Some(true) { "Lead on your word" } else { "You" };
             let quote = input["owner_word_checked"]["text"].as_str().unwrap_or_default();
             events.push(Event::new("member_removed", json!({"by":by,"member":role,"owner_word":quote})));
@@ -4583,7 +4586,7 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
             let id = text(input, "member").to_owned();
             ensure!(!id.is_empty(), "drain names the member");
             ensure!(id != team.lead, "The lead cannot be drained");
-            let reports: Vec<String> = team.reports_of(&id).iter().map(|member| member.role.clone()).collect();
+            let reports: Vec<String> = team.reports_of(&id).iter().map(|member| team.name_of(&member.id)).collect();
             ensure!(reports.is_empty(), "Move its reports to another lead first: {}", reports.join(", "));
             // Undo before the drain ends: the same command with `draining: false`.
             let draining = input["draining"].as_bool().unwrap_or(true);
@@ -5164,6 +5167,35 @@ mod tests {
         }
         let error = apply(&mut review, "approve-phase", &json!({"phase":3}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
         assert_eq!(error, "Phase 3 opens after the previous phase is approved");
+    }
+
+    /// U56: a phase whose tasks were all moved out holds no work; the lead
+    /// discards it without your word, a draft or an accepted one.
+    #[test]
+    fn the_lead_discards_an_empty_phase() {
+        let none = BTreeSet::new();
+        let lead = Actor::Member("lead".into());
+        let mut events = Vec::new();
+        let mut team = running_team();
+        extend(&mut team, &json!({"tasks":[{"id":3,"title":"T","assignee":"dev"}]}), &lead, &none, &mut events).unwrap();
+        apply(&mut team, "move-task", &json!({"task":3,"phase":1}), &lead, &none, &mut events).unwrap();
+        assert!(team.phases.iter().any(|phase| phase.n == 2 && phase.state.is_draft() && phase.tasks.is_empty()));
+        let discarded = apply(&mut team, "discard-phase", &json!({"phase":2}), &lead, &none, &mut events).unwrap();
+        assert_eq!((discarded["status"].as_str(), discarded["tasks"].clone()), (Some("phase_discarded"), json!([])));
+        assert!(team.task(3).is_some(), "the moved task stays");
+        // An accepted phase left empty goes the same way.
+        let mut accepted = running_team();
+        extend(&mut accepted, &json!({"tasks":[{"id":3,"title":"T","assignee":"dev"}]}), &lead, &none, &mut events).unwrap();
+        apply(&mut accepted, "approve-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap();
+        apply(&mut accepted, "move-task", &json!({"task":3,"phase":1}), &lead, &none, &mut events).unwrap();
+        apply(&mut accepted, "discard-phase", &json!({"phase":2}), &lead, &none, &mut events).unwrap();
+        assert!(accepted.phases.iter().all(|phase| phase.n != 2));
+        // A phase with a task in it still needs your word.
+        let mut kept = running_team();
+        extend(&mut kept, &json!({"tasks":[{"id":3,"title":"T","assignee":"dev"}]}), &lead, &none, &mut events).unwrap();
+        apply(&mut kept, "approve-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap();
+        let error = apply(&mut kept, "discard-phase", &json!({"phase":2}), &lead, &none, &mut events).unwrap_err().to_string();
+        assert!(error.contains("Only you discard an accepted phase"), "{error}");
     }
 
     #[test]
@@ -5865,9 +5897,9 @@ mod tests {
         assert_eq!(error.to_string(), "The lead reports to nobody");
         // A sub-lead with reports stays one, and is not removed.
         let error = apply(&mut team, "sub-lead", &json!({"member":"qalead","sub":false}), &Actor::Human, &none, &mut events).unwrap_err();
-        assert_eq!(error.to_string(), "Move its reports to another lead first: Tester");
+        assert_eq!(error.to_string(), "Move its reports to another lead first: qa (Tester)");
         let error = apply(&mut team, "remove-member", &json!({"member":"qalead"}), &Actor::Human, &none, &mut events).unwrap_err();
-        assert_eq!(error.to_string(), "Move its reports to another lead first: Tester");
+        assert_eq!(error.to_string(), "Move its reports to another lead first: qa (Tester)");
         // Add member names "Reports to"; an unknown one is refused.
         let error = apply(&mut team, "add-member", &json!({"member":{"id":"x","role":"Fuzzer","agent":"codex","parent":"nobody"}}), &Actor::Human, &none, &mut events)
             .unwrap_err();

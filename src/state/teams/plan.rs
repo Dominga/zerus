@@ -489,7 +489,7 @@ fn health_of(team: &Team, scope: &[Task]) -> Health {
         if health.chain > 1 && load.on_critical_path * 2 > health.chain {
             health.warnings.push(format!(
                 "{} holds {} of the {} critical-path tasks",
-                team.role_of(member),
+                team.name_of(member),
                 load.on_critical_path,
                 health.chain
             ));
@@ -548,7 +548,7 @@ fn health_of(team: &Team, scope: &[Task]) -> Health {
     }
     for (member, count) in suites {
         if count > 2 {
-            health.warnings.push(format!("(18) {} runs the full GUI suites in {count} tasks; batch them", team.role_of(&member)));
+            health.warnings.push(format!("(18) {} runs the full GUI suites in {count} tasks; batch them", team.name_of(&member)));
         }
     }
     health
@@ -828,7 +828,7 @@ pub(crate) fn validate(team: &Team, offline: &BTreeSet<String>) -> Validation {
                 "offline",
                 None,
                 Some(&member.id),
-                format!("{}: {} is offline — its tasks wait until it is back", team.role_of(&member.id), member.computer),
+                format!("{}: {} is offline — its tasks wait until it is back", team.name_of(&member.id), member.computer),
             ));
         }
     }

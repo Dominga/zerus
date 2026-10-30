@@ -10,7 +10,7 @@ copied from its role when it joins. Zerus gives the task to a free member of
 the role whose models allow one, switches model and effort with hgs settings and
 waits for the confirmation; a refused or unconfirmed switch leaves the task
 waiting (retry or reassign), never on the wrong model. A plan naming a role with
-no member is an error.
+no member is an error. keep_assignees (off) pins every planned assignee.
 
 The context before a task (U46): context_before_task on a role (or a member) is
 none (default), compact or clear; before each hand-out, a stage's included,

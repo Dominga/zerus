@@ -104,6 +104,17 @@ mod tests {
         }
     }
 
+    /// U56: the draft page shows seen with its request_id, and the custom page
+    /// names keep_assignees.
+    #[test]
+    fn the_draft_seen_and_keep_assignees_are_documented() {
+        let draft = TOPICS.iter().find(|(name, _)| *name == "team-draft").unwrap().1;
+        let seen = draft.lines().find(|line| line.contains("\"action\":\"seen\"")).expect("a seen example");
+        assert!(seen.contains("\"request_id\":\"UUID\""), "{seen}");
+        let custom = TOPICS.iter().find(|(name, _)| *name == "team-custom").unwrap().1;
+        assert!(custom.contains("keep_assignees (off)"));
+    }
+
     #[test]
     fn topics_and_arguments_are_exact() {
         assert!(dispatch(&[]).is_ok());

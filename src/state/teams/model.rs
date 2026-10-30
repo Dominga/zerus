@@ -168,6 +168,10 @@ pub(crate) struct Settings {
     /// U56: the lead may interrupt or relaunch a stuck member; the owner sets it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub lead_restarts_stuck: bool,
+    /// U56: every task with a planned assignee stays with it, as a pinned
+    /// task does; off by default, so a free same-role member may take it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keep_assignees: bool,
 }
 
 /// U48: the name of a task's branch: `{id}`, `{member}` and `{team8}` are
@@ -257,6 +261,7 @@ impl Default for Settings {
             restart_crashed: false,
             stuck_minutes: 0,
             lead_restarts_stuck: false,
+            keep_assignees: false,
         }
     }
 }
@@ -1869,6 +1874,26 @@ impl Team {
             return "Lead".into();
         }
         self.member(member).map(|m| m.role.clone()).unwrap_or_else(|| member.to_owned())
+    }
+
+    /// U56: how a notice names a member, "b-body (backend-opus)": its id with
+    /// its role, since several members may share a role. The lead whose id is
+    /// "lead" is "Lead"; an unknown or roleless member is its id.
+    pub(crate) fn name_of(&self, member: &str) -> String {
+        let role = self.role_of(member);
+        if member.is_empty() || role.is_empty() || role == member {
+            return if member.is_empty() { role } else { member.to_owned() };
+        }
+        if member == self.lead && member.eq_ignore_ascii_case("lead") {
+            return role;
+        }
+        format!("{member} ({role})")
+    }
+
+    /// U56: a task Zerus never gives to another member of its role: pinned by
+    /// the lead or you, or any planned assignee under `keep_assignees`.
+    pub(crate) fn keeps_assignee(&self, task: &Task) -> bool {
+        task.pinned || (self.settings.keep_assignees && task.role.is_empty() && !task.assignee.is_empty())
     }
 
     /// Spec 5.6: who reviews a member's work - its parent when that is a

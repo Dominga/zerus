@@ -267,8 +267,8 @@ pub(crate) fn stalled(team: &Team, at: f64) -> Vec<(u32, String, String)> {
             }
             let member = team.member(&run.member);
             let reason = match member.map(|member| member.state) {
-                Some(MemberState::Removed) => format!("{} was removed", team.role_of(&run.member)),
-                Some(MemberState::Paused) => format!("{} was paused", team.role_of(&run.member)),
+                Some(MemberState::Removed) => format!("{} was removed", team.name_of(&run.member)),
+                Some(MemberState::Paused) => format!("{} was paused", team.name_of(&run.member)),
                 _ if run.unconfirmed && at - run.delivered_at.unwrap_or(run.at) >= STAGE_UNCONFIRMED_GRACE => {
                     "the stage hand-off was not confirmed".to_owned()
                 }
@@ -483,7 +483,7 @@ pub(crate) fn run_folder(team: &Team, member: &str, attempt: &str, template: &st
 pub(crate) fn hand_off_text(team: &Team, task: &Task, run: &StageRun, prepared: &Prepared, report_host: &str) -> String {
     let pipeline = task.pipeline_run.as_ref();
     let max_rounds = pipeline.map(|run| run.max_rounds).unwrap_or_default();
-    let implementer = checked_attempt(task, run).map(|attempt| team.role_of(&attempt.member)).unwrap_or_default();
+    let implementer = checked_attempt(task, run).map(|attempt| team.name_of(&attempt.member)).unwrap_or_default();
     let mut text = format!(
         "[Zerus team \u{b7} from: Zerus \u{b7} task: #{} \u{b7} {} stage \u{b7} round {} of {max_rounds}]\nTeam: {}. Your role: {}.\n",
         task.id,
@@ -731,7 +731,7 @@ mod tests {
             let text = hand_off_text(&team, task, &run_of(&team, &review), &prepared, "");
             assert!(text.contains(&format!("Folder: {} (the task's own folder", worktree.display())), "{text}");
             assert!(text.contains(&format!("- commit {} (2 files)", &sha[..12])), "{text}");
-            assert!(text.contains("Acceptance criteria:\n- Paged") && text.contains("Backend's report:\nDone: two() added"), "{text}");
+            assert!(text.contains("Acceptance criteria:\n- Paged") && text.contains("dev (Backend)'s report:\nDone: two() added"), "{text}");
             assert!(text.contains(&format!("\"attempt\":\"{review}\"")) && text.contains("Read only: a review runs no command"), "{text}");
             // #538 N5: the test stage ahead holds the folder from the report,
             // so the implementer's next task waits during the review.

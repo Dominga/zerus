@@ -88,11 +88,13 @@ fn team_items(team: &Team, now: f64, out: &mut Vec<Value>) {
                 let task = attention["task"].as_u64().unwrap_or_default();
                 let title = team.task(task as u32).map(|task| task.title.clone()).unwrap_or_default();
                 let member = attention["member"].as_str().unwrap_or_default();
+                // U56: the summary names the member by id with its role.
+                let named = attention["member_id"].as_str().map(|id| team.name_of(id)).unwrap_or_else(|| member.to_owned());
                 let mut found = item(
                     team,
                     "report_escalated",
                     &task.to_string(),
-                    format!("Report on #{task} {title} from {member} waits for your decision"),
+                    format!("Report on #{task} {title} from {named} waits for your decision"),
                     at,
                     "decide_report",
                 );

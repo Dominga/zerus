@@ -31,6 +31,8 @@ mod drafts;
 pub use drafts::draft_checkpoint;
 mod preferences;
 pub use preferences::qt_retained_view_preference;
+mod startup;
+pub use startup::tray_config;
 
 #[derive(Clone, Copy)]
 pub enum Origin {

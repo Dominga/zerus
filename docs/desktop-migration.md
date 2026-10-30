@@ -444,6 +444,27 @@ unsupported variants, nesting, non-finite numbers and oversized data remain in
 the original source without a final family record. Attach the existing source
 reader's fresh identity/hash recheck. This is retained Staged evidence only.
 
+`tray_config(bytes)` retains the actual configured `tray.conf` through the
+existing `menubar::tray_conf_value` parser. One `tray-config` family, schema 1,
+format `tray-conf-v1`, records the exact original byte hash; the shared file
+does not become separate Qt/Next copies. The caller pins its actual configured
+path (including an override) with the existing reader, and freshly rechecks
+file identity/hash after G1's current drain.
+
+The private body is `{kind:"tray-config",text,parsed}`. `text` preserves the
+exact UTF-8 comments, line endings, duplicate assignments, unknown keys and
+malformed lines. `parsed` contains only present `hgs`, `local-poll`,
+`peer-poll`, `terminal`, `icon-color` and `open-mode` strings, with the existing
+last-assignment-wins behavior. Explicit empty values differ from absent keys;
+no defaults or semantic validity are inferred. Missing files are not invented
+as empty input. Invalid UTF-8 or input beyond 64 KiB refuses; the private body
+also keeps the 1 MiB cap. Source changes prevent a final manifest.
+
+This is Staged source evidence only: it does not execute text, replace the
+selected CLI/configuration, alter polling/terminal/service definitions, seed
+preferences or start anything. Existing runtime fallback behavior is unchanged;
+discovery and G1's authenticated drain/producer boundary remain separate.
+
 `approval_policies(&QtSnapshot, next_settings_bytes)` inspects both policy
 stores before returning either `qt-approval-policy` or `next-approval-policy`
 stream. It reuses the existing Qt flag conversion and bounded Next settings

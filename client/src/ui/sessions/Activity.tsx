@@ -722,8 +722,8 @@ export function ActivityView(props: { source?: ActivitySource }) {
             </div>
           </Show>
           <Show when={preview()}>{(p) => <section class="search-preview" aria-label="Search result">
-            <div class="search-preview-header"><span>Search result / {p().hit.role === "user" ? "You" : p().hit.role === "tool" ? "Tool" : "Agent"}</span><button class="btn small" onClick={clearSearchPreview}>Return to activity</button></div>
-            <Show when={p().hit.content_truncated}><div class="hint">This match is an excerpt of a longer message.</div></Show>
+            <div class="act-label eyebrow">SEARCH RESULT — Saved message</div>
+            <Show when={p().hit.content_truncated}><div class="hint">Excerpt around the match. This message is too long to display in full.</div></Show>
             <div class="search-preview-body"><SearchHighlight text={String(p().hit.event.detail ?? "")} query={p().query} /></div>
           </section>}</Show>
           <Show when={!preview()}>

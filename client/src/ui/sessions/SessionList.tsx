@@ -499,7 +499,7 @@ export function SessionList() {
           <button class="icon-btn hd" data-tip="Session and machine actions" onClick={(e) => openMenu(e, batchMenu())}><Icon name="more" size={18} /></button>
         </header>
         <div class="sp-search">
-          <input class="field" type="search" maxLength={256} placeholder={stateFilter() === "archived" ? "Search archive contents and IDs…" : "Search sessions, contents and IDs…"} value={search()}
+          <input class="field" type="search" maxLength={256} placeholder={stateFilter() === "archived" ? "Search archive names and IDs…" : "Search sessions, IDs and messages…"} value={search()}
             onInput={(e) => setSearch(e.currentTarget.value)} onFocus={() => setSearchFocused(true)} onBlur={() => setSearchFocused(false)}
             onKeyDown={(e) => {
               if (e.key === "Escape") setSearch("");

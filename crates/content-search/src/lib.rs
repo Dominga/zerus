@@ -403,13 +403,47 @@ impl Index {
     /// Literal Unicode case-insensitive substring search, matching the existing
     /// regex contract. A page visits <=128 postings regardless of selectivity;
     /// an empty page with a cursor is incomplete, never proof of no matches.
-    pub fn query(&self, query: &str, limit: usize, cursor: Option<&str>) -> Result<Page> {
+    pub fn start_cursor(&self, query: &str, limit: usize) -> Result<String> {
         let query = query.trim();
         printable(query, 1024, false)?;
         ensure!(
             (2..=256).contains(&query.chars().count()) && (1..=200).contains(&limit),
             "invalid indexed search query or limit"
         );
+        let cursor = Cursor {
+            version: 1,
+            database: self.identity.clone(),
+            query: hash(&serde_json::to_vec(&(query, limit))?),
+            upper: self
+                .db
+                .query_row("SELECT COALESCE(MAX(id),0) FROM messages", [], |r| r.get(0))?,
+            at: f64::MAX,
+            id: i64::MAX,
+        };
+        Ok(URL_SAFE_NO_PAD.encode(serde_json::to_vec(&cursor)?))
+    }
+
+    pub fn query(&self, query: &str, limit: usize, cursor: Option<&str>) -> Result<Page> {
+        self.query_part(query, limit, limit, cursor)
+    }
+
+    /// Consume a smaller part of a fixed-size cursor page. Adapters can verify
+    /// one result at a time and stop before exhausting their source-proof budget
+    /// without advancing past an unverified hit or changing cursor identity.
+    pub fn query_part(
+        &self,
+        query: &str,
+        limit: usize,
+        take: usize,
+        cursor: Option<&str>,
+    ) -> Result<Page> {
+        let query = query.trim();
+        printable(query, 1024, false)?;
+        ensure!(
+            (2..=256).contains(&query.chars().count()) && (1..=200).contains(&limit),
+            "invalid indexed search query or limit"
+        );
+        ensure!((1..=limit).contains(&take), "invalid partial query limit");
         let fingerprint = hash(&serde_json::to_vec(&(query, limit))?);
         let mut position = match cursor {
             Some(cursor) => {
@@ -450,7 +484,7 @@ impl Index {
         let mut bytes = 0;
         let mut more = false;
         while let Some(row) = rows.next()? {
-            if candidates == CANDIDATES || hits.len() == limit {
+            if candidates == CANDIDATES || hits.len() == take {
                 more = true;
                 break;
             }

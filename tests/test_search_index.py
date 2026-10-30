@@ -27,7 +27,8 @@ class SearchIndex(unittest.TestCase):
                         HGS_CONFIG_DIR=str(self.root / "config"), HGS_SELF="fixture", HGS_PEERS="")
 
     def invoke(self, flag, request=None, check=True):
-        result = subprocess.run([str(HGS), "__state", "search", flag], env=self.env,
+        flags = flag if isinstance(flag, list) else [flag]
+        result = subprocess.run([str(HGS), "__state", "search", *flags], env=self.env,
                                 input=json.dumps(request) if request is not None else "",
                                 text=True, capture_output=True, timeout=5)
         if check:
@@ -90,6 +91,69 @@ class SearchIndex(unittest.TestCase):
         self.assertLessEqual(progress["ingestion"]["bytes"], 4 << 20)
         self.assertEqual(reply["status"]["catalog"]["fallback_sources"], 1)
         self.assertNotEqual(reply["status"]["coverage"]["state"], "ready")
+
+    def indexed(self, query="needle", limit=2, cursor=None, check=True):
+        args = ["--indexed", "--query", query, "--limit", str(limit)]
+        if cursor is not None:
+            args += ["--cursor", cursor]
+        return self.invoke(args, check=check)
+
+    def archive_fixture(self):
+        identity, binding, transcript = self.fixture()
+        record = json.loads(binding.read_text())
+        archive_id = str(uuid.uuid4())
+        record.update(archive_id=archive_id, archived_at=42)
+        archives = self.state / "archives"
+        archives.mkdir()
+        archived = archives / (archive_id + ".json")
+        archived.write_text(json.dumps(record))
+        binding.unlink()
+        return identity, archived, transcript
+
+    def test_indexed_archive_pages_use_exact_targets_and_reject_mismatched_cursors(self):
+        identity, archived, transcript = self.archive_fixture()
+        events = [dict(type="event_msg", timestamp=i, payload=dict(type="agent_message",
+                  id="message-" + str(i), message="needle response " + str(i))) for i in range(1, 5)]
+        transcript.write_text("".join(json.dumps(event) + "\n" for event in events))
+        reply = self.indexed()
+        self.assertEqual(reply["abi"], "content-search-query-v1")
+        self.assertEqual(reply["index_coverage"]["state"], "ready")
+        self.assertIsNone(reply["fallback"])
+        self.assertEqual([r["message_id"] for r in reply["results"]], ["message-4", "message-3"])
+        target = reply["results"][0]
+        self.assertEqual(target["run_id"], identity["run_id"])
+        self.assertEqual(target["session"]["archive_id"], archived.stem)
+        second = self.indexed(cursor=reply["next_cursor"])
+        self.assertEqual([r["message_id"] for r in second["results"]], ["message-2", "message-1"])
+        self.assertIsNone(second["next_cursor"])
+        self.assertNotEqual(self.indexed(query="other", cursor=reply["next_cursor"], check=False).returncode, 0)
+        # A forgotten target cannot leak through a continuation between passes.
+        archived.unlink()
+        forgotten = self.indexed(cursor=reply["next_cursor"])
+        self.assertEqual(forgotten["results"], [])
+
+    def test_indexed_live_queries_keep_the_current_bounded_scan_and_new_messages(self):
+        _, _, transcript = self.fixture()
+        first = self.indexed()
+        self.assertEqual(first["results"], [])
+        self.assertIsNotNone(first["fallback"])
+        self.assertEqual(first["fallback"]["results"][0]["message_id"], "public-one")
+        with transcript.open("a") as stream:
+            stream.write(json.dumps(dict(type="event_msg", timestamp=43,
+                         payload=dict(type="agent_message", id="new-turn", message="needle new turn"))) + "\n")
+        second = self.indexed()
+        self.assertEqual(second["fallback"]["results"][0]["message_id"], "new-turn")
+
+    @unittest.skipIf(os.name == "nt", "Unix private file permissions")
+    def test_an_unsafe_copied_index_is_refused_and_uses_legacy_fallback(self):
+        self.fixture()
+        self.invoke("--index-catchup")
+        index = self.state / "content-search-v1" / "index.sqlite3"
+        index.chmod(0o644)
+        reply = self.indexed()
+        self.assertEqual(reply["index_coverage"]["state"], "unavailable")
+        self.assertEqual(reply["fallback"]["results"][0]["message_id"], "public-one")
+        self.assertEqual(index.stat().st_mode & 0o777, 0o644)
 
     def test_discovery_queues_paths_without_reading_or_claiming_indexed_content(self):
         _, binding, _ = self.fixture()

@@ -102,6 +102,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] settings <session> --json model and effort for this session (JSON stdin)
        hgs [@host] recovery get | set | action   automatic recovery policy (JSON stdin for writes)
        hgs [@host] search --query <text> [--limit N]   search saved session contents
+       hgs [@host] search --indexed --query <text> [--limit 1..100] [--cursor C]   content-search-query-v1
        hgs [@host] search --index-status | --index-step | --index-discover | --index-catchup   bounded index diagnostics (JSON stdin for step)
        hgs [@host] schedules <session> [--json]   native DeepSeek Schedule tasks (JSON stdin changes)
        hgs machine ls | set <alias> --json <profile> | remove <alias> | reset <alias>

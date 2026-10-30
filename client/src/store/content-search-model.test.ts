@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createContentSearch, identityMatches, metadataMatches, SEARCH_HITS, SEARCH_HOSTS, type SearchHit, type SearchReply } from "./content-search-model";
+import { createContentSearch, identityMatches, metadataMatches, mergeSessionMatch, searchCount, SEARCH_HITS, SEARCH_HOSTS, type SearchHit, type SearchReply } from "./content-search-model";
 import type { Session } from "../ui/sessions/types";
 
 const host = (n: number, online = true) => ({ computer: `host-${n}`, machine: `machine-${n}`, online });
@@ -47,7 +47,7 @@ describe("bounded public-content search", () => {
   it("caps retained excerpts and computers and explicitly reports partial or unavailable history", async () => {
     const f = fixture(); const hosts = Array.from({ length: SEARCH_HOSTS + 2 }, (_, n) => host(n, n !== 0));
     f.search.configure("needle", hosts, true); await vi.advanceTimersByTimeAsync(350);
-    expect(f.search.errors()[0]).toContain("Machine offline; contents unavailable"); expect(f.search.limited()).toBe(true);
+    expect(f.search.errors()[0]).toContain("machine offline; contents unavailable"); expect(f.search.limited()).toBe(true);
     for (let n = 0; n < 4; n++) f.answer(n, Array.from({ length: 100 }, (_, i) => hit(`${n}-${i}`)), { truncated: true, unavailable_sessions: 2 });
     await tick(); expect(f.search.hits()).toHaveLength(SEARCH_HITS); expect(f.search.unavailable()).toBe(8);
     f.search.dispose();
@@ -59,4 +59,26 @@ describe("bounded public-content search", () => {
     f.search.configure("needle", [host(0)], true); await vi.advanceTimersByTimeAsync(350); expect(f.calls).toHaveLength(2);
     f.search.dispose();
   });
+});
+
+it("shows mixed cold coverage inline and keeps fresh results available", async () => {
+  const f = fixture(); f.search.configure("needle", [host(0)], true); await vi.advanceTimersByTimeAsync(350);
+  f.answer(0, [hit("fresh")], { contents_unavailable: true }); await tick();
+  expect(f.search.hits()).toHaveLength(1);
+  expect(f.search.errors()).toEqual(["machine-0: contents unavailable"]);
+  f.search.dispose();
+});
+it("keeps one session row and its position while metadata and matching messages arrive", () => {
+  const session = { key: "one", name: "example" } as Session;
+  const items: { id: string; session: Session; found?: { computer: string; machine: string; hit: SearchHit } }[] = [];
+  const positions = new Map<string, number>();
+  const found = (id: string, at: number) => ({ computer: "", machine: "example", hit: { ...hit(id), at } });
+  mergeSessionMatch(items, positions, { id: "stable", session }, 2);
+  mergeSessionMatch(items, positions, { id: "other", session: { ...session, key: "two" } }, 2);
+  mergeSessionMatch(items, positions, { id: "message", session, found: found("new", 20) }, 2);
+  mergeSessionMatch(items, positions, { id: "late-page", session, found: found("old", 10) }, 2);
+  expect(items.map((row) => row.id)).toEqual(["stable", "other"]);
+  expect(items[0].found?.hit.message_id).toBe("new");
+  expect(mergeSessionMatch(items, positions, { id: "overflow", session: { ...session, key: "three" } }, 2)).toBe(false);
+  expect(searchCount(1, 1)).toBe("1 message, 1 session"); expect(searchCount(2, 2)).toBe("2 messages, 2 sessions");
 });

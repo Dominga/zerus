@@ -116,6 +116,40 @@ fn cursor_is_query_limit_database_and_snapshot_bound() {
 }
 
 #[test]
+fn a_partial_page_keeps_one_cursor_identity_and_does_not_skip_unconsumed_hits() {
+    let mut index = index();
+    let key = index.register(&target("one", false)).unwrap();
+    fill(&mut index, &key, 1, 6, "needle");
+    let start = index.start_cursor("needle", 4).unwrap();
+    let first = index.query_part("needle", 4, 1, Some(&start)).unwrap();
+    assert_eq!(first.hits[0].message.id, "message-6");
+    let second = index
+        .query_part("needle", 4, 2, first.next_cursor.as_deref())
+        .unwrap();
+    assert_eq!(
+        second
+            .hits
+            .iter()
+            .map(|h| h.message.id.as_str())
+            .collect::<Vec<_>>(),
+        ["message-5", "message-4"]
+    );
+    let third = index
+        .query_part("needle", 4, 3, second.next_cursor.as_deref())
+        .unwrap();
+    assert_eq!(
+        third
+            .hits
+            .iter()
+            .map(|h| h.message.id.as_str())
+            .collect::<Vec<_>>(),
+        ["message-3", "message-2", "message-1"]
+    );
+    assert!(third.next_cursor.is_none());
+    assert!(index.query_part("needle", 4, 0, Some(&start)).is_err());
+}
+
+#[test]
 fn common_grams_and_hidden_rows_cannot_scan_beyond_a_page() {
     let mut index = index();
     let key = index.register(&target("one", false)).unwrap();

@@ -13,6 +13,8 @@ use std::{
 };
 use zerus_content_search::{Index, Message, Role, Target, DEFAULT_FILE_BYTES, DOCUMENT_BYTES};
 mod catalog;
+mod query;
+pub(super) use query::read as indexed;
 pub(crate) use catalog::{DiscoveryBudget, DiscoveryProgress};
 
 const ABI: &str = "content-search-index-v1";

@@ -1,8 +1,9 @@
 # Public-content index component
 
 This crate is the storage/query slice of `zerus-5wmh.66.2.2.1`. It creates no
-worker or service. Qt and Next continue to use the existing bounded search until
-catalog discovery and indexed result publication are delivered.
+worker or service. Qt keeps its existing search contract. Next probes for the
+additive indexed-query capability and retains the existing bounded scan when
+coverage needs it.
 
 The root CLI now provides explicit on-demand ingestion diagnostics:
 `hgs search --index-status` reports coverage without creating an absent index;
@@ -18,7 +19,7 @@ coverage state for unsupported native histories or over-limit text. A step has
 32 source-file opens, 128 records, 4 MiB and a 250 ms monotonic deadline; it
 starts no continuation after return. The CLI lowers only its own CPU/I/O
 priority. The exported step accepts cancellation and explicit bounded budgets
-for a later G1 owner. There is no advertised indexed-query capability yet.
+for a later G1 owner.
 
 `hgs search --index-discover` stages candidate filenames and file stamps in the
 same capped database, without reading binding bodies or transcripts. The
@@ -38,16 +39,39 @@ against the source-file/byte budget. A completed catalog pass also prunes at
 most 16 vanished paths; retirement excludes their text before bounded secure
 cleanup. Constant counters distinguish pending paths from sources that still
 need the legacy search (live, unsupported, invalid, evicted or incomplete).
-Live histories retain the fresh legacy read even after cache ingestion. Indexed
-query publication and client selection follow separately.
+Live histories retain the fresh legacy read even after cache ingestion.
+
+`hgs search --indexed --query TEXT --limit 1..100 [--cursor CURSOR]` advertises
+`content-search-query-v1` in help. It publishes at most 100 freshly verified
+archive hits and 2 MiB per page, with a separate `next_cursor`, `index_coverage`
+and optional `fallback` legacy reply. Each first page performs at most one
+bounded discovery/catch-up call; continuations schedule no indexing. Publication
+visits at most 512 posting candidates with a 500 ms deadline, 128 source opens
+and 8 MiB of metadata/fingerprints. Every distinct returned target needs a fresh
+exact binding and transcript-identity/fingerprint proof. Forgotten or changed
+sources retire before any hit is exposed. If proof or output budgets run out,
+the cursor stays before the unconsumed hit.
+
+Cold, incomplete, live or unsupported coverage retains the existing bounded
+scan in a separate fallback channel. Fallback payloads are capped at 5 MiB
+with explicit truncation, so the whole response stays below Next's 8 MiB child
+output limit. The cursor advances only through index hits, never fallback hits.
+Next validates both channels separately, deduplicates exact run/conversation/
+archive/message identities with the fresh fallback copy preferred, and retains
+its existing 100-hit host bound. The UI keeps one stable row per session and
+names unavailable computers inline, including cold index coverage.
+An unsafe or unavailable cache fails back to the existing search on the first
+page. A stale/mismatched cursor requires a new query. No new UI is introduced.
+Live/native queries still use legacy history reads; extending fresh indexed
+coverage to those sources remains a separate adapter/invalidation step.
 
 The adapter refuses copied/restored loose directory, database or auxiliary-file
 permissions and links. New index directories are 0700, database and rollback
 journal files 0600. Configuration identity prevents reusing a copied index
 under another state root. A bounded source sweep retires forgotten targets
 without needing them to appear in the next request, and a persistent purge queue
-drains secure payload cleanup. Indexed UI activation must still revalidate the
-target immediately before publication; that integration follows separately.
+drains secure payload cleanup. Indexed publication revalidates the exact target immediately before returning
+a hit; the index never authorizes a session action.
 
 The caller owns a private, disposable database in the selected configuration's
 state directory, with directory mode 0700 and file mode 0600 (owner ACL on

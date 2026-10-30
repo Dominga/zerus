@@ -8,7 +8,7 @@ import { defaultProject, groups } from "./organization";
 import { bindSearchRow, machineFilter, matchesFilter, page, projectFilter, search, selectedKey, setDetailTab, setSelectedKey, setSubagentOpen, stateFilter } from "./ui";
 import { pageHidden } from "./visibility";
 import { notify, bindSearchActionRow } from "./actions";
-import { createContentSearch, identityMatches, metadataMatches, SEARCH_ROWS, type FoundHit, type SearchReply } from "./content-search-model";
+import { createContentSearch, identityMatches, metadataMatches, mergeSessionMatch, searchCount, SEARCH_ROWS, type FoundHit, type SearchReply } from "./content-search-model";
 import { clearSearchPreview, setSearchPreview } from "./searchSelection";
 import type { Session } from "../ui/sessions/types";
 
@@ -36,8 +36,10 @@ export const { contentSearch, searchItems, searchStatus, activateSearchItem } = 
     && (!projectFilter().length || projectFilter().includes(group))
     && (stateFilter() !== "archived" || archive.includes((row as { archivedAt?: number }).archivedAt ?? 0));
   const built = createMemo(() => {
-    const items: SearchItem[] = []; let limited = false;
-    const append = (item: Omit<SearchItem, "run" | "conversation">) => { if (items.length < SEARCH_ROWS) items.push({ ...item, run: item.session.runId ?? "", conversation: item.session.conversationId ?? "" }); else limited = true; };
+    const items: SearchItem[] = [], positions = new Map<string, number>(); let limited = false;
+    const append = (item: Omit<SearchItem, "run" | "conversation">) => {
+      if (!mergeSessionMatch(items, positions, { ...item, id: `session:${item.session.key}`, run: item.session.runId ?? "", conversation: item.session.conversationId ?? "" }, SEARCH_ROWS)) limited = true;
+    };
     const query = search().trim(); if (!query) return { items, limited };
     const metadata = stateFilter() === "archived" ? archive.rows() : orderedRows();
     for (const row of metadata) {
@@ -55,10 +57,10 @@ export const { contentSearch, searchItems, searchStatus, activateSearchItem } = 
   const searchItems = () => built().items;
   const searchStatus = createMemo(() => {
     const items = searchItems();
-    let text = [...search().trim()].length < 2 ? "Type 2+ characters to search message contents" : `${items.filter((item) => item.found).length} messages, ${new Set(items.map((item) => item.session.key)).size} sessions`;
+    let text = [...search().trim()].length < 2 ? "Type 2+ characters to search message contents" : searchCount(items.filter((item) => item.found).length, items.length);
     if (contentSearch.busy()) text += " — Searching…";
     if (contentSearch.limited() || built().limited) text += " — Limited history searched";
-    if (contentSearch.errors().length || contentSearch.unavailable()) text += " — Some history unavailable";
+    if (contentSearch.errors().length) text += ` — ${contentSearch.errors().join("; ")}`;
     return text;
   });
   function activateSearchItem(item: SearchItem) {

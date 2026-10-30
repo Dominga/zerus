@@ -1,3 +1,4 @@
+#include "Settings.h"
 #include "HgsClient.h"
 #include <QtMath>
 #include "DownloadCache.h"
@@ -1648,8 +1649,7 @@ void saveWorktreeSnapshots(QJsonObject snapshots)
     while(snapshots.size()>64||QJsonDocument(snapshots).toJson(QJsonDocument::Compact).size()>WorktreeSnapshotsLimit){QString oldest;double time=std::numeric_limits<double>::max();for(auto i=snapshots.begin();i!=snapshots.end();++i)if(i.value().toObject()["sampled_at"].toDouble()<time){oldest=i.key();time=i.value().toObject()["sampled_at"].toDouble();}snapshots.remove(oldest);}
     const QJsonDocument document(snapshots);
     const auto bytes=document.toJson(QJsonDocument::Compact);
-    QSettings().setValue(WorktreeSnapshotsKey,bytes);
-    SettingsJson::remember(WorktreeSnapshotsKey,bytes,document);
+    SettingsJson::store(WorktreeSnapshotsKey,bytes,document);
 }
 QString worktreeCacheKey(const QString &executable,const QString &host,const QString &path) {
     return QString::fromLatin1(QCryptographicHash::hash((executable+'\n'+host+'\n'+path).toUtf8(),QCryptographicHash::Sha256).toHex());

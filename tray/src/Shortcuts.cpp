@@ -1,3 +1,4 @@
+#include "Settings.h"
 #include "Shortcuts.h"
 #include <QAction>
 #include <QApplication>
@@ -237,24 +238,23 @@ void ShortcutRegistry::setKeys(const QString &id, const QList<QKeySequence> &key
     QStringList chords;
     for (const auto &key : keys)
         if (!key.isEmpty()) chords.append(key.toString(QKeySequence::PortableText));
-    QSettings settings;
     QStringList defaults;
     for (const auto &key : Shortcuts::defaults(id, m_platform)) defaults.append(key.toString(QKeySequence::PortableText));
     // Defaults are stored as an absence, so they follow future default changes.
-    if (chords == defaults) settings.remove(settingsKey(id));
-    else settings.setValue(settingsKey(id), chords);
+    if (chords == defaults) Settings::remove(settingsKey(id));
+    else Settings::set(settingsKey(id), chords);
     emit changed();
 }
 
 void ShortcutRegistry::reset(const QString &id)
 {
-    QSettings().remove(settingsKey(id));
+    Settings::remove(settingsKey(id));
     emit changed();
 }
 
 void ShortcutRegistry::resetAll()
 {
-    QSettings().remove(QStringLiteral("shortcuts"));
+    Settings::remove(QStringLiteral("shortcuts"));
     emit changed();
 }
 

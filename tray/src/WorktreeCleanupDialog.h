@@ -1,4 +1,5 @@
 #pragma once
+#include "Settings.h"
 #include "HgsClient.h"
 #include "WorktreeReviewUi.h"
 #include <QCheckBox>
@@ -46,7 +47,7 @@ public:
         connect(m_close,&QPushButton::clicked,this,&QDialog::reject);
         connect(m_review,&QPushButton::clicked,this,[this]{m_results.clear();review();});
         connect(m_remove,&QPushButton::clicked,this,[this]{confirm();});
-        connect(m_branches,&QCheckBox::toggled,this,[this](bool on){QSettings().setValue("workspace/worktreeCleanupDeleteBranches",on);});
+        connect(m_branches,&QCheckBox::toggled,this,[this](bool on){Settings::set("workspace/worktreeCleanupDeleteBranches",on);});
         connect(m_list,&QTreeWidget::itemChanged,this,[this]{updateActions();});
         connect(m_list,&QTreeWidget::currentItemChanged,this,[this]{showDetails();});
         connect(m_client,&HgsClient::worktreeReviewReady,this,[this](quint64 request,const QString &,const QString &,const QJsonObject &data){

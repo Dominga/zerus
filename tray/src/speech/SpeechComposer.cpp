@@ -1,3 +1,4 @@
+#include "Settings.h"
 #include "SpeechComposer.h"
 #include "SpeechClient.h"
 #include "SpeechRecorder.h"
@@ -93,7 +94,7 @@ SpeechComposer::SpeechComposer(const QString &executable, MessageComposer *compo
     connect(m_voice,&QPushButton::clicked,this,[this]{if(m_state==State::Recording)requestSendRecording();else start();});
     connect(m_mode,&QPushButton::clicked,this,[this]{
         if(m_loading || m_state!=State::Idle)return;
-        m_videoMode=!m_videoMode;QSettings().setValue("speech/video_mode",m_videoMode);update();
+        m_videoMode=!m_videoMode;Settings::set("speech/video_mode",m_videoMode);update();
     });
     connect(m_cancel,&QPushButton::clicked,this,&SpeechComposer::discard);
     connect(m_result,&QPushButton::clicked,this,&SpeechComposer::showResult);
@@ -104,7 +105,7 @@ SpeechComposer::SpeechComposer(const QString &executable, MessageComposer *compo
     connect(m_provider,&QComboBox::currentIndexChanged,this,[this]{
         if(m_syncing || !m_rejection.isEmpty())return;
         const auto profile=m_provider->currentData().toJsonObject();
-        if(!profile.isEmpty()){m_selectedProfile=profile;m_profileBound=true;m_profileError.clear();QSettings s;s.setValue("speech/machine_id",profile.value("machine_id").toString());s.setValue("speech/profile",profile.value("profile_id").toString());s.setValue("speech/profile_revision",profile.value("profile_revision").toVariant());saveProfileSelection();}
+        if(!profile.isEmpty()){m_selectedProfile=profile;m_profileBound=true;m_profileError.clear();Settings::set("speech/machine_id",profile.value("machine_id").toString());Settings::set("speech/profile",profile.value("profile_id").toString());Settings::set("speech/profile_revision",profile.value("profile_revision").toVariant());saveProfileSelection();}
         update();
     });
     connect(composer,&MessageComposer::controlsChanged,this,[this]{syncTarget();update();});
@@ -319,8 +320,7 @@ void SpeechComposer::send() {
         m_attemptedRejectionGeneration=m_rejection.value("generation").toInteger();
     }
     m_operationId=payload.value("request_id").toString();
-    QSettings settings;
-    settings.setValue("speech/machine_id",chosen.value("machine_id").toString());settings.setValue("speech/profile",chosen.value("profile_id").toString());settings.setValue("speech/profile_revision",chosen.value("profile_revision").toVariant());
+    Settings::set("speech/machine_id",chosen.value("machine_id").toString());Settings::set("speech/profile",chosen.value("profile_id").toString());Settings::set("speech/profile_revision",chosen.value("profile_revision").toVariant());
     payload["audio"]=QJsonObject{{"format","pcm_s16le"},{"sample_rate",16000},{"channels",1},{"data_base64",QString::fromLatin1(m_pcm.toBase64())}};
     const auto target=m_target;const auto key=storageKey();
     const auto video=m_video;const auto videoMeta=m_videoMeta;

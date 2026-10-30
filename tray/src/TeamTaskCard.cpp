@@ -1,3 +1,4 @@
+#include "Settings.h"
 #include "TeamTaskCard.h"
 #include "TeamStages.h"
 #include "TeamWidgets.h"
@@ -270,7 +271,7 @@ void TeamTaskCard::rebuild()
         auto *summary = permissionToggle(it->permissions, c, open, "teamTaskPermissionsToggle");
         summary->setProperty("attempt", it->n);
         QObject::connect(summary, &QToolButton::clicked, this, [this, key](bool expanded) {
-            QSettings().setValue(key, expanded);
+            Settings::set(key, expanded);
             rebuild();
         });
         v->addWidget(summary, 0, Qt::AlignLeft);

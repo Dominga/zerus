@@ -1315,17 +1315,31 @@ fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, of
             _ => format!("Phase {n} is not waiting for approval"),
         })?;
     if accepted {
-        let tasks = &team.phases[at].tasks;
+        let tasks = team.phases[at].tasks.clone();
+        ensure!(!tasks.is_empty(), "Phase {n} is done; a finished phase stays");
+        // U57: a phase with no work done may be discarded even while it runs:
+        // none of its tasks accepted and none delivered by a task that was not
+        // cancelled. Its cancelled tasks do not keep it.
+        let accepted_any = tasks
+            .iter()
+            .any(|id| team.task(*id).is_some_and(|task| task.status == TaskStatus::Accepted));
+        ensure!(!accepted_any, "Phase {n} has accepted work; a phase with accepted work stays");
+        let delivered: Vec<String> = tasks
+            .iter()
+            .filter_map(|id| team.task(*id))
+            .filter(|task| {
+                task.status != TaskStatus::Cancelled
+                    && task
+                        .attempts
+                        .iter()
+                        .any(|attempt| !matches!(attempt.state, AttemptState::Revoked | AttemptState::Refused))
+            })
+            .map(|task| format!("#{}", task.id))
+            .collect();
         ensure!(
-            !tasks.is_empty() && !tasks.iter().all(|id| team.task(*id).is_none_or(|task| task.status.finished())),
-            "Phase {n} is done; a finished phase stays"
-        );
-        // Started or decided work stays: cancel it first.
-        let started = started_tasks(team, at);
-        ensure!(
-            started.is_empty(),
-            "Phase {n} has started work ({}): cancel those tasks first, then discard the phase",
-            started.join(", ")
+            delivered.is_empty(),
+            "Phase {n} has delivered work ({}): cancel those tasks first, then discard the phase",
+            delivered.join(", ")
         );
     }
     let ids = team.phases[at].tasks.clone();
@@ -3448,24 +3462,56 @@ fn serves_another_team(session: &SessionRef, others: &[Team]) -> bool {
 
 /// F8: the lead proposes a membership change; the owner decides.
 fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
-    ensure!(actor.is_lead(team), "The lead proposes a membership change");
+    ensure!(actor.is_lead(team), "Only the lead proposes a change to your team");
     let kind = text(input, "kind").to_owned();
     ensure!(
-        ["add-member", "remove-member", "swap-member", "next-goal", "switch-plan-mode"].contains(&kind.as_str()),
-        "A proposal adds, removes or swaps a member, starts the next goal or switches the plan mode"
+        ["add-member", "remove-member", "swap-member", "next-goal", "switch-plan-mode",
+         "add-to-phase", "cancel-tasks", "discard-phase"].contains(&kind.as_str()),
+        "A proposal adds or removes members, adds tasks to a running phase, cancels tasks, discards a phase, starts the next goal or switches the plan mode"
     );
     let reason = clean(text(input, "reason").trim(), 2000, "A proposal reason")?;
     ensure!(!reason.is_empty(), "A proposal needs its reason");
-    // U59: a plan-mode proposal names the mode and carries the content hash the
-    // owner's dialog confirms; the switch applies only on that id and content.
+    // U59: a plan-mode proposal names the mode.
     let mut mode = String::new();
-    let mut hash = String::new();
     if kind == "switch-plan-mode" {
         let requested = text(input, "mode").to_owned();
         ensure!(matches!(requested.as_str(), "free" | "standard"), "A plan-mode proposal names free or standard");
-        mode = requested.clone();
-        hash = format!("{:x}", Sha256::digest(format!("switch-plan-mode:{requested}:{reason}").as_bytes()));
+        mode = requested;
     }
+    // U57: the exact change the owner's card shows and Allow applies.
+    let change = match kind.as_str() {
+        "add-member" => {
+            let members: Vec<Value> = match input.get("members").filter(|members| members.is_array()) {
+                Some(members) => members.as_array().cloned().unwrap_or_default(),
+                None => {
+                    let member = input["member"].clone();
+                    ensure!(member.is_object(), "The add-member proposal carries its member");
+                    vec![member]
+                }
+            };
+            ensure!(!members.is_empty() && members.len() <= 50, "An add-member proposal names 1 to 50 members");
+            ensure!(members.iter().all(Value::is_object), "Every added member is an object");
+            ensure!(Value::Array(members.clone()).to_string().len() <= 64 * 1024, "The added members have at most 64 KiB");
+            json!({"members":members})
+        }
+        "add-to-phase" => {
+            let phase = input["phase"].as_u64().context("The add-to-phase proposal names its phase")?;
+            let tasks: Vec<Value> = input["tasks"].as_array().cloned().context("The add-to-phase proposal carries its tasks")?;
+            ensure!(!tasks.is_empty() && tasks.len() <= 50, "An add-to-phase proposal carries 1 to 50 tasks");
+            json!({"phase":phase,"tasks":tasks})
+        }
+        "cancel-tasks" => {
+            let tasks: Vec<u64> = input["tasks"].as_array().into_iter().flatten().filter_map(Value::as_u64).collect();
+            ensure!(!tasks.is_empty() && tasks.len() <= 50, "A cancel-tasks proposal names 1 to 50 tasks");
+            json!({"tasks":tasks})
+        }
+        "discard-phase" => {
+            let phase = input["phase"].as_u64().context("The discard-phase proposal names its phase")?;
+            json!({"phase":phase})
+        }
+        _ => Value::Null,
+    };
+    ensure!(change.to_string().len() <= 64 * 1024, "A proposal's change has at most 64 KiB");
     ensure!(team.proposals.iter().filter(|proposal| proposal["state"] == "open").count() < 50, "A team keeps at most 50 open proposals");
     // C8: a swap keeps its section 5 fields with the member, the way the
     // owner's decision runs it and the desktop shows it.
@@ -3486,12 +3532,17 @@ fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
     // N3: accepting the proposal runs the change under this one request id, so
     // a retried or interrupted decision replays it instead of running twice.
     let operation_request = uuid::Uuid::new_v4().to_string();
+    // U57: the owner's Allow is bound to this id and this content hash; a
+    // changed proposal never applies.
+    let content = json!({"kind":kind,"reason":reason,"change":change,"member":member,
+        "goal":input["goal"].clone(),"mode":mode});
+    let hash = format!("{:x}", Sha256::digest(content.to_string().as_bytes()));
     let proposal = json!({"id":id,"kind":kind,"by":actor.label(team),"at":now(),"state":"open","reason":reason,
         "member":member,"goal":input["goal"].clone(),"operation_request":operation_request,
-        "mode":mode,"hash":hash});
+        "mode":mode,"hash":hash,"change":change});
     team.proposals.push(proposal);
-    events.push(Event::new("proposed", json!({"id":id,"kind":kind})));
-    Ok(json!({"status":"proposed","proposal":id,"hash":hash,"mode":mode}))
+    events.push(Event::new("proposed", json!({"id":id,"kind":kind,"hash":hash})));
+    Ok(json!({"status":"proposed","proposal":id,"hash":hash,"mode":mode,"change":change}))
 }
 
 /// F8: only the owner decides a proposal; accepting runs the change as the
@@ -3504,19 +3555,21 @@ fn decide_proposal(team: &mut Team, input: &Value, actor: &Actor, offline: &BTre
     let accept = input["accept"].as_bool() == Some(true);
     let reason = clean(text(input, "reason").trim(), 2000, "A decision reason")?;
     let kind = team.proposals[at]["kind"].as_str().unwrap_or_default().to_owned();
-    if kind == "switch-plan-mode" {
-        // U59: the owner's answer is bound to this id and its content.
+    // U57: the owner's Allow is bound to this proposal's id and its content
+    // hash; a proposal whose content changed never applies. Older proposals
+    // stored without a hash stay decidable.
+    if let Some(hash) = team.proposals[at]["hash"].as_str().filter(|hash| !hash.is_empty()) {
         let expected = text(input, "expected_hash");
         ensure!(
-            !expected.is_empty() && expected == team.proposals[at]["hash"].as_str().unwrap_or_default(),
-            "The plan-mode switch needs the request's hash; reload the dialog and answer again"
+            !expected.is_empty() && expected == hash,
+            "The proposal changed; reload the card and answer again with its hash"
         );
     }
     if !accept {
         team.proposals[at]["state"] = json!("rejected");
         team.proposals[at]["decided_at"] = json!(super::super::now());
         team.proposals[at]["note"] = json!(reason);
-        events.push(Event::new("proposal_decided", json!({"id":id,"accept":false})));
+        events.push(Event::new("proposal_decided", json!({"id":id,"accept":false,"reason":reason})));
         if kind == "switch-plan-mode" {
             // U59: the reason reaches the lead with the team's feed.
             events.push(Event::new("plan_mode_denied", json!({"by":"You","proposal":id,"reason":reason})));
@@ -3524,15 +3577,43 @@ fn decide_proposal(team: &mut Team, input: &Value, actor: &Actor, offline: &BTre
         return Ok(json!({"status":"rejected","proposal":id}));
     }
     let member = team.proposals[at]["member"].clone();
+    let change = team.proposals[at]["change"].clone();
     let result = match kind.as_str() {
         "add-member" => {
-            let mut value = member;
-            value["request_id"] = json!(uuid::Uuid::new_v4().to_string());
-            apply(team, "add-member", &json!({"member":value}), &Actor::Human, offline, events)?
+            let members: Vec<Value> = change["members"].as_array().cloned().unwrap_or_else(|| vec![member.clone()]);
+            let mut applied = Vec::new();
+            for (index, member) in members.into_iter().enumerate() {
+                let mut value = member;
+                value["request_id"] = json!(uuid::Uuid::new_v4().to_string());
+                let _ = index;
+                applied.push(apply(team, "add-member", &json!({"member":value}), &Actor::Human, offline, events)?);
+            }
+            json!({"added":applied.len()})
         }
         "remove-member" => {
             let id = member["id"].as_str().or(member.as_str()).unwrap_or_default().to_owned();
             apply(team, "remove-member", &json!({"member":id}), &Actor::Human, offline, events)?
+        }
+        "add-to-phase" => {
+            let phase = change["phase"].as_u64().context("The add-to-phase proposal carries its phase")?;
+            let tasks = change["tasks"].clone();
+            let first = apply(team, "add-to-phase", &json!({"phase":phase,"tasks":tasks}), &Actor::Human, offline, events)?;
+            if let Some(confirm) = first["confirm"].as_str().filter(|id| !id.is_empty()) {
+                apply(team, "add-to-phase", &json!({"phase":phase,"tasks":change["tasks"],"confirm":confirm}), &Actor::Human, offline, events)?
+            } else {
+                first
+            }
+        }
+        "cancel-tasks" => {
+            let mut cancelled = Vec::new();
+            for id in change["tasks"].as_array().into_iter().flatten().filter_map(Value::as_u64) {
+                cancelled.push(apply(team, "cancel", &json!({"task":id}), &Actor::Human, offline, events)?);
+            }
+            json!({"cancelled":cancelled.len()})
+        }
+        "discard-phase" => {
+            let phase = change["phase"].as_u64().context("The discard-phase proposal carries its phase")?;
+            apply(team, "discard-phase", &json!({"phase":phase}), &Actor::Human, offline, events)?
         }
         "switch-plan-mode" => {
             let mode = team.proposals[at]["mode"].as_str().unwrap_or_default().to_owned();
@@ -4443,6 +4524,48 @@ mod tests {
         assert_eq!(queued.phases[0].state, PhaseState::Queued, "a queued phase is left as it is");
     }
 
+    /// U57: a proposal stores the exact change and a content hash; the owner's
+    /// Allow is bound to them.
+    #[test]
+    fn a_proposal_stores_the_exact_change_and_its_content_hash() {
+        let mut team = running_team();
+        let mut events = Vec::new();
+        let lead = Actor::Member("lead".into());
+        let cases = [
+            (json!({"kind":"add-member","reason":"needs two",
+                "members":[{"id":"x","role":"Ops","agent":"claude"},{"id":"y","role":"Ops","agent":"claude"}]}), "add-member"),
+            (json!({"kind":"cancel-tasks","reason":"drop","tasks":[1]}), "cancel-tasks"),
+            (json!({"kind":"discard-phase","reason":"empty","phase":2}), "discard-phase"),
+        ];
+        for (input, kind) in cases {
+            let receipt = propose(&mut team, &input, &lead, &mut events).unwrap();
+            let hash = receipt["hash"].as_str().unwrap().to_owned();
+            assert!(!hash.is_empty(), "{kind}");
+            let proposal = team.proposals.last().unwrap();
+            assert_eq!(proposal["hash"], hash);
+            assert_eq!(proposal["kind"], kind);
+            assert!(proposal["change"].is_object(), "{kind}: {}", proposal["change"]);
+        }
+        // The multi-member change keeps every member exactly as proposed.
+        assert_eq!(team.proposals[0]["change"]["members"].as_array().unwrap().len(), 2);
+        assert_eq!(team.proposals[1]["change"]["tasks"], json!([1]));
+        assert_eq!(team.proposals[2]["change"]["phase"], 2);
+        // An unhashed or changed proposal is refused by the decision.
+        let id = team.proposals[0]["id"].as_str().unwrap().to_owned();
+        let error = apply(&mut team, "decide-proposal", &json!({"proposal":id,"accept":true,"expected_hash":"bad"}), &Actor::Human, &BTreeSet::new(), &mut events)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("changed"), "{error}");
+        // A change that has gone stale is refused when it applies, never re-applied.
+        let hash = team.proposals[1]["hash"].as_str().unwrap().to_owned();
+        let id = team.proposals[1]["id"].as_str().unwrap().to_owned();
+        apply(&mut team, "cancel", &json!({"task":1}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        let error = apply(&mut team, "decide-proposal", &json!({"proposal":id,"accept":true,"expected_hash":hash}), &Actor::Human, &BTreeSet::new(), &mut events)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("already decided"), "a stale change is refused: {error}");
+    }
+
     #[test]
     fn the_owner_closes_a_free_phase_only_when_its_work_is_done() {
         let mut team = running_team();
@@ -4699,14 +4822,32 @@ mod tests {
         assert_eq!(discarded["tasks"], json!([4]));
         assert!(team.task(4).is_none());
         assert_eq!(events.last().unwrap().payload["state"], "queued");
-        // Started work stays: a phase with a task in work is refused.
+        // U57: running without a delivered attempt is still "no work done", so
+        // it may be discarded; a delivered attempt blocks it.
         team.task_mut(3).unwrap().status = TaskStatus::InProgress;
-        let error = apply(&mut team, "discard-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
-        assert!(error.contains("has started work (#3)"), "{error}");
-        // A done phase stays.
-        team.task_mut(3).unwrap().status = TaskStatus::Accepted;
-        let error = apply(&mut team, "discard-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
-        assert!(error.contains("is done"), "{error}");
+        let discarded = apply(&mut team, "discard-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(discarded["tasks"], json!([3]));
+        // A delivered attempt keeps the phase; cancel it first.
+        let mut started = running_team();
+        extend(&mut started, &json!({"tasks":[{"id":3,"title":"T","assignee":"dev"}]}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        apply(&mut started, "approve-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap();
+        {
+            let task = started.task_mut(3).unwrap();
+            task.status = TaskStatus::InProgress;
+            task.attempts.push(Attempt { n: 1, id: "a1".into(), member: "dev".into(), state: AttemptState::Delivered, sent_at: 1.0, delivered_at: Some(1.0), ..Default::default() });
+        }
+        let error = apply(&mut started, "discard-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
+        assert!(error.contains("has delivered work (#3)"), "{error}");
+        // A task cancelled after its delivered attempt does not block.
+        apply(&mut started, "cancel", &json!({"task":3}), &Actor::Human, &none, &mut events).unwrap();
+        apply(&mut started, "discard-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap();
+        // A phase with accepted work stays.
+        let mut done = running_team();
+        extend(&mut done, &json!({"tasks":[{"id":3,"title":"T","assignee":"dev"}]}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        apply(&mut done, "approve-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap();
+        done.task_mut(3).unwrap().status = TaskStatus::Accepted;
+        let error = apply(&mut done, "discard-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
+        assert!(error.contains("has accepted work"), "{error}");
     }
 
     /// U42 (#587): an accepted phase with no started work returns to a draft:
@@ -7278,12 +7419,13 @@ mod tests {
         )
         .unwrap();
         let id = value["proposal"].as_str().unwrap().to_owned();
+        let hash = value["hash"].as_str().unwrap().to_owned();
         // Only the owner decides.
         let error = apply(&mut team, "decide-proposal", &json!({"proposal":id,"accept":true}), &Actor::Member("lead".into()), &none, &mut events)
             .unwrap_err()
             .to_string();
         assert_eq!(error, "Only you decide a proposal");
-        apply(&mut team, "decide-proposal", &json!({"proposal":id,"accept":true}), &Actor::Human, &none, &mut events).unwrap();
+        apply(&mut team, "decide-proposal", &json!({"proposal":id,"accept":true,"expected_hash":hash}), &Actor::Human, &none, &mut events).unwrap();
         assert!(team.member("extra").is_some());
         assert_eq!(team.proposals[0]["state"], "accepted");
         // F8: a swap-member proposal is stored with the member it changes.

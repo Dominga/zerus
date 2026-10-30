@@ -1358,6 +1358,16 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
     let accept = input["accept"].as_bool() == Some(true);
     let reason = text(input, "reason").trim().to_owned();
     ensure!(reason.chars().count() <= 2000, "A reason has at most 2000 characters");
+    // U57: the owner's Allow is bound to this id and the proposal's content
+    // hash; a changed proposal never applies. An older proposal without a hash
+    // stays decidable.
+    if let Some(hash) = team.proposals[at]["hash"].as_str().filter(|hash| !hash.is_empty()) {
+        let expected = text(input, "expected_hash");
+        ensure!(
+            !expected.is_empty() && expected == hash,
+            "The proposal changed; reload the card and answer again with its hash"
+        );
+    }
     if !accept {
         store.mutate(None, &team_id, None, |team, events| {
             if let Some(proposal) = team.proposals.iter_mut().find(|proposal| proposal["id"] == id) {
@@ -1365,26 +1375,80 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
                 proposal["decided_at"] = json!(super::super::now());
                 proposal["note"] = json!(reason);
             }
-            events.push(Event::new("proposal_decided", json!({"proposal":id,"accept":false})));
+            events.push(Event::new("proposal_decided", json!({"proposal":id,"accept":false,"reason":reason})));
             Ok(Value::Null)
         })?;
         return Ok(json!({"status":"rejected","proposal":id}));
     }
     let kind = team.proposals[at]["kind"].as_str().unwrap_or_default().to_owned();
     let member = team.proposals[at]["member"].clone();
+    let change = team.proposals[at]["change"].clone();
     let goal = team.proposals[at]["goal"].as_str().unwrap_or_default().to_owned();
     // N3: the change runs under one request id stored with the proposal, so an
     // interrupted or retried decision replays it instead of applying it twice.
     let operation_request = proposal_operation_request(store, &team_id, &id, &team)?;
     let result = match kind.as_str() {
         "add-member" | "swap-member" => {
-            owner_change(store, &kind, &proposal_input(&team_id, &kind, &member, &operation_request)?)?
+            let members: Vec<Value> = change["members"].as_array().cloned().unwrap_or_else(|| vec![member.clone()]);
+            let mut applied = Vec::new();
+            for (index, member) in members.into_iter().enumerate() {
+                let request = if index == 0 {
+                    operation_request.clone()
+                } else {
+                    // One request id per member: each change is its own replay.
+                    use sha2::{Digest, Sha256};
+                    let digest = Sha256::digest(format!("{operation_request}:{index}").as_bytes());
+                    let mut bytes = [0u8; 16];
+                    bytes.copy_from_slice(&digest[..16]);
+                    uuid::Uuid::from_bytes(bytes).to_string()
+                };
+                let value = proposal_input(&team_id, &kind, &member, &request)?;
+                applied.push(owner_change(store, &kind, &value)?);
+            }
+            json!({"applied":applied.len()})
         }
         "remove-member" => {
             let member_id = member["id"].as_str().or(member.as_str()).unwrap_or_default().to_owned();
             let value = json!({"team":team_id,"request_id":operation_request,"member":member_id,"by":"human"});
             store.mutate(Some((&operation_request, &value)), &team_id, None, |team, events| {
                 super::ops::apply(team, "remove-member", &value, &Actor::Human, &BTreeSet::new(), events)
+            })?
+        }
+        "add-to-phase" => {
+            let phase = change["phase"].as_u64().context("The add-to-phase proposal carries its phase")?;
+            let tasks = change["tasks"].clone();
+            let value = json!({"team":team_id,"request_id":operation_request,"by":"human","phase":phase,"tasks":tasks});
+            let first = store.mutate(Some((&operation_request, &value)), &team_id, None, |team, events| {
+                super::ops::apply(team, "add-to-phase", &value, &Actor::Human, &BTreeSet::new(), events)
+            })?;
+            match first["confirm"].as_str().filter(|confirm| !confirm.is_empty()) {
+                Some(confirm) => {
+                    let value = json!({"team":team_id,"request_id":operation_request,"by":"human","phase":phase,
+                        "tasks":change["tasks"],"confirm":confirm});
+                    store.mutate(Some((&operation_request, &value)), &team_id, None, |team, events| {
+                        super::ops::apply(team, "add-to-phase", &value, &Actor::Human, &BTreeSet::new(), events)
+                    })?
+                }
+                None => first,
+            }
+        }
+        "cancel-tasks" => {
+            let mut cancelled = 0;
+            for id in change["tasks"].as_array().into_iter().flatten().filter_map(Value::as_u64) {
+                let request = uuid::Uuid::new_v4().to_string();
+                let value = json!({"team":team_id,"request_id":request,"by":"human","task":id});
+                store.mutate(Some((&request, &value)), &team_id, None, |team, events| {
+                    super::ops::apply(team, "cancel", &value, &Actor::Human, &BTreeSet::new(), events)
+                })?;
+                cancelled += 1;
+            }
+            json!({"cancelled":cancelled})
+        }
+        "discard-phase" => {
+            let phase = change["phase"].as_u64().context("The discard-phase proposal carries its phase")?;
+            let value = json!({"team":team_id,"request_id":operation_request,"by":"human","phase":phase});
+            store.mutate(Some((&operation_request, &value)), &team_id, None, |team, events| {
+                super::ops::apply(team, "discard-phase", &value, &Actor::Human, &BTreeSet::new(), events)
             })?
         }
         "next-goal" => {
@@ -7570,6 +7634,62 @@ mod tests {
         assert!(owner_without_team(&json!({}), false, false, false, false).is_err());
     }
 
+    /// U57: Allow applies exactly the proposed change once, bound to the id and
+    /// hash; a changed card is refused; Deny records the reason for the lead.
+    #[test]
+    fn an_allow_applies_the_proposed_change_once_and_a_changed_card_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut team = running_team();
+        ops::apply(
+            &mut team,
+            "propose",
+            &json!({"kind":"add-member","reason":"needs help",
+                "members":[{"id":"x","role":"Ops","agent":"claude"},{"id":"y","role":"Ops","agent":"claude"}]}),
+            &Actor::Member("lead".into()),
+            &BTreeSet::new(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        let hash = team.proposals[0]["hash"].as_str().unwrap().to_owned();
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+        let error = decide_proposal_in(
+            &mut store,
+            &json!({"team":"t","proposal":"p1","accept":true,"by":"human","expected_hash":"bad"}),
+            &Actor::Human,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("changed"), "{error}");
+        let receipt = decide_proposal_in(&mut store, &json!({"team":"t","proposal":"p1","accept":true,"by":"human","expected_hash":hash}), &Actor::Human).unwrap();
+        assert_eq!(receipt["status"], "accepted");
+        let team = store.load("t").unwrap().unwrap();
+        assert!(team.member("x").is_some() && team.member("y").is_some());
+        // A replay returns the stored state; no member is added twice.
+        let replay = decide_proposal_in(&mut store, &json!({"team":"t","proposal":"p1","accept":true,"by":"human","expected_hash":hash}), &Actor::Human).unwrap();
+        assert_eq!(replay["status"], "accepted");
+        assert_eq!(store.load("t").unwrap().unwrap().members.iter().filter(|member| member.id == "x").count(), 1);
+        // Deny records its reason for the lead and runs nothing.
+        store
+            .mutate(None, "t", None, |team, events| {
+                ops::apply(team, "propose", &json!({"kind":"cancel-tasks","reason":"drop","tasks":[2]}), &Actor::Member("lead".into()), &BTreeSet::new(), events)
+            })
+            .unwrap();
+        let team = store.load("t").unwrap().unwrap();
+        let hash = team.proposals[1]["hash"].as_str().unwrap().to_owned();
+        let before = team.task(1).unwrap().status;
+        let denied = decide_proposal_in(
+            &mut store,
+            &json!({"team":"t","proposal":"p2","accept":false,"reason":"not now","expected_hash":hash}),
+            &Actor::Human,
+        )
+        .unwrap();
+        assert_eq!(denied["status"], "rejected");
+        let team = store.load("t").unwrap().unwrap();
+        assert_eq!(team.proposals[1]["note"], "not now");
+        assert_eq!(team.task(1).unwrap().status, before, "a Deny runs nothing");
+    }
+
     #[test]
     fn an_accepted_swap_proposal_runs_with_its_fields() {
         // C8: the spec's shape (member id plus section 5 fields) is kept by
@@ -7580,8 +7700,9 @@ mod tests {
         let proposal = json!({"kind":"swap-member","member":"dev","agent":"claude","model":"opus","reason":"Stuck three times"});
         ops::apply(&mut team, "propose", &proposal, &Actor::Member("lead".into()), &BTreeSet::new(), &mut Vec::new()).unwrap();
         assert_eq!(team.proposals[0]["member"], json!({"id":"dev","agent":"claude","model":"opus"}));
+        let hash = team.proposals[0]["hash"].as_str().unwrap().to_owned();
         store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
-        let decide = json!({"team":"t","proposal":"p1","accept":true,"by":"human"});
+        let decide = json!({"team":"t","proposal":"p1","accept":true,"by":"human","expected_hash":hash});
         let error = decide_proposal_in(&mut store, &decide, &Actor::Member("lead".into())).unwrap_err().to_string();
         assert!(error.contains("Only you decide"), "{error}");
         let receipt = decide_proposal_in(&mut store, &decide, &Actor::Human).unwrap();
@@ -7626,9 +7747,10 @@ mod tests {
         let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
         let mut team = running_team();
         ops::apply(&mut team, "propose", &json!({"kind":"next-goal","goal":"Ship v2","reason":"Done here"}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut Vec::new()).unwrap();
+        let hash = team.proposals[0]["hash"].as_str().unwrap().to_owned();
         team.status = TeamStatus::Done;
         store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
-        let receipt = decide_proposal_in(&mut store, &json!({"team":"t","proposal":"p1","accept":true,"by":"human"}), &Actor::Human).unwrap();
+        let receipt = decide_proposal_in(&mut store, &json!({"team":"t","proposal":"p1","accept":true,"by":"human","expected_hash":hash}), &Actor::Human).unwrap();
         let next = receipt["result"]["team"].as_str().unwrap().to_owned();
         assert_eq!(store.load(&next).unwrap().unwrap().goal, "Ship v2");
         assert_eq!(store.load("t").unwrap().unwrap().next, next);

@@ -190,7 +190,7 @@ mod tests {
     fn ledger_recovery_failure_is_component_local_and_clears_after_repair() {
         let temp = tempfile::tempdir().unwrap();
         let location = Location {
-            root: temp.path().join("state/desktop"),
+            root: canonical(&temp.path().join("state/desktop")).unwrap(),
             configuration: "fixture".into(),
         };
         location.prepare().unwrap();

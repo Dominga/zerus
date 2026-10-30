@@ -288,7 +288,7 @@ public:
         legacy->setEnabled(false);legacy->hide();mobileLayout->addWidget(legacy);
         connect(legacyToggle,&QToolButton::toggled,this,[legacy,legacyToggle](bool show){legacy->setVisible(show);legacyToggle->setArrowType(show?Qt::DownArrow:Qt::RightArrow);});
         workspaceConnection->protectionChanged=[legacy,legacyToggle](bool encrypted){legacy->setEnabled(!encrypted);legacyToggle->setEnabled(!encrypted);if(encrypted){legacyToggle->setChecked(false);legacy->hide();}};
-        auto *phones=new PhonePairing::Panel(executable);mobileLayout->addWidget(phones);
+        auto *phones=new PhonePairing::Panel(executable);phones->setObjectName("settingsPhonesPanel");phonesPanel=phones;mobileLayout->addWidget(phones);
         workspaceConnection->connectionChanged=[phones]{phones->refresh();};
         mobileDelivery=new MobileDeliverySettings(executable);mobileLayout->addWidget(mobileDelivery);mobileLayout->addStretch();addPage(mobile);
         files=new DownloadCacheSettings;addPage(files);
@@ -409,6 +409,9 @@ public:
         activityFullWidth->setChecked(ActivityWidth::fullWidth());activityWidth->setEnabled(!activityFullWidth->isChecked());
         updateResets();
     }
+    // #650 N1: the Phones panel of Mobile connection draws its own colours,
+    // so it takes the window's theme here, and again on each change.
+    void setDark(bool dark){if(phonesPanel)phonesPanel->setTheme(dark);}
     // Keyboard zoom changes the content scale; the window applies it itself.
     void syncContentScale(){
         auto *scale=findChild<QSlider *>("workspaceContentScale");if(!scale)return;
@@ -421,6 +424,7 @@ private:
     HgsClient *versionClient;QLabel *cliVersion;MobileDeliverySettings *mobileDelivery;
     QLabel *forkStatus=nullptr;QPushButton *forkUpdate=nullptr;   // WhiteWh fork: About
     WorkspaceSettings::Panel *workspaceConnection;
+    PhonePairing::Panel *phonesPanel=nullptr;
     SpeechSettings *speech;
     DownloadCacheSettings *files;
     AutomaticApprovalSettings *approvals;

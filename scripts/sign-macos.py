@@ -114,10 +114,10 @@ def create_disk_image(app, image):
                    "-srcfolder", str(staging), str(image)]
         for delay in (2, 5, None):
             result = subprocess.run(command, capture_output=True, text=True)
-            if result.returncode == 0:
-                break
             print(result.stdout, end="")
             print(result.stderr, end="", file=sys.stderr)
+            if result.returncode == 0:
+                break
             if delay is None or "Resource busy" not in result.stdout + result.stderr:
                 result.check_returncode()
             image.unlink(missing_ok=True)

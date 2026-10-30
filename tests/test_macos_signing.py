@@ -118,6 +118,7 @@ class Signing(unittest.TestCase):
     def disk_image_attempts(self, image, results):
         def execute(command, **kwargs):
             if command[0] == "hdiutil":
+                self.assertFalse(image.exists())
                 image.write_bytes(b"partial image")
             return results.pop(0)
         return execute
@@ -139,6 +140,7 @@ class Signing(unittest.TestCase):
             self.assertEqual(call.kwargs, {"capture_output": True, "text": True})
         self.assertIn("Creating disk\n", output.getvalue())
         self.assertIn("hdiutil: create failed - Resource busy\n", output.getvalue())
+        self.assertIn("created: Zerus.dmg\n", output.getvalue())
 
     def test_disk_image_create_stops_after_three_resource_busy_failures(self):
         image = Path(self.temporary.name) / "Zerus.dmg"

@@ -1138,16 +1138,15 @@ fn seed_from(store: &QtStore, snapshot: Option<&QtSnapshot>) -> (BTreeMap<String
 /// Writes the store through a synced private temporary file and a rename,
 /// so a cut-off write keeps the old file.
 fn write_store(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    crate::fsx::write_private_atomic(path, bytes, true)
-        .and_then(|()| {
-            #[cfg(unix)]
-            File::open(
-                path.parent()
-                    .filter(|p| !p.as_os_str().is_empty())
-                    .unwrap_or_else(|| Path::new(".")),
-            )?
-            .sync_all()?;
-            Ok(())
-        })
-        .map_err(|error| format!("Settings not saved: {error}"))
+    let failure = |error| format!("Settings not saved: {error}");
+    crate::fsx::write_private_atomic(path, bytes, true).map_err(failure)?;
+    #[cfg(unix)]
+    File::open(
+        path.parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new(".")),
+    )
+    .and_then(|directory| directory.sync_all())
+    .map_err(failure)?;
+    Ok(())
 }

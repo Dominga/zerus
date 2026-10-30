@@ -30,8 +30,11 @@ if sys.argv[1:] == ['--build-info']:
     # 'unverifiable' reports itself as a build, never once installed.
     if VARIANT == 'unverifiable' and pathlib.Path(sys.argv[0]).parent.name == 'bin':
         sys.exit(1)
-    print(json.dumps({{'version': '0.42.0', 'versionName': VARIANT, 'devBuildNumber': int(VARIANT[4:]) if VARIANT.startswith('dev-') else 0,
-                      'sourceCommit': VARIANT.ljust(40, '0'), 'sourceDirty': False}}))
+    info = {{'version': '0.42.0', 'versionName': VARIANT, 'devBuildNumber': int(VARIANT[4:]) if VARIANT.startswith('dev-') else 0,
+             'sourceCommit': VARIANT.ljust(40, '0'), 'sourceDirty': False}}
+    if VARIANT.startswith('client-'):
+        info.update(CFBundleIdentifier='com.hgdev.hgs-tray', ZerusGUI='tauri')
+    print(json.dumps(info))
     sys.exit(0)
 if VARIANT == 'broken':
     sys.exit(1)
@@ -345,6 +348,43 @@ class TrayUpdate(unittest.TestCase):
         self.assertIn("'second'", (self.home / '.local/share/hgs/desktop-previous/hgs-tray').read_text())
         self.assertEqual(json.loads((self.drafts / 'kept/draft.json').read_text())['text'], 'unsent text')
         self.assertEqual((self.root / 'activations').read_text(), 'sessions\nsessions\n')
+
+    def test_client_updates_keep_qt_as_the_rollback_copy(self):
+        self.launch('first')
+        self.draft('kept', 'from Qt')
+        result = self.update(self.build('client-1'))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([variant for variant, _ in self.running()], ['client-1'])
+        slot = self.home / '.local/share/hgs/desktop-previous/hgs-tray'
+        self.assertIn("'first'", slot.read_text())
+        client_drafts = self.home / '.local/share/com.hgdev.hgs-tray/drafts'
+        (client_drafts / 'kept').mkdir(parents=True)
+        (client_drafts / 'kept/draft.json').write_text(json.dumps({'key': 'kept', 'text': 'from the client'}))
+        result = self.update(self.build('client-2'))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([variant for variant, _ in self.running()], ['client-2'])
+        self.assertIn("'first'", slot.read_text(), 'later client updates retain the original Qt')
+        self.assertEqual(json.loads((client_drafts / 'kept/draft.json').read_text())['text'], 'from the client')
+        self.assertEqual(list(self.installed.parent.glob('.hgs-tray-kept-*')), [])
+        kind = subprocess.run([sys.executable, str(UPDATER), '--installed-gui', str(self.installed)],
+                              env=self.env, capture_output=True, text=True, timeout=30)
+        self.assertEqual((kind.returncode, kind.stdout.strip()), (0, 'tauri'), kind.stderr)
+        result = self.rollback()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([variant for variant, _ in self.running()], ['first'])
+        self.assertIn("'client-2'", slot.read_text())
+        self.assertEqual(json.loads((client_drafts / 'kept/draft.json').read_text())['text'], 'from the client')
+        kind = subprocess.run([sys.executable, str(UPDATER), '--installed-gui', str(self.installed)],
+                              env=self.env, capture_output=True, text=True, timeout=30)
+        self.assertEqual((kind.returncode, kind.stdout.strip()), (0, 'qt'), kind.stderr)
+
+    def test_an_on_disk_client_switch_needs_the_live_update(self):
+        self.build('first', self.installed)
+        result = subprocess.run([sys.executable, str(UPDATER), '--check', str(self.build('client-1')),
+                                 str(self.installed)], env=self.env, capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('needs the live update', result.stderr)
+        self.assertIn("'first'", self.installed.read_text())
 
     def test_rollback_without_a_copy_changes_nothing(self):
         self.build('first', self.installed)

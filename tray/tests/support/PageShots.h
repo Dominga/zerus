@@ -12,17 +12,19 @@
 // on top of the page's own sheet - saved to ZERUS_TEAM_SHOTS as <name>.png.
 namespace PageShots {
 
-inline QString windowSheet(bool dark)
+inline QString windowSheet(bool dark, const QString &page = {})
 {
     const auto c = [dark](const char *name) { return WorkspaceSkin::color(WorkspaceSkin::active(), dark, QString::fromLatin1(name)).name(QColor::HexArgb); };
-    return QStringLiteral(
-        "QWidget{background:%1;color:%2;font-size:13px;}"
+    // The window paints the page itself; what the page holds is transparent.
+    const QString own = page.isEmpty() ? QString() : QStringLiteral("#%1{background:%2;}").arg(page, c("bg"));
+    return own + QStringLiteral(
+        "QWidget{color:%2;font-size:13px;} QDialog{background:%1;}"
         "QLabel{background:transparent;} QLabel#muted{color:%3;} QLabel#heading{font-size:18px;font-weight:600;}"
         "QLineEdit,QSpinBox,QComboBox,QPlainTextEdit{background:%4;color:%2;border:1px solid %5;border-radius:7px;padding:5px 8px;}"
         "QLineEdit:disabled,QSpinBox:disabled{color:%6;}"
-        "QPushButton{background:%7;color:%8;border:1px solid %5;border-radius:7px;padding:4px 11px;min-height:18px;}"
+        // The window's own button (SessionsWindow): boxed, flat ones too.
+        "QPushButton{background:%7;color:%8;border:1px solid %5;border-radius:7px;padding:8px 13px;min-height:18px;}"
         "QPushButton:disabled{color:%6;}"
-        "QPushButton:flat{background:transparent;border:0;}"
         "QListWidget,QTreeWidget,QTableWidget{background:transparent;border:0;outline:0;}"
         "QHeaderView::section{background:transparent;color:%3;border:0;border-bottom:1px solid %9;padding:5px 7px;}"
         "QTreeWidget::item,QTableWidget::item{padding:6px;border-bottom:1px solid %9;}"
@@ -42,7 +44,7 @@ inline void shot(Page &page, bool dark, const QString &name)
     if (dir.isEmpty()) return;
     page.setTheme(dark);
     const QString own = page.styleSheet();
-    page.setStyleSheet(windowSheet(dark) + own);
+    page.setStyleSheet(windowSheet(dark, page.objectName()) + own);
     QTest::qWait(150);
     page.grab().save(QDir(dir).filePath(name + QStringLiteral(".png")));
     page.setStyleSheet(own);

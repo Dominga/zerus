@@ -129,6 +129,10 @@ pub struct ViewRow {
     /// The checkout's root (`git_root`), empty outside Git. The worktree
     /// picker counts sessions by it.
     pub git_root: String,
+    /// Linked checkout name from the existing Git worktree metadata. Main
+    /// checkouts and rows without verified metadata leave the chip absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
     /// The row's `terminal_supported`, else true unless the agent is
     /// `dsh` or `opencode` (`HgsClient.cpp:217`).
     pub terminal_supported: bool,
@@ -1210,6 +1214,14 @@ pub fn row(value: &Value) -> ViewRow {
         cwd: text(value, "cwd").to_owned(),
         cwd_canonical: text(value, "cwd_canonical").to_owned(),
         git_root: text(value, "git_root").to_owned(),
+        worktree: (value.get("git_worktree").and_then(Value::as_bool) == Some(true))
+            .then(|| {
+                path_parts(text(value, "git_root"))
+                    .last()
+                    .filter(|s| !s.is_empty())
+                    .map(|s| (*s).to_owned())
+            })
+            .flatten(),
         terminal_supported: flag("terminal_supported").unwrap_or(cmd != "dsh" && cmd != "opencode"),
         terminal_reported: flag("terminal_supported").is_some(),
         terminal_attach_supported: flag("terminal_attach_supported").unwrap_or(false),
@@ -2024,6 +2036,34 @@ mod tests {
             let view = with_preferences(case);
             assert!(!view.shared_notifications && !view.muted, "{name}");
             assert_eq!(view.notification_revision, None, "{name}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod worktree_chip_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn linked_checkout_chip_uses_recorded_git_metadata() {
+        assert_eq!(row(&json!({"git_worktree":true,"git_root":"/srv/example/api-work","cwd":"/srv/example/api-work/src"})).worktree.as_deref(), Some("api-work"));
+        assert_eq!(
+            row(&json!({"git_worktree":true,"git_root":"C:\\workspace\\api-work"}))
+                .worktree
+                .as_deref(),
+            Some("api-work")
+        );
+        for value in [
+            json!({"git_worktree":false,"git_root":"/srv/example/api-work"}),
+            json!({"git_root":"/srv/example/api-work"}),
+            json!({"git_worktree":true,"cwd":"/srv/example/api-work"}),
+        ] {
+            let projected = row(&value);
+            assert_eq!(projected.worktree, None);
+            assert!(serde_json::to_value(projected)
+                .unwrap()
+                .get("worktree")
+                .is_none());
         }
     }
 }

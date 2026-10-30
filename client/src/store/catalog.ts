@@ -113,7 +113,7 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow, marks: 
     effort: optional(v.effort),
     cwd: text(v.folder),
     branch: optional(v.branch),
-    worktree: undefined,
+    worktree: optional(v.worktree),
     git: undefined,
     status,
     caption,

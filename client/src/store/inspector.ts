@@ -1,5 +1,6 @@
 import { createMemo } from "solid-js";
 import { skin } from "../skin/runtime";
+import { chord } from "./shortcuts";
 import { settings, setSetting } from "./settings";
 
 export const INSPECTOR_TABS = ["plan", "details", "worktrees", "tasks"] as const;
@@ -20,3 +21,8 @@ export function toggleInspectorCard(id: string) {
   void setSetting("workspace/inspectorClosed", JSON.stringify(next.slice(-128)));
 }
 export function openInspector(tab: InspectorTab) { setInspectorTab(tab); setInspectorOpen(true); }
+
+export function inspectorHint(message: string) {
+  const keys = chord("panel.toggle");
+  return keys ? `${message} (${keys})` : message;
+}

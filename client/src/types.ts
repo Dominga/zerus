@@ -82,6 +82,8 @@ export interface ViewRow {
   cwd_canonical?: string;
   /** The checkout's root, "" outside Git (the worktree picker's session counts). */
   git_root?: string;
+  /** Verified linked checkout name; absent for main or unknown checkouts. */
+  worktree?: string | null;
   terminal_supported?: boolean;
   terminal_reported?: boolean;
   terminal_attach_supported?: boolean;

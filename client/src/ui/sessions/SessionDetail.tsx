@@ -30,12 +30,12 @@ import { createSubagentIdentity } from "../../store/subagentIdentity";
 import { selectedTask } from "../../store/taskNavigation";
 import { Inspector } from "./Inspector";
 import { TaskView, followProjectTasks } from "../screens/Tasks";
-import { inspectorOpen, setInspectorOpen, openInspector } from "../../store/inspector";
+import { inspectorOpen, setInspectorOpen, openInspector, inspectorHint } from "../../store/inspector";
 import { sessionGoal } from "./inspector-data";
 
 // The session header and its Activity with the composer under it, after
-// design/webui SessionDetail. Processes and the side panel move in with later
-// phases; their actions show disabled until then.
+// design/webui SessionDetail. Session actions keep the mockup placement and
+// use the existing guarded handlers.
 
 function headerCaption(): string {
   const s = selected();
@@ -73,12 +73,6 @@ function Header() {
   const mark = createMemo(() => markEntry(s()));
   const slot = () => headerClearSlot(!subagentOpen(), s().state);
   const fresh = createMemo(() => freshActionEntry(s(), true));
-  // Every Stop is the composer's (Qt's interruptRequested, 1187-1191): its start or compaction is cancelled first.
-  const stopTurn = () => {
-    const stop = act().stop;
-    if (stop.disabled) return;
-    void composer.interrupted().then(() => stop.action());
-  };
   // Clear session goes through the composer's clear_context (Qt's clearContext): its dialog shows the identity it sends back.
   const clear = () => composer.view()?.clear;
   const clearEntry = (): MenuEntry => ({
@@ -94,7 +88,6 @@ function Header() {
     { separator: true },
     { label: "Copy connect command", icon: "link", disabled: true },
     act().change,
-    ...(act().stop.disabled ? [] : [{ ...act().stop, action: stopTurn }]),
     ...(mark() ? [mark()!] : []),
     { separator: true },
     ...(slot() === "fresh" && fresh() ? [fresh()!] : slot() === "clear" ? [clearEntry()] : []),
@@ -108,13 +101,6 @@ function Header() {
         <Show when={s().computer !== "" && statusOf(s()) === "working" && !activity.loaded()}><span class="busy-arc" title="Waiting for the remote read" /></Show>
         <span class="grow" />
         <span class={`hbadge t-${tone()}`}>{headerCaption()}</span>
-        {/* Qt's composer Stop: shown while the turn works, enabled when the host can interrupt it. */}
-        <Show when={act().stop.shown}>
-          <button class="icon-btn" data-tip={act().stop.hint ?? "Stop the current turn"} aria-label="Stop the current turn" disabled={act().stop.disabled}
-            onClick={stopTurn}><Icon name="circle-stop" size={16} /></button>
-        </Show>
-        <button class="icon-btn" data-tip={act().change.hint ?? act().change.label} disabled={act().change.disabled} aria-label={act().change.label}
-          onClick={() => act().change.action()}><Icon name={act().change.icon!} size={16} /></button>
         <button class="icon-btn" data-tip="Open session folder in file manager" disabled><Icon name="folder-open" size={16} /></button>
         <button class="icon-btn" data-tip="Open shell in session folder" disabled><Icon name="square-terminal" size={16} /></button>
         <button class="icon-btn" data-tip={identity().caption} aria-label={identity().caption} disabled={!identity().value} onClick={copyId}><Icon name="copy" size={15} /></button>
@@ -122,6 +108,7 @@ function Header() {
           <button class="icon-btn" data-tip={clear()?.reason || "Clear session"}
             aria-label={clear()?.running ? "Clearing…" : "Clear session"} disabled={!clear()?.enabled} onClick={() => composer.openClear()}><Icon name="clear" size={15} /></button>
         </Show>
+        <Show when={!subagentOpen() && (s().status === "ended" || s().state === "archived")}><button class="btn small primary" title={act().change.hint} disabled={act().change.disabled} onClick={() => act().change.action()}><Icon name="play" size={12} />Restore</button></Show>
         <button class="icon-btn" data-tip="Session actions" onClick={(e) => setMenu({ x: e.clientX - 200, y: e.clientY + 12, items: actions() })}><Icon name="ellipsis" size={16} /></button>
       </div>
       <div class="dh-row2">
@@ -134,6 +121,7 @@ function Header() {
         <Show when={s().cwd}>
           <span class="dh-chip ell" title={s().cwd}><Icon name="folder" size={13} />{folderOf(s())}</span>
         </Show>
+        <Show when={s().worktree}><span class="dh-chip ell" title={`Linked worktree ${s().worktree}`}><Icon name="folder-git-2" size={13} />worktree {s().worktree}</span></Show>
         <span class="grow" />
         <span class="dh-model ell">{s().model} {s().effort ?? ""}</span>
       </div>
@@ -231,7 +219,7 @@ export function SessionDetail() {
                 <button class="tab" role="tab" classList={{ on: detailTab() === t.id }} aria-selected={detailTab() === t.id} onClick={() => { if (t.id === "terminal") terminal.opened(); setDetailTab(t.id); }}>{t.label}</button>
               )}</For>
               <span class="grow" />
-              <Show when={!inspectorOpen()}><button class="icon-btn small" aria-label="Show side panel" title="Show side panel" onClick={() => setInspectorOpen(true)}><Icon name="panel-right-open" size={14} /></button></Show>
+              <Show when={!inspectorOpen()}><button class="icon-btn small" aria-label="Show side panel" data-tip={inspectorHint("Show tasks, plan, agents, details and worktrees")} data-tip-pos="left" onClick={() => setInspectorOpen(true)}><Icon name="panel-right" size={15} /></button></Show>
             </div>
             <div class="tab-body">
               <Switch>

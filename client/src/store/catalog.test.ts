@@ -13,6 +13,13 @@ const row = (key: string, name: string, extra: Partial<ViewRow> = {}, computer =
 const batchOf = (part: Partial<Batch>): Batch => ({ ...emptyBatch(), ...part });
 
 describe("applyBatch", () => {
+  it("updates a linked worktree chip and clears it when later metadata is absent", () => {
+    const c = createCatalog();
+    c.applyBatch(batchOf({ upserts: [row("run:chip", "codex/sample/one", { worktree: "api-work" })] }));
+    expect(c.catalog.rows["\nrun:chip"].worktree).toBe("api-work");
+    c.applyBatch(batchOf({ upserts: [row("run:chip", "codex/sample/one")] }));
+    expect(c.catalog.rows["\nrun:chip"].worktree).toBeUndefined();
+  });
   it("keeps verified Rust density keys without reconstructing them from display fields", () => {
     const hashes: [string, string] = ["a".repeat(64), "b".repeat(64)];
     const s=toSession("peer-fixture","run:fixture",view("codex/sample/fixture",{compact_keys:hashes}));

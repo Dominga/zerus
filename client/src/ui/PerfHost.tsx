@@ -1026,7 +1026,7 @@ export function PerfHost() {
       <aside class="perf-host" aria-label="Diagnostics">
         <Suspense>
           {/* The unattended run samples resources itself, after its own 10 s idle pause. */}
-          <Diagnostics scrollList={scrollList} scrollActivity={scrollActivity} activityEvents={() => activity.events().length} openSession={openSession} displayHz={displayHz}
+          <Diagnostics scrollList={scrollList} scrollActivity={scrollActivity} openSession={openSession} displayHz={displayHz}
             metrics={auto() ? undefined : metrics} label={config().label ?? undefined} representative={config().representative}
             onScenarioStart={auto() ? onScenarioStart : undefined} onScenarioEnd={auto() ? onScenarioEnd : undefined} />
         </Suspense>

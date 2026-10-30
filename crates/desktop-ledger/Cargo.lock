@@ -535,6 +535,15 @@ dependencies = [
  "sha2",
  "tempfile",
  "uuid",
+ "zerus-desktop-read-policy",
+]
+
+[[package]]
+name = "zerus-desktop-read-policy"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

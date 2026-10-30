@@ -8,6 +8,7 @@ description = "Durable identity and receipt guards owned by the hgs desktop writ
 publish = false
 
 [dependencies]
+zerus-desktop-read-policy = { path = "../desktop-read-policy" }
 anyhow = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }

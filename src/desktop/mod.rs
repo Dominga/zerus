@@ -214,7 +214,7 @@ fn projection(
         "configuration":location.configuration,"generation":store.generation,"epoch":epoch,
         "running":true,"ownership":"passive","writers_enabled":false,"handoff":"required",
         "upstreams":[],"complete":false,"subscribers":subscribers,"automatic_approvals":false,
-        "pending":{"reads":0,"posting":0,"approvals":0},"errors":[],"migration":migration,"effect_journal":store.effect_status(),
+        "pending":{"reads":store.read_status()["pending"],"posting":0,"approvals":0},"errors":[],"migration":migration,"effect_journal":store.effect_status(),"read_queue":store.read_status(),
         "limits":{"subscribers":protocol::SUBSCRIBERS,"queue_bytes":protocol::QUEUE_BYTES,
             "frame_bytes":protocol::FRAME_BYTES,"control_bytes":protocol::CONTROL_BYTES,"ingress_bytes":16<<20},
         "components":{"fleet":"awaiting_handoff","presence":"awaiting_handoff","reads":"awaiting_handoff","attention":"awaiting_handoff","approvals":"awaiting_handoff"}})

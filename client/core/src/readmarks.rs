@@ -2,46 +2,10 @@
 //! restart keeps retrying (`tray/src/ReadMarks.h`).
 use crate::fsx::write_private_atomic;
 use crate::view::ViewRow;
-use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::PathBuf;
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ReadMark {
-    pub computer: String,
-    pub name: String,
-    pub run_id: String,
-    pub conversation_id: String,
-    pub reply_id: Option<String>,
-    pub attention_signature: Option<String>,
-}
-
-impl ReadMark {
-    /// Marks neither a reply nor an attention signature (`ReadMark::isEmpty`).
-    pub fn is_empty(&self) -> bool {
-        self.reply_id.as_deref().is_none_or(str::is_empty)
-            && self
-                .attention_signature
-                .as_deref()
-                .is_none_or(str::is_empty)
-    }
-
-    /// A newer mark for the same run and conversation keeps the field it does
-    /// not set; a mark for another run or conversation replaces the old one.
-    pub(crate) fn merged(old: &ReadMark, mut next: ReadMark) -> ReadMark {
-        if old.run_id != next.run_id || old.conversation_id != next.conversation_id {
-            return next;
-        }
-        if next.reply_id.is_none() {
-            next.reply_id.clone_from(&old.reply_id);
-        }
-        if next.attention_signature.is_none() {
-            next.attention_signature
-                .clone_from(&old.attention_signature);
-        }
-        next
-    }
-}
+pub use zerus_desktop_read_policy::ReadMark;
 
 pub struct ReadMarks {
     path: PathBuf,
@@ -154,17 +118,14 @@ impl ReadMarks {
         let Some(mark) = self.marks.get(&key) else {
             return false;
         };
-        let part = |mine: &Option<String>, current: &Option<String>, read: &Option<String>| {
-            mine.as_deref().is_none_or(str::is_empty) || mine != current || read == mine
-        };
-        let settled = row.run_id.as_deref() != Some(mark.run_id.as_str())
-            || row.conversation_id.as_deref() != Some(mark.conversation_id.as_str())
-            || (part(&mark.reply_id, &row.reply_id, &row.read_reply_id)
-                && part(
-                    &mark.attention_signature,
-                    &row.attention_signature,
-                    &row.read_attention_signature,
-                ));
+        let settled = mark.settled(
+            row.run_id.as_deref(),
+            row.conversation_id.as_deref(),
+            row.reply_id.as_deref(),
+            row.attention_signature.as_deref(),
+            row.read_reply_id.as_deref(),
+            row.read_attention_signature.as_deref(),
+        );
         if settled {
             self.marks.remove(&key);
             self.save();

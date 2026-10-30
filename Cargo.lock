@@ -2315,6 +2315,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "uuid",
+ "zerus-desktop-read-policy",
 ]
 
 [[package]]
@@ -2324,6 +2325,14 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "zerus-desktop-read-policy"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -200,7 +200,7 @@ export function SessionDetail() {
     onCleanup(() => observer.disconnect());
   };
   const goal = createMemo(() => sessionGoal(selected() ? followedFor(selected()!.key).value : undefined));
-  const toggle = onCommand("panel.toggle", () => { if (page() === "sessions") setInspectorOpen(!inspectorOpen()); });
+  const toggle = onCommand("panel.toggle", () => { if (page() === "sessions" && selected()) setInspectorOpen(!inspectorOpen()); });
   onCleanup(toggle);
   createEffect(() => {
     if (page() !== "sessions" || !selected()) return;
@@ -242,7 +242,7 @@ export function SessionDetail() {
             </div>
           </div>
         </Show>
-        <Inspector available={available()} />
+        <Show when={selected()}><Inspector available={available()} /></Show>
         </div>
         {/* The composer's questions and Clear session, also from the header on another tab; the field takes the focus back. */}
         <ComposerDialogs onClosed={() => { if (document.activeElement === document.body) document.querySelector<HTMLTextAreaElement>(".cmp-editor")?.focus(); }} />

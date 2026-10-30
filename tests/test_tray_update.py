@@ -16,6 +16,7 @@ import time
 import unittest
 
 from tray_update_fixture import OwnedChildren, StartControl, cleanup
+from desktop_revoke_fixture import REVOCATION_CLI
 
 REPO = Path(__file__).resolve().parents[1]
 UPDATER = REPO / 'tray/update-installed.py'
@@ -122,13 +123,14 @@ class TrayUpdate(unittest.TestCase):
             path.mkdir(parents=True)
         self.installed = self.home / '.local/bin/hgs-tray'
         self.drafts = self.home / '.config/hgdev/hgs-tray.conf.drafts'
+        self.script(self.home / '.local/bin/hgs', REVOCATION_CLI.format(python=sys.executable))
         self.script(self.bin / 'systemctl', SYSTEMCTL.format(python=sys.executable))
         for tool in ('qdbus6', 'busctl'):
             self.script(self.bin / tool, '#!/bin/sh\nexit 1\n')
         self.env = dict(os.environ, HOME=str(self.home), TMPDIR=str(self.root / 'tmp'),
                         XDG_CONFIG_HOME=str(self.home / '.config'), TRAY_FIXTURE=str(self.root),
                         PATH=f'{self.bin}{os.pathsep}{os.environ["PATH"]}',
-                        HGS_TRAY_QUIT_TIMEOUT='10', HGS_TRAY_START_TIMEOUT='4')
+                        HGS_TRAY_QUIT_TIMEOUT='10', HGS_TRAY_START_TIMEOUT='4', HGS_DESKTOP_REVOKE_TIMEOUT='1')
         self.owned = OwnedChildren(self.env)
         self.control = StartControl(self.root / 'start.sock', lambda: self.owned.start(self.installed))
         self.control.open()
@@ -435,6 +437,8 @@ class TrayUpdate(unittest.TestCase):
         prefix = self.root / 'prefix'
         self.env['HGS_INSTALL_PREFIX'] = str(prefix)
         self.installed = prefix / 'bin/hgs-tray'
+        (prefix / 'bin').mkdir(parents=True)
+        self.script(prefix / 'bin/hgs', REVOCATION_CLI.format(python=sys.executable))
         self.launch('first')
         self.draft('kept', 'from Qt')
         result = self.update(self.build('client-1'))
@@ -492,6 +496,75 @@ class TrayUpdate(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('needs the live update', result.stderr)
         self.assertIn("'first'", self.installed.read_text())
+
+    def revocation_calls(self):
+        path = self.root / 'revocation.jsonl'
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def test_no_handoff_revocation_allows_qt_to_start(self):
+        self.env['REVOCATION_MODE'] = 'noop'
+        self.build('first', self.installed)
+        result = self.update(self.build('second'))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("'second'", self.installed.read_text())
+        slot = self.home / '.local/share/hgs/desktop-previous/hgs-tray'
+        self.assertIn("'first'", slot.read_text())
+
+    def test_revocation_recovers_the_same_request_after_disconnect(self):
+        self.env['REVOCATION_MODE'] = 'disconnect'
+        self.launch('first')
+        result = self.update(self.build('second'))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = [call for call in self.revocation_calls()
+                 if call['args'][:2] in (['desktop', 'revoke'], ['desktop', 'request'])]
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0]['args'][:2], ['desktop', 'revoke'])
+        self.assertEqual(calls[1]['args'][:2], ['desktop', 'request'])
+        self.assertEqual(calls[0]['request_id'], calls[1]['request_id'])
+        self.assertEqual([variant for variant, _ in self.running()], ['second'])
+
+    def test_legacy_cli_without_desktop_state_keeps_qt_update_and_rollback(self):
+        self.env['REVOCATION_MODE'] = 'unsupported'
+        self.env.pop('HGS_STATE_DIR', None)
+        self.env.pop('XDG_STATE_HOME', None)
+        self.build('first', self.installed)
+        result = self.update(self.build('second'))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("'second'", self.installed.read_text())
+        self.assertIn('no desktop state; keeping the plain Qt path', result.stdout)
+
+        result = self.rollback()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("'first'", self.installed.read_text())
+        self.assertFalse(any(call['args'][:2] in (['desktop', 'status'], ['desktop', 'revoke'],
+                                                  ['desktop', 'request']) for call in self.revocation_calls()))
+        self.assertFalse((self.home / '.local/state/hgs/sessions').exists())
+
+    def test_legacy_cli_with_desktop_state_keeps_qt_stopped(self):
+        self.env['REVOCATION_MODE'] = 'unsupported'
+        self.env.pop('HGS_STATE_DIR', None)
+        self.env.pop('XDG_STATE_HOME', None)
+        desktop = self.home / '.local/state/hgs/sessions/desktop'
+        desktop.mkdir(parents=True)
+        self.build('first', self.installed)
+        result = self.update(self.build('second'))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('cannot check desktop revocation', result.stderr)
+        self.assertIn(str(desktop), result.stderr)
+        self.assertIn("'first'", self.installed.read_text())
+        self.assertEqual(self.running(), [])
+        self.assertFalse(any(call['args'][:2] == ['desktop', 'revoke'] for call in self.revocation_calls()))
+
+    def test_failed_revocation_keeps_qt_stopped(self):
+        for mode in ('held', 'pending', 'malformed', 'wrong_config', 'timeout'):
+            with self.subTest(mode=mode):
+                self.env['REVOCATION_MODE'] = mode
+                self.build('first', self.installed)
+                result = self.update(self.build('second'))
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("'first'", self.installed.read_text())
+                self.assertEqual(self.running(), [])
+                self.assertFalse((self.root / 'systemctl').exists())
 
     def test_rollback_without_a_copy_changes_nothing(self):
         self.build('first', self.installed)

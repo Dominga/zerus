@@ -1964,6 +1964,8 @@ void TestSessionsWindow::rebuildKeepsProjectOrderAtScale()
 {
     QFETCH(int, count);
     QFETCH(bool, storedOrder);
+    if (count > 400 && qEnvironmentVariableIsSet("HGS_SKIP_QT_SCALE_ROWS"))
+        QSKIP("zerus-5wmh.79: hosted macOS CI skips the 3000 and 6000 scale rows");
     BoxState box; box.host = "arch"; box.ok = true;
     box.metrics = QJsonObject{{"platform", "linux"}};
     QStringList names, identities;

@@ -160,20 +160,12 @@ pub fn build_info(facts: &BuildFacts) -> Value {
 
 /// The build identity plus the running client's identity for the Linux updater.
 /// macOS reads these fields from the signed bundle's Info.plist instead.
+#[cfg(target_os = "linux")]
 pub fn build_info_for(facts: &BuildFacts, identifier: &str) -> Value {
-    let info = build_info(facts);
-    #[cfg(target_os = "linux")]
-    {
-        let mut info = info;
-        info["CFBundleIdentifier"] = Value::from(identifier);
-        info["ZerusGUI"] = Value::from("tauri");
-        info
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = identifier;
-        info
-    }
+    let mut info = build_info(facts);
+    info["CFBundleIdentifier"] = Value::from(identifier);
+    info["ZerusGUI"] = Value::from("tauri");
+    info
 }
 
 /// `hgs-tray --version` (`main.cpp:196-200`).
@@ -357,14 +349,12 @@ mod tests {
         );
         assert_eq!(build_info(&preview)["previewLabel"], "task-board");
         assert_eq!(build_info(&preview)["devBuildNumber"], 0);
-        let identified = build_info_for(&dev, "com.hgdev.hgs-tray");
         #[cfg(target_os = "linux")]
         {
+            let identified = build_info_for(&dev, "com.hgdev.hgs-tray");
             assert_eq!(identified["CFBundleIdentifier"], "com.hgdev.hgs-tray");
             assert_eq!(identified["ZerusGUI"], "tauri");
         }
-        #[cfg(not(target_os = "linux"))]
-        assert_eq!(identified, build_info(&dev));
     }
 
     #[test]

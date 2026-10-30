@@ -1218,6 +1218,33 @@ sets them in the catalog, the team settings or the plan; members never do.
   name; a failed launch returns to the old account, an unconfirmed one is
   reported uncertain and never retried. Nothing changes until the owner
   chooses; a team member's account changes only through swap-member.
+- **U59. Free planning: an open phase that takes tasks as they come (owner,
+  2026-10-30).** Besides the standard mode (phases that are planned, approved,
+  run and close with their integration and build), a team can plan in the free
+  mode: its phase is not closed when its tasks are done, and the owner and the
+  lead keep adding tasks to it.
+  - *The modes:* `standard` (the default and today's behaviour) and `free`.
+    A free phase runs each task as it is added, under the same pipelines,
+    reports and acceptance; it never closes by itself, and an empty queue is
+    idle, not done. Integration and a build run when the owner or the lead asks
+    (a lead task added to the phase), never as a phase barrier. The owner
+    closes a free phase explicitly; the team then continues in standard mode.
+  - *Choosing at the start:* when planning begins (Start planning, a new goal,
+    a next phase), the lead reads the goal and the tasks and proposes one of
+    the two modes with a one-line reason (a known scope with a release: standard;
+    a stream of small independent requests, support or polishing: free). The
+    owner chooses one of the two; with no choice, standard.
+  - *Switching to free:* only on the owner's confirmation. The lead (or the
+    owner through the lead's chat) requests it; Zerus shows a pop-up dialog
+    with the reason and Switch to free / Keep standard, the same confirmation
+    as a U57 card and bound to the request id. Deny keeps standard and its
+    reason reaches the lead. Switching back to standard is the owner's close
+    of the free phase.
+  - The mode is shown beside the phase (status, the plan header, Graph and
+    Board), and `hgs team status` carries `plan_mode`. The lead protocol says
+    to propose a mode at the start, never to switch to free without the
+    dialog, and to add incoming work to the open phase instead of planning a
+    new one.
 - **U58. Changing a plan on the go costs less than the work (owner, 2026-10-30).**
   From team 6d0aabee (RogueDOD QA bot): a task was cancelled and copied under
   a new id three times to start it earlier, fully cancelled phases stayed on
@@ -1393,6 +1420,16 @@ phase 37. Lanes are balanced by volume and cost (U28 rule 9), not by count.
   their tokens on the server, `hgs team profile` with the ranked losses,
   the Profile view and the heat overlay, the lead protocol and docs;
   integration, review, QA and the build.
+
+## Phase 50 (planned 2026-10-30)
+
+- **50 Free planning (U59)**, the last phase of the plan: the plan mode on
+  the server and its status field, the lead's proposal at the start of
+  planning, the switch-to-free dialog bound to the request (on U57's
+  confirmation), adding tasks to an open phase and closing it, the mode in
+  the desktop and Android views, the lead protocol and docs; integration,
+  review, QA and the build. It starts after phase 45, which brings U57's
+  confirmation cards.
 
 ## Order of work (proposal)
 

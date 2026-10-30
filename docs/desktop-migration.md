@@ -344,6 +344,30 @@ presentation seed. They add no apply request, source write, currentness,
 settlement, replay or service authority. Production discovery and G1's fresh
 drain remain separate.
 
+`provider_operations(&QtSnapshot, next_settings_bytes)` reads the existing
+`speech/providerOperation` checkpoints together through QtStore, the bounded
+Settings decoder and the pure pending decoder extracted from `Providers::new`.
+The two families are `qt-provider-operation` and `next-provider-operation`,
+schema 1, with each settings source's exact byte hash and existing Qt or
+`settings-json-v1` format. Both must decode before either stream is returned.
+
+Each private body is
+`{kind:"provider-operation",key:"speech/providerOperation",present,cleared,record}`.
+Absent differs from explicit empty text (`cleared:true`); neither infers a
+current settled operation. An active record retains original machine/request
+IDs, host/computer/action and unknown private fields. Existing UUID checks own
+identity validation; known actions are `profile_upsert`, `profile_remove` and
+`profile_test`. Unsupported shapes/actions/identities refuse the pair. Source
+operation text and the complete encoded body must fit the existing 1 MiB bound;
+the Next settings input keeps its 4 MiB cap. Attach both source readers' fresh
+identity/hash rechecks before a final Staged record.
+
+This does not re-seed an already handled speech setting or create a live
+provider page. No status poll, receipt settlement, profile mutation, recording,
+credential read or operation replay runs. Credentials remain in their existing
+processing-computer stores. Current drain, source discovery, G2 receipt checks
+and consumer integration remain separate.
+
 `approval_policies(&QtSnapshot, next_settings_bytes)` inspects both policy
 stores before returning either `qt-approval-policy` or `next-approval-policy`
 stream. It reuses the existing Qt flag conversion and bounded Next settings

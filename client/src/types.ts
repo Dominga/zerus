@@ -561,6 +561,9 @@ export interface LaunchAccounts {
 export interface TerminalTarget { computer: ComputerId; name: string; run_id: string; machine: string }
 export interface TerminalConnected { generation: number; status: string; reused: boolean }
 export interface TerminalStatus { supported: boolean; available: boolean; reason: string; idle: string; connecting: string; disconnected: string }
+/** The next raw output is history; parse it before accepting input. */
+export interface TerminalReplay { kind: "replay" }
+export type TerminalEvent = ArrayBuffer | TerminalFinished | TerminalReplay;
 export interface TerminalFinished { kind: "finished"; code: number; status: string }
 /** The core's `TerminalFacts`: a row's terminal fields. */
 export interface TerminalFacts {

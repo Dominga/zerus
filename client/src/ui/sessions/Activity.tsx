@@ -2,7 +2,7 @@ import { createActivityScroll } from "./activity-scroll";
 import { activityReadingRows, createActivityAnchor } from "./activity-anchor";
 import { searchPreview, clearSearchPreview } from "../../store/searchSelection";
 import { SearchHighlight } from "./SearchHighlight";
-import { For, Show, createContext, createEffect, createMemo, createSignal, on, onCleanup, onMount, useContext } from "solid-js";
+import { For, Show, batch, createContext, createEffect, createMemo, createSignal, on, onCleanup, onMount, useContext } from "solid-js";
 import { attachmentFetch, attachmentOpen, copyVerbatim } from "../../bridge";
 import { notify } from "../../store/actions";
 import { previews } from "../../store/attachments";
@@ -153,6 +153,17 @@ const copyText = (text: string, what: string) => {
 // opener, and local/file references open the session's File reference dialog.
 
 const ActivitySession = createContext<() => Session | undefined>();
+const ActivityLayoutHeld = createContext<() => boolean>(() => false);
+
+/** Keep disclosure geometry while a gesture or persistent selection owns
+ * layout. In particular, shrinking offscreen content would clamp WebKit's
+ * scrollTop even without an application scroll write (zerus-5wmh.85). */
+function layoutDisclosure() {
+  const held = useContext(ActivityLayoutHeld);
+  const [wanted, setWanted] = createSignal(false);
+  const open = createMemo((previous: boolean) => held() ? previous : wanted(), false);
+  return [open, () => setWanted((value) => !value)] as const;
+}
 
 function inline(text: string, session?: () => Session | undefined) {
   return inlineParts(text).map((part) => {
@@ -249,7 +260,7 @@ function Waveform(props: { values: number[] }) {
 
 function MediaCard(props: { item: MediaMessage }) {
   const it = props.item;
-  const [transcript, setTranscript] = createSignal(false);
+  const [transcript, toggleTranscript] = layoutDisclosure();
   const [position, setPosition] = createSignal(0);
   let timer: number | undefined;
   const stop = () => { clearInterval(timer); timer = undefined; if (playing() === it.id) setPlaying(undefined); };
@@ -296,7 +307,7 @@ function MediaCard(props: { item: MediaMessage }) {
               <span class="vp-caption tabular">{mediaTime(position())} / {mediaTime(it.durationMs)}</span>
             </div>
           </div>
-          <Show when={it.transcript}><TranscriptButton open={transcript()} onToggle={() => setTranscript(!transcript())} /></Show>
+          <Show when={it.transcript}><TranscriptButton open={transcript()} onToggle={toggleTranscript} /></Show>
         </div>
       }>
         {/* The round video plays in place: click plays or pauses; a ring shows progress. */}
@@ -316,7 +327,7 @@ function MediaCard(props: { item: MediaMessage }) {
             </span>
             <span class="vm-time tabular">{position() > 0 ? `${mediaTime(position())} / ` : ""}{mediaTime(it.durationMs)}</span>
           </button>
-          <Show when={it.transcript}><TranscriptButton open={transcript()} onToggle={() => setTranscript(!transcript())} /></Show>
+          <Show when={it.transcript}><TranscriptButton open={transcript()} onToggle={toggleTranscript} /></Show>
         </div>
       </Show>
       <Show when={transcript() && it.transcript}><p class="vm-text">{it.transcript}</p></Show>
@@ -494,7 +505,7 @@ function EchoBody(props: { item: ActivityItem; scope?: AttachmentScope }) {
 }
 
 function Item(props: { item: TranscriptItem; scope?: AttachmentScope }) {
-  const [open, setOpen] = createSignal(false);
+  const [open, toggleOpen] = layoutDisclosure();
   const it = props.item;
   if (it.kind === "media") return <MediaCard item={it} />;
   if (it.kind === "context") return <div class="act-label eyebrow" id={`item-${it.id}`}>{it.body}</div>;
@@ -503,14 +514,14 @@ function Item(props: { item: TranscriptItem; scope?: AttachmentScope }) {
     return (
       <div class="act-notice" id={`item-${it.id}`} classList={{ open: open() }}>
         <div class="row"><Icon name="bot" size={13} /><b>{it.title}</b><Show when={it.sender}><span class="muted">from {it.sender}</span></Show><span class="grow" /><span class="act-time">{it.at}</span></div>
-        <button class="link" onClick={() => setOpen(!open())}>{open() ? "▾ Hide report" : "▸ Show report"}</button>
+        <button class="link" onClick={toggleOpen}>{open() ? "▾ Hide report" : "▸ Show report"}</button>
         <Show when={open()}><p class="act-notice-body">{it.body}</p></Show>
       </div>
     );
   return (
     <Show when={it.kind !== "tools" && it.kind !== "tool"} fallback={
       <div class="act-tools" id={`item-${it.id}`} classList={{ open: open(), warn: !!it.warn }}>
-        <button class="act-tools-head" onClick={() => setOpen(!open())} aria-expanded={open()}>
+        <button class="act-tools-head" onClick={toggleOpen} aria-expanded={open()}>
           <Icon name="chevron-right" size={12} class="chev" />
           <b>{it.title}</b>
           <Show when={it.kind === "tools"}><span class="muted">/ {it.body}</span></Show>
@@ -622,6 +633,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
   const source = (): ActivitySource => props.source ?? activity;
   let scroller!: HTMLDivElement;
   const [placed, setPlaced] = createSignal(false);
+  const [layoutHeld, setLayoutHeld] = createSignal(false);
   // Items keep their identity while events append: the list reconciles by id,
   // so a growing tool group updates in place and older pages only add nodes.
   const [view, setView] = createStore<{ items: TranscriptItem[]; expired: boolean; loaded: boolean; pane: ReturnType<typeof paneStates>; tool: string }>({ items: [], expired: false, loaded: false, pane: paneStates(source(), s()), tool: "" });
@@ -638,6 +650,8 @@ export function ActivityView(props: { source?: ActivitySource }) {
     const expired = source().olderDone() && source().events().length > 0 && source().summary()?.history_truncated === true;
     const pane = paneStates(source(), s());
     const summary = source().summary(), tool = String(summary?.current_tool || summary?.activity_summary || s()?.summary || "");
+    resetTarget();
+    holdSelection();
     motion.update(() => {
       settleReading(true);
       setView("items", reconcile(items, { key: "id" }));
@@ -664,22 +678,27 @@ export function ActivityView(props: { source?: ActivitySource }) {
   let latestAfterScroll = false;
   const motion = createActivityScroll(() => scroller.scrollTop, (flush) => {
     const atEnd = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= 1;
+    const pinned = end.active();
     reading.remember();
-    flush();
-    if ((atEnd || latestAfterScroll) && !preview()) { latestAfterScroll = false; setFollowing(true); setUnseen(0); reading.reset(); end.pin(); }
+    batch(() => { setLayoutHeld(false); flush(); });
+    if ((pinned || atEnd || latestAfterScroll) && !preview()) { latestAfterScroll = false; setFollowing(true); setUnseen(0); reading.reset(); end.pin(); }
     else reading.changed();
   });
   const reading = createActivityAnchor({
     visible: () => activityReadingRows(scroller).visible(),
     offset: (key) => activityReadingRows(scroller).offset(key),
     adjust: (delta) => activityReadingRows(scroller).adjust(delta),
-  }, () => !end.active() && !preview(), animationFrames, () => !motion.active());
+  }, () => !end.active() && !preview(), animationFrames, () => !motion.active() && !selectionInside());
+  const holdSelection = () => {
+    if (selectionInside()) { setLayoutHeld(true); motion.selection(true); }
+  };
   const settleReading = (before = false) => { if (before) reading.beforeChange(); else reading.changed(); };
   const scrollIntent = () => {
-    motion.intent(); latestAfterScroll = false;
+    setLayoutHeld(true); motion.intent(); latestAfterScroll = false;
     end.release(); setFollowing(false); reading.remember();
   };
   const latest = () => {
+    holdSelection();
     if (motion.active()) { latestAfterScroll = true; return; }
     reading.reset(); end.pin();
     scroller.scrollTo({ top: scroller.scrollHeight, behavior: "instant" });
@@ -690,7 +709,11 @@ export function ActivityView(props: { source?: ActivitySource }) {
     const pointerEnded = () => motion.release();
     window.addEventListener("pointerup", pointerEnded); window.addEventListener("pointercancel", pointerEnded); window.addEventListener("blur", pointerEnded);
     onCleanup(() => { window.removeEventListener("pointerup", pointerEnded); window.removeEventListener("pointercancel", pointerEnded); window.removeEventListener("blur", pointerEnded); });
-    const selectionChanged = () => { if (selectionInside() && motion.active()) motion.moved(); else end.changed(); };
+    const selectionChanged = () => {
+      const inside = selectionInside();
+      if (inside) setLayoutHeld(true);
+      motion.selection(inside);
+    };
     document.addEventListener("selectionchange", selectionChanged);
     // Content includes Markdown, images and tool disclosures; the viewport
     // also resizes when the composer or a question card changes height.
@@ -723,12 +746,20 @@ export function ActivityView(props: { source?: ActivitySource }) {
     reading.changed();
   };
   let sendIds: Set<string> | undefined;
-  createEffect(on(() => source().target()?.id, () => {
+  let layoutTarget: string | undefined | null = null;
+  const resetTarget = () => {
+    const target = source().target()?.id;
+    if (layoutTarget === target) return;
+    layoutTarget = target;
+    // An explicit session switch ends its old selection. Do this before the
+    // first new projection, so a held range cannot defer a cached first page.
+    if (selectionInside()) document.getSelection()?.removeAllRanges();
     sendIds = undefined; setPlaced(false);
-    motion.reset(); latestAfterScroll = false; setFollowing(true); setUnseen(0); reading.reset(); newest = undefined;
+    motion.reset(); setLayoutHeld(false); latestAfterScroll = false; setFollowing(true); setUnseen(0); reading.reset(); newest = undefined;
     // Selection changes must place even when the next page has the same row count.
     end.pin();
-  }));
+  };
+  createEffect(on(() => source().target()?.id, resetTarget));
   createEffect(on(local, (rows) => {
     const sends = newLocalSends(sendIds, rows.map((row) => row.id));
     sendIds = sends.baseline;
@@ -737,8 +768,8 @@ export function ActivityView(props: { source?: ActivitySource }) {
   createEffect(on(preview, (match) => {
     if (match) {
       setPlaced(true);
-      motion.reset(); end.release(); reading.reset(); setFollowing(false);
-      requestAnimationFrame(() => { if (!motion.active()) scroller.querySelector(".search-preview mark")?.scrollIntoView({ block: "center" }); });
+      motion.reset(); setLayoutHeld(false); end.release(); reading.reset(); setFollowing(false);
+      requestAnimationFrame(() => { if (!motion.active() && !selectionInside()) scroller.querySelector(".search-preview mark")?.scrollIntoView({ block: "center" }); });
     } else { setFollowing(true); end.pin(); }
   }));
   // Events after the newest one seen count as new while the view does not follow (Qt's m_unseen).
@@ -762,6 +793,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
   };
   return (
     <ActivitySession.Provider value={fileSession}>
+    <ActivityLayoutHeld.Provider value={layoutHeld}>
     <div class="activity" style={{ position: "relative" }}>
       <Show when={!placed()}>
         <div class="act-col" style={{ position: "absolute", inset: "0", "min-height": "0", "pointer-events": "none" }} role="status">
@@ -775,7 +807,13 @@ export function ActivityView(props: { source?: ActivitySource }) {
         onWheel={scrollIntent}
         onKeyDown={(e) => { if (!e.defaultPrevented && ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(e.key)
           && !(e.target as HTMLElement).closest("input,textarea,select,[contenteditable=true]") && !(e.key === " " && (e.target as HTMLElement).closest("button,a"))) { scrollIntent(); } }}
-        onPointerDown={(e) => { if (e.button === 0 && !(e.target as HTMLElement).closest("button,a,input,textarea,.col-edge")) { scrollIntent(); motion.hold(); } }}
+        onPointerDown={(e) => { if (e.button === 0 && !(e.target as HTMLElement).closest("button,a,input,textarea,.col-edge")) {
+          // The scrollbar releases follow. Selecting text merely pauses it;
+          // the persistent range keeps ownership after pointerup.
+          if (e.target === scroller) scrollIntent();
+          else setLayoutHeld(true);
+          motion.hold();
+        } }}
         onTouchStart={() => { scrollIntent(); motion.hold(); }} onTouchMove={scrollIntent} onTouchEnd={() => motion.release()} onTouchCancel={() => motion.release()}>
         <div class="act-col" style={{ visibility: placed() ? "visible" : "hidden" }}>
           <Show when={!fullWidth()}><ColumnEdge /><ColumnEdge right /></Show>
@@ -828,6 +866,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
         </div>
       </div>
     </div>
+    </ActivityLayoutHeld.Provider>
     </ActivitySession.Provider>
   );
 }

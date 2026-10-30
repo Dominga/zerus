@@ -51,12 +51,14 @@ pub const INVALID: &str = "The video recording is invalid or exceeds 10 MiB.";
 
 /// A refused recording: the user sees Qt's one text, and the log says which
 /// check refused it (never a path or the recording's content).
+#[cfg(feature = "video")]
 pub(crate) fn refused(why: impl std::fmt::Display) -> String {
     eprintln!("zerus-client-media: video recording refused: {why}");
     INVALID.to_owned()
 }
 
 /// [`finish`]'s error, logged when it is the recording's own check.
+#[cfg(feature = "video")]
 pub(crate) fn finish_refused(error: &str, duration_ms: u64, width: u32, height: u32) -> String {
     if error == INVALID {
         refused(format!("{duration_ms} ms at {width}x{height}"))

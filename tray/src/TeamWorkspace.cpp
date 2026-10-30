@@ -3619,6 +3619,11 @@ void TeamWorkspace::assignMenu(const Team &team, const QString &member, const QP
     menu.exec(global);
 }
 
+void TeamWorkspace::setWaitingBanner(QWidget *banner)
+{
+    m_conversation->setBanner(banner);
+}
+
 void TeamWorkspace::renderCoordinator(const Team &team)
 {
     const Colors c = colorsFor(m_dark);

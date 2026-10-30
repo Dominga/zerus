@@ -581,6 +581,7 @@ private:
     void showNewTeam(const QString &host = {}, const QString &name = {});
     void showTeamDesigner();
     void showTeamWaiting();
+    void openWaitingItem(const QString &team,const QString &kind,int phase,int task);
     void startTeamDesigner(const QString &folder,const QString &goal,const QJsonObject &agent);
     QString m_teamDesignerFolder,m_teamDesignerProject;
     QString teamDesignerSession() const;
@@ -604,6 +605,11 @@ private:
     class TeamWaitingPage *m_teamWaitingPage=nullptr;
     class QPushButton *m_teamWaitingNav=nullptr;
     int m_teamWaitingPageIndex=-1;
+    // U55: the same list as banners above the session's chat and Activity and
+    // above the lead's conversation in the Team tab, read while the window shows.
+    class TeamWaitingFeed *m_waitingFeed=nullptr;
+    class TeamWaitingBanner *m_waitingBanner=nullptr,*m_teamWaitingBanner=nullptr;
+    QWidget *m_waitingHost=nullptr;
     QWidget *m_teamNewTab=nullptr;
     class TeamNewTab *m_teamNewForm=nullptr;
     bool m_teamNewWaiting=false;

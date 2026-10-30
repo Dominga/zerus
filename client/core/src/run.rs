@@ -132,14 +132,138 @@ pub fn run_without(
 type StreamInput = Box<dyn FnOnce(ChildStdin) -> bool + Send>;
 type StreamOutput = Box<dyn FnOnce(ChildStdout) -> bool + Send>;
 type Spawn = fn(&mut Command) -> std::io::Result<Child>;
+type GuardedSpawn = Box<dyn FnOnce(&mut Command) -> std::io::Result<Child> + Send>;
 
 #[derive(Default)]
 struct Pipes {
     input: Option<StreamInput>,
     output: Option<StreamOutput>,
-    spawn: Option<Spawn>,
+    spawn: Option<GuardedSpawn>,
     readers: Option<Arc<dyn Send + Sync>>,
     stop: Option<Arc<AtomicBool>>,
+    require_complete: bool,
+    stderr_cap: Option<usize>,
+    child_exited: Option<Arc<AtomicBool>>,
+}
+
+struct ChildCharge {
+    resources: Option<Arc<dyn Send + Sync>>,
+    exited: Arc<AtomicBool>,
+}
+impl ChildCharge {
+    fn unverified(&mut self) -> Option<Arc<dyn Send + Sync>> {
+        if self.exited.load(Ordering::Acquire) {
+            None
+        } else {
+            self.resources.take()
+        }
+    }
+}
+impl Drop for ChildCharge {
+    fn drop(&mut self) {
+        if let Some(resources) = self.unverified() {
+            // kill/wait errors do not prove child exit. Keep this admission
+            // pinned rather than reporting a false last-resource completion.
+            // The host must bound admissions and recover from verified durable
+            // process/boot identities before allowing another operation.
+            std::mem::forget(resources);
+        }
+    }
+}
+
+/// Body-free failures of an owned exchange. The caller retains its original
+/// operation identity; none of these errors authorizes delivery or a retry.
+#[derive(Debug, PartialEq, Eq)]
+pub enum OwnedError {
+    InvalidInput,
+    Cancelled,
+    TimedOut,
+    StartFailed,
+    WriteFailed,
+    ChildFailed,
+    OutputTooLarge,
+    Incomplete,
+    ExitUnverified,
+}
+
+/// One bounded exchange through the existing runner, with actual lifetime
+/// accounting for the owned child, input writer and both output readers.
+/// This supplies no authorization, executable selection or operation policy.
+/// The host must reserve first and fence the supplied spawn hook itself.
+///
+/// Input/stdout are capped at 1 MiB, stderr at 16 KiB and the child deadline
+/// at 30 seconds. Success requires exit zero, successful complete input and
+/// real EOF on both pipes. A bounded stop/incomplete exchange may return while
+/// a descendant retains a pipe; the shared resources guard then stays alive.
+/// Only the owned child is stopped. No descendant or process group is killed.
+/// An unverified wait failure conservatively pins one guard until this host
+/// exits. The caller must cap admissions and supply durable recovery/remediation.
+pub fn run_owned(
+    hgs: &Path,
+    inv: &Invocation,
+    parent_env: &[(&str, &str)],
+    cancel: &AtomicBool,
+    spawn: impl FnOnce(&mut Command) -> std::io::Result<Child> + Send + 'static,
+    resources: Arc<dyn Send + Sync>,
+) -> Result<Vec<u8>, OwnedError> {
+    if cancel.load(Ordering::Acquire) {
+        return Err(OwnedError::Cancelled);
+    }
+    if inv.stdin.as_ref().is_none_or(|bytes| bytes.len() > 1 << 20)
+        || inv.timeout.is_zero()
+        || inv.timeout > Duration::from_secs(30)
+    {
+        return Err(OwnedError::InvalidInput);
+    }
+    let child_exited = Arc::new(AtomicBool::new(false));
+    // Each pipe also owns a copy, even after the bounded runner returns.
+    let _child = ChildCharge {
+        resources: Some(resources.clone()),
+        exited: child_exited.clone(),
+    };
+    let until = Instant::now() + inv.timeout;
+    let exit = run_inner(
+        hgs,
+        inv,
+        parent_env,
+        &[],
+        1 << 20,
+        Some(cancel),
+        Pipes {
+            spawn: Some(Box::new(spawn)),
+            readers: Some(resources),
+            require_complete: true,
+            stderr_cap: Some(16 << 10),
+            child_exited: Some(child_exited.clone()),
+            ..Pipes::default()
+        },
+    );
+    if matches!(exit, Ok(Exit::StartFailed(_))) {
+        // The guarded spawn hook returned no owned child.
+        child_exited.store(true, Ordering::Release);
+    }
+    if !child_exited.load(Ordering::Acquire) {
+        return Err(OwnedError::ExitUnverified);
+    }
+    // A cancellation/deadline racing completion cannot grant success.
+    if cancel.load(Ordering::Acquire) {
+        return Err(OwnedError::Cancelled);
+    }
+    if Instant::now() >= until {
+        return Err(OwnedError::TimedOut);
+    }
+    match exit {
+        Ok(Exit::Code {
+            code: 0, stdout, ..
+        }) => Ok(stdout),
+        Ok(Exit::Code { .. }) => Err(OwnedError::ChildFailed),
+        Ok(Exit::TimedOut) => Err(OwnedError::TimedOut),
+        Ok(Exit::StartFailed(_)) => Err(OwnedError::StartFailed),
+        Ok(Exit::WriteFailed) => Err(OwnedError::WriteFailed),
+        Ok(Exit::Abnormal { .. }) => Err(OwnedError::Incomplete),
+        Err(Stopped::Cancelled) => Err(OwnedError::Cancelled),
+        Err(Stopped::TooLarge(_)) => Err(OwnedError::OutputTooLarge),
+    }
 }
 
 // Also cancels a decoder that is still blocked in an OS read when the runner
@@ -201,7 +325,7 @@ pub fn run_decoded<T: Send + 'static, E: Send + 'static>(
             let ok = result.is_ok();
             tx.send(result).is_ok() && ok
         })),
-        spawn: Some(spawn),
+        spawn: Some(Box::new(spawn)),
         readers: Some(readers),
         stop: Some(stop),
         ..Pipes::default()
@@ -272,7 +396,12 @@ fn run_inner(
     pipes: Pipes,
 ) -> Result<Exit, Stopped> {
     let consumed = pipes.output.is_some();
-    let strict_outputs = pipes.input.is_some() || consumed;
+    let strict_outputs = pipes.input.is_some() || consumed || pipes.require_complete;
+    let stderr_cap = pipes.stderr_cap.unwrap_or(if strict_outputs {
+        stdout_cap
+    } else {
+        STDERR_CAP
+    });
     let _cancel_output = CancelOutput(pipes.stop);
     let mut command = Command::new(hgs);
     command.args(&inv.args);
@@ -292,7 +421,7 @@ fn run_inner(
         })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = match pipes.spawn.unwrap_or(Command::spawn)(&mut command) {
+    let mut child = match pipes.spawn.unwrap_or_else(|| Box::new(Command::spawn))(&mut command) {
         Ok(child) => child,
         Err(error) => return Ok(Exit::StartFailed(error.to_string())),
     };
@@ -301,7 +430,13 @@ fn run_inner(
     let stdin = child.stdin.take();
     let input = inv.stdin.clone();
     let (write_tx, write_rx) = mpsc::channel();
+    let input_guard = if pipes.require_complete {
+        pipes.readers.clone()
+    } else {
+        None
+    };
     thread::spawn(move || {
+        let _input = input_guard;
         let ok = match (stdin, pipes.input, input) {
             (Some(pipe), Some(write), _) => write(pipe),
             (Some(mut pipe), None, Some(bytes)) => {
@@ -328,7 +463,7 @@ fn run_inner(
             // Release the pipe group before waking a possible replacement.
             drop(guard);
             completed.store(if ok { 1 } else { 2 }, Ordering::Release);
-            let _ = done.send(());
+            let _ = done.send(ok);
         });
         Arc::default()
     } else {
@@ -341,18 +476,18 @@ fn run_inner(
             },
             done_tx.clone(),
             limit,
-            None,
+            if pipes.require_complete {
+                pipes.readers.clone()
+            } else {
+                None
+            },
         )
     };
     let err = reader(
         child.stderr.take(),
-        if strict_outputs {
-            stdout_cap
-        } else {
-            STDERR_CAP
-        },
+        stderr_cap,
         done_tx,
-        strict_outputs.then(|| (stdout_cap, Arc::clone(&over))),
+        strict_outputs.then(|| (stderr_cap, Arc::clone(&over))),
         pipes.readers,
     );
     let too_large = |err: &Shared| {
@@ -368,8 +503,9 @@ fn run_inner(
     let status = loop {
         if !written {
             match write_rx.try_recv() {
-                Ok(true) | Err(TryRecvError::Disconnected) => written = true,
-                Ok(false) => {
+                Ok(true) => written = true,
+                Err(TryRecvError::Disconnected) if !pipes.require_complete => written = true,
+                Ok(false) | Err(TryRecvError::Disconnected) => {
                     written = true;
                     write_failed_until = Some((Instant::now() + WRITE_GRACE).min(deadline));
                 }
@@ -377,13 +513,13 @@ fn run_inner(
             }
         }
         if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
-            let _ = stop(child, Exit::TimedOut);
+            let _ = stop(child, Exit::TimedOut, pipes.child_exited.as_deref());
             drain(&done_rx);
             return Err(Stopped::Cancelled);
         }
         if over.load(Ordering::Relaxed) {
             // Ended for its output: the exit that gives is not reported.
-            let _ = stop(child, Exit::TimedOut);
+            let _ = stop(child, Exit::TimedOut, pipes.child_exited.as_deref());
             drain(&done_rx);
             return Err(too_large(&err));
         }
@@ -393,12 +529,18 @@ fn run_inner(
                 Exit::Abnormal {
                     stderr: "stdout decoder failed".into(),
                 },
+                pipes.child_exited.as_deref(),
             );
             drain(&done_rx);
             return Ok(exit);
         }
         match child.try_wait() {
-            Ok(Some(status)) => break status,
+            Ok(Some(status)) => {
+                if let Some(exited) = &pipes.child_exited {
+                    exited.store(true, Ordering::Release);
+                }
+                break status;
+            }
             Ok(None) => {}
             Err(error) => {
                 return Ok(stop(
@@ -406,15 +548,20 @@ fn run_inner(
                     Exit::Abnormal {
                         stderr: error.to_string(),
                     },
+                    pipes.child_exited.as_deref(),
                 ))
             }
         }
         let now = Instant::now();
         if write_failed_until.is_some_and(|until| now >= until) {
-            return Ok(stop(child, Exit::WriteFailed));
+            return Ok(stop(
+                child,
+                Exit::WriteFailed,
+                pipes.child_exited.as_deref(),
+            ));
         }
         if now >= deadline {
-            let exit = stop(child, Exit::TimedOut);
+            let exit = stop(child, Exit::TimedOut, pipes.child_exited.as_deref());
             if consumed {
                 drain(&done_rx);
             }
@@ -422,15 +569,28 @@ fn run_inner(
         }
         thread::sleep(POLL);
     };
-    if consumed {
+    if consumed || pipes.require_complete {
         let until = deadline.min(Instant::now() + DRAIN);
         let mut ended = 0;
-        while ended < 2 {
+        while ended < 2 || (pipes.require_complete && !written) {
             if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
                 return Err(Stopped::Cancelled);
             }
             if over.load(Ordering::Relaxed) {
                 return Err(too_large(&err));
+            }
+            if pipes.require_complete && !written {
+                match write_rx.try_recv() {
+                    Ok(true) => written = true,
+                    Ok(false) | Err(TryRecvError::Disconnected) => return Ok(Exit::WriteFailed),
+                    Err(TryRecvError::Empty) => (),
+                }
+            }
+            if pipes.require_complete && write_failed_until.is_some() {
+                return Ok(Exit::WriteFailed);
+            }
+            if ended == 2 && written {
+                break;
             }
             let left = until.saturating_duration_since(Instant::now());
             if left.is_zero() {
@@ -442,11 +602,29 @@ fn run_inner(
                     }
                 });
             }
-            if done_rx.recv_timeout(left.min(POLL)).is_ok() {
-                ended += 1;
+            if ended == 2 {
+                // Both readers ended; only the owned input writer is pending.
+                // Its counterpart may be a descendant. Do not spin on the now
+                // disconnected reader-completion channel.
+                thread::sleep(left.min(POLL));
+                continue;
+            }
+            match done_rx.recv_timeout(left.min(POLL)) {
+                Ok(false) if pipes.require_complete => {
+                    return Ok(Exit::Abnormal {
+                        stderr: "owned pipe did not reach EOF".into(),
+                    })
+                }
+                Ok(_) => ended += 1,
+                Err(mpsc::RecvTimeoutError::Disconnected) if pipes.require_complete => {
+                    return Ok(Exit::Abnormal {
+                        stderr: "owned reader did not complete".into(),
+                    });
+                }
+                Err(_) => (),
             }
         }
-        if decoded.load(Ordering::Acquire) != 1 {
+        if consumed && decoded.load(Ordering::Acquire) != 1 {
             return Ok(Exit::Abnormal {
                 stderr: "stdout decoder failed".into(),
             });
@@ -473,7 +651,7 @@ fn run_inner(
 /// Waits for both pipe readers to finish. One budget for both pipes: a
 /// grandchild that keeps them open must not hold the call, and what was read
 /// by then is still returned.
-fn drain(done: &Receiver<()>) {
+fn drain(done: &Receiver<bool>) {
     let until = Instant::now() + DRAIN;
     for _ in 0..2 {
         let left = until.saturating_duration_since(Instant::now());
@@ -483,9 +661,13 @@ fn drain(done: &Receiver<()>) {
     }
 }
 
-fn stop(mut child: Child, exit: Exit) -> Exit {
+fn stop(mut child: Child, exit: Exit, exited: Option<&AtomicBool>) -> Exit {
     let _ = child.kill();
-    let _ = child.wait();
+    if child.wait().is_ok() {
+        if let Some(exited) = exited {
+            exited.store(true, Ordering::Release);
+        }
+    }
     exit
 }
 
@@ -503,19 +685,23 @@ fn take(buffer: &Shared) -> Vec<u8> {
 fn reader(
     pipe: Option<impl Read + Send + 'static>,
     cap: usize,
-    done: Sender<()>,
+    done: Sender<bool>,
     limit: Option<(usize, Arc<AtomicBool>)>,
     guard: Option<Arc<dyn Send + Sync>>,
 ) -> Shared {
     let buffer: Shared = Arc::default();
     let shared = Arc::clone(&buffer);
     thread::spawn(move || {
+        let mut eof = false;
         if let Some(mut pipe) = pipe {
             let mut chunk = [0u8; 8192];
             let mut received = 0usize;
             loop {
                 match pipe.read(&mut chunk) {
-                    Ok(0) => break,
+                    Ok(0) => {
+                        eof = true;
+                        break;
+                    }
                     Ok(n) => {
                         received = received.saturating_add(n);
                         let mut kept = shared.lock().unwrap_or_else(|e| e.into_inner());
@@ -533,9 +719,46 @@ fn reader(
             }
         }
         drop(guard);
-        let _ = done.send(());
+        let _ = done.send(eof);
     });
     buffer
+}
+
+#[cfg(test)]
+mod owned_charge_tests {
+    use super::*;
+
+    #[test]
+    fn an_unverified_child_keeps_its_resource_charge() {
+        let resource = Arc::new(());
+        let weak = Arc::downgrade(&resource);
+        let mut charge = ChildCharge {
+            resources: Some(resource),
+            exited: Arc::new(AtomicBool::new(false)),
+        };
+        // Exercise the exact unverified branch without leaking a test guard.
+        // Drop retains this guard indefinitely; only external verified recovery
+        // may settle the host's durable charge after this process is gone.
+        let pinned = charge.unverified().unwrap();
+        drop(charge);
+        assert!(weak.upgrade().is_some());
+        drop(pinned);
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn verified_child_exit_releases_only_its_own_guard_copy() {
+        let resource = Arc::new(());
+        let weak = Arc::downgrade(&resource);
+        let charge = ChildCharge {
+            resources: Some(resource.clone()),
+            exited: Arc::new(AtomicBool::new(true)),
+        };
+        drop(charge);
+        assert!(weak.upgrade().is_some());
+        drop(resource);
+        assert!(weak.upgrade().is_none());
+    }
 }
 
 #[cfg(all(test, unix))]

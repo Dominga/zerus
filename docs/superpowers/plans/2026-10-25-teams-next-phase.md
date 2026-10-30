@@ -1236,8 +1236,8 @@ sets them in the catalog, the team settings or the plan; members never do.
     owner chooses one of the two; with no choice, standard.
   - *Switching to free:* only on the owner's confirmation. The lead (or the
     owner through the lead's chat) requests it; Zerus shows a pop-up dialog
-    with the reason and Switch to free / Keep standard, the same confirmation
-    as a U57 card and bound to the request id. Deny keeps standard and its
+    with the reason and Switch to free / Keep standard, bound to the request
+    id (U57 later moves it onto the shared confirmation card). Deny keeps standard and its
     reason reaches the lead. Switching back to standard is the owner's close
     of the free phase.
   - The mode is shown beside the phase (status, the plan header, Graph and
@@ -1421,15 +1421,15 @@ phase 37. Lanes are balanced by volume and cost (U28 rule 9), not by count.
   the Profile view and the heat overlay, the lead protocol and docs;
   integration, review, QA and the build.
 
-## Phase 50 (planned 2026-10-30)
+## Free planning in phase 43 (owner, 2026-10-30)
 
-- **50 Free planning (U59)**, the last phase of the plan: the plan mode on
-  the server and its status field, the lead's proposal at the start of
-  planning, the switch-to-free dialog bound to the request (on U57's
-  confirmation), adding tasks to an open phase and closing it, the mode in
-  the desktop and Android views, the lead protocol and docs; integration,
-  review, QA and the build. It starts after phase 45, which brings U57's
-  confirmation cards.
+- U59 joins phase 43 as its last work, before the phase's integration,
+  review, QA, build and the fork release: the plan mode on the server and
+  its status field, the lead's proposal at the start of planning, the
+  switch-to-free dialog bound to the request, adding tasks to an open phase
+  and closing it, the mode in the desktop and Android views, the lead
+  protocol and docs. The dialog is its own confirmation bound to the request
+  id; U57 (phase 45) later moves it onto the shared confirmation card.
 
 ## Order of work (proposal)
 

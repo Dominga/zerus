@@ -613,6 +613,7 @@ private:
     class TeamNewDialog *teamNewForm(QWidget *parent);
     int m_teamSettingsSection=-1;
     void updateTeamPanel();
+    void updateProposalCards();
     void showTeam(const QString &team);
     Teams::Live teamLive(const Teams::Member &member) const;
     // The strip a team lead's card carries (SessionRoles::TeamLead).
@@ -795,6 +796,7 @@ private:
     void openSessionTerminal(const QString &host, const QString &name);
     QHash<quint64, QString> m_childMessages;
     QuestionCard *m_question = nullptr;
+    class TeamProposalCards *m_proposalCards = nullptr;
     QList<ActivityWidth::ColumnLayout *> m_activityColumns;   // content sharing Activity's reading column
     RecoveryUi::Panel *m_recovery = nullptr;
     ToolbarChip *m_recoveryChip = nullptr;

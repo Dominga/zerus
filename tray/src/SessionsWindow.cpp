@@ -43,6 +43,7 @@
 #include "TeamNewDialog.h"
 #include "TeamCatalogEditor.h"
 #include "TeamWorkspace.h"
+#include "TeamProposalCard.h"
 #include "TeamDesignerPage.h"
 #include "TeamWaitingPage.h"
 #include "TeamNewTab.h"
@@ -1039,7 +1040,9 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     });
     m_contextUsage=new SessionUsage::ContextButton;m_contextUsage->setObjectName("activityContext");
     activityLayout->addWidget(m_activityView, 1);
-    auto *inputColumn = activityColumn(activityLayout); inputColumn->addWidget(m_question);
+    // WhiteWh fork: U57, the lead's open proposals as cards above the question card.
+    m_proposalCards = new TeamProposalCards; m_proposalCards->setObjectName("mainProposalCards");
+    auto *inputColumn = activityColumn(activityLayout); inputColumn->addWidget(m_proposalCards); inputColumn->addWidget(m_question);
     m_usageLimit=new ToolbarChip;m_usageLimit->setObjectName("usageLimitChip");m_usageLimit->setTone(ChipTone::Danger);m_usageLimit->setIconName("attention");
     auto *usagePanel=new QWidget;usagePanel->setObjectName("usageLimitPopover");
     auto *limitLayout=new QVBoxLayout(usagePanel);limitLayout->setContentsMargins(14,12,14,12);limitLayout->setSpacing(8);
@@ -1665,6 +1668,12 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     // or a team selected in the list; `?N` counts questions in member sessions.
     m_teams=new TeamController(new HgsClient(hgsPath,this),this);
     m_teamPanel=new TeamPanel(m_teams);
+    m_proposalCards->decide=[this](const QJsonObject &input,const TeamProposalCards::Done &done){m_teams->act(QStringLiteral("decide-proposal"),input,done);};
+    m_proposalCards->current=[this]()->const Teams::Team *{
+        const QString id=m_proposalCards->teamId();
+        if(const auto *watched=m_teams->watched();watched&&watched->id==id)return watched;
+        return m_teams->team(id);
+    };
     m_teamPanel->openSession=[this](const QString &host,const QString &name){showSession(host,name);};
     m_teamPanel->sendMessage=[this](const QString &host,const QString &name,const QString &text){
         for(const auto &entry:std::as_const(m_entries))if(entry.host==host&&entry.session.name==name&&entry.session.state!="archived"){
@@ -1752,6 +1761,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     // N7 (U18): every team's attention items reach the desktop notifications,
     // once each; the known ones are kept across restarts.
     m_teamNotices=std::make_shared<TeamAttentionNotices>(QSettings().value("teams/attentionNotified").toStringList());
+    connect(m_teams,&TeamController::watchedChanged,this,[this]{updateProposalCards();});
     connect(m_teams,&TeamController::teamsChanged,this,[this]{
         // U25 (spec 2.3): members other than the lead are muted by default.
         QSet<QString> members;
@@ -2811,7 +2821,7 @@ void SessionsWindow::applyTheme()
     m_fileDrop->setTheme(m_dark);
     m_recovery->setStyleSheet(QStringLiteral("QFrame#recoveryPanel {background:transparent;border:0;} QLabel {border:0;background:transparent;}"));
     m_archiveBrowser->setTheme(m_dark);
-    m_machineFilter->setTheme(m_dark); m_projectFilter->setTheme(m_dark); m_accountFilter->setTheme(m_dark); m_dashboard->setTheme(m_dark); m_searchResults->setTheme(m_dark); m_activityView->setTheme(m_dark); m_composer->setTheme(m_dark); m_question->setTheme(m_dark); m_terminal->setTheme(m_dark);
+    m_machineFilter->setTheme(m_dark); m_projectFilter->setTheme(m_dark); m_accountFilter->setTheme(m_dark); m_dashboard->setTheme(m_dark); m_searchResults->setTheme(m_dark); m_activityView->setTheme(m_dark); m_composer->setTheme(m_dark); m_question->setTheme(m_dark); m_proposalCards->setDark(m_dark); m_terminal->setTheme(m_dark);
     m_subagentView->setTheme(m_dark); m_subagentComposer->setTheme(m_dark);
     if (m_teamPanel) m_teamPanel->setTheme(m_dark);   // WhiteWh fork: agent teams
     if (m_teamCatalog) m_teamCatalog->setDark(m_dark);
@@ -7341,9 +7351,23 @@ void SessionsWindow::updateWorktrees()
 }
 // WhiteWh fork: the Team tab follows the selected session's team, unless a
 // team header in the list was chosen.
+void SessionsWindow::updateProposalCards()
+{
+    // U57: the lead's own session shows its team's open proposals.
+    if(!m_proposalCards||!m_teams)return;
+    const auto *entry=selected();
+    const auto *team=entry?m_teams->teamOfSession(entry->host,entry->session.name):nullptr;
+    const auto *member=team?team->memberOfSession(entry->host,entry->session.name):nullptr;
+    const bool lead=member&&m_subagentId.isEmpty()&&(member->lead||member->id==team->lead);
+    // The watched copy is the newer one when it is this team.
+    if(lead)if(const auto *watched=m_teams->watched();watched&&watched->id==team->id)team=watched;
+    m_proposalCards->setTeam(lead?team:nullptr);
+}
+
 void SessionsWindow::updateTeamPanel()
 {
     if(!m_teamPanel||!m_teams)return;
+    updateProposalCards();
     if(m_teamStrip){
         const auto *entry=selected();
         const auto *found=entry?m_teams->teamOfSession(entry->host,entry->session.name):nullptr;

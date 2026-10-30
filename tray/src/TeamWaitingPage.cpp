@@ -48,7 +48,7 @@ TeamWaitingPage::Item TeamWaitingPage::parse(const QJsonObject &item)
     Item out;
     out.id = item["id"].toString(); out.team = item["team"].toString(); out.teamName = item["team_name"].toString();
     out.kind = item["kind"].toString(); out.title = item["title"].toString(); out.action = item["action"].toString();
-    out.member = item["member"].toString(); out.since = item["since"].toDouble();
+    out.member = item["member"].toString(); out.proposal = item["proposal"].toString(); out.since = item["since"].toDouble();
     out.phase = item["phase"].toInt(); out.task = item["task"].toInt();
     if (out.teamName.isEmpty()) out.teamName = out.team;
     return out;
@@ -197,18 +197,21 @@ QWidget *TeamWaitingPage::rowFor(const Item &item)
 {
     const Colors c = colorsFor(m_dark);
     const QColor tone = kindColor(c, item.kind);
+    // U57: a lead's proposal is answered on its card in the lead's chat.
+    const bool proposal = item.action == "decide_proposal";
+    const QString kindName = proposal ? tr("Proposal") : kindLabel(item.kind);
     auto *frame = new WaitingRow; frame->setObjectName("teamWaitingRow"); frame->setAttribute(Qt::WA_StyledBackground);
     frame->setProperty("kind", item.kind); frame->setProperty("team", item.team); frame->setProperty("itemId", item.id);
     frame->setCursor(Qt::PointingHandCursor);
     auto *h = new QHBoxLayout(frame); h->setContentsMargins(12, 9, 10, 9); h->setSpacing(10);
     auto *icon = new QLabel; icon->setObjectName("teamWaitingKindIcon"); icon->setFixedSize(18, 18);
-    icon->setPixmap(workspaceIcon(kindIcon(item.kind), tone).pixmap(18, 18)); icon->setToolTip(kindLabel(item.kind));
+    icon->setPixmap(workspaceIcon(kindIcon(item.kind), tone).pixmap(18, 18)); icon->setToolTip(kindName);
     h->addWidget(icon, 0, Qt::AlignTop);
     auto *text = new QVBoxLayout; text->setContentsMargins(0, 0, 0, 0); text->setSpacing(4);
     auto *title = elided(item.title, c.fg, 13); title->setObjectName("teamWaitingItemTitle");
     text->addWidget(title);
     auto *meta = row(8);
-    auto *kind = label(kindLabel(item.kind), tone, 11, true, "teamWaitingKind");
+    auto *kind = label(kindName, tone, 11, true, "teamWaitingKind");
     auto *team = new QLabel(item.teamName); team->setObjectName("teamWaitingTeam"); team->setTextFormat(Qt::PlainText);
     team->setToolTip(tr("Team %1").arg(item.teamName));
     meta->addWidget(kind); meta->addWidget(team); meta->addStretch();
@@ -218,8 +221,9 @@ QWidget *TeamWaitingPage::rowFor(const Item &item)
     auto *since = label(agoText(item.since, now), c.muted, 11, false, "teamWaitingSince");
     since->setToolTip(QDateTime::fromSecsSinceEpoch(qint64(item.since)).toString(QStringLiteral("yyyy-MM-dd HH:mm")));
     h->addWidget(since);
-    auto *open = button(tr("Open team"), "teamWaitingOpen");
-    open->setAccessibleName(tr("Open team %1").arg(item.teamName));
+    auto *open = button(proposal ? tr("Answer") : tr("Open team"), "teamWaitingOpen");
+    open->setAccessibleName(proposal ? tr("Answer the proposal in team %1").arg(item.teamName) : tr("Open team %1").arg(item.teamName));
+    if (proposal) open->setToolTip(tr("Allow or deny it on its card in the lead's chat"));
     h->addWidget(open);
     const auto go = [this, item] { if (openTeam) openTeam(item); };
     QObject::connect(open, &QPushButton::clicked, frame, go);

@@ -895,7 +895,7 @@ Team parse(const QJsonObject &v)
         proposal.goal = p.value("goal").toString();
         proposal.mode = str(p, "mode"); proposal.hash = str(p, "hash");
         proposal.at = p.value("at").toDouble();
-        proposal.member = p.value("member");
+        proposal.member = p.value("member"); proposal.change = p.value("change");
         if (!proposal.id.isEmpty()) team.proposals.append(proposal);
     }
     for (const auto &value : v.value("swapped").toArray()) {
@@ -1207,6 +1207,30 @@ QString resetText(double resetsAt)
                                              : tr("resets %1").arg(at.toString(QStringLiteral("d MMM HH:mm")));
 }
 
+namespace {
+// A proposed member, "Designer (claude · sonnet)".
+QString proposedMember(const Team &team, const QJsonObject &object, const QString &id)
+{
+    const QString role = team.member(id) ? team.roleOf(id) : object.value("role").toString(id);
+    QStringList how;
+    for (const auto *key : {"agent", "model", "effort", "account"})
+        if (const auto value = object.value(QLatin1String(key)).toString(); !value.isEmpty()) how << value;
+    return how.isEmpty() ? role : QStringLiteral("%1 (%2)").arg(role, how.join(QStringLiteral(" · ")));
+}
+
+QJsonArray proposedMembers(const Team::Proposal &proposal)
+{
+    const auto members = proposal.change.toObject().value("members").toArray();
+    return members.isEmpty() && proposal.member.isObject() ? QJsonArray{proposal.member} : members;
+}
+
+QString phaseName(const Team &team, int n)
+{
+    const auto *phase = team.phase(n);
+    return phase && !phase->title.isEmpty() ? tr("phase %1 (%2)").arg(n).arg(phase->title) : tr("phase %1").arg(n);
+}
+}
+
 QString proposalText(const Team &team, const Team::Proposal &proposal)
 {
     const auto object = proposal.member.toObject();
@@ -1215,7 +1239,13 @@ QString proposalText(const Team &team, const Team::Proposal &proposal)
     QStringList how;
     for (const auto *key : {"agent", "model", "effort", "account"})
         if (const auto value = object.value(QLatin1String(key)).toString(); !value.isEmpty()) how << value;
-    if (proposal.kind == "add-member") return how.isEmpty() ? tr("Add %1").arg(role) : tr("Add %1 (%2)").arg(role, how.join(QStringLiteral(" · ")));
+    const auto change = proposal.change.toObject();
+    if (proposal.kind == "add-member") {
+        const auto members = proposedMembers(proposal);
+        if (members.size() > 1) return tr("Add %1 members").arg(members.size());
+        const auto one = members.isEmpty() ? object : members.first().toObject();
+        return tr("Add %1").arg(proposedMember(team, one, one.value("id").toString()));
+    }
     if (proposal.kind == "remove-member") return tr("Remove %1").arg(role);
     if (proposal.kind == "swap-member") {
         const auto session = object.value("session").toObject().value("name").toString();
@@ -1224,7 +1254,53 @@ QString proposalText(const Team &team, const Team::Proposal &proposal)
     }
     if (proposal.kind == "next-goal") return tr("Next goal: %1").arg(proposal.goal.section('\n', 0, 0).left(120));
     if (proposal.kind == "switch-plan-mode") return proposal.mode == "standard" ? tr("Switch to standard planning") : tr("Switch to free planning");
+    // U57: tasks for a running phase, tasks to cancel, a phase to discard.
+    if (proposal.kind == "add-to-phase") {
+        const int count = int(change.value("tasks").toArray().size());
+        const QString phase = phaseName(team, change.value("phase").toInt());
+        return count == 1 ? tr("Add 1 task to %1").arg(phase) : tr("Add %1 tasks to %2").arg(count).arg(phase);
+    }
+    if (proposal.kind == "cancel-tasks") {
+        const int count = int(change.value("tasks").toArray().size());
+        return count == 1 ? tr("Cancel 1 task") : tr("Cancel %1 tasks").arg(count);
+    }
+    if (proposal.kind == "discard-phase") return tr("Discard %1").arg(phaseName(team, change.value("phase").toInt()));
     return proposal.kind;
+}
+
+QStringList proposalChanges(const Team &team, const Team::Proposal &proposal)
+{
+    QStringList lines;
+    const auto change = proposal.change.toObject();
+    const auto taskLine = [&team](int id) {
+        const auto *task = team.task(id);
+        return task ? tr("#%1 %2 (%3)").arg(id).arg(task->title, statusLabel(task->status)) : tr("#%1").arg(id);
+    };
+    if (proposal.kind == "add-member") {
+        const auto members = proposedMembers(proposal);
+        if (members.size() > 1)
+            for (const auto &member : members) lines << proposedMember(team, member.toObject(), member.toObject().value("id").toString());
+    } else if (proposal.kind == "remove-member") {
+        lines << tr("Its session keeps running; it gets no more tasks.");
+    } else if (proposal.kind == "swap-member") {
+        lines << tr("Its open task goes to the new session with what was done so far; the old session keeps running for you to stop.");
+    } else if (proposal.kind == "next-goal") {
+        lines << proposal.goal.left(600);
+    } else if (proposal.kind == "add-to-phase") {
+        for (const auto &value : change.value("tasks").toArray()) {
+            const auto task = value.toObject();
+            const QString title = task.value("title").toString(tr("Untitled task"));
+            const QString assignee = task.value("assignee").toString();
+            lines << (assignee.isEmpty() ? title : tr("%1, for %2").arg(title, team.member(assignee) ? team.roleOf(assignee) : assignee));
+        }
+    } else if (proposal.kind == "cancel-tasks") {
+        for (const auto &value : change.value("tasks").toArray()) lines << taskLine(value.toInt());
+    } else if (proposal.kind == "discard-phase") {
+        const auto *phase = team.phase(change.value("phase").toInt());
+        if (phase) for (int id : phase->tasks) lines << taskLine(id);
+        if (lines.isEmpty()) lines << tr("It has no tasks.");
+    }
+    return lines;
 }
 
 QString statusLabel(const QString &status)

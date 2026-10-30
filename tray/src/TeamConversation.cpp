@@ -622,6 +622,12 @@ void TeamConversation::send(const QString &raw)
     updateSend();
 }
 
+void TeamConversation::setCards(QWidget *cards)
+{
+    auto *v = static_cast<QVBoxLayout *>(layout());
+    v->insertWidget(v->indexOf(m_question), cards);
+}
+
 void TeamConversation::setQuestionsShown(bool shown)
 {
     m_questionsShown = shown;

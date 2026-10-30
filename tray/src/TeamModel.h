@@ -509,11 +509,12 @@ struct Team {
     // F8: the lead's membership proposals, decided by the owner. `member` is
     // the proposed member (add), its id (remove) or the swap fields (swap).
     // U59: a switch-plan-mode proposal names its mode and the content hash the
-    // owner's answer is bound to.
+    // owner's answer is bound to. U57: `change` is the exact change Allow
+    // applies (members, a phase's new tasks, the tasks to cancel, a phase).
     struct Proposal {
         QString id, kind, by, state, reason, goal, note, mode, hash;
         double at = 0;
-        QJsonValue member;
+        QJsonValue member, change;
         bool open() const { return state == QLatin1String("open"); }
         QString memberId() const;
     };
@@ -669,6 +670,8 @@ QString statusLabel(const QString &status);
 Tone statusTone(const QString &status);
 // F8: what a proposal would do, in one line ("Swap Backend to Codex · gpt-5.5").
 QString proposalText(const Team &team, const Team::Proposal &proposal);
+// U57: the proposal's exact change, one line per member or task, for its card.
+QStringList proposalChanges(const Team &team, const Team::Proposal &proposal);
 // H1: "resets 14:30" (today) or "resets 3 Nov 14:30"; empty when unknown.
 QString resetText(double resetsAt);
 // F4: the one Team designer conversation hgs starts (`catalog designer`). It

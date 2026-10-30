@@ -1431,8 +1431,9 @@ pub(crate) struct StageRun {
     /// member, a hand-off never confirmed); empty while it has its member.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub stalled: String,
-    /// #635 N2: the member whose live run still uses the folder and checkout
-    /// after the stage went back to Waiting.
+    /// #635 N2/#727: the member a stall kept: its live run still uses the
+    /// folder and checkout, or the verdict it owed still arrives while the
+    /// stage waits. `member` is empty so a peer may take the stage.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub stalled_member: String,
     /// #635 N1: the stage's member ended its turn without a verdict while the

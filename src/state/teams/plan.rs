@@ -258,9 +258,9 @@ pub(crate) fn ready_ahead(team: &Team, phase: u32) -> Vec<u32> {
         .collect()
 }
 
-/// U61: the independent tasks of an auto-accepted draft that may start now: the
-/// lead started it ahead, or every phase ahead of it is done. Their first
-/// hand-out accepts the phase.
+/// U61: the independent tasks of an auto-accepted draft the lead started ahead;
+/// only that decision opens such a draft early (the phases-ahead case is
+/// accepted by Auto and goes through the ordinary ready path).
 pub(crate) fn auto_draft_tasks(team: &Team) -> Vec<u32> {
     if !team.settings.auto_accept {
         return Vec::new();
@@ -269,16 +269,8 @@ pub(crate) fn auto_draft_tasks(team: &Team) -> Vec<u32> {
     for phase in team
         .phases
         .iter()
-        .filter(|phase| phase.state == PhaseState::Draft && phase.approval == Approval::Auto)
+        .filter(|phase| phase.state == PhaseState::Draft && phase.approval == Approval::Auto && phase.start_ahead)
     {
-        let ahead_done = team
-            .tasks
-            .iter()
-            .filter(|task| task.phase == phase.n)
-            .all(|task| barrier_blockers(team, task).is_empty());
-        if !phase.start_ahead && !ahead_done {
-            continue;
-        }
         out.extend(ready_ahead(team, phase.n));
     }
     out

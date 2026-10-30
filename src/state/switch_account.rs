@@ -320,8 +320,8 @@ fn launch(name: &str, run_id: &str) -> Result<()> {
         return start(name, run_id);
     }
     let record = read(name)?;
-    let spec = lifecycle::resume_spec(&record, run_id, None)?;
-    backend::current().start(&spec)
+    let (spec, secrets) = lifecycle::resume_spec(&record, run_id, None)?;
+    lifecycle::start_with_secrets(&spec, &secrets)
 }
 
 /// Waits for the resumed conversation to be confirmed: the new run is live, its

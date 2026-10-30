@@ -592,12 +592,13 @@ clipboard. They are not writes: they need no row lock and show no "Updating…".
 - The reference takes the run and conversation of the selected session's
   details, else the row's. A reply must be a `zerus://session?` URI of at most
   8192 characters; otherwise the notice says "Could not read a session
-  reference. Update hgs on this computer." Success shows "Session reference
-  copied".
+  reference. Update hgs on this computer." Success shows the toast "Copied",
+  "The session reference is on the clipboard".
 - The clipboard is written from Rust (tauri-plugin-clipboard-manager). A text
   that is empty or holds a line break is refused with Qt's texts. A failure
-  shows "Zerus: could not copy" with the error. A success shows no notice,
-  except for Copy session reference. The browser build (no Tauri) copies
+  shows the sticky toast "Not copied" with the error. A success shows no
+  notice, except for Copy session reference and the header's ID copy ("Copied",
+  as the design's toasts carry a title). The browser build (no Tauri) copies
   through `navigator.clipboard` with the same two checks.
 - Each copy rechecks its row when it runs, as Qt does: a session that is gone
   or whose conversation changed copies nothing and shows "This session is no

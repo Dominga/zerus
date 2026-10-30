@@ -313,7 +313,7 @@ export function createActions(
   /** Copies text; a failure is a sticky notice, a success shows nothing. */
   async function copy(text: string): Promise<Outcome> {
     try { await bridge.copyText(text); copied = text; return { outcome: "done", receipt: null, cleanup: null }; } catch (error) {
-      notify("error", `Zerus: could not copy\n${errorText(error)}`, true);
+      notify("error", errorText(error), true, undefined, "Not copied");
       return failed(errorText(error));
     }
   }
@@ -346,7 +346,7 @@ export function createActions(
     const identity = sessionIdentity(live, details ?? selectedDetails(live), child);
     if (!identity.value) return failed("nothing to copy");
     const out = await copy(identity.value);
-    if (out.outcome === "done") notify("info", `${identity.title} copied`);
+    if (out.outcome === "done") notify("info", `The ${identity.title.charAt(0).toLowerCase()}${identity.title.slice(1)} is on the clipboard`, false, undefined, "Copied");
     return out;
   }
 
@@ -387,7 +387,7 @@ export function createActions(
       return failed(errorText(error));
     }
     const out = await copy(uri);
-    if (out.outcome === "done") notify("info", "Session reference copied");
+    if (out.outcome === "done") notify("info", "The session reference is on the clipboard", false, undefined, "Copied");
     return out;
   }
 

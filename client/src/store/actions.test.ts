@@ -510,7 +510,7 @@ describe("copy", () => {
       expect(a.notices()).toEqual([]);
       mocked.copyText.mockRejectedValue("Nothing to copy.");
       await a.copy("x");
-      expect(a.notices()).toEqual([expect.objectContaining({ tone: "error", sticky: true, text: "Zerus: could not copy\nNothing to copy." })]);
+      expect(a.notices()).toEqual([expect.objectContaining({ tone: "error", sticky: true, title: "Not copied", text: "Nothing to copy." })]);
       dispose();
     });
   });
@@ -536,7 +536,7 @@ describe("copy", () => {
       await a.copyReference(session(), details({ run_id: "run-9", conversation_id: "conv-9" }));
       expect(mocked.sessionReference).toHaveBeenCalledWith({ computer: "", name: "claude/sample-project/a", run_id: "run-9", conversation_id: "conv-9" }, null);
       expect(mocked.copyText).toHaveBeenCalledWith("zerus://session?x=1");
-      expect(a.notices()).toEqual([expect.objectContaining({ tone: "info", text: "Session reference copied", sticky: false })]);
+      expect(a.notices()).toEqual([expect.objectContaining({ tone: "info", title: "Copied", text: "The session reference is on the clipboard", sticky: false })]);
       a.applyBatch(batchOf({ upserts: [rowOut({ state: "archived", archive_id: "ar1" })] }));
       await a.copyReference(session({ state: "archived", archive_id: "ar1" }));
       expect(mocked.sessionReference).toHaveBeenLastCalledWith({ computer: "", name: "claude/sample-project/a", run_id: "run-1", conversation_id: "conv-1" }, "ar1");
@@ -562,7 +562,7 @@ describe("header copy identity", () => {
       const a = setup();
       await a.copyIdentity(session());
       expect(mocked.copyText).toHaveBeenCalledWith("conv-1");
-      expect(a.notices()).toEqual([expect.objectContaining({ text: "Session ID copied", tone: "info" })]);
+      expect(a.notices()).toEqual([expect.objectContaining({ title: "Copied", text: "The session ID is on the clipboard", tone: "info" })]);
       dispose();
     });
   });
@@ -571,7 +571,7 @@ describe("header copy identity", () => {
       const a = setup();
       await a.copyIdentity(session(), details({ conversation_id: "" }));
       expect(mocked.copyText).toHaveBeenCalledWith("run-1");
-      expect(a.notices()[0].text).toBe("Run ID copied");
+      expect(a.notices()[0].text).toBe("The run ID is on the clipboard");
       dispose();
     });
   });
@@ -580,10 +580,10 @@ describe("header copy identity", () => {
       const a = setup(rowOut(), () => true, () => ({ key: "\nrun:a", subagent: "child" }));
       await a.copyIdentity(session(), details(), { id: "child", conversationId: "child-conversation" });
       expect(mocked.copyText).toHaveBeenLastCalledWith("child-conversation");
-      expect(a.notices().at(-1)?.text).toBe("Session ID copied");
+      expect(a.notices().at(-1)?.text).toBe("The session ID is on the clipboard");
       await a.copyIdentity(session(), details(), { id: "child" });
       expect(mocked.copyText).toHaveBeenLastCalledWith("child");
-      expect(a.notices().at(-1)?.text).toBe("Agent ID copied");
+      expect(a.notices().at(-1)?.text).toBe("The agent ID is on the clipboard");
       dispose();
     });
   });

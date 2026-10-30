@@ -84,6 +84,9 @@ describe("usage windows (inventory 8.4, gaps 1-4 and 7)", () => {
 
   it("formats local dates as Qt's d MMM HH:mm", () => {
     expect(dayTime(new Date(2026, 9, 28, 7, 5).getTime() / 1000)).toBe("28 Oct 07:05");
+    const mockup = new Date(2026, 9, 27, 10, 24, 9).getTime() / 1000;
+    expect(dayTime(mockup)).toBe("27 Oct 10:24");
+    expect(dayTime(mockup, true)).toBe("27 Oct 10:24:09");
   });
 
   it("shows exhausted limits and cached warnings without a dot separator", () => {

@@ -5,6 +5,5 @@
 .content-search-status > span { flex: 1; }
 .content-search-list { flex: 1; min-height: 0; overflow: auto; margin-top: 0; }
 .content-search-row { position: absolute; inset: 0 0 auto; width: 100%; }
-.content-search-meta { white-space: pre; }
 .search-preview { display: contents; }
 .search-preview-body { white-space: pre-wrap; font: inherit; line-height: 1.6; overflow-wrap: anywhere; }

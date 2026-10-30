@@ -2420,6 +2420,20 @@ fn profile_of(store: &Store, team: &Team, chosen: &[&Task], page: &super::profil
     Ok(value)
 }
 
+/// #717: the suite's targets from the project's map for the task's diff against
+/// the lead branch; an empty list when the project has no map or no change.
+fn affected_targets(project: &std::path::Path, team: &str, suite: &str) -> anyhow::Result<Vec<String>> {
+    let loaded = crate::test_discipline::load(project, Some(team))?;
+    let config = &loaded.config;
+    let text = std::fs::read_to_string(project.join(&config.map.file)).map_err(|error| anyhow::anyhow!("{error}"))?;
+    let map: crate::test_discipline::map::TestMap = serde_json::from_str(&text)?;
+    let durations = crate::test_discipline::durations::Durations::read(&project.join(&config.map.durations)).map_err(|error| anyhow::anyhow!("{error}"))?;
+    let changed = super::dispatcher::git_at(&project.to_string_lossy(), &["diff", "--name-only", "teams-v2/lead"]).unwrap_or_default();
+    let files: Vec<String> = changed.lines().map(|line| line.trim().to_owned()).filter(|line| !line.is_empty()).collect();
+    let selection = crate::test_discipline::affected::select(project, config, &map, &durations, &files, &Default::default(), false);
+    Ok(selection.runs.iter().filter(|run| run.provider == suite).flat_map(|run| run.targets.clone()).collect())
+}
+
 /// #717: `hgs team test submit|force|results` on the team's test database.
 fn test_command(input: &Value) -> anyhow::Result<Value> {
     use super::test_queue::{self, Load, TestStore};
@@ -2444,7 +2458,14 @@ fn test_command(input: &Value) -> anyhow::Result<Value> {
         "submit" | "force" => {
             let suite = text(input, "suite");
             ensure!(!suite.is_empty(), "A test request names a suite");
-            let targets: Vec<String> = input["targets"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
+            let mut targets: Vec<String> = input["targets"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
+            // #717: without listed targets the task's diff against the lead
+            // branch names them through the project's test map.
+            if targets.is_empty() {
+                if let Ok(found) = affected_targets(&project, &team_id, suite) {
+                    targets = found;
+                }
+            }
             let mut request = test_queue::suite_from_config(&project, Some(&team_id), suite, &targets)?;
             request.id = uuid::Uuid::new_v4().to_string();
             request.team = team_id.clone();
@@ -7590,6 +7611,30 @@ mod tests {
         let value = view_with(&team, &[], None);
         assert_eq!(member(&value, "dev")["held_by"], json!({"task":1,"stage":"test"}));
         assert!(member(&value, "lead").get("held_by").is_none());
+    }
+
+    /// #717: submit queues, force runs within the resource rule, results list it.
+    #[test]
+    fn test_submit_force_and_results_use_the_projects_suite() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".zerus")).unwrap();
+        std::fs::write(
+            dir.path().join(".zerus/tests.toml"),
+            "version = 1\n[budgets]\nsuite_minutes = 1\n[[provider]]\nname = \"echo\"\nkind = \"command\"\ncommand = \"echo hello\"\n",
+        )
+        .unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let id = "11111111-1111-4111-8111-111111111111";
+            let team = Team { id: id.into(), lead: "lead".into(), folder: dir.path().display().to_string(), ..Default::default() };
+            let mut store = Store::open_at(&super::super::store::path(), true).unwrap();
+            store.create(id, &json!({}), team, vec![]).unwrap();
+            let queued = run("test", &json!({"team":id,"action":"submit","suite":"echo","targets":[]}), false).unwrap();
+            assert_eq!(queued["status"], "queued", "{queued}");
+            let ran = run("test", &json!({"team":id,"action":"force","suite":"echo","targets":[]}), false).unwrap();
+            assert_eq!(ran["results"][0]["status"], "passed", "{ran}");
+            let listed = run("test", &json!({"team":id,"action":"results"}), false).unwrap();
+            assert!(!listed["items"].as_array().unwrap().is_empty(), "{listed}");
+        });
     }
 
     #[test]

@@ -249,7 +249,8 @@ cannot complete a family manifest. The caller still discovers only the existing
 source and freshly rechecks it under G1's current drain. These are Staged
 evidence adapters with no startup publication, status service, placement,
 launch, task delivery, release, settlement or replay authority. Deferred,
-draft operation, download and cleanup sources remain uncovered.
+draft operation and cleanup sources remain uncovered; download-index metadata
+has the separate adapter below.
 
 `qt_repository_clones(&QtSnapshot)` preserves the separate Qt
 `workspace/repositoryClone/<scope>/pending|previous|parent` namespace as
@@ -272,6 +273,35 @@ source recheck before publication. No live Clone, status, retirement, clone,
 checkout or launch call runs. Next keeps no separate pending-clone store: its
 actual clone operations are already in the covered creation journal. These
 adapters add no discovery, startup publication, consumer or execution authority.
+
+`download_index(folder, bytes)` reuses the pure bounded decoder extracted from
+the existing `download_cache::Ledger::open`. The index `.zerus-files.json` is
+already shared by Qt and Next. Its one family is
+`download-index/<sha256(canonical UTF-8 folder)>`, schema 1, format
+`download-cache-json-v1`, with the hash of the original index bytes. The caller
+uses the existing `download_cache::folder` resolver and read-only source reader,
+deduplicates canonical shared/aliased roots, and supplies the freshly verified
+absolute UTF-8 folder. Non-UTF-8 or unsupported folder identities stay unhandled;
+never bind a lossy path conversion. The family hash selects no filesystem path.
+
+Private snapshots start with
+`{kind:"download-index-header",folder,content:<original root without files>}`
+and continue with `{entries:[<original file records>]}`. Header extensions,
+names, saved times, sizes, content hashes and original host/path/source digests
+survive unchanged. The existing decoder owns schema/name/hash/source validation;
+this adapter does not build another cache reader. The 32 MiB source cap,
+50,000-entry cap and existing 64-entry/1 MiB pages bound assembly. A newer,
+malformed, oversized or partial index cannot complete a manifest. Attach the
+same source reader's fresh file/folder identity and hash recheck before staging.
+
+Only index metadata is preserved here. Downloaded content, edited files,
+unknown local files and in-progress files stay in their existing folder; their
+bytes are neither opened nor copied by the adapter. It never acquires the
+live cache's Qt lock, creates a folder, calls the live Ledger, updates a saved
+time, reserves a download, trims or removes anything. Index evidence proves
+no current content identity, cleanup permission or reuse authority. G1's
+current drain/publication and G2's fresh content/ownership guards remain
+separate. This is Staged evidence only, with no discovery or startup hook.
 
 `approval_policies(&QtSnapshot, next_settings_bytes)` inspects both policy
 stores before returning either `qt-approval-policy` or `next-approval-policy`

@@ -19,6 +19,8 @@ mod launches;
 pub use launches::{qt_executor_launches, qt_pending_launches};
 mod clones;
 pub use clones::qt_repository_clones;
+mod downloads;
+pub use downloads::download_index;
 
 #[derive(Clone, Copy)]
 pub enum Origin {

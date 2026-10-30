@@ -17,6 +17,9 @@ const MAX_SESSIONS: usize = 500;
 const MAX_JOURNAL_ROWS: usize = 50_000;
 
 pub(super) fn dispatch(args: &[String]) -> Result<i32> {
+    if let Some(result) = search_index::dispatch(args) {
+        return result;
+    }
     let mut query = None;
     let mut limit = 80;
     let mut index = 0;
@@ -383,7 +386,7 @@ fn equivalent_excerpt(left: &str, right: &str) -> bool {
         || (right.ends_with('…') && left.starts_with(right.trim_end_matches('…')))
 }
 
-fn journal_role(event: &Value) -> &'static str {
+pub(super) fn journal_role(event: &Value) -> &'static str {
     if string(event, "agent_id").is_empty() && !event["origin"].is_string() {
         match string(event, "type") {
             "UserPromptSubmit" | "UserPromptQueued" | "TurnStarted" | "QuestionAnswered" => {

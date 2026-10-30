@@ -1,8 +1,32 @@
 # Public-content index component
 
-This crate is the storage/query slice of `zerus-5wmh.66.2.2.1`. It is not yet
-wired to `hgs search` and creates no worker or service. Qt and Next continue to
-use the existing bounded search until the source adapter is delivered.
+This crate is the storage/query slice of `zerus-5wmh.66.2.2.1`. It creates no
+worker or service. Qt and Next continue to use the existing bounded search until
+catalog discovery and indexed result publication are delivered.
+
+The root CLI now provides explicit on-demand ingestion diagnostics:
+`hgs search --index-status` reports coverage without creating an absent index;
+`hgs search --index-step` accepts at most 16 exact targets on JSON stdin:
+
+```json
+{"abi":"content-search-index-v1","targets":[{"name":"codex/example/search","run_id":"run-one","conversation_id":"conversation-one","archive_id":""}]}
+```
+
+The caller verifies each authoritative binding, reads public Codex/Claude lines
+and exact journal pages with persistent cursors, and retains an incomplete
+coverage state for unsupported native histories or over-limit text. A step has
+32 source-file opens, 128 records, 4 MiB and a 250 ms monotonic deadline; it
+starts no continuation after return. The CLI lowers only its own CPU/I/O
+priority. The exported step accepts cancellation and explicit bounded budgets
+for a later G1 owner. There is no advertised indexed-query capability yet.
+
+The adapter refuses copied/restored loose directory, database or auxiliary-file
+permissions and links. New index directories are 0700, database and rollback
+journal files 0600. Configuration identity prevents reusing a copied index
+under another state root. A bounded source sweep retires forgotten targets
+without needing them to appear in the next request, and a persistent purge queue
+drains secure payload cleanup. Indexed UI activation must still revalidate the
+target immediately before publication; that integration follows separately.
 
 The caller owns a private, disposable database in the selected configuration's
 state directory, with directory mode 0700 and file mode 0600 (owner ACL on

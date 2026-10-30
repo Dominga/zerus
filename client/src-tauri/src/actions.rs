@@ -141,6 +141,7 @@ impl Drop for Claim {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WriteKind {
     Update,
+    Settings,
     Terminate,
     /// A context reset (Qt's `m_clearKey` while `m_clearRequest` runs): it
     /// blocks only the session it resets, never another one.
@@ -150,6 +151,7 @@ pub enum WriteKind {
 impl WriteKind {
     pub fn of(action: &Action) -> Self {
         match action {
+            Action::Settings { .. } => Self::Settings,
             Action::Terminate | Action::Kill => Self::Terminate,
             Action::ClearContext { .. } => Self::Clear,
             _ => Self::Update,
@@ -267,14 +269,14 @@ impl Actions {
     /// session's reset is no update anywhere.
     pub fn write_kind(&self, computer: &str, name: &str) -> Option<WriteKind> {
         let writes = self.writes.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(own @ (WriteKind::Terminate | WriteKind::Clear)) =
+        if let Some(own @ (WriteKind::Terminate | WriteKind::Clear | WriteKind::Settings)) =
             writes.get(&(computer.to_owned(), name.to_owned()))
         {
             return Some(*own);
         }
         writes
             .values()
-            .any(|kind| *kind != WriteKind::Clear)
+            .any(|kind| !matches!(kind, WriteKind::Clear | WriteKind::Settings))
             .then_some(WriteKind::Update)
     }
 
@@ -352,7 +354,10 @@ impl Actions {
         live: impl FnOnce() -> (Option<ViewRow>, bool),
     ) -> Option<WriteKind> {
         let running = self.write_kind(computer, name);
-        if matches!(running, Some(WriteKind::Terminate | WriteKind::Clear)) {
+        if matches!(
+            running,
+            Some(WriteKind::Terminate | WriteKind::Clear | WriteKind::Settings)
+        ) {
             return running;
         }
         let Some(run) = self
@@ -1404,6 +1409,34 @@ mod tests {
             run_id: "run-2".into(),
             ..review()
         }
+    }
+
+    #[test]
+    fn model_settings_block_the_own_composer_until_the_write_ends() {
+        let actions = Actions::new(std::env::temp_dir().join("zerus-model-settings-marks.json"));
+        let target = review();
+        let settings = Action::Settings {
+            model: "model-a".into(),
+            effort: "high".into(),
+            expected_pending_id: None,
+            without_terminal: false,
+        };
+        let running = actions
+            .begin(Lane::key(&target, &settings), &settings)
+            .unwrap();
+        assert_eq!(
+            actions.write_kind(&target.computer, &target.name),
+            Some(WriteKind::Settings)
+        );
+        assert_eq!(
+            actions.write_kind(&target.computer, "claude/sample-project/other"),
+            None
+        );
+        assert!(actions
+            .begin(Lane::key(&target, &Action::Pause), &Action::Pause)
+            .is_none());
+        drop(running);
+        assert_eq!(actions.write_kind(&target.computer, &target.name), None);
     }
 
     #[test]

@@ -473,3 +473,17 @@
 .act-reply-q { color: var(--z-color-muted); font-size: 10px; margin-bottom: 3px; }
 .act-reply-a { border: 1px solid var(--z-color-border); background: var(--z-color-code-bg); padding: 10px; border-radius: var(--z-radius-md); margin-bottom: 10px; }
 .act-reply-a b { color: var(--z-color-accent); font-size: 10px; }
+
+@layer components {
+  .cmp-model { min-width: 0; flex: 0 1 auto; }
+  .cmp-model-name { min-width: 0; }
+  .cmp-model-suffix, .cmp-model > svg { flex: none; white-space: pre; }
+  dialog.cmp-settings-pop { position: fixed; inset: auto; margin: 0; padding: 12px 14px; max-height: calc(100vh - 16px); overflow: auto; border: 1px solid var(--z-color-border); border-radius: var(--z-radius-lg); background: var(--z-color-raised); color: var(--z-color-text); box-shadow: var(--z-shadow-popover); }
+  dialog.cmp-settings-pop::backdrop { background: transparent; }
+  .cmp-settings-pop > label { display: block; margin: 8px 0; font-size: var(--fs-sm); }
+  .cmp-settings-pop > .field { width: 100%; }
+  .cmp-settings-models { border: 0; padding: 0; margin: 0; min-width: 0; }
+  .cmp-settings-models .ocm-list { height: 240px; max-height: 320px; flex: none; }
+  .cmp-settings-hint { font-size: var(--fs-sm); color: var(--z-color-muted); white-space: pre-line; margin: 12px 0; }
+  .cmp-settings-actions { display: flex; align-items: center; gap: 8px; }
+}

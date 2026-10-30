@@ -1,10 +1,11 @@
-import { batch, createEffect, createRoot, createSignal, on } from "solid-js";
+import { batch, createEffect, createRoot, createSignal, on, untrack } from "solid-js";
 import { activityPort, composerTab, processesFollow, processesShown, windowVisibility } from "../bridge";
-import { applyBatch, computerFresh, onReplaced, orderedRows, setDraftKeys } from "./catalog";
+import { applyBatch, catalog, computerFresh, computerOffline, onReplaced, orderedRows, setDraftKeys } from "./catalog";
 import { composer } from "./composer";
+import { sessionModels, bindModelNotice } from "./sessionModels";
 import { terminal } from "./terminal";
 import { flag, num } from "./settings";
-import { bindActivity, bindSelection, followedFor, notify } from "./actions";
+import { bindActivity, bindSelection, followedFor, notify, updating } from "./actions";
 import { observeMarks } from "./marks";
 import { createActivity } from "./activity";
 import { archive } from "./archive";
@@ -26,6 +27,7 @@ import type { Batch, ComposerEvent } from "../types";
 
 export const activity = createActivity(activityPort);
 bindActivity(activity);
+bindModelNotice((message) => notify("error", message, true));
 bindSelection(() => ({ key: selectedKey(), subagent: subagentOpen() }));
 
 /** Applies one batch from the bridge: its rows and their grouping are one reactive update. */
@@ -74,6 +76,27 @@ createRoot(() => {
   createEffect(on(() => [detailTab(), num("processes/backgroundSeconds"), num("processes/activeSeconds")] as const, ([tab]) => {
     void composerTab(tab).catch(() => {});
   }));
+});
+
+// Model settings reuse the selected session's existing Activity inspection and
+// bounded pending keys. There is no model-settings poller or catalog-wide scan.
+createRoot(() => {
+  createEffect(() => {
+    const row = selected(), v = composer.view();
+    const followed = row ? followedFor(row.key) : undefined;
+    const context = row && !subagentOpen() ? { row, details: followed?.value, online: !computerOffline(row.computer),
+      busy: updating(row.computer, row.name) || !!v?.sending || !!v?.waiting,
+      answering: !!v?.question?.answering, inspectError: !!activity.error() || !!v?.inspect_error } : undefined;
+    untrack(() => sessionModels.setContext(context));
+  });
+  createEffect(() => {
+    sessionModels.view();
+    const rows = sessionModels.queuedKeys().map((key) => {
+      const row = catalog.rows[key];
+      return { key, row, online: !!row && !computerOffline(row.computer), busy: !!row && updating(row.computer, row.name) };
+    });
+    untrack(() => sessionModels.observe(rows));
+  });
 });
 
 // The Processes tab follows the selected session while Settings > Processes

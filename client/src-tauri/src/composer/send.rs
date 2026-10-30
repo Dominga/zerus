@@ -308,10 +308,10 @@ impl Composers {
             compacting: hub.compacts.contains_key(&key),
             clearing: write == Some(WriteKind::Clear) || hub.clearing.as_ref() == Some(&key),
             terminating: write == Some(WriteKind::Terminate),
-            settings_changing: false,
+            settings_changing: write == Some(WriteKind::Settings),
             online,
             state: row.state.clone(),
-            updating: write == Some(WriteKind::Update),
+            updating: matches!(write, Some(WriteKind::Update | WriteKind::Settings)),
             cmd: cmd(&row),
             inspect_error: followed && hub.followed.inspect_error.is_some(),
         };
@@ -2217,7 +2217,7 @@ impl Composers {
                 };
                 let write = (self.0.deps.facts)(&pending.session.computer, &pending.session.name);
                 // Qt's `m_pending` (and its rename).
-                let busy = write == Some(WriteKind::Update);
+                let busy = matches!(write, Some(WriteKind::Update | WriteKind::Settings));
                 if start {
                     hub.start.as_mut().map_or(Step::Idle, |(_, start)| {
                         start.prepared(ok, current.as_ref(), evidence.as_deref(), busy)
@@ -2491,7 +2491,7 @@ impl Composers {
             let write = (self.0.deps.facts)(&session.computer, &session.name);
             // Qt's `m_terminating` and `m_pending` (4618, 4787).
             let terminating = write == Some(WriteKind::Terminate);
-            let updating = write == Some(WriteKind::Update);
+            let updating = matches!(write, Some(WriteKind::Update | WriteKind::Settings));
             let compact = hub.compacts.get_mut(key).map(|(pending, compact)| {
                 pending.evidence = Some(Arc::clone(details));
                 let step = compact.inspected(details, &draft_now, terminating, now);

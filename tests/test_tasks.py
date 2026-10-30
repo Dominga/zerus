@@ -806,6 +806,57 @@ class TaskDelivery(DeliveryFixture):
         self.wait_received("[Zerus task orchard/" + task["id"] + " cancelled]")
         self.assertNotIn("Wrong approach", self.received())
 
+    def start_plan(self, task, **overrides):
+        current = self.hgs("get", task["ref"])["task"]
+        record = json.loads(self.record_path.read_text())
+        request = dict(schema=1, id=str(uuid.uuid4()), stage_at=current["stage_at"], target=current["target"],
+                       selection=dict(host="", name=self.name, session_id="run_id:" + self.run_id,
+                                      run_id=self.run_id, conversation_id=record["conversation_id"]))
+        request.update(overrides)
+        return self.hgs("start-plan", task["ref"], text=json.dumps(request))["plan"]
+
+    def test_start_plan_is_readonly_and_delivery_uses_one_original_request(self):
+        task = self.add("A guarded task start", "--target", self.name)
+        plan = self.start_plan(task)
+        self.assertEqual(self.received(), "")
+        self.assertEqual(self.hgs("get", task["ref"])["task"]["stage"], "todo")
+        recovered = self.hgs("start-deliver", task["ref"], "--recover-only", text=json.dumps(plan))
+        self.assertEqual(recovered["state"], "uncertain")
+        self.assertEqual(self.received(), "")
+        sent = self.hgs("start-deliver", task["ref"], text=json.dumps(plan))
+        self.assertEqual((sent["state"], sent["id"], sent["task"]["stage"]), ("submitted", plan["id"], "active"))
+        self.assertNotIn("log", sent["task"])
+        self.wait_received("A guarded task start")
+        self.assertEqual(self.hgs("start-deliver", task["ref"], "--recover-only", text=json.dumps(plan))["state"], "submitted")
+        self.assertEqual(self.hgs("start-deliver", task["ref"], text=json.dumps(plan))["state"], "submitted")
+        self.assertEqual(self.received().count("A guarded task start"), 1)
+
+    def test_start_deliver_refuses_changed_document_or_run_before_input(self):
+        task = self.add("Original task", "--target", self.name)
+        plan = self.start_plan(task)
+        self.hgs("rename", task["ref"], text="Changed title")
+        refusal = self.hgs("start-deliver", task["ref"], text=json.dumps(plan))
+        self.assertEqual(refusal["state"], "refused")
+        self.assertEqual(self.received(), "")
+        self.assertEqual(self.hgs("get", task["ref"])["task"]["stage"], "todo")
+        plan = self.start_plan(task)
+        record = json.loads(self.record_path.read_text()); record["conversation_id"] = str(uuid.uuid4()); self.record_path.write_text(json.dumps(record))
+        refusal = self.hgs("start-deliver", task["ref"], text=json.dumps(plan))
+        self.assertEqual(refusal["state"], "refused")
+        self.assertEqual(self.received(), "")
+
+    def test_start_recovery_settles_native_receipt_without_pasting_again(self):
+        task = self.add("Recover native acknowledgement", "--target", self.name)
+        plan = self.start_plan(task)
+        # Simulate a process exit after native submission and before task save.
+        sent = subprocess.run([str(HGS), "send", self.name, "--json"], input=json.dumps(plan["request"], separators=(",", ":"), ensure_ascii=False), env=self.env, text=True, capture_output=True, timeout=30)
+        self.assertEqual(sent.returncode, 0, sent.stderr)
+        self.wait_received("Recover native acknowledgement")
+        self.assertEqual(self.hgs("get", task["ref"])["task"]["stage"], "todo")
+        recovered = self.hgs("start-deliver", task["ref"], "--recover-only", text=json.dumps(plan))
+        self.assertEqual((recovered["state"], recovered["task"]["stage"]), ("submitted", "active"))
+        self.assertEqual(self.received().count("Recover native acknowledgement"), 1)
+
     def test_cancel_execution_pins_dispatch_and_executor_and_keeps_reason_literal(self):
         task = self.add("Refactor the parser", "--target", self.name)
         sent = self.hgs("send", task["ref"])["task"]

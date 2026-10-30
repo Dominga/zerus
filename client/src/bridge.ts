@@ -33,6 +33,9 @@ export const taskEditorEdit = (input: Pick<import("./store/taskEditor").TaskEdit
 export const taskEditorPick = (handle: number, start: number, end: number) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_pick", { handle, start, end });
 export const taskEditorRemove = (handle: number, index: number) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_files", { handle, change: { kind: "remove", index } });
 export const taskEditorSubmit = (handle: number, rev: number, recover: boolean) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_submit", { handle, rev, recover });
+export const taskStartOpen = (project: string, task: string) => desktop<import("./store/taskStart").StartView>("task_start_open", { project, task });
+export const taskStart = (input: import("./store/taskStart").StartInput) => desktop<import("./store/taskStart").StartView>("task_start", { input });
+export const taskStartRelease = (view: import("./store/taskStart").StartView) => desktop<import("./store/taskStart").StartView>("task_start_release", { project: view.project, task: view.task, id: view.id, snapshot: view.snapshot });
 export const cancelTaskExecution = (project: string, task: string, execution: import("./store/taskCancel").Execution, reason: string) => desktop<string | null>("task_cancel_execution", { project, task, execution, reason });
 export const taskBoardAction = (project: string, task: string, expectedStage: string, action: import("./store/taskBoard").BoardAction) => desktop<void>("task_board_action", { project, task, expectedStage, action });
 export const taskFormOpen = (target: import("./store/taskEditor").TaskEditorTarget<import("./store/taskForms").FormKind>) => desktop<import("./store/taskEditor").TaskEditorView<import("./store/taskForms").FormKind>>("task_form_open", { project: target.project, task: target.task, kind: target.mode });

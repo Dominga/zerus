@@ -71,6 +71,8 @@ mod task_editor;
 #[cfg(feature = "live")]
 mod task_forms;
 #[cfg(feature = "live")]
+mod task_start;
+#[cfg(feature = "live")]
 mod terminal;
 #[cfg(feature = "live")]
 mod updates;
@@ -352,6 +354,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(task_details::TaskWrites::default());
                 app.manage(task_editor::TaskEditor::default());
                 app.manage(task_forms::TaskForms::default());
+                app.manage(task_start::TaskStarts::default());
                 app.manage(actions::ActivityReads::default());
                 app.manage(actions::Attention::new(dir.join(actions::attention_file(replay))));
                 let pump = app.state::<commands::AppState>().pump();
@@ -989,6 +992,9 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         task_details::task_assign,
         task_details::task_board_action,
         task_details::task_cancel_execution,
+        task_start::task_start_open,
+        task_start::task_start,
+        task_start::task_start_release,
         task_editor::task_editor_open,
         task_editor::task_editor_edit,
         task_editor::task_editor_files,

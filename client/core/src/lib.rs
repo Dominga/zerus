@@ -60,6 +60,7 @@ pub mod stream;
 pub mod swarm;
 pub mod task_board;
 pub mod task_cancel;
+pub mod task_start;
 pub mod task_details;
 pub mod task_view;
 pub mod tasks;

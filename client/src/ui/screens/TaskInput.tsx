@@ -1,3 +1,4 @@
+import { descriptionEditing, setDescriptionEditing } from "../../store/taskStart";
 import { For, Show, createEffect, createMemo, on, onCleanup, onMount } from "solid-js";
 import { Icon } from "../lib/icons";
 import { taskEditor, type TaskEditorMode } from "../../store/taskEditor";
@@ -8,6 +9,9 @@ import { notify } from "../../store/actions";
 import type { Task } from "./tasks-ui";
 
 export function TaskInput(props: { project: string; task: Task; describing: boolean; cancel: () => void; saved: () => void }) {
+  const owner = Symbol();
+  createEffect(() => setDescriptionEditing(props.describing ? { project: props.project, task: props.task.uuid, owner } : undefined));
+  onCleanup(() => { if (descriptionEditing()?.owner === owner) setDescriptionEditing(undefined); });
   let alive = true; onCleanup(() => { alive = false; });
   let editor!: HTMLTextAreaElement;
   const mode = (): TaskEditorMode => props.describing ? "description" : "note";

@@ -773,6 +773,18 @@ fn a_damaged_journal_keeps_requests_and_sends_nothing() {
 }
 
 #[test]
+fn an_invalid_later_entry_does_not_partially_load_earlier_creations() {
+    let mut driver = Driver::new();
+    let effects = driver.creations.load(journal(
+        json!({id(7):saved("launching"), "z-invalid":saved("unknown")}),
+    ));
+    driver.take(effects);
+    assert_eq!(driver.creations.storage_error(), INVALID_IDENTITY);
+    assert!(driver.creations.operations().is_empty());
+    assert!(driver.writes.is_empty() && driver.calls.is_empty() && driver.launches.is_empty());
+}
+
+#[test]
 fn stop_keeps_retained_files_and_reads_what_is_unconfirmed() {
     // Nothing under way: stopped at once.
     let mut driver = Driver::loaded();

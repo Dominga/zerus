@@ -212,9 +212,16 @@ impl TaskDoc {
     /// A stable, bounded token for list readers to notice journal-only edits.
     /// Sorting the clock keeps it identical after reload and replica exchange.
     pub fn revision(&self) -> String {
-        let clock: std::collections::BTreeMap<_, _> = self.doc.oplog_vv().iter()
-            .map(|(peer, count)| (peer.to_string(), *count)).collect();
-        format!("{:x}", Sha256::digest(serde_json::to_vec(&clock).expect("document clock")))
+        let clock: std::collections::BTreeMap<_, _> = self
+            .doc
+            .oplog_vv()
+            .iter()
+            .map(|(peer, count)| (peer.to_string(), *count))
+            .collect();
+        format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&clock).expect("document clock"))
+        )
     }
 
     pub fn export_since(&self, version: &[u8]) -> Result<Vec<u8>> {
@@ -1293,7 +1300,12 @@ mod tests {
             .unwrap());
         let (before, before_ids) = task.view_with_history_ids().unwrap();
         let revision = task.revision();
-        assert_eq!(TaskDoc::from_bytes(&task.snapshot().unwrap()).unwrap().revision(), revision);
+        assert_eq!(
+            TaskDoc::from_bytes(&task.snapshot().unwrap())
+                .unwrap()
+                .revision(),
+            revision
+        );
         let message_index = before.log.iter().position(|e| e.kind == "message").unwrap();
         let message_id = before_ids[message_index].clone();
         task.record_send(&api(), "dispatch", &Actor::Person, 3)
@@ -1314,7 +1326,11 @@ mod tests {
             .reserve_message(&id, "Changed", &[], &delivery, None, (&Actor::Person, 6))
             .is_err());
         let view = task.view().unwrap();
-        assert_ne!(task.revision(), revision, "receipt-only edits change the revision");
+        assert_ne!(
+            task.revision(),
+            revision,
+            "receipt-only edits change the revision"
+        );
         let message = view.log.iter().find(|e| e.kind == "message").unwrap();
         assert_eq!(message.delivery.as_ref().unwrap().state, "submitted");
         assert_eq!(message.delivery.as_ref().unwrap().submitted_id, "dispatch");

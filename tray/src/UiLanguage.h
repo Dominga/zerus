@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Settings.h"
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QLibraryInfo>
@@ -34,7 +35,7 @@ inline QComboBox *zerusLanguageChoice(QWidget *parent = nullptr) {
     choice->addItem(QObject::tr("Russian (preview)"), "ru");
     choice->setCurrentIndex(choice->findData(zerusUiLanguage()));
     QObject::connect(choice, &QComboBox::currentIndexChanged, choice, [choice] {
-        QSettings().setValue("workspace/language", choice->currentData());
+        Settings::set("workspace/language", choice->currentData());
     });
     return choice;
 }

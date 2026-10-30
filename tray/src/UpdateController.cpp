@@ -1,3 +1,4 @@
+#include "Settings.h"
 #include "UpdateController.h"
 #include "JsonParse.h"
 #include "ProcessRunner.h"
@@ -334,7 +335,7 @@ int UpdateController::automaticInterval(const QString &channel){return channel==
 bool UpdateController::isUpdateToken(const QString &token){return matches(token,"\\Azerus-update:(?:v1:(?:stable|nightly)|v2:dev):[1-9][0-9]{0,15}\\z");}
 bool UpdateController::claimNotification(const QString &token){
     if(!isUpdateToken(token))return false;QSettings settings;QString key="updates/notified/"+token;
-    if(settings.value(key,false).toBool())return false;settings.setValue(key,true);settings.sync();return settings.status()==QSettings::NoError;
+    if(settings.value(key,false).toBool())return false;return Settings::setNow(key,true);
 }
 QString UpdateController::comparisonMessage(const DesktopInstallation &installation,const DesktopUpdateFeed &feed,const QString &appVersion,int comparison,bool compared){
     if(!feed.valid)return tr("No verified release catalog yet.");
@@ -482,10 +483,10 @@ UpdateController::UpdateController(QObject *parent,QString executable,std::funct
     connect(this,&UpdateController::changed,this,[this]{if(m_startCheck&&m_installation.kind!="checking"){m_startCheck=false;checkAutomatically();}});
 }
 QString UpdateController::channel() const{return configuredChannel();}
-void UpdateController::setChannel(const QString &value){if(value!="stable"&&value!="nightly"&&value!="dev")return;++m_checkGeneration;m_automaticInFlight=false;if(m_activeReply)m_activeReply->abort();QSettings().setValue("updates/channel",value);m_freshForNotification=false;m_feed={};m_notice.clear();m_error.clear();m_comparison.clear();m_lastSuccess=0;m_cached=false;m_available=false;m_message="Updates have not been checked for this channel.";restoreCatalog();++m_checkGeneration;m_busy=false;emit changed();compare();checkAutomatically();}
+void UpdateController::setChannel(const QString &value){if(value!="stable"&&value!="nightly"&&value!="dev")return;++m_checkGeneration;m_automaticInFlight=false;if(m_activeReply)m_activeReply->abort();Settings::set("updates/channel",value);m_freshForNotification=false;m_feed={};m_notice.clear();m_error.clear();m_comparison.clear();m_lastSuccess=0;m_cached=false;m_available=false;m_message="Updates have not been checked for this channel.";restoreCatalog();++m_checkGeneration;m_busy=false;emit changed();compare();checkAutomatically();}
 bool UpdateController::automaticChecks() const{return QSettings().value("updates/automatic",true).toBool();}
 void UpdateController::setAutomaticChecks(bool enabled){
-    QSettings().setValue("updates/automatic",enabled);
+    Settings::set("updates/automatic",enabled);
     if(!enabled){m_startCheck=false;m_freshForNotification=false;if(m_automaticInFlight){++m_checkGeneration;m_busy=false;m_automaticInFlight=false;m_freshForNotification=false;if(m_activeReply)m_activeReply->abort();}}
     emit changed();if(enabled)checkAutomatically();
 }
@@ -578,7 +579,7 @@ void UpdateController::detectInstallation(const QString &executable){
     if(mac.kind.isEmpty())mac=macosBundleInstallation(canonical);
     if(macosInstallation(mac)){
         m_installation=mac;
-        if(!QSettings().contains("updates/channel")){QSettings().setValue("updates/channel",preferredChannel(m_installation));m_feed={};restoreCatalog();}
+        if(!QSettings().contains("updates/channel")){Settings::set("updates/channel",preferredChannel(m_installation));m_feed={};restoreCatalog();}
         emit changed();compare();return;
     }
 #endif
@@ -588,7 +589,7 @@ void UpdateController::detectInstallation(const QString &executable){
             if(!okay||!matches(owner,"\\A[A-Za-z0-9][A-Za-z0-9@._+-]{0,119}\\z")){sourceInstallation(canonical);return;}
             m_installation.kind="package";m_installation.package=owner;
             run(pacman,{"-Q","--",owner},[this,owner](bool success,QString raw){if(success&&raw.startsWith(owner+" ")&&!raw.contains('\n')){QString version=raw.mid(owner.size()+1);if(matches(version,"\\A[0-9][A-Za-z0-9.+_~:-]{0,159}\\z"))m_installation.version=version;}
-                if(prefersNightly(m_installation)&&!QSettings().contains("updates/channel")){QSettings().setValue("updates/channel","nightly");m_feed={};restoreCatalog();}emit changed();compare();});
+                if(prefersNightly(m_installation)&&!QSettings().contains("updates/channel")){Settings::set("updates/channel","nightly");m_feed={};restoreCatalog();}emit changed();compare();});
         });return;
     }
 #endif
@@ -599,7 +600,7 @@ void UpdateController::check(){refreshBundleState();startCheck(false);ForkUpdate
 void UpdateController::startCheck(bool automatic){
     if(automatic&&!automaticChecks())return;
     if(m_busy)return;m_busy=true;m_freshForNotification=false;m_automaticInFlight=automatic;m_message="Checking the published release catalog…";m_error.clear();emit changed();emit requestStarted();
-    QString selected=channel();auto generation=++m_checkGeneration;QSettings().setValue("updates/lastAttempt/"+selected,QDateTime::currentSecsSinceEpoch());
+    QString selected=channel();auto generation=++m_checkGeneration;Settings::set("updates/lastAttempt/"+selected,QDateTime::currentSecsSinceEpoch());
     auto *manager=m_fetch?nullptr:new QNetworkAccessManager(this);QNetworkRequest request(QUrl("https://zerus.dev/updates/"+QString(selected=="dev"?"v2":"v1")+"/desktop/"+selected+".json"));request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,QNetworkRequest::ManualRedirectPolicy);request.setTransferTimeout(10000);
     auto *reply=m_fetch?m_fetch(request):manager->get(request);m_activeReply=reply;auto data=std::make_shared<QByteArray>();auto oversized=std::make_shared<bool>(false);auto *timer=new QTimer(reply);timer->setSingleShot(true);connect(timer,&QTimer::timeout,reply,&QNetworkReply::abort);timer->start(10000);
     connect(reply,&QNetworkReply::readyRead,this,[reply,data,oversized]{auto bytes=reply->readAll();if(data->size()+bytes.size()>256*1024){*oversized=true;reply->abort();}else *data+=bytes;});
@@ -610,7 +611,7 @@ void UpdateController::startCheck(bool automatic){
         reply->deleteLater();if(manager)manager->deleteLater();
         ProcessRunner::post(this,[fetched,bytes=*data,selected]{return fetched?parseFeed(bytes,selected):DesktopUpdateFeed{};},[this,data,generation,selected](const DesktopUpdateFeed &verified){if(generation==m_checkGeneration){
         m_busy=false;m_activeReply=nullptr;bool mayNotify=!m_automaticInFlight||automaticChecks();m_automaticInFlight=false;
-        if(verified.valid){m_freshForNotification=mayNotify;m_cached=false;m_available=false;m_feed=verified;m_lastSuccess=QDateTime::currentSecsSinceEpoch();QSettings settings;settings.setValue("updates/catalog/"+selected,*data);settings.setValue("updates/lastSuccess/"+selected,m_lastSuccess);m_notice="Last successful check: "+QDateTime::fromSecsSinceEpoch(m_lastSuccess).toString(Qt::ISODate)+".";}
+        if(verified.valid){m_freshForNotification=mayNotify;m_cached=false;m_available=false;m_feed=verified;m_lastSuccess=QDateTime::currentSecsSinceEpoch();Settings::set("updates/catalog/"+selected,*data);Settings::set("updates/lastSuccess/"+selected,m_lastSuccess);m_notice="Last successful check: "+QDateTime::fromSecsSinceEpoch(m_lastSuccess).toString(Qt::ISODate)+".";}
         else {m_error=tr("Check failed. Try again later.");m_cached=m_feed.valid;m_notice=m_feed.valid?"Update check failed. Showing the last verified catalog ("+QDateTime::fromSecsSinceEpoch(m_lastSuccess).toString(Qt::ISODate)+").":"Update check failed or the catalog was invalid. Try again later.";}
         present(m_feed.valid?comparisonMessage(m_installation,m_feed,QCoreApplication::applicationVersion(),0,false):QString());emit changed();compare();
     }});});

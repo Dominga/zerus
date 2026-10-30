@@ -285,7 +285,7 @@ private slots:
     void localWindowsSessionExplainsDisabledVoice();
     // Shards run functions and data rows in any order, so every test starts without
     // the settings an earlier one saved, window geometry included.
-    void init() { ComposerDraftStore::flushWrites(); QSettings().clear(); QFile::remove(QSettings().fileName()+".creations.json");QSettings().setValue("downloads/folder", m_dir->filePath("download-cache")); QVERIFY(QDir(ComposerDraftStore::directory()).removeRecursively());
+    void init() { ComposerDraftStore::flushWrites(); clearSettings(); QFile::remove(QSettings().fileName()+".creations.json");QSettings().setValue("downloads/folder", m_dir->filePath("download-cache")); QVERIFY(QDir(ComposerDraftStore::directory()).removeRecursively());
         m_modals = std::make_unique<TestWait::ModalGuard>(); }
     // Chords a test rebinds end with it.
     void cleanup() {
@@ -1803,7 +1803,7 @@ void TestSessionsWindow::sessionStatesShowOnCardsAndHeader_data()
 void TestSessionsWindow::sessionStatesShowOnCardsAndHeader()
 {
     QFETCH(QString, theme);
-    const auto restore = qScopeGuard([] { for (const auto *key : {"workspace/skin", "workspace/theme"}) QSettings().remove(key); });
+    const auto restore = qScopeGuard([] { for (const auto *key : {"workspace/skin", "workspace/theme"}) removeSetting(key); });
     QSettings().setValue("workspace/skin", "whitewh"); QSettings().setValue("workspace/theme", theme);
     const double now = QDateTime::currentSecsSinceEpoch();
     const auto make = [now](const QString &tag, const QString &state) {
@@ -1982,7 +1982,7 @@ void TestSessionsWindow::sessionListFollowsThePrototype()
 {
     QFETCH(QString, theme);
     const auto restore = qScopeGuard([] {
-        for (const auto *key : {"workspace/skin", "workspace/theme", "workspace/organization", "workspace/inspectorVisible", "processes/enabled"}) QSettings().remove(key);
+        for (const auto *key : {"workspace/skin", "workspace/theme", "workspace/organization", "workspace/inspectorVisible", "processes/enabled"}) removeSetting(key);
     });
     QSettings().setValue("workspace/skin", "whitewh"); QSettings().setValue("workspace/theme", theme);
     setJsonSetting("workspace/organization", QJsonDocument(ReadmeShots::organization()).toJson(QJsonDocument::Compact));
@@ -2481,7 +2481,7 @@ void TestSessionsWindow::readmeScreenshots()
     const QStringList keys{"workspace/skin", "workspace/theme", "workspace/organization", "workspace/inspectorVisible", "workspace/collapsedTeams",
                            "workspace/sessionsCollapsed", "workspace/splitter", "sessions/geometry", "workspace/organizationBeforeSwarm",
                            "swarm/observedOrganization", "swarm/observedVersions", "swarm/driveFoldersShared"};
-    const auto restore = qScopeGuard([keys] { for (const auto &key : keys) QSettings().remove(key); sessionCardTileInset() = 0; });
+    const auto restore = qScopeGuard([keys] { for (const auto &key : keys) removeSetting(key); sessionCardTileInset() = 0; });
     QSettings().setValue("workspace/skin", "whitewh"); QSettings().setValue("workspace/theme", "dark");
     setJsonSetting("workspace/organization", QJsonDocument(ReadmeShots::organization()).toJson(QJsonDocument::Compact));
     QSettings().setValue("workspace/inspectorVisible", true);
@@ -2625,7 +2625,7 @@ void TestSessionsWindow::readmeScreenshots()
 void TestSessionsWindow::teamAttentionReachesTheNotifications()
 {
     const QStringList keys{"workspace/organization", "workspace/inspectorVisible", "teams/attentionNotified"};
-    const auto restore = qScopeGuard([keys] { for (const auto &key : keys) QSettings().remove(key); });
+    const auto restore = qScopeGuard([keys] { for (const auto &key : keys) removeSetting(key); });
     QSettings().remove("teams/attentionNotified");
     setJsonSetting("workspace/organization", QJsonDocument(ReadmeShots::organization()).toJson(QJsonDocument::Compact));
     const double now = QDateTime::currentSecsSinceEpoch();
@@ -2673,7 +2673,7 @@ void TestSessionsWindow::teamAttentionReachesTheNotifications()
 void TestSessionsWindow::designerSessionDropsTheTeamHeader()
 {
     const QStringList keys{"workspace/skin", "workspace/organization", "workspace/inspectorVisible", "teams/attentionNotified"};
-    const auto restore = qScopeGuard([keys] { for (const auto &key : keys) QSettings().remove(key); sessionCardTileInset() = 0; });
+    const auto restore = qScopeGuard([keys] { for (const auto &key : keys) removeSetting(key); sessionCardTileInset() = 0; });
     QSettings().setValue("workspace/skin", "whitewh");
     setJsonSetting("workspace/organization", QJsonDocument(ReadmeShots::organization()).toJson(QJsonDocument::Compact));
     QSettings().setValue("workspace/inspectorVisible", false);
@@ -2706,7 +2706,7 @@ void TestSessionsWindow::designerSessionDropsTheTeamHeader()
 void TestSessionsWindow::leadSessionAnswersAProposalOnItsCard()
 {
     const QStringList keys{"workspace/skin", "workspace/theme", "workspace/organization", "workspace/inspectorVisible", "workspace/collapsedTeams"};
-    const auto restore = qScopeGuard([keys] { for (const auto &key : keys) QSettings().remove(key); });
+    const auto restore = qScopeGuard([keys] { for (const auto &key : keys) removeSetting(key); });
     QSettings().setValue("workspace/skin", "whitewh");
     setJsonSetting("workspace/organization", QJsonDocument(ReadmeShots::organization()).toJson(QJsonDocument::Compact));
     QSettings().setValue("workspace/inspectorVisible", false);
@@ -2778,7 +2778,7 @@ void TestSessionsWindow::leadSessionAnswersAProposalOnItsCard()
 void TestSessionsWindow::modelServersRailButtonOnlyWithAServer()
 {
     const QStringList keys{"workspace/skin", "workspace/theme", "workspace/organization", "workspace/inspectorVisible"};
-    const auto restore = qScopeGuard([keys] { for (const auto &key : keys) QSettings().remove(key); });
+    const auto restore = qScopeGuard([keys] { for (const auto &key : keys) removeSetting(key); });
     QSettings().setValue("workspace/skin", "whitewh");
     setJsonSetting("workspace/organization", QJsonDocument(ReadmeShots::organization()).toJson(QJsonDocument::Compact));
     const double now = QDateTime::currentSecsSinceEpoch();
@@ -2816,7 +2816,7 @@ void TestSessionsWindow::modelServersRailButtonOnlyWithAServer()
 void TestSessionsWindow::leadSessionHeaderCarriesTheTeam()
 {
     const QStringList keys{"workspace/skin", "workspace/theme", "workspace/organization", "workspace/inspectorVisible", "workspace/collapsedTeams"};
-    const auto restore = qScopeGuard([keys] { for (const auto &key : keys) QSettings().remove(key); sessionCardTileInset() = 0; });
+    const auto restore = qScopeGuard([keys] { for (const auto &key : keys) removeSetting(key); sessionCardTileInset() = 0; });
     QSettings().setValue("workspace/skin", "whitewh");
     setJsonSetting("workspace/organization", QJsonDocument(ReadmeShots::organization()).toJson(QJsonDocument::Compact));
     QSettings().setValue("workspace/inspectorVisible", false);
@@ -4163,7 +4163,7 @@ void TestSessionsWindow::groupsPersistFilterAndRevealAttention()
     auto *results = window.findChild<QListWidget *>("searchResults"); QVERIFY(results->isVisible()); QCOMPARE(results->count(), 1);
     search->clear(); QVERIFY(list->currentItem()->isHidden());
     list->sessionMoved(remote, docs, {}); list->groupMoved(docs, work);
-    auto persisted = SessionOrganization(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());
+    auto persisted = SessionOrganization(QJsonDocument::fromJson(jsonSetting("workspace/organization")).object());
     QCOMPARE(persisted.groupFor(remote), docs); QCOMPARE(persisted.groups().at(0).id, docs);
     auto offline = fleet(); BoxState unavailable; unavailable.host = "mac"; offline.setPeer(unavailable, QDateTime::currentMSecsSinceEpoch()); window.setFleet(offline);
     QCOMPARE(header(docs)->data(SessionRoles::Attention).toInt(), 0); QCOMPARE(list->currentItem()->data(SessionRoles::Identity).toString(), remote);
@@ -4671,7 +4671,7 @@ void TestSessionsWindow::emptyProjectsSettingPreservesArchiveAndProjects()
     box.sessions.first().activity = "idle"; box.sessions.first().phase = "idle"; box.sessions.first().state = "paused";
     state.setLocal(box, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state); QVERIFY(hasHeader(active));
     box.sessions.removeFirst(); state.setLocal(box, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state); QVERIFY(!hasHeader(active));
-    const SessionOrganization stored(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());
+    const SessionOrganization stored(QJsonDocument::fromJson(jsonSetting("workspace/organization")).object());
     QVERIFY(stored.group(empty)); QVERIFY(stored.group(active)); QVERIFY(stored.group(archived));
 }
 
@@ -6758,17 +6758,17 @@ void TestSessionsWindow::refreshedListingsKeepRowsUnlessTimeChangesThem()
 
 void TestSessionsWindow::organizationIsSavedOnlyWhenItChanges()
 {
-    QSettings().remove("workspace/organization");
+    removeSetting("workspace/organization");
     SessionsWindow window(program()); keepDetailsPollsOut(window); window.setFleet(fleet()); window.show();
-    QTRY_VERIFY(QSettings().contains("workspace/organization"));
+    QTRY_VERIFY(SettingsJson::contains("workspace/organization"));
     // Polls with the same rows leave the saved layout alone, whatever else wrote it.
     setJsonSetting("workspace/organization", QByteArray("{}"));
     for (int i = 0; i < 3; ++i) window.setFleet(fleet());
-    QCOMPARE(QSettings().value("workspace/organization").toByteArray(), QByteArray("{}"));
+    QCOMPARE(jsonSetting("workspace/organization"), QByteArray("{}"));
     // A newly observed session changes the layout, which is saved at once.
     auto state = fleet(); auto local = state.local(); auto added = local.sessions[1]; added.name = "kimi/docs/second"; added.tag = "second";
     local.sessions << added; state.setLocal(local, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
-    const auto saved = QSettings().value("workspace/organization").toByteArray();
+    const auto saved = jsonSetting("workspace/organization");
     QVERIFY(saved.contains("kimi/docs/second"));
 }
 
@@ -12130,7 +12130,7 @@ void TestSessionsWindow::forkKeepsSourceAndGroup()
     QTRY_VERIFY(list->currentItem());
     QCOMPARE(list->currentItem()->data(Qt::UserRole).toString(), QString("\ncodex/project/topic-fork"));
     QVERIFY(!list->currentItem()->isHidden());
-    const auto persisted = SessionOrganization(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());
+    const auto persisted = SessionOrganization(QJsonDocument::fromJson(jsonSetting("workspace/organization")).object());
     const QString createdIdentity = "arch\ncodex/project/topic-fork";
     QCOMPARE(persisted.groupFor(sourceIdentity), group); QCOMPARE(persisted.groupFor(createdIdentity), group);
     QVERIFY(persisted.group(group));
@@ -12991,7 +12991,7 @@ void TestSessionsWindow::preview()
         QVERIFY(window.grab().save(destination + (dark ? "/projects-dark.png" : "/projects-light.png")));
         // Compare selection, activity, unread and action states at the smallest
         // supported sidebar width, using the real delegate in both densities.
-        QSettings().remove("workspace/organization");
+        removeSetting("workspace/organization");
         BoxState states; states.host = "arch"; states.ok = true;
         const QStringList stateNames{"nebula", "infrastructure-rollout-with-a-long-name", "persistence", "deploy", "research", "tests", "navigation", "content", "legacy"};
         for (int i = 0; i < stateNames.size(); ++i) {
@@ -13300,7 +13300,7 @@ void TestSessionsWindow::launchAddsOnlyFoldersOutsideTheProject()
         SessionInfo created;created.name="codex/infra/"+name;created.cmd="codex";created.project="infra";created.tag=name;
         created.runId="run-"+name;created.state="running";created.launchId=launches.last()[5].toString();
         box.sessions.append(created);state.setPeer(box,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);
-        const SessionOrganization stored(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());
+        const SessionOrganization stored(QJsonDocument::fromJson(jsonSetting("workspace/organization")).object());
         QCOMPARE(stored.groupFor("mac\ncodex/infra/"+name),group);
         paths.clear();for(const auto &folder:stored.group(group)->folders)paths<<folder.path;
     };
@@ -13549,7 +13549,7 @@ print(json.dumps({'tracked':True,'events':[],'cursor':0}))
     window.findChild<QLineEdit *>("search")->clear();
     QVERIFY(!list->currentItem());QCOMPARE(composer->sessionKey(),QString());
     if(mode=="archive"){
-        SessionOrganization saved(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());
+        SessionOrganization saved(QJsonDocument::fromJson(jsonSetting("workspace/organization")).object());
         QCOMPARE(saved.groupFor("arch\narchive\nterminated-archive"),group);
     }
     QListWidgetItem *next=nullptr;
@@ -14831,7 +14831,7 @@ void TestSessionsWindow::pendingImplicitInboxDoesNotOverrideNativeProject()
     created.tag="new-inference";created.state="running";created.runId="new-run";created.launchId=token;local.sessions.append(created);
     state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
     SessionsWindow window(program());window.setFleet(state);window.show();
-    const auto saved=[] {return QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object();};
+    const auto saved=[] {return QJsonDocument::fromJson(jsonSetting("workspace/organization")).object();};
     const bool passive=intent=="implicit";
     const auto expected=passive?(nativeFirst?work:QString("ungrouped")):intent=="concrete"?chosen:QString("ungrouped");
     QCOMPARE(SessionOrganization(saved()).groupFor(identity),expected);
@@ -14906,7 +14906,7 @@ void TestSessionsWindow::newSessionGroupFollowsLaunchIdentity()
     if (mode == "empty" && !preview.isEmpty()) { QDir().mkpath(preview); QVERIFY(window->grab().save(preview + "/starting-session.png")); }
     auto pending = window->findChild<SessionCreationController *>()->operations();
     QCOMPARE(pending.value(token).toObject().value("group").toString(), destination);
-    QCOMPARE(SessionOrganization(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object()).group(destination)->folders.size(),1);
+    QCOMPARE(SessionOrganization(QJsonDocument::fromJson(jsonSetting("workspace/organization")).object()).group(destination)->folders.size(),1);
     SessionInfo created; created.name = "codex/infra/grouped"; created.cmd = "codex"; created.project = "infra"; created.tag = "grouped";
     created.runId = "run-created"; created.state = "running"; created.launchId = "different-launch";
     auto box = host.isEmpty() ? state.local() : *state.peer(host);
@@ -14918,7 +14918,7 @@ void TestSessionsWindow::newSessionGroupFollowsLaunchIdentity()
     };
     deliver(); // A matching name from someone else's launch is never moved.
     QVERIFY(placeholder());
-    auto stored = SessionOrganization(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());
+    auto stored = SessionOrganization(QJsonDocument::fromJson(jsonSetting("workspace/organization")).object());
     QCOMPARE(stored.groupFor(machine + '\n' + created.name), QString("ungrouped"));
     QVERIFY(window->findChild<SessionCreationController *>()->owns(token));
     if (mode == "failed") { window->newSessionLaunchFailed(token); QVERIFY(placeholder());QCOMPARE(placeholder()->data(SessionRoles::Status).toString(),QString("Creation result unknown")); }
@@ -14943,7 +14943,7 @@ void TestSessionsWindow::newSessionGroupFollowsLaunchIdentity()
     }
     created.launchId = token; created.runId = "run-receipt"; deliver();
     QVERIFY(!placeholder());
-    stored = SessionOrganization(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());
+    stored = SessionOrganization(QJsonDocument::fromJson(jsonSetting("workspace/organization")).object());
     QCOMPARE(stored.groupFor(machine + '\n' + created.name), mode == "deleted" ? QString("ungrouped") : destination);
     QVERIFY(!QJsonDocument::fromJson(QSettings().value("workspace/pendingLaunches").toByteArray()).object().contains(token));
     const auto *resultGroup=stored.group(mode=="deleted"?stored.defaultProject():destination);QVERIFY(resultGroup);
@@ -15211,14 +15211,14 @@ void TestSessionsWindow::legacyProjectsMigrateWithBackupAndLocalFolders()
     client->projectsForHostReady({}, {local,ignored});
     auto remote=local;remote.dir="/Users/test/shared";client->projectsForHostReady("mac",{remote});
     QCOMPARE(QSettings().value("workspace/organizationBeforeProjects").toByteArray(),legacy);
-    SessionOrganization migrated(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());
+    SessionOrganization migrated(QJsonDocument::fromJson(jsonSetting("workspace/organization")).object());
     QCOMPARE(migrated.groups().size(),2);QVERIFY(!migrated.group("pinned"));
     QCOMPARE(migrated.groupFor("arch\ncodex/hgs/dashboard"),QString("work"));
     QCOMPARE(migrated.group("work")->folders.size(),2);QVERIFY(migrated.group("work")->collapsed);
     QCOMPARE(migrated.group("work")->folders[0].machine,QString("arch"));
     QCOMPARE(migrated.group("work")->folders[1].machine,QString("mac"));
     local.dir="/unexpected";client->projectsForHostReady({}, {local});
-    SessionOrganization unchanged(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());
+    SessionOrganization unchanged(QJsonDocument::fromJson(jsonSetting("workspace/organization")).object());
     QCOMPARE(unchanged.group("work")->folders.size(),2);
     auto offline=fleet();BoxState sleeping;sleeping.host="mac";offline.setPeer(sleeping,QDateTime::currentMSecsSinceEpoch());
     NewSessionDialog launch(program(),offline,"mac");launch.setGroups(migrated,"work");
@@ -15241,7 +15241,7 @@ void TestSessionsWindow::projectOrderAndDefaultBadge()
     QCOMPARE(list->count(),3);QVERIFY(list->item(2)->data(Qt::UserRole+3).toBool());
     QVERIFY(list->item(2)->data(Qt::AccessibleTextRole).toString().contains("default project"));
     list->setCurrentRow(2);QVERIFY(list->model()->moveRow({},2,{},0));
-    const auto stored=[] {return SessionOrganization(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());};
+    const auto stored=[] {return SessionOrganization(QJsonDocument::fromJson(jsonSetting("workspace/organization")).object());};
     QTRY_COMPARE(stored().groups().first().id,QString("ungrouped"));
     QCOMPARE(list->currentItem()->data(Qt::UserRole).toString(),QString("ungrouped"));
     page->selectProject(first);page->findChild<QCheckBox *>("defaultProject")->click();
@@ -15270,7 +15270,7 @@ void TestSessionsWindow::projectsEmbeddedAndRemote()
     auto *table=page->findChild<QTableWidget *>("projectFolders");QCOMPARE(table->rowCount(),2);
     QCOMPARE(table->item(1,1)->text(),QString("mac"));QCOMPARE(table->item(1,2)->text(),QString("/Users/test/infra"));
     auto *name=page->findChild<QLineEdit *>("projectName");name->setText("Infrastructure / renamed");name->editingFinished();
-    const auto restored=SessionOrganization(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());
+    const auto restored=SessionOrganization(QJsonDocument::fromJson(jsonSetting("workspace/organization")).object());
     QCOMPARE(restored.group(id)->name,QString("Infrastructure / renamed"));QCOMPARE(restored.group(id)->folders.size(),2);
     QCOMPARE(restored.group(id)->color,QString("#ffcc00"));
     NewSessionDialog launch(program(),fleet(),"mac");launch.setGroups(restored,id);
@@ -15403,7 +15403,7 @@ void TestSessionsWindow::projectFolderActionsKeepTargets()
     });
     menu->findChild<QAction *>("contextRemoveProjectFolder")->trigger();QVERIFY(askedRemove);delete menu.data();
     QSignalSpy launches(page,&ProjectsDialog::newSessionRequested);launch->trigger();QCOMPARE(launches.size(),0);delete launch.data();
-    const SessionOrganization saved(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());
+    const SessionOrganization saved(QJsonDocument::fromJson(jsonSetting("workspace/organization")).object());
     QCOMPARE(saved.group(first)->folders.size(),2);QCOMPARE(saved.group(second)->folders.size(),1);QVERIFY(QDir(path).exists());
     table->customContextMenuRequested(QPoint(5,table->viewport()->height()-5));
     menu=page->findChild<QMenu *>("projectFolderMenu");QVERIFY(menu);QCOMPARE(menu->actions().size(),1);
@@ -15415,7 +15415,7 @@ void TestSessionsWindow::projectFolderActionsKeepTargets()
         if(!preview.isEmpty()){QTest::qWait(30);QVERIFY(dialog->grab().save(preview+"/delete-project.png"));}
         QTest::keyClick(dialog,Qt::Key_Return);});
     page->deleteProject(first);
-    const SessionOrganization afterDelete(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());
+    const SessionOrganization afterDelete(QJsonDocument::fromJson(jsonSetting("workspace/organization")).object());
     QVERIFY(afterDelete.group(first));
 }
 
@@ -15442,7 +15442,7 @@ void TestSessionsWindow::localWindowsLaunchJoinsTheFolderInAnyCase()
     }
     state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
     SessionsWindow window(program());window.show();window.setFleet(state);
-    const SessionOrganization saved(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());
+    const SessionOrganization saved(QJsonDocument::fromJson(jsonSetting("workspace/organization")).object());
     QStringList paths;for(const auto &folder:saved.group(project)->folders)paths<<folder.path;
     // A drive-less rooted path is no folder of a Windows machine: the session still joins.
     QCOMPARE(paths,QStringList({"C:/Work/Repo","D:/New/Folder"}));QCOMPARE(saved.group(project)->folders[0].id,existing);
@@ -15487,7 +15487,7 @@ void TestSessionsWindow::localWindowsFolderFilterIgnoresCase()
 // is done. "Show all in Sessions" opens the list on the project.
 void TestSessionsWindow::projectSessionBadgesFollowTheStatusContract()
 {
-    const auto restore=qScopeGuard([]{QSettings().remove("workspace/organization");});
+    const auto restore=qScopeGuard([]{removeSetting("workspace/organization");});
     SessionOrganization model;const auto id=model.createGroup("Status contract");model.setDefaultProject(id);
     model.markImported("arch");model.markImported("mac");
     setJsonSetting("workspace/organization",QJsonDocument(model.toJson()).toJson(QJsonDocument::Compact));
@@ -15557,9 +15557,9 @@ void TestSessionsWindow::projectColorsApplyOrCancel()
         watchdog.stop();QVERIFY(!expired);QVERIFY(opened);
     };
     edit(false);QVERIFY(opened);
-    auto restored=SessionOrganization(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());
+    auto restored=SessionOrganization(QJsonDocument::fromJson(jsonSetting("workspace/organization")).object());
     QCOMPARE(restored.group(id)->color,QString("#00aa7f"));
-    edit(true);restored=SessionOrganization(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());
+    edit(true);restored=SessionOrganization(QJsonDocument::fromJson(jsonSetting("workspace/organization")).object());
     QCOMPARE(restored.group(id)->color,QString("#ffe100"));QVERIFY(!restored.group(id)->vivid);
 }
 
@@ -16368,7 +16368,7 @@ void TestSessionsWindow::projectListKeepsItsReorderKeys()
     SessionOrganization projects; projects.createGroup("infra"); projects.createGroup("sample-app");
     QSettings().setValue("workspace/hideEmptyProjects", false);
     setJsonSetting("workspace/organization", QJsonDocument(projects.toJson()).toJson(QJsonDocument::Compact));
-    const auto stored = [] { return SessionOrganization(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object()); };
+    const auto stored = [] { return SessionOrganization(QJsonDocument::fromJson(jsonSetting("workspace/organization")).object()); };
     SessionsWindow window(program()); window.setFleet(fleet()); window.show(); window.activateWindow();
     QVERIFY(QTest::qWaitForWindowActive(&window));
     window.showProjects();

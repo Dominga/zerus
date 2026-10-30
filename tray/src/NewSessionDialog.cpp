@@ -1,3 +1,4 @@
+#include "Settings.h"
 #include "SettingsJson.h"
 #include "NewSessionDialog.h"
 #include "RepositoryClone.h"
@@ -915,14 +916,14 @@ bool NewSessionDialog::implicitInbox() const
 }
 void NewSessionDialog::launch(const QString &target,const QString &addFolder)
 {
-    QSettings settings;settings.setValue("workspace/launchOpenTerminal",m_openTerminal->isChecked());
-    if(m_worktreeChosen)settings.setValue("workspace/launchWorktree",m_autoPreferred?"auto":"none");
+    Settings::set("workspace/launchOpenTerminal",m_openTerminal->isChecked());
+    if(m_worktreeChosen)Settings::set("workspace/launchWorktree",m_autoPreferred?"auto":"none");
     // The next dialog starts with this agent and, per machine and agent, this account.
-    settings.setValue("workspace/launchAgent",agent());
+    Settings::set("workspace/launchAgent",agent());
     if(const auto selectedAccount=account();!selectedAccount.isEmpty()){
         auto accounts=SettingsJson::object("workspace/launchAccounts");
         auto machine=accounts.value(host()).toObject();machine[agent()]=selectedAccount;accounts[host()]=machine;
-        SettingsJson::store(settings,QStringLiteral("workspace/launchAccounts"),QJsonDocument(accounts));
+        SettingsJson::store(QStringLiteral("workspace/launchAccounts"),QJsonDocument(accounts));
     }
     // A local model account takes this session's model (hgs --local-model).
     const auto model=agent()=="opencode"?m_model->currentData().toString():denseLocalModel();

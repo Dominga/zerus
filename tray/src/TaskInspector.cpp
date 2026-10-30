@@ -1,3 +1,4 @@
+#include "Settings.h"
 #include "SettingsJson.h"
 #include "TaskInspector.h"
 #include <QScopeGuard>
@@ -91,7 +92,7 @@ TaskInspector::TaskInspector(HgsClient *client, TasksView *board, QWidget *paren
     m_createError = new QLabel; m_createError->setObjectName("taskCreateError"); m_createError->setWordWrap(true); m_createError->setTextFormat(Qt::PlainText); m_createError->hide();
     connect(m_add, &QToolButton::clicked, this, [this] { m_creationHeader->setCurrentWidget(m_newTitle); m_newTitle->setFocus(); });
     connect(m_newTitle, &QLineEdit::textEdited, this, [this](const QString &text) {
-        if (m_creation.isEmpty()) QSettings().setValue("tasks/newCard/" + m_project + "/title", text);
+        if (m_creation.isEmpty()) Settings::set("tasks/newCard/" + m_project + "/title", text);
     });
     connect(m_newTitle, &QLineEdit::returnPressed, this, &TaskInspector::createCard);
     m_filters = new QWidget; auto *filters = new QHBoxLayout(m_filters);
@@ -139,7 +140,7 @@ TaskInspector::TaskInspector(HgsClient *client, TasksView *board, QWidget *paren
     m_titleEditor = new QPlainTextEdit; m_titleEditor->setObjectName("taskTitleEditor"); m_titleEditor->setAccessibleName(tr("Task title · Enter to save, Escape to cancel"));
     m_titleEditor->setTabChangesFocus(true); m_titleEditor->installEventFilter(this); m_titleEditor->hide(); titleColumn->addWidget(m_titleEditor);
     connect(m_titleEditor, &QPlainTextEdit::textChanged, this, [this] {
-        if (m_titleEditor->isVisible() && !m_titleSaving) QSettings().setValue("tasks/titleDraft/" + m_project + '/' + m_selected, m_titleEditor->toPlainText());
+        if (m_titleEditor->isVisible() && !m_titleSaving) Settings::set("tasks/titleDraft/" + m_project + '/' + m_selected, m_titleEditor->toPlainText());
     });
     m_titleError = new QLabel; m_titleError->setObjectName("taskTitleError"); m_titleError->setTextFormat(Qt::PlainText); m_titleError->setWordWrap(true); m_titleError->hide(); titleColumn->addWidget(m_titleError);
     heading->addLayout(titleColumn, 1);
@@ -347,7 +348,7 @@ TaskInspector::TaskInspector(HgsClient *client, TasksView *board, QWidget *paren
     m_splitter->setSizes(saved.size() == 2 && saved[0].toInt() > 0 && saved[1].toInt() > 0
         ? QList<int>{saved[0].toInt(), saved[1].toInt()} : QList<int>{400, 320});
     connect(m_splitter, &QSplitter::splitterMoved, this, [this] {
-        const auto sizes = m_splitter->sizes(); QSettings().setValue("tasks/inspectorSplit", QVariantList{sizes.value(0), sizes.value(1)});
+        const auto sizes = m_splitter->sizes(); Settings::set("tasks/inspectorSplit", QVariantList{sizes.value(0), sizes.value(1)});
     });
     connect(m_detailTabs, &QTabBar::currentChanged, this, [this](int index) { Q_UNUSED(index); renderDetail(); });
     connect(m_board, &TasksView::taskEditRequested, this, [this](const QString &uuid) {
@@ -668,7 +669,7 @@ void TaskInspector::renderDetail() {
         m_commentComposer->setDraftLabel((descriptionMode(m_detail) ? tr("Description · %1") : tr("Comment · %1")).arg(task.id));
         const auto legacyKey = QStringLiteral("tasks/noteDraft/%1/%2").arg(m_project, m_selected);
         const auto legacy = QSettings().value(legacyKey).toString();
-        if (!legacy.isEmpty() && m_commentComposer->offerDraft(noteKey, legacy)) QSettings().remove(legacyKey);
+        if (!legacy.isEmpty() && m_commentComposer->offerDraft(noteKey, legacy)) Settings::remove(legacyKey);
     }
     m_commentComposer->setAvailability(!m_detail.isEmpty() && task.writable);
     m_commentComposer->setSessionStatus(task.writable ? QString() : tr("Update Zerus to comment on this task"), false, !task.writable);
@@ -892,7 +893,7 @@ void TaskInspector::beginRename() {
 
 void TaskInspector::cancelRename() {
     if (m_titleSaving) return;
-    QSettings().remove("tasks/titleDraft/" + m_project + '/' + m_selected);
+    Settings::remove("tasks/titleDraft/" + m_project + '/' + m_selected);
     m_titleEditor->hide(); m_title->show(); m_titleError->hide(); m_renameRequested.clear();
 }
 
@@ -906,7 +907,7 @@ void TaskInspector::finishRename() {
     m_titleSaving = true; m_titleEditor->setReadOnly(true); m_titleError->hide();
     const auto uuid = m_selected; const auto project = m_project; QPointer<TaskInspector> guard(this);
     m_board->renameTask(uuid, title, [guard, uuid, project, title] {
-        QSettings().remove("tasks/titleDraft/" + project + '/' + uuid);
+        Settings::remove("tasks/titleDraft/" + project + '/' + uuid);
         if (!guard) return; guard->m_titleSaving = false;
         if (guard->m_selected == uuid && guard->m_project == project) {
             ++guard->m_generation; guard->m_detail["title"] = title; guard->cancelRename(); guard->renderDetail(); guard->fetch();
@@ -1041,18 +1042,17 @@ void TaskInspector::createCard() {
     if (std::any_of(title.begin(), title.end(), [](QChar c) { return c.category() == QChar::Other_Control; })) { m_createError->setText(tr("Use a single-line task title without control characters.")); m_createError->show(); return; }
     if (title.toUtf8().size() > 512) { m_createError->setText(tr("Use a shorter task title (up to 512 bytes).")); m_createError->show(); return; }
     const auto project = m_project; const auto key = "tasks/newCard/" + project;
-    QSettings settings;
     if (m_creation.isEmpty()) {
         m_creation = {{"project", project}, {"title", title}, {"request_id", QUuid::createUuid().toString(QUuid::WithoutBraces)},
                       {"stage", m_stage == QLatin1String("backlog") ? "backlog" : "todo"}, {"session", m_sessionId.isEmpty() ? "any" : m_session}, {"host", m_sessionId.isEmpty() ? QString() : m_host}, {"session_id", m_sessionId}};
-        SettingsJson::store(settings, key + "/request", QJsonDocument(m_creation)); settings.sync();
-        if (settings.status() != QSettings::NoError) { m_creation = {}; m_createError->setText(tr("Could not save the new card identity. Nothing was sent.")); m_createError->show(); return; }
+        // A reservation: stored now, or nothing is sent (Settings.h).
+        if (!SettingsJson::storeNow(key + "/request", QJsonDocument(m_creation))) { m_creation = {}; m_createError->setText(tr("Could not save the new card identity. Nothing was sent.")); m_createError->show(); return; }
     }
     m_creating = true; m_newTitle->setReadOnly(true); m_createError->hide();
     QPointer<TaskInspector> guard(this);
     m_board->createNamedTask(m_creation, [guard, project, key](const QJsonObject &task) {
         if (!guard) return;
-        guard->m_creating = false; QSettings settings; settings.remove(key); settings.sync();
+        guard->m_creating = false; Settings::remove(key);
         if (project != guard->m_project) return;
         guard->m_creation = {}; guard->m_newTitle->clear(); guard->m_newTitle->setReadOnly(false); guard->m_creationHeader->setCurrentWidget(guard->m_scope);
         guard->openTask(task.value("uuid").toString()); guard->m_inlineRequested = task.value("uuid").toString(); guard->publishDetail(task); guard->m_commentComposer->editor()->setFocus();

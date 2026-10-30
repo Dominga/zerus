@@ -1,3 +1,4 @@
+#include "Settings.h"
 #include "ConversationSource.h"
 #include "MessageComposer.h"
 #include "AccountSwitch.h"
@@ -289,9 +290,9 @@ MessageComposer::MessageComposer(QWidget *parent) : QWidget(parent)
     handle->dragged = [this](int distance) {
         m_editorHeight = boundedEditorHeight(m_dragEditorHeight + distance) / m_scale; updateEditorHeight();
     };
-    handle->finished = [this] { QSettings().setValue(EditorHeightSetting, m_editorHeight); };
+    handle->finished = [this] { Settings::set(EditorHeightSetting, m_editorHeight); };
     handle->reset = [this] {
-        m_editorHeight = DefaultEditorHeight; QSettings().remove(EditorHeightSetting); updateEditorHeight();
+        m_editorHeight = DefaultEditorHeight; Settings::remove(EditorHeightSetting); updateEditorHeight();
     };
     inputLayout->addWidget(edit);
     auto *actions = new QHBoxLayout; m_actions = actions; actions->setContentsMargins(0, 0, 0, 0); actions->setSpacing(8);

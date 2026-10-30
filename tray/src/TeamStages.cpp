@@ -187,16 +187,19 @@ StageLine stageLine(const Team &team, const Task &task, const Colors &c)
 {
     StageLine line;
     const auto &run = task.pipelineRun;
-    // A pending task whose folder a test of another task holds (#532: the
-    // wait says so; an older hgs: derived the same way).
+    // A pending task whose folder a stage of another task holds (#635 N4: the
+    // status's held_by; the wait's text "the stage of #N", or "the test of
+    // #N" before #680; an older hgs: derived the same way).
     if (task.status == "pending" && !task.held) {
-        int holder = folderHeldBy(team, task.assignee);
-        if (holder == task.id) holder = 0;
-        static const QRegularExpression held(QStringLiteral("folder held by the test of #(\\d+)"));
-        if (const auto match = held.match(task.wait.unblock); match.hasMatch()) holder = match.captured(1).toInt();
-        if (holder) {
-            StageChip chip{QStringLiteral("folder_held"), tr("Folder held by the test of #%1").arg(holder),
-                           tr("Ready, but its folder is under the test of #%1; it starts when that test ends.").arg(holder), QStringLiteral("held"), c.warn};
+        Member::Hold holder = folderHold(team, task.assignee);
+        if (holder.task == task.id) holder = {};
+        static const QRegularExpression held(QStringLiteral("folder held by the (test|stage) of #(\\d+)"));
+        if (const auto match = held.match(task.wait.unblock); match.hasMatch() && match.captured(2).toInt() != holder.task)
+            holder = {match.captured(2).toInt(), match.captured(1) == "test" ? QStringLiteral("test") : QString()};
+        if (holder.task) {
+            const QString by = holderText(holder);
+            StageChip chip{QStringLiteral("folder_held"), tr("Folder held by %1").arg(by),
+                           tr("Ready, but its folder is under %1; it starts when that stage ends.").arg(by), QStringLiteral("held"), c.warn};
             line.chips << chip; line.warn = true;
             // A returned task keeps its findings' note under the hold.
             if (const auto *last = run.runs.isEmpty() ? nullptr : &run.runs.last(); last && last->state == "returned") {
@@ -284,7 +287,7 @@ StageLine stageLine(const Team &team, const Task &task, const Colors &c)
             tip << tr("%1 round %2 of %3").arg(stageName(kind)).arg(open->round).arg(rounds);
             if (member) tip << QStringLiteral("%1 · %2").arg(team.roleOf(member->id), member->model.isEmpty() ? member->agent : member->model);
             if (!open->folder.isEmpty()) tip << tr("Works in %1").arg(open->checkout.isEmpty() ? open->folder : open->checkout);
-            if (kind == "test" && folderHeldBy(team, implementerOf(task, *open)) == task.id) tip << tr("Holds %1's folder").arg(team.roleOf(implementerOf(task, *open)));
+            if (folderHeldBy(team, implementerOf(task, *open)) == task.id) tip << tr("Holds %1's folder").arg(team.roleOf(implementerOf(task, *open)));
             const int next = open->stage + 1;
             tip << (next < run.stages.size() ? tr("Next: %1").arg(stageName(run.stages[next].kind))
                                              : run.accept == "auto" ? tr("Next: accepted by the pipeline") : tr("Next: %1 accepts").arg(stageName(acceptKind(run))));
@@ -371,8 +374,8 @@ QString heldFoldersNote(const Team &team, const QList<int> &tasks, QString *tip)
 {
     QStringList lines;
     for (const auto &member : team.members)
-        if (const int holder = folderHeldBy(team, member.id); holder && tasks.contains(holder))
-            lines << tr("%1's folder: held by the test of #%2").arg(team.roleOf(member.id)).arg(holder);
+        if (const auto holder = folderHold(team, member.id); holder.task && tasks.contains(holder.task))
+            lines << tr("%1's folder: held by %2").arg(team.roleOf(member.id), holderText(holder));
     if (tip) *tip = lines.join(QLatin1Char('\n'));
     if (lines.isEmpty()) return {};
     return lines.size() == 1 ? tr("1 folder held") : tr("%1 folders held").arg(lines.size());
@@ -478,9 +481,11 @@ QWidget *pipelineSection(const Team &team, const Task &task, const Colors &c, bo
             // when it ends; nothing recorded, no line.
             if (const QString ran = ranText(*open); !ran.isEmpty()) fact(tr("Ran"), ran, "teamTaskPipelineRan");
         }
-        if (open->kind == "test") {
+        // #635 N4: any stage may hold the implementer's folder now (review,
+        // command and land too); a test that does not works detached.
+        if (const bool held = folderHeldBy(team, implementer) == task.id; held || open->kind == "test") {
             QString holds = tr("nothing: it works on a detached checkout");
-            if (folderHeldBy(team, implementer) == task.id) {
+            if (held) {
                 holds = tr("%1's folder").arg(team.roleOf(implementer));
                 for (const auto &next : team.tasks)
                     if (next.id != task.id && next.assignee == implementer && next.status == "pending" && !next.held) { holds = tr("the folder: #%1 %2 waits").arg(next.id).arg(next.title); break; }
@@ -643,9 +648,11 @@ QWidget *memberStageQueue(const Team &team, const Member &member, const Colors &
     for (const auto &entry : queue) { if (entry.state == "delivered" && !current) current = &entry; else waiting << entry; }
     auto *head = row(6);
     auto *icon = new QLabel; icon->setPixmap(workspaceIcon("inbox", c.text3).pixmap(12, 12)); head->addWidget(icon);
-    QString title = waiting.isEmpty() ? tr("Stage queue empty") : tr("Stage queue %1").arg(waiting.size());
-    if (waiting.isEmpty() && current && current->since > 0) title += QStringLiteral(" · ") + tr("%1 in this stage").arg(agoText(current->since, now).remove(QStringLiteral(" ago")));
-    head->addWidget(label(title, c.text2, 11, false, "teamMemberStageQueueTitle"));
+    const QString title = waiting.isEmpty() ? tr("Stage queue empty") : tr("Stage queue %1").arg(waiting.size());
+    auto *titleLabel = label(title, c.text2, 11, false, "teamMemberStageQueueTitle");
+    // #693: the minutes in this stage tick in place.
+    if (waiting.isEmpty() && current && current->since > 0) aged(titleLabel, title + QStringLiteral(" · ") + tr("%1 in this stage"), QStringLiteral("age"), current->since, now);
+    head->addWidget(titleLabel);
     head->addStretch();
     v->addLayout(head);
     for (const auto &entry : waiting) {
@@ -657,7 +664,7 @@ QWidget *memberStageQueue(const Team &team, const Member &member, const Colors &
         h->addWidget(new StageChipWidget(StageChip{glyphOf(entry.stage), tr("%1 r%2").arg(stageName(entry.stage)).arg(qMax(1, entry.round)), {},
                                                    QStringLiteral("waiting"), stageColor(c, entry.stage)}));
         h->addWidget(elided(QStringLiteral("#%1 %2").arg(task->id).arg(task->title), c.fg, 11), 1);
-        if (entry.since > 0) h->addWidget(label(agoText(entry.since, now).remove(QStringLiteral(" ago")), c.muted, 10));
+        if (entry.since > 0) h->addWidget(aged(label(QString(), c.muted, 10, false, "teamMemberStageQueueAge"), QStringLiteral("%1"), QStringLiteral("age"), entry.since, now));
         line->setMinimumHeight(21);
         line->setStyleSheet(QStringLiteral("QPushButton#teamMemberStageQueueRow{border:none;background:transparent;text-align:left;}"));
         QObject::connect(line, &QPushButton::clicked, line, [open, id = entry.task] { if (open) open(id); });

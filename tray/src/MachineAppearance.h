@@ -1,4 +1,5 @@
 #pragma once
+#include "Settings.h"
 #include <QColor>
 #include <QCoreApplication>
 #include <QHash>
@@ -37,9 +38,9 @@ inline QColor color(const QString &machine) {
 }
 inline void setColor(const QString &machine, const QColor &value) {
     if (machine.isEmpty() || !value.isValid()) return;
-    QSettings().setValue("machines/colors/" + machine, value.name()); cache().colors.insert(machine, QColor(value.name()));
+    Settings::set("machines/colors/" + machine, value.name()); cache().colors.insert(machine, QColor(value.name()));
 }
-inline void resetColor(const QString &machine) { QSettings().remove("machines/colors/" + machine); cache().colors.remove(machine); }
+inline void resetColor(const QString &machine) { Settings::remove("machines/colors/" + machine); cache().colors.remove(machine); }
 inline bool vivid(const QString &machine) {
     auto &vivid = cache().vivid;
     if (const auto it = vivid.constFind(machine); it != vivid.cend()) return *it;
@@ -47,7 +48,7 @@ inline bool vivid(const QString &machine) {
 }
 inline void setVivid(const QString &machine, bool enabled) {
     if (machine.isEmpty()) return;
-    QSettings().setValue("machines/vivid/" + machine, enabled); cache().vivid.insert(machine, enabled);
+    Settings::set("machines/vivid/" + machine, enabled); cache().vivid.insert(machine, enabled);
 }
 inline QColor blend(const QColor &a, const QColor &b, qreal amount) {
     return QColor::fromRgbF(a.redF() * (1-amount) + b.redF() * amount,

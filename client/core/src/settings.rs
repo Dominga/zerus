@@ -366,6 +366,14 @@ impl QtStore {
         }
     }
 
+    /// A value Qt keeps in a JSON file of its own beside the store
+    /// (tray/src/SettingsJson.cpp): `<store>.<name>.json`.
+    pub fn json_file(&self, name: &str) -> PathBuf {
+        let mut path = self.path().as_os_str().to_owned();
+        path.push(format!(".{name}.json"));
+        PathBuf::from(path)
+    }
+
     /// Every value of the store by Qt name and where it was read;
     /// `Ok(None)` when the store does not exist.
     pub fn read(&self) -> Result<Option<QtValues>, String> {

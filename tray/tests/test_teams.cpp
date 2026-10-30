@@ -146,6 +146,8 @@ private slots:
     void pipelineFixtureReadsEveryStageState();
     void stageDeliveryFixtureReadsTheDeliveredStage();
     void stageQueuesStatesAndFeedLines();
+    void holdsComeFromTheStatusAndRoundsCountTrimmedReturns();
+    void visibleShapeIgnoresWhatOnlyTicks();
     void modelReadsTheTeamAndDerivesMemberStates();
     void modelReadsPhasesPinnedAndTheWaitingState();
     void cancelledWorkAndMoveTargets();
@@ -1846,6 +1848,10 @@ void TestTeams::stageDeliveryFixtureReadsTheDeliveredStage()
     QCOMPARE(run.state, QString("delivered")); QCOMPARE(run.member, QString("qa"));
     QCOMPARE(run.folder, QString("/srv/example/proj"));
     QVERIFY(run.holds);
+    // #635 N4: the status names dev's hold itself.
+    QCOMPARE(team.member("dev")->heldBy.task, 1);
+    QCOMPARE(team.member("dev")->heldBy.stage, QString("test"));
+    QVERIFY(!team.member("qa")->heldBy.task);
     QCOMPARE(folderHeldBy(team, "dev"), 1);
     const auto c = TeamUi::colorsFor(true);
     const auto line = TeamUi::stageLine(team, task, c);
@@ -1906,7 +1912,7 @@ void TestTeams::pipelineFixtureReadsEveryStageState()
     // hold shows, with the returned round's findings as its note.
     line = TeamUi::stageLine(team, returned, c);
     QCOMPARE(line.chips.size(), 1);
-    QCOMPARE(line.chips[0].text, QString("Folder held by the test of #2"));
+    QCOMPARE(line.chips[0].text, QString("Folder held by the test stage of #2"));
     QCOMPARE(line.chips[0].state, QString("held"));
     QCOMPARE(line.note, QString("Attempt 2 · 1 finding"));
     QVERIFY(line.warn);
@@ -1993,7 +1999,7 @@ void TestTeams::stageQueuesStatesAndFeedLines()
     QCOMPARE(status.task, 1);
     const auto held = memberStatus(team, *team.member("dev"), Live{});
     QCOMPARE(held.kind, QString("folder_held"));
-    QCOMPARE(held.text, QString("Waits: its folder is held by the test of #2"));
+    QCOMPARE(held.text, QString("Waits: its folder is held by the test stage of #2"));
     QVERIFY(!held.problem);
     QCOMPARE(displayStatus(team, {}), QString("running"));
     // A soft dependency in review counts as started.
@@ -2114,6 +2120,135 @@ void TestTeams::accountMoveReadsAccountsBlocksAndSteps()
     move.error = "No member of team T could move to account second";
     QCOMPARE(stepOf(later, move, "lead").state, QStringLiteral("failed"));
     QVERIFY(stepOf(later, move, "lead").text.contains(move.error));
+}
+
+// #635 N4: the status's held_by names the stage that holds a member's folder
+// (review, test, command or land), and a status that names one names all; an
+// older hgs's wait text ("the stage of #N", before #680 "the test of #N") is
+// still read. L2: the round count adds the returns hgs trimmed away.
+void TestTeams::holdsComeFromTheStatusAndRoundsCountTrimmedReturns()
+{
+    const auto json = pipelineFixture();
+    QVERIFY(!json.isEmpty());
+    const auto withMember = [](QJsonObject json, const QString &id, const QJsonObject &held) {
+        auto members = json["members"].toArray();
+        for (int i = 0; i < members.size(); ++i) {
+            auto m = members[i].toObject();
+            if (m["id"].toString() == id) { m["held_by"] = held; members[i] = m; }
+        }
+        json["members"] = members;
+        return json;
+    };
+    const auto withTask = [](QJsonObject json, int id, const std::function<void(QJsonObject &)> &edit) {
+        auto tasks = json["tasks"].toArray();
+        for (int i = 0; i < tasks.size(); ++i) {
+            auto t = tasks[i].toObject();
+            if (t["id"].toInt() == id) { edit(t); tasks[i] = t; }
+        }
+        json["tasks"] = tasks;
+        return json;
+    };
+    const auto c = TeamUi::colorsFor(true);
+    // #1's review, given to rev, holds dev's folder (a review before a land
+    // stage, #683): the status says so, not the old test-only rule.
+    auto reviewing = withTask(withMember(json, "dev", {{"task", 1}, {"stage", "review"}}), 1, [](QJsonObject &t) {
+        auto run = t["pipeline_run"].toObject(); auto runs = run["runs"].toArray();
+        auto r = runs[0].toObject(); r["state"] = "delivered"; r["member"] = "rev"; r["delivered_at"] = 1800000300.0; runs[0] = r;
+        run["runs"] = runs; t["pipeline_run"] = run;
+    });
+    Team team = parse(reviewing);
+    QCOMPARE(team.member("dev")->heldBy.task, 1);
+    QCOMPARE(folderHeldBy(team, "dev"), 1);
+    QCOMPARE(folderHold(team, "dev").stage, QString("review"));
+    QCOMPARE(holderText(folderHold(team, "dev")), QString("the review stage of #1"));
+    auto line = TeamUi::stageLine(team, *team.task(3), c);
+    QCOMPARE(line.chips[0].text, QString("Folder held by the review stage of #1"));
+    QCOMPARE(line.chips[0].state, QString("held"));
+    QVERIFY2(line.chips[0].tooltip.contains("its folder is under the review stage of #1; it starts when that stage ends"), qPrintable(line.chips[0].tooltip));
+    const auto status = memberStatus(team, *team.member("dev"), Live{});
+    QCOMPARE(status.kind, QString("folder_held"));
+    QCOMPARE(status.text, QString("Waits: its folder is held by the review stage of #1"));
+    QString tip;
+    QCOMPARE(TeamUi::heldFoldersNote(team, {1, 2, 3, 4}, &tip), QString("1 folder held"));
+    QCOMPARE(tip, QString("Backend's folder: held by the review stage of #1"));
+    // The holding review's chip and inspector say whose folder it holds.
+    line = TeamUi::stageLine(team, *team.task(1), c);
+    QVERIFY2(line.chips[0].tooltip.contains("Holds Backend's folder"), qPrintable(line.chips[0].tooltip));
+    std::unique_ptr<QWidget> section(TeamUi::pipelineSection(team, *team.task(1), c, true));
+    QVERIFY(section && section->findChild<QLabel *>("teamTaskPipelineHolds"));
+    QCOMPARE(section->findChild<QLabel *>("teamTaskPipelineHolds")->text(), QString("the folder: #3 API waits"));
+    // Another member's held_by: the status names every hold, so #2's waiting
+    // test no longer counts as holding dev's folder by the old rule.
+    team = parse(withMember(json, "rev", {{"task", 2}, {"stage", "land"}}));
+    QCOMPARE(folderHeldBy(team, "dev"), 0);
+    QCOMPARE(holderText(folderHold(team, "rev")), QString("the land stage of #2"));
+    QCOMPARE(TeamUi::stageLine(team, *team.task(3), c).chips[0].text, QString("Review returned r1"));
+    // An older hgs: the waiting task's text. "the stage of #N" takes the
+    // kind from #N's open run; "the test of #N" (before #680) still reads.
+    const auto waiting = [&](const QString &unblock) {
+        return parse(withTask(json, 3, [unblock](QJsonObject &t) {
+            t["waits"] = QJsonObject{{"for", "folder"}, {"on", QJsonArray{"#2"}}, {"unblock", unblock}};
+        }));
+    };
+    team = waiting("folder held by the stage of #2");
+    QCOMPARE(holderText(folderHold(team, "dev")), QString("the test stage of #2"));
+    QCOMPARE(TeamUi::stageLine(team, *team.task(3), c).chips[0].text, QString("Folder held by the test stage of #2"));
+    team = waiting("folder held by the test of #2");
+    QCOMPARE(TeamUi::stageLine(team, *team.task(3), c).chips[0].text, QString("Folder held by the test stage of #2"));
+    QCOMPARE(memberStatus(team, *team.member("dev"), Live{}).text, QString("Waits: its folder is held by the test stage of #2"));
+    team = waiting("folder held by the stage of #9");
+    QCOMPARE(holderText(folderHold(team, "dev")), QString("the stage of #9"));
+    QCOMPARE(TeamUi::stageLine(team, *team.task(3), c).chips[0].text, QString("Folder held by the stage of #9"));
+    // L2: hgs keeps the last 64 runs and counts the returns it trimmed. #4
+    // with two of its three returns trimmed still used its three rounds.
+    const auto trim = [&](bool counted) {
+        return parse(withTask(json, 4, [counted](QJsonObject &t) {
+            auto run = t["pipeline_run"].toObject(); auto runs = run["runs"].toArray();
+            runs.removeFirst(); runs.removeFirst();
+            run["runs"] = runs;
+            if (counted) run["trimmed_returns"] = 2;
+            t["pipeline_run"] = run;
+        }));
+    };
+    team = trim(true);
+    QCOMPARE(team.task(4)->pipelineRun.runs.size(), 1);
+    QCOMPARE(team.task(4)->pipelineRun.trimmedReturns, 2);
+    QCOMPARE(team.task(4)->pipelineRun.returned(), 3);
+    line = TeamUi::stageLine(team, *team.task(4), c);
+    QCOMPARE(line.chips[0].state, QString("limit"));
+    QCOMPARE(line.note, QString("3 review rounds used"));
+    // Without it the rounds would read as one and the limit would not show.
+    team = trim(false);
+    QCOMPARE(team.task(4)->pipelineRun.returned(), 1);
+    QVERIFY(TeamUi::stageLine(team, *team.task(4), c).chips[0].state != "limit");
+}
+
+// #693: what a poll changes that the views do not draw leaves the shape alone;
+// a drawn change moves it.
+void TestTeams::visibleShapeIgnoresWhatOnlyTicks()
+{
+    const auto status = [](int revision, double updated, int worked, int deps, int idle, const QString &state, int doneWorked) {
+        return QJsonObject{
+            {"id", "t"}, {"revision", revision}, {"updated", updated},
+            {"tasks", QJsonArray{
+                QJsonObject{{"id", 1}, {"status", state}, {"timing", QJsonObject{
+                    {"worked_s", worked}, {"running_since", 1000.0}, {"waits", QJsonObject{{"deps_s", deps}}},
+                    {"attempts", QJsonArray{QJsonObject{{"n", 1}, {"from", 1000.0}, {"to", QJsonValue()}, {"worked_s", worked}}}}}}},
+                QJsonObject{{"id", 2}, {"status", "accepted"}, {"timing", QJsonObject{{"worked_s", doneWorked}, {"running_since", QJsonValue()},
+                                                                                     {"waits", QJsonObject{{"deps_s", 60}}}}}}}},
+            {"health", QJsonObject{{"starved", QJsonArray{QJsonObject{{"member", "qa"}, {"minutes", idle}}}},
+                                   {"warnings", QJsonArray{QStringLiteral("starved: QA idle %1 min without a ready task").arg(idle)}}}},
+            {"validation", QJsonObject{{"health", QJsonObject{{"warnings", QJsonArray{QStringLiteral("starved: QA idle %1 min").arg(idle)}}}}}}};
+    };
+    const QByteArray first = visibleShape(status(10, 100.0, 600, 30, 11, "in_progress", 900));
+    QCOMPARE(visibleShape(status(11, 160.0, 660, 90, 12, "in_progress", 900)), first);
+    QCOMPARE(visibleShape(status(19, 999.0, 6600, 900, 59, "in_progress", 900)), first);
+    // Drawn: a status, a finished task's time.
+    QVERIFY(visibleShape(status(11, 160.0, 660, 90, 12, "submitted", 900)) != first);
+    QVERIFY(visibleShape(status(10, 100.0, 600, 30, 11, "in_progress", 960)) != first);
+    // A list item has no tasks; its revision and updated time go the same way.
+    QCOMPARE(visibleShape(QJsonObject{{"id", "t"}, {"revision", 1}, {"updated", 5.0}, {"status", "running"}}),
+             visibleShape(QJsonObject{{"id", "t"}, {"revision", 2}, {"updated", 9.0}, {"status", "running"}}));
 }
 
 QTEST_MAIN(TestTeams)

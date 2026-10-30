@@ -7,6 +7,7 @@
 #include <QVBoxLayout>
 #include <algorithm>
 #include <functional>
+#include "Settings.h"
 #include "TeamModel.h"
 #include "TeamWidgets.h"
 
@@ -112,7 +113,7 @@ public:
     {
         auto ids = favourites();
         if (ids.contains(id)) ids.removeAll(id); else ids << id;
-        QSettings().setValue(QStringLiteral("teams/templateFavourites"), ids);
+        Settings::set(QStringLiteral("teams/templateFavourites"), ids);
         rebuild();
     }
 

@@ -1,3 +1,4 @@
+#include "Settings.h"
 #include "SettingsJson.h"
 #include "LinuxAttentionNotifier.h"
 #include <QDBusConnectionInterface>
@@ -37,8 +38,8 @@ void LinuxAttentionNotifier::save()
 {
     QJsonObject tokens;
     for (auto it = m_tokens.begin(); it != m_tokens.end(); ++it) tokens[QString::number(it.key())] = it.value();
-    QSettings settings; settings.setValue("attention/linuxOwner", m_owner);
-    SettingsJson::store(settings, QStringLiteral("attention/linuxTokens"), QJsonDocument(tokens));
+    Settings::set("attention/linuxOwner", m_owner);
+    SettingsJson::store(QStringLiteral("attention/linuxTokens"), QJsonDocument(tokens));
 }
 
 void LinuxAttentionNotifier::post(const QString &token, const QString &title, const QString &body)

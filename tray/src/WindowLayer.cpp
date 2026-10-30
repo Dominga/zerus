@@ -1,3 +1,4 @@
+#include "Settings.h"
 #include "WindowLayer.h"
 #include <QEvent>
 #include <QGuiApplication>
@@ -32,7 +33,7 @@ WindowLayer::WindowLayer(QWidget *window)
                 if (m_desired != on) { request(m_desired); return; }
             }
             if (QSettings().value("workspace/alwaysOnTop", false).toBool() != on)
-                QSettings().setValue("workspace/alwaysOnTop", on);
+                Settings::set("workspace/alwaysOnTop", on);
             if (m_queued) { const bool desired = *m_queued; m_queued.reset(); request(desired); return; }
         } else {
             m_poll.stop(); m_queued.reset();
@@ -73,7 +74,7 @@ void WindowLayer::request(bool on)
     if (!m_supported || m_busy) { emit changed(); return; }
     m_desired = on;
     if (!m_wayland) {
-        applyQt(on); m_onTop = on; QSettings().setValue("workspace/alwaysOnTop", on); emit changed(); return;
+        applyQt(on); m_onTop = on; Settings::set("workspace/alwaysOnTop", on); emit changed(); return;
     }
 #ifdef Q_OS_LINUX
     m_busy = true; emit changed(); m_kwin->request(m_window->windowTitle(), m_id, on);

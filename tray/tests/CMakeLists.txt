@@ -2,7 +2,7 @@ find_package(Qt6 REQUIRED COMPONENTS Test)
 
 add_executable(test_ui_language test_ui_language.cpp)
 target_include_directories(test_ui_language PRIVATE ../src)
-target_link_libraries(test_ui_language PRIVATE Qt6::Test Qt6::Widgets hgs-translations)
+target_link_libraries(test_ui_language PRIVATE Qt6::Test Qt6::Widgets hgs-translations hgs-tray-core)
 # Registered below, after the common native-test launcher is defined.
 
 # support/FakeCli.h starts fixture scripts as fake executables on every platform.
@@ -268,6 +268,10 @@ add_executable(test_jsonparse test_jsonparse.cpp)
 target_include_directories(test_jsonparse PRIVATE ../src)
 target_link_libraries(test_jsonparse PRIVATE Qt6::Test Qt6::Gui hgs-tray-core)
 zerus_add_test(jsonparse test_jsonparse)
+add_executable(test_settings test_settings.cpp)
+target_include_directories(test_settings PRIVATE ../src)
+target_link_libraries(test_settings PRIVATE Qt6::Test Qt6::Gui hgs-tray-core)
+zerus_add_test(settings test_settings)
 
 add_executable(test_processrunner test_processrunner.cpp)
 target_include_directories(test_processrunner PRIVATE ../src)

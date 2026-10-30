@@ -23,7 +23,7 @@ fn text(value: &Value, max: usize) -> Result<String> {
     Ok(value.into())
 }
 
-fn token(value: &str) -> bool {
+pub(super) fn token(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 200
         && value

@@ -72,6 +72,25 @@ without receiving a retirement fence merely for lacking a fingerprint. Live and
 native queries still retain the existing history scan for freshness; replacing
 that scan completely needs the remaining revision/native adapter work.
 
+Kimi reuses the current search's public `agent.message.appended` parser and
+exact unique-conversation wire path. Each source or publication pass shares a
+2,000-directory-entry budget and at most 2,000 exact locator probes across its
+targets, within its existing file/row/byte/deadline bounds. Workspace names and
+paths count against bytes. Iterators end with the call; a bounded root snapshot
+is reused within that pass only. Its fingerprint includes each child workspace's
+identity/mtime, since a duplicate conversation added under an existing workspace
+does not change the top-level sessions directory mtime.
+
+Only a fully enumerated, unchanged inventory can admit a unique wire locator.
+The input cursor persists that root fingerprint and exact path, never the wire
+body. Publication verifies the current binding/profile, fresh inventory and
+file fingerprints, repeating the bounded exact-path uniqueness probes even when
+workspace stamps match. A changed/incomplete root reschedules and uses fallback;
+linked or ambiguous paths never publish copied text. Main-agent public text is
+indexed; reasoning, system context and other agents' bodies remain excluded by
+the existing parser. No Kimi process or engine is contacted. DSH stays delegated
+until its bounded public-history read contract is admitted.
+
 The adapter refuses copied/restored loose directory, database or auxiliary-file
 permissions and links. New index directories are 0700, database and rollback
 journal files 0600. Configuration identity prevents reusing a copied index

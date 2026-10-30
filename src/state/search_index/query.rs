@@ -41,6 +41,7 @@ pub(in crate::state) fn read(query: &str, limit: usize, cursor: Option<&str>) ->
     }
     let budget = Budget {
         files: 128,
+        directory_entries: 2000,
         records: 512,
         bytes: 8 << 20,
         deadline: Instant::now() + Duration::from_millis(500),
@@ -98,6 +99,7 @@ impl Store {
     ) -> Result<Value> {
         if !(1..=100).contains(&limit)
             || budget.files > 128
+            || budget.directory_entries > 2000
             || budget.bytes > 8 << 20
             || budget.deadline > Instant::now() + Duration::from_secs(2)
         {
@@ -109,6 +111,7 @@ impl Store {
         {
             return Err("Search-index query configuration changed".into());
         }
+        self.wire_roots.clear();
         let pattern = RegexBuilder::new(&regex::escape(query))
             .case_insensitive(true)
             .build()
@@ -143,7 +146,7 @@ impl Store {
             };
             // Unsupported adapters retain native/legacy reads. They cannot
             // acquire a retirement tombstone merely for lacking a fingerprint.
-            if !["codex", "claude"].contains(&hit.target.agent.as_str()) {
+            if !["codex", "claude", "kimi"].contains(&hit.target.agent.as_str()) {
                 continue;
             }
             let key = hit.target.key().map_err(|e| e.to_string())?;
@@ -160,7 +163,8 @@ impl Store {
                     conversation_id: hit.target.conversation_id.clone(),
                     archive_id: hit.target.archive_id.clone(),
                 };
-                let proof = self.verify_source(state, &identity, &key, &mut progress, budget);
+                let proof =
+                    self.verify_source(state, &identity, &key, &mut progress, budget, cancel);
                 let target = match proof {
                     Ok(SourceProof::Current(target)) => Some(target),
                     Ok(SourceProof::Appended) => {
@@ -235,12 +239,13 @@ impl Store {
     }
 
     fn verify_source(
-        &self,
+        &mut self,
         state: &Path,
         identity: &Identity,
         key: &str,
         progress: &mut Progress,
         budget: &Budget,
+        cancel: &AtomicBool,
     ) -> Result<SourceProof> {
         let record = binding(state, identity, progress, budget)?;
         let encoded: String = self
@@ -253,8 +258,19 @@ impl Store {
             )
             .map_err(|_| "Source cursor unavailable")?;
         let cursor: Cursor = serde_json::from_str(&encoded).map_err(|_| "Invalid source cursor")?;
-        let stamp = cursor.stamp.ok_or("Source fingerprint unavailable")?;
-        if stamp.path != Path::new(string(&record, "transcript")) {
+        let stamp = match cursor.stamp.as_ref() {
+            Some(stamp) => stamp,
+            None if record["agent"] == "kimi" => return Ok(SourceProof::Appended),
+            None => return Err("Source fingerprint unavailable".into()),
+        };
+        if record["agent"] == "kimi" {
+            if !self
+                .verify_wire(&record, &cursor, budget, progress, cancel)
+                .unwrap_or(false)
+            {
+                return Ok(SourceProof::Appended);
+            }
+        } else if stamp.path != Path::new(string(&record, "transcript")) {
             return Err("Source path changed".into());
         }
         progress.files += 1;

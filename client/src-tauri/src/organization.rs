@@ -129,6 +129,15 @@ struct Hub {
     /// Renames included in the next pending-draft checkpoint. Never acknowledge
     /// tokens before that checkpoint is durable, even if sync.edit succeeded.
     run_acks: VecDeque<(String, String)>,
+    qt_recovery: Option<QtRecovery>,
+    recovery_seen: Option<(String, bool)>,
+    recovery_due: Option<String>,
+}
+
+#[derive(Clone)]
+struct QtRecovery {
+    source: zerus_client_core::settings::QtStore,
+    settings: zerus_client_core::settings::Settings,
 }
 
 impl Hub {
@@ -176,6 +185,43 @@ struct Shared {
 pub struct Organization(Arc<Shared>);
 
 impl Organization {
+    /// Only the production switch supplies a source. Recovery is queued by
+    /// the existing local organization topic and runs on this hub's worker.
+    pub fn recover_qt(
+        &self,
+        source: Option<zerus_client_core::settings::QtStore>,
+        settings: zerus_client_core::settings::Settings,
+    ) {
+        if !self.0.allowed {
+            return;
+        }
+        let Some(source) = source else {
+            return;
+        };
+        let mut hub = self.lock();
+        hub.qt_recovery = Some(QtRecovery { source, settings });
+        if let Some(value) = hub.sync.observed_value() {
+            Self::queue_recovery(&mut hub, &value);
+        }
+        drop(hub);
+        self.0.wake.notify_all();
+    }
+
+    fn queue_recovery(hub: &mut Hub, value: &Value) {
+        if hub.qt_recovery.is_none() || hub.stopped {
+            return;
+        }
+        let (Some(node), Some(initialized)) =
+            (value["node_id"].as_str(), value["initialized"].as_bool())
+        else {
+            return;
+        };
+        let identity = (node.to_owned(), initialized);
+        if hub.recovery_seen.as_ref() != Some(&identity) {
+            hub.recovery_seen = Some(identity);
+            hub.recovery_due = Some(node.to_owned());
+        }
+    }
     pub fn new(
         pump: Pump,
         hgs: PathBuf,
@@ -368,6 +414,7 @@ impl Organization {
                     // The list shows a catalog now; the dropped draft's notice goes.
                     hub.notice = None;
                 }
+                Self::queue_recovery(&mut hub, value);
                 hub
             }
             OrganizationUpdate::Failed { message, .. } => {
@@ -660,6 +707,32 @@ impl Organization {
             if self.0.fail.load(SeqCst) {
                 panic!("a test stops the organization worker");
             }
+        }
+        // No source or settings I/O and no CLI call holds the hub, pump or
+        // writer lock. A failed false-state attempt retries at the next
+        // startup; a later initialized state can reconcile a lost reply.
+        let recovery = {
+            let mut hub = self.lock();
+            if hub.stopped {
+                None
+            } else {
+                hub.recovery_due.take().zip(hub.qt_recovery.clone())
+            }
+        };
+        if let Some((node, recovery)) = recovery {
+            if let Err(detail) = swarm::qt_import::recover(
+                &self.0.hgs,
+                &[],
+                &recovery.source,
+                &recovery.settings,
+                &node,
+            ) {
+                let mut hub = self.lock();
+                hub.sync.source_failed(&detail);
+                self.publish(&mut hub);
+                self.release(hub);
+            }
+            return;
         }
         self.runs_writer().request(false);
         let mut writer = self.writer();
@@ -1463,6 +1536,73 @@ mod tests {
             assert!(Instant::now() < deadline, "timed out waiting for {what}");
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    #[test]
+    fn qt_recovery_uses_the_existing_worker_without_holding_ui_or_checkpoint_locks() {
+        let fake = Fake::landing();
+        let node = "11111111-1111-4111-8111-111111111111";
+        let qt = fake.dir.join("synthetic-qt.conf");
+        let org = json!({"version":2,"projects":[{"id":"alpha","name":"Qt project","color":"#123456","sessions":[],"folders":[]}]});
+        // QSettings text JSON: the entire value is quoted, not a string list.
+        let ini = format!(
+            "[workspace]\norganization={}\n",
+            serde_json::to_string(&org.to_string()).unwrap()
+        );
+        std::fs::write(&qt, &ini).unwrap();
+        let hash = zerus_client_core::settings::QtStore::Ini(qt.clone())
+            .snapshot()
+            .unwrap()
+            .unwrap()
+            .sha256;
+        std::fs::write(fake.dir.join("config.json"),json!({"g3-status":[{"gate":"recovery-gate","stdout":{"version":1,"node_id":node,"initialized":false,"gui_import_pending":false}}],
+            "g3-import":[{"stdout":{"schema":1,"node_id":node,"initialized":true,"organization":org,"g3_import":{"version":1,"source_sha256":hash}}}]}).to_string()).unwrap();
+        let settings =
+            zerus_client_core::settings::Settings::open(fake.dir.join("settings.json"), None);
+        let organization = fake.organization(&Pump::default(), true);
+        organization.recover_qt(
+            Some(zerus_client_core::settings::QtStore::Ini(qt.clone())),
+            settings.clone(),
+        );
+        organization.set_source(snapshot("d1"));
+        let mut observed = full("d1");
+        observed["node_id"] = json!(node);
+        observed["initialized"] = json!(false);
+        organization.observe(&state_of(&observed));
+        wait_until("the held recovery status", || {
+            std::fs::read_to_string(fake.dir.join("log.ndjson"))
+                .is_ok_and(|log| log.contains("--g3-status"))
+        });
+        let (sent, received) = std::sync::mpsc::channel();
+        let flushing = organization.clone();
+        let worker = std::thread::spawn(move || {
+            flushing.flush();
+            sent.send(()).unwrap();
+        });
+        received
+            .recv_timeout(Duration::from_secs(2))
+            .expect("a held CLI must not block checkpoint locks");
+        worker.join().unwrap();
+        organization.observe(&state_of(&observed)); // same false state never queues another import
+        std::fs::write(fake.dir.join("recovery-gate"), b"release").unwrap();
+        wait_until("the completed recovery record", || {
+            settings.organization_import().unwrap()
+                == zerus_client_core::settings::OrganizationImport::Handled
+        });
+        let log = std::fs::read_to_string(fake.dir.join("log.ndjson")).unwrap();
+        assert_eq!(
+            log.lines()
+                .filter(|line| line.contains("--g3-status"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            log.lines().filter(|line| line.contains("\"--g3\"")).count(),
+            1
+        );
+        assert_eq!(std::fs::read_to_string(qt).unwrap(), ini);
+        drop(settings);
+        fake.finish(organization);
     }
 
     /// The passes the worker finished.

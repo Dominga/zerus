@@ -240,6 +240,52 @@ fresh identity/hash recheck before publication. Every snapshot/manifest keeps
 approval reservation and never delivers a request. Source discovery and G1's
 policy/UI integration remain separate.
 
+## Retained Qt shared organization
+
+On the production switch only, the existing local organization topic queues a
+one-time recovery on its organization worker. No GUI/pump/writer lock is held
+across Qt, settings or CLI I/O. `swarm::qt_import` uses `QtStore::snapshot` to
+read the current `workspace/organization` only. Backups, `swarm/observed*`,
+pending edits, local layout/default/collapse/order and run memory are not
+initialization sources. Supported current project fields are validated within
+the existing project/folder/member limits, then the existing shared projection
+filters implicit membership and this computer's Windows folders. Source
+extensions and local fields remain untouched in Qt for their separate families.
+Malformed, ambiguous, legacy pinned/groups, future and over-limit input refuses
+without marking the family handled. An existing Qt store missing the current
+organization is not treated as empty.
+
+Recovery uses the existing `hgs swarm initialize` / `import_missing` writer:
+
+- `initialize --g3-status --json` takes `{version:1,expected_node_id}` and
+  returns `{version:1,node_id,initialized,gui_import_pending}` without saving
+  or supervising a service. `initialized:true` alone is insufficient: the
+  earlier CLI bootstrap may still await its GUI import. A missing catalog
+  establishes its local node through the existing metadata-only `swarm
+  inventory`, which does not initialize projects or read Tasks.
+- `initialize --g3 --json` takes
+  `{version:1,expected_node_id,source_sha256,organization}`. It verifies the
+  exact node under the existing catalog lock and calls the original
+  missing-field initializer. Existing values, concurrent heads and tombstones
+  win. The normal snapshot carries `g3_import:{version:1,source_sha256}`.
+  Legacy `initialize` input/output and the closed catalog file schema remain
+  unchanged. Old CLIs cannot mistake the wrapper for a project organization;
+  a missing protocol response never completes a G3 record.
+
+Before initialization, the existing Settings writer durably saves metadata at
+`g3_shared_organization_pending`: version, exact node and the normal G3 family
+record (family/schema/source path/time/key names/raw source-byte hash and the
+post-switch mtime observation). It contains no operation or source body. Qt's
+path/source/hash is freshly rechecked before the command. An exact successful
+receipt completes `g3.families.shared-organization` in that same writer. If a
+reply is lost, a subsequent same-node status with no pending GUI import can
+complete the original metadata without reading Qt again. Unknown/foreign
+metadata and failed barriers remain pending; no completed family re-seeds after
+rollback. A catalog already initialized by an earlier Qt import is kept as-is.
+This is shared project metadata recovery, not G1 evidence publication, a drain
+claim, a marker phase or effect authority. Local presentation families remain
+separate.
+
 ## Delivery boundary
 
 The shared crate validates no running process and offers no `ReadyForWrites`

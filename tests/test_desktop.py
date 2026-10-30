@@ -3,6 +3,7 @@
 No system manager, native agent, production state or tmux server is used.
 """
 from contextlib import closing
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -203,6 +204,112 @@ class Desktop(unittest.TestCase):
         result = self.cli('desktop', 'request', '--json', data={'op': 'ping', 'request_id': 'not-a-uuid'})
         self.assertEqual(result['code'], 'invalid_request_id')
         self.assertFalse((self.desktop / 'approval-log').exists())
+
+    def import_evidence(self, phase='complete', evidence='drained'):
+        configuration = self.cli('desktop', 'status', '--json')['configuration']
+        import_id = '11111111-1111-4111-8111-111111111111'
+        folder = self.desktop / 'imports' / import_id
+        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        for directory in (self.state, self.desktop, folder.parent, folder):
+            directory.chmod(0o700)
+        record = json.dumps(dict(version=1, configuration=configuration, source='com.hgdev.hgs-tray',
+                                 import_id=import_id, evidence=evidence, created_at=1,
+                                 automatic_approvals=False, sources=[], pages=[])).encode()
+        record_path = folder / 'record-v1.json'
+        record_path.write_bytes(record)
+        record_path.chmod(0o600)
+        marker = dict(version=1, configuration=configuration, source='com.hgdev.hgs-tray', import_id=import_id,
+                      writer_epoch='22222222-2222-4222-8222-222222222222', phase=phase,
+                      import_record=dict(version=1, sha256=hashlib.sha256(record).hexdigest()), automatic_approvals=False)
+        marker_path = self.desktop / 'handoff-v1.json'
+        marker_path.write_text(json.dumps(marker))
+        marker_path.chmod(0o600)
+        return marker_path, record_path, marker
+
+    def assert_passive_import(self, reason):
+        process, status = self.serve()
+        self.assertEqual(status['migration']['reason'], reason)
+        self.assertFalse(status['writers_enabled'])
+        self.assertFalse(status['automatic_approvals'])
+        self.assertEqual(status['upstreams'], [])
+        result = self.cli('desktop', 'request', '--json', data={'op': 'read', 'request_id': str(uuid.uuid4())})
+        self.assertFalse(result['accepted'])
+        self.stop(process)
+        self.assertFalse((self.root / 'unexpected-tool').exists())
+
+    def test_import_phases_never_substitute_for_current_writer_proof(self):
+        for phase, evidence, reason in [('revoked', 'drained', 'revoked'),
+                                        ('imported', 'drained', 'handoff_incomplete'),
+                                        ('quiesced', 'drained', 'handoff_incomplete'),
+                                        ('complete', 'staged', 'import_not_drained'),
+                                        ('complete', 'drained', 'delegation_required')]:
+            with self.subTest(phase=phase, evidence=evidence):
+                marker, record, _ = self.import_evidence(phase, evidence)
+                before = marker.read_bytes(), record.read_bytes()
+                self.assert_passive_import(reason)
+                self.assertEqual((marker.read_bytes(), record.read_bytes()), before)
+        # Even a second start with a complete, drained record stays passive.
+        self.assert_passive_import('delegation_required')
+
+    def test_invalid_or_newer_handoff_is_preserved_and_refused(self):
+        changes = [dict(version=2), dict(phase='future'), dict(configuration='b' * 64),
+                   dict(source='dev.zerus.next'), dict(automatic_approvals=True),
+                   dict(import_id='../escape'), dict(unknown='field')]
+        for change in changes:
+            with self.subTest(change=change):
+                path, record, marker = self.import_evidence()
+                marker.update(change)
+                path.write_text(json.dumps(marker))
+                before = path.read_bytes(), record.read_bytes()
+                self.assert_passive_import('invalid_import_evidence')
+                self.assertEqual((path.read_bytes(), record.read_bytes()), before)
+        for contents in (b'{', b' ' * (64 * 1024 + 1)):
+            path, _, _ = self.import_evidence()
+            path.write_bytes(contents)
+            self.assert_passive_import('invalid_import_evidence')
+            self.assertEqual(path.read_bytes(), contents)
+
+    def test_import_manifest_digest_size_and_private_leaf_are_checked(self):
+        for contents in (b'{}', b' ' * (256 * 1024 + 1)):
+            _, record, _ = self.import_evidence()
+            record.write_bytes(contents)
+            self.assert_passive_import('invalid_import_evidence')
+            self.assertEqual(record.read_bytes(), contents)
+        _, record, _ = self.import_evidence()
+        record.unlink()
+        self.assert_passive_import('invalid_import_evidence')
+        if os.name != 'nt':
+            marker, record, _ = self.import_evidence()
+            record.chmod(0o644)
+            self.assert_passive_import('invalid_import_evidence')
+            record.chmod(0o600)
+            saved = marker.read_bytes()
+            marker.unlink()
+            marker.symlink_to(record)
+            self.assert_passive_import('invalid_import_evidence')
+            self.assertTrue(marker.is_symlink())
+            marker.unlink()
+            os.mkfifo(marker, 0o600)
+            self.assert_passive_import('invalid_import_evidence')
+            marker.unlink()
+            marker.write_bytes(saved)
+            marker.chmod(0o600)
+            sibling = record.parent.with_name('foreign-import')
+            record.parent.rename(sibling)
+            record.parent.symlink_to(sibling, target_is_directory=True)
+            self.assert_passive_import('invalid_import_evidence')
+            self.assertTrue(record.parent.is_symlink())
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX flock import-commit contention fixture')
+    def test_import_commit_lock_is_separate_and_contention_stays_passive(self):
+        import fcntl
+        self.import_evidence()
+        lock_path = self.desktop / 'handoff.lock'
+        with lock_path.open('w') as lock:
+            lock_path.chmod(0o600)
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.assert_passive_import('handoff_unavailable')
+        self.assert_passive_import('delegation_required')
 
     def test_two_clients_share_epoch_and_eof_detaches_only_one(self):
         service, status = self.serve()

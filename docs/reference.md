@@ -4123,6 +4123,21 @@ additional connections preserve the unary request/status lane. Admission holds
 at most sixteen control lines and twelve parsers, below the proposed 16 MiB
 ingress budget. The kernel has no upstream ingress or per-session cache.
 
+The service and the read-only importer share the configuration fingerprint from
+`zerus-desktop-migration`. A running service reports a small `migration` summary
+in status/watch frames. It checks at startup and each ten-second heartbeat,
+under the separate `desktop/handoff.lock`; status requests use that cached
+summary. The marker (64 KiB maximum) and fixed import manifest (256 KiB maximum)
+must be private single-link regular files beneath private directories. Links,
+malformed/newer/mismatched input and bad digests stay unchanged and keep the
+service passive. Import pages are not scanned by this diagnostic probe.
+
+`import_not_drained`, `handoff_incomplete` and `revoked` describe historical
+import state. Even a complete, drained marker reports `delegation_required`: it
+cannot enable writers or approvals without the later live delegation, effect
+guards and revocation protocol. The kernel writes no takeover marker. See the
+exact [migration contract](desktop-migration.md).
+
 `hgs desktop registration --json` previews the current platform's per-user
 definition and exact configuration identity. It creates no files, contacts no
 service manager and enables no writer. Its `operation:preview` identifies this

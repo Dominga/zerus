@@ -1,0 +1,230 @@
+# U62: this repository's test configuration (hgs guide tests). The mechanism
+# is Zerus's; these suites, commands and limits are this project's own. The
+# owner may override any of it in the team settings.
+version = 1
+
+[map]
+file = ".zerus/test-map.json"
+durations = ".zerus/test-durations.json"
+unmapped = "report"
+# Files no test answers for: documentation, artwork, notes and tool settings.
+ignore = [
+    "docs/**", "design/**", "examples/**", "*.md", "LICENSE", ".beads/**",
+    ".agents/**", ".codex/**", ".cursor/**", ".gitignore", ".gitattributes",
+    ".gitleaksignore", "packaging/rust-licenses/**", "**/licenses/**",
+    # The configuration and its map: `hgs test map --check` answers for them.
+    ".zerus/**",
+]
+
+# The release full run is the fork CI's run of the candidate, on the owner's word.
+[full]
+where = "ci"
+policy = "owner"
+target = "fork-windows.yml"
+
+[retries]
+flaky = 1
+quarantine_days = 14
+
+[budgets]
+grow_percent = 50
+
+[isolation]
+enabled = true
+
+[build_cache]
+enabled = false
+tool = "sccache"
+
+[merge_queue]
+enabled = false
+
+[resources.gui]
+cpu = 2
+ram_mb = 2048
+exclusive = false
+
+[resources.device]
+cpu = 4
+ram_mb = 4096
+exclusive = true
+
+# The hgs CLI: its module graph names each module's tests; a change in a
+# module also runs the tests of the modules that use it.
+[[provider]]
+name = "rust"
+kind = "cargo"
+sources = ["src/**", "build.rs", "Cargo.toml", "Cargo.lock", ".cargo/**"]
+widen = "dependants"
+command = "cargo test --locked {targets}"
+
+[[provider.paths]]
+files = ["crates/replica/**"]
+mentions = "zerus_replica"
+
+[[provider.paths]]
+files = ["crates/watch-protocol/**"]
+mentions = "zerus_watch_protocol"
+
+[[provider]]
+name = "replica"
+kind = "cargo"
+root = "crates/replica"
+sources = ["crates/replica/**"]
+command = "cargo test --locked --target-dir ../../target/replica {targets}"
+
+[[provider]]
+name = "replica-ffi"
+kind = "cargo"
+root = "crates/replica-ffi"
+sources = ["crates/replica-ffi/**"]
+command = "cargo test --locked --target-dir ../../target/replica-ffi {targets}"
+
+[[provider]]
+name = "watch-protocol"
+kind = "cargo"
+root = "crates/watch-protocol"
+sources = ["crates/watch-protocol/**"]
+
+# The Qt desktop: CMake's link lists and the include graph name the files each
+# test binary uses. The build folder is this checkout's; the owner may move it.
+[[provider]]
+name = "tray"
+kind = "ctest"
+build_dir = ".ci-build/gui"
+sources = ["tray/**"]
+tests = ["tray/tests/test_*.cpp", "tray/tests/test_*.mm"]
+manual = ["tray/tests/test_guiprofile.cpp"]
+elsewhere = [
+    "tray/tests/test_linux*.cpp", "tray/tests/test_kwinwindowlayer.cpp",
+    "tray/tests/test_snitrayicon.cpp", "tray/tests/test_macpresence.cpp",
+    "tray/tests/test_macapplicationbadge.cpp", "tray/tests/test_macappvisibility.cpp",
+    "tray/tests/test_macbackend.cpp", "tray/tests/*.mm",
+    "tray/tests/test_terminationsignals.cpp",
+    # Built only with the embedded native UI plugin.
+    "tray/tests/test_nativeuiplugin.cpp",
+]
+resources = "gui"
+
+# The Python suites: a test runs when a file it names or imports changes; the
+# integration tests that start target/debug/hgs run for every CLI change.
+[[provider]]
+name = "python"
+kind = "unittest"
+root = "tests"
+sources = [
+    "tests/**", "scripts/**", "packaging/**", ".github/**", "hgs", "hgs_state.py",
+    "install.sh", "mac-install.sh", "tmux.conf", "VERSION", "DEV_VERSION",
+    "tray/update-installed.py", "tray/sign-local-macos.py",
+]
+tests = ["tests/test_*.py"]
+# Real agents and hosts on this computer: never chosen automatically.
+manual = ["tests/test_dsh_native.py"]
+
+[[provider.paths]]
+files = ["src/**", "Cargo.toml", "Cargo.lock", "build.rs"]
+mentions = "target/debug/hgs"
+
+# Every workflow is read by the CI policy tests, which find them by folder.
+[[provider.paths]]
+files = [".github/workflows/**"]
+targets = ["tests/test_ci_security.py", "tests/test_ci_profiles.py", "tests/test_ci_phase_queues.py"]
+
+[[provider]]
+name = "client-core"
+kind = "cargo"
+root = "client/core"
+sources = ["client/core/**", "client/fixtures/**"]
+command = "cargo test --locked --target-dir ../../target/client-core {targets}"
+
+[[provider]]
+name = "client-tauri"
+kind = "cargo"
+root = "client/src-tauri"
+sources = ["client/src-tauri/**"]
+
+[[provider]]
+name = "client-media"
+kind = "cargo"
+root = "client/media"
+sources = ["client/media/**"]
+
+[[provider]]
+name = "client-web"
+kind = "npm"
+root = "client"
+sources = ["client/src/**", "client/public/**", "client/bench/**", "client/perf-probe-mac/**", "client/*"]
+tests = ["client/src/**/*.test.ts", "client/src/**/*.test.tsx"]
+command = "npx vitest run {targets}"
+
+[[provider]]
+name = "client-scripts"
+kind = "unittest"
+root = "client/scripts"
+sources = ["client/scripts/**"]
+tests = ["client/scripts/test_*.py"]
+
+[[provider]]
+name = "android"
+kind = "gradle"
+root = "mobile/android"
+sources = ["mobile/android/**"]
+tests = ["mobile/android/app/src/test/**/*.kt", "mobile/android/app/src/test/**/*.java"]
+elsewhere = ["mobile/android/app/src/androidTest/**"]
+command = "./gradlew --no-daemon testDebugUnitTest -PzerusFirebase=true {targets}"
+resources = "device"
+
+[[provider]]
+name = "ios"
+kind = "command"
+root = "mobile/ios/ZerusKit"
+sources = ["mobile/ios/**"]
+affected = "all"
+command = "swift test"
+platforms = ["macos"]
+
+[[provider]]
+name = "relay"
+kind = "cargo"
+root = "services/mobile/relay"
+sources = ["services/mobile/relay/**", "services/mobile/vectors/**"]
+
+[[provider]]
+name = "connector"
+kind = "cargo"
+root = "services/mobile/connector"
+sources = ["services/mobile/connector/**"]
+command = "cargo test --locked --lib {targets}"
+
+[[provider]]
+name = "mobile-crypto"
+kind = "cargo"
+root = "services/mobile/crypto"
+sources = ["services/mobile/crypto/**"]
+
+[[provider]]
+name = "mobile-workspace"
+kind = "cargo"
+root = "services/mobile/workspace-tests"
+sources = ["services/mobile/workspace-tests/**"]
+
+[[provider]]
+name = "windows-private"
+kind = "cargo"
+root = "services/mobile/windows-private"
+sources = ["services/mobile/windows-private/**"]
+platforms = ["windows"]
+
+[[provider]]
+name = "mobile-python"
+kind = "unittest"
+root = "services/mobile/tests"
+sources = ["services/mobile/**"]
+tests = ["services/mobile/tests/test_*.py"]
+
+[[provider]]
+name = "speech"
+kind = "unittest"
+root = "services/speech/tests"
+sources = ["services/speech/**"]
+tests = ["services/speech/tests/test_*.py"]

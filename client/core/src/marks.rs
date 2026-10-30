@@ -73,7 +73,7 @@ impl AttentionMarks {
     pub fn load(path: PathBuf) -> Self {
         let file: File = std::fs::read(&path)
             .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .and_then(|bytes| decode_saved(&bytes).ok())
             .unwrap_or_default();
         let mut marks = Written::default();
         for (key, mark) in file.marks {
@@ -157,11 +157,17 @@ impl Contents {
 
 /// The file: each map as `[key, value]` pairs, oldest written first.
 #[derive(Default, Serialize, Deserialize)]
-struct File {
+pub(crate) struct File {
     #[serde(default)]
     marks: Vec<(String, Mark)>,
     #[serde(default)]
     replies: Vec<(String, String)>,
+}
+
+/// The original ordered-file decoder, without loading/capping a live store.
+/// Migration keeps raw fields and order separately from this typed check.
+pub(crate) fn decode_saved(bytes: &[u8]) -> Result<File, serde_json::Error> {
+    serde_json::from_slice(bytes)
 }
 
 /// A map that remembers the order its keys were last written in.

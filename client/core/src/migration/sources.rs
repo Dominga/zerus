@@ -35,6 +35,8 @@ mod startup;
 pub use startup::tray_config;
 mod attention;
 pub use attention::{next_attention_observed, qt_attention_observed};
+mod local_reads;
+pub use local_reads::{next_local_read_marks, qt_local_read_marks};
 
 #[derive(Clone, Copy)]
 pub enum Origin {

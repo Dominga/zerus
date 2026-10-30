@@ -1,4 +1,5 @@
 #include "Settings.h"
+#include "SlowEventLog.h"
 #include "TeamWorkspace.h"
 #include "SubagentRequest.h"
 #include "TeamAttentionNotices.h"
@@ -310,7 +311,10 @@ void TeamWorkspace::queueRender()
         const bool forced = std::exchange(m_forced, false);
         // #693: the same drawn content keeps every widget, its scroll and
         // hover; the header's ages tick in place.
-        if (!forced && !m_renderedKey.isEmpty() && pollKey() == m_renderedKey) return;
+        if (!forced && !m_renderedKey.isEmpty() && pollKey() == m_renderedKey) {
+            if (liveKey() != m_renderedLive) renderLive();
+            return;
+        }
         render();
     });
 }
@@ -320,17 +324,118 @@ QByteArray TeamWorkspace::pollKey() const
     QByteArray key = m_team.toUtf8() + '\n' + m_teams->shapeOf(m_team) + '\n' + m_teams->inboxShape() + '\n';
     const auto feed = m_teams->feed();
     key += QByteArray::number(feed.size()) + ' ' + QByteArray::number(feed.isEmpty() ? 0 : feed.first().value("seq").toInteger()) + '\n';
-    const Team *team = m_teams->watched();
-    if (!team || team->id != m_team) team = m_teams->team(m_team);
-    if (team && m_live)
-        for (const auto &member : team->members) {
-            const Live live = m_live(member);
-            key += member.id.toUtf8() + ' ' + char('0' + live.known) + char('0' + live.offline) + char('0' + live.attention) + char('0' + live.working)
-                   + ' ' + live.attentionText.toUtf8() + '\n';
-        }
+    const Team *team = currentTeam(m_team);
+    // #706: members' live states reach the canvas beyond its activity labels
+    // and working dots only through the team's status and its problems.
+    if (team && m_live) {
+        key += displayStatus(*team, m_live).toUtf8() + '\n';
+        for (const auto &p : problems(*team, m_live))
+            key += QByteArray::number(p.task) + ' ' + QByteArray::number(int(p.tone)) + ' ' + p.member.toUtf8() + ' ' + p.text.toUtf8() + '\n';
+    }
     // G9: a phase decision stays marked until the revision moves.
     if (team && !m_phasesDecided.isEmpty()) key += "revision " + QByteArray::number(team->revision);
     return key;
+}
+
+QByteArray TeamWorkspace::liveKey(bool working) const
+{
+    // The text of what a member does shows only while it asks (Needs your answer).
+    QByteArray key;
+    const Team *team = currentTeam(m_team);
+    if (team && m_live)
+        for (const auto &member : team->members) {
+            const Live live = m_live(member);
+            key += member.id.toUtf8() + ' ' + char('0' + live.known) + char('0' + live.offline) + char('0' + live.attention)
+                   + (working ? char('0' + live.working) : '-') + ' ' + (live.attention ? live.attentionText.toUtf8() : QByteArray()) + '\n';
+        }
+    return key;
+}
+
+void TeamWorkspace::renderLive()
+{
+    // Hidden or behind a confirmation, the whole render decides what to do.
+    const Team *team = currentTeam(m_team);
+    if (!team || !isVisible() || m_panel->confirming()) { render(); return; }
+    const SlowEventLog::Scope scope(this, "live");
+    const QScopedValueRollback<bool> rebuilding(m_answerRendering, true);
+    renderHeader();
+    const auto live = m_live ? m_live : LiveLookup([](const Member &) { return Live{}; });
+    // Working and idle change only the members' marks; anything else of a
+    // member's live state rebuilds the column.
+    if (liveKey(false) != m_renderedLiveRest || !refreshMembersLive(*team)) renderSide(*team, displayStatus(*team, live));
+    renderCoordinator(*team);
+    refreshCanvasLive(*team);
+    if (m_drawerTask) m_drawer->setTask(*team, m_drawerTask, live, m_dark);
+    m_renderedLive = liveKey(); m_renderedLiveRest = liveKey(false);
+}
+
+static QString activityLabel(const Teams::Task &task, const Teams::Live &live);
+
+namespace {
+// A member's state mark in the Members column: its status, or the phase icon
+// and tooltip of the attempt it works on (A1).
+struct MemberMark { QString text, kind, tooltip, phase; QColor color; };
+MemberMark memberMark(const Team &team, const Member &m, const Status &status, const Colors &c)
+{
+    const Task *current = status.task ? team.task(status.task) : nullptr;
+    const auto mark = current ? phaseMark(team, *current) : PhaseMark{};
+    const QString shown = team.status == "planning" && m.session.isEmpty() && !m.lead ? TeamWorkspace::tr("On approval") : status.text;
+    MemberMark result;
+    result.text = shown; result.kind = mark.kind.isEmpty() ? status.kind : mark.kind; result.tooltip = mark.tooltip;
+    result.color = toneColor(c, mark.tone != Tone::Neutral ? mark.tone : status.tone); result.phase = mark.phase;
+    return result;
+}
+}
+
+bool TeamWorkspace::refreshMembersLive(const Team &team)
+{
+    if (!m_membersContent) return false;
+    const Colors c = colorsFor(m_dark);
+    const auto live = m_live ? m_live : LiveLookup([](const Member &) { return Live{}; });
+    for (auto *widget : m_membersContent->findChildren<QWidget *>(QStringLiteral("teamWorkspaceMemberState"))) {
+        auto *state = dynamic_cast<StatusMark *>(widget);
+        QWidget *card = widget->parentWidget();
+        while (card && card->objectName() != QLatin1String("teamWorkspaceMember")) card = card->parentWidget();
+        const auto *m = card ? team.member(card->property("teamMember").toString()) : nullptr;
+        if (!state || !m) return false;
+        const auto mark = memberMark(team, *m, memberStatus(team, *m, live(*m)), c);
+        if (mark.phase != state->property("phase").toString()) return false;
+        state->setState(mark.text, mark.color, mark.kind, mark.tooltip);
+    }
+    return true;
+}
+
+void TeamWorkspace::refreshCanvasLive(const Team &team)
+{
+    if (!m_left) return;
+    const auto live = m_live ? m_live : LiveLookup([](const Member &) { return Live{}; });
+    const auto activityOf = [&](const Task &task) {
+        const auto *member = team.member(task.assignee);
+        return activityLabel(task, member ? live(*member) : Live{});
+    };
+    // Board and Layers: the labels that show a task's activity carry its id.
+    for (auto *label : m_left->findChildren<QLabel *>()) {
+        const int id = label->property("liveTask").toInt();
+        const auto *task = id ? team.task(id) : nullptr;
+        if (!task) continue;
+        const QString text = activityOf(*task);
+        if (text == label->text()) continue;
+        label->setText(text);
+        if (!label->toolTip().isEmpty()) label->setToolTip(text);
+    }
+    // Graph: each view's nodes, as graphNodes sets them.
+    for (auto *widget : m_left->findChildren<QWidget *>()) {
+        auto *view = dynamic_cast<TaskView *>(widget);
+        if (!view) continue;
+        view->refreshLive([&](TaskView::Node &node) {
+            const auto *task = team.task(node.id);
+            if (!task) return;
+            const auto *assignee = team.member(task->assignee);
+            if (!node.activity.isEmpty()) node.activity = activityOf(*task);
+            node.working = assignee && task->status == "in_progress" && !node.problem && assignee->state != "paused"
+                           && team.status == "running" && !live(*assignee).offline && !live(*assignee).attention;
+        });
+    }
 }
 
 void TeamWorkspace::tickInPlace()
@@ -376,6 +481,7 @@ void TeamWorkspace::placePopover()
 
 void TeamWorkspace::render()
 {
+    const SlowEventLog::Scope scope(this, "render");
     const QScopedValueRollback<bool> rebuilding(m_answerRendering, true);
     renderHeader();
     // #693: a skipped rebuild is made up by the next poll.
@@ -444,47 +550,7 @@ void TeamWorkspace::render()
         if (m_profileView && m_left && m_left->isAncestorOf(m_profileView)) { m_profileView->hide(); m_profileView->setParent(this); }
         if (m_left) { m_leftHost->removeWidget(m_left); retire(m_left); }
         m_leftHost->addWidget(left); left->show(); m_left = left;
-        // Members keep their scroll position.
-        const int scroll = m_members->verticalScrollBar()->value();
-        // A poll may rebuild Members just after Answer focused Allow. Keep a
-        // decision button focused only for the exact same pending question;
-        // Enter must never transfer to another member or a newer request.
-        QString focusTeam, focusMember, focusQuestion, focusHash, focusControl;
-        if (const auto *focused = QApplication::focusWidget(); focused && m_members->isAncestorOf(focused)
-            && (focused->objectName() == "teamMemberPermissionAllow" || focused->objectName() == "teamMemberPermissionDeny")) {
-            for (auto *box = focused->parentWidget(); box; box = box->parentWidget()) {
-                if (box->objectName() != "teamMemberPermission") continue;
-                focusTeam = box->property("team").toString();
-                focusMember = box->property("member").toString();
-                focusQuestion = box->property("question").toString();
-                focusHash = box->property("questionHash").toString();
-                focusControl = focused->objectName();
-                break;
-            }
-        }
-        auto *list = new QWidget; list->setObjectName("teamWorkspaceSide");
-        {auto *sv = new QVBoxLayout(list); sv->setContentsMargins(0, 0, 0, 0); sv->setSpacing(0);
-         if (auto *lists = sideLists(*team, status)) sv->addWidget(lists);
-         sv->addWidget(members(*team), 1);}
-        retire(m_members->takeWidget());
-        m_members->setWidget(list); m_membersContent = list;
-        m_members->verticalScrollBar()->setValue(scroll);
-        // Answer was clicked a moment ago and the focus has already gone (a
-        // rebuild before this one, or the window briefly inactive): focus the
-        // same question's Allow again (fork CI, leadAnswersAMembersSubagentRequest).
-        if (focusControl.isEmpty() && m_answerAt.isValid() && m_answerAt.elapsed() < 3000 && m_answerTeam == team->id) {
-            focusMember = m_answerMember; focusQuestion = m_answerQuestion; focusHash = m_answerHash;
-            focusTeam = m_answerTeam; focusControl = QStringLiteral("teamMemberPermissionAllow");
-        }
-        if (!focusControl.isEmpty() && focusTeam == team->id && !focusQuestion.isEmpty() && !focusHash.isEmpty()) {
-            for (auto *box : list->findChildren<QFrame *>("teamMemberPermission")) {
-                if (box->property("member").toString() != focusMember || box->property("question").toString() != focusQuestion
-                    || box->property("questionHash").toString() != focusHash) continue;
-                if (auto *control = box->findChild<QPushButton *>(focusControl); control && control->isEnabled() && control->isVisible())
-                    control->setFocus(Qt::OtherFocusReason);
-                break;
-            }
-        }
+        renderSide(*team, status);
         renderCoordinator(*team);
     }
     if (m_top) { m_topHost->removeWidget(m_top); retire(m_top); }
@@ -498,7 +564,52 @@ void TeamWorkspace::render()
         m_drawer->show();
     } else m_drawer->hide();
     placePopover();
-    if (team) m_renderedKey = pollKey();
+    if (team) { m_renderedKey = pollKey(); m_renderedLive = liveKey(); m_renderedLiveRest = liveKey(false); }
+}
+
+void TeamWorkspace::renderSide(const Team &team, const QString &status)
+{
+    // Members keep their scroll position.
+    const int scroll = m_members->verticalScrollBar()->value();
+    // A poll may rebuild Members just after Answer focused Allow. Keep a
+    // decision button focused only for the exact same pending question;
+    // Enter must never transfer to another member or a newer request.
+    QString focusTeam, focusMember, focusQuestion, focusHash, focusControl;
+    if (const auto *focused = QApplication::focusWidget(); focused && m_members->isAncestorOf(focused)
+        && (focused->objectName() == "teamMemberPermissionAllow" || focused->objectName() == "teamMemberPermissionDeny")) {
+        for (auto *box = focused->parentWidget(); box; box = box->parentWidget()) {
+            if (box->objectName() != "teamMemberPermission") continue;
+            focusTeam = box->property("team").toString();
+            focusMember = box->property("member").toString();
+            focusQuestion = box->property("question").toString();
+            focusHash = box->property("questionHash").toString();
+            focusControl = focused->objectName();
+            break;
+        }
+    }
+    auto *list = new QWidget; list->setObjectName("teamWorkspaceSide");
+    {auto *sv = new QVBoxLayout(list); sv->setContentsMargins(0, 0, 0, 0); sv->setSpacing(0);
+     if (auto *lists = sideLists(team, status)) sv->addWidget(lists);
+     sv->addWidget(members(team), 1);}
+    retire(m_members->takeWidget());
+    m_members->setWidget(list); m_membersContent = list;
+    m_members->verticalScrollBar()->setValue(scroll);
+    // Answer was clicked a moment ago and the focus has already gone (a
+    // rebuild before this one, or the window briefly inactive): focus the
+    // same question's Allow again (fork CI, leadAnswersAMembersSubagentRequest).
+    if (focusControl.isEmpty() && m_answerAt.isValid() && m_answerAt.elapsed() < 3000 && m_answerTeam == team.id) {
+        focusMember = m_answerMember; focusQuestion = m_answerQuestion; focusHash = m_answerHash;
+        focusTeam = m_answerTeam; focusControl = QStringLiteral("teamMemberPermissionAllow");
+    }
+    if (!focusControl.isEmpty() && focusTeam == team.id && !focusQuestion.isEmpty() && !focusHash.isEmpty()) {
+        for (auto *box : list->findChildren<QFrame *>("teamMemberPermission")) {
+            if (box->property("member").toString() != focusMember || box->property("question").toString() != focusQuestion
+                || box->property("questionHash").toString() != focusHash) continue;
+            if (auto *control = box->findChild<QPushButton *>(focusControl); control && control->isEnabled() && control->isVisible())
+                control->setFocus(Qt::OtherFocusReason);
+            break;
+        }
+    }
 }
 
 void TeamWorkspace::takeHeader()
@@ -1839,7 +1950,7 @@ QWidget *TeamWorkspace::board(const Team &team)
                 const auto *member = team.member(task.assignee);
                 const QString activity = activityLabel(task, member ? live(*member) : Live{});
                 if (!activity.isEmpty()) {
-                    auto *a = label(activity, c.text3, 11); a->setObjectName("teamBoardActivity"); r->addWidget(a);
+                    auto *a = label(activity, c.text3, 11); a->setObjectName("teamBoardActivity"); a->setProperty("liveTask", task.id); r->addWidget(a);
                 }
             }
             // U38: the heat tint and its loss in the working time's place.
@@ -2684,6 +2795,12 @@ QWidget *TeamWorkspace::boardColumns(const Team &team, const QList<int> &ids, in
             if (!m_focus.isEmpty() && task->assignee != m_focus) continue;
             shown << task;
         }
+        // #706: styled before its cards go in; a column styled after them
+        // restyled every card it held.
+        const bool problems = key == "problems" && !shown.isEmpty();
+        col->setStyleSheet(QStringLiteral("QFrame#teamBoardColumn{background:%1;border:1px solid %2;border-radius:10px;}")
+                               .arg(shown.isEmpty() ? QStringLiteral("transparent") : c.bg.name(),
+                                          problems ? alpha(c.danger, .55).name(QColor::HexArgb) : shown.isEmpty() ? alpha(c.cardBorder, .6).name(QColor::HexArgb) : c.cardBorder.name()));
         auto *headRow = row(4);
         if (key == "in_review" || key == "in_test") {
             auto *icon = new QLabel; icon->setPixmap(glyphPixmap(c.text3, key, 11)); headRow->addWidget(icon);
@@ -2749,6 +2866,7 @@ QWidget *TeamWorkspace::boardColumns(const Team &team, const QList<int> &ids, in
                 if (!activity.isEmpty()) {
                     const QColor tone = note.isEmpty() ? c.text3 : c.warn;
                     auto *a = lost ? elided(activity, tone, 11) : label(activity, tone, 11); a->setObjectName("teamBoardActivity");
+                    if (note.isEmpty()) a->setProperty("liveTask", task->id);
                     if (lost) r2->addWidget(a, 1); else r2->addWidget(a);
                 }
             }
@@ -2768,10 +2886,6 @@ QWidget *TeamWorkspace::boardColumns(const Team &team, const QList<int> &ids, in
             cv->addWidget(none);
         }
         cv->addStretch();
-        const bool problems = key == "problems" && !shown.isEmpty();
-        col->setStyleSheet(QStringLiteral("QFrame#teamBoardColumn{background:%1;border:1px solid %2;border-radius:10px;}")
-                               .arg(shown.isEmpty() ? QStringLiteral("transparent") : c.bg.name(),
-                                          problems ? alpha(c.danger, .55).name(QColor::HexArgb) : shown.isEmpty() ? alpha(c.cardBorder, .6).name(QColor::HexArgb) : c.cardBorder.name()));
         readableColumn(col);
         h->addWidget(col, 1);
     }
@@ -2828,7 +2942,7 @@ QWidget *TeamWorkspace::layerRows(const Team &team, const QList<int> &ids)
         if (problem) { auto *why = elided(problemText(team, id), toneColor(c, problemsByTask.value(id)), 11); why->setObjectName("teamLayerProblem"); h->addWidget(why, 1); }
         else if (const QString activity = activityLabel(*task, team.member(task->assignee) ? live(*team.member(task->assignee)) : Live{}); !activity.isEmpty()) {
             // The same small activity label as the graph and the board.
-            auto *a = label(activity, c.text3, 11); a->setObjectName("teamLayerActivity"); h->addWidget(a);
+            auto *a = label(activity, c.text3, 11); a->setObjectName("teamLayerActivity"); a->setProperty("liveTask", id); h->addWidget(a);
         }
         addWorked(h, *task, workedClock()(), c.text3, "teamLayerWorked");
         const QString role = team.assigneeRole(*task, tr("You"));
@@ -3096,11 +3210,8 @@ QWidget *TeamWorkspace::members(const Team &team)
             col->addLayout(wait);
         } else {
             // A1: the attempt's phase icon and tooltip beside the member.
-            const Task *current = status.task ? team.task(status.task) : nullptr;
-            const auto mark = current ? phaseMark(team, *current) : PhaseMark{};
-            const QString shown = team.status == "planning" && m.session.isEmpty() && !m.lead ? tr("On approval") : status.text;
-            auto *state = new StatusMark(shown, toneColor(c, mark.tone != Tone::Neutral ? mark.tone : status.tone),
-                                         mark.kind.isEmpty() ? status.kind : mark.kind, 0, Qt::AlignLeft, nullptr, mark.tooltip);
+            const auto mark = memberMark(team, m, status, c);
+            auto *state = new StatusMark(mark.text, mark.color, mark.kind, 0, Qt::AlignLeft, nullptr, mark.tooltip);
             state->setObjectName("teamWorkspaceMemberState");
             state->setProperty("phase", mark.phase);
             col->addWidget(state);

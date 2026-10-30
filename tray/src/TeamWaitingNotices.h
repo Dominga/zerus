@@ -36,6 +36,7 @@ public:
     }
     static TeamWaitingNotices stored() { return TeamWaitingNotices(QSettings().value(QLatin1String(kSetting)).toStringList()); }
     void store() const { Settings::set(QLatin1String(kSetting), m_known); }
+    QStringList known() const { return m_known; }
 
     // The waiting id (owner_waiting.rs) of an attention item, empty for a kind
     // the waiting list does not carry; a replan names only its prefix.

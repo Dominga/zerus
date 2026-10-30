@@ -233,6 +233,7 @@ TeamConversation::TeamConversation(HgsClient *client, QWidget *parent) : QWidget
     QObject::connect(m_client, &HgsClient::questionAnswerFailed, this, [this](quint64 request, const QString &, const QString &, const QString &error, bool uncertain) {
         finishAnswer(request, false, error, uncertain);
     });
+    m_timer.setObjectName(QStringLiteral("teamConversationPoll"));
     m_timer.setInterval(pollInterval);
     QObject::connect(&m_timer, &QTimer::timeout, this, [this] { poll(); });
     setTheme(true);

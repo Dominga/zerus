@@ -42,6 +42,9 @@ inline const char *prototypeIconPath(const QString &name)
         {"mute", "M8.7 4.3A6 6 0 0 1 18 11v4M6 11v5l-2 2h12M10 20a2 2 0 0 0 4 0M3 3l18 18"},
         // The lead's session header and the composer row (spec 3, 4).
         {"clock", "M4 13a8 8 0 1 0 16 0a8 8 0 1 0 -16 0ZM12 9v4l2.5 2M10 2h4"},
+        // U38: the heat tint's legend and its Tokens choice.
+        {"flame", "M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.4-.5-2-1-3-1.1-2.1-.2-4.1 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.2.4-2.3 1-3a2.5 2.5 0 0 0 2.5 2.5z"},
+        {"coins","M2 8a6 6 0 1 0 12 0a6 6 0 1 0 -12 0ZM18.1 10.4A6 6 0 1 1 10.3 18M7 6h1v4M16.7 13.9l.7.7-2.8 2.8"},
         // U25 part 6: the inspector's Environment rows (the prototype's key,
         // pc, sparkle and bolt).
         {"key", "M4 15a4 4 0 1 0 8 0a4 4 0 1 0 -8 0ZM10.8 12.2L20 3M17 6l2.5 2.5M14.5 8.5L17 11"},
@@ -138,6 +141,8 @@ inline QIcon workspaceIcon(const QString &name, const QColor &color)
         } else if (name == "view-board") {   // tasks as a board: columns of cards
             p.drawRoundedRect(QRectF(3, 4, 5, 16), 1.5, 1.5); p.drawRoundedRect(QRectF(9.5, 4, 5, 11), 1.5, 1.5);
             p.drawRoundedRect(QRectF(16, 4, 5, 7), 1.5, 1.5);
+        } else if (name == "view-profile") {   // U38: a profile: lanes of spans
+            p.drawLine(QPointF(4, 7), QPointF(16, 7)); p.drawLine(QPointF(4, 12), QPointF(20, 12)); p.drawLine(QPointF(4, 17), QPointF(12, 17));
         } else if (name == "view-layers") {   // tasks in layers: stacked sheets
             QPainterPath top; top.moveTo(12, 4); top.lineTo(21, 8.5); top.lineTo(12, 13); top.lineTo(3, 8.5); top.closeSubpath(); p.drawPath(top);
             QPainterPath mid; mid.moveTo(3, 12.5); mid.lineTo(12, 17); mid.lineTo(21, 12.5); p.drawPath(mid);

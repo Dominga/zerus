@@ -6,6 +6,10 @@
       "stage_queue": []
     },
     {
+      "held_by": {
+        "stage": "test",
+        "task": 1
+      },
       "id": "dev",
       "role": "Backend",
       "stage_queue": []

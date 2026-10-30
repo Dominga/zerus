@@ -2341,7 +2341,7 @@ QWidget *TeamCatalogEditor::pipelineStageDetails(int index, int stage)
             {"hold", tr("The task's folder"),
              tr("The implementer's worktree or clone, or the shared folder when the team works in one. The stage reads and builds there and writes only build output "
                 "and its own temporary folder. While it runs the folder is held: the implementer's next task there waits, and its card says “folder held by the "
-                "test of #N”. In a shared folder the others keep working; the hand-off names the task's files."), "teamPipelineFolderHold"},
+                "test stage of #N”. In a shared folder the others keep working; the hand-off names the task's files."), "teamPipelineFolderHold"},
             {"checkout", tr("A detached checkout of the attempt's commits"),
              tr("Frees the implementer at once and costs one build. Needs a Git checkout; for a non-Git folder the stage uses the task's folder."), "teamPipelineFolderCheckout"}};
         for (const auto &[value, title, text, name] : options) {

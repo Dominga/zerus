@@ -24,6 +24,29 @@ use transport::{Listener, Stream, TIMEOUT};
 
 const USAGE: &str = "usage: hgs desktop serve [--config-dir DIR --state-dir DIR] | status [--json] | watch --json | request --json | registration --json";
 const HEARTBEAT: Duration = Duration::from_secs(10);
+pub const STARTUP_REFUSED: i32 = 78;
+
+#[derive(Debug)]
+struct StartupRefused;
+impl std::fmt::Display for StartupRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("desktop startup refused")
+    }
+}
+impl std::error::Error for StartupRefused {}
+
+pub fn registered_command(args: &[String]) -> bool {
+    matches!(args, [desktop, serve, config_flag, _, state_flag, _]
+        if desktop == "desktop" && serve == "serve"
+        && config_flag == "--config-dir" && state_flag == "--state-dir")
+}
+
+/// launchd's SuccessfulExit=false retries every nonzero status. Only its exact
+/// registered invocation maps permanent startup refusals to a clean exit; the
+/// diagnostic remains on stderr. Ordinary CLI errors retain a failure status.
+pub fn launchd_command(args: &[String]) -> bool {
+    args.last().is_some_and(|arg| arg == "--launchd") && registered_command(&args[..args.len() - 1])
+}
 
 /// Registrations pass the selected directories as argv, including on Windows
 /// where a logon task cannot carry a custom environment block. Only this exact
@@ -40,7 +63,7 @@ pub fn launch_configuration(args: &[String]) -> cli::Result<()> {
                 || !std::path::Path::new(state).is_absolute()
             {
                 return Err(cli::Error::new(
-                    1,
+                    STARTUP_REFUSED,
                     "desktop registration directories must be absolute",
                 ));
             }
@@ -57,7 +80,13 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
             !dry && (target.is_empty() || config.is_self(target)),
             "desktop manages only this computer; remote desktop IPC is refused"
         );
-        let location = Location::new(config)?;
+        let location = Location::new(config).map_err(|error| {
+            if args.first().is_some_and(|arg| arg == "serve") {
+                error.context(StartupRefused)
+            } else {
+                error
+            }
+        })?;
         match args
             .iter()
             .map(String::as_str)
@@ -66,8 +95,11 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
         {
             ["serve"] => serve(location),
             ["serve", "--config-dir", dir, "--state-dir", state] => {
-                ensure!(std::path::Path::new(dir) == config.dir && std::path::Path::new(state) == config.state,
-                    "desktop registration configuration was not selected; invoke its exact local command");
+                if std::path::Path::new(dir) != config.dir
+                    || std::path::Path::new(state) != config.state
+                {
+                    return Err(anyhow::anyhow!("desktop registration configuration was not selected; invoke its exact local command").context(StartupRefused));
+                }
                 serve(location)
             }
             ["registration", "--json"] => {
@@ -112,9 +144,16 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
             _ => anyhow::bail!(USAGE),
         }
     };
-    run()
-        .map(|()| 0)
-        .map_err(|error| cli::Error::new(1, format!("{error:#}")))
+    run().map(|()| 0).map_err(|error| {
+        cli::Error::new(
+            if error.is::<StartupRefused>() {
+                STARTUP_REFUSED
+            } else {
+                1
+            },
+            format!("{error:#}"),
+        )
+    })
 }
 
 fn frame(epoch: &str, seq: u64, kind: &str, value: Value) -> Value {
@@ -143,18 +182,22 @@ impl Drop for Permit {
 }
 
 fn serve(location: Location) -> Result<()> {
-    let _signals = platform::ShutdownGuard::install()?;
-    // This dedicated service process has no workers yet. Make socket creation
-    // private too, so a concurrent status probe never sees the pre-chmod mode.
-    #[cfg(unix)]
-    unsafe {
-        libc::umask(0o077);
-    }
-    location.prepare()?;
-    let _lock = location.lock()?;
-    let listener = Arc::new(Listener::bind(&location)?);
-    let epoch = uuid::Uuid::new_v4().to_string();
-    let store = Store::open(&location, &epoch)?;
+    let (_signals, _lock, listener, epoch, store) = (|| -> Result<_> {
+        let signals = platform::ShutdownGuard::install()?;
+        // This dedicated service process has no workers yet. Make socket creation
+        // private too, so a concurrent status probe never sees the pre-chmod mode.
+        #[cfg(unix)]
+        unsafe {
+            libc::umask(0o077);
+        }
+        location.prepare()?;
+        let lock = location.lock()?;
+        let listener = Arc::new(Listener::bind(&location)?);
+        let epoch = uuid::Uuid::new_v4().to_string();
+        let store = Store::open(&location, &epoch)?;
+        Ok((signals, lock, listener, epoch, store))
+    })()
+    .context(StartupRefused)?;
     let stopped = Arc::new(AtomicBool::new(false));
     let active = Arc::new(AtomicUsize::new(0));
     // At most 16 bounded control lines, plus at most 12 bounded parsers. No

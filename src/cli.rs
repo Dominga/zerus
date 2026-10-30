@@ -404,6 +404,16 @@ fn usage_text(tmux: bool) -> Cow<'static, str> {
 }
 
 pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
+    if crate::desktop::launchd_command(&args) {
+        args.pop();
+        return dispatch(args).map_err(|mut error| {
+            if error.code == crate::desktop::STARTUP_REFUSED {
+                error.code = 0;
+                error.message = format!("{}; automatic restart paused", error.message);
+            }
+            error
+        });
+    }
     // Private: the screen model behind the differential tmux capture test.
     if args.first().is_some_and(|a| a == "__screen-capture") {
         return crate::screen::cli(&args[1..]).map_err(|e| Error::new(2, e));
@@ -423,7 +433,12 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
         return state::dispatch(&args[1..]).map_err(|e| Error::new(1, e));
     }
     crate::desktop::launch_configuration(&args)?;
-    let config = Config::load()?;
+    let config = Config::load().map_err(|mut error| {
+        if crate::desktop::registered_command(&args) {
+            error.code = crate::desktop::STARTUP_REFUSED;
+        }
+        error
+    })?;
     // An encrypted gateway binds every local native call to the physical
     // machine it advertised. This check also works on Windows, without a
     // shell, stdin rewriting or a second native process.

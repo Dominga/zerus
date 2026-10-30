@@ -23,8 +23,8 @@ struct Spec {
     user_sid: String,
 }
 impl Spec {
-    fn argv(&self) -> Vec<&str> {
-        vec![
+    fn argv(&self, os: Os) -> Vec<&str> {
+        let mut argv = vec![
             &self.binary,
             "desktop",
             "serve",
@@ -32,13 +32,38 @@ impl Spec {
             &self.config,
             "--state-dir",
             &self.state,
-        ]
+        ];
+        if matches!(os, Os::Mac) {
+            argv.push("--launchd");
+        }
+        argv
     }
-    fn validate(&self) -> Result<()> {
+    fn validate(&self, os: Os) -> Result<()> {
         for value in [&self.binary, &self.config, &self.state] {
             ensure!(
                 !value.is_empty() && !value.chars().any(char::is_control),
                 "desktop registration paths must be nonempty and contain no control characters"
+            );
+            let absolute = match os {
+                Os::Linux | Os::Mac => value.starts_with('/'),
+                // Check target-platform syntax even in cross-platform tests.
+                // A drive-relative C:foo or rooted \\foo is not absolute.
+                Os::Windows => {
+                    let bytes = value.as_bytes();
+                    (bytes.len() >= 3
+                        && bytes[0].is_ascii_alphabetic()
+                        && bytes[1] == b':'
+                        && matches!(bytes[2], b'\\' | b'/'))
+                        || value.strip_prefix("\\\\").is_some_and(|unc| {
+                            let mut parts = unc.split('\\');
+                            parts.next().is_some_and(|part| !part.is_empty())
+                                && parts.next().is_some_and(|part| !part.is_empty())
+                        })
+                }
+            };
+            ensure!(
+                absolute,
+                "desktop registration paths must be absolute for the target platform"
             );
         }
         ensure!(
@@ -63,6 +88,11 @@ pub fn preview(config: &Config, location: &Location) -> Result<Value> {
     } else {
         std::env::current_dir()?.join(&config.dir)
     };
+    let state_dir = if config.state.is_absolute() {
+        config.state.clone()
+    } else {
+        std::env::current_dir()?.join(&config.state)
+    };
     let spec = Spec {
         binary: binary
             .to_str()
@@ -72,8 +102,7 @@ pub fn preview(config: &Config, location: &Location) -> Result<Value> {
             .to_str()
             .context("desktop config path must be Unicode")?
             .into(),
-        state: config
-            .state
+        state: state_dir
             .to_str()
             .context("desktop state path must be Unicode")?
             .into(),
@@ -110,7 +139,7 @@ pub fn preview(config: &Config, location: &Location) -> Result<Value> {
     };
     Ok(
         json!({"schema":1,"operation":"preview","configuration":spec.configuration,"label":label,"destination":destination,
-        "argv":spec.argv(),"definition":render(&spec,os)?}),
+        "argv":spec.argv(os),"definition":render(&spec,os)?}),
     )
 }
 
@@ -135,10 +164,10 @@ fn xml(value: &str) -> String {
         .replace('\'', "&apos;")
 }
 fn render(spec: &Spec, os: Os) -> Result<String> {
-    spec.validate()?;
-    let argv = spec.argv();
+    spec.validate(os)?;
+    let argv = spec.argv(os);
     Ok(match os {
-        Os::Linux => format!("# {MARKER}; configuration={}\n[Unit]\nDescription=Zerus desktop background service\n\n[Service]\nType=simple\nExecStart={}\nRestart=on-failure\nRestartSec=10\nTimeoutStopSec=10\n# Desktop owns only its readers; never terminate native process groups.\nKillMode=process\nUMask=0077\n\n[Install]\nWantedBy=default.target\n",spec.configuration,argv.iter().map(|arg|unit_quote(arg)).collect::<Vec<_>>().join(" ")),
+        Os::Linux => format!("# {MARKER}; configuration={}\n[Unit]\nDescription=Zerus desktop background service\nStartLimitIntervalSec=300\nStartLimitBurst=3\n\n[Service]\nType=simple\nExecStart={}\nRestart=on-failure\nRestartSec=10\nRestartPreventExitStatus=78\nTimeoutStopSec=10\n# Desktop owns only its readers; never terminate native process groups.\nKillMode=process\nUMask=0077\n\n[Install]\nWantedBy=default.target\n",spec.configuration,argv.iter().map(|arg|unit_quote(arg)).collect::<Vec<_>>().join(" ")),
         Os::Mac => {
             let arguments = argv.iter().map(|arg|format!("<string>{}</string>",xml(arg))).collect::<String>();
             format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<!-- {MARKER}; configuration={} -->\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>com.hgdev.hgs-desktop</string>\n<key>ProgramArguments</key><array>{arguments}</array>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>\n<key>ThrottleInterval</key><integer>10</integer>\n<key>AbandonProcessGroup</key><true/>\n<key>LimitLoadToSessionType</key><string>Aqua</string>\n</dict></plist>\n",spec.configuration)
@@ -170,6 +199,14 @@ mod tests {
             user_sid: "S-1-5-21-1000".into(),
         }
     }
+    fn windows_spec() -> Spec {
+        Spec {
+            binary: r"C:\Program Files\Example\hgs.exe".into(),
+            config: r"C:\Users\example\config".into(),
+            state: r"C:\Users\example\state & data".into(),
+            ..spec()
+        }
+    }
     #[test]
     fn linux_runs_only_desktop_and_preserves_literal_argv() {
         let unit = render(&spec(), Os::Linux).unwrap();
@@ -177,6 +214,8 @@ mod tests {
         assert!(unit.contains("\"--config-dir\" \"/data/example/config $$root%%\""));
         assert!(unit.contains("KillMode=process\nUMask=0077"));
         assert!(unit.contains("Restart=on-failure\nRestartSec=10"));
+        assert!(unit.contains("StartLimitIntervalSec=300\nStartLimitBurst=3"));
+        assert!(unit.contains("RestartPreventExitStatus=78"));
         assert!(!unit.contains("ExecStop"));
     }
     #[test]
@@ -185,14 +224,13 @@ mod tests {
         assert!(plist.contains("<string>com.hgdev.hgs-desktop</string>"));
         assert!(plist.contains("<string>/opt/example/CLI &amp; tools/hgs</string>"));
         assert!(plist.contains("<key>AbandonProcessGroup</key><true/>"));
+        assert!(plist.contains("<string>--launchd</string>"));
+        assert!(plist.contains("<key>SuccessfulExit</key><false/>"));
         assert!(!plist.contains("com.hgdev.hgs-tray"));
     }
     #[test]
     fn windows_is_one_unelevated_task_for_the_exact_user() {
-        let mut spec = spec();
-        spec.binary = r"C:\Program Files\Example\hgs.exe".into();
-        spec.config = r"C:\Users\example\config".into();
-        spec.state = r"C:\Users\example\state & data".into();
+        let spec = windows_spec();
         let task = render(&spec, Os::Windows).unwrap();
         assert!(task.contains("<Command>C:\\Program Files\\Example\\hgs.exe</Command>"));
         assert!(task.contains("<RunLevel>LeastPrivilege</RunLevel>"));
@@ -209,18 +247,53 @@ mod tests {
             spec.config.push('\n');
             assert!(render(&spec, os).is_err());
         }
-        let mut input = spec();
-        input.config = r"C:\Users\example\config".into();
+        let mut input = windows_spec();
         input.user_sid = "example".into();
         assert!(render(&input, Os::Windows)
             .unwrap_err()
             .to_string()
             .contains("SID"));
-        let mut input = spec();
+        let mut input = windows_spec();
         input.config = r"C:\Users\example\%alternate%".into();
         assert!(render(&input, Os::Windows)
             .unwrap_err()
             .to_string()
             .contains("environment-variable"));
+    }
+    #[test]
+    fn every_path_requires_target_platform_absolute_syntax() {
+        for os in [Os::Linux, Os::Mac, Os::Windows] {
+            for field in 0..3 {
+                let mut input = if matches!(os, Os::Windows) {
+                    windows_spec()
+                } else {
+                    spec()
+                };
+                let value = match field {
+                    0 => &mut input.binary,
+                    1 => &mut input.config,
+                    _ => &mut input.state,
+                };
+                *value = "relative/path".into();
+                assert!(render(&input, os)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("absolute"));
+            }
+        }
+        for path in [
+            r"C:relative",
+            r"\rooted",
+            "/unix/path",
+            r"\\server",
+            r"\\server\",
+        ] {
+            let mut input = windows_spec();
+            input.state = path.into();
+            assert!(render(&input, Os::Windows).is_err(), "{path}");
+        }
+        let mut input = windows_spec();
+        input.state = r"\\server\share\state".into();
+        assert!(render(&input, Os::Windows).is_ok());
     }
 }

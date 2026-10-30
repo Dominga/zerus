@@ -12,7 +12,7 @@ import type { ActivitySource, AttachmentScope } from "../../store/activitySource
 import { composer, draftKey } from "../../store/composer";
 import { terminal } from "../../store/terminal";
 import type { LocalMessage } from "../../types";
-import { createActivityEnd } from "./activity-end";
+import { createActivityEnd, newLocalSends } from "./activity-end";
 import { buildTranscript, VOICE_STATE_LABEL, voiceStateDetail, voiceStateIssue } from "./transcript";
 import { DELETE_TEXT, DELETE_TITLE, retryReason, routeInspect } from "./local-actions";
 import { statusOf } from "./SessionCard";
@@ -616,10 +616,17 @@ export function ActivityView(props: { source?: ActivitySource }) {
       source().loadOlder();
     }
   };
+  let sendIds: Set<string> | undefined;
   createEffect(on(() => source().target()?.id, () => {
+    sendIds = undefined;
     setFollowing(true); setUnseen(0); anchor = undefined; newest = undefined; manualAway = false;
     // Selection changes must place even when the next page has the same row count.
     end.pin();
+  }));
+  createEffect(on(local, (rows) => {
+    const sends = newLocalSends(sendIds, rows.map((row) => row.id));
+    sendIds = sends.baseline;
+    if (sends.added.length) jumpToLatest();
   }));
   // Events after the newest one seen count as new while the view does not follow (Qt's m_unseen).
   createEffect(on(() => source().events(), (events) => {

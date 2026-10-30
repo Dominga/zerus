@@ -42,3 +42,7 @@ export function createActivityEnd(read: () => ScrollGeometry, writeEnd: () => vo
     dispose() { release(); disposed = true; },
   };
 }
+
+export function newLocalSends(baseline: ReadonlySet<string> | undefined, current: readonly string[]): { added: string[]; baseline: Set<string> } {
+  return { added: baseline ? current.filter((id) => !baseline.has(id)) : [], baseline: new Set(current) };
+}

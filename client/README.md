@@ -606,8 +606,10 @@ live catalog.
   reads that are running, also one sent before the cancel that has not started
   yet; an answer that arrives afterwards is dropped. Each read carries the
   store's request number, so a late older read never cancels a newer one.
-- The search text is the archive query, applied 300 ms after the last change.
-  It does not filter the loaded rows.
+- The archive metadata query is applied 300 ms after the last text change.
+  Public-content search adds matching message excerpts after 350 ms; while it
+  is active, the date picker stays visible and content results replace the
+  metadata page controls. Clearing the query returns to the paged archive.
 - The date picker offers All dates (the default), Today, Last 7 days, Last 30
   days and a custom range, which starts at the last 30 days. A range whose
   start is not before its end loads nothing.
@@ -1267,6 +1269,28 @@ While the window is hidden or minimised the pump asks for nothing and schedules
 no frame; a batch that arrives meanwhile waits, the Rust side keeps folding
 changes into the next one, and the first frame after the window returns applies
 it. The Working clocks stop too, as Qt stops its timers when a window hides.
+
+## Session content search
+
+Session search shows immediate name, metadata and identity matches and reads
+public message contents after 350 ms with two or more characters. Live and
+archive excerpts share the virtual list, with state, machine, project and
+archive-date scopes. Click, arrow navigation and Enter open the exact matched
+run/conversation/archive, with a clearable highlighted preview. A stale result
+never falls back to the latest session of the same name.
+
+The parity path uses Qt's existing `hgs search --query … --limit 100` contract;
+older peers are help-gated before that verb is sent. Four cancellable CLI reads
+run at most, including children of a retired query until they exit. Replies are
+limited to 8 MiB and 100 hits per computer, with 32 computers, 200 retained
+content hits and 500 visible metadata/content rows overall, plus one selected
+archive/excerpt. Exceeding coverage shows “Limited history searched”; offline,
+unsupported or failed computers stay explicit. There are no transcript caches
+per session. The cursor-backed content index is tracked by
+`zerus-5wmh.66.2.2.1`; the current CLI's own scan limits remain visible meanwhile.
+The `content-search-smoke=1` replay query requires an explicit fake hgs and
+`ZERUS_CLIENT_PERF`; run it only under isolated data, Xvfb and a private D-Bus
+session, as the other native replay smokes.
 
 ## Settings and motion
 

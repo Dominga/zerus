@@ -72,12 +72,15 @@ export function setSessionsWidth(width: number) {
 export { toast } from "./notices";
 
 let archivedRow: (key: string) => Session | undefined = () => undefined;
+let searchRow: (key: string) => Session | undefined = () => undefined;
+/** The search keeps at most its one selected archived row, independently of archive pages. */
+export function bindSearchRow(lookup: (key: string) => Session | undefined) { searchRow = lookup; }
 /** Hands the selection the loaded archived rows (store/archive.ts), which this module cannot import: archive.ts reads the filters here. */
 export function bindArchivedRows(lookup: (key: string) => Session | undefined) { archivedRow = lookup; }
 
 export const selected = createMemo<Session | undefined>(() => {
   const key = selectedKey();
-  return key ? catalog.rows[key] ?? archivedRow(key) : undefined;
+  return key ? catalog.rows[key] ?? archivedRow(key) ?? searchRow(key) : undefined;
 });
 
 /** The window's online state of a row: its computer's rows are current (Qt's `entry.online`). */

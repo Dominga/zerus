@@ -422,8 +422,11 @@ export function withArchived(catalog: Pick<CatalogState, "rows">, archived: (key
 }
 
 let archivedRow: (key: string) => Session | undefined = () => undefined;
+let searchRow: (key: string) => Session | undefined = () => undefined;
+/** One selected archive from a checked search reply; normal action preflights still apply. */
+export function bindSearchActionRow(lookup: (key: string) => Session | undefined) { searchRow = lookup; }
 /** Hands the store the loaded archived rows (store/archive.ts), which this module cannot import: archive.ts reads ui.ts. */
 export function bindArchivedRows(lookup: (key: string) => Session | undefined) { archivedRow = lookup; }
 
-const app = createActions(withArchived(appCatalog, (key) => archivedRow(key)), (computer) => !computerOffline(computer), () => selection(), appMarks, appBus);
+const app = createActions(withArchived(appCatalog, (key) => archivedRow(key) ?? searchRow(key)), (computer) => !computerOffline(computer), () => selection(), appMarks, appBus);
 export const { perform, performComputer, end, forget, toggleMute, stillListed, pendingNotifications, copy, copyName, copyIdentity, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices, dismiss, notify, clearNotice } = app;

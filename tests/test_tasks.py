@@ -806,6 +806,28 @@ class TaskDelivery(DeliveryFixture):
         self.wait_received("[Zerus task orchard/" + task["id"] + " cancelled]")
         self.assertNotIn("Wrong approach", self.received())
 
+    def test_cancel_execution_pins_dispatch_and_executor_and_keeps_reason_literal(self):
+        task = self.add("Refactor the parser", "--target", self.name)
+        sent = self.hgs("send", task["ref"])["task"]
+        self.confirm()
+        request = dict(schema=1, dispatch_id=sent["dispatch_id"], stage_at=sent["stage_at"], machine=sent["session"]["machine"],
+                       session_id=sent["session"]["session_id"], reason="--agent")
+        before = self.received()
+        for key, value in (("stage_at", sent["stage_at"] + 1), ("dispatch_id", "later"), ("machine", "other"), ("session_id", "run_id:later"), ("schema", 2)):
+            refused = self.hgs("cancel-execution", task["ref"], text=json.dumps(dict(request, **{key: value})), ok=False)
+            self.assertTrue("changed" in refused or "invalid" in refused, refused)
+            self.assertEqual(self.hgs("get", task["ref"])["task"]["stage"], "active")
+            self.assertEqual(self.received(), before)
+        out = self.hgs("cancel-execution", task["ref"], text=json.dumps(request))
+        self.assertEqual(out["task"]["stage"], "review")
+        self.assertNotIn("log", out["task"])
+        self.assertTrue(out["cancel_message"]["sent"], out)
+        self.wait_received("[Zerus task orchard/" + task["id"] + " cancelled]")
+        self.assertNotIn("--agent", self.received())
+        self.assertIn("--agent", [e.get("text") for e in self.hgs("get", task["ref"])["task"]["log"]])
+        self.assertIn("changed", self.hgs("cancel-execution", task["ref"], text=json.dumps(request), ok=False))
+        self.assertEqual(self.received().count(" cancelled]"), 1)
+
     def test_a_refused_cancel_message_still_cancels(self):
         task = self.add("Refactor the parser", "--target", self.name)
         self.hgs("send", task["ref"])

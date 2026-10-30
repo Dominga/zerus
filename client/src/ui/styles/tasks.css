@@ -252,3 +252,19 @@
 }
 
 @layer components { .tk-create-error { color: var(--z-color-danger); font-size: var(--fs-xs); white-space: pre-line; } }
+
+@layer components {
+  .td-form { display: flex; flex-direction: column; gap: 8px; font-size: var(--fs-sm); }
+  .td-label { margin-top: 6px; color: var(--z-color-label); font-size: var(--fs-xs); }
+  .td-cancel-text { padding: 8px 10px; border-radius: var(--z-radius-md); background: var(--z-color-tile); color: var(--z-color-text-2); line-height: 1.45; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; line-clamp: 4; overflow: hidden; }
+  .tk-act.blocked { opacity: .4; }
+  .tk-tip { position: fixed; z-index: 95; translate: -50% 0; width: max-content; max-width: 320px; padding: 6px 10px; border-radius: var(--z-radius-md); background: var(--z-color-raised); border: 1px solid var(--z-color-border); color: var(--z-color-text); font-size: var(--fs-xs); line-height: 1.4; box-shadow: var(--z-shadow-popover); pointer-events: none; animation: drop var(--z-motion-fast) var(--ease) both; }
+}
+
+@media (prefers-reduced-motion: reduce) { .tk-tip { animation: none; } }
+
+@layer components {
+  .tv-blocker { display: flex; align-items: center; gap: 7px; padding: 6px 8px 6px 10px; border-radius: var(--z-radius-md); background: var(--z-color-warn-bg); color: var(--z-color-warn); font-size: var(--fs-sm); animation: fadeIn var(--z-motion-base) both; }
+  .tv-blocker.quiet { padding: 0; background: transparent; color: var(--z-color-dim); font-size: var(--fs-xs); }
+}
+@media (prefers-reduced-motion: reduce) { .tv-blocker { animation: none; } }

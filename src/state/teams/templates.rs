@@ -71,7 +71,7 @@ pub(crate) const BUILTIN: &[Template] = &[
     },
     Template {
         id: "cargo-test",
-        summary: "cargo test --locked in your folder (a test-name filter, a binary, an optional package)",
+        summary: "cargo test --locked in your folder (a filter or the filters and skips hgs test affected names, a binary, a package or manifest)",
         program: "cargo",
         args: &["+{toolchain}", "test", "--locked", "--package={package}", "--bin={bin}", "{filter}"],
         params: &[
@@ -79,6 +79,10 @@ pub(crate) const BUILTIN: &[Template] = &[
             optional("package", Kind::Identifier),
             optional("bin", Kind::Identifier),
             optional("filter", Kind::Identifier),
+            // #741: an affected set: several filters with skips, another crate.
+            optional("filters", Kind::Identifiers),
+            optional("skips", Kind::Identifiers),
+            optional("manifest", Kind::Paths),
         ],
         timeout_secs: 1800,
     },
@@ -108,10 +112,16 @@ pub(crate) const BUILTIN: &[Template] = &[
     },
     Template {
         id: "qt-test",
-        summary: "a Qt test binary from .ci-build/gui, offscreen; functions are arguments, shots into the folder",
+        summary: "Qt test binaries from .ci-build/gui, offscreen, one after another; functions are arguments (suite:function with several), shots into the folder",
         program: ".ci-build/gui/{suite}",
         args: &[],
-        params: &[param("suite", Kind::Identifier), optional("functions", Kind::Identifiers), optional("shots", Kind::Identifier)],
+        params: &[
+            optional("suite", Kind::Identifier),
+            // #741: an affected set runs several binaries in one run.
+            optional("suites", Kind::Identifiers),
+            optional("functions", Kind::Identifiers),
+            optional("shots", Kind::Identifier),
+        ],
         timeout_secs: 1800,
     },
     // Owner, 2026-10-28: QA ran the Android tests by hand, a permission each.
@@ -159,6 +169,8 @@ pub(crate) struct Plan {
     pub argv: Vec<String>,
     /// U21: B4's commit is Zerus' own code, not a shell: the request goes as JSON.
     pub commit: Option<Value>,
+    /// #741: further commands of the same run, in turn (several Qt suites).
+    pub more: Vec<(String, Vec<String>)>,
 }
 
 /// The built-in template with `id`, if the set has one.
@@ -550,7 +562,9 @@ fn value_of(params: &[Param], args: &Value, name: &str, folder: &Path) -> anyhow
                 Value::Array(items) => items.iter().map(|item| item.as_str().unwrap_or_default().to_owned()).collect(),
                 _ => bail!("The template's \"{name}\" is a list"),
             };
-            ensure!(list.len() <= 64, "The template's \"{name}\" has at most 64 values");
+            // An affected set's filters, skips and suites run to hundreds.
+            let bound = if matches!(name, "filters" | "skips" | "suites" | "functions") { 512 } else { 64 };
+            ensure!(list.len() <= bound, "The template's \"{name}\" has at most {bound} values");
             let mut words = Vec::new();
             for word in list {
                 if param.kind == Kind::Paths {
@@ -583,7 +597,7 @@ pub(crate) fn plan(id: &str, args: &Value, folder: &Path) -> anyhow::Result<Plan
             if let Some((key, _)) = args.as_object().into_iter().flatten().next() {
                 bail!("The project template {id} takes no placeholders (got \"{key}\")");
             }
-            return Ok(Plan { template: id.to_owned(), program, argv, commit: None });
+            return Ok(Plan { template: id.to_owned(), program, argv, commit: None, more: Vec::new() });
         }
     }
     let Some(template) = builtin(id) else { bail!("Unknown template {id}") };
@@ -604,7 +618,7 @@ pub(crate) fn plan(id: &str, args: &Value, folder: &Path) -> anyhow::Result<Plan
             check_path(path, "paths")?;
             ensure!(folder.join(path).lexists(), "The template's path {path} does not exist in your folder");
         }
-        return Ok(Plan { template: "git-commit".to_owned(), program: "hgs".into(), argv: vec!["team".into(), "commit".into(), "--json".into()], commit: Some(json!({"message":message,"paths":paths})) });
+        return Ok(Plan { template: "git-commit".to_owned(), program: "hgs".into(), argv: vec!["team".into(), "commit".into(), "--json".into()], commit: Some(json!({"message":message,"paths":paths})), more: Vec::new() });
     }
     let mut program = template.program.to_owned();
     let mut argv = Vec::new();
@@ -634,7 +648,8 @@ pub(crate) fn plan(id: &str, args: &Value, folder: &Path) -> anyhow::Result<Plan
         if keep {
             argv.push(element);
         }    }
-    for placeholder in placeholders(&program) {
+    // qt-test names its binaries itself (below).
+    for placeholder in placeholders(&program).into_iter().filter(|_| template.id != "qt-test") {
         let Some(Words::One(word)) = value_of(template.params, args, &placeholder, folder)? else {
             bail!("The template {id} needs a single \"{placeholder}\" for its program");
         };
@@ -655,21 +670,82 @@ pub(crate) fn plan(id: &str, args: &Value, folder: &Path) -> anyhow::Result<Plan
             argv.extend(targets);
         }
     }
-    if template.id == "qt-test" {
-        // N2: Qt test functions are positional arguments of the test binary.
-        if let Some(Words::Many(functions)) = value_of(template.params, args, "functions", folder)? {
-            argv.extend(functions);
+    let mut more = Vec::new();
+    if template.id == "cargo-test" {
+        // #741: another crate's manifest, then the filters and skips of an
+        // affected set after `--`, each its own argv element.
+        if let Some(Words::Many(manifest)) = value_of(template.params, args, "manifest", folder)? {
+            ensure!(manifest.len() == 1 && manifest[0].ends_with("Cargo.toml"), "The template's \"manifest\" is one Cargo.toml in your folder");
+            argv.push("--manifest-path".into());
+            argv.push(manifest[0].clone());
         }
-        // U21: the test binary is one of the folder's build outputs, run by
-        // Zerus; a suite that is not a file in the folder is refused.
-        // Expert, #528: the Windows build puts the suites in gui/tests.
-        let suite = program.trim_start_matches(".ci-build/gui/").to_owned();
-        let path = [program.clone(), format!(".ci-build/gui/tests/{suite}")]
-            .iter()
-            .flat_map(|name| [folder.join(name), folder.join(format!("{name}.exe"))])
-            .find(|path| path.is_file());
-        let Some(path) = path else { bail!("The Qt test binary {program} is not in your folder's build") };
-        program = path.display().to_string();
+        let filters = match value_of(template.params, args, "filters", folder)? {
+            Some(Words::Many(filters)) => filters,
+            _ => Vec::new(),
+        };
+        let skips = match value_of(template.params, args, "skips", folder)? {
+            Some(Words::Many(skips)) => skips,
+            _ => Vec::new(),
+        };
+        if !filters.is_empty() || !skips.is_empty() {
+            argv.push("--".into());
+            argv.extend(filters);
+            for skip in skips {
+                argv.push("--skip".into());
+                argv.push(skip);
+            }
+        }
+    }
+    if template.id == "qt-test" {
+        // #741: one suite, or several run one after another in the same run.
+        let mut suites = Vec::new();
+        if let Some(Words::One(suite)) = value_of(template.params, args, "suite", folder)? {
+            suites.push(suite);
+        }
+        if let Some(Words::Many(listed)) = value_of(template.params, args, "suites", folder)? {
+            suites.extend(listed);
+        }
+        ensure!(!suites.is_empty(), "The template needs \"suite\" or \"suites\"");
+        let unique: std::collections::BTreeSet<&String> = suites.iter().collect();
+        ensure!(unique.len() == suites.len(), "The template names a suite twice");
+        // N2: Qt test functions are positional arguments of the test binary.
+        // With several suites each is `suite:function`; with one, a plain
+        // name or QtTest's `function:datatag` is that suite's.
+        let functions = match value_of(template.params, args, "functions", folder)? {
+            Some(Words::Many(functions)) => functions,
+            _ => Vec::new(),
+        };
+        let mut runs = Vec::new();
+        for suite in &suites {
+            let mut mine = Vec::new();
+            for function in &functions {
+                match function.split_once(':') {
+                    Some((owner, name)) if suites.len() > 1 || owner == suite => {
+                        ensure!(suites.contains(&owner.to_owned()), "The function {function} names no listed suite");
+                        if owner == suite {
+                            mine.push(name.to_owned());
+                        }
+                    }
+                    _ => {
+                        ensure!(suites.len() == 1, "With several suites a function is suite:function (got {function})");
+                        mine.push(function.clone());
+                    }
+                }
+            }
+            // U21: the test binary is one of the folder's build outputs, run by
+            // Zerus; a suite that is not a file in the folder is refused.
+            // Expert, #528: the Windows build puts the suites in gui/tests.
+            let path = [format!(".ci-build/gui/{suite}"), format!(".ci-build/gui/tests/{suite}")]
+                .iter()
+                .flat_map(|name| [folder.join(name), folder.join(format!("{name}.exe"))])
+                .find(|path| path.is_file());
+            let Some(path) = path else { bail!("The Qt test binary .ci-build/gui/{suite} is not in your folder's build") };
+            runs.push((path.display().to_string(), mine));
+        }
+        let (first, rest) = runs.split_first().map(|(first, rest)| (first.clone(), rest.to_vec())).unwrap_or_default();
+        program = first.0;
+        argv.extend(first.1);
+        more = rest;
         let shots = args["shots"].as_str().unwrap_or_default();
         if !shots.is_empty() {
             ensure!(shots == "true" || shots == "false", "The template's \"shots\" is true or false");
@@ -699,7 +775,7 @@ pub(crate) fn plan(id: &str, args: &Value, folder: &Path) -> anyhow::Result<Plan
         let home = folder.join(".zerus-team").join("gradle");
         argv.extend(["-g".to_owned(), home.join("home").display().to_string(), "--project-cache-dir".to_owned(), home.join("cache").display().to_string()]);
     }
-    Ok(Plan { template: template.id.to_owned(), program, argv, commit: None })
+    Ok(Plan { template: template.id.to_owned(), program, argv, commit: None, more })
 }
 
 /// Owner, 2026-10-28 (QA #512): on Windows a Qt build needs the Visual Studio
@@ -904,35 +980,43 @@ pub(crate) fn execute(plan: &Plan, folder: &Path, timeout: Duration, env: &[(&st
 pub(crate) fn execute_as(plan: &Plan, folder: &Path, timeout: Duration, env: &[(&str, String)], person: &super::isolation::Person) -> Outcome {
     let temp = folder.join(".zerus-team").join("tmp");
     let _ = std::fs::create_dir_all(&temp);
-    let mut command = Command::new(&plan.program);
-    command
-        .args(&plan.argv)
-        .current_dir(folder)
-        .env("TEMP", &temp)
-        .env("TMP", &temp)
-        .env("QT_QPA_PLATFORM", "offscreen")
-        // The worker's own build dir is Zerus', never the member's.
-        .env_remove("CARGO_TARGET_DIR");
     // U62 (#720): a test runs with its own home, data, temporary and XDG
     // folders in a run folder (the project's .zerus/tests.toml).
     let isolated = super::isolation::prepare(&plan.template, &plan.program, folder, person);
-    if let Some(run) = &isolated {
-        for name in &run.remove {
-            command.env_remove(name);
-        }
-        for (key, value) in &run.env {
-            command.env(key, value);
-        }
+    if isolated.is_some() {
         super::isolation::quiet_crashes();
     }
     let base = template_environment(plan, folder);
     let cache = cache_use(&plan.template, folder);
-    for (key, value) in base.iter().chain(cache.env.iter()) {
-        command.env(key, value);
-    }
-    for (key, value) in env {
-        command.env(key, value);
-    }
+    // Every command of the run (#741: several Qt suites) gets the same folder
+    // and environment.
+    let build = |program: &str, argv: &[String]| {
+        let mut command = Command::new(program);
+        command
+            .args(argv)
+            .current_dir(folder)
+            .env("TEMP", &temp)
+            .env("TMP", &temp)
+            .env("QT_QPA_PLATFORM", "offscreen")
+            // The worker's own build dir is Zerus', never the member's.
+            .env_remove("CARGO_TARGET_DIR");
+        if let Some(run) = &isolated {
+            for name in &run.remove {
+                command.env_remove(name);
+            }
+            for (key, value) in &run.env {
+                command.env(key, value);
+            }
+        }
+        for (key, value) in base.iter().chain(cache.env.iter()) {
+            command.env(key, value);
+        }
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        command
+    };
+    let mut command = build(&plan.program, &plan.argv);
     let started = Instant::now();
     // U62 (#721): a Qt build folder configured with another launcher (or none)
     // takes the cache's first, so a member's existing build uses it too.
@@ -958,6 +1042,15 @@ pub(crate) fn execute_as(plan: &Plan, folder: &Path, timeout: Duration, env: &[(
     let stdin = plan.commit.as_ref().map(|payload| serde_json::to_vec(payload).unwrap_or_default());
     let before = isolated.as_ref().map(super::isolation::Run::fingerprint);
     let mut outcome = run_tree(&mut command, timeout.saturating_sub(started.elapsed()).max(Duration::from_secs(1)), stdin);
+    for (program, argv) in &plan.more {
+        let left = timeout.saturating_sub(started.elapsed());
+        if outcome.timed_out || left.is_zero() {
+            outcome.timed_out = true;
+            break;
+        }
+        let step = run_tree(&mut build(program, argv), left, None);
+        outcome = joined(outcome, step, program);
+    }
     outcome.ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     if !cache.note.is_empty() {
         outcome.tail = last_chars(&format!("{}
@@ -966,6 +1059,25 @@ pub(crate) fn execute_as(plan: &Plan, folder: &Path, timeout: Duration, env: &[(
     if let (Some(run), Some(before)) = (&isolated, before) {
         checked(&mut outcome, run, &before, folder);
     }
+    outcome
+}
+
+/// #741: one run of several commands: the first failure's exit and error
+/// stand, every failure is named, and the tail keeps the latest output.
+fn joined(mut outcome: Outcome, step: Outcome, program: &str) -> Outcome {
+    if outcome.exit == Some(0) || (outcome.exit.is_none() && outcome.error.is_empty()) {
+        outcome.exit = step.exit;
+    }
+    if outcome.error.is_empty() {
+        outcome.error = step.error;
+    }
+    outcome.failures.extend(step.failures);
+    if outcome.excerpt.is_empty() {
+        outcome.excerpt = step.excerpt;
+    }
+    outcome.timed_out |= step.timed_out;
+    let name = Path::new(program).file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+    outcome.tail = last_chars(&format!("{}\n== {name}\n{}", outcome.tail, step.tail), TAIL_BYTES);
     outcome
 }
 
@@ -1203,7 +1315,7 @@ mod tests {
         std::fs::write(dir.path().join(".ci-build").join("gui").join("CMakeCache.txt"),
                        format!("Qt6_DIR:PATH={}\n", qt.join("lib").join("cmake").join("Qt6").display())).unwrap();
         assert_eq!(qt_bin(dir.path()), Some(qt.join("bin")));
-        let test = Plan { template: "qt-test".into(), program: "t".into(), argv: vec![], commit: None };
+        let test = Plan { template: "qt-test".into(), program: "t".into(), argv: vec![], commit: None, more: Vec::new() };
         let env = template_environment(&test, dir.path());
         let path = env.iter().find(|(key, _)| key == "PATH").map(|(_, value)| value.clone()).unwrap();
         assert!(path.starts_with(&qt.join("bin").display().to_string()), "{path}");
@@ -1271,6 +1383,70 @@ mod tests {
         );
     }
 
+    /// #741: the run hgs test affected names goes through the templates: a
+    /// cargo set with its filters and skips, another crate by its manifest,
+    /// and several Qt binaries with their own functions.
+    #[test]
+    fn an_affected_set_runs_through_the_test_templates() {
+        let dir = temp();
+        let built = plan(
+            "cargo-test",
+            &json!({"bin":"hgs","filters":["state::teams::","tests::a_case"],"skips":["state::teams::ops::"]}),
+            dir.path(),
+        )
+        .unwrap();
+        assert_eq!(built.argv, ["test", "--locked", "--bin=hgs", "--", "state::teams::", "tests::a_case", "--skip", "state::teams::ops::"]);
+        std::fs::create_dir_all(dir.path().join("crates/replica")).unwrap();
+        std::fs::write(dir.path().join("crates/replica/Cargo.toml"), "").unwrap();
+        let built = plan("cargo-test", &json!({"manifest":["crates/replica/Cargo.toml"]}), dir.path()).unwrap();
+        assert_eq!(built.argv, ["test", "--locked", "--manifest-path", "crates/replica/Cargo.toml"]);
+        assert!(plan("cargo-test", &json!({"manifest":["crates/replica"]}), dir.path()).is_err());
+        assert!(plan("cargo-test", &json!({"filters":["a; b"]}), dir.path()).is_err());
+        // Hundreds of filters fit; a thousand do not.
+        let many: Vec<String> = (0..300).map(|index| format!("m{index}::")).collect();
+        assert_eq!(plan("cargo-test", &json!({"filters":many}), dir.path()).unwrap().argv.len(), 303);
+        let too_many: Vec<String> = (0..600).map(|index| format!("m{index}::")).collect();
+        assert!(plan("cargo-test", &json!({"filters":too_many}), dir.path()).is_err());
+        let tests = dir.path().join(".ci-build").join("gui").join("tests");
+        std::fs::create_dir_all(&tests).unwrap();
+        for name in ["test_teams.exe", "test_teamsui.exe", "test_settings.exe"] {
+            std::fs::write(tests.join(name), b"x").unwrap();
+        }
+        let built = plan(
+            "qt-test",
+            &json!({"suites":["test_teams","test_teamsui","test_settings"],"functions":["test_teamsui:opens","test_teamsui:rows:empty","test_teams:closes"]}),
+            dir.path(),
+        )
+        .unwrap();
+        assert!(built.program.ends_with("test_teams.exe"), "{}", built.program);
+        assert_eq!(built.argv, ["closes"]);
+        let more: Vec<(String, Vec<String>)> = built.more.iter().map(|(program, argv)| (Path::new(program).file_name().unwrap().to_string_lossy().into_owned(), argv.clone())).collect();
+        assert_eq!(more, vec![("test_teamsui.exe".to_owned(), vec!["opens".to_owned(), "rows:empty".to_owned()]), ("test_settings.exe".to_owned(), vec![])]);
+        // A plain function needs one suite; a data tag stays the function's.
+        assert!(plan("qt-test", &json!({"suites":["test_teams","test_teamsui"],"functions":["opens"]}), dir.path()).is_err());
+        assert!(plan("qt-test", &json!({"suites":["test_teams","test_teamsui"],"functions":["test_other:opens"]}), dir.path()).is_err());
+        assert!(plan("qt-test", &json!({"suites":["test_teams","test_teams"]}), dir.path()).is_err());
+        assert!(plan("qt-test", &json!({}), dir.path()).is_err());
+        assert_eq!(plan("qt-test", &json!({"suite":"test_teams","functions":["rows:empty"]}), dir.path()).unwrap().argv, ["rows:empty"]);
+    }
+
+    /// #741: the commands of one run go in turn; the first failure stands.
+    #[test]
+    fn a_run_of_several_commands_keeps_the_first_failure() {
+        let dir = temp();
+        let mut failing = shell_plan("exit /b 3", "exit 3");
+        let second = shell_plan("echo second", "echo second");
+        failing.more = vec![(second.program.clone(), second.argv.clone())];
+        let outcome = execute(&failing, dir.path(), Duration::from_secs(60), &[]);
+        assert_eq!(outcome.exit, Some(3));
+        assert!(outcome.tail.contains("second"), "{}", outcome.tail);
+        let mut good = shell_plan("echo first", "echo first");
+        good.more = vec![(second.program.clone(), second.argv.clone())];
+        let outcome = execute(&good, dir.path(), Duration::from_secs(60), &[]);
+        assert_eq!(outcome.exit, Some(0));
+        assert!(outcome.tail.contains("first") && outcome.tail.contains("second"), "{}", outcome.tail);
+    }
+
     #[test]
     fn qt_test_functions_are_arguments() {
         // N2: qt-test's functions were validated and then dropped; they are the
@@ -1323,6 +1499,7 @@ mod tests {
                 program: "cmd".into(),
                 argv: vec!["/c".into(), format!("start /b {}", script.display())],
                 commit: None,
+                more: Vec::new(),
             }
         };
         #[cfg(unix)]
@@ -1331,6 +1508,7 @@ mod tests {
             program: "sh".into(),
             argv: vec!["-c".into(), format!("(sleep 3; echo late > '{}') &", marker.display())],
             commit: None,
+            more: Vec::new(),
         };
         let started = Instant::now();
         let outcome = execute(&plan, dir.path(), Duration::from_secs(120), &[]);
@@ -1352,7 +1530,7 @@ mod tests {
 
     fn shell_plan(windows: &str, unix: &str) -> Plan {
         let (program, flag, command) = if cfg!(windows) { ("cmd", "/c", windows) } else { ("sh", "-c", unix) };
-        Plan { template: "test".into(), program: program.into(), argv: vec![flag.into(), command.into()], commit: None }
+        Plan { template: "test".into(), program: program.into(), argv: vec![flag.into(), command.into()], commit: None, more: Vec::new() }
     }
 
     #[test]

@@ -5415,13 +5415,25 @@ enforced: a team without a configuration keeps today's flow.
   imports. `[[provider.paths]]` adds path rules, with targets or with the tests
   that mention a text (such as the CLI binary).
 - `hgs test map --check` fails on a tracked file outside every provider's area
-  and `map.ignore`, on a test file the map lacks, and on a map older than the
-  sources; the CLI job runs it.
+  and `map.ignore` and on a tracked test file no provider maps; the CLI job runs
+  it. Untracked files never count (#741).
+- The map is read from the sources when it is used (#741): `--check` computes
+  it whole, `affected` recomputes the providers the change touches. The
+  committed `.zerus/test-map.json` is a snapshot that stands in only for a build
+  this checkout cannot read (the Qt build in the CLI job), so a merge that
+  changes sources never leaves the check failing or the selection behind; how
+  far the snapshot lags is printed, and `--write` refreshes it on a computer
+  with the configured build.
 - `hgs test affected [RANGE|--staged|--files ...] [--full] [--json]` prints the
   commands to run with their estimate from `.zerus/test-durations.json`. A file
   the map does not know runs its provider's whole set; a file in no area is
   named, never skipped. `--full` prints the whole set and its time; the
-  full-run policy (`[full]`) says who may start it.
+  full-run policy (`[full]`) says who may start it. Each run also carries its
+  `hgs team run` request where a template expresses it: `cargo-test` with
+  `bin`, `manifest` (another crate), `filters` and `skips` (up to 512 each),
+  `qt-test` with `suites` run one after another in the same run and
+  `functions` as `suite:function` (a plain name, or `function:datatag`, with
+  one suite).
 - `hgs test durations --record LOG --provider NAME` keeps the slowest measured
   time per target from CTest, QtTest, Cargo (and libtest JSON), unittest or
   pytest output, or a JSON object of test ids to seconds.
@@ -5430,4 +5442,16 @@ enforced: a team without a configuration keeps today's flow.
   file the map does not give the target is a gap. The weekly
   `test-map-coverage.yml` workflow measures every Rust module and Qt binary.
 
-The file's fields are listed in `hgs guide tests`.
+The file's fields: `version = 1`; `[map]` `file`, `durations`, `unmapped`
+(`report` or `all`), `ignore` (never hides a file the map knows, such as a text
+a module compiles in); `[full]` `where` (`here`, `ci`, `runner`), `policy`
+(`owner`, `standing`, `anyone`), `target`; `[retries]` `flaky`,
+`quarantine_days`; `[budgets]` `grow_percent`, `suite_minutes`; `[isolation]`
+`enabled` and the keys under "Test isolation"; `[build_cache]`; `[merge_queue]`
+`enabled`; `[resources.NAME]` `cpu`, `ram_mb`, `gpu`, `exclusive`; and each
+`[[provider]]`: `name`, `kind` (`cargo`, `ctest`, `pytest`, `unittest`,
+`gradle`, `npm`, `command`), `root`, `sources`, `tests`, `manual`, `elsewhere`,
+`affected` (`build`, `paths`, `all`), `[[provider.paths]]` (`files` with
+`targets` or `mentions`), `command` (`{targets}`, `{manifest}`, `{build_dir}`),
+`manifest`, `widen` (`none`, `dependants`, `transitive`), `build_dir`,
+`resources`, `platforms`, `budget_minutes`, `disabled`.

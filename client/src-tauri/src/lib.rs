@@ -95,6 +95,8 @@ mod watchdog;
 mod window_layer;
 mod window_visibility;
 #[cfg(feature = "live")]
+mod worktree_cleanup;
+#[cfg(feature = "live")]
 mod worktree_policy;
 
 use tauri::{AppHandle, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
@@ -370,6 +372,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(settings::open(app.handle(), &dir, replay));
                 app.manage(speech_settings::SpeechPage::default());
                 app.manage(termination_cleanup::TerminationCleanup::default());
+                app.manage(worktree_cleanup::WorktreeCleanup::default());
                 app.manage(recovery::start(app.handle()));
                 app.manage(files::start());
                 app.manage(analytics::start(app.handle()));
@@ -1149,6 +1152,12 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         termination_cleanup::termination_cleanup_check,
         termination_cleanup::termination_cleanup_remove,
         termination_cleanup::termination_cleanup_keep,
+        worktree_cleanup::worktree_cleanup_open,
+        worktree_cleanup::worktree_cleanup_view,
+        worktree_cleanup::worktree_cleanup_refresh,
+        worktree_cleanup::worktree_cleanup_prepare,
+        worktree_cleanup::worktree_cleanup_confirm,
+        worktree_cleanup::worktree_cleanup_close,
         session_files::session_file_dialog,
         session_files::session_file_check,
         session_files::session_file_download,

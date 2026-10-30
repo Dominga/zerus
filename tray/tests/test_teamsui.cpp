@@ -740,6 +740,7 @@ private slots:
     void draftUpdateRetriesAStaleRevision();
     void draftCreateSavesFirstAndShowsBlockersInRed();
     void templatesAreCompactWithSearchAndFavourites();
+    void templateListHidesItsOldRowsAtOnce();
     void dialogTemplateListAppliesOnlyWhenChosen();
     void designerSessionKeepsItsNameAndLeadsNoTeam();
     void nextGoalFromADoneTeam();
@@ -4421,6 +4422,28 @@ void TestTeamsUi::draftCreateSavesFirstAndShowsBlockersInRed()
     QCOMPARE(sent.at(0)["action"].toString(), QStringLiteral("update"));
     QCOMPARE(sent.at(0)["set"].toObject()["settings"].toObject()["max_members"].toInt(), 7);
     QCOMPARE(sent.last()["action"].toString(), QStringLiteral("create"));
+}
+
+// Owner, 2026-10-30 (Debian 13, KDE): New team showed the empty list's "No
+// template" row over the first template. A refill hides the old rows at once,
+// before their deferred delete, which a dialog's own event loop postpones.
+void TestTeamsUi::templateListHidesItsOldRowsAtOnce()
+{
+    const QJsonArray roster{QJsonObject{{"role", "backend"}, {"count", 1}}};
+    auto catalogObject = catalog()["catalog"].toObject();
+    catalogObject["templates"] = QJsonArray{
+        QJsonObject{{"id", "bugfix"}, {"name", "Bugfix"}, {"description", "One bug, one fix"}, {"roster", roster}},
+        QJsonObject{{"id", "feature"}, {"name", "Feature delivery"}, {"description", "Full feature"}, {"roster", roster}}};
+    const auto parsed = Teams::parseCatalog(QJsonObject{{"catalog", catalogObject}});
+    TeamTemplateList list;
+    list.resize(380, 320); list.show();
+    QCOMPARE(list.visibleIds(), QStringList{"-"});
+    // No event is processed in between, as inside a dialog's exec().
+    list.setCatalog(parsed);
+    QStringList shown;
+    for (auto *row : list.findChildren<QWidget *>("teamTemplateRow")) if (row->isVisibleTo(&list)) shown << row->property("template").toString();
+    shown.sort();
+    QCOMPARE(shown, (QStringList{"-", "bugfix", "feature"}));
 }
 
 // F6: many templates in a compact list with a search field and favourites; the

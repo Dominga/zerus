@@ -801,7 +801,13 @@ fn deliver(app: &AppHandle, changes: Changes) {
 
 fn publish(app: &AppHandle, desk: &Desk, mode: OpenMode) {
     #[cfg(target_os = "linux")]
-    crate::platform::linux_tray::offer(app, desk.face(), desk.tooltip(), desk.menu(mode));
+    crate::platform::linux_tray::offer(
+        app,
+        desk.face(),
+        desk.tooltip(),
+        desk.menu(mode),
+        desk.badge(),
+    );
     #[cfg(target_os = "macos")]
     {
         let (face, tooltip, menu, badge) =

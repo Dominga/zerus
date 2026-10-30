@@ -92,6 +92,16 @@ Automatic, Tab, Window and Clipboard, reads `open-mode`/`terminal` from
 Native protocol tests create a private D-Bus daemon and fake Plasma watcher;
 they never connect to the desktop's bus.
 
+The same Linux connection exports Qt's launcher badge at
+`/org/hgdev/Zerus/LauncherEntry`, using `com.canonical.Unity.LauncherEntry`
+`Query`/`Update` for `application://hgs-tray.desktop`. Its signed 64-bit `count`
+and `count-visible` follow the existing desk attention count even while a menu
+is open; zero or unavailable counters hide it. The existing tray worker watches
+Plasma/Unity registration and coalesces republication after one second, without
+another poller or thread. Normal exit clears the badge and fences late offers.
+The shell owns its appearance; the tray tile, menu and activation routes stay
+unchanged. This remains the GUI's legacy authority until a G1 writer handoff.
+
 Linux attention uses `org.freedesktop.Notifications`, with Qt's literal body
 escaping, action labels, icon and hints. The existing desk decides attention;
 the adapter adds no fleet reader or detector. It stores native IDs in

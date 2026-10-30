@@ -27,6 +27,20 @@ pub const FRESH_SECONDS: f64 = 30.0;
 /// The largest catalog reply.
 pub const CATALOG_LIMIT: usize = 2 * 1024 * 1024;
 
+/// Existing saved-cache decoding, without constructing/pruning a live catalog.
+/// The filesystem loader reads at most twice the writer's bound; migration
+/// separately validates the cache envelope and preserves original snapshots.
+pub fn decode_saved(bytes: &[u8]) -> Option<Value> {
+    (bytes.len() <= 2 * SNAPSHOT_BYTES)
+        .then(|| serde_json::from_slice(bytes).ok())
+        .flatten()
+}
+
+pub(crate) fn catalog_shape(value: &Value) -> bool {
+    value.get("worktrees").is_some_and(Value::is_array)
+        && value.get("state").is_some_and(Value::is_string)
+}
+
 fn hgs_args(computer: &ComputerId, words: &[&str]) -> Vec<String> {
     let mut args: Vec<String> = computer
         .alias()
@@ -322,12 +336,10 @@ impl Catalogs {
             return Err("Folder changed. Refresh its catalog.".into());
         }
         object.insert("received_at".into(), Value::from(now.floor()));
-        if !object.get("worktrees").is_some_and(Value::is_array)
-            || !object.get("state").is_some_and(Value::is_string)
-        {
+        let data = Value::Object(object);
+        if !catalog_shape(&data) {
             return Err("Invalid worktree catalog response".into());
         }
-        let data = Value::Object(object);
         let key = self.key(host, path);
         self.snapshots.insert(key, data.clone());
         if data["state"] == "ok" {

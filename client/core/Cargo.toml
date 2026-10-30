@@ -24,6 +24,7 @@ zerus-desktop-migration = { path = "../../crates/desktop-migration" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+socket2 = "0.6"
 
 # Konsole tabs and raising over the session D-Bus (libdbus); the Linux app
 # turns it on, while the crate's own checks build without it.

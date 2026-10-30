@@ -142,7 +142,7 @@ fn load(file: &Path) -> Option<Value> {
     if bytes.len() as u64 > limit {
         return None;
     }
-    serde_json::from_slice(&bytes).ok()
+    worktrees::decode_saved(&bytes)
 }
 
 /// Replaces `file` through a sibling, so a crash never leaves half of it.

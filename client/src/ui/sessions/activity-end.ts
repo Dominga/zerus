@@ -9,7 +9,7 @@ export const animationFrames: AnimationFrames = { request: (callback) => request
  * Layout and browser scroll anchoring never revoke the pin. The owner
  * releases it on explicit user scroll intent or before restoring an older page.
  */
-export function createActivityEnd(read: () => ScrollGeometry, writeEnd: () => void, frames: AnimationFrames = animationFrames, canWrite: () => boolean = () => true) {
+export function createActivityEnd(read: () => ScrollGeometry, writeEnd: () => void, frames: AnimationFrames = animationFrames, canWrite: () => boolean = () => true, placed: () => void = () => {}) {
   let active = false, disposed = false, epoch = 0;
   let frame: number | undefined;
   let last: ScrollGeometry | undefined;
@@ -21,8 +21,12 @@ export function createActivityEnd(read: () => ScrollGeometry, writeEnd: () => vo
       if (mine !== epoch || !active || disposed) return;
       frame = undefined;
       if (!canWrite()) return;
-      writeEnd();
+      const now = read();
+      // A stable verification frame must not write the same position again:
+      // WebKit sends overflow scrolling through its asynchronous compositor.
+      if (Math.abs(now.top - Math.max(0, now.height - now.viewport)) > 1) writeEnd();
       last = read();
+      if (Math.abs(last.top - Math.max(0, last.height - last.viewport)) <= 1) placed();
       if (verify) schedule(false);
     });
   };

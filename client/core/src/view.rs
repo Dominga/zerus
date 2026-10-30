@@ -113,6 +113,8 @@ pub struct ViewRow {
     pub resumable: bool,
     pub activity: String,
     pub process_state: String,
+    /// `process_work.count`, -1 when unknown.
+    pub background: i64,
     pub archive_id: Option<String>,
     /// The latest reply and the attention it raised, for marking them read.
     pub reply_id: Option<String>,
@@ -1199,6 +1201,7 @@ pub fn row(value: &Value) -> ViewRow {
             .unwrap_or(false),
         activity: session.activity.to_owned(),
         process_state: session.process_state.to_owned(),
+        background: session.background,
         archive_id: some(text(value, "archive_id")),
         reply_id: some(text(value, "reply_id")),
         attention_signature: some(text(value, "attention_signature")),
@@ -1539,6 +1542,7 @@ mod tests {
                 attention_fingerprint: "[\"\",\"\",\"\",null,{}]".into(),
                 // Qt's default for a row without a state (`HgsClient.cpp`).
                 state: "running".into(),
+                background: -1,
                 terminal_supported: true,
                 bulk_lifecycle_supported: true,
                 // Unknown counts are -1, never 0 (`HgsClient.cpp:169-174`, `:194-201`).
@@ -1710,6 +1714,9 @@ mod tests {
         );
         assert_eq!(view.summary, "2 running commands: npm run dev");
         assert_eq!(view.turn_started, Some(1787840000.0));
+        assert_eq!(view.background, 2);
+        assert_eq!(serde_json::to_value(&view).unwrap()["background"], 2);
+        assert_eq!(row(&json!({})).background, -1);
     }
 
     #[test]

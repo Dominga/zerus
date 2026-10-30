@@ -1,10 +1,12 @@
+import { createActivityScroll } from "./activity-scroll";
+import { activityReadingRows, createActivityAnchor } from "./activity-anchor";
 import { searchPreview, clearSearchPreview } from "../../store/searchSelection";
 import { SearchHighlight } from "./SearchHighlight";
-import { For, Show, createContext, createEffect, createMemo, createSignal, on, onCleanup, onMount, useContext } from "solid-js";
-import { attachmentOpen } from "../../bridge";
+import { For, Show, batch, createContext, createEffect, createMemo, createSignal, on, onCleanup, onMount, useContext } from "solid-js";
+import { attachmentFetch, attachmentOpen, copyVerbatim } from "../../bridge";
 import { notify } from "../../store/actions";
 import { previews } from "../../store/attachments";
-import { cardTarget, createOpen } from "./attachment-card";
+import { cardTarget, createOpen, readCards } from "./attachment-card";
 import { createStore, reconcile } from "solid-js/store";
 import { Icon } from "../lib/icons";
 import { selected, toast, contentScale, subagentOpen, setSubagentOpen, setMenu, setDetailTab, type MenuEntry } from "../../store/ui";
@@ -16,13 +18,13 @@ import { composer, draftKey } from "../../store/composer";
 import { terminal } from "../../store/terminal";
 import type { LocalMessage } from "../../types";
 import { animationFrames, createActivityEnd, newLocalSends } from "./activity-end";
-import { buildTranscript, VOICE_STATE_LABEL, voiceStateDetail, voiceStateIssue } from "./transcript";
+import { buildTranscript, createTranscriptProjection, VOICE_STATE_LABEL, voiceStateDetail, voiceStateIssue } from "./transcript";
 import { DELETE_TEXT, DELETE_TITLE, retryReason, routeInspect } from "./local-actions";
 import { inlineParts, markdownBlocks } from "./markdown";
 import { openExternal, openSessionFile } from "./sessionFiles";
 import { SessionFileDialog } from "./SessionFileDialog";
 import { statusOf } from "./SessionCard";
-import type { ItemAttachment, LocalItem, MediaMessage, Session, TranscriptItem } from "./types";
+import type { ActivityItem, ItemAttachment, LocalItem, MediaMessage, Session, TranscriptItem } from "./types";
 
 // ---------------------------------------------------------------------------
 // Reading column (ActivityWidth.h): 900 px at 100% content scale, 480–2400,
@@ -144,13 +146,24 @@ function activityMenu(e: MouseEvent) {
 // Transcript
 
 const copyText = (text: string, what: string) => {
-  void navigator.clipboard?.writeText(text).then(() => toast("Copied", what), () => toast("Not copied", "The clipboard is unavailable", "error"));
+  void copyVerbatim(text).then(() => toast("Copied", what), () => toast("Not copied", "The clipboard is unavailable", "error"));
 };
 
 // Inline Markdown stays text except its links: HTTP(S) uses the system
 // opener, and local/file references open the session's File reference dialog.
 
 const ActivitySession = createContext<() => Session | undefined>();
+const ActivityLayoutHeld = createContext<() => boolean>(() => false);
+
+/** Keep disclosure geometry while a gesture or persistent selection owns
+ * layout. In particular, shrinking offscreen content would clamp WebKit's
+ * scrollTop even without an application scroll write (zerus-5wmh.85). */
+function layoutDisclosure() {
+  const held = useContext(ActivityLayoutHeld);
+  const [wanted, setWanted] = createSignal(false);
+  const open = createMemo((previous: boolean) => held() ? previous : wanted(), false);
+  return [open, () => setWanted((value) => !value)] as const;
+}
 
 function inline(text: string, session?: () => Session | undefined) {
   return inlineParts(text).map((part) => {
@@ -247,7 +260,7 @@ function Waveform(props: { values: number[] }) {
 
 function MediaCard(props: { item: MediaMessage }) {
   const it = props.item;
-  const [transcript, setTranscript] = createSignal(false);
+  const [transcript, toggleTranscript] = layoutDisclosure();
   const [position, setPosition] = createSignal(0);
   let timer: number | undefined;
   const stop = () => { clearInterval(timer); timer = undefined; if (playing() === it.id) setPlaying(undefined); };
@@ -294,7 +307,7 @@ function MediaCard(props: { item: MediaMessage }) {
               <span class="vp-caption tabular">{mediaTime(position())} / {mediaTime(it.durationMs)}</span>
             </div>
           </div>
-          <Show when={it.transcript}><TranscriptButton open={transcript()} onToggle={() => setTranscript(!transcript())} /></Show>
+          <Show when={it.transcript}><TranscriptButton open={transcript()} onToggle={toggleTranscript} /></Show>
         </div>
       }>
         {/* The round video plays in place: click plays or pauses; a ring shows progress. */}
@@ -314,7 +327,7 @@ function MediaCard(props: { item: MediaMessage }) {
             </span>
             <span class="vm-time tabular">{position() > 0 ? `${mediaTime(position())} / ` : ""}{mediaTime(it.durationMs)}</span>
           </button>
-          <Show when={it.transcript}><TranscriptButton open={transcript()} onToggle={() => setTranscript(!transcript())} /></Show>
+          <Show when={it.transcript}><TranscriptButton open={transcript()} onToggle={toggleTranscript} /></Show>
         </div>
       </Show>
       <Show when={transcript() && it.transcript}><p class="vm-text">{it.transcript}</p></Show>
@@ -347,22 +360,17 @@ function AttachmentCard(props: { file: ItemAttachment; scope?: AttachmentScope }
     const state = previews.state(now.computer, now.ref);
     return state.kind === "ready" && state.fetched.thumbnail ? state.url : undefined;
   };
+  const contents = () => <>
+    <Show when={props.file.image}>
+      <span class="att-thumb"><Show when={thumbnail()}>{(url) => <img src={url()} alt="" onError={() => { const now=target(); if(now)previews.failed(now.computer,now.ref); }} />}</Show></span>
+    </Show>
+    <span class="att-caption">{props.file.caption}</span>
+    <span class="dim">{props.file.meta}</span>
+    <span class="att-open" style={{ visibility: target() ? "visible" : "hidden" }}>Open →</span>
+  </>;
   return (
-    <Show when={target()} fallback={<span class="att-card">Attachment: {props.file.name}</span>}>
-      {(now) => (
-        <button class="att-card" title={props.file.caption} onClick={() => void openAttachment(now().computer, now().ref)}>
-          <Show when={props.file.image}>
-            <span class="att-thumb">
-              <Show when={thumbnail()}>
-                {(url) => <img src={url()} alt="" onError={() => previews.failed(now().computer, now().ref)} />}
-              </Show>
-            </span>
-          </Show>
-          <span class="att-caption">{props.file.caption}</span>
-          <span class="dim">{props.file.meta}</span>
-          <span class="att-open">Open →</span>
-        </button>
-      )}
+    <Show when={target()} fallback={<span class="att-card" title={`Attachment: ${props.file.name}`}>{contents()}</span>}>
+      {(now) => <button class="att-card" title={props.file.caption} onClick={() => void openAttachment(now().computer,now().ref)}>{contents()}</button>}
     </Show>
   );
 }
@@ -434,8 +442,70 @@ function LocalDeleteDialog() {
   );
 }
 
+function ItemBody(props: { item: ActivityItem; scope?: AttachmentScope }) {
+  const it = props.item;
+  return (
+    <div class="act-body">
+      <Show when={it.kind === "user"} fallback={<Body text={it.body ?? ""} />}>
+        {/* A Codex question reply reads as Question and Your answer blocks (ActivityView.cpp:347-363). */}
+        <Show when={it.replies?.length} fallback={<Body text={it.body ?? ""} />}>
+          <For each={it.replies}>{(r) => (
+            <div class="act-reply">
+              <div class="act-reply-q">Question</div>
+              <p class="wrap-pre">{r.question}</p>
+              <div class="act-reply-a"><b>Your answer</b><p class="wrap-pre">{r.answer}</p></div>
+            </div>
+          )}</For>
+        </Show>
+      </Show>
+      <Show when={it.local?.error}><p class="act-error">{it.local!.error}</p></Show>
+      <Show when={it.code}><pre class="act-code mono">{it.code}</pre></Show>
+      <Show when={it.attachments}>
+        <div class="act-attachments">
+          <For each={it.attachments}>{(a) => (
+            // Reserve the same card geometry before its delivery receipt arrives.
+            // A missing request remains read-only; it never authorizes a file read.
+            <AttachmentCard file={a} scope={props.scope} />
+          )}</For>
+        </div>
+      </Show>
+      <Show when={it.local?.actions.length}><LocalActions local={it.local!} /></Show>
+    </div>
+  );
+}
+
+function EchoBody(props: { item: ActivityItem; scope?: AttachmentScope }) {
+  const request = createMemo(() => {
+    const files = props.item.attachments;
+    if (!props.scope || !files?.length) return undefined;
+    return { scope: props.scope, files };
+  }, undefined, { equals: (a, b) => JSON.stringify(a) === JSON.stringify(b) });
+  const [answer, setAnswer] = createSignal<{ current?: { scope: AttachmentScope; files: ItemAttachment[] }; done: boolean; ok: boolean }>({ done: false, ok: false });
+  createEffect(on(request, (current) => {
+    if (!current) { setAnswer({ current, done: true, ok: false }); return; }
+    let live = true;
+    setAnswer({ current, done: false, ok: false });
+    void readCards(current.files, current.scope, attachmentFetch).then((files) => {
+      if (live) setAnswer({ current, done: true, ok: !!files });
+    });
+    onCleanup(() => { live = false; });
+  }));
+  const state = () => {
+    const current = request();
+    if (!current) return "raw";
+    const now = answer();
+    if (now.current !== current || !now.done) return "loading";
+    return now.ok ? "cards" : "raw";
+  };
+  return <>
+    <Show when={state() === "cards"}><ItemBody {...props} /></Show>
+    <Show when={state() === "raw"}><ItemBody {...props} item={{ ...props.item, body: props.item.echoBody, attachments: undefined }} /></Show>
+    <Show when={state() === "loading"}><ItemBody {...props} item={{ ...props.item, attachments: undefined }} /></Show>
+  </>;
+}
+
 function Item(props: { item: TranscriptItem; scope?: AttachmentScope }) {
-  const [open, setOpen] = createSignal(false);
+  const [open, toggleOpen] = layoutDisclosure();
   const it = props.item;
   if (it.kind === "media") return <MediaCard item={it} />;
   if (it.kind === "context") return <div class="act-label eyebrow" id={`item-${it.id}`}>{it.body}</div>;
@@ -444,14 +514,14 @@ function Item(props: { item: TranscriptItem; scope?: AttachmentScope }) {
     return (
       <div class="act-notice" id={`item-${it.id}`} classList={{ open: open() }}>
         <div class="row"><Icon name="bot" size={13} /><b>{it.title}</b><Show when={it.sender}><span class="muted">from {it.sender}</span></Show><span class="grow" /><span class="act-time">{it.at}</span></div>
-        <button class="link" onClick={() => setOpen(!open())}>{open() ? "▾ Hide report" : "▸ Show report"}</button>
+        <button class="link" onClick={toggleOpen}>{open() ? "▾ Hide report" : "▸ Show report"}</button>
         <Show when={open()}><p class="act-notice-body">{it.body}</p></Show>
       </div>
     );
   return (
     <Show when={it.kind !== "tools" && it.kind !== "tool"} fallback={
       <div class="act-tools" id={`item-${it.id}`} classList={{ open: open(), warn: !!it.warn }}>
-        <button class="act-tools-head" onClick={() => setOpen(!open())} aria-expanded={open()}>
+        <button class="act-tools-head" onClick={toggleOpen} aria-expanded={open()}>
           <Icon name="chevron-right" size={12} class="chev" />
           <b>{it.title}</b>
           <Show when={it.kind === "tools"}><span class="muted">/ {it.body}</span></Show>
@@ -474,34 +544,9 @@ function Item(props: { item: TranscriptItem; scope?: AttachmentScope }) {
           <span class="grow" />
           <Show when={it.kind === "agent"}><button class="icon-btn small act-copy" title="Copy as Markdown" onClick={() => copyText(it.body ?? "", "The reply is on the clipboard")}><Icon name="copy" size={12} /></button></Show>
         </header>
-        <div class="act-body">
-          <Show when={it.kind === "user"} fallback={<Body text={it.body ?? ""} />}>
-            {/* A Codex question reply reads as Question and Your answer blocks (ActivityView.cpp:347-363). */}
-            <Show when={it.replies?.length} fallback={<p>{it.body}</p>}>
-              <For each={it.replies}>{(r) => (
-                <div class="act-reply">
-                  <div class="act-reply-q">Question</div>
-                  <p class="wrap-pre">{r.question}</p>
-                  <div class="act-reply-a"><b>Your answer</b><p class="wrap-pre">{r.answer}</p></div>
-                </div>
-              )}</For>
-            </Show>
-          </Show>
-          <Show when={it.local?.error}><p class="act-error">{it.local!.error}</p></Show>
-          <Show when={it.code}><pre class="act-code mono">{it.code}</pre></Show>
-          <Show when={it.attachments}>
-            <div class="act-attachments">
-              <For each={it.attachments}>{(a, i) => (
-                // A local row's file without its request or cached copy only names itself (ActivityView.cpp:765, 780);
-                // the others are Qt's attachment card.
-                <Show when={!it.local || it.local.available[i()]} fallback={<span class="att-card">Attachment: {a.name}</span>}>
-                  <AttachmentCard file={a} scope={props.scope} />
-                </Show>
-              )}</For>
-            </div>
-          </Show>
-          <Show when={it.local?.actions.length}><LocalActions local={it.local!} /></Show>
-        </div>
+        <Show when={it.echoBody} fallback={<ItemBody item={it} scope={props.scope} />}>
+          <EchoBody item={it} scope={props.scope} />
+        </Show>
       </article>
     </Show>
   );
@@ -509,8 +554,6 @@ function Item(props: { item: TranscriptItem; scope?: AttachmentScope }) {
 
 /** Within this distance of the top, scrolling reads the previous page. */
 const OLDER_EDGE = 120;
-/** Within this distance of the bottom, new events keep the view at the bottom. */
-const STICK_EDGE = 48;
 
 // The jump to the latest activity (ActivityView.cpp 1607-1636): whether the
 // view follows the newest item, how many events arrived since it stopped,
@@ -520,7 +563,7 @@ const [following, setFollowing] = createSignal(true);
 const [unseen, setUnseen] = createSignal(0);
 /** The mounted transcript's scroller (one Activity view shows at a time). */
 let liveScroller: HTMLDivElement | undefined;
-let liveEnd: ReturnType<typeof createActivityEnd> | undefined;
+let liveLatest: (() => void) | undefined;
 export { following, unseen };
 
 /**
@@ -538,8 +581,7 @@ export function jumpToLatest() {
   if (searchPreview()) { clearSearchPreview(); return; }
   setFollowing(true);
   setUnseen(0);
-  liveEnd?.pin();
-  liveScroller?.scrollTo({ top: liveScroller.scrollHeight, behavior: "instant" });
+  liveLatest?.();
 }
 
 /** The transcript items of a source, with the open session's local rows. */
@@ -590,15 +632,35 @@ export function ActivityView(props: { source?: ActivitySource }) {
   /** The live follow unless the detail passes another source (an archived row's). */
   const source = (): ActivitySource => props.source ?? activity;
   let scroller!: HTMLDivElement;
+  const [placed, setPlaced] = createSignal(false);
+  const [layoutHeld, setLayoutHeld] = createSignal(false);
   // Items keep their identity while events append: the list reconciles by id,
   // so a growing tool group updates in place and older pages only add nodes.
-  const [view, setView] = createStore<{ items: TranscriptItem[] }>({ items: [] });
+  const [view, setView] = createStore<{ items: TranscriptItem[]; expired: boolean; loaded: boolean; pane: ReturnType<typeof paneStates>; tool: string }>({ items: [], expired: false, loaded: false, pane: paneStates(source(), s()), tool: "" });
   const local = createMemo(() => localRows(source(), s()), undefined, { equals: (a, b) => a === b || (a.length === 0 && b.length === 0) });
-  const built = createMemo(() => transcriptOf(source(), local()));
-  createEffect(() => setView("items", reconcile(built(), { key: "id" })));
+  const projection = createTranscriptProjection();
+  let projectedTarget: string | undefined;
+  const built = createMemo(() => {
+    const target = source().target()?.id;
+    if (target !== projectedTarget) { projection.reset(); projectedTarget = target; }
+    return projection.build(source().events(), source().summary(), local());
+  });
+  createEffect(() => {
+    const items = built(), loaded = source().loaded();
+    const expired = source().olderDone() && source().events().length > 0 && source().summary()?.history_truncated === true;
+    const pane = paneStates(source(), s());
+    const summary = source().summary(), tool = String(summary?.current_tool || summary?.activity_summary || s()?.summary || "");
+    resetTarget();
+    holdSelection();
+    motion.update(() => {
+      settleReading(true);
+      setView("items", reconcile(items, { key: "id" }));
+      setView({ expired, loaded, pane, tool });
+      reading.changed(); end.changed();
+    });
+  });
 
-  // Stay at the bottom while it is in view; keep the reading position when an older page lands above.
-  let anchor: { height: number; top: number } | undefined;
+  // Keep a named row and its offset while the end pin is released.
   /** The newest event's seq the view has seen, for the count of new ones. */
   let newest: number | undefined;
   const selectionInside = () => {
@@ -610,49 +672,94 @@ export function ActivityView(props: { source?: ActivitySource }) {
     () => ({ top: scroller.scrollTop, height: scroller.scrollHeight, viewport: scroller.clientHeight }),
     () => scroller.scrollTo({ top: scroller.scrollHeight, behavior: "instant" }),
     animationFrames,
-    () => !selectionInside(),
+    () => !motion.active() && !selectionInside(),
+    () => { if (view.loaded || view.items.length) setPlaced(true); },
   );
-  let manualAway = false;
-  let touchY: number | undefined;
-  const scrollAway = () => { end.release(); manualAway = true; setFollowing(false); };
+  let latestAfterScroll = false;
+  const motion = createActivityScroll(() => scroller.scrollTop, (flush) => {
+    const atEnd = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= 1;
+    const pinned = end.active();
+    reading.remember();
+    batch(() => { setLayoutHeld(false); flush(); });
+    if ((pinned || atEnd || latestAfterScroll) && !preview()) { latestAfterScroll = false; setFollowing(true); setUnseen(0); reading.reset(); end.pin(); }
+    else reading.changed();
+  });
+  const reading = createActivityAnchor({
+    visible: () => activityReadingRows(scroller).visible(),
+    offset: (key) => activityReadingRows(scroller).offset(key),
+    adjust: (delta) => activityReadingRows(scroller).adjust(delta),
+  }, () => !end.active() && !preview(), animationFrames, () => !motion.active() && !selectionInside());
+  const holdSelection = () => {
+    if (selectionInside()) { setLayoutHeld(true); motion.selection(true); }
+  };
+  const settleReading = (before = false) => { if (before) reading.beforeChange(); else reading.changed(); };
+  const scrollIntent = () => {
+    setLayoutHeld(true); motion.intent(); latestAfterScroll = false;
+    end.release(); setFollowing(false); reading.remember();
+  };
+  const latest = () => {
+    holdSelection();
+    if (motion.active()) { latestAfterScroll = true; return; }
+    reading.reset(); end.pin();
+    scroller.scrollTo({ top: scroller.scrollHeight, behavior: "instant" });
+  };
   onMount(() => {
     liveScroller = scroller;
-    liveEnd = end;
-    const selectionChanged = () => end.changed();
+    liveLatest = latest;
+    const pointerEnded = () => motion.release();
+    window.addEventListener("pointerup", pointerEnded); window.addEventListener("pointercancel", pointerEnded); window.addEventListener("blur", pointerEnded);
+    onCleanup(() => { window.removeEventListener("pointerup", pointerEnded); window.removeEventListener("pointercancel", pointerEnded); window.removeEventListener("blur", pointerEnded); });
+    const selectionChanged = () => {
+      const inside = selectionInside();
+      if (inside) setLayoutHeld(true);
+      motion.selection(inside);
+    };
     document.addEventListener("selectionchange", selectionChanged);
     // Content includes Markdown, images and tool disclosures; the viewport
     // also resizes when the composer or a question card changes height.
-    const resize = new ResizeObserver(() => end.changed());
+    const changed = () => { end.changed(); settleReading(); };
+    const resize = new ResizeObserver(changed);
     resize.observe(scroller);
     const column = scroller.querySelector(".act-col");
-    if (column) resize.observe(column);
-    onCleanup(() => { document.removeEventListener("selectionchange", selectionChanged); resize.disconnect(); });
+    const mutations = new MutationObserver(changed);
+    if (column) {
+      resize.observe(column);
+      mutations.observe(column, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["class", "style", "src", "width", "height", "hidden", "open"] });
+    }
+    scroller.addEventListener("load", changed, true);
+    scroller.addEventListener("contentvisibilityautostatechange", changed, true);
+    document.fonts?.addEventListener("loadingdone", changed);
+    onCleanup(() => { document.removeEventListener("selectionchange", selectionChanged); resize.disconnect(); mutations.disconnect(); scroller.removeEventListener("load", changed, true); scroller.removeEventListener("contentvisibilityautostatechange", changed, true); document.fonts?.removeEventListener("loadingdone", changed); });
   });
   onCleanup(() => {
-    end.dispose();
+    end.dispose(); reading.dispose(); motion.dispose();
     if (liveScroller === scroller) liveScroller = undefined;
-    if (liveEnd === end) liveEnd = undefined;
+    if (liveLatest === latest) liveLatest = undefined;
   });
   const onScroll = () => {
-    // A first render or a resize can emit scroll before the pin's frame.
-    // It must not turn following off or trigger an older-page read.
-    if (end.scrolled()) return;
-    const atBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < (manualAway ? 1 : STICK_EDGE);
-    if (atBottom) manualAway = false;
-    if (atBottom !== following()) setFollowing(atBottom);
-    if (atBottom && unseen()) setUnseen(0);
-    if (scroller.scrollTop < OLDER_EDGE && readsOlder(source())) {
-      anchor = { height: scroller.scrollHeight, top: scroller.scrollTop };
-      source().loadOlder();
+    if (motion.active()) {
+      motion.moved(); reading.remember();
+      if (!preview() && scroller.scrollTop < OLDER_EDGE && readsOlder(source())) source().loadOlder();
+      return;
     }
+    if (end.scrolled()) return;
+    reading.changed();
   };
   let sendIds: Set<string> | undefined;
-  createEffect(on(() => source().target()?.id, () => {
-    sendIds = undefined;
-    setFollowing(true); setUnseen(0); anchor = undefined; newest = undefined; manualAway = false;
+  let layoutTarget: string | undefined | null = null;
+  const resetTarget = () => {
+    const target = source().target()?.id;
+    if (layoutTarget === target) return;
+    layoutTarget = target;
+    // An explicit session switch ends its old selection. Do this before the
+    // first new projection, so a held range cannot defer a cached first page.
+    if (selectionInside()) document.getSelection()?.removeAllRanges();
+    sendIds = undefined; setPlaced(false);
+    motion.reset(); setLayoutHeld(false); latestAfterScroll = false; setFollowing(true); setUnseen(0); reading.reset(); newest = undefined;
     // Selection changes must place even when the next page has the same row count.
     end.pin();
-  }));
+  };
+  createEffect(on(() => source().target()?.id, resetTarget));
   createEffect(on(local, (rows) => {
     const sends = newLocalSends(sendIds, rows.map((row) => row.id));
     sendIds = sends.baseline;
@@ -660,9 +767,10 @@ export function ActivityView(props: { source?: ActivitySource }) {
   }));
   createEffect(on(preview, (match) => {
     if (match) {
-      end.release(); manualAway = true; setFollowing(false);
-      requestAnimationFrame(() => scroller.querySelector(".search-preview mark")?.scrollIntoView({ block: "center" }));
-    } else { manualAway = false; setFollowing(true); end.pin(); }
+      setPlaced(true);
+      motion.reset(); setLayoutHeld(false); end.release(); reading.reset(); setFollowing(false);
+      requestAnimationFrame(() => { if (!motion.active() && !selectionInside()) scroller.querySelector(".search-preview mark")?.scrollIntoView({ block: "center" }); });
+    } else { setFollowing(true); end.pin(); }
   }));
   // Events after the newest one seen count as new while the view does not follow (Qt's m_unseen).
   createEffect(on(() => source().events(), (events) => {
@@ -674,39 +782,40 @@ export function ActivityView(props: { source?: ActivitySource }) {
     }
     if (last !== undefined) newest = last;
   }));
-  createEffect(on(() => view.items.length, () => {
-    queueMicrotask(() => {
-      if (!scroller) return;
-      if (anchor && !following()) {
-        const grown = scroller.scrollHeight - anchor.height;
-        if (grown > 0) scroller.scrollTo({ top: anchor.top + grown, behavior: "instant" });
-        anchor = undefined;
-      } else if (end.active()) end.changed();
-      else if (following()) scroller.scrollTo({ top: scroller.scrollHeight, behavior: "instant" });
-    });
-  }));
 
-  const summary = () => source().summary();
+
   const scope = createMemo(() => source().attachmentScope?.(), undefined, { equals: (a, b) => JSON.stringify(a) === JSON.stringify(b) });
-  const liveTool = () => String(summary()?.current_tool || summary()?.activity_summary || s()?.summary || "");
-  const states = createMemo(() => paneStates(source(), s()));
+  const liveTool = () => view.tool;
+  const states = () => view.pane;
   const fileSession = () => {
     const id = source().target()?.id;
     return orderedRows().find((row) => row.key === id);
   };
   return (
     <ActivitySession.Provider value={fileSession}>
-    <div class="activity">
+    <ActivityLayoutHeld.Provider value={layoutHeld}>
+    <div class="activity" style={{ position: "relative" }}>
+      <Show when={!placed()}>
+        <div class="act-col" style={{ position: "absolute", inset: "0", "min-height": "0", "pointer-events": "none" }} role="status">
+          <div class="act-label eyebrow">Recorded activity — messages and tool excerpts</div>
+          <div class="act-older hint">Reading activity…</div>
+        </div>
+      </Show>
       <LocalDeleteDialog />
       <SessionFileDialog />
-      <div class="act-scroll" ref={scroller} tabindex="-1" onContextMenu={activityMenu} onScroll={onScroll}
-        onWheel={(e) => { if (e.deltaY < 0) scrollAway(); }}
-        onKeyDown={(e) => { if (!e.defaultPrevented && ["ArrowUp", "PageUp", "Home"].includes(e.key)
-          && !(e.target as HTMLElement).closest("input,textarea,select")) scrollAway(); }}
-        onPointerDown={(e) => { if (e.target === scroller) scrollAway(); }}
-        onTouchStart={(e) => { touchY = e.touches[0]?.clientY; }}
-        onTouchMove={(e) => { const y = e.touches[0]?.clientY; if (y !== undefined && touchY !== undefined && y > touchY) scrollAway(); touchY = y; }}>
-        <div class="act-col">
+      <div class="act-scroll" ref={scroller} tabindex="-1" onContextMenu={activityMenu} onScroll={onScroll} style={{ "overflow-anchor": "none" }}
+        onWheel={scrollIntent}
+        onKeyDown={(e) => { if (!e.defaultPrevented && ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(e.key)
+          && !(e.target as HTMLElement).closest("input,textarea,select,[contenteditable=true]") && !(e.key === " " && (e.target as HTMLElement).closest("button,a"))) { scrollIntent(); } }}
+        onPointerDown={(e) => { if (e.button === 0 && !(e.target as HTMLElement).closest("button,a,input,textarea,.col-edge")) {
+          // The scrollbar releases follow. Selecting text merely pauses it;
+          // the persistent range keeps ownership after pointerup.
+          if (e.target === scroller) scrollIntent();
+          else setLayoutHeld(true);
+          motion.hold();
+        } }}
+        onTouchStart={() => { scrollIntent(); motion.hold(); }} onTouchMove={scrollIntent} onTouchEnd={() => motion.release()} onTouchCancel={() => motion.release()}>
+        <div class="act-col" style={{ visibility: placed() ? "visible" : "hidden" }}>
           <Show when={!fullWidth()}><ColumnEdge /><ColumnEdge right /></Show>
           <Show when={subagentOpen()}>
             <div class="subagent-bar">
@@ -721,13 +830,15 @@ export function ActivityView(props: { source?: ActivitySource }) {
             <div class="search-preview-body"><SearchHighlight text={String(p().hit.event.detail ?? "")} query={p().query} /></div>
           </section>}</Show>
           <Show when={!preview()}>
-          <div class="act-label eyebrow">Recorded activity — messages and tool excerpts</div>
-          <Show when={source().loadingOlder()}><div class="act-older hint">Reading earlier activity…</div></Show>
-          <Show when={source().olderDone() && source().events().length > 0 && summary()?.history_truncated === true}>
+          <div class="act-label eyebrow" style={{ position: "relative" }}>
+            <span style={{ visibility: source().loadingOlder() ? "hidden" : "visible" }}>Recorded activity — messages and tool excerpts</span>
+            <span class="act-older hint" style={{ position: "absolute", inset: "0", padding: "0", display: "flex", "align-items": "center", "justify-content": "center", "text-transform": "none", "letter-spacing": "normal", "font-weight": "normal", visibility: source().loadingOlder() ? "visible" : "hidden" }} aria-hidden={!source().loadingOlder()}>Reading earlier activity…</span>
+          </div>
+          <Show when={view.expired}>
             <div class="act-older hint">Older events have expired from the journal.</div>
           </Show>
           <Show when={!states().archived} fallback={<div class="notice"><Icon name="archive" size={14} /><div>This conversation is archived.</div></div>}>
-            <Show when={source().loaded() || view.items.length} fallback={<div class="act-older hint">Reading activity…</div>}>
+            <Show when={view.loaded || view.items.length} fallback={<div class="act-older hint">Reading activity…</div>}>
               <Show when={view.items.length} fallback={<div class="act-older hint">No recorded activity yet.</div>}>
                 <For each={view.items}>{(it) => <Item item={it} scope={scope()} />}</For>
               </Show>
@@ -755,6 +866,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
         </div>
       </div>
     </div>
+    </ActivityLayoutHeld.Provider>
     </ActivitySession.Provider>
   );
 }

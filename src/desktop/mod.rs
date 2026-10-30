@@ -1,8 +1,10 @@
 //! Durable desktop service kernel. Pre-handoff it owns no fleet or effect writer.
+mod catalog_read;
 mod fanout;
 mod feed;
 mod handoff;
 mod import_evidence;
+mod owner;
 mod presence_admission;
 mod protocol;
 mod registration;
@@ -28,7 +30,7 @@ use std::{
 use store::{Location, Store};
 use transport::{Listener, Stream, TIMEOUT};
 
-const USAGE: &str = "usage: hgs desktop serve [--config-dir DIR --state-dir DIR] | status [--json] | watch --json | feed --json | request --json | registration --json | revoke --json [--request-id UUID] [--reason rollback] | import-evidence --json | import-status --json --import-id UUID";
+const USAGE: &str = "usage: hgs desktop serve [--config-dir DIR --state-dir DIR] | status [--json] | owner-status --json | watch --json | feed --json | request --json | registration --json | revoke --json [--request-id UUID] [--reason rollback] | import-evidence --json | import-status --json --import-id UUID";
 const HEARTBEAT: Duration = Duration::from_secs(10);
 pub const STARTUP_REFUSED: i32 = 78;
 
@@ -118,6 +120,10 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
             }
             ["import-status", "--json", "--import-id", id] => {
                 println!("{}", import_evidence::status(&location, id)?);
+                Ok(())
+            }
+            ["owner-status", "--json"] => {
+                println!("{}", owner::status(&location));
                 Ok(())
             }
             ["status", "--json"] => {
@@ -212,14 +218,15 @@ fn projection(
     subscribers: usize,
     migration: &Value,
     feed: &feed::Broker,
+    reads: &catalog_read::Reader,
 ) -> Value {
     json!({"abi":ABI,"version":env!("CARGO_PKG_VERSION"),"schema":store::SCHEMA,
         "configuration":location.configuration,"generation":store.generation,"epoch":epoch,
         "running":true,"ownership":"passive","writers_enabled":false,"handoff":"required",
         "upstreams":[],"complete":false,"subscribers":subscribers,"automatic_approvals":false,
         "pending":{"reads":store.read_status()["pending"],"posting":0,"approvals":0},"errors":[],"migration":migration,"effect_journal":store.effect_status(),"read_queue":store.read_status(),
-        "catalog_projection":store.catalog_status(),
-        "passive_feed":feed.status(),
+        "catalog_projection":store.catalog_status(),"operation_queue":store.operation_status(),
+        "passive_feed":feed.status(),"catalog_reads":reads.status(),
         "limits":{"subscribers":protocol::SUBSCRIBERS,"queue_bytes":protocol::QUEUE_BYTES,
             "frame_bytes":protocol::FRAME_BYTES,"control_bytes":protocol::CONTROL_BYTES,"ingress_bytes":feed::INGRESS_BYTES,
             "feed_producers":1,"feed_frame_bytes":feed::LINE_BYTES,"connections":protocol::CONNECTIONS},
@@ -259,6 +266,7 @@ fn serve(location: Location) -> Result<()> {
     let stopped = Arc::new(AtomicBool::new(false));
     let active = Arc::new(AtomicUsize::new(0));
     let mut feed = feed::Broker::new(&epoch);
+    let mut reads = catalog_read::Reader::default();
     // At most16 queued controls/data, thirteen bounded parsers and one passive
     // producer. No upstream reader starts here; later sources share this actor.
     let (send, receive) = mpsc::sync_channel(protocol::PENDING);
@@ -315,7 +323,15 @@ fn serve(location: Location) -> Result<()> {
     while platform::shutdown_signal() == 0 {
         match receive.recv_timeout(Duration::from_millis(200)) {
             Ok(Event::Command(hello, queue)) => {
-                let value = projection(&location, &store, &epoch, fanout.len(), &migration, &feed);
+                let value = projection(
+                    &location,
+                    &store,
+                    &epoch,
+                    fanout.len(),
+                    &migration,
+                    &feed,
+                    &reads,
+                );
                 let mut streaming = false;
                 let reply = if hello.abi != ABI || hello.configuration != location.configuration {
                     frame(
@@ -334,7 +350,13 @@ fn serve(location: Location) -> Result<()> {
                 } else if hello.op == "status" && hello.request.is_none() {
                     frame(&epoch, seq, "status", value)
                 } else if hello.op == "request" {
-                    let result = request(&location, &mut store, hello.request.as_ref());
+                    let result = if hello.request.as_ref().is_some_and(|v| {
+                        matches!(v["op"].as_str(), Some("catalog_page" | "catalog_close"))
+                    }) {
+                        reads.request(&store, &feed, &epoch, hello.request.as_ref().unwrap())
+                    } else {
+                        request(&location, &mut store, hello.request.as_ref())
+                    };
                     migration = handoff::inspect(&location);
                     frame(&epoch, seq, "response", result)
                 } else {
@@ -412,7 +434,15 @@ fn serve(location: Location) -> Result<()> {
             store.recover_effects(&epoch);
             seq += 1;
             migration = handoff::inspect(&location);
-            let value = projection(&location, &store, &epoch, fanout.len(), &migration, &feed);
+            let value = projection(
+                &location,
+                &store,
+                &epoch,
+                fanout.len(),
+                &migration,
+                &feed,
+                &reads,
+            );
             fanout.publish(protocol::encode(&frame(&epoch, seq, "heartbeat", value))?.into());
             heartbeat = Instant::now() + HEARTBEAT;
         }

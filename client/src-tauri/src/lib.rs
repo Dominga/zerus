@@ -21,6 +21,8 @@ mod content_search;
 mod creations;
 #[cfg(feature = "live")]
 mod desk;
+#[cfg(all(feature = "live", any(target_os = "linux", target_os = "macos")))]
+mod desktop_hello;
 mod display;
 #[cfg(feature = "live")]
 mod drops;
@@ -191,8 +193,18 @@ pub fn run() {
             } else {
                 instance::Activation::Show
             };
-            match instance::claim(&name, identity.launchd_label(), activation) {
-                instance::Claim::Claimed(claimed) => Some(claimed),
+            #[cfg(feature = "live")]
+            let (reply, responder) = desktop_hello::prepare(&identity);
+            #[cfg(feature = "live")]
+            let reply = Some(reply);
+            #[cfg(not(feature = "live"))]
+            let reply = None;
+            match instance::claim(&name, identity.launchd_label(), activation, reply) {
+                instance::Claim::Claimed(claimed) => {
+                    #[cfg(feature = "live")]
+                    desktop_hello::configure(responder, identity.is_switch());
+                    Some(claimed)
+                }
                 instance::Claim::Forwarded => {
                     eprintln!("zerus-client: already running");
                     return;
@@ -381,9 +393,11 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     draft_path,
                     replay,
                 );
-                organization.seed_runs(organization::run_seed_source(
+                let qt_source = organization::run_seed_source(
                     &app.state::<identity::Identity>().bundle_id, replay,
-                ));
+                );
+                organization.seed_runs(qt_source.clone());
+                organization.recover_qt(qt_source,app.state::<settings::Store>().0.clone());
                 // Before any start of the source (the menu bar's below, or the webview's).
                 app.state::<commands::AppState>().set_organization(organization.clone());
                 let screens = screens::Screens::tauri(app.handle().clone(), pump.clone());

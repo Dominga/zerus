@@ -384,18 +384,53 @@ private quarantine metadata and retries for failed families. Row density keeps
 Qt's bounded packed hashes, matches exact host/raw-command/archive/conversation
 identity and persists new choices without rereading a handled Qt family.
 `client/core::migration` supplies bounded staged evidence over the existing
-creation/read decoders and task forms/delivery records; original states and
-identities are preserved without replay. Its transport client streams to G1's
-selected publisher with exact capability/configuration checks, bounded pipes
+creation/read/task/launch decoders, separate repository-clone checkpoints,
+download indexes, organization observations/backups/drafts, provider operations
+and non-authoritative worktree caches, plus original draft-operation manifests
+and attachment references through the existing draft decoder. Qt and interim
+Next attention-observed history also has private bounded evidence through the
+existing seed parser, without notification delivery, withdrawal or token replay.
+Qt and Next local attention marks/read replies also retain original keys,
+unknown fields and pair order through the existing mark/file decoders, without
+applying, settling or converting them. Original states, identities and private
+unknown fields are preserved without replay. Its transport
+client streams to G1's selected publisher with exact capability/configuration checks, bounded pipes
 and source rechecks; it has no startup hook. The shared handoff contract lives
 in `crates/desktop-migration`; G1 owns the executable transport, secure publisher,
 marker phases and current drain. The first-G3 `task-preferences` family also
 imports a previously unhandled missing `tasks/onlySession` value once.
 
-Remaining source coverage includes `projectFolderSplit`,
-`removeWorktreeAfterTermination`, worktree snapshots, `pendingLaunches`,
-repository-clone pending state, `swarm/observed*`, `tray.conf`, task inspector
-geometry, `.zerus-files.json` and the rest of the interim stores listed below.
+Retained current Qt shared organization also recovers missing or
+`imported=false` catalogs through the existing missing-field initializer;
+existing causal values and tombstones win. The separate first-G3 local
+`organization-presentation` family records collapsed projects, session order
+and default project together in the existing local layout writer. Only these
+three fields may fill empty/null Next defaults under the coordinator's explicit
+2026-10-30 cosmetic exception; nonempty Next fields win, and handled families
+and the earlier run-memory seed never repeat. Both decoders share Qt's bounded
+legacy `groups` and `before_pin` restoration rules, preserving exact project
+and session identities without generating missing folder IDs or discarding an
+ambiguous bucket. Project vivid state remains private evidence until the UI
+consumer (`.66.2.30`, G3 dependent `.66.5.3.9`) lands; the approved future local
+setting is `projects/vivid/<exact-project-id>` with existing Next values winning.
+Local Windows folders remain private evidence until the Windows Next Projects
+model (`.66.2.31`, G3 dependent `.66.5.3.10`) exists. Neither creates a new
+organization-layout field or an independent G3 folder stack.
+
+The design owner's 2026-10-30 ruling retains `projectFolderSplit` and
+`tasks/inspectorSplit` as private typed evidence, with no Qt splitter decoding
+or seed, including when Next's Projects splitter lands. Tasks has no equivalent
+splitter; never map it onto a different inspector panel. The remembered
+`removeWorktreeAfterTermination` value also stays private evidence until the
+Terminate dialog owner (`.10`) may prefill its checkbox once, with explicit
+confirmation every time, never automatic-maintenance consent.
+
+The shared `tray.conf` also has bounded private evidence through its existing
+key parser; it preserves the original text without changing the selected CLI,
+terminal, polling or service settings. Remaining source coverage includes
+downloaded content and the rest of the interim stores listed below. Linux
+notification owner/token sources await the native worker/lease ownership seam;
+the existing native reader and one-time seed remain unchanged.
 Source discovery and production integration remain separate; adapters do not
 by themselves publish eligible evidence or transfer writer authority. The
 `approval_policies` adapter inspects Qt and interim Next choices together,
@@ -438,7 +473,7 @@ Implement the five remaining UI gaps: the Go to popup and shortcut-help dialog; 
 3. **Identity before defaults.** Import exact run/conversation/launch/archive/request/checkout ownership and causal versions first. Missing or conflicting evidence stays for review; never infer it from a display name, lexical path, timestamp or current filter.
 4. **No replay or privilege expansion.** Recovery uses read-only status/receipt checks. Automatic approvals remain off (Qt's former choice may be reported), and no notification, message, task, voice, cleanup or provider mutation is repeated automatically. **Microphone is not imported; the user chooses again**, because Qt's `QAudioDevice` ID names no client device.
 5. **Fail closed and preserve.** Invalid/truncated/unsupported records are quarantined, not dropped or rewritten as defaults. Re-running an importer is idempotent. Branches, ignored files, edited downloads and unknown local data remain untouched.
-6. **Rollback is not a new seed for a handled family.** The switch seed's settings, layout and drafts remain handled and never re-seed after rollback. Owner/coordinator ruling of 2026-10-30 permits one explicitly scoped, versioned first-G3 import of each previously unhandled family. Import only keys Next has not stored. Record the family, schema, source path, time, key names and hash of the bytes read. A source changed since the original switch is still eligible for a new family; record that observation without treating it as an error. A failed or partial family stays unhandled and retries at the next start. Later G3 versions may import only new families. Continued read-only access to Qt drafts through Saved drafts “From the previous Zerus app” (`client/src-tauri/src/composer/saved.rs`, `SavedDrafts.tsx`) and Recover does not re-import or replay them.
+6. **Rollback is not a new seed for a handled family.** The switch seed's settings, layout and drafts remain handled and never re-seed after rollback. Owner/coordinator ruling of 2026-10-30 permits one explicitly scoped, versioned first-G3 import of each previously unhandled family. Import only keys Next has not stored. The coordinator's narrow local-presentation exception permits `collapsed`, `order` and `default_project` to fill empty/null Next defaults once; nonempty Next values win and every other family retains strict key-presence precedence. Record the family, schema, source path, time, key names and hash of the bytes read. A source changed since the original switch is still eligible for a new family; record that observation without treating it as an error. A failed or partial family stays unhandled and retries at the next start. Later G3 versions may import only new families. Continued read-only access to Qt drafts through Saved drafts “From the previous Zerus app” (`client/src-tauri/src/composer/saved.rs`, `SavedDrafts.tsx`) and Recover does not re-import or replay them.
 7. **Local layout stays local.** The client's `organization-layout.json` is a local per-device store like Qt's local QSettings, not a synchronized second format. Shared organization uses the `hgs` replica; `.40`/`.47` local run memory and tokens do not create another sync protocol.
 8. **Connector boundary.** Connector settings import is read-only. Retirement never touches the `zerus-mobile-connector` unit or `~/.local/share/zerus-mobile` before `zerus-nmc8`; moving a live gateway is owner-approved.
 

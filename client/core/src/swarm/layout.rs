@@ -8,6 +8,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{self, Read};
 use std::path::Path;
 
+mod presentation;
+pub use presentation::{qt_presentation, PresentationSeed};
+
 /// The space between neighbouring ranks; an insert takes the middle.
 pub const GAP: u64 = 1 << 20;
 /// The most members the layout remembers.
@@ -114,7 +117,7 @@ struct Saved {
     extra: serde_json::Map<String, serde_json::Value>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Layout {
     collapsed: BTreeSet<String>,
     default_project: Option<String>,

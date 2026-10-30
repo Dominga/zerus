@@ -60,6 +60,7 @@ sources=(Cargo.toml Cargo.lock build.rs .cargo src scripts install.sh hgs hgs_st
   services/mobile/crypto/Cargo.toml services/mobile/crypto/src
   crates/replica/Cargo.toml crates/replica/Cargo.lock crates/replica/.cargo crates/replica/src
   crates/watch-protocol/Cargo.toml crates/watch-protocol/Cargo.lock crates/watch-protocol/.cargo crates/watch-protocol/src
+  client/core/Cargo.toml client/core/src
   crates/content-search/Cargo.toml crates/content-search/src
   crates/desktop-catalog/Cargo.toml crates/desktop-catalog/src
   crates/desktop-ledger/Cargo.toml crates/desktop-ledger/src
@@ -79,7 +80,7 @@ bash "$HOME/.local/src/hgs/.rust-build/install.sh"
 # Old callbacks and saved launch paths still refer to this checkout. Only publish
 # their entry points after a working native binary exists, using atomic renames.
 cd "$HOME/.local/src/hgs/.rust-build"
-copy="Cargo.toml Cargo.lock build.rs .cargo src crates scripts install.sh tests README.md LICENSE THIRD_PARTY_NOTICES.md docs mac-install.sh tmux.conf .gitignore"
+copy="Cargo.toml Cargo.lock build.rs .cargo src crates client/core/Cargo.toml client/core/src scripts install.sh tests README.md LICENSE THIRD_PARTY_NOTICES.md docs mac-install.sh tmux.conf .gitignore"
 (cd .. && rm -rf $copy)
 tar cf - $copy | tar xf - -C ..
 for entry in hgs hgs_state.py; do

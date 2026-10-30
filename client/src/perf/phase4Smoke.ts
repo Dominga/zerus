@@ -207,12 +207,51 @@ async function sendFollowStep() {
   selection.removeAllRanges();
   selection.addRange(range);
   await sleep(100);
-  const selectedTop = scroller.scrollTop;
-  disclosure.click();
-  await sleep(200);
-  if (scroller.scrollTop !== selectedTop) throw new Error("a text selection did not pause Activity follow");
-  selection.removeAllRanges();
-  await until(atEnd, 3000, "clearing the selection did not resume Activity follow");
+  const selectedTop = scroller.scrollTop, selectedHeight = scroller.scrollHeight;
+  const selectedText = selection.toString();
+  const originalScrollTo = scroller.scrollTo, scrollTo = originalScrollTo.bind(scroller);
+  const writes: unknown[] = [];
+  const frames: { top: number; height: number }[] = [];
+  scroller.scrollTo = (options?: ScrollToOptions | number, y?: number) => {
+    writes.push({ options, y });
+    if (typeof options === "number") scrollTo(options, y ?? 0);
+    else scrollTo(options);
+  };
+  try {
+    disclosure.click();
+    // Hold longer than the gesture idle timeout. New journal events must not
+    // alter layout or invalidate the selected range until it is cleared.
+    const target = activity.target()!;
+    const seq = Math.max(0, ...activity.events().map((event) => event.seq ?? 0)) + 1;
+    for (let n = 0; n < 30; n++) {
+      if (n % 5 === 0) activity.applyActivity([{ computer: target.computer, key: target.key, kind: "events", payload: {
+        events: [{ seq: seq + n, type: "Stop", source: "claude_hooks", detail: `Selection hold smoke ${n}`, at: 1_793_000_000 + seq + n }],
+      } }]);
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      frames.push({ top: scroller.scrollTop, height: scroller.scrollHeight });
+      log(`phase4-selection-frame ${JSON.stringify({ n, top: scroller.scrollTop, height: scroller.scrollHeight })}`);
+    }
+    await sleep(300);
+    log(`phase4-selection-hold ${JSON.stringify({ selectedTop, selectedHeight, writes, frames: frames.length })}`);
+    if (writes.length || frames.some((frame) => frame.top !== selectedTop || frame.height !== selectedHeight)
+      || scroller.scrollTop !== selectedTop) throw new Error("a text selection did not pause Activity follow");
+    if (selection.toString() !== selectedText) throw new Error("streaming invalidated the Activity selection");
+  } finally {
+    scroller.scrollTo = originalScrollTo;
+    selection.removeAllRanges();
+  }
+  await until(() => atEnd() && disclosure.getAttribute("aria-expanded") === "false"
+    && scroller.textContent?.includes("Selection hold smoke 25") === true, 3000, "clearing the selection did not resume Activity follow");
+  const again = document.createRange();
+  again.selectNodeContents(scroller.querySelector(".act-msg")!);
+  selection.addRange(again);
+  await sleep(100);
+  await select(PAGINATION);
+  await until(() => {
+    const next = document.querySelector<HTMLDivElement>(".act-scroll");
+    return next?.querySelector<HTMLDivElement>(".act-col")?.style.visibility === "visible" && selection.isCollapsed
+      && Math.abs(next.scrollHeight - next.scrollTop - next.clientHeight) < 2;
+  }, 3000, "the old selection blocked the next session's first placement");
 }
 
 async function coldStep() {
@@ -246,7 +285,12 @@ async function startStep() {
 async function processesStep() {
   await select(API);
   await setSetting("processes/enabled", true);
-  setDetailTab("processes");
+  document.querySelector<HTMLElement>(".scard.selected")!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 400, clientY: 300 }));
+  await until(() => [...document.querySelectorAll<HTMLButtonElement>("button")].some((candidate) => candidate.textContent?.trim() === "Show running commands"), 3000, "the background-job menu entry did not appear");
+  const commands = button("Show running commands");
+  if (commands.disabled) throw new Error("the background-job menu entry stayed disabled with live jobs and Processes on");
+  commands.click();
+  await until(() => processes.view()?.groups.length === 3, 15_000, "the menu did not open the process groups");
   await until(() => flag("processes/enabled") && processes.view()?.groups.length === 3, 15_000, "the three process groups did not appear")
     .catch((error) => {
       const view = processes.view();
@@ -269,6 +313,20 @@ async function previewStep() {
     const image = document.querySelector<HTMLImageElement>(".att-card .att-thumb img");
     return !!image && image.src.startsWith("zerus-file:") && image.complete && image.naturalWidth === 1;
   }, 10_000, "the convertFileSrc thumbnail did not decode");
+  await until(() => {
+    const message = [...document.querySelectorAll<HTMLElement>(".act-msg")].find((row) => row.textContent?.includes("Reconciled image message"));
+    const image = message?.querySelector<HTMLImageElement>(".att-card .att-thumb img");
+    return !!message && !message.textContent?.includes("Inspect the attached image")
+      && !!image && image.src.startsWith("zerus-file:") && image.complete && image.naturalWidth === 1;
+  }, 10_000, "the native image echo did not become a decoded attachment card");
+  const missing = [...document.querySelectorAll<HTMLElement>(".act-msg")].find((row) => row.textContent?.includes("Unreadable image stays raw"));
+  if (!missing?.textContent?.includes("Inspect the attached image") || missing.querySelector(".att-card")) {
+    throw new Error("an unreadable native image echo did not keep its raw text");
+  }
+  const reads = await calls("attachment");
+  for (const request of ["req-fixture-echo-image", "req-fixture-missing-image"]) {
+    if (!reads.some((entry) => entry.argv.includes(request))) throw new Error(`the echo did not use its guarded read: ${request}`);
+  }
 }
 
 async function questionStep() {

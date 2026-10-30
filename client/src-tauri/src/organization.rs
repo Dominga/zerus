@@ -129,6 +129,16 @@ struct Hub {
     /// Renames included in the next pending-draft checkpoint. Never acknowledge
     /// tokens before that checkpoint is durable, even if sync.edit succeeded.
     run_acks: VecDeque<(String, String)>,
+    qt_recovery: Option<QtRecovery>,
+    recovery_seen: Option<(String, bool)>,
+    recovery_due: Option<String>,
+    presentation_due: bool,
+}
+
+#[derive(Clone)]
+struct QtRecovery {
+    source: zerus_client_core::settings::QtStore,
+    settings: zerus_client_core::settings::Settings,
 }
 
 impl Hub {
@@ -176,6 +186,66 @@ struct Shared {
 pub struct Organization(Arc<Shared>);
 
 impl Organization {
+    /// Only the production switch supplies a source. Recovery is queued by
+    /// the existing local organization topic and runs on this hub's worker.
+    pub fn recover_qt(
+        &self,
+        source: Option<zerus_client_core::settings::QtStore>,
+        settings: zerus_client_core::settings::Settings,
+    ) {
+        if !self.0.allowed {
+            return;
+        }
+        let Some(source) = source else {
+            return;
+        };
+        let mut hub = self.lock();
+        hub.qt_recovery = Some(QtRecovery { source, settings });
+        hub.presentation_due = true;
+        if let Some(value) = hub.sync.observed_value() {
+            Self::queue_recovery(&mut hub, &value);
+        }
+        drop(hub);
+        self.0.wake.notify_all();
+    }
+
+    fn queue_recovery(hub: &mut Hub, value: &Value) {
+        if hub.qt_recovery.is_none() || hub.stopped {
+            return;
+        }
+        let (Some(node), Some(initialized)) =
+            (value["node_id"].as_str(), value["initialized"].as_bool())
+        else {
+            return;
+        };
+        let identity = (node.to_owned(), initialized);
+        if hub.recovery_seen.as_ref() != Some(&identity) {
+            hub.recovery_seen = Some(identity);
+            hub.recovery_due = Some(node.to_owned());
+        }
+    }
+
+    fn recover_presentation(&self, recovery: &QtRecovery) -> Result<(), String> {
+        if !self.0.layout_writable || self.0.pump.presentation_seeded()? {
+            return Ok(());
+        }
+        // The shared record builder uses the old switch time only to record
+        // a later Qt mtime. That observation never blocks this new family.
+        let seed_at = recovery
+            .settings
+            .seed_record()
+            .and_then(|record| record["at"].as_u64());
+        let seed = swarm::layout::qt_presentation(&recovery.source, &self.0.layout, seed_at)?;
+        let mut writer = self.writer();
+        self.0.pump.seed_presentation(seed)?;
+        writer.save_layout(&self.0.pump, &self.0.layout, self.0.layout_writable);
+        drop(writer);
+        let mut hub = self.lock();
+        hub.shown = None;
+        self.publish(&mut hub);
+        self.release(hub);
+        Ok(())
+    }
     pub fn new(
         pump: Pump,
         hgs: PathBuf,
@@ -368,6 +438,7 @@ impl Organization {
                     // The list shows a catalog now; the dropped draft's notice goes.
                     hub.notice = None;
                 }
+                Self::queue_recovery(&mut hub, value);
                 hub
             }
             OrganizationUpdate::Failed { message, .. } => {
@@ -660,6 +731,49 @@ impl Organization {
             if self.0.fail.load(SeqCst) {
                 panic!("a test stops the organization worker");
             }
+        }
+        let presentation = {
+            let mut hub = self.lock();
+            if hub.stopped || !std::mem::take(&mut hub.presentation_due) {
+                None
+            } else {
+                hub.qt_recovery.clone()
+            }
+        };
+        if let Some(recovery) = presentation {
+            if let Err(detail) = self.recover_presentation(&recovery) {
+                let mut hub = self.lock();
+                hub.sync.source_failed(&detail);
+                self.publish(&mut hub);
+                self.release(hub);
+            }
+            return;
+        }
+        // No source or settings I/O and no CLI call holds the hub, pump or
+        // writer lock. A failed false-state attempt retries at the next
+        // startup; a later initialized state can reconcile a lost reply.
+        let recovery = {
+            let mut hub = self.lock();
+            if hub.stopped {
+                None
+            } else {
+                hub.recovery_due.take().zip(hub.qt_recovery.clone())
+            }
+        };
+        if let Some((node, recovery)) = recovery {
+            if let Err(detail) = swarm::qt_import::recover(
+                &self.0.hgs,
+                &[],
+                &recovery.source,
+                &recovery.settings,
+                &node,
+            ) {
+                let mut hub = self.lock();
+                hub.sync.source_failed(&detail);
+                self.publish(&mut hub);
+                self.release(hub);
+            }
+            return;
         }
         self.runs_writer().request(false);
         let mut writer = self.writer();
@@ -1463,6 +1577,183 @@ mod tests {
             assert!(Instant::now() < deadline, "timed out waiting for {what}");
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    #[test]
+    fn presentation_import_checkpoints_with_its_record_and_a_second_start_never_reads_qt() {
+        let fake = Fake::landing();
+        let qt = fake.dir.join("synthetic-qt.conf");
+        let org = json!({"version":2,"default_project":"beta","projects":[
+            {"id":"alpha","name":"Alpha","collapsed":true,"sessions":["peer\ncodex/example/two","peer\ncodex/example/one"]},
+            {"id":"beta","name":"Beta","sessions":[]}]});
+        let original = format!(
+            "[workspace]\norganization={}\n",
+            serde_json::to_string(&org.to_string()).unwrap()
+        );
+        std::fs::write(&qt, &original).unwrap();
+        let mtime = std::fs::metadata(&qt).unwrap().modified().unwrap();
+        std::fs::write(
+            fake.layout(),
+            json!({"version":1,"collapsed":[],"order":{},"default_project":null,
+            "run_groups":[["peer\noriginal-run","next-run-project"]],"runs_seeded":true})
+            .to_string(),
+        )
+        .unwrap();
+        let settings_file = fake.dir.join("settings.json");
+        std::fs::write(
+            &settings_file,
+            json!({"version":1,"seed":{"at":0},"values":{}}).to_string(),
+        )
+        .unwrap();
+        let settings = zerus_client_core::settings::Settings::open(settings_file, None);
+        let pump = Pump::default();
+        let organization = fake.organization(&pump, true);
+        pump.present(&org, Arc::new(Default::default()), 1, SyncView::default());
+        organization.recover_qt(
+            Some(zerus_client_core::settings::QtStore::Ini(qt.clone())),
+            settings.clone(),
+        );
+        wait_until(
+            "the presentation family and values to checkpoint together",
+            || {
+                std::fs::read(fake.layout())
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                    .is_some_and(|value| value["g3_organization_presentation"]["version"] == 1)
+            },
+        );
+        let saved: Value = serde_json::from_slice(&std::fs::read(fake.layout()).unwrap()).unwrap();
+        assert_eq!(saved["collapsed"], json!(["alpha"]));
+        assert_eq!(saved["default_project"], "beta");
+        assert_eq!(pump.default_project(), "beta");
+        assert_eq!(
+            saved["run_groups"],
+            json!([["peer\noriginal-run", "next-run-project"]])
+        );
+        assert_eq!(
+            saved["g3_organization_presentation"]["source_mtime_after_switch"],
+            true
+        );
+        assert_eq!(std::fs::read_to_string(&qt).unwrap(), original);
+        assert_eq!(std::fs::metadata(&qt).unwrap().modified().unwrap(), mtime);
+        assert!(
+            !fake.dir.join("log.ndjson").exists(),
+            "local presentation runs no hgs command"
+        );
+        let runs = organization.runs_writer();
+        let shared = Arc::downgrade(&organization.0);
+        drop(organization);
+        wait_until("the first presentation worker to end", || {
+            shared.strong_count() == 0
+        });
+        runs.stop();
+
+        std::fs::write(&qt, b"[workspace]\norganization=malformed\n").unwrap();
+        let before = std::fs::read(fake.layout()).unwrap();
+        let pump = Pump::default();
+        let organization = fake.organization(&pump, true);
+        let before_parked = parked(&organization);
+        organization.recover_qt(
+            Some(zerus_client_core::settings::QtStore::Ini(qt)),
+            settings.clone(),
+        );
+        wait_until("the handled family's startup pass to finish", || {
+            parked(&organization) > before_parked
+        });
+        assert!(pump.presentation_seeded().unwrap());
+        assert!(!organization.lock().sync.view().status_error);
+        organization.flush();
+        assert_eq!(std::fs::read(fake.layout()).unwrap(), before);
+        assert!(!fake.dir.join("log.ndjson").exists());
+        drop(settings);
+        fake.finish(organization);
+    }
+
+    #[test]
+    fn a_refused_layout_also_blocks_presentation_import_without_reading_qt() {
+        let fake = Fake::landing();
+        let original = b"{\"version\":99,\"unknown\":\"retained\"}";
+        std::fs::write(fake.layout(), original).unwrap();
+        let organization = fake.organization(&Pump::default(), true);
+        let settings =
+            zerus_client_core::settings::Settings::open(fake.dir.join("settings.json"), None);
+        let recovery = QtRecovery {
+            source: zerus_client_core::settings::QtStore::Ini(fake.dir.clone()),
+            settings,
+        };
+        // The source is a directory: reading it would fail. The refused target
+        // must short-circuit before opening any source or replacing the layout.
+        assert!(organization.recover_presentation(&recovery).is_ok());
+        organization.flush();
+        assert_eq!(std::fs::read(fake.layout()).unwrap(), original);
+        fake.finish(organization);
+    }
+
+    #[test]
+    fn qt_recovery_uses_the_existing_worker_without_holding_ui_or_checkpoint_locks() {
+        let fake = Fake::landing();
+        let node = "11111111-1111-4111-8111-111111111111";
+        let qt = fake.dir.join("synthetic-qt.conf");
+        let org = json!({"version":2,"projects":[{"id":"alpha","name":"Qt project","color":"#123456","sessions":[],"folders":[]}]});
+        // QSettings text JSON: the entire value is quoted, not a string list.
+        let ini = format!(
+            "[workspace]\norganization={}\n",
+            serde_json::to_string(&org.to_string()).unwrap()
+        );
+        std::fs::write(&qt, &ini).unwrap();
+        let hash = zerus_client_core::settings::QtStore::Ini(qt.clone())
+            .snapshot()
+            .unwrap()
+            .unwrap()
+            .sha256;
+        std::fs::write(fake.dir.join("config.json"),json!({"g3-status":[{"gate":"recovery-gate","stdout":{"version":1,"node_id":node,"initialized":false,"gui_import_pending":false}}],
+            "g3-import":[{"stdout":{"schema":1,"node_id":node,"initialized":true,"organization":org,"g3_import":{"version":1,"source_sha256":hash}}}]}).to_string()).unwrap();
+        let settings =
+            zerus_client_core::settings::Settings::open(fake.dir.join("settings.json"), None);
+        let organization = fake.organization(&Pump::default(), true);
+        organization.recover_qt(
+            Some(zerus_client_core::settings::QtStore::Ini(qt.clone())),
+            settings.clone(),
+        );
+        organization.set_source(snapshot("d1"));
+        let mut observed = full("d1");
+        observed["node_id"] = json!(node);
+        observed["initialized"] = json!(false);
+        organization.observe(&state_of(&observed));
+        wait_until("the held recovery status", || {
+            std::fs::read_to_string(fake.dir.join("log.ndjson"))
+                .is_ok_and(|log| log.contains("--g3-status"))
+        });
+        let (sent, received) = std::sync::mpsc::channel();
+        let flushing = organization.clone();
+        let worker = std::thread::spawn(move || {
+            flushing.flush();
+            sent.send(()).unwrap();
+        });
+        received
+            .recv_timeout(Duration::from_secs(2))
+            .expect("a held CLI must not block checkpoint locks");
+        worker.join().unwrap();
+        organization.observe(&state_of(&observed)); // same false state never queues another import
+        std::fs::write(fake.dir.join("recovery-gate"), b"release").unwrap();
+        wait_until("the completed recovery record", || {
+            settings.organization_import().unwrap()
+                == zerus_client_core::settings::OrganizationImport::Handled
+        });
+        let log = std::fs::read_to_string(fake.dir.join("log.ndjson")).unwrap();
+        assert_eq!(
+            log.lines()
+                .filter(|line| line.contains("--g3-status"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            log.lines().filter(|line| line.contains("\"--g3\"")).count(),
+            1
+        );
+        assert_eq!(std::fs::read_to_string(qt).unwrap(), ini);
+        drop(settings);
+        fake.finish(organization);
     }
 
     /// The passes the worker finished.

@@ -246,19 +246,16 @@ export const processes = createProcesses({
   stop: (key, ids) => bridge.processesStop(key, ids),
 });
 
-/**
- * Qt's backgroundIdle (SessionPresentation.h:120-123): idle with confirmed
- * background jobs. The row carries no job count yet (core request
- * zerus-5wmh.65), so its status says it, with the attention acknowledged or not.
- */
-const backgroundIdle = (s: Pick<Session, "status" | "ackStatus">) => s.status === "background" || s.ackStatus === "background";
+/** Qt's backgroundIdle (SessionPresentation.h:120-123): idle with confirmed background jobs. */
+const backgroundIdle = (s: Pick<Session, "activity" | "phase" | "backgroundJobs">) =>
+  s.activity === "idle" && s.phase === "idle" && (s.backgroundJobs ?? 0) > 0;
 
 /**
  * The session menu's Show running commands (SessionsWindow.cpp:5297-5299,
  * 5463-5465): listed for a session with background work, enabled while its
  * computer is online and Processes is on, and checked again when chosen.
  */
-export function runningCommandsEntry(s: Pick<Session, "state" | "status" | "ackStatus">, online: () => boolean, enabled: () => boolean, open: () => void): Extract<MenuEntry, { label: string }> | undefined {
+export function runningCommandsEntry(s: Pick<Session, "state" | "activity" | "phase" | "backgroundJobs">, online: () => boolean, enabled: () => boolean, open: () => void): Extract<MenuEntry, { label: string }> | undefined {
   if (s.state === "archived" || !backgroundIdle(s)) return undefined;
   return {
     label: "Show running commands", icon: "activity", disabled: !(online() && enabled()),

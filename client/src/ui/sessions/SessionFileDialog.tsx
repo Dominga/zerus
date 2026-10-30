@@ -1,4 +1,5 @@
 import { createEffect, Show } from "solid-js";
+import { copyVerbatim } from "../../bridge";
 import { toast } from "../../store/ui";
 import { actOnSessionFile, closeSessionFile, downloadSessionFile, saveSessionFile, sessionFile } from "./sessionFiles";
 import { Icon } from "../lib/icons";
@@ -10,7 +11,7 @@ export function SessionFileDialog() {
   });
   const copyPath = () => {
     const path = sessionFile()?.path;
-    if (path) void navigator.clipboard?.writeText(path).then(() => toast("File reference", "Path copied"), () => toast("File reference", "The clipboard is unavailable"));
+    if (path) void copyVerbatim(path).then(() => toast("File reference", "Path copied"), () => toast("File reference", "The clipboard is unavailable"));
   };
   return (
     <Show when={sessionFile()}>

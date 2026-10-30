@@ -95,16 +95,32 @@ they never connect to the desktop's bus.
 Linux attention uses `org.freedesktop.Notifications`, with Qt's literal body
 escaping, action labels, icon and hints. The existing desk decides attention;
 the adapter adds no fleet reader or detector. It stores native IDs in
-`linux-notifications.json`, bound to the notification daemon's unique owner,
-and seeds Qt's `attention/linuxOwner` and `attention/linuxTokens` read-only on
-the switch identity's first start. `attention/observed` supplies the existing
-edge seed, so historical alerts are not reposted. Expired Plasma notifications
-stay clickable in history; withdrawal removes their exact token's IDs, and
-late replies to a withdrawn post are closed. Clicks preserve the activation
+`linux-notifications.json`, bound to the session bus's authenticated
+`org.freedesktop.DBus.GetId` and the notification daemon's exact unique owner.
+It reads Qt's `attention/linuxOwner` and `attention/linuxTokens` on the switch
+identity's first start. Owner-only Qt/older Next IDs cannot prove which bus
+generation owns their integers: their exact tokens become uncertain suppression,
+never numeric-ID activation or close authority. Clicking a Qt-era banner after
+the switch therefore does nothing in Next; attention still shows in the list,
+badge and tray, and the next new edge posts a bound notification. A daemon/bus
+change also retires its old IDs to suppression; it never permits an automatic
+repost. Only withdrawal of the original edge clears that suppression.
+`attention/observed` supplies the existing edge seed, so historical alerts are
+not reposted. Properly bound expired Plasma notifications stay clickable in
+history; withdrawal removes their exact token's IDs, and late replies to a
+withdrawn post close only on their verified original bus/owner. Clicks preserve the activation
 token and use the desk's guarded session resolution; update clicks verify the
 current update token separately. Unconfirmed native deliveries remain reserved
 across restart instead of being posted again. Invalid client state is preserved
 and posting stays disabled until it can be reviewed.
+
+The pure `zerus_client_core::linux_notify` module shares the existing schema-1
+saved-state decoder, namespace quarantine and literal body escaping. Its values
+are retained evidence, not authenticated connections or permission to post. It
+opens no files or buses and adds no dependencies. The GUI still owns its secure
+reader, Qt seed, persistence and OS calls. Importers must retain original source
+bytes and unknown fields separately from this projection. A future service
+transport and writer handoff require G1 admission and current producer drain.
 
 ## Build and run
 
@@ -594,7 +610,14 @@ clipboard. They are not writes: they need no row lock and show no "Updating…".
   8192 characters; otherwise the notice says "Could not read a session
   reference. Update hgs on this computer." Success shows the toast "Copied",
   "The session reference is on the clipboard".
-- The clipboard is written from Rust (tauri-plugin-clipboard-manager). A text
+- The clipboard is written from Rust. Linux tries Klipper's
+  `org.kde.klipper.klipper.setClipboardContents`, then `wl-copy`, then the
+  native clipboard plugin with exact read-back. Calls run off GTK's thread;
+  Klipper and the front helper have Qt's three-second timeout. The helper
+  gets exact text on anonymous memory-backed stdin, including leading dashes
+  and trailing newlines for verbatim copies; no copied body goes to argv or
+  disk. Its donor keeps null output streams and survives until the next
+  clipboard selection. No Qt clipboard or service is required. A text
   that is empty or holds a line break is refused with Qt's texts. A failure
   shows the sticky toast "Not copied" with the error. A success shows no
   notice, except for Copy session reference and the header's ID copy ("Copied",

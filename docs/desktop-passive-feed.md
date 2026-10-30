@@ -23,7 +23,9 @@ fingerprint and this request:
 ```
 
 Unknown fields, incompatible ABI/mode and noncanonical UUIDs refuse. One
-producer may own a configuration at a time. The service assigns a monotonically
+producer may own a configuration at a time. A rogue process running as that
+same user can hold this slot; the OS user is the trust boundary. The service
+assigns a monotonically
 increasing incarnation within its own epoch; the caller's UUID grants no
 identity or authority over a computer. Every source is bound to the service
 epoch, assigned incarnation, caller-selected computer alias and generation.
@@ -93,8 +95,9 @@ Storage limits and background collection stay unchanged. It publishes small
 `catalog_changed` invalidations through the existing single fanout: eight
 subscribers, each capped at 4 MiB / 1024 frames. Feed status exposes bounded
 source scopes, incomplete/complete display coverage, ingress counters and
-retirement errors. Indexed page delivery and GUI adaptation follow separately;
-this slice does not change GUI behavior.
+retirement errors. [Indexed page delivery](desktop-catalog-read.md) uses bounded
+read requests. GUI adaptation follows separately; this slice does not change
+GUI behavior.
 
 EOF, malformed data, a refused item or cancellation closes an atomic producer
 fence. Already-queued callbacks then refuse. Before a replacement may enter,

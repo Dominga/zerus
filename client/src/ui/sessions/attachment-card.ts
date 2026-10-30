@@ -1,5 +1,5 @@
 import type { AttachmentScope } from "../../store/activitySource";
-import type { AttachmentRef } from "../../types";
+import type { AttachmentRef, Fetched } from "../../types";
 import type { ItemAttachment } from "./types";
 
 // Activity attachment cards (ActivityView.cpp:759-782) and their Open
@@ -15,6 +15,21 @@ export function cardTarget(file: ItemAttachment, scope: AttachmentScope | undefi
       conversation_id: scope.conversation_id, archive_id: scope.archive_id, agent_id: null,
     },
   };
+}
+
+/** Reads every reconciled echo file before replacing its raw text with cards. */
+export async function readCards(
+  files: ItemAttachment[],
+  scope: AttachmentScope | undefined,
+  read: (computer: string, ref: AttachmentRef) => Promise<Fetched>,
+): Promise<Fetched[] | undefined> {
+  const targets = files.map((file) => cardTarget(file, scope));
+  if (!targets.length || targets.some((target) => !target)) return undefined;
+  try {
+    return await Promise.all(targets.map((target) => read(target!.computer, target!.ref)));
+  } catch {
+    return undefined;
+  }
 }
 
 /** One status line for an attachment being opened, as Qt's showNotice replaces its own. */

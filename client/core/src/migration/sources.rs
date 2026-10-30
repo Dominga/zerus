@@ -15,6 +15,28 @@ mod tasks;
 pub use tasks::{qt_task_forms, task_delivery, task_start_delivery};
 mod approvals;
 pub use approvals::approval_policies;
+mod launches;
+pub use launches::{qt_executor_launches, qt_pending_launches};
+mod clones;
+pub use clones::qt_repository_clones;
+mod downloads;
+pub use downloads::download_index;
+mod organization;
+pub use organization::{next_organization_draft, qt_organization_checkpoints};
+mod provider;
+pub use provider::provider_operations;
+mod worktrees;
+pub use worktrees::{next_worktree_snapshots, qt_worktree_snapshots};
+mod drafts;
+pub use drafts::draft_checkpoint;
+mod preferences;
+pub use preferences::qt_retained_view_preference;
+mod startup;
+pub use startup::tray_config;
+mod attention;
+pub use attention::{next_attention_observed, qt_attention_observed};
+mod local_reads;
+pub use local_reads::{next_local_read_marks, qt_local_read_marks};
 
 #[derive(Clone, Copy)]
 pub enum Origin {
@@ -122,12 +144,16 @@ fn valid_mark(mark: &ReadMark) -> SourceResult<()> {
 }
 
 fn qt_json(value: &QtValue) -> SourceResult<Value> {
+    qt_json_bounded(value, READ_BYTES)
+}
+
+fn qt_json_bounded(value: &QtValue, maximum: usize) -> SourceResult<Value> {
     let bytes = match value {
         QtValue::Bytes(bytes) => bytes.as_slice(),
         QtValue::Text(text) => text.as_bytes(),
         _ => return Err(SourceError::UnsupportedSource),
     };
-    if bytes.len() > READ_BYTES {
+    if bytes.len() > maximum {
         return Err(SourceError::TooLarge);
     }
     serde_json::from_slice(bytes).map_err(|_| SourceError::UnsupportedSource)

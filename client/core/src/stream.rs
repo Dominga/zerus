@@ -1129,7 +1129,14 @@ impl Supervisor {
                 Ok(Input::UnsubscribeProcesses { key, .. }) => {
                     self.state.processes_mut().unfollow(&key)
                 }
-                Ok(Input::SubscribeTasks { key }) => self.state.tasks_mut().follow(&key),
+                Ok(Input::SubscribeTasks { key }) => {
+                    self.state.tasks_mut().follow(&key);
+                    self.tasks_unavailable(
+                        &key,
+                        "disconnected",
+                        "The task connection was interrupted. Reconnecting…",
+                    );
+                }
                 Ok(Input::UnsubscribeTasks { key }) => self.state.tasks_mut().unfollow(&key),
                 Ok(Input::SubscribeOrganization) => self.subscribe_organization(),
                 Ok(Input::UnsubscribeOrganization) => self.unsubscribe_organization(),
@@ -1222,7 +1229,10 @@ impl Supervisor {
                 Ok(Input::UnsubscribeProcesses { key, .. }) => {
                     self.state.processes_mut().unfollow(&key)
                 }
-                Ok(Input::SubscribeTasks { key }) => self.state.tasks_mut().follow(&key),
+                Ok(Input::SubscribeTasks { key }) => {
+                    self.state.tasks_mut().follow(&key);
+                    self.tasks_unavailable(&key, "unsupported_topic", "This computer's hgs does not support task subscriptions. Update hgs and reconnect.");
+                }
                 Ok(Input::UnsubscribeTasks { key }) => self.state.tasks_mut().unfollow(&key),
                 Ok(Input::SubscribeOrganization) => self.subscribe_organization(),
                 Ok(Input::UnsubscribeOrganization) => self.unsubscribe_organization(),
@@ -1824,6 +1834,7 @@ impl Supervisor {
             return;
         }
         let Some(limit) = self.state.tasks_limit() else {
+            self.tasks_unavailable(key, "unsupported_topic", "This computer's hgs does not support task subscriptions. Update hgs and reconnect.");
             return;
         };
         if self.state.tasks().keys().position(|known| known == key) >= Some(limit) {
@@ -1838,6 +1849,16 @@ impl Supervisor {
             project: Some(key.to_owned()),
             ..Subscription::default()
         }));
+    }
+
+    fn tasks_unavailable(&mut self, key: &str, code: &str, message: &str) {
+        if let Some(change) = self
+            .state
+            .tasks_mut()
+            .unavailable(&self.computer, key, code, message)
+        {
+            self.emit(change);
+        }
     }
 
     fn unsubscribe_tasks(&mut self, key: &str) {

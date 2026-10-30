@@ -1,0 +1,1066 @@
+{
+  "abi": "desktop-operation-contract-v1",
+  "model_only": true,
+  "raw_record": "{\n  \"error\": \"Synthetic private host error\",\n  \"id\": \"00000002-1111-4111-8111-111111111111\",\n  \"intent\": {\n    \"plan\": {\n      \"id\": \"00000002-1111-4111-8111-111111111111\",\n      \"opaque_future\": {\n        \"keep\": \"private fixture only\"\n      },\n      \"project\": \"example-ёж\",\n      \"request\": {\n        \"attachments\": [],\n        \"expected_conversation_id\": \"fixture-conversation\",\n        \"expected_run_id\": \"fixture-worker\",\n        \"request_id\": \"00000002-1111-4111-8111-111111111111\",\n        \"text\": \"Synthetic private prompt / пример\"\n      },\n      \"revision\": \"fixture-revision\",\n      \"schema\": 1,\n      \"selection\": {\n        \"conversation_id\": \"fixture-conversation\",\n        \"host\": \"fixture-peer\",\n        \"name\": \"codex/example/worker\",\n        \"run_id\": \"fixture-worker\",\n        \"session_id\": \"run_id:fixture-worker\"\n      },\n      \"session\": {\n        \"machine\": \"fixture-machine\",\n        \"session\": \"codex/example/worker\",\n        \"session_id\": \"run_id:fixture-worker\"\n      },\n      \"stage_at\": 123,\n      \"target\": {\n        \"kind\": \"any\"\n      },\n      \"task\": \"00000001-1111-4111-8111-111111111111\"\n    }\n  },\n  \"phase\": \"review\",\n  \"schema\": 1\n}",
+  "retained_input": " \n{\n  \"id\": \"00000002-1111-4111-8111-111111111111\",\n  \"opaque_future\": {\n    \"keep\": \"private fixture only\"\n  },\n  \"project\": \"example-ёж\",\n  \"request\": {\n    \"attachments\": [],\n    \"expected_conversation_id\": \"fixture-conversation\",\n    \"expected_run_id\": \"fixture-worker\",\n    \"request_id\": \"00000002-1111-4111-8111-111111111111\",\n    \"text\": \"Synthetic private prompt / пример\"\n  },\n  \"revision\": \"fixture-revision\",\n  \"schema\": 1,\n  \"selection\": {\n    \"conversation_id\": \"fixture-conversation\",\n    \"host\": \"fixture-peer\",\n    \"name\": \"codex/example/worker\",\n    \"run_id\": \"fixture-worker\",\n    \"session_id\": \"run_id:fixture-worker\"\n  },\n  \"session\": {\n    \"machine\": \"fixture-machine\",\n    \"session\": \"codex/example/worker\",\n    \"session_id\": \"run_id:fixture-worker\"\n  },\n  \"stage_at\": 123,\n  \"target\": {\n    \"kind\": \"any\"\n  },\n  \"task\": \"00000001-1111-4111-8111-111111111111\"\n}\n ",
+  "binding": {
+    "key": {
+      "kind": "task_start_reconcile",
+      "schema": 1,
+      "configuration": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "project": "example-ёж",
+      "task": "00000001-1111-4111-8111-111111111111",
+      "request_id": "00000002-1111-4111-8111-111111111111"
+    },
+    "marker_id": "00000002-1111-4111-8111-111111111111",
+    "source_record_sha256": "b9a4dec7d11a5ae35598a5094431b788a183aa3700013a4baabd90b6bb6b0322",
+    "ui_snapshot_sha256": "f06a5bc3d2fc7c77bc27e7a495200029a108522135426b09f5ce04f26168753f",
+    "task_start_reconcile_input_v1_sha256": "2bbd674dc288ad380fcbcaae9c68d182aee59fe14ca57e426af6a773a4c888e2",
+    "executor": {
+      "machine": "fixture-machine",
+      "session_id": "run_id:fixture-worker",
+      "run_id": "fixture-worker",
+      "conversation_id": "fixture-conversation"
+    }
+  },
+  "expected_operation_id": "477802675ff7808e546c36520bdfb079fe9883f0af10aeaa5643910341fb30c3",
+  "expected_plan_sha256": "2bbd674dc288ad380fcbcaae9c68d182aee59fe14ca57e426af6a773a4c888e2",
+  "expected_consent_sha256": "cb11f51e3086b323c09dcd4318540fa6bee8f759d87f0ba0a1ca3ac1bc1ca835",
+  "tickets": {
+    "first": {
+      "operation_id": "477802675ff7808e546c36520bdfb079fe9883f0af10aeaa5643910341fb30c3",
+      "attempt_id": "00000003-1111-4111-8111-111111111111",
+      "revision": 1,
+      "admission_id": "00000004-1111-4111-8111-111111111111",
+      "binding_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "writer_epoch": "00000005-1111-4111-8111-111111111111",
+      "service_epoch": "00000006-1111-4111-8111-111111111111",
+      "lease": "00000007-1111-4111-8111-111111111111"
+    },
+    "second": {
+      "operation_id": "477802675ff7808e546c36520bdfb079fe9883f0af10aeaa5643910341fb30c3",
+      "attempt_id": "00000008-1111-4111-8111-111111111111",
+      "revision": 1,
+      "admission_id": "00000004-1111-4111-8111-111111111111",
+      "binding_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "writer_epoch": "00000005-1111-4111-8111-111111111111",
+      "service_epoch": "00000006-1111-4111-8111-111111111111",
+      "lease": "00000007-1111-4111-8111-111111111111"
+    },
+    "foreign": {
+      "operation_id": "477802675ff7808e546c36520bdfb079fe9883f0af10aeaa5643910341fb30c3",
+      "attempt_id": "00000003-1111-4111-8111-111111111111",
+      "revision": 1,
+      "admission_id": "00000004-1111-4111-8111-111111111111",
+      "binding_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "writer_epoch": "00000005-1111-4111-8111-111111111111",
+      "service_epoch": "00000006-1111-4111-8111-111111111111",
+      "lease": "00000009-1111-4111-8111-111111111111"
+    }
+  },
+  "cases": [
+    {
+      "name": "submitted-reserve-before-spawn-and-actual-drain",
+      "input_available": true,
+      "trace": [
+        {
+          "t": "explicit_lookup"
+        },
+        {
+          "t": "guard_current"
+        },
+        {
+          "t": "admitted"
+        },
+        {
+          "t": "reserved",
+          "ticket": "first",
+          "fresh": true
+        },
+        {
+          "t": "spawn",
+          "ticket": "first",
+          "input_sha256": "2bbd674dc288ad380fcbcaae9c68d182aee59fe14ca57e426af6a773a4c888e2"
+        },
+        {
+          "t": "finish",
+          "ticket": "first",
+          "outcome": "submitted",
+          "receipt_id": "00000002-1111-4111-8111-111111111111"
+        },
+        {
+          "t": "child_done",
+          "ticket": "first"
+        },
+        {
+          "t": "stdout_done",
+          "ticket": "first"
+        },
+        {
+          "t": "stderr_done",
+          "ticket": "first"
+        },
+        {
+          "t": "drained",
+          "ticket": "first"
+        },
+        {
+          "t": "release",
+          "ticket": "first"
+        }
+      ],
+      "expected_error": null
+    },
+    {
+      "name": "fresh-false-is-status-only",
+      "input_available": true,
+      "trace": [
+        {
+          "t": "guard_current"
+        },
+        {
+          "t": "admitted"
+        },
+        {
+          "t": "reserved",
+          "ticket": "first",
+          "fresh": false
+        },
+        {
+          "t": "status_only",
+          "ticket": "first"
+        }
+      ],
+      "expected_error": null
+    },
+    {
+      "name": "pressure-refuses-before-reservation",
+      "input_available": true,
+      "trace": [
+        {
+          "t": "guard_current"
+        },
+        {
+          "t": "admission_refused",
+          "reason": "pressure"
+        }
+      ],
+      "expected_error": null,
+      "unsettled": 32
+    },
+    {
+      "name": "revocation-before-reserve",
+      "input_available": true,
+      "trace": [
+        {
+          "t": "guard_current"
+        },
+        {
+          "t": "admitted"
+        },
+        {
+          "t": "revoke"
+        },
+        {
+          "t": "reserve_refused",
+          "reason": "revoked"
+        }
+      ],
+      "expected_error": null
+    },
+    {
+      "name": "missing-retained-input-is-review",
+      "input_available": false,
+      "trace": [
+        {
+          "t": "review",
+          "reason": "missing_retained_input"
+        }
+      ],
+      "expected_error": null
+    },
+    {
+      "name": "unknown-holds-admission-after-bounded-stop",
+      "input_available": true,
+      "trace": [
+        {
+          "t": "explicit_lookup"
+        },
+        {
+          "t": "guard_current"
+        },
+        {
+          "t": "admitted"
+        },
+        {
+          "t": "reserved",
+          "ticket": "first",
+          "fresh": true
+        },
+        {
+          "t": "spawn",
+          "ticket": "first",
+          "input_sha256": "2bbd674dc288ad380fcbcaae9c68d182aee59fe14ca57e426af6a773a4c888e2"
+        },
+        {
+          "t": "finish",
+          "ticket": "first",
+          "outcome": "unknown"
+        },
+        {
+          "t": "stop_returned",
+          "ticket": "first"
+        }
+      ],
+      "expected_error": null
+    },
+    {
+      "name": "unknown-releases-only-after-real-drain",
+      "input_available": true,
+      "trace": [
+        {
+          "t": "explicit_lookup"
+        },
+        {
+          "t": "guard_current"
+        },
+        {
+          "t": "admitted"
+        },
+        {
+          "t": "reserved",
+          "ticket": "first",
+          "fresh": true
+        },
+        {
+          "t": "spawn",
+          "ticket": "first",
+          "input_sha256": "2bbd674dc288ad380fcbcaae9c68d182aee59fe14ca57e426af6a773a4c888e2"
+        },
+        {
+          "t": "finish",
+          "ticket": "first",
+          "outcome": "unknown"
+        },
+        {
+          "t": "stop_returned",
+          "ticket": "first"
+        },
+        {
+          "t": "child_done",
+          "ticket": "first"
+        },
+        {
+          "t": "stdout_done",
+          "ticket": "first"
+        },
+        {
+          "t": "stderr_done",
+          "ticket": "first"
+        },
+        {
+          "t": "drained",
+          "ticket": "first"
+        },
+        {
+          "t": "release",
+          "ticket": "first"
+        }
+      ],
+      "expected_error": null
+    },
+    {
+      "name": "late-exact-result-after-revoke",
+      "input_available": true,
+      "trace": [
+        {
+          "t": "explicit_lookup"
+        },
+        {
+          "t": "guard_current"
+        },
+        {
+          "t": "admitted"
+        },
+        {
+          "t": "reserved",
+          "ticket": "first",
+          "fresh": true
+        },
+        {
+          "t": "spawn",
+          "ticket": "first",
+          "input_sha256": "2bbd674dc288ad380fcbcaae9c68d182aee59fe14ca57e426af6a773a4c888e2"
+        },
+        {
+          "t": "revoke"
+        },
+        {
+          "t": "finish",
+          "ticket": "first",
+          "outcome": "submitted",
+          "receipt_id": "00000002-1111-4111-8111-111111111111"
+        },
+        {
+          "t": "child_done",
+          "ticket": "first"
+        },
+        {
+          "t": "stdout_done",
+          "ticket": "first"
+        },
+        {
+          "t": "stderr_done",
+          "ticket": "first"
+        },
+        {
+          "t": "drained",
+          "ticket": "first"
+        },
+        {
+          "t": "release",
+          "ticket": "first"
+        }
+      ],
+      "expected_error": null
+    },
+    {
+      "name": "unknown-rejects-a-late-submitted-reply",
+      "input_available": true,
+      "trace": [
+        {
+          "t": "explicit_lookup"
+        },
+        {
+          "t": "guard_current"
+        },
+        {
+          "t": "admitted"
+        },
+        {
+          "t": "reserved",
+          "ticket": "first",
+          "fresh": true
+        },
+        {
+          "t": "spawn",
+          "ticket": "first",
+          "input_sha256": "2bbd674dc288ad380fcbcaae9c68d182aee59fe14ca57e426af6a773a4c888e2"
+        },
+        {
+          "t": "finish",
+          "ticket": "first",
+          "outcome": "unknown"
+        },
+        {
+          "t": "finish_rejected",
+          "ticket": "first",
+          "outcome": "submitted"
+        },
+        {
+          "t": "child_done",
+          "ticket": "first"
+        },
+        {
+          "t": "stdout_done",
+          "ticket": "first"
+        },
+        {
+          "t": "stderr_done",
+          "ticket": "first"
+        },
+        {
+          "t": "drained",
+          "ticket": "first"
+        },
+        {
+          "t": "release",
+          "ticket": "first"
+        }
+      ],
+      "expected_error": null
+    },
+    {
+      "name": "restart-recovers-unknown-without-pretending-drain",
+      "input_available": true,
+      "trace": [
+        {
+          "t": "explicit_lookup"
+        },
+        {
+          "t": "guard_current"
+        },
+        {
+          "t": "admitted"
+        },
+        {
+          "t": "reserved",
+          "ticket": "first",
+          "fresh": true
+        },
+        {
+          "t": "spawn",
+          "ticket": "first",
+          "input_sha256": "2bbd674dc288ad380fcbcaae9c68d182aee59fe14ca57e426af6a773a4c888e2"
+        },
+        {
+          "t": "restart"
+        },
+        {
+          "t": "recover_unknown",
+          "ticket": "first"
+        },
+        {
+          "t": "stop_returned",
+          "ticket": "first"
+        }
+      ],
+      "expected_error": null
+    },
+    {
+      "name": "second-explicit-lookup-keeps-original-input",
+      "input_available": true,
+      "trace": [
+        {
+          "t": "explicit_lookup"
+        },
+        {
+          "t": "guard_current"
+        },
+        {
+          "t": "admitted"
+        },
+        {
+          "t": "reserved",
+          "ticket": "first",
+          "fresh": true
+        },
+        {
+          "t": "spawn",
+          "ticket": "first",
+          "input_sha256": "2bbd674dc288ad380fcbcaae9c68d182aee59fe14ca57e426af6a773a4c888e2"
+        },
+        {
+          "t": "finish",
+          "ticket": "first",
+          "outcome": "unknown"
+        },
+        {
+          "t": "child_done",
+          "ticket": "first"
+        },
+        {
+          "t": "stdout_done",
+          "ticket": "first"
+        },
+        {
+          "t": "stderr_done",
+          "ticket": "first"
+        },
+        {
+          "t": "drained",
+          "ticket": "first"
+        },
+        {
+          "t": "release",
+          "ticket": "first"
+        },
+        {
+          "t": "guard_current"
+        },
+        {
+          "t": "explicit_lookup"
+        },
+        {
+          "t": "reserved",
+          "ticket": "second",
+          "fresh": true
+        },
+        {
+          "t": "spawn",
+          "ticket": "second",
+          "input_sha256": "2bbd674dc288ad380fcbcaae9c68d182aee59fe14ca57e426af6a773a4c888e2"
+        },
+        {
+          "t": "finish",
+          "ticket": "second",
+          "outcome": "submitted",
+          "receipt_id": "00000002-1111-4111-8111-111111111111"
+        },
+        {
+          "t": "child_done",
+          "ticket": "second"
+        },
+        {
+          "t": "stdout_done",
+          "ticket": "second"
+        },
+        {
+          "t": "stderr_done",
+          "ticket": "second"
+        },
+        {
+          "t": "drained",
+          "ticket": "second"
+        },
+        {
+          "t": "release",
+          "ticket": "second"
+        }
+      ],
+      "expected_error": null
+    },
+    {
+      "name": "spawn-without-reservation",
+      "input_available": true,
+      "trace": [
+        {
+          "t": "guard_current"
+        },
+        {
+          "t": "admitted"
+        },
+        {
+          "t": "spawn",
+          "ticket": "first",
+          "input_sha256": "2bbd674dc288ad380fcbcaae9c68d182aee59fe14ca57e426af6a773a4c888e2"
+        }
+      ],
+      "expected_error": "reserve_before_spawn"
+    },
+    {
+      "name": "fresh-false-cannot-spawn",
+      "input_available": true,
+      "trace": [
+        {
+          "t": "guard_current"
+        },
+        {
+          "t": "admitted"
+        },
+        {
+          "t": "reserved",
+          "ticket": "first",
+          "fresh": false
+        },
+        {
+          "t": "spawn",
+          "ticket": "first",
+          "input_sha256": "2bbd674dc288ad380fcbcaae9c68d182aee59fe14ca57e426af6a773a4c888e2"
+        }
+      ],
+      "expected_error": "fresh_reservation_required"
+    },
+    {
+      "name": "wrong-ticket-cannot-finish",
+      "input_available": true,
+      "trace": [
+        {
+          "t": "explicit_lookup"
+        },
+        {
+          "t": "guard_current"
+        },
+        {
+          "t": "admitted"
+        },
+        {
+          "t": "reserved",
+          "ticket": "first",
+          "fresh": true
+        },
+        {
+          "t": "spawn",
+          "ticket": "first",
+          "input_sha256": "2bbd674dc288ad380fcbcaae9c68d182aee59fe14ca57e426af6a773a4c888e2"
+        },
+        {
+          "t": "finish",
+          "ticket": "foreign",
+          "outcome": "submitted",
+          "receipt_id": "00000002-1111-4111-8111-111111111111"
+        }
+      ],
+      "expected_error": "exact_ticket_required"
+    },
+    {
+      "name": "unknown-outcome-is-immutable",
+      "input_available": true,
+      "trace": [
+        {
+          "t": "explicit_lookup"
+        },
+        {
+          "t": "guard_current"
+        },
+        {
+          "t": "admitted"
+        },
+        {
+          "t": "reserved",
+          "ticket": "first",
+          "fresh": true
+        },
+        {
+          "t": "spawn",
+          "ticket": "first",
+          "input_sha256": "2bbd674dc288ad380fcbcaae9c68d182aee59fe14ca57e426af6a773a4c888e2"
+        },
+        {
+          "t": "finish",
+          "ticket": "first",
+          "outcome": "unknown"
+        },
+        {
+          "t": "finish",
+          "ticket": "first",
+          "outcome": "submitted",
+          "receipt_id": "00000002-1111-4111-8111-111111111111"
+        }
+      ],
+      "expected_error": "terminal_outcome_immutable"
+    },
+    {
+      "name": "bounded-stop-is-not-drain",
+      "input_available": true,
+      "trace": [
+        {
+          "t": "explicit_lookup"
+        },
+        {
+          "t": "guard_current"
+        },
+        {
+          "t": "admitted"
+        },
+        {
+          "t": "reserved",
+          "ticket": "first",
+          "fresh": true
+        },
+        {
+          "t": "spawn",
+          "ticket": "first",
+          "input_sha256": "2bbd674dc288ad380fcbcaae9c68d182aee59fe14ca57e426af6a773a4c888e2"
+        },
+        {
+          "t": "finish",
+          "ticket": "first",
+          "outcome": "unknown"
+        },
+        {
+          "t": "stop_returned",
+          "ticket": "first"
+        },
+        {
+          "t": "drained",
+          "ticket": "first"
+        }
+      ],
+      "expected_error": "actual_drain_required"
+    },
+    {
+      "name": "stdout-drain-is-not-enough",
+      "input_available": true,
+      "trace": [
+        {
+          "t": "explicit_lookup"
+        },
+        {
+          "t": "guard_current"
+        },
+        {
+          "t": "admitted"
+        },
+        {
+          "t": "reserved",
+          "ticket": "first",
+          "fresh": true
+        },
+        {
+          "t": "spawn",
+          "ticket": "first",
+          "input_sha256": "2bbd674dc288ad380fcbcaae9c68d182aee59fe14ca57e426af6a773a4c888e2"
+        },
+        {
+          "t": "finish",
+          "ticket": "first",
+          "outcome": "submitted",
+          "receipt_id": "00000002-1111-4111-8111-111111111111"
+        },
+        {
+          "t": "child_done",
+          "ticket": "first"
+        },
+        {
+          "t": "stdout_done",
+          "ticket": "first"
+        },
+        {
+          "t": "drained",
+          "ticket": "first"
+        }
+      ],
+      "expected_error": "actual_drain_required"
+    },
+    {
+      "name": "release-needs-drained-proof",
+      "input_available": true,
+      "trace": [
+        {
+          "t": "explicit_lookup"
+        },
+        {
+          "t": "guard_current"
+        },
+        {
+          "t": "admitted"
+        },
+        {
+          "t": "reserved",
+          "ticket": "first",
+          "fresh": true
+        },
+        {
+          "t": "spawn",
+          "ticket": "first",
+          "input_sha256": "2bbd674dc288ad380fcbcaae9c68d182aee59fe14ca57e426af6a773a4c888e2"
+        },
+        {
+          "t": "finish",
+          "ticket": "first",
+          "outcome": "submitted",
+          "receipt_id": "00000002-1111-4111-8111-111111111111"
+        },
+        {
+          "t": "child_done",
+          "ticket": "first"
+        },
+        {
+          "t": "stdout_done",
+          "ticket": "first"
+        },
+        {
+          "t": "stderr_done",
+          "ticket": "first"
+        },
+        {
+          "t": "release",
+          "ticket": "first"
+        }
+      ],
+      "expected_error": "verified_drain_before_release"
+    },
+    {
+      "name": "revocation-fences-new-reserve",
+      "input_available": true,
+      "trace": [
+        {
+          "t": "explicit_lookup"
+        },
+        {
+          "t": "guard_current"
+        },
+        {
+          "t": "admitted"
+        },
+        {
+          "t": "revoke"
+        },
+        {
+          "t": "reserved",
+          "ticket": "first",
+          "fresh": true
+        }
+      ],
+      "expected_error": "current_guard_required"
+    },
+    {
+      "name": "unknown-undrained-attempt-blocks-next",
+      "input_available": true,
+      "trace": [
+        {
+          "t": "explicit_lookup"
+        },
+        {
+          "t": "guard_current"
+        },
+        {
+          "t": "admitted"
+        },
+        {
+          "t": "reserved",
+          "ticket": "first",
+          "fresh": true
+        },
+        {
+          "t": "spawn",
+          "ticket": "first",
+          "input_sha256": "2bbd674dc288ad380fcbcaae9c68d182aee59fe14ca57e426af6a773a4c888e2"
+        },
+        {
+          "t": "finish",
+          "ticket": "first",
+          "outcome": "unknown"
+        },
+        {
+          "t": "reserved",
+          "ticket": "second",
+          "fresh": true
+        }
+      ],
+      "expected_error": "one_undrained_attempt"
+    },
+    {
+      "name": "changed-input-cannot-be-executed",
+      "input_available": true,
+      "trace": [
+        {
+          "t": "explicit_lookup"
+        },
+        {
+          "t": "guard_current"
+        },
+        {
+          "t": "admitted"
+        },
+        {
+          "t": "reserved",
+          "ticket": "first",
+          "fresh": true
+        },
+        {
+          "t": "spawn",
+          "ticket": "first",
+          "input_sha256": "e3108dfd19cd8e49d29b399769bd307e7f30c1ce7d97a89f6e6d4c524553f5dc"
+        }
+      ],
+      "expected_error": "original_input_required"
+    },
+    {
+      "name": "wrong-receipt-cannot-settle-original",
+      "input_available": true,
+      "trace": [
+        {
+          "t": "explicit_lookup"
+        },
+        {
+          "t": "guard_current"
+        },
+        {
+          "t": "admitted"
+        },
+        {
+          "t": "reserved",
+          "ticket": "first",
+          "fresh": true
+        },
+        {
+          "t": "spawn",
+          "ticket": "first",
+          "input_sha256": "2bbd674dc288ad380fcbcaae9c68d182aee59fe14ca57e426af6a773a4c888e2"
+        },
+        {
+          "t": "finish",
+          "ticket": "first",
+          "outcome": "submitted",
+          "receipt_id": "ffffffff-1111-4111-8111-111111111111"
+        }
+      ],
+      "expected_error": "original_receipt_required"
+    },
+    {
+      "name": "admission-at-unsettled-cap-refuses",
+      "input_available": true,
+      "unsettled": 32,
+      "trace": [
+        {
+          "t": "guard_current"
+        },
+        {
+          "t": "admitted"
+        }
+      ],
+      "expected_error": "admission_pressure"
+    },
+    {
+      "name": "coalesced-status-does-not-repeat-the-running-worker",
+      "input_available": true,
+      "trace": [
+        {
+          "t": "explicit_lookup"
+        },
+        {
+          "t": "guard_current"
+        },
+        {
+          "t": "admitted"
+        },
+        {
+          "t": "reserved",
+          "ticket": "first",
+          "fresh": true
+        },
+        {
+          "t": "spawn",
+          "ticket": "first",
+          "input_sha256": "2bbd674dc288ad380fcbcaae9c68d182aee59fe14ca57e426af6a773a4c888e2"
+        },
+        {
+          "t": "reserved",
+          "ticket": "first",
+          "fresh": false
+        },
+        {
+          "t": "status_only",
+          "ticket": "first"
+        },
+        {
+          "t": "finish",
+          "ticket": "first",
+          "outcome": "submitted",
+          "receipt_id": "00000002-1111-4111-8111-111111111111"
+        },
+        {
+          "t": "child_done",
+          "ticket": "first"
+        },
+        {
+          "t": "stdout_done",
+          "ticket": "first"
+        },
+        {
+          "t": "stderr_done",
+          "ticket": "first"
+        },
+        {
+          "t": "drained",
+          "ticket": "first"
+        },
+        {
+          "t": "release",
+          "ticket": "first"
+        }
+      ],
+      "expected_error": null
+    },
+    {
+      "name": "duplicate-finish-must-match-the-complete-outcome",
+      "input_available": true,
+      "trace": [
+        {
+          "t": "explicit_lookup"
+        },
+        {
+          "t": "guard_current"
+        },
+        {
+          "t": "admitted"
+        },
+        {
+          "t": "reserved",
+          "ticket": "first",
+          "fresh": true
+        },
+        {
+          "t": "spawn",
+          "ticket": "first",
+          "input_sha256": "2bbd674dc288ad380fcbcaae9c68d182aee59fe14ca57e426af6a773a4c888e2"
+        },
+        {
+          "t": "finish",
+          "ticket": "first",
+          "outcome": "review",
+          "reason": "scope_changed"
+        },
+        {
+          "t": "finish",
+          "ticket": "first",
+          "outcome": "review",
+          "reason": "another_reason"
+        }
+      ],
+      "expected_error": "terminal_outcome_immutable"
+    },
+    {
+      "name": "first-lookup-cannot-be-automatic",
+      "input_available": true,
+      "trace": [
+        {
+          "t": "guard_current"
+        },
+        {
+          "t": "admitted"
+        },
+        {
+          "t": "reserved",
+          "ticket": "first",
+          "fresh": true
+        },
+        {
+          "t": "spawn",
+          "ticket": "first",
+          "input_sha256": "2bbd674dc288ad380fcbcaae9c68d182aee59fe14ca57e426af6a773a4c888e2"
+        },
+        {
+          "t": "finish",
+          "ticket": "first",
+          "outcome": "submitted",
+          "receipt_id": "00000002-1111-4111-8111-111111111111"
+        },
+        {
+          "t": "child_done",
+          "ticket": "first"
+        },
+        {
+          "t": "stdout_done",
+          "ticket": "first"
+        },
+        {
+          "t": "stderr_done",
+          "ticket": "first"
+        },
+        {
+          "t": "drained",
+          "ticket": "first"
+        },
+        {
+          "t": "release",
+          "ticket": "first"
+        }
+      ],
+      "expected_error": "explicit_lookup_required"
+    },
+    {
+      "name": "coalesced-status-retains-the-exact-ticket",
+      "input_available": true,
+      "trace": [
+        {
+          "t": "explicit_lookup"
+        },
+        {
+          "t": "guard_current"
+        },
+        {
+          "t": "admitted"
+        },
+        {
+          "t": "reserved",
+          "ticket": "first",
+          "fresh": true
+        },
+        {
+          "t": "spawn",
+          "ticket": "first",
+          "input_sha256": "2bbd674dc288ad380fcbcaae9c68d182aee59fe14ca57e426af6a773a4c888e2"
+        },
+        {
+          "t": "reserved",
+          "ticket": "foreign",
+          "fresh": false
+        }
+      ],
+      "expected_error": "exact_ticket_required"
+    }
+  ]
+}

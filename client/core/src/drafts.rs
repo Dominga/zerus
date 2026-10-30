@@ -49,7 +49,7 @@ pub const INTERRUPTED: &str =
 pub const ALREADY_EXISTS: &str =
     "Another draft already exists here. Recover the previous one from Saved drafts.";
 /// Saved drafts skips larger manifests.
-const MAX_MANIFEST: u64 = 1024 * 1024;
+pub(crate) const MAX_MANIFEST: u64 = 1024 * 1024;
 const PREVIEW_CHARS: usize = 200;
 
 /// One stored draft: the composer's text and attachments and what Qt keeps
@@ -335,6 +335,23 @@ fn save_direct(root: &Path, key: &str, draft: &StoredDraft) -> Result<(), String
     Ok(())
 }
 
+/// Pure original manifest header decoding, shared with read-only migration.
+/// No attachments are opened and sending/uncertain flags are not normalized.
+pub(crate) fn decode_manifest(key: &str, bytes: &[u8]) -> Option<Map<String, Value>> {
+    if bytes.len() as u64 > MAX_MANIFEST {
+        return None;
+    }
+    match serde_json::from_slice::<Value>(bytes).ok()? {
+        Value::Object(object)
+            if object.get("version").and_then(Value::as_i64) == Some(1)
+                && object.get("key").and_then(Value::as_str) == Some(key) =>
+        {
+            Some(object)
+        }
+        _ => None,
+    }
+}
+
 /// One read of a draft (`loadDirect`): what could be restored, and whether
 /// the manifest and every attachment were valid.
 fn load_once(root: &Path, key: &str) -> (StoredDraft, bool) {
@@ -345,14 +362,9 @@ fn load_once(root: &Path, key: &str) -> (StoredDraft, bool) {
     }
     let object = match read_bounded(&manifest, MAX_MANIFEST)
         .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .and_then(|bytes| decode_manifest(key, &bytes))
     {
-        Some(Value::Object(object))
-            if object.get("version").and_then(Value::as_i64) == Some(1)
-                && object.get("key").and_then(Value::as_str) == Some(key) =>
-        {
-            object
-        }
+        Some(object) => object,
         _ => return (StoredDraft::default(), false),
     };
     let text = |name: &str| {

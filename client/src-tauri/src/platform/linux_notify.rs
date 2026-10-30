@@ -9,17 +9,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 use zbus::blocking::{Connection, MessageIterator, Proxy};
 use zbus::zvariant::Value;
 use zerus_client_core::attention::Notice;
+use zerus_client_core::linux_notify::{
+    decode_saved, escape_body, Namespace, Saved, FILE_LIMIT, LIMIT,
+};
 
 const SERVICE: &str = "org.freedesktop.Notifications";
 const PATH: &str = "/org/freedesktop/Notifications";
 pub const FILE: &str = "linux-notifications.json";
-const LIMIT: usize = 8192;
-const FILE_LIMIT: u64 = 16 * 1024 * 1024;
 type Sink = Arc<dyn Fn(Event) + Send + Sync>;
 type QtSeed = Box<dyn FnOnce() -> Result<Option<Saved>, String> + Send>;
 
@@ -30,30 +30,6 @@ enum Event {
     Uncertain(String),
 }
 
-#[derive(Default, Serialize, Deserialize)]
-pub struct Saved {
-    version: u32,
-    owner: String,
-    tokens: BTreeMap<u32, String>,
-    /// A reservation survives an unknown Notify result. It is never reposted
-    /// automatically: a late native banner may already exist without its ID.
-    #[serde(default)]
-    uncertain: BTreeSet<String>,
-}
-impl Saved {
-    fn valid(&self) -> bool {
-        self.version == 1
-            && self.tokens.len() + self.uncertain.len() <= LIMIT
-            && self
-                .tokens
-                .iter()
-                .all(|(id, token)| *id > 0 && !token.is_empty() && token.len() <= 16384)
-            && self
-                .uncertain
-                .iter()
-                .all(|token| !token.is_empty() && token.len() <= 16384)
-    }
-}
 struct Pending {
     nonce: u64,
     notice: Notice,
@@ -64,7 +40,7 @@ struct State {
     saved: Saved,
     activation: BTreeMap<u32, String>,
     pending: BTreeMap<String, Pending>,
-    closes: BTreeSet<(String, u32)>,
+    closes: BTreeSet<(Namespace, u32)>,
     withdrawn: BTreeSet<String>,
     nonce: u64,
     ready: bool,
@@ -115,8 +91,7 @@ fn load(path: &Path, qt: QtSeed) -> Result<Saved, String> {
             if bytes.len() as u64 > FILE_LIMIT {
                 return Err("Notification identities exceed the storage limit".into());
             }
-            serde_json::from_slice::<Saved>(&bytes)
-                .map_err(|e| format!("Could not read notification identities: {e}"))?
+            decode_saved(&bytes)?
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => qt()?.unwrap_or(Saved {
             version: 1,
@@ -161,6 +136,7 @@ fn qt_seed() -> Result<Option<Saved>, String> {
     };
     Ok(Some(Saved {
         version: 1,
+        bus_id: String::new(),
         owner,
         tokens,
         uncertain: BTreeSet::new(),
@@ -225,8 +201,8 @@ impl Poster {
             for id in ids {
                 state.saved.tokens.remove(&id);
                 state.activation.remove(&id);
-                let owner = state.saved.owner.clone();
-                state.closes.insert((owner, id));
+                let namespace = Namespace::saved(&state.saved);
+                state.closes.insert((namespace, id));
             }
             changed = true;
         }
@@ -297,36 +273,43 @@ fn owner(connection: &Connection) -> Result<String, String> {
         Err(error) => Err(error.to_string()),
     }
 }
-fn refresh_owner(shared: &Shared, connection: &Connection) -> Result<String, String> {
+fn current_namespace(connection: &Connection) -> Result<Namespace, String> {
+    let bus = zbus::blocking::fdo::DBusProxy::new(connection).map_err(|e| e.to_string())?;
+    Ok(Namespace {
+        bus_id: bus.get_id().map_err(|e| e.to_string())?.to_string(),
+        owner: owner(connection)?,
+    })
+}
+fn adopt_namespace(state: &mut State, current: &Namespace) -> bool {
+    if !state.saved.adopt_namespace(current) {
+        return false;
+    }
+    state.activation.clear();
+    true
+}
+fn refresh_owner(shared: &Shared, connection: &Connection) -> Result<Namespace, String> {
     // Serialize the lookup and publication: an older concurrent lookup cannot
     // restore IDs from a daemon the owner-change worker already retired.
     let mut state = lock(&shared.state);
-    let owner = owner(connection)?;
-    if state.saved.owner == owner {
-        return Ok(owner);
+    let current = current_namespace(connection)?;
+    if !adopt_namespace(&mut state, &current) {
+        return Ok(current);
     }
-    state.saved.owner = owner.clone();
-    state.saved.tokens.clear();
-    state.saved.uncertain.clear();
-    state.activation.clear();
     if state.ready {
         persist(&shared.path, &state.saved)?;
     }
-    Ok(owner)
+    Ok(current)
 }
-fn close(connection: &Connection, owner: &str, id: u32) {
-    if owner.is_empty() {
+fn close(connection: &Connection, namespace: &Namespace, id: u32) {
+    if namespace.owner.is_empty()
+        || namespace.bus_id.is_empty()
+        || current_namespace(connection).as_ref() != Ok(namespace)
+    {
         return;
     }
-    if let Ok(proxy) = Proxy::new(connection, owner, PATH, SERVICE) {
+    if let Ok(proxy) = Proxy::new(connection, namespace.owner.as_str(), PATH, SERVICE) {
         let _ = proxy.call::<_, _, ()>("CloseNotification", &(id,));
     }
-}
-fn escaped(body: &str) -> String {
-    body.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
 }
 
 fn run(
@@ -376,6 +359,10 @@ fn run(
     {
         let mut state = lock(&shared.state);
         state.saved = load(&shared.path, qt)?;
+        // Quarantine legacy/different-bus IDs before processing an early
+        // withdrawal, so even a pre-start clear cannot close an unproved ID.
+        let current = current_namespace(&connection)?;
+        adopt_namespace(&mut state, &current);
         let withdrawn = std::mem::take(&mut state.withdrawn);
         for token in withdrawn {
             state.saved.uncertain.remove(&token);
@@ -387,24 +374,19 @@ fn run(
                 .collect();
             for id in ids {
                 state.saved.tokens.remove(&id);
-                let old = state.saved.owner.clone();
-                state.closes.insert((old, id));
+                let namespace = Namespace::saved(&state.saved);
+                state.closes.insert((namespace, id));
             }
-        }
-        let current = owner(&connection)?;
-        if state.saved.owner != current {
-            state.saved.owner = current;
-            state.saved.tokens.clear();
-            state.saved.uncertain.clear();
         }
         state.ready = true;
         persist(&shared.path, &state.saved)?;
     }
     let events = shared.clone();
+    let signals_bus = connection.clone();
     let signals_worker = std::thread::spawn(move || {
         for message in signals {
             let Ok(message) = message else { break };
-            signal(&events, &message);
+            signal(&events, &signals_bus, &message);
         }
     });
     let ownership = shared.clone();
@@ -468,7 +450,7 @@ fn run(
     Ok(())
 }
 enum Work {
-    Close(String, u32),
+    Close(Namespace, u32),
     Post(u64, Notice),
     Continue,
 }
@@ -503,7 +485,19 @@ fn post(shared: &Shared, connection: &Connection, nonce: u64, notice: Notice) {
         {
             return;
         }
-        if current.is_empty() {
+        // A notice may have queued before the saved/Qt seed loaded. Recheck
+        // suppression at the effect boundary, not only in deliver().
+        if state.saved.uncertain.contains(&notice.token)
+            || state
+                .saved
+                .tokens
+                .values()
+                .any(|token| *token == notice.token)
+        {
+            state.pending.remove(&notice.token);
+            return;
+        }
+        if current.owner.is_empty() {
             state.pending.remove(&notice.token);
             drop(state);
             (shared.sink)(Event::Failed {
@@ -525,7 +519,7 @@ fn post(shared: &Shared, connection: &Connection, nonce: u64, notice: Notice) {
         }
     }
     let result = (|| {
-        let proxy = Proxy::new(connection, current.as_str(), PATH, SERVICE)?;
+        let proxy = Proxy::new(connection, current.owner.as_str(), PATH, SERVICE)?;
         let hints = BTreeMap::from([
             ("desktop-entry", Value::from("hgs-tray")),
             ("urgency", Value::from(1_u8)),
@@ -538,7 +532,7 @@ fn post(shared: &Shared, connection: &Connection, nonce: u64, notice: Notice) {
                 0_u32,
                 "hgs-zerus-swarm-symbolic",
                 notice.title.as_str(),
-                escaped(&notice.body),
+                escape_body(&notice.body),
                 vec!["default", "Open session", "open-session", "Open session"],
                 hints,
                 -1_i32,
@@ -555,7 +549,7 @@ fn post(shared: &Shared, connection: &Connection, nonce: u64, notice: Notice) {
     }
     match result {
         Ok(id) if id > 0 => {
-            if wanted && state.saved.owner == current {
+            if wanted && Namespace::saved(&state.saved) == current {
                 state.saved.uncertain.remove(&notice.token);
                 state.saved.tokens.insert(id, notice.token);
             } else {
@@ -594,12 +588,24 @@ fn post(shared: &Shared, connection: &Connection, nonce: u64, notice: Notice) {
         (shared.sink)(Event::Uncertain(error));
     }
 }
-fn signal(shared: &Shared, message: &zbus::Message) {
+fn signal(shared: &Shared, connection: &Connection, message: &zbus::Message) {
     let header = message.header();
+    if !matches!(
+        header.member().map(|member| member.as_str()),
+        Some("ActivationToken" | "ActionInvoked" | "NotificationClosed")
+    ) {
+        return;
+    }
+    // An owner-change signal may still be queued on its separate reader.
+    // Check the current connection before interpreting a numeric ID.
+    let Ok(current) = refresh_owner(shared, connection) else {
+        return;
+    };
     let mut state = lock(&shared.state);
-    if header
-        .sender()
-        .is_none_or(|sender| sender.as_str() != state.saved.owner)
+    if Namespace::saved(&state.saved) != current
+        || header
+            .sender()
+            .is_none_or(|sender| sender.as_str() != state.saved.owner)
     {
         return;
     }

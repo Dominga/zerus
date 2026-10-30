@@ -8,7 +8,7 @@ license = "MIT"
 publish = false
 
 # Its own package and lock, like crates/watch-protocol; the root hgs package
-# depends on neither this crate nor client/core.
+# shares pure client/core code, and never depends on this Tauri crate.
 
 [lib]
 # Distinct from the binary name, so Windows debug symbols of both never collide.

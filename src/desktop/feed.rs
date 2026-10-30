@@ -19,8 +19,8 @@ mod io;
 pub(super) use io::{client, proxy};
 pub const ABI: &str = "desktop-source-feed-v1";
 pub const LINE_BYTES: usize = watch::MAX_FRAME_BYTES + 2048;
-pub const INGRESS_BYTES: usize = 16 << 20;
-pub const INGRESS_ITEMS: usize = 1024;
+pub const INGRESS_BYTES: usize = zerus_client_core::source::INGRESS_BYTES;
+pub const INGRESS_ITEMS: usize = zerus_client_core::source::INGRESS_ITEMS;
 
 #[derive(Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case", deny_unknown_fields)]
@@ -263,6 +263,14 @@ impl Broker {
             "retiring":self.producer.as_ref().is_some_and(|p|!p.alive()),"error":self.error,
             "ingress_bytes":usage.bytes,"ingress_items":usage.items,"high_ingress_bytes":usage.high_bytes,
             "sources":self.sources.iter().map(|(computer,e)|json!({"computer":computer,"incarnation":e.source.incarnation,"generation":e.source.generation,"complete":e.complete && active,"authority":false})).collect::<Vec<_>>()})
+    }
+    pub fn coverage(&self, computer: &str) -> bool {
+        !self.error
+            && self.producer.as_ref().is_some_and(|p| p.alive())
+            && self
+                .sources
+                .get(computer)
+                .is_some_and(|entry| entry.complete)
     }
     pub fn failed(&mut self, producer: &Producer) {
         producer.close();

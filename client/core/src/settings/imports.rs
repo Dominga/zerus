@@ -23,7 +23,7 @@ struct Journal {
     quarantine: BTreeMap<String, Value>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FamilyRecord {
     version: u32,
@@ -35,6 +35,163 @@ struct FamilyRecord {
     keys: Vec<String>,
     sha256: Option<String>,
     source_mtime_after_switch: Option<bool>,
+}
+
+/// The same bounded metadata for a family committed by another existing
+/// client store. No source body or writer authority is included.
+pub(crate) fn family_metadata(
+    family: &str,
+    store: &QtStore,
+    snapshot: Option<&QtSnapshot>,
+    keys: Vec<String>,
+    seed_at: Option<u64>,
+) -> Result<Value, &'static str> {
+    let record = FamilyRecord {
+        version: VERSION,
+        family: family.into(),
+        schema: 1,
+        source: snapshot.map_or("none", |s| s.source).into(),
+        source_path: store.path().to_string_lossy().into(),
+        at: super::seconds(std::time::SystemTime::now()).unwrap_or(0),
+        keys,
+        sha256: snapshot.map(|s| s.sha256.clone()),
+        source_mtime_after_switch: snapshot
+            .and_then(|s| s.modified_at)
+            .zip(seed_at)
+            .map(|(mtime, seed)| mtime > seed),
+    };
+    if !valid_record(family, &record) {
+        return Err("unsupported G3 family metadata");
+    }
+    Ok(serde_json::to_value(record).unwrap())
+}
+
+pub(crate) fn valid_family_metadata(family: &str, value: &Value) -> bool {
+    serde_json::from_value::<FamilyRecord>(value.clone())
+        .is_ok_and(|record| valid_record(family, &record))
+}
+
+const SHARED_ORGANIZATION: &str = "shared-organization";
+const ORGANIZATION_PENDING: &str = "g3_shared_organization_pending";
+
+/// Metadata only. It is not a request, a pending edit or writer authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OrganizationImport {
+    Unhandled,
+    Pending {
+        node_id: String,
+        sha256: Option<String>,
+    },
+    Handled,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PendingOrganization {
+    version: u32,
+    node_id: String,
+    record: FamilyRecord,
+}
+
+fn pending_organization(contents: &Contents) -> Result<Option<PendingOrganization>, &'static str> {
+    let Some(value) = contents.extra.get(ORGANIZATION_PENDING) else {
+        return Ok(None);
+    };
+    let pending: PendingOrganization =
+        serde_json::from_value(value.clone()).map_err(|_| "unsupported pending project import")?;
+    if pending.version != VERSION
+        || !crate::creation::canonical_uuid(&pending.node_id)
+        || !valid_record(SHARED_ORGANIZATION, &pending.record)
+        || (pending.record.source != "none" && pending.record.keys != ["workspace/organization"])
+    {
+        return Err("unsupported pending project import");
+    }
+    Ok(Some(pending))
+}
+
+pub(super) fn organization_state(contents: &Contents) -> Result<OrganizationImport, &'static str> {
+    let journal = journal(contents)?;
+    let pending = pending_organization(contents)?;
+    if journal.families.contains_key(SHARED_ORGANIZATION) {
+        if pending.is_some() {
+            return Err("conflicting project import records");
+        }
+        return Ok(OrganizationImport::Handled);
+    }
+    Ok(match pending {
+        Some(pending) => OrganizationImport::Pending {
+            node_id: pending.node_id,
+            sha256: pending.record.sha256,
+        },
+        None => OrganizationImport::Unhandled,
+    })
+}
+
+pub(super) fn prepare_organization(
+    contents: &mut Contents,
+    node_id: &str,
+    store: &QtStore,
+    snapshot: Option<&QtSnapshot>,
+) -> Result<bool, &'static str> {
+    match organization_state(contents)? {
+        OrganizationImport::Handled => return Ok(false),
+        OrganizationImport::Pending { node_id: old, .. } if old != node_id => {
+            return Err("project import belongs to another catalog node")
+        }
+        _ => {}
+    }
+    if !crate::creation::canonical_uuid(node_id) {
+        return Err("invalid project catalog node");
+    }
+    if journal(contents)?.families.len() >= 256 {
+        return Err("project import record limit reached");
+    }
+    let seed_at = contents.seed.as_ref().and_then(|s| s["at"].as_u64());
+    let pending = PendingOrganization {
+        version: VERSION,
+        node_id: node_id.into(),
+        record: serde_json::from_value(family_metadata(
+            SHARED_ORGANIZATION,
+            store,
+            snapshot,
+            snapshot
+                .filter(|s| s.values.contains_key("workspace/organization"))
+                .map_or_else(Vec::new, |_| vec!["workspace/organization".into()]),
+            seed_at,
+        )?)
+        .unwrap(),
+    };
+    contents.extra.insert(
+        ORGANIZATION_PENDING.into(),
+        serde_json::to_value(pending).unwrap(),
+    );
+    pending_organization(contents)?;
+    Ok(true)
+}
+
+pub(super) fn complete_organization(
+    contents: &mut Contents,
+    node_id: &str,
+) -> Result<(), &'static str> {
+    if organization_state(contents)? == OrganizationImport::Handled {
+        return Ok(());
+    }
+    let pending = pending_organization(contents)?.ok_or("missing project import record")?;
+    if pending.node_id != node_id {
+        return Err("project import belongs to another catalog node");
+    }
+    let mut journal = journal(contents)?;
+    if journal.families.len() >= 256 {
+        return Err("project import record limit reached");
+    }
+    journal
+        .families
+        .insert(SHARED_ORGANIZATION.into(), pending.record);
+    contents
+        .extra
+        .insert("g3".into(), serde_json::to_value(journal).unwrap());
+    contents.extra.remove(ORGANIZATION_PENDING);
+    Ok(())
 }
 
 fn journal(contents: &Contents) -> Result<Journal, &'static str> {
@@ -52,28 +209,31 @@ fn journal(contents: &Contents) -> Result<Journal, &'static str> {
     }
     // An unknown family is retained, never interpreted or imported again.
     for (family, record) in &journal.families {
-        let digest = match &record.sha256 {
-            Some(hash) => {
-                record.source != "none"
-                    && hash.len() == 64
-                    && hash
-                        .bytes()
-                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-            }
-            None => record.source == "none" && record.keys.is_empty(),
-        };
-        if record.family != *family
-            || record.version != VERSION
-            || record.schema != 1
-            || !digest
-            || record.keys.len() > MAX_KEYS
-            || record.source_path.is_empty()
-            || !["none", "qt-ini", "qt-plist", "qt-defaults"].contains(&record.source.as_str())
-        {
+        if !valid_record(family, record) {
             return Err("invalid handled G3 family");
         }
     }
     Ok(journal)
+}
+
+fn valid_record(family: &str, record: &FamilyRecord) -> bool {
+    let digest = match &record.sha256 {
+        Some(hash) => {
+            record.source != "none"
+                && hash.len() == 64
+                && hash
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        }
+        None => record.source == "none" && record.keys.is_empty(),
+    };
+    record.family == family
+        && record.version == VERSION
+        && record.schema == 1
+        && digest
+        && record.keys.len() <= MAX_KEYS
+        && !record.source_path.is_empty()
+        && ["none", "qt-ini", "qt-plist", "qt-defaults"].contains(&record.source.as_str())
 }
 
 pub(super) fn pending(contents: &Contents) -> Result<bool, &'static str> {

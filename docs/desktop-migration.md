@@ -420,6 +420,30 @@ blob readers and fresh exact content/receipt checks before any effect; a saved
 submitted/sending flag grants no replay authority. Source discovery and G1's
 current drain remain separate; evidence stays Staged.
 
+`qt_retained_view_preference(&QtSnapshot, key)` retains exactly these three
+fields under the design owner's 2026-10-30 ruling:
+
+| Qt key | Schema 1 family | Target handling |
+| --- | --- | --- |
+| `workspace/projectFolderSplit` | `qt-retained-project-folder-split` | Private evidence only. Never decode/seed QSplitter bytes, including when Next's Projects folder/worktree splitter lands; Next keeps its default. |
+| `tasks/inspectorSplit` | `qt-retained-task-inspector-split` | Private evidence only. The mockup has no board/inspector splitter; never map this onto `workspace/inspectorWidth`. |
+| `workspace/removeWorktreeAfterTermination` | `qt-retained-termination-remove-default` | Private evidence until the Terminate dialog owner (`zerus-5wmh.10`) wires its checkbox. That owner may prefill once under the presentation exception, with explicit confirmation every time; never automatic-maintenance consent. |
+
+The mockup targets are `design/webui/src/screens/Projects.tsx` and
+`design/webui/src/dialogs/SessionDialogs.tsx`. The private body is
+`{kind:"retained-view-preference",key,present,value}`. `value` retains the
+existing Qt decoder's type (`bool`, `int`, finite `double`, `text`, `bytes`,
+or a scalar `list`): scalar/list data is in `value`, bytes in `base64`.
+An absent key differs from false or an empty text/byte/list value. The source
+format/hash stays the existing Qt snapshot's. No splitter or layout decoding,
+default conversion, seed/handled record, UI, consent or removal runs.
+
+Each family is separate, so an unsupported field does not mark another as
+handled. Raw value and complete body are bounded at 1 MiB, lists at 64 scalars;
+unsupported variants, nesting, non-finite numbers and oversized data remain in
+the original source without a final family record. Attach the existing source
+reader's fresh identity/hash recheck. This is retained Staged evidence only.
+
 `approval_policies(&QtSnapshot, next_settings_bytes)` inspects both policy
 stores before returning either `qt-approval-policy` or `next-approval-policy`
 stream. It reuses the existing Qt flag conversion and bounded Next settings

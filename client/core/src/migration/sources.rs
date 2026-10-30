@@ -29,6 +29,8 @@ mod worktrees;
 pub use worktrees::{next_worktree_snapshots, qt_worktree_snapshots};
 mod drafts;
 pub use drafts::draft_checkpoint;
+mod preferences;
+pub use preferences::qt_retained_view_preference;
 
 #[derive(Clone, Copy)]
 pub enum Origin {

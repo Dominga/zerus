@@ -66,6 +66,8 @@ mod updates;
 mod voice;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod watchdog;
+#[cfg(feature = "live")]
+mod window_layer;
 mod window_visibility;
 #[cfg(feature = "live")]
 mod worktree_policy;
@@ -630,7 +632,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
             // Keep above is decided once from the display; the stored value
             // applies when the main window is created (`lifecycle::show_main`).
             #[cfg(feature = "live")]
-            settings::init_window_layer(display.as_deref());
+            window_layer::init(app.handle(), display.as_deref());
             if lifecycle::window_at_start(opens_sessions, menu_bar) {
                 let window = lifecycle::show_main(app.handle())?;
                 // An unattended measurement needs frames: keep its window in front
@@ -918,7 +920,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         settings::settings_get,
         settings::settings_set,
         desk::desk_take_pending,
-        settings::window_layer_supported,
+        window_layer::window_layer_state,
         settings::hgs_version,
         settings::open_repository,
         speech_settings::speech_input,
@@ -1130,6 +1132,7 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     #[allow(unused_mut)]
     let mut builder = WebviewWindowBuilder::new(app, MAIN_WINDOW, WebviewUrl::App(page.into()))
         .title("Zerus Next")
+        .visible(false)
         .inner_size(1440.0, 900.0)
         .min_inner_size(900.0, 560.0);
     // Page rendering at the display rate, not near 60 fps: the preference is set

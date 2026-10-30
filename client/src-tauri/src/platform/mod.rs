@@ -18,3 +18,6 @@ pub mod macos_menubar;
 // Attention notifications come from the desk thread too.
 #[cfg(all(target_os = "macos", feature = "live"))]
 pub mod macos_notify;
+
+#[cfg(all(target_os = "linux", feature = "live"))]
+pub mod linux_window_layer;

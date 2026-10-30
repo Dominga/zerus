@@ -4095,6 +4095,17 @@ hgs desktop status --json
 hgs desktop watch --json
 ```
 
+The existing `hgs presence set --json` payload and success output remain
+compatible. Its writes now hold a scoped `desktop-presence.lock`. Before any
+handoff, a passive service leaves that legacy producer available. A supported
+non-revoked marker or active service policy refuses legacy writes and names
+`hgs desktop revoke --json`; unknown/newer/mismatched state also refuses without
+repair. Revoked, inactive policy allows the legacy path again. Future service
+epoch activation and presence writes must use this same scoped fence. This
+admission guard enables no sampler, producer lease or service writer. Presence
+listings read at most 4 KiB of a private regular leaf; malformed, oversized or
+special files provide no presence evidence.
+
 The private `desktop-v1` service kernel is local to one user and canonical
 configuration/state identity. It is **passive until the writer handoff is
 implemented**: it starts no fleet readers, presence/read workers, notifications

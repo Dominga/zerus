@@ -9,7 +9,7 @@ use std::{
 };
 use zerus_desktop_migration::{canonical, configuration, HANDOFF_LOCK};
 
-pub const SCHEMA: i64 = 5;
+pub const SCHEMA: i64 = 6;
 pub struct HandoffLock {
     _lock: platform::FileLock,
     root: PathBuf,
@@ -256,6 +256,12 @@ impl Store {
             let tx = db.transaction()?;
             zerus_desktop_catalog::migrate(&tx)?;
             tx.execute_batch("PRAGMA user_version=5;")?;
+            tx.commit()?;
+        }
+        if version < 6 {
+            let tx = db.transaction()?;
+            zerus_desktop_catalog::migrate_metadata(&tx)?;
+            tx.execute_batch("PRAGMA user_version=6;")?;
             tx.commit()?;
         }
         zerus_desktop_catalog::begin_service(&mut db, epoch)?;

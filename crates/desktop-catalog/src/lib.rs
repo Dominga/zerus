@@ -101,6 +101,9 @@ pub fn migrate(db: &Connection) -> Result<()> {
         "CREATE TABLE desktop_catalog_owner(id INTEGER PRIMARY KEY CHECK(id=1), epoch TEXT NOT NULL);
          INSERT INTO desktop_catalog_owner VALUES(1,'');
          CREATE TABLE desktop_catalog_sources(
+           -- Nonempty stream: watch seq/cursor/hello. Empty stream: legacy
+           -- seq=declared pages, cursor=declared rows, next_page=received pages,
+           -- hello=provisional metadata, meta=last published metadata.
            computer TEXT PRIMARY KEY, epoch TEXT NOT NULL, incarnation INTEGER NOT NULL,
            generation INTEGER NOT NULL, stream TEXT NOT NULL, seq INTEGER NOT NULL,
            visible INTEGER, staged INTEGER, next_page INTEGER NOT NULL DEFAULT 0,
@@ -132,6 +135,52 @@ pub fn migrate(db: &Connection) -> Result<()> {
            UPDATE desktop_catalog_totals SET bytes=bytes+new.bytes-old.bytes WHERE id=1;
          END;",
     )?;
+    migrate_metadata(db)
+}
+
+/// Root schema 6: add source metadata to the maintained byte total. The caller
+/// owns the migration transaction. At most 64 existing metadata rows are read
+/// once here; page admission continues to read only the maintained total.
+pub fn migrate_metadata(db: &Connection) -> Result<()> {
+    let installed: i64 = db.query_row(
+        "SELECT count(*) FROM sqlite_schema WHERE type='trigger' AND name IN
+         ('desktop_catalog_source_insert','desktop_catalog_source_update','desktop_catalog_source_delete')",
+        [], |r|r.get(0),
+    )?;
+    ensure!(
+        installed == 0 || installed == 3,
+        "incomplete catalog metadata migration"
+    );
+    if installed == 3 {
+        return Ok(());
+    }
+    let sources: i64 = db.query_row(
+        "SELECT count(*) FROM (SELECT 1 FROM desktop_catalog_sources LIMIT ?1)",
+        [MAX_SOURCES + 1],
+        |r| r.get(0),
+    )?;
+    ensure!(
+        sources <= MAX_SOURCES,
+        "catalog source capacity exceeded during migration"
+    );
+    db.execute_batch(
+        "UPDATE desktop_catalog_totals SET bytes=bytes+coalesce((SELECT sum(
+           length(CAST(hello AS BLOB))+coalesce(length(CAST(meta AS BLOB)),0))
+           FROM desktop_catalog_sources),0) WHERE id=1;
+         CREATE TRIGGER desktop_catalog_source_insert AFTER INSERT ON desktop_catalog_sources BEGIN
+           UPDATE desktop_catalog_totals SET bytes=bytes+length(CAST(new.hello AS BLOB))+
+             coalesce(length(CAST(new.meta AS BLOB)),0) WHERE id=1;
+         END;
+         CREATE TRIGGER desktop_catalog_source_update AFTER UPDATE OF hello,meta ON desktop_catalog_sources BEGIN
+           UPDATE desktop_catalog_totals SET bytes=bytes+length(CAST(new.hello AS BLOB))+
+             coalesce(length(CAST(new.meta AS BLOB)),0)-length(CAST(old.hello AS BLOB))-
+             coalesce(length(CAST(old.meta AS BLOB)),0) WHERE id=1;
+         END;
+         CREATE TRIGGER desktop_catalog_source_delete AFTER DELETE ON desktop_catalog_sources BEGIN
+           UPDATE desktop_catalog_totals SET bytes=bytes-length(CAST(old.hello AS BLOB))-
+             coalesce(length(CAST(old.meta AS BLOB)),0) WHERE id=1;
+         END;",
+    )?;
     Ok(())
 }
 
@@ -147,7 +196,8 @@ pub fn begin_service(db: &mut Connection, epoch: &str) -> Result<()> {
     tx.execute_batch(
         "UPDATE desktop_catalog_generations SET obsolete=1 WHERE id IN
            (SELECT staged FROM desktop_catalog_sources WHERE staged IS NOT NULL);
-         UPDATE desktop_catalog_sources SET staged=NULL,complete=0,next_page=0,active=0;",
+         UPDATE desktop_catalog_sources SET staged=NULL,complete=0,next_page=0,active=0,
+           hello=CASE WHEN stream='' THEN '' ELSE hello END;",
     )?;
     tx.commit()?;
     Ok(())
@@ -166,6 +216,7 @@ pub fn connect(db: &mut Connection, source: &Source, frame: &Frame) -> Result<()
     ensure!(hello_json.len() <= 16 << 10, "hello metadata too large");
     let tx = db.transaction()?;
     replace_source(&tx, source, &hello.stream, frame.seq as i64, &hello_json)?;
+    check_budget(&tx)?;
     tx.commit()?;
     Ok(())
 }
@@ -577,7 +628,8 @@ fn current(db: &Connection, source: &Source) -> Result<State> {
 fn abandon(tx: &Transaction<'_>, computer: &str) -> Result<()> {
     tx.execute("UPDATE desktop_catalog_generations SET obsolete=1 WHERE id=(SELECT staged FROM desktop_catalog_sources WHERE computer=?1)", [computer])?;
     tx.execute(
-        "UPDATE desktop_catalog_sources SET staged=NULL,next_page=0,complete=0 WHERE computer=?1",
+        "UPDATE desktop_catalog_sources SET staged=NULL,next_page=0,complete=0,
+         hello=CASE WHEN stream='' THEN '' ELSE hello END WHERE computer=?1",
         [computer],
     )?;
     Ok(())
@@ -645,5 +697,7 @@ fn row_json(item: &watch::CatalogItem) -> Result<String> {
     Ok(json)
 }
 
+#[cfg(test)]
+mod metadata_tests;
 #[cfg(test)]
 mod tests;

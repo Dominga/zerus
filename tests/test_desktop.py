@@ -397,7 +397,7 @@ class Desktop(unittest.TestCase):
             db.execute('PRAGMA user_version=1')
         database.chmod(0o600)
         process, status = self.serve()
-        self.assertEqual(status['schema'], 5)
+        self.assertEqual(status['schema'], 6)
         self.assertEqual(status['generation'], 8)
         self.assertEqual(status['configuration'], configuration)
         self.assertTrue(status['effect_journal']['revoked'])
@@ -407,10 +407,34 @@ class Desktop(unittest.TestCase):
         self.assertFalse(status['read_queue']['recovery_error'])
         self.stop(process)
         with closing(sqlite3.connect(database)) as db:
-            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 5)
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 6)
             self.assertEqual(db.execute('SELECT rows,bytes FROM desktop_catalog_totals').fetchone(), (0, 0))
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_catalog_sources').fetchone()[0], 0)
             self.assertEqual(db.execute('SELECT configuration FROM service').fetchone()[0], configuration)
+
+    def test_schema_five_metadata_is_charged_once_and_preserved(self):
+        process, _ = self.serve()
+        self.stop(process)
+        database = self.desktop / 'state.sqlite3'
+        hello = json.dumps({'machine_id': 'example-machine'})
+        meta = json.dumps({'label': 'example-\u03bb'}, ensure_ascii=False)
+        expected = len(hello.encode()) + len(meta.encode())
+        with closing(sqlite3.connect(database)) as db, db:
+            for suffix in ('insert', 'update', 'delete'):
+                db.execute(f'DROP TRIGGER desktop_catalog_source_{suffix}')
+            db.execute('INSERT INTO desktop_catalog_sources(computer,epoch,incarnation,generation,stream,seq,hello,meta) VALUES(?,?,?,?,?,?,?,?)',
+                       ('peer', str(uuid.uuid4()), 1, 1, 'old-watch', 1, hello, meta))
+            db.execute('PRAGMA user_version=5')
+        for _ in range(2):
+            process, status = self.serve()
+            self.assertEqual(status['schema'], 6)
+            self.assertEqual(status['catalog_projection']['stored_bytes'], expected)
+            self.assertEqual(status['catalog_projection']['stored_rows'], 0)
+            self.stop(process)
+        with closing(sqlite3.connect(database)) as db:
+            self.assertEqual(db.execute('SELECT hello,meta FROM desktop_catalog_sources').fetchone(), (hello, meta))
+            self.assertEqual(db.execute('SELECT rows,bytes FROM desktop_catalog_totals').fetchone(), (0, expected))
+            self.assertEqual(db.execute('SELECT count(*) FROM desktop_catalog_sources').fetchone()[0], 1)
 
     def test_catalog_collection_progresses_without_a_frontend(self):
         process, _ = self.serve()

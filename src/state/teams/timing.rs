@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 
 /// A moment the timeline needs: recorded, not reached yet, or never recorded.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Moment {
+pub(super) enum Moment {
     At(f64),
     NotYet,
     Unknown,
@@ -18,7 +18,7 @@ enum Moment {
 
 /// When the task's phase opened: the plan's approval for phase 1, the
 /// phase's own approval after it.
-fn opened(team: &Team, task: &Task) -> Moment {
+pub(super) fn opened(team: &Team, task: &Task) -> Moment {
     if task.phase <= 1 {
         return if team.approved_by.is_empty() && team.approved_at.is_none() {
             Moment::NotYet
@@ -48,7 +48,7 @@ fn satisfied(team: &Team, id: u32, kind: DependencyKind) -> Moment {
 }
 
 /// When every dependency and the phase let the task start.
-fn ready(team: &Team, task: &Task, opened: Moment) -> Moment {
+pub(super) fn ready(team: &Team, task: &Task, opened: Moment) -> Moment {
     let mut at = opened;
     for dep in &task.deps {
         at = match (at, satisfied(team, dep.task, dep.kind)) {

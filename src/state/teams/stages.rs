@@ -325,7 +325,7 @@ pub(crate) fn held(team: &Team, member: &str) -> Option<u32> {
 }
 
 /// Whether two folder paths name the same place (the dispatcher's rule).
-fn same_folder(left: &str, right: &str) -> bool {
+pub(super) fn same_folder(left: &str, right: &str) -> bool {
     let key = |path: &str| {
         let path = path.strip_prefix(r"\\?\").unwrap_or(path).replace('\\', "/");
         let path = path.trim_end_matches('/').to_owned();

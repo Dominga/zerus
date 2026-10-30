@@ -1,0 +1,670 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Profile · U38 mock-up</title>
+<style>
+/* U38 profile. The tokens, buttons, chips, cards, workspace bar, Board and the gallery
+   chrome up to the U38 block are the U59 page's (design/agent-teams/plan-modes), itself
+   from the U36 page and the Zerus UI prototype; new here are the lanes, spans, critical
+   paths, losses, token bars, the members table, the compare and the heat tint. */
+html,body{margin:0}
+body{background:#0e1115;font:13px/1.45 "Segoe UI",system-ui,sans-serif;color:#e6e8eb}
+body.lightpage{background:#e4e9ee;color:#1a2733}
+.app{--bg:#14181d;--surface:#1b1f26;--card:#181c22;--cardBorder:#232932;--cardHover:#1e232b;--cardSel:#1b2621;--cardSelBorder:#2f5a4a;--field:#11151a;--border:#2c323b;--segOn:#26443a;--hover:#222830;--accent:#7dd3b0;--accentText:#0f1a16;--accentHover:#a8e6cc;--accentMuted:#5c9e86;--warn:#e8a75a;--danger:#ef7d6d;--folder:#7fb6e0;--violet:#b79cff;--fg:#e6e8eb;--text2:#c4cad1;--text3:#aab1ba;--muted:#9aa3ad;--label:#8f97a2;--dim:#7b8590;--tile:#0f1318;--warnBg:rgba(232,167,90,.11);--dangerBg:rgba(239,125,109,.11);--accentBg:rgba(125,211,176,.10);--page:#0e1115;--shadow:0 12px 40px rgba(0,0,0,.45);--r-lead:#b79cff;--r-backend:#6fa8ff;--r-frontend:#f08bb4;--r-tester:#56c8e0;--r-reviewer:#d9b38c;--r-secretary:#7fcf9a;--r-researcher:#b9d36b;
+  --s-review:#b79cff;--s-test:#7fb6e0;--s-accept:#7dd3b0;
+  position:relative;display:flex;flex-direction:column;background:var(--page);color:var(--fg);font:12px/1.38 "Segoe UI",-apple-system,system-ui,sans-serif;overflow:hidden;color-scheme:dark}
+.app.light{--bg:#f5f7f9;--surface:#ffffff;--card:#ffffff;--cardBorder:#e1e6eb;--cardHover:#eef2f5;--cardSel:#e7f3ee;--cardSelBorder:#9fd3bd;--field:#ffffff;--border:#d6dde4;--segOn:#e0f0e9;--hover:#edf1f4;--accent:#167357;--accentText:#ffffff;--accentHover:#115d46;--accentMuted:#4f8f78;--warn:#9a5a0c;--danger:#c4402f;--folder:#2f6ea3;--violet:#6f4fd8;--fg:#1a2733;--text2:#2c3a47;--text3:#415060;--muted:#5d6b7c;--label:#647181;--dim:#6f7b88;--tile:#eef2f5;--warnBg:rgba(168,98,15,.09);--dangerBg:rgba(196,64,47,.08);--accentBg:rgba(22,115,87,.08);--page:#e4e9ee;--shadow:0 12px 36px rgba(20,30,40,.18);--r-lead:#6f4fd8;--r-backend:#2f66c9;--r-frontend:#b83a72;--r-tester:#137f95;--r-reviewer:#8a5a2b;--r-secretary:#2f7d4a;--r-researcher:#5f7a12;
+  --s-review:#6f4fd8;--s-test:#2f6ea3;--s-accept:#167357;color-scheme:light}
+.app *{box-sizing:border-box}
+.app button,.app input,.app select,.app textarea{font:inherit;color:inherit}
+.mono{font-family:"Cascadia Mono",Consolas,ui-monospace,monospace}
+.i{width:14px;height:14px;flex:none;vertical-align:middle;overflow:visible}
+.i path{fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.i path.f{fill:currentColor;stroke:none}
+.i path.k{stroke:var(--card);stroke-width:2.2}
+.i.s10{width:10px;height:10px}.i.s12{width:12px;height:12px}.i.s16{width:16px;height:16px}
+.lg{width:14px;height:14px;flex:none}
+.lg path{stroke:none}
+.ell{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.grow{flex:1;min-width:0}
+.muted{color:var(--muted)}.dim{color:var(--dim)}.lbl{color:var(--label)}.warn{color:var(--warn)}.danger{color:var(--danger)}.acc{color:var(--accent)}.okc{color:var(--accentMuted)}
+.row{display:flex;align-items:center;gap:6px;min-width:0}
+.col{display:flex;flex-direction:column;gap:6px;min-width:0}
+.wrap{flex-wrap:wrap}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:26px;padding:3px 11px;border-radius:7px;border:1px solid var(--border);background:var(--surface);color:var(--text2);white-space:nowrap}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:var(--accentText);font-weight:600}
+.btn.dng{color:var(--danger)}
+.btn.ghost{border-color:transparent;background:transparent}
+.btn.sm{min-height:23px;padding:2px 9px;font-size:11px}
+.btn.icon{padding:0;width:26px}
+.btn.sm.icon{width:23px}
+.btn.dis{opacity:.42}
+.field{min-width:0;white-space:nowrap;overflow:hidden;background:var(--field);border:1px solid var(--border);border-radius:7px;padding:4px 8px;min-height:27px;color:var(--fg);width:100%;display:flex;align-items:center;gap:6px}
+.field.sel::after{content:"";margin-left:auto;width:7px;height:7px;border-right:1.6px solid var(--muted);border-bottom:1.6px solid var(--muted);transform:translateY(-2px) rotate(45deg);flex:none}
+.field.focus{border-color:var(--cardSelBorder);box-shadow:0 0 0 3px var(--accentBg)}
+.field.ta{white-space:normal;align-items:flex-start;min-height:46px;line-height:1.45}
+.seg{display:inline-flex;border:1px solid var(--border);border-radius:8px;overflow:hidden;background:var(--surface);flex:none}
+.seg span{color:var(--muted);padding:4px 10px;min-height:25px;display:inline-flex;align-items:center;gap:5px;font-size:11.5px}
+.seg span+span{border-left:1px solid var(--border)}
+.seg span.on{background:var(--segOn);color:var(--accent);font-weight:600}
+.seg.sm span{padding:2px 8px;min-height:21px;font-size:11px}
+.pill{display:inline-flex;align-items:center;gap:4px;height:19px;padding:0 7px;border-radius:6px;background:var(--hover);color:var(--text3);font-size:11px;white-space:nowrap;flex:none}
+.pill.acc{background:var(--accentBg);color:var(--accent)}
+.pill.warnp{background:var(--warnBg);color:var(--warn)}
+.pill.dngp{background:var(--dangerBg);color:var(--danger)}
+.pill.out{background:transparent;border:1px solid var(--border)}
+.role{--rc:var(--muted);display:inline-flex;align-items:center;gap:3px;height:18px;padding:0 7px 0 5px;border-radius:9px;font-size:11px;font-weight:600;color:var(--rc);border:1px solid color-mix(in srgb,var(--rc) 45%,transparent);background:color-mix(in srgb,var(--rc) 12%,transparent);white-space:nowrap;flex:none}
+.role .i{width:11px;height:11px}
+.role.mini{height:16px;padding:0 5px 0 4px;font-size:10px}
+.rc-lead{--rc:var(--r-lead)}.rc-backend{--rc:var(--r-backend)}.rc-frontend{--rc:var(--r-frontend)}.rc-tester{--rc:var(--r-tester)}.rc-reviewer{--rc:var(--r-reviewer)}.rc-secretary{--rc:var(--r-secretary)}.rc-researcher{--rc:var(--r-researcher)}
+.tile{width:22px;height:22px;border-radius:6px;background:var(--tile);border:1px solid var(--cardBorder);display:inline-grid;place-items:center;flex:none}
+.tile .lg{width:13px;height:13px}
+.tile.t16{width:17px;height:17px;border-radius:5px}.tile.t16 .lg{width:11px;height:11px}
+.ih{font-size:10.5px;letter-spacing:.4px;text-transform:uppercase;color:var(--dim);font-weight:600;display:flex;align-items:center;gap:6px}
+.dmark{display:inline-flex;align-items:center;height:17px;padding:0 6px;border-radius:5px;font-size:9.5px;font-weight:700;letter-spacing:.3px;flex:none}
+.dm-new{background:var(--accentBg);color:var(--accent);border:1px solid var(--cardSelBorder)}
+.dm-changed{background:color-mix(in srgb,var(--folder) 14%,transparent);color:var(--folder);border:1px solid color-mix(in srgb,var(--folder) 45%,transparent)}
+.dm-removed{background:var(--dangerBg);color:var(--danger);border:1px solid color-mix(in srgb,var(--danger) 45%,transparent)}
+.old{text-decoration:line-through;color:var(--danger);background:var(--dangerBg);border-radius:3px;padding:0 4px;margin-right:4px}
+.nw{background:var(--accentBg);color:var(--accent);border-radius:3px;padding:0 4px}
+.app,.app *{scrollbar-width:thin;scrollbar-color:color-mix(in srgb,var(--text3) 28%,transparent) transparent}
+.app ::-webkit-scrollbar{width:8px;height:8px}
+.app ::-webkit-scrollbar-thumb{background:color-mix(in srgb,var(--text3) 24%,transparent);border-radius:8px;border:2px solid transparent;background-clip:padding-box}
+.app ::-webkit-scrollbar-track,.app ::-webkit-scrollbar-corner{background:transparent}
+
+/* ===== new: stage chip and track ===== */
+.stg{--sc:var(--muted);display:inline-flex;align-items:center;gap:4px;height:19px;padding:0 6px 0 5px;border-radius:6px;font-size:11px;font-weight:600;white-space:nowrap;flex:none;color:var(--sc);background:color-mix(in srgb,var(--sc) 13%,transparent)}
+.stg .i{width:12px;height:12px}
+.stg .r{font-weight:400;opacity:.85}
+.sk-review{--sc:var(--s-review)}.sk-test{--sc:var(--s-test)}.sk-accept{--sc:var(--s-accept)}.sk-warn{--sc:var(--warn)}.sk-danger{--sc:var(--danger)}.sk-wait{--sc:var(--muted)}
+.stg.out{background:transparent;box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--sc) 50%,transparent)}
+.stg.skip{text-decoration:line-through;opacity:.8}
+.trk{display:inline-flex;gap:2px;align-items:center;flex:none}
+.trk i{width:9px;height:4px;border-radius:2px;background:var(--border)}
+.trk i.d{background:var(--accentMuted)}
+.trk i.c{background:var(--sc,var(--accent))}
+.trk i.x{background:transparent;box-shadow:inset 0 0 0 1px var(--dim)}
+.hold{display:flex;align-items:center;gap:5px;color:var(--warn);font-size:11px;min-width:0}
+.hold .i{width:12px;height:12px}
+
+/* ===== workspace and board (U33 widths) ===== */
+.twbar{flex:none;display:flex;align-items:center;gap:9px;min-height:40px;padding:4px 14px;border-bottom:1px solid var(--cardBorder);background:var(--bg)}
+.twbar .tn{font-weight:600;font-size:14px}
+.tbadge{display:inline-flex;align-items:center;gap:4px;height:19px;padding:0 8px;border-radius:10px;font-size:11px;font-weight:600;white-space:nowrap;border:1px solid currentColor;flex:none}
+.tb-running{color:var(--accent)}.tb-draft{color:var(--folder);border-style:dashed}
+.twbody{flex:1;min-height:0;display:flex}
+.twmain{flex:1;min-width:0;display:flex;flex-direction:column;min-height:0;background:var(--bg)}
+.twtool{flex:none;display:flex;align-items:center;gap:8px;padding:8px 12px}
+.bscroll{flex:1;min-height:0;overflow-x:auto;overflow-y:auto;padding:0 12px 10px}
+.bpage{display:flex;flex-direction:column;gap:8px;width:max-content}
+.phase{border:1px solid var(--cardBorder);border-radius:11px;background:var(--card)}
+.phase.run{border-color:color-mix(in srgb,var(--accent) 45%,var(--cardBorder))}
+.phase.draft{border-style:dashed;border-color:color-mix(in srgb,var(--folder) 55%,var(--cardBorder))}
+.ph{display:flex;align-items:center;gap:9px;height:38px;padding:0 12px;position:sticky;left:0;width:fit-content}
+.ph .pn{width:18px;height:18px;border-radius:9px;background:var(--hover);display:grid;place-items:center;font-size:10.5px;color:var(--muted)}
+.ph b{font-size:13px}
+.pbar{display:flex;gap:2px;height:5px;width:120px}
+.pbar i{flex:1;border-radius:2px;background:var(--border)}.pbar i.on{background:var(--accentMuted)}
+.board7{display:grid;grid-template-columns:repeat(7,240px);gap:8px;padding:0 8px 8px;align-items:start}
+.bcol{background:var(--bg);border:1px solid var(--cardBorder);border-radius:10px;padding:7px;display:flex;flex-direction:column;gap:6px;min-height:70px}
+.bcol.prob{border-color:color-mix(in srgb,var(--danger) 55%,var(--cardBorder))}
+.bcol.rev{border-color:color-mix(in srgb,var(--s-review) 40%,var(--cardBorder))}
+.bcol.tst{border-color:color-mix(in srgb,var(--s-test) 40%,var(--cardBorder))}
+.bh{display:flex;align-items:center;gap:5px;font-weight:600;color:var(--text3);padding:2px 4px;font-size:10.5px;letter-spacing:.4px;text-transform:uppercase}
+.bh .n{margin-left:auto}
+.bh .q{font-weight:400;text-transform:none;letter-spacing:0;color:var(--dim)}
+.bcard{border:1px solid var(--border);border-radius:8px;background:var(--surface);padding:7px 9px;display:flex;flex-direction:column;gap:5px;width:100%;position:relative}
+.bcard.pw{border-color:var(--warn)}.bcard.pd{border-color:var(--danger)}.bcard.on{box-shadow:0 0 0 2px var(--accent)}
+.bcard .l1{display:flex;align-items:flex-start;gap:6px;font-size:12px;min-width:0}
+.bcard .l1 .id{font-weight:600;flex:none}
+.bcard .l1 .dep{color:var(--folder);font-size:11px;flex:none;padding-top:1px}
+.bcard .l1 .tt{font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bcard .l2{display:flex;align-items:center;gap:6px;min-width:0;font-size:11px}
+.bcard .l3{display:flex;align-items:center;gap:5px;min-width:0;font-size:11px}
+.bcard .l3 .who{display:inline-flex;align-items:center;gap:4px;color:var(--muted);min-width:0}
+.bempty{color:var(--dim);border:1px dashed var(--border);border-radius:8px;text-align:center;padding:10px 6px;font-size:11px}
+.feedbar{flex:none;height:34px;border-top:1px solid var(--cardBorder);display:flex;align-items:center;gap:8px;padding:0 14px;font-size:11.5px;background:var(--bg)}
+.side{width:400px;flex:none;border-left:1px solid var(--cardBorder);display:flex;flex-direction:column;min-height:0;background:var(--bg);padding:10px;gap:8px;overflow:hidden}
+.sech{display:flex;align-items:center;gap:6px;min-height:26px}
+.sech h3{margin:0;font-size:12.5px;font-weight:600}
+.mcard{display:grid;grid-template-columns:22px 1fr auto;gap:4px 9px;padding:8px 9px;border-radius:10px;border:1px solid var(--cardBorder);background:var(--card)}
+.mcard.probw{border-color:color-mix(in srgb,var(--warn) 60%,var(--cardBorder))}
+.mcard .mr{display:flex;align-items:center;gap:6px;min-width:0}
+.mcard .rt{display:flex;flex-direction:column;align-items:flex-end;gap:4px;font-size:11px;color:var(--dim)}
+.sq{grid-column:2/4;display:flex;flex-direction:column;gap:3px;margin-top:2px;padding:5px 7px;border-radius:7px;background:var(--hover);font-size:11px}
+.sq .sqh{display:flex;align-items:center;gap:5px;color:var(--label)}
+.sq .sqr{display:flex;align-items:center;gap:6px;color:var(--text2);min-width:0}
+.tip{position:absolute;z-index:5;width:300px;background:var(--surface);border:1px solid var(--border);border-radius:9px;box-shadow:var(--shadow);padding:8px 10px;font-size:11.5px;display:flex;flex-direction:column;gap:4px;color:var(--text2)}
+.tip b{color:var(--fg)}
+
+/* ===== catalog editor ===== */
+.cat{flex:1;min-width:0;display:flex;flex-direction:column;min-height:0;background:var(--bg)}
+.cath{flex:none;display:flex;align-items:center;gap:9px;min-height:48px;padding:0 16px;border-bottom:1px solid var(--cardBorder)}
+.cath .tn{font-size:15px;font-weight:600}
+.catbody{flex:1;overflow:hidden;padding:12px 16px 20px;display:flex;flex-direction:column;gap:12px}
+.ctabs{display:flex;align-items:center;gap:10px}
+.ctabs .seg span{font-size:12.5px;padding:5px 12px}
+.ctabs .cnt{display:inline-grid;place-items:center;min-width:18px;height:17px;padding:0 5px;border-radius:9px;background:var(--hover);color:var(--text3);font-size:10.5px;font-weight:600}
+.roles2{display:flex;gap:14px;align-items:flex-start;min-height:0}
+.rlist{width:250px;flex:none;display:flex;flex-direction:column;gap:3px}
+.pitem{padding:7px 10px;border-radius:9px;border:1px solid transparent;display:flex;flex-direction:column;gap:2px}
+.pitem.on{background:var(--cardSel);border-color:var(--cardSelBorder)}
+.pitem .pn{font-weight:600;font-size:12.5px;display:flex;align-items:center;gap:6px}
+.pitem .ps{font-size:11px;color:var(--muted)}
+.pitem .flow{display:flex;align-items:center;gap:3px;margin-top:3px;flex-wrap:wrap}
+.redit{flex:1;min-width:0;border:1px solid var(--cardBorder);border-radius:11px;background:var(--card);padding:12px 14px;display:flex;flex-direction:column;gap:11px}
+.kv{display:grid;grid-template-columns:130px 1fr;gap:9px 14px;align-items:center}
+.kv>.k{color:var(--label);text-align:right;font-size:12px}
+.kv>.k.top{align-self:start;padding-top:5px}
+.note{font-size:11px;color:var(--dim);line-height:1.45}
+.stab{display:grid;grid-template-columns:16px 22px 132px 1fr 210px 92px 24px;gap:8px;align-items:center}
+.stab .th{font-size:11px;color:var(--label)}
+.stab .fixed{opacity:.7}
+.grip{color:var(--dim)}
+.stepper{display:inline-flex;align-items:center;border:1px solid var(--border);border-radius:7px;overflow:hidden;height:26px}
+.stepper span{width:24px;text-align:center;color:var(--muted)}
+.stepper b{min-width:24px;text-align:center;font-weight:600;border-left:1px solid var(--border);border-right:1px solid var(--border);line-height:24px}
+.sdetail{grid-column:3/7;border:1px solid var(--cardBorder);border-radius:9px;background:var(--bg);padding:9px 11px;display:flex;flex-direction:column;gap:7px}
+.opt{display:grid;grid-template-columns:16px 1fr;gap:3px 7px;align-items:start}
+.radio{width:13px;height:13px;border-radius:7px;border:1.5px solid var(--border);margin-top:2px}
+.radio.on{border-color:var(--accent);box-shadow:inset 0 0 0 2.5px var(--card),inset 0 0 0 7px var(--accent)}
+.cbx{width:13px;height:13px;border-radius:3px;border:1.5px solid var(--border);flex:none;display:inline-grid;place-items:center}
+.cbx.on{background:var(--accent);border-color:var(--accent)}
+.cbx.on::after{content:"";width:6px;height:3px;border-left:1.6px solid var(--accentText);border-bottom:1.6px solid var(--accentText);transform:translateY(-1px) rotate(-45deg)}
+.dtab{width:100%;border-collapse:collapse;font-size:12px}
+.dtab td,.dtab th{padding:5px 8px;border-bottom:1px solid var(--cardBorder);text-align:left}
+.dtab th{color:var(--label);font-weight:400;font-size:11px}
+.try{border:1px dashed var(--border);border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:9px;background:var(--bg)}
+.steps{display:flex;flex-direction:column}
+.step{display:grid;grid-template-columns:22px 1fr;gap:2px 9px;position:relative;padding-bottom:9px}
+.step:not(:last-child)::before{content:"";position:absolute;left:10px;top:22px;bottom:0;width:1.5px;background:var(--border)}
+.step .dot{width:22px;height:22px;border-radius:11px;display:grid;place-items:center;background:color-mix(in srgb,var(--sc,var(--muted)) 15%,transparent);color:var(--sc,var(--muted))}
+.step .dot .i{width:12px;height:12px}
+.step .sh{display:flex;align-items:center;gap:6px;min-height:22px;font-weight:600;flex-wrap:wrap}
+.step .sb{grid-column:2;font-size:11.5px;color:var(--muted);display:flex;flex-direction:column;gap:2px}
+.prop{border:1px solid var(--cardBorder);border-radius:10px;background:var(--card);padding:8px 10px;display:flex;flex-direction:column;gap:4px}
+.prop.kept{border-color:var(--cardSelBorder)}.prop.rej{opacity:.55}.prop.rej .pt{text-decoration:line-through}
+.plate{border:1px dashed color-mix(in srgb,var(--folder) 55%,var(--cardBorder));border-radius:9px;padding:7px 10px;display:flex;flex-direction:column;gap:3px;background:color-mix(in srgb,var(--folder) 5%,transparent)}
+.dchat{width:470px;flex:none;display:flex;flex-direction:column;border-right:1px solid var(--cardBorder);min-height:0;background:var(--bg)}
+.dhd{flex:none;padding:10px 14px;border-bottom:1px solid var(--cardBorder);display:flex;flex-direction:column;gap:7px}
+.dfeed{flex:1;overflow:hidden;padding:12px 14px;display:flex;flex-direction:column;gap:9px}
+.bubble{align-self:flex-end;max-width:88%;background:var(--segOn);border:1px solid var(--cardSelBorder);border-radius:12px 12px 4px 12px;padding:8px 11px;color:var(--fg);line-height:1.45}
+.tool{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:11.5px;padding-left:4px;border-left:2px solid var(--border)}
+.tool b{color:var(--text2);font-weight:600}
+
+/* ===== inspector and plan ===== */
+.insp{background:var(--bg);display:flex;flex-direction:column;min-height:0;border:1px solid var(--cardBorder)}
+.ihd{padding:12px 14px 10px;border-bottom:1px solid var(--cardBorder);display:flex;flex-direction:column;gap:7px}
+.ibody{flex:1;overflow:hidden;padding:12px 14px;display:flex;flex-direction:column;gap:12px}
+.ifoot{flex:none;border-top:1px solid var(--cardBorder);padding:9px 12px;display:flex;gap:6px;align-items:center;background:var(--bg)}
+.box{border:1px solid var(--cardBorder);border-radius:10px;background:var(--card);padding:9px 11px;display:flex;flex-direction:column;gap:7px}
+.kv2{display:grid;grid-template-columns:86px 1fr;gap:5px 10px;font-size:11.5px;align-items:baseline}
+.kv2 .k{color:var(--label)}
+.kv2 .v{color:var(--text2);min-width:0}
+.pipe{display:flex;align-items:center;gap:4px;flex-wrap:wrap}
+.pipe .arr{color:var(--dim);font-size:11px}
+.rnd{display:grid;grid-template-columns:22px 1fr;gap:3px 8px;position:relative;padding-bottom:10px}
+.rnd:not(:last-child)::before{content:"";position:absolute;left:10px;top:23px;bottom:1px;width:1.5px;background:var(--border)}
+.rnd .dot{width:22px;height:22px;border-radius:11px;display:grid;place-items:center;color:var(--sc,var(--muted));background:color-mix(in srgb,var(--sc,var(--muted)) 15%,transparent)}
+.rnd .dot .i{width:12px;height:12px}
+.rnd .rh{display:flex;align-items:center;gap:6px;min-height:22px;flex-wrap:wrap}
+.rnd .rh b{font-size:12px}
+.rnd .rb{grid-column:2;display:flex;flex-direction:column;gap:4px;font-size:11.5px;color:var(--muted)}
+.verdict{display:inline-flex;align-items:center;gap:3px;height:18px;padding:0 7px;border-radius:9px;font-size:10.5px;font-weight:700;letter-spacing:.2px}
+.v-pass{background:var(--accentBg);color:var(--accent)}
+.v-return{background:var(--warnBg);color:var(--warn)}
+.v-run{background:color-mix(in srgb,var(--s-test) 14%,transparent);color:var(--s-test)}
+.v-wait{background:var(--hover);color:var(--muted)}
+.find{display:grid;grid-template-columns:auto 1fr;gap:2px 7px;padding:5px 8px;border:1px solid var(--cardBorder);border-radius:7px;background:var(--card);color:var(--text2);font-size:11.5px}
+.sev{font-size:9.5px;font-weight:700;letter-spacing:.3px;padding:0 5px;border-radius:4px;height:16px;display:inline-flex;align-items:center;text-transform:uppercase}
+.sev-major{background:var(--dangerBg);color:var(--danger)}.sev-minor{background:var(--warnBg);color:var(--warn)}.sev-nit{background:var(--hover);color:var(--muted)}
+.find .loc{grid-column:2;color:var(--dim);font-size:11px}
+.find.fixed{opacity:.65}
+.menu{position:absolute;z-index:6;min-width:250px;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:4px;box-shadow:var(--shadow)}
+.menu .mi{display:grid;grid-template-columns:16px 1fr;gap:1px 9px;align-items:center;padding:6px 9px;border-radius:6px;color:var(--text2)}
+.menu .mi.on{background:var(--hover);color:var(--fg)}
+.menu .mi .md{grid-column:2;font-size:11px;color:var(--dim)}
+.menu .msep{height:1px;background:var(--cardBorder);margin:4px 2px}
+.menu .mh{font-size:10.5px;color:var(--dim);text-transform:uppercase;letter-spacing:.4px;font-weight:600;padding:6px 9px 3px}
+.frow{display:grid;grid-template-columns:38px 16px 1fr;gap:6px;align-items:start;padding:5px 2px;border-bottom:1px solid var(--cardBorder);font-size:11.5px}
+.frow .ft{color:var(--dim);font-size:10.5px;padding-top:1px}
+.frow .fx{color:var(--text2)}
+/* ===== gallery chrome (not part of the design) ===== */
+.gal{max-width:2300px;margin:0 auto;padding:24px 28px 60px}
+.gal header{display:flex;align-items:center;gap:16px;margin-bottom:6px}
+.gal h1{font-size:20px;margin:0}
+.gal .lead{max-width:980px;opacity:.8;margin:4px 0 18px}
+.gal .tgl{display:inline-flex;border:1px solid #445;border-radius:8px;overflow:hidden}
+.gal .tgl a{padding:4px 12px;color:inherit;text-decoration:none;font-size:12px}
+.gal .tgl a.on{background:#2a4a3e;color:#bdf0da}
+.lightpage .gal .tgl a.on{background:#cfe8dc;color:#115d46}
+.gal nav{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:22px}
+.gal nav a{font-size:12px;color:inherit;opacity:.85;border:1px solid #445;border-radius:12px;padding:2px 10px;text-decoration:none}
+.gal section{margin:0 0 40px}
+.gal h2{font-size:15px;margin:0 0 4px}
+.gal .cap{max-width:1100px;opacity:.8;margin:0 0 10px;font-size:12.5px}
+.gal .frame{box-shadow:0 0 0 1px rgba(128,140,155,.35);border-radius:6px;overflow:hidden;width:max-content;max-width:100%;overflow-x:auto}
+body.shot{overflow:hidden}
+
+/* ===== U38: the profile ===== */
+.app{--k-work:#7dd3b0;--k-rework:#e8a75a;--k-build:#56c8e0;--k-review:#b79cff;--k-test:#7fb6e0;--k-delay:#7b8590;--k-block:#ef7d6d;--k-queue:#7fb6e0;--k-deps:#9aa3ad;--k-lead:#b79cff;--k-idle:#ef7d6d;--k-unk:#7b8590;--heat:#ef7d6d}
+.app.light{--k-work:#2f9a76;--k-rework:#b36b12;--k-build:#137f95;--k-review:#6f4fd8;--k-test:#2f6ea3;--k-delay:#6f7b88;--k-block:#c4402f;--k-queue:#2f6ea3;--k-deps:#5d6b7c;--k-lead:#6f4fd8;--k-idle:#c4402f;--k-unk:#6f7b88;--heat:#c4402f}
+.pbody{flex:1;min-height:0;display:flex;background:var(--bg)}
+.pmain{flex:1;min-width:0;display:flex;flex-direction:column;min-height:0;padding:0 14px 12px;gap:10px}
+.pside{width:430px;flex:none;border-left:1px solid var(--cardBorder);padding:10px 12px;display:flex;flex-direction:column;gap:9px;background:var(--bg);overflow:hidden}
+.kpis{display:flex;gap:8px;flex-wrap:nowrap}
+.kpi{flex:1;min-width:0;border:1px solid var(--cardBorder);border-radius:9px;background:var(--card);padding:6px 10px;display:flex;flex-direction:column;gap:1px}
+.kpi .kl{font-size:10.5px;color:var(--label)}
+.kpi .kv{font-size:15px;font-weight:600}
+.kpi .ks{font-size:10.5px;color:var(--dim)}
+.kpi.bad .kv{color:var(--warn)}
+.tl{border:1px solid var(--cardBorder);border-radius:11px;background:var(--card);padding:8px 10px 10px;display:flex;flex-direction:column;gap:2px;position:relative}
+.axis{display:grid;grid-template-columns:168px 1fr;align-items:end;height:22px}
+.axis .ticks{position:relative;height:22px;border-bottom:1px solid var(--cardBorder)}
+.axis .ticks span{position:absolute;bottom:3px;font-size:10.5px;color:var(--dim);transform:translateX(-50%)}
+.axis .ticks i{position:absolute;bottom:-1px;height:5px;width:1px;background:var(--border)}
+.lane{display:grid;grid-template-columns:168px 1fr;align-items:center;min-height:40px;border-bottom:1px dashed color-mix(in srgb,var(--cardBorder) 70%,transparent)}
+.lane:last-child{border-bottom:0}
+.lane .who{display:flex;align-items:center;gap:6px;min-width:0;font-size:11.5px}
+.lane .who .u{margin-left:auto;padding-right:10px;color:var(--dim);font-size:10.5px}
+.trk2{position:relative;height:36px;overflow:hidden}
+.sp.cut{border-top-right-radius:0;border-bottom-right-radius:0;-webkit-mask-image:linear-gradient(90deg,#000 calc(100% - 14px),transparent);mask-image:linear-gradient(90deg,#000 calc(100% - 14px),transparent)}
+.sp{position:absolute;top:4px;height:18px;border-radius:4px;font-size:10.5px;line-height:18px;padding:0 4px;overflow:hidden;white-space:nowrap;color:var(--accentText);font-weight:600;box-sizing:border-box}
+.sp.q{top:25px;height:8px;border-radius:3px;padding:0;font-size:0}
+.sp.cp{box-shadow:0 0 0 2px var(--fg)}
+.k-work{background:var(--k-work)}
+.k-rework{background:var(--k-rework)}
+.k-build{background:var(--k-build)}
+.k-review{background:var(--k-review)}
+.k-test{background:var(--k-test)}
+.k-delay{background:var(--k-delay)}
+.k-block{background:var(--k-block)}
+.hatch{color:var(--fg);font-weight:500}
+.k-queue{background:repeating-linear-gradient(135deg,color-mix(in srgb,var(--k-queue) 55%,transparent) 0 3px,transparent 3px 6px);border:1px solid color-mix(in srgb,var(--k-queue) 60%,transparent)}
+.k-deps{background:repeating-linear-gradient(135deg,color-mix(in srgb,var(--k-deps) 45%,transparent) 0 3px,transparent 3px 6px);border:1px solid color-mix(in srgb,var(--k-deps) 55%,transparent)}
+.k-lead{background:repeating-linear-gradient(135deg,color-mix(in srgb,var(--k-lead) 55%,transparent) 0 3px,transparent 3px 6px);border:1px solid color-mix(in srgb,var(--k-lead) 60%,transparent)}
+.k-idle{background:color-mix(in srgb,var(--k-idle) 9%,transparent);border:1px dashed color-mix(in srgb,var(--k-idle) 55%,transparent);color:var(--k-idle)!important;font-weight:500}
+.k-unk{background:repeating-linear-gradient(45deg,color-mix(in srgb,var(--k-unk) 35%,transparent) 0 2px,transparent 2px 5px),repeating-linear-gradient(135deg,color-mix(in srgb,var(--k-unk) 35%,transparent) 0 2px,transparent 2px 5px);border:1px solid color-mix(in srgb,var(--k-unk) 50%,transparent);color:var(--muted)!important;font-weight:500}
+.tick{position:absolute;top:2px;width:2px;height:22px;background:var(--k-rework);border-radius:1px}
+.tick::after{content:"↩";position:absolute;top:-3px;left:3px;font-size:10px;color:var(--k-rework)}
+.pathrow .trk2{height:24px}
+.pathrow .sp{top:3px}
+.pp{background:transparent;border:1.5px dashed var(--fg);color:var(--fg)!important;font-weight:500}
+.legend{display:flex;gap:10px 14px;flex-wrap:wrap;font-size:11px;color:var(--text2);align-items:center}
+.legend .sw{display:inline-block;width:18px;height:10px;border-radius:3px;vertical-align:middle;margin-right:5px}
+.legend .g{font-size:10.5px;color:var(--dim);text-transform:uppercase;letter-spacing:.4px;font-weight:600}
+.loss{display:grid;grid-template-columns:20px 1fr auto;gap:2px 8px;padding:7px 9px;border:1px solid var(--cardBorder);border-radius:9px;background:var(--card)}
+.loss.on{border-color:color-mix(in srgb,var(--fg) 45%,var(--cardBorder))}
+.loss .rk{width:20px;height:20px;border-radius:10px;display:grid;place-items:center;font-size:11px;font-weight:700;background:var(--warnBg);color:var(--warn)}
+.loss .lt{font-weight:600;font-size:12px;min-width:0}
+.loss .la{font-weight:700;font-size:12px;text-align:right}
+.loss .ld{grid-column:2/4;font-size:11px;color:var(--muted);line-height:1.4}
+.loss .ll{grid-column:2/4;display:flex;gap:5px;flex-wrap:wrap;margin-top:2px}
+.lnk{display:inline-flex;align-items:center;gap:3px;height:18px;padding:0 6px;border-radius:5px;font-size:10.5px;color:var(--folder);background:color-mix(in srgb,var(--folder) 11%,transparent);white-space:nowrap}
+.share{grid-column:2/4;height:4px;border-radius:2px;background:var(--border);overflow:hidden;margin-top:3px}
+.share i{display:block;height:100%;background:var(--warn)}
+.sample{display:inline-flex;align-items:center;gap:4px;height:18px;padding:0 7px;border-radius:9px;font-size:10.5px;font-weight:600;color:var(--violet);border:1px dashed color-mix(in srgb,var(--violet) 55%,transparent)}
+.trow{display:grid;grid-template-columns:58px 1fr 120px 400px 150px;gap:8px;align-items:center;padding:5px 4px;border-bottom:1px solid var(--cardBorder);font-size:11.5px}
+.trow.h{color:var(--label);font-size:10.5px;text-transform:uppercase;letter-spacing:.3px}
+.tbar{display:flex;height:12px;border-radius:3px;overflow:hidden;background:var(--hover)}
+.tbar i{display:block;height:100%}
+.ptab{width:100%;border-collapse:collapse;font-size:12px}
+.ptab th{color:var(--label);font-weight:400;font-size:10.5px;text-transform:uppercase;letter-spacing:.3px;text-align:right;padding:6px 10px;border-bottom:1px solid var(--cardBorder)}
+.ptab th:first-child,.ptab td:first-child{text-align:left}
+.ptab td{padding:6px 10px;border-bottom:1px solid var(--cardBorder);text-align:right;white-space:nowrap}
+.ptab tr.grp td{background:var(--hover);font-weight:600}
+.ptab td .ubar{display:inline-block;width:70px;height:6px;border-radius:3px;background:var(--border);vertical-align:middle;margin-left:6px;overflow:hidden}
+.ptab td .ubar i{display:block;height:100%;background:var(--accentMuted)}
+.cmp{display:grid;grid-template-columns:240px 1fr 1fr 110px;gap:0;border:1px solid var(--cardBorder);border-radius:11px;overflow:hidden;background:var(--card)}
+.cmp>div{padding:8px 12px;border-bottom:1px solid var(--cardBorder);display:flex;align-items:center;gap:8px;font-size:12px;min-height:36px}
+.cmp .ch{background:var(--hover);font-weight:600}
+.cmp .cl{color:var(--label)}
+.cbar{flex:1;height:8px;border-radius:4px;background:var(--border);overflow:hidden;max-width:240px}
+.cbar i{display:block;height:100%;background:var(--accentMuted)}
+.cbar.w i{background:var(--warn)}
+.delta{font-weight:700;font-size:11.5px}
+.delta.up{color:var(--warn)}.delta.dn{color:var(--accent)}
+.gnode{position:absolute;width:232px;height:60px;border:1px solid var(--border);border-radius:9px;background:var(--surface);padding:7px 9px 6px 12px;display:flex;flex-direction:column;gap:6px;overflow:hidden;font-size:12px}
+.gnode::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--nb,var(--accentMuted))}
+.gnode .tt{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gnode.dim{opacity:.5}
+.gedges{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
+.gedges path{fill:none;stroke:var(--dim);stroke-width:1.3;opacity:.7}
+.heatlg{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--text2)}
+.heatlg .grad{width:180px;height:10px;border-radius:5px;background:linear-gradient(90deg,color-mix(in srgb,var(--heat) 0%,var(--surface)),color-mix(in srgb,var(--heat) 45%,var(--surface)))}
+.hl{font-size:10.5px;font-weight:700;margin-left:auto}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+const LOGO_D = {
+  claude: "M4.709 15.955l4.72-2.647.08-.23-.08-.128H9.2l-.79-.048-2.698-.073-2.339-.097-2.266-.122-.571-.121L0 11.784l.055-.352.48-.321.686.06 1.52.103 2.278.158 1.652.097 2.449.255h.389l.055-.157-.134-.098-.103-.097-2.358-1.596-2.552-1.688-1.336-.972-.724-.491-.364-.462-.158-1.008.656-.722.881.06.225.061.893.686 1.908 1.476 2.491 1.833.365.304.145-.103.019-.073-.164-.274-1.355-2.446-1.446-2.49-.644-1.032-.17-.619a2.970 2.970 0 01-.104-.729L6.283.134 6.696 0l.996.134.42.364.62 1.414 1.002 2.229 1.555 3.030.456.898.243.832.091.255h.158V9.010l.128-1.706.237-2.095.23-2.695.08-.76.376-.91.747-.492.584.28.48.685-.067.444-.286 1.851-.559 2.903-.364 1.942h.212l.243-.242.985-1.306 1.652-2.064.73-.82.85-.904.547-.431h1.033l.76 1.129-.34 1.166-1.064 1.347-.881 1.142-1.264 1.7-.79 1.36.073.11.188-.02 2.856-.606 1.543-.28 1.841-.315.833.388.091.395-.328.807-1.969.486-2.309.462-3.439.813-.042.03.049.061 1.549.146.662.036h1.622l3.020.225.79.522.474.638-.079.485-1.215.62-1.640-.389-3.829-.91-1.312-.329h-.182v.11l1.093 1.068 2.006 1.810 2.509 2.330.127.578-.322.455-.34-.049-2.205-1.657-.851-.747-1.926-1.620h-.128v.17l.444.649 2.345 3.521.122 1.080-.17.353-.608.213-.668-.122-1.374-1.925-1.415-2.167-1.143-1.943-.14.08-.674 7.254-.316.37-.729.28-.607-.461-.322-.747.322-1.476.389-1.924.315-1.530.286-1.900.17-.632-.012-.042-.14.018-1.434 1.967-2.180 2.945-1.726 1.845-.414.164-.717-.37.067-.662.401-.589 2.388-3.036 1.440-1.882.93-1.086-.006-.158h-.055L4.132 18.560l-1.130.146-.487-.456.061-.746.231-.243 1.908-1.312-.006.006z",
+  codexBg: "M19.503 0H4.496A4.496 4.496 0 000 4.496v15.007A4.496 4.496 0 004.496 24h15.007A4.496 4.496 0 0024 19.503V4.496A4.496 4.496 0 0019.503 0z",
+  codex: "M9.064 3.344a4.578 4.578 0 012.285-.312c1 .115 1.891.54 2.673 1.275.01.01.024.017.037.021a.09.09 0 00.043 0 4.55 4.55 0 013.046.275l.047.022.116.057a4.581 4.581 0 012.188 2.399c.209.51.313 1.041.315 1.595a4.24 4.24 0 01-.134 1.223.123.123 0 00.03.115c.594.607.988 1.33 1.183 2.17.289 1.425-.007 2.71-.887 3.854l-.136.166a4.548 4.548 0 01-2.201 1.388.123.123 0 00-.081.076c-.191.551-.383 1.023-.74 1.494-.9 1.187-2.222 1.846-3.711 1.838-1.187-.006-2.239-.44-3.157-1.302a.107.107 0 00-.105-.024c-.388.125-.78.143-1.204.138a4.441 4.441 0 01-1.945-.466 4.544 4.544 0 01-1.61-1.335c-.152-.202-.303-.392-.414-.617a5.81 5.81 0 01-.37-.961 4.582 4.582 0 01-.014-2.298.124.124 0 00.006-.056.085.085 0 00-.027-.048 4.467 4.467 0 01-1.034-1.651 3.896 3.896 0 01-.251-1.192 5.189 5.189 0 01.141-1.6c.337-1.112.982-1.985 1.933-2.618.212-.141.413-.251.601-.33.215-.089.43-.164.646-.227a.098.098 0 00.065-.066 4.51 4.51 0 01.829-1.615 4.535 4.535 0 011.837-1.388zm3.482 10.565a.637.637 0 000 1.272h3.636a.637.637 0 100-1.272h-3.636zM8.462 9.23a.637.637 0 00-1.106.631l1.272 2.224-1.266 2.136a.636.636 0 101.095.649l1.454-2.455a.636.636 0 00.005-.64L8.462 9.23z",
+  deepseek: "M23.748 4.482c-.254-.124-.364.113-.512.234-.051.039-.094.09-.137.136-.372.397-.806.657-1.373.626-.829-.046-1.537.214-2.163.848-.133-.782-.575-1.248-1.247-1.548-.352-.156-.708-.311-.955-.65-.172-.241-.219-.51-.305-.774-.055-.16-.11-.323-.293-.35-.2-.031-.278.136-.356.276-.313.572-.434 1.202-.422 1.84.027 1.436.633 2.58 1.838 3.393.137.093.172.187.129.323-.082.28-.18.552-.266.833-.055.179-.137.217-.329.14a5.526 5.526 0 01-1.736-1.18c-.857-.828-1.631-1.742-2.597-2.458a11.365 11.365 0 00-.689-.471c-.985-.957.13-1.743.388-1.836.27-.098.093-.432-.779-.428-.872.004-1.67.295-2.687.684a3.055 3.055 0 01-.465.137 9.597 9.597 0 00-2.883-.102c-1.885.21-3.39 1.102-4.497 2.623C.082 8.606-.231 10.684.152 12.85c.403 2.284 1.569 4.175 3.36 5.653 1.858 1.533 3.997 2.284 6.438 2.14 1.482-.085 3.133-.284 4.994-1.86.47.234.962.327 1.78.397.63.059 1.236-.03 1.705-.128.735-.156.684-.837.419-.961-2.155-1.004-1.682-.595-2.113-.926 1.096-1.296 2.746-2.642 3.392-7.003.05-.347.007-.565 0-.845-.004-.17.035-.237.23-.256a4.173 4.173 0 001.545-.475c1.396-.763 1.96-2.015 2.093-3.517.02-.23-.004-.467-.247-.588zM11.581 18c-2.089-1.642-3.102-2.183-3.52-2.16-.392.024-.321.471-.235.763.09.288.207.486.371.739.114.167.192.416-.113.603-.673.416-1.842-.14-1.897-.167-1.361-.802-2.5-1.86-3.301-3.307-.774-1.393-1.224-2.887-1.298-4.482-.02-.386.093-.522.477-.592a4.696 4.696 0 011.529-.039c2.132.312 3.946 1.265 5.468 2.774.868.86 1.525 1.887 2.202 2.891.72 1.066 1.494 2.082 2.48 2.914.348.292.625.514.891.677-.802.09-2.140.11-3.054-.614zm1-6.44a.306.306 0 01.415-.287.302.302 0 01.2.288.306.306 0 01-.31.307.303.303 0 01-.304-.308zm3.11 1.596c-.2.081-.399.151-.59.16a1.245 1.245 0 01-.798-.254c-.274-.23-.47-.358-.552-.758a1.730 1.730 0 01.016-.588c.07-.327-.008-.537-.239-.727-.187-.156-.426-.199-.688-.199a.559.559 0 01-.254-.078c-.11-.054-.2-.19-.114-.358.028-.054.16-.186.192-.21.356-.202.767-.136 1.146.016.352.144.618.408 1.001.782.391.451.462.576.685.914.176.265.336.537.445.848.067.195-.019.354-.25.452z",
+  kimiDot: "M21.846 0a1.923 1.923 0 110 3.846H20.15a.226.226 0 01-.227-.226V1.923C19.923.861 20.784 0 21.846 0z",
+  kimi: "M11.065 11.199l7.257-7.2c.137-.136.06-.41-.116-.41H14.3a.164.164 0 00-.117.051l-7.82 7.756c-.122.12-.302.013-.302-.179V3.820c0-.127-.083-.23-.185-.23H3.186c-.103 0-.186.103-.186.23V19.770c0 .128.083.23.186.23h2.690c.103 0 .186-.102.186-.23v-3.250c0-.069.025-.135.069-.178l2.424-2.406a.158.158 0 01.205-.023l6.484 4.772a7.677 7.677 0 003.453 1.283c.108.012.2-.095.2-.23v-3.060c0-.117-.07-.212-.164-.227a5.028 5.028 0 01-2.027-.807l-5.613-4.064c-.117-.078-.132-.279-.028-.381z",
+};
+const IC = {
+  play: "M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0ZM10 8.5l5 3.5-5 3.5z",
+  check: "M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0ZM8 12.5l2.8 2.8L16.5 9",
+  checkf: ["M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0Z", "M8 12.5l2.8 2.8L16.5 9"],
+  tick: "M5 12.5l4.5 4.5L19 7.5",
+  clock: "M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0ZM12 7v5l3 2",
+  circle: "M4 12a8 8 0 1 0 16 0a8 8 0 1 0 -16 0Z",
+  arrowc: "M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0ZM8 12h8M13 9l3 3-3 3",
+  x: "M6 6l12 12M18 6L6 18",
+  chevd: "M6 9l6 6 6-6", chevr: "M9 6l6 6-6 6", chevl: "M15 6l-6 6 6 6",
+  dots: "M4.7 12a1.3 1.3 0 1 0 2.6 0a1.3 1.3 0 1 0 -2.6 0ZM10.7 12a1.3 1.3 0 1 0 2.6 0a1.3 1.3 0 1 0 -2.6 0ZM16.7 12a1.3 1.3 0 1 0 2.6 0a1.3 1.3 0 1 0 -2.6 0Z",
+  plus: "M12 5v14M5 12h14",
+  copy: "M10 8h8a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2v-8a2 2 0 0 1 2 -2ZM16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3",
+  trash: "M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13",
+  send: "M4 12l16-8-6 16-2.5-6.5zM11.5 13.5L20 4",
+  folder: "M3 6a1 1 0 0 1 1-1h5l2 2h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z",
+  branch: "M4 5a2 2 0 1 0 4 0a2 2 0 1 0 -4 0ZM4 19a2 2 0 1 0 4 0a2 2 0 1 0 -4 0ZM16 7a2 2 0 1 0 4 0a2 2 0 1 0 -4 0ZM6 7v10M18 9c0 5-6 4-11.5 8.5",
+  eye: "M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12zM9 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0Z",
+  back: "M10 6l-6 6 6 6M4 12h16",
+  lock: "M6.5 11h11a1.5 1.5 0 0 1 1.5 1.5v6a1.5 1.5 0 0 1 -1.5 1.5h-11a1.5 1.5 0 0 1 -1.5 -1.5v-6a1.5 1.5 0 0 1 1.5 -1.5ZM8 11V8a4 4 0 0 1 8 0v3",
+  q: "M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0ZM9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.3-1 .8-1 1.5v.4M11.65 16.8a0.35 0.35 0 1 0 0.7 0a0.35 0.35 0 1 0 -0.7 0Z",
+  alert: "M12 3.5l9.5 16.5h-19zM12 10v4.5M11.65 17.2a0.35 0.35 0 1 0 0.7 0a0.35 0.35 0 1 0 -0.7 0Z",
+  refresh: "M20 11a8 8 0 0 0-14.5-4.5M4 13a8 8 0 0 0 14.5 4.5M5 3v4h4M19 21v-4h-4",
+  ret: "M9 14l-5-5 5-5M4 9h10a6 6 0 0 1 0 12h-3",
+  skip: "M5 6l7 6-7 6zM13 6l7 6-7 6z",
+  grip: "M9 6h.01M15 6h.01M9 12h.01M15 12h.01M9 18h.01M15 18h.01",
+  graph: "M10 3h4a1 1 0 0 1 1 1v2a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1v-2a1 1 0 0 1 1 -1ZM4 17h4a1 1 0 0 1 1 1v2a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1v-2a1 1 0 0 1 1 -1ZM16 17h4a1 1 0 0 1 1 1v2a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1v-2a1 1 0 0 1 1 -1ZM12 7v4M6 17v-3h12v3",
+  board: "M4 4h4v16H4zM10 4h4v10h-4zM16 4h4v7h-4z",
+  layers: "M12 3l9 5-9 5-9-5zM3 12l9 5 9-5M3 16l9 5 9-5",
+  users: "M5.5 8a3.5 3.5 0 1 0 7 0a3.5 3.5 0 1 0 -7 0ZM2.5 20c.6-3.5 3.2-5.5 6.5-5.5s5.9 2 6.5 5.5M16 4.6a3.5 3.5 0 0 1 0 6.8M18 14.8c2 .7 3.2 2.5 3.5 5.2",
+  user: "M8 8a4 4 0 1 0 8 0a4 4 0 1 0 -8 0ZM4 21c1-4 4-6 8-6s7 2 8 6",
+  bolt: "M13 3L5 14h6l-1 7 8-11h-6z",
+  pipe: "M5 6a2 2 0 1 0 4 0a2 2 0 1 0 -4 0ZM15 18a2 2 0 1 0 4 0a2 2 0 1 0 -4 0ZM9 6h6a3 3 0 0 1 0 6H9a3 3 0 0 0 0 6h6",
+  sparkle: "M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8zM18.5 15.5l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8z",
+  imp: "M4 20h4L19 9l-4-4L4 16zM14 6l4 4",
+  dl: "M12 4v11M7 10l5 5 5-5M5 20h14", ul: "M12 20V9M7 14l5-5 5 5M5 4h14",
+  r_lead: "M4 8l4 4 4-6 4 6 4-4-2 10H6zM6 21h12",
+  r_backend: "M5.5 4h13a1.5 1.5 0 0 1 1.5 1.5v3a1.5 1.5 0 0 1 -1.5 1.5h-13a1.5 1.5 0 0 1 -1.5 -1.5v-3a1.5 1.5 0 0 1 1.5 -1.5ZM5.5 14h13a1.5 1.5 0 0 1 1.5 1.5v3a1.5 1.5 0 0 1 -1.5 1.5h-13a1.5 1.5 0 0 1 -1.5 -1.5v-3a1.5 1.5 0 0 1 1.5 -1.5ZM8 7h.01M8 17h.01",
+  r_frontend: "M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-12a2 2 0 0 1 2 -2ZM3 9h18M9 9v11",
+  r_tester: "M9 3h6M10 3v6l-5 9.5A1.5 1.5 0 0 0 6.3 21h11.4a1.5 1.5 0 0 0 1.3-2.5L14 9V3M7.5 15h9",
+  r_reviewer: "M4.5 10.5a6 6 0 1 0 12 0a6 6 0 1 0 -12 0ZM20 20l-5-5M8 10.5l2 2 3.5-3.5",
+  r_secretary: "M4 20h4L19 9l-4-4L4 16z",
+  r_researcher: "M4 5h6a2 2 0 0 1 2 2v13a2 2 0 0 0-2-2H4zM20 5h-6a2 2 0 0 0-2 2v13a2 2 0 0 1 2-2h6z",
+};
+const ic = (n, c = '') => {
+  const v = IC[n] || IC.circle;
+  const p = Array.isArray(v) ? `<path class="f" d="${v[0]}"/><path class="k" d="${v[1]}"/>` : `<path d="${v}"/>`;
+  return `<svg class="i ${c}" viewBox="0 0 24 24">${p}</svg>`;
+};
+const lg = (a) => {
+  const L = LOGO_D;
+  if (a === 'claude') return `<svg class="lg" viewBox="0 0 24 24"><path fill="#D97757" d="${L.claude}"/></svg>`;
+  if (a === 'codex') return `<svg class="lg" viewBox="0 0 24 24"><path fill="#f4f6ff" d="${L.codexBg}"/><path fill="#5b78ff" d="${L.codex}"/></svg>`;
+  if (a === 'deepseek') return `<svg class="lg" viewBox="0 0 24 24"><path fill="#4D6BFE" d="${L.deepseek}"/></svg>`;
+  if (a === 'kimi') return `<svg class="lg" viewBox="0 0 24 24"><path fill="#1783FF" d="${L.kimiDot}"/><path fill="currentColor" d="${L.kimi}"/></svg>`;
+  return '';
+};
+const tile = (a, c = '') => `<span class="tile ${c}">${lg(a)}</span>`;
+const RN = { lead: 'Lead', backend: 'Backend', frontend: 'Frontend', tester: 'Tester', reviewer: 'Reviewer', secretary: 'Secretary', researcher: 'Researcher' };
+const role = (k, mini = false, name) => `<span class="role rc-${k}${mini ? ' mini' : ''}">${ic('r_' + k)}${name || RN[k]}</span>`;
+const KIND = { review: ['r_reviewer', 'Review', 'sk-review'], test: ['r_tester', 'Test', 'sk-test'], accept: ['r_lead', 'Lead', 'sk-accept'], auto: ['bolt', 'Auto', 'sk-accept'], impl: ['imp', 'Implement', 'sk-wait'] };
+const stg = (k, extra = '', cls = '') => { const [i, n, c] = KIND[k]; return `<span class="stg ${c} ${cls}">${ic(i)}${n}${extra ? ` <span class="r">${extra}</span>` : ''}</span>`; };
+// stage track: d = done, c = current, x = skipped, '' = to come
+const trk = (cells, sc) => `<span class="trk" style="${sc ? `--sc:var(${sc})` : ''}">${cells.map(c => `<i class="${c}"></i>`).join('')}</span>`;
+const seg = (opts, on, cls = '') => `<span class="seg ${cls}">${opts.map((o, n) => `<span class="${n === on ? 'on' : ''}">${o}</span>`).join('')}</span>`;
+const ST = {
+  pending: ['circle', 'var(--muted)'], active: ['play', 'var(--accent)'], problem: ['q', 'var(--warn)'], submitted: ['arrowc', 'var(--accentMuted)'],
+  review: ['r_reviewer', 'var(--s-review)'], test: ['r_tester', 'var(--s-test)'], accepted: ['checkf', 'var(--accentMuted)'], rework: ['refresh', 'var(--warn)'], accept: ['r_lead', 'var(--s-accept)'],
+};
+const sti = (s) => `<span style="color:${ST[s][1]};display:inline-flex;padding-top:1px">${ic(ST[s][0], 's12')}</span>`;
+
+// A Board card: line 1 status, id, deps and title; line 2 the implementer;
+// line 3 (new) the stage chip, its member and the stage track, or a hold.
+function card(t) {
+  const deps = t.deps ? `<span class="dep">↤${t.deps}</span>` : '';
+  const l2 = `<div class="l2">${role(t.role)}${tile(t.agent, 't16')}<span class="ell ${t.l2c || 'muted'}">${t.l2 || ''}</span></div>`;
+  const l3 = t.l3 ? `<div class="l3">${t.l3}</div>` : '';
+  return `<div class="bcard ${t.cls || ''}" ${t.style ? `style="${t.style}"` : ''}><div class="l1">${sti(t.st)}<span class="id">#${t.id}</span>${deps}<span class="tt">${t.title}</span></div>${l2}${l3}${t.tip || ''}</div>`;
+}
+// The stage member: its agent, and a number when the role has several members.
+const who = (k, a, name) => `<span class="who" title="${RN[k]}">${tile(a, 't16')}${name ? `<span class="ell">${name}</span>` : ''}</span>`;
+
+/* ---------------------------------------------------------------- views */
+const V = {};
+/* ===== U38: the profile ===== */
+Object.assign(IC, {
+  prof: "M4 6h9M4 12h14M4 18h6M15 6h5M20 12h0M12 18h8",
+  flame: "M12 3c1 3 4 4.5 4 8.5a4 4 0 0 1-8 0c0-1.6.7-2.7 1.6-3.6.2 1.3.9 2.1 1.9 2.4C11 8 11 5.5 12 3zM8.5 17.5A4.5 4.5 0 0 0 12 21a4.5 4.5 0 0 0 3.5-3.5",
+  coins: "M5 7c0-1.7 3.1-3 7-3s7 1.3 7 3-3.1 3-7 3-7-1.3-7-3zM5 7v5c0 1.7 3.1 3 7 3s7-1.3 7-3V7M5 12v5c0 1.7 3.1 3 7 3s7-1.3 7-3v-5",
+  cmp: "M7 4v16M17 4v16M3 8h8M13 16h8",
+  table: "M4 5h16v14H4zM4 10h16M4 15h16M10 5v14",
+  stairs: "M4 19h5v-5h5V9h6M17 6l3 3-3 3",
+  pause: "M8 5v14M16 5v14",
+});
+// Phase 38 of team 528aebfe, read from `hgs team status` (attempts' sent, start
+// and report times; each task's timing): minutes from 16:47 on 2026-10-27.
+// Positions are shares of the timeline, so every bar and label stays inside
+// the members card; a span past the phase's end is cut there (class cut).
+// PX only sizes a label against the narrowest track (about 900 px).
+const T0 = 16 * 60 + 47, SPAN = 330, PX = 900 / SPAN;
+const pct = (m) => `${(Math.min(Math.max(m, 0), SPAN) / SPAN * 100).toFixed(3)}%`;
+const hm = (m) => { const t = T0 + m; return `${String(Math.floor(t / 60) % 24).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`; };
+const dur = (m) => m >= 60 ? `${Math.floor(m / 60)}h ${String(Math.round(m % 60)).padStart(2, '0')}m` : `${Math.round(m)}m`;
+const sp = (a, b, k, label = '', o = {}) => `<span class="sp k-${k} ${o.q ? 'q' : ''} ${o.cp ? 'cp' : ''} ${b > SPAN ? 'cut' : ''} ${['queue', 'deps', 'lead', 'unk'].includes(k) ? 'hatch' : ''}" style="left:${pct(a)};width:max(2px, calc(${pct(b)} - ${pct(a)}))" title="${label}${b > SPAN ? ' (runs past the phase’s end)' : ''}">${(Math.min(b, SPAN) - a) * PX > 34 ? label : ''}</span>`;
+const tickAt = (m) => `<span class="tick" style="left:${pct(m)}" title="returned by the lead"></span>`;
+const AG = { dsh: 'deepseek', claude: 'claude' };
+const RK = (who) => who === 'lead' ? 'lead' : who === 'reviewer' ? 'reviewer' : who === 'qa' ? 'tester' : 'backend';
+const LANES = [
+  { id: 'backend2', role: 'backend', agent: 'dsh', util: '65%', spans: [
+    [0, 18, 'rework', '#479 a1'], [18, 31, 'rework', '#477 a1'], [31, 48, 'rework', '#479 a2'], [49, 59, 'rework', '#477 a2'],
+    [59, 66, 'work', '#479'], [67, 79, 'work', '#477'], [79, 92, 'rework', '#481 a1'], [92, 107, 'rework', '#482 a1'],
+    [108, 114, 'work', '#481'], [114, 220, 'work', '#482 Settings > Sessions: confirm subagents'], [220, 330, 'idle', 'idle 1h 50m']],
+    ticks: [18, 31, 48, 59, 92, 107], queue: [[0, 92, 'queue', '#481 waited 79m, #477 18m, #482 26m']], cp: [0, 220] },
+  { id: 'backend', role: 'backend', agent: 'dsh', util: '47%', spans: [
+    [0, 36, 'work', '#474 review fixes'], [37, 60, 'work', '#475'], [61, 157, 'work', '#515 approve a draft while the previous runs'], [157, 330, 'idle', 'idle 2h 53m while #482 and #483 were open']],
+    queue: [[0, 61, 'queue', '#475 waited 37m, #515 61m']] },
+  { id: 'backend3', role: 'backend', agent: 'claude', util: '39%', spans: [
+    [33, 35, 'delay', 'start'], [35, 46, 'work', '#476'], [47, 164, 'work', '#480 limit resume, findings, reports'], [164, 330, 'idle', 'idle 2h 46m']],
+    queue: [[0, 33, 'queue', '#476 waited 33m'], [33, 47, 'queue', '#480 waited 47m']] },
+  { id: 'backend4', role: 'backend', agent: 'dsh', util: '16%', spans: [
+    [39, 40, 'delay', 'start'], [40, 43, 'rework', '#478 a1'], [46, 49, 'rework', '#478 a2'], [52, 99, 'work', '#478 designer trust rules'], [99, 330, 'idle', 'idle 3h 51m while tasks waited for backend2']],
+    ticks: [43, 49], queue: [[0, 39, 'queue', '#478 waited 39m'], [43, 46, 'unk', 'lead decision'], [49, 52, 'unk', 'lead decision']] },
+  { id: 'lead', role: 'lead', agent: 'claude', util: '28%', spans: [
+    [0, 236, 'unk', 'reviews and 19 decisions: their times were not recorded'], [236, 330, 'build', '#483 integrate phase 38 and build']],
+    queue: [[0, 236, 'deps', '#483 waited for its 10 dependencies']], cp: [236, 330] },
+  { id: 'reviewer', role: 'reviewer', agent: 'claude', util: '0%', spans: [[0, 330, 'idle', 'no work: #484 Review phase 38 was cancelled']] },
+  { id: 'qa', role: 'tester', agent: 'dsh', util: '0%', spans: [[0, 330, 'idle', 'no work: #485 Test phase 38 was cancelled']] },
+];
+const laneHtml = (l) => {
+  const cpOn = (s) => l.cp && s[0] >= l.cp[0] && s[1] <= l.cp[1] && s[2] !== 'idle';
+  return `<div class="lane"><span class="who">${role(l.role, true, l.id)}${tile(AG[l.agent], 't16')}<span class="u mono">${l.util}</span></span>
+    <div class="trk2">${l.spans.map(s => sp(s[0], s[1], s[2], s[3], { cp: cpOn(s) })).join('')}${(l.ticks || []).map(tickAt).join('')}
+      ${(l.queue || []).map(s => sp(s[0], s[1], s[2], s[3], { q: true })).join('')}</div></div>`;
+};
+const axis = () => `<div class="axis"><span class="ih">Members</span><div class="ticks">${Array.from({ length: 12 }, (_, i) => i * 30).map(m => `<i style="left:${m >= SPAN ? 'calc(100% - 1px)' : pct(m)}"></i><span style="left:${pct(m)};transform:translateX(${m === 0 ? '0' : m >= SPAN ? '-100%' : '-50%'})">${hm(m)}</span>`).join('')}</div></div>`;
+const pathRows = () => `
+  <div class="lane pathrow"><span class="who"><b>Real critical path</b><span class="u mono">5h 30m</span></span><div class="trk2">
+    ${sp(0, 220, 'rework', 'backend2: #479, #477, #481, #482 one after another, 6 returns', { cp: true })}${sp(220, 236, 'unk', '')}${sp(236, 330, 'build', '#483 integrate', { cp: true })}</div></div>
+  <div class="lane pathrow"><span class="who"><span class="muted">Planned path</span><span class="u mono">2h 07m</span></span><div class="trk2">
+    <span class="sp pp" style="left:0;width:${pct(18)}">#479</span><span class="sp pp" style="left:${pct(18)};width:calc(${pct(33)} - ${pct(18)})">#482</span><span class="sp pp" style="left:${pct(33)};width:calc(${pct(127)} - ${pct(33)})">#483 at their first attempts</span></div></div>`;
+const legend = (more = '') => `<div class="legend"><span class="g">Spans</span>
+  <span><i class="sw k-work"></i>Work</span><span><i class="sw k-rework"></i>Rework (a returned attempt)</span><span><i class="sw k-build"></i>Build and merge</span>
+  <span><i class="sw k-review"></i>Review stage</span><span><i class="sw k-test"></i>Test stage</span><span><i class="sw k-block"></i>Blocked on a question or permission</span><span><i class="sw k-delay"></i>Delivery and start delay</span>
+  <span class="g">Waits</span><span><i class="sw k-queue"></i>for a free member</span><span><i class="sw k-deps"></i>for dependencies</span><span><i class="sw k-lead"></i>for the lead</span>
+  <span><i class="sw k-idle"></i>Idle while tasks were open</span><span><i class="sw k-unk"></i>Not recorded</span><span>${ic('ret', 's12')} returned</span>${more}</div>`;
+
+const header = (view, sub = 0) => `<div class="twbar"><span class="tn">Teams v2: delivery and reports</span><span class="tbadge tb-running">${ic('play', 's12')}Running</span>
+  <span class="muted">Phase 38 of 50</span><span class="grow"></span><span class="btn sm">${ic('pause', 's12')}Pause</span></div>
+  <div class="twtool">${seg([`${ic('graph', 's12')}Graph`, `${ic('board', 's12')}Board`, `${ic('layers', 's12')}Layers`, `${ic('prof', 's12')}Profile`], view)}
+  ${view === 3 ? `<span class="field sel" style="width:420px">${ic('stairs', 's12')}Phase 38 · Server fixes and the Sessions settings<span class="dim">done</span></span>
+    ${seg([`${ic('clock', 's12')}Time`, `${ic('coins', 's12')}Tokens`, `${ic('table', 's12')}Members`, `${ic('cmp', 's12')}Compare`], sub, 'sm')}`
+    : `<span class="lbl" style="margin-left:6px">Heat</span>${seg(['Off', `${ic('clock', 's12')}Time lost`, `${ic('coins', 's12')}Tokens`], 1, 'sm')}`}
+  <span class="grow"></span>${view === 3 ? `<span class="btn sm">${ic('dl', 's12')}Export JSON</span>` : ''}</div>`;
+
+const KPIS = `<div class="kpis">
+  <div class="kpi"><span class="kl">Phase took</span><span class="kv">5h 30m</span><span class="ks">16:47 to 22:17</span></div>
+  <div class="kpi"><span class="kl">Planned critical path</span><span class="kv">2h 07m</span><span class="ks">real 5h 30m, +3h 23m</span></div>
+  <div class="kpi"><span class="kl">Worked</span><span class="kv">10h 46m</span><span class="ks">5 of 7 members</span></div>
+  <div class="kpi bad"><span class="kl">Rework</span><span class="kv">8 returns</span><span class="ks">1h 32m of work redone</span></div>
+  <div class="kpi bad"><span class="kl">Waited for a free member</span><span class="kv">5h 18m</span><span class="ks">summed over 10 tasks</span></div>
+  <div class="kpi"><span class="kl">Waited for the lead</span><span class="kv">unknown</span><span class="ks">decisions not recorded</span></div>
+  <div class="kpi"><span class="kl">Accepted</span><span class="kv">11 of 14</span><span class="ks">review, test, build cancelled</span></div></div>`;
+
+const loss = (n, t, a, d, links, share, on) => `<div class="loss ${on ? 'on' : ''}"><span class="rk">${n}</span><span class="lt">${t}</span><span class="la">${a}</span>
+  <span class="ld">${d}</span>${share != null ? `<span class="share"><i style="width:${share}%"></i></span>` : ''}<span class="ll">${links.map(l => `<span class="lnk">${ic('chevr', 's10')}${l}</span>`).join('')}</span></div>`;
+const LOSSES = [
+  ['One member’s queue: backend2', '+3h 23m', 'Four tasks ran one after another on backend2 while three Backend members idled; the real critical path ran here, not through the plan’s chain. #481 waited 79m, #482 26m after its dependency.', ['#477', '#479', '#481', '#482', 'backend2 lane'], 100, true],
+  ['Rework: 8 attempts returned', '1h 32m', '14% of the phase’s work was redone: backend2 6 returns (85m), backend4 2 (7m). Every return went through the lead, whose decision times are not recorded.', ['#477', '#478', '#479', '#481', '#482'], 45],
+  ['Idle members while tasks were open', '9h 30m', 'backend4 3h 51m, backend 2h 53m, backend3 2h 46m of member time: the open tasks were pinned to backend2 and the lead.', ['backend4 lane', 'backend lane', 'backend3 lane'], 40],
+  ['Integration waited for one late task', '3h 56m', '#483 waited for its 10 dependencies; nine were done by 2h 44m, the last one, #482, at 3h 40m after a return.', ['#483', '#482'], 30],
+  ['Review, test and build cancelled', 'risk', 'The phase closed without #484 Review, #485 Test and #486 Build; their checks moved to phase 39.', ['#484', '#485', '#486'], null],
+];
+
+V.profile = { w: 1600, h: 820, title: 'Profile: the timeline per member, the critical path and the top losses',
+  cap: 'Profile beside Graph, Board and Layers, for a finished phase (here phase 38, read from the team’s own attempts). Each member is a lane: what it did on the upper track, colored by kind, and the tasks waiting for it underneath; a return marks where the lead sent an attempt back. The real critical path is outlined and set against the planned one. The top losses on the right link to their tasks and lanes. What was never recorded (the lead’s decision times) is hatched as unknown, not guessed.',
+  html: () => `${header(3)}<div class="pbody"><div class="pmain">${KPIS}
+    <div class="tl">${axis()}${pathRows()}${LANES.map(laneHtml).join('')}</div>${legend()}</div>
+    <div class="pside"><div class="row"><h3 style="margin:0;font-size:13px">Top losses</h3><span class="grow"></span>${seg(['By time', 'By tokens'], 0, 'sm')}</div>
+    ${LOSSES.map((l, i) => loss(i + 1, ...l)).join('')}
+    <span class="note">The lead’s phase report names the first three. Planning (U28) reads the per-role numbers in Members.</span></div></div>` };
+
+/* Tokens: a bar per task and the losses by tokens */
+const TK = 9;   // sample: thousand tokens per worked minute
+const TASKS = [
+  [482, 'Settings > Sessions: confirm subagents, and the subagent card', 'backend2', 'dsh', 106, 15], [483, 'Integrate phase 38: merge the DeepSeek members’ work', 'lead', 'claude', 94, 0, true],
+  [480, 'Review fixes: limit resume, findings and reports', 'backend3', 'claude', 117, 0], [515, 'Approve a draft while the previous phase runs', 'backend', 'dsh', 96, 0],
+  [478, 'The Team designer starts trusted with the narrow rules', 'backend4', 'dsh', 47, 6], [479, 'Confirm subagents before an agent starts them', 'backend2', 'dsh', 7, 35],
+  [477, 'Review fixes: sub-team questions, reports and limits', 'backend2', 'dsh', 12, 23], [474, 'Review fixes: drafts, proposals and the inbox', 'backend', 'dsh', 36, 0],
+  [475, 'Draft follow-ups: owner edits release, lead guide', 'backend', 'dsh', 23, 0], [481, 'Block DeepSeek session-log upload', 'backend2', 'dsh', 6, 13],
+  [476, 'MCP servers from plugins and the Windows npx wrapper', 'backend3', 'claude', 11, 0],
+];
+const MAXT = Math.max(...TASKS.map(t => (t[4] + t[5]) * TK));
+const fmtk = (k) => k >= 1000 ? `${(k / 1000).toFixed(2)}M` : `${Math.round(k)}k`;
+V.tokens = { w: 1600, h: 640, title: 'Tokens: a bar per task and the losses by tokens',
+  cap: 'Each task’s tokens split into the accepted attempt, the returned attempts (rework) and integration or build; stages add their own segments. The losses rank by tokens the same way. Phases 36 to 41 recorded no token counts, so the numbers here are a sample scaled from the real worked minutes; a provider without counters shows unknown.',
+  html: () => `${header(3, 1)}
+  <div class="pbody"><div class="pmain">
+    <div class="row"><span class="ih">Tokens per task, phase 38</span><span class="sample">${ic('alert', 's10')}sample values: not recorded in phases 36 to 41</span><span class="grow"></span>
+      <span class="legend"><span><i class="sw k-work"></i>Accepted attempt</span><span><i class="sw k-rework"></i>Returned attempts</span><span><i class="sw k-build"></i>Integration and build</span><span><i class="sw k-review"></i>Stages</span><span><i class="sw k-unk"></i>Unknown</span></span></div>
+    <div><div class="trow h"><span>Task</span><span>Title</span><span>Member</span><span>Tokens</span><span style="text-align:right">Total</span></div>
+    ${TASKS.map(t => { const a = t[4] * TK, r = t[5] * TK, tot = a + r; return `<div class="trow"><span class="mono">#${t[0]}</span><span class="ell">${t[1]}</span>
+      <span class="row">${tile(AG[t[3]], 't16')}<span class="muted">${t[2]}</span></span>
+      <span class="tbar" style="width:${Math.max(4, 400 * tot / MAXT)}px"><i class="${t[6] ? 'k-build' : 'k-work'}" style="width:${100 * a / tot}%"></i><i class="k-rework" style="width:${100 * r / tot}%"></i></span>
+      <span class="mono" style="text-align:right">${fmtk(tot)}${r ? `<span class="warn" style="font-size:10.5px"> ${Math.round(100 * r / tot)}% rework</span>` : ''}</span></div>`; }).join('')}
+    <div class="trow"><span class="mono dim">#484</span><span class="ell dim">Review phase 38 (cancelled)</span><span class="row">${tile('claude', 't16')}<span class="muted">reviewer</span></span><span class="tbar" style="width:60px"><i class="k-unk" style="width:100%"></i></span><span class="mono dim" style="text-align:right">none</span></div></div></div>
+  <div class="pside"><div class="row"><h3 style="margin:0;font-size:13px">Top losses</h3><span class="grow"></span>${seg(['By time', 'By tokens'], 1, 'sm')}</div>
+    ${loss(1, 'Rework tokens', '828k', '14% of the phase’s 5.82M tokens went to 8 returned attempts; #479 lost 83% of its tokens to two returns, #481 68%.', ['#479', '#481', '#477', '#482'], 100, true)}
+    ${loss(2, 'The largest task: #482', '1.09M', 'One task of 14 used 19% of the phase: two attempts on backend2, the second 1h 46m.', ['#482'], 70)}
+    ${loss(3, 'Integration re-reads every member’s change', '846k', '#483 read ten tasks’ changes in one turn; a pipeline review per task (U36) spreads it and finds issues earlier.', ['#483'], 55)}
+    ${loss(4, 'Tokens per accepted task by model', '', 'Backend on DeepSeek: 478k per accepted task, 2 attempts each; Backend on Opus 5.5: 576k, 1 attempt each. Members has the table.', ['Members'], null)}
+  </div></div>` };
+
+/* Members: per member, role and model */
+const MROWS = [
+  ['backend2', 'backend', 'dsh', 'DeepSeek', 4, 10, 6, 216, 65, 98, 39],
+  ['backend', 'backend', 'dsh', 'DeepSeek', 3, 3, 0, 155, 47, 98, 0],
+  ['backend3', 'backend', 'claude', 'Opus 5.5', 2, 2, 0, 129, 39, 82, 0],
+  ['backend4', 'backend', 'dsh', 'DeepSeek', 1, 3, 2, 54, 16, 40, 13],
+  ['lead', 'lead', 'claude', 'default', 1, 1, 0, 94, 28, 0, 0],
+  ['reviewer', 'reviewer', 'claude', 'Opus 5.5', 0, 0, 0, 0, 0, 0, 0],
+  ['qa', 'tester', 'dsh', 'DeepSeek', 0, 0, 0, 0, 0, 0, 0],
+];
+const mtr = (r) => `<tr><td><span class="row">${role(r[1], true, r[0])}</span></td><td><span class="row" style="justify-content:flex-end">${tile(AG[r[2]], 't16')}${r[3]}</span></td>
+  <td>${r[4]}</td><td>${r[5]}</td><td class="${r[6] ? 'warn' : ''}">${r[6]}</td><td class="mono">${dur(r[7])}</td>
+  <td>${r[8]}%<span class="ubar"><i style="width:${r[8]}%"></i></span></td><td class="mono">${dur(r[9])}</td><td class="${r[10] ? 'warn' : ''}">${r[10]}%</td>
+  <td class="mono"><span style="color:var(--violet)">${r[4] ? fmtk(r[7] * TK / r[4]) : '—'}</span></td></tr>`;
+V.members = { w: 1600, h: 560, title: 'Members: per member, role and model',
+  cap: 'Utilization (worked time over the phase), attempts, returns, the time its tasks waited for it, the share of its work redone, and tokens per accepted task, per member and then per role and model. Planning (U28) reads the role and model rows when it weighs lanes. Times are phase 38’s real ones; tokens are the sample of the Tokens view.',
+  html: () => `${header(3, 2)}
+  <div class="pbody"><div class="pmain" style="padding-top:4px">
+  <table class="ptab"><tr><th>Member</th><th>Agent and model</th><th>Accepted</th><th>Attempts</th><th>Returned</th><th>Worked</th><th>Utilization</th><th>Its tasks waited</th><th>Work redone</th><th>Tokens per accepted <span class="sample" style="height:15px">sample</span></th></tr>
+  ${MROWS.map(mtr).join('')}
+  <tr class="grp"><td>Backend on DeepSeek, 3 members</td><td></td><td>8</td><td>16</td><td class="warn">8</td><td class="mono">7h 05m</td><td>43%<span class="ubar"><i style="width:43%"></i></span></td><td class="mono">3h 56m</td><td class="warn">22%</td><td class="mono"><span style="color:var(--violet)">478k</span></td></tr>
+  <tr class="grp"><td>Backend on Opus 5.5, 1 member</td><td></td><td>2</td><td>2</td><td>0</td><td class="mono">2h 09m</td><td>39%<span class="ubar"><i style="width:39%"></i></span></td><td class="mono">1h 22m</td><td>0%</td><td class="mono"><span style="color:var(--violet)">576k</span></td></tr>
+  <tr class="grp"><td>Lead</td><td></td><td>1</td><td>1</td><td>0</td><td class="mono">1h 34m</td><td>28%<span class="ubar"><i style="width:28%"></i></span></td><td class="mono">—</td><td>0%</td><td class="mono"><span style="color:var(--violet)">846k</span></td></tr>
+  <tr class="grp"><td>Reviewer and QA</td><td></td><td>0</td><td>0</td><td>0</td><td class="mono">0m</td><td>0%<span class="ubar"><i style="width:0%"></i></span></td><td class="mono">—</td><td>—</td><td class="mono">—</td></tr></table>
+  <span class="note">Utilization counts worked spans only; waits for a dependency, a free member or the lead are not work (U37). Rows link to the member’s lane in the timeline.</span></div></div>` };
+
+/* Compare two phases */
+const crow = (l, a, b, wa, wb, d, warn) => `<div class="cl">${l}</div><div>${a}${wa != null ? `<span class="cbar ${warn ? 'w' : ''}"><i style="width:${wa}%"></i></span>` : ''}</div>
+  <div>${b}${wb != null ? `<span class="cbar ${warn ? 'w' : ''}"><i style="width:${wb}%"></i></span>` : ''}</div><div>${d}</div>`;
+V.compare = { w: 1600, h: 640, title: 'Compare two phases',
+  cap: 'Two finished phases side by side with the same measures; the delta is the second against the first, warning when it is worse. Phase 38 (four Backend members, three on DeepSeek) against phase 39 (nine members, mostly Opus 5.5): fewer returns, more waiting for a free member. Real numbers from both phases; a measure a phase did not record says unknown.',
+  html: () => `${header(3, 3)}
+  <div class="pbody"><div class="pmain" style="padding-top:4px">
+  <div class="cmp">
+    <div class="ch">Measure</div><div class="ch"><span class="field sel" style="width:360px">Phase 38 · Server fixes and the Sessions settings</span></div><div class="ch"><span class="field sel" style="width:360px">Phase 39 · New UI, the rest</span></div><div class="ch">Delta</div>
+    ${crow('Phase took', '<b>5h 30m</b>', '<b>7h 25m</b>', 74, 100, '<span class="delta up">+1h 55m</span>', false)}
+    ${crow('Tasks', '14: 11 accepted, 3 cancelled', '17: all accepted', null, null, '<span class="delta dn">+3</span>')}
+    ${crow('Worked', '10h 46m', '19h 06m', 56, 100, '<span class="delta">+8h 20m</span>')}
+    ${crow('Members working', '5 of 7', '9 of 9', null, null, '')}
+    ${crow('Average utilization', '39%', '29%', 39, 29, '<span class="delta up">−10 pt</span>', false)}
+    ${crow('Returned attempts', '8 (1h 32m redone)', '1 (26m redone)', 100, 13, '<span class="delta dn">−7</span>', true)}
+    ${crow('Waited for a free member', '5h 18m', '16h 24m', 32, 100, '<span class="delta up">+11h 06m</span>', true)}
+    ${crow('Waited for dependencies', 'unknown for #482, #483', '0m', null, null, '')}
+    ${crow('Waited for the lead', 'unknown', '6m', null, null, '')}
+    ${crow('Review and test', 'cancelled', 'review and test tasks accepted', null, null, '<span class="delta dn">done</span>')}
+    ${crow('Top loss', `<span class="lnk">${ic('chevr', 's10')}one member’s queue: backend2</span>`, `<span class="lnk">${ic('chevr', 's10')}members waiting for a free member: 16h 24m</span>`, null, null, '')}
+  </div>
+  <div class="row" style="gap:16px;margin-top:6px">
+    <span class="note">Per-role rows of both phases are in Members; the timeline of either phase opens from its name.</span></div></div></div>` };
+
+/* Graph and Board with the heat tint */
+const LOST = { 474: 0, 475: 37, 476: 35, 477: 41, 478: 47, 479: 35, 480: 47, 481: 92, 482: 107, 483: 236, 515: 61 };
+const heat = (id) => LOST[id] == null ? 0 : Math.min(1, LOST[id] / 120);
+const tint = (id) => `background:color-mix(in srgb,var(--heat) ${Math.round(heat(id) * 42)}%,var(--surface))`;
+const NODES = [[474, 'Review fixes: drafts, proposals', 'backend', 'dsh'], [475, 'Draft follow-ups: owner edits', 'backend', 'dsh'], [515, 'Approve a draft while the previous runs', 'backend', 'dsh'],
+  [476, 'MCP servers from plugins', 'backend3', 'claude'], [480, 'Review fixes: limit resume', 'backend3', 'claude'], [478, 'Designer starts trusted', 'backend4', 'dsh'],
+  [477, 'Review fixes: sub-team questions', 'backend2', 'dsh'], [479, 'Confirm subagents', 'backend2', 'dsh'], [481, 'Block session-log upload', 'backend2', 'dsh']];
+const gnode = (id, title, who, agent, x, y, dim) => `<div class="gnode ${dim ? 'dim' : ''}" style="left:${x}px;top:${y}px;${dim ? '' : tint(id)};--nb:${dim ? 'var(--dim)' : 'var(--accentMuted)'}">
+  <div class="row"><span style="color:${dim ? 'var(--muted)' : 'var(--accentMuted)'};display:inline-flex">${ic(dim ? 'x' : 'checkf', 's12')}</span><b>#${id}</b><span class="tt">${title}</span></div>
+  <div class="row">${role(RK(who), true, who)}${tile(AG[agent], 't16')}<span class="grow"></span>${dim ? '<span class="dim">cancelled</span>' : LOST[id] ? `<span class="hl" style="color:${heat(id) > .5 ? 'var(--heat)' : 'var(--muted)'}">lost ${dur(LOST[id])}</span>` : '<span class="dim">no loss</span>'}</div></div>`;
+const heatLegend = `<div class="heatlg">${ic('flame', 's12')}<span>Time lost: waits and rework</span><span class="dim">0</span><span class="grad"></span><span class="dim">2h or more</span><span class="dim" style="margin-left:10px">Tint only; the state icon and border stay.</span></div>`;
+V.heat = { w: 1600, h: 860, title: 'Graph with the heat tint',
+  cap: 'The Graph overlays the profile as a tint: the more time a task lost to waits and rework, the warmer its node, with the lost time on its second line. Heat Off returns the usual view; Tokens tints by tokens instead. Phase 38’s real numbers: the integration and the tasks queued on backend2 are the hottest.',
+  html: () => { const ys = NODES.map((_, i) => 14 + i * 74); const by = (id) => ys[NODES.findIndex(n => n[0] === id)] + 30;
+    const edge = (x1, y1, x2, y2) => `<path d="M${x1} ${y1} C ${x1 + 40} ${y1}, ${x2 - 40} ${y2}, ${x2} ${y2}"/>`;
+    return `${header(0)}<div class="pbody"><div class="pmain">${heatLegend}<div class="phase run" style="flex:1;position:relative;overflow:hidden">
+    <div class="ph"><span class="pn">38</span><b>Phase 38 · Server fixes and the Sessions settings</b><span class="tbadge" style="color:var(--accentMuted)">${ic('check', 's12')}Done</span></div>
+    <div class="gph" style="position:absolute;inset:40px 0 0 0"><svg class="gedges">
+      ${NODES.map(n => edge(252, by(n[0]), 620, 340)).join('')}${edge(252, by(479), 330, 315)}${edge(562, 315, 620, 340)}${edge(852, 340, 900, 250)}${edge(852, 340, 900, 430)}${edge(1132, 250, 1180, 340)}${edge(1132, 430, 1180, 340)}</svg>
+      ${NODES.map((n, i) => gnode(n[0], n[1], n[2], n[3], 20, ys[i])).join('')}
+      ${gnode(482, 'Settings: confirm subagents', 'backend2', 'dsh', 330, 285)}${gnode(483, 'Integrate phase 38', 'lead', 'claude', 620, 310)}
+      ${gnode(484, 'Review phase 38', 'reviewer', 'claude', 900, 220, true)}${gnode(485, 'Test phase 38', 'qa', 'dsh', 900, 400, true)}${gnode(486, 'Build phase 38', 'lead', 'claude', 1180, 310, true)}
+    </div></div></div></div>`; } };
+V.heatboard = { w: 1600, h: 520, title: 'Board with the heat tint',
+  cap: 'The same tint on the Board’s cards, with the same legend and switch; the columns and the card lines do not change.',
+  html: () => { const card2 = (n) => `<div class="bcard" style="${n[4] ? '' : tint(n[0])}${n[4] ? ';opacity:.55' : ''}"><div class="l1"><span style="color:${n[4] ? 'var(--muted)' : 'var(--accentMuted)'};display:inline-flex;padding-top:1px">${ic(n[4] ? 'x' : 'checkf', 's12')}</span><span class="id">#${n[0]}</span><span class="tt">${n[1]}</span></div>
+      <div class="l2">${role(RK(n[2]), true, n[2])}${tile(AG[n[3]], 't16')}<span class="grow"></span>${n[4] ? '<span class="dim">cancelled</span>' : LOST[n[0]] ? `<span class="hl" style="color:${heat(n[0]) > .5 ? 'var(--heat)' : 'var(--muted)'}">lost ${dur(LOST[n[0]])}</span>` : '<span class="dim">no loss</span>'}</div></div>`;
+    const acc = [...NODES, [482, 'Settings: confirm subagents', 'backend2', 'dsh'], [483, 'Integrate phase 38', 'lead', 'claude']].sort((a, b) => LOST[b[0]] - LOST[a[0]]);
+    const cols = [acc.slice(0, 4), acc.slice(4, 8), acc.slice(8)];
+    return `${header(1)}<div class="pbody"><div class="pmain">${heatLegend}<div class="phase run"><div class="ph"><span class="pn">38</span><b>Phase 38 · Server fixes and the Sessions settings</b></div>
+    <div style="display:grid;grid-template-columns:repeat(4,300px);gap:8px;padding:0 8px 8px;align-items:start">
+      <div class="bcol"><div class="bh">${ic('checkf', 's12')}Accepted<span class="n">11</span></div>${cols[0].map(card2).join('')}</div>
+      <div class="bcol"><div class="bh" style="visibility:hidden">.</div>${cols[1].map(card2).join('')}</div>
+      <div class="bcol"><div class="bh" style="visibility:hidden">.</div>${cols[2].map(card2).join('')}</div>
+      <div class="bcol"><div class="bh">${ic('x', 's12')}Cancelled<span class="n">3</span></div>${[[484, 'Review phase 38', 'reviewer', 'claude', 1], [485, 'Test phase 38', 'qa', 'dsh', 1], [486, 'Build phase 38', 'lead', 'claude', 1]].map(card2).join('')}</div>
+    </div></div></div></div>`; } };
+
+/* ---------------------------------------------------------------- render */
+const params = new URLSearchParams(location.search);
+const theme = params.get('theme') || 'dark';
+const one = params.get('view');
+const root = document.getElementById('root');
+const frame = (k) => `<div class="app ${theme === 'light' ? 'light' : ''}" style="width:${V[k].w}px;height:${V[k].h}px">${V[k].html()}</div>`;
+if (one && V[one]) {
+  document.body.classList.add('shot');
+  if (theme === 'light') document.body.classList.add('lightpage');
+  root.innerHTML = frame(one);
+} else {
+  if (theme === 'light') document.body.classList.add('lightpage');
+  root.innerHTML = `<div class="gal"><header><h1>U38 · The profile after the work — mock-up</h1>
+    <span class="tgl"><a href="?theme=dark" class="${theme === 'dark' ? 'on' : ''}">Dark</a><a href="?theme=light" class="${theme === 'light' ? 'on' : ''}">Light</a></span></header>
+    <p class="lead">Where the time and the tokens of a finished phase went and what was lost (U38, with the U36 stages and the U37 timing). Profile sits beside Graph, Board and Layers: a timeline per member lane, the real critical path against the planned one, the top losses by time and by tokens, a tokens bar per task, the per member, role and model table and a compare of two phases; Graph and Board can overlay the profile as a heat tint. The times are phases 38 and 39 of this team (Teams v2), read from <code>hgs team status</code>: the attempts, their reports and each task’s timing. Those phases recorded no tokens and no stage runs: the tokens are a sample scaled from the real minutes and say so, and the stage colors are in the legend only. Every view has a PNG beside this file in both themes (<code>shots/&lt;view&gt;-dark.png</code>, <code>-light.png</code>).</p>
+    <nav>${Object.keys(V).map(k => `<a href="#${k}">${V[k].title}</a>`).join('')}</nav>
+    ${Object.keys(V).map(k => `<section id="${k}"><h2>${V[k].title}</h2><p class="cap">${V[k].cap}</p><div class="frame">${frame(k)}</div></section>`).join('')}</div>`;
+}
+</script>
+</body>
+</html>

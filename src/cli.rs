@@ -49,6 +49,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs approval-log begin|finish|list|detail  local automatic-approval journal (JSON stdin)
        hgs desktop serve|status [--json]   per-user background desktop service
        hgs desktop watch|request --json    private local desktop-v1 IPC
+       hgs desktop registration --json    preview this user's passive service definition
        Desktop service ABI: desktop-v1
        hgs mobile-peer --json         guarded direct-peer native request from JSON stdin
        hgs [@host] voice <session> --json  send and inspect persistent voice messages (JSON stdin; voice-video-v1)
@@ -300,11 +301,11 @@ fn binding_exists(config: &Config, name: &str) -> Result<bool> {
 /// On Windows only the stable CLI, whichever hgs.exe runs now: records, hooks
 /// and recipes never name a portable folder that an update replaces (spec D8).
 #[cfg(windows)]
-fn executable_path() -> Result<PathBuf> {
+pub(crate) fn executable_path() -> Result<PathBuf> {
     platform::stable_executable().map_err(|error| Error::new(1, error))
 }
 #[cfg(unix)]
-fn executable_path() -> Result<PathBuf> {
+pub(crate) fn executable_path() -> Result<PathBuf> {
     if let Some(path) = env::var_os("HGS_EXECUTABLE").filter(|s| !s.is_empty()) {
         let path = PathBuf::from(path);
         if path.is_absolute() && platform::executable(&path) {
@@ -421,6 +422,7 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
         session_process()?;
         return state::dispatch(&args[1..]).map_err(|e| Error::new(1, e));
     }
+    crate::desktop::launch_configuration(&args)?;
     let config = Config::load()?;
     // An encrypted gateway binds every local native call to the physical
     // machine it advertised. This check also works on Windows, without a

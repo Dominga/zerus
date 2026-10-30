@@ -112,6 +112,39 @@ class Desktop(unittest.TestCase):
         self.cli('--dry-run', 'desktop', 'serve', ok=False)
         self.assertFalse((self.root / 'unexpected-tool').exists())
 
+    @unittest.skipIf(os.name == 'nt', 'Windows preview requires an installed stable CLI')
+    def test_registration_preview_preserves_selected_paths_without_installing(self):
+        preview = self.cli('desktop', 'registration', '--json')
+        self.assertEqual(preview['operation'], 'preview')
+        self.assertEqual(preview['argv'][1:], ['desktop', 'serve', '--config-dir', str(self.config), '--state-dir', str(self.state)])
+        self.assertEqual(Path(preview['argv'][0]).resolve(), HGS)
+        self.assertEqual(preview['configuration'], self.cli('desktop', 'status', '--json')['configuration'])
+        self.assertFalse(Path(preview['destination']).exists())
+        self.assertFalse(self.state.exists())
+        self.assertFalse((self.root / 'unexpected-tool').exists())
+
+    def test_registered_launch_pins_directories_instead_of_inherited_environment(self):
+        selected = self.root / 'selected config'
+        state = self.root / 'selected state'
+        selected.mkdir(mode=0o700)
+        process = subprocess.Popen([str(HGS), 'desktop', 'serve', '--config-dir', str(selected), '--state-dir', str(state)], env=self.env,
+                                   stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(self.stop, process)
+        env = dict(self.env, HGS_CONFIG_DIR=str(selected), HGS_STATE_DIR=str(state))
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            self.assertIsNone(process.poll(), 'registered launch exited')
+            if self.cli('desktop', 'status', '--json', env=env)['running']:
+                break
+            time.sleep(0.02)
+        else:
+            self.fail('registered launch did not use selected paths')
+        self.assertFalse(self.state.exists())
+        self.assertFalse(self.cli('desktop', 'status', '--json')['running'])
+        self.cli('desktop', 'serve', '--config-dir', 'relative', '--state-dir', str(state), ok=False)
+        self.cli('@example', 'desktop', 'serve', '--config-dir', str(selected), '--state-dir', str(state), ok=False)
+        self.assertFalse(self.state.exists(), 'a prefixed invocation must never ignore registered paths')
+
     def test_passive_kernel_exclusion_and_restart(self):
         process, first = self.serve()
         self.assertEqual(first['ownership'], 'passive')

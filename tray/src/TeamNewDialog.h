@@ -1,7 +1,9 @@
 #pragma once
 #include <QDialog>
 #include <QJsonObject>
+#include <QHash>
 #include <QMap>
+#include <QSet>
 #include <functional>
 #include "TeamModel.h"
 
@@ -41,12 +43,29 @@ public:
         QWidget *box; QComboBox *role, *agent, *account, *model, *effort, *permissions, *computer; QCheckBox *worktree; QLabel *error;
         QString prompt;
     };
+    // #738: a model of an account's native catalog and the efforts it takes.
+    struct ModelOption { QString id, label; QStringList efforts; };
 private:
     Row *addRow(const Teams::Role *role, const QString &roleName = {});
     void applyTemplate();
     void validate();
     void create();
     void fillAccounts(QComboBox *box, const QString &agent, const QString &host, const QString &preferred = {});
+    // #738 (owner, 2026-10-31: the lead's model picker was empty for Kimi):
+    // the model pickers list the account's native catalog, read as the role
+    // editor reads it (`account model-settings`; OpenCode's model_options from
+    // its account row), and Teams::knownModels until it is read or when it is
+    // empty. A typed model still goes as typed. The effort picker offers the
+    // chosen model's efforts where the catalog names them.
+    static QString modelKey(const QString &agent, const QString &host, const QString &account);
+    void requestModels(const QString &agent, const QString &host, const QString &account);
+    void fillModels(QComboBox *model, QComboBox *effort, const QString &agent, const QString &host, const QString &account);
+    static void fillEffortsFor(QComboBox *model, QComboBox *effort);
+    void refillLeadModels();
+    void refillRowModels(Row *row);
+    QHash<QString, QList<ModelOption>> m_models;   // by computer and account (modelKey)
+    QSet<QString> m_modelPending;
+    QHash<quint64, QString> m_modelRequests;
     QJsonObject memberJson(const Row &row, const QString &id) const;
     TeamController *m_teams;
     HgsClient *m_client;
@@ -78,4 +97,5 @@ private:
     QVBoxLayout *m_rows = nullptr;
     QList<Row *> m_rowList;
     QString m_project, m_created;
+    bool m_dark = false;   // #737: the theme of the window it opened over
 };

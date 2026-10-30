@@ -1143,35 +1143,15 @@ bool TeamWorkspace::approvePhase(const QString &id, int phase)
 {
     const auto *team = currentTeam(id);
     if (!team || m_phaseAct || phaseDecided(*team, phase)) return false;
-    int count = 0;
-    for (const auto &group : phaseGroups(*team)) if (group.n == phase) count = group.tasks.size();
-    // F12/N40: a draft approved while an earlier phase runs runs alongside it;
-    // the owner is warned of what that costs before anything is sent.
-    const int alongside = alongsidePhase(*team, phase);
-    bool barrier = false;
-    for (const auto &group : phaseGroups(*team)) if (group.n == phase) barrier = group.barrier;
-    if (alongside) {
-        // N6: a barrier phase's tasks wait for the earlier phase however it is
-        // approved, so its confirmation says that instead of promising them now.
-        if (!m_panel->confirm("teamApproveAlongsideConfirm", tr("Approve phase %1 now?").arg(phase),
-                              barrier ? tr("Phase %1 is a barrier: its tasks start only when phase %2 is finished, so approving it "
-                                           "now just locks the plan. Are you sure?").arg(phase).arg(alongside)
-                                      : tr("If you approve phase %1 now, the lead can send members to its tasks while phase %2 still runs, "
-                                           "but can no longer edit this phase. Are you sure?").arg(phase).arg(alongside),
-                              tr("Approve now")))
-            return false;
-    } else if (!m_panel->confirm("teamApprovePhaseConfirm", tr("Approve phase?"),
-                                 tr("Hand phase %1's %2 tasks to the members?").arg(phase).arg(count),
-                                 tr("Approve phase")))
-        return false;
+    // #724: the same question as Waiting for you's Approve (Teams::phaseApproval).
+    const auto approval = phaseApproval(*team, phase);
+    if (!m_panel->confirm(approval.name, approval.title, approval.text, approval.action)) return false;
     // The team may have been refreshed while the dialog was open: read it again.
     team = currentTeam(id);
     if (!team || m_phaseAct || phaseDecided(*team, phase)) return false;
     const QString key = markPhaseDecided(*team, phase);
-    // N6: the confirmed alongside approval really hands the tasks out; a
-    // barrier phase keeps its U25 queue because its barrier holds it anyway.
-    QJsonObject request{{"team", id}, {"phase", phase}};
-    if (alongside && !barrier) request["alongside"] = true;
+    QJsonObject request = approval.input;
+    request.insert("team", id);
     m_panel->act("approve-phase", request, [this, key](bool ok, const QString &message) { phaseSent(key, ok, message); });
     return true;
 }
@@ -2137,7 +2117,8 @@ QWidget *TeamWorkspace::board(const Team &team)
                 health->setObjectName("teamBoardPhaseHealth");
                 health->setStyleSheet(QStringLiteral("QLabel{color:%1;font-size:10px;}").arg(c.text3.name()));
                 const QString tip = phaseHealthTip(team, group.n);
-                health->setToolTip(tip.isEmpty() ? summary->healthLine : tip);
+                // #709 L4: its minutes grow in place between rebuilds.
+                agedHealth(health, summary->healthLine, tip.isEmpty() ? summary->healthLine : tip);
                 h->addWidget(health);
             }
         }
@@ -2372,7 +2353,7 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
         auto *health = label(tr("Healthy %1/%2").arg(healthy).arg(group.tasks.size()), healthy == group.tasks.size() ? c.accent : c.warn, 11, false, "teamPhaseHealth");
         const QString tip = phaseHealthTip(team, group.n);
         const auto *summary = team.phaseSummaryOf(group.n);
-        health->setToolTip(!tip.isEmpty() ? tip : summary ? summary->healthLine : QString());
+        agedHealth(health, QString(), !tip.isEmpty() ? tip : summary ? summary->healthLine : QString());
         info->add(health, 2);
         // QA #539: the folders the phase's tests hold, as the mock-up's "1 folder held".
         QString heldTip;
@@ -3155,7 +3136,7 @@ QWidget *TeamWorkspace::sideLists(const Team &team, const QString &status)
                 auto *r = new ClickFrame; r->setObjectName("teamPlanProblem"); r->setProperty("task", issue.task);
                 auto *h = new QHBoxLayout(r); h->setContentsMargins(4, 3, 4, 3); h->setSpacing(7);
                 auto *icon = new QLabel; icon->setPixmap(workspaceIcon("warning", tone).pixmap(12, 12)); h->addWidget(icon);
-                auto *t = elided(issue.text, tone, 12); t->setToolTip(issue.text); h->addWidget(t, 1);
+                auto *t = elided(issue.text, tone, 12); agedHealth(t, issue.text, issue.text); h->addWidget(t, 1);
                 if (issue.task) {
                     r->setCursor(Qt::PointingHandCursor); r->setToolTip(tr("Open the task"));
                     r->clicked = [this, id = issue.task] { if (const auto *t = currentTeam(m_team)) m_panel->editTask(*t, id); };
@@ -3696,6 +3677,7 @@ void TeamWorkspace::nextGoalDialog(const Team &team)
     const Colors c = colorsFor(m_dark);
     auto *dialog = new QDialog(this);
     dialog->setObjectName("teamNextGoalDialog");
+    dialog->setStyleSheet(dialogSheet(c));   // #737
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     dialog->setWindowTitle(tr("Next goal \u00b7 %1").arg(team.name));
     dialog->resize(560, 380);
@@ -3757,7 +3739,7 @@ void TeamWorkspace::addLateDialog(const Team &team, int phase)
     dialog->setProperty("free", free);
     dialog->setWindowTitle(free ? tr("Add a task to open phase %1").arg(phase) : tr("Add a task to running phase %1").arg(phase));
     dialog->resize(520, 420);
-    dialog->setStyleSheet(QStringLiteral("QDialog{background:%1;} QLabel{background:transparent;}").arg(c.bg.name()));
+    dialog->setStyleSheet(dialogSheet(c));
     auto *v = new QVBoxLayout(dialog);
     auto *intro = label(free ? tr("Phase %1 is open. The task joins it and starts when its member is free.").arg(phase)
                              : tr("Phase %1 is running. The task joins it only after Zerus warns what changes and you confirm.").arg(phase), c.text2, 12);
@@ -3853,6 +3835,7 @@ void TeamWorkspace::swapDialog(const Team &team, const Member &member)
     const QString role = team.roleOf(member.id);
     auto *dialog = new QDialog(this);
     dialog->setObjectName("teamSwapDialog");
+    dialog->setStyleSheet(dialogSheet(c));   // #737
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     dialog->setWindowTitle(tr("Swap %1").arg(role));
     dialog->resize(520, 300);

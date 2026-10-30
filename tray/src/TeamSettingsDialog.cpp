@@ -34,6 +34,9 @@ TeamSettingsDialog::TeamSettingsDialog(TeamController *teams, const Teams::Team 
 {
     const Colors c = colorsFor(dark);
     setObjectName("teamSettingsDialog");
+    // #737: the theme, not the system's palette, behind the sections too.
+    setStyleSheet(dialogSheet(c) + QStringLiteral("QScrollArea#teamSettingsScroll,QScrollArea#teamSettingsScroll>QWidget,"
+                                                  "QScrollArea#teamSettingsScroll>QWidget>QWidget{background:transparent;border:0;}"));
     setWindowTitle(tr("Team settings"));
     setModal(true);
     resize(560, 640);

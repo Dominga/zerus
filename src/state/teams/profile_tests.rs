@@ -68,15 +68,16 @@ fn timelines(team: &Team, now: f64) -> Vec<Value> {
 
 fn tokens(qa: Option<Tokens>) -> TokenMap {
     let mut map = TokenMap::new();
-    map.insert((1, "a1".into()), Some(Tokens { total: 3000, cost_usd: 0.3 }));
-    map.insert((1, "a2".into()), Some(Tokens { total: 6000, cost_usd: 0.6 }));
+    map.insert((1, "a1".into()), Some(Tokens { total: 3000, uncached_input: 3000, cost_usd: 0.3, ..Default::default() }));
+    map.insert((1, "a2".into()), Some(Tokens { total: 6000, uncached_input: 6000, cost_usd: 0.6, ..Default::default() }));
     map.insert((2, "a1".into()), qa);
     map
 }
 
 fn run(team: &Team, map: &TokenMap, page: &Page) -> Value {
     let tasks: Vec<&Task> = team.tasks.iter().collect();
-    profile(team, &tasks, &timelines(team, 5000.0), map, page, 5000.0)
+    let times = timelines(team, 5000.0);
+    profile(team, &tasks, &times, &times, map, page, 5000.0)
 }
 
 fn ids(list: &Value) -> Vec<(String, i64)> {
@@ -86,7 +87,7 @@ fn ids(list: &Value) -> Vec<(String, i64)> {
 #[test]
 fn the_losses_of_a_hand_built_team_rank_by_time_and_by_tokens() {
     let team = known();
-    let value = run(&team, &tokens(Some(Tokens { total: 4000, cost_usd: 0.4 })), &Page { limit: 100, ..Default::default() });
+    let value = run(&team, &tokens(Some(Tokens { total: 4000, cost_usd: 0.4, ..Default::default() })), &Page { limit: 100, ..Default::default() });
     let expected: Vec<(String, i64)> = [
         ("idle_member:dev", 1320),
         ("idle_member:qa", 1105),
@@ -149,8 +150,8 @@ fn an_unknown_token_count_stays_unknown_never_zero() {
     remote.members[1].session = Some(SessionRef { host: "box".into(), name: "codex/x/dev".into(), ..Default::default() });
     let asks = asks(&timelines(&remote, 5000.0), 5000.0);
     assert_eq!(
-        asks.iter().map(|ask| (ask.task, ask.part.as_str(), ask.member.as_str(), ask.from, ask.to)).collect::<Vec<_>>(),
-        [(1, "a1", "dev", 115.0, 400.0), (1, "a2", "dev", 505.0, 900.0), (2, "a1", "qa", 1105.0, 2000.0)]
+        asks.iter().map(|ask| (ask.task, ask.part.as_str(), ask.member.as_str(), ask.windows.clone())).collect::<Vec<_>>(),
+        [(1, "a1", "dev", vec![(115.0, 400.0)]), (1, "a2", "dev", vec![(505.0, 900.0)]), (2, "a1", "qa", vec![(1105.0, 2000.0)])]
     );
     let (read, capped) = read_tokens(&remote, &asks);
     assert!(!capped && read.len() == 3 && read.values().all(Option::is_none), "{read:?}");
@@ -159,7 +160,7 @@ fn an_unknown_token_count_stays_unknown_never_zero() {
 #[test]
 fn loss_pages_are_bounded_and_stable() {
     let team = known();
-    let map = tokens(Some(Tokens { total: 4000, cost_usd: 0.4 }));
+    let map = tokens(Some(Tokens { total: 4000, cost_usd: 0.4, ..Default::default() }));
     let whole = ids(&run(&team, &map, &Page { limit: 100, ..Default::default() })["losses"]["by_time"]);
     // Pages of three walk the same order with no repeat and no gap.
     let mut walked = Vec::new();
@@ -231,10 +232,11 @@ fn the_real_critical_path_follows_the_dependency_that_ended_last() {
 #[test]
 fn two_phases_compare_side_by_side() {
     let team = known();
-    let map = tokens(Some(Tokens { total: 4000, cost_usd: 0.4 }));
+    let map = tokens(Some(Tokens { total: 4000, cost_usd: 0.4, ..Default::default() }));
     let first = run(&team, &map, &Page { limit: 3, ..Default::default() });
     let one: Vec<&Task> = team.tasks.iter().take(1).collect();
-    let second = profile(&team, &one, &timelines(&team, 5000.0)[..1], &map, &Page { limit: 3, ..Default::default() }, 5000.0);
+    let times = timelines(&team, 5000.0);
+    let second = profile(&team, &one, &times[..1], &times, &map, &Page { limit: 3, ..Default::default() }, 5000.0);
     let compared = compare((1, &first), (2, &second));
     assert_eq!(compared["a"]["top_losses"].as_array().unwrap().len(), 3);
     assert_eq!(compared["delta"]["tasks"], -1);
@@ -275,9 +277,9 @@ fn a_large_team_profiles_within_its_time_bound() {
     let started = std::time::Instant::now();
     let lines = timelines(&team, 100_000.0);
     let asks = asks(&lines, 100_000.0);
-    let map: TokenMap = asks.iter().map(|ask| ((ask.task, ask.part.clone()), Some(Tokens { total: 100, cost_usd: 0.01 }))).collect();
+    let map: TokenMap = asks.iter().map(|ask| ((ask.task, ask.part.clone()), Some(Tokens { total: 100, cost_usd: 0.01, ..Default::default() }))).collect();
     let tasks: Vec<&Task> = team.tasks.iter().collect();
-    let value = profile(&team, &tasks, &lines, &map, &Page { limit: 20, ..Default::default() }, 100_000.0);
+    let value = profile(&team, &tasks, &lines, &lines, &map, &Page { limit: 20, ..Default::default() }, 100_000.0);
     let took = started.elapsed();
     assert!(took < std::time::Duration::from_secs(10), "{took:?}");
     assert_eq!(value["losses"]["by_time"]["items"].as_array().unwrap().len(), 20);
@@ -285,4 +287,123 @@ fn a_large_team_profiles_within_its_time_bound() {
     assert_eq!(value["critical_path"]["planned"]["length"], 250);
     assert_eq!(value["tasks"]["items"].as_array().unwrap().len(), 20);
     assert_eq!(value["members"].as_array().unwrap().len(), 20);
+}
+
+fn bare_team(tasks: Vec<Task>, members: Vec<Member>) -> Team {
+    let mut members = members;
+    members.insert(0, Member { id: "lead".into(), role: "Lead".into(), agent: "claude".into(), ..Default::default() });
+    Team { id: "t".into(), lead: "lead".into(), folder: "/f".into(), approved_at: Some(100.0), members, tasks, ..Default::default() }
+}
+
+/// #736: never started is its own state, not unknown; a started task whose
+/// provider has no timed counters stays unknown.
+#[test]
+fn a_task_that_never_started_is_not_unknown_and_a_provider_without_counters_stays_unknown() {
+    let team = bare_team(
+        vec![
+            Task { id: 1, phase: 1, title: "Waiting".into(), assignee: "dev".into(), status: TaskStatus::Pending, ..Default::default() },
+            Task {
+                id: 2,
+                phase: 1,
+                title: "DeepSeek".into(),
+                assignee: "ds".into(),
+                status: TaskStatus::InProgress,
+                attempts: vec![attempt(1, "ds", AttemptState::Reported, 100.0, 105.0, 200.0, 300.0)],
+                ..Default::default()
+            },
+        ],
+        vec![
+            Member { id: "dev".into(), role: "Backend".into(), agent: "codex".into(), ..Default::default() },
+            Member { id: "ds".into(), role: "Backend".into(), agent: "dsh".into(), ..Default::default() },
+        ],
+    );
+    let lines = vec![
+        json!({"task":1,"spans":[{"kind":"member","member":"dev","from":100.0,"to":200.0,"s":100}],"totals":{"member":100},"overlay":[]}),
+        json!({"task":2,"spans":[{"kind":"work","member":"ds","from":100.0,"to":200.0,"s":100,"attempt":1}],"totals":{"work":100},"overlay":[]}),
+    ];
+    let mut map = TokenMap::new();
+    map.insert((2, "a1".into()), None);
+    let tasks: Vec<&Task> = team.tasks.iter().collect();
+    let value = profile(&team, &tasks, &lines, &lines, &map, &Page { limit: 100, ..Default::default() }, 5000.0);
+    let rows = value["tasks"]["items"].as_array().unwrap();
+    let started = rows.iter().find(|row| row["task"] == 1).unwrap();
+    assert_eq!((started["started"].clone(), started["tokens"].clone()), (json!(false), json!({"not_started":true})));
+    let unknown = rows.iter().find(|row| row["task"] == 2).unwrap();
+    assert_eq!((unknown["started"].clone(), unknown["tokens"].clone()), (json!(true), json!({"unknown":true})));
+}
+
+/// #736: the member's other task in the same hours is not this task's tokens,
+/// and a part's gap between its own spending spans is never read.
+#[test]
+fn a_members_other_work_in_the_same_hours_is_not_the_tasks_tokens() {
+    let team = bare_team(
+        vec![
+            Task { id: 1, phase: 1, title: "A".into(), assignee: "dev".into(), status: TaskStatus::InProgress,
+                attempts: vec![attempt(1, "dev", AttemptState::Reported, 90.0, 95.0, 600.0, 700.0)], ..Default::default() },
+            Task { id: 2, phase: 2, title: "B".into(), assignee: "dev".into(), status: TaskStatus::Pending,
+                attempts: vec![Attempt { n: 1, id: "dev-b".into(), member: "dev".into(), state: AttemptState::Delivered, sent_at: 100.0, ..Default::default() }], ..Default::default() },
+        ],
+        vec![Member { id: "dev".into(), role: "Backend".into(), agent: "codex".into(), ..Default::default() }],
+    );
+    let lines = vec![
+        json!({"task":1,"spans":[
+            {"kind":"work","member":"dev","from":100.0,"to":200.0,"s":100,"attempt":1},
+            {"kind":"work","member":"dev","from":400.0,"to":500.0,"s":100,"attempt":1}],
+            "totals":{"work":200},"overlay":[]}),
+        json!({"task":2,"spans":[{"kind":"delivery","member":"dev","from":100.0,"to":500.0,"s":400}],"totals":{"delivery":400},"overlay":[]}),
+    ];
+    let asks = asks(&lines, 5000.0);
+    assert_eq!(asks.iter().map(|ask| (ask.task, ask.windows.clone())).collect::<Vec<_>>(), [(1, vec![(100.0, 200.0), (400.0, 500.0)])], "{asks:?}");
+    let mut map = TokenMap::new();
+    map.insert((1, "a1".into()), Some(Tokens { total: 5000, uncached_input: 5000, ..Default::default() }));
+    let tasks: Vec<&Task> = team.tasks.iter().collect();
+    let value = profile(&team, &tasks, &lines, &lines, &map, &Page { limit: 100, ..Default::default() }, 5000.0);
+    let rows = value["tasks"]["items"].as_array().unwrap();
+    assert_eq!(rows.iter().find(|row| row["task"] == 1).unwrap()["tokens"]["total"], 5000);
+    assert_eq!(rows.iter().find(|row| row["task"] == 2).unwrap()["tokens"], json!({"not_started":true}));
+}
+
+/// #736: cache reads and writes are apart; the totals and the ranking count
+/// uncached input plus output, never the cache reads.
+#[test]
+fn tokens_show_the_cache_buckets_apart_and_rank_the_fresh_input_and_output() {
+    let team = known();
+    let mut map = tokens(Some(Tokens { total: 4000, uncached_input: 4000, ..Default::default() }));
+    map.insert((1, "a1".into()), Some(Tokens { total: 1000, uncached_input: 600, output: 400, cache_read: 9000, cache_write: 1000, cost_usd: 0.1 }));
+    let value = run(&team, &map, &Page { limit: 100, ..Default::default() });
+    let first = value["tasks"]["items"].as_array().unwrap().iter().find(|row| row["task"] == 1).unwrap();
+    assert_eq!(first["tokens"], json!({"total":7000,"uncached_input":6600,"output":400,"cache_read":9000,"cache_write":1000,"cost_usd":0.7,"partial":false}));
+    assert_eq!((value["summary"]["tokens"]["total"].clone(), value["summary"]["tokens"]["cache_read"].clone()), (json!(11000), json!(9000)));
+    // The rework loss ranks by its fresh input and output, not its cache reads.
+    assert_eq!(value["losses"]["by_tokens"]["items"][0]["tokens"], 1000);
+}
+
+/// #736: idle time and a member wait use the member's busy time in every
+/// phase; another phase's work (or a task moved between phases) is not idle.
+#[test]
+fn idle_and_member_waits_use_the_members_busy_time_in_every_phase() {
+    let team = bare_team(
+        vec![
+            Task { id: 1, phase: 1, title: "A".into(), assignee: "dev".into(), status: TaskStatus::InProgress,
+                attempts: vec![attempt(1, "dev", AttemptState::Reported, 100.0, 105.0, 200.0, 300.0)], ..Default::default() },
+            Task { id: 2, phase: 2, title: "B".into(), assignee: "dev".into(), status: TaskStatus::InProgress,
+                attempts: vec![attempt(1, "dev", AttemptState::Reported, 300.0, 305.0, 800.0, 900.0)], ..Default::default() },
+        ],
+        vec![Member { id: "dev".into(), role: "Backend".into(), agent: "codex".into(), ..Default::default() }],
+    );
+    let scope = vec![json!({"task":1,"spans":[
+            {"kind":"work","member":"dev","from":100.0,"to":200.0,"s":100,"attempt":1},
+            {"kind":"member","member":"dev","from":300.0,"to":800.0,"s":500},
+            {"kind":"lead","from":800.0,"to":1000.0,"s":200}],
+            "totals":{"work":100,"member":500,"lead":200},"overlay":[]})];
+    let all = vec![scope[0].clone(), json!({"task":2,"spans":[
+            {"kind":"work","member":"dev","from":300.0,"to":800.0,"s":500,"attempt":1}],
+            "totals":{"work":500},"overlay":[]})];
+    let tasks: Vec<&Task> = team.tasks.iter().take(1).collect();
+    let value = profile(&team, &tasks, &scope, &all, &TokenMap::new(), &Page { limit: 100, ..Default::default() }, 5000.0);
+    let dev = value["members"].as_array().unwrap().iter().find(|member| member["member"] == "dev").unwrap();
+    assert_eq!((dev["busy_s"].clone(), dev["idle_s"].clone()), (json!(600), json!(300)), "{dev}");
+    // The member worked #2 through the whole wait for #1: no member_wait loss.
+    assert!(!value["losses"]["by_time"]["items"].as_array().unwrap().iter().any(|loss| loss["kind"] == "member_wait"), "{value}");
+    assert_eq!(value["summary"]["totals"]["member"], 0);
 }

@@ -2405,13 +2405,16 @@ fn profile_of(store: &Store, team: &Team, chosen: &[&Task], page: &super::profil
     };
     let holders = spans::holders(team, now);
     let timelines: Vec<Value> = chosen.iter().map(|task| spans::spans(team, task, &journal, &holders, now)).collect();
+    // #736: every phase's timelines decide whether a member was really idle:
+    // work on another phase's task (or one moved between phases) is not idle.
+    let all: Vec<Value> = team.tasks.iter().map(|task| spans::spans(team, task, &journal, &holders, now)).collect();
     let asks = profile::asks(&timelines, now);
     let (tokens, capped) = if read {
         profile::read_tokens(team, &asks)
     } else {
         (asks.iter().map(|ask| ((ask.task, ask.part.clone()), None)).collect(), false)
     };
-    let mut value = profile::profile(team, chosen, &timelines, &tokens, page, now);
+    let mut value = profile::profile(team, chosen, &timelines, &all, &tokens, page, now);
     value["events"] = json!({"read":journal.len(),"truncated":cut});
     value["token_reads"] = json!({"asked":asks.len(),"read":if read { asks.len().min(profile::TOKEN_READS) } else { 0 },"truncated":capped});
     Ok(value)
@@ -2934,8 +2937,12 @@ fn roster_word_rule(team: &Team, op: &str, input: &Value) -> super::owner_word::
         }
         "relaunch" => {
             // U54: the lead relaunches a member's session on the owner's word.
+            // #728: except a stuck member when the owner set lead_restarts_stuck;
+            // that route is the lead's own decision.
             let id = text(input, "member");
-            if id.is_empty() {
+            if id.is_empty()
+                || (team.settings.lead_restarts_stuck && team.member(id).is_some_and(|member| member.stuck.is_some()))
+            {
                 WordRule::default()
             } else {
                 WordRule {
@@ -8440,6 +8447,34 @@ mod tests {
             // The owner starts it too.
             let again = call("start-ahead", json!({"phase":9,"by":"human"})).unwrap();
             assert_eq!(again["status"], json!("started"));
+        });
+    }
+
+    /// #728: the lead relaunches a stuck member on the owner's setting without a
+    /// word; the owner has the same route; without the setting the word is still
+    /// asked.
+    #[test]
+    fn the_lead_relaunches_a_stuck_member_with_lead_restarts_stuck() {
+        use crate::state::teams::model::MemberStuck;
+        let (mut team, _, _) = review_team();
+        team.settings.lead_restarts_stuck = true;
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().stuck =
+            Some(MemberStuck { at: 1.0, reason: "no_progress".into(), phase: "tool".into() });
+        with_review_team(&team, || {
+            let receipt = as_lead(|| call("relaunch", json!({"member":"dev"}))).unwrap();
+            assert_eq!(receipt["status"], json!("relaunching"));
+            assert!(stored().member("dev").unwrap().restart_pending);
+            // The owner takes the same route.
+            let owner = call("relaunch", json!({"member":"dev","by":"human"})).unwrap();
+            assert_eq!(owner["status"], json!("relaunching"));
+        });
+        // Without the setting the lead still needs the owner's word.
+        let (mut strict, _, _) = review_team();
+        strict.members.iter_mut().find(|member| member.id == "dev").unwrap().stuck =
+            Some(MemberStuck { at: 1.0, reason: "no_progress".into(), phase: "tool".into() });
+        with_review_team(&strict, || {
+            let error = as_lead(|| call("relaunch", json!({"member":"dev"}))).unwrap_err().to_string();
+            assert!(error.contains("owner_word"), "{error}");
         });
     }
 

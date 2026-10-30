@@ -1,0 +1,79 @@
+name: Test map coverage
+
+# U62: once a week, each test target of the map runs alone under coverage and
+# hgs test coverage compares what it executed with .zerus/test-map.json. A gap
+# (a file a target covers that the map does not give it) is reported in the job
+# summary and the artifact; it is a finding for the map, not a failure.
+on:
+  schedule:
+    - cron: '23 2 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust modules (ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Linux test dependencies
+        run: sudo apt-get update && sudo apt-get install -y libevent-dev libncurses-dev bison pkg-config fish
+      - name: Pinned tmux with verified input-mode support
+        shell: bash
+        run: |
+          bash scripts/ci/install-tmux.sh "$RUNNER_TEMP/tmux"
+          echo "$RUNNER_TEMP/tmux/bin" >> "$GITHUB_PATH"
+      - run: rustup toolchain install stable --profile minimal --component llvm-tools-preview && rustup default stable
+      - run: cargo install cargo-llvm-cov --locked --version 0.6.16
+      - run: cargo build --locked
+      - name: Each module alone under llvm-cov
+        run: python3 scripts/ci/test-map-coverage.py rust --out artifacts/coverage
+      - name: Retain the comparison
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-map-coverage-rust
+          path: artifacts/coverage
+          retention-days: 14
+
+  tray:
+    name: Qt binaries (Arch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    container:
+      image: archlinux@sha256:996c3a1d6b0d87b01242f6fcd8cfa3ad3eece1a67ab5c8f108e20af1d7b97bdd
+    env:
+      CMAKE_GENERATOR: Ninja
+    steps:
+      - name: Bootstrap Git before checkout
+        run: pacman -Syu --noconfirm --needed git
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Arch dependencies and unprivileged builder
+        run: |
+          pacman -Syu --noconfirm --needed base-devel git cmake ninja qt6-base qt6-tools qt6-webengine qt6-multimedia qt6-svg kstatusnotifieritem kwindowsystem kidletime tmux openssh python dbus rust gcovr
+          useradd -m user
+          chown -R user:user "$GITHUB_WORKSPACE"
+      - name: hgs and a coverage build of the desktop
+        run: |
+          runuser -u user -- cargo build --locked
+          runuser -u user -- cmake -S tray -B build-coverage -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON \
+            -DCMAKE_CXX_FLAGS=--coverage -DCMAKE_C_FLAGS=--coverage -DCMAKE_EXE_LINKER_FLAGS=--coverage
+          runuser -u user -- cmake --build build-coverage --parallel 4
+      - name: Each test binary alone under gcov
+        run: runuser -u user -- env QTWEBENGINE_DISABLE_SANDBOX=1 python3 scripts/ci/test-map-coverage.py tray --build build-coverage --out artifacts/coverage
+      - name: Retain the comparison
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-map-coverage-tray
+          path: artifacts/coverage
+          retention-days: 14

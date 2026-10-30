@@ -5,6 +5,7 @@ import "./ui/styles/app.css";
 import "./ui/styles/sessions.css";
 import "./ui/styles/detail.css";
 import "./ui/styles/client.css";
+import "./ui/styles/goto.css";
 import "./ui/styles/screens.css";
 import "./ui/styles/machines.css";
 import "./ui/styles/motion.css";

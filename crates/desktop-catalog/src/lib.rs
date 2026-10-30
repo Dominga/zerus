@@ -283,6 +283,36 @@ pub fn disconnect(db: &mut Connection, source: &Source) -> Result<()> {
     Ok(())
 }
 
+/// Retire one producer's at-most-64 exact callbacks in one transaction. Already
+/// retired or replaced callbacks are harmless; none can retire a replacement.
+pub fn disconnect_many(db: &mut Connection, sources: &[Source]) -> Result<()> {
+    ensure!(
+        sources.len() <= MAX_SOURCES as usize,
+        "too many source retirements"
+    );
+    let tx = db.transaction()?;
+    for source in sources {
+        validate_source(source)?;
+        owner(&tx, source)?;
+        let Some(old) = state(&tx, &source.computer)? else {
+            continue;
+        };
+        if old.active
+            && old.epoch == source.service_epoch
+            && old.incarnation as u64 == source.incarnation
+            && old.generation as u64 == source.generation
+        {
+            abandon(&tx, &source.computer)?;
+            tx.execute(
+                "UPDATE desktop_catalog_sources SET active=0 WHERE computer=?1",
+                [&source.computer],
+            )?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 fn apply_inner(db: &mut Connection, source: &Source, frame: &Frame) -> Result<Applied> {
     check_frame(frame)?;
     let tx = db.transaction()?;

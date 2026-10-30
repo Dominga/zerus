@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount, untrack } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, lazy, onCleanup, onMount, untrack } from "solid-js";
 import { Icon } from "../lib/icons";
 import { catalog, computerOffline } from "../../store/catalog";
 import { GONE, change, copyCommand, copyFolder, copyName, copyReference, end, forget, interrupting, notify, perform, stillListed, pendingNotifications, toggleMute, updating } from "../../store/actions";
@@ -12,6 +12,10 @@ import type { BatchConfirmation } from "./selection";
 import { terminationCleanupOffer, terminationCleanupCancel } from "../../bridge";
 import { targetOf } from "../../store/actions";
 import { setSetting } from "../../store/settings";
+import { sessionForks } from "../../store/sessionForks";
+import { FORK_CHECKING, FORK_HINT } from "./fork-ui";
+
+const ForkDialog = lazy(() => import("./ForkDialog"));
 
 // The guarded session actions: the entries both menus share, the Rename,
 // Terminate, Forget (saved or archived), Start fresh and selection dialogs.
@@ -40,7 +44,7 @@ type Item = Extract<MenuEntry, { label: string }> & { action: () => void };
  * snapshot of the row as it is now, which the store checks against the
  * listed row when they run.
  */
-export function actionEntries(s: Session, details?: Details, options: { context?: boolean } = {}): { change: Item; stop: Item & { shown: boolean }; rename: Item; archive?: Item; end: Item } {
+export function actionEntries(s: Session, details?: Details, options: { context?: boolean } = {}): { change: Item; stop: Item & { shown: boolean }; rename: Item; fork: Item; archive?: Item; end: Item } {
   const row = snapshotOf(s);
   const archived = row.state === "archived";
   const m = menuState(row, !computerOffline(s.computer), updating(s.computer, s.name), details, {
@@ -59,6 +63,7 @@ export function actionEntries(s: Session, details?: Details, options: { context?
       action: () => { if (details) void perform(row, { kind: "interrupt", turn_started: details.turn_started }); },
     },
     rename: { label: "Rename…", icon: "pencil", disabled: !m.rename, action: () => send({ type: "open", kind: "rename", row }) },
+    fork: forkEntry(s, details),
     archive: m.archive.visible
       ? { label: "Move to archive", icon: "archive", disabled: !m.archive.enabled, hint: hint(m.archive.enabled, m.archive.reason), action: () => { void perform(row, { kind: "archive" }).then(refreshArchiveWhenDone); } }
       : undefined,
@@ -76,6 +81,15 @@ export function actionEntries(s: Session, details?: Details, options: { context?
         send({ type: "open", kind: "forget", ...opening });
       },
     },
+  };
+}
+
+/** Both menus share the inspected source and the one guarded Fork path. */
+export function forkEntry(s: Session, details?: Details): Item {
+  const row = snapshotOf(s);
+  return { label: "Fork session…", icon: "git-fork", disabled: !sessionForks.available(row, details),
+    hint: details ? details.fork_reason || FORK_HINT : FORK_CHECKING,
+    action: () => { if (details && sessionForks.available(row, details)) send({ type: "open", kind: "fork", row, details: { ...details } }); },
   };
 }
 
@@ -309,14 +323,14 @@ export function ActionDialogs() {
     queueMicrotask(() => {
       const initial = el?.querySelector<HTMLElement>("[data-initial]");
       initial?.focus();
-      if (state.kind === "rename" && initial instanceof HTMLInputElement) initial.select();
+      if ((state.kind === "rename" || state.kind === "fork") && initial instanceof HTMLInputElement) initial.select();
     });
   });
   return (
-    <dialog class="dlg" ref={el} role={open()?.kind === "rename" || !open() ? "dialog" : "alertdialog"} aria-labelledby="action-dlg-title"
-      aria-describedby={open() && open()?.kind !== "rename" ? "action-dlg-body" : undefined} style={{ width: "460px" }} onClose={closeDialog}>
+    <dialog class="dlg" ref={el} role={open()?.kind === "rename" || open()?.kind === "fork" || !open() ? "dialog" : "alertdialog"} aria-labelledby="action-dlg-title"
+      aria-describedby={open() && open()?.kind !== "rename" && open()?.kind !== "fork" ? "action-dlg-body" : undefined} style={{ width: open()?.kind === "fork" ? "480px" : "460px" }} onClose={closeDialog}>
       <Show when={open()} keyed>
-        {(p) => (p.kind === "rename" ? <RenameDialog row={p.row} close={closeDialog} />
+        {(p) => (p.kind === "fork" ? <ForkDialog row={p.row} details={p.details} close={closeDialog} /> : p.kind === "rename" ? <RenameDialog row={p.row} close={closeDialog} />
           : p.kind === "fresh" ? <FreshDialog row={p.row} close={closeDialog} /> : p.kind === "forget" ? <ForgetDialog row={p.row} bound={p.bound} close={closeDialog} />
           : p.kind === "batch" ? <BatchDialog copy={p.copy} answer={p.answer} close={closeDialog} /> : p.kind === "terminate" ? <TerminateDialog row={p.row} close={closeDialog} /> : null)}
       </Show>

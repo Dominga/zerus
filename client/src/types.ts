@@ -251,6 +251,7 @@ export interface ActivityEvent {
 export interface Target { computer: ComputerId; name: string; run_id: string; conversation_id: string }
 
 export type Action =
+  | { kind: "fork"; tag: string; archive_id: string | null }
   | { kind: "settings"; model: string; effort: string; expected_pending_id?: string; without_terminal: boolean }
   | { kind: "interrupt"; turn_started: number }
   | { kind: "mark_read"; reply_id: string | null; attention_signature: string | null }
@@ -284,6 +285,8 @@ export interface Details {
   auth_required: boolean;
   expected_id: string;
   resume_message_can_send: boolean;
+  fork_supported?: boolean;
+  fork_reason?: string;
   allowed_actions: string[] | null;
   action_reasons: Record<string, string>;
   /** The host can interrupt this turn (Stop). */

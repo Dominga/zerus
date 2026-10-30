@@ -1,4 +1,4 @@
-import { sessionFolderStatus } from "../../bridge";
+import { inspectSession, sessionFolderStatus } from "../../bridge";
 import { folderEntries, folderRequest, type FolderStatus } from "../../store/sessionFolders";
 import { groupOf } from "../../store/organization";
 import { taskDragOver, taskDrop } from "../../store/taskAssignment";
@@ -22,7 +22,7 @@ import { running } from "../../store/batch";
 import { grouping, headerOf, moveProject, setProjectCollapsed, setProjectToShow, sortProject } from "../../store/organization";
 import { TOOL_WIDTH, clearArchiveMenuEntry, machineMenu, runSelection, selectedRows, selectionContextMenu, selectionCount } from "./selection-live";
 import { barTools, splitTools, toolEntry } from "./selection-ui";
-import { actionEntries, copyEntries, freshActionEntry, muteEntry } from "./ActionDialogs";
+import { actionEntries, copyEntries, freshActionEntry, forkEntry, muteEntry } from "./ActionDialogs";
 import { markAllEntry, markAllTip, markEntry, runMarkAll } from "./mark-entries";
 import { moveEntry, openCreateProjectDialog, openDeleteProjectDialog, openRenameProjectDialog } from "./OrganizationDialogs";
 import { backgroundEntries } from "./background-menu";
@@ -178,7 +178,7 @@ function clearEntry(s: Session): MenuEntry {
   };
 }
 
-export function sessionMenu(s: Session, folderStatus?: { request: ReturnType<typeof folderRequest>; status: FolderStatus }): MenuEntry[] {
+export function sessionMenu(s: Session, folderStatus?: { request: ReturnType<typeof folderRequest>; status: FolderStatus }, forkDetails?: import("../../types").Details): MenuEntry[] {
   // The selected row's menu reads the same details as the header (Qt's m_details).
   const details = s.key === selectedKey() && !subagentOpen() ? detailsFor(s, !computerOffline(s.computer), followedFor(s.key)) : undefined;
   const act = actionEntries(s, undefined, { context: true });
@@ -205,7 +205,7 @@ export function sessionMenu(s: Session, folderStatus?: { request: ReturnType<typ
     act.change,
     ...(fresh ? [fresh] : archived ? [] : [clearEntry(s)]),
     act.rename,
-    { label: "Fork session…", icon: "git-fork", disabled: LATER },
+    forkEntry(s, forkDetails ?? details),
     ...(act.archive ? [act.archive] : []),
     moveEntry(s),
     { separator: true },
@@ -221,12 +221,23 @@ export function sessionMenu(s: Session, folderStatus?: { request: ReturnType<typ
 function openSessionMenu(e: MouseEvent, s: Session) {
   const details = s.key === selectedKey() && !subagentOpen() ? detailsFor(s, !computerOffline(s.computer), followedFor(s.key)) : undefined;
   const request = folderRequest(s, details);
-  const items = sessionMenu(s);
+  let items = sessionMenu(s);
+  let folderStatus: { request: ReturnType<typeof folderRequest>; status: FolderStatus } | undefined;
+  let forkDetails = details;
   openMenu(e, items);
-  void sessionFolderStatus(request.target.computer, request.directory).then((status) => {
+  const refresh = () => {
     const shown = menu();
-    if (shown?.items === items) setMenu({ ...shown, items: sessionMenu(s, { request, status }) });
+    if (shown?.items !== items) return;
+    items = sessionMenu(s, folderStatus, forkDetails);
+    setMenu({ ...shown, items });
+  };
+  void sessionFolderStatus(request.target.computer, request.directory).then((status) => {
+    folderStatus = { request, status }; refresh();
   }).catch(() => { /* Keep explicit unavailable states, with no automatic retry. */ });
+  // An explicitly opened nonselected row reads capability once, as Qt's
+  // contextForkSession. The exact open-menu identity drops late replies.
+  if (!details && !computerOffline(s.computer)) void inspectSession({ computer: s.computer, name: s.name, run_id: s.runId ?? "", conversation_id: s.conversationId ?? "" }, s.archiveId ?? null)
+    .then((value) => { forkDetails = value ?? undefined; refresh(); }).catch(() => {});
 }
 
 /** The project header's menu (SessionsWindow.cpp:2568-2616); its rules are organization-ui.ts's. */

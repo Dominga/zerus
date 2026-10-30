@@ -329,6 +329,7 @@ private slots:
     void readmeScreenshots();
     void leadSessionHeaderCarriesTheTeam();
     void leadSessionAnswersAProposalOnItsCard();
+    void modelServersRailButtonOnlyWithAServer();
     void teamAttentionReachesTheNotifications();
     void designerSessionDropsTheTeamHeader();
     void liveStreamFollowsGitFoldersInsteadOfPolling();
@@ -1497,6 +1498,7 @@ elif c=='team':
   # A change is kept for the test to read (U57: decide-proposal).
   open(__file__+'.calls','a',encoding='utf-8').write(json.dumps({'args':a,'input':json.loads(sys.stdin.read() or '{}')})+'\n')
   out({'status':'accepted' if op=='decide-proposal' else 'ok'})
+elif c=='model-server':out(d.get('model_servers',{'servers':[]}) if a[1:2]==['list'] else {'status':'error','error':'refused','detail':'not in this fixture'})
 elif c=='git-status' and 'git' in d:out(d['git'].get(host+'\n'+a[a.index('--path')+1],{'state':'not_repo'}))
 elif c=='ls':out({'host':host or 'workstation','ok':True,'sessions':[]})
 elif c=='swarm':out({'schema':1,'organization':d['organization'],'node_id':'node-workstation','versions':{},'written':{},'conflicts':[],
@@ -2768,6 +2770,46 @@ void TestSessionsWindow::leadSessionAnswersAProposalOnItsCard()
         QCOMPARE(input["expected_hash"].toString(), hash);
         QCOMPARE(input["by"].toString(), QStringLiteral("human"));
         QVERIFY(!input.contains("reason"));
+    }
+}
+
+// U60 (#656): a computer without a model server shows no Model servers
+// button and behaves as before; with one, the rail's button opens the tab.
+void TestSessionsWindow::modelServersRailButtonOnlyWithAServer()
+{
+    const QStringList keys{"workspace/skin", "workspace/theme", "workspace/organization", "workspace/inspectorVisible"};
+    const auto restore = qScopeGuard([keys] { for (const auto &key : keys) QSettings().remove(key); });
+    QSettings().setValue("workspace/skin", "whitewh");
+    setJsonSetting("workspace/organization", QJsonDocument(ReadmeShots::organization()).toJson(QJsonDocument::Compact));
+    const double now = QDateTime::currentSecsSinceEpoch();
+    const auto plain = ReadmeShots::fleet(now);
+    for (const bool configured : {false, true}) {
+        QJsonObject data{{"inspect", ReadmeShots::conversations(plain, now)}, {"accounts", ReadmeShots::accounts(now)}, {"team", ReadmeShots::team(now)},
+                         {"feed", ReadmeShots::feed(now)}, {"catalog", ReadmeShots::catalog()}, {"organization", ReadmeShots::organization()}};
+        if (configured)
+            data["model_servers"] = QJsonObject{{"servers", QJsonArray{QJsonObject{{"name", "lab"}, {"base_url", "http://192.0.2.10:8000/v1"}, {"kind", "openai"},
+                                                                                   {"ssh", ""}, {"key", false}, {"argv", QJsonObject{}}}}}};
+        const QString fixture = m_dir->filePath(configured ? "hgs-model-servers" : "hgs-no-model-servers");
+        QVERIFY(FakeCli::install(fixture, ReadmeShots::program));
+        QVERIFY(FakeCli::replace(fixture + ".json", QJsonDocument(data).toJson(QJsonDocument::Compact)));
+        SessionsWindow window(FakeCli::program(fixture)); window.resize(1440, 900); window.setFleet(plain); window.show();
+        QPushButton *nav = nullptr;
+        for (auto *button : window.findChildren<QPushButton *>()) if (button->property("modelServersNav").toBool()) nav = button;
+        QVERIFY(nav);
+        if (!configured) {
+            QTest::qWait(1500);
+            QVERIFY(nav->isHidden());
+            QVERIFY(!window.findChild<QWidget *>("modelServersPage"));
+            continue;
+        }
+        QTRY_VERIFY_WITH_TIMEOUT(!nav->isHidden(), 10000);
+        QCOMPARE(nav->toolTip(), QStringLiteral("Model servers"));
+        nav->click();
+        QWidget *page = nullptr;
+        QTRY_VERIFY((page = window.findChild<QWidget *>("modelServersPage")) && page->isVisible());
+        QTRY_VERIFY(nav->isChecked());
+        QFrame *card = nullptr;
+        QTRY_VERIFY((card = page->findChild<QFrame *>("modelServerCard")) && card->property("server") == "lab");
     }
 }
 

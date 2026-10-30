@@ -49,6 +49,7 @@ class WorktreePanel;
 class ActivityView;
 class MessageComposer;
 class QuestionCard;
+namespace ModelServers { class Controller; }
 class TerminalView;
 class NativeUiView;
 class QTabWidget;
@@ -581,6 +582,7 @@ private:
     void showNewTeam(const QString &host = {}, const QString &name = {});
     void showTeamDesigner();
     void showTeamWaiting();
+    void showModelServers();
     void openWaitingItem(const QString &team,const QString &kind,int phase,int task);
     void startTeamDesigner(const QString &folder,const QString &goal,const QJsonObject &agent);
     QString m_teamDesignerFolder,m_teamDesignerProject;
@@ -603,6 +605,12 @@ private:
     int m_teamDesignerPageIndex=-1;
     // U50: the rail's Waiting for you page, made on first use.
     class TeamWaitingPage *m_teamWaitingPage=nullptr;
+    // U60 (#656): the model servers, their tab and their settings section.
+    ModelServers::Controller *m_modelServers=nullptr;
+    class ModelServersPage *m_modelServersPage=nullptr;
+    class ModelServerSettings *m_modelServerSettings=nullptr;
+    class QPushButton *m_modelServersNav=nullptr;
+    int m_modelServersPageIndex=-1,m_modelServerSettingsSection=-1;
     class QPushButton *m_teamWaitingNav=nullptr;
     int m_teamWaitingPageIndex=-1;
     // U55: the same list as banners above the session's chat and Activity and

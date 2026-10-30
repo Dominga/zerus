@@ -1,4 +1,5 @@
 #include "ProcessRunner.h"
+#include "SlowEventLog.h"
 #include "ChildProcess.h"
 
 #include <QCoreApplication>
@@ -479,7 +480,10 @@ private:
         if (it == m_pending.end()) return;
         Pending pending = std::move(*it); m_pending.erase(it);
         QObject::disconnect(pending.destroyed);
-        if (pending.owner) pending.apply(std::move(value));
+        if (!pending.owner) return;
+        // The slow-event log names a reply by the object it is for (SlowEventLog.h).
+        const SlowEventLog::Scope scope(pending.owner, "result");
+        pending.apply(std::move(value));
     }
     void cancel(quint64 id)   // application thread, while the owner is destroyed
     {

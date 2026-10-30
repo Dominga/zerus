@@ -114,6 +114,7 @@ impl Store {
                 CREATE TABLE IF NOT EXISTS events(seq INTEGER PRIMARY KEY AUTOINCREMENT,team TEXT NOT NULL,at REAL NOT NULL,
                     kind TEXT NOT NULL,payload TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS events_team ON events(team,seq);
+                CREATE INDEX IF NOT EXISTS events_team_kind_at ON events(team,kind,at);
                 CREATE TABLE IF NOT EXISTS operations(id TEXT PRIMARY KEY,digest TEXT NOT NULL,receipt TEXT NOT NULL,at REAL NOT NULL);",
             )?;
         }
@@ -193,6 +194,27 @@ impl Store {
         items.truncate(limit as usize);
         let next = if more { items.last().map(|item| item["seq"].clone()) } else { None };
         Ok(json!({"items":items,"next_cursor":next}))
+    }
+
+    /// U38: one team's journal entries a timeline reads (spans::EVENT_KINDS)
+    /// between `from` and `to`, oldest first, at most `limit`, through the
+    /// (team, kind, at) index; true when more were there.
+    pub(crate) fn span_events(&self, team: &str, from: f64, to: f64, limit: i64) -> anyhow::Result<(Vec<super::spans::Journal>, bool)> {
+        let kinds = super::spans::EVENT_KINDS.iter().map(|kind| format!("'{kind}'")).collect::<Vec<_>>().join(",");
+        let mut statement = self.db.prepare(&format!(
+            "SELECT at,kind,payload FROM events WHERE team=?1 AND kind IN ({kinds}) AND at>=?2 AND at<=?3 ORDER BY at,seq LIMIT ?4"
+        ))?;
+        let rows = statement.query_map(params![team, from, to, limit.max(1) + 1], |row| {
+            Ok((row.get::<_, f64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+        })?;
+        let mut items = Vec::new();
+        for row in rows {
+            let (at, kind, payload) = row?;
+            items.push(super::spans::Journal { at, kind, detail: serde_json::from_str(&payload)? });
+        }
+        let cut = items.len() as i64 > limit.max(1);
+        items.truncate(limit.max(1) as usize);
+        Ok((items, cut))
     }
 
     /// Creates a team. A replay of the same request returns its first receipt.

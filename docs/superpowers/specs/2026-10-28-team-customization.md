@@ -209,9 +209,10 @@ team with tasks whose approval is `review`; `report_escalated` and
 `remind_owner_minutes` and `remind_owner_permission_minutes`;
 `owner_word_asked` an open lead proposal (F8), an addition to a running
 phase waiting for its confirmation (U29) and a paused replan (N17);
-`task_waits_owner` a task the owner holds (A5); `team_finished` a Running or
-Paused team with every task decided and no draft phase. `task.waits` (U45)
-joins `task_waits_owner` once it exists. The desktop page is the rail's
+`task_waits_owner` a task the owner holds (A5, action `release_task`) or a
+pending task whose `task.waits` is not running (U45/U46/U48, action
+`retry_task`, with its `reason` and `waits_for`); `team_finished` a Running or
+Paused team with every task decided and no draft phase. The desktop page is the rail's
 Waiting for you, after the Team designer: pages of 50 with Show older; a
 poll reads every shown item and a page more, so an arrival never pushes a
 shown item out; a row opens its team's Team tab, a draft phase unfolded.

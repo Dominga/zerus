@@ -124,10 +124,13 @@ private:
     {
         m_rebuilding = true;
         // QA #347: an old row's item widget outlives clear(); delete it so no
-        // stale row paints over a new one after a theme switch.
+        // stale row paints over a new one after a theme switch. Hide it first:
+        // a deferred delete posted before a dialog's own event loop runs only
+        // after that loop ends, so the row stayed on top of the first new one
+        // (KDE, the empty-catalog "No template" over the first template).
         for (int i = 0; i < m_list->count(); ++i) {
             if (auto *item = m_list->item(i)) {
-                if (auto *widget = m_list->itemWidget(item)) { m_list->removeItemWidget(item); widget->deleteLater(); }
+                if (auto *widget = m_list->itemWidget(item)) { widget->hide(); m_list->removeItemWidget(item); widget->deleteLater(); }
             }
         }
         m_list->clear();

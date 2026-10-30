@@ -141,7 +141,7 @@ pub(crate) fn candidates<'a>(team: &'a Team, task: &Task) -> Vec<&'a Member> {
     }
     let Some(assignee) = team.member(&task.assignee).filter(live) else { return Vec::new() };
     let mut out = vec![assignee];
-    if !task.pinned {
+    if !team.keeps_assignee(task) {
         let role = team.role_of(&assignee.id);
         out.extend(team.members.iter().filter(live).filter(|member| member.id != assignee.id && team.role_of(&member.id) == role));
     }
@@ -169,13 +169,13 @@ pub(crate) fn no_fit_reason(team: &Team, task: &Task) -> String {
     let models = task.models.join(", ");
     let found = candidates(team, task);
     if found.is_empty() {
-        return if for_role(task) { format!("No member has the role {}", task.role) } else { format!("{} cannot take the task", team.role_of(&task.assignee)) };
+        return if for_role(task) { format!("No member has the role {}", task.role) } else { format!("{} cannot take the task", team.name_of(&task.assignee)) };
     }
     if let [only] = found.as_slice() {
         if !SWITCHING.contains(&only.agent.as_str()) {
             return format!("{} cannot switch to model {models}", agent_name(&only.agent));
         }
-        return format!("{} allows none of the models {models}", team.role_of(&only.id));
+        return format!("{} allows none of the models {models}", team.name_of(&only.id));
     }
     let role = if for_role(task) { task.role.clone() } else { team.role_of(&task.assignee) };
     format!("No member of {role} allows the models {models}")

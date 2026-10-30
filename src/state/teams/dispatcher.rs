@@ -1202,7 +1202,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         // U36: a test holding the assignee's folder keeps its next task back;
         // a free member with the same role may take it.
         let held = super::stages::held(team, &member.id).is_some();
-        if !task.pinned {
+        if !team.keeps_assignee(task) {
             let failed = |m: &Member| {
             task.attempts
                 .iter()
@@ -2771,13 +2771,13 @@ fn switch_model(store: &mut Store, team: &Team, task_id: u32, member_id: &str, f
         Err(error) => ("uncertain", error.to_string().chars().take(300).collect()),
     };
     change(store, &team.id, |team, events| {
-        let role = team.role_of(member_id);
+        let (role, name) = (team.role_of(member_id), team.name_of(member_id));
         let task = team.task_mut(task_id).context("unknown task")?;
         if let Some(step) = task.prepare.iter_mut().rev().find(|step| step.step == "model" && step.result == "pending" && step.member == member_id) {
             step.result = outcome.0.into();
             step.reason = outcome.1.clone();
         }
-        super::models::wait(task, "model", &format!("{role} could not switch to {to}: {}", outcome.1), now());
+        super::models::wait(task, "model", &format!("{name} could not switch to {to}: {}", outcome.1), now());
         events.push(Event::new(
             if outcome.0 == "refused" { "model_switch_refused" } else { "model_switch_uncertain" },
             json!({"task":task_id,"member":role,"to":to,"reason":outcome.1}),
@@ -2961,19 +2961,19 @@ fn drain_member(store: &mut Store, team: &Team, member: &str, pause: bool) -> an
             anyhow::ensure!(
                 output.status.success(),
                 "The session of {} was not paused: {}",
-                current.role_of(member),
+                current.name_of(member),
                 String::from_utf8_lossy(&output.stderr).trim()
             );
         }
     }
     change(store, &team.id, |team, events| {
-        let role = team.role_of(member);
+        let (role, name) = (team.role_of(member), team.name_of(member));
         anyhow::ensure!(
             team.tasks.iter().all(|task| task.assignee != member || !task_owes(task)),
             "{} still owes a task",
-            role
+            name
         );
-        anyhow::ensure!(team.reports_of(member).is_empty(), "{} still has reports", role);
+        anyhow::ensure!(team.reports_of(member).is_empty(), "{} still has reports", name);
         let found = team.members.iter_mut().find(|found| found.id == member).context("Unknown member")?;
         anyhow::ensure!(found.draining, "the drain was cancelled");
         found.draining = false;
@@ -3608,11 +3608,12 @@ fn hand_out_now(
         let session = team.member(member_id).and_then(|m| m.session.clone()).context("no session")?;
         let member_host = team.member(member_id).map(|m| m.computer.clone()).unwrap_or_default();
         let roles = from.map(|from| (team.role_of(from), team.role_of(member_id)));
+        let keeps = team.task(task_id).is_some_and(|task| team.keeps_assignee(task));
         let task = team.task_mut(task_id).context("unknown task")?;
         // Given to a free member with the same role, unless the lead or you
         // chose the assignee in the meantime.
         let rebalanced = match from {
-            Some(from) if task.assignee == from && !task.pinned => {
+            Some(from) if task.assignee == from && !keeps => {
                 task.assignee = member_id.to_owned();
                 from.to_owned()
             }
@@ -4132,9 +4133,10 @@ fn record_context_start(
     change(store, team_id, |team, events| {
         anyhow::ensure!(can_hand_out(team, task_id), "no longer ready");
         let roles = from.map(|from| (team.role_of(from), team.role_of(member_id)));
+        let keeps = team.task(task_id).is_some_and(|task| team.keeps_assignee(task));
         let task = team.task_mut(task_id).context("unknown task")?;
         let rebalanced = match from {
-            Some(from) if task.assignee == from && !task.pinned => {
+            Some(from) if task.assignee == from && !keeps => {
                 task.assignee = member_id.to_owned();
                 from.to_owned()
             }
@@ -4170,9 +4172,10 @@ fn record_waits(
     change(store, team_id, |team, events| {
         anyhow::ensure!(can_hand_out(team, task_id), "no longer ready");
         let roles = from.map(|from| (team.role_of(from), team.role_of(member_id)));
+        let keeps = team.task(task_id).is_some_and(|task| team.keeps_assignee(task));
         let task = team.task_mut(task_id).context("unknown task")?;
         let rebalanced = match from {
-            Some(from) if task.assignee == from && !task.pinned => {
+            Some(from) if task.assignee == from && !keeps => {
                 task.assignee = member_id.to_owned();
                 from.to_owned()
             }
@@ -4280,7 +4283,7 @@ fn check_context_step(store: &mut Store, team_id: &str, task_id: u32, member_id:
 /// re-sends the hand-out and never presses keys: the input may still be waiting
 /// in the member's terminal.
 pub(crate) fn start_late_text(team: &Team, task: &Task, attempt: &Attempt, now: f64) -> String {
-    let role = team.role_of(&attempt.member);
+    let role = team.name_of(&attempt.member);
     let minutes = (((now - attempt.delivered_at.unwrap_or(attempt.sent_at)) / 60.0).round() as u64).max(1);
     format!(
         "[Zerus team \u{b7} from: Zerus \u{b7} task: #{} \u{b7} not started]\n\
@@ -4303,7 +4306,7 @@ pub(crate) fn answer_to_member_text(task: &Task, question: &Question) -> String 
 /// The message that tells the lead a finished turn has waited too long for an
 /// answer or for Background work (N5).
 pub(crate) fn blocked_text(team: &Team, task: &Task, attempt: &Attempt, now: f64) -> String {
-    let role = team.role_of(&attempt.member);
+    let role = team.name_of(&attempt.member);
     let minutes = (((now - attempt.blocked_since.unwrap_or(now)) / 60.0).round() as u64).max(1);
     if let Some(question) = attempt.open_question() {
         format!(
@@ -4347,12 +4350,11 @@ pub(crate) fn rebalanced_text(team: &Team, tasks: &[u32]) -> String {
     for task in tasks.iter().filter_map(|id| team.task(*id)) {
         if let Some(attempt) = task.open_attempt() {
             text += &format!(
-                "#{} {}: given to {} ({}) instead of {}, which was busy or failed its last attempt.\n",
+                "#{} {}: given to {} instead of {}, which was busy or failed its last attempt.\n",
                 task.id,
                 task.title,
-                attempt.member,
-                team.role_of(&attempt.member),
-                attempt.rebalanced_from
+                team.name_of(&attempt.member),
+                team.name_of(&attempt.rebalanced_from)
             );
         }
     }
@@ -4803,7 +4805,7 @@ fn tell_lead_silent(store: &mut Store, team: &Team, task_id: u32, minutes: u64, 
          (a permission of a subagent call, a dialog) may hold it: look at its terminal, or interrupt the turn with the \
          owner's word (hgs interrupt {session} --json) and tell it how to go on.",
         task.id,
-        team.role_of(&attempt.member),
+        team.name_of(&attempt.member),
         task.id,
         task.title,
     );
@@ -4847,7 +4849,7 @@ fn remind_report(store: &mut Store, team: &Team, task_id: u32) -> anyhow::Result
          {held}Decide with hgs team accept --json or reject --json, or look at the whole inbox:\n  \
          {} | hgs team inbox --json",
         task.id,
-        team.role_of(&attempt.member),
+        team.name_of(&attempt.member),
         task.id,
         task.title,
         json!({"team":team.id})
@@ -4891,7 +4893,7 @@ fn remind_reviewer(store: &mut Store, team: &Team, task_id: u32, member: &str) -
          Decide with hgs team accept --json or reject --json, or look at your inbox:\n  \
          {} | hgs team inbox --json",
         task.id,
-        team.role_of(&attempt.member),
+        team.name_of(&attempt.member),
         task.id,
         task.title,
         json!({"team":team.id})
@@ -4943,7 +4945,7 @@ fn send_sub_brief(store: &mut Store, team: &Team, member: &str) -> anyhow::Resul
 /// blocking chain of the open tasks.
 pub(crate) fn starved_text(team: &Team, member: &Member, now: f64) -> String {
     let minutes = (((now - member.starved_since.unwrap_or(now)).max(0.0)) / 60.0).round() as u64;
-    let role = team.role_of(&member.id);
+    let role = team.name_of(&member.id);
     let ready: BTreeSet<u32> = plan::ready(team).into_iter().collect();
     let open: Vec<&Task> = team.tasks.iter().filter(|task| !task.status.finished()).collect();
     let mut chain = String::new();
@@ -5053,7 +5055,7 @@ fn output_tail(text: &str) -> String {
 
 /// The message that tells the lead a Background job passed its red time (C12).
 pub(crate) fn budget_text(team: &Team, member: &Member, command: &str, since: f64, now: f64, last_output: &str) -> String {
-    let role = team.role_of(&member.id);
+    let role = team.name_of(&member.id);
     let minutes = (((now - since).max(0.0)) / 60.0).round() as u64;
     let command = if command.is_empty() { "(command not reported)" } else { command };
     match member.budget.as_ref() {
@@ -5420,11 +5422,46 @@ fn waits_only(reply: &str) -> bool {
     !reports.iter().any(|marker| text.contains(marker))
 }
 
+/// U56: a reply whose last line says the member still waits ("waiting for the
+/// editor to close", "I'll report once the build ends") is not its report,
+/// whatever work the lines before name; a wait for the lead's review is.
+fn still_waits(reply: &str) -> bool {
+    let Some(last) = reply.lines().map(str::trim).rfind(|line| !line.is_empty()) else { return false };
+    let last = last.to_lowercase();
+    // A report ends waiting for its decision: that wait is the lead's, not one.
+    let decision = ["review", "accept", "decision", "approv", "feedback", "ревью", "решени", "одобр", "приём", "прием"];
+    if decision.iter().any(|word| last.contains(word)) {
+        return false;
+    }
+    let still = [
+        "still waiting", "still wait", "i'll report once", "i'll report when", "i will report once", "i will report when",
+        "report as soon as", "ещё жду", "еще жду", "всё ещё жду", "все еще жду", "отчитаюсь, когда", "отчитаюсь когда",
+        "отчитаюсь после", "дождусь",
+    ];
+    if still.iter().any(|phrase| last.contains(phrase)) {
+        return true;
+    }
+    // "waiting for the editor to close": a wait for something to end.
+    let ends = [" to close", " to finish", " to complete", " to end", " to exit", " to be released", " to unlock", " to free"];
+    ["waiting for", "wait for", "waiting on", "waiting until"].iter().any(|wait| {
+        last.match_indices(wait).any(|(at, _)| {
+            let rest: String = last[at + wait.len()..].chars().take(60).collect();
+            ends.iter().any(|end| rest.contains(end))
+        })
+    }) || ["жду, пока", "жду пока", "жду заверш", "жду оконч"].iter().any(|phrase| last.contains(phrase))
+}
+
+/// What capture refuses to make a report: a waiting-only reply (U58) or one
+/// that ends saying it still waits (U56). The attempt then shows No report.
+fn not_a_report(reply: &str) -> bool {
+    waits_only(reply) || still_waits(reply)
+}
+
 /// A2: records the member's last reply as the attempt's report and marks it
 /// captured, so the member may replace it while the task is undecided (A6).
 fn capture_report(store: &mut Store, team_id: &str, task_id: u32, reply: &str, expected_reply: &str) -> anyhow::Result<()> {
-    // U58: a waiting-only reply is a status; the attempt then shows No report.
-    anyhow::ensure!(!waits_only(reply), "the reply only says it waits; it is a status, not a report");
+    // U58/U56: a reply that only waits, or still waits, is a status; the attempt then shows No report.
+    anyhow::ensure!(!not_a_report(reply), "the reply only says it waits; it is a status, not a report");
     change(store, team_id, |team, events| {
         let task = team.task(task_id).context("unknown task")?;
         anyhow::ensure!(!task.is_check(), "a check task reports its exit code, not a reply");
@@ -5438,10 +5475,10 @@ fn capture_report(store: &mut Store, team_id: &str, task_id: u32, reply: &str, e
                 && (expected_reply.is_empty() || attempt.turn_reply == expected_reply),
             "the attempt changed before its report was captured"
         );
-        let role = team.role_of(&attempt.member);
+        let name = team.name_of(&attempt.member);
         let (attempt_id, member) = (attempt.id.clone(), attempt.member.clone());
         let input = json!({"task":task_id,"attempt":attempt_id,
-            "text":format!("(From {role}'s last reply; it ran no hgs team report.)\n\n{reply}")});
+            "text":format!("(From the last reply of {name}; it ran no hgs team report.)\n\n{reply}")});
         ops::apply(team, "capture-report", &input, &ops::Actor::Member(member), &BTreeSet::new(), events)?;
         Ok(())
     })
@@ -5452,8 +5489,8 @@ fn capture_report(store: &mut Store, team_id: &str, task_id: u32, reply: &str, e
 /// last reply as its report in one change, so the next tick cannot read it as a
 /// resumed turn and clear it.
 fn capture_quiet(store: &mut Store, team_id: &str, task_id: u32, reply: &str) -> anyhow::Result<()> {
-    // U58: a waiting-only reply is a status; the attempt then shows No report.
-    anyhow::ensure!(!waits_only(reply), "the reply only says it waits; it is a status, not a report");
+    // U58/U56: a reply that only waits, or still waits, is a status; the attempt then shows No report.
+    anyhow::ensure!(!not_a_report(reply), "the reply only says it waits; it is a status, not a report");
     change(store, team_id, |team, events| {
         let task = team.task(task_id).context("unknown task")?;
         anyhow::ensure!(!task.is_check(), "a check task reports its exit code, not a reply");
@@ -5463,10 +5500,10 @@ fn capture_quiet(store: &mut Store, team_id: &str, task_id: u32, reply: &str) ->
             "the attempt changed before its report was captured"
         );
         let at = now();
-        let role = team.role_of(&attempt.member);
+        let name = team.name_of(&attempt.member);
         let (attempt_id, member) = (attempt.id.clone(), attempt.member.clone());
         let input = json!({"task":task_id,"attempt":attempt_id,
-            "text":format!("(From {role}'s last reply; it ran no hgs team report.)\n\n{reply}")});
+            "text":format!("(From the last reply of {name}; it ran no hgs team report.)\n\n{reply}")});
         ops::apply(team, "capture-report", &input, &ops::Actor::Member(member), &BTreeSet::new(), events)?;
         let found = team.task_mut(task_id).and_then(|task| task.attempts.last_mut()).context("the captured attempt")?;
         found.turn_ended_at = Some(at);
@@ -6254,7 +6291,7 @@ fn start_run(
         return refuse("a request for another team".into());
     }
     if request["member"].as_str() != Some(member.id.as_str()) {
-        return refuse(format!("the folder belongs to {}", team.role_of(&member.id)));
+        return refuse(format!("the folder belongs to {}", team.name_of(&member.id)));
     }
     let attempt = request["attempt"].as_str().unwrap_or_default();
     // U36: a test stage builds under its stage run, as an attempt.
@@ -6388,7 +6425,7 @@ fn run_request(store: &mut Store, folder: &Path, request: &Value) {
         anyhow::ensure!(
             !mine.is_empty() && (same_path(&here, &mine) || inside(&here, &mine)),
             "This folder is not {}'s own folder",
-            team.role_of(&member.id)
+            team.name_of(&member.id)
         );
         let attempt = request["attempt"].as_str().unwrap_or_default();
         // C1: the attempt may have ended while the command ran; the result is
@@ -6415,7 +6452,7 @@ fn apply_outbox(store: &mut Store, team: &Team, member: &Member, request: &Value
     let op = request["op"].as_str().unwrap_or_default();
     anyhow::ensure!(matches!(op, "report" | "ask" | "commit" | "reply" | "expect"), "Unknown outbox request {op}");
     anyhow::ensure!(request["team"] == team.id.as_str(), "a request for another team");
-    anyhow::ensure!(request["member"] == member.id.as_str(), "the folder belongs to {}", team.role_of(&member.id));
+    anyhow::ensure!(request["member"] == member.id.as_str(), "the folder belongs to {}", team.name_of(&member.id));
     // The member's own request, unchanged: a replay keys the same store receipt.
     let input = request["input"].clone();
     let request_id = request["request_id"].as_str().unwrap_or_default().to_owned();
@@ -7715,6 +7752,85 @@ mod tests {
         assert_eq!(error, "the reply only says it waits; it is a status, not a report");
     }
 
+    /// U56: a reply whose last line says it still waits is not made a report,
+    /// whatever work it names before; one waiting for its review is a report.
+    #[test]
+    fn a_reply_that_still_waits_is_not_made_a_report() {
+        for text in [
+            "Implemented the parser and committed it.\nWaiting for the editor to close.",
+            "Tests pass. I'm still waiting for the build to finish.",
+            "Done with the API. I'll report once the GUI suite ends.",
+            "Сделал парсер и тесты.\nЖду, пока закроется редактор.",
+        ] {
+            assert!(not_a_report(text), "{text}");
+        }
+        for text in [
+            "Done: the API is in and its tests passed.",
+            "Waiting for the build; meanwhile I fixed the parser and committed it.",
+            "Done, tests pass. Waiting for your review.",
+            "Tests pass, but the build lock is still queued.",
+            "Waiting for the editor to close.\nThen I committed: tests pass, done.",
+        ] {
+            assert!(!not_a_report(text), "{text}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        delivered(&mut t);
+        {
+            let attempt = &mut t.task_mut(1).unwrap().attempts[0];
+            attempt.turn_ended_at = Some(50.0);
+            attempt.turn_reply = "r7".into();
+            attempt.report_ready_at = Some(50.0);
+        }
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+        let reply = "Implemented the parser, tests pass.\nCommitting now: waiting for the editor to close.";
+        let error = capture_report(&mut store, &t.id, 1, reply, "r7").unwrap_err().to_string();
+        assert_eq!(error, "the reply only says it waits; it is a status, not a report");
+        let attempt = store.load(&t.id).unwrap().unwrap().task(1).unwrap().attempts.last().unwrap().clone();
+        assert_eq!((attempt.state, attempt.report.is_some()), (AttemptState::Delivered, false));
+    }
+
+    /// U56: keep_assignees pins every planned assignee: a busy assignee's task
+    /// waits for it instead of going to a free member of its role.
+    #[test]
+    fn keep_assignees_keeps_a_task_with_its_planned_member() {
+        let (mut team, seen) = team_with_two_backends();
+        // dev works on #1; #2, also dev's, would go to the free dev2.
+        team.task_mut(1).unwrap().attempts.push(Attempt { n: 1, member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
+        team.task_mut(1).unwrap().status = TaskStatus::InProgress;
+        let moved = |team: &Team| steps(team, &seen, 1.0).iter().any(|step| matches!(step, Step::Rebalance { .. }));
+        // Off (the default), the free same-role member takes it, as today.
+        assert!(moved(&team));
+        team.settings.keep_assignees = true;
+        assert!(!moved(&team), "{:?}", steps(&team, &seen, 1.0));
+        assert!(team.keeps_assignee(team.task(2).unwrap()));
+        // A task for a role has no planned assignee to keep.
+        let role_task = Task { id: 9, role: "Backend".into(), ..Default::default() };
+        assert!(!team.keeps_assignee(&role_task));
+    }
+
+    /// U56: the lead's notices name a member by id with its role.
+    #[test]
+    fn notices_name_members_by_id_and_role() {
+        let mut team = team();
+        assert_eq!((team.name_of("dev"), team.name_of("lead"), team.name_of("gone")), ("dev (Backend)".into(), "Lead".into(), "gone".into()));
+        delivered(&mut team);
+        let attempt = team.task(1).unwrap().attempts[0].clone();
+        let task = team.task(1).unwrap().clone();
+        assert!(start_late_text(&team, &task, &attempt, 1000.0).contains("delivered to dev (Backend)"));
+        assert!(blocked_text(&team, &task, &attempt, 1000.0).contains("dev (Backend)'s turn"));
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().starved_since = Some(10.0);
+        let member = team.member("dev").unwrap().clone();
+        assert!(starved_text(&team, &member, 1210.0).contains("dev (Backend) has had no ready task"));
+        team.task_mut(1).unwrap().attempts[0].no_report = true;
+        let items = inbox::items(&team);
+        let stalled = items.iter().find(|item| item.kind == "stalled").expect("a stalled item");
+        assert_eq!(stalled.member, "dev (Backend)");
+        assert!(stalled.summary.starts_with("dev (Backend) ended its turn"), "{}", stalled.summary);
+        assert!(inbox::text(&team, &items, 1000.0).contains("dev (Backend)"));
+    }
+
     #[test]
     fn a_closed_question_is_never_sent() {
         let mut team = team();
@@ -8883,7 +8999,7 @@ mod tests {
         let pending = saved.member("dev").unwrap().pending.clone().unwrap();
         assert_eq!(pending.question_id, card["question_id"].as_str().unwrap());
         let item = inbox::items(&saved).into_iter().find(|item| item.kind == "permission").unwrap();
-        assert_eq!(item.member, "Backend");
+        assert_eq!(item.member, "dev (Backend)");
         // #520: the rows of a card that lists its calls reach the lead's
         // record and item; a card without them keeps the text alone.
         assert!(item.value().get("subagents").is_none());
@@ -9205,7 +9321,7 @@ mod tests {
         assert!(saved.task(id).unwrap().attempts.last().unwrap().report.is_none());
         let result = super::super::outbox::result(&folder, "44444444-4444-4444-8444-444444444444").unwrap();
         assert_eq!(result["status"], "refused");
-        assert!(result["error"].as_str().unwrap_or_default().contains("folder belongs to Backend"), "{result}");
+        assert!(result["error"].as_str().unwrap_or_default().contains("folder belongs to dev (Backend)"), "{result}");
     }
 
     #[test]
@@ -10060,7 +10176,7 @@ mod tests {
         let attempt = saved.task(id).unwrap().attempts.last().unwrap();
         let report = attempt.report.as_ref().unwrap();
         assert!(report.captured);
-        assert_eq!(report.text, "(From Backend's last reply; it ran no hgs team report.)\n\nDone and checked");
+        assert_eq!(report.text, "(From the last reply of dev (Backend); it ran no hgs team report.)\n\nDone and checked");
         assert_eq!((attempt.state, saved.task(id).unwrap().status), (AttemptState::Reported, TaskStatus::Submitted));
         assert_eq!(attempt.notice, Notice::Pending);
         // The member's real report replaces the captured one (A6) and the lead
@@ -10082,7 +10198,7 @@ mod tests {
         let report = attempt.report.as_ref().unwrap();
         assert!(!report.captured);
         assert_eq!(report.text, "Done: 42 tests pass.");
-        assert_eq!(report.replaced[0].text, "(From Backend's last reply; it ran no hgs team report.)\n\nDone and checked");
+        assert_eq!(report.replaced[0].text, "(From the last reply of dev (Backend); it ran no hgs team report.)\n\nDone and checked");
     }
 
     #[test]
@@ -10176,7 +10292,7 @@ mod tests {
         assert!(steps_now.contains(&Step::Inbox), "{steps_now:?}");
         let items = super::inbox::items(&team);
         assert_eq!(items[0].kind, "stalled");
-        assert!(items[0].summary.contains("Backend's session stopped"), "{}", items[0].summary);
+        assert!(items[0].summary.contains("dev (Backend)'s session stopped"), "{}", items[0].summary);
         assert_eq!(items[0].task, Some(id));
         team.inbox.told.push(items[0].key.clone());
         team.inbox.told_at = 1.0;
@@ -10677,7 +10793,7 @@ mod tests {
         let mut team = team();
         submit(&mut team, 1, "dev", true);
         let item = inbox::items(&team).into_iter().find(|item| item.kind == "report").unwrap();
-        assert!(item.detail.contains("Backend gets no new work until you accept, reject, retry, reassign or cancel"), "{}", item.detail);
+        assert!(item.detail.contains("dev (Backend) gets no new work until you accept, reject, retry, reassign or cancel"), "{}", item.detail);
         // An explicit report carries no such note.
         team.task_mut(1).unwrap().attempts.last_mut().unwrap().report.as_mut().unwrap().captured = false;
         let item = inbox::items(&team).into_iter().find(|item| item.kind == "report").unwrap();
@@ -12015,7 +12131,7 @@ mod tests {
         // H1: the lead reads a local date and time, not a raw epoch.
         assert!(limited.summary.contains("resets at 2026"), "{}", limited.summary);
         assert!(!limited.summary.contains("1793050000"), "{}", limited.summary);
-        assert_eq!(limited.member, "Backend");
+        assert_eq!(limited.member, "dev (Backend)");
         assert!(limited.command.contains("hgs team status --json"), "{}", limited.command);
         // Status keeps the number.
         assert_eq!(team.member("dev").unwrap().limited.as_ref().and_then(|limit| limit.resets_at), Some(1_793_050_000.0));

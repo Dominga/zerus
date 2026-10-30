@@ -570,7 +570,7 @@ pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<
     for starving in &validation.health.starved {
         validation.health.warnings.push(format!(
             "starved: {} idle {} min without a ready task; Open: {}",
-            starving.role,
+            team.name_of(&starving.member),
             starving.minutes,
             starving.blocking.iter().map(|task| format!("#{task}")).collect::<Vec<_>>().join(", ")
         ));
@@ -2721,7 +2721,7 @@ fn roster_word_rule(team: &Team, op: &str, input: &Value) -> super::owner_word::
                 // U32: the sentence says to add and names the member's role or
                 // agent/model, never the generated id; that naming and the
                 // count are checked once the sentence is verified.
-                WordRule { phrases: &[], all: Vec::new(), add: true, ..Default::default() }
+                WordRule { phrases: &[], all: Vec::new(), add: true, expect: format!("add a {}", text(member, "role")), ..Default::default() }
             }
         }
         "remove-member" => {
@@ -2729,7 +2729,7 @@ fn roster_word_rule(team: &Team, op: &str, input: &Value) -> super::owner_word::
             if id.is_empty() {
                 WordRule::default()
             } else {
-                WordRule { phrases: ROSTER_PHRASES, all: Vec::new(), add: false, verbs: REMOVE_VERBS, names: names_for(id) }
+                WordRule { phrases: ROSTER_PHRASES, all: Vec::new(), add: false, verbs: REMOVE_VERBS, names: names_for(id), expect: format!("remove {id}") }
             }
         }
         "scale" => {
@@ -2737,7 +2737,7 @@ fn roster_word_rule(team: &Team, op: &str, input: &Value) -> super::owner_word::
             // the role it names is checked once the sentence is verified.
             match input["count"].as_u64() {
                 Some(count) if (1..=32).contains(&count) && !text(input, "role").trim().is_empty() => {
-                    WordRule { phrases: &[], all: vec![count.to_string()], add: true, ..Default::default() }
+                    WordRule { phrases: &[], all: vec![count.to_string()], add: true, expect: format!("add {count} {}", text(input, "role").trim()), ..Default::default() }
                 }
                 _ => WordRule::default(),
             }
@@ -2748,7 +2748,7 @@ fn roster_word_rule(team: &Team, op: &str, input: &Value) -> super::owner_word::
             if id.is_empty() || input["draining"].as_bool() == Some(false) {
                 WordRule::default()
             } else {
-                WordRule { phrases: super::owner_word::DRAIN_PHRASES, all: vec![id.to_owned()], add: false, ..Default::default() }
+                WordRule { phrases: super::owner_word::DRAIN_PHRASES, all: vec![id.to_owned()], add: false, expect: format!("drain {id}"), ..Default::default() }
             }
         }
         "swap-member" => {
@@ -2769,6 +2769,7 @@ fn roster_word_rule(team: &Team, op: &str, input: &Value) -> super::owner_word::
                     add: false,
                     verbs: SWAP_VERBS,
                     names: ids.iter().flat_map(|id| names_for(id)).collect(),
+                    expect: format!("swap {}", ids.join(", ")),
                 }
             }
         }
@@ -2784,6 +2785,7 @@ fn roster_word_rule(team: &Team, op: &str, input: &Value) -> super::owner_word::
                     add: false,
                     verbs: super::owner_word::RELAUNCH_VERBS,
                     names: names_for(id),
+                    expect: format!("relaunch {id}"),
                 }
             }
         }
@@ -2791,7 +2793,7 @@ fn roster_word_rule(team: &Team, op: &str, input: &Value) -> super::owner_word::
             let cap = input["settings"]["max_members"].as_u64();
             match cap {
                 Some(cap) if cap as usize != team.settings.max_members => {
-                    WordRule { phrases: ROSTER_PHRASES, all: vec![cap.to_string()], add: false, verbs: MAX_VERBS, names: Vec::new() }
+                    WordRule { phrases: ROSTER_PHRASES, all: vec![cap.to_string()], add: false, verbs: MAX_VERBS, names: Vec::new(), expect: format!("max members {cap}") }
                 }
                 _ => WordRule::default(),
             }
@@ -2823,12 +2825,13 @@ fn check_roster_word(
         object.remove("roster_word");
     }
     // The sentence is the request's `owner_word` object, as `approve` takes it.
-    let word_input = input
-        .get("owner_word")
-        .filter(|word| word.is_object())
-        .context("The lead changes the roster only on your word: pass \"owner_word\" with the owner's sentence")?;
-    let word = verify(team, word_input, &rule, super::super::now())
-        .context("The lead changes the roster only on your word; without it, propose the change (F8)")?;
+    let word_input = input.get("owner_word").filter(|word| word.is_object()).with_context(|| {
+        format!("The lead changes the roster only on your word: pass \"owner_word\" with the owner's sentence, such as \"{}\"", rule.expect)
+    })?;
+    // U56: the refusal names a sentence that would pass.
+    let word = verify(team, word_input, &rule, super::super::now()).with_context(|| {
+        format!("The lead changes the roster only on your word: quote your own sentence of the last 30 minutes that says \"{}\"; without it, propose the change (F8)", rule.expect)
+    })?;
     // U32/N7: a count word ("add two backends") authorizes that many adds and
     // the cap grows by one for each; every other word pays for one change.
     let (allowed, change) = if op == "add-member" {
@@ -2898,7 +2901,7 @@ fn check_phase_word(
     let word = input
         .get("owner_word")
         .filter(|word| word.is_object())
-        .context("The lead adds a task to a running phase only on your word: pass \"owner_word\" with the owner's sentence")?;
+        .with_context(|| format!("The lead adds a task to a running phase only on your word: pass \"owner_word\" with the owner's sentence, such as \"add a task to phase {phase}\""))?;
     let (kind, after, change) = match input["confirm"].as_str().filter(|id| !id.is_empty()) {
         None => (super::owner_word::PhaseWord::Request, 0.0, "the request to add to a running phase"),
         Some(id) => {
@@ -3650,11 +3653,13 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                 let caller = if parent_lead { Actor::ParentLead } else { actor(&team, op, &filled)? };
                 let auto_plan = op == "approve" && team.settings.approval == Approval::Auto;
                 if matches!(&caller, Actor::Member(member) if *member == team.lead) && !auto_plan {
-                    let word = input
-                        .get("owner_word")
-                        .filter(|word| word.is_object())
-                        .context("The lead approves only on the owner's word: pass \"owner_word\" with the owner's sentence")?;
-                    let verified = super::owner_word::verify(&team, word, super::super::now())?;
+                    // U56: a refusal names the sentence this approval expects.
+                    let phase = (op == "approve-phase").then(|| input["phase"].as_u64().and_then(|n| u32::try_from(n).ok())).flatten();
+                    let sentence = super::owner_word::approval_sentence(phase);
+                    let word = input.get("owner_word").filter(|word| word.is_object()).with_context(|| {
+                        format!("The lead approves only on the owner's word: pass \"owner_word\" with the owner's sentence, which says {sentence}")
+                    })?;
+                    let verified = super::owner_word::verify(&team, word, phase, super::super::now())?;
                     if let Some(used) = team.owner_word_used(verified.event) {
                         bail!("That word was already used for {used}; ask the owner again");
                     }
@@ -7516,7 +7521,7 @@ mod tests {
         team.task_mut(1).unwrap().status = TaskStatus::Submitted;
         let inbox = inbox_view_for(&team, &team.lead);
         assert_eq!(inbox["items"][0]["kind"], "report");
-        assert_eq!((inbox["items"][0]["task"].as_u64(), inbox["items"][0]["member"].as_str()), (Some(1), Some("Backend")));
+        assert_eq!((inbox["items"][0]["task"].as_u64(), inbox["items"][0]["member"].as_str()), (Some(1), Some("dev (Backend)")));
         assert!(inbox["items"][0]["command"].as_str().unwrap().contains("hgs team accept --json"));
         let value = view_with(&team, &[], None);
         assert_eq!(value["tasks"][0]["waits"], json!({"for":"lead","on":["Lead"],"unblock":"accept #1"}));

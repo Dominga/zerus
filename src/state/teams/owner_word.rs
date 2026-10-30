@@ -57,6 +57,22 @@ pub(crate) struct WordRule {
     pub add: bool,
     pub verbs: &'static [&'static str],
     pub names: Vec<String>,
+    /// U56: a sentence that meets the rule, which a refusal names.
+    pub expect: String,
+}
+
+/// U56: the sentence an approval expects, as a refusal names it: the plan's,
+/// or phase `n`'s ("phase N approved" as well as the plan phrases).
+pub(crate) fn approval_sentence(phase: Option<u32>) -> String {
+    match phase {
+        None => "\"plan approved\" (or \"план принят\")".to_owned(),
+        Some(n) => format!("\"phase {n} approved\" (or \"фаза {n} принята\", \"next phase plan approved\")"),
+    }
+}
+
+/// U56: phase `n` is approved by its own sentence too.
+fn phase_phrases(n: u32) -> [String; 2] {
+    [format!("phase {n} approved"), format!("фаза {n} принята")]
 }
 
 impl WordRule {
@@ -270,27 +286,39 @@ pub(crate) fn verify_roster_in(db: &Connection, name: &str, conversation: &str, 
 }
 
 fn rule_scan(rule: &WordRule, exact: bool) -> ScanOptions<'_> {
-    ScanOptions { phrases: rule.phrases, needed: &rule.all, exact, add: rule.add, verbs: rule.verbs, names: &rule.names, accept: None, after: 0.0 }
+    let expect = if rule.expect.is_empty() { "the roster phrase and the change it names".to_owned() } else { format!("\"{}\"", rule.expect) };
+    ScanOptions { phrases: rule.phrases, needed: &rule.all, exact, add: rule.add, verbs: rule.verbs, names: &rule.names, accept: None, after: 0.0, expect }
 }
 
 /// Checks the lead's `owner_word` request against the lead session's events
-/// and returns the quote to store.
-pub(crate) fn verify(team: &Team, input: &Value, now: f64) -> anyhow::Result<OwnerWord> {
+/// and returns the quote to store: a plan approval, or phase `phase`'s.
+pub(crate) fn verify(team: &Team, input: &Value, phase: Option<u32>, now: f64) -> anyhow::Result<OwnerWord> {
     let text = input["text"]
         .as_str()
         .map(str::trim)
         .filter(|text| !text.is_empty())
-        .context("owner_word.text is required: quote the owner's sentence")?;
+        .with_context(|| format!("owner_word.text is required: quote the owner's sentence, which says {}", approval_sentence(phase)))?;
     let lead = team.member(&team.lead).context("The team has no lead")?;
     let session = lead.session.as_ref().context("The lead has no session to check the owner's word in")?;
     let db = super::super::journal::event_db().map_err(|error| anyhow::anyhow!("The session events are unavailable: {error}"))?;
-    verify_in(&db, &session.name, &session.conversation_id, text, now)
+    verify_approval_in(&db, &session.name, &session.conversation_id, text, phase, now)
 }
 
 /// The verification against one events database, so it is tested with a
 /// fixture instead of the live state.
+#[cfg(test)]
 pub(crate) fn verify_in(db: &Connection, name: &str, conversation: &str, text: &str, now: f64) -> anyhow::Result<OwnerWord> {
-    verify_scan(db, name, conversation, text, now, ScanOptions { phrases: KEY_PHRASES, needed: &[], exact: false, add: false, verbs: &[], names: &[], accept: None, after: 0.0 })
+    verify_approval_in(db, name, conversation, text, None, now)
+}
+
+/// U56: a phase approval also takes "phase N approved" for its own phase,
+/// and a refusal names the sentence it expects.
+pub(crate) fn verify_approval_in(db: &Connection, name: &str, conversation: &str, text: &str, phase: Option<u32>, now: f64) -> anyhow::Result<OwnerWord> {
+    let own = phase.map(phase_phrases);
+    let mut phrases: Vec<&str> = KEY_PHRASES.to_vec();
+    phrases.extend(own.iter().flatten().map(String::as_str));
+    let expect = approval_sentence(phase);
+    verify_scan(db, name, conversation, text, now, ScanOptions { phrases: &phrases, needed: &[], exact: false, add: false, verbs: &[], names: &[], accept: None, after: 0.0, expect })
 }
 
 /// U29: the owner asks to add a task to a running phase, naming it by number
@@ -453,11 +481,20 @@ pub(crate) fn verify_phase_in(
     // C1: a confirmation is the owner's whole sentence, never a fragment of a
     // longer one; a request may be quoted from a sentence that also explains it.
     let exact = matches!(kind, PhaseWord::Confirm);
-    verify_scan(db, name, conversation, text, now, ScanOptions { phrases: &[], needed: &[], exact, add: false, verbs: &[], names: &[], accept: Some(&accept), after })
+    let expect = phase_word_sentence(phase, kind);
+    verify_scan(db, name, conversation, text, now, ScanOptions { phrases: &[], needed: &[], exact, add: false, verbs: &[], names: &[], accept: Some(&accept), after, expect: expect.clone() })
         .with_context(|| match kind {
-            PhaseWord::Request => format!("The owner has not asked to add a task to phase {phase} (name the phase or say the current phase)"),
-            PhaseWord::Confirm => format!("The owner has not confirmed the addition to phase {phase} after the warning"),
+            PhaseWord::Request => format!("The owner has not asked to add a task to phase {phase}: quote the owner's sentence that says {expect}"),
+            PhaseWord::Confirm => format!("The owner has not confirmed the addition to phase {phase} after the warning: quote the owner's newer sentence {expect}"),
         })
+}
+
+/// U56: the sentence an addition to a running phase expects.
+fn phase_word_sentence(phase: u32, kind: PhaseWord) -> String {
+    match kind {
+        PhaseWord::Request => format!("\"add a task to phase {phase}\" (or \"to the current phase\")"),
+        PhaseWord::Confirm => "\"yes, add it\" (or \"да, добавь\")".to_owned(),
+    }
 }
 
 /// U39/U42: what the owner says to change an accepted phase on the lead's
@@ -505,10 +542,14 @@ pub(crate) fn verify_phase_change(team: &Team, input: &Value, phase: u32, change
 /// whole sentence, never a fragment of one that also refuses it.
 pub(crate) fn verify_phase_change_in(db: &Connection, name: &str, conversation: &str, text: &str, phase: u32, change: PhaseChange, now: f64) -> anyhow::Result<OwnerWord> {
     let accept = move |lowered: &str| asks_phase_change(lowered, phase, change);
-    verify_scan(db, name, conversation, text, now, ScanOptions { phrases: &[], needed: &[], exact: true, add: false, verbs: &[], names: &[], accept: Some(&accept), after: 0.0 })
+    let expect = match change {
+        PhaseChange::Discard => format!("\"discard phase {phase}\""),
+        PhaseChange::ToDraft => format!("\"return phase {phase} to a draft\""),
+    };
+    verify_scan(db, name, conversation, text, now, ScanOptions { phrases: &[], needed: &[], exact: true, add: false, verbs: &[], names: &[], accept: Some(&accept), after: 0.0, expect: expect.clone() })
         .with_context(|| match change {
-            PhaseChange::Discard => format!("The owner has not asked to discard phase {phase} (the sentence names the phase and the discard)"),
-            PhaseChange::ToDraft => format!("The owner has not asked to return phase {phase} to a draft (the sentence names the phase and the draft)"),
+            PhaseChange::Discard => format!("The owner has not asked to discard phase {phase}: quote the owner's whole sentence, such as {expect}"),
+            PhaseChange::ToDraft => format!("The owner has not asked to return phase {phase} to a draft: quote the owner's whole sentence, such as {expect}"),
         })
 }
 
@@ -526,6 +567,8 @@ struct ScanOptions<'a> {
     accept: Option<&'a dyn Fn(&str) -> bool>,
     /// U29: the sentence must be newer than this time.
     after: f64,
+    /// U56: the sentence the refusal names.
+    expect: String,
 }
 
 fn verify_scan(
@@ -610,9 +653,10 @@ fn verify_scan(
         }
         return Ok(OwnerWord { text: detail.to_owned(), at, event: seq });
     }
+    // U56: the refusal names the sentence this operation expects.
     anyhow::bail!(
-        "The owner's word is not in the lead session's last 30 minutes: no such prompt contains the sentence, \
-         the roster phrase and the change it names"
+        "The owner's word is not in the lead session's last 30 minutes: quote the owner's own sentence that says {}",
+        options.expect
     )
 }
 
@@ -639,6 +683,38 @@ mod tests {
 
     fn prompt(at: f64, detail: &str) -> Value {
         serde_json::json!({"type":"UserPromptSubmit","at":at,"agent_id":"","detail":detail})
+    }
+
+    /// U56: a refused word names the sentence its operation expects, and a
+    /// phase approval takes "phase N approved" for its own phase only.
+    #[test]
+    fn a_refused_word_names_the_expected_sentence() {
+        let db = database();
+        add(&db, "claude/x/lead", "c1", prompt(2000.0, "please continue"));
+        let error = verify_in(&db, "claude/x/lead", "c1", "please continue", 2000.0).unwrap_err().to_string();
+        assert!(error.contains("\"plan approved\" (or \"план принят\")"), "{error}");
+        assert!(!error.contains("roster"), "{error}");
+        let error = verify_approval_in(&db, "claude/x/lead", "c1", "please continue", Some(3), 2000.0).unwrap_err().to_string();
+        assert!(error.contains("\"phase 3 approved\""), "{error}");
+        // The phase's own sentence approves that phase, in either language.
+        let db = database();
+        add(&db, "claude/x/lead", "c1", prompt(2000.0, "Phase 3 approved, go"));
+        add(&db, "claude/x/lead", "c1", prompt(2001.0, "фаза 4 принята"));
+        assert!(verify_approval_in(&db, "claude/x/lead", "c1", "Phase 3 approved", Some(3), 2010.0).is_ok());
+        assert!(verify_approval_in(&db, "claude/x/lead", "c1", "фаза 4 принята", Some(4), 2010.0).is_ok());
+        // Another phase's sentence, a plan approval and a refusal do not.
+        assert!(verify_approval_in(&db, "claude/x/lead", "c1", "Phase 3 approved", Some(4), 2010.0).is_err());
+        assert!(verify_approval_in(&db, "claude/x/lead", "c1", "Phase 3 approved", None, 2010.0).is_err());
+        add(&db, "claude/x/lead", "c1", prompt(2002.0, "phase 5 approved? no, not yet"));
+        assert!(verify_approval_in(&db, "claude/x/lead", "c1", "phase 5 approved", Some(5), 2010.0).is_err());
+        // A roster rule names its own sentence; phase changes and additions too.
+        let rule = WordRule { phrases: ROSTER_PHRASES, verbs: REMOVE_VERBS, names: vec!["dev".into()], expect: "remove dev".into(), ..Default::default() };
+        let error = verify_roster_in(&db, "claude/x/lead", "c1", "please continue", &rule, 2010.0).unwrap_err().to_string();
+        assert!(error.contains("\"remove dev\""), "{error}");
+        let error = verify_phase_change_in(&db, "claude/x/lead", "c1", "please continue", 2, PhaseChange::Discard, 2010.0).unwrap_err().to_string();
+        assert!(error.contains("\"discard phase 2\""), "{error}");
+        let error = verify_phase_in(&db, "claude/x/lead", "c1", "please continue", 2, PhaseWord::Request, 0.0, 2010.0).unwrap_err().to_string();
+        assert!(error.contains("\"add a task to phase 2\""), "{error}");
     }
 
     #[test]
@@ -684,7 +760,7 @@ mod tests {
         assert!(verify_in(&db, "claude/x/lead", "c1", "plan approved", 2000.0).is_ok());
         // A lead on another computer cannot be checked here.
         let team = Team { lead: "lead".into(), ..Default::default() };
-        assert!(verify(&team, &serde_json::json!({"text":"plan approved"}), 2000.0).is_err());
+        assert!(verify(&team, &serde_json::json!({"text":"plan approved"}), None, 2000.0).is_err());
     }
 
     fn roster_rule(all: &[&str]) -> WordRule {
@@ -700,12 +776,12 @@ mod tests {
     fn member_rule(verbs: &'static [&'static str], id: &str, role: &str) -> WordRule {
         let mut names = vec![id.to_owned()];
         names.extend(role_aliases(role).iter().map(|alias| (*alias).to_owned()));
-        WordRule { phrases: ROSTER_PHRASES, all: Vec::new(), add: false, verbs, names }
+        WordRule { phrases: ROSTER_PHRASES, all: Vec::new(), add: false, verbs, names, expect: String::new() }
     }
 
     /// N15: the cap change, naming the number the owner said.
     fn max_rule(cap: u64) -> WordRule {
-        WordRule { phrases: ROSTER_PHRASES, all: vec![cap.to_string()], add: false, verbs: MAX_VERBS, names: Vec::new() }
+        WordRule { phrases: ROSTER_PHRASES, all: vec![cap.to_string()], add: false, verbs: MAX_VERBS, names: Vec::new(), expect: String::new() }
     }
 
     #[test]

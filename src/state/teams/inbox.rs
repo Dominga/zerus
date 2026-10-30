@@ -89,7 +89,7 @@ fn decide_command(team: &Team, task: &Task, accept: bool) -> String {
 
 /// A7: what a captured report means for its member, for the reviewer.
 pub(crate) fn captured_hold_note(team: &Team, member: &str) -> String {
-    let role = team.role_of(member);
+    let role = team.name_of(member);
     format!(
         "Captured from {role}'s last reply, which may only acknowledge the task. {role} gets no new work until you \
          accept, reject, retry, reassign or cancel this task, or {role} replaces the report with hgs team report."
@@ -144,7 +144,7 @@ fn all_items(team: &Team) -> Vec<Item> {
         .filter(|_| active)
         .filter(|member| member.state != MemberState::Removed && !member.error.is_empty() && member.session.is_none())
     {
-        let role = team.role_of(&member.id);
+        let role = team.name_of(&member.id);
         items.push(Item {
             subagents: Value::Null,
             kind: "member_error",
@@ -173,9 +173,9 @@ fn all_items(team: &Team) -> Vec<Item> {
             key: format!("task_waits:{}:{}", task.id, wait.at),
             task: Some(task.id),
             member: match attempt {
-                Some(attempt) => team.role_of(&attempt.member),
+                Some(attempt) => team.name_of(&attempt.member),
                 None if task.assignee.is_empty() => task.role.clone(),
-                None => team.role_of(&task.assignee),
+                None => team.name_of(&task.assignee),
             },
             since: wait.at,
             summary: summary(&format!("#{} {} waits: {}", task.id, task.title, wait.reason)),
@@ -187,7 +187,7 @@ fn all_items(team: &Team) -> Vec<Item> {
     // lead, naming them, so a drain never waits silently; when no same-role peer
     // can take them, the item says that too.
     for member in team.members.iter().filter(|_| active).filter(|member| member.draining && member.state != MemberState::Removed) {
-        let role = team.role_of(&member.id);
+        let (role, name) = (team.role_of(&member.id), team.name_of(&member.id));
         let waiting: Vec<u32> = team
             .tasks
             .iter()
@@ -208,17 +208,17 @@ fn all_items(team: &Team) -> Vec<Item> {
             kind: "drain_held",
             key: format!("drain_held:{}", member.id),
             task: waiting.first().copied(),
-            member: role.clone(),
+            member: name.clone(),
             since: crate::state::now(),
-            summary: summary(&format!("Draining {role}: {listed} still to decide; {why}")),
+            summary: summary(&format!("Draining {name}: {listed} still to decide; {why}")),
             command: format!("{} | hgs team status --json", json!({"team":team.id})),
-            detail: format!("{role} is draining. {listed} keep it open: {why}."),
+            detail: format!("{name} is draining. {listed} keep it open: {why}."),
         });
     }
     // U52: a member whose session crashed too often this hour stays stopped
     // until the owner or the lead starts it again.
     for member in team.members.iter().filter(|member| member.id != team.lead && member.crash_told).filter(|_| active) {
-        let role = team.role_of(&member.id);
+        let role = team.name_of(&member.id);
         let at = member.crash.unwrap_or_else(crate::state::now);
         let restarts = member.restarts.iter().filter(|restart| crate::state::now() - **restart <= 3600.0).count();
         let command = member
@@ -306,7 +306,7 @@ fn all_items(team: &Team) -> Vec<Item> {
                         // texts it replaced, so the digest tells the lead again.
                         key: format!("report:{}:{}:{}", task.id, attempt.id, report.replaced.len()),
                         task: Some(task.id),
-                        member: team.role_of(&attempt.member),
+                        member: team.name_of(&attempt.member),
                         since: report.at,
                         // U31: a report made ahead of its draft phase waits for
                         // the owner's approval of that phase.
@@ -346,7 +346,7 @@ fn all_items(team: &Team) -> Vec<Item> {
                     kind: "question",
                     key: format!("question:{}", question.id),
                     task: Some(task.id),
-                    member: team.role_of(&attempt.member),
+                    member: team.name_of(&attempt.member),
                     since: question.at,
                     summary: summary(&question.text),
                     command: format!(
@@ -366,7 +366,7 @@ fn all_items(team: &Team) -> Vec<Item> {
                         kind: "question",
                         key: format!("question:{}", question.id),
                         task: Some(task.id),
-                        member: if run.member.is_empty() { "Zerus".into() } else { team.role_of(&run.member) },
+                        member: if run.member.is_empty() { "Zerus".into() } else { team.name_of(&run.member) },
                         since: question.at,
                         summary: summary(&question.text),
                         command: format!(
@@ -410,7 +410,7 @@ fn all_items(team: &Team) -> Vec<Item> {
             None
         };
         if let Some(kind) = kind {
-            let role = team.role_of(&attempt.member);
+            let role = team.name_of(&attempt.member);
             let what = if kind == "no_report" {
                 format!("{role} ended its turn on #{} with neither a report nor a reply", task.id)
             } else {
@@ -440,7 +440,7 @@ fn all_items(team: &Team) -> Vec<Item> {
         if run.stalled.is_empty() {
             continue;
         }
-        let role = if run.member.is_empty() { "Zerus".to_owned() } else { team.role_of(&run.member) };
+        let role = if run.member.is_empty() { "Zerus".to_owned() } else { team.name_of(&run.member) };
         items.push(Item {
             kind: "stage_stalled",
             key: format!("stage_stalled:{}:{}", task.id, run.id),
@@ -462,7 +462,7 @@ fn all_items(team: &Team) -> Vec<Item> {
             kind: "permission",
             key: format!("permission:{}:{}", member.id, pending.question_id),
             task: None,
-            member: team.role_of(&member.id),
+            member: team.name_of(&member.id),
             since: pending.at,
             summary: if asked.is_empty() { "asks for permission".into() } else { summary(&asked) },
             command: pending.answer_command(team, &member.id),
@@ -483,7 +483,7 @@ fn all_items(team: &Team) -> Vec<Item> {
         if now - ended < team.settings.report_timeout_seconds as f64 * 2.0 {
             continue;
         }
-        let role = team.role_of(&attempt.member);
+        let role = team.name_of(&attempt.member);
         let minutes = ((now - ended) / 60.0).round() as u64;
         items.push(Item {
             subagents: Value::Null,
@@ -504,7 +504,7 @@ fn all_items(team: &Team) -> Vec<Item> {
     // when the session reports one.
     for member in &team.members {
         let Some(limit) = &member.limited else { continue };
-        let role = team.role_of(&member.id);
+        let role = team.name_of(&member.id);
         let reset = match limit.resets_at {
             Some(at) => format!("; resets at {}", local_time(at)),
             None => "; reset time unknown".to_owned(),
@@ -657,14 +657,14 @@ pub(crate) fn waits(team: &Team, task: &Task, ready: bool) -> Option<Value> {
     }
     if task.status == TaskStatus::Submitted {
         return Some(json!({
-            "for":"lead","on":[team.role_of(&team.lead)],"unblock":format!("accept #{}", task.id)
+            "for":"lead","on":[team.name_of(&team.lead)],"unblock":format!("accept #{}", task.id)
         }));
     }
     // U36: a stage waits for its member (or for one with its role).
     if let Some(run) = task.pipeline_run.as_ref().filter(|_| task.status.in_stage()) {
         let open = run.open_run();
         let who = match open {
-            Some(stage) if !stage.member.is_empty() => team.role_of(&stage.member),
+            Some(stage) if !stage.member.is_empty() => team.name_of(&stage.member),
             Some(stage) => run.stages.get(stage.stage).map(|spec| spec.role.clone()).unwrap_or_default(),
             None => String::new(),
         };
@@ -672,7 +672,7 @@ pub(crate) fn waits(team: &Team, task: &Task, ready: bool) -> Option<Value> {
         return Some(json!({"for":"stage","on":[who],"unblock":format!("the {kind} of #{} by {who}", task.id)}));
     }
     if let Some(attempt) = task.open_attempt() {
-        let role = team.role_of(&attempt.member);
+        let role = team.name_of(&attempt.member);
         if let Some(question) = attempt.open_question() {
             return Some(json!({"for":"lead","on":[role],"unblock":format!("answer {}", question.id)}));
         }
@@ -703,7 +703,7 @@ pub(crate) fn waits(team: &Team, task: &Task, ready: bool) -> Option<Value> {
             }));
         }
     }
-    let role = team.role_of(&task.assignee);
+    let role = team.name_of(&task.assignee);
     Some(json!({"for":"member","on":[role],"unblock":format!("wait for {role}")}))
 }
 
@@ -760,7 +760,7 @@ pub(crate) fn attention(team: &Team, now: f64) -> Vec<Value> {
                     let report = attempt.report.as_ref()?;
                     let waited = (now - report.at).max(0.0);
                     (waited >= report_minutes as f64 * 60.0).then(|| {
-                        json!({"kind":"report","task":task.id,"member":team.role_of(&attempt.member),
+                        json!({"kind":"report","task":task.id,"member":team.role_of(&attempt.member),"member_id":attempt.member,
                             "since":report.at,"minutes":(waited / 60.0).round() as u64})
                     })
                 }),
@@ -796,9 +796,11 @@ pub(crate) fn attention(team: &Team, now: f64) -> Vec<Value> {
             }
             let role = team.role_of(&member.id);
             let asked = pending.card_question();
-            let mut item = json!({"kind":"permission","member":role,"since":pending.at,
+            // U56: the desktop finds the member's card by "member"; the summary
+            // names it by id.
+            let mut item = json!({"kind":"permission","member":role,"member_id":member.id,"since":pending.at,
                 "minutes":(waited / 60.0).round() as u64,
-                "summary":format!("{role} waits for your answer: {}",
+                "summary":format!("{} waits for your answer: {}", team.name_of(&member.id),
                     if asked.is_empty() { "a permission request".to_owned() } else { asked }),
                 "command":pending.answer_command(team, &member.id)});
             if pending.card["subagents"].is_array() {
@@ -1011,7 +1013,7 @@ mod tests {
         // task at 150, the question at 200.
         assert_eq!(kinds, ["stalled", "report", "lead_task", "question"]);
         assert_eq!(items[1].task, Some(1));
-        assert_eq!(items[1].member, "Backend");
+        assert_eq!(items[1].member, "dev (Backend)");
         assert!(items[1].summary.contains("Done and checked"));
         assert!(items[1].command.contains("hgs team accept --json"), "{}", items[1].command);
         assert!(items[3].command.contains("\"question\":\"q1\"") && items[3].command.contains("hgs team reply --json"));
@@ -1058,6 +1060,9 @@ mod tests {
         assert_eq!(permissions[0]["member"], "Tester");
         assert_eq!(permissions[0]["minutes"], 30);
         assert_eq!(permissions[1]["member"], "Backend");
+        // U56: the desktop finds the card by role; the summary names the id.
+        assert_eq!(permissions[1]["member_id"], "dev");
+        assert!(permissions[1]["summary"].as_str().unwrap().starts_with("dev (Backend) waits"), "{}", permissions[1]);
         assert!(permissions[1]["summary"].as_str().unwrap().contains("waits for your answer"), "{}", permissions[1]);
         // The owner may answer it from the attention list.
         assert!(permissions[1]["command"].as_str().unwrap().contains("hgs team answer --json"), "{}", permissions[1]);
@@ -1086,7 +1091,7 @@ mod tests {
         let items = super::items(&team);
         assert_eq!(items.len(), 1);
         let item = &items[0];
-        assert_eq!((item.kind, item.member.as_str(), item.task), ("permission", "Backend", None));
+        assert_eq!((item.kind, item.member.as_str(), item.task), ("permission", "dev (Backend)", None));
         assert!(item.summary.contains("Bash: Run the build?"), "{}", item.summary);
         // The option ids the answer needs are in the summary.
         assert!(item.summary.contains("[allow] Allow") && item.summary.contains("[deny] Deny"), "{}", item.summary);
@@ -1225,7 +1230,7 @@ mod tests {
         let mut team = team();
         // #1 waits for a free member; #2 waits for #1.
         let tasks = team.tasks.clone();
-        assert_eq!(waits(&team, &tasks[0], true).unwrap(), json!({"for":"member","on":["Backend"],"unblock":"wait for Backend"}));
+        assert_eq!(waits(&team, &tasks[0], true).unwrap(), json!({"for":"member","on":["dev (Backend)"],"unblock":"wait for dev (Backend)"}));
         assert_eq!(waits(&team, &tasks[1], false).unwrap(), json!({"for":"deps","on":[1],"unblock":"accept #1"}));
         // A soft dependency still pending names the start that frees it.
         team.task_mut(2).unwrap().deps[0].kind = DependencyKind::Soft;
@@ -1245,7 +1250,7 @@ mod tests {
             at: 30.0,
             ..Default::default()
         });
-        assert_eq!(waits(&team, &team.task(2).unwrap().clone(), false).unwrap(), json!({"for":"lead","on":["Backend"],"unblock":"answer q3"}));
+        assert_eq!(waits(&team, &team.task(2).unwrap().clone(), false).unwrap(), json!({"for":"lead","on":["dev (Backend)"],"unblock":"answer q3"}));
         // A held task, a draft phase and a finished task.
         let mut held = team.task(1).unwrap().clone();
         held.status = TaskStatus::Pending;
@@ -1281,7 +1286,7 @@ mod tests {
         assert!(attention(&team, 1000.0 + 59.0 * 60.0).is_empty());
         let listed = attention(&team, 1000.0 + 60.0 * 60.0);
         assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0], json!({"kind":"report","task":1,"member":"Backend","since":1000.0,"minutes":60}));
+        assert_eq!(listed[0], json!({"kind":"report","task":1,"member":"Backend","member_id":"dev","since":1000.0,"minutes":60}));
         // 0 turns the owner's list off.
         team.settings.remind_owner_minutes = 0;
         assert!(attention(&team, 100_000.0).is_empty());

@@ -22,8 +22,11 @@ wait in unseen until the owner calls seen.
 The owner also runs the draft: create (status planning, or running with
 "approve":true; a wider permissions profile needs "confirm_widening":true),
 discard (with "stop_lead":true it stops the lead's session; the reason is
-kept), and seen (clears unseen). Only the owner creates, discards or approves;
-do not create the team yourself.
+kept), and seen, which drops the fields it names from unseen:
+  {"action":"seen","request_id":"UUID","team":"ID","by":"human",
+   "fields":["goal"]} | hgs team draft --json
+Every change, seen too, carries a new request_id. Only the owner creates,
+discards or approves; do not create the team yourself.
 
 Draft the plan as tasks with acceptance criteria and dependencies, as a team
 lead does (hgs guide team-lead): the owner approves the phases in order. Keep

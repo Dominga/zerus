@@ -358,7 +358,7 @@ fn role_matches(name: &str, id: &str) -> bool {
 /// Stage delivery gives the open stage to `member` (U36, #532). The task's
 /// implementer never takes its own stage.
 pub(crate) fn give_stage(team: &mut Team, id: u32, member: &str) -> anyhow::Result<String> {
-    ensure!(candidates(team, id).iter().any(|found| found == member), "{} cannot take this stage of task #{id}", team.role_of(member));
+    ensure!(candidates(team, id).iter().any(|found| found == member), "{} cannot take this stage of task #{id}", team.name_of(member));
     let task = team.task_mut(id).context("Unknown task")?;
     let run = task.pipeline_run.as_mut().and_then(PipelineRun::open_run_mut).context("The task is not in a stage")?;
     ensure!(run.state == StageState::Waiting || run.member == member, "This stage already has its member");
@@ -387,7 +387,7 @@ pub(crate) fn stage_report(team: &mut Team, input: &Value, actor: &Actor, events
         events.push(Event::new("stale_report", json!({"by":team.role_of(&caller),"task":id,"stage":run.kind,"round":run.round})));
         return Ok(Some(json!({"status":"stale","task":id,"stage":run.kind,"round":run.round})));
     }
-    ensure!(run.member == caller, "This stage of task #{id} was given to {}, not to you", if run.member.is_empty() { "nobody yet".to_owned() } else { team.role_of(&run.member) });
+    ensure!(run.member == caller, "This stage of task #{id} was given to {}, not to you", if run.member.is_empty() { "nobody yet".to_owned() } else { team.name_of(&run.member) });
     ensure!(!team.task(id).map(implementers).unwrap_or_default().contains(&caller), "The implementer never takes its own task's stage");
     let text = input["text"].as_str().unwrap_or_default().trim().to_owned();
     ensure!(text.chars().count() <= 64 * 1024, "A report is at most 64 KiB");
@@ -1251,7 +1251,7 @@ mod tests {
         let stage = give_stage(&mut team, 1, "rev").unwrap();
         for who in ["rev2", "dev"] {
             let error = run(&mut team, "report", json!({"task":1,"attempt":stage,"verdict":"pass"}), &member(who)).unwrap_err();
-            assert!(error.to_string().contains("was given to Reviewer"), "{who}: {error}");
+            assert!(error.to_string().contains("was given to rev (Reviewer)"), "{who}: {error}");
         }
         assert!(run(&mut team, "report", json!({"task":1,"attempt":stage,"verdict":"pass"}), &Actor::Human).is_err());
         let mut pinned = team_with("self", &catalog);

@@ -38,6 +38,7 @@ pub enum Phase {
     Imported,
     Quiesced,
     Complete,
+    Revoked,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

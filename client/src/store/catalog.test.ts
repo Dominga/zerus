@@ -115,6 +115,10 @@ describe("applyBatch", () => {
 });
 
 describe("toSession", () => {
+  it("carries the background count independently of the presentation status", () => {
+    expect(toSession("", "run:a", view("a", { status: "paused", background: 3, activity: "idle", phase: "idle" })).backgroundJobs).toBe(3);
+    expect(toSession("", "run:a", view("a")).backgroundJobs).toBeUndefined();
+  });
   it("takes bulk lifecycle from the row, else from the agent", () => {
     expect(toSession("", "k", view("a", { agent: "claude" })).bulkLifecycle).toBe(true);
     expect(toSession("", "k", view("a", { agent: "opencode" })).bulkLifecycle).toBe(false);

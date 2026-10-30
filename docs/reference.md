@@ -4067,6 +4067,57 @@ needs manual inspection before another request. `agent_id` is supported only for
 verified DeepSeek continuable children. Questions carry request identity/hash
 through `pending_questions`; answers use the exact unchanged request.
 
+### Desktop background service
+
+```sh
+hgs desktop serve
+hgs desktop status --json
+hgs desktop watch --json
+```
+
+The private `desktop-v1` service kernel is local to one user and canonical
+configuration/state identity. It is **passive until the writer handoff is
+implemented**: it starts no fleet readers, presence/read workers, notifications
+or automatic approvals. It does not register itself with an OS service manager.
+Existing desktop clients retain their current owners. This kernel alone does
+not establish Qt retirement or native platform acceptance.
+
+`status` is read-only and never starts a service or creates state. Its JSON
+reports `running`, `ownership`, `configuration`, executable `version`, schema,
+generation/epoch, pending counts, component state and incomplete upstream
+coverage. IPC connectivity does not establish peer freshness. An absent service
+reports `running:false`; an unsafe or incompatible endpoint is an error.
+
+`serve` holds an exclusive OS file lock under `HGS_STATE_DIR/desktop`, opens the
+private versioned `state.sqlite3` and serves a same-user Unix socket or Windows
+named pipe. A newer schema is refused without migrating/resetting it. Changing
+configuration with the same state refuses reuse; canonical path aliases share
+ownership. There is no agent/terminal/process shutdown operation. SIGTERM or
+SIGHUP on Unix stops admissions, detaches clients and checkpoints only desktop
+state. Native Windows graceful shutdown qualification remains separate.
+
+Every IPC connection begins with one bounded JSON line containing `abi`,
+`configuration`, `op` (`status`, `watch` or `request`) and optional `request`.
+The CLI adds this private handshake. Frames contain `abi`, random service
+`epoch`, broadcast `seq`, `t` and `value`. A watch begins with `hello` at the
+current broadcast watermark; subsequent ten-second heartbeats advance `seq`.
+Unary answers do not advance the broadcast watermark. A new epoch invalidates
+subscriptions; it never authorizes replay. EOF on a watch's stdin detaches that
+client. Control requests use a separate connection, not the display stream.
+
+`hgs desktop request --json` reads a JSON object from stdin with `op` and a
+canonical UUID `request_id`. Only `ping` is admitted now, returning an exact-ID,
+read-only `pong` with `durable:false`. Effect requests return `accepted:false`
+and `handoff_required` before acceptance; no command is queued for later replay.
+No durable request journal or delegation handshake is claimed in this slice.
+
+Control lines including framing are capped at 64 KiB. Output frames allow
+watch-v1's 1 MiB plus 4 KiB envelope metadata. Eight subscribers each have at most
+4 MiB/1,024 queued frames; overflow disconnects only that subscriber. Four
+additional connections preserve the unary request/status lane. Admission holds
+at most sixteen control lines and twelve parsers, below the proposed 16 MiB
+ingress budget. The kernel has no upstream ingress or per-session cache.
+
 ### Event stream
 
 ```sh

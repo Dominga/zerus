@@ -239,14 +239,55 @@ export function mergeLocal(events: readonly ActivityEvent[], local: readonly Loc
   return merged;
 }
 
+const PROVIDER_SOURCES = new Set(["codex_transcript", "claude_transcript", "kimi_wire"]);
+const isExcerpt = (excerpt: string, full: string) => {
+  const prefix = excerpt.endsWith("…") ? excerpt.slice(0, -1) : excerpt;
+  return !!prefix && full.startsWith(prefix);
+};
+
+/**
+ * Qt's provider_messages merge: watch event frames also arrive here, folded
+ * into the summary by the core. Keep journal cursors intact and project the
+ * bounded provider window at render time, including progress between tools.
+ */
+function mergeProvider(given: readonly ActivityEvent[], summary?: Record<string, unknown>): readonly ActivityEvent[] {
+  if (!Array.isArray(summary?.provider_messages) || !summary.provider_messages.length) return given;
+  const events = [...given];
+  const matchedStops = new Set<number>();
+  for (const value of summary.provider_messages.slice(-100)) {
+    if (!value || typeof value !== "object") continue;
+    const message = value as ActivityEvent;
+    if (!PROVIDER_SOURCES.has(message.source ?? "") || message.agent_id
+      || (message.type !== "AgentMessage" && !(message.type === "AgentThinking" && message.source === "claude_transcript"))) continue;
+    const same = events.findIndex((e) => e.type === message.type && e.source === message.source && !e.agent_id
+      && (message.message_id && e.message_id ? message.message_id === e.message_id
+        : e.detail === message.detail && Math.abs((e.at ?? 0) - (message.at ?? 0)) < 3));
+    if (same >= 0) continue;
+    // The hook's final excerpt and the provider's full response are one row.
+    // An empty Stop never absorbs commentary immediately before completion.
+    const stop = message.type === "AgentMessage" ? events.findIndex((e, index) => !matchedStops.has(index) && e.type === "Stop" && !e.agent_id
+      && Math.abs((e.at ?? 0) - (message.at ?? 0)) <= 2
+      && (e.detail ? isExcerpt(e.detail, message.detail ?? "") : message.message_phase !== "commentary")) : -1;
+    if (stop >= 0) {
+      matchedStops.add(stop);
+      events[stop] = { ...events[stop], detail: message.detail, source: message.source, message_id: message.message_id };
+    }
+    else events.push(message);
+  }
+  // Provider messages have no journal sequence. Stable occurrence-time order
+  // puts mid-turn commentary between the surrounding tool events.
+  return events.sort((a, b) => (a.at ?? 0) - (b.at ?? 0));
+}
+
 /**
  * The items of a transcript, oldest first; ids are stable while events only
  * append. `local` are the open session's local rows (the composer view's).
  */
 export function buildTranscript(given: readonly ActivityEvent[], summary?: Record<string, unknown>, local: readonly LocalMessage[] = []): TranscriptItem[] {
-  if (!given.length && !local.length) return recordedContext(summary);
-  const items: TranscriptItem[] = given.length ? [] : recordedContext(summary);
-  const events = local.length ? mergeLocal(given, local) : given;
+  const provider = mergeProvider(given, summary);
+  if (!provider.length && !local.length) return recordedContext(summary);
+  const items: TranscriptItem[] = provider.length ? [] : recordedContext(summary);
+  const events = local.length ? mergeLocal(provider, local) : provider;
   for (let i = 0; i < events.length;) {
     const e = events[i];
     const id = eventKey(e);

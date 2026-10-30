@@ -360,6 +360,8 @@ impl Terminals {
         let replay: Vec<u8> = delivery.delivered.iter().copied().collect();
         delivery.unacked = usize::from(!replay.is_empty());
         if !replay.is_empty() {
+            // The view must finish parsing history before enabling PTY input.
+            sink.message(json!({"kind": "replay"}).to_string());
             sink.output(replay);
         }
         delivery.sink = Arc::clone(sink);
@@ -1502,6 +1504,7 @@ mod tests {
             .connect("main", target("run-1"), 80, 24, second.clone())
             .unwrap();
         assert!(again.reused);
+        assert_eq!(second.messages(), [json!({"kind": "replay"})]);
         assert_eq!(again.generation, c.generation);
         assert_eq!(
             second.text(),

@@ -496,7 +496,7 @@ fn another_bus_cannot_reuse_retained_ids_even_with_the_same_unique_owner() {
     wait(|| f.poster.shared.done.load(Ordering::Acquire));
     let bus = Bus::new();
     let (server, calls, closed) = Server::new(&bus);
-    let current = Namespace::current(&server.connection).unwrap();
+    let current = current_namespace(&server.connection).unwrap();
     assert_eq!(old_namespace.owner, current.owner);
     assert_ne!(old_namespace.bus_id, current.bus_id);
     let (poster, events) = poster(
@@ -634,7 +634,7 @@ fn a_notice_queued_before_seed_loading_is_rechecked_before_the_native_call() {
         let dir = Directory::new();
         let bus = Bus::new();
         let (server, calls, _) = Server::new(&bus);
-        let namespace = Namespace::current(&server.connection).unwrap();
+        let namespace = current_namespace(&server.connection).unwrap();
         let (wake, _) = mpsc::sync_channel(1);
         let mut saved = Saved {
             version: 1,

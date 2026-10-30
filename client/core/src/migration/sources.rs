@@ -15,6 +15,8 @@ mod tasks;
 pub use tasks::{qt_task_forms, task_delivery, task_start_delivery};
 mod approvals;
 pub use approvals::approval_policies;
+mod launches;
+pub use launches::{qt_executor_launches, qt_pending_launches};
 
 #[derive(Clone, Copy)]
 pub enum Origin {
@@ -122,12 +124,16 @@ fn valid_mark(mark: &ReadMark) -> SourceResult<()> {
 }
 
 fn qt_json(value: &QtValue) -> SourceResult<Value> {
+    qt_json_bounded(value, READ_BYTES)
+}
+
+fn qt_json_bounded(value: &QtValue, maximum: usize) -> SourceResult<Value> {
     let bytes = match value {
         QtValue::Bytes(bytes) => bytes.as_slice(),
         QtValue::Text(text) => text.as_bytes(),
         _ => return Err(SourceError::UnsupportedSource),
     };
-    if bytes.len() > READ_BYTES {
+    if bytes.len() > maximum {
         return Err(SourceError::TooLarge);
     }
     serde_json::from_slice(bytes).map_err(|_| SourceError::UnsupportedSource)

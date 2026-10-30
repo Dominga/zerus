@@ -231,6 +231,43 @@ impl Pump {
         self.wake(inner);
     }
 
+    /// Read-only project membership for a bounded public-content reply. Search
+    /// never admits new identities to the mutation/placement page cache.
+    pub fn place_search_archives(
+        &self,
+        computer: &ComputerId,
+        hits: &mut [zerus_client_core::content_search::Hit],
+    ) -> Result<(), String> {
+        if hits.len() > zerus_client_core::content_search::MAX_HITS {
+            return Err("Invalid search response".into());
+        }
+        let inner = self.lock();
+        let machine = computer
+            .alias()
+            .map(str::to_owned)
+            .or_else(|| {
+                inner
+                    .mirror
+                    .computers
+                    .get(&computer.0)?
+                    .machine
+                    .as_ref()?
+                    .host
+                    .clone()
+            })
+            .unwrap_or_default();
+        for hit in hits.iter_mut().filter(|hit| !hit.archive_id.is_empty()) {
+            hit.group = inner.grouping.archive_project(&ArchivedRow {
+                computer: computer.clone(),
+                key: format!("archive:{}", hit.archive_id),
+                machine: machine.clone(),
+                archive_id: hit.archive_id.clone(),
+                run_id: hit.run_id.clone(),
+            });
+        }
+        Ok(())
+    }
+
     /// One checked archive page, resolved against one organization snapshot.
     /// The local host comes from hello/meta even when its live list is empty;
     /// a peer always uses its configured alias (as live catalog rows do).

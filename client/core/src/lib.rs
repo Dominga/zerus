@@ -16,6 +16,7 @@ pub mod batch;
 pub mod cache;
 #[cfg(windows)]
 mod conpty;
+pub mod content_search;
 pub mod creation;
 pub mod details;
 pub mod download_cache;

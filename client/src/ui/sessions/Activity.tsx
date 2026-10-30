@@ -1,3 +1,5 @@
+import { searchPreview, clearSearchPreview } from "../../store/searchSelection";
+import { SearchHighlight } from "./SearchHighlight";
 import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
 import { attachmentOpen } from "../../bridge";
 import { notify } from "../../store/actions";
@@ -525,6 +527,7 @@ export function focusTranscript(): boolean {
 
 /** Scrolls to the newest item and follows it again. */
 export function jumpToLatest() {
+  if (searchPreview()) { clearSearchPreview(); return; }
   setFollowing(true);
   setUnseen(0);
   liveScroller?.scrollTo({ top: liveScroller.scrollHeight, behavior: "instant" });
@@ -571,6 +574,10 @@ export function paneStates(source: ActivitySource, s: Session | undefined) {
 
 export function ActivityView(props: { source?: ActivitySource }) {
   const s = () => selected();
+  const preview = () => {
+    const p = searchPreview(), row = s();
+    return p && row && p.key === row.key && p.run === (row.runId ?? "") && p.conversation === (row.conversationId ?? "") && !subagentOpen() ? p : undefined;
+  };
   /** The live follow unless the detail passes another source (an archived row's). */
   const source = (): ActivitySource => props.source ?? activity;
   let scroller!: HTMLDivElement;
@@ -628,6 +635,12 @@ export function ActivityView(props: { source?: ActivitySource }) {
     sendIds = sends.baseline;
     if (sends.added.length) jumpToLatest();
   }));
+  createEffect(on(preview, (match) => {
+    if (match) {
+      end.release(); manualAway = true; setFollowing(false);
+      requestAnimationFrame(() => scroller.querySelector(".search-preview mark")?.scrollIntoView({ block: "center" }));
+    } else { manualAway = false; setFollowing(true); end.pin(); }
+  }));
   // Events after the newest one seen count as new while the view does not follow (Qt's m_unseen).
   createEffect(on(() => source().events(), (events) => {
     const last = events.at(-1)?.seq;
@@ -673,6 +686,12 @@ export function ActivityView(props: { source?: ActivitySource }) {
               <span class="hint">Showing recent activity. Read only: this agent is managed by the parent conversation.</span>
             </div>
           </Show>
+          <Show when={preview()}>{(p) => <section class="search-preview" aria-label="Search result">
+            <div class="search-preview-header"><span>Search result / {p().hit.role === "user" ? "You" : p().hit.role === "tool" ? "Tool" : "Agent"}</span><button class="btn small" onClick={clearSearchPreview}>Return to activity</button></div>
+            <Show when={p().hit.content_truncated}><div class="hint">This match is an excerpt of a longer message.</div></Show>
+            <div class="search-preview-body"><SearchHighlight text={String(p().hit.event.detail ?? "")} query={p().query} /></div>
+          </section>}</Show>
+          <Show when={!preview()}>
           <div class="act-label eyebrow">Recorded activity — messages and tool excerpts</div>
           <Show when={source().loadingOlder()}><div class="act-older hint">Reading earlier activity…</div></Show>
           <Show when={source().olderDone() && source().events().length > 0 && summary()?.history_truncated === true}>
@@ -702,6 +721,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
             <Show when={states().failure}>
               <div class="notice danger"><Icon name="circle-alert" size={14} /><div>{states().failure}</div></div>
             </Show>
+          </Show>
           </Show>
         </div>
       </div>

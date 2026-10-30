@@ -452,10 +452,10 @@ impl Grouping {
         out
     }
 
-    fn archive_place(&mut self, row: &ArchivedRow) -> (String, u64) {
+    /// Read-only archive membership for bounded search hits; no placement cache.
+    pub fn archive_project(&self, row: &ArchivedRow) -> String {
         let member = super::archive_member(&row.machine, &row.archive_id);
-        let project = self
-            .membership
+        self.membership
             .get(&member)
             .map(String::as_str)
             .filter(|project| self.listed.contains(*project))
@@ -465,7 +465,12 @@ impl Grouping {
                     .filter(|project| self.listed.contains(*project))
             })
             .unwrap_or(&self.default)
-            .to_owned();
+            .to_owned()
+    }
+
+    fn archive_place(&mut self, row: &ArchivedRow) -> (String, u64) {
+        let member = super::archive_member(&row.machine, &row.archive_id);
+        let project = self.archive_project(row);
         let rank = self.layout.rank(&project, &member);
         (project, rank)
     }

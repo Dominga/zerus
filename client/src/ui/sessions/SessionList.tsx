@@ -41,6 +41,9 @@ import { composer } from "../../store/composer";
 import { composerClearControl } from "../../bridge";
 import { bulkSelect, clearMulti, multiCount, setAnchor, dragItem, setDragItem, drop, setDrop, endDrag, placement, applyDrop, SESSION_MIME, type DragItem } from "./organize";
 
+import { SearchResults } from "./SearchResults";
+import "../styles/content-search.css";
+
 const SavedDraftsDialog = lazy(() => import("./SavedDrafts").then((m) => ({ default: m.SavedDraftsDialog })));
 
 /** Actions that go through guarded `hgs` calls arrive in phase 2; their menu entries show disabled. */
@@ -494,9 +497,15 @@ export function SessionList() {
           <button class="icon-btn hd" data-tip="Session and machine actions" onClick={(e) => openMenu(e, batchMenu())}><Icon name="more" size={18} /></button>
         </header>
         <div class="sp-search">
-          <input class="field" type="search" placeholder={stateFilter() === "archived" ? "Search archive names and IDs…" : "Search sessions and IDs…"} value={search()}
+          <input class="field" type="search" maxLength={256} placeholder={stateFilter() === "archived" ? "Search archive contents and IDs…" : "Search sessions, contents and IDs…"} value={search()}
             onInput={(e) => setSearch(e.currentTarget.value)} onFocus={() => setSearchFocused(true)} onBlur={() => setSearchFocused(false)}
-            onKeyDown={(e) => e.key === "Escape" && setSearch("")} aria-label="Search sessions" />
+            onKeyDown={(e) => {
+              if (e.key === "Escape") setSearch("");
+              else if (e.key === "ArrowDown" && search().trim()) {
+                e.preventDefault(); const results = document.querySelector<HTMLElement>(".content-search-list");
+                results?.focus(); results?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+              }
+            }} aria-label="Search sessions" />
         </div>
         <div class="sp-filters" role="toolbar" aria-label="State filter">
           <For each={FILTERS}>
@@ -513,7 +522,8 @@ export function SessionList() {
         </div>
         <FilterChips />
 
-        <Show when={stateFilter() === "archived"}><ArchiveBar /></Show>
+        <Show when={stateFilter() === "archived"}><ArchiveBar contentSearch={!!search().trim()} /></Show>
+        <Show when={search().trim()} fallback={<>
           <Show when={catalog.order.length > 0 || creationCount() > 0 || stateFilter() === "archived"} fallback={<ListPlaceholder />}>
             <div class="sp-scroll" classList={{ morphing: morphing(), organizing: !!dragItem() }} ref={list.ref} tabindex="0" onKeyDown={onKey} role="tree"
               onDragOver={(e) => organizeOver(e, list)} onDrop={(e) => organizeDrop(e)} onDragLeave={(e) => { if (!(e.currentTarget as Element).contains(e.relatedTarget as Node)) setDrop(undefined); }}
@@ -526,9 +536,12 @@ export function SessionList() {
               </Show>
             </div>
           </Show>
-        <SelectionBar />
+        </>}>
+          <SearchResults />
+        </Show>
+        <Show when={!search().trim()}><SelectionBar /></Show>
         <footer class="sp-foot">
-          <span class="tabular ell">{shownSummary().shown ? `${shownSummary().shown} shown, ${shownSummary().working} working, ${shownSummary().attention} attention${creationFooter(true)}` : creationFooter(false) || (catalog.order.length ? "No matching sessions" : "")}</span>
+          <span class="tabular ell">{search().trim() ? "" : shownSummary().shown ? `${shownSummary().shown} shown, ${shownSummary().working} working, ${shownSummary().attention} attention${creationFooter(true)}` : creationFooter(false) || (catalog.order.length ? "No matching sessions" : "")}</span>
           <span class="grow" />
           <button class="icon-btn small" data-tip="Session creation status" onClick={(e) => openMenu(e, creationStatusMenu())}><Icon name="clock" size={16} /></button>
           <button class="icon-btn small" title={markAllTip(markAllEntry())} disabled={markAllEntry().disabled} onClick={() => runMarkAll()}><Icon name="read-all" size={16} /></button>

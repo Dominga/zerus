@@ -16,6 +16,8 @@ mod commands;
 #[cfg(feature = "live")]
 mod composer;
 #[cfg(feature = "live")]
+mod content_search;
+#[cfg(feature = "live")]
 mod creations;
 #[cfg(feature = "live")]
 mod desk;
@@ -338,6 +340,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 readsync::start(actions.clone());
                 app.manage(actions);
                 app.manage(actions::ArchiveReads::default());
+                app.manage(content_search::Searches::default());
                 app.manage(actions::ActivityReads::default());
                 app.manage(actions::Attention::new(dir.join(actions::attention_file(replay))));
                 let pump = app.state::<commands::AppState>().pump();
@@ -917,6 +920,8 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::perf_away,
         commands::build_info,
         renderer::renderer_frame,
+        content_search::content_search,
+        content_search::cancel_content_search,
         settings::settings_get,
         settings::settings_set,
         desk::desk_take_pending,

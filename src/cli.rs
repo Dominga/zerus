@@ -47,6 +47,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [-n tag] [-d] [--rc] [--dry-run] [-- args...]
        hgs mobile-peers --json        guarded direct-peer discovery (mobile-peer ABI 1)
        hgs approval-log begin|finish|list|detail  local automatic-approval journal (JSON stdin)
+       hgs desktop serve|status [--json]   per-user background desktop service
+       hgs desktop watch|request --json    private local desktop-v1 IPC
+       Desktop service ABI: desktop-v1
        hgs mobile-peer --json         guarded direct-peer native request from JSON stdin
        hgs [@host] voice <session> --json  send and inspect persistent voice messages (JSON stdin; voice-video-v1)
        hgs [@host] speech --json      host speech providers and durable jobs (JSON stdin)
@@ -590,6 +593,9 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
     }
     if command == "approval-log" {
         return crate::approval_log::dispatch(&config, &target, args, dry);
+    }
+    if command == "desktop" {
+        return crate::desktop::dispatch(&config, &target, args, dry);
     }
     // Windows only, before local sessions are enabled, and never forwarded: it
     // enables them on this computer (spec D2). On Unix the word stays a program.

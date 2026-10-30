@@ -142,7 +142,7 @@ fn load(file: &Path) -> Option<Value> {
     if bytes.len() as u64 > limit {
         return None;
     }
-    serde_json::from_slice(&bytes).ok()
+    worktrees::decode_saved(&bytes)
 }
 
 /// Replaces `file` through a sibling, so a crash never leaves half of it.
@@ -311,6 +311,11 @@ impl NewSession {
             self.save();
         }
         answer
+    }
+
+    pub(crate) fn invalidate_worktrees(&self, computer: &ComputerId, common_dir: &str) {
+        lock(&self.0.catalogs).invalidate(&computer.0, common_dir);
+        self.save();
     }
 
     /// Create worktree in the manual dialog (`NewWorktreeDialog`, with
@@ -813,7 +818,7 @@ pub async fn pick_local_folder(app: AppHandle, start: String) -> Option<String> 
         if let Some(directory) = directory {
             dialog = dialog.set_directory(directory);
         }
-        if let Some(window) = app.get_webview_window(crate::MAIN_WINDOW) {
+        if let Some(window) = crate::main_window(&app) {
             dialog = dialog.set_parent(&window);
         }
         dialog.blocking_pick_folder()

@@ -21,6 +21,25 @@ pub struct AppState {
 }
 
 #[cfg(feature = "live")]
+#[tauri::command]
+pub fn fleet_refresh(state: State<'_, AppState>) -> usize {
+    let mut nudged = state.reconnect("") as usize;
+    if let Some(peers) = state.peers() {
+        nudged += peers
+            .iter()
+            .filter(|computer| state.reconnect(computer))
+            .count();
+    }
+    nudged
+}
+
+#[cfg(not(feature = "live"))]
+#[tauri::command]
+pub fn fleet_refresh() -> usize {
+    0
+}
+
+#[cfg(feature = "live")]
 impl AppState {
     /// A manual offline Refresh nudges only its existing source; never starts
     /// another fleet or changes an online source.
@@ -125,6 +144,7 @@ mod live {
         source: Mutex<Option<Source>>,
         pub organization: OnceLock<Organization>,
         pub creations: OnceLock<crate::creations::CreationHost>,
+        tasks_project: Mutex<Option<String>>,
     }
 
     /// Follows this computer's organization: the catalog is shared, so its
@@ -145,6 +165,33 @@ mod live {
     }
 
     impl Live {
+        /// The board follows one local replica project, including across reconnects.
+        pub fn follow_tasks(&self, project: Option<String>) -> Result<(), String> {
+            if project
+                .as_deref()
+                .is_some_and(|p| !zerus_client_core::tasks::valid_project(p))
+            {
+                return Err("Invalid task project.".into());
+            }
+            let source = self.source.lock().unwrap_or_else(PoisonError::into_inner);
+            let Some(Source::Fleet(fleet)) = source.as_ref() else {
+                return Err("Tasks need a live hgs event stream.".into());
+            };
+            let mut current = self
+                .tasks_project
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if let Some(old) = current.take() {
+                fleet.unfollow_tasks(&ComputerId::local(), &old);
+            }
+            if let Some(next) = project {
+                fleet
+                    .follow_tasks(&ComputerId::local(), &next)
+                    .map_err(|e| e.to_string())?;
+                *current = Some(next);
+            }
+            Ok(())
+        }
         pub fn reconnect(&self, computer: &str) -> bool {
             match self
                 .source
@@ -579,6 +626,24 @@ pub async fn unfollow(
     }
 }
 
+/// Starts/stops the Tasks board's one project subscription; no list poller.
+#[tauri::command]
+pub async fn tasks_follow(
+    state: State<'_, AppState>,
+    project: Option<String>,
+) -> Result<(), String> {
+    #[cfg(feature = "live")]
+    {
+        let live = Arc::clone(&state.live);
+        blocking(move || live.follow_tasks(project)).await
+    }
+    #[cfg(not(feature = "live"))]
+    {
+        let _ = (&state, project);
+        Err(NO_LIVE.into())
+    }
+}
+
 /// The measurement run mode from the environment: `ZERUS_CLIENT_PERF` (`auto`
 /// runs the Diagnostics scenarios, saves the report and exits),
 /// `ZERUS_CLIENT_PERF_OUT` (where the report goes), `ZERUS_CLIENT_PERF_LABEL`
@@ -650,8 +715,8 @@ pub fn save_perf(path: String, json: String) -> Result<String, String> {
 /// (`ZERUS_CLIENT_PERF_HZ` overrides it). Synchronous: it runs on the main
 /// thread, where the platform display APIs must be called.
 #[tauri::command]
-pub fn display_hz(window: tauri::WebviewWindow) -> Option<f64> {
-    crate::display::display_hz(&window)
+pub fn display_hz(app: tauri::AppHandle) -> Option<f64> {
+    crate::main_window(&app).and_then(|window| crate::display::display_hz(&window))
 }
 
 /// One progress line of a measurement run on stderr, so a stalled run shows
@@ -675,7 +740,7 @@ fn smoke_origin(label: &str) -> Result<(), String> {
 /// Refused outside a smoke run, so a real `hgs` folder is never read.
 #[cfg(feature = "live")]
 #[tauri::command]
-pub async fn smoke_log(window: tauri::WebviewWindow) -> Result<Vec<serde_json::Value>, String> {
+pub async fn smoke_log(window: tauri::Webview) -> Result<Vec<serde_json::Value>, String> {
     smoke_origin(window.label())?;
     if !crate::actions::smoke_env_allowed() {
         return Err("not a smoke run".into());
@@ -700,7 +765,7 @@ pub async fn smoke_log(window: tauri::WebviewWindow) -> Result<Vec<serde_json::V
 #[tauri::command]
 pub async fn smoke_resume(
     state: State<'_, AppState>,
-    window: tauri::WebviewWindow,
+    window: tauri::Webview,
     key: String,
 ) -> Result<(), String> {
     smoke_origin(window.label())?;
@@ -745,13 +810,14 @@ pub fn exit_app(app: tauri::AppHandle, code: i32) -> Result<(), String> {
 /// X server has none). Refused outside a measurement run.
 #[tauri::command(async, rename_all = "snake_case")]
 pub fn perf_away(
-    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
     how: String,
     window_ms: Option<u64>,
 ) -> Result<Value, String> {
     if !perf_mode() {
         return Err("not a measurement run (ZERUS_CLIENT_PERF is not set)".into());
     }
+    let window = crate::main_window(&app).ok_or("The main window is unavailable")?;
     match how.as_str() {
         "hide" => window.hide(),
         "minimize" => window.minimize(),
@@ -796,6 +862,19 @@ pub fn metrics(window_ms: Option<u64>) -> Value {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "live")]
+    #[test]
+    fn task_board_checks_the_project_and_needs_the_existing_live_source() {
+        let live = super::live::Live::default();
+        assert_eq!(
+            live.follow_tasks(Some("bad\nproject".into())).unwrap_err(),
+            "Invalid task project."
+        );
+        assert_eq!(
+            live.follow_tasks(Some("project-1".into())).unwrap_err(),
+            "Tasks need a live hgs event stream."
+        );
+    }
     #[test]
     fn build_info_answers_what_the_command_line_prints() {
         let info = super::build_info();
@@ -830,4 +909,10 @@ mod tests {
             serde_json::json!([{"question": "Which checks?", "answer": "Unit"}])
         );
     }
+}
+
+/// Whether this build includes the native recorder; no device is opened.
+#[tauri::command]
+pub fn voice_support() -> Value {
+    serde_json::json!({"available":cfg!(feature = "media"), "reason":"Voice recording is unavailable in this build."})
 }

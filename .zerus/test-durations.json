@@ -2,9 +2,9 @@
   "groups": {
     "rust/--bin hgs": {
       "recorded": "2026-10-31",
-      "runs": 3,
-      "seconds": 54.87,
-      "tests": 873
+      "runs": 4,
+      "seconds": 92.55,
+      "tests": 535
     },
     "tray/test_accountfilter": {
       "recorded": "2026-10-28",

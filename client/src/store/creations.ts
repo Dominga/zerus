@@ -5,7 +5,7 @@ import { catalog, computerFresh } from "./catalog";
 import { errorText, notify } from "./actions";
 import { groupOf, grouping, setProjectCollapsed } from "./organization";
 import {
-  machineFilter, projectFilter, search, selectedKey, setPage, setRevealing, setSelectedKey, setSubagentOpen, stateFilter,
+  machineFilter, projectFilter, accountFilter, folderFilter, search, selectedKey, setPage, setRevealing, setSelectedKey, setSubagentOpen, stateFilter,
 } from "./ui";
 import {
   CARD_LIMIT, NOTICE_LIMIT, RESOLVED, creationOfRow, creationRowId, footerText, newestFirst, noticeOf, placeCreations, shownCards, statusMenu,
@@ -303,7 +303,7 @@ export function createCreations(deps: CreationsDeps) {
 
   return {
     creations, selectedCreation, selectedCard, revealed, adopted, cardVersion: (id: string) => versions[id] ?? 0,
-    start, apply, selectCreation, choose, act, editChoices, returnToFilters, admitted,
+    start, apply, selectCreation, choose, act, editChoices, returnToFilters, admitted, adopt,
     withCreations, creationCount: shownCount, creationFooter, creationStatusMenu,
     hideCreation: (id: string) => act(id, "hide"),
     details: (id: string) => deps.bridge.creationDetails(id),
@@ -328,8 +328,8 @@ const app = createRoot(() => createCreations({
   session: (key) => catalog.rows[key],
   sessionKeys: () => catalog.order,
   online: computerFresh,
-  scope: () => ({ grouping: grouping(), filter: stateFilter(), hosts: machineFilter(), query: search().trim(), projects: projectFilter() }),
-  filterKey: () => `${stateFilter()}\n${machineFilter().join("\t")}\n${projectFilter().join("\t")}\n${search()}`,
+  scope: () => ({ grouping: grouping(), filter: stateFilter(), hosts: machineFilter(), query: search().trim(), projects: projectFilter(), accounts: accountFilter(), folder: folderFilter() }),
+  filterKey: () => JSON.stringify([stateFilter(), machineFilter(), projectFilter(), accountFilter(), folderFilter(), search()]),
 }));
 // Without a listener the cards stay empty; nothing else depends on them.
 void app.start().catch((error) => console.warn("Zerus Next: the creation cards could not start.", error));
@@ -352,6 +352,8 @@ export const runCreationAction = app.act;
 export const hideCreation = app.hideCreation;
 export const editChoices = app.editChoices;
 export const returnToFilters = app.returnToFilters;
+/** A verified creation or fork reveals one session without discarding the user's filters. */
+export const adoptSession = app.adopt;
 export const creationDetailsText = app.details;
 /** New session's admission (newSession.ts calls it): reveal the new card. */
 export const creationAdmitted = app.admitted;

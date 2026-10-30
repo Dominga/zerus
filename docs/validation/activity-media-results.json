@@ -1,0 +1,54 @@
+{
+  "bead": "zerus-5wmh.9.41",
+  "fixture": "Built embedded-assets Tauri app with measurement-only media-event observer. Synthetic WAV/MP4 and two-machine replay, client local and session on studio. Fresh private D-Bus, Xvfb, HOME, XDG, TMPDIR and TMUX_TMPDIR for every case. Private OpenAL null driver; no microphone, camera, audio hardware or owner display used. Observer removed for the final production build and Phase 4 smoke.",
+  "reference": "Mockup Sessions Activity media cards; design/webui/src/screens/sessions/Activity.tsx and styles/detail.css:112-155. Same waveform, controls, round 200px video, ring and spacing. Qt for real playback, pause, seek and recording interference.",
+  "walk": {
+    "routing": [
+      {
+        "peer": "@studio",
+        "session": "codex/example/media-peer",
+        "conversation": "conv-000002-run",
+        "request_id": "media-voice",
+        "index": 0,
+        "bytes": 384044
+      },
+      {
+        "peer": "@studio",
+        "session": "codex/example/media-peer",
+        "conversation": "conv-000002-run",
+        "request_id": "media-video",
+        "index": 1,
+        "bytes": 429935
+      }
+    ],
+    "audio": "Native loadedmetadata duration 12s, actual 250ms timeupdate clock, pause preserved position, seeked to 7.133s and resumed; no synthetic progress timer.",
+    "video": "Native loadedmetadata duration 12s; decoded changing color-bar frames in the existing round player; pause at 2.250s.",
+    "capture": "Recording paused the loaded audio at 1.450s without resetting its position. A separate fresh pending-read case recorded no playing event after capture took ownership.",
+    "delayed_read": "Two 2s delayed peer fetches; only item-s5001 played. Superseded voice response never started.",
+    "failed_read": "Qt Recording is unavailable error appears in the existing media error line; explicit retry succeeds.",
+    "media_errors": 0,
+    "phase4": "16/16 steps pass in the final normal embedded-assets build, including persistent selection and send-follow"
+  },
+  "checks": {
+    "frontend": "check; full Vitest 2015 passed, 1 skipped after integration rebase; production build and bundle budget",
+    "entry_bytes": 477248,
+    "budget_bytes": 500000,
+    "tauri": "all-target Clippy default, media, video, no-default-features; 2 new focused private-cache tests pass; Windows MSVC all-target cross-Clippy pass",
+    "privacy": "0 findings",
+    "ui_separators": "pass"
+  },
+  "scope": {
+    "root_src_changed": false,
+    "core_rust_changed": false,
+    "new_poller": false,
+    "protocol_permission_change": false,
+    "csp_change": false,
+    "bounded_bytes": 10485760,
+    "players": "One pending/loaded owner across Activity and composer; old Blob revoked and media source released on replacement, target change, hide or unmount."
+  },
+  "captures": [
+    "activity-media-audio-paused.png",
+    "activity-media-video-playing.png",
+    "activity-media-read-failure.png"
+  ]
+}

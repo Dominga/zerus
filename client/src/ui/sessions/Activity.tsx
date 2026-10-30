@@ -1,8 +1,15 @@
-import { For, Show, createContext, createEffect, createMemo, createSignal, on, onCleanup, onMount, useContext } from "solid-js";
-import { attachmentOpen } from "../../bridge";
+import { createActivityScroll } from "./activity-scroll";
+import { activityReadingRows, createActivityAnchor } from "./activity-anchor";
+import { searchPreview, clearSearchPreview } from "../../store/searchSelection";
+import { SearchHighlight } from "./SearchHighlight";
+import { For, Show, batch, createContext, createEffect, createMemo, createSignal, on, onCleanup, onMount, useContext } from "solid-js";
+import { attachmentFetch, attachmentMedia, attachmentOpen, copyVerbatim } from "../../bridge";
 import { notify } from "../../store/actions";
 import { previews } from "../../store/attachments";
-import { cardTarget, createOpen } from "./attachment-card";
+import { mediaPlayback } from "../../store/mediaPlayback";
+import { pageHidden } from "../../store/visibility";
+import { recordingBlob } from "./voice-playback";
+import { cardTarget, createOpen, readCards } from "./attachment-card";
 import { createStore, reconcile } from "solid-js/store";
 import { Icon } from "../lib/icons";
 import { selected, toast, contentScale, subagentOpen, setSubagentOpen, setMenu, setDetailTab, type MenuEntry } from "../../store/ui";
@@ -13,13 +20,14 @@ import type { ActivitySource, AttachmentScope } from "../../store/activitySource
 import { composer, draftKey } from "../../store/composer";
 import { terminal } from "../../store/terminal";
 import type { LocalMessage } from "../../types";
-import { buildTranscript, VOICE_STATE_LABEL, voiceStateDetail, voiceStateIssue } from "./transcript";
+import { animationFrames, createActivityEnd, newLocalSends } from "./activity-end";
+import { buildTranscript, createTranscriptProjection, VOICE_STATE_LABEL, voiceStateDetail, voiceStateIssue } from "./transcript";
 import { DELETE_TEXT, DELETE_TITLE, retryReason, routeInspect } from "./local-actions";
-import { inlineParts } from "./markdown";
+import { inlineParts, markdownBlocks } from "./markdown";
 import { openExternal, openSessionFile } from "./sessionFiles";
 import { SessionFileDialog } from "./SessionFileDialog";
 import { statusOf } from "./SessionCard";
-import type { ItemAttachment, LocalItem, MediaMessage, Session, TranscriptItem } from "./types";
+import type { ActivityItem, ItemAttachment, LocalItem, MediaMessage, Session, TranscriptItem } from "./types";
 
 // ---------------------------------------------------------------------------
 // Reading column (ActivityWidth.h): 900 px at 100% content scale, 480–2400,
@@ -141,13 +149,24 @@ function activityMenu(e: MouseEvent) {
 // Transcript
 
 const copyText = (text: string, what: string) => {
-  void navigator.clipboard?.writeText(text).then(() => toast("Copied", what), () => toast("Not copied", "The clipboard is unavailable"));
+  void copyVerbatim(text).then(() => toast("Copied", what), () => toast("Not copied", "The clipboard is unavailable", "error"));
 };
 
 // Inline Markdown stays text except its links: HTTP(S) uses the system
 // opener, and local/file references open the session's File reference dialog.
 
 const ActivitySession = createContext<() => Session | undefined>();
+const ActivityLayoutHeld = createContext<() => boolean>(() => false);
+
+/** Keep disclosure geometry while a gesture or persistent selection owns
+ * layout. In particular, shrinking offscreen content would clamp WebKit's
+ * scrollTop even without an application scroll write (zerus-5wmh.85). */
+function layoutDisclosure() {
+  const held = useContext(ActivityLayoutHeld);
+  const [wanted, setWanted] = createSignal(false);
+  const open = createMemo((previous: boolean) => held() ? previous : wanted(), false);
+  return [open, () => setWanted((value) => !value)] as const;
+}
 
 function inline(text: string, session?: () => Session | undefined) {
   return inlineParts(text).map((part) => {
@@ -167,29 +186,23 @@ function inline(text: string, session?: () => Session | undefined) {
   });
 }
 
-type Block = { kind: "p" | "ul" | "code"; text: string };
-
-/** Splits text into paragraphs, "- " lists and ``` fenced code blocks. */
-function blocks(text: string): Block[] {
-  const out: Block[] = [];
-  const parts = text.split(/^```[^\n]*\n?/m);
-  parts.forEach((part, i) => {
-    if (i % 2 === 1) { out.push({ kind: "code", text: part.replace(/\n$/, "") }); return; }
-    for (const b of part.split(/\n{2,}/)) {
-      const trimmed = b.replace(/^\n+|\n+$/g, "");
-      if (trimmed) out.push({ kind: trimmed.startsWith("- ") ? "ul" : "p", text: trimmed });
-    }
-  });
-  return out;
-}
-
 export function Body(props: { text: string }) {
   const session = useContext(ActivitySession);
   return (
-    <For each={blocks(props.text)}>
-      {(b) => b.kind === "code" ? <pre class="act-code mono">{b.text}</pre> : b.kind === "ul" ? (
-        <ul class="md-list"><For each={b.text.split("\n")}>{(li) => <li>{inline(li.replace(/^- /, ""), session)}</li>}</For></ul>
-      ) : <p>{inline(b.text, session)}</p>}
+    <For each={markdownBlocks(props.text)}>
+      {(b) => {
+        if (b.kind === "code") return <pre class="act-code mono">{b.text}</pre>;
+        if (b.kind === "table") return (
+          <div class="act-table-wrap" role="region" aria-label="Message table" tabindex="0">
+            <table class="act-table" style={{ "--table-columns": b.header.length }}>
+              <thead><tr><For each={b.header}>{(cell, column) => <th scope="col" style={{ "text-align": b.align[column()] }}>{inline(cell, session)}</th>}</For></tr></thead>
+              <Show when={b.rows.length}><tbody><For each={b.rows}>{(row) => <tr><For each={row}>{(cell, column) => <td style={{ "text-align": b.align[column()] }}>{inline(cell, session)}</td>}</For></tr>}</For></tbody></Show>
+            </table>
+          </div>
+        );
+        if (b.kind === "ul") return <ul class="md-list"><For each={b.text.split("\n")}>{(li) => <li>{inline(li.replace(/^- /, ""), session)}</li>}</For></ul>;
+        return <p>{inline(b.text, session)}</p>;
+      }}
     </For>
   );
 }
@@ -201,9 +214,6 @@ const mediaTime = (ms: number) => {
   const s = Math.floor(Math.max(0, ms) / 1000);
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 };
-
-// One recording plays at a time, as with the view's single media player.
-const [playing, setPlaying] = createSignal<string>();
 
 /** Delivery state glyph (18 px); media state never claims reading or completion. */
 function DeliveryGlyph(props: { item: MediaMessage }) {
@@ -248,29 +258,74 @@ function Waveform(props: { values: number[] }) {
   return <>{layer("rest")}{layer("played")}</>;
 }
 
-function MediaCard(props: { item: MediaMessage }) {
+function MediaCard(props: { item: MediaMessage; scope?: AttachmentScope }) {
   const it = props.item;
-  const [transcript, setTranscript] = createSignal(false);
-  const [position, setPosition] = createSignal(0);
-  let timer: number | undefined;
-  const stop = () => { clearInterval(timer); timer = undefined; if (playing() === it.id) setPlaying(undefined); };
-  const play = () => {
-    if (position() >= it.durationMs) setPosition(0);
-    setPlaying(it.id);
-    clearInterval(timer);
-    timer = window.setInterval(() => {
-      const next = position() + 100;
-      if (next >= it.durationMs) { setPosition(it.durationMs); stop(); } else setPosition(next);
-    }, 100);
-  };
-  createEffect(() => { if (playing() !== it.id && timer) { clearInterval(timer); timer = undefined; } });
-  onCleanup(stop);
-  const isPlaying = () => playing() === it.id;
-  const seek = (e: MouseEvent) => {
-    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    setPosition(Math.round(clamp((e.clientX - r.left) / r.width, 0, 1) * it.durationMs));
-  };
   const video = it.media === "video";
+  const [transcript, toggleTranscript] = layoutDisclosure();
+  const held = useContext(ActivityLayoutHeld);
+  const [position, setPosition] = createSignal(0);
+  const [duration, setDuration] = createSignal(it.durationMs);
+  const [isPlaying, setPlaying] = createSignal(false);
+  const [loading, setLoading] = createSignal(false);
+  const [url, setUrl] = createSignal("");
+  const [error, setError] = createSignal("");
+  const visibleError = createMemo((previous: string) => held() ? previous : error() || it.error || "", "");
+  const target = createMemo(() => it.file ? cardTarget(it.file, props.scope) : undefined,
+    undefined, { equals: (a, b) => JSON.stringify(a) === JSON.stringify(b) });
+  let player: HTMLMediaElement | undefined, objectUrl = "";
+  let claim: ReturnType<typeof mediaPlayback.take> | undefined;
+  let pendingSeek: number | undefined;
+  const clear = () => {
+    claim?.release(); claim = undefined;
+    player?.pause(); setPlaying(false); setLoading(false);
+    if (player) { player.removeAttribute("src"); player.load(); }
+    if (objectUrl) URL.revokeObjectURL(objectUrl);
+    objectUrl = ""; pendingSeek = undefined; setUrl(""); setPosition(0);
+  };
+  createEffect(on(target, () => { clear(); setPosition(0); setDuration(it.durationMs); setError(""); }));
+  createEffect(() => { if (pageHidden()) clear(); });
+  onCleanup(clear);
+  const ratio = () => duration() > 0 ? clamp(position() / duration(), 0, 1) : 0;
+  const play = async (seekTo?: number) => {
+    const current = target();
+    if (!current || loading()) return;
+    if (!claim?.current()) claim = mediaPlayback.take(clear, () => { if (loading()) clear(); else player?.pause(); });
+    const mine = claim;
+    if (seekTo !== undefined) { pendingSeek = seekTo; setPosition(seekTo); }
+    setError("");
+    try {
+      if (!objectUrl) {
+        setLoading(true);
+        const bytes = await attachmentMedia(current.computer, current.ref, video);
+        if (!mine.current() || target() !== current) return;
+        objectUrl = URL.createObjectURL(recordingBlob(bytes, video));
+        setUrl(objectUrl);
+      }
+      await Promise.resolve();
+      if (mine.current() && target() === current && player) await player.play();
+    } catch (failure) { if (mine.current()) { setError(`Could not play recording: ${String(failure)}`); setPlaying(false); } }
+    finally { if (mine.current()) setLoading(false); }
+  };
+  const pause = () => { player?.pause(); setPlaying(false); };
+  const loaded = (event: Event) => {
+    if (!claim?.current() || !objectUrl) return;
+    const media = event.currentTarget as HTMLMediaElement;
+    if (Number.isFinite(media.duration) && media.duration > 0) setDuration(Math.round(media.duration * 1000));
+    if (pendingSeek !== undefined) { media.currentTime = Math.min(pendingSeek, duration()) / 1000; pendingSeek = undefined; }
+  };
+  const moved = (event: Event) => { if (claim?.current() && objectUrl) setPosition(Math.round((event.currentTarget as HTMLMediaElement).currentTime * 1000)); };
+  const failed = (event: Event) => {
+    if (!claim?.current() || !objectUrl) return;
+    setPlaying(false); setLoading(false);
+    setError(`Could not play recording: ${(event.currentTarget as HTMLMediaElement).error?.message || "Recording is unavailable."}`);
+  };
+  const seek = (e: MouseEvent) => {
+    if (!target() || !duration()) return;
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const next = Math.round(clamp((e.clientX - r.left) / r.width, 0, 1) * duration());
+    if (objectUrl && player && claim?.current()) { player.currentTime = next / 1000; setPosition(next); }
+    else void play(next);
+  };
   return (
     <article class="act-msg k-user media" id={`item-${it.id}`}>
       <header>
@@ -281,9 +336,9 @@ function MediaCard(props: { item: MediaMessage }) {
       </header>
       <Show when={video} fallback={
         <div class="vm-row">
-          <div class="vp" style={{ "--p": String(position() / it.durationMs) }}>
-            <button class="vp-btn" aria-label={`Play or pause voice message (${mediaTime(it.durationMs)})`} aria-pressed={isPlaying()}
-              onClick={() => (isPlaying() ? stop() : play())}>
+          <div class="vp" style={{ "--p": String(ratio()) }}>
+            <button class="vp-btn" aria-label={`Play or pause voice message (${mediaTime(duration())})`} aria-pressed={isPlaying()}
+              disabled={!target() || loading()} title={!target() ? "Recording is unavailable." : undefined} aria-busy={loading()} onClick={() => { if (isPlaying()) pause(); else void play(); }}>
               <svg width="44" height="44" viewBox="0 0 44 44" aria-hidden="true">
                 <Show when={isPlaying()} fallback={<path d="M17 12L31 22L17 32Z" />}>
                   <rect x="15" y="13" width="5" height="18" rx="1" /><rect x="24" y="13" width="5" height="18" rx="1" />
@@ -291,37 +346,42 @@ function MediaCard(props: { item: MediaMessage }) {
               </svg>
             </button>
             <div class="vp-side">
-              <div class="vp-wave" role="slider" tabindex="-1" aria-label="Seek" aria-valuemin={0} aria-valuemax={it.durationMs} aria-valuenow={position()} onClick={seek}>
+              <div class="vp-wave" role="slider" tabindex="-1" aria-label="Seek" aria-valuemin={0} aria-valuemax={duration()} aria-valuenow={position()} onClick={seek}>
                 <Waveform values={it.waveform} />
               </div>
-              <span class="vp-caption tabular">{mediaTime(position())} / {mediaTime(it.durationMs)}</span>
+              <span class="vp-caption tabular">{mediaTime(position())} / {mediaTime(duration())}</span>
             </div>
           </div>
-          <Show when={it.transcript}><TranscriptButton open={transcript()} onToggle={() => setTranscript(!transcript())} /></Show>
+          <Show when={it.transcript}><TranscriptButton open={transcript()} onToggle={toggleTranscript} /></Show>
         </div>
       }>
         {/* The round video plays in place: click plays or pauses; a ring shows progress. */}
         <div class="vm-row video">
-          <button class="vm-poster" classList={{ playing: isPlaying(), started: position() > 0 && position() < it.durationMs }}
-            style={{ "--p": String(position() / it.durationMs) }} aria-pressed={isPlaying()}
-            aria-label={`${isPlaying() ? "Pause" : "Play"} video message (${mediaTime(it.durationMs)})`} onClick={() => (isPlaying() ? stop() : play())}>
-            <span class="vm-frames" aria-hidden="true" />
+          <button class="vm-poster" classList={{ playing: isPlaying(), started: position() > 0 && position() < duration() }}
+            style={{ "--p": String(ratio()) }} aria-pressed={isPlaying()}
+            aria-label={`${isPlaying() ? "Pause" : "Play"} video message (${mediaTime(duration())})`} disabled={!target() || loading()} title={!target() ? "Recording is unavailable." : undefined} aria-busy={loading()} onClick={() => { if (isPlaying()) pause(); else void play(); }}>
+            <span class="vm-frames" classList={{ real: !!url() }} aria-hidden="true">
+              <Show when={url()}><video ref={(el) => { player = el; }} src={url()} playsinline preload="metadata"
+                onLoadedMetadata={loaded} onTimeUpdate={moved} onPlaying={() => setPlaying(true)} onPause={() => setPlaying(false)} onEnded={() => setPlaying(false)} onError={failed} /></Show>
+            </span>
             <svg class="vm-ring" viewBox="0 0 200 200" aria-hidden="true">
               <circle class="vm-ring-track" cx="100" cy="100" r="97" pathLength="100" />
-              <circle class="vm-ring-done" cx="100" cy="100" r="97" pathLength="100" style={{ "stroke-dashoffset": String(100 - (100 * position()) / it.durationMs) }} />
+              <circle class="vm-ring-done" cx="100" cy="100" r="97" pathLength="100" style={{ "stroke-dashoffset": String(100 - 100 * ratio()) }} />
             </svg>
             <span class="vm-play" aria-hidden="true">
               <svg width="48" height="48" viewBox="0 0 48 48">
                 <Show when={isPlaying()} fallback={<path d="M18 12L36 24L18 36Z" />}><rect x="15" y="13" width="6" height="22" rx="1.5" /><rect x="27" y="13" width="6" height="22" rx="1.5" /></Show>
               </svg>
             </span>
-            <span class="vm-time tabular">{position() > 0 ? `${mediaTime(position())} / ` : ""}{mediaTime(it.durationMs)}</span>
+            <span class="vm-time tabular">{position() > 0 ? `${mediaTime(position())} / ` : ""}{mediaTime(duration())}</span>
           </button>
-          <Show when={it.transcript}><TranscriptButton open={transcript()} onToggle={() => setTranscript(!transcript())} /></Show>
+          <Show when={it.transcript}><TranscriptButton open={transcript()} onToggle={toggleTranscript} /></Show>
         </div>
       </Show>
       <Show when={transcript() && it.transcript}><p class="vm-text">{it.transcript}</p></Show>
-      <Show when={it.error}><p class="vm-error">{it.error}</p></Show>
+      <Show when={!video}><audio ref={(el) => { player = el; }} src={url() || undefined} preload="none"
+        onLoadedMetadata={loaded} onTimeUpdate={moved} onPlaying={() => setPlaying(true)} onPause={() => setPlaying(false)} onEnded={() => setPlaying(false)} onError={failed} /></Show>
+      <Show when={visibleError()}><p class="vm-error">{visibleError()}</p></Show>
     </article>
   );
 }
@@ -350,22 +410,17 @@ function AttachmentCard(props: { file: ItemAttachment; scope?: AttachmentScope }
     const state = previews.state(now.computer, now.ref);
     return state.kind === "ready" && state.fetched.thumbnail ? state.url : undefined;
   };
+  const contents = () => <>
+    <Show when={props.file.image}>
+      <span class="att-thumb"><Show when={thumbnail()}>{(url) => <img src={url()} alt="" onError={() => { const now=target(); if(now)previews.failed(now.computer,now.ref); }} />}</Show></span>
+    </Show>
+    <span class="att-caption">{props.file.caption}</span>
+    <span class="dim">{props.file.meta}</span>
+    <span class="att-open" style={{ visibility: target() ? "visible" : "hidden" }}>Open →</span>
+  </>;
   return (
-    <Show when={target()} fallback={<span class="att-card">Attachment: {props.file.name}</span>}>
-      {(now) => (
-        <button class="att-card" title={props.file.caption} onClick={() => void openAttachment(now().computer, now().ref)}>
-          <Show when={props.file.image}>
-            <span class="att-thumb">
-              <Show when={thumbnail()}>
-                {(url) => <img src={url()} alt="" onError={() => previews.failed(now().computer, now().ref)} />}
-              </Show>
-            </span>
-          </Show>
-          <span class="att-caption">{props.file.caption}</span>
-          <span class="dim">{props.file.meta}</span>
-          <span class="att-open">Open →</span>
-        </button>
-      )}
+    <Show when={target()} fallback={<span class="att-card" title={`Attachment: ${props.file.name}`}>{contents()}</span>}>
+      {(now) => <button class="att-card" title={props.file.caption} onClick={() => void openAttachment(now().computer,now().ref)}>{contents()}</button>}
     </Show>
   );
 }
@@ -437,24 +492,86 @@ function LocalDeleteDialog() {
   );
 }
 
-function Item(props: { item: TranscriptItem; scope?: AttachmentScope }) {
-  const [open, setOpen] = createSignal(false);
+function ItemBody(props: { item: ActivityItem; scope?: AttachmentScope }) {
   const it = props.item;
-  if (it.kind === "media") return <MediaCard item={it} />;
+  return (
+    <div class="act-body">
+      <Show when={it.kind === "user"} fallback={<Body text={it.body ?? ""} />}>
+        {/* A Codex question reply reads as Question and Your answer blocks (ActivityView.cpp:347-363). */}
+        <Show when={it.replies?.length} fallback={<Body text={it.body ?? ""} />}>
+          <For each={it.replies}>{(r) => (
+            <div class="act-reply">
+              <div class="act-reply-q">Question</div>
+              <p class="wrap-pre">{r.question}</p>
+              <div class="act-reply-a"><b>Your answer</b><p class="wrap-pre">{r.answer}</p></div>
+            </div>
+          )}</For>
+        </Show>
+      </Show>
+      <Show when={it.local?.error}><p class="act-error">{it.local!.error}</p></Show>
+      <Show when={it.code}><pre class="act-code mono">{it.code}</pre></Show>
+      <Show when={it.attachments}>
+        <div class="act-attachments">
+          <For each={it.attachments}>{(a) => (
+            // Reserve the same card geometry before its delivery receipt arrives.
+            // A missing request remains read-only; it never authorizes a file read.
+            <AttachmentCard file={a} scope={props.scope} />
+          )}</For>
+        </div>
+      </Show>
+      <Show when={it.local?.actions.length}><LocalActions local={it.local!} /></Show>
+    </div>
+  );
+}
+
+function EchoBody(props: { item: ActivityItem; scope?: AttachmentScope }) {
+  const request = createMemo(() => {
+    const files = props.item.attachments;
+    if (!props.scope || !files?.length) return undefined;
+    return { scope: props.scope, files };
+  }, undefined, { equals: (a, b) => JSON.stringify(a) === JSON.stringify(b) });
+  const [answer, setAnswer] = createSignal<{ current?: { scope: AttachmentScope; files: ItemAttachment[] }; done: boolean; ok: boolean }>({ done: false, ok: false });
+  createEffect(on(request, (current) => {
+    if (!current) { setAnswer({ current, done: true, ok: false }); return; }
+    let live = true;
+    setAnswer({ current, done: false, ok: false });
+    void readCards(current.files, current.scope, attachmentFetch).then((files) => {
+      if (live) setAnswer({ current, done: true, ok: !!files });
+    });
+    onCleanup(() => { live = false; });
+  }));
+  const state = () => {
+    const current = request();
+    if (!current) return "raw";
+    const now = answer();
+    if (now.current !== current || !now.done) return "loading";
+    return now.ok ? "cards" : "raw";
+  };
+  return <>
+    <Show when={state() === "cards"}><ItemBody {...props} /></Show>
+    <Show when={state() === "raw"}><ItemBody {...props} item={{ ...props.item, body: props.item.echoBody, attachments: undefined }} /></Show>
+    <Show when={state() === "loading"}><ItemBody {...props} item={{ ...props.item, attachments: undefined }} /></Show>
+  </>;
+}
+
+function Item(props: { item: TranscriptItem; scope?: AttachmentScope }) {
+  const [open, toggleOpen] = layoutDisclosure();
+  const it = props.item;
+  if (it.kind === "media") return <MediaCard item={it} scope={props.scope} />;
   if (it.kind === "context") return <div class="act-label eyebrow" id={`item-${it.id}`}>{it.body}</div>;
   if (it.kind === "thinking") return <div class="act-thinking" id={`item-${it.id}`}><span class="eyebrow">Thinking</span><p>{it.body}</p></div>;
   if (it.kind === "report")
     return (
       <div class="act-notice" id={`item-${it.id}`} classList={{ open: open() }}>
         <div class="row"><Icon name="bot" size={13} /><b>{it.title}</b><Show when={it.sender}><span class="muted">from {it.sender}</span></Show><span class="grow" /><span class="act-time">{it.at}</span></div>
-        <button class="link" onClick={() => setOpen(!open())}>{open() ? "▾ Hide report" : "▸ Show report"}</button>
+        <button class="link" onClick={toggleOpen}>{open() ? "▾ Hide report" : "▸ Show report"}</button>
         <Show when={open()}><p class="act-notice-body">{it.body}</p></Show>
       </div>
     );
   return (
     <Show when={it.kind !== "tools" && it.kind !== "tool"} fallback={
       <div class="act-tools" id={`item-${it.id}`} classList={{ open: open(), warn: !!it.warn }}>
-        <button class="act-tools-head" onClick={() => setOpen(!open())} aria-expanded={open()}>
+        <button class="act-tools-head" onClick={toggleOpen} aria-expanded={open()}>
           <Icon name="chevron-right" size={12} class="chev" />
           <b>{it.title}</b>
           <Show when={it.kind === "tools"}><span class="muted">/ {it.body}</span></Show>
@@ -477,34 +594,9 @@ function Item(props: { item: TranscriptItem; scope?: AttachmentScope }) {
           <span class="grow" />
           <Show when={it.kind === "agent"}><button class="icon-btn small act-copy" title="Copy as Markdown" onClick={() => copyText(it.body ?? "", "The reply is on the clipboard")}><Icon name="copy" size={12} /></button></Show>
         </header>
-        <div class="act-body">
-          <Show when={it.kind === "user"} fallback={<Body text={it.body ?? ""} />}>
-            {/* A Codex question reply reads as Question and Your answer blocks (ActivityView.cpp:347-363). */}
-            <Show when={it.replies?.length} fallback={<p>{it.body}</p>}>
-              <For each={it.replies}>{(r) => (
-                <div class="act-reply">
-                  <div class="act-reply-q">Question</div>
-                  <p class="wrap-pre">{r.question}</p>
-                  <div class="act-reply-a"><b>Your answer</b><p class="wrap-pre">{r.answer}</p></div>
-                </div>
-              )}</For>
-            </Show>
-          </Show>
-          <Show when={it.local?.error}><p class="act-error">{it.local!.error}</p></Show>
-          <Show when={it.code}><pre class="act-code mono">{it.code}</pre></Show>
-          <Show when={it.attachments}>
-            <div class="act-attachments">
-              <For each={it.attachments}>{(a, i) => (
-                // A local row's file without its request or cached copy only names itself (ActivityView.cpp:765, 780);
-                // the others are Qt's attachment card.
-                <Show when={!it.local || it.local.available[i()]} fallback={<span class="att-card">Attachment: {a.name}</span>}>
-                  <AttachmentCard file={a} scope={props.scope} />
-                </Show>
-              )}</For>
-            </div>
-          </Show>
-          <Show when={it.local?.actions.length}><LocalActions local={it.local!} /></Show>
-        </div>
+        <Show when={it.echoBody} fallback={<ItemBody item={it} scope={props.scope} />}>
+          <EchoBody item={it} scope={props.scope} />
+        </Show>
       </article>
     </Show>
   );
@@ -512,8 +604,6 @@ function Item(props: { item: TranscriptItem; scope?: AttachmentScope }) {
 
 /** Within this distance of the top, scrolling reads the previous page. */
 const OLDER_EDGE = 120;
-/** Within this distance of the bottom, new events keep the view at the bottom. */
-const STICK_EDGE = 48;
 
 // The jump to the latest activity (ActivityView.cpp 1607-1636): whether the
 // view follows the newest item, how many events arrived since it stopped,
@@ -523,6 +613,7 @@ const [following, setFollowing] = createSignal(true);
 const [unseen, setUnseen] = createSignal(0);
 /** The mounted transcript's scroller (one Activity view shows at a time). */
 let liveScroller: HTMLDivElement | undefined;
+let liveLatest: (() => void) | undefined;
 export { following, unseen };
 
 /**
@@ -537,9 +628,10 @@ export function focusTranscript(): boolean {
 
 /** Scrolls to the newest item and follows it again. */
 export function jumpToLatest() {
+  if (searchPreview()) { clearSearchPreview(); return; }
   setFollowing(true);
   setUnseen(0);
-  liveScroller?.scrollTo({ top: liveScroller.scrollHeight, behavior: "instant" });
+  liveLatest?.();
 }
 
 /** The transcript items of a source, with the open session's local rows. */
@@ -583,32 +675,153 @@ export function paneStates(source: ActivitySource, s: Session | undefined) {
 
 export function ActivityView(props: { source?: ActivitySource }) {
   const s = () => selected();
+  const preview = () => {
+    const p = searchPreview(), row = s();
+    return p && row && p.key === row.key && p.run === (row.runId ?? "") && p.conversation === (row.conversationId ?? "") && !subagentOpen() ? p : undefined;
+  };
   /** The live follow unless the detail passes another source (an archived row's). */
   const source = (): ActivitySource => props.source ?? activity;
   let scroller!: HTMLDivElement;
+  const [placed, setPlaced] = createSignal(false);
+  const [layoutHeld, setLayoutHeld] = createSignal(false);
   // Items keep their identity while events append: the list reconciles by id,
   // so a growing tool group updates in place and older pages only add nodes.
-  const [view, setView] = createStore<{ items: TranscriptItem[] }>({ items: [] });
+  const [view, setView] = createStore<{ items: TranscriptItem[]; expired: boolean; loaded: boolean; pane: ReturnType<typeof paneStates>; tool: string }>({ items: [], expired: false, loaded: false, pane: paneStates(source(), s()), tool: "" });
   const local = createMemo(() => localRows(source(), s()), undefined, { equals: (a, b) => a === b || (a.length === 0 && b.length === 0) });
-  const built = createMemo(() => transcriptOf(source(), local()));
-  createEffect(() => setView("items", reconcile(built(), { key: "id" })));
+  const projection = createTranscriptProjection();
+  let projectedTarget: string | undefined;
+  const built = createMemo(() => {
+    const target = source().target()?.id;
+    if (target !== projectedTarget) { projection.reset(); projectedTarget = target; }
+    return projection.build(source().events(), source().summary(), local());
+  });
+  createEffect(() => {
+    const items = built(), loaded = source().loaded();
+    const expired = source().olderDone() && source().events().length > 0 && source().summary()?.history_truncated === true;
+    const pane = paneStates(source(), s());
+    const summary = source().summary(), tool = String(summary?.current_tool || summary?.activity_summary || s()?.summary || "");
+    resetTarget();
+    holdSelection();
+    motion.update(() => {
+      settleReading(true);
+      setView("items", reconcile(items, { key: "id" }));
+      setView({ expired, loaded, pane, tool });
+      reading.changed(); end.changed();
+    });
+  });
 
-  // Stay at the bottom while it is in view; keep the reading position when an older page lands above.
-  let anchor: { height: number; top: number } | undefined;
+  // Keep a named row and its offset while the end pin is released.
   /** The newest event's seq the view has seen, for the count of new ones. */
   let newest: number | undefined;
-  onMount(() => { liveScroller = scroller; });
-  onCleanup(() => { if (liveScroller === scroller) liveScroller = undefined; });
-  const onScroll = () => {
-    const atBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < STICK_EDGE;
-    if (atBottom !== following()) setFollowing(atBottom);
-    if (atBottom && unseen()) setUnseen(0);
-    if (scroller.scrollTop < OLDER_EDGE && readsOlder(source())) {
-      anchor = { height: scroller.scrollHeight, top: scroller.scrollTop };
-      source().loadOlder();
-    }
+  const selectionInside = () => {
+    const selection = document.getSelection();
+    if (!selection || selection.isCollapsed) return false;
+    return [selection.anchorNode, selection.focusNode].some((node) => !!node && scroller.contains(node));
   };
-  createEffect(on(() => source().target()?.id, () => { setFollowing(true); setUnseen(0); anchor = undefined; newest = undefined; }));
+  const end = createActivityEnd(
+    () => ({ top: scroller.scrollTop, height: scroller.scrollHeight, viewport: scroller.clientHeight }),
+    () => scroller.scrollTo({ top: scroller.scrollHeight, behavior: "instant" }),
+    animationFrames,
+    () => !motion.active() && !selectionInside(),
+    () => { if (view.loaded || view.items.length) setPlaced(true); },
+  );
+  let latestAfterScroll = false;
+  const motion = createActivityScroll(() => scroller.scrollTop, (flush) => {
+    const atEnd = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= 1;
+    const pinned = end.active();
+    reading.remember();
+    batch(() => { setLayoutHeld(false); flush(); });
+    if ((pinned || atEnd || latestAfterScroll) && !preview()) { latestAfterScroll = false; setFollowing(true); setUnseen(0); reading.reset(); end.pin(); }
+    else reading.changed();
+  });
+  const reading = createActivityAnchor({
+    visible: () => activityReadingRows(scroller).visible(),
+    offset: (key) => activityReadingRows(scroller).offset(key),
+    adjust: (delta) => activityReadingRows(scroller).adjust(delta),
+  }, () => !end.active() && !preview(), animationFrames, () => !motion.active() && !selectionInside());
+  const holdSelection = () => {
+    if (selectionInside()) { setLayoutHeld(true); motion.selection(true); }
+  };
+  const settleReading = (before = false) => { if (before) reading.beforeChange(); else reading.changed(); };
+  const scrollIntent = () => {
+    setLayoutHeld(true); motion.intent(); latestAfterScroll = false;
+    end.release(); setFollowing(false); reading.remember();
+  };
+  const latest = () => {
+    holdSelection();
+    if (motion.active()) { latestAfterScroll = true; return; }
+    reading.reset(); end.pin();
+    scroller.scrollTo({ top: scroller.scrollHeight, behavior: "instant" });
+  };
+  onMount(() => {
+    liveScroller = scroller;
+    liveLatest = latest;
+    const pointerEnded = () => motion.release();
+    window.addEventListener("pointerup", pointerEnded); window.addEventListener("pointercancel", pointerEnded); window.addEventListener("blur", pointerEnded);
+    onCleanup(() => { window.removeEventListener("pointerup", pointerEnded); window.removeEventListener("pointercancel", pointerEnded); window.removeEventListener("blur", pointerEnded); });
+    const selectionChanged = () => {
+      const inside = selectionInside();
+      if (inside) setLayoutHeld(true);
+      motion.selection(inside);
+    };
+    document.addEventListener("selectionchange", selectionChanged);
+    // Content includes Markdown, images and tool disclosures; the viewport
+    // also resizes when the composer or a question card changes height.
+    const changed = () => { end.changed(); settleReading(); };
+    const resize = new ResizeObserver(changed);
+    resize.observe(scroller);
+    const column = scroller.querySelector(".act-col");
+    const mutations = new MutationObserver(changed);
+    if (column) {
+      resize.observe(column);
+      mutations.observe(column, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["class", "style", "src", "width", "height", "hidden", "open"] });
+    }
+    scroller.addEventListener("load", changed, true);
+    scroller.addEventListener("contentvisibilityautostatechange", changed, true);
+    document.fonts?.addEventListener("loadingdone", changed);
+    onCleanup(() => { document.removeEventListener("selectionchange", selectionChanged); resize.disconnect(); mutations.disconnect(); scroller.removeEventListener("load", changed, true); scroller.removeEventListener("contentvisibilityautostatechange", changed, true); document.fonts?.removeEventListener("loadingdone", changed); });
+  });
+  onCleanup(() => {
+    end.dispose(); reading.dispose(); motion.dispose();
+    if (liveScroller === scroller) liveScroller = undefined;
+    if (liveLatest === latest) liveLatest = undefined;
+  });
+  const onScroll = () => {
+    if (motion.active()) {
+      motion.moved(); reading.remember();
+      if (!preview() && scroller.scrollTop < OLDER_EDGE && readsOlder(source())) source().loadOlder();
+      return;
+    }
+    if (end.scrolled()) return;
+    reading.changed();
+  };
+  let sendIds: Set<string> | undefined;
+  let layoutTarget: string | undefined | null = null;
+  const resetTarget = () => {
+    const target = source().target()?.id;
+    if (layoutTarget === target) return;
+    layoutTarget = target;
+    // An explicit session switch ends its old selection. Do this before the
+    // first new projection, so a held range cannot defer a cached first page.
+    if (selectionInside()) document.getSelection()?.removeAllRanges();
+    sendIds = undefined; setPlaced(false);
+    motion.reset(); setLayoutHeld(false); latestAfterScroll = false; setFollowing(true); setUnseen(0); reading.reset(); newest = undefined;
+    // Selection changes must place even when the next page has the same row count.
+    end.pin();
+  };
+  createEffect(on(() => source().target()?.id, resetTarget));
+  createEffect(on(local, (rows) => {
+    const sends = newLocalSends(sendIds, rows.map((row) => row.id));
+    sendIds = sends.baseline;
+    if (sends.added.length) jumpToLatest();
+  }));
+  createEffect(on(preview, (match) => {
+    if (match) {
+      setPlaced(true);
+      motion.reset(); setLayoutHeld(false); end.release(); reading.reset(); setFollowing(false);
+      requestAnimationFrame(() => { if (!motion.active() && !selectionInside()) scroller.querySelector(".search-preview mark")?.scrollIntoView({ block: "center" }); });
+    } else { setFollowing(true); end.pin(); }
+  }));
   // Events after the newest one seen count as new while the view does not follow (Qt's m_unseen).
   createEffect(on(() => source().events(), (events) => {
     const last = events.at(-1)?.seq;
@@ -619,32 +832,40 @@ export function ActivityView(props: { source?: ActivitySource }) {
     }
     if (last !== undefined) newest = last;
   }));
-  createEffect(on(() => view.items.length, () => {
-    queueMicrotask(() => {
-      if (!scroller) return;
-      if (anchor && !following()) {
-        const grown = scroller.scrollHeight - anchor.height;
-        if (grown > 0) scroller.scrollTo({ top: anchor.top + grown, behavior: "instant" });
-        anchor = undefined;
-      } else if (following()) scroller.scrollTo({ top: scroller.scrollHeight, behavior: "instant" });
-    });
-  }));
 
-  const summary = () => source().summary();
+
   const scope = createMemo(() => source().attachmentScope?.(), undefined, { equals: (a, b) => JSON.stringify(a) === JSON.stringify(b) });
-  const liveTool = () => String(summary()?.current_tool || summary()?.activity_summary || s()?.summary || "");
-  const states = createMemo(() => paneStates(source(), s()));
+  const liveTool = () => view.tool;
+  const states = () => view.pane;
   const fileSession = () => {
     const id = source().target()?.id;
     return orderedRows().find((row) => row.key === id);
   };
   return (
     <ActivitySession.Provider value={fileSession}>
-    <div class="activity">
+    <ActivityLayoutHeld.Provider value={layoutHeld}>
+    <div class="activity" style={{ position: "relative" }}>
+      <Show when={!placed()}>
+        <div class="act-col" style={{ position: "absolute", inset: "0", "min-height": "0", "pointer-events": "none" }} role="status">
+          <div class="act-label eyebrow">Recorded activity — messages and tool excerpts</div>
+          <div class="act-older hint">Reading activity…</div>
+        </div>
+      </Show>
       <LocalDeleteDialog />
       <SessionFileDialog />
-      <div class="act-scroll" ref={scroller} tabindex="-1" onContextMenu={activityMenu} onScroll={onScroll}>
-        <div class="act-col">
+      <div class="act-scroll" ref={scroller} tabindex="-1" onContextMenu={activityMenu} onScroll={onScroll} style={{ "overflow-anchor": "none" }}
+        onWheel={scrollIntent}
+        onKeyDown={(e) => { if (!e.defaultPrevented && ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(e.key)
+          && !(e.target as HTMLElement).closest("input,textarea,select,[contenteditable=true]") && !(e.key === " " && (e.target as HTMLElement).closest("button,a"))) { scrollIntent(); } }}
+        onPointerDown={(e) => { if (e.button === 0 && !(e.target as HTMLElement).closest("button,a,input,textarea,.col-edge")) {
+          // The scrollbar releases follow. Selecting text merely pauses it;
+          // the persistent range keeps ownership after pointerup.
+          if (e.target === scroller) scrollIntent();
+          else setLayoutHeld(true);
+          motion.hold();
+        } }}
+        onTouchStart={() => { scrollIntent(); motion.hold(); }} onTouchMove={scrollIntent} onTouchEnd={() => motion.release()} onTouchCancel={() => motion.release()}>
+        <div class="act-col" style={{ visibility: placed() ? "visible" : "hidden" }}>
           <Show when={!fullWidth()}><ColumnEdge /><ColumnEdge right /></Show>
           <Show when={subagentOpen()}>
             <div class="subagent-bar">
@@ -653,13 +874,21 @@ export function ActivityView(props: { source?: ActivitySource }) {
               <span class="hint">Showing recent activity. Read only: this agent is managed by the parent conversation.</span>
             </div>
           </Show>
-          <div class="act-label eyebrow">Recorded activity — messages and tool excerpts</div>
-          <Show when={source().loadingOlder()}><div class="act-older hint">Reading earlier activity…</div></Show>
-          <Show when={source().olderDone() && source().events().length > 0 && summary()?.history_truncated === true}>
+          <Show when={preview()}>{(p) => <section class="search-preview" aria-label="Search result">
+            <div class="act-label eyebrow">SEARCH RESULT — Saved message</div>
+            <Show when={p().hit.content_truncated}><div class="hint">Excerpt around the match. This message is too long to display in full.</div></Show>
+            <div class="search-preview-body"><SearchHighlight text={String(p().hit.event.detail ?? "")} query={p().query} /></div>
+          </section>}</Show>
+          <Show when={!preview()}>
+          <div class="act-label eyebrow" style={{ position: "relative" }}>
+            <span style={{ visibility: source().loadingOlder() ? "hidden" : "visible" }}>Recorded activity — messages and tool excerpts</span>
+            <span class="act-older hint" style={{ position: "absolute", inset: "0", padding: "0", display: "flex", "align-items": "center", "justify-content": "center", "text-transform": "none", "letter-spacing": "normal", "font-weight": "normal", visibility: source().loadingOlder() ? "visible" : "hidden" }} aria-hidden={!source().loadingOlder()}>Reading earlier activity…</span>
+          </div>
+          <Show when={view.expired}>
             <div class="act-older hint">Older events have expired from the journal.</div>
           </Show>
           <Show when={!states().archived} fallback={<div class="notice"><Icon name="archive" size={14} /><div>This conversation is archived.</div></div>}>
-            <Show when={source().loaded() || view.items.length} fallback={<div class="act-older hint">Reading activity…</div>}>
+            <Show when={view.loaded || view.items.length} fallback={<div class="act-older hint">Reading activity…</div>}>
               <Show when={view.items.length} fallback={<div class="act-older hint">No recorded activity yet.</div>}>
                 <For each={view.items}>{(it) => <Item item={it} scope={scope()} />}</For>
               </Show>
@@ -683,9 +912,11 @@ export function ActivityView(props: { source?: ActivitySource }) {
               <div class="notice danger"><Icon name="circle-alert" size={14} /><div>{states().failure}</div></div>
             </Show>
           </Show>
+          </Show>
         </div>
       </div>
     </div>
+    </ActivityLayoutHeld.Provider>
     </ActivitySession.Provider>
   );
 }

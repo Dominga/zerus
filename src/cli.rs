@@ -50,6 +50,19 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs path-ref describe|validate|map   explicit lexical identity (JSON stdin)
        hgs mobile-peers --json        guarded direct-peer discovery (mobile-peer ABI 1)
        hgs approval-log begin|finish|list|detail  local automatic-approval journal (JSON stdin)
+       hgs desktop serve|status [--json]   per-user background desktop service
+       hgs desktop revoke --json          revoke desktop writers before Qt rollback
+       hgs desktop watch|request --json    private local desktop-v1 IPC
+       hgs desktop feed --json             passive owner source data, no reader launch
+       hgs desktop registration --json    preview this user's passive service definition
+       hgs desktop import-evidence --json private staged migration input on stdin
+       hgs desktop import-status --json --import-id UUID  read one import manifest
+       Desktop service ABI: desktop-v1
+        Desktop revoke ABI: desktop-revoke-v1
+        Desktop import ABI: desktop-import-v1
+        Desktop source feed ABI: desktop-source-feed-v1
+        Desktop owner ABI: desktop-delegation-v1
+        Desktop catalog ABI: desktop-catalog-v1
        hgs mobile-peer --json         guarded direct-peer native request from JSON stdin
        hgs [@host] voice <session> --json  send and inspect persistent voice messages (JSON stdin; voice-video-v1)
        hgs [@host] speech --json      host speech providers and durable jobs (JSON stdin)
@@ -102,6 +115,8 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] switch-account <session> --account ID --request-id UUID   move a running session to another account of its agent
        hgs [@host] recovery get | set | action   automatic recovery policy (JSON stdin for writes)
        hgs [@host] search --query <text> [--limit N]   search saved session contents
+       hgs [@host] search --indexed --query <text> [--limit 1..100] [--cursor C]   content-search-query-v1
+       hgs [@host] search --index-status | --index-step | --index-discover | --index-catchup   bounded index diagnostics (JSON stdin for step)
        hgs [@host] schedules <session> [--json]   native DeepSeek Schedule tasks (JSON stdin changes)
        hgs machine ls | set <alias> --json <profile> | remove <alias> | reset <alias>
        hgs machine resolve <alias>          effective SSH settings (no connection)
@@ -357,11 +372,11 @@ fn binding_exists(config: &Config, name: &str) -> Result<bool> {
 /// On Windows only the stable CLI, whichever hgs.exe runs now: records, hooks
 /// and recipes never name a portable folder that an update replaces (spec D8).
 #[cfg(windows)]
-fn executable_path() -> Result<PathBuf> {
+pub(crate) fn executable_path() -> Result<PathBuf> {
     platform::stable_executable().map_err(|error| Error::new(1, error))
 }
 #[cfg(unix)]
-fn executable_path() -> Result<PathBuf> {
+pub(crate) fn executable_path() -> Result<PathBuf> {
     if let Some(path) = env::var_os("HGS_EXECUTABLE").filter(|s| !s.is_empty()) {
         let path = PathBuf::from(path);
         if path.is_absolute() && platform::executable(&path) {
@@ -466,6 +481,16 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
         env::set_var(crate::wsl::POLICY, "existing-only");
         args.drain(..2);
     }
+    if crate::desktop::launchd_command(&args) {
+        args.pop();
+        return dispatch(args).map_err(|mut error| {
+            if error.code == crate::desktop::STARTUP_REFUSED {
+                error.code = 0;
+                error.message = format!("{}; automatic restart paused", error.message);
+            }
+            error
+        });
+    }
     // Private: the screen model behind the differential tmux capture test.
     if args.first().is_some_and(|a| a == "__screen-capture") {
         return crate::screen::cli(&args[1..]).map_err(|e| Error::new(2, e));
@@ -484,7 +509,13 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
         session_process()?;
         return state::dispatch(&args[1..]).map_err(|e| Error::new(1, e));
     }
-    let config = Config::load()?;
+    crate::desktop::launch_configuration(&args)?;
+    let config = Config::load().map_err(|mut error| {
+        if crate::desktop::registered_command(&args) {
+            error.code = crate::desktop::STARTUP_REFUSED;
+        }
+        error
+    })?;
     // WhiteWh fork: both ends of the lasting channel to a Windows peer.
     if args.first().is_some_and(|a| a == "__peer") {
         return crate::peer_channel::command(&config, &args[1..]);
@@ -706,6 +737,9 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
     }
     if command == "approval-log" {
         return crate::approval_log::dispatch(&config, &target, args, dry);
+    }
+    if command == "desktop" {
+        return crate::desktop::dispatch(&config, &target, args, dry);
     }
     // Windows only, before local sessions are enabled, and never forwarded: it
     // enables them on this computer (spec D2). On Unix the word stays a program.

@@ -1,12 +1,67 @@
-import { Show, createSignal, onMount } from "solid-js";
+import { Show, createEffect, createSignal, onMount } from "solid-js";
 import { refreshUpdates, updateCommands, updates } from "../../../store/updates";
 import { toast } from "../../../store/ui";
 import type { UpdateChannel } from "../../../types";
+import { Icon } from "../../lib/icons";
 import { Actions, Group, Lines, Row, SectionHead, Select, Status, ToggleRow } from "./ui";
 import { lastCheckedText } from "./updates-time";
 
 function failed(error: unknown) {
-  toast("Updates", String(error));
+  toast("Updates", String(error), "error", true);
+}
+
+function LoginItemDialog() {
+  const [open, setOpen] = createSignal(false);
+  const [busy, setBusy] = createSignal(false);
+  let dialog!: HTMLDialogElement;
+  createEffect(() => {
+    if (open()) {
+      if (!dialog.open) dialog.showModal();
+      queueMicrotask(() => dialog.querySelector<HTMLElement>("[data-initial]")?.focus());
+    } else if (dialog.open) dialog.close();
+  });
+  const fix = (restart: boolean) => {
+    setBusy(true);
+    void updateCommands.fixLoginItem(restart).then((restartError) => {
+      setOpen(false);
+      if (restartError) {
+        toast("Login item", "The Zerus login item is updated; it applies at your next login.");
+        toast("Fix the Zerus login item", `Zerus could not restart:\n${restartError}`, "error", true);
+      } else if (restart) {
+        toast("Restarting Zerus", "The login item is updated. Drafts are saved; agents keep running.");
+      } else {
+        toast("Login item", "The Zerus login item is updated; it applies at your next login.");
+      }
+    }).catch((error) => {
+      toast("Fix the Zerus login item", `The login item was not changed.\n\n${String(error)}`, "error", true);
+    }).finally(() => setBusy(false));
+  };
+  return (
+    <>
+      <Show when={updates().login_item_deprioritized}>
+        <div class="notice warn upd-login">
+          <Icon name="triangle-alert" size={14} />
+          <span class="grow">macOS starts Zerus at background priority, so it can stop responding while the computer is busy.</span>
+          <button type="button" class="btn small" onClick={() => setOpen(true)}>Fix login item</button>
+        </div>
+      </Show>
+      <dialog id="login-item-dialog" class="dlg" ref={dialog} style={{ width: "520px" }} role="alertdialog" aria-labelledby="login-item-title" aria-describedby="login-item-text"
+        onCancel={(event) => { event.preventDefault(); setOpen(false); }} onClose={() => setOpen(false)}>
+        <div class="dlg-head"><Icon name="triangle-alert" size={18} class="warn" /><h2 id="login-item-title">Fix the Zerus login item</h2></div>
+        <div class="dlg-body confirm-body" id="login-item-text">
+          <p><b>macOS runs Zerus at background priority.</b></p>
+          <p class="muted">Zerus was started by its login item, which macOS runs at background priority, so Zerus can stop responding while other programs keep the computer busy. Updating the login item makes macOS start Zerus like other apps.</p>
+          <p class="muted">Update Only applies this at your next login; Zerus keeps running.<br />Update and Restart applies it now: Zerus quits and opens again. Saved drafts, sessions and agents stay; a voice or video message that is still recording stops and is not kept.</p>
+        </div>
+        <div class="dlg-foot">
+          <button type="button" class="btn" disabled={busy()} onClick={() => setOpen(false)}>Cancel</button>
+          <span class="spacer" />
+          <button type="button" class="btn" disabled={busy()} onClick={() => fix(true)}>Update and Restart</button>
+          <button type="button" class="btn primary" data-initial autofocus disabled={busy()} onClick={() => fix(false)}>Update Only</button>
+        </div>
+      </dialog>
+    </>
+  );
 }
 
 export function UpdatesSection() {
@@ -36,6 +91,8 @@ export function UpdatesSection() {
           </Actions>
         </div>
       </Group>
+
+      <LoginItemDialog />
 
       <Group title="Update checks">
         <ToggleRow label="Check for updates automatically" checked={updates().automatic}

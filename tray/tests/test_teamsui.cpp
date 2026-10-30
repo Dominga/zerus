@@ -82,6 +82,7 @@
 #include <QTableWidget>
 #include <QInputDialog>
 #include "support/FakeCli.h"
+#include "support/DialogTheme.h"
 #include "TeamProfile.h"
 
 using namespace Teams;
@@ -848,6 +849,7 @@ private slots:
     void planEditorPicksATasksPipeline();
     void heatTintsGraphAndBoardByTimeOrTokens();
     void aHeatReadThatDrawsTheSameRebuildsNothing();
+    void teamDialogsDrawTheThemeNotTheSystem();
     void heldByFromTheStatusOnTheBoard();
     void aPollThatChangesNothingDrawnRebuildsNothing();
     void aPhaseGraphThatFitsShowsNoSidewaysBar();
@@ -4286,6 +4288,7 @@ void TestTeamsUi::waitingPageEmptyAndRefused()
 
 
 QTEST_MAIN(TestTeamsUi)
+
 void TestTeamsUi::emptyPanelOffersNewTeamAndDesigner()
 {
     HgsClient client(FakeCli::program(script()));
@@ -10820,9 +10823,12 @@ void TestTeamsUi::phaseScrollsInEveryView()
     QTRY_COMPARE(scrolls().size(), 3);
     QCOMPARE(scroll(2)->findChildren<QFrame *>("teamBoardColumn").size(), 5);
     QVERIFY(!workspace.findChild<QWidget *>("teamWorkspaceFilter"));
-    QWidget *card2 = nullptr;
-    for (auto *card : scroll(2)->findChildren<QFrame *>("teamBoardCard")) if (card->property("task").toInt() == 2) card2 = card;
-    QVERIFY(card2); QCOMPARE(card2->parentWidget()->property("column").toString(), QStringLiteral("problems"));
+    const auto cardOf = [&](int id) -> QFrame * {
+        for (auto *card : scroll(2)->findChildren<QFrame *>("teamBoardCard")) if (card->property("task").toInt() == id) return card;
+        return nullptr;
+    };
+    QTRY_VERIFY(cardOf(2));
+    QCOMPARE(cardOf(2)->parentWidget()->property("column").toString(), QStringLiteral("problems"));
     QVERIFY(scroll(3)->findChild<QPushButton *>("teamPhaseAccept"));
     // Collapse Analysis again for the pictures.
     scroll(1)->findChild<QToolButton *>("teamPhaseToggle")->click();
@@ -10832,8 +10838,8 @@ void TestTeamsUi::phaseScrollsInEveryView()
     for (auto *b : workspace.findChild<QWidget *>("teamWorkspaceView")->findChildren<QPushButton *>()) if (b->property("segment") == "layers") b->click();
     QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceLayers"));
     QTRY_COMPARE(scrolls().size(), 3);
-    QCOMPARE(scroll(2)->findChildren<QFrame *>("teamLayerRow").size(), 5);
-    QCOMPARE(scroll(3)->findChildren<QFrame *>("teamLayerRow").size(), 3);
+    QTRY_COMPARE(scroll(2)->findChildren<QFrame *>("teamLayerRow").size(), 5);
+    QTRY_COMPARE(scroll(3)->findChildren<QFrame *>("teamLayerRow").size(), 3);
     QVERIFY(scroll(3)->findChild<QPushButton *>("teamPhaseReject"));
     shot(&workspace, "ux-4-layers-dark");
     // Light.
@@ -11734,21 +11740,22 @@ void TestTeamsUi::stageColumnsAndChipsOnTheBoard()
     QStringList waiting;
     for (auto *note : area()->findChildren<QLabel *>("teamBoardColumnWaiting")) waiting << note->text();
     QCOMPARE(waiting, (QStringList{QStringLiteral("· 1 waiting")}));
-    // Every state's chip.
-    const auto chips = boardChips(area());
-    QCOMPARE(chips.value(3), QStringList{"Review r1/3"});
-    QCOMPARE(chips.value(11), QStringList{"Review r2/3"});
-    QCOMPARE(chips.value(10), QStringList{QStringLiteral("Review waits · 1st in queue")});
-    QCOMPARE(chips.value(4), QStringList{"Test r2/3"});
-    QCOMPARE(chips.value(17), QStringList{QStringLiteral("Test r1/3 · 4 files")});
-    QCOMPARE(chips.value(18), QStringList{QStringLiteral("Test r1/3 · detached")});
-    QCOMPARE(chips.value(9), QStringList{"Folder held by the test stage of #4"});
-    QCOMPARE(chips.value(2), QStringList{"Review returned r1"});
-    QCOMPARE(chips.value(5), QStringList{QStringLiteral("Lead decides · 7 findings")});
-    QCOMPARE(chips.value(16), (QStringList{"Review skipped", "Lead"}));
-    QCOMPARE(chips.value(12), (QStringList{QStringLiteral("Review ✓"), QStringLiteral("Test ✓")}));
-    QCOMPARE(chips.value(13), (QStringList{QStringLiteral("Review ✓"), "Auto"}));
-    QVERIFY(!chips.contains(8) && !chips.contains(6));   // not reported yet: no line
+    // Every state's chip. The board builds a large view in bounded slices, so
+    // a card's line is waited for, not assumed to exist at the first turn.
+    const auto chips = [&] { return boardChips(area()); };
+    QTRY_COMPARE(chips().value(3), QStringList{"Review r1/3"});
+    QTRY_COMPARE(chips().value(11), QStringList{"Review r2/3"});
+    QTRY_COMPARE(chips().value(10), QStringList{QStringLiteral("Review waits · 1st in queue")});
+    QTRY_COMPARE(chips().value(4), QStringList{"Test r2/3"});
+    QTRY_COMPARE(chips().value(17), QStringList{QStringLiteral("Test r1/3 · 4 files")});
+    QTRY_COMPARE(chips().value(18), QStringList{QStringLiteral("Test r1/3 · detached")});
+    QTRY_COMPARE(chips().value(9), QStringList{"Folder held by the test stage of #4"});
+    QTRY_COMPARE(chips().value(2), QStringList{"Review returned r1"});
+    QTRY_COMPARE(chips().value(5), QStringList{QStringLiteral("Lead decides · 7 findings")});
+    QTRY_COMPARE(chips().value(16), (QStringList{"Review skipped", "Lead"}));
+    QTRY_COMPARE(chips().value(12), (QStringList{QStringLiteral("Review ✓"), QStringLiteral("Test ✓")}));
+    QTRY_COMPARE(chips().value(13), (QStringList{QStringLiteral("Review ✓"), "Auto"}));
+    QVERIFY(!chips().contains(8) && !chips().contains(6));   // not reported yet: no line
     // The stage member's agent beside a running stage; the skipped chip is struck.
     QVERIFY(boardCard(area(), 3)->findChild<QLabel *>("teamStageAgent"));
     QVERIFY(!boardCard(area(), 10)->findChild<QLabel *>("teamStageAgent"));
@@ -11811,7 +11818,7 @@ void TestTeamsUi::stageColumnsAndChipsOnTheBoard()
     for (auto *b : workspace.findChild<QWidget *>("teamWorkspaceView")->findChildren<QPushButton *>()) if (b->property("segment") == "layers") b->click();
     QTRY_VERIFY(workspace.findChild<QScrollArea *>("teamWorkspaceLayers"));
     QTRY_VERIFY(!boardChips(workspace.findChild<QScrollArea *>("teamWorkspaceLayers")).isEmpty());
-    QCOMPARE(boardChips(workspace.findChild<QScrollArea *>("teamWorkspaceLayers")).value(4), QStringList{"Test r2/3"});
+    QTRY_COMPARE(boardChips(workspace.findChild<QScrollArea *>("teamWorkspaceLayers")).value(4), QStringList{"Test r2/3"});
     shot(&workspace, "u36-layers-dark");
     workspace.setTheme(false);
     lightShot(&workspace, "u36-layers-light");
@@ -11860,12 +11867,14 @@ void TestTeamsUi::heldByFromTheStatusOnTheBoard()
     QVERIFY(team);
     QCOMPARE(team->member("frontend")->heldBy.task, 3);
     // #4's test no longer counts: the status names the review as the hold.
-    QCOMPARE(boardChips(area()).value(9), QStringList{"Folder held by the review stage of #3"});
+    QTRY_COMPARE(boardChips(area()).value(9), QStringList{"Folder held by the review stage of #3"});
     QCOMPARE(memberStatus(*team, *team->member("frontend"), Live{}).text, QStringLiteral("Waits: its folder is held by the review stage of #3"));
     QString tip;
+    QTRY_VERIFY(boardCard(area(), 3));
     for (auto *chip : boardCard(area(), 3)->findChildren<QWidget *>("teamStageChip")) tip = chip->toolTip();
     QVERIFY2(tip.contains("Holds Frontend's folder"), qPrintable(tip));
     tip.clear();
+    QTRY_VERIFY(boardCard(area(), 4));
     for (auto *chip : boardCard(area(), 4)->findChildren<QWidget *>("teamStageChip")) tip = chip->toolTip();
     QVERIFY2(!tip.contains("Holds Frontend's folder"), qPrintable(tip));
     auto *held = workspace.findChild<QLabel *>("teamPhaseHeld");
@@ -13340,7 +13349,11 @@ void TestTeamsUi::heatTintsGraphAndBoardByTimeOrTokens()
     QVERIFY(!lost(485));
     QVERIFY(!card(483)->findChild<QLabel *>("teamBoardWorked"));
     QVERIFY(card(483)->toolTip().contains("Top loss: Waited for the lead"));
-    QVERIFY(lost(483)->geometry().left() > card(483)->findChild<QWidget *>("teamBoardRole")->geometry().right());
+    QTRY_VERIFY(([&] {
+        auto *heat = lost(483);
+        auto *role = card(483) ? card(483)->findChild<QWidget *>("teamBoardRole") : nullptr;
+        return heat && role && heat->geometry().left() > role->geometry().right();
+    })());
     shoot("u38-heat-board-time");
     // Tokens: the losses by tokens, read with the sessions' tokens; the scale
     // ends at the largest task's and the unknown tokens are named.
@@ -14057,6 +14070,73 @@ void TestTeamsUi::aHeatReadThatDrawsTheSameRebuildsNothing()
     QTRY_VERIFY(!view || view != graph());
     QTRY_COMPARE(node(483).heat, QStringLiteral("lost 3h 58m"));
     QVERIFY2(node(483).tooltip.contains("Top loss: Waited for the lead (decision 1h 42m, questions 20m), 2h 02m"), qPrintable(node(483).tooltip));
+}
+
+// #737: the team's dialogs draw the workspace theme on a system palette of
+// the other one: Team settings, the plan-mode switch and the account move.
+void TestTeamsUi::teamDialogsDrawTheThemeNotTheSystem()
+{
+    const QPalette before = QApplication::palette();
+    const auto restore = qScopeGuard([before] { QApplication::setPalette(before); });
+    for (const bool dark : {true, false}) {
+        const QString theme = dark ? QStringLiteral("dark") : QStringLiteral("light");
+        QApplication::setPalette(DialogTheme::system(!dark));
+        const auto check = [&](QWidget *dialog) {
+            QTest::qWait(150);
+            const QString found = DialogTheme::problem(dialog, dark);
+            if (const auto shots = qEnvironmentVariable("ZERUS_TEAM_SHOTS"); !shots.isEmpty())
+                dialog->grab().save(QDir(shots).filePath("u737-" + dialog->objectName() + "-" + theme + ".png"));
+            QVERIFY2(found.isEmpty(), qPrintable(theme + ": " + found));
+        };
+        // The lead asks to switch to free planning: the dialog pops up.
+        auto running = phasedTeam();
+        running["plan_mode"] = "standard";
+        running["proposals"] = QJsonArray{QJsonObject{{"id", "p5"}, {"kind", "switch-plan-mode"}, {"by", "Lead"}, {"at", 1800000000.0}, {"state", "open"},
+                                                      {"mode", "free"}, {"hash", QStringLiteral("7f3a2c19e0d84b1c9a5e6f7081a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4")},
+                                                      {"reason", "The QA bot files small fixes every day."}}};
+        setTeam(running);
+        {
+            HgsClient client(FakeCli::program(script()));
+            TeamController controller(&client);
+            TeamPanel panel(&controller);
+            TeamWorkspace workspace(&controller, &panel);
+            workspace.setTheme(dark); workspace.setLive(live);
+            workspace.resize(1400, 860); workspace.show();
+            controller.refresh(); panel.showTeam("team-1"); workspace.showTeam("team-1");
+            QDialog *dialog = nullptr;
+            QTRY_VERIFY((dialog = workspace.findChild<QDialog *>("teamSwitchModeDialog")) && dialog->isVisible());
+            check(dialog);
+            if (QTest::currentTestFailed()) return;
+            dialog->close();
+            // Team settings, as the toolbar opens it.
+            QTRY_VERIFY(controller.team("team-1"));
+            TeamSettingsDialog settings(&controller, *controller.team("team-1"), dark, &workspace);
+            settings.show();
+            QVERIFY(QTest::qWaitForWindowExposed(&settings));
+            check(&settings);
+            if (QTest::currentTestFailed()) return;
+        }
+        // Move to another account, from a member's menu.
+        setTeam(moveTeam());
+        QVERIFY(FakeCli::replace(script() + ".accounts", moveAccounts));
+        {
+            HgsClient client(FakeCli::program(script()));
+            TeamController controller(&client);
+            TeamPanel panel(&controller);
+            TeamWorkspace workspace(&controller, &panel);
+            workspace.setTheme(dark); workspace.setLive(live);
+            workspace.resize(1300, 820); workspace.show();
+            controller.refresh(); panel.showTeam("team-1"); workspace.showTeam("team-1");
+            QTRY_COMPARE(cardAccount(&workspace, "backend"), QStringLiteral("Work"));
+            chooseMenuAction("teamWorkspaceMemberMoveAccount");
+            memberCard(&workspace, "backend")->findChild<QToolButton *>("teamWorkspaceMemberMenu")->click();
+            QDialog *dialog = nullptr;
+            QTRY_VERIFY((dialog = workspace.findChild<QDialog *>("teamMoveAccountDialog")) && dialog->isVisible());
+            check(dialog);
+            if (QTest::currentTestFailed()) return;
+            dialog->close();
+        }
+    }
 }
 
 #include "test_teamsui.moc"

@@ -106,21 +106,16 @@ pub fn on_event(app: &AppHandle, event: &RunEvent) {
 
 /// Opens Zerus: Qt's `TrayAgent::showSessions` (`TrayAgent.cpp:781-783`).
 pub fn show_main(app: &AppHandle) -> tauri::Result<WebviewWindow> {
-    let window = match app.get_webview_window(MAIN_WINDOW) {
+    let window = match crate::main_window(app) {
         Some(window) => window,
-        None => {
-            let window = crate::create_main_window(app)?;
-            // The stored Keep above, once the store loads; an unattended
-            // measurement keeps its own window in front instead.
-            #[cfg(feature = "live")]
-            if !std::env::var("ZERUS_CLIENT_PERF").is_ok_and(|mode| mode == "auto") {
-                if let Some(store) = app.try_state::<crate::settings::Store>() {
-                    crate::settings::apply_stored_window_layer(&store, window.clone());
-                }
-            }
-            window
-        }
+        None => crate::create_main_window(app)?,
     };
+    #[cfg(feature = "live")]
+    if !std::env::var("ZERUS_CLIENT_PERF").is_ok_and(|mode| mode == "auto")
+        && crate::window_layer::show(app, window.clone())
+    {
+        return Ok(window);
+    }
     if window.is_minimized()? {
         window.unminimize()?;
     }
@@ -131,7 +126,9 @@ pub fn show_main(app: &AppHandle) -> tauri::Result<WebviewWindow> {
 }
 
 pub fn hide_main(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+    #[cfg(feature = "live")]
+    crate::window_layer::hidden(app);
+    if let Some(window) = crate::main_window(app) {
         let _ = window.hide();
     }
     sync_policy(app);
@@ -139,7 +136,7 @@ pub fn hide_main(app: &AppHandle) {
 
 #[cfg(target_os = "macos")]
 fn window_open(app: &AppHandle) -> bool {
-    app.get_webview_window(MAIN_WINDOW).is_some_and(|window| {
+    crate::main_window(app).is_some_and(|window| {
         window.is_visible().unwrap_or(false) || window.is_minimized().unwrap_or(false)
     })
 }
@@ -176,7 +173,7 @@ pub fn prepare(app: &mut tauri::App, menu_bar: bool, opens_sessions: bool) {
 
 #[cfg(target_os = "macos")]
 fn reopen(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+    if let Some(window) = crate::main_window(app) {
         let minimized = window.is_minimized().unwrap_or(false);
         let visible = window.is_visible().unwrap_or(false);
         if reopen_restores(minimized, visible) {
@@ -199,6 +196,11 @@ fn exit(app: &AppHandle) {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     if let Some(dog) = app.try_state::<crate::watchdog::Watchdog>() {
         dog.stop();
+    }
+    #[cfg(all(target_os = "linux", feature = "live"))]
+    {
+        crate::platform::linux_notify::stop(app);
+        crate::platform::linux_tray::clear_badge(app);
     }
     #[cfg(all(target_os = "macos", feature = "live"))]
     crate::platform::macos_menubar::clear_badge(app);

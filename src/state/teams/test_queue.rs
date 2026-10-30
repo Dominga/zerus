@@ -1,0 +1,467 @@
+//! U62, #717: the team's test queue and its local results database. A request
+//! names a provider's suite (command, folder, targets, recorded time and
+//! resource class); the scheduler runs what the machine has room for, forced
+//! and short suites first, never two heavy ones at once, and long suites only
+//! at night. Only `run_due` writes results, each with its commit, input hash,
+//! status, duration, a bounded excerpt and who asked.
+use crate::test_discipline::config::{self, Resources};
+use super::templates::{last_chars, run_tree};
+use rusqlite::{params, Connection, OptionalExtension};
+use serde::Serialize;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::Duration;
+
+pub(crate) const RESULT_LIMIT: i64 = 5000;
+pub(crate) const EXCERPT_BYTES: usize = 4000;
+pub(crate) const HEAVY_CPU: u32 = 4;
+pub(crate) const HEAVY_RAM_MB: u32 = 4096;
+
+/// A suite's declared class: the config's `[resources.NAME]`.
+pub(crate) type Classes = BTreeMap<String, Resources>;
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Load {
+    pub cpu_free: u32,
+    pub ram_free_mb: u32,
+    pub gpu_free: bool,
+    pub at_night: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub(crate) struct Request {
+    pub id: String,
+    pub team: String,
+    pub suite: String,
+    pub task: Option<u32>,
+    pub targets: Vec<String>,
+    pub commit: String,
+    pub input_hash: String,
+    pub asked_by: String,
+    pub forced: bool,
+    pub at: f64,
+    pub seconds: f64,
+    pub budget_minutes: f64,
+    pub resources: String,
+    pub command: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub(crate) struct Record {
+    pub id: String,
+    pub team: String,
+    pub suite: String,
+    pub commit: String,
+    pub input_hash: String,
+    pub status: String,
+    pub duration_ms: u64,
+    pub excerpt: String,
+    pub asked_by: String,
+    pub at: f64,
+    pub affected: Vec<String>,
+}
+
+pub(crate) fn database_path() -> PathBuf {
+    super::store::path().with_file_name("tests.sqlite3")
+}
+
+#[derive(Debug)]
+pub(crate) struct TestStore {
+    db: Connection,
+}
+
+impl TestStore {
+    pub(crate) fn open(read_only: bool) -> anyhow::Result<Self> {
+        Self::open_at(&database_path(), read_only)
+    }
+
+    pub(crate) fn open_at(path: &Path, read_only: bool) -> anyhow::Result<Self> {
+        if !read_only {
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+        }
+        let flags = if read_only { rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY } else { rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_CREATE };
+        let db = Connection::open_with_flags(path, flags)?;
+        db.busy_timeout(Duration::from_secs(5))?;
+        if !read_only {
+            db.execute_batch(
+                "PRAGMA journal_mode=DELETE; PRAGMA max_page_count=262144;
+                 CREATE TABLE IF NOT EXISTS queue(id TEXT PRIMARY KEY,team TEXT NOT NULL,suite TEXT NOT NULL,task INTEGER,
+                    targets TEXT NOT NULL,commit_id TEXT NOT NULL,input_hash TEXT NOT NULL,asked_by TEXT NOT NULL,
+                    forced INTEGER NOT NULL,at REAL NOT NULL,seconds REAL NOT NULL,budget_minutes REAL NOT NULL,
+                    resources TEXT NOT NULL,command TEXT NOT NULL,state TEXT NOT NULL);
+                 CREATE INDEX IF NOT EXISTS queue_team ON queue(team,state,at);
+                 CREATE TABLE IF NOT EXISTS results(seq INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT NOT NULL UNIQUE,team TEXT NOT NULL,
+                    suite TEXT NOT NULL,commit_id TEXT NOT NULL,input_hash TEXT NOT NULL,status TEXT NOT NULL,
+                    duration_ms INTEGER NOT NULL,excerpt TEXT NOT NULL,asked_by TEXT NOT NULL,at REAL NOT NULL,
+                    affected TEXT NOT NULL);
+                 CREATE INDEX IF NOT EXISTS results_input ON results(suite,commit_id,input_hash);
+                 CREATE INDEX IF NOT EXISTS results_team ON results(team,at);
+                 CREATE INDEX IF NOT EXISTS results_at ON results(at);",
+            )?;
+        }
+        Ok(Self { db })
+    }
+
+    pub(crate) fn enqueue(&self, request: &Request) -> anyhow::Result<()> {
+        self.db.execute(
+            "INSERT OR REPLACE INTO queue VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,'queued')",
+            params![
+                request.id,
+                request.team,
+                request.suite,
+                request.task,
+                serde_json::to_string(&request.targets)?,
+                request.commit,
+                request.input_hash,
+                request.asked_by,
+                request.forced as i64,
+                request.at,
+                request.seconds,
+                request.budget_minutes,
+                request.resources,
+                request.command
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn queued(&self, team: &str) -> anyhow::Result<Vec<Request>> {
+        let mut statement = self.db.prepare(
+            "SELECT id,team,suite,task,targets,commit_id,input_hash,asked_by,forced,at,seconds,budget_minutes,resources,command
+             FROM queue WHERE team=?1 AND state='queued' ORDER BY forced DESC, at ASC",
+        )?;
+        let rows = statement.query_map([team], |row| {
+            Ok(Request {
+                id: row.get(0)?,
+                team: row.get(1)?,
+                suite: row.get(2)?,
+                task: row.get(3)?,
+                targets: serde_json::from_str(&row.get::<_, String>(4)?).unwrap_or_default(),
+                commit: row.get(5)?,
+                input_hash: row.get(6)?,
+                asked_by: row.get(7)?,
+                forced: row.get::<_, i64>(8)? != 0,
+                at: row.get(9)?,
+                seconds: row.get(10)?,
+                budget_minutes: row.get(11)?,
+                resources: row.get(12)?,
+                command: row.get(13)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    fn finish(&self, id: &str) -> anyhow::Result<()> {
+        self.db.execute("UPDATE queue SET state='done' WHERE id=?1", [id])?;
+        Ok(())
+    }
+
+    /// Only the runner calls this: a result names its suite, commit, input
+    /// hash, status, duration, a bounded excerpt and who asked.
+    fn write(&self, record: &Record) -> anyhow::Result<()> {
+        self.db.execute(
+            "INSERT OR REPLACE INTO results(id,team,suite,commit_id,input_hash,status,duration_ms,excerpt,asked_by,at,affected)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            params![
+                record.id,
+                record.team,
+                record.suite,
+                record.commit,
+                record.input_hash,
+                record.status,
+                record.duration_ms as i64,
+                record.excerpt,
+                record.asked_by,
+                record.at,
+                serde_json::to_string(&record.affected)?
+            ],
+        )?;
+        // Bounded: only the oldest records past the limit go.
+        let count: i64 = self.db.query_row("SELECT COUNT(*) FROM results", [], |row| row.get(0))?;
+        if count > RESULT_LIMIT {
+            self.db.execute(
+                "DELETE FROM results WHERE seq IN (SELECT seq FROM results ORDER BY seq ASC LIMIT ?1)",
+                [count - RESULT_LIMIT],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The last result for the same inputs, if the runner already measured it.
+    pub(crate) fn reused(&self, suite: &str, commit: &str, input_hash: &str) -> anyhow::Result<Option<Record>> {
+        let mut statement = self.db.prepare(
+            "SELECT id,team,suite,commit_id,input_hash,status,duration_ms,excerpt,asked_by,at,affected
+             FROM results WHERE suite=?1 AND commit_id=?2 AND input_hash=?3 ORDER BY seq DESC LIMIT 1",
+        )?;
+        Ok(statement.query_row(params![suite, commit, input_hash], Self::record).optional()?)
+    }
+
+    pub(crate) fn results(&self, team: Option<&str>, before: Option<f64>, limit: usize) -> anyhow::Result<Vec<Record>> {
+        let limit = limit.clamp(1, 100) as i64;
+        let mut statement = self.db.prepare(
+            "SELECT id,team,suite,commit_id,input_hash,status,duration_ms,excerpt,asked_by,at,affected
+             FROM results WHERE (?1 IS NULL OR team=?1) AND (?2 IS NULL OR at<?2) ORDER BY at DESC, seq DESC LIMIT ?3",
+        )?;
+        let rows = statement.query_map(params![team, before, limit], Self::record)?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    fn record(row: &rusqlite::Row<'_>) -> rusqlite::Result<Record> {
+        Ok(Record {
+            id: row.get(0)?,
+            team: row.get(1)?,
+            suite: row.get(2)?,
+            commit: row.get(3)?,
+            input_hash: row.get(4)?,
+            status: row.get(5)?,
+            duration_ms: row.get::<_, i64>(6)? as u64,
+            excerpt: row.get(7)?,
+            asked_by: row.get(8)?,
+            at: row.get(9)?,
+            affected: serde_json::from_str(&row.get::<_, String>(10)?).unwrap_or_default(),
+        })
+    }
+}
+
+fn is_heavy(class: Option<&Resources>) -> bool {
+    class.is_some_and(|class| class.gpu || class.exclusive || class.cpu >= HEAVY_CPU || class.ram_mb >= HEAVY_RAM_MB)
+}
+
+fn long(request: &Request) -> bool {
+    request.seconds > request.budget_minutes.max(0.0) * 60.0
+}
+
+/// The requests a tick runs, in order: forced first, then short before long,
+/// then by age; a long suite waits for the night (or the CI) unless forced, and
+/// never two heavy suites at once. The machine's free CPU, RAM and GPU must fit.
+pub(crate) fn schedule(requests: &[Request], classes: &Classes, load: &Load) -> Vec<Request> {
+    let mut ordered: Vec<&Request> = requests.iter().collect();
+    ordered.sort_by(|a, b| b.forced.cmp(&a.forced).then(a.seconds.total_cmp(&b.seconds)).then(a.at.total_cmp(&b.at)).then(a.id.cmp(&b.id)));
+    let (mut cpu, mut ram, mut gpu, mut heavy) = (load.cpu_free, load.ram_free_mb, load.gpu_free, false);
+    let mut chosen = Vec::new();
+    for request in ordered {
+        if !request.forced && long(request) && !load.at_night {
+            continue;
+        }
+        let class = classes.get(&request.resources);
+        let (need_cpu, need_ram, need_gpu) = class.map_or((1, 0, false), |class| (class.cpu.max(1), class.ram_mb, class.gpu));
+        if need_cpu > cpu || need_ram > ram || (need_gpu && !gpu) {
+            continue;
+        }
+        let this_heavy = is_heavy(class);
+        if this_heavy && heavy {
+            continue;
+        }
+        cpu -= need_cpu;
+        ram = ram.saturating_sub(need_ram);
+        if need_gpu {
+            gpu = false;
+        }
+        heavy |= this_heavy;
+        chosen.push(request.clone());
+    }
+    chosen
+}
+
+fn shell(command: &str, cwd: &Path) -> Command {
+    let mut process = if cfg!(windows) {
+        let mut process = Command::new("cmd");
+        process.args(["/D", "/S", "/C", command]);
+        process
+    } else {
+        let mut process = Command::new("sh");
+        process.args(["-c", command]);
+        process
+    };
+    process.current_dir(cwd);
+    process
+}
+
+/// Runs the scheduled requests in order and writes one result each. The command
+/// comes from the project's configuration, never from a report; a timeout or a
+/// nonzero exit is the result's status.
+pub(crate) fn run_due(store: &TestStore, project: &Path, requests: &[Request], now: f64) -> anyhow::Result<Vec<Record>> {
+    let mut written = Vec::new();
+    for request in requests {
+        let started = std::time::Instant::now();
+        let mut process = shell(&request.command_for(project), project);
+        let outcome = run_tree(&mut process, Duration::from_secs((request.budget_minutes.max(1.0) * 60.0) as u64), None);
+        let status = if outcome.timed_out {
+            "timeout".to_owned()
+        } else if outcome.exit == Some(0) {
+            "passed".to_owned()
+        } else {
+            "failed".to_owned()
+        };
+        let excerpt = if outcome.excerpt.is_empty() { last_chars(&outcome.tail, EXCERPT_BYTES) } else { outcome.excerpt };
+        let record = Record {
+            id: format!("{}-{}", request.id, now as i64),
+            team: request.team.clone(),
+            suite: request.suite.clone(),
+            commit: request.commit.clone(),
+            input_hash: request.input_hash.clone(),
+            status,
+            duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            excerpt,
+            asked_by: request.asked_by.clone(),
+            at: now,
+            affected: request.targets.clone(),
+        };
+        store.write(&record)?;
+        store.finish(&request.id)?;
+        written.push(record);
+    }
+    Ok(written)
+}
+
+impl Request {
+    /// The command the runner executes: the project file's provider command.
+    fn command_for(&self, _project: &Path) -> String {
+        self.command.clone()
+    }
+}
+
+/// A suite the CLI or a test builds from the configuration: its command, folder,
+/// targets, recorded seconds, budget and resource class.
+pub(crate) fn suite_from_config(project: &Path, team: Option<&str>, name: &str, targets: &[String]) -> anyhow::Result<Request> {
+    let loaded = crate::test_discipline::load(project, team).map_err(|error| anyhow::anyhow!("{error}"))?;
+    let config = &loaded.config;
+    let provider = config.providers.iter().find(|provider| provider.name == name).ok_or_else(|| anyhow::anyhow!("No provider {name}"))?;
+    let command = if provider.command.is_empty() {
+        // The kind's own command is the config's job; refuse rather than guess.
+        anyhow::bail!("Provider {name} has no command in {}", config::FILE)
+    } else {
+        provider.command.replace("{targets}", &targets.join(" ")).replace("{manifest}", &provider.manifest).replace("{build_dir}", &provider.build_dir)
+    };
+    let budget = if provider.budget_minutes > 0.0 { provider.budget_minutes } else { config.budgets.suite_minutes };
+    Ok(Request {
+        id: uuid::Uuid::new_v4().to_string(),
+        team: String::new(),
+        suite: name.to_owned(),
+        task: None,
+        targets: targets.to_vec(),
+        commit: String::new(),
+        input_hash: String::new(),
+        asked_by: String::new(),
+        forced: false,
+        at: super::super::now(),
+        seconds: 0.0,
+        budget_minutes: budget,
+        resources: provider.resources.clone(),
+        command,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(id: &str, suite: &str, seconds: f64, forced: bool, resources: &str) -> Request {
+        Request {
+            id: id.into(), team: "t".into(), suite: suite.into(), task: None, targets: Vec::new(),
+            commit: "c".into(), input_hash: "h".into(), asked_by: "dev".into(), forced, at: 1.0,
+            seconds, budget_minutes: 10.0, resources: resources.into(), command: String::new(),
+        }
+    }
+
+    #[test]
+    fn the_scheduler_runs_forced_and_short_suites_first_and_one_heavy_at_a_time() {
+        let classes: Classes = [
+            ("gpu".to_owned(), Resources { cpu: 8, ram_mb: 16000, gpu: true, exclusive: false }),
+            ("small".to_owned(), Resources { cpu: 1, ram_mb: 512, ..Default::default() }),
+        ]
+        .into_iter()
+        .collect();
+        let requests = vec![
+            request("long", "long", 1000.0, false, "small"),
+            request("heavy-a", "a", 10.0, false, "gpu"),
+            request("heavy-b", "b", 10.0, false, "gpu"),
+            request("forced", "f", 20.0, true, "small"),
+            request("short", "s", 5.0, false, "small"),
+        ];
+        let load = Load { cpu_free: 16, ram_free_mb: 32000, gpu_free: true, at_night: false };
+        let picked = schedule(&requests, &classes, &load);
+        let chosen: Vec<&str> = picked.iter().map(|request| request.id.as_str()).collect();
+        assert_eq!(chosen, ["forced", "short", "heavy-a"], "forced first, short before long, one heavy; a long suite waits for the night");
+        let night = Load { at_night: true, ..load };
+        let picked = schedule(&requests, &classes, &night);
+        let chosen: Vec<&str> = picked.iter().map(|request| request.id.as_str()).collect();
+        assert!(chosen.contains(&"long"), "{chosen:?}");
+    }
+
+    #[test]
+    fn results_page_and_resolve_by_their_inputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TestStore::open_at(&dir.path().join("tests.sqlite3"), false).unwrap();
+        let record = |id: &str, suite: &str, at: f64| Record {
+            id: id.into(), team: "t".into(), suite: suite.into(), commit: "c".into(), input_hash: "h".into(),
+            status: "passed".into(), duration_ms: 10, excerpt: "ok".into(), asked_by: "dev".into(), at,
+            affected: vec!["a".into()],
+        };
+        store.write(&record("1", "cargo", 1.0)).unwrap();
+        store.write(&record("2", "cargo", 2.0)).unwrap();
+        let found = store.reused("cargo", "c", "h").unwrap().unwrap();
+        assert_eq!(found.id, "2");
+        let page = store.results(Some("t"), None, 1).unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].id, "2");
+        let older = store.results(Some("t"), Some(2.0), 10).unwrap();
+        assert_eq!(older.len(), 1);
+        assert_eq!(older[0].id, "1");
+    }
+
+    #[test]
+    fn the_runner_writes_the_result_with_its_excerpt_and_empties_the_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TestStore::open_at(&dir.path().join("tests.sqlite3"), false).unwrap();
+        let mut request = request("run", "echo", 5.0, false, "small");
+        request.command = if cfg!(windows) { "echo hello & exit /b 0".into() } else { "echo hello".into() };
+        store.enqueue(&request).unwrap();
+        assert_eq!(store.queued("t").unwrap().len(), 1);
+        let written = run_due(&store, dir.path(), &store.queued("t").unwrap(), 100.0).unwrap();
+        assert_eq!(written.len(), 1);
+        assert_eq!(written[0].status, "passed");
+        assert!(written[0].excerpt.contains("hello"), "{}", written[0].excerpt);
+        assert!(store.queued("t").unwrap().is_empty());
+        let found = store.reused("echo", "c", "h").unwrap().unwrap();
+        assert_eq!(found.id, written[0].id);
+    }
+
+    #[test]
+    fn a_suite_reads_its_command_and_class_from_the_project_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".zerus")).unwrap();
+        std::fs::write(
+            dir.path().join(".zerus/tests.toml"),
+            "version = 1\n[budgets]\nsuite_minutes = 10\n[resources.small]\ncpu = 2\n[[provider]]\nname = \"echo\"\nkind = \"command\"\ncommand = \"echo {targets}\"\nresources = \"small\"\n",
+        )
+        .unwrap();
+        let request = suite_from_config(dir.path(), None, "echo", &["a".into(), "b".into()]).unwrap();
+        assert_eq!(request.command, "echo a b");
+        assert_eq!(request.suite, "echo");
+        assert!(request.budget_minutes > 0.0);
+    }
+
+    #[test]
+    fn the_results_database_is_bounded_and_indexed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TestStore::open_at(&dir.path().join("tests.sqlite3"), false).unwrap();
+        for index in 0..(RESULT_LIMIT + 2) {
+            let record = Record {
+                id: format!("r{index}"), team: "t".into(), suite: "s".into(), commit: "c".into(), input_hash: "h".into(),
+                status: "passed".into(), duration_ms: 1, excerpt: String::new(), asked_by: "dev".into(), at: index as f64,
+                affected: Vec::new(),
+            };
+            store.write(&record).unwrap();
+        }
+        let count: i64 = store.db.query_row("SELECT COUNT(*) FROM results", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, RESULT_LIMIT);
+        let indexed: i64 = store.db.query_row("SELECT COUNT(*) FROM pragma_index_list('results') WHERE name='results_input'", [], |row| row.get(0)).unwrap();
+        assert_eq!(indexed, 1);
+        let newest = store.results(Some("t"), None, 1).unwrap();
+        assert_eq!(newest[0].id, format!("r{}", RESULT_LIMIT + 1));
+    }
+}

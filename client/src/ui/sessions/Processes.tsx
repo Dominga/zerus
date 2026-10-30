@@ -35,7 +35,7 @@ function rowMenu(v: ProcessesView, at: { x: number; y: number }) {
 
 /** Copy command: the command as the agent ran it (Qt copies it verbatim). */
 async function copyCommand(command: string) {
-  try { await copyVerbatim(command); } catch (error) { notify("error", `Zerus: could not copy\n${typeof error === "string" ? error : String(error)}`, true); }
+  try { await copyVerbatim(command); } catch (error) { notify("error", typeof error === "string" ? error : String(error), true, undefined, "Not copied"); }
 }
 
 export function ProcessesTab() {

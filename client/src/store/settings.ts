@@ -67,6 +67,7 @@ function storedObject(raw: string | null | undefined): Record<string, unknown> {
 
 /** A value of the same type as the setting's default, or undefined. */
 export function sameType(key: string, value: unknown): SettingValue | undefined {
+  if (key === "workspace/inspectorOpen") return typeof value === "boolean" || value === "auto" ? value : undefined;
   const fallback = DEFAULTS[key];
   if (fallback === undefined || value === null || value === undefined) return undefined;
   if (Array.isArray(fallback)) return Array.isArray(value) && value.every((item) => typeof item === "string") ? value as string[] : undefined;
@@ -78,7 +79,20 @@ function shortcut(key: string, value: unknown): string[] | undefined {
   return key.startsWith("shortcuts/") && Array.isArray(value) && value.every((item) => typeof item === "string") ? value as string[] : undefined;
 }
 
-const typed = (key: string, value: unknown) => sameType(key, value) ?? shortcut(key, value);
+function machinePreference(key: string, value: unknown): SettingValue | undefined {
+  const match = /^machines\/(colors|vivid)\/([^/\\\u0000-\u001f\u007f]+)$/u.exec(key);
+  if (!match || new TextEncoder().encode(match[2]).length > 256) return undefined;
+  if (match[1] === "vivid") return typeof value === "boolean" ? value : undefined;
+  return typeof value === "string" && /^#(?:[\da-f]{3}|[\da-f]{6})$/iu.test(value) ? value : undefined;
+}
+
+function projectPreference(key: string, value: unknown): boolean | undefined {
+  const prefix = "projects/vivid/";
+  if (!key.startsWith(prefix)) return undefined;
+  const id = key.slice(prefix.length);
+  return id && new TextEncoder().encode(id).length <= 256 && !/[\u0000-\u001f\u007f-\u009f]/u.test(id) && typeof value === "boolean" ? value : undefined;
+}
+const typed = (key: string, value: unknown) => sameType(key, value) ?? shortcut(key, value) ?? machinePreference(key, value) ?? projectPreference(key, value);
 
 function typedObject(raw: Record<string, unknown>, keys?: readonly string[]): Settings {
   const values: Settings = {};

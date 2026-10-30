@@ -1,7 +1,7 @@
 //! The page's last debounced edit, before the one existing exit hook runs.
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager, State, Webview};
 
 pub const EXIT_FLUSH: Duration = Duration::from_millis(150);
 
@@ -188,7 +188,7 @@ pub(crate) fn quit_with_flush(app: &AppHandle, code: i32) {
     let end = app.clone();
     app.state::<ExitFlush>().quit(
         code,
-        app.get_webview_window(crate::MAIN_WINDOW).is_some(),
+        crate::main_window(app).is_some(),
         |nonce| {
             let _ = app.emit_to(crate::MAIN_WINDOW, "exit-flush", nonce);
         },
@@ -197,7 +197,7 @@ pub(crate) fn quit_with_flush(app: &AppHandle, code: i32) {
 }
 
 #[tauri::command]
-pub fn exit_flush_ack(window: WebviewWindow, flush: State<'_, ExitFlush>, nonce: String) {
+pub fn exit_flush_ack(window: Webview, flush: State<'_, ExitFlush>, nonce: String) {
     flush.acknowledge(&nonce, window.label());
 }
 

@@ -234,31 +234,38 @@ fn write_map(options: &Options) -> Result<i32> {
         }
     }
     if options.rest.iter().any(|arg| arg == "--check") {
-        let Some(committed) = committed else {
-            return Err(fail(format!("No test map at {}: write it with hgs test map --write", config.map.file)));
-        };
+        // #741: the map checked is the one the sources give now; the committed
+        // file stands in only for a build this checkout cannot read.
+        let committed = committed.unwrap_or_default();
         let findings = map::check(config, &files, &committed, &fresh);
         let mut report = String::new();
         let sections = [
-            ("In no provider's area and not in map.ignore (a new area for .zerus/tests.toml)", &findings.outside),
-            ("Test files the map lacks", &findings.missing_tests),
-            ("The map is out of date (hgs test map --write)", &findings.stale),
-            ("Read from the committed map, the build could not be read", &findings.unread),
+            ("In no provider's area and not in map.ignore (a new area for .zerus/tests.toml)", &findings.outside, 50),
+            ("Test files no provider maps", &findings.missing_tests, 50),
+            ("Read from the committed map, the build could not be read", &findings.unread, 50),
         ];
-        for (title, list) in sections {
+        for (title, list, shown) in sections {
             if !list.is_empty() {
                 report.push_str(&format!("{title}:\n"));
-                for line in list.iter().take(50) {
+                for line in list.iter().take(shown) {
                     report.push_str(&format!("  {line}\n"));
                 }
-                if list.len() > 50 {
-                    report.push_str(&format!("  ... and {} more\n", list.len() - 50));
+                if list.len() > shown {
+                    report.push_str(&format!("  ... and {} more\n", list.len() - shown));
                 }
             }
         }
+        if !findings.stale.is_empty() {
+            report.push_str(&format!(
+                "The committed {} lags the sources in {} entr{} (not a failure: the map is read from the sources; hgs test map --write refreshes the snapshot).\n",
+                config.map.file,
+                findings.stale.len(),
+                if findings.stale.len() == 1 { "y" } else { "ies" }
+            ));
+        }
         let ok = findings.ok();
         if ok {
-            report.push_str(&format!("The test map is current: {} file(s) checked.\n", files.len()));
+            report.push_str(&format!("The test map is current: {} tracked file(s) checked.\n", files.len()));
         }
         print(options, json!({"ok": ok, "findings": findings}), &report);
         return Ok(if ok { 0 } else { 1 });
@@ -316,14 +323,6 @@ fn affected_tests(options: &Options) -> Result<i32> {
             _ => return Err(usage()),
         }
     }
-    let map = match read_map(&options.root, config)? {
-        Some(map) => map,
-        // No committed map: the one the build gives now.
-        None => {
-            let files = map::project_files(&options.root).map_err(|error| fail(format!("{error:#}")))?;
-            map::generate(&options.root, config, &files, None).map_err(|error| fail(format!("{error:#}")))?
-        }
-    };
     let durations = durations::Durations::read(&options.root.join(&config.map.durations)).map_err(|error| fail(format!("{error:#}")))?;
     let (files, hunks) = if !listed.is_empty() {
         (listed, affected::Hunks::new())
@@ -332,6 +331,18 @@ fn affected_tests(options: &Options) -> Result<i32> {
     } else {
         changes(options, range.as_deref(), staged)?
     };
+    // #741: the providers a change touches are read from the sources now, so
+    // a merge never leaves the selection behind; the rest, and a build this
+    // checkout cannot read, come from the committed map.
+    let committed = read_map(&options.root, config)?;
+    let touched: std::collections::BTreeSet<String> = config
+        .providers
+        .iter()
+        .filter(|provider| full || committed.is_none() || files.iter().any(|file| map::in_area(provider, file) || provider.paths.iter().any(|rule| glob::any(&rule.files, file))))
+        .map(|provider| provider.name.clone())
+        .collect();
+    let tracked = map::project_files(&options.root).map_err(|error| fail(format!("{error:#}")))?;
+    let map = map::generate_only(&options.root, config, &tracked, committed.as_ref(), Some(&touched)).map_err(|error| fail(format!("{error:#}")))?;
     let selection = affected::select(&options.root, config, &map, &durations, &files, &hunks, full);
     let mut text = affected::text(&selection);
     if !loaded.active() {

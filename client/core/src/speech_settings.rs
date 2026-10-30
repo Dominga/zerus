@@ -566,6 +566,17 @@ pub struct Providers {
     views: Cell<u64>,
 }
 
+/// Decode an existing saved operation without constructing a provider page or
+/// producing calls. The caller bounds its source; original private fields stay.
+pub(crate) fn decode_pending(pending: &str) -> Option<Map<String, Value>> {
+    serde_json::from_str::<Value>(pending)
+        .ok()
+        .and_then(|value| value.as_object().cloned())
+        .filter(|pending| {
+            canonical_uuid(text(pending, "machine_id")) && uuid(text(pending, "request_id"))
+        })
+}
+
 impl Providers {
     /// The page for `platform`, managing providers on `host` (empty for this
     /// computer), with the change `pending` names still unconfirmed. A
@@ -577,12 +588,7 @@ impl Providers {
         pending: &str,
         ids: impl FnMut() -> String + Send + 'static,
     ) -> Providers {
-        let pending = serde_json::from_str::<Value>(pending)
-            .ok()
-            .and_then(|value| value.as_object().cloned())
-            .filter(|pending| {
-                canonical_uuid(text(pending, "machine_id")) && uuid(text(pending, "request_id"))
-            });
+        let pending = decode_pending(pending);
         let mut providers = Providers {
             local: local_computer_name(platform),
             ids: Box::new(ids),

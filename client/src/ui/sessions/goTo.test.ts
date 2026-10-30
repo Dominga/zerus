@@ -1,11 +1,20 @@
 import { describe, expect, it } from "vitest";
 import { parseSequence } from "../../store/shortcuts";
-import { goToKey, goToScore, rankGoTo, recentSessionIds, rememberRecentSession, visibleGoToRows, GoToKind, type GoToItem, type GoToKeyState } from "./goTo";
+import { goToDetails, goToKey, goToKindLabel, goToScore, rankGoTo, recentSessionIds, rememberRecentSession, visibleGoToRows, GoToKind, type GoToItem, type GoToKeyState } from "./goTo";
 
 const item = (kind: GoToKind, id: string, title = id, recency = -1): GoToItem => ({ kind, id, host: "", title, detail: "", recency });
 const press = (key: string, code: string, extra: Partial<KeyboardEvent> = {}) => ({ key, code, altKey: false, ctrlKey: false, metaKey: false, shiftKey: false, ...extra });
 
 describe("Go to matching and ordering", () => {
+  it("labels kinds and matches each detail part independently", () => {
+    expect([GoToKind.Session, GoToKind.Project, GoToKind.Account, GoToKind.Machine, GoToKind.Section, GoToKind.Command].map(goToKindLabel))
+      .toEqual(["SESSION", "PROJECT", "ACCOUNT", "MACHINE", "SECTION", "COMMAND"]);
+    const row = { ...item(GoToKind.Session, "session"), detail: ["Project", "workstation"] };
+    expect(goToDetails(row.detail)).toEqual(["Project", "workstation"]);
+    expect(goToDetails("Section")).toEqual(["Section"]);
+    expect(rankGoTo([row], "workstation").map((entry) => entry.id)).toEqual(["session"]);
+  });
+
   it("scores subsequence, prefix and word starts like Qt", () => {
     expect(goToScore("", "anything")).toBe(0);
     expect(goToScore("abc", "a1b2c")).toBeGreaterThan(0);

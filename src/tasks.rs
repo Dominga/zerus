@@ -18,10 +18,13 @@ use zerus_replica::{
 };
 
 mod answers;
+mod cancellation;
+mod dispatch;
 mod mobile;
 mod phone;
 mod sessions;
 mod messages;
+mod history;
 
 /// A send that pasted the prompt but could not record it: its outcome is
 /// uncertain, and the phone's receipt says so.
@@ -34,7 +37,7 @@ fn paste_uncertain(message: &str) -> bool {
     message.starts_with(SENT_UNRECORDED) || message.starts_with("delivery uncertain")
 }
 
-const USAGE: &str = "usage: hgs task list --project P [--stage S] | get REF | add --project P [--backlog] [--start] [--target SESSION|any [--host ALIAS]] [--title TITLE [--request-id UUID]] [--position N] | edit REF | rename REF | move REF --top|--before REF|--after REF|--position N | stage REF backlog|todo|done | target REF SESSION|any|new-session|subagent [--parent SESSION] [--host ALIAS] | send REF [--session SESSION [--host ALIAS]] | cancel REF [--reason TEXT] | handoff REF --session SESSION [--host ALIAS] | start REF | report REF | comment REF [--content-json] | message REF --request-id UUID --mode queue|send|reopen|note [--expect-dispatch ID] [--content-json] | worker REF --subagent ID --request-id REQUEST | settings --project P [--set] | digests --json | exchange --json | mobile-send|mobile-cancel|mobile-done --json
+const USAGE: &str = "usage: hgs task list --project P [--stage S] | get REF [--history-limit 1..80 [--history-before CURSOR]] | add --project P [--backlog] [--start] [--target SESSION|any [--host ALIAS]] [--title TITLE [--request-id UUID]] [--position N] | edit REF | rename REF | move REF --top|--before REF|--after REF|--position N | stage REF backlog|todo|done | target REF SESSION|any|new-session|subagent [--parent SESSION] [--host ALIAS] | send REF [--session SESSION [--host ALIAS]] | start-plan REF --json | start-deliver REF --json [--recover-only] | cancel REF [--reason TEXT] | cancel-execution REF --json (guard JSON on stdin) | handoff REF --session SESSION [--host ALIAS] | start REF | report REF | comment REF [--content-json] | message REF --request-id UUID --mode queue|send|reopen|note [--expect-dispatch ID] [--content-json] | worker REF --subagent ID --request-id REQUEST | settings --project P [--set] | digests --json | exchange --json | mobile-send|mobile-cancel|mobile-done --json
   REF is T-xxxxxx with --project P, or PROJECT/T-xxxxxx; texts and --set settings are read from stdin;
   a change an agent makes prints one line, and --json prints the task";
 
@@ -290,7 +293,14 @@ fn view(task: &TaskDoc, project_name: &str, with_log: bool, machines: &Machines)
     let dispatch_id = task_view.execution_id();
     let mut value = serde_json::to_value(task_view).map_err(fail)?;
     value["dispatch_id"] = json!(dispatch_id);
-    value["ref"] = json!(format!("{project_name}/{}", task.id()));
+    // A note or receipt changes no other list field. Its clock must change
+    // the tasks-topic digest so the selected inspector can refresh.
+    if !with_log { value["history_revision"] = json!(task.revision()); }
+    label_view(value, project_name, with_log, &files, machines)
+}
+
+fn label_view(mut value: Value, project_name: &str, with_log: bool, files: &[Value], machines: &Machines) -> Result<Value> {
+    value["ref"] = json!(format!("{project_name}/{}", value["id"].as_str().unwrap_or_default()));
     // Every session reference names its computer: the task's target, session and
     // author, and each history entry's session and actor.
     let name = |reference: &mut Value| {
@@ -402,13 +412,26 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
             let machines = machines(config)?;
             let who = actor(&machines.here, args, false)?;
             let r = reference(config, args, &who)?;
-            let task = store(config, &r.project.0)?
-                .find(&r.task)
-                .map_err(fail)?;
-            Ok(json!({"project": {"id": r.project.0, "name": r.project.1}, "task": view(&task, &r.project.1, true, &machines)?}))
+            let limit = history::limit(args)?;
+            let store = store(config, &r.project.0)?;
+            let value = if let Some(limit) = limit {
+                let uuid = if zerus_replica::ids::is_uuid(&r.task) { r.task.clone() }
+                    else { store.find(&r.task).map_err(fail)?.uuid().to_owned() };
+                let task = history::page(&store, &store_dir(config, &r.project.0), &uuid,
+                    limit, option(args, "--history-before")?)?;
+                label_view(task, &r.project.1, true, &[], &machines)?
+            } else {
+                view(&store.find(&r.task).map_err(fail)?, &r.project.1, true, &machines)?
+            };
+            Ok(json!({"project": {"id": r.project.0, "name": r.project.1}, "task": value}))
         }
         "add" => add(config, args),
         "message" => messages::execute(config, args),
+        "cancel-execution" => {
+            let guard = cancellation::read()?;
+            change_guarded(config, "cancel", args, None, Some(&guard))
+        }
+        "start-plan" | "start-deliver" => dispatch::execute(config, action, args),
         "edit" | "rename" | "move" | "stage" | "target" | "comment" | "report" | "start" | "send" | "handoff" | "cancel" | "worker" => {
             change(config, action, args)
         }
@@ -526,6 +549,10 @@ fn change(config: &Config, action: &str, args: &[String]) -> Result<Value> {
 /// `change`, waiting at most `wait` for a project another command holds:
 /// the phone's Send now and Cancel are refused as busy before anything happens.
 fn change_within(config: &Config, action: &str, args: &[String], wait: Option<std::time::Duration>) -> Result<Value> {
+    change_guarded(config, action, args, wait, None)
+}
+
+fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<std::time::Duration>, guard: Option<&cancellation::Guard>) -> Result<Value> {
     let content = if action == "edit" || (action == "comment" && flag(args, "--content-json")) { Some(stdin_content(args)?) } else { None };
     let text = match action {
         "edit" => Some(content.as_ref().expect("edit content").text.clone()),
@@ -575,6 +602,7 @@ fn change_within(config: &Config, action: &str, args: &[String], wait: Option<st
             .ok_or_else(|| fail("the project's tasks are busy; try again"))?,
     };
     let mut task = store.find(&r.task).map_err(fail)?;
+    if let Some(guard) = guard { guard.check(&task)?; }
     if action == "edit" && text.as_deref() == Some("") && task.title().is_empty() { agent_text("", action, &who)?; }
     if task.view().map_err(fail)?.writable {
         let view = task.view().map_err(fail)?;
@@ -621,10 +649,10 @@ fn change_within(config: &Config, action: &str, args: &[String], wait: Option<st
         drop(store);
         let out = match reach(config, &machines, project_id, session) {
             // That computer words its own refusals (see `forwarded`).
-            Ok(alias) => forwarded(config, &machines, &r.project, &uuid, action, args, session, &alias, &who)?,
+            Ok(alias) => forwarded(config, &machines, &r.project, &uuid, action, args, session, &alias, &who, guard)?,
             // A cancel goes through while that computer is out of reach: the task
             // moves to In review here and its session is not told.
-            Err(reason) if action == "cancel" => cancel_here(config, &machines, &r.project, &uuid, args, &who, reason)?,
+            Err(reason) if action == "cancel" => cancel_here(config, &machines, &r.project, &uuid, args, &who, reason, guard)?,
             Err(reason) => return Err(refuse(fail(reason), &to)),
         };
         return Ok(with_answer(&who, action, out, 0, &to));
@@ -687,7 +715,7 @@ fn change_within(config: &Config, action: &str, args: &[String], wait: Option<st
             extra = send(&store, &mut task, project_name, session, pin, &who, action == "handoff")
                 .map_err(|e| refuse(e, &destination))?;
         }
-        "cancel" => extra = cancel(&store, &machines, &mut task, project_name, args, &who, None)?,
+        "cancel" => extra = cancel(&store, &machines, &mut task, project_name, cancellation::reason(args, guard)?, &who, None)?,
         _ => return Err(fail(USAGE)),
     }
     store.save(&mut task).map_err(|e| {
@@ -699,7 +727,7 @@ fn change_within(config: &Config, action: &str, args: &[String], wait: Option<st
         }
     })?;
     let at = if action == "move" { place(&store, &task)? } else { 0 };
-    let mut out = json!({"task": view(&task, project_name, true, &machines)?});
+    let mut out = json!({"task": view(&task, project_name, guard.is_none(), &machines)?});
     for (key, value) in extra.as_object().expect("object") {
         out[key] = value.clone();
     }
@@ -765,9 +793,11 @@ fn forwarded(
     session: &SessionKey,
     alias: &str,
     who: &Actor,
+    guard: Option<&cancellation::Guard>,
 ) -> Result<Value> {
     // That computer answers in JSON even for an agent; this one answers the agent.
-    let mut remote: Vec<String> = vec!["task".into(), action.into(), uuid.into(), "--project".into(), project.0.clone(), "--json".into()];
+    let wire_action = if guard.is_some() { "cancel-execution" } else { action };
+    let mut remote: Vec<String> = vec!["task".into(), wire_action.into(), uuid.into(), "--project".into(), project.0.clone(), "--json".into()];
     if matches!(action, "send" | "handoff") && option(args, "--session")?.is_some() {
         remote.extend(["--session".into(), session.session.clone()]);
         if !session.session_id.is_empty() { remote.extend(["--session-id".into(), session.session_id.clone()]); }
@@ -780,7 +810,10 @@ fn forwarded(
         remote.extend(["--agent".into(), format!("{}/{}", agent.machine, agent.session)]);
         if !agent.session_id.is_empty() { remote.extend(["--agent-session-id".into(), agent.session_id.clone()]); }
     }
-    let reply = crate::swarm::remote_hgs(config, alias, &remote).map_err(|e| {
+    let reply = match guard {
+        Some(guard) => crate::swarm::remote_hgs_input(config, alias, &remote, &serde_json::to_value(guard).map_err(fail)?),
+        None => crate::swarm::remote_hgs(config, alias, &remote),
+    }.map_err(|e| {
         let message = format!("{e:#}");
         match message.strip_prefix(&format!("{alias}: hgs: ")) {
             // That computer's own refusal: it pasted nothing, and an agent reads
@@ -808,7 +841,7 @@ fn forwarded(
         }
     };
     let task = store(config, &project.0)?.find(uuid).map_err(fail)?;
-    let mut out = json!({"task": view(&task, &project.1, true, machines)?, "synced": synced});
+    let mut out = json!({"task": view(&task, &project.1, guard.is_none(), machines)?, "synced": synced});
     for key in ["receipt", "cancel_message"] {
         if let Some(value) = reply.get(key) {
             out[key] = value.clone();
@@ -820,6 +853,7 @@ fn forwarded(
 /// Cancels here a task whose session's computer cannot be reached: it moves to
 /// In review, its session is not told, and that computer's copy follows with
 /// the next sync.
+#[allow(clippy::too_many_arguments)]
 fn cancel_here(
     config: &Config,
     machines: &Machines,
@@ -828,12 +862,14 @@ fn cancel_here(
     args: &[String],
     who: &Actor,
     reason: String,
+    guard: Option<&cancellation::Guard>,
 ) -> Result<Value> {
     let store = store(config, &project.0)?;
     let mut task = store.find(uuid).map_err(fail)?;
-    let extra = cancel(&store, machines, &mut task, &project.1, args, who, Some(reason))?;
+    if let Some(guard) = guard { guard.check(&task)?; }
+    let extra = cancel(&store, machines, &mut task, &project.1, cancellation::reason(args, guard)?, who, Some(reason))?;
     store.save(&mut task).map_err(fail)?;
-    let mut out = json!({"task": view(&task, &project.1, true, machines)?});
+    let mut out = json!({"task": view(&task, &project.1, guard.is_none(), machines)?});
     out["cancel_message"] = extra["cancel_message"].clone();
     Ok(out)
 }
@@ -863,11 +899,7 @@ fn send(
         task.set_target(&Target::Session(session.clone()), who, now())
             .map_err(fail)?;
     }
-    let (mut prompt, files) = task_dispatch_content(&settings.task_template, &task.view().map_err(fail)?, project_name, Tools::Cli).map_err(fail)?;
-    if matches!(view.target, Target::Subagent { .. }) {
-        prompt.push_str(&format!("\n\n[Zerus executor: subagent]\nYou are the coordinator for this task. Create a native subagent only now, after this explicit start request, and give it the implementation work. Keep coordination and task reporting in this session. After the native child appears, read `hgs task get {}/{}` and register its exact live ID with `hgs task worker {}/{} --subagent CHILD_ID --request-id CURRENT_SENT_REQUEST_ID`. Do not claim that the child has started before this registration succeeds; if creation is unavailable, report that limitation. The child must not impersonate the coordinator's CLI identity.\n", project_name, task.id(), project_name, task.id()));
-    }
-    let attachments = files.iter().map(serde_json::to_value).collect::<std::result::Result<Vec<_>, _>>().map_err(fail)?;
+    let (prompt, attachments) = dispatch_content(&settings, &task.view().map_err(fail)?, project_name, matches!(view.target, Target::Subagent { .. }))?;
     let receipt = crate::state::submit_task_message(&session, &prompt, &attachments).map_err(fail)?;
     let request_id = receipt["request_id"].as_str().unwrap_or_default().to_owned();
     (if handoff { task.record_handoff(&session, &request_id, who, now()) }
@@ -877,6 +909,15 @@ fn send(
     Ok(json!({"receipt": receipt}))
 }
 
+fn dispatch_content(settings: &Settings, view: &zerus_replica::TaskView, project_name: &str, subagent: bool) -> Result<(String, Vec<Value>)> {
+    let (mut prompt, files) = task_dispatch_content(&settings.task_template, view, project_name, Tools::Cli).map_err(fail)?;
+    if subagent {
+        prompt.push_str(&format!("\n\n[Zerus executor: subagent]\nYou are the coordinator for this task. Create a native subagent only now, after this explicit start request, and give it the implementation work. Keep coordination and task reporting in this session. After the native child appears, read `hgs task get {}/{}` and register its exact live ID with `hgs task worker {}/{} --subagent CHILD_ID --request-id CURRENT_SENT_REQUEST_ID`. Do not claim that the child has started before this registration succeeds; if creation is unavailable, report that limitation. The child must not impersonate the coordinator's CLI identity.\n", project_name, view.id, project_name, view.id));
+    }
+    let attachments = files.iter().map(serde_json::to_value).collect::<std::result::Result<Vec<_>, _>>().map_err(fail)?;
+    Ok((prompt, attachments))
+}
+
 /// Moves the task to In review and pastes the cancel message; the turn is not
 /// stopped. `undelivered` says why the message cannot reach the session.
 fn cancel(
@@ -884,7 +925,7 @@ fn cancel(
     machines: &Machines,
     task: &mut TaskDoc,
     project_name: &str,
-    args: &[String],
+    reason: &str,
     who: &Actor,
     undelivered: Option<String>,
 ) -> Result<Value> {
@@ -907,7 +948,6 @@ fn cancel(
     settings
         .check_agent(who, session, false, 0)
         .map_err(fail)?;
-    let reason = option(args, "--reason")?.unwrap_or_default();
     task.record_cancel(reason, who, now()).map_err(fail)?;
     store.save(task).map_err(fail)?;
     let message = cancel_message(

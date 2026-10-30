@@ -87,6 +87,51 @@ fn index(store: &DraftStore) -> std::collections::BTreeMap<String, Summary> {
 }
 
 #[test]
+fn clearing_a_submitted_snapshot_preserves_edits_on_either_side_of_it() {
+    let scratch = Scratch::new("conditional-clear");
+    let store = DraftStore::open(scratch.0.join("drafts"));
+    let key = "task-comment\nexample\n11111111-1111-4111-8111-111111111111";
+    let submitted = draft("Submitted", &[("a.txt", b"original")]);
+    save(&store, key, submitted.clone()).unwrap();
+    let newer = draft("New context", &[("a.txt", b"original")]);
+    save(&store, key, newer.clone()).unwrap();
+    assert!(!wait(|done| store.clear_if_unchanged(key, submitted.draft.clone(), done)).unwrap());
+    assert_eq!(load(&store, key).draft.draft, newer.draft);
+    // An edit queued after the clear must win. Splitting the comparison and
+    // clearing into separate writer jobs would put the clear after this edit.
+    let (sender, receiver) = mpsc::channel();
+    store.clear_if_unchanged(key, newer.draft.clone(), move |r| sender.send(r).unwrap());
+    let after = draft("Typed later", &[("b.txt", b"later")]);
+    store.save_durable(key, after.clone(), |r| r.unwrap());
+    assert!(receiver
+        .recv_timeout(Duration::from_secs(10))
+        .unwrap()
+        .unwrap());
+    store.flush();
+    assert_eq!(load(&store, key).draft.draft, after.draft);
+}
+
+#[test]
+fn conditional_clear_checks_attachment_bytes_and_resets_delivery_flags() {
+    let scratch = Scratch::new("clear-media");
+    let store = DraftStore::open(scratch.0.join("drafts"));
+    let mut stored = draft("Same text", &[("a.txt", b"changed")]);
+    stored.sending = true;
+    stored.uncertain = true;
+    save(&store, KEY, stored.clone()).unwrap();
+    assert!(!wait(|done| store.clear_if_unchanged(
+        KEY,
+        draft("Same text", &[("a.txt", b"original")]).draft,
+        done
+    ))
+    .unwrap());
+    assert!(wait(|done| store.clear_if_unchanged(KEY, stored.draft, done)).unwrap());
+    let empty = load(&store, KEY).draft;
+    assert!(empty.draft.text.is_empty() && empty.draft.attachments.is_empty());
+    assert!(!empty.sending && !empty.uncertain);
+}
+
+#[test]
 fn a_draft_round_trips_in_qt_format() {
     let scratch = Scratch::new("round");
     let store = DraftStore::open(scratch.0.join("drafts"));
@@ -847,4 +892,34 @@ fn a_draft_that_cannot_be_saved_runs_the_import_again() {
     assert!(here.join(IMPORT_MARKER).exists());
     let store = DraftStore::open(here.clone());
     assert_eq!(load(&store, KEY).draft.draft.text, "from Qt");
+}
+
+#[test]
+fn form_checkpoint_compares_reserved_identity_and_preserves_unknown_fields() {
+    let root = Scratch::new("form-checkpoint");
+    let store = DraftStore::open(root.0.clone());
+    let mut original = draft("Same title", &[]);
+    original.form_state.insert(
+        "request".into(),
+        json!({"id":"original","private":{"kept":true}}),
+    );
+    wait(|done| store.save_durable(KEY, original.clone(), done)).unwrap();
+    let mut newer = original.clone();
+    newer.form_state["request"]["id"] = json!("newer");
+    wait(|done| store.save_durable(KEY, newer.clone(), done)).unwrap();
+    assert!(
+        !wait(|done| store.replace_if_unchanged(KEY, original, StoredDraft::default(), done))
+            .unwrap()
+    );
+    let loaded = wait(|done| store.load(KEY, done));
+    assert_eq!(loaded.draft, newer);
+    let mut settled = newer.clone();
+    settled.sending = true;
+    wait(|done| store.save_durable(KEY, settled, done)).unwrap();
+    let interrupted = wait(|done| store.load(KEY, done)).draft;
+    assert!(interrupted.uncertain);
+    assert!(
+        wait(|done| store.replace_if_unchanged(KEY, interrupted, newer.clone(), done)).unwrap()
+    );
+    assert_eq!(wait(|done| store.load(KEY, done)).draft, newer);
 }

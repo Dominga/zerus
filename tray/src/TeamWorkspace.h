@@ -4,6 +4,7 @@
 #include <QPoint>
 #include <QPointer>
 #include <QWidget>
+#include <deque>
 #include <functional>
 #include <memory>
 #include "TeamAccountMove.h"
@@ -14,6 +15,7 @@ class QFrame;
 class QLabel;
 class QScrollArea;
 class QSplitter;
+class QTimer;
 class QVBoxLayout;
 class TeamController;
 class TeamConversation;
@@ -261,6 +263,14 @@ private:
     void assignMenu(const Teams::Team &team, const QString &member, const QPoint &global);
     void placeDrawer();
     void placePopover();
+    // #708: a large Board or Layers view is built over bounded event-loop
+    // turns, so one render never stalls the window; a small view is drained
+    // inside the render and behaves as before.
+    void queueSlice(std::function<void()> work);
+    void runSlices();
+    void cancelSlices();
+    QTimer *m_sliceTimer = nullptr;
+    std::deque<std::function<void()>> m_slices;
     // A view rebuilt by a render keeps where the owner scrolled it.
     void keepScroll(QScrollArea *area, const QString &key);
     TeamController *m_teams;

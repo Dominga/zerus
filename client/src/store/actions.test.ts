@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createRoot } from "solid-js";
 import { createCatalog, toSession } from "./catalog";
-import { createActions, withArchived, type Followed } from "./actions";
+import { createActions, withArchived, type Followed, type Selection } from "./actions";
 import { createMarks, type MarksPort } from "./marks";
 import { notificationsState, snapshotOf } from "../ui/sessions/actions-ui";
 import * as bridge from "../bridge";
@@ -9,6 +9,7 @@ import { emptyBatch, type Action, type Batch, type Details, type Outcome, type R
 
 vi.mock("../bridge", () => ({
   runAction: vi.fn(),
+  terminationCleanupConfirm: vi.fn(),
   inspectSession: vi.fn(),
   pendingReadMarks: vi.fn(),
   attentionMarks: vi.fn(async () => ({ marks: {}, replies: {} })),
@@ -36,10 +37,10 @@ const details = (extra: Partial<Details> = {}): Details => ({
 });
 const flush = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
 
-function setup(entry = rowOut(), online: (computer: string) => boolean = () => true) {
+function setup(entry = rowOut(), online: (computer: string) => boolean = () => true, selection: () => Selection = () => ({})) {
   const catalog = createCatalog();
   catalog.applyBatch(batchOf({ upserts: [entry] }));
-  const actions = createActions(catalog.catalog, online);
+  const actions = createActions(catalog.catalog, online, selection);
   return { ...catalog, ...actions };
 }
 
@@ -47,6 +48,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(1_790_000_000_000);
   mocked.runAction.mockReset();
+  mocked.terminationCleanupConfirm.mockReset();
   mocked.inspectSession.mockReset();
   mocked.pendingReadMarks.mockReset();
   mocked.sessionReference.mockReset();
@@ -252,7 +254,10 @@ describe("perform", () => {
       mocked.runAction.mockResolvedValueOnce({ outcome: "failed", detail: "kept" });
       await a.perform(session(), { kind: "pause" });
       mocked.runAction.mockResolvedValue(done());
+      // A repeated passing result shows once (the bus coalesces it).
       for (let i = 0; i < 6; i++) await a.perform(session(), { kind: "pause" });
+      expect(a.notices().map((n) => n.text)).toEqual(["kept", "Session updated. Refreshing…"]);
+      for (let i = 0; i < 6; i++) a.notify("info", `passing ${i}`);
       expect(a.notices()).toHaveLength(5);
       expect(a.notices()[0]).toMatchObject({ text: "kept", sticky: true });
       mocked.runAction.mockResolvedValue({ outcome: "failed", detail: "x" });
@@ -317,7 +322,8 @@ describe("targets", () => {
         expect((await a.perform(row, action)).outcome).toBe("failed");
       }
       expect(mocked.runAction).not.toHaveBeenCalled();
-      expect(a.notices().map((n) => n.text)).toEqual(Array(3).fill("This session changed. Open its actions again."));
+      // Each refusal says so; the repeated passing notice shows once.
+      expect(a.notices().map((n) => n.text)).toEqual(["This session changed. Open its actions again."]);
       dispose();
     });
   });
@@ -510,7 +516,7 @@ describe("copy", () => {
       expect(a.notices()).toEqual([]);
       mocked.copyText.mockRejectedValue("Nothing to copy.");
       await a.copy("x");
-      expect(a.notices()).toEqual([expect.objectContaining({ tone: "error", sticky: true, text: "Zerus: could not copy\nNothing to copy." })]);
+      expect(a.notices()).toEqual([expect.objectContaining({ tone: "error", sticky: true, title: "Not copied", text: "Nothing to copy." })]);
       dispose();
     });
   });
@@ -536,7 +542,7 @@ describe("copy", () => {
       await a.copyReference(session(), details({ run_id: "run-9", conversation_id: "conv-9" }));
       expect(mocked.sessionReference).toHaveBeenCalledWith({ computer: "", name: "claude/sample-project/a", run_id: "run-9", conversation_id: "conv-9" }, null);
       expect(mocked.copyText).toHaveBeenCalledWith("zerus://session?x=1");
-      expect(a.notices()).toEqual([expect.objectContaining({ tone: "info", text: "Session reference copied", sticky: false })]);
+      expect(a.notices()).toEqual([expect.objectContaining({ tone: "info", title: "Copied", text: "The session reference is on the clipboard", sticky: false })]);
       a.applyBatch(batchOf({ upserts: [rowOut({ state: "archived", archive_id: "ar1" })] }));
       await a.copyReference(session({ state: "archived", archive_id: "ar1" }));
       expect(mocked.sessionReference).toHaveBeenLastCalledWith({ computer: "", name: "claude/sample-project/a", run_id: "run-1", conversation_id: "conv-1" }, "ar1");
@@ -551,6 +557,62 @@ describe("copy", () => {
       await a.copyReference(session());
       expect(mocked.copyText).not.toHaveBeenCalled();
       expect(a.notices()).toEqual([expect.objectContaining({ tone: "error", sticky: true, text: "hgs: no such run" })]);
+      dispose();
+    });
+  });
+});
+
+describe("header copy identity", () => {
+  it("copies the session ID and says what was copied", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup();
+      await a.copyIdentity(session());
+      expect(mocked.copyText).toHaveBeenCalledWith("conv-1");
+      expect(a.notices()).toEqual([expect.objectContaining({ title: "Copied", text: "The session ID is on the clipboard", tone: "info" })]);
+      dispose();
+    });
+  });
+  it("copies the run ID as a fallback and names it", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup();
+      await a.copyIdentity(session(), details({ conversation_id: "" }));
+      expect(mocked.copyText).toHaveBeenCalledWith("run-1");
+      expect(a.notices()[0].text).toBe("The run ID is on the clipboard");
+      dispose();
+    });
+  });
+  it("copies a selected child's conversation or agent ID and names the result", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup(rowOut(), () => true, () => ({ key: "\nrun:a", subagent: "child" }));
+      await a.copyIdentity(session(), details(), { id: "child", conversationId: "child-conversation" });
+      expect(mocked.copyText).toHaveBeenLastCalledWith("child-conversation");
+      expect(a.notices().at(-1)?.text).toBe("The session ID is on the clipboard");
+      await a.copyIdentity(session(), details(), { id: "child" });
+      expect(mocked.copyText).toHaveBeenLastCalledWith("child");
+      expect(a.notices().at(-1)?.text).toBe("The agent ID is on the clipboard");
+      dispose();
+    });
+  });
+  it("copies nothing after the selected child or parent identity changes", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup(rowOut(), () => true, () => ({ key: "\nrun:a", subagent: "new-child" }));
+      expect((await a.copyIdentity(session(), details(), { id: "old-child" })).outcome).toBe("failed");
+      expect((await a.copyIdentity(session())).outcome).toBe("failed");
+      a.applyBatch(batchOf({ upserts: [rowOut({ run_id: "new-run" })] }));
+      expect((await a.copyIdentity(session(), details(), { id: "new-child" })).outcome).toBe("failed");
+      expect(mocked.copyText).not.toHaveBeenCalled();
+      dispose();
+    });
+  });
+  it("copies nothing without an ID, and a clipboard failure never reports success", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup(rowOut({ run_id: undefined, conversation_id: undefined }));
+      expect((await a.copyIdentity(session({ run_id: undefined, conversation_id: undefined }))).outcome).toBe("failed");
+      expect(mocked.copyText).not.toHaveBeenCalled();
+      a.applyBatch(batchOf({ upserts: [rowOut()] }));
+      mocked.copyText.mockRejectedValue("Clipboard unavailable");
+      expect((await a.copyIdentity(session())).outcome).toBe("failed");
+      expect(a.notices()).toEqual([expect.objectContaining({ tone: "error", sticky: true })]);
       dispose();
     });
   });
@@ -1031,6 +1093,38 @@ describe("archived rows (the Archive view)", () => {
       const rename = { kind: "rename", new_name: "claude/sample-project/b", archive_id: ARCHIVE_ID } as const;
       expect(await a.perform(snapshotOf(row), rename)).toMatchObject({ outcome: "done" });
       expect(mocked.runAction).toHaveBeenCalledWith({ computer: "", name: "claude/sample-project/a", run_id: "run-1", conversation_id: "conv-1" }, rename);
+      dispose();
+    });
+  });
+});
+
+
+describe("explicit cleanup confirmation", () => {
+  it("holds the existing pending lane and never falls back to legacy terminate", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup();
+      let settle!: (out: Outcome) => void;
+      mocked.terminationCleanupConfirm.mockReturnValue(new Promise((resolve) => { settle = resolve; }));
+      const pending = a.end(session(), "terminate", "opaque-rust-offer");
+      expect(a.updating("", "claude/sample-project/a")).toBe(true);
+      await a.end(session(), "terminate", "opaque-rust-offer");
+      expect(mocked.terminationCleanupConfirm).toHaveBeenCalledTimes(1);
+      expect(mocked.terminationCleanupConfirm).toHaveBeenCalledWith("opaque-rust-offer");
+      settle({ outcome: "failed", detail: "Unknown. Check the session before retrying." });
+      expect((await pending).outcome).toBe("failed");
+      expect(mocked.runAction).not.toHaveBeenCalled();
+      expect(a.updating("", "claude/sample-project/a")).toBe(false);
+      dispose();
+    });
+  });
+  it("refuses a changed run before submitting a retained cleanup offer", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup();
+      const opening = session();
+      a.applyBatch(batchOf({ upserts: [rowOut({ run_id: "replacement" })] }));
+      expect((await a.end(opening, "terminate", "old-offer")).outcome).toBe("failed");
+      expect(mocked.terminationCleanupConfirm).not.toHaveBeenCalled();
+      expect(mocked.runAction).not.toHaveBeenCalled();
       dispose();
     });
   });

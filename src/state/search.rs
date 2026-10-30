@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::time::Duration;
 
 const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
@@ -17,15 +18,26 @@ const MAX_SESSIONS: usize = 500;
 const MAX_JOURNAL_ROWS: usize = 50_000;
 
 pub(super) fn dispatch(args: &[String]) -> Result<i32> {
+    if let Some(result) = search_index::dispatch(args) {
+        return result;
+    }
     let mut query = None;
     let mut limit = 80;
+    let mut indexed = false;
+    let mut cursor = None;
     let mut index = 0;
     while index < args.len() {
+        if args[index] == "--indexed" && !indexed {
+            indexed = true;
+            index += 1;
+            continue;
+        }
         let value = args
             .get(index + 1)
             .ok_or("usage: hgs search --query <text> [--limit 1..200]")?;
         match args[index].as_str() {
             "--query" if query.is_none() => query = Some(value.as_str()),
+            "--cursor" if cursor.is_none() => cursor = Some(value.as_str()),
             "--limit" => limit = value.parse::<usize>().map_err(|_| "invalid search limit")?,
             _ => return Err("usage: hgs search --query <text> [--limit 1..200]".into()),
         }
@@ -38,6 +50,18 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     if !(1..=200).contains(&limit) {
         return Err("search limit must be between 1 and 200".into());
     }
+    if indexed {
+        println!("{}", search_index::indexed(query, limit, cursor)?);
+    } else {
+        if cursor.is_some() {
+            return Err("search cursors require --indexed".into());
+        }
+        println!("{}", legacy(query, limit)?);
+    }
+    Ok(0)
+}
+
+pub(super) fn legacy(query: &str, limit: usize) -> Result<Value> {
     let mut bindings = records()?;
     let archives = archive::records()?;
     bindings.retain(|record| !archive::equivalent(record, &archives));
@@ -49,8 +73,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     }
     // Prefer recent sessions when the explicit scan budget is exhausted.
     bindings.sort_by(|a, b| number(b, "updated").total_cmp(&number(a, "updated")));
-    println!("{}", search(&root(), bindings, query, limit)?);
-    Ok(0)
+    search(&root(), bindings, query, limit)
 }
 
 fn number(value: &Value, key: &str) -> f64 {
@@ -129,7 +152,8 @@ impl Search {
                 "name":record["name"],"cmd":record["agent"],"project":string(record,"name").split('/').nth(1),
                 "tag":string(record,"name").splitn(3,'/').nth(2),"run_id":record["run_id"],"conversation_id":record["conversation_id"],
                 "archive_id":record["archive_id"],"archived_at":record["archived_at"],"state":"archived","tracked":true,
-                "resumable":!string(record,"conversation_id").is_empty(),"cwd":record["cwd"]})},
+                "resumable":!string(record,"conversation_id").is_empty(),"cwd":record["cwd"],
+                "account_id":account_binding(record)["id"],"account_home":account_binding(record)["home"]})},
             "source":event["source"],"message_id":id,"seq":event.get("seq").cloned().unwrap_or(json!(0)),
             "content":content,"content_truncated":content_truncated,"snippet":snippet,"event":event});
         self.results.push(result);
@@ -368,11 +392,60 @@ fn search(directory: &Path, mut bindings: Vec<Value>, query: &str, limit: usize)
             );
         }
     }
+    search.truncated |= enrich_archive_results(&mut search.results);
     Ok(
         json!({"query":query,"results":search.results,"truncated":search.truncated,
         "scanned_sessions":bindings.len(),"unavailable_sessions":search.unavailable.len(),
         "scope":"public_messages_and_recorded_activity"}),
     )
+}
+
+/// Reuse the legacy excerpt and archive navigation shape for typed index data.
+pub(super) fn indexed_hit(pattern: Regex, hit: zerus_content_search::Hit, record: &Value) -> Option<Value> {
+    let message = hit.message;
+    let role = match message.role {
+        zerus_content_search::Role::User => "user",
+        zerus_content_search::Role::Assistant => "assistant",
+        zerus_content_search::Role::Tool => "tool",
+        zerus_content_search::Role::Event => "event",
+    };
+    let mut formatter = Search {
+        pattern, results: Vec::new(), limit: 1, bytes_left: 0,
+        rows_left: 0, truncated: false, unavailable: BTreeSet::new(),
+    };
+    formatter.accept(
+        record,
+        json!({"type":message.kind,"source":message.source,"message_id":message.id,
+            "seq":message.seq,"at":message.at,"detail":message.text}),
+        role,
+    );
+    formatter.results.pop()
+}
+
+/// Same folder scopes as archive pages, with no writes or catalog enumeration.
+/// One returned window shares a 250 ms deadline and at most 200 folder reads.
+pub(super) struct ArchiveScopes {
+    folders: std::collections::BTreeMap<String, Option<Value>>,
+    deadline: std::time::Instant,
+    pub incomplete: bool,
+}
+impl ArchiveScopes {
+    pub fn new() -> Self {
+        Self { folders: std::collections::BTreeMap::new(), deadline: std::time::Instant::now() + Duration::from_millis(250), incomplete: false }
+    }
+    pub fn enrich(&mut self, hit: &mut Value) {
+        let Some(row) = hit.get_mut("session").and_then(Value::as_object_mut) else { return; };
+        let cwd = row.get("cwd").and_then(Value::as_str).unwrap_or("").to_owned();
+        if !self.folders.contains_key(&cwd) && self.folders.len() >= 200 { self.incomplete = true; return; }
+        let fields = self.folders.entry(cwd.clone()).or_insert_with(|| workspace::search_scopes(&cwd, self.deadline));
+        if let Some(fields) = fields { row.extend(fields.as_object().unwrap().clone()); }
+        else { self.incomplete = true; }
+    }
+}
+pub(super) fn enrich_archive_results(results: &mut [Value]) -> bool {
+    let mut scopes = ArchiveScopes::new();
+    for hit in results.iter_mut().take(200) { scopes.enrich(hit); }
+    scopes.incomplete
 }
 
 fn equivalent_excerpt(left: &str, right: &str) -> bool {
@@ -383,7 +456,7 @@ fn equivalent_excerpt(left: &str, right: &str) -> bool {
         || (right.ends_with('…') && left.starts_with(right.trim_end_matches('…')))
 }
 
-fn journal_role(event: &Value) -> &'static str {
+pub(super) fn journal_role(event: &Value) -> &'static str {
     if string(event, "agent_id").is_empty() && !event["origin"].is_string() {
         match string(event, "type") {
             "UserPromptSubmit" | "UserPromptQueued" | "TurnStarted" | "QuestionAnswered" => {
@@ -738,6 +811,16 @@ fn parse_timestamp(value: &str) -> Option<f64> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn expired_scope_budget_is_explicit_and_does_not_guess_folder_metadata() {
+        let mut scopes = ArchiveScopes { folders: Default::default(), deadline: std::time::Instant::now() - Duration::from_secs(1), incomplete: false };
+        let mut hit = json!({"session":{"cwd":"/srv/example/app"}});
+        scopes.enrich(&mut hit);
+        assert!(scopes.incomplete);
+        assert!(hit["session"].get("cwd_canonical").is_none());
+        assert!(hit["session"].get("git_root").is_none());
+    }
 
     fn record(path: &Path) -> Value {
         json!({"version":1,"name":"codex/docs","agent":"codex","run_id":"run",

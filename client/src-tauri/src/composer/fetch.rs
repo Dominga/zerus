@@ -2,8 +2,8 @@
 //! `AttachmentLoader`, `AttachmentViewer.h:162-243`): one read per file
 //! however many views ask, at most three reads at once with an Open ahead of
 //! thumbnails, and the last files read answered from their copies while the
-//! copies last. Bytes never cross the IPC: a view shows a copy through the
-//! `zerus-file` scheme by the path a read answers.
+//! copies last. Thumbnails show a copy through `zerus-file`; playback reads
+//! a bounded raw IPC copy because WebKit's media backend refuses that scheme.
 //!
 //! Opening follows Qt's `ExternalFile`: an Activity attachment is another
 //! machine's file (marked as downloaded, `AttachmentLoader::open`), a
@@ -282,7 +282,7 @@ impl Fetcher {
     }
 
     /// The view's description of a copy the read stored.
-    fn described(&self, cached: CachedAttachment) -> Answer {
+    pub(crate) fn described(&self, cached: CachedAttachment) -> Answer {
         let path = attachments::cached_at(self.cache.root(), &cached.local_path)
             .ok_or_else(|| "Could not save the attachment.".to_owned())?;
         let relative = path
@@ -339,7 +339,7 @@ impl Fetcher {
 /// Opens or reveals a copy and says what happened. The path loses
 /// Windows's `\\?\` prefix first, which canonical paths carry and which
 /// neither a notice nor an opener should see.
-fn opened(
+pub(crate) fn opened(
     path: &Path,
     origin: Origin,
     opener: &Opener,
@@ -468,6 +468,27 @@ pub async fn attachment_fetch(
     // Awaited, not waited for: a queued read holds no thread.
     let fetcher = Arc::clone(fetcher.inner());
     fetcher.fetch(&computer, file, false).await
+}
+
+/// Read a recording through the same receipt-bound, bounded attachment
+/// queue. The browser receives raw bytes, never a local or remote file path.
+#[tauri::command]
+pub async fn attachment_media(
+    fetcher: tauri::State<'_, Arc<Fetcher>>,
+    computer: String,
+    file: AttachmentRef,
+    video: bool,
+) -> Result<tauri::ipc::Response, String> {
+    let fetcher = Arc::clone(fetcher.inner());
+    let fetched = fetcher.fetch(&computer, file, true).await?;
+    let cache = Arc::clone(fetcher.cache());
+    tauri::async_runtime::spawn_blocking(move || {
+        cache
+            .recording(&fetched.path, video)
+            .map(tauri::ipc::Response::new)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 /// A view shows the copy at `path` (`cache/{digest}/{name}`).

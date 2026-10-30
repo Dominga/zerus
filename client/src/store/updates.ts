@@ -11,6 +11,7 @@ export interface UpdatesPort {
   open(target: "release" | "download" | "instructions"): Promise<void>;
   copyCommand(): Promise<void>;
   restart(): Promise<void>;
+  fixLoginItem(restart: boolean): Promise<string | null>;
 }
 
 const native: UpdatesPort = {
@@ -22,6 +23,7 @@ const native: UpdatesPort = {
   open: bridge.updatesOpen,
   copyCommand: bridge.updatesCopyCommand,
   restart: bridge.updatesRestart,
+  fixLoginItem: bridge.updatesFixLoginItem,
 };
 
 export function createUpdates(port: UpdatesPort) {
@@ -73,6 +75,7 @@ export function createUpdates(port: UpdatesPort) {
     open: (target: "release" | "download" | "instructions") => port.open(target),
     copyCommand: () => port.copyCommand(),
     restart: () => port.restart(),
+    fixLoginItem: (restart: boolean) => port.fixLoginItem(restart),
   };
 }
 
@@ -88,4 +91,5 @@ export const updateCommands = {
   open: store.open,
   copyCommand: store.copyCommand,
   restart: store.restart,
+  fixLoginItem: store.fixLoginItem,
 };

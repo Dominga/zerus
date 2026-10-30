@@ -7,14 +7,13 @@
 
 use serde_json::{json, Value};
 use std::path::Path;
-use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::Duration;
-use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
+use tauri::{AppHandle, Emitter, State};
 use zerus_client_core::settings::{QtStore, Settings};
 
 /// The identity that replaces Qt at the switch: only it seeds from Qt's
 /// store, once. The dev identity never does.
-pub const SWITCH_IDENTITY: &str = "com.hgdev.hgs-tray";
+pub const SWITCH_IDENTITY: &str = crate::identity::SWITCH_ID;
 
 /// How long quitting waits for the last change to reach the disk.
 pub const EXIT_FLUSH: Duration = Duration::from_millis(750);
@@ -23,10 +22,19 @@ pub const EXIT_FLUSH: Duration = Duration::from_millis(750);
 pub struct Store(pub Settings);
 
 /// Qt's store to seed from, for this app identity.
-pub fn seed_source(identifier: &str) -> Option<QtStore> {
-    (identifier == SWITCH_IDENTITY)
+pub fn seed_source(identifier: &str, replay: bool) -> Option<QtStore> {
+    crate::identity::Identity::new(identifier)
+        .seeds_qt(replay)
         .then(QtStore::here)
         .flatten()
+}
+
+pub fn file(replay: bool) -> &'static str {
+    if replay {
+        "settings-replay.json"
+    } else {
+        "settings.json"
+    }
 }
 
 /// Settings > Appearance > Keep Zerus above other windows (WindowLayer.cpp).
@@ -35,103 +43,25 @@ pub const ALWAYS_ON_TOP: &str = "workspace/alwaysOnTop";
 /// Opens the store in `dir`; every change is announced as
 /// `settings-changed` with its key and new value, and Keep Zerus above other
 /// windows applies to the main window at once.
-pub fn open(app: &AppHandle, dir: &Path) -> Store {
+pub fn open(app: &AppHandle, dir: &Path, replay: bool) -> Store {
     let settings = Settings::open(
-        dir.join("settings.json"),
-        seed_source(&{
-            use tauri::Manager;
-            app.state::<crate::identity::Identity>().bundle_id.clone()
-        }),
+        dir.join(file(replay)),
+        seed_source(
+            &{
+                use tauri::Manager;
+                app.state::<crate::identity::Identity>().bundle_id.clone()
+            },
+            replay,
+        ),
     );
     let handle = app.clone();
     settings.subscribe(Box::new(move |key, value, revision| {
-        if key == ALWAYS_ON_TOP {
-            apply_newer_layer(revision, || {
-                if let Some(window) = handle.get_webview_window(crate::MAIN_WINDOW) {
-                    apply_window_layer(&window, value.as_bool().unwrap_or(false));
-                }
-            });
-        }
         let _ = handle.emit(
             "settings-changed",
             json!({ "key": key, "value": value, "revision": revision }),
         );
     }));
     Store(settings)
-}
-
-/// Whether this session can keep the window above others, decided once.
-static KEEP_ABOVE: OnceLock<bool> = OnceLock::new();
-/// The store revision of the last Keep above applied (0: none yet). Listeners
-/// run after the store's lock is released, so changes can arrive out of
-/// order: only a newer one applies. Held across the apply, so an older
-/// change cannot follow it; off the main thread, `set_always_on_top` only
-/// posts to the event loop.
-static LAYER: Mutex<u64> = Mutex::new(0);
-
-/// Runs `apply` for the change at `revision` when it is newer than the last
-/// one applied.
-fn apply_newer_layer(revision: u64, apply: impl FnOnce()) {
-    let mut last = LAYER.lock().unwrap_or_else(PoisonError::into_inner);
-    if revision > *last {
-        *last = revision;
-        apply();
-    }
-}
-
-/// Whether a window on `display` can be kept above others. GTK has no
-/// keep-above on Wayland, where Qt needs KWin scripting (WindowLayer.cpp);
-/// X11, macOS and Windows keep it.
-pub fn supports_keep_above(display: Option<&str>) -> bool {
-    !(cfg!(target_os = "linux") && display.is_some_and(|name| name.starts_with("wayland")))
-}
-
-/// Records, from the display GTK opened (display::display_name), whether
-/// Keep Zerus above other windows can work.
-pub fn init_window_layer(display: Option<&str>) {
-    let _ = KEEP_ABOVE.set(supports_keep_above(display));
-}
-
-pub fn keep_above_supported() -> bool {
-    KEEP_ABOVE.get().copied().unwrap_or(true)
-}
-
-/// Keeps `window` above other windows, or not, where the platform can.
-pub fn apply_window_layer(window: &WebviewWindow, on_top: bool) {
-    if !keep_above_supported() {
-        return;
-    }
-    if let Err(error) = window.set_always_on_top(on_top) {
-        eprintln!("zerus-client: Keep Zerus above other windows: {error}");
-    }
-}
-
-/// Applies the stored Keep Zerus above other windows once the store has
-/// loaded (on the switch identity's first start, after the Qt seed), on a
-/// thread of its own: setup never waits for the store.
-pub fn apply_stored_window_layer(store: &Store, window: WebviewWindow) {
-    let settings = store.0.clone();
-    let started = std::thread::Builder::new()
-        .name("window-layer".into())
-        .spawn(move || {
-            // Waits for the load without the lock; a change applied since
-            // then is newer than the stored value, and one arriving now
-            // waits until this apply is done.
-            let on = settings.flag(ALWAYS_ON_TOP);
-            let applied = LAYER.lock().unwrap_or_else(PoisonError::into_inner);
-            if *applied == 0 {
-                apply_window_layer(&window, on);
-            }
-        });
-    if let Err(error) = started {
-        eprintln!("zerus-client: Keep Zerus above other windows: {error}");
-    }
-}
-
-/// Whether Keep Zerus above other windows can work in this session.
-#[tauri::command]
-pub fn window_layer_supported() -> bool {
-    keep_above_supported()
 }
 
 /// `hgs --version` on this computer, for Settings > About
@@ -198,11 +128,17 @@ pub async fn settings_get(store: State<'_, Store>) -> Result<Value, String> {
 /// revision after the change.
 #[tauri::command]
 pub async fn settings_set(
+    app: AppHandle,
     store: State<'_, Store>,
     key: String,
     value: Value,
 ) -> Result<Value, String> {
-    let (value, revision) = store.0.set_tracked(&key, value)?;
+    let (value, revision) = if key == ALWAYS_ON_TOP {
+        let on = value.as_bool().ok_or("Keep Above requires a boolean.")?;
+        crate::window_layer::request(&app, on).await?
+    } else {
+        store.0.set_tracked(&key, value)?
+    };
     Ok(json!({ "value": value, "revision": revision }))
 }
 
@@ -211,21 +147,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn keep_above_is_unavailable_only_on_a_wayland_display() {
-        assert!(supports_keep_above(Some(":0")));
-        assert!(supports_keep_above(None));
-        assert_eq!(
-            supports_keep_above(Some("wayland-0")),
-            !cfg!(target_os = "linux")
-        );
+    fn only_the_switch_identity_seeds_from_qt() {
+        assert!(seed_source("dev.zerus.next", false).is_none());
+        assert!(seed_source("dev.zerus.next.phase2", false).is_none());
+        assert!(seed_source(SWITCH_IDENTITY, true).is_none());
+        if std::env::var_os("HOME").is_some() || std::env::var_os("APPDATA").is_some() {
+            assert!(seed_source(SWITCH_IDENTITY, false).is_some());
+        }
     }
 
     #[test]
-    fn only_the_switch_identity_seeds_from_qt() {
-        assert!(seed_source("dev.zerus.next").is_none());
-        assert!(seed_source("dev.zerus.next.phase2").is_none());
-        if std::env::var_os("HOME").is_some() || std::env::var_os("APPDATA").is_some() {
-            assert!(seed_source(SWITCH_IDENTITY).is_some());
-        }
+    fn replay_settings_use_their_own_store() {
+        assert_eq!(file(false), "settings.json");
+        assert_eq!(file(true), "settings-replay.json");
     }
 }

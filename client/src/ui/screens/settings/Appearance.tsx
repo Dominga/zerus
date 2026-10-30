@@ -1,6 +1,5 @@
-import { For, Show, createMemo, createResource, createSignal, onCleanup } from "solid-js";
-import { invoke } from "@tauri-apps/api/core";
-import { inTauri } from "../../../bridge";
+import { For, Show, createMemo, createSignal, onCleanup } from "solid-js";
+import { windowLayer, setWindowLayer } from "../../../store/windowLayer";
 import { Icon } from "../../lib/icons";
 import { setContentScale, toast } from "../../../store/ui";
 import { previewColumn } from "../../sessions/Activity";
@@ -13,10 +12,6 @@ import { Group, Row, SectionHead, Select, Slider, Check } from "./ui";
 // ContentScale.h, ActivityWidth.h, WindowLayer.cpp), with the client's skins
 // and Overview width from the approved mockup
 // (design/webui/src/screens/settings/Appearance.tsx).
-
-/** Whether the window can be kept above others here (src-tauri settings.rs). */
-const [layerSupported] = createResource(() =>
-  inTauri() ? invoke<boolean>("window_layer_supported").catch(() => false) : Promise.resolve(false));
 
 /** A token of a skin, following {group.token} references. */
 export function tok(s: ResolvedSkin, group: string, key: string, depth = 0): string {
@@ -197,11 +192,9 @@ export function AppearanceSection() {
             <Check label="Full-width Overview" checked={flag("client/overviewFullWidth")} onChange={(v) => void setSetting("client/overviewFullWidth", v)} />
           </div>
         </Row>
-        <Row label="Window" hint={layerSupported.loading ? undefined : layerSupported()
-          ? "Files and terminals opened from Zerus may appear behind it while this is on."
-          : "Keep Above is unavailable in this Zerus session. On Wayland, KDE Plasma 6 with KWin scripting is required. You can use your desktop's window menu or rules."}>
-          <Check label="Keep Zerus above other windows" checked={flag("workspace/alwaysOnTop")} disabled={layerSupported.loading || !layerSupported()}
-            onChange={(v) => void setSetting("workspace/alwaysOnTop", v)} />
+        <Row label="Window" hint={windowLayer().hint}>
+          <Check label="Keep Zerus above other windows" checked={windowLayer().on} disabled={!windowLayer().supported}
+            onChange={(v) => void setWindowLayer(v)} />
         </Row>
       </Group>
       <p class="set-foot">Appearance and session list preferences apply to this Zerus.</p>

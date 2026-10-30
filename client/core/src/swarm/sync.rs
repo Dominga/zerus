@@ -19,11 +19,10 @@
 //! first state, and the draft then goes out from its saved base and versions
 //! (SwarmController.cpp:76-89, 191-206).
 //!
-//! One rule differs from Qt on purpose. Qt initializes an empty local catalog
-//! with its own cache (81-88). This client has none, and an initialize from it
-//! would mark the catalog imported and skip the Qt GUI's one-time import
-//! (src/swarm/mod.rs:212-215): edits wait until the catalog reports
-//! `initialized`.
+//! Edits wait until the catalog reports `initialized`. Production-switch
+//! recovery separately reads Qt's retained organization and calls the existing
+//! missing-field initializer (`super::qt_import`); it never treats pending
+//! edits or an observed cache as an initialization source.
 //!
 //! Edits are refused while the controller is not ready, renames included: a
 //! rename the list saw before the first state stays with the hub, which hands
@@ -328,6 +327,7 @@ impl Controller {
             status_error,
             conflicts: self.conflicts,
             notice: None,
+            layout_save_paused: false,
         }
     }
 

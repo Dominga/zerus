@@ -1,5 +1,5 @@
 import { createSignal } from "solid-js";
-import { accountsView } from "../bridge";
+import { accountsView, accountFiltersView } from "../bridge";
 import { emptyAccounts, type AccountsView } from "../types";
 import { latest } from "./latest";
 
@@ -9,6 +9,7 @@ import { latest } from "./latest";
 export const [accountsPage, setAccountsPage] = createSignal<AccountsView>(emptyAccounts());
 const pull = latest(setAccountsPage);
 export const loadAccounts = (force = false) => pull(() => accountsView(force));
+export const loadAccountFilters = (force = false) => pull(() => accountFiltersView(force));
 /** The machine the Accounts list shows: a computer id, or "*" for all machines. */
 export const [accountMachine, setAccountMachine] = createSignal("*");
 /** The profile key an Overview card asks Accounts to select. */

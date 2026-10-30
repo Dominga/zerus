@@ -1,0 +1,54 @@
+{
+  "fixture": "synthetic Activity in the built Tauri app, private D-Bus/Xvfb/HOME/XDG/TMPDIR",
+  "capture": "90 screenshots per scenario plus rAF geometry and MutationObserver",
+  "scenarios": {
+    "Cached": {
+      "frames": 111,
+      "screenshots": 90,
+      "states": [
+        "existing loading state",
+        "content at end"
+      ],
+      "painted_frames_off_end": 0,
+      "row_mount_batches": 1
+    },
+    "Uncached": {
+      "frames": 107,
+      "screenshots": 90,
+      "states": [
+        "existing loading state",
+        "content at end"
+      ],
+      "painted_frames_off_end": 0,
+      "row_mount_batches": 1
+    },
+    "Send": {
+      "frames": 108,
+      "screenshots": 90,
+      "display_key": "item-local-synthetic-request",
+      "heights": [
+        137.78125
+      ],
+      "widths": [
+        900
+      ],
+      "row_removals": 0,
+      "row_replacements": 0,
+      "receipt_removed_before_journal": false
+    },
+    "Attachment": {
+      "frames": 113,
+      "screenshots": 90,
+      "display_key": "item-local-synthetic-file",
+      "heights": [
+        211.28125
+      ],
+      "widths": [
+        900
+      ],
+      "row_removals": 0,
+      "row_replacements": 0,
+      "receipt_removed_before_journal": true
+    }
+  }
+}

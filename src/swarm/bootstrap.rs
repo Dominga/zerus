@@ -102,6 +102,93 @@ pub(super) fn initialize(store: &mut LockedStore, organization: &Value) -> Resul
     initialize_at(store, organization, || Ok(()))
 }
 
+/// The opt-in envelope cannot be mistaken for legacy organization input:
+/// old CLIs see no top-level projects and refuse an uninitialized import.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct G3Import {
+    version: u32,
+    expected_node_id: String,
+    source_sha256: Option<String>,
+    organization: Value,
+}
+
+impl G3Import {
+    pub(super) fn parse(value: Value) -> Result<Self> {
+        let request: Self = serde_json::from_value(value).context("invalid G3 project import")?;
+        ensure!(
+            request.version == 1
+                && super::catalog::uuid(&request.expected_node_id)
+                && uuid::Uuid::parse_str(&request.expected_node_id)?.to_string()
+                    == request.expected_node_id,
+            "unsupported G3 project import identity"
+        );
+        ensure!(
+            request
+                .source_sha256
+                .as_ref()
+                .is_none_or(|hash| hash.len() == 64
+                    && hash
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+                && request.organization["projects"].is_array(),
+            "unsupported G3 project import source"
+        );
+        Ok(request)
+    }
+
+    pub(super) fn initialize(&self, store: &mut LockedStore) -> Result<()> {
+        ensure!(
+            store.data.node_id == self.expected_node_id,
+            "project catalog node changed; nothing imported"
+        );
+        if let Some(pending) = marker(store.path.parent().expect("catalog directory"))? {
+            ensure!(
+                pending.node_id == self.expected_node_id,
+                "pending GUI import belongs to another node"
+            );
+        }
+        initialize(store, &self.organization)
+    }
+
+    pub(super) fn receipt(&self) -> Value {
+        serde_json::json!({"version":1,"source_sha256":self.source_sha256})
+    }
+}
+
+/// Read-only reconciliation: imported=true alone is insufficient while an
+/// earlier CLI bootstrap still has a pending GUI import. Never saves a store
+/// or supervises the swarm worker.
+pub(super) fn g3_status(config: &Config, request: Value) -> Result<Value> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Request {
+        version: u32,
+        expected_node_id: String,
+    }
+    let request: Request = serde_json::from_value(request)?;
+    ensure!(
+        request.version == 1 && super::catalog::uuid(&request.expected_node_id),
+        "unsupported project import status"
+    );
+    let snapshot = store::read_snapshot(config)?;
+    ensure!(
+        snapshot["node_id"].as_str() == Some(request.expected_node_id.as_str()),
+        "project catalog node changed"
+    );
+    let pending = marker(&config.dir.join("swarm"))?;
+    ensure!(
+        pending
+            .as_ref()
+            .is_none_or(|p| p.node_id == request.expected_node_id),
+        "pending GUI import belongs to another node"
+    );
+    Ok(
+        serde_json::json!({"version":1,"node_id":request.expected_node_id,
+        "initialized":snapshot["initialized"],"gui_import_pending":pending.is_some()}),
+    )
+}
+
 /// A missing-field import preserves all causal heads, including tombstones.
 /// `after_save` models a crash before removing the marker: retrying imports
 /// only fields still absent. Catalog durability always precedes marker removal.
@@ -238,6 +325,129 @@ mod tests {
 
     fn gui() -> Value {
         json!({"projects":[{"id":"imported-project","name":"Later GUI import","color":"#123456","sessions":[],"folders":[]}]})
+    }
+
+    #[test]
+    fn g3_status_is_read_only_and_distinguishes_a_bootstrap_from_a_finished_gui_import() {
+        let root = tempfile::tempdir().unwrap();
+        let config = test_config(root.path());
+        let node = {
+            let mut store = LockedStore::load(&config).unwrap();
+            store.save().unwrap();
+            store.data.node_id.clone()
+        };
+        let path = config.dir.join("swarm/catalog.json");
+        let before = std::fs::read(&path).unwrap();
+        let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let request = json!({"version":1,"expected_node_id":node});
+        let status = g3_status(&config, request.clone()).unwrap();
+        assert_eq!(status["initialized"], false);
+        assert_eq!(status["gui_import_pending"], false);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), mtime);
+        assert!(!config.state.exists());
+        {
+            let mut store = LockedStore::load(&config).unwrap();
+            maybe_with(&mut store, || true).unwrap();
+        }
+        let status = g3_status(&config, request.clone()).unwrap();
+        assert_eq!(status["initialized"], true);
+        assert_eq!(status["gui_import_pending"], true);
+        {
+            let mut store = LockedStore::load(&config).unwrap();
+            G3Import::parse(json!({"version":1,"expected_node_id":node,"source_sha256":"a".repeat(64),"organization":gui()}))
+                .unwrap().initialize(&mut store).unwrap();
+        }
+        assert_eq!(
+            g3_status(&config, request).unwrap()["gui_import_pending"],
+            false
+        );
+    }
+
+    #[test]
+    fn g3_import_preserves_received_values_tombstones_and_the_existing_catalog_format() {
+        use super::super::catalog::Key;
+        let root = tempfile::tempdir().unwrap();
+        let config = test_config(root.path());
+        let mut store = LockedStore::load(&config).unwrap();
+        let node = store.data.node_id.clone();
+        store
+            .data
+            .catalog
+            .set(
+                &node,
+                Key::project("imported-project", "name"),
+                json!("Next name"),
+            )
+            .unwrap();
+        store
+            .data
+            .catalog
+            .set(
+                &node,
+                Key::project("imported-project", "alive"),
+                json!(false),
+            )
+            .unwrap();
+        store.save().unwrap();
+        let before = store.data.catalog.operations.clone();
+        let request = G3Import::parse(json!({"version":1,"expected_node_id":node,
+            "source_sha256":"a".repeat(64),"organization":gui()}))
+        .unwrap();
+        request.initialize(&mut store).unwrap();
+        assert!(store.data.imported);
+        for (id, operation) in before {
+            assert_eq!(store.data.catalog.operations[&id], operation);
+        }
+        let values = store.data.catalog.values();
+        assert_eq!(
+            values[&Key::project("imported-project", "name")],
+            "Next name"
+        );
+        assert_eq!(values[&Key::project("imported-project", "alive")], false);
+        assert_eq!(
+            values[&Key::project("imported-project", "color")],
+            "#123456"
+        );
+        let saved = std::fs::read(&store.path).unwrap();
+        request.initialize(&mut store).unwrap();
+        assert_eq!(
+            std::fs::read(&store.path).unwrap(),
+            saved,
+            "never re-seed handled fields"
+        );
+        let saved: Value = serde_json::from_slice(&saved).unwrap();
+        assert!(
+            saved.get("g3").is_none(),
+            "no fields added to the legacy closed Store schema"
+        );
+    }
+
+    #[test]
+    fn a_foreign_node_or_unknown_g3_envelope_never_changes_the_catalog() {
+        let root = tempfile::tempdir().unwrap();
+        let config = test_config(root.path());
+        let mut store = LockedStore::load(&config).unwrap();
+        store.save().unwrap();
+        let before = std::fs::read(&store.path).unwrap();
+        let base = json!({"version":1,"expected_node_id":super::super::catalog::new_id(),"source_sha256":null,"organization":gui()});
+        assert!(G3Import::parse(base.clone())
+            .unwrap()
+            .initialize(&mut store)
+            .is_err());
+        for field in [
+            "version",
+            "expected_node_id",
+            "source_sha256",
+            "organization",
+            "unknown",
+        ] {
+            let mut bad = base.clone();
+            bad[field] = json!(99);
+            assert!(G3Import::parse(bad).is_err(), "{field}");
+        }
+        assert_eq!(std::fs::read(&store.path).unwrap(), before);
+        assert!(!store.data.imported);
     }
 
     #[test]

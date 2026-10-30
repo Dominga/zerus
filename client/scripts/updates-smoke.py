@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture the Updates screen in WebKitGTK from bounded replay views, without network."""
+"""Capture Updates and the Sessions status bar from bounded replay views, without network."""
 import argparse
 import copy
 import json
@@ -11,7 +11,7 @@ import subprocess
 
 
 CLIENT = Path(__file__).resolve().parent.parent
-STATES = ("unchecked", "available", "cached-error", "restart-required")
+STATES = ("unchecked", "available", "cached-error", "restart-required", "statusbar")
 THEMES = ("dark", "light")
 
 BASE = {
@@ -36,6 +36,7 @@ BASE = {
         "instructions": "Review the installation instructions before updating.",
     },
     "restart_required": False,
+    "login_item_deprioritized": False,
     "version": "",
     "quiet": False,
 }
@@ -45,7 +46,7 @@ def view(state):
     result = copy.deepcopy(BASE)
     if state == "checking":
         result.update(busy=True, heading="Checking for updates…", comparison="A previous comparison")
-    elif state in ("available", "cached-error", "restart-required"):
+    elif state in ("available", "cached-error", "restart-required", "statusbar"):
         result.update(
             available=True,
             heading="Update available",
@@ -58,8 +59,10 @@ def view(state):
         )
         if state == "cached-error":
             result.update(cached=True, error="Check failed. Try again later.")
-        elif state == "restart-required":
+        elif state in ("restart-required", "statusbar"):
             result["restart_required"] = True
+        if state == "statusbar":
+            result["login_item_deprioritized"] = True
     elif state != "unchecked":
         raise ValueError(f"unknown update replay state: {state}")
     return result
@@ -67,13 +70,15 @@ def view(state):
 
 def run_case(app, replay, scratch, state, theme):
     case = scratch / f"{state}-{theme}"
-    for name in ("home", "data", "cache"):
+    for name in ("home", "data", "cache", "tmp", "runtime"):
         (case / name).mkdir(parents=True)
+    (case / "runtime").chmod(0o700)
     fixture = case / "view.json"
     fixture.write_text(json.dumps(view(state), separators=(",", ":")), encoding="utf-8")
     image = scratch / f"{state}-{theme}.png"
     log = case / "app.log"
-    query = f"page=settings&section=updates&skin=zerus-{theme}&updates-smoke={state}"
+    page = "sessions" if state == "statusbar" else "settings"
+    query = f"page={page}&section=updates&skin=zerus-{theme}&updates-smoke={state}"
     script = case / "run.sh"
     script.write_text(f"""set -eu
 {shlex.quote(str(app))} 2> {shlex.quote(str(log))} &
@@ -108,6 +113,8 @@ trap - EXIT
         HOME=str(case / "home"),
         XDG_DATA_HOME=str(case / "data"),
         XDG_CACHE_HOME=str(case / "cache"),
+        TMPDIR=str(case / "tmp"),
+        XDG_RUNTIME_DIR=str(case / "runtime"),
         WAYLAND_DISPLAY="zerus-none",
         GDK_BACKEND="x11",
         WEBKIT_DISABLE_DMABUF_RENDERER="1",
@@ -144,7 +151,7 @@ def main():
     for state in STATES:
         for theme in THEMES:
             run_case(app, replay, scratch, state, theme)
-    print(f"eight offline WebKitGTK screenshots are in {scratch}")
+    print(f"ten offline WebKitGTK screenshots are in {scratch}")
     return 0
 
 

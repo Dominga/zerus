@@ -72,6 +72,7 @@ mod schedules;
 mod waits;
 pub(crate) mod watch_source;
 mod search;
+pub(crate) mod search_index;
 pub(crate) mod session_graph;
 mod storage;
 mod subagents;

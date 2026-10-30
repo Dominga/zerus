@@ -2048,6 +2048,21 @@ inline void retire(QObject *object)
     object->deleteLater();
 }
 
+// #737: a dialog is a window: it takes neither its view's palette nor its
+// theme, but the system's palette, under the window's style sheet. A team
+// dialog names its surface and its text in the theme itself.
+inline QString dialogSheet(const Colors &c)
+{
+    return QStringLiteral("QDialog{background:%1;color:%2;} QLabel{background:transparent;} QCheckBox,QRadioButton{color:%2;}")
+        .arg(c.bg.name(), c.fg.name());
+}
+// The theme a dialog opened over `parent` draws: its window's, which the
+// window sets from the workspace theme; without a parent, its own palette's.
+inline bool dialogDark(const QWidget *dialog, const QWidget *parent)
+{
+    return (parent ? parent->window() : dialog)->palette().color(QPalette::Window).lightness() < 128;
+}
+
 inline QLabel *label(const QString &text, const QColor &color, int pixels = 12, bool bold = false, const char *name = nullptr)
 {
     auto *l = new QLabel(text);

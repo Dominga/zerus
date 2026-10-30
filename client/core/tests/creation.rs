@@ -773,6 +773,18 @@ fn a_damaged_journal_keeps_requests_and_sends_nothing() {
 }
 
 #[test]
+fn an_invalid_later_entry_does_not_partially_load_earlier_creations() {
+    let mut driver = Driver::new();
+    let effects = driver.creations.load(journal(
+        json!({id(7):saved("launching"), "z-invalid":saved("unknown")}),
+    ));
+    driver.take(effects);
+    assert_eq!(driver.creations.storage_error(), INVALID_IDENTITY);
+    assert!(driver.creations.operations().is_empty());
+    assert!(driver.writes.is_empty() && driver.calls.is_empty() && driver.launches.is_empty());
+}
+
+#[test]
 fn stop_keeps_retained_files_and_reads_what_is_unconfirmed() {
     // Nothing under way: stopped at once.
     let mut driver = Driver::loaded();
@@ -1188,4 +1200,23 @@ mod calls {
             .starts_with(zerus_client_core::worktrees::GUARDED_UNSUPPORTED));
         assert_eq!(older.log(), [vec!["--help"]]);
     }
+}
+
+#[test]
+fn task_creation_keeps_its_reserved_launch_id_and_refuses_duplicate_admission() {
+    let mut driver = Driver::loaded();
+    let reserved = id(99);
+    let (result, effects) = driver
+        .creations
+        .submit_reserved(plan(&choices()), &reserved);
+    assert_eq!(result, Ok(reserved.clone()));
+    driver.take(effects);
+    assert_eq!(driver.op(&reserved)["launch_id"], reserved);
+    assert!(driver.calls.is_empty() && driver.launches.is_empty());
+    let before = driver.writes.len();
+    let (result, effects) = driver
+        .creations
+        .submit_reserved(plan(&choices()), &reserved);
+    assert!(result.is_err() && effects.is_empty());
+    assert_eq!(driver.writes.len(), before);
 }

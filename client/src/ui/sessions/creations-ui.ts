@@ -3,6 +3,7 @@ import { headerAttention, isWorking } from "../../store/attention";
 import type { CreationCard, GroupingOut, HeaderOut } from "../../types";
 import type { ListInput, Row } from "./model";
 import type { Session } from "./types";
+import { acceptsAccount, sameFolderForCreation, type FolderScope } from "./scope-filters";
 
 // The creation cards' view rules, which Qt keeps in its Sessions window
 // (SessionsWindow.cpp 463-480, 3729-3756; SessionsWindowRows.cpp 259-341,
@@ -151,13 +152,15 @@ export function noticeOf(c: CreationCard): { key: string; text: string } | undef
 
 /** What the list's filters and organization are (model.ts `listRows`). */
 export interface ListScope extends ListInput {
+  accounts?: readonly string[];
+  folder?: FolderScope;
   filter: StateFilter;
   /** The machine filter's names. */
   hosts: readonly string[];
   /** The search, trimmed. */
   query: string;
 }
-export type CardScope = Pick<ListScope, "grouping" | "filter" | "hosts" | "query" | "projects">;
+export type CardScope = Pick<ListScope, "grouping" | "filter" | "hosts" | "query" | "projects" | "accounts" | "folder">;
 
 export interface Placement {
   /** Every unbound card. */
@@ -186,12 +189,14 @@ export function shownCards(scope: CardScope, state: Pick<Placement, "cards" | "r
   const revealedGroup = revealed?.show_pending ? projectOf(revealed, scope.grouping) : undefined;
   const allowed = (project: string) => !scope.projects.length || scope.projects.includes(project) || project === state.adoptedGroup || project === revealedGroup;
   const needle = scope.query.toLowerCase();
+  const accounts = new Set(scope.accounts);
   const ordered = [...state.cards].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   for (const c of ordered) {
     if (!c.show_pending) continue;
     if (c.id !== state.revealed) {
       if (scope.filter !== "all" && scope.filter !== "active") continue;
       if (scope.hosts.length && !scope.hosts.includes(machineOf(c))) continue;
+      if (!acceptsAccount({ computer: c.host, cmd: c.cmd, accountId: c.account }, accounts) || !sameFolderForCreation(c, scope.folder)) continue;
       if (needle && !(state.details(c.id) ?? "").toLowerCase().includes(needle)) continue;
     }
     const project = projectOf(c, scope.grouping);

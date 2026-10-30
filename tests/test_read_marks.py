@@ -7,6 +7,7 @@ import re
 import sqlite3
 import subprocess
 import time
+import threading
 import unittest
 import uuid
 
@@ -438,6 +439,55 @@ os.execv('/bin/sh', ['sh', '-c', sys.argv[-1]])
         missing = self.read(remote=True, name='codex/missing-session', reply_id=reply)
         self.assertEqual(missing.returncode, 1)
         self.assertEqual(json.loads(missing.stdout), {'ok': False, 'error': 'not_found'})
+
+    def test_ordinary_local_and_peer_reads_close_both_output_pipes_after_exit(self):
+        # Actual hgs dispatch and remote argv. The isolated SSH shim execs the
+        # selected command; it neither starts nor emulates a persistent master.
+        self.script('ssh', """#!/usr/bin/env python3
+import json, os, pathlib, sys
+pathlib.Path(os.environ['INPUT_FIXTURE'], 'ssh-args').write_text(json.dumps(sys.argv[1:]))
+os.execv('/bin/sh', ['sh', '-c', sys.argv[-1]])
+""")
+        reply = self.reply(100.5)
+        payload = json.dumps(dict(run_id=self.run_id, conversation_id=self.conversation_id,
+                                  reply_id=reply, attention_signature=None)).encode()
+        for remote in (False, True):
+            with self.subTest(remote=remote):
+                process = subprocess.Popen([str(HGS), *(['@remote'] if remote else []),
+                    'read', self.name, '--json'], env=self.env, stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                output = [None, None]
+                eof = [threading.Event(), threading.Event()]
+                def reader(index, pipe):
+                    try:
+                        output[index] = pipe.read()
+                    finally:
+                        eof[index].set()
+                readers = [threading.Thread(target=reader, args=(i, pipe), daemon=True)
+                           for i, pipe in enumerate((process.stdout, process.stderr))]
+                for thread in readers:
+                    thread.start()
+                process.stdin.write(payload)
+                process.stdin.close()
+                try:
+                    self.assertEqual(process.wait(timeout=10), 0)
+                    deadline = time.monotonic() + 2
+                    for ended in eof:
+                        self.assertTrue(ended.wait(max(0, deadline - time.monotonic())),
+                                        'ordinary read retained an output pipe after owned exit')
+                    self.assertTrue(json.loads(output[0])['applied']['reply_id'])
+                    self.assertEqual(output[1], b'')
+                finally:
+                    if process.poll() is None:
+                        process.terminate()  # Only this test's owned helper.
+                        process.wait(timeout=5)
+                    for i, thread in enumerate(readers):
+                        thread.join(timeout=.1)
+                        if not thread.is_alive():
+                            (process.stdout, process.stderr)[i].close()
+                if remote:
+                    args = json.loads((self.root / 'ssh-args').read_text())
+                    self.assertFalse(any('ControlPersist' in arg for arg in args), args)
 
 
 if __name__ == '__main__':

@@ -121,7 +121,12 @@ ROOT=Path(__file__).parent
 class Fast(unittest.TestCase):
  def test_finish(self):time.sleep(.01);(ROOT/'fast.done').write_text('done')
 class Slow(unittest.TestCase):
- def test_finish(self):time.sleep(.3);(ROOT/'slow.done').write_text('done')
+ def test_finish(self):
+  # Unsequenced, finish only after a scope test has looked (bounded), so the
+  # negative control never depends on how fast the runner is.
+  deadline=time.monotonic()+30
+  while (ROOT/'unsequenced').is_file() and not (ROOT/'scope.checked').is_file() and time.monotonic()<deadline:time.sleep(.01)
+  time.sleep(.3);(ROOT/'slow.done').write_text('done')
 """ + ('# unrelated ordinary fixture metadata\n' * 30)
                 (tests/'test_ordinary.py').write_text(ordinary)
                 for name in driver.WORKTREE_MODULES:
@@ -130,9 +135,12 @@ from pathlib import Path
 class Scope(unittest.TestCase):
  def test_all_unrelated_jobs_finished(self):
   root=Path(__file__).parent
-  self.assertTrue((root/'fast.done').is_file())
-  self.assertTrue((root/'slow.done').is_file())
+  fast,slow=(root/'fast.done').is_file(),(root/'slow.done').is_file()
+  (root/'scope.checked').write_text('checked')
+  self.assertTrue(fast)
+  self.assertTrue(slow)
 """)
+                if unsequenced:(tests/'unsequenced').write_text('unsequenced')
                 partition=(lambda jobs:(list(jobs),[])) if unsequenced else driver.partition_jobs
                 with patch.multiple(driver, ROOT=root, TESTS=tests, RESULTS=results,
                         DURATIONS=results/'durations.json', SEED=root/'absent-seed.json', partition_jobs=partition), \

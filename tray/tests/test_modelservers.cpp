@@ -21,6 +21,7 @@
 #include "ModelServers.h"
 #include "ModelServersPage.h"
 #include "WorkspaceSkin.h"
+#include "DialogTheme.h"
 
 // WhiteWh fork, U60 (#656): the Model servers tab and Settings > Model servers
 // against a fake hgs that answers `hgs model-server ...` as docs/reference.md
@@ -36,6 +37,7 @@ private slots:
     void apiAddressCopiesAndNewSessionStartsTheChosenAgent();
     void settingsAddEditTestAndRemoveWithoutShowingTheKey();
     void emptyReadOnlyAndUnreachableStates();
+    void settingsAndDialogsDrawTheThemeNotTheSystem();
 private:
     QString script() const { return m_dir.filePath("hgs"); }
     QList<QJsonObject> calls(const QString &command) const;
@@ -669,4 +671,38 @@ void TestModelServers::emptyReadOnlyAndUnreachableStates()
 }
 
 QTEST_MAIN(TestModelServers)
+// #737: the tab's dialogs draw the theme the person chose on a system palette
+// of the other one (the settings are a page of the window's Settings: the
+// window's test checks them there).
+void TestModelServers::settingsAndDialogsDrawTheThemeNotTheSystem()
+{
+    const auto restore = qScopeGuard([] { lightPalette(false); });
+    setServers(fourServers()); setStatus(fourStatuses());
+    HgsClient client(FakeCli::program(script()));
+    ModelServers::Controller servers(&client);
+    servers.refreshList();
+    QTRY_VERIFY(servers.available());
+    for (const bool dark : {true, false}) {
+        const QString theme = dark ? QStringLiteral("dark") : QStringLiteral("light");
+        QApplication::setPalette(DialogTheme::system(!dark));
+        QString found;
+        ModelServersPage page(&servers);
+        page.setDark(dark);
+        page.resize(1440, 1000); page.show();
+        QTRY_VERIFY(modelRow(&page, "lab-gpu", "coder-a"));
+        bool answered = false;
+        answerDialog("modelServerDownDialog", [&](QDialog *dialog) {
+            QTest::qWait(150);
+            found = DialogTheme::problem(dialog, dark);
+            shot(dialog, "u737-modelServerDownDialog-" + theme);
+            answered = true;
+            dialog->findChild<QPushButton *>("modelServerDownCancel")->click();
+        });
+        modelRow(&page, "lab-gpu", "coder-a")->findChild<QPushButton *>("modelServerDown")->click();
+        QTRY_VERIFY(answered);
+        QTRY_VERIFY(!QApplication::activeModalWidget());
+        QVERIFY2(found.isEmpty(), qPrintable(theme + ": " + found));
+    }
+}
+
 #include "test_modelservers.moc"

@@ -59,6 +59,30 @@ pub(crate) fn canonical(path: &Path) -> PathBuf {
 }
 
 impl Cache {
+    /// Playback gets one bounded raw copy from an already fetched private
+    /// cache entry. No renderer-supplied filesystem path is opened.
+    pub fn recording(&self, path: &str, video: bool) -> Result<Vec<u8>, String> {
+        let read = self
+            .shown(path)
+            .and_then(|file| open_copy(&file))
+            .and_then(|(file, _)| read_copy(file, None));
+        let Some((mime, bytes)) = read else {
+            return Err("Recording is unavailable.".into());
+        };
+        let supported = if video {
+            mime == "video/mp4"
+        } else {
+            matches!(
+                mime.as_str(),
+                "audio/wav" | "audio/x-wav" | "audio/wave" | "audio/vnd.wave"
+            )
+        };
+        if !supported {
+            return Err("Recording is unavailable.".into());
+        }
+        Ok(bytes)
+    }
+
     pub fn new(root: PathBuf) -> Arc<Self> {
         Self::with_limit(root, attachments::CACHE_LIMIT)
     }
@@ -506,6 +530,56 @@ mod tests {
     use crate::composer::tests::{dir, hub, session, until, Scratch};
     use std::io::Write;
     use zerus_client_core::attachments::Selection;
+
+    #[test]
+    fn playback_reads_only_bounded_recordings_in_the_private_cache() {
+        let root = dir("recording-bytes");
+        let cache = Cache::new(root.join("cache"));
+        let pcm = [0, 0, 1, 0];
+        let wav = zerus_client_core::voice::wav(&pcm);
+        let file = attachments::store_at(cache.root(), "voice.wav", &wav).unwrap();
+        let path = format!(
+            "cache/{}",
+            file.strip_prefix(cache.root())
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/")
+        );
+        assert_eq!(cache.recording(&path, false).unwrap(), wav);
+        assert!(cache.recording(&path, true).is_err());
+        assert!(cache
+            .recording("cache/../../outside/voice.wav", false)
+            .is_err());
+        assert!(cache.recording(file.to_str().unwrap(), false).is_err());
+        std::fs::write(&file, b"<html>not a recording</html>").unwrap();
+        assert!(cache.recording(&path, false).is_err());
+        let large = File::create(&file).unwrap();
+        large
+            .set_len(attachments::MAX_ATTACHMENT_BYTES as u64 + 1)
+            .unwrap();
+        assert!(cache.recording(&path, false).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn playback_refuses_a_replaced_cache_file() {
+        let root = dir("recording-link");
+        let cache = Cache::new(root.join("cache"));
+        let wav = zerus_client_core::voice::wav(&[0, 0]);
+        let file = attachments::store_at(cache.root(), "voice.wav", &wav).unwrap();
+        let path = format!(
+            "cache/{}",
+            file.strip_prefix(cache.root())
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/")
+        );
+        let outside = root.join("outside.wav");
+        std::fs::write(&outside, wav).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        std::os::unix::fs::symlink(outside, file).unwrap();
+        assert!(cache.recording(&path, false).is_err());
+    }
 
     fn get(path: &str, range: Option<&str>) -> Request<Vec<u8>> {
         let mut request = Request::builder().uri(format!("zerus-file://localhost/{path}"));

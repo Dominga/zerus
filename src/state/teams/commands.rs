@@ -1498,6 +1498,10 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
                 proposal["note"] = json!(reason);
             }
             events.push(Event::new("proposal_decided", json!({"proposal":id,"accept":false,"reason":reason})));
+            if team.proposals.iter().any(|proposal| proposal["id"] == id && proposal["kind"] == "switch-plan-mode") {
+                // U59: a Deny's reason reaches the lead with the team's feed.
+                events.push(Event::new("plan_mode_denied", json!({"by":"You","proposal":id,"reason":reason})));
+            }
             Ok(Value::Null)
         })?;
         return Ok(json!({"status":"rejected","proposal":id}));
@@ -1578,6 +1582,18 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
             // N2: it runs as your own next goal, not as the caller re-derived.
             let value = json!({"team":team_id,"goal":goal,"request_id":operation_request,"by":"human"});
             next_goal_as(store, &operation_request, &value, &Actor::Human)?
+        }
+        "switch-plan-mode" => {
+            // U59: the desktop's dialog decides through this path; the switch
+            // applies only the mode the proposal names.
+            let mode = team.proposals[at]["mode"].as_str().unwrap_or_default().to_owned();
+            let asked = team.proposals[at]["reason"].clone();
+            store.mutate(None, &team_id, None, |team, events| {
+                team.plan_mode = if mode == "free" { super::model::PlanMode::Free } else { super::model::PlanMode::Standard };
+                events.push(Event::new("plan_mode_switched", json!({"by":"You","mode":mode,"proposal":id,"reason":asked})));
+                Ok(Value::Null)
+            })?;
+            json!({"status":"switched","plan_mode":mode})
         }
         other => bail!("Unknown proposal kind {other}"),
     };
@@ -7900,6 +7916,44 @@ mod tests {
         let team = store.load("t").unwrap().unwrap();
         assert_eq!(team.proposals[1]["note"], "not now");
         assert_eq!(team.task(1).unwrap().status, before, "a Deny runs nothing");
+    }
+
+    /// U59: the desktop's switch dialog decides through decide-proposal; its
+    /// Allow switches the plan mode once, and a Deny keeps it and tells the lead.
+    #[test]
+    fn the_switch_dialog_switches_the_plan_mode_through_decide_proposal() {
+        use super::super::model::PlanMode;
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut team = running_team();
+        let lead = Actor::Member("lead".into());
+        for reason in ["short requests", "a stream"] {
+            let input = json!({"kind":"switch-plan-mode","mode":"free","reason":reason});
+            ops::apply(&mut team, "propose", &input, &lead, &BTreeSet::new(), &mut Vec::new()).unwrap();
+        }
+        let first = team.proposals[0]["hash"].as_str().unwrap().to_owned();
+        let second = team.proposals[1]["hash"].as_str().unwrap().to_owned();
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+        let denied = decide_proposal_in(
+            &mut store,
+            &json!({"team":"t","proposal":"p1","accept":false,"reason":"not yet","expected_hash":first}),
+            &Actor::Human,
+        )
+        .unwrap();
+        assert_eq!(denied["status"], "rejected");
+        assert_eq!(store.load("t").unwrap().unwrap().plan_mode, PlanMode::Standard);
+        let feed = store.events("t", None, 50).unwrap().to_string();
+        assert!(feed.contains("plan_mode_denied") && feed.contains("not yet"), "{feed}");
+        let receipt = decide_proposal_in(
+            &mut store,
+            &json!({"team":"t","proposal":"p2","accept":true,"by":"human","expected_hash":second}),
+            &Actor::Human,
+        )
+        .unwrap();
+        assert_eq!(receipt["status"], "accepted", "{receipt}");
+        assert_eq!(receipt["result"]["plan_mode"], "free");
+        assert_eq!(store.load("t").unwrap().unwrap().plan_mode, PlanMode::Free);
+        assert!(store.events("t", None, 50).unwrap().to_string().contains("plan_mode_switched"));
     }
 
     /// U56: status shows each member's phase, activity and minutes without

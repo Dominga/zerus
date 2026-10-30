@@ -9,8 +9,15 @@ pub(super) fn root() -> PathBuf {
     if let Some(root) = TEST_ROOT.with(|root| root.borrow().clone()) {
         return root;
     }
-    nonempty_env("HGS_STATE_DIR")
-        .map(PathBuf::from)
+    // U62 (#720): a test never reaches the person's state folder: read marks
+    // tests once recorded their refused temporary files in the real
+    // private-stores.json, and the owner's tray reported them. A state folder a
+    // test set is below its temporary or build folder; any other (one the test
+    // process inherited) is replaced by the test's own.
+    let configured = nonempty_env("HGS_STATE_DIR").map(PathBuf::from);
+    #[cfg(test)]
+    let configured = configured.filter(|dir| test_owned(dir)).or_else(|| Some(test_default_root()));
+    configured
         .unwrap_or_else(|| {
             nonempty_env("XDG_STATE_HOME")
                 .map(PathBuf::from)
@@ -25,6 +32,50 @@ thread_local! {
     /// point: the store, the worker lock and the records all live here, and
     /// nothing outside the test sees it.
     static TEST_ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The state folder of a test that sets none: one per test process beside the
+/// test binary (target/<profile>/deps), never the person's profile or %TEMP%.
+#[cfg(test)]
+pub(super) fn test_default_root() -> PathBuf {
+    static ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    ROOT.get_or_init(|| {
+        let base = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(Path::to_path_buf))
+            .unwrap_or_else(std::env::temp_dir)
+            .join("hgs-test-state");
+        // Earlier processes' folders older than a day go; a live one is kept.
+        if let Ok(entries) = fs::read_dir(&base) {
+            for entry in entries.flatten().take(1000) {
+                let old = entry.metadata().and_then(|meta| meta.modified()).ok()
+                    .and_then(|at| at.elapsed().ok())
+                    .is_some_and(|age| age > std::time::Duration::from_secs(86_400));
+                if old {
+                    let _ = fs::remove_dir_all(entry.path());
+                }
+            }
+        }
+        base.join(std::process::id().to_string()).join("sessions")
+    })
+    .clone()
+}
+
+/// Whether `dir` is a test's own: below the temporary folder or the folder
+/// that holds the test binary's build (target/).
+#[cfg(test)]
+pub(super) fn test_owned(dir: &Path) -> bool {
+    let key = |path: &Path| path.display().to_string().replace('\\', "/").to_lowercase();
+    let dir = key(dir);
+    let mut roots = vec![std::env::temp_dir()];
+    if let Some(target) = std::env::current_exe().ok().and_then(|exe| exe.ancestors().nth(3).map(Path::to_path_buf)) {
+        roots.push(target);
+    }
+    roots.iter().any(|root| {
+        let root = key(root);
+        let root = root.trim_end_matches('/');
+        !root.is_empty() && dir.starts_with(root) && dir[root.len()..].starts_with('/')
+    })
 }
 
 /// Sets (or clears) this thread's state directory; `state::with_test_state_root`

@@ -292,6 +292,9 @@ fn worker(id: &str) -> Result<i32> {
     done["status"] = json!("ran");
     done["exit"] = json!(outcome.exit);
     done["tail"] = json!(outcome.tail);
+    // #717: a nonzero exit names the failing tests and keeps a bounded excerpt.
+    done["failures"] = json!(outcome.failures);
+    done["excerpt"] = json!(outcome.excerpt);
     done["ms"] = json!(outcome.ms);
     done["timed_out"] = json!(outcome.timed_out);
     done["error"] = json!(outcome.error);

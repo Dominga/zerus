@@ -555,7 +555,8 @@ fn all_items(team: &Team) -> Vec<Item> {
         if !stalled && !silent {
             continue;
         }
-        let role = if run.member.is_empty() { "Zerus".to_owned() } else { team.name_of(&run.member) };
+        let member = if !run.member.is_empty() { &run.member } else { &run.stalled_member };
+        let role = if member.is_empty() { "Zerus".to_owned() } else { team.name_of(member) };
         if stalled {
             items.push(Item {
                 kind: "stage_stalled",

@@ -16,6 +16,8 @@
 #include <QStandardPaths>
 #include <QUuid>
 
+#include <windows.h>
+
 namespace {
 // QSettings creates the directory on its first write, and it is removed when the
 // program ends normally. A test child that is killed on purpose before it writes
@@ -41,8 +43,18 @@ void moveTemporaryFiles()
     qputenv("TMP", native);
 }
 
+// U62 (#720): a crashing test program, and every helper or child tray it
+// starts (they inherit the mode), shows no error box, so Windows Error
+// Reporting writes no dump into the person's %LOCALAPPDATA%\CrashDumps and
+// never rotates the owner's own dumps out. QtTest still prints the crash.
+void quietCrashes()
+{
+    SetErrorMode(SetErrorMode(0) | SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+}
+
 void isolateSettings()
 {
+    quietCrashes();
     moveTemporaryFiles();
     static SettingsDirectory directory;
     directory.path = QDir::tempPath() + '/' + QCoreApplication::applicationName() + '-'

@@ -34,6 +34,15 @@ struct Entry {
 };
 
 QMutex s_mutex;
+// #705: reads per key, for the tests that bound a hot path's reads. Bounded by
+// the keys the desktop uses.
+QMutex s_countMutex;
+QHash<QString, quint64> s_readCounts;
+void countRead(const QString &key)
+{
+    QMutexLocker lock(&s_countMutex);
+    ++s_readCounts[key];
+}
 QHash<QString, Entry> s_entries;
 // Writes per key: a parse that started before a write does not replace it.
 QHash<QString, quint64> s_writes;
@@ -228,6 +237,7 @@ QJsonDocument readFileKey(const QString &key, qsizetype maximumBytes, const char
 
 QJsonDocument read(const QString &key, qsizetype maximumBytes, const char *file, int line)
 {
+    countRead(key);
     if (inFile(key)) return readFileKey(key, maximumBytes, file, line);
     const QByteArray bytes = QSettings().value(key).toByteArray();
     if (maximumBytes > 0 && bytes.size() > maximumBytes) return {};
@@ -251,6 +261,12 @@ QJsonDocument read(const QString &key, qsizetype maximumBytes, const char *file,
 }
 
 bool inFile(const QString &key) { return fileNames().contains(key); }
+
+quint64 readCount(const QString &key)
+{
+    QMutexLocker lock(&s_countMutex);
+    return s_readCounts.value(key);
+}
 
 QString filePath(const QString &key)
 {

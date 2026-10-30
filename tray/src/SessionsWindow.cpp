@@ -6,6 +6,7 @@
 #include "ArchiveBrowser.h"
 #include "NativeSessionCapabilities.h"
 #include "SessionsWindow.h"
+#include "SlowEventLog.h"
 #include "AgentWorking.h"
 #include "EventStream.h"
 #include <QStandardPaths>
@@ -4303,6 +4304,7 @@ void SessionsWindow::finishSendEvidence(const QString &key)
 
 void SessionsWindow::acceptInspection(const QString &host, const QString &name, const QJsonObject &reply, const QString &archiveId)
 {
+    const SlowEventLog::Scope scope(this, "inspection");
     auto data = reply;
     const QString restoredKey = host + '\n' + name;
     if (archiveId.isEmpty() && m_restoredInspections.contains(restoredKey)) {
@@ -5247,12 +5249,17 @@ void SessionsWindow::updateLeadPanel()
     const auto nameOf = [this](const Entry &e) { return displayTitle(e.session); };
     SessionLeadPanel::Session lead;
     QList<SessionLeadPanel::Session> subordinates, candidates;
-    const auto leadId = SessionLeads::lead(entry->identity);
+    // #705: the links are read once, not twice for every session (each read
+    // went through QSettings: about 90 ms with 400 sessions on every render).
+    const auto links = SessionLeads::all();
+    const auto leadOf = [&links](const QString &identity) { return identity.isEmpty() ? QString() : links.value(identity).toString(); };
+    const auto leadId = leadOf(entry->identity);
     for (const auto &other : std::as_const(m_entries)) {
         if (other.identity == entry->identity) continue;
         if (other.identity == leadId) lead = {other.identity, nameOf(other)};
-        if (SessionLeads::lead(other.identity) == entry->identity) subordinates.append({other.identity, nameOf(other)});
-        else if (m_organization.groupFor(other.identity) == project && SessionLeads::lead(other.identity).isEmpty())
+        const auto otherLead = leadOf(other.identity);
+        if (otherLead == entry->identity) subordinates.append({other.identity, nameOf(other)});
+        else if (otherLead.isEmpty() && m_organization.groupFor(other.identity) == project)
             candidates.append({other.identity, nameOf(other)});
     }
     if (!leadId.isEmpty() && lead.first.isEmpty()) lead = {leadId, tr("a closed session")};

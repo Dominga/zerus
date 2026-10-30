@@ -42,6 +42,10 @@ private:
     void showEffectiveConnection(const QJsonObject &data);
     // #647: the header's label, system and state line.
     void updateHeader();
+    // #650 N2: the overrides of the connection type not saved, kept on this
+    // device per machine so switching the type back restores them.
+    static QString otherTransportKey(const QString &machine);
+    void rememberOtherTransport();
     QString hostFacts(const QJsonObject &host) const;
     void updateAppearance();
     QString appearanceMachine() const;
@@ -74,6 +78,8 @@ private:
     // session host and the Phones panel; the last check of each machine.
     QFrame *m_sidebar, *m_localCard, *m_connectionCard;
     QLabel *m_stateLine, *m_hint, *m_localLine;
+    // #650 L4: the HGS_PEERS override and the alias's source, on the page.
+    QLabel *m_peersNote, *m_sourceNote;
     QPushButton *m_testHost;
     PhonePairing::Panel *m_phones;
     quint64 m_hostTest = 0;

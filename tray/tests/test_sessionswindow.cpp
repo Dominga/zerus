@@ -129,6 +129,7 @@
 #include "MachinesPage.h"
 #include "WorkspaceColorDialog.h"
 #include "PhonePairing.h"
+#include "PageCards.h"
 #include <QTreeWidget>
 #include "PopupMouse.h"
 #include "AccountsPage.h"
@@ -264,6 +265,7 @@ private slots:
     void initTestCase();
     void phonePairingDialogUsesWorkspaceTheme_data();
     void phonePairingDialogUsesWorkspaceTheme();
+    void settingsPhonesPanelFollowsTheTheme();
     void machinesPageMatchesThePrototype_data();
     void machinesPageMatchesThePrototype();
     void nativeSettingsNavigationOnExplicitSpeechHost();
@@ -3077,6 +3079,61 @@ void TestSessionsWindow::phonePairingDialogUsesWorkspaceTheme()
     QTRY_COMPARE(code->palette().color(QPalette::Base), QColor(theme == "dark" ? "#1c2229" : "#ffffff"));
     QCOMPARE(code->palette().color(QPalette::Text), QColor(theme == "dark" ? "#e8edf4" : "#1a2733"));
 }
+// #650 N1: the Phones panel in Settings > Mobile connection draws its table,
+// intro and group rows in the window's theme, and follows a theme change;
+// it used to keep the light colours it set itself. Shots in both themes.
+void TestSessionsWindow::settingsPhonesPanelFollowsTheTheme()
+{
+    QSettings().setValue("workspace/theme", "dark");
+    const auto restoreTheme = qScopeGuard([] { QSettings().remove("workspace/theme"); });
+    QTemporaryDir fixture; QVERIFY(fixture.isValid()); const auto fake = fixture.filePath("hgs");
+    QVERIFY(FakeCli::install(fake, (QStringLiteral("#!/usr/bin/env python3\nimport json,runpy,sys,time\na=sys.argv[1:]\n"
+        "host=a.pop(0)[1:] if a and a[0].startswith('@') else ''\n"
+        "if a==['--help']:print('usage: hgs [@host] <cmd>\\n       hgs [@host] mobile phones|invite|revoke-phone <id> --json')\n"
+        "elif a[:2]==['machine','ls']:print(json.dumps({'local':'workstation','machines':[{'alias':'studio','enabled':True}]}))\n"
+        "elif a==['mobile','phones','--json']:\n"
+        " now=time.time()\n"
+        " print(json.dumps({'configured':True,'server_url':'https://relay.example.test','workspace_id':'w1' if host=='' else 'w2',"
+        "'workspace_name':'Orbit' if host=='' else 'Lab','devices':[] if host else [{'id':'00000000-0000-4000-8000-0000000000a1','name':'Pixel 9','platform':'android',"
+        "'paired_at':now-86400*40,'last_seen_at':now-600,'added_by':{'name':'workstation'}}]}))\n"
+        "else:\n sys.argv[0]=") + FakeCli::pythonString(script()) + ";runpy.run_path(sys.argv[0],run_name='__main__')\n").toUtf8()));
+    SessionsWindow window(FakeCli::program(fake)); window.setFleet(fleet()); window.resize(1260, 820); window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    window.showUpdates();
+    auto *sections = window.findChild<QListWidget *>("settingsSections"); QVERIFY(sections);
+    for (int i = 0; i < sections->count(); ++i) if (sections->item(i)->text() == "Mobile connection") sections->setCurrentRow(i);
+    auto *panel = dynamic_cast<PhonePairing::Panel *>(window.findChild<QWidget *>("settingsPhonesPanel")); QVERIFY(panel);
+    QTRY_VERIFY(panel->isVisible());
+    auto *tree = panel->findChild<QTreeWidget *>("linkedPhones");
+    QTRY_COMPARE(tree->topLevelItemCount(), 2);
+    const auto fg = [](bool dark) { return PageCards::token(dark, "fg").name(QColor::HexArgb); };
+    const auto muted = [](bool dark) { return PageCards::token(dark, "muted").name(QColor::HexArgb); };
+    const auto check = [&](bool dark) {
+        QTRY_COMPARE(panel->dark(), dark);
+        QVERIFY2(tree->styleSheet().contains("color:" + fg(dark)), qPrintable(tree->styleSheet()));
+        QVERIFY(panel->findChild<QLabel *>("phonesIntro")->styleSheet().contains(muted(dark)));
+        QCOMPARE(tree->topLevelItem(1)->background(0).color(), PageCards::token(dark, "hover"));
+    };
+    check(true);
+    const auto save = [&](const QString &name) {
+        const auto shots = qEnvironmentVariable("ZERUS_TEAM_SHOTS");
+        if (shots.isEmpty()) return;
+        // The page around it too: scrolled to the panel, the whole window.
+        for (auto *parent = panel->parentWidget(); parent; parent = parent->parentWidget())
+            if (auto *scroll = qobject_cast<QScrollArea *>(parent)) { scroll->ensureWidgetVisible(panel, 0, 0); break; }
+        QDir().mkpath(shots); QTest::qWait(80);
+        QVERIFY(window.grab().save(shots + "/" + name + ".png"));
+    };
+    save("u701-settings-phones-dark");
+    // A theme change reaches it at once.
+    auto *theme = window.findChild<QComboBox *>("workspaceTheme"); QVERIFY(theme);
+    theme->setCurrentIndex(theme->findData("light"));
+    check(false);
+    save("u701-settings-phones-light");
+    theme->setCurrentIndex(theme->findData("dark"));
+    check(true);
+}
+
 void TestSessionsWindow::colorPickerUsesWorkspaceThemeAndCancelsOutside()
 {
     QFETCH(QString,theme);QSettings().setValue("workspace/theme",theme);
@@ -17659,6 +17716,9 @@ void TestSessionsWindow::machinesPageMatchesThePrototype()
         "{'alias':'studio','connection':{'hostname':'studio.example.test','enabled':True},'enabled':True,'source':'local','inherited':False}]}))\n"
         "elif a[:2]==['machine','resolve']:print(json.dumps({'alias':a[2],'effective':{'hostname':a[2]+'.example','user':'user','port':'22','identity_files':['~/.ssh/id_ed25519']}}))\n"
         "elif a==['mobile','phones','--json']:print(json.dumps(%1 if host=='' else {'configured':False}))\n"
+        "elif a[:2]==['mobile','invite']:print(json.dumps({'workspace_id':'w1','workspace_name':'Orbit','pair_code':'synthetic_pair-code_0123456789','encrypted':False,"
+        "'expires_at':__import__('time').time()+600,'server_url':'https://relay.example.test',"
+        "'pair_url':'zerus://pair?server=https%3A%2F%2Frelay.example.test&code=synthetic_pair-code_0123456789'}))\n"
         "elif 'account' in a[:2]:print(json.dumps({'profiles':[]}))\n"
         "else:\n sys.argv[0]=").arg(phones) + FakeCli::pythonString(script()) + ";runpy.run_path(sys.argv[0],run_name='__main__')\n").toUtf8()));
     // A Windows workstation with six sessions, two connected machines and one that does not answer.
@@ -17717,6 +17777,38 @@ void TestSessionsWindow::machinesPageMatchesThePrototype()
         QVERIFY(window.grab().save(shots + "/" + name + "-" + theme + ".png"));
     };
     save("pm-machines-local");
+    // #651 QA: the pair and revoke dialogs, shot in the page's theme; Revoke
+    // is cancelled, so nothing is revoked.
+    {
+        bool paired = false, asked = false;
+        QTimer closer; closer.setInterval(30);
+        QObject::connect(&closer, &QTimer::timeout, &window, [&] {
+            for (auto *widget : QApplication::topLevelWidgets()) {
+                if (auto *dialog = dynamic_cast<PhonePairing::Dialog *>(widget); dialog && dialog->isVisible()) {
+                    if (dialog->findChild<QLabel *>("phonePairingStatus")->text().startsWith("Requesting")) continue;
+                    if (!shots.isEmpty()) { QDir().mkpath(shots); dialog->grab().save(shots + "/pm-phone-pair-" + theme + ".png"); }
+                    paired = true; dialog->reject();
+                } else if (auto *box = qobject_cast<QMessageBox *>(widget); box && box->isVisible() && box->windowTitle().startsWith("Revoke")) {
+                    if (!shots.isEmpty()) { QDir().mkpath(shots); box->grab().save(shots + "/pm-phone-revoke-" + theme + ".png"); }
+                    asked = true; box->button(QMessageBox::Cancel)->click();
+                }
+            }
+        });
+        closer.start();
+        auto *pair = page->findChild<QPushButton *>("pairPhone");
+        QTRY_VERIFY(pair->isEnabled());
+        QTimer::singleShot(0, pair, [pair] { pair->click(); });
+        QTRY_VERIFY(paired);
+        QTRY_COMPARE(page->findChild<QTreeWidget *>("linkedPhones")->topLevelItemCount(), 1);
+        table = page->findChild<QTreeWidget *>("linkedPhones");
+        table->setCurrentItem(table->topLevelItem(0)->child(1));
+        auto *revoke = page->findChild<QPushButton *>("revokePhone");
+        QTRY_VERIFY(revoke->isEnabled());
+        QTimer::singleShot(0, revoke, [revoke] { revoke->click(); });
+        QTRY_VERIFY(asked);
+        closer.stop();
+        QTRY_COMPARE(table->topLevelItem(0)->childCount(), 2);   // nothing revoked
+    }
     // A remote machine: its system and state, and the prototype's form.
     list->setCurrentRow(1);
     QTRY_COMPARE(page->findChild<QLabel *>("machineTitle")->text(), QStringLiteral("macbook"));
@@ -17727,9 +17819,13 @@ void TestSessionsWindow::machinesPageMatchesThePrototype()
     QTRY_VERIFY(page->findChild<QLabel *>("effectiveMachineConnection")->text().contains("user@macbook.example, port 22"));
     for (const char *name : {"saveMachine", "discardNewMachine", "checkMachine", "sshMachine", "installMachine", "resetMachine", "removeMachine", "browseMachineKey"})
         QVERIFY2(page->findChild<QPushButton *>(name)->isVisible(), name);
+    // #650 N2: a saved SSH machine can change its connection type.
+    QVERIFY(page->findChild<QComboBox *>("machineTransport")->isVisible());
     save("pm-machines-remote");
-    // The machine that does not answer.
+    // The machine that does not answer; #651 QA: the shot waits for its
+    // effective connection in both themes.
     list->setCurrentRow(3);
     QTRY_COMPARE(page->findChild<QLabel *>("machineState")->text(), QStringLiteral("Not connected"));
+    QTRY_VERIFY(page->findChild<QLabel *>("effectiveMachineConnection")->text().contains("user@studio.example, port 22"));
     save("pm-machines-unreachable");
 }

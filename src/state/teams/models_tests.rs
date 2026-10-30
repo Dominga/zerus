@@ -298,6 +298,25 @@ fn the_plan_checks_roles_and_models() {
     assert!(!found.warnings.iter().any(|f| f.task == Some(3)), "{:?}", found.warnings);
 }
 
+/// #581 L1: a Vertex-style id with @ is one model, not a model and an effort;
+/// only a known effort word after @ is split.
+#[test]
+fn a_model_id_with_at_is_split_only_on_a_known_effort() {
+    assert_eq!(crate::state::teams::models::split("claude-sonnet-4-5@20250929"), ("claude-sonnet-4-5@20250929", ""));
+    assert_eq!(crate::state::teams::models::split("claude-sonnet-4-5@high"), ("claude-sonnet-4-5", "high"));
+    assert_eq!(crate::state::teams::models::split("gpt-5.5@HIGH"), ("gpt-5.5", "HIGH"));
+    assert_eq!(crate::state::teams::models::split("model@"), ("model@", ""));
+    let mut task = Task {
+        id: 1,
+        title: "A".into(),
+        role: "Backend".into(),
+        models: vec!["claude-sonnet-4-5@20250929".into()],
+        ..Default::default()
+    };
+    crate::state::teams::models::check_task(&mut task).unwrap();
+    assert_eq!(task.models, vec!["claude-sonnet-4-5@20250929"]);
+}
+
 /// #581 N2: dev (a reviewer who may switch to gpt-5.5) has a pending switch
 /// for #1 while imp's #3 waits for review; at `at` the switch was sent.
 fn switching_with_review(at: f64) -> Team {

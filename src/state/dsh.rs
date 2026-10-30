@@ -675,7 +675,7 @@ pub(crate) fn check_upload(name: &str) -> Option<Value> {
         match super::session_upload::file(string(&record, "agent_home"), string(&record, "conversation_id")) {
             Some(found) => path = found,
             None => {
-                remember_upload(name, &record, at, None, None);
+                remember_upload(name, &record, at, None, None, false);
                 return None;
             }
         }
@@ -685,7 +685,7 @@ pub(crate) fn check_upload(name: &str) -> Option<Value> {
     let Ok(tail) = super::session_upload::read_tail(&path, offset) else { return None };
     let seen = super::session_upload::uploaded_after(&tail.records, since)
         .then(|| json!({"at":at,"plugin":"session-log-deepseek","offset":tail.offset}));
-    remember_upload(name, &record, at, Some((&path, tail.offset)), seen.as_ref());
+    remember_upload(name, &record, at, Some((&path, tail.offset)), seen.as_ref(), tail.unverifiable);
     seen
 }
 
@@ -715,7 +715,7 @@ fn mark_upload_start(record: &mut Value) {
 /// C2: writes only the upload fields into a binding re-read under the bindings
 /// lock, so a poll overlapping a resume, rename or forget never reverts it. A
 /// binding that is gone or changed since the check read it is skipped.
-fn remember_upload(name: &str, read: &Value, at: f64, tail: Option<(&Path, u64)>, seen: Option<&Value>) -> Option<()> {
+fn remember_upload(name: &str, read: &Value, at: f64, tail: Option<(&Path, u64)>, seen: Option<&Value>, unverifiable: bool) -> Option<()> {
     let _guard = lock(Some(&root().join("dsh/bindings.lock"))).ok()?;
     let mut current = binding(name).ok()?;
     if current["run_id"] != read["run_id"] || current["conversation_id"] != read["conversation_id"] {
@@ -728,6 +728,13 @@ fn remember_upload(name: &str, read: &Value, at: f64, tail: Option<(&Path, u64)>
     }
     if let Some(seen) = seen {
         current["upload_seen"] = seen.clone();
+    }
+    // L1: a store the reader cannot step through is marked instead of being
+    // re-read forever; a store that walks again clears the mark.
+    if unverifiable {
+        current["upload_unverifiable"] = json!(true);
+    } else if let Some(object) = current.as_object_mut() {
+        object.remove("upload_unverifiable");
     }
     save(&current).ok()?;
     Some(())
@@ -2255,7 +2262,7 @@ mod notification_tests {
             let mut resumed = base.clone();
             resumed["run_id"] = json!("run-2");
             save(&resumed).unwrap();
-            assert!(remember_upload(name, &base, 10.0, None, None).is_none());
+            assert!(remember_upload(name, &base, 10.0, None, None, false).is_none());
             let kept = binding(name).unwrap();
             assert_eq!(kept["run_id"], json!("run-2"));
             assert!(kept.get("upload_checked_at").is_none(), "a changed binding was written");
@@ -2265,14 +2272,14 @@ mod notification_tests {
             changed["paused"] = json!(true);
             save(&changed).unwrap();
             let seen = json!({"at":10.0,"plugin":"session-log-deepseek","offset":42});
-            assert!(remember_upload(name, &base, 10.0, None, Some(&seen)).is_some());
+            assert!(remember_upload(name, &base, 10.0, None, Some(&seen), false).is_some());
             let saved = binding(name).unwrap();
             assert_eq!(saved["paused"], json!(true), "another field was reverted");
             assert_eq!(saved["upload_checked_at"], json!(10.0));
             assert_eq!(saved["upload_seen"], seen);
             // A forgotten binding is skipped, never recreated.
             std::fs::remove_file(binding_path(name)).unwrap();
-            assert!(remember_upload(name, &base, 20.0, None, Some(&seen)).is_none());
+            assert!(remember_upload(name, &base, 20.0, None, Some(&seen), false).is_none());
             assert!(!binding_path(name).exists());
         });
     }
@@ -2301,6 +2308,51 @@ mod notification_tests {
 
     /// N8: a session that has written no store still records the check time, so
     /// a listing does not look for it on every poll.
+    /// #595 L1: a store the upload reader cannot walk is marked unverifiable on
+    /// its binding instead of being re-read forever; a store that walks again
+    /// clears the mark on its next pass.
+    #[test]
+    fn an_unwalkable_upload_store_is_marked_unverifiable_and_cleared_again() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let name = "dsh/project/session";
+            let home = dir.path().join("home");
+            let store = home.join("sessions").join("--encoded--").join("session-one");
+            std::fs::create_dir_all(&store).unwrap();
+            let file = store.join("session.v4.jsonl.zstd");
+            let mut bytes = ruzstd::encoding::compress_to_vec(
+                json!({"type":"session","seq":1,"time":1_000_000.0}).to_string().as_bytes(),
+                ruzstd::encoding::CompressionLevel::Fastest,
+            );
+            // An unknown magic after a whole frame: the reader cannot step.
+            bytes.extend_from_slice(&[0x00, 0x01, 0x02, 0x03, 0x04]);
+            std::fs::write(&file, &bytes).unwrap();
+            save(&json!({"backend":"dsh","name":name,"agent":"dsh",
+                "agent_home":home.display().to_string(),"cwd":"/work/example",
+                "conversation_id":"session-one","run_id":"run-1","created":1.0,"upload_offset":0})).unwrap();
+            assert!(check_upload(name).is_none());
+            let marked = binding(name).unwrap();
+            assert_eq!(marked["upload_unverifiable"], json!(true), "{marked}");
+            // A rewritten store that walks again clears the mark.
+            std::fs::write(
+                &file,
+                ruzstd::encoding::compress_to_vec(
+                    json!({"type":"session-log-deepseek/delivery-accepted","seq":2,"time":2_000_500.0})
+                        .to_string()
+                        .as_bytes(),
+                    ruzstd::encoding::CompressionLevel::Fastest,
+                ),
+            )
+            .unwrap();
+            let mut reset = binding(name).unwrap();
+            reset["upload_checked_at"] = json!(0);
+            reset["upload_offset"] = json!(0);
+            save(&reset).unwrap();
+            assert!(check_upload(name).is_some());
+            assert!(binding(name).unwrap().get("upload_unverifiable").is_none());
+        });
+    }
+
     #[test]
     fn a_missing_store_records_the_check_time_and_is_not_scanned_again() {
         let dir = tempfile::tempdir().unwrap();

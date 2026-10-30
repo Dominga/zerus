@@ -974,6 +974,13 @@ def revoke_configuration():
     """The selected CLI's supported, read-only configuration, never an approximation."""
     try:
         help_result = subprocess.run([CLI, '--help'], capture_output=True, text=True, timeout=10)
+    except FileNotFoundError as error:
+        # A GUI installed before hgs (no zerus-setup yet) has nothing to revoke
+        # unless desktop state exists; the same rule as a CLI that predates it.
+        if legacy_desktop_state_absent():
+            say('no hgs is installed and there is no desktop state; keeping the plain Qt path')
+            return None
+        raise UpdateError(f'cannot probe the selected hgs for {REVOKE_MARKER}: {error}; keep Qt stopped')
     except (OSError, subprocess.TimeoutExpired) as error:
         raise UpdateError(f'cannot probe the selected hgs for {REVOKE_MARKER}: {error}; keep Qt stopped')
     if help_result.returncode != 0 or REVOKE_MARKER not in help_result.stdout:

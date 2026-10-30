@@ -11,6 +11,7 @@ import queue
 import socket
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -22,7 +23,9 @@ HGS = Path(os.environ.get('HGS_TEST_BIN', Path(__file__).resolve().parents[1] / 
 
 class Desktop(unittest.TestCase):
     def setUp(self):
-        temp = tempfile.TemporaryDirectory(prefix='hgs-desk-')
+        # macOS's per-user TMPDIR (/var/folders/...) leaves too little of the
+        # 104-byte socket path for the desktop service under nested state dirs.
+        temp = tempfile.TemporaryDirectory(prefix='hgs-desk-', dir='/tmp' if sys.platform == 'darwin' else None)
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name).resolve()
         self.state = self.root / 'state'

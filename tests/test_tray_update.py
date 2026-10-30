@@ -540,6 +540,33 @@ class TrayUpdate(unittest.TestCase):
                                                   ['desktop', 'request']) for call in self.revocation_calls()))
         self.assertFalse((self.home / '.local/state/hgs/sessions').exists())
 
+    def test_missing_cli_without_desktop_state_keeps_qt_update_and_rollback(self):
+        # A GUI installed before hgs (no zerus-setup yet) has no writers to revoke.
+        (self.home / '.local/bin/hgs').unlink()
+        self.env.pop('HGS_STATE_DIR', None)
+        self.env.pop('XDG_STATE_HOME', None)
+        self.build('first', self.installed)
+        result = self.update(self.build('second'))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("'second'", self.installed.read_text())
+        self.assertIn('no hgs is installed and there is no desktop state', result.stdout)
+        result = self.rollback()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("'first'", self.installed.read_text())
+        self.assertFalse((self.home / '.local/state/hgs/sessions').exists())
+
+    def test_missing_cli_with_desktop_state_keeps_qt_stopped(self):
+        (self.home / '.local/bin/hgs').unlink()
+        self.env.pop('HGS_STATE_DIR', None)
+        self.env.pop('XDG_STATE_HOME', None)
+        (self.home / '.local/state/hgs/sessions/desktop').mkdir(parents=True)
+        self.build('first', self.installed)
+        result = self.update(self.build('second'))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('cannot check desktop revocation', result.stderr)
+        self.assertIn("'first'", self.installed.read_text())
+        self.assertEqual(self.running(), [])
+
     def test_legacy_cli_with_desktop_state_keeps_qt_stopped(self):
         self.env['REVOCATION_MODE'] = 'unsupported'
         self.env.pop('HGS_STATE_DIR', None)

@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use zerus_watch_protocol::{
@@ -36,6 +36,10 @@ use zerus_watch_protocol::{
 const QUEUE_LINES: usize = 1024;
 /// The most help text a probe reads.
 const PROBE_BYTES: u64 = 1 << 20;
+const SOURCE_JOIN: Duration = Duration::from_secs(1);
+
+#[path = "stream_legacy_source.rs"]
+mod legacy_source;
 
 /// The delays and bounds of a stream. [`Timing::scaled`] shrinks the restart
 /// and re-probe delays for tests.
@@ -484,6 +488,25 @@ fn lock<T>(follows: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+#[derive(Clone)]
+pub(crate) struct SourceCancel {
+    stop: Weak<AtomicBool>,
+    wake: SyncSender<Input>,
+}
+impl SourceCancel {
+    pub fn cancel(&self) {
+        if let Some(stop) = self.stop.upgrade() {
+            stop.store(true, Ordering::Relaxed);
+        }
+        let _ = self.wake.try_send(Input::Stop);
+    }
+    pub fn cancelled(&self) -> bool {
+        self.stop
+            .upgrade()
+            .is_none_or(|stop| stop.load(Ordering::Relaxed))
+    }
+}
+
 /// Controls one computer's supervisor; dropping it stops the stream.
 pub struct StreamHandle {
     computer: ComputerId,
@@ -500,6 +523,7 @@ pub struct StreamHandle {
     stop: Arc<AtomicBool>,
     retry: Arc<Retry>,
     thread: Option<JoinHandle<()>>,
+    raw_source: bool,
 }
 
 impl StreamHandle {
@@ -769,6 +793,21 @@ impl StreamHandle {
 
     fn shutdown(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        if self.raw_source {
+            let _ = self.tx.try_send(Input::Stop);
+            if let Some(thread) = self.thread.take() {
+                let until = Instant::now() + SOURCE_JOIN;
+                while !thread.is_finished() && Instant::now() < until {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                if thread.is_finished() {
+                    let _ = thread.join();
+                }
+                // Pending I/O keeps its endpoint/reader guards after this
+                // bounded join; cancellation never proves writer drain.
+            }
+            return;
+        }
         let _ = self.tx.send(Input::Stop);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
@@ -806,7 +845,7 @@ fn spawn_with(
     computer: &ComputerId,
     timing: Timing,
     sink: Option<Sender<StreamEvent>>,
-    source: Option<crate::source::Endpoint>,
+    mut source: Option<crate::source::Endpoint>,
 ) -> io::Result<StreamHandle> {
     let (tx, rx) = mpsc::sync_channel(QUEUE_LINES);
     let follows = Follows::default();
@@ -817,6 +856,13 @@ fn spawn_with(
     let organization = Arc::new(AtomicBool::new(false));
     let organization_snapshot = OrganizationShared::default();
     let stop = Arc::new(AtomicBool::new(false));
+    let raw_source = source.is_some();
+    if let Some(source) = &mut source {
+        source.set_cancel(SourceCancel {
+            stop: Arc::downgrade(&stop),
+            wake: tx.clone(),
+        });
+    }
     let retry = Arc::new(Retry::default());
     let supervisor = Supervisor {
         hgs: hgs.to_owned(),
@@ -869,6 +915,7 @@ fn spawn_with(
         stop,
         retry,
         thread: Some(thread),
+        raw_source,
     })
 }
 
@@ -946,11 +993,19 @@ impl Supervisor {
                     self.legacy_windows.clear();
                 }
                 Probe::Unsupported if self.source.is_some() => {
-                    // Raw legacy conversion is a separate bounded adapter. Do
-                    // not silently start the UI's whole-catalog poll/cache.
                     self.connection = None;
                     self.status(ComputerStatus::Unsupported);
-                    if self.wait(self.timing.reprobe) {
+                    let again = if self
+                        .source
+                        .as_ref()
+                        .and_then(|s| s.legacy_config())
+                        .is_some()
+                    {
+                        self.poll_source_legacy(self.timing.reprobe)
+                    } else {
+                        self.wait(self.timing.reprobe)
+                    };
+                    if again {
                         continue;
                     }
                     break;

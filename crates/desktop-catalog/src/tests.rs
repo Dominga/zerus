@@ -1,7 +1,7 @@
 use super::*;
 use serde_json::json;
 
-fn setup() -> (Connection, Source) {
+pub(super) fn setup() -> (Connection, Source) {
     let mut db = Connection::open_in_memory().unwrap();
     migrate(&db).unwrap();
     begin_service(&mut db, "actor-1").unwrap();
@@ -17,7 +17,7 @@ fn setup() -> (Connection, Source) {
 fn frame(seq: u64, body: Body) -> Frame {
     Frame { v: 1, seq, body }
 }
-fn hello() -> Frame {
+pub(super) fn hello() -> Frame {
     frame(
         1,
         Body::Hello(watch::Hello {
@@ -32,13 +32,19 @@ fn hello() -> Frame {
         }),
     )
 }
-fn item(n: usize) -> watch::CatalogItem {
+pub(super) fn item(n: usize) -> watch::CatalogItem {
     watch::CatalogItem {
         key: format!("run:run-{n}"),
         row: json!({"name":format!("codex/example/session-{n}"),"run_id":format!("run-{n}"),"conversation_id":format!("conversation-{n}"),"process_work":{"count":3,"future":true},"unknown":{"kept":"exact"}}),
     }
 }
-fn snapshot(seq: u64, page: u32, last: bool, cursor: i64, items: Vec<watch::CatalogItem>) -> Frame {
+pub(super) fn snapshot(
+    seq: u64,
+    page: u32,
+    last: bool,
+    cursor: i64,
+    items: Vec<watch::CatalogItem>,
+) -> Frame {
     frame(
         seq,
         Body::Snapshot(watch::Snapshot {
@@ -74,13 +80,13 @@ fn delta(seq: u64, cursor: i64, upsert: Vec<watch::CatalogItem>, remove: &[usize
         }),
     )
 }
-fn heartbeat(seq: u64) -> Frame {
+pub(super) fn heartbeat(seq: u64) -> Frame {
     frame(seq, Body::Heartbeat(watch::Heartbeat { at: 1.0 }))
 }
-fn put(db: &mut Connection, source: &Source, frame: &Frame) -> Applied {
+pub(super) fn put(db: &mut Connection, source: &Source, frame: &Frame) -> Applied {
     apply(db, source, frame).unwrap()
 }
-fn visible(db: &Connection) -> Vec<Value> {
+pub(super) fn visible(db: &Connection) -> Vec<Value> {
     page(db, "peer", None)
         .unwrap()
         .rows
@@ -267,6 +273,12 @@ fn deltas_keep_insertion_identity_and_counts_and_refuse_incomplete_base() {
             .iter()
             .map(|r| charge(&r.key, &r.json))
             .sum::<i64>()
+            + serde_json::to_vec(match &hello().body {
+                Body::Hello(h) => h,
+                _ => unreachable!(),
+            })
+            .unwrap()
+            .len() as i64
     );
     assert!(apply(&mut db, &source, &delta(4, 2, vec![], &[])).is_err());
     let newer = Source {
@@ -528,4 +540,44 @@ fn storage_limit_refuses_entire_frame_and_keeps_visible_generation() {
     assert!(error.to_string().contains("full"), "{error:#}");
     assert_eq!(visible(&db), vec![item(1).row]);
     assert_eq!(status(&db, "peer").unwrap().stored_rows, 1);
+}
+
+#[test]
+fn batch_retirement_is_exact_atomic_and_bounded() {
+    let (mut db, source) = setup();
+    put(&mut db, &source, &snapshot(2, 0, true, 1, vec![item(1)]));
+    let mut replacement = source.clone();
+    replacement.incarnation += 1;
+    connect(&mut db, &replacement, &hello()).unwrap();
+    put(
+        &mut db,
+        &replacement,
+        &snapshot(2, 0, true, 2, vec![item(2)]),
+    );
+    let mut other = source.clone();
+    other.computer = "other".into();
+    connect(&mut db, &other, &hello()).unwrap();
+    put(&mut db, &other, &snapshot(2, 0, false, 1, vec![item(3)]));
+    // A late validation failure rolls back even the earlier exact retirement.
+    let mut invalid = source.clone();
+    invalid.generation = 0;
+    assert!(disconnect_many(&mut db, &[replacement.clone(), invalid]).is_err());
+    assert!(status(&db, "peer").unwrap().complete);
+    assert!(disconnect_many(&mut db, &vec![source.clone(); MAX_SOURCES as usize + 1]).is_err());
+    disconnect_many(&mut db, &[source, other.clone()]).unwrap();
+    assert!(
+        status(&db, "peer").unwrap().complete,
+        "stale tuple retired replacement"
+    );
+    assert_eq!(visible(&db), vec![item(2).row]);
+    assert!(!state(&db, "other").unwrap().unwrap().active);
+    assert!(state(&db, "other").unwrap().unwrap().staged.is_none());
+    disconnect_many(&mut db, &[other, replacement.clone()]).unwrap();
+    disconnect_many(&mut db, &[replacement]).unwrap();
+    assert!(!status(&db, "peer").unwrap().complete);
+    assert_eq!(
+        visible(&db),
+        vec![item(2).row],
+        "last-known display must survive"
+    );
 }

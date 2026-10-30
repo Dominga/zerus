@@ -1,3 +1,4 @@
+import { dayTime } from "../ui/lib/usage";
 import { batch, createSignal } from "solid-js";
 import { createStore, produce } from "solid-js/store";
 import type { ConflictsPage, DraftSource, SavedDraftDetail, SavedDraftItem, SavedDraftsPage } from "../types";
@@ -156,13 +157,8 @@ export function draftPresentation(item: SavedDraftItem, owner: Session | undefin
   };
 }
 
-/** "d MMM HH:mm" in local time. */
-const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-export function modifiedText(seconds: number): string {
-  if (!(seconds > 0)) return "";
-  const d = new Date(seconds * 1000);
-  return `${d.getDate()} ${MONTHS[d.getMonth()]} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-}
+/** "d MMM HH:mm" in local time; unknown timestamps stay empty. */
+export const modifiedText = (seconds: number): string => seconds > 0 ? dayTime(seconds) : "";
 
 export function createSavedDrafts(port: SavedDraftsPort) {
   const [open, setOpen] = createSignal(false);

@@ -9,20 +9,20 @@ export const TASK_LIMIT = 10_000, TASK_PAGE = 50;
 export const object = (v: unknown): Record<string, unknown> => v && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : {};
 export const text = (v: unknown) => typeof v === "string" ? v : "";
 const number = (v: unknown) => typeof v === "number" && Number.isFinite(v) ? v : 0;
-export interface TaskRef { host: string | null; name: string; id: string; known: boolean }
+export interface TaskRef { host: string | null; name: string; id: string; known: boolean; machine?: string }
 export interface Task {
-  uuid: string; id: string; ref: string; title: string; text: string; stage: string; summary: string; cancelReason: string; historyRevision: string;
+  uuid: string; id: string; ref: string; title: string; text: string; stage: string; summary: string; cancelReason: string; historyRevision: string; dispatchId: string;
   createdAt: number; stageAt: number; cancelledAt: number; queue: number; writable: boolean;
   target: TaskRef; executor: TaskRef; author: TaskRef; targetKind: string; worker: string; attachments: number;
 }
 const reference = (v: unknown): TaskRef => {
   const o = object(v);
-  return { host: o.host === null ? null : text(o.host), name: text(o.session), id: text(o.session_id), known: o.host !== null && o.resolved !== false };
+  return { host: o.host === null ? null : text(o.host), name: text(o.session), id: text(o.session_id), machine: text(o.machine), known: o.host !== null && o.resolved !== false };
 };
 export function taskItem(value: unknown, queue = 0): Task {
   const t = object(value), target = object(t.target), author = object(t.author);
   return { uuid: text(t.uuid), id: text(t.id), ref: text(t.ref), title: text(t.title) || text(t.text).split("\n", 1)[0],
-    text: text(t.text), stage: text(t.stage), summary: text(t.summary), cancelReason: text(t.cancel_reason), historyRevision: text(t.history_revision),
+    text: text(t.text), stage: text(t.stage), summary: text(t.summary), cancelReason: text(t.cancel_reason), historyRevision: text(t.history_revision), dispatchId: text(t.dispatch_id),
     createdAt: number(t.created_at), stageAt: number(t.stage_at), cancelledAt: number(t.cancelled_at), queue, writable: t.writable !== false,
     target: reference(target.kind === "any" ? undefined : target.parent ?? target), executor: reference(t.session),
     author: reference(author.kind === "agent" ? author : undefined), targetKind: text(target.kind), worker: text(object(t.worker).name),

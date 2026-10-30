@@ -776,6 +776,37 @@ impl DraftStore {
         );
     }
 
+    /// Replace a private form only if its complete checkpoint still matches.
+    /// Form fields can hold a reserved request identity; text equality alone
+    /// must never authorize clearing or overwriting that identity.
+    pub fn replace_if_unchanged(
+        &self,
+        key: &str,
+        expected: StoredDraft,
+        next: StoredDraft,
+        done: impl FnOnce(Result<bool, String>) + Send + 'static,
+    ) {
+        let (root, owned) = (self.root.clone(), key.to_owned());
+        self.writer.enqueue(
+            key,
+            false,
+            Box::new(move || {
+                let (mut current, valid) = load_once(&root, &owned);
+                let mut expected = expected;
+                current.uncertain |= current.sending;
+                expected.uncertain |= expected.sending;
+                let result = if !valid {
+                    Err(NOT_RESTORED.to_owned())
+                } else if current != expected {
+                    Ok(false)
+                } else {
+                    save_direct(&root, &owned, &next).map(|()| true)
+                };
+                done(result);
+            }),
+        );
+    }
+
     /// One page of Saved drafts, after every save queued before it.
     pub fn index(&self, page: IndexPage, done: impl FnOnce(Page) + Send + 'static) {
         let root = self.root.clone();

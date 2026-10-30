@@ -31,6 +31,8 @@ mod identity;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod instance;
 mod lifecycle;
+#[cfg(feature = "live")]
+mod login_item;
 mod metrics;
 #[cfg(feature = "live")]
 mod mobile;
@@ -66,6 +68,12 @@ mod speech_settings;
 mod task_details;
 #[cfg(feature = "live")]
 mod task_editor;
+#[cfg(feature = "live")]
+mod task_forms;
+#[cfg(feature = "live")]
+mod task_settings;
+#[cfg(feature = "live")]
+mod task_start;
 #[cfg(feature = "live")]
 mod terminal;
 #[cfg(feature = "live")]
@@ -347,6 +355,8 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(task_details::TaskReads::default());
                 app.manage(task_details::TaskWrites::default());
                 app.manage(task_editor::TaskEditor::default());
+                app.manage(task_forms::TaskForms::default());
+                app.manage(task_start::TaskStarts::default());
                 app.manage(actions::ActivityReads::default());
                 app.manage(actions::Attention::new(dir.join(actions::attention_file(replay))));
                 let pump = app.state::<commands::AppState>().pump();
@@ -920,6 +930,7 @@ fn flush_drafts(app: &AppHandle) {
 fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
         commands::start,
+        commands::fleet_refresh,
         commands::next_batch,
         commands::follow,
         commands::unfollow,
@@ -982,11 +993,21 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         task_details::task_details,
         task_details::task_assign,
         task_details::task_board_action,
+        task_details::task_cancel_execution,
+        task_start::task_start_open,
+        task_start::task_start,
+        task_start::task_start_release,
+        task_settings::task_settings,
         task_editor::task_editor_open,
         task_editor::task_editor_edit,
         task_editor::task_editor_files,
         task_editor::task_editor_pick,
         task_editor::task_editor_submit,
+        task_editor::task_editor_release,
+        task_forms::task_form_open,
+        task_forms::task_form_edit,
+        task_forms::task_form_submit,
+        task_forms::task_form_cancel,
         task_details::task_attachment_open,
         actions::pending_read_marks,
         actions::queue_read_marks,
@@ -1011,6 +1032,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         screens::screen_visible,
         screens::session_usage,
         screens::accounts_view,
+        screens::account_filters_view,
         screens::machines_view,
         screens::machine_resolve,
         screens::machine_check,
@@ -1106,6 +1128,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         updates::updates_open,
         updates::updates_copy_command,
         updates::updates_restart,
+        updates::updates_fix_login_item,
         #[cfg(feature = "media")]
         voice::voice_open,
         #[cfg(feature = "media")]
@@ -1129,6 +1152,7 @@ fn desk_take_pending() -> serde_json::Value {
 fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
         commands::start,
+        commands::fleet_refresh,
         commands::next_batch,
         commands::follow,
         commands::unfollow,

@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::time::Duration;
 
 const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
@@ -151,7 +152,8 @@ impl Search {
                 "name":record["name"],"cmd":record["agent"],"project":string(record,"name").split('/').nth(1),
                 "tag":string(record,"name").splitn(3,'/').nth(2),"run_id":record["run_id"],"conversation_id":record["conversation_id"],
                 "archive_id":record["archive_id"],"archived_at":record["archived_at"],"state":"archived","tracked":true,
-                "resumable":!string(record,"conversation_id").is_empty(),"cwd":record["cwd"]})},
+                "resumable":!string(record,"conversation_id").is_empty(),"cwd":record["cwd"],
+                "account_id":account_binding(record)["id"],"account_home":account_binding(record)["home"]})},
             "source":event["source"],"message_id":id,"seq":event.get("seq").cloned().unwrap_or(json!(0)),
             "content":content,"content_truncated":content_truncated,"snippet":snippet,"event":event});
         self.results.push(result);
@@ -390,6 +392,7 @@ fn search(directory: &Path, mut bindings: Vec<Value>, query: &str, limit: usize)
             );
         }
     }
+    search.truncated |= enrich_archive_results(&mut search.results);
     Ok(
         json!({"query":query,"results":search.results,"truncated":search.truncated,
         "scanned_sessions":bindings.len(),"unavailable_sessions":search.unavailable.len(),
@@ -398,8 +401,7 @@ fn search(directory: &Path, mut bindings: Vec<Value>, query: &str, limit: usize)
 }
 
 /// Reuse the legacy excerpt and archive navigation shape for typed index data.
-pub(super) fn indexed_hit(pattern: Regex, hit: zerus_content_search::Hit) -> Option<Value> {
-    let record = serde_json::to_value(hit.target).ok()?;
+pub(super) fn indexed_hit(pattern: Regex, hit: zerus_content_search::Hit, record: &Value) -> Option<Value> {
     let message = hit.message;
     let role = match message.role {
         zerus_content_search::Role::User => "user",
@@ -412,12 +414,38 @@ pub(super) fn indexed_hit(pattern: Regex, hit: zerus_content_search::Hit) -> Opt
         rows_left: 0, truncated: false, unavailable: BTreeSet::new(),
     };
     formatter.accept(
-        &record,
+        record,
         json!({"type":message.kind,"source":message.source,"message_id":message.id,
             "seq":message.seq,"at":message.at,"detail":message.text}),
         role,
     );
     formatter.results.pop()
+}
+
+/// Same folder scopes as archive pages, with no writes or catalog enumeration.
+/// One returned window shares a 250 ms deadline and at most 200 folder reads.
+pub(super) struct ArchiveScopes {
+    folders: std::collections::BTreeMap<String, Option<Value>>,
+    deadline: std::time::Instant,
+    pub incomplete: bool,
+}
+impl ArchiveScopes {
+    pub fn new() -> Self {
+        Self { folders: std::collections::BTreeMap::new(), deadline: std::time::Instant::now() + Duration::from_millis(250), incomplete: false }
+    }
+    pub fn enrich(&mut self, hit: &mut Value) {
+        let Some(row) = hit.get_mut("session").and_then(Value::as_object_mut) else { return; };
+        let cwd = row.get("cwd").and_then(Value::as_str).unwrap_or("").to_owned();
+        if !self.folders.contains_key(&cwd) && self.folders.len() >= 200 { self.incomplete = true; return; }
+        let fields = self.folders.entry(cwd.clone()).or_insert_with(|| workspace::search_scopes(&cwd, self.deadline));
+        if let Some(fields) = fields { row.extend(fields.as_object().unwrap().clone()); }
+        else { self.incomplete = true; }
+    }
+}
+pub(super) fn enrich_archive_results(results: &mut [Value]) -> bool {
+    let mut scopes = ArchiveScopes::new();
+    for hit in results.iter_mut().take(200) { scopes.enrich(hit); }
+    scopes.incomplete
 }
 
 fn equivalent_excerpt(left: &str, right: &str) -> bool {
@@ -783,6 +811,16 @@ fn parse_timestamp(value: &str) -> Option<f64> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn expired_scope_budget_is_explicit_and_does_not_guess_folder_metadata() {
+        let mut scopes = ArchiveScopes { folders: Default::default(), deadline: std::time::Instant::now() - Duration::from_secs(1), incomplete: false };
+        let mut hit = json!({"session":{"cwd":"/srv/example/app"}});
+        scopes.enrich(&mut hit);
+        assert!(scopes.incomplete);
+        assert!(hit["session"].get("cwd_canonical").is_none());
+        assert!(hit["session"].get("git_root").is_none());
+    }
 
     fn record(path: &Path) -> Value {
         json!({"version":1,"name":"codex/docs","agent":"codex","run_id":"run",

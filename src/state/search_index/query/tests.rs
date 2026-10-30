@@ -35,21 +35,32 @@ fn source_fixture(archive: bool) -> (tempfile::TempDir, PathBuf, PathBuf, PathBu
         &path,
         json!({"version":1,"name":"codex/example/archive","agent":"codex",
         "run_id":"fixture-run","conversation_id":conversation,"archive_id":archive,
-        "archived_at":42,"transcript":transcript,"cwd":"/work/example"})
+        "archived_at":42,"transcript":transcript,"cwd":state})
         .to_string(),
     )
     .unwrap();
     let mut store = Store::open(&state.join("content-search-v1")).unwrap();
-    store
-        .discover(
-            &state,
-            &DiscoveryBudget::interactive(),
-            &AtomicBool::new(false),
-        )
-        .unwrap();
-    store
-        .consume(&state, &budget(), &AtomicBool::new(false))
-        .unwrap();
+    // Page tests start with a warm source. A slow disk may need more than one
+    // bounded catch-up; this does not grant a larger per-call work budget.
+    for _ in 0..8 {
+        store
+            .discover(
+                &state,
+                &DiscoveryBudget::interactive(),
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        store
+            .consume(&state, &budget(), &AtomicBool::new(false))
+            .unwrap();
+        let coverage = store.index.status().unwrap();
+        if coverage.messages == 6 && coverage.pending_sources == 0 {
+            break;
+        }
+    }
+    let coverage = store.index.status().unwrap();
+    assert_eq!(coverage.messages, 6);
+    assert_eq!(coverage.pending_sources, 0);
     (temp, state, path, transcript, store)
 }
 fn budget() -> Budget {
@@ -91,6 +102,24 @@ fn archive_pages_keep_exact_navigation_and_cursor_snapshot_without_fallback() {
     );
     assert_eq!(third["results"][0]["message_id"], "m2");
     assert!(third["next_cursor"].is_null());
+}
+
+#[test]
+fn publication_uses_fresh_recorded_account_binding_not_an_indexed_copy() {
+    let (_temp, state, path, _transcript, mut store) = fixture();
+    let mut record: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    record["account_id"] = json!("changed-profile");
+    record["agent_home"] = json!("/srv/example/recorded-home");
+    fs::write(&path, record.to_string()).unwrap();
+    let first = page(&mut store, &state, None, &budget());
+    assert_eq!(
+        first["results"][0]["session"]["account_id"],
+        "changed-profile"
+    );
+    assert_eq!(
+        first["results"][0]["session"]["account_home"],
+        "/srv/example/recorded-home"
+    );
 }
 
 #[test]

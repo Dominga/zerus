@@ -6,13 +6,14 @@ import { isActive, isWorking, needsAttention } from "./attention";
 import { settings, settingsReady, setSetting } from "./settings";
 import { createRowDensity, ROW_DENSITY_KEY } from "./rowDensity";
 import type { Session, Status } from "../ui/sessions/types";
+import type { FolderScope } from "../ui/sessions/scope-filters";
 export { isActive, needsAttention };
 
 // Interface state of the first screen: page, selection, filters, list layout,
 // menus and toasts. Data lives in store/catalog.ts and store/activity.ts.
 
 export type MenuEntry =
-  | { label: string; icon?: string; kbd?: string; danger?: boolean; disabled?: boolean; hint?: string; checked?: boolean; action?: () => void }
+  | { label: string; icon?: string; agent?: string; kbd?: string; danger?: boolean; disabled?: boolean; hint?: string; checked?: boolean | "mixed"; action?: () => void }
   | { separator: true }
   | { heading: string };
 
@@ -27,9 +28,15 @@ const PAGES: Page[] = ["dashboard", "sessions", "projects", "machines", "account
 // `?page=settings` opens a screen (headless screenshots), as in the mockup.
 export const [page, setPage] = createSignal<Page>(PAGES.find((p) => p === params.get("page")) ?? "sessions");
 export const [selectedKey, setSelectedKey] = createSignal<string | undefined>();
-export const [stateFilter, setStateFilter] = createSignal<StateFilter>("all");
+export const [stateFilter, setStateFilterRaw] = createSignal<StateFilter>("all");
+/** Qt clears an exact-folder scope when All sessions is chosen. */
+export function setStateFilter(filter: StateFilter) { if (filter === "all") setFolderFilter(undefined); return setStateFilterRaw(filter); }
 export const [machineFilter, setMachineFilter] = createSignal<string[]>([]);
 export const [projectFilter, setProjectFilter] = createSignal<string[]>([]);
+/** Machine-local binding keys, not display account ids. */
+export const [accountFilter, setAccountFilter] = createSignal<string[]>([]);
+export const accountFilterSet = createMemo(() => new Set(accountFilter()));
+export const [folderFilter, setFolderFilter] = createSignal<FolderScope>();
 export const [multi, setMulti] = createStore<Record<string, boolean>>({});
 export const [peek, setPeek] = createSignal(false);
 export type DetailTab = "activity" | "terminal" | "native" | "processes" | "taskview";

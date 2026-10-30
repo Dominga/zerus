@@ -1,5 +1,7 @@
 import { For, Show, createEffect, onCleanup } from "solid-js";
 import { Icon } from "../lib/icons";
+import { ProviderGlyph } from "../sessions/SessionCard";
+import { agentKind } from "../../store/catalog";
 import { menuItemActivates } from "../sessions/actions-ui";
 import { menu, setMenu } from "../../store/ui";
 import { dismissNotice, notices } from "../../store/notices";
@@ -50,8 +52,9 @@ export function MenuLayer() {
                   aria-checked={item.checked} aria-disabled={item.disabled} title={item.hint}
                   onClick={() => { if (!menuItemActivates(item)) return; setMenu(undefined); item.action?.(); }}>
                   <Show when={item.checked !== undefined} fallback={<Show when={item.icon} fallback={<span style={{ width: "14px" }} />}><Icon name={item.icon!} size={14} /></Show>}>
-                    <Icon name={item.checked ? "check" : "minus"} size={14} style={{ opacity: item.checked ? 1 : 0 }} />
+                    <Icon name={item.checked && item.checked !== "mixed" ? "check" : "minus"} size={14} style={{ opacity: item.checked ? 1 : 0 }} />
                   </Show>
+                  <Show when={item.agent}><span class="menu-agent" style={{ color: `var(--z-agent-${agentKind(item.agent)})` }}><ProviderGlyph agent={agentKind(item.agent)} size={13} /></span></Show>
                   <span>{item.label}</span>
                   <Show when={item.kbd}><span class="kbd">{item.kbd}</span></Show>
                 </button>

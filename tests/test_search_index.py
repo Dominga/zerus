@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Private on-demand index protocol; no agents, desktop, services or live data."""
+from contextlib import closing
 import hashlib
 import json
 import os
@@ -14,7 +15,6 @@ REPO = Path(__file__).resolve().parents[1]
 HGS = Path(os.environ.get("HGS_TEST_BIN", REPO / "target/debug/hgs")).resolve()
 
 
-@unittest.skipIf(os.name == "nt", "indexed content search is not available on Windows yet")
 class SearchIndex(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="hgs-index-")
@@ -26,12 +26,16 @@ class SearchIndex(unittest.TestCase):
                     if not key.startswith(("HGS_", "ZERUS_CLIENT_")) and key not in ("TMUX", "TMUX_PANE")}
         self.env.update(HOME=str(self.root), HGS_STATE_DIR=str(self.state),
                         HGS_CONFIG_DIR=str(self.root / "config"), HGS_SELF="fixture", HGS_PEERS="")
+        if os.name == "nt":
+            # The existing override admits __state for an isolated state only;
+            # this suite never installs or starts a session host.
+            self.env.update(USERPROFILE=str(self.root), HGS_HOST_ALLOW_UNSTAGED="1")
 
     def invoke(self, flag, request=None, check=True):
         flags = flag if isinstance(flag, list) else [flag]
         result = subprocess.run([str(HGS), "__state", "search", *flags], env=self.env,
                                 input=json.dumps(request) if request is not None else "",
-                                text=True, capture_output=True, timeout=5)
+                                text=True, encoding="utf-8", capture_output=True, timeout=5)
         if check:
             self.assertEqual(result.returncode, 0, result.stderr)
             return json.loads(result.stdout)
@@ -46,7 +50,7 @@ class SearchIndex(unittest.TestCase):
         transcript.write_text(json.dumps(event) + "\n")
         binding = self.state / (hashlib.sha256(identity["name"].encode()).hexdigest() + ".json")
         binding.write_text(json.dumps({**identity, "version": 1, "agent": "codex",
-                                       "transcript": str(transcript), "cwd": "/work/example"}))
+                                       "transcript": str(transcript), "cwd": str(self.state)}))
         return identity, binding, transcript
 
     def test_cold_status_does_not_create_an_index(self):
@@ -72,7 +76,7 @@ class SearchIndex(unittest.TestCase):
         # The next pass catches a forgotten source even when it is not requested.
         binding.unlink()
         self.invoke("--index-step", dict(abi="content-search-index-v1", targets=[]))
-        with sqlite3.connect(index) as db:
+        with closing(sqlite3.connect(index)) as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 0)
             self.assertEqual(db.execute("SELECT SUM(active) FROM sources").fetchone()[0], 0)
 
@@ -111,11 +115,22 @@ class SearchIndex(unittest.TestCase):
         binding.unlink()
         return identity, archived, transcript
 
+    def warm_source(self, messages=1):
+        # Warm-query contracts require a caught-up source. Each subprocess keeps
+        # the production budgets; slow disks resume the persisted cursor.
+        for _ in range(12):
+            reply = self.invoke("--index-catchup")
+            coverage = reply["status"]["coverage"]
+            if coverage["messages"] == messages and coverage["pending_sources"] == 0:
+                return
+        self.fail("source did not catch up within 12 bounded passes: " + json.dumps(reply))
+
     def test_indexed_archive_pages_use_exact_targets_and_reject_mismatched_cursors(self):
         identity, archived, transcript = self.archive_fixture()
         events = [dict(type="event_msg", timestamp=i, payload=dict(type="agent_message",
                   id="message-" + str(i), message="needle response " + str(i))) for i in range(1, 5)]
         transcript.write_text("".join(json.dumps(event) + "\n" for event in events))
+        self.warm_source(messages=4)
         reply = self.indexed()
         self.assertEqual(reply["abi"], "content-search-query-v1")
         self.assertEqual(reply["index_coverage"]["state"], "ready")
@@ -135,6 +150,7 @@ class SearchIndex(unittest.TestCase):
 
     def test_indexed_live_queries_keep_the_current_bounded_scan_and_new_messages(self):
         _, _, transcript = self.fixture()
+        self.warm_source()
         first = self.indexed()
         self.assertEqual(first["results"][0]["message_id"], "public-one")
         self.assertIsNotNone(first["fallback"])
@@ -145,6 +161,7 @@ class SearchIndex(unittest.TestCase):
         second = self.indexed()
         self.assertEqual(second["fallback"]["results"][0]["message_id"], "new-turn")
         self.assertEqual(second["results"], [])
+        self.warm_source(messages=2)
         third = self.indexed()
         self.assertEqual(third["results"][0]["message_id"], "new-turn")
         self.assertEqual(third["fallback"]["results"][0]["message_id"], "new-turn")
@@ -164,8 +181,9 @@ class SearchIndex(unittest.TestCase):
                                            dict(type="text", text="needle kimi public message")])))
         wire.write_text(json.dumps(event) + "\n")
         binding = self.state / (hashlib.sha256(identity["name"].encode()).hexdigest() + ".json")
-        binding.write_text(json.dumps({**identity, "version": 1, "agent": "kimi", "agent_home": str(profile), "cwd": "/work/example"}))
+        binding.write_text(json.dumps({**identity, "version": 1, "agent": "kimi", "agent_home": str(profile), "cwd": str(self.state)}))
         before = wire.read_bytes()
+        self.warm_source()
         reply = self.indexed()
         self.assertEqual(reply["results"][0]["message_id"], "kimi-public")
         self.assertEqual(reply["fallback"]["results"][0]["message_id"], "kimi-public")

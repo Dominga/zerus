@@ -3,7 +3,7 @@ import { catalog, rowId } from "./catalog";
 import { groupOf, headerOf, setProjectCollapsed } from "./organization";
 import {
   revealRow, search, setDetailTab, setMachineFilter, setPage, setProjectFilter, setSearch, setSelectedKey,
-  setStateFilter, setSubagentOpen, toast,
+  setAccountFilter, setFolderFilter, setStateFilter, setSubagentOpen, toast,
 } from "./ui";
 
 // The menu bar and attention notifications open sessions and show notices
@@ -33,6 +33,7 @@ export function openSession(target: OpenSession, options: OpenSessionOptions = {
     setStateFilter("all");
     setMachineFilter([]);
     setProjectFilter([]);
+    setAccountFilter([]); setFolderFilter(undefined);
     setSearch("");
   }
   setPage("sessions");
@@ -56,6 +57,13 @@ export function openUpdates(): void {
   void import("../ui/screens/settings/sections")
     .then(({ openSettings }) => openSettings("updates"))
     .catch((error) => toast("Updates", String(error), "error", true));
+}
+
+/** The Rail's version opens About, not the top of Settings. */
+export function openAbout(): void {
+  void import("../ui/screens/settings/sections")
+    .then(({ openSettings }) => openSettings("about"))
+    .catch((error) => toast("About", String(error), "error", true));
 }
 
 /**

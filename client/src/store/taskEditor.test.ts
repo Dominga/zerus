@@ -33,10 +33,36 @@ describe("selected task draft editor", () => {
     s.follow(target("one")); await tick(); await s.submit(); await tick(); expect(p.submit).toHaveBeenCalledTimes(1); expect(s.view()?.recovery).toBe(true);
     await s.submit(true); expect(p.submit).toHaveBeenNthCalledWith(2, 1, 0, true);
   });
+  it("passes an explicit feedback snapshot once and ignores changed choices during recovery", async () => {
+    const p = port({ submit: vi.fn().mockResolvedValueOnce(view("one", { recovery: true, error: "unknown" })).mockResolvedValueOnce(view("one", { saved: true, text: "" })) }), s = createTaskEditor(p);
+    const delivery = { mode: "send" as const, stage_at: 123, dispatch_id: "original" };
+    s.follow(target("one")); await tick(); await s.submit(false, delivery);
+    expect(p.submit).toHaveBeenNthCalledWith(1, 1, 0, false, delivery);
+    await tick(); expect(p.submit).toHaveBeenCalledOnce();
+    await s.submit(true, { mode: "reopen", stage_at: 456, dispatch_id: "changed" });
+    expect(p.submit).toHaveBeenNthCalledWith(2, 1, 0, true);
+  });
   it("checkpoints an attachment save failure before switching away", async () => {
     const file = { path: "cache/example/file.txt", name: "file.txt", mime: "text/plain", bytes: 4, thumbnail: false, reference: "[File #1]" };
     const p = port({ pick: vi.fn().mockResolvedValue(view("one", { files: [file], unsaved: true, error: "disk full", rev: 1 })) }), s = createTaskEditor(p);
     s.follow(target("one")); await tick(); await s.pick(); expect(s.view()?.files).toEqual([file]); s.follow(target("two")); await tick(); expect(p.edit).toHaveBeenCalledOnce(); expect(s.view()?.task).toBe("two");
+  });
+  it("releases only the reviewed handle and record after saving the current draft", async () => {
+    const record = { id: "original", snapshot: "exact" };
+    const p = port({ open: vi.fn(async () => view("one", { recovery: true, recovery_record: record })), release: vi.fn(async (_handle, rev) => view("one", { rev: rev + 1, text: "Newer", position: 5, anchor: 2, saved: true })) });
+    const s = createTaskEditor(p); s.follow(target("one")); await tick();
+    expect(p.release).not.toHaveBeenCalled(); s.edit("Newer", 5, 2);
+    expect(await s.release(1, record)).toBe(true);
+    expect(vi.mocked(p.edit).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(p.release!).mock.invocationCallOrder[0]);
+    expect(p.release).toHaveBeenCalledExactlyOnceWith(1, 1, record);
+    expect(p.submit).not.toHaveBeenCalled(); expect(s.view()?.text).toBe("Newer");
+    expect(await s.release(2, record)).toBe(false); expect(p.release).toHaveBeenCalledOnce();
+  });
+  it("keeps a failed release visible without replaying it", async () => {
+    const record = { id: "original", snapshot: "exact" }, p = port({ release: vi.fn(async () => view("one", { recovery: true, recovery_record: record, error: "record changed" })) });
+    const s = createTaskEditor(p); s.follow(target("one")); await tick();
+    expect(await s.release(1, record)).toBe(false); await tick();
+    expect(s.error()).toBe("record changed"); expect(s.view()?.recovery).toBe(true); expect(p.release).toHaveBeenCalledOnce(); expect(p.submit).not.toHaveBeenCalled();
   });
   it("blocks editing an invalid stored draft and concurrent submissions", async () => {
     const pending = deferred<TaskEditorView>(), p = port({ submit: vi.fn().mockReturnValue(pending.promise) }), s = createTaskEditor(p);

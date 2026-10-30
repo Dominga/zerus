@@ -6,6 +6,9 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde_json::Value;
 use zerus_watch_protocol::{self as watch, topic, Body, Frame};
 
+/// Typed older-peer replacements, without manufacturing watch frames.
+pub mod legacy;
+
 pub const MAX_SOURCES: i64 = 64;
 pub const MAX_ROWS: i64 = 1_000_000;
 pub const MAX_BYTES: i64 = 128 << 20;
@@ -98,6 +101,9 @@ pub fn migrate(db: &Connection) -> Result<()> {
         "CREATE TABLE desktop_catalog_owner(id INTEGER PRIMARY KEY CHECK(id=1), epoch TEXT NOT NULL);
          INSERT INTO desktop_catalog_owner VALUES(1,'');
          CREATE TABLE desktop_catalog_sources(
+           -- Nonempty stream: watch seq/cursor/hello. Empty stream: legacy
+           -- seq=declared pages, cursor=declared rows, next_page=received pages,
+           -- hello=provisional metadata, meta=last published metadata.
            computer TEXT PRIMARY KEY, epoch TEXT NOT NULL, incarnation INTEGER NOT NULL,
            generation INTEGER NOT NULL, stream TEXT NOT NULL, seq INTEGER NOT NULL,
            visible INTEGER, staged INTEGER, next_page INTEGER NOT NULL DEFAULT 0,
@@ -129,6 +135,52 @@ pub fn migrate(db: &Connection) -> Result<()> {
            UPDATE desktop_catalog_totals SET bytes=bytes+new.bytes-old.bytes WHERE id=1;
          END;",
     )?;
+    migrate_metadata(db)
+}
+
+/// Root schema 6: add source metadata to the maintained byte total. The caller
+/// owns the migration transaction. At most 64 existing metadata rows are read
+/// once here; page admission continues to read only the maintained total.
+pub fn migrate_metadata(db: &Connection) -> Result<()> {
+    let installed: i64 = db.query_row(
+        "SELECT count(*) FROM sqlite_schema WHERE type='trigger' AND name IN
+         ('desktop_catalog_source_insert','desktop_catalog_source_update','desktop_catalog_source_delete')",
+        [], |r|r.get(0),
+    )?;
+    ensure!(
+        installed == 0 || installed == 3,
+        "incomplete catalog metadata migration"
+    );
+    if installed == 3 {
+        return Ok(());
+    }
+    let sources: i64 = db.query_row(
+        "SELECT count(*) FROM (SELECT 1 FROM desktop_catalog_sources LIMIT ?1)",
+        [MAX_SOURCES + 1],
+        |r| r.get(0),
+    )?;
+    ensure!(
+        sources <= MAX_SOURCES,
+        "catalog source capacity exceeded during migration"
+    );
+    db.execute_batch(
+        "UPDATE desktop_catalog_totals SET bytes=bytes+coalesce((SELECT sum(
+           length(CAST(hello AS BLOB))+coalesce(length(CAST(meta AS BLOB)),0))
+           FROM desktop_catalog_sources),0) WHERE id=1;
+         CREATE TRIGGER desktop_catalog_source_insert AFTER INSERT ON desktop_catalog_sources BEGIN
+           UPDATE desktop_catalog_totals SET bytes=bytes+length(CAST(new.hello AS BLOB))+
+             coalesce(length(CAST(new.meta AS BLOB)),0) WHERE id=1;
+         END;
+         CREATE TRIGGER desktop_catalog_source_update AFTER UPDATE OF hello,meta ON desktop_catalog_sources BEGIN
+           UPDATE desktop_catalog_totals SET bytes=bytes+length(CAST(new.hello AS BLOB))+
+             coalesce(length(CAST(new.meta AS BLOB)),0)-length(CAST(old.hello AS BLOB))-
+             coalesce(length(CAST(old.meta AS BLOB)),0) WHERE id=1;
+         END;
+         CREATE TRIGGER desktop_catalog_source_delete AFTER DELETE ON desktop_catalog_sources BEGIN
+           UPDATE desktop_catalog_totals SET bytes=bytes-length(CAST(old.hello AS BLOB))-
+             coalesce(length(CAST(old.meta AS BLOB)),0) WHERE id=1;
+         END;",
+    )?;
     Ok(())
 }
 
@@ -144,7 +196,8 @@ pub fn begin_service(db: &mut Connection, epoch: &str) -> Result<()> {
     tx.execute_batch(
         "UPDATE desktop_catalog_generations SET obsolete=1 WHERE id IN
            (SELECT staged FROM desktop_catalog_sources WHERE staged IS NOT NULL);
-         UPDATE desktop_catalog_sources SET staged=NULL,complete=0,next_page=0,active=0;",
+         UPDATE desktop_catalog_sources SET staged=NULL,complete=0,next_page=0,active=0,
+           hello=CASE WHEN stream='' THEN '' ELSE hello END;",
     )?;
     tx.commit()?;
     Ok(())
@@ -162,15 +215,30 @@ pub fn connect(db: &mut Connection, source: &Source, frame: &Frame) -> Result<()
     let hello_json = serde_json::to_string(hello)?;
     ensure!(hello_json.len() <= 16 << 10, "hello metadata too large");
     let tx = db.transaction()?;
-    owner(&tx, source)?;
-    if let Some(old) = state(&tx, &source.computer)? {
+    replace_source(&tx, source, &hello.stream, frame.seq as i64, &hello_json)?;
+    check_budget(&tx)?;
+    tx.commit()?;
+    Ok(())
+}
+
+// Empty stream is reserved for the typed legacy adapter. Real watch hellos
+// require a nonempty stream above; neither mode can accept the other's data.
+fn replace_source(
+    tx: &Transaction<'_>,
+    source: &Source,
+    stream: &str,
+    seq: i64,
+    hello: &str,
+) -> Result<()> {
+    owner(tx, source)?;
+    if let Some(old) = state(tx, &source.computer)? {
         ensure!(
             old.epoch != source.service_epoch
                 || (source.incarnation, source.generation)
                     > (old.incarnation as u64, old.generation as u64),
             "source callback is not a new incarnation/generation"
         );
-        abandon(&tx, &source.computer)?;
+        abandon(tx, &source.computer)?;
     } else {
         let count: i64 = tx.query_row("SELECT count(*) FROM desktop_catalog_sources", [], |r| {
             r.get(0)
@@ -181,11 +249,12 @@ pub fn connect(db: &mut Connection, source: &Source, frame: &Frame) -> Result<()
         "INSERT INTO desktop_catalog_sources(computer,epoch,incarnation,generation,stream,seq,hello)
          VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(computer) DO UPDATE SET
          epoch=excluded.epoch,incarnation=excluded.incarnation,generation=excluded.generation,
-         stream=excluded.stream,seq=excluded.seq,hello=excluded.hello,meta=NULL,complete=0,active=1",
+         stream=excluded.stream,seq=excluded.seq,hello=excluded.hello,
+         meta=CASE WHEN excluded.stream='' THEN desktop_catalog_sources.meta ELSE NULL END,
+         complete=0,active=1",
         params![source.computer, source.service_epoch, source.incarnation as i64,
-            source.generation as i64, hello.stream, frame.seq as i64, hello_json],
+            source.generation as i64, stream, seq, hello],
     )?;
-    tx.commit()?;
     Ok(())
 }
 
@@ -214,10 +283,41 @@ pub fn disconnect(db: &mut Connection, source: &Source) -> Result<()> {
     Ok(())
 }
 
+/// Retire one producer's at-most-64 exact callbacks in one transaction. Already
+/// retired or replaced callbacks are harmless; none can retire a replacement.
+pub fn disconnect_many(db: &mut Connection, sources: &[Source]) -> Result<()> {
+    ensure!(
+        sources.len() <= MAX_SOURCES as usize,
+        "too many source retirements"
+    );
+    let tx = db.transaction()?;
+    for source in sources {
+        validate_source(source)?;
+        owner(&tx, source)?;
+        let Some(old) = state(&tx, &source.computer)? else {
+            continue;
+        };
+        if old.active
+            && old.epoch == source.service_epoch
+            && old.incarnation as u64 == source.incarnation
+            && old.generation as u64 == source.generation
+        {
+            abandon(&tx, &source.computer)?;
+            tx.execute(
+                "UPDATE desktop_catalog_sources SET active=0 WHERE computer=?1",
+                [&source.computer],
+            )?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 fn apply_inner(db: &mut Connection, source: &Source, frame: &Frame) -> Result<Applied> {
     check_frame(frame)?;
     let tx = db.transaction()?;
     let mut old = current(&tx, source)?;
+    ensure!(!old.stream.is_empty(), "watch frame for legacy source");
     ensure!(frame.seq as i64 > old.seq, "repeated or reordered frame");
     let hole = frame.seq as i64 != old.seq + 1;
     if hole {
@@ -252,20 +352,7 @@ fn apply_inner(db: &mut Connection, source: &Source, frame: &Frame) -> Result<Ap
             ensure!(snapshot.cursor >= 0, "invalid catalog cursor");
             if snapshot.page == 0 {
                 abandon(&tx, &source.computer)?;
-                let generations: i64 = tx.query_row(
-                    "SELECT count(*) FROM desktop_catalog_generations",
-                    [],
-                    |r| r.get(0),
-                )?;
-                ensure!(
-                    generations < MAX_GENERATIONS,
-                    "catalog generation capacity reached; collect obsolete generations"
-                );
-                tx.execute(
-                    "INSERT INTO desktop_catalog_generations(computer) VALUES(?1)",
-                    [&source.computer],
-                )?;
-                old.staged = Some(tx.last_insert_rowid());
+                old.staged = Some(start_generation(&tx, source)?);
                 old.next_page = 0;
                 old.cursor = snapshot.cursor;
             }
@@ -283,11 +370,7 @@ fn apply_inner(db: &mut Connection, source: &Source, frame: &Frame) -> Result<Ap
             tx.execute("UPDATE desktop_catalog_sources SET staged=?2,next_page=?3,cursor=?4,complete=0 WHERE computer=?1",
                 params![source.computer, stage, old.next_page + 1, snapshot.cursor])?;
             if snapshot.last {
-                tx.execute(
-                    "UPDATE desktop_catalog_generations SET obsolete=1 WHERE id=?1",
-                    [old.visible],
-                )?;
-                tx.execute("UPDATE desktop_catalog_sources SET visible=staged,staged=NULL,complete=1 WHERE computer=?1", [&source.computer])?;
+                publish(&tx, source, &old)?;
                 result = Applied::Visible;
             } else {
                 result = Applied::Staging;
@@ -339,7 +422,43 @@ fn apply_inner(db: &mut Connection, source: &Source, frame: &Frame) -> Result<Ap
         }
         _ => (),
     }
-    let (rows, bytes): (i64, i64) = tx.query_row(
+    check_budget(&tx)?;
+    tx.execute(
+        "UPDATE desktop_catalog_sources SET seq=?2 WHERE computer=?1",
+        params![source.computer, frame.seq as i64],
+    )?;
+    tx.commit()?;
+    Ok(result)
+}
+
+fn start_generation(tx: &Transaction<'_>, source: &Source) -> Result<i64> {
+    let generations: i64 = tx.query_row(
+        "SELECT count(*) FROM desktop_catalog_generations",
+        [],
+        |r| r.get(0),
+    )?;
+    ensure!(
+        generations < MAX_GENERATIONS,
+        "catalog generation capacity reached; collect obsolete generations"
+    );
+    tx.execute(
+        "INSERT INTO desktop_catalog_generations(computer) VALUES(?1)",
+        [&source.computer],
+    )?;
+    Ok(tx.last_insert_rowid())
+}
+
+fn publish(tx: &Transaction<'_>, source: &Source, old: &State) -> Result<()> {
+    tx.execute(
+        "UPDATE desktop_catalog_generations SET obsolete=1 WHERE id=?1",
+        [old.visible],
+    )?;
+    tx.execute("UPDATE desktop_catalog_sources SET visible=staged,staged=NULL,complete=1 WHERE computer=?1", [&source.computer])?;
+    Ok(())
+}
+
+fn check_budget(db: &Connection) -> Result<()> {
+    let (rows, bytes): (i64, i64) = db.query_row(
         "SELECT rows,bytes FROM desktop_catalog_totals WHERE id=1",
         [],
         |r| Ok((r.get(0)?, r.get(1)?)),
@@ -348,12 +467,7 @@ fn apply_inner(db: &mut Connection, source: &Source, frame: &Frame) -> Result<Ap
         rows <= MAX_ROWS && bytes <= MAX_BYTES,
         "catalog storage budget exhausted; collect obsolete generations"
     );
-    tx.execute(
-        "UPDATE desktop_catalog_sources SET seq=?2 WHERE computer=?1",
-        params![source.computer, frame.seq as i64],
-    )?;
-    tx.commit()?;
-    Ok(result)
+    Ok(())
 }
 
 /// Captures a generation and insertion watermark. Replacement invalidates the
@@ -503,6 +617,7 @@ pub fn collect(db: &mut Connection) -> Result<Option<usize>> {
 }
 
 struct State {
+    stream: String,
     epoch: String,
     incarnation: i64,
     generation: i64,
@@ -515,8 +630,8 @@ struct State {
     active: bool,
 }
 fn state(db: &Connection, computer: &str) -> Result<Option<State>> {
-    Ok(db.query_row("SELECT epoch,incarnation,generation,seq,visible,staged,next_page,cursor,complete,active FROM desktop_catalog_sources WHERE computer=?1", [computer], |r| Ok(State {
-        epoch:r.get(0)?,incarnation:r.get(1)?,generation:r.get(2)?,seq:r.get(3)?,visible:r.get(4)?,staged:r.get(5)?,next_page:r.get(6)?,cursor:r.get(7)?,complete:r.get(8)?,active:r.get(9)?,
+    Ok(db.query_row("SELECT epoch,incarnation,generation,seq,visible,staged,next_page,cursor,complete,active,stream FROM desktop_catalog_sources WHERE computer=?1", [computer], |r| Ok(State {
+        epoch:r.get(0)?,incarnation:r.get(1)?,generation:r.get(2)?,seq:r.get(3)?,visible:r.get(4)?,staged:r.get(5)?,next_page:r.get(6)?,cursor:r.get(7)?,complete:r.get(8)?,active:r.get(9)?,stream:r.get(10)?,
     })).optional()?)
 }
 fn owner(db: &Connection, source: &Source) -> Result<()> {
@@ -543,7 +658,8 @@ fn current(db: &Connection, source: &Source) -> Result<State> {
 fn abandon(tx: &Transaction<'_>, computer: &str) -> Result<()> {
     tx.execute("UPDATE desktop_catalog_generations SET obsolete=1 WHERE id=(SELECT staged FROM desktop_catalog_sources WHERE computer=?1)", [computer])?;
     tx.execute(
-        "UPDATE desktop_catalog_sources SET staged=NULL,next_page=0,complete=0 WHERE computer=?1",
+        "UPDATE desktop_catalog_sources SET staged=NULL,next_page=0,complete=0,
+         hello=CASE WHEN stream='' THEN '' ELSE hello END WHERE computer=?1",
         [computer],
     )?;
     Ok(())
@@ -611,5 +727,7 @@ fn row_json(item: &watch::CatalogItem) -> Result<String> {
     Ok(json)
 }
 
+#[cfg(test)]
+mod metadata_tests;
 #[cfg(test)]
 mod tests;

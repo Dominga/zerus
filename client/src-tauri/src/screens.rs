@@ -960,6 +960,33 @@ impl Screens {
         }
     }
 
+    /// Sessions' account picker refreshes catalog bindings only. It neither
+    /// pretends the Accounts screen is visible nor queues profile inspects.
+    pub fn filter_accounts(&self, force: bool) -> Revisioned<AccountsView> {
+        if force && self.0.allowed {
+            let mut hub = self.current();
+            let hosts = account_hosts(&hub.fleet);
+            let now = self.now();
+            let runs: Vec<Run> = hosts
+                .into_iter()
+                .filter_map(|host| {
+                    hub.accounts
+                        .ensure_catalog(&host, now)
+                        .then_some(Run::Catalog(host))
+                })
+                .collect();
+            drop(hub);
+            self.run(runs);
+        }
+        let mut hub = self.current();
+        let view = self.accounts_of(&mut hub);
+        let revision = remember(&mut hub, &ACCOUNT_SCREENS, &view);
+        Revisioned {
+            value: view,
+            revision,
+        }
+    }
+
     fn machines_answer(&self) -> Revisioned<MachinesView> {
         let mut hub = self.lock();
         let view = self.machines_of(&hub);
@@ -1291,6 +1318,14 @@ pub fn accounts_view(
     force: bool,
 ) -> Result<Revisioned<AccountsView>, String> {
     Ok(state.accounts(force))
+}
+
+#[tauri::command(async)]
+pub fn account_filters_view(
+    state: State<'_, Screens>,
+    force: bool,
+) -> Result<Revisioned<AccountsView>, String> {
+    Ok(state.filter_accounts(force))
 }
 
 #[tauri::command(async)]
@@ -1944,6 +1979,22 @@ mod tests {
     }
 
     // Review Focus 4.
+    #[test]
+    fn sessions_account_picker_refreshes_catalogs_without_profile_or_session_inspects() {
+        let h = harness(local_accounts(), true);
+        assert!(h.screens.filter_accounts(true).catalog_loading);
+        h.drain();
+        let view = h.screens.filter_accounts(false);
+        assert!(!view.catalog_loading);
+        assert!(!view.accounts.is_empty());
+        assert_eq!(h.count("account ls"), 1);
+        assert!(h.fake.calls().iter().all(|call| !call.contains("inspect")));
+        h.screens.filter_accounts(true);
+        h.drain();
+        assert_eq!(h.count("account ls"), 2);
+        assert!(h.fake.calls().iter().all(|call| !call.contains("inspect")));
+    }
+
     #[test]
     fn a_failing_or_slow_inspect_leaves_the_others_and_waits_five_minutes() {
         let h = harness(local_accounts(), true);

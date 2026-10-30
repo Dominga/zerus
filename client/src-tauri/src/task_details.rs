@@ -16,7 +16,7 @@ use zerus_client_core::{attachments, reads::CachedAttachment, task_details, task
 pub struct TaskReads(Arc<AtomicBool>);
 pub(crate) struct Permit(TaskReads);
 impl TaskReads {
-    fn begin(&self) -> Result<Permit, String> {
+    pub(crate) fn begin(&self) -> Result<Permit, String> {
         self.0
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .map_err(|_| "Task details are already loading.".to_owned())?;
@@ -146,7 +146,7 @@ pub async fn task_board_action(
     .map_err(|e| e.to_string())?
 }
 
-fn assignment_target(
+pub(crate) fn assignment_target(
     row: &zerus_client_core::view::ViewRow,
     target: &zerus_client_core::actions::Target,
     session_id: &str,
@@ -269,4 +269,27 @@ mod assignment_tests {
         row.run_id = Some("new".into());
         assert!(assignment_target(&row, &target, "launch_id:launch").is_err());
     }
+}
+
+/// The UI has already shown the cancel dialog for this exact execution.
+#[tauri::command]
+pub async fn task_cancel_execution(
+    state: State<'_, TaskWrites>,
+    project: String,
+    task: String,
+    execution: zerus_client_core::task_cancel::Execution,
+    reason: String,
+) -> Result<Option<String>, String> {
+    if crate::actions::blocked() {
+        return Err(crate::screens::REPLAY_NEEDS_HGS.into());
+    }
+    let permit = state.begin()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _permit = permit;
+        zerus_client_core::task_cancel::apply(&project, &task, &execution, &reason, |call| {
+            tasks_write::run(&zerus_client_core::default_hgs(), call)
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }

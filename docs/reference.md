@@ -2595,6 +2595,32 @@ for that session, and the project settings can keep agents to their own
 session or limit how many tasks they start per hour. `settings --set` reads a
 JSON object and changes only the fields it names.
 
+The desktop cancellation dialog uses `hgs task cancel-execution REF --project P --json`,
+with schema 1 JSON on stdin: `dispatch_id`, `stage_at`, executor `machine` and `session_id`,
+and `reason`. It checks the exact active execution while holding the project lock,
+including after forwarding or offline fallback, and returns a compact task plus
+`cancel_message`. Peers without this command refuse it; no legacy cancellation
+fallback is attempted. `hgs task cancel` retains its existing full response.
+
+The desktop's explicit Start for an existing executor uses two schema 1 JSON
+commands: `hgs task start-plan REF --project P --json` prepares an immutable
+native request without sending it, and `hgs task start-deliver REF --project P
+--json` delivers that exact plan. Preparation binds a fresh request UUID, the
+task's `stage_at` and target, and the selected host, session name, stable session
+ID, run ID and conversation ID. Delivery rechecks the task revision and executor
+before entering the existing native input path. Peers without these commands
+refuse them; there is no fallback to an unguarded send.
+
+Before delivery, the client checkpoints the complete original plan in its
+private task outbox, separate from discussion-message recovery. A restored or
+uncertain Start is never delivered again. **Review task start** reads that local
+record; its explicit release first calls `start-deliver --recover-only` with the
+original plan. This only reads the native receipt and settles an acknowledged
+dispatch. A found receipt keeps the task started; otherwise the reviewed record
+can be released so a later, separate Start has a fresh request UUID. A changed
+record or failed check keeps the record. Release never stops an executor or
+sends any input, and there is no additional polling loop.
+
 Task links retain the computer and immutable launch identity (a run identity for
 older bindings). The session name is a display and routing hint: renaming changes
 the shown label and keeps current-session emphasis and filtering. A different

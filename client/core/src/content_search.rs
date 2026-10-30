@@ -206,11 +206,30 @@ fn decode_channel(query: &str, value: Value) -> Result<Reply, ReadError> {
             } else {
                 format!("{project} / {tag}")
             };
+            // A scope is an identity: oversized values become unknown, never
+            // another profile or folder obtained by truncating a common prefix.
+            let scope = |key: &str, max| {
+                session[key]
+                    .as_str()
+                    .filter(|v| v.chars().count() <= max)
+                    .unwrap_or("")
+            };
+            let bad_binding = [("account_id", 4096), ("account_home", 16 << 10)]
+                .iter()
+                .any(|(key, max)| {
+                    session.get(key).is_some_and(|v| {
+                        !v.is_null() && v.as_str().is_none_or(|s| s.chars().count() > *max)
+                    })
+                });
             hit.session = Some(serde_json::json!({ "name": hit.name, "run_id": hit.run_id,
                 "conversation_id": hit.conversation_id, "archive_id": hit.archive_id,
                 "title": if title.is_empty() { hit.name.clone() } else { title },
                 "agent": agent.chars().take(128).collect::<String>(), "state":"archived", "status":"ended", "caption":"Archived",
                 "tracked": true, "resumable": session["resumable"] == true, "cwd": field("cwd"),
+                "cwd_canonical":scope("cwd_canonical", 16 << 10), "git_root":scope("git_root", 16 << 10),
+                "account_provider":agent.chars().take(128).collect::<String>(),
+                "account_id":if bad_binding { "" } else { scope("account_id",4096) }, "account_home":if bad_binding { "" } else { scope("account_home",16 << 10) },
+                "account_binding_reported":!bad_binding && (session.get("account_id").is_some_and(Value::is_string) || session.get("account_home").is_some_and(Value::is_string)),
                 "archived_at": session["archived_at"].as_f64().filter(|at| at.is_finite()).unwrap_or(0.0) }));
         }
         // A preview is public message text, never a source of attachment,
@@ -409,5 +428,45 @@ mod tests {
         assert_eq!(row["archive_id"], "archive-one");
         assert_eq!(row["run_id"], "run-one");
         assert_eq!(row["title"], "example / search");
+        assert_eq!(row["account_binding_reported"], false);
+    }
+
+    #[test]
+    fn legacy_and_indexed_archive_hits_keep_bounded_public_scope_metadata_only() {
+        let mut item = hit();
+        item["archive_id"] = json!("archive-one");
+        item["session"] = json!({"name":item["name"],"run_id":item["run_id"],
+            "conversation_id":item["conversation_id"],"archive_id":"archive-one","state":"archived","cmd":"dsh",
+            "account_id":"recorded","account_home":"/srv/example/profile","cwd_canonical":"/srv/example/app/sub","git_root":"/srv/example/app",
+            "credential_body":"must never be forwarded"});
+        for value in [
+            json!({"query":"needle","results":[item.clone()],"truncated":false,"unavailable_sessions":0}),
+            indexed(vec![item], Value::Null),
+        ] {
+            let reply = decode("needle", value).unwrap();
+            let row = reply.results[0].session.as_ref().unwrap();
+            assert_eq!(row["account_provider"], "dsh");
+            assert_eq!(row["account_id"], "recorded");
+            assert_eq!(row["account_home"], "/srv/example/profile");
+            assert_eq!(row["account_binding_reported"], true);
+            assert_eq!(row["cwd_canonical"], "/srv/example/app/sub");
+            assert_eq!(row["git_root"], "/srv/example/app");
+            assert!(row.get("credential_body").is_none());
+        }
+    }
+
+    #[test]
+    fn oversized_scope_identities_are_unknown_instead_of_matching_a_shorter_prefix() {
+        let mut item = hit();
+        item["archive_id"] = json!("archive-one");
+        item["session"] = json!({"name":item["name"],"run_id":item["run_id"],"conversation_id":item["conversation_id"],
+            "archive_id":"archive-one","state":"archived","cmd":"claude","account_id":"x".repeat(4097),
+            "account_home":"/srv/example/other-account","cwd_canonical":"p".repeat((16 << 10) + 1)});
+        let reply = decode("needle", indexed(vec![item], Value::Null)).unwrap();
+        let row = reply.results[0].session.as_ref().unwrap();
+        assert_eq!(row["account_binding_reported"], false);
+        assert_eq!(row["account_id"], "");
+        assert_eq!(row["account_home"], "");
+        assert_eq!(row["cwd_canonical"], "");
     }
 }

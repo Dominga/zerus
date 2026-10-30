@@ -26,7 +26,6 @@
   .dh-chip svg { flex: none; opacity: .85; }
   .dh-model { flex: 0 1 260px; text-align: right; }
   .account-usage { border: 0; background: transparent; }
-  .account-usage > .badge { height: 18px; }
   .usage-refresh { width: 22px; height: 22px; color: var(--z-color-muted); }
   .usage-refresh .su-spin { display: inline-flex; color: var(--z-color-accent); }
   .usage-reset { margin-left: 5px; color: var(--z-color-muted); }
@@ -100,6 +99,12 @@
   .act-body p + p, .act-body p + ul, .act-body ul + p { margin-top: 8px; }
   .act-body code { font-family: var(--z-font-mono); font-size: .9em; padding: 1px 5px; border-radius: 4px; background: var(--z-color-code-bg); }
   .act-body a { color: var(--z-color-accent); text-decoration: none; }
+  /* Message tables use the mockup proc-table's type, header and divider tokens. */
+  .act-table-wrap { max-width: 100%; overflow-x: auto; margin: 8px 0; }
+  .act-table { width: 100%; min-width: calc(var(--fs-sm) * var(--table-columns) * 9); border-collapse: collapse; font-size: var(--fs-sm); }
+  .act-table th { font-weight: 600; color: var(--z-color-label); font-size: var(--fs-xs); padding: 4px 8px; border-bottom: 1px solid var(--z-color-divider); }
+  .act-table td { padding: 5px 8px; border-bottom: 1px solid color-mix(in srgb, var(--z-color-divider) 60%, transparent); }
+  .act-table th, .act-table td { vertical-align: top; white-space: normal; overflow-wrap: anywhere; }
   .md-list { padding-left: 20px !important; list-style: disc !important; }
   .md-list li { margin: 2px 0; }
   .act-code { margin: 8px 0 0; padding: 9px 12px; border-radius: var(--z-radius-md); background: var(--z-color-code-bg); border: 1px solid var(--z-color-divider); font-size: calc(var(--fs-base) * .9); line-height: 1.45; overflow-x: auto; white-space: pre; }
@@ -435,6 +440,7 @@
     border: 1px solid var(--z-color-divider); border-radius: var(--z-radius-md); background: var(--z-color-code-bg); font-size: calc(var(--fs-base) * .9); }
   .draft-message { font-size: var(--fs-xs); color: var(--z-color-text-2); }
   .draft-message.error { color: var(--z-color-danger); }
+  .confirm-body { font-size: var(--fs-sm); line-height: 1.5; margin-bottom: 12px; color: var(--z-color-text-2); }
   .confirm-body p { line-height: 1.5; }
 
   /* Status bar */

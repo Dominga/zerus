@@ -46,6 +46,19 @@ pub struct EditorFile {
     reference: String,
 }
 #[derive(Clone, Serialize)]
+pub struct Recovery {
+    id: String,
+    snapshot: String,
+}
+impl Recovery {
+    fn of(record: &Value) -> Self {
+        Self {
+            id: record["id"].as_str().unwrap_or("").into(),
+            snapshot: outbox::snapshot(record),
+        }
+    }
+}
+#[derive(Clone, Serialize)]
 pub struct View {
     handle: u64,
     rev: u64,
@@ -58,6 +71,7 @@ pub struct View {
     files: Vec<EditorFile>,
     error: String,
     recovery: bool,
+    recovery_record: Option<Recovery>,
     blocked: bool,
     saved: bool,
     unsaved: bool,
@@ -85,6 +99,7 @@ struct Slot {
     unsaved: bool,
     error: String,
     recovery: bool,
+    recovery_record: Option<Recovery>,
     blocked: bool,
 }
 impl Slot {
@@ -115,7 +130,7 @@ impl TaskEditor {
         Ok(Permit(self.clone()))
     }
 }
-fn load(store: &DraftStore, key: &str) -> Result<Loaded, String> {
+pub(crate) fn load(store: &DraftStore, key: &str) -> Result<Loaded, String> {
     let (tx, rx) = mpsc::channel();
     store.load(key, move |value| {
         let _ = tx.send(value);
@@ -195,6 +210,7 @@ fn view(slot: &Slot) -> View {
         files: slot.files.clone(),
         error: slot.error.clone(),
         recovery: slot.recovery,
+        recovery_record: slot.recovery_record.clone(),
         blocked: slot.blocked,
         saved: false,
         unsaved: slot.unsaved,
@@ -258,6 +274,11 @@ fn open_slot(
         Ok(None)
     };
     let recovery = pending.as_ref().is_ok_and(Option::is_some);
+    let recovery_record = pending
+        .as_ref()
+        .ok()
+        .and_then(Option::as_ref)
+        .map(Recovery::of);
     let error = loaded
         .storage_error
         .or_else(|| pending.err())
@@ -275,6 +296,7 @@ fn open_slot(
         unsaved: false,
         error,
         recovery,
+        recovery_record,
         blocked,
     };
     Ok(slot)
@@ -513,11 +535,23 @@ pub async fn task_editor_pick(
     .map_err(|e| e.to_string())?
 }
 
+#[cfg(test)]
 fn submitted(
     slot: &mut Slot,
     composers: &Composers,
     detail: Value,
     recover: bool,
+    call: &impl Fn(&TaskCall) -> Result<serde_json::Map<String, Value>, String>,
+) -> Result<bool, String> {
+    submitted_with_delivery(slot, composers, detail, recover, None, call)
+}
+
+fn submitted_with_delivery(
+    slot: &mut Slot,
+    composers: &Composers,
+    detail: Value,
+    recover: bool,
+    delivery: Option<&zerus_client_core::task_feedback::Delivery>,
     call: &impl Fn(&TaskCall) -> Result<serde_json::Map<String, Value>, String>,
 ) -> Result<bool, String> {
     if slot.blocked {
@@ -529,6 +563,14 @@ fn submitted(
     if slot.mode == Mode::Description && recover {
         return Err("Open this task's description to review the saved document.".into());
     }
+    let message_mode = if !recover && slot.mode == Mode::Note {
+        delivery
+            .map(|d| zerus_client_core::task_feedback::checked(&detail, d))
+            .transpose()?
+            .unwrap_or("note")
+    } else {
+        "note"
+    };
     let original = if slot.mode == Mode::Note {
         let pending = outbox::pending(store.root(), &slot.project, &slot.task)?;
         if !recover && pending.is_none() && (slot.stored.uncertain || slot.stored.sending) {
@@ -598,7 +640,7 @@ fn submitted(
                 let intent = tasks_write::message_intent(
                     &expected.text,
                     &expected.attachments,
-                    "note",
+                    message_mode,
                     detail["dispatch_id"].as_str().unwrap_or(""),
                 );
                 let reservation = outbox::reserve(
@@ -666,15 +708,22 @@ fn submitted(
     slot.error.clear();
     Ok(cleared)
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Submission {
+    handle: u64,
+    rev: u64,
+    recover: bool,
+    delivery: Option<zerus_client_core::task_feedback::Delivery>,
+}
+
 #[tauri::command]
 pub async fn task_editor_submit(
     writes: State<'_, crate::task_details::TaskWrites>,
     state: State<'_, TaskEditor>,
     composers: State<'_, Composers>,
     fetcher: State<'_, Arc<Fetcher>>,
-    handle: u64,
-    rev: u64,
-    recover: bool,
+    input: Submission,
 ) -> Result<View, String> {
     if crate::actions::blocked() {
         return Err(crate::screens::REPLAY_NEEDS_HGS.into());
@@ -684,6 +733,12 @@ pub async fn task_editor_submit(
     let editor = state.inner().clone();
     let composers = composers.inner().clone();
     let fetcher = Arc::clone(fetcher.inner());
+    let Submission {
+        handle,
+        rev,
+        recover,
+        delivery,
+    } = input;
     tauri::async_runtime::spawn_blocking(move || {
         let _write_permit = write_permit;
         let _permit = permit;
@@ -693,9 +748,14 @@ pub async fn task_editor_submit(
             .filter(|s| s.handle == handle && s.rev == rev)
             .ok_or(CHANGED)?;
         let result = document(&slot.project, &slot.task).and_then(|detail| {
-            submitted(slot, &composers, detail, recover, &|call| {
-                tasks_write::run(&zerus_client_core::default_hgs(), call)
-            })
+            submitted_with_delivery(
+                slot,
+                &composers,
+                detail,
+                recover,
+                delivery.as_ref(),
+                &|call| tasks_write::run(&zerus_client_core::default_hgs(), call),
+            )
         });
         let saved = match result {
             Ok(saved) => saved,
@@ -705,12 +765,98 @@ pub async fn task_editor_submit(
             }
         };
         if slot.mode == Mode::Note {
-            slot.recovery = outbox::pending(composers.0.store.root(), &slot.project, &slot.task)
-                .is_ok_and(|p| p.is_some());
+            let pending = outbox::pending(composers.0.store.root(), &slot.project, &slot.task);
+            slot.recovery = pending.as_ref().is_ok_and(Option::is_some);
+            slot.recovery_record = pending
+                .as_ref()
+                .ok()
+                .and_then(Option::as_ref)
+                .map(Recovery::of);
         }
         refresh_files(slot, &composers, &fetcher)?;
         let mut answer = view(slot);
         answer.saved = saved;
+        Ok(answer)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn release_record(
+    slot: &mut Slot,
+    store: &DraftStore,
+    id: &str,
+    snapshot: &str,
+) -> Result<(), String> {
+    if slot.mode != Mode::Note || slot.blocked {
+        return Err(CHANGED.into());
+    }
+    let record = outbox::pending(store.root(), &slot.project, &slot.task)?
+        .ok_or("The pending message changed; refresh this task.")?;
+    if record["id"].as_str() != Some(id) || outbox::snapshot(&record) != snapshot {
+        return Err("The pending message changed; refresh this task.".into());
+    }
+    // Keep the current text, cursor and files. Only this explicit review clears
+    // the local sending flags; the original remains until that write is durable.
+    slot.stored.sending = false;
+    slot.stored.uncertain = false;
+    checkpoint(slot, store)?;
+    if !outbox::release_if_unchanged(store.root(), &slot.project, &slot.task, &record)? {
+        return Err("The pending message changed; refresh this task.".into());
+    }
+    slot.recovery = false;
+    slot.recovery_record = None;
+    slot.rev += 1;
+    slot.error.clear();
+    Ok(())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Release {
+    handle: u64,
+    rev: u64,
+    id: String,
+    snapshot: String,
+}
+#[tauri::command]
+pub async fn task_editor_release(
+    writes: State<'_, crate::task_details::TaskWrites>,
+    state: State<'_, TaskEditor>,
+    composers: State<'_, Composers>,
+    input: Release,
+) -> Result<View, String> {
+    if crate::actions::blocked() {
+        return Err(crate::screens::REPLAY_NEEDS_HGS.into());
+    }
+    let write_permit = writes.begin()?;
+    let permit = state.begin()?;
+    let editor = state.inner().clone();
+    let composers = composers.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _write_permit = write_permit;
+        let _permit = permit;
+        let mut guard = crate::composer::lock(&editor.0.slot);
+        let slot = guard
+            .as_mut()
+            .filter(|s| s.handle == input.handle && s.rev == input.rev)
+            .ok_or(CHANGED)?;
+        let released = match release_record(slot, &composers.0.store, &input.id, &input.snapshot) {
+            Ok(()) => true,
+            Err(error) => {
+                slot.error = error;
+                false
+            }
+        };
+        let pending = outbox::pending(composers.0.store.root(), &slot.project, &slot.task);
+        slot.recovery = pending.as_ref().is_ok_and(Option::is_some);
+        slot.recovery_record = pending
+            .as_ref()
+            .ok()
+            .and_then(Option::as_ref)
+            .map(Recovery::of);
+        let mut answer = view(slot);
+        answer.saved = released;
         Ok(answer)
     })
     .await
@@ -741,6 +887,7 @@ mod tests {
             unsaved: false,
             error: String::new(),
             recovery: false,
+            recovery_record: None,
             blocked: false,
         }
     }
@@ -752,6 +899,103 @@ mod tests {
             .as_object()
             .unwrap()
             .clone()
+    }
+    #[test]
+    fn every_feedback_mode_reserves_once_and_recovers_only_its_original_intent() {
+        use zerus_client_core::task_feedback::Delivery;
+        for (stage, mode) in [
+            ("todo", "queue"),
+            ("backlog", "queue"),
+            ("active", "send"),
+            ("review", "reopen"),
+            ("done", "reopen"),
+            ("active", "note"),
+        ] {
+            let root = crate::composer::tests::dir(&format!("task-feedback-{stage}-{mode}"));
+            let store = crate::composer::tests::drafts(&root);
+            let (hub, _) = crate::composer::tests::hub_on(&store);
+            let mut slot = slot(Mode::Note);
+            let detail = json!({"uuid":ID,"project":"example","stage":stage,"stage_at":123,"dispatch_id":"original-dispatch","writable":true});
+            let delivery = Delivery {
+                mode: mode.into(),
+                stage_at: 123,
+                dispatch_id: "original-dispatch".into(),
+            };
+            assert!(submitted_with_delivery(
+                &mut slot,
+                &hub,
+                detail.clone(),
+                false,
+                Some(&delivery),
+                &|call| {
+                    let record = outbox::pending(store.root(), "example", ID)?.unwrap();
+                    assert_eq!(record["intent"]["mode"], mode);
+                    assert_eq!(record["intent"]["dispatch"], "original-dispatch");
+                    assert!(call.args.windows(2).any(|p| p == ["--mode", mode]));
+                    assert!(!call.args.iter().any(|s| s == "--recover-only"));
+                    Err("reply lost".into())
+                }
+            )
+            .is_err());
+            let original = outbox::pending(store.root(), "example", ID)
+                .unwrap()
+                .unwrap();
+            let mut changed = detail;
+            changed["stage_at"] = json!(456);
+            changed["dispatch_id"] = json!("later-dispatch");
+            let wrong = Delivery {
+                mode: "note".into(),
+                stage_at: 456,
+                dispatch_id: "later-dispatch".into(),
+            };
+            assert!(submitted_with_delivery(
+                &mut slot,
+                &hub,
+                changed,
+                true,
+                Some(&wrong),
+                &|call| {
+                    assert!(call.args.windows(2).any(|p| p == ["--mode", mode]));
+                    assert!(call
+                        .args
+                        .windows(2)
+                        .any(|p| p == ["--expect-dispatch", "original-dispatch"]));
+                    assert!(call.args.iter().any(|s| s == "--recover-only"));
+                    Ok(receipt(original["id"].as_str().unwrap()))
+                }
+            )
+            .unwrap());
+            assert!(outbox::pending(store.root(), "example", ID)
+                .unwrap()
+                .is_none());
+        }
+    }
+    #[test]
+    fn a_changed_feedback_snapshot_keeps_the_draft_before_reservation() {
+        use zerus_client_core::task_feedback::Delivery;
+        let root = crate::composer::tests::dir("task-feedback-stale");
+        let store = crate::composer::tests::drafts(&root);
+        let (hub, _) = crate::composer::tests::hub_on(&store);
+        let mut slot = slot(Mode::Note);
+        let detail = json!({"stage":"active","stage_at":124,"dispatch_id":"other","writable":true});
+        let delivery = Delivery {
+            mode: "send".into(),
+            stage_at: 123,
+            dispatch_id: "original".into(),
+        };
+        assert!(submitted_with_delivery(
+            &mut slot,
+            &hub,
+            detail,
+            false,
+            Some(&delivery),
+            &|_| panic!("stale feedback cannot call hgs")
+        )
+        .is_err());
+        assert_eq!(slot.stored.draft.text, "Original");
+        assert!(outbox::pending(store.root(), "example", ID)
+            .unwrap()
+            .is_none());
     }
     #[test]
     fn note_unknown_is_only_checked_by_original_request_and_never_resubmitted() {
@@ -903,6 +1147,90 @@ mod tests {
         assert!(outbox::pending(store.root(), "example", ID)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn reviewed_release_keeps_current_text_cursor_and_files_without_delivery() {
+        let root = crate::composer::tests::dir("task-note-release");
+        let store = crate::composer::tests::drafts(&root);
+        let (hub, _) = crate::composer::tests::hub_on(&store);
+        let mut slot = slot(Mode::Note);
+        assert!(submitted(&mut slot, &hub, detail(""), false, &|_| Err(
+            "unknown".into()
+        ))
+        .is_err());
+        let record = outbox::pending(store.root(), "example", ID)
+            .unwrap()
+            .unwrap();
+        slot.stored.draft.text = "Newer note".into();
+        slot.stored.position = 7;
+        slot.stored.anchor = 3;
+        slot.stored
+            .draft
+            .attachments
+            .push(zerus_client_core::attachments::Attachment {
+                name: "context.txt".into(),
+                mime: "text/plain".into(),
+                bytes: Arc::from(b"context".as_slice()),
+                reference: "[File #1]".into(),
+            });
+        let draft = slot.stored.draft.clone();
+        release_record(
+            &mut slot,
+            &store,
+            record["id"].as_str().unwrap(),
+            &outbox::snapshot(&record),
+        )
+        .unwrap();
+        assert_eq!(slot.stored.draft, draft);
+        assert_eq!(load(&store, &slot.key()).unwrap().draft.draft, draft);
+        assert_eq!((slot.stored.position, slot.stored.anchor), (7, 3));
+        let saved = load(&store, &slot.key()).unwrap().draft;
+        assert_eq!((saved.position, saved.anchor), (7, 3));
+        assert!(!slot.stored.sending && !slot.stored.uncertain);
+        assert_eq!(outbox::pending(store.root(), "example", ID), Ok(None));
+    }
+
+    #[test]
+    fn stale_review_or_failed_checkpoint_preserves_recovery_evidence() {
+        let root = crate::composer::tests::dir("task-note-release-stale");
+        let store = crate::composer::tests::drafts(&root);
+        let (hub, _) = crate::composer::tests::hub_on(&store);
+        let mut slot = slot(Mode::Note);
+        assert!(submitted(&mut slot, &hub, detail(""), false, &|_| Err(
+            "unknown".into()
+        ))
+        .is_err());
+        let record = outbox::pending(store.root(), "example", ID)
+            .unwrap()
+            .unwrap();
+        assert!(
+            release_record(&mut slot, &store, record["id"].as_str().unwrap(), "stale").is_err()
+        );
+        assert_eq!(
+            outbox::pending(store.root(), "example", ID).unwrap(),
+            Some(record.clone())
+        );
+        let key_dir = std::fs::read_dir(store.root())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| p.is_dir() && p.file_name().unwrap().to_string_lossy().len() == 64)
+            .unwrap();
+        let backup = root.join("saved-draft");
+        std::fs::rename(&key_dir, &backup).unwrap();
+        std::fs::write(&key_dir, b"blocked").unwrap();
+        assert!(release_record(
+            &mut slot,
+            &store,
+            record["id"].as_str().unwrap(),
+            &outbox::snapshot(&record)
+        )
+        .is_err());
+        assert_eq!(
+            outbox::pending(store.root(), "example", ID).unwrap(),
+            Some(record)
+        );
+        std::fs::remove_file(key_dir).unwrap();
     }
     #[test]
     fn stale_editor_and_oversize_edits_preserve_the_original_draft() {

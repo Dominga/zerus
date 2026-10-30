@@ -32,8 +32,19 @@ export const taskEditorOpen = (target: import("./store/taskEditor").TaskEditorTa
 export const taskEditorEdit = (input: Pick<import("./store/taskEditor").TaskEditorView, "handle" | "rev" | "text" | "position" | "anchor">) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_edit", { input });
 export const taskEditorPick = (handle: number, start: number, end: number) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_pick", { handle, start, end });
 export const taskEditorRemove = (handle: number, index: number) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_files", { handle, change: { kind: "remove", index } });
-export const taskEditorSubmit = (handle: number, rev: number, recover: boolean) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_submit", { handle, rev, recover });
+export const taskEditorSubmit = (handle: number, rev: number, recover: boolean, delivery?: import("./store/taskEditor").TaskMessageDelivery) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_submit", { input: { handle, rev, recover, delivery: delivery ?? null } });
+export const taskEditorRelease = (handle: number, rev: number, record: import("./store/taskEditor").TaskRecoveryRecord) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_release", { input: { handle, rev, ...record } });
+export const taskStartOpen = (project: string, task: string) => desktop<import("./store/taskStart").StartView>("task_start_open", { project, task });
+export const readTaskSettings = (project: string) => desktop<import("./store/taskSettings").TaskSettings>("task_settings", { project, changes: null });
+export const saveTaskSettings = (project: string, changes: Partial<import("./store/taskSettings").TaskSettings>) => desktop<import("./store/taskSettings").TaskSettings>("task_settings", { project, changes });
+export const taskStart = (input: import("./store/taskStart").StartInput) => desktop<import("./store/taskStart").StartView>("task_start", { input });
+export const taskStartRelease = (view: import("./store/taskStart").StartView) => desktop<import("./store/taskStart").StartView>("task_start_release", { project: view.project, task: view.task, id: view.id, snapshot: view.snapshot });
+export const cancelTaskExecution = (project: string, task: string, execution: import("./store/taskCancel").Execution, reason: string) => desktop<string | null>("task_cancel_execution", { project, task, execution, reason });
 export const taskBoardAction = (project: string, task: string, expectedStage: string, action: import("./store/taskBoard").BoardAction) => desktop<void>("task_board_action", { project, task, expectedStage, action });
+export const taskFormOpen = (target: import("./store/taskEditor").TaskEditorTarget<import("./store/taskForms").FormKind>) => desktop<import("./store/taskEditor").TaskEditorView<import("./store/taskForms").FormKind>>("task_form_open", { project: target.project, task: target.task, kind: target.mode });
+export const taskFormEdit = (kind: import("./store/taskForms").FormKind, input: Pick<import("./store/taskEditor").TaskEditorView, "handle" | "rev" | "text" | "position" | "anchor">) => desktop<import("./store/taskEditor").TaskEditorView<import("./store/taskForms").FormKind>>("task_form_edit", { kind, input });
+export const taskFormSubmit = (input: import("./store/taskForms").FormSubmit) => desktop<import("./store/taskEditor").TaskEditorView<import("./store/taskForms").FormKind>>("task_form_submit", { input });
+export const taskFormCancel = (kind: import("./store/taskForms").FormKind, handle: number, rev: number) => desktop<import("./store/taskEditor").TaskEditorView<import("./store/taskForms").FormKind>>("task_form_cancel", { kind, handle, rev });
 export const assignTask = (project: string, task: string, target: { computer: string; name: string; run_id: string; conversation_id: string } | null, catalogKey: string | null, sessionId: string | null) => desktop<void>("task_assign", { project, task, target, catalogKey, sessionId });
 export const readTaskDetails = (project: string, task: string, before: string | null) => desktop<unknown>("task_details", { project, task, before });
 export const openTaskAttachment = (path: string) => desktop<string | null>("task_attachment_open", { path });
@@ -412,6 +423,11 @@ export async function accountsView(force = false): Promise<AccountsView> {
   if (!inTauri()) return emptyAccounts([DESKTOP_ONLY]);
   return invoke<AccountsView>("accounts_view", { force });
 }
+/** Sessions' explicit account chooser reads catalogs, without profile inspects. */
+export async function accountFiltersView(force = false): Promise<AccountsView> {
+  if (!inTauri()) return emptyAccounts([DESKTOP_ONLY]);
+  return invoke<AccountsView>("account_filters_view", { force });
+}
 
 /** The Machines view; `force` is Refresh. */
 export async function machinesView(force = false): Promise<MachinesView> {
@@ -631,6 +647,9 @@ export const onOpenUpdates = (listener: () => void) => onEvent<void>("open-updat
 /** `desk-notice`: a notice for the window; resolves with the stop once listening. */
 export const onDeskNotice = (listener: (notice: DeskNotice) => void) => onEvent<DeskNotice>("desk-notice", listener);
 
+/** Qt's global Refresh: nudge this computer and every listed peer, never a new source. */
+export const fleetRefresh = () => inTauri() ? invoke<number>("fleet_refresh").then(() => undefined) : Promise.resolve();
+
 const UPDATES_DESKTOP_ONLY = "Updates need the desktop app.";
 export const updatesView = () => inTauri() ? invoke<UpdatesView>("updates_view") : Promise.resolve(emptyUpdatesView());
 export const updatesCheck = () => inTauri() ? invoke<void>("updates_check") : Promise.resolve();
@@ -640,6 +659,7 @@ export const updatesOpen = (target: "release" | "download" | "instructions") =>
   inTauri() ? invoke<void>("updates_open", { target }) : Promise.reject(UPDATES_DESKTOP_ONLY);
 export const updatesCopyCommand = () => inTauri() ? invoke<void>("updates_copy_command") : Promise.reject(UPDATES_DESKTOP_ONLY);
 export const updatesRestart = () => inTauri() ? invoke<void>("updates_restart") : Promise.reject(UPDATES_DESKTOP_ONLY);
+export const updatesFixLoginItem = (restart: boolean) => inTauri() ? invoke<string | null>("updates_fix_login_item", { restart }) : Promise.reject(UPDATES_DESKTOP_ONLY);
 /** `updates-changed`: the native worker's latest snapshot; resolves once listening. */
 export const onUpdates = (listener: (view: UpdatesView) => void) => onEvent<UpdatesView>("updates-changed", listener);
 

@@ -72,6 +72,8 @@ pub struct UpdatesView {
     pub download_label: Option<String>,
     pub details: InstallationGuide,
     pub restart_required: bool,
+    #[serde(default)]
+    pub login_item_deprioritized: bool,
     pub version: String,
     /// A source or unknown dev-app installation keeps its status in Settings only.
     pub quiet: bool,
@@ -90,6 +92,7 @@ struct UpdateState {
     cached: bool,
     error: String,
     restart_required: bool,
+    login_item_deprioritized: bool,
     fresh_for_notification: bool,
     automatic_in_flight: bool,
 }
@@ -111,6 +114,7 @@ impl Default for UpdateState {
             cached: false,
             error: String::new(),
             restart_required: false,
+            login_item_deprioritized: false,
             fresh_for_notification: false,
             automatic_in_flight: false,
         }
@@ -238,6 +242,7 @@ impl UpdatesView {
                 &build.app_version,
             ),
             restart_required: state.restart_required,
+            login_item_deprioritized: state.login_item_deprioritized,
             version: state.feed.version.clone(),
             quiet: false,
         }
@@ -262,6 +267,7 @@ impl Updates {
         let state = UpdateState {
             channel: Channel::parse(&settings.text("updates/channel")).unwrap_or_default(),
             automatic: settings.flag("updates/automatic"),
+            login_item_deprioritized: crate::login_item::deprioritized(),
             ..UpdateState::default()
         };
         (
@@ -1066,6 +1072,48 @@ pub fn updates_restart() -> Result<(), String> {
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn login_item_restart(
+    executable: &Path,
+    restart: bool,
+    start: impl FnOnce(&Path) -> Result<(), String>,
+) -> Option<String> {
+    if !restart {
+        return None;
+    }
+    restart_bundle(executable, true)
+        .and_then(|bundle| start(&bundle))
+        .err()
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+pub async fn updates_fix_login_item(
+    app: AppHandle,
+    restart: bool,
+) -> Result<Option<String>, String> {
+    let updates = app.state::<Updates>().inner().clone();
+    let executable = updates.0.executable.clone();
+    tauri::async_runtime::spawn_blocking(move || crate::login_item::fix(&executable))
+        .await
+        .map_err(|error| error.to_string())??;
+    lock(&updates.0.state).login_item_deprioritized = false;
+    updates.changed();
+    let restart_error = login_item_restart(&updates.0.executable, restart, |bundle| {
+        restart_helper(bundle, std::process::id()).map_err(|error| error.to_string())
+    });
+    if restart_error.is_none() && restart {
+        crate::exit_flush::quit_with_flush(&app, 0);
+    }
+    Ok(restart_error)
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+pub fn updates_fix_login_item() -> Result<(), String> {
+    Err("Fix login item is available on macOS only.".into())
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn notification_current(app: &AppHandle, token: &str) -> bool {
     zerus_client_core::updates::is_update_token(token)
         && app
@@ -1372,6 +1420,19 @@ mod tests {
                 ..Installation::default()
             }
         ));
+    }
+
+    #[test]
+    fn login_item_restart_failure_is_a_result_not_a_fix_error() {
+        let executable = Path::new("/tmp/Zerus.app/Contents/MacOS/zerus-client");
+        assert_eq!(
+            login_item_restart(executable, false, |_| unreachable!()),
+            None
+        );
+        assert_eq!(
+            login_item_restart(executable, true, |_| Err("restart refused".into())),
+            Some("restart refused".into())
+        );
     }
 
     #[test]

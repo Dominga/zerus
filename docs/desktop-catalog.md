@@ -1,9 +1,9 @@
 # Indexed desktop catalog
 
 `zerus-desktop-catalog` is the private SQLite projection of raw watch-v1 catalog
-rows. Root desktop schema 5 creates it and resets coverage at every service
-start. This passive slice starts no source or effect worker. Client delegation,
-legacy adaptation, runtime freshness and native delivery remain separate work.
+rows. Root desktop schema 6 includes source metadata in its storage budget and
+resets coverage at every service start. The [passive owner feed](desktop-passive-feed.md) can supply display data; it starts no source or effect worker. Client delegation,
+runtime freshness and native delivery remain separate work.
 
 The actor owns one connection on its background thread. It retains each source
 ingress item until its transaction finishes. `connect` pins the selected alias,
@@ -27,6 +27,35 @@ restart keeps last-known visible rows but never promotes partial staging. Raw
 JSON, unknown fields and background-work counts remain unchanged. Projection
 and attention/read policies reuse their existing shared decoders later.
 
+Typed older-peer events use `legacy::begin`, `legacy::page` and
+`legacy::complete`, without synthesizing watch frames or a peer hello. The
+caller first verifies the configured computer from the source's bounded
+top-level metadata and admits a new incarnation/generation. Begin records
+declared row/page counts and provisional metadata; numbered pages use the same
+indexed staging rows, canonical unique keys, transactional counters and storage
+budgets. Each input page has at most 128 rows and one frame of encoded data.
+Declarations allow at most 250,000 rows and require at least one page; an empty
+replacement has exactly one empty page. Metadata is at most 512 KiB and cannot
+contain the sessions array.
+
+Only a separate complete call, after verified source spool replay, can publish
+the rows and metadata together. Both exact declared counts must match. A late
+error, missing page, duplicate key or failed count check retires that exact
+source and abandons staging, retaining last-known rows and metadata. A stale
+callback cannot retire a replacement. Restart discards partial legacy staging
+through the same bounded collection path as watch snapshots. A switch between
+legacy and watch requires a new source generation; mixed-mode callbacks refuse.
+
+The existing source columns are reused. A nonempty `stream` identifies watch;
+watch hello admission already refuses an empty token. Typed legacy uses the
+reserved empty token, with `seq` holding declared pages, `cursor` declared rows
+and `next_page` received pages. Its `hello` column holds provisional metadata
+until completion copies it into `meta` and clears the provisional copy. These
+are internal SQLite fields, not another wire protocol. Both paths reuse the
+same row store, generation limits, paging and garbage collection. Neither
+complete coverage nor a local completion timestamp grants freshness or effect
+authority; the actor retains the original pre-spawn observation time.
+
 `complete` describes catalog coverage, never source freshness or effect authority.
 The actor must separately retain monotonic receive timestamps, current ownership,
 delegation and writer fences. Processing an old queued heartbeat must not renew
@@ -41,9 +70,14 @@ replacement invalidates the cursor. It is an actor-owned cursor, not an
 untrusted IPC token. No full-catalog materialization or per-session map exists.
 
 Maintained counters avoid scans. Admission caps 64 retained source aliases,
-256 generations, one million stored rows and 128 MiB of charged stored rows,
-including staging and obsolete generations. Source metadata is bounded by frame
-limits (hello 16 KiB). The root database additionally retains its existing hard
+256 generations, one million stored rows and 128 MiB of charged bytes,
+including staging/obsolete rows and source hello/meta UTF-8 bytes. Source metadata
+is additionally bounded by frame limits (watch hello 16 KiB, legacy metadata
+512 KiB). Root schema 6 transactionally charges existing metadata once and
+installs insert/update/delete counter triggers. Admission reads the maintained
+total, never a metadata aggregate. Provisional legacy metadata is released on
+abandon/restart; last published metadata stays charged with last-known rows.
+The root database additionally retains its existing hard
 page cap; SQLite overhead and WAL are outside the charged row budget. Alias
 retirement and whole-service disk/RSS qualification remain integration work.
 
@@ -67,3 +101,6 @@ Focused tests walk 100,000 synthetic rows, check query plans without scans or
 temporary sorting, replace snapshots, collect obsolete rows in bounded steps,
 and cover callback fences, restart, malformed input, exact identities, byte and
 metadata admission limits, stable cursors and aggregate-counter updates.
+Legacy cases additionally cover explicit completion, atomic metadata, exact
+counts, empty replacements, stale/mixed callbacks, restart, storage pressure and
+100,000 rows across 782 bounded indexed pages.

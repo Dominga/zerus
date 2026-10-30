@@ -7,7 +7,6 @@ import { expandAllCollapsedEntry } from "../sessions/background-menu";
 import { windowLayer, setWindowLayer } from "../../store/windowLayer";
 import { skin } from "../../skin/runtime";
 import { newSessionFromRail } from "../sessions/newsession-view";
-import { openTasks } from "../../store/taskNavigation";
 
 // The side screen switcher stays on the side (owner decision 2026-10-27).
 // Order follows SessionsWindow: brand -> Overview, New session, Sessions,
@@ -17,7 +16,6 @@ import { openTasks } from "../../store/taskNavigation";
 
 const ITEMS: { id: Page; icon: string; label: string; tip: string }[] = [
   { id: "sessions", icon: "sessions", label: "Sessions", tip: "Sessions" },
-  { id: "tasks", icon: "list-todo", label: "Tasks", tip: "Project tasks" },
   { id: "projects", icon: "projects", label: "Projects", tip: "Projects" },
   { id: "machines", icon: "machines", label: "Machines", tip: "Machines and connection status" },
   { id: "accounts", icon: "accounts", label: "Accounts", tip: "Agent accounts" },
@@ -43,7 +41,7 @@ export function Rail() {
         {(item) => (
           <button class="rail-btn" classList={{ on: page() === item.id }} aria-current={page() === item.id ? "page" : undefined}
             aria-label={item.label}
-            data-tip={labeled() ? undefined : item.tip} data-tip-pos="right" onClick={() => item.id === "tasks" ? openTasks() : setPage(item.id)}
+            data-tip={labeled() ? undefined : item.tip} data-tip-pos="right" onClick={() => setPage(item.id)}
             onContextMenu={(e) => { if (item.id !== "sessions") return; e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY, items: [markAllEntry(), expandAllCollapsedEntry()] }); }}>
             <Icon name={item.icon} size={24} />
             <Show when={item.id === "sessions" && counts().attention > 0}>

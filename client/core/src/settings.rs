@@ -24,6 +24,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub enum Kind {
     /// `toBool()`.
     Flag(bool),
+    /// A device-local bool whose unset value follows the active skin.
+    AutoFlag,
     /// `toString()`: one of the choices, otherwise the first (Qt's
     /// `findData` falling back to index 0, or `== "ru" ? "ru" : "en"`).
     Choice(&'static [&'static str]),
@@ -219,6 +221,20 @@ pub const KEYS: &[Key] = &[
         },
     ),
     client("client/overviewFullWidth", Kind::Flag(false)),
+    client("workspace/inspectorOpen", Kind::AutoFlag),
+    client(
+        "workspace/inspectorTab",
+        Kind::Choice(&["plan", "details", "worktrees", "tasks"]),
+    ),
+    client(
+        "workspace/inspectorWidth",
+        Kind::Whole {
+            default: 400,
+            min: 240,
+            max: 900,
+        },
+    ),
+    client("workspace/inspectorClosed", Kind::Text("[]")),
 ];
 
 /// The setting called `name`: a listed key, a shortcut override, or one of
@@ -288,6 +304,7 @@ fn update_family(name: &str) -> Option<Key> {
 pub fn default_value(kind: Kind) -> Value {
     match kind {
         Kind::Flag(on) => Value::Bool(on),
+        Kind::AutoFlag => Value::from("auto"),
         Kind::Choice(choices) => Value::from(choices[0]),
         Kind::Real { default, .. } => json!(default),
         Kind::Whole { default, .. } | Kind::Long { default, .. } => Value::from(default),
@@ -304,6 +321,9 @@ pub fn effective(kind: Kind, value: Option<&Value>) -> Value {
     };
     match kind {
         Kind::Flag(on) => Value::Bool(value.as_bool().unwrap_or(on)),
+        Kind::AutoFlag => value
+            .as_bool()
+            .map_or_else(|| Value::from("auto"), Value::Bool),
         Kind::Choice(choices) => Value::from(
             value
                 .as_str()
@@ -345,7 +365,7 @@ pub fn effective(kind: Kind, value: Option<&Value>) -> Value {
 /// Qt's stored value converted the way Qt's reader converts it.
 pub fn from_qt(kind: Kind, value: &QtValue) -> Value {
     let stored = match kind {
-        Kind::Flag(_) => Value::Bool(value.to_bool()),
+        Kind::Flag(_) | Kind::AutoFlag => Value::Bool(value.to_bool()),
         Kind::Choice(_) | Kind::Text(_) | Kind::Bytes => Value::from(value.to_text()),
         Kind::Real { .. } => {
             let (number, _) = value.to_double();
@@ -813,7 +833,8 @@ impl Settings {
         }
         let stored = match (&key.kind, &value) {
             (Kind::Chords, Value::Null) => None,
-            (Kind::Flag(_), Value::Bool(_))
+            (Kind::AutoFlag, Value::String(s)) if s == "auto" => Some(Value::from("auto")),
+            (Kind::AutoFlag | Kind::Flag(_), Value::Bool(_))
             | (Kind::Choice(_) | Kind::Text(_) | Kind::Bytes, Value::String(_))
             | (Kind::Chords, Value::Array(_)) => Some(effective(key.kind, Some(&value))),
             (Kind::RowKeys, Value::Array(_)) if crate::row_preferences::valid(&value) => {

@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use std::{path::Path, sync::OnceLock, time::Duration};
 use zerus_desktop_migration::canonical_uuid;
 
+pub mod drain;
+
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]

@@ -4,7 +4,7 @@ import * as bridge from "../bridge";
 import { catalog as appCatalog, computerOffline, type CatalogState } from "./catalog";
 import { marks as appMarks, type Marks } from "./marks";
 import { activityReadOnly } from "./activitySource";
-import { copyState, detailsFromInspection, MUTE_PENDING, STATE_CHANGED, forgetsBindingOnly, notificationsStillAllowed, snapshotOf, terminates, type ActionRow, type ForgetScope, type PendingNotifications } from "../ui/sessions/actions-ui";
+import { copyState, sessionIdentity, detailsFromInspection, MUTE_PENDING, STATE_CHANGED, forgetsBindingOnly, notificationsStillAllowed, snapshotOf, terminates, type ActionRow, type ChildIdentity, type ForgetScope, type PendingNotifications } from "../ui/sessions/actions-ui";
 import type { Action, Details, Outcome, Target } from "../types";
 import type { Session } from "../ui/sessions/types";
 
@@ -366,6 +366,19 @@ export function createActions(
     return live ? copy(live.name) : failed(GONE);
   }
 
+  /** The header copies the selected conversation, run or child ID and names it. */
+  async function copyIdentity(row: ActionRow, details?: Details, child?: ChildIdentity): Promise<Outcome> {
+    const live = current(row);
+    if (!live) return failed(GONE);
+    const sel = selection();
+    if (live.runId !== row.runId || (sel.key && sel.key !== live.key) || sel.subagent !== child?.id) return failed(CHANGED);
+    const identity = sessionIdentity(live, details ?? selectedDetails(live), child);
+    if (!identity.value) return failed("nothing to copy");
+    const out = await copy(identity.value);
+    if (out.outcome === "done") notify("info", `${identity.title} copied`);
+    return out;
+  }
+
   /** Copy folder path: the selected row's current details folder, else the live row's; nothing when empty. */
   async function copyFolder(row: ActionRow, details?: Details): Promise<Outcome> {
     const live = current(row);
@@ -407,7 +420,7 @@ export function createActions(
     return out;
   }
 
-  return { perform, performComputer, end, forget, toggleMute, stillListed, pendingNotifications, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices: list, dismiss, notify, clearNotice };
+  return { perform, performComputer, end, forget, toggleMute, stillListed, pendingNotifications, copy, copyName, copyIdentity, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices: list, dismiss, notify, clearNotice };
 }
 
 type FollowSource = { target(): { id: string } | undefined; summary(): Record<string, unknown> | undefined; loaded(): boolean; ended(): boolean; error(): unknown };
@@ -442,4 +455,4 @@ let archivedRow: (key: string) => Session | undefined = () => undefined;
 export function bindArchivedRows(lookup: (key: string) => Session | undefined) { archivedRow = lookup; }
 
 const app = createActions(withArchived(appCatalog, (key) => archivedRow(key)), (computer) => !computerOffline(computer), () => selection());
-export const { perform, performComputer, end, forget, toggleMute, stillListed, pendingNotifications, copy, copyName, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices, dismiss, notify, clearNotice } = app;
+export const { perform, performComputer, end, forget, toggleMute, stillListed, pendingNotifications, copy, copyName, copyIdentity, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices, dismiss, notify, clearNotice } = app;

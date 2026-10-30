@@ -318,6 +318,19 @@ export function terminal(s: Pick<ActionRow, "cmd" | "terminalSupported" | "termi
   return s.terminalSupported;
 }
 
+/** The selected child identity, when its conversation has been inspected. */
+export interface ChildIdentity { id: string; conversationId?: string }
+
+/** Qt's header and Details identity (SessionsWindow.cpp:4163-4173). */
+export function sessionIdentity(s: Pick<ActionRow, "runId" | "conversationId">, details?: Pick<Details, "run_id" | "conversation_id">, child?: ChildIdentity) {
+  const conversation = child ? child.conversationId ?? "" : details?.conversation_id ?? s.conversationId ?? "";
+  const fallback = child ? child.id : details?.run_id ?? s.runId ?? "";
+  const value = conversation || fallback;
+  const title = conversation || !fallback ? "Session ID" : child ? "Agent ID" : "Run ID";
+  const caption = title === "Session ID" ? "Copy session ID" : title === "Agent ID" ? "Copy agent ID" : "Copy run ID";
+  return { value, title, caption };
+}
+
 export interface CopyState {
   command: { label: "Copy connect command" | "Copy restore command"; enabled: boolean };
   reference: boolean;

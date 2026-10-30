@@ -47,6 +47,8 @@ vi.mock("../../bridge", () => ({
   composerRemove: vi.fn(async () => {}), composerUndoRemove: vi.fn(async () => {}), composerAllowRetry: vi.fn(async () => {}), composerRefresh: vi.fn(async () => {}),
   composerTab: vi.fn(async () => {}), sendMessage: vi.fn(), sendAnswer: vi.fn(), sendCancel: vi.fn(async () => {}), sendInterrupted: vi.fn(async () => {}), clearContext: vi.fn(),
   localRetry: vi.fn(), localDelete: vi.fn(async () => {}), localInspect: vi.fn(async () => null),
+  // The File reference dialog (SessionFileDialog) listens with Activity.
+  onSessionFileChanged: vi.fn(async () => () => {}),
 }));
 
 import * as bridge from "../../bridge";

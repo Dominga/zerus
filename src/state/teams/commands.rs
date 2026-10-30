@@ -376,6 +376,8 @@ fn starts_worker(op: &str) -> bool {
             | "drain"
             // N6: a created draft team starts its lead and sends it the brief.
             | "draft"
+            // U58: a task moved into the running phase is ready to hand out.
+            | "move-task"
     )
 }
 

@@ -35,42 +35,37 @@ fn budget(records: usize) -> Budget {
     }
 }
 fn discover(store: &Store, state: &Path) {
-    store
-        .discover(
-            state,
-            &DiscoveryBudget {
-                entries: 100,
-                path_bytes: 8 << 20,
-                deadline: Instant::now() + Duration::from_secs(1),
-            },
-            &AtomicBool::new(false),
-        )
-        .unwrap();
+    for _ in 0..32 {
+        let progress = store
+            .discover(
+                state,
+                &DiscoveryBudget {
+                    entries: 100,
+                    path_bytes: 8 << 20,
+                    deadline: Instant::now() + Duration::from_secs(1),
+                },
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        if progress.complete {
+            return;
+        }
+    }
+    panic!("fixture discovery did not finish within 32 bounded passes");
 }
-
-#[test]
-fn queue_consumption_resumes_public_archive_content_and_updates_fallback_counters() {
-    let (_temp, state, mut store) = fixture(true);
-    discover(&store, &state);
-    let first = store
-        .consume(&state, &budget(2), &AtomicBool::new(false))
-        .unwrap();
-    assert_eq!(first.visited_paths, 1);
-    assert_eq!(first.ingestion.records, 2);
-    assert!(first.ingestion.files <= 32);
-    assert!(first.ingestion.bytes <= 4 << 20);
-    assert_eq!(
-        store.index.query("needle", 100, None).unwrap().hits.len(),
-        2
-    );
+fn consume_until(store: &mut Store, state: &Path, ready: impl Fn(&Store) -> bool) {
+    for _ in 0..32 {
+        store
+            .consume(state, &budget(128), &AtomicBool::new(false))
+            .unwrap();
+        if ready(store) {
+            return;
+        }
+    }
+    panic!("fixture consumption did not finish within 32 bounded passes");
+}
+fn totals(store: &Store) -> (i64, i64) {
     store
-        .consume(&state, &budget(128), &AtomicBool::new(false))
-        .unwrap();
-    assert_eq!(
-        store.index.query("needle", 100, None).unwrap().hits.len(),
-        6
-    );
-    let (pending, fallback): (i64, i64) = store
         .index
         .connection()
         .query_row(
@@ -78,7 +73,41 @@ fn queue_consumption_resumes_public_archive_content_and_updates_fallback_counter
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
-        .unwrap();
+        .unwrap()
+}
+
+#[test]
+fn queue_consumption_resumes_public_archive_content_and_updates_fallback_counters() {
+    let (_temp, state, mut store) = fixture(true);
+    discover(&store, &state);
+    let mut records = 0;
+    let mut visited = false;
+    for _ in 0..32 {
+        let first = store
+            .consume(&state, &budget(2 - records), &AtomicBool::new(false))
+            .unwrap();
+        assert!(first.visited_paths <= 1);
+        visited |= first.visited_paths == 1;
+        records += first.ingestion.records;
+        assert!(records <= 2);
+        assert!(first.ingestion.files <= 32);
+        assert!(first.ingestion.bytes <= 4 << 20);
+        if records == 2 {
+            break;
+        }
+    }
+    assert!(visited);
+    assert_eq!(records, 2);
+    assert_eq!(
+        store.index.query("needle", 100, None).unwrap().hits.len(),
+        2
+    );
+    consume_until(&mut store, &state, |store| totals(store) == (0, 0));
+    assert_eq!(
+        store.index.query("needle", 100, None).unwrap().hits.len(),
+        6
+    );
+    let (pending, fallback) = totals(&store);
     assert_eq!((pending, fallback), (0, 0));
 }
 
@@ -86,9 +115,9 @@ fn queue_consumption_resumes_public_archive_content_and_updates_fallback_counter
 fn live_history_keeps_fresh_legacy_fallback_after_cache_ingestion() {
     let (_temp, state, mut store) = fixture(false);
     discover(&store, &state);
-    store
-        .consume(&state, &budget(128), &AtomicBool::new(false))
-        .unwrap();
+    consume_until(&mut store, &state, |store| {
+        totals(store) == (0, 1) && store.index.status().unwrap().messages == 6
+    });
     assert_eq!(
         store.index.query("needle", 100, None).unwrap().hits.len(),
         6

@@ -225,7 +225,7 @@ fn projection(
         "running":true,"ownership":"passive","writers_enabled":false,"handoff":"required",
         "upstreams":[],"complete":false,"subscribers":subscribers,"automatic_approvals":false,
         "pending":{"reads":store.read_status()["pending"],"posting":0,"approvals":0},"errors":[],"migration":migration,"effect_journal":store.effect_status(),"read_queue":store.read_status(),
-        "catalog_projection":store.catalog_status(),
+        "catalog_projection":store.catalog_status(),"operation_queue":store.operation_status(),
         "passive_feed":feed.status(),"catalog_reads":reads.status(),
         "limits":{"subscribers":protocol::SUBSCRIBERS,"queue_bytes":protocol::QUEUE_BYTES,
             "frame_bytes":protocol::FRAME_BYTES,"control_bytes":protocol::CONTROL_BYTES,"ingress_bytes":feed::INGRESS_BYTES,

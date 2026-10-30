@@ -1,6 +1,6 @@
 import { For, Show, Switch, Match, createEffect, createMemo, createSignal, onCleanup, on, type JSX } from "solid-js";
 import { Icon } from "../lib/icons";
-import { selected, folderFilter, setSubagentOpen, setDetailTab, setSelectedKey } from "../../store/ui";
+import { selected, folderFilter, setSubagentOpen, setDetailTab, setSelectedKey, subagentOpen } from "../../store/ui";
 import { inspectorOpen, inspectorTab, inspectorWidth, inspectorClosed, setInspectorOpen, setInspectorTab, setInspectorWidth, toggleInspectorCard, panelGeometry, inspectorHint, INSPECTOR_TABS, type InspectorTab } from "../../store/inspector";
 import { followedFor, detailsFor, copyIdentity } from "../../store/actions";
 import { computerOffline, orderedRows } from "../../store/catalog";
@@ -16,6 +16,7 @@ import type { Session } from "./types";
 import { accountsPage } from "../../store/accounts";
 import { sessionUsage, sessionUsageTarget } from "../../store/sessionUsage";
 import { sessionUsageView } from "./session-usage-ui";
+import { composer } from "../../store/composer";
 import * as bridge from "../../bridge";
 import "../styles/inspector.css";
 
@@ -49,6 +50,8 @@ function Details() {
   const value = (v: string | undefined) => v || "Not reported";
   const rows = createMemo(() => usageRows(raw()));
   const usage = () => sessionUsageView(object(raw()).session_usage);
+  const context = () => composer.view()?.context;
+  const clear = () => composer.view()?.clear;
   const account = createMemo(() => {
     const target = sessionUsageTarget(), row = s();
     const id = text(object(raw()).account_id) || (target?.host === row.computer && target.name === row.name && target.run_id === row.runId ? sessionUsage().id : "");
@@ -58,6 +61,7 @@ function Details() {
     <Card id="details-session" title="Session"><Row icon="message-square" label="name" mono title={s().name}>{s().name}</Row><Row icon="monitor" label="machine">{s().machine}</Row><Row icon="folder" label="directory" mono title={s().cwdPath}>{value(s().cwdPath)}</Row><Row icon="git-branch" label="branch">{value(s().branch)}</Row><Row icon="layers" label="project">{grouping().headers.find((p) => p.id === groupOf(s().key))?.name ?? "Not reported"}</Row><Row icon="clock" label="last event">{s().updatedAt ? new Date(s().updatedAt! * 1000).toLocaleString() : "Not reported"}</Row><div class="hint">Activity stays on {s().machine}. Closing this window does not stop your agent.</div></Card>
     <Card id="details-account" title="Account"><Row icon="user-round-cog" label="account">{value(account()?.label || text(object(raw()).account_id))}</Row><Row icon="hard-drive" label="agent home" mono>{value(account()?.home || text(object(raw()).agent_home))}</Row><Row icon="sparkles" label="model">{value(s().model)} {s().effort}</Row></Card>
     <Card id="details-usage" title="Session usage"><Show when={rows().length} fallback={<div class="hint">No native usage reported for this conversation yet.</div>}><table class="usage"><tbody><For each={rows()}>{([label, val]) => <tr><td>{label}</td><td class="tabular">{val}</td></tr>}</For></tbody></table><Show when={usage().costNote}><div class="hint">{usage().costNote}</div></Show><div class="hint">{usage().footer}</div></Show></Card>
+    <Show when={!subagentOpen()}><div class="insp-foot"><span class="muted" title={context()?.tooltip}>Context: {context()?.text || "Not reported"}</span><span class="grow" /><button class="btn small" title={clear()?.reason || undefined} disabled={!clear()?.enabled} onClick={() => composer.openClear()}>{clear()?.running ? "Clearing…" : "Clear session…"}</button></div></Show>
   </div>;
 }
 function Worktrees() {

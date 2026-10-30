@@ -1526,12 +1526,20 @@ expected exit code and a time limit — and a final `land` stage:
 
 A command or land stage names no role or member: Zerus runs it in the stage's
 folder as a detached `hgs run`, with no model, so the session shows Building
-and the output is kept in the run log. The exit code is the verdict: the
-expected one passes; any other returns the task to the implementer with the
-last 4000 characters of the output as the finding, counting toward the preset's
-rounds. The same output on the same commit twice in a row is marked `flaky`
-and goes to the lead; a timeout returns "timed out after N min". The plan
-chooses a preset, never a command: only the owner's catalog writes it.
+and the output is kept in the run log. The folder follows the preset's `folder`
+rule exactly as a test's does: `checkout` gives a detached checkout of the
+checked attempt's last commit, and otherwise the command runs in the task's
+folder, which the stage holds from the report on, so the implementer gets no
+next task there until the stage ends. The command gets the task as
+`HGS_TASK_ID`, its branch as `HGS_TASK_BRANCH` and the checked commit as
+`HGS_TASK_COMMIT`. A land stage refuses to run when the stage's folder HEAD is
+not that commit (the task waits for the lead, and the feed says why). The exit
+code is the verdict: the expected one passes; any other returns the task to the
+implementer with the last 4000 characters of the output as the finding,
+counting toward the preset's rounds. The same output on the same commit twice
+in a row is marked `flaky` and goes to the lead; a timeout returns "timed out
+after N min". The plan chooses a preset, never a command: only the owner's
+catalog writes it.
 
 A `land` stage runs once every earlier stage passed and is the preset's last
 stage. Its `exits` map an exit code to `accepted` (Zerus accepts the task,
@@ -2567,6 +2575,49 @@ local transport bindings. `hgs swarm export` exports only shared fields. Origina
 Zerus settings stay in `workspace/organizationBeforeSwarm`; import/merge backups
 use `~/.config/hgs/swarm/backup-*.json`.
 
+On a computer without a Qt settings store, the first `hgs swarm get` or initial
+`organization` watch subscription may initialize an empty catalog. It derives
+no projects, folder links or session assignments from names. The client still
+sends only explicit edits; placement and concurrent field versions stay in hgs
+and the replica. An existing uninitialized catalog may also bootstrap; every
+existing operation, peer, binding and machine-name entry is preserved. Steady-state
+organization watch reads remain lock-free and do not save. Only the first read
+of an explicit organization subscription may try the bootstrap; a present or
+undecidable Qt probe is retried only on a new subscription.
+
+The presence check is conservative and never parses Qt settings. Any existing,
+malformed, unreadable or unexpected store counts as possibly holding an
+organization, as does a probe error. The locations are
+`$XDG_CONFIG_HOME/hgdev/hgs-tray.conf` (default `~/.config`) on Linux,
+`%APPDATA%/hgdev/hgs-tray.ini` on Windows, and
+`~/Library/Preferences/com.hgdev.hgs-tray.plist` on macOS. Zerus.app retains that
+macOS preferences domain after switching clients. A computer with such a store
+keeps the existing Qt import path; neither trigger bootstraps it or writes a
+pending-import marker. Watch hello still obtains its stable machine identity
+and may create an uninitialized catalog before the organization subscription.
+
+`hgs swarm get` keeps its ordinary locked load and save, including self bindings,
+the machine-name refresh and a stable persisted node identity even when a Qt
+store exists and the catalog is still uninitialized. The bootstrap is the only
+new behavior, evaluated under that same lock when `imported` is false and Qt
+settings are definitely absent. Get and the initial organization subscription
+share this idempotent operation, so concurrent first reads initialize once.
+
+An automatic bootstrap writes a node-bound `gui-import-pending.json` beside the
+catalog before saving the legacy `imported` flag. A later Qt first start, using
+the current hgs, can still call `swarm initialize` to import its local
+organization. While that marker is pending, initialize fills only missing
+fields, preserving existing values, deletions and concurrent versions. It saves
+the catalog before clearing the marker, so a crash can safely retry that
+missing-field import. An already imported catalog without a matching marker
+keeps the existing initialize no-op. The catalog and peer wire formats are
+unchanged; older hgs versions can read the catalog but do not perform the pending
+GUI import. Qt's settings store is never changed by the bootstrap or import.
+An unreadable, malformed or unsupported pending marker prevents bootstrap but
+does not fail get or the initial organization read: they return the existing
+uninitialized state and leave the marker untouched. A stderr note is emitted
+once per process. Explicit initialize still refuses that unknown import state.
+
 The independent `hgs-swarm` service (`com.hgdev.hgs-swarm` on macOS) makes no network
 requests without members. Local changes normally trigger exchange within three
 seconds; unchanged peers are checked every 30 seconds, backing off to five minutes
@@ -3599,11 +3650,12 @@ SSH launches; an `opencode` found earlier on PATH keeps precedence.
 
 ## Official DeepSeek Harness
 
-The native adapter is pinned to `@deepseek-ai/dsh@0.2.1-rc.2`. Install it on the
-agent host, sign in and choose **DeepSeek Harness** in New session:
+The native adapter accepts exactly the reviewed `@deepseek-ai/dsh` releases
+`0.2.1-rc.2` and `0.2.1-rc.5`. Install a reviewed release on the agent host,
+sign in and choose **DeepSeek Harness** in New session:
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.2.1-rc.2
+npm install -g @deepseek-ai/dsh@0.2.1-rc.5
 hgs account login native-dsh
 hgs dsh /path/to/project --new -n work
 ```
@@ -3613,6 +3665,39 @@ A versioned adapter connects its Session Controller through a private Unix socke
 The official web host uses a separate `hgs` profile through `--patch`; sign-in and
 secrets stay in `DSH_HOME`. The web endpoint is loopback-only; remote access uses
 SSH. `~/.npm-global/bin` is discoverable from service and SSH launches.
+
+Reviewed adoption of `0.2.1-rc.5` (2026-10-29, `zerus-r7d4`): the rc.2-only
+startup gate rejected rc.5 before starting the host. Comparison of the official
+npm packages found the launcher's code, boot/profile handling, web listener,
+browser authentication and Session Controller runtime unchanged. In particular,
+`--profile hgs`, `--from-default-profile web`, `--patch`, `--no-open`,
+`--host 127.0.0.1` and `--port 0` retain their meanings. The web host still
+exchanges its loopback launch token for an authority-bound cookie with HTTP 303.
+The adapter's private socket, protocol 1, per-host random generation and native
+methods are unchanged. Its ping version remains `0.2.1-rc.2`: that identifies
+the resident adapter, independently of the installed harness. Existing rc.2
+hosts remain accepted without a restart or extension reload.
+
+rc.5 adds a UI entry-customization plugin and changes conversation, settings,
+analytics and model-list UI. It shares model-listing/cache code between account
+and API-key providers; the default official API-key route now follows `/models`,
+and the bundled official models advertise a 1,048,576-token context window. MCP
+resource listing returns an empty list when the server has no resource
+capability. These changes preserve the controller operations used by Zerus;
+isolated contracts exercise both reviewed releases with a local keyless model,
+including native startup, browser authentication and account-key handling.
+Package URLs and SHA-512 integrities are recorded under `dsh` in
+`scripts/ci/agent-compatibility.json`. That is review history: CI still resolves
+one official latest release, with no fallback. An unknown version still refuses
+startup pending review.
+
+rc.5 does not resolve the remaining dependency advisories in `zerus-s7nn`:
+its dependency tree still contains `@modelcontextprotocol/client` 2.2.0
+([GHSA-6prh-2h8m-c8cw](https://github.com/advisories/GHSA-6prh-2h8m-c8cw),
+fixed in 2.3.0) and `fflate` 0.8.2 nested under `@deepseek-ai/libreoffice-kit`
+([GHSA-px8p-9vwx-vf98](https://github.com/advisories/GHSA-px8p-9vwx-vf98),
+fixed in 0.8.3). The separate top-level `fflate` 0.8.3 does not replace that
+nested copy. This adoption introduces no dependency overrides.
 
 A new session waits for its first message. API-key `deepseek-official` connections
 work independently of account sign-in. If `deepseek-account` needs login, Activity
@@ -3680,7 +3765,7 @@ older adapter or a host that does not answer within 7 seconds reports that
 history as unavailable.
 
 The official Schedule plugin (**Automation tasks** in Native UI Plugins) is
-listed and managed per exact session. The web bundle of 0.2.1-rc.2 includes it,
+listed and managed per exact session. Both reviewed web bundles include it,
 and the profile Zerus creates layers that bundle, so it is on unless the
 profile's own patch disables it:
 
@@ -4044,7 +4129,9 @@ for a GUI that is not running, by its signature and its own `--build-info`) and
 only then becomes the one rollback copy in `~/.local/share/hgs/desktop-previous`;
 a new GUI that does not start is replaced by it again. A replaced bundle without
 its identity, executable or valid signature never becomes the rollback copy, and
-a Zerus process started during the update stops the change. Those cases and an
+a Zerus process started during the update stops the change. After the Mac switch,
+Qt stays the rollback copy; if it cannot be verified as complete, including when
+its signature check times out, the replaced client is kept too. Those cases and an
 interrupted update keep the replaced GUI in a `.hgs-tray-kept-*` folder beside
 the installed one and print where; later updates list such folders and never
 remove them. Links at the
@@ -4072,16 +4159,21 @@ number, and the build shows as `DEV_VERSION-preview.LABEL.COMMIT`. The Qt GUI
 reads it as a CMake cache variable (configure `tray/build` with
 `-DZERUS_DEV_BUILD_NUMBER= -DZERUS_LOCAL_PREVIEW_LABEL=task-board` before
 running `tray/install.sh`); the Tauri client reads the environment variable
-when it builds. Clear the label before building main again. On macOS, a switch
-between the Qt GUI and the Tauri client always takes the live update, never
-`HGS_TRAY_RESTART=0`.
+when it builds. Clear the label before building main again. On either platform,
+a switch between the Qt GUI and the Tauri client always takes the live update,
+never `HGS_TRAY_RESTART=0`.
 
 Linux installs the binary under `~/.local/bin`, a systemd user service under
 `~/.config/systemd/user` and a launcher under `~/.local/share/applications`.
-The launcher is not a second autostart entry. The service belongs to
-`graphical-session.target`, restarts after crashes and does not loop on exit code 4
-(system tray unavailable). Compare `systemctl --user status hgs-tray.service` and
-`journalctl --user -u hgs-tray.service` when startup fails.
+The launcher is not a second autostart entry. `HGS_LINUX_GUI=client` selects the
+Tauri client, later installs retain the selected GUI, and a fresh installation
+defaults to Qt. `HGS_INSTALL_PREFIX` redirects the binary, launch files and
+updater state into a scratch prefix and performs no service-manager action; see
+[Linux source installation and the Tauri client switch](linux-distribution.md).
+The service belongs to `graphical-session.target`, restarts after crashes and
+does not loop on exit code 4 (system tray unavailable). Compare
+`systemctl --user status hgs-tray.service` and `journalctl --user -u
+hgs-tray.service` when startup fails.
 
 On macOS the installer uses Qt/Homebrew, builds and ad-hoc-signs an app bundle,
 and installs it under `~/Applications/hgs-tray.app` with
@@ -4738,7 +4830,12 @@ gives `replaced` (the name lists under a new run), `archived`, `forgotten` or
 `ended`. The listing's other fields arrive as one `catalog.meta` snapshot: at
 once when a lasting field changes, and at most every 10 s when only `metrics` or
 `desktop_presence` changed. Archives stay outside the stream; page them with
-`archives --json`.
+`archives --json`. A row retains its `launch_id` when it has one. For launch
+binding, `catalog.meta` always includes `ended_launches`, including an empty
+array when no launch has ended; its newest-first, 32-entry shape is the same as
+`ls --json`. This is additive watch-v1 data. A client treats a missing field on
+an older peer as a reason to retain its bounded `ls --json` binding poll, and an
+explicit empty array as supported with no results.
 
 ```json
 {"op":"subscribe","topic":"activity","session":{"name":"claude/sample-project/review","run_id":"RUN","conversation_id":"CONVERSATION"},"after":123,"tail":50}
@@ -4820,8 +4917,18 @@ catalog key. Its `state` value is `{processes, process_work}` exactly as
 `hgs inspect NAME` reports them. The first follows the subscription; later ones
 only when the value changed apart from both `sampled_at` fields. Two worker
 threads run the inspection, so a slow `ps` or native host delays no other frame.
-A session is read again when its catalog row changes and at least every 10 s;
-reads of one session start at least 2 s apart. A session that leaves the
+A session is read again when its catalog row changes and every 10 s by default;
+reads of one session start at least 1 s apart. A processes subscription may
+include `interval_ms` (clamped to 1,000–600,000 ms). Repeating the subscription with `interval_ms`
+changes its interval while keeping the current inventory, revision and running
+read. Adding `"refresh":true` requests one read as soon as the minimum gap
+allows; repeated refreshes while a read runs coalesce into one follow-up read.
+Both fields are additive watch-v1 options. Older servers ignore them: each
+interval change or refresh becomes a plain resubscription, which reads again
+at once without the minimum gap, resends the state as revision 1, then keeps
+the 10 s default. Plain resubscriptions without either option retain the
+original behavior: replace the subscription and resend its first state.
+A session that leaves the
 catalog ends with `subscription_ended`, and an inspection that fails sends a
 non-fatal `inspect_failed`. A stream follows the processes of at most 16
 sessions (`limits.processes_subscriptions`).

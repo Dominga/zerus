@@ -60,7 +60,7 @@
     transition: background var(--z-motion-fast), border-color var(--z-motion-fast), color var(--z-motion-fast);
   }
   .btn:hover { background: var(--z-color-hover); }
-  .btn:disabled { opacity: .5; cursor: default; }
+  .btn:disabled, .btn[aria-disabled="true"] { opacity: .5; cursor: default; }
   .btn.primary { background: var(--z-color-accent); border-color: var(--z-color-accent); color: var(--z-color-accent-text); font-weight: 600; }
   .btn.primary:hover { background: var(--z-color-accent-hover); }
   .btn.danger { color: var(--z-color-danger); border-color: color-mix(in srgb, var(--z-color-danger) 45%, transparent); }
@@ -183,7 +183,7 @@
   dialog.dlg {
     padding: 0; border: 1px solid var(--z-color-border); border-radius: var(--z-radius-dialog);
     background: var(--z-color-surface); color: var(--z-color-text); box-shadow: var(--z-shadow-dialog);
-    width: min(640px, calc(100vw - 48px)); max-height: calc(100vh - 64px);
+    width: min(640px, calc(100vw - 48px)); max-width: calc(100vw - 48px); max-height: calc(100vh - 64px);
   }
   dialog.dlg[open] { display: flex; flex-direction: column; animation: pop var(--z-motion-base) var(--ease) both; }
   dialog.dlg:modal { overscroll-behavior: contain; }

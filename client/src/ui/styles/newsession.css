@@ -1,0 +1,145 @@
+/* New session (NewSessionDialog.tsx), from design/webui/src/styles/setup.css
+   ("Dialog helpers" and "New session") where Qt does not differ: Qt's 660 px
+   dialog, at least 520 (NewSessionDialog.cpp:141), and rows that keep their
+   height while texts change (171-186, 685, 705). Skin tokens only. */
+@layer components {
+  dialog.ns-dlg { width: min(660px, calc(100vw - 48px)); min-width: min(520px, calc(100vw - 48px)); overflow: hidden; }
+  .ns-form { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+  .ns-form > .dlg-body { flex: 1 1 auto; }
+  .ns-form .dlg-head h2 { min-width: 0; }
+  .ns-dlg .icon-btn:disabled { opacity: .4; cursor: default; background: none; }
+
+  .ns-body { padding-top: 6px; }
+  .ns-body .form-row { grid-template-columns: 130px minmax(0, 1fr); margin: 10px 0; }
+  .ns-body .form-row.top { align-items: start; }
+  .ns-body .form-row.top > label { padding-top: 5px; }
+  .ns-body .form-row.top + .form-row { margin-top: 4px; }
+  .ns-reserved { visibility: hidden; }
+  .ns-reserved-field { display: block; height: var(--control-h); }
+
+  /* Target: the project (2 parts), the manage button, the computer (1 part). */
+  .ns-target { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .ns-target .ns-project { flex: 2 1 0; }
+  .ns-target .ns-computer { flex: 1 1 0; }
+  .ns-manage { flex: none; width: 34px; height: 34px; }
+  .ns-project-icon { flex: none; }
+
+  /* A choice list: a field-styled button and a list under it. */
+  .ns-choice { position: relative; min-width: 0; }
+  .ns-choice-btn { display: flex; align-items: center; gap: 6px; width: 100%; padding: 0 8px; text-align: left; cursor: pointer; }
+  .ns-choice-btn:disabled { opacity: .5; cursor: default; }
+  .ns-choice-btn:focus-visible { outline: none; border-color: var(--z-color-accent-muted); box-shadow: var(--z-shadow-focus-ring); }
+  .ns-choice-value { display: flex; align-items: center; gap: 7px; flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; }
+  .ns-choice-chevron { flex: none; color: var(--z-color-dim); }
+  .ns-placeholder { color: var(--z-color-dim); }
+  .ns-choice-list {
+    position: absolute; z-index: 20; top: calc(100% + 4px); left: 0; min-width: 100%; max-width: min(520px, 80vw); max-height: 280px; overflow: auto;
+    padding: 4px; border: 1px solid var(--z-color-border); border-radius: var(--z-radius-lg);
+    background: var(--z-color-raised); color: var(--z-color-text); box-shadow: var(--z-shadow-popover);
+    animation: drop var(--z-motion-fast) var(--ease) both;
+  }
+  .ns-choice-list li { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: var(--z-radius-sm); font-size: var(--fs-sm); white-space: nowrap; cursor: default; }
+  .ns-choice-list li.active { background: var(--z-color-hover); }
+  .ns-choice-list li.on { background: var(--z-color-segment-on); color: var(--z-color-accent); font-weight: 600; }
+
+  /* Source and Worktree: two checkable buttons. */
+  .ns-seg { justify-self: start; display: inline-flex; padding: 2px; gap: 2px; border-radius: var(--z-radius-md); background: var(--z-color-field); border: 1px solid var(--z-color-border); }
+  .ns-segbtn { display: inline-flex; align-items: center; gap: 6px; height: calc(var(--control-h) - 6px); padding: 0 10px; border-radius: calc(var(--z-radius-md) - 2px); color: var(--z-color-muted); font-size: var(--fs-sm); transition: background var(--z-motion-fast), color var(--z-motion-fast); }
+  .ns-segbtn:hover:not(:disabled) { color: var(--z-color-text); }
+  .ns-segbtn.on { background: var(--z-color-segment-on); color: var(--z-color-accent); font-weight: 600; }
+  .ns-segbtn:disabled { opacity: .45; cursor: default; }
+
+  /* The working folder's path and its two-line preview; the clone's destination takes the same height. */
+  .ns-src-detail { min-width: 0; display: flex; flex-direction: column; gap: 4px; min-height: calc(var(--fs-xs) * 1.4 * 3 + 4px); }
+  .ns-path { font-size: var(--fs-xs); line-height: 1.4; color: var(--z-color-text-3); user-select: text; }
+  .ns-preview { height: calc(2 * 1.4em); overflow: hidden; font-size: var(--fs-xs); color: var(--z-color-muted); white-space: pre-line; line-height: 1.4; }
+  .ns-preview.warn { color: var(--z-color-warn); }
+
+  /* Worktree: the modes, the options menu and the target path (two lines kept). */
+  .ns-wt { gap: 4px; }
+  .ns-menu-anchor { position: relative; }
+  .menu.ns-menu { position: absolute; top: calc(100% + 4px); left: 0; z-index: 20; }
+  .ns-wt-target { height: calc(2 * 1.4em); overflow: hidden; font-size: var(--fs-xs); line-height: 1.4; color: var(--z-color-text-3); user-select: text; overflow-wrap: anywhere; }
+
+  /* Account and agent (AccountChoice::Delegate): logo, bold name, meters or summary. */
+  .ns-accounts { min-height: 180px; max-height: 250px; overflow: auto; padding: 4px; border: 1px solid var(--z-color-border); border-radius: var(--z-radius-md); background: var(--z-color-field); }
+  .ns-accounts:focus-visible { outline: 2px solid var(--z-color-focus); outline-offset: 1px; }
+  .ns-accounts[aria-disabled="true"] { opacity: .6; }
+  .ns-accounts li { display: flex; align-items: center; gap: 12px; padding: 8px 10px; border-radius: var(--z-radius-sm); cursor: default; font-size: var(--fs-sm); }
+  .ns-accounts li:hover { background: var(--z-color-hover); }
+  .ns-accounts li.on { background: var(--z-color-row-selected); }
+  .ns-acc-logo { display: grid; place-items: center; width: 34px; height: 34px; flex: none; color: var(--z-color-muted); }
+  .ns-acc-text { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+  .ns-acc-text b { font-weight: 600; }
+  .ns-usage { font-size: var(--fs-xs); color: var(--z-color-muted); white-space: pre; }
+  .ns-usage.selected { color: var(--z-color-text); }
+  .ns-usage.tone-warning { color: var(--z-list-usage-warning); }
+  .ns-usage.tone-critical { color: var(--z-list-usage-critical); }
+  .ns-meters { display: block; margin-left: -4px; height: 22px; overflow: hidden; }
+  .ns-acc-status { margin-top: 6px; }
+  .ns-status { font-size: var(--fs-sm); color: var(--z-color-text-2); min-width: 0; }
+
+  /* OpenCode. */
+  .ns-model-btn { display: flex; align-items: center; justify-content: space-between; gap: 6px; width: 100%; padding: 0 8px; text-align: left; cursor: pointer; }
+  .ns-model-btn:disabled { opacity: .5; cursor: default; }
+  .ns-service { min-width: 0; }
+  .ns-effort { justify-self: start; min-width: 160px; }
+
+  /* The error line and the buttons. */
+  .ns-error { padding: 2px 16px 10px; font-size: var(--fs-sm); color: var(--z-color-text-2); white-space: pre-line; overflow-wrap: anywhere; }
+  .ns-error:empty { padding: 0; }
+  .menu.ns-menu:focus { outline: none; }
+  .ns-start { min-width: 168px; }
+
+  /* The local Windows-session warning. */
+  dialog.ns-warning { width: min(480px, calc(100vw - 48px)); }
+
+  /* Choose existing… (WorktreePicker.tsx): Qt's 620 x 420 dialog. */
+  dialog.wt-dlg { width: min(620px, calc(100vw - 48px)); height: min(420px, calc(100vh - 64px)); }
+  .wt-body { display: flex; flex-direction: column; gap: 8px; flex: 1 1 auto; }
+  .wt-status { font-size: var(--fs-sm); color: var(--z-color-muted); white-space: pre-line; overflow-wrap: anywhere; }
+  .wt-tree { flex: 1 1 auto; min-height: 120px; overflow: auto; padding: 4px; border: 1px solid var(--z-color-border); border-radius: var(--z-radius-md); background: var(--z-color-field); }
+  .wt-tree:focus-visible { outline: 2px solid var(--z-color-focus); outline-offset: 1px; }
+  .wt-tree li { display: flex; flex-direction: column; gap: 1px; padding: 5px 8px; border-radius: var(--z-radius-sm); font-size: var(--fs-sm); cursor: default; }
+  .wt-tree li:hover { background: var(--z-color-hover); }
+  .wt-tree li.on { background: var(--z-color-row-selected); }
+  .wt-tree li.off { color: var(--z-color-muted); }
+  .wt-path { font-size: var(--fs-xs); color: var(--z-color-text-3); }
+
+  /* Create manually… (NewWorktreeDialog.tsx): Qt's 640 x 440 dialog, at least 580 wide. */
+  dialog.nw-dlg { width: min(640px, calc(100vw - 48px)); min-width: min(580px, calc(100vw - 48px)); }
+  .nw-body .form-row { grid-template-columns: 110px minmax(0, 1fr); }
+  .nw-context { font-size: var(--fs-sm); color: var(--z-color-muted); white-space: pre-line; overflow-wrap: anywhere; user-select: text; }
+  .nw-help { margin-top: 8px; font-size: var(--fs-sm); color: var(--z-color-text-2); }
+  .nw-error { min-height: 1.4em; margin-top: 6px; font-size: var(--fs-sm); color: var(--z-color-text-2); white-space: pre-line; overflow-wrap: anywhere; }
+  .nw-base { position: relative; display: flex; align-items: center; gap: 4px; min-width: 0; }
+  .nw-base-open { flex: none; width: 28px; height: 28px; }
+  .nw-base-list { top: calc(100% + 4px); }
+
+  /* The model popover (ModelPicker.tsx): at least 440 x 420 under the model button. */
+  dialog.ns-model-pop {
+    position: fixed; inset: auto; margin: 0; padding: 10px; max-width: none; max-height: none; overflow: hidden;
+    display: none; flex-direction: column; gap: 8px;
+    border: 1px solid var(--z-color-border); border-radius: var(--z-radius-lg); background: var(--z-color-raised); color: var(--z-color-text);
+    box-shadow: var(--z-shadow-popover); animation: drop var(--z-motion-fast) var(--ease) both;
+  }
+  dialog.ns-model-pop[open] { display: flex; }
+  dialog.ns-model-pop::backdrop { background: transparent; }
+  .ns-model-native { align-self: flex-start; }
+  .ocm { display: flex; flex-direction: column; gap: 6px; flex: 1 1 auto; min-height: 0; }
+  .ocm-list { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 2px; border: 1px solid var(--z-color-border); border-radius: var(--z-radius-md); background: var(--z-color-field); }
+  .ocm-list:focus-visible { outline: 2px solid var(--z-color-focus); outline-offset: 1px; }
+  .ocm-group { padding: 6px 8px 2px; font-size: var(--fs-sm); font-weight: 600; color: var(--z-color-text); }
+  .ocm-row { display: flex; align-items: center; gap: 8px; padding: 3px 4px 3px 18px; border-radius: var(--z-radius-sm); font-size: var(--fs-sm); cursor: default; }
+  .ocm-row:hover, .ocm-row.active { background: var(--z-color-hover); }
+  .ocm-row.on { background: var(--z-color-row-selected); }
+  .ocm-row.gone .ocm-name { color: var(--z-color-dim); }
+  .ocm-name { flex: 0 1 auto; }
+  .ocm-marks { flex: none; font-size: var(--fs-xs); color: var(--z-color-muted); }
+  .ocm-star { flex: none; width: 32px; margin-left: auto; text-align: center; color: var(--z-color-muted); cursor: pointer; }
+  .ocm-star.on { color: var(--z-color-accent); }
+  .ocm-star.off { color: var(--z-color-dim); cursor: default; }
+  .ocm-foot { display: flex; align-items: flex-start; gap: 8px; }
+  .ocm-foot .btn.on { background: var(--z-color-segment-on); color: var(--z-color-accent); }
+  .ocm-notice { flex: 1; min-width: 0; font-size: var(--fs-xs); color: var(--z-color-muted); overflow-wrap: anywhere; }
+}

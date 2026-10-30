@@ -86,6 +86,14 @@ pub struct Fleet {
 }
 
 impl Fleet {
+    /// Bypasses one offline source's retry delay. Repeated pending requests,
+    /// online computers and computers without a source do nothing.
+    pub fn reconnect(&self, computer: &ComputerId) -> bool {
+        guard(&self.shared.streams)
+            .get(computer)
+            .is_some_and(StreamHandle::reconnect)
+    }
+
     /// Follows this computer and the peers it lists through `hgs` (a path or
     /// a name on `PATH`, see [`crate::default_hgs`]); changes go to `sink`.
     pub fn start(hgs: PathBuf, sink: Sender<Change>) -> Self {
@@ -167,6 +175,30 @@ impl Fleet {
         let streams = guard(&self.shared.streams);
         let handle = streams.get(computer).ok_or(FollowError::UnknownComputer)?;
         handle.follow_processes(session)
+    }
+
+    /// Changes one processes subscription's interval (1–600 seconds), keeping
+    /// its current inventory and carrying the choice across reconnects.
+    pub fn set_processes_interval(
+        &self,
+        computer: &ComputerId,
+        key: &str,
+        interval_ms: u64,
+    ) -> Result<(), FollowError> {
+        let streams = guard(&self.shared.streams);
+        streams
+            .get(computer)
+            .ok_or(FollowError::UnknownComputer)?
+            .set_processes_interval(key, interval_ms)
+    }
+
+    /// Requests one read after the server's minimum gap, without clearing state.
+    pub fn refresh_processes(&self, computer: &ComputerId, key: &str) -> Result<(), FollowError> {
+        let streams = guard(&self.shared.streams);
+        streams
+            .get(computer)
+            .ok_or(FollowError::UnknownComputer)?
+            .refresh_processes(key)
     }
 
     /// Stops following a session's processes; false when it was not followed.

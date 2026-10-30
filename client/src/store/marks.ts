@@ -28,7 +28,7 @@ export const OVERRIDE_CAP = 1000;
 export const CAP = 20_000;
 
 /** What the overlay decides; the rest of a row is the host's. */
-export type Overlay = Pick<Session, "status" | "caption" | "attention" | "unread" | "reviewLater" | "attentionNeeded" | "actionNeeded" | "childAttention" | "summary" | "muted" | "notificationConflict">;
+export type Overlay = Pick<Session, "status" | "caption" | "attention" | "unread" | "unreadReply" | "reviewLater" | "attentionNeeded" | "actionNeeded" | "childAttention" | "summary" | "muted" | "notificationConflict">;
 
 export interface MarksPort {
   attentionMarks(): Promise<AttentionSnapshot>;
@@ -292,6 +292,7 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
       caption: r.ack ? s.ackCaption : s.baseCaption,
       attention: status === "attention" ? s.baseAttention : undefined,
       unread: r.unread,
+      unreadReply: r.unreadReply,
       reviewLater: r.reviewLater,
       // SessionInfo::needsAttention with these marks. The core's `needs_attention`
       // is the listing's value before any device mark: an older host's reply is

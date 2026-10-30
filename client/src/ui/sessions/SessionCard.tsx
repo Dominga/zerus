@@ -1,6 +1,7 @@
 import { For, Show } from "solid-js";
 import { AGENT_LABEL, Icon } from "../lib/icons";
-import { computerOffline } from "../../store/catalog";
+import { computerFresh, computerOffline } from "../../store/catalog";
+import { visibleUnreadReply } from "../../store/attention";
 import { now } from "../../store/ui";
 import type { AgentKind, Session, Status, Subagent } from "./types";
 
@@ -50,7 +51,7 @@ export function badgeKind(s: Session): BadgeKind {
   if (status === "attention") return s.muted ? "muted-attention" : "attention";
   if (status === "error" || status === "working" || status === "background") return status;
   if (s.draft && status !== "offline") return "draft";
-  if (s.unread) return s.muted ? "muted-unread" : "unread";
+  if (visibleUnreadReply(s, computerFresh(s.computer))) return s.muted ? "muted-unread" : "unread";
   if (status === "scheduled" || status === "waiting" || status === "paused") return status;
   return "neutral";
 }
@@ -58,11 +59,11 @@ export function badgeKind(s: Session): BadgeKind {
 // Edge mark: attention/error > draft > unread; muted rows turn it grey.
 export function emphasis(s: Session): string | undefined {
   const status = statusOf(s);
-  if (s.muted && (status === "attention" || s.unread)) return "muted";
+  if (s.muted && (status === "attention" || visibleUnreadReply(s, computerFresh(s.computer)))) return "muted";
   if (status === "attention" || s.reviewLater) return "attention";
   if (status === "error") return "error";
   if (s.draft) return "draft";
-  if (s.unread) return "unread";
+  if (visibleUnreadReply(s, computerFresh(s.computer))) return "unread";
   return undefined;
 }
 
@@ -205,7 +206,7 @@ const titleReserve = (name: string, max: number) => ({ "min-width": `${Math.min(
 
 function detailText(s: Session): string {
   if (s.summary) return s.summary;
-  if (s.unread) return "Response ready to read";
+  if (visibleUnreadReply(s, computerFresh(s.computer))) return "Response ready to read";
   if (s.status === "ready") return "Waiting for your next message";
   if (s.status === "paused") return "Resume to continue";
   return "";
@@ -236,7 +237,7 @@ export function SessionCard(props: {
         <Show when={s().muted}><Icon name="mute" size={14} class="sc-mute" /></Show>
         <span class="sc-title ell" style={titleReserve(s().title, 72)} title={s().name}>{s().title}</span>
         <StatusBadge kind={kind()} caption={statusCaption(s())} />
-        <Show when={s().unread && (s().status === "working" || s().status === "attention" || s().draft)}>
+        <Show when={visibleUnreadReply(s(), computerFresh(s().computer)) && (s().status === "working" || s().status === "attention" || s().draft)}>
           <span class="sc-extra"><StatusBadge kind={s().muted ? "muted-unread" : "unread"} caption="" iconOnly /></span>
         </Show>
         <Show when={s().optionalQuestions}>

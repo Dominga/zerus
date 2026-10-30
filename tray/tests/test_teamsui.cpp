@@ -5669,7 +5669,7 @@ void TestTeamsUi::designerPageStartsOrOpensTheDesigner()
 // the column empty below "+ Role".
 // Owner, 2026-10-28: Settings > About names the fork as the active repository
 // beside upstream, and offers the update from the fork's releases. Outside a
-// portable Windows folder (this test) the button stays off and says why.
+// supported installation (this test) the button stays off and says why.
 void TestTeamsUi::aboutNamesTheForkAndItsUpdate()
 {
     SettingsPage page(FakeCli::program(script()));

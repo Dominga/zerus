@@ -8,6 +8,7 @@ vi.hoisted(() => {
 });
 vi.mock("../../bridge", () => ({
   archivePage: vi.fn(() => new Promise(() => {})),
+  resetArchivePages: vi.fn(async () => {}),
   cancelArchivePages: vi.fn(async () => {}),
   pendingReadMarks: vi.fn(async () => []),
   attentionMarks: vi.fn(async () => ({ marks: {}, replies: {} })),
@@ -15,11 +16,11 @@ vi.mock("../../bridge", () => ({
   queueReadMarks: vi.fn(async () => []),
 }));
 
-import { CLEAR_ARCHIVE_LABEL, CLEAR_NEEDS_ALL_PROJECTS, clearArchiveEntry, clearArchiveRows } from "./archive-entries";
+import { CLEAR_ARCHIVE_LABEL, clearArchiveEntry, clearArchiveRows } from "./archive-entries";
 
 // Qt's Clear archive (SessionSelection.cpp 171-181 and 226-235).
 
-const row = (name: string, machine: string, project: string, archivedAt: number, state = "archived") => ({ name, machine, project, archivedAt, state });
+const row = (name: string, machine: string, project: string, archivedAt: number, state = "archived") => ({ name, machine, project: "tag-project", group: project, archivedAt, state });
 const rows = [
   row("a", "box", "Inbox", 100),
   row("b", "box", "Docs", 200),
@@ -37,10 +38,9 @@ describe("clearArchiveRows", () => {
     expect(clearArchiveRows(rows, { machines: ["box"], projects: [], includes: (at) => at < 1000 }).map((r) => r.name)).toEqual(["a", "b"]);
   });
 
-  // Archived rows have no organization project yet: with a project filter set
-  // it takes none, never more than Qt's project filter would.
-  it("takes no row while a project filter is set", () => {
-    expect(clearArchiveRows(rows, { machines: [], projects: ["p-inbox"], includes: () => true })).toEqual([]);
+  it("takes only archive identities in the selected projects, machines and dates", () => {
+    expect(clearArchiveRows(rows, { machines: [], projects: ["Inbox"], includes: () => true }).map((r) => r.name)).toEqual(["a", "c", "d"]);
+    expect(clearArchiveRows(rows, { machines: ["box"], projects: ["Inbox"], includes: (at) => at < 1000 }).map((r) => r.name)).toEqual(["a"]);
   });
 });
 
@@ -53,13 +53,13 @@ describe("clearArchiveEntry", () => {
     e.action?.();
     expect(run).toHaveBeenCalledTimes(1);
   });
-  it("is enabled only when some archived row in the machine filter can be forgotten, no project filter is set and no batch runs", () => {
+  it("is enabled only when a scoped archived row can be forgotten and no batch runs", () => {
     expect(clearArchiveEntry(rows, all, () => true, true, run).disabled).toBe(true);
     expect(clearArchiveEntry(rows, all, () => false, false, run).disabled).toBe(true);
     expect(clearArchiveEntry(rows, all, (s) => s.name === "c", false, run).disabled).toBe(false);
     expect(clearArchiveEntry(rows, { machines: ["box"], projects: [] }, (s) => s.name === "c", false, run).disabled).toBe(true);
-    const filtered = clearArchiveEntry(rows, { machines: [], projects: ["p-docs"] }, () => true, false, run);
-    expect([filtered.disabled, filtered.hint]).toEqual([true, CLEAR_NEEDS_ALL_PROJECTS]);
+    const filtered = clearArchiveEntry(rows, { machines: [], projects: ["Docs"] }, () => true, false, run);
+    expect([filtered.disabled, filtered.hint]).toEqual([false, undefined]);
     // A live row never counts, and the date range does not limit the count (Qt 171-176).
     expect(clearArchiveEntry(rows, all, (s) => s.name === "live", false, run).disabled).toBe(true);
     expect(clearArchiveEntry([], all, () => true, false, run).disabled).toBe(true);

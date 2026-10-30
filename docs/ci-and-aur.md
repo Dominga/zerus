@@ -34,12 +34,32 @@ conservative change selection, including both sides of renames.
 | iOS core tests and simulator build | Affected PR; full nightly/stable | The project task replica built with Rust 1.99.1 for the iPhone, the simulator and macOS (`mobile/ios/scripts/build-replica.sh`, without the release profile's LTO in this check), then `swift test` for the ZerusKit core and an unsigned Release build of the app for the iOS simulator, with the newest installed Xcode 26 or later and no signing identity |
 | Android unit tests and lint | Always | `testDebugUnitTest` and `lintRelease` of the Firebase variant that Dev ships, with a synthetic `google-services.json` and no credentials |
 | Linux CLI | Always | Stable Rust unit tests, terminal smoke tests, Python integration modules, release build |
+| Native desktop client | Linux with the CLI; macOS/Windows with their desktop jobs | Linux `client/media` audio/video tests, including synthetic GStreamer recordings, and `client/src-tauri` tests under headless Xvfb plus clippy with video; native macOS `client/core` tests, `client/media` video checks and `client/src-tauri` clippy (its test suite runs on the local Mac gate until `zerus-5wmh.78` is fixed); native Windows `client/core` tests, `client/media` video checks and `client/src-tauri` clippy (its test suite stays pending `zerus-5wmh.52`), all on standard runners with Rust 1.99.1 |
 | Arch desktop | Always | Qt build and all CTest suites |
 | Arch package | Always | Production package with the recipe's `check()`, namcap, staged and installed bundle checks; the only producer of the `arch-x86_64-<commit>` candidate artifact |
 | macOS CLI and desktop | Always | Native CLI integration and all Qt CTest suites on two standard macOS jobs |
 | Windows client and desktop | Affected PR; full nightly/stable | Rust tests, Rust 1.99 clippy for the Windows target, Windows client and session host integration tests, MSVC Qt build with all offscreen CTest suites, and the portable zip checked from an isolated extraction |
 | Windows real agents | Affected PR; full nightly/stable | One latest `win32-x64` Claude Code and Codex release in isolated session hosts of the release build, each against a local fake API; skipped or empty suites fail |
 | CI gate | Always | Requires every selected suite to succeed; fails on unexpected skips, cancellation and errors |
+
+PR #430's first native-client run at `b3716dd8` (run `40898847326`) measured an
+11-minute-19-second green Linux check run, a 65-minute macOS check-run span that
+ended in cancellation at the 60-minute job timeout, and a 1-minute-51-second
+Windows run that stopped at the first core-test failure. To bound cold builds
+with registry-only caches, macOS and Windows disable dev/test debug info and use
+`client/src-tauri` clippy with all targets instead of a redundant cargo check
+with all targets. The separate media/video check remains because the app's
+default features do not include media.
+
+Native macOS checks are split into two parallel standard-runner jobs with
+90-minute timeouts: `client-native-macos-core` runs core tests and the
+media/video check, while `client-native-macos-tauri` runs clippy with a
+25-minute step timeout. Hosted src-tauri tests are disabled until
+`zerus-5wmh.78` is fixed; the local Mac gate continues to run them. Every cargo
+command has its own named workflow step and calls
+`scripts/ci/client-native.sh macos` with its stage. Only the Tauri job saves the
+shared registry cache, so the two jobs cannot race to save one key. Linux keeps
+45 minutes and Windows 60.
 
 Quick checks and the full suites start together once the commit is resolved, so
 a quick-check failure no longer holds back the other suites. New PR/manual runs cancel
@@ -182,6 +202,7 @@ save them.
 | --- | --- | --- | --- | --- |
 | `msrv-`, `cli-`, `windows-cli-` | Quick checks, CLI, Windows | OS/arch, hash of `rustc -Vv`, month, `Cargo.lock` hash | Exact key missed; Rust build passed | Monthly restart; about 200–250 MB each; the quick checks' `target/replica` (the replica crate's own lockfile) rides under the same key |
 | `connector-` | Rust mobile connector | OS/arch, hash of `rustc +1.99.1 -Vv`, month, `services/mobile/connector/Cargo.lock` hash | Exact key missed; connector tests passed | Monthly restart; about 400 MB before compression, without incremental state |
+| `client-native-` | Native desktop client | OS/arch, hash of `rustc +1.99.1 -Vv`, month, hashes of the three client lockfiles | Exact key missed; native checks passed | Monthly restart; Cargo registry and Git checkouts only, so multi-GB native target directories are never cached |
 | `arch-cargo-v1-` | Arch package | Month, hash of `Cargo.lock` and the connector's lock | Exact key missed; package built | Cargo registry only |
 | `android-gradle-v1-` | Android | Month, hash of the Gradle wrapper properties and `*.gradle.kts` | Exact key missed; tests and lint passed | Monthly restart; about 700 MB (`~/.gradle/caches` and `wrapper`) |
 | `windows-qt-6.10.3-` | Windows | Hash of the Qt pin and installer | Exact key missed; desktop build passed | The pinned Qt archives, no WebEngine |
@@ -840,6 +861,11 @@ Targets are `linux-x64`, `linux-x64-baseline`, `darwin-arm64` and `win32-x64`.
 From 2.1.304 Claude also
 records each API request as an `api-request-blob` transcript row and can defer
 WebFetch behind ToolSearch (its approval fixture sets `ENABLE_TOOL_SEARCH=false`).
+Reviewed 2.1.314 against 2.1.312: its unattended approval countdown says
+"automatically block" and "avoid holding up" instead of "automatically deny"
+and "avoid blocking progress". Either exact advisory is outside question identity
+because it counts down and disappears on navigation; the command, warning and
+choices remain bound, and altered wording still refuses delivery.
 Claude offers a one-time default permission mode change; fixtures set
 `hasSeenAutoDefaultNudge` except the suite that answers that offer. OpenCode has
 a supported minimum of 2.0.32; CI tests its latest release on Linux and macOS.

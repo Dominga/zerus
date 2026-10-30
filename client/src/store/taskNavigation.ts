@@ -5,6 +5,10 @@ import { selected, setPage, setSelectedKey, setDetailTab, setSubagentOpen } from
 import { tasks } from "./tasks";
 import { openInspector } from "./inspector";
 
+export const [taskDescriptionRequest, setTaskDescriptionRequest] = createSignal<{ project: string; uuid: string }>();
+export function requestTaskDescription(project: string, uuid: string) { openTask(project, uuid); setTaskDescriptionRequest({ project, uuid }); }
+export const [taskRenameRequest, setTaskRenameRequest] = createSignal<{ project: string; uuid: string }>();
+export function requestTaskRename(project: string, uuid: string) { openTask(project, uuid); setTaskRenameRequest({ project, uuid }); }
 export const [selectedTask, setSelectedTask] = createSignal<{ project: string; uuid: string }>();
 /** Task entry points share the session workspace; there is no separate Tasks page. */
 export function openTasks(project?: string, sessionKey?: string, task?: string) {

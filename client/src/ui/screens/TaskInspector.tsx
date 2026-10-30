@@ -5,6 +5,8 @@ import { notify } from "../../store/actions";
 import { taskDetails, type TaskEntry } from "../../store/taskDetails";
 import type { Fetched } from "../../types";
 import { TaskWorkflow } from "./TaskWorkflow";
+import { TaskTitle } from "./TaskTitle";
+import { taskRenameRequest, setTaskRenameRequest, taskDescriptionRequest, setTaskDescriptionRequest } from "../../store/taskNavigation";
 import { TaskInput } from "./TaskInput";
 import { setMenu } from "../../store/ui";
 import { Icon } from "../lib/icons";
@@ -43,7 +45,7 @@ function JournalEntry(props: { entry: TaskEntry; discussion?: boolean; worker: s
 const TABS = ["Task", "Result", "History"] as const;
 /** Qt's canonical document and result beside a bounded discussion/history. */
 export function TaskInspector(props: { project: string; task: Task; presentation?: Task; executorAvailable: boolean; openExecutor: () => void }) {
-  const [describing, setDescribing] = createSignal(false);
+  const [describing, setDescribing] = createSignal(false), [renaming, setRenaming] = createSignal(false);
   const [tab, setTab] = createSignal<typeof TABS[number]>("Task"), [count, setCount] = createSignal(8);
   const identity = createMemo(() => `${props.project}\n${props.task.uuid}`);
   const revision = createMemo(() => JSON.stringify([props.project, props.task.uuid, props.task.historyRevision || props.task]));
@@ -53,14 +55,16 @@ export function TaskInspector(props: { project: string; task: Task; presentation
     if (key !== selected) { selected = key; taskDetails.select(props.project, task.uuid); }
     else taskDetails.refresh();
   }));
-  createEffect(on(identity, () => { setTab("Task"); setCount(8); setDescribing(false); }));
+  createEffect(on(identity, () => { setTab("Task"); setCount(8); setDescribing(false); setRenaming(false); }));
+  createEffect(() => { const request = taskRenameRequest(); if (request?.project === props.project && request.uuid === props.task.uuid) { setTaskRenameRequest(undefined); setRenaming(true); } });
+  createEffect(() => { const request = taskDescriptionRequest(); if (request?.project === props.project && request.uuid === props.task.uuid) { setTaskDescriptionRequest(undefined); if (["todo", "backlog"].includes(props.task.stage)) setDescribing(true); } });
   onCleanup(() => taskDetails.select());
   const detail = taskDetails.data;
   const item = () => props.presentation ?? props.task;
   const shown = () => detail()?.log.slice(-count()) ?? [];
   const discussion = () => detail()?.log.filter((e) => e.kind === "message" || e.kind === "comment") ?? [];
   return <>
-    <div class="tv-col"><header class="tv-head"><div class="tv-title-row"><h2 class="tv-title grow">{detail()?.title || item().title || "Untitled task"}</h2><button class="icon-btn tv-more" aria-label="Task actions" title="Task actions" aria-haspopup="menu" onClick={(e) => { const box = e.currentTarget.getBoundingClientRect(); setMenu({ x: box.left, y: box.bottom, items: TABS.map((name) => ({ label: name === "Task" ? "Task and discussion" : name, checked: tab() === name, action: () => setTab(name) })) }); }}><Icon name="ellipsis" size={17} /></button></div>
+    <div class="tv-col"><header class="tv-head"><div class="tv-title-row"><TaskTitle project={props.project} task={item()} title={detail()?.title || item().title || "Untitled task"} renaming={renaming()} setRenaming={setRenaming} saved={taskDetails.refresh} /><button class="icon-btn tv-more" aria-label="Task actions" title="Task actions" aria-haspopup="menu" onClick={(e) => { const box = e.currentTarget.getBoundingClientRect(); setMenu({ x: box.left, y: box.bottom, items: [{ label: "Rename task", icon: "pencil", disabled: !item().writable, action: (): void => { setRenaming(true); } }, { separator: true }, ...TABS.map((name) => ({ label: name === "Task" ? "Task and discussion" : name, checked: tab() === name, action: () => setTab(name) }))] }); }}><Icon name="ellipsis" size={17} /></button></div>
       <div class="tv-context"><span class={`tv-stage st-${item().stage}`}><span class={`tk-glyph st-${item().stage}`} /><span>{STAGE_LABEL[item().stage as Stage] ?? item().stage}</span></span><span class="mono tv-id">{item().id}</span><button class="tchip tv-assign" disabled={!props.executorAvailable} onClick={props.openExecutor} title="Open executor Activity">{assignmentLabel(item())}</button><span class="grow" /><TaskWorkflow project={props.project} task={item()} /></div>
     </header></div><div class="tv-scroll"><div class="tv-col tv-content">
     <Show when={tab() !== "Task"}><div class="tv-section"><span class="eyebrow">{tab()}</span><span class="grow" /><button class="link tv-back" onClick={() => setTab("Task")}><Icon name="chevron-left" size={12} />Task and discussion</button></div></Show>

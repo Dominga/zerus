@@ -250,3 +250,5 @@
 @layer components {
   .tv-draft-files .att-chip { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border-radius: var(--z-radius-md); border: 1px solid var(--z-color-border); background: var(--z-color-surface); font-size: var(--fs-xs); }
 }
+
+@layer components { .tk-create-error { color: var(--z-color-danger); font-size: var(--fs-xs); white-space: pre-line; } }

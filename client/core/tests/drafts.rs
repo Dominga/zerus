@@ -893,3 +893,33 @@ fn a_draft_that_cannot_be_saved_runs_the_import_again() {
     let store = DraftStore::open(here.clone());
     assert_eq!(load(&store, KEY).draft.draft.text, "from Qt");
 }
+
+#[test]
+fn form_checkpoint_compares_reserved_identity_and_preserves_unknown_fields() {
+    let root = Scratch::new("form-checkpoint");
+    let store = DraftStore::open(root.0.clone());
+    let mut original = draft("Same title", &[]);
+    original.form_state.insert(
+        "request".into(),
+        json!({"id":"original","private":{"kept":true}}),
+    );
+    wait(|done| store.save_durable(KEY, original.clone(), done)).unwrap();
+    let mut newer = original.clone();
+    newer.form_state["request"]["id"] = json!("newer");
+    wait(|done| store.save_durable(KEY, newer.clone(), done)).unwrap();
+    assert!(
+        !wait(|done| store.replace_if_unchanged(KEY, original, StoredDraft::default(), done))
+            .unwrap()
+    );
+    let loaded = wait(|done| store.load(KEY, done));
+    assert_eq!(loaded.draft, newer);
+    let mut settled = newer.clone();
+    settled.sending = true;
+    wait(|done| store.save_durable(KEY, settled, done)).unwrap();
+    let interrupted = wait(|done| store.load(KEY, done)).draft;
+    assert!(interrupted.uncertain);
+    assert!(
+        wait(|done| store.replace_if_unchanged(KEY, interrupted, newer.clone(), done)).unwrap()
+    );
+    assert_eq!(wait(|done| store.load(KEY, done)).draft, newer);
+}

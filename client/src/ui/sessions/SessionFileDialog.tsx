@@ -20,7 +20,7 @@ export function SessionFileDialog() {
         return (
         <dialog class="dlg session-file" ref={dialog} aria-labelledby="session-file-title"
           onCancel={(event) => { event.preventDefault(); closeSessionFile(); }} onClose={() => { if (sessionFile()?.id === id) closeSessionFile(); }}>
-          <div class="dlg-head"><Icon name="file" size={18} class="accent" /><h2 id="session-file-title">File reference</h2><span class="grow" /><button class="icon-btn" aria-label="Close" onClick={closeSessionFile}><Icon name="x" size={16} /></button></div>
+          <div class="dlg-head"><Icon name="file-text" size={18} class="accent" /><h2 id="session-file-title">File reference</h2><span class="grow" /><button class="icon-btn" aria-label="Close" onClick={closeSessionFile}><Icon name="x" size={16} /></button></div>
           <div class="dlg-body">
             <div class="dlg-detail">{file().title}</div>
             <div class="dlg-detail session-file-path">{file().path}</div>

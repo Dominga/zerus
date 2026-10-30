@@ -285,3 +285,10 @@
   :root[data-status-badge="dot"] .status .dot { width: 7px; height: 7px; }
 }
 @keyframes mt-pulse { from { transform: scale(.7); opacity: .9; } to { transform: scale(1.5); opacity: 0; } }
+
+/* WebKitGTK paints an overflow scroller's overlay scrollbar above the top layer,
+   across an open modal and its backdrop. Nothing behind a modal scrolls, so the
+   scrollbars beneath it go; overlay scrollbars take no space, so nothing moves. */
+@layer variants {
+  :root[data-platform="linux"]:has(dialog:modal) :not(dialog, dialog *) { scrollbar-width: none; }
+}

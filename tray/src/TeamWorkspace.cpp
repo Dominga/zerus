@@ -1270,47 +1270,41 @@ private:
         }
     }
     // Steps: first the switch labels go (their switches keep them as
-    // tooltips), then the filter's words, then every button's words (the
-    // icon-only row leaves out Hide finished and the zoom group).
+    // tooltips) and the wide Heat switch gives way to its one-button menu
+    // ("toolbarLevels"), then the filter's words, then every button's words
+    // (the icon-only row leaves out Hide finished and the zoom group). Each
+    // step is applied and measured, widest first, so the row keeps as many
+    // words as truly fit.
     void refit()
     {
-        if (m_level == 0) {
-            m_full = sizeHint().width();
-            m_labels = 0;
-            const int spacing = layout() ? layout()->spacing() : 0;
-            for (auto *l : findChildren<QLabel *>())
-                if (l->property("compactHide").toBool() && !l->isHidden()) m_labels += l->sizeHint().width() + spacing;
-            // Then the filter's words, before the views' (U38 added Profile).
-            m_first = 0;
-            for (auto *b : findChildren<QPushButton *>())
-                if (b->property("compactFirst").toBool() && !b->property("compactText").toString().isEmpty())
-                    m_first += std::max(0, b->sizeHint().width() - (b->iconSize().width() + 16));
+        if (m_fitting) return;
+        const QScopedValueRollback<bool> once(m_fitting, true);
+        int level = 0;
+        for (; level < 3; ++level) {
+            apply(level);
+            if (sizeHint().width() <= width()) break;
         }
-        // U38: a widget marked "toolbarLevels" shows at level 0 ("0") or at any narrower
-        // level ("1"); the Heat switch gives way to its one-button menu at the first.
-        if (m_level == 0) {
-            const int spacing = layout() ? layout()->spacing() : 0;
-            for (auto *w : findChildren<QWidget *>()) {
-                const QString levels = w->property("toolbarLevels").toString();
-                if (levels.contains(QLatin1Char('0')) && !levels.contains(QLatin1Char('1'))) m_labels += w->sizeHint().width() + spacing;
-                if (!levels.isEmpty() && !levels.contains(QLatin1Char('0')) && levels.contains(QLatin1Char('1'))) m_labels -= w->sizeHint().width() + spacing;
-            }
-        }
-        const int level = width() >= m_full ? 0 : width() >= m_full - m_labels ? 1 : width() >= m_full - m_labels - m_first ? 2 : 3;
+        if (level == 3) apply(3);
+    }
+    void apply(int level)
+    {
         if (level == m_level) { if (level == 3) fitCompactSpacing(); return; }
         m_level = level;
         const bool compact = level == 3;
         for (auto *l : findChildren<QLabel *>()) if (l->property("compactHide").toBool()) l->setVisible(level == 0);
+        // "toolbarLevels": "0" shows at the full row, "1" at the narrower
+        // rows with words; the icon-only row leaves the Heat switch out.
         for (auto *w : findChildren<QWidget *>())
-            if (const QString levels = w->property("toolbarLevels").toString(); !levels.isEmpty()) w->setVisible(levels.contains(QLatin1Char(level == 0 ? '0' : '1')));
+            if (const QString levels = w->property("toolbarLevels").toString(); !levels.isEmpty())
+                w->setVisible(level < 3 && levels.contains(QLatin1Char(level == 0 ? '0' : '1')));
         // The icon-only row leaves out a view preference (Hide finished, which
         // stays set) and the zoom group.
         for (auto *w : findChildren<QWidget *>()) if (w->property("compactDrop").toBool()) w->setVisible(level < 3);
         // Icon-only buttons take their icon's width, not the style's text
-        // minimum, and the row draws its groups closer together.
+        // minimum, and each narrower step draws the groups closer together.
         if (auto *row = qobject_cast<QHBoxLayout *>(layout())) {
-            row->setSpacing(compact ? 2 : 8);
-            row->setContentsMargins(compact ? 4 : 12, 8, compact ? 4 : 12, 6);
+            row->setSpacing(compact ? 2 : level == 0 ? 8 : 6);
+            row->setContentsMargins(compact ? 4 : level == 0 ? 12 : 8, 8, compact ? 4 : level == 0 ? 12 : 8, 6);
         }
         for (auto *b : findChildren<QPushButton *>()) {
             const QString text = b->property("compactText").toString();
@@ -1326,8 +1320,12 @@ private:
             if (!icon.isNull()) b->setIcon(iconOnly ? icon : QIcon());
         }
         if (compact) fitCompactSpacing();
+        // The row's hint follows the shown widgets at once.
+        for (auto *w : findChildren<QWidget *>()) if (w->layout()) w->layout()->activate();
+        if (layout()) layout()->activate();
     }
-    int m_level = 0, m_full = 0, m_labels = 0, m_first = 0;
+    int m_level = -1;
+    bool m_fitting = false;
 };
 
 QWidget *TeamWorkspace::toolbar(const Team &team)

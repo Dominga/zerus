@@ -4,6 +4,7 @@ import { attachmentPin, attachmentUnpin, inTauri, openTaskAttachment } from "../
 import { notify } from "../../store/actions";
 import { taskDetails, type TaskEntry } from "../../store/taskDetails";
 import type { Fetched } from "../../types";
+import { TaskInput } from "./TaskInput";
 import { setMenu } from "../../store/ui";
 import { Icon } from "../lib/icons";
 import { Body } from "../sessions/Activity";
@@ -41,6 +42,7 @@ function JournalEntry(props: { entry: TaskEntry; discussion?: boolean; worker: s
 const TABS = ["Task", "Result", "History"] as const;
 /** Qt's canonical document and result beside a bounded discussion/history. */
 export function TaskInspector(props: { project: string; task: Task; presentation?: Task; executorAvailable: boolean; openExecutor: () => void }) {
+  const [describing, setDescribing] = createSignal(false);
   const [tab, setTab] = createSignal<typeof TABS[number]>("Task"), [count, setCount] = createSignal(8);
   const identity = createMemo(() => `${props.project}\n${props.task.uuid}`);
   const revision = createMemo(() => JSON.stringify([props.project, props.task.uuid, props.task.historyRevision || props.task]));
@@ -50,7 +52,7 @@ export function TaskInspector(props: { project: string; task: Task; presentation
     if (key !== selected) { selected = key; taskDetails.select(props.project, task.uuid); }
     else taskDetails.refresh();
   }));
-  createEffect(on(identity, () => { setTab("Task"); setCount(8); }));
+  createEffect(on(identity, () => { setTab("Task"); setCount(8); setDescribing(false); }));
   onCleanup(() => taskDetails.select());
   const detail = taskDetails.data;
   const item = () => props.presentation ?? props.task;
@@ -66,7 +68,7 @@ export function TaskInspector(props: { project: string; task: Task; presentation
       <Show when={d().stage === "active" && !d().started}><p class="notice">Dispatched to {assignmentLabel(d())} — start unconfirmed</p></Show>
       <Show when={tab() === "Task"}>
         <Show when={(d().stage === "review" || d().stage === "done") && (d().summary || d().cancelReason)}><article class="act-msg tv-entry tv-result k-agent"><header><b>{item().worker || "Agent"}</b><span class="chip">{d().cancelledAt ? "Cancelled" : "Result"}</span></header><div class="act-body"><Body text={d().cancelReason || d().summary} /></div></article></Show>
-        <section class="tv-doc" aria-label="Description"><header><span class="eyebrow">Description</span></header><div class="act-body"><Body text={d().text || "No description yet."} /><TaskFiles files={d().files} /></div></section>
+        <section class="tv-doc" classList={{ editing: describing() }} aria-label="Description"><header><span class="eyebrow">Description</span><span class="grow" /><Show when={d().writable && ["todo", "backlog"].includes(d().stage)}><Show when={describing()} fallback={<button class="btn small ghost" onClick={() => setDescribing(true)}><Icon name="pencil" size={12} />Edit description</button>}><span class="tv-doc-state"><Icon name="pencil" size={11} />Being edited below</span></Show></Show></header><div class="act-body"><Body text={d().text || "No description yet."} /><TaskFiles files={d().files} /></div></section>
         <div class="tv-section"><span class="eyebrow">Discussion</span></div>
         <For each={discussion()}>{(entry) => <JournalEntry entry={entry} worker={d().worker} discussion />}</For>
         <Show when={!discussion().length}><div class="tv-placeholder">Messages and notes appear here.</div></Show>
@@ -82,5 +84,5 @@ export function TaskInspector(props: { project: string; task: Task; presentation
         <Show when={!d().log.length}><p class="tasks-empty">No history yet.</p></Show>
       </Show>
     </>}</Show>
-  </div></div></>;
+  </div></div><TaskInput project={props.project} task={item()} describing={describing()} cancel={() => setDescribing(false)} saved={() => { setDescribing(false); taskDetails.refresh(); }} /></>;
 }

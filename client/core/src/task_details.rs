@@ -6,6 +6,20 @@ use serde_json::{Map, Value};
 pub const HISTORY_PAGE: usize = 80;
 
 pub fn call(project: &str, task: &str, before: Option<&str>) -> Result<TaskCall, String> {
+    page_call(project, task, HISTORY_PAGE, before)
+}
+
+/// Seeding a description editor needs its document and at most one event.
+pub fn document_call(project: &str, task: &str) -> Result<TaskCall, String> {
+    page_call(project, task, 1, None)
+}
+
+fn page_call(
+    project: &str,
+    task: &str,
+    limit: usize,
+    before: Option<&str>,
+) -> Result<TaskCall, String> {
     if project.is_empty()
         || project.len() > 128
         || project.chars().any(char::is_control)
@@ -16,7 +30,7 @@ pub fn call(project: &str, task: &str, before: Option<&str>) -> Result<TaskCall,
     }
     let mut call = TaskCall::get(project, task);
     call.args
-        .extend(["--history-limit".into(), HISTORY_PAGE.to_string()]);
+        .extend(["--history-limit".into(), limit.to_string()]);
     if let Some(before) = before {
         call.args.extend(["--history-before".into(), before.into()]);
     }
@@ -140,6 +154,8 @@ mod tests {
             ]
         );
         assert!(call.input.is_empty());
+        let document = document_call("example", ID).unwrap();
+        assert_eq!(document.args.last().map(String::as_str), Some("1"));
         assert!(super::call("example", "../task", None).is_err());
         assert!(super::call("example\nother", ID, None).is_err());
         assert!(super::call("example", ID, Some(&"x".repeat(513))).is_err());

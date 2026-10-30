@@ -217,6 +217,171 @@ pub(crate) fn set_enabled(enabled: bool) -> anyhow::Result<()> {
     write_settings(&settings)
 }
 
+/// U62 (#721): one build cache that every worktree of a team shares - sccache
+/// for rustc, ccache for the C and C++ compilers of the Qt build. It is the
+/// project's choice, never this repository's built into Zerus: the project
+/// file `.zerus/tests.toml` turns it on in `[build_cache]`, and the owner's
+/// `build_cache` in the templates file (Settings > Teams) overrides any key of
+/// it. Without either it is off and builds run as before.
+///
+/// ```toml
+/// [build_cache]
+/// enabled = true            # off when absent
+/// size = "20G"              # each tool's bound: K, M, G or T
+/// compilers = ["rust", "cxx"]
+/// dir = "D:/caches/zerus"   # absolute; default: Zerus state's build-cache
+/// ```
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct BuildCache {
+    pub dir: PathBuf,
+    pub size: String,
+    pub rust: bool,
+    pub cxx: bool,
+}
+
+/// The default bound of each tool's cache.
+const CACHE_SIZE: &str = "20G";
+
+/// The project's `[build_cache]` with the owner's overrides, or None when it
+/// is off. A malformed value turns the cache off rather than guess.
+pub(crate) fn build_cache(folder: &Path) -> Option<BuildCache> {
+    let mut config = serde_json::Map::new();
+    let project = std::fs::read_to_string(folder.join(".zerus").join("tests.toml")).ok().and_then(|text| text.parse::<toml_edit::DocumentMut>().ok());
+    if let Some(table) = project.as_ref().and_then(|document| document.get("build_cache")).and_then(toml_edit::Item::as_table_like) {
+        for (key, item) in table.iter() {
+            let value = match item.as_value() {
+                Some(toml_edit::Value::Boolean(flag)) => json!(*flag.value()),
+                Some(toml_edit::Value::String(text)) => json!(text.value()),
+                Some(toml_edit::Value::Array(list)) => json!(list.iter().filter_map(|item| item.as_str()).collect::<Vec<_>>()),
+                _ => continue,
+            };
+            config.insert(key.to_owned(), value);
+        }
+    }
+    if let Some(owner) = read_settings()["build_cache"].as_object() {
+        for (key, value) in owner {
+            config.insert(key.clone(), value.clone());
+        }
+    }
+    if config.get("enabled").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let size = config.get("size").and_then(Value::as_str).unwrap_or(CACHE_SIZE).trim().to_ascii_uppercase();
+    let digits = size.trim_end_matches(['K', 'M', 'G', 'T']);
+    if digits.is_empty() || digits.len() + 1 < size.len() || !digits.chars().all(|ch| ch.is_ascii_digit()) || digits.parse::<u64>().ok()? == 0 {
+        return None;
+    }
+    let dir = match config.get("dir").and_then(Value::as_str) {
+        Some(dir) if !dir.trim().is_empty() => PathBuf::from(dir.trim()),
+        _ => root().join("build-cache"),
+    };
+    if !dir.is_absolute() {
+        return None;
+    }
+    let compilers: Vec<String> = match config.get("compilers") {
+        Some(Value::Array(list)) => list.iter().filter_map(Value::as_str).map(str::to_owned).collect(),
+        _ => vec!["rust".into(), "cxx".into()],
+    };
+    let cache = BuildCache { dir, size, rust: compilers.iter().any(|name| name == "rust"), cxx: compilers.iter().any(|name| name == "cxx") };
+    (cache.rust || cache.cxx).then_some(cache)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test names the cache tools' paths instead of searching PATH.
+    static TOOLS: std::cell::RefCell<Option<std::collections::HashMap<String, PathBuf>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn tools_override(tools: Option<std::collections::HashMap<String, PathBuf>>) {
+    TOOLS.with(|found| *found.borrow_mut() = tools);
+}
+
+/// A cache tool on PATH, or in cargo's own bin folder.
+fn cache_tool(name: &str) -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(tools) = TOOLS.with(|found| found.borrow().clone()) {
+        return tools.get(name).cloned();
+    }
+    let file = if cfg!(windows) { format!("{name}.exe") } else { name.to_owned() };
+    let mut folders: Vec<PathBuf> = std::env::var_os("PATH").map(|path| std::env::split_paths(&path).collect()).unwrap_or_default();
+    if let Some(home) = std::env::var_os("CARGO_HOME").map(PathBuf::from).or_else(|| crate::platform::home_dir().map(|home| home.join(".cargo"))) {
+        folders.push(home.join("bin"));
+    }
+    folders.into_iter().map(|folder| folder.join(&file)).find(|path| path.is_file())
+}
+
+/// What a run of `template` needs for the build cache: the environment, the
+/// compiler launcher for the Qt build (empty: none) and a note when a tool the
+/// cache names is missing, so the run says why it built without it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct CacheUse {
+    pub env: Vec<(String, String)>,
+    pub launcher: Option<String>,
+    pub note: String,
+}
+
+pub(crate) fn cache_use(template: &str, folder: &Path) -> CacheUse {
+    let mut used = CacheUse::default();
+    let cargo = matches!(template, "cargo-build" | "cargo-test" | "cargo-clippy");
+    let qt = matches!(template, "qt-configure" | "qt-build");
+    if !cargo && !qt {
+        return used;
+    }
+    // Not configured: builds run as before and the launcher is left alone.
+    let Some(cache) = build_cache(folder) else { return used };
+    if cargo && cache.rust {
+        match cache_tool("sccache") {
+            Some(sccache) => {
+                // A server of the run's own on a free port, inside the run's
+                // process tree: it ends with the run and never serves another.
+                let port = std::net::TcpListener::bind(("127.0.0.1", 0)).ok().and_then(|socket| socket.local_addr().ok()).map(|address| address.port());
+                used.env.push(("RUSTC_WRAPPER".into(), sccache.display().to_string()));
+                used.env.push(("SCCACHE_DIR".into(), cache.dir.join("sccache").display().to_string()));
+                used.env.push(("SCCACHE_CACHE_SIZE".into(), cache.size.clone()));
+                if let Some(port) = port {
+                    used.env.push(("SCCACHE_SERVER_PORT".into(), port.to_string()));
+                }
+            }
+            None => used.note = "build cache: sccache was not found; this run built without it".into(),
+        }
+    }
+    if qt {
+        if !cache.cxx {
+            used.launcher = Some(String::new());
+            return used;
+        }
+        match cache_tool("ccache") {
+            Some(ccache) => {
+                used.launcher = Some(ccache.display().to_string());
+                used.env.push(("CCACHE_DIR".into(), cache.dir.join("ccache").display().to_string()));
+                used.env.push(("CCACHE_MAXSIZE".into(), cache.size.clone()));
+                // Paths under the member's folder are hashed relative to it,
+                // so every worktree of the team finds the others' entries.
+                used.env.push(("CCACHE_BASEDIR".into(), folder.display().to_string()));
+                used.env.push(("CCACHE_NOHASHDIR".into(), "1".into()));
+            }
+            None => {
+                used.launcher = Some(String::new());
+                used.note = "build cache: ccache was not found; this run built without it".into();
+            }
+        }
+    }
+    used
+}
+
+/// The compiler launcher a Qt build folder was configured with ("" for none),
+/// or None when the folder is not configured.
+fn configured_launcher(folder: &Path) -> Option<String> {
+    let cache = std::fs::read_to_string(folder.join(".ci-build").join("gui").join("CMakeCache.txt")).ok()?;
+    Some(
+        cache
+            .lines()
+            .find_map(|line| line.strip_prefix("CMAKE_CXX_COMPILER_LAUNCHER:").and_then(|rest| rest.split_once('=')).map(|(_, value)| value.trim().to_owned()))
+            .unwrap_or_default(),
+    )
+}
+
 /// The owner's additions: fixed programs and argv kept in Zerus state and set
 /// only with `hgs team templates set` (owner-only). Their ids never shadow a
 /// built-in one.
@@ -475,6 +640,13 @@ pub(crate) fn plan(id: &str, args: &Value, folder: &Path) -> anyhow::Result<Plan
         };
         program = program.replace(&format!("{{{placeholder}}}"), &word);
     }
+    if template.id == "qt-configure" {
+        // U62 (#721): the compiler launcher of the build cache, or none.
+        if let Some(launcher) = cache_use(template.id, folder).launcher {
+            argv.push(format!("-DCMAKE_C_COMPILER_LAUNCHER={launcher}"));
+            argv.push(format!("-DCMAKE_CXX_COMPILER_LAUNCHER={launcher}"));
+        }
+    }
     if template.id == "qt-build" {
         // U21: cmake takes each target after one `--target`; Zerus adds the
         // flag itself, so a target is never read as another option.
@@ -665,14 +837,43 @@ pub(crate) fn execute(plan: &Plan, folder: &Path, timeout: Duration, env: &[(&st
         .env("QT_QPA_PLATFORM", "offscreen")
         // The worker's own build dir is Zerus', never the member's.
         .env_remove("CARGO_TARGET_DIR");
-    for (key, value) in template_environment(plan, folder) {
+    let base = template_environment(plan, folder);
+    let cache = cache_use(&plan.template, folder);
+    for (key, value) in base.iter().chain(cache.env.iter()) {
         command.env(key, value);
     }
     for (key, value) in env {
         command.env(key, value);
     }
+    let started = Instant::now();
+    // U62 (#721): a Qt build folder configured with another launcher (or none)
+    // takes the cache's first, so a member's existing build uses it too.
+    if plan.template == "qt-build" {
+        if let (Some(wanted), Some(current)) = (&cache.launcher, configured_launcher(folder)) {
+            if *wanted != current {
+                let mut configure = Command::new("cmake");
+                configure
+                    .args(["-B", ".ci-build/gui", &format!("-DCMAKE_C_COMPILER_LAUNCHER={wanted}"), &format!("-DCMAKE_CXX_COMPILER_LAUNCHER={wanted}")])
+                    .current_dir(folder)
+                    .env("TEMP", &temp)
+                    .env("TMP", &temp);
+                for (key, value) in base.iter().chain(cache.env.iter()) {
+                    configure.env(key, value);
+                }
+                let outcome = run_tree(&mut configure, timeout, None);
+                if outcome.exit != Some(0) {
+                    return Outcome { tail: format!("build cache: the build folder's compiler launcher was not set\n{}", outcome.tail), ..outcome };
+                }
+            }
+        }
+    }
     let stdin = plan.commit.as_ref().map(|payload| serde_json::to_vec(payload).unwrap_or_default());
-    run_tree(&mut command, timeout, stdin)
+    let mut outcome = run_tree(&mut command, timeout.saturating_sub(started.elapsed()).max(Duration::from_secs(1)), stdin);
+    outcome.ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    if !cache.note.is_empty() {
+        outcome.tail = last_chars(&format!("{}\n{}", cache.note, outcome.tail), TAIL_BYTES);
+    }
+    outcome
 }
 
 /// How long a pipe reader may take after the tree ended: a process that escaped
@@ -1118,5 +1319,157 @@ mod tests {
         // No placeholders in an addition: an argument is refused.
         assert!(plan("say", &json!({"x":"y"}), dir.path()).is_err());
         settings_override(None);
+    }
+
+    fn env_of(used: &CacheUse, key: &str) -> Option<String> {
+        used.env.iter().find(|(name, _)| name == key).map(|(_, value)| value.clone())
+    }
+
+    fn project(folder: &Path, text: &str) {
+        std::fs::create_dir_all(folder.join(".zerus")).unwrap();
+        std::fs::write(folder.join(".zerus").join("tests.toml"), text).unwrap();
+    }
+
+    // U62 (#721): the build cache is the project's choice. Without
+    // `[build_cache]` (or with it off) builds run as before: no wrapper, no
+    // launcher, the Qt configure unchanged.
+    #[test]
+    fn a_project_without_a_build_cache_builds_as_before() {
+        let dir = temp();
+        settings_override(Some(dir.path().join("templates.json")));
+        let folder = dir.path().join("member");
+        std::fs::create_dir_all(&folder).unwrap();
+        assert_eq!(build_cache(&folder), None);
+        for template in ["cargo-build", "cargo-test", "cargo-clippy", "qt-configure", "qt-build", "qt-test"] {
+            assert_eq!(cache_use(template, &folder), CacheUse::default(), "{template}");
+        }
+        let configure = plan("qt-configure", &json!({}), &folder).unwrap();
+        assert!(!configure.argv.iter().any(|arg| arg.contains("LAUNCHER")), "{:?}", configure.argv);
+        project(&folder, "[build_cache]\nenabled = false\n");
+        assert_eq!(build_cache(&folder), None);
+        // Another section of the file alone does not turn it on.
+        project(&folder, "[providers]\ncargo = true\n");
+        assert_eq!(build_cache(&folder), None);
+        settings_override(None);
+    }
+
+    // On: cargo runs through sccache and the Qt build through ccache, both in
+    // one shared folder and bounded; ccache hashes paths relative to the
+    // member's folder so worktrees share entries; each sccache server is the
+    // run's own.
+    #[test]
+    fn a_project_build_cache_wraps_rustc_and_the_qt_compilers_in_one_bounded_folder() {
+        let dir = temp();
+        settings_override(Some(dir.path().join("templates.json")));
+        let shared = dir.path().join("shared-cache");
+        let folder = dir.path().join("member");
+        std::fs::create_dir_all(&folder).unwrap();
+        project(&folder, &format!("[build_cache]\nenabled = true\nsize = \"5g\"\ndir = '{}'\n", shared.display()));
+        let tools = std::collections::HashMap::from([("sccache".to_owned(), dir.path().join("sccache")), ("ccache".to_owned(), dir.path().join("ccache"))]);
+        tools_override(Some(tools));
+        assert_eq!(build_cache(&folder), Some(BuildCache { dir: shared.clone(), size: "5G".into(), rust: true, cxx: true }));
+        let cargo = cache_use("cargo-test", &folder);
+        assert_eq!(env_of(&cargo, "RUSTC_WRAPPER"), Some(dir.path().join("sccache").display().to_string()));
+        assert_eq!(env_of(&cargo, "SCCACHE_DIR"), Some(shared.join("sccache").display().to_string()));
+        assert_eq!(env_of(&cargo, "SCCACHE_CACHE_SIZE").as_deref(), Some("5G"));
+        let port: u16 = env_of(&cargo, "SCCACHE_SERVER_PORT").unwrap().parse().unwrap();
+        assert!(port > 0);
+        assert!(cargo.launcher.is_none() && cargo.note.is_empty());
+        let qt = cache_use("qt-build", &folder);
+        assert_eq!(qt.launcher, Some(dir.path().join("ccache").display().to_string()));
+        assert_eq!(env_of(&qt, "CCACHE_DIR"), Some(shared.join("ccache").display().to_string()));
+        assert_eq!(env_of(&qt, "CCACHE_MAXSIZE").as_deref(), Some("5G"));
+        assert_eq!(env_of(&qt, "CCACHE_BASEDIR"), Some(folder.display().to_string()));
+        assert!(env_of(&qt, "RUSTC_WRAPPER").is_none());
+        // The Qt configure names the launcher for both compilers.
+        let configure = plan("qt-configure", &json!({}), &folder).unwrap();
+        let launcher = dir.path().join("ccache").display().to_string();
+        assert!(configure.argv.contains(&format!("-DCMAKE_CXX_COMPILER_LAUNCHER={launcher}")), "{:?}", configure.argv);
+        assert!(configure.argv.contains(&format!("-DCMAKE_C_COMPILER_LAUNCHER={launcher}")), "{:?}", configure.argv);
+        // A test run, a git route or a commit gets nothing of it.
+        for template in ["qt-test", "git-merge-lead", "git-commit", "android-test"] {
+            assert_eq!(cache_use(template, &folder), CacheUse::default(), "{template}");
+        }
+        // Only the C++ compilers: cargo builds as before.
+        project(&folder, &format!("[build_cache]\nenabled = true\ncompilers = [\"cxx\"]\ndir = '{}'\n", shared.display()));
+        assert_eq!(cache_use("cargo-build", &folder), CacheUse::default());
+        assert!(cache_use("qt-build", &folder).launcher.is_some_and(|launcher| !launcher.is_empty()));
+        // The default folder is one in Zerus state, shared by every worktree.
+        project(&folder, "[build_cache]\nenabled = true\n");
+        assert_eq!(build_cache(&folder).map(|cache| (cache.dir, cache.size)), Some((root().join("build-cache"), "20G".to_owned())));
+        tools_override(None);
+        settings_override(None);
+    }
+
+    // The owner's `build_cache` in Settings > Teams overrides the project's
+    // keys; a malformed value turns the cache off instead of guessing; a
+    // missing tool builds without it and says so in the run.
+    #[test]
+    fn the_owner_overrides_the_project_and_a_missing_tool_is_named() {
+        let dir = temp();
+        settings_override(Some(dir.path().join("templates.json")));
+        let folder = dir.path().join("member");
+        std::fs::create_dir_all(&folder).unwrap();
+        let shared = dir.path().join("shared-cache");
+        project(&folder, &format!("[build_cache]\nenabled = true\nsize = \"5G\"\ndir = '{}'\n", shared.display()));
+        write_settings(&json!({"enabled":true,"build_cache":{"size":"2G"}})).unwrap();
+        assert_eq!(build_cache(&folder).map(|cache| cache.size), Some("2G".to_owned()));
+        write_settings(&json!({"enabled":true,"build_cache":{"enabled":false}})).unwrap();
+        assert_eq!(build_cache(&folder), None);
+        // The owner may turn it on for a project without the section.
+        write_settings(&json!({"enabled":true,"build_cache":{"enabled":true,"dir":shared.display().to_string()}})).unwrap();
+        project(&folder, "");
+        assert_eq!(build_cache(&folder).map(|cache| cache.dir), Some(shared.clone()));
+        write_settings(&json!({"enabled":true})).unwrap();
+        for bad in ["size = \"lots\"", "size = \"0G\"", "size = \"5GB\"", "dir = \"relative/cache\"", "compilers = []"] {
+            project(&folder, &format!("[build_cache]\nenabled = true\n{bad}\n"));
+            assert_eq!(build_cache(&folder), None, "{bad}");
+        }
+        project(&folder, &format!("[build_cache]\nenabled = true\ndir = '{}'\n", shared.display()));
+        tools_override(Some(std::collections::HashMap::new()));
+        let cargo = cache_use("cargo-build", &folder);
+        assert!(cargo.env.is_empty() && cargo.note.contains("sccache was not found"), "{cargo:?}");
+        let qt = cache_use("qt-configure", &folder);
+        assert!(qt.env.is_empty() && qt.note.contains("ccache was not found"), "{qt:?}");
+        // The launcher a build folder had is cleared, not left pointing at a missing tool.
+        assert_eq!(qt.launcher.as_deref(), Some(""));
+        tools_override(None);
+        settings_override(None);
+    }
+
+    // A run with the cache on and its tools missing still runs and exits as
+    // its command does; the result names the missing tool first.
+    #[test]
+    fn a_missing_cache_tool_never_fails_a_run() {
+        let dir = temp();
+        settings_override(Some(dir.path().join("templates.json")));
+        project(dir.path(), &format!("[build_cache]\nenabled = true\ndir = '{}'\n", dir.path().join("cache").display()));
+        tools_override(Some(std::collections::HashMap::new()));
+        let mut run = shell_plan("echo built", "echo built");
+        run.template = "cargo-build".into();
+        let outcome = execute(&run, dir.path(), Duration::from_secs(30), &[]);
+        assert_eq!(outcome.exit, Some(0), "{outcome:?}");
+        assert!(outcome.tail.starts_with("build cache: sccache was not found") && outcome.tail.contains("built"), "{}", outcome.tail);
+        // A Qt build folder that is not configured is not configured for it.
+        run.template = "qt-build".into();
+        let outcome = execute(&run, dir.path(), Duration::from_secs(30), &[]);
+        assert_eq!(outcome.exit, Some(0), "{outcome:?}");
+        assert!(outcome.tail.starts_with("build cache: ccache was not found"), "{}", outcome.tail);
+        tools_override(None);
+        settings_override(None);
+    }
+
+    // A Qt build folder already configured keeps its launcher until the
+    // cache's differs; Zerus reads it from the build's CMakeCache.txt.
+    #[test]
+    fn the_build_folder_names_its_compiler_launcher() {
+        let dir = temp();
+        assert_eq!(configured_launcher(dir.path()), None);
+        let gui = dir.path().join(".ci-build").join("gui");
+        std::fs::create_dir_all(&gui).unwrap();
+        std::fs::write(gui.join("CMakeCache.txt"), "CMAKE_BUILD_TYPE:STRING=Release\n").unwrap();
+        assert_eq!(configured_launcher(dir.path()).as_deref(), Some(""));
+        std::fs::write(gui.join("CMakeCache.txt"), "CMAKE_CXX_COMPILER_LAUNCHER:STRING=C:/tools/ccache.exe\n").unwrap();
+        assert_eq!(configured_launcher(dir.path()).as_deref(), Some("C:/tools/ccache.exe"));
     }
 }

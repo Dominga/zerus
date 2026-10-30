@@ -3,6 +3,8 @@ import { AGENT_LABEL, Icon } from "../lib/icons";
 import { computerFresh, computerOffline } from "../../store/catalog";
 import { visibleUnreadReply } from "../../store/attention";
 import { now } from "../../store/ui";
+import { settings } from "../../store/settings";
+import { machineAppearance } from "../../store/machineAppearance";
 import type { AgentKind, Session, Status, Subagent } from "./types";
 
 // Card anatomy follows tray/src/SessionCardDelegate.h paintCard() at the
@@ -124,9 +126,10 @@ export function paletteIndex(name: string): number {
 }
 
 export function MachineBadge(props: { alias: string; computer: string; vivid?: boolean; offline?: boolean }) {
+  const appearance = () => machineAppearance(settings, props.alias, `var(--z-entity-palette-${paletteIndex(props.alias)})`);
   return (
-    <span class="entity mbadge" classList={{ vivid: props.vivid, offline: computerOffline(props.computer) }}
-      style={{ "--entity": `var(--z-entity-palette-${paletteIndex(props.alias)})` }} title={props.computer === "" ? `${props.alias} (this computer)` : props.alias}>
+    <span class="entity mbadge" classList={{ vivid: props.vivid ?? appearance().vivid, offline: computerOffline(props.computer) }}
+      style={{ "--entity": appearance().color }} title={props.computer === "" ? `${props.alias} (this computer)` : props.alias}>
       {props.alias}{props.offline ? " (offline)" : ""}
     </span>
   );

@@ -26,6 +26,7 @@
   "updates/channel": "stable",
   "workspace/activityFullWidth": false,
   "workspace/activityWidth": 900,
+  "workspace/allSwarmProjects": false,
   "workspace/alwaysOnTop": false,
   "workspace/animateActivity": true,
   "workspace/compact": false,

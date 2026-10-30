@@ -4,6 +4,7 @@ import { MachineLabel } from "../components/MachineLabel";
 import type { Folder, Project } from "../../types";
 import { projectToShow, setProjectToShow } from "../../store/organization";
 import { projectsPage } from "../../store/projects";
+import { flag, setSetting } from "../../store/settings";
 import { setMenu, type MenuEntry } from "../../store/ui";
 import { PROJECT_EDITING, WORKTREE_FLOWS } from "./reasons";
 import { machineCards } from "../../store/machines";
@@ -30,7 +31,8 @@ function ProjectLabel(props: { project: Project; class?: string }) {
 
 const [selectedProject, setSelectedProject] = createSignal<string | undefined>();
 const [selectedFolder, setSelectedFolder] = createSignal(0);
-const [allSwarm, setAllSwarm] = createSignal(false);
+const allSwarm = () => flag("workspace/allSwarmProjects");
+const setAllSwarm = (value: boolean) => { void setSetting("workspace/allSwarmProjects", value); };
 
 const disabled = (label: string, icon: string, hint: string): MenuEntry => ({ label, icon, disabled: true, hint });
 /** No folder selected: Qt's selectedFolder() is an empty folder. */

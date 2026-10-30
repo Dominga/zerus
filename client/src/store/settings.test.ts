@@ -5,6 +5,17 @@ import {
   type SettingsStorage,
 } from "./settings";
 
+describe("imported machine appearance settings", () => {
+  it("loads dynamic color and vivid keys and refuses malformed overrides", async () => {
+    const backend = storageBackend(memoryStorage({ [STORAGE_KEY]: JSON.stringify({
+      "machines/colors/peer": "#abcdef", "machines/vivid/peer": true,
+      "machines/colors/bad": "not-a-color", "machines/vivid/bad": "true",
+      "machines/colors/": "#123456", "machines/colors/a/b": "#123456",
+    }) }));
+    expect((await backend.load()).values).toEqual({ "machines/colors/peer": "#abcdef", "machines/vivid/peer": true });
+  });
+});
+
 function memoryStorage(initial: Record<string, string> = {}): SettingsStorage & { data: Record<string, string> } {
   const data = { ...initial };
   return {

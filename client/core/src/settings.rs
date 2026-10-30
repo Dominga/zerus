@@ -7,15 +7,15 @@
 //! from Qt's own store; Qt's store is never written, so a rollback finds Qt as
 //! it was. Loading, seeding and writing run on the store's own thread.
 
+mod imports;
 pub mod qt;
 
 use qt::QtValue;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -125,6 +125,12 @@ pub const KEYS: &[Key] = &[
     key("workspace/launchAgent", Kind::Text("")),
     key("workspace/launchOpenTerminal", Kind::Flag(false)),
     key("workspace/launchAccounts", Kind::Text("")),
+    // A first-G3 family import handles this separately from the old seed.
+    Key {
+        name: "workspace/allSwarmProjects",
+        kind: Kind::Flag(false),
+        seeded: false,
+    },
     // Processes (ProcessSettings.h), web client phase 4 Task 11.
     key("processes/enabled", Kind::Flag(false)),
     key(
@@ -216,6 +222,28 @@ pub fn find(name: &str) -> Option<Key> {
             })
         })
         .or_else(|| update_family(name))
+        .or_else(|| machine_family(name))
+}
+
+fn machine_family(name: &str) -> Option<Key> {
+    let (prefix, kind) = if name.starts_with("machines/colors/") {
+        ("machines/colors/", Kind::Text(""))
+    } else if name.starts_with("machines/vivid/") {
+        ("machines/vivid/", Kind::Flag(false))
+    } else {
+        return None;
+    };
+    let alias = name.strip_prefix(prefix)?;
+    (!alias.is_empty()
+        && alias.len() <= 256
+        && !alias
+            .chars()
+            .any(|c| c.is_control() || c == '/' || c == '\\'))
+    .then_some(Key {
+        name: "machines/",
+        kind,
+        seeded: false,
+    })
 }
 
 fn update_family(name: &str) -> Option<Key> {
@@ -334,6 +362,15 @@ const DEFAULTS: &str = "/usr/bin/defaults";
 /// (cfprefsd), `qt-plist` (the plist file) or `qt-ini`.
 pub type QtValues = (BTreeMap<String, QtValue>, &'static str);
 
+/// One bounded read, including the hash of exactly the bytes parsed. The
+/// import report stores metadata only, never source payloads or credentials.
+pub struct QtSnapshot {
+    pub values: BTreeMap<String, QtValue>,
+    pub source: &'static str,
+    pub sha256: String,
+    pub modified_at: Option<u64>,
+}
+
 /// Qt's platform-specific settings location. Kept explicit so migration
 /// tests can resolve all three platforms without changing process globals.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -396,32 +433,65 @@ impl QtStore {
     /// Every value of the store by Qt name and where it was read;
     /// `Ok(None)` when the store does not exist.
     pub fn read(&self) -> Result<Option<QtValues>, String> {
+        self.snapshot()
+            .map(|snapshot| snapshot.map(|s| (s.values, s.source)))
+    }
+
+    pub fn snapshot(&self) -> Result<Option<QtSnapshot>, String> {
         if let QtStore::Plist {
             domain: Some(domain),
             ..
         } = self
         {
-            if let Some(values) = export_domain(domain) {
-                return Ok(Some((values, "qt-defaults")));
+            if let Some((values, bytes)) = export_domain(domain) {
+                return Ok(Some(QtSnapshot {
+                    values,
+                    source: "qt-defaults",
+                    sha256: zerus_desktop_migration::sha256(&bytes),
+                    modified_at: fs::metadata(self.path())
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .and_then(seconds),
+                }));
             }
         }
-        let bytes = match read_bounded(self.path(), MAX_QT_STORE) {
-            Ok(bytes) => bytes,
+        let file = match File::open(self.path()) {
+            Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.to_string()),
         };
-        match self {
-            QtStore::Plist { .. } => {
-                qt::read_plist(&bytes).map(|values| Some((values, "qt-plist")))
-            }
-            QtStore::Ini(_) => Ok(Some((qt::read_ini(&bytes), "qt-ini"))),
+        let modified_at = file
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(seconds);
+        let mut bytes = Vec::new();
+        file.take(MAX_QT_STORE + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| e.to_string())?;
+        if bytes.len() as u64 > MAX_QT_STORE {
+            return Err("Qt store exceeds its byte limit".into());
         }
+        let (values, source) = match self {
+            QtStore::Plist { .. } => (qt::read_plist(&bytes)?, "qt-plist"),
+            QtStore::Ini(_) => (qt::read_ini(&bytes), "qt-ini"),
+        };
+        Ok(Some(QtSnapshot {
+            values,
+            source,
+            sha256: zerus_desktop_migration::sha256(&bytes),
+            modified_at,
+        }))
     }
+}
+
+fn seconds(time: SystemTime) -> Option<u64> {
+    time.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())
 }
 
 /// `defaults export DOMAIN -`: the domain as cfprefsd holds it, read-only,
 /// or `None` when the tool is missing, fails or prints no dictionary.
-fn export_domain(domain: &str) -> Option<BTreeMap<String, QtValue>> {
+fn export_domain(domain: &str) -> Option<(BTreeMap<String, QtValue>, Vec<u8>)> {
     let invocation = crate::actions::Invocation {
         args: vec!["export".into(), domain.into(), "-".into()],
         stdin: None,
@@ -431,7 +501,7 @@ fn export_domain(domain: &str) -> Option<BTreeMap<String, QtValue>> {
     match crate::run::run_limited(Path::new(DEFAULTS), &invocation, &[], MAX_QT_STORE as usize) {
         Ok(crate::actions::Exit::Code {
             code: 0, stdout, ..
-        }) => qt::read_plist(&stdout).ok(),
+        }) => qt::read_plist(&stdout).ok().map(|values| (values, stdout)),
         _ => None,
     }
 }
@@ -493,6 +563,8 @@ struct Contents {
     values: Map<String, Value>,
     /// `{"source", "path", "at", "keys"}` once seeded from Qt.
     seed: Option<Value>,
+    /// Versioned family records and unknown extension fields stay intact.
+    extra: Map<String, Value>,
 }
 
 impl Contents {
@@ -500,16 +572,29 @@ impl Contents {
         let Value::Object(mut object) = serde_json::from_slice(bytes).ok()? else {
             return None;
         };
+        if object.get("version").is_some_and(|v| v != 1) {
+            return None;
+        }
+        object.remove("version");
         let values = match object.remove("values") {
             Some(Value::Object(values)) => values,
-            _ => Map::new(),
+            None => Map::new(),
+            _ => return None,
         };
-        let seed = object.remove("seed").filter(Value::is_object);
-        Some(Contents { values, seed })
+        let seed = match object.remove("seed") {
+            None => None,
+            Some(value @ Value::Object(_)) => Some(value),
+            _ => return None,
+        };
+        Some(Contents {
+            values,
+            seed,
+            extra: object,
+        })
     }
 
     fn to_bytes(&self) -> Vec<u8> {
-        let mut object = Map::new();
+        let mut object = self.extra.clone();
         object.insert("version".into(), Value::from(1));
         if let Some(seed) = &self.seed {
             object.insert("seed".into(), seed.clone());
@@ -647,9 +732,11 @@ impl Settings {
             })
             .collect();
         for (name, value) in &state.contents.values {
-            if let Some(key) =
-                find(name).filter(|_| name.starts_with(SHORTCUTS) || name.starts_with("updates/"))
-            {
+            if let Some(key) = find(name).filter(|_| {
+                name.starts_with(SHORTCUTS)
+                    || name.starts_with("updates/")
+                    || name.starts_with("machines/")
+            }) {
                 all.insert(name.clone(), effective(key.kind, Some(value)));
             }
         }
@@ -773,7 +860,7 @@ impl Drop for Settings {
 /// The store's thread: load, seed once when asked, then write the latest
 /// values whenever they change.
 fn run(shared: &Shared) {
-    let (contents, unreadable) = match read_bounded(&shared.path, MAX_STORE) {
+    let (contents, mut unreadable) = match read_bounded(&shared.path, MAX_STORE) {
         Ok(bytes) => match Contents::parse(&bytes) {
             Some(contents) => (contents, None),
             None => (
@@ -790,22 +877,44 @@ fn run(shared: &Shared) {
         ),
     };
     let seed = shared.lock().seed.take();
+    if let Some(source) = &seed {
+        match (
+            zerus_desktop_migration::canonical(&shared.path),
+            zerus_desktop_migration::canonical(source.path()),
+        ) {
+            (Ok(target), Ok(source)) if target != source => (),
+            _ => {
+                unreadable =
+                    Some("Settings cannot overwrite an overlapping or unverified Qt source.".into())
+            }
+        }
+    }
     let mut contents = contents;
     let mut dirty = false;
     if let (Some(store), None) = (seed, &unreadable) {
-        if contents.seed.is_none() {
-            match seed_from(&store) {
-                Ok((values, record)) => {
-                    for (name, value) in values {
-                        contents.values.entry(name).or_insert(value);
+        let families = imports::pending(&contents);
+        if families.is_ok() && (contents.seed.is_none() || families.as_ref().is_ok_and(|p| *p)) {
+            match store.snapshot() {
+                Ok(snapshot) => {
+                    if contents.seed.is_none() {
+                        let (values, record) = seed_from(&store, snapshot.as_ref());
+                        for (name, value) in values {
+                            contents.values.entry(name).or_insert(value);
+                        }
+                        contents.seed = Some(record);
+                        dirty = true;
                     }
-                    contents.seed = Some(record);
-                    dirty = true;
+                    if families.as_ref().is_ok_and(|p| *p) {
+                        dirty |= imports::apply(&mut contents, &store, snapshot.as_ref());
+                    }
                 }
                 Err(error) => eprintln!(
                     "zerus-client-core: settings seed: {error}; retried at the next start"
                 ),
             }
+        }
+        if let Err(error) = families {
+            eprintln!("zerus-client-core: family import: {error}; existing records preserved");
         }
     }
     {
@@ -841,18 +950,17 @@ fn run(shared: &Shared) {
     }
 }
 
-/// Qt's values for the seeded settings, and the record of the seed.
-/// `Err` when Qt's store exists but could not be read: nothing is recorded,
-/// so the next start tries again.
-fn seed_from(store: &QtStore) -> Result<(BTreeMap<String, Value>, Value), String> {
+/// Qt's values for the old settings seed, and its record. The caller has
+/// already obtained one bounded snapshot shared with the new family imports.
+fn seed_from(store: &QtStore, snapshot: Option<&QtSnapshot>) -> (BTreeMap<String, Value>, Value) {
     let at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| since.as_secs());
-    let (values, source) = match store.read()? {
-        Some((values, source)) => {
-            let names = seed_names(&values);
+    let (values, source) = match snapshot {
+        Some(snapshot) => {
+            let names = seed_names(&snapshot.values);
             let names: Vec<&str> = names.iter().map(String::as_str).collect();
-            (seed_values(&values, &names), source)
+            (seed_values(&snapshot.values, &names), snapshot.source)
         }
         None => (BTreeMap::new(), "none"),
     };
@@ -864,38 +972,16 @@ fn seed_from(store: &QtStore) -> Result<(BTreeMap<String, Value>, Value), String
         "source": source,
         "domain": domain,
         "path": store.path().to_string_lossy(),
+        "sha256": snapshot.map(|s| &s.sha256),
         "at": at,
         "keys": values.keys().collect::<Vec<_>>(),
     });
-    Ok((values, record))
+    (values, record)
 }
-
-static TEMPORARY: AtomicU64 = AtomicU64::new(0);
 
 /// Writes the store through a synced private temporary file and a rename,
 /// so a cut-off write keeps the old file.
 fn write_store(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    let temporary = path.with_file_name(format!(
-        ".settings.json.{}-{}.tmp",
-        std::process::id(),
-        TEMPORARY.fetch_add(1, Ordering::Relaxed)
-    ));
-    let written = (|| {
-        let mut file = File::create(&temporary)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
-        }
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        fs::rename(&temporary, path)
-    })();
-    written.map_err(|error| {
-        let _ = fs::remove_file(&temporary);
-        format!("Settings not saved: {error}")
-    })
+    crate::fsx::write_private_atomic(path, bytes, true)
+        .map_err(|error| format!("Settings not saved: {error}"))
 }

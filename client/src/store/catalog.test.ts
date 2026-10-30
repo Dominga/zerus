@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createComputed, createRoot } from "solid-js";
-import { createCatalog, rowId, statusOf, toSession } from "./catalog";
+import { agentKind, createCatalog, rowId, statusOf, toSession } from "./catalog";
 import { createMarks, marks as appMarks } from "./marks";
 import { emptyBatch, type Batch, type RowOut, type ViewRow } from "../types";
 
@@ -13,6 +13,26 @@ const row = (key: string, name: string, extra: Partial<ViewRow> = {}, computer =
 const batchOf = (part: Partial<Batch>): Batch => ({ ...emptyBatch(), ...part });
 
 describe("applyBatch", () => {
+  it("keeps sh as Qt's Shell presentation rather than a Claude provider", () => {
+    expect(agentKind("sh")).toBe("sh"); expect(agentKind("SH")).toBe("sh");
+    const shell = toSession("", "run:shell", view("sh/example/probe", { agent: "sh", model: "", effort: null }));
+    expect(shell.agent).toBe("sh"); expect(shell.cmd).toBe("sh"); expect(shell.model).toBe("");
+    for (const provider of ["claude", "codex", "kimi", "opencode", "deepseek"] as const) expect(agentKind(provider)).toBe(provider);
+    expect(agentKind("dsh")).toBe("deepseek");
+  });
+  it("updates a linked worktree chip and clears it when later metadata is absent", () => {
+    const c = createCatalog();
+    c.applyBatch(batchOf({ upserts: [row("run:chip", "codex/sample/one", { worktree: "api-work" })] }));
+    expect(c.catalog.rows["\nrun:chip"].worktree).toBe("api-work");
+    c.applyBatch(batchOf({ upserts: [row("run:chip", "codex/sample/one")] }));
+    expect(c.catalog.rows["\nrun:chip"].worktree).toBeUndefined();
+  });
+  it("keeps verified Rust density keys without reconstructing them from display fields", () => {
+    const hashes: [string, string] = ["a".repeat(64), "b".repeat(64)];
+    const s=toSession("peer-fixture","run:fixture",view("codex/sample/fixture",{compact_keys:hashes}));
+    expect(s.compactKeys).toEqual(hashes);
+    expect(toSession("peer-fixture","run:older",view("older")).compactKeys).toBeUndefined();
+  });
   it("keeps the identity of unchanged rows and updates a changed row in place", () => {
     createRoot((dispose) => {
       const { catalog, applyBatch } = createCatalog();
@@ -102,6 +122,10 @@ describe("applyBatch", () => {
 });
 
 describe("toSession", () => {
+  it("carries the background count independently of the presentation status", () => {
+    expect(toSession("", "run:a", view("a", { status: "paused", background: 3, activity: "idle", phase: "idle" })).backgroundJobs).toBe(3);
+    expect(toSession("", "run:a", view("a")).backgroundJobs).toBeUndefined();
+  });
   it("takes bulk lifecycle from the row, else from the agent", () => {
     expect(toSession("", "k", view("a", { agent: "claude" })).bulkLifecycle).toBe(true);
     expect(toSession("", "k", view("a", { agent: "opencode" })).bulkLifecycle).toBe(false);
@@ -142,7 +166,7 @@ describe("toSession", () => {
     expect(Object.values(s).some((v) => typeof v === "object" && v !== null)).toBe(false);
     expect(toSession("", "run:a", view("a", { allowed_actions: null })).allowed).toBeUndefined();
     expect(toSession("", "run:a", view("a", { allowed_actions: [] })).allowed).toBe("");
-    expect(toSession("", "run:a", view("x/a", { agent: "sh" }))).toMatchObject({ agent: "claude", cmd: "sh" });
+    expect(toSession("", "run:a", view("x/a", { agent: "sh" }))).toMatchObject({ agent: "sh", cmd: "sh" });
   });
 });
 

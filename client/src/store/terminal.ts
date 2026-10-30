@@ -1,7 +1,7 @@
 import { createSignal } from "solid-js";
 import * as bridge from "../bridge";
 import type { PageVisibility } from "./visibility";
-import type { TerminalConnected, TerminalFinished, TerminalStatus, TerminalTarget } from "../types";
+import type { TerminalConnected, TerminalEvent, TerminalStatus, TerminalTarget } from "../types";
 
 // The Terminal tab's state (Qt TerminalView): one attach per view, connected
 // while the tab shows. Output is written to the screen and acknowledged once
@@ -20,7 +20,7 @@ export const VIEW = "main";
 export const RESIZE_MS = 100;
 
 export interface TerminalPort {
-  connect(view: string, target: TerminalTarget, cols: number, rows: number, onEvent: (message: ArrayBuffer | TerminalFinished) => void): Promise<TerminalConnected>;
+  connect(view: string, target: TerminalTarget, cols: number, rows: number, onEvent: (message: TerminalEvent) => void): Promise<TerminalConnected>;
   write(view: string, generation: number, bytes: Uint8Array): Promise<void>;
   resize(view: string, generation: number, cols: number, rows: number): Promise<void>;
   ack(view: string, generation: number): void;
@@ -91,15 +91,41 @@ export function createTerminal(port: TerminalPort, timers: Timers = realTimers, 
 
   const ready = () => !!target && !!texts()?.available;
 
-  const handler = (mine: number) => (m: ArrayBuffer | TerminalFinished) => {
+  interface Restore { next: boolean; parsing: boolean; connected?: TerminalConnected; cols: number; rows: number }
+  const restored = (mine: number, restore: Restore) => {
+    if (mine !== serial || restore.parsing || !restore.connected) return;
+    setPhase("connected");
+    setStatus(restore.connected.status);
+    // The view may have been resized while its history was being parsed.
+    const now = screen?.size();
+    if (now && (now.cols !== restore.cols || now.rows !== restore.rows)) resized(now.cols, now.rows);
+  };
+
+  const handler = (mine: number, restore: Restore) => (m: TerminalEvent) => {
     if (mine !== serial) return;
     if (m instanceof ArrayBuffer || ArrayBuffer.isView(m)) {
       const view = m as ArrayBufferView;
       const bytes = m instanceof ArrayBuffer ? new Uint8Array(m) : new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
       // xterm calls back in a later task: use the generation current by then.
-      const ack = () => { if (mine !== serial) return; if (generation !== 0) port.ack(VIEW, generation); else owed++; };
-      if (screen) screen.write(bytes, ack);
+      const replay = restore.next;
+      restore.next = false;
+      const ack = () => {
+        if (mine !== serial) return;
+        if (generation !== 0) port.ack(VIEW, generation); else owed++;
+        if (replay) { restore.parsing = false; restored(mine, restore); }
+      };
+      // Cancel an unfinished historical escape sequence so a live suffix
+      // cannot complete a replayed query after input becomes enabled.
+      let output = bytes;
+      if (replay) { output = new Uint8Array(bytes.length + 1); output.set(bytes); output[bytes.length] = 0x18; }
+      if (screen) screen.write(output, ack);
       else ack();
+      return;
+    }
+    if (m.kind === "replay") {
+      restore.next = true;
+      restore.parsing = true;
+      setPhase("connecting");
       return;
     }
     if (m.kind === "finished") {
@@ -123,17 +149,18 @@ export function createTerminal(port: TerminalPort, timers: Timers = realTimers, 
     const { cols, rows } = screen.size();
     const sent = target!;
     const ticket = ++issued;
+    const restore: Restore = { next: false, parsing: false, cols, rows };
     rustHolds = true;
     try {
-      const c = await queue(() => port.connect(VIEW, sent, cols, rows, handler(mine)));
+      const c = await queue(() => port.connect(VIEW, sent, cols, rows, handler(mine, restore)));
       if (mine !== serial) return;
       generation = c.generation;
-      setPhase("connected");
-      setStatus(c.status);
+      // xterm parses asynchronously. The connect IPC can resolve before its
+      // replay callback; keeping Connecting rejects every historical reply.
+      restore.connected = c;
+      restored(mine, restore);
       for (; owed > 0; owed--) port.ack(VIEW, generation);
-      // The view may have been resized while connecting.
-      const now = screen?.size();
-      if (now && (now.cols !== cols || now.rows !== rows)) resized(now.cols, now.rows);
+
     } catch (error) {
       if (ticket === issued) rustHolds = false;
       if (mine !== serial) return;
@@ -252,8 +279,8 @@ export function createTerminal(port: TerminalPort, timers: Timers = realTimers, 
     connect, disconnect,
     async reconnect() { await disconnect(); await connect(); },
     async toggle() { if (phase() === "idle") await connect(); else await disconnect(); },
-    input(bytes: Uint8Array) {
-      if (phase() !== "connected" || !bytes.length) return;
+    input(bytes: Uint8Array, source?: Screen) {
+      if ((source && source !== screen) || phase() !== "connected" || !bytes.length) return;
       const gen = generation;
       writes = writes.then(() => port.write(VIEW, gen, bytes)).catch((error) => { setStatus(message(error)); });
     },

@@ -250,17 +250,40 @@ pub enum OpenMode {
     #[default]
     Terminal,
     Clipboard,
+    Automatic,
+    Tab,
+    Window,
 }
 
 impl OpenMode {
     pub const ALL: [OpenMode; 2] = [OpenMode::Terminal, OpenMode::Clipboard];
+    pub const LINUX: [OpenMode; 4] = [Self::Automatic, Self::Tab, Self::Window, Self::Clipboard];
 
     /// Qt's labels (`TrayMenu.cpp:78-81`).
     pub fn label(self) -> &'static str {
         match self {
             Self::Terminal => "Terminal.app",
             Self::Clipboard => "Clipboard",
+            Self::Automatic => "Automatic",
+            Self::Tab => "Tab",
+            Self::Window => "Window",
         }
+    }
+
+    pub fn config(self) -> &'static str {
+        match self {
+            Self::Terminal => "terminal",
+            Self::Clipboard => "clipboard",
+            Self::Automatic => "auto",
+            Self::Tab => "tab",
+            Self::Window => "window",
+        }
+    }
+
+    pub fn from_linux_config(value: &str) -> Option<Self> {
+        Self::LINUX
+            .into_iter()
+            .find(|mode| mode.config() == value.trim())
     }
 
     /// An `open-mode` value of `~/.config/hgs/tray.conf`; the Linux and
@@ -306,9 +329,12 @@ pub enum Entry {
         name: String,
         text: String,
         running: bool,
+        /// First attached local client's TTY, captured with the session.
+        tty: String,
     },
     /// The "Open in" submenu with the chosen mode checked.
     OpenIn(OpenMode),
+    Refresh,
     Quit,
 }
 
@@ -601,6 +627,14 @@ fn sessions(menu: &mut Vec<Entry>, computer: &ComputerId, state: &Computer) {
             name: row.name.clone(),
             text: session_text(row),
             running: row.state == "running",
+            tty: if computer == &ComputerId::local()
+                && row.state == "running"
+                && row.notify.attached
+            {
+                row.notify.client_tty.clone()
+            } else {
+                String::new()
+            },
         });
     }
 }
@@ -1203,14 +1237,16 @@ mod tests {
                     key: "k1".into(),
                     name: "claude/R&D/main".into(),
                     text: "\u{25cf} claude/R&&D/main".into(),
-                    running: true
+                    running: true,
+                    tty: String::new(),
                 },
                 Entry::Session {
                     computer: local,
                     key: "k2".into(),
                     name: "codex/p/zeta".into(),
                     text: "codex/p/zeta  (stopped)".into(),
-                    running: false
+                    running: false,
+                    tty: String::new(),
                 },
                 Entry::Separator,
                 Entry::Label("mac&&m".into()),
@@ -1226,6 +1262,42 @@ mod tests {
                 Entry::Quit,
             ]
         );
+    }
+
+    #[test]
+    fn only_a_running_attached_local_session_captures_its_terminal() {
+        let mut desk = Desk::default();
+        let mut attached = row("sh/sample-project", "running");
+        attached.notify.attached = true;
+        attached.notify.client_tty = "/dev/pts/7".into();
+        let mut saved = attached.clone();
+        saved.name = "sh/saved-project".into();
+        saved.state = "paused".into();
+        let mut detached = attached.clone();
+        detached.name = "sh/detached-project".into();
+        detached.notify.attached = false;
+        listed(
+            &mut desk,
+            "",
+            vec![
+                ("attached", attached.clone()),
+                ("saved", saved),
+                ("detached", detached),
+            ],
+        );
+        listed(&mut desk, "peer", vec![("remote", attached)]);
+        let targets: BTreeMap<String, String> = desk
+            .menu(OpenMode::Automatic)
+            .into_iter()
+            .filter_map(|entry| match entry {
+                Entry::Session { key, tty, .. } => Some((key, tty)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(targets["attached"], "/dev/pts/7");
+        for key in ["saved", "detached", "remote"] {
+            assert_eq!(targets[key], "", "{key}");
+        }
     }
 
     #[test]

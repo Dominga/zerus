@@ -1,6 +1,7 @@
 import { batch, createMemo, createRoot, createSignal } from "solid-js";
 import * as bridge from "../bridge";
 import { notify } from "./actions";
+import { suggestions } from "./suggestions";
 import { documentVisibility, type PageVisibility } from "./visibility";
 import type { Timers } from "./terminal";
 import type { Answer, ClearControl, ColdPrompt, ComposerView, Inspect, SendReply, SessionRef, StartQuestion } from "../types";
@@ -137,7 +138,7 @@ function handleSet() {
   };
 }
 
-export function createComposer(port: ComposerPort, timers: Timers = realTimers, images: Images = browserImages, notices: Notices = appNotices) {
+export function createComposer(port: ComposerPort, timers: Timers = realTimers, images: Images = browserImages, notices: Notices = appNotices, sent: (key: string) => void = () => {}) {
   const [view, setView] = createSignal<ComposerView | undefined>();
   const [text, setText] = createSignal("");
   /** `start` is the anchor and `end` the cursor position (Qt's anchor and position); start may follow end. */
@@ -170,6 +171,7 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
   let hintTimer: (() => void) | undefined;
   /** The draft key of the session last opened; a view of another composer is an older answer. */
   let expected: string | undefined;
+  let suggestionKey = "";
   let opens = 0;
   let inFlight = 0;
   /** The newest envelope view while an open runs: it may be older than the open's answer. */
@@ -189,7 +191,7 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
     const v = view();
     const h = v?.handle;
     return closing() || opening() > 0 || (h !== undefined && (pending.has(h) || calling.has(h))) || handBack() !== undefined || starting() || question()
-      || !v?.loaded || v.attaching || v.sending || !!v.waiting;
+      || !v?.loaded || v.attaching || v.sending || !!v.recording || !!v.waiting;
   };
   const locked = () => operationLocked() || !!view()?.session_blocks_input;
   const ordered = () => { const s = selection(); return { start: Math.min(s.start, s.end), end: Math.max(s.start, s.end) }; };
@@ -388,6 +390,7 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
     try {
       await flush();
       if (h !== handle() || opening() > 0) { calling.remove(h); return; }
+      if (!queuePush) sent(suggestionKey);
       setError(undefined);
       if (pushing) {
         r = await port.push(h, captured.rev, captured.epoch, captured.text, captured.position, captured.anchor);
@@ -415,6 +418,7 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
       try {
         // The composer being left keeps what was typed: its edit goes first.
         await flush();
+        suggestionKey = session?.key ?? "";
         expected = session ? draftKey(session) : undefined;
         const mine = ++opens;
         inFlight++;
@@ -576,7 +580,7 @@ export const composer = createRoot(() => createComposer({
   send: bridge.sendMessage, push: (...args) => bridge.sendPush(...args), sendNow: (id) => bridge.queueSendNow(id), answer: bridge.sendAnswer, remove: bridge.composerRemove, undo: bridge.composerUndoRemove,
   allowRetry: bridge.composerAllowRetry, cancelSend: bridge.sendCancel, interrupted: bridge.sendInterrupted, clear: bridge.clearContext,
   refresh: bridge.composerRefresh, openAttachment: (path) => bridge.attachmentOpenDraft(path), localRetry: bridge.localRetry, localDelete: bridge.localDelete, localInspect: bridge.localInspect,
-}));
+}, realTimers, browserImages, appNotices, suggestions.dismiss));
 
 /**
  * Typing not yet flushed goes to Rust when the window hides or the page goes:

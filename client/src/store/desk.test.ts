@@ -173,7 +173,7 @@ describe("desk wiring", () => {
     await settle();
     expect(mocked.deskTakePending).toHaveBeenCalledWith(3);
     expect(shown.setSelectedKey).toHaveBeenCalledWith("\nk1");
-    expect(shown.toast).toHaveBeenCalledWith("Zerus", "This session is no longer available: claude/sample-project/x");
+    expect(shown.toast).toHaveBeenCalledWith("Zerus", "This session is no longer available: claude/sample-project/x", "info", false);
   });
 
   it("shows notices as toasts", async () => {
@@ -184,7 +184,18 @@ describe("desk wiring", () => {
     });
     await startDesk();
     notice!({ title: "Zerus", text: "System notification was not delivered: denied" });
-    expect(shown.toast).toHaveBeenCalledWith("Zerus", "System notification was not delivered: denied");
+    expect(shown.toast).toHaveBeenCalledWith("Zerus", "System notification was not delivered: denied", "info", false);
+  });
+
+  it("keeps an advisory with what to do by hand until it is dismissed", async () => {
+    let notice: ((value: bridge.DeskNotice) => void) | undefined;
+    mocked.onDeskNotice.mockImplementation(async (listener) => {
+      notice = listener;
+      return () => {};
+    });
+    await startDesk();
+    notice!({ title: "Zerus: the terminal did not open", text: "Run this in a terminal: hgs a example" });
+    expect(shown.toast).toHaveBeenCalledWith("Zerus: the terminal did not open", "Run this in a terminal: hgs a example", "warn", true);
   });
 
   it("opens an update action in Settings, never as a session", async () => {

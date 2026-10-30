@@ -5978,6 +5978,7 @@ dependencies = [
  "ureq",
  "uuid",
  "webkit2gtk",
+ "zbus",
  "zerus-client-core",
  "zerus-client-media",
  "zerus-watch-protocol",
@@ -5997,8 +5998,11 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "socket2",
  "time",
  "windows-sys 0.61.2",
+ "zerus-desktop-migration",
+ "zerus-desktop-read-policy",
  "zerus-watch-protocol",
 ]
 
@@ -6021,6 +6025,23 @@ dependencies = [
  "serde_json",
  "windows",
  "zerus-client-core",
+]
+
+[[package]]
+name = "zerus-desktop-migration"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "zerus-desktop-read-policy"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

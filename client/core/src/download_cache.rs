@@ -10,8 +10,8 @@
 //! file, then a rename); an index that cannot be read, is too large, a link
 //! or of another version is never rewritten, trimmed or removed from.
 //!
-//! Every function blocks on the file system; callers run them off the UI
-//! thread. Nothing here keeps global state.
+//! File-system operations block; callers run them off the UI thread. The pure
+//! index decoder is also reused by read-only migration. No global state is kept.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -29,7 +29,7 @@ pub const OPENING_GRACE_MS: i64 = 60_000;
 const INDEX: &str = ".zerus-files.json";
 const LOCK: &str = ".zerus-files.lock";
 const PART: &str = ".zerus-part-";
-const MAX_INDEX_BYTES: u64 = 32 * 1024 * 1024;
+pub(crate) const MAX_INDEX_BYTES: u64 = 32 * 1024 * 1024;
 const LOCK_WAIT: Duration = Duration::from_secs(5);
 
 const INDEX_INVALID: &str = "The downloaded files index is invalid. Existing files were preserved.";
@@ -549,6 +549,63 @@ fn fresh_file(root: &Path, prefix: &str) -> io::Result<(PathBuf, File)> {
     Err(io::Error::other("no unused name"))
 }
 
+/// Pure Qt-compatible index decoder shared by the live cache and read-only
+/// migration. It opens no folder, lock or downloaded content; unknown header
+/// and entry fields remain in the returned original document.
+pub(crate) fn decode_index(bytes: &[u8]) -> Result<Map<String, Value>, String> {
+    if bytes.len() as u64 > MAX_INDEX_BYTES {
+        return Err(INDEX_INVALID.into());
+    }
+    let document: Value = serde_json::from_slice(bytes).map_err(|_| INDEX_INVALID.to_owned())?;
+    let version_one = document.get("version").and_then(Value::as_f64) == Some(1.0);
+    let Some(files) = document
+        .get("files")
+        .and_then(Value::as_array)
+        .filter(|_| version_one)
+    else {
+        return Err(INDEX_INVALID.into());
+    };
+    let mut names = std::collections::HashSet::new();
+    for value in files {
+        let entry = value.as_object().cloned().unwrap_or_default();
+        let name = text(&entry, "name");
+        let sha = text(&entry, "sha256");
+        let valid = safe_name(name)
+            && names.insert(name.to_owned())
+            && entry
+                .get("bytes")
+                .and_then(Value::as_f64)
+                .is_some_and(|bytes| bytes >= 0.0)
+            && entry.get("saved").is_some_and(Value::is_number)
+            && sha.len() == 64
+            && sha
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'));
+        if !valid {
+            return Err(INDEX_INVALID.into());
+        }
+        if entry.contains_key("source") || entry.contains_key("source_sha256") {
+            let saved = entry.get("source").and_then(Value::as_object);
+            let identity = saved.map(|saved| Source {
+                host: text(saved, "host").to_owned(),
+                path: text(saved, "path").to_owned(),
+            });
+            let attributed = saved.is_some_and(|saved| saved.len() == 2)
+                && identity.as_ref().is_some_and(|identity| {
+                    valid_source(identity)
+                        && text(&entry, "source_sha256") == source_digest(identity)
+                });
+            if !attributed {
+                return Err(INDEX_INVALID.into());
+            }
+        }
+    }
+    let Value::Object(document) = document else {
+        unreachable!()
+    };
+    Ok(document)
+}
+
 /// The folder's index, read and held under the folder's lock.
 struct Ledger {
     root: PathBuf,
@@ -589,52 +646,22 @@ impl Ledger {
         File::open(&index)
             .and_then(|file| file.take(MAX_INDEX_BYTES + 1).read_to_end(&mut bytes))
             .map_err(|_| unreadable())?;
-        let document: Value =
-            serde_json::from_slice(&bytes).map_err(|_| INDEX_INVALID.to_owned())?;
-        let version_one = document.get("version").and_then(Value::as_f64) == Some(1.0);
-        let Some(files) = document
-            .get("files")
-            .and_then(Value::as_array)
-            .filter(|_| version_one)
-        else {
-            return Err(INDEX_INVALID.into());
-        };
-        let mut names = std::collections::HashSet::new();
-        for value in files {
-            let entry = value.as_object().cloned().unwrap_or_default();
-            let name = text(&entry, "name");
-            let sha = text(&entry, "sha256");
-            let valid = safe_name(name)
-                && names.insert(name.to_owned())
-                && entry
-                    .get("bytes")
-                    .and_then(Value::as_f64)
-                    .is_some_and(|bytes| bytes >= 0.0)
-                && entry.get("saved").is_some_and(Value::is_number)
-                && sha.len() == 64
-                && sha
-                    .bytes()
-                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'));
-            if !valid {
-                return Err(INDEX_INVALID.into());
-            }
-            if entry.contains_key("source") || entry.contains_key("source_sha256") {
-                let saved = entry.get("source").and_then(Value::as_object);
-                let identity = saved.map(|saved| Source {
-                    host: text(saved, "host").to_owned(),
-                    path: text(saved, "path").to_owned(),
-                });
-                let attributed = saved.is_some_and(|saved| saved.len() == 2)
-                    && identity.as_ref().is_some_and(|identity| {
-                        valid_source(identity)
-                            && text(&entry, "source_sha256") == source_digest(identity)
-                    });
-                if !attributed {
-                    return Err(INDEX_INVALID.into());
-                }
-            }
-            ledger.entries.push(entry);
+        if bytes.len() as u64 > MAX_INDEX_BYTES {
+            return Err(unreadable());
         }
+        let mut document = decode_index(&bytes)?;
+        let Value::Array(files) = document.remove("files").unwrap() else {
+            unreachable!()
+        };
+        ledger.entries = files
+            .into_iter()
+            .map(|value| {
+                let Value::Object(entry) = value else {
+                    unreachable!()
+                };
+                entry
+            })
+            .collect();
         Ok(ledger)
     }
 

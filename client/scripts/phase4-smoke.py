@@ -59,6 +59,7 @@ def fixture_config():
         "attachments": {
             "req-fixture-1": {"name": "orders.json", "mime": "application/json", "data_base64": orders},
             "req-fixture-image": {"name": "pixel.png", "mime": "image/png", "data_base64": PNG},
+            "req-fixture-echo-image": {"name": "pasted-image.png", "mime": "image/png", "data_base64": PNG},
         },
     }
 

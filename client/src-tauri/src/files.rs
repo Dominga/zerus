@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Sender};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -19,7 +19,8 @@ use crate::settings::Store;
 type Job = Box<dyn FnOnce() + Send>;
 
 /// The worker the folder's work runs on.
-pub struct Files(Mutex<Sender<Job>>);
+#[derive(Clone)]
+pub struct Files(Arc<Mutex<Sender<Job>>>);
 
 /// Starts the worker.
 pub fn start() -> Files {
@@ -34,12 +35,12 @@ pub fn start() -> Files {
     if let Err(error) = started {
         eprintln!("zerus-client: downloaded files: {error}");
     }
-    Files(Mutex::new(jobs))
+    Files(Arc::new(Mutex::new(jobs)))
 }
 
 impl Files {
     /// Runs `work` on the worker and waits for it.
-    fn run<T: Send + 'static>(
+    pub(crate) fn run<T: Send + 'static>(
         &self,
         work: impl FnOnce() -> T + Send + 'static,
     ) -> Result<T, String> {
@@ -67,7 +68,7 @@ pub struct FilesView {
     pub error: Option<String>,
 }
 
-fn folder(app: &AppHandle) -> PathBuf {
+pub(crate) fn folder(app: &AppHandle) -> PathBuf {
     let store = app.state::<Store>();
     download_cache::folder(
         &store.0.text("downloads/folder"),
@@ -76,7 +77,7 @@ fn folder(app: &AppHandle) -> PathBuf {
     )
 }
 
-fn limit(app: &AppHandle) -> u64 {
+pub(crate) fn limit(app: &AppHandle) -> u64 {
     app.state::<Store>()
         .0
         .get("downloads/cacheBytes")

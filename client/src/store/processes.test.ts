@@ -227,7 +227,7 @@ describe("the output pane", () => {
 const session = (change: Partial<Session> = {}): Session => ({
   key: "\nrun:a", catalogKey: "run:a", computer: "", name: "claude/sample-project/review", rawMachine: "workstation", machine: "workstation",
   runId: "run-a", conversationId: "conv-a", state: "running", processState: "running", status: "background", ackStatus: "background",
-  archiveId: undefined, ...change,
+  activity: "idle", phase: "idle", backgroundJobs: 2, archiveId: undefined, ...change,
 }) as Session;
 
 describe("the followed session (SessionsWindow.cpp:3783-3784)", () => {
@@ -312,10 +312,17 @@ describe("Show running commands (SessionsWindow.cpp:5297-5299, 5463-5465)", () =
     expect(runningCommandsEntry(session(), yes, no, () => {})).toMatchObject({ disabled: true, hint: "Enable Settings > Processes to inspect running commands" });
   });
 
-  it("counts background work under an acknowledged attention, and lists nothing otherwise", () => {
-    expect(runningCommandsEntry(session({ status: "attention", ackStatus: "background" }), yes, yes, () => {})).toBeDefined();
-    expect(runningCommandsEntry(session({ status: "working", ackStatus: "working" }), yes, yes, () => {})).toBeUndefined();
-    expect(runningCommandsEntry(session({ state: "archived" }), yes, yes, () => {})).toBeUndefined();
+  it("uses the exact idle and live-count rule, not the status approximation", () => {
+    for (const change of [
+      { status: "waiting", ackStatus: "ready" },
+      { status: "paused", ackStatus: "paused", state: "paused" },
+      { status: "ended", ackStatus: "ended", state: "stopped" },
+      { status: "attention", ackStatus: "ready" },
+    ] as const) expect(runningCommandsEntry(session(change), yes, yes, () => {})).toBeDefined();
+    for (const change of [
+      { backgroundJobs: 0 }, { backgroundJobs: -1 }, { activity: "busy" }, { phase: "working" }, { state: "archived" },
+    ] as const) expect(runningCommandsEntry(session(change), yes, yes, () => {})).toBeUndefined();
+    expect(runningCommandsEntry(session({ status: "background", ackStatus: "background", backgroundJobs: 0 }), yes, yes, () => {})).toBeUndefined();
   });
 
   it("opens the tab when chosen, checking online and the setting again then", () => {

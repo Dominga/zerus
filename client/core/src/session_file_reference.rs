@@ -75,9 +75,7 @@ pub fn parse(href: &str, style: Style) -> Target {
     if source.contains('?') {
         return Target::default();
     }
-    let (before_fragment, fragment) = source
-        .split_once('#')
-        .map_or((source.as_str(), ""), |parts| parts);
+    let (before_fragment, fragment) = source.split_once('#').unwrap_or((source.as_str(), ""));
     let scheme_end = before_fragment
         .find(':')
         .filter(|at| !before_fragment[..*at].contains('/'));
@@ -229,8 +227,8 @@ mod tests {
         );
         let home = parse("~/notes.md", Style::Posix);
         assert_eq!(
-            resolve(&home, "/work/session", Some("/home/user"), Style::Posix),
-            "/home/user/notes.md"
+            resolve(&home, "/work/session", Some("/home/example"), Style::Posix),
+            "/home/example/notes.md"
         );
         assert_eq!(resolve(&home, "/work/session", None, Style::Posix), "");
         let relative = parse("../shared/notes.md", Style::Posix);

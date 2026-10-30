@@ -5,6 +5,7 @@ import { archive } from "./archive";
 import { receive } from "./session";
 import { composer } from "./composer";
 import { questions } from "./questions";
+import { tasks } from "./tasks";
 import { notices } from "./actions";
 import { detailTab, setDetailTab, setStateFilter } from "./ui";
 import { catalog } from "./catalog";
@@ -24,6 +25,17 @@ const loaded = (): GroupingOut => ({
 });
 
 describe("receive", () => {
+  it("routes the followed project's task list from a batch", async () => {
+    const read = vi.spyOn(bridge, "followTasks").mockResolvedValue(undefined);
+    tasks.follow("project-task-test");
+    receive({ ...emptyBatch(), tasks: [{ computer: "", key: "project-task-test", kind: "list", payload: {
+      project: { id: "project-task-test" }, tasks: [{ uuid: "task-1", stage: "todo", text: "Board task" }], damaged: [],
+    } }] });
+    expect(tasks.tasks().map((t) => t.title)).toEqual(["Board task"]);
+    tasks.follow(undefined);
+    for (let i = 0; i < 6; i++) await Promise.resolve();
+    read.mockRestore();
+  });
   it("applies a batch's rows and its grouping in one reactive update", () => createRoot((dispose) => {
     const seen: string[] = [];
     createComputed(() => { seen.push(`${catalog.order.length} ${grouping().loaded} ${groupOf("\nrun:1")}`); });

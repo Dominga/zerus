@@ -70,10 +70,11 @@ pub struct ResolvedRule {
     pub targets: Vec<String>,
 }
 
-/// The project's files as Git sees them: tracked and new, never ignored.
+/// The project's tracked files (#741): a checkout's untracked logs and
+/// artifacts are no area, and a new test counts once it is added.
 pub fn project_files(root: &Path) -> anyhow::Result<Vec<String>> {
     let output = std::process::Command::new("git")
-        .args(["ls-files", "--cached", "--others", "--exclude-standard", "-z"])
+        .args(["ls-files", "--cached", "-z"])
         .current_dir(root)
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
@@ -95,8 +96,21 @@ pub fn in_area(provider: &Provider, file: &str) -> bool {
 /// The map of every enabled provider. `previous` keeps a provider whose build
 /// cannot be read now (no CMake reply yet), marked by its note.
 pub fn generate(root: &Path, config: &TestsConfig, files: &[String], previous: Option<&TestMap>) -> anyhow::Result<TestMap> {
+    generate_only(root, config, files, previous, None)
+}
+
+/// `generate` for the providers `only` names (all without it); the others
+/// keep `previous`'s sections. A change's affected set reads the providers it
+/// touches this way, from the sources as they are now (#741).
+pub fn generate_only(root: &Path, config: &TestsConfig, files: &[String], previous: Option<&TestMap>, only: Option<&BTreeSet<String>>) -> anyhow::Result<TestMap> {
     let mut map = TestMap { schema: SCHEMA, providers: BTreeMap::new() };
     for provider in config.providers.iter().filter(|provider| !provider.disabled) {
+        if only.is_some_and(|only| !only.contains(&provider.name)) {
+            if let Some(kept) = previous.and_then(|map| map.providers.get(&provider.name)) {
+                map.providers.insert(provider.name.clone(), kept.clone());
+            }
+            continue;
+        }
         let started = std::time::Instant::now();
         let area: Vec<String> = files.iter().filter(|file| in_area(provider, file)).cloned().collect();
         let mut section = match (provider.affected, provider.kind) {
@@ -413,14 +427,17 @@ fn resolve_rules(root: &Path, provider: &Provider, area: &[String], section: &Pr
         .collect()
 }
 
-/// What `--check` finds wrong with the committed map.
+/// What `--check` finds. The map it checks is the one the sources give now
+/// (#741): the committed file only stands in for a build this checkout cannot
+/// read, so a merge that changes sources never leaves the check failing; how
+/// far the committed snapshot lags is told, not failed.
 #[derive(Debug, Default, Serialize)]
 pub struct Findings {
     /// Files in no provider's area and not ignored: a new area.
     pub outside: Vec<String>,
-    /// Test files the committed map lacks.
+    /// Test files no provider maps.
     pub missing_tests: Vec<String>,
-    /// Targets or file entries the map lacks or still names.
+    /// Where the committed snapshot differs from the map now (not a failure).
     pub stale: Vec<String>,
     /// Providers whose build could not be read now.
     pub unread: Vec<String>,
@@ -428,7 +445,7 @@ pub struct Findings {
 
 impl Findings {
     pub fn ok(&self) -> bool {
-        self.outside.is_empty() && self.missing_tests.is_empty() && self.stale.is_empty()
+        self.outside.is_empty() && self.missing_tests.is_empty()
     }
 }
 
@@ -444,26 +461,29 @@ pub fn check(config: &TestsConfig, files: &[String], committed: &TestMap, fresh:
         }
     }
     for provider in &providers {
-        let section = committed.providers.get(&provider.name);
-        let Some(section) = section else {
-            findings.stale.push(format!("{}: not in the map", provider.name));
+        let Some(now) = fresh.providers.get(&provider.name) else {
+            findings.missing_tests.push(format!("{}: no map (its build was never read)", provider.name));
             continue;
         };
-        if let Some(now) = fresh.providers.get(&provider.name) {
-            if !now.note.is_empty() {
-                findings.unread.push(format!("{}: {}", provider.name, now.note));
-            }
+        if !now.note.is_empty() {
+            findings.unread.push(format!("{}: {}", provider.name, now.note));
         }
-        if section.rule == Rule::All {
+        if now.rule == Rule::All {
             continue;
         }
         let named = |file: &&String| glob::any(&provider.tests, file) && !glob::any(&provider.manual, file) && !glob::any(&provider.elsewhere, file);
         for file in files.iter().filter(named) {
-            if !section.test_files.contains_key(file) {
+            if !now.test_files.contains_key(file) {
                 findings.missing_tests.push(format!("{}: {file}", provider.name));
             }
         }
-        let Some(now) = fresh.providers.get(&provider.name).filter(|now| now.note.is_empty()) else { continue };
+        let Some(section) = committed.providers.get(&provider.name) else {
+            findings.stale.push(format!("{}: not in the committed map", provider.name));
+            continue;
+        };
+        if !now.note.is_empty() {
+            continue;
+        }
         for id in now.targets.keys().filter(|id| !section.targets.contains_key(*id)) {
             findings.stale.push(format!("{}: new target {id}", provider.name));
         }
@@ -479,9 +499,7 @@ pub fn check(config: &TestsConfig, files: &[String], committed: &TestMap, fresh:
             findings.stale.push(format!("{}: {file} maps to nothing now", provider.name));
         }
         for file in now.test_files.keys().filter(|file| !section.test_files.contains_key(*file)) {
-            if !findings.missing_tests.iter().any(|known| known.ends_with(file.as_str())) {
-                findings.missing_tests.push(format!("{}: {file}", provider.name));
-            }
+            findings.stale.push(format!("{}: {file} is a new test file", provider.name));
         }
     }
     for list in [&mut findings.outside, &mut findings.missing_tests, &mut findings.stale, &mut findings.unread] {
@@ -593,6 +611,33 @@ mentions = "target/debug/demo"
     }
 
     #[test]
+    fn the_map_reads_only_tracked_files() {
+        let dir = project(&[("src/main.rs", "fn main() {}\n"), ("artifacts-run.log", "x"), ("gone.rs", "")]);
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git").args(args).current_dir(dir.path()).stdout(std::process::Stdio::null()).status().unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["add", "src/main.rs", "gone.rs"]);
+        std::fs::remove_file(dir.path().join("gone.rs")).unwrap();
+        // The untracked log is no new area; the deleted file is gone.
+        assert_eq!(project_files(dir.path()).unwrap(), vec!["src/main.rs"]);
+    }
+
+    #[test]
+    fn a_partial_map_reads_the_named_providers_and_keeps_the_others() {
+        let dir = project(&files());
+        let config = config(CONFIG);
+        let committed = generate(dir.path(), &config, &listed(dir.path()), None).unwrap();
+        std::fs::write(dir.path().join("src/cli.rs"), "pub fn run() {}\n#[test]\nfn runs() {}\n").unwrap();
+        let only = BTreeSet::from(["rust".to_owned()]);
+        let now = generate_only(dir.path(), &config, &listed(dir.path()), Some(&committed), Some(&only)).unwrap();
+        // cli no longer uses store; py is the committed section as it was.
+        assert_eq!(now.providers["rust"].files["src/store.rs"], vec!["--bin demo store"]);
+        assert_eq!(now.providers["py"], committed.providers["py"]);
+    }
+
+    #[test]
     fn the_check_finds_new_areas_new_tests_and_a_stale_map() {
         let dir = project(&files());
         let config = config(CONFIG);
@@ -607,9 +652,19 @@ mentions = "target/debug/demo"
         let fresh = generate(dir.path(), &config, &files, Some(&committed)).unwrap();
         let findings = check(&config, &files, &committed, &fresh);
         assert_eq!(findings.outside, vec!["web/app.ts"]);
-        assert_eq!(findings.missing_tests, vec!["py: tests/test_new.py", "rust: src/main.rs"]);
+        // The map now has the new tests; the committed snapshot lags, which
+        // is told, not failed (#741).
+        assert!(findings.missing_tests.is_empty(), "{:?}", findings.missing_tests);
         assert!(findings.stale.contains(&"py: new target test_new".to_owned()), "{:?}", findings.stale);
         assert!(findings.stale.contains(&"rust: new target --bin demo ".to_owned()), "{:?}", findings.stale);
+        assert!(findings.stale.contains(&"py: tests/test_new.py is a new test file".to_owned()), "{:?}", findings.stale);
         assert!(!findings.ok());
+        std::fs::remove_file(dir.path().join("web/app.ts")).unwrap();
+        let files = listed(dir.path());
+        assert!(check(&config, &files, &committed, &fresh).ok());
+        // A test file no provider maps (a ctest binary CMake does not build).
+        let mut lacking = fresh.clone();
+        lacking.providers.get_mut("py").unwrap().test_files.remove("tests/test_new.py");
+        assert_eq!(check(&config, &files, &committed, &lacking).missing_tests, vec!["py: tests/test_new.py"]);
     }
 }

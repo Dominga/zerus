@@ -24,10 +24,13 @@ use std::time::Duration;
 
 use tauri::State;
 use zerus_client_core::actions::{
-    change_notifications, classify, invocation, parse_reference, reference_invocation,
-    ALREADY_ANSWERING, ALREADY_SENDING,
+    change_notifications, classify, invocation, parse_reference, recovery_preflight,
+    reference_invocation, ALREADY_ANSWERING, ALREADY_SENDING,
 };
-use zerus_client_core::details::{details_invocation, parse_details, Details};
+use zerus_client_core::details::{
+    details_invocation, parse_details, parse_subagent_identity, subagent_identity_invocation,
+    Details, SubagentIdentity,
+};
 use zerus_client_core::marks::{AttentionMarks, Mark};
 use zerus_client_core::readmarks::{ReadMark, ReadMarks};
 use zerus_client_core::reads::{self, ArchivePage};
@@ -74,6 +77,7 @@ pub enum Lane {
     Queue,
     Inbox,
     Answer,
+    Recovery,
 }
 
 impl Lane {
@@ -86,6 +90,7 @@ impl Lane {
             Action::SendNow { .. } => Self::Queue,
             Action::RemoveQueued { .. } => Self::Inbox,
             Action::Answer { .. } => Self::Answer,
+            Action::Recovery { .. } => Self::Recovery,
             _ => Self::Write,
         }
     }
@@ -141,6 +146,7 @@ impl Drop for Claim {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WriteKind {
     Update,
+    Settings,
     Terminate,
     /// A context reset (Qt's `m_clearKey` while `m_clearRequest` runs): it
     /// blocks only the session it resets, never another one.
@@ -150,6 +156,7 @@ pub enum WriteKind {
 impl WriteKind {
     pub fn of(action: &Action) -> Self {
         match action {
+            Action::Settings { .. } => Self::Settings,
             Action::Terminate | Action::Kill => Self::Terminate,
             Action::ClearContext { .. } => Self::Clear,
             _ => Self::Update,
@@ -267,14 +274,14 @@ impl Actions {
     /// session's reset is no update anywhere.
     pub fn write_kind(&self, computer: &str, name: &str) -> Option<WriteKind> {
         let writes = self.writes.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(own @ (WriteKind::Terminate | WriteKind::Clear)) =
+        if let Some(own @ (WriteKind::Terminate | WriteKind::Clear | WriteKind::Settings)) =
             writes.get(&(computer.to_owned(), name.to_owned()))
         {
             return Some(*own);
         }
         writes
             .values()
-            .any(|kind| *kind != WriteKind::Clear)
+            .any(|kind| !matches!(kind, WriteKind::Clear | WriteKind::Settings))
             .then_some(WriteKind::Update)
     }
 
@@ -352,7 +359,10 @@ impl Actions {
         live: impl FnOnce() -> (Option<ViewRow>, bool),
     ) -> Option<WriteKind> {
         let running = self.write_kind(computer, name);
-        if matches!(running, Some(WriteKind::Terminate | WriteKind::Clear)) {
+        if matches!(
+            running,
+            Some(WriteKind::Terminate | WriteKind::Clear | WriteKind::Settings)
+        ) {
             return running;
         }
         let Some(run) = self
@@ -845,9 +855,43 @@ async fn dispatch_with(
     target: Target,
     action: Action,
     request_id: String,
-    runner: impl FnOnce(&std::path::Path, &zerus_client_core::Invocation) -> zerus_client_core::Exit
+    runner: impl Fn(&std::path::Path, &zerus_client_core::Invocation) -> zerus_client_core::Exit
         + Send
         + 'static,
+) -> Result<Outcome, String> {
+    dispatch_with_plan(state, target, action, request_id, runner, None).await
+}
+
+/// Optional cleanup uses the same write lane and completion hooks as Terminate.
+/// Its source was captured before confirmation; only a fresh scoped receipt
+/// admits the separate background review after this dispatcher returns.
+pub(crate) async fn dispatch_cleanup(
+    state: &Actions,
+    capture: zerus_client_core::termination_cleanup::Capture,
+) -> Result<Outcome, String> {
+    if blocked() {
+        return Ok(failed(REPLAY_NEEDS_HGS));
+    }
+    dispatch_with_plan(
+        state,
+        capture.target.clone(),
+        Action::Terminate,
+        uuid::Uuid::new_v4().to_string(),
+        run,
+        Some(capture),
+    )
+    .await
+}
+
+async fn dispatch_with_plan(
+    state: &Actions,
+    target: Target,
+    action: Action,
+    request_id: String,
+    runner: impl Fn(&std::path::Path, &zerus_client_core::Invocation) -> zerus_client_core::Exit
+        + Send
+        + 'static,
+    cleanup: Option<zerus_client_core::termination_cleanup::Capture>,
 ) -> Result<Outcome, String> {
     if let Some(refusal) = refused_before_claim(&target, &action) {
         return Ok(failed(refusal));
@@ -900,8 +944,33 @@ async fn dispatch_with(
                 .capture_termination(&target)
         })
         .flatten();
+    let cleanup_receipt = cleanup.clone();
     let ran = tauri::async_runtime::spawn_blocking(move || {
-        let inv = invocation(&call_target, &call_action, &request_id)?;
+        if let Some(capture) = &cleanup {
+            crate::termination_cleanup::probe(&hgs, &capture.target, &runner)?;
+            let fresh = crate::termination_cleanup::inspection(
+                &hgs,
+                &capture.target,
+                &capture.machine,
+                &runner,
+            )?;
+            if !capture.recheck(&fresh) {
+                return Err(zerus_client_core::termination_cleanup::STATE_CHANGED.into());
+            }
+        }
+        if matches!(call_action, Action::Recovery { .. }) {
+            let inspection = details_invocation(&call_target, None);
+            let fresh = runner(&hgs, &inspection);
+            recovery_preflight(&call_target, &call_action, fresh)?;
+        }
+        let mut inv = if let Some(capture) = &cleanup {
+            capture.invocation(&request_id)?
+        } else {
+            invocation(&call_target, &call_action, &request_id)?
+        };
+        if let Some(capture) = &cleanup {
+            zerus_client_core::worktrees::guard(&mut inv.args, &capture.machine);
+        }
         let exit = runner(&hgs, &inv);
         Ok::<_, String>((inv, exit))
     })
@@ -909,7 +978,11 @@ async fn dispatch_with(
     .map_err(|error| error.to_string())?;
     match ran {
         Ok((inv, exit)) => {
-            let outcome = classify(&target, &action, &inv, exit);
+            let outcome = if let Some(capture) = &cleanup_receipt {
+                capture.completed(&inv, exit)
+            } else {
+                classify(&target, &action, &inv, exit)
+            };
             state.finished(&target, &action, &outcome);
             if matches!(outcome, Outcome::Done { .. }) {
                 if let (Some(pump), Some(capture)) = (
@@ -972,6 +1045,26 @@ pub async fn inspect_session(target: Target, archive_id: Option<String>) -> Opti
         .await
         .ok()?;
     parse_details(&target, exit)
+}
+
+/// Read once on opening a child; no timer or separate subscription.
+#[tauri::command]
+pub async fn inspect_subagent_identity(
+    target: Target,
+    archive_id: Option<String>,
+    agent_id: String,
+) -> Option<SubagentIdentity> {
+    if blocked() {
+        return None;
+    }
+    let inv = subagent_identity_invocation(&target, archive_id.as_deref(), &agent_id)?;
+    let hgs = default_hgs();
+    let exit = tauri::async_runtime::spawn_blocking(move || {
+        zerus_client_core::run_limited(&hgs, &inv, &[], 4 * 1024 * 1024).ok()
+    })
+    .await
+    .ok()??;
+    parse_subagent_identity(&target, &agent_id, exit)
 }
 
 /// `hgs reference` for the session: its `zerus://session?...` URI, or why it
@@ -1356,6 +1449,70 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cleanup_terminate_rechecks_after_claim_and_requires_the_exact_archive_receipt() {
+        use serde_json::json;
+        use zerus_client_core::{termination_cleanup::Capture, Exit};
+        for scenario in [
+            "ok",
+            "source-changed",
+            "legacy-help",
+            "wrong-archive",
+            "unknown",
+        ] {
+            let actions = Actions::new(
+                std::env::temp_dir()
+                    .join(format!("zerus-cleanup-test-{}.json", uuid::Uuid::new_v4())),
+            );
+            let target = review();
+            let source = json!({"name":target.name,"run_id":target.run_id,"conversation_id":target.conversation_id,"state":"running","tracked":true,"cmd":"claude","git_worktree":true,"git_root":"/srv/example/work","git_common_dir":"/srv/example/.git","worktree_owner_id":"owner-1"});
+            let capture =
+                Capture::from_inspection(&target, "11111111-1111-4111-8111-111111111111", &source)
+                    .unwrap()
+                    .unwrap();
+            let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let seen = Arc::clone(&count);
+            let state = actions.clone();
+            let scope = target.clone();
+            let out=tauri::async_runtime::block_on(dispatch_with_plan(&actions,target,Action::Terminate,uuid::Uuid::new_v4().to_string(),move|_,inv|{
+                assert!(state.begin(Lane::key(&scope,&Action::Terminate),&Action::Terminate).is_none(),"same write lane held before every preflight");
+                if inv.args.last().is_some_and(|a|a=="--help") {
+                    return Exit::Code{code:0,stdout:if scenario=="legacy-help"{b"guarded-create-v1".to_vec()}else{b"guarded-create-v1 scoped native lifecycle action".to_vec()},stderr:String::new()};
+                }
+                assert!(inv.args.windows(2).any(|a|a==["--expect-machine","11111111-1111-4111-8111-111111111111"]));
+                let value=if inv.args.iter().any(|a|a=="inspect") {
+                    let mut value=source.clone();if scenario=="source-changed"{value["worktree_owner_id"]=json!("replacement")}value
+                } else {
+                    seen.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
+                    let req:serde_json::Value=serde_json::from_slice(inv.stdin.as_ref().unwrap()).unwrap();
+                    assert_eq!(req["action"],"terminate");
+                    if scenario=="unknown"{return Exit::TimedOut}
+                    json!({"request_id":req["request_id"],"name":scope.name,"run_id":scope.run_id,"conversation_id":scope.conversation_id,"status":"completed","result_target":{"name":scope.name,"run_id":scope.run_id,"conversation_id":scope.conversation_id,"archive_id":if scenario=="wrong-archive"{"invalid"}else{"22222222-2222-4222-8222-222222222222"}}})
+                };
+                Exit::Code{code:0,stdout:serde_json::to_vec(&value).unwrap(),stderr:String::new()}
+            },Some(capture))).unwrap();
+            assert_eq!(
+                matches!(out, Outcome::Done { .. }),
+                scenario == "ok",
+                "{scenario}: {out:?}"
+            );
+            assert_eq!(
+                count.load(std::sync::atomic::Ordering::Relaxed),
+                usize::from(!matches!(scenario, "source-changed" | "legacy-help")),
+                "no legacy fallback or automatic replay"
+            );
+            assert!(actions
+                .begin(
+                    Lane::key(&scope_for_test(), &Action::Terminate),
+                    &Action::Terminate
+                )
+                .is_some());
+        }
+        fn scope_for_test() -> Target {
+            review()
+        }
+    }
+
+    #[test]
     fn recorded_question_replies_are_annotated() {
         let detail = "<send_user_message_question_reply>{\"questionItemId\":\"q1\",\"question\":\"Which checks?\",\"answer\":\"Unit\"}</send_user_message_question_reply>";
         let mut events =
@@ -1404,6 +1561,98 @@ mod tests {
             run_id: "run-2".into(),
             ..review()
         }
+    }
+
+    #[test]
+    fn model_settings_block_the_own_composer_until_the_write_ends() {
+        let actions = Actions::new(std::env::temp_dir().join("zerus-model-settings-marks.json"));
+        let target = review();
+        let settings = Action::Settings {
+            model: "model-a".into(),
+            effort: "high".into(),
+            expected_pending_id: None,
+            without_terminal: false,
+        };
+        let running = actions
+            .begin(Lane::key(&target, &settings), &settings)
+            .unwrap();
+        assert_eq!(
+            actions.write_kind(&target.computer, &target.name),
+            Some(WriteKind::Settings)
+        );
+        assert_eq!(
+            actions.write_kind(&target.computer, "claude/sample-project/other"),
+            None
+        );
+        assert!(actions
+            .begin(Lane::key(&target, &Action::Pause), &Action::Pause)
+            .is_none());
+        drop(running);
+        assert_eq!(actions.write_kind(&target.computer, &target.name), None);
+    }
+
+    #[test]
+    fn recovery_rechecks_the_fresh_job_before_qts_action() {
+        const JOB: &str = "11111111-1111-4111-8111-111111111111";
+        let actions = Actions::new(std::env::temp_dir().join(format!(
+            "zerus-recovery-preflight-{}.json",
+            std::process::id()
+        )));
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&calls);
+        let outcome = tauri::async_runtime::block_on(dispatch_with(
+            &actions,
+            review(),
+            Action::Recovery {
+                job_id: JOB.into(),
+                action: zerus_client_core::actions::RecoveryControl::Now,
+            },
+            "request-1".into(),
+            move |_, invocation| {
+                recorded.lock().unwrap().push(invocation.args.clone());
+                let value = if invocation.args.iter().any(|arg| arg == "inspect") {
+                    serde_json::json!({"run_id": "run-1", "conversation_id": "conv-1", "recovery": {"id": JOB, "name": "claude/sample-project/review", "state": "waiting"}})
+                } else {
+                    serde_json::json!({"id": JOB, "name": "claude/sample-project/review", "state": "waiting", "due_at": 123})
+                };
+                zerus_client_core::Exit::Code {
+                    code: 0,
+                    stdout: value.to_string().into_bytes(),
+                    stderr: String::new(),
+                }
+            },
+        ));
+        assert!(matches!(outcome, Ok(Outcome::Done { .. })));
+        let calls = calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0][1], "inspect");
+        assert_eq!(calls[1], ["@studio", "recovery", "action"]);
+
+        let actions = Actions::new(
+            std::env::temp_dir().join(format!("zerus-recovery-stale-{}.json", std::process::id())),
+        );
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&calls);
+        let outcome = tauri::async_runtime::block_on(dispatch_with(
+            &actions,
+            review(),
+            Action::Recovery {
+                job_id: JOB.into(),
+                action: zerus_client_core::actions::RecoveryControl::Now,
+            },
+            "request-2".into(),
+            move |_, invocation| {
+                recorded.lock().unwrap().push(invocation.args.clone());
+                let value = serde_json::json!({"run_id": "run-2", "conversation_id": "conv-1", "recovery": {"id": JOB, "name": "claude/sample-project/review", "state": "waiting"}});
+                zerus_client_core::Exit::Code {
+                    code: 0,
+                    stdout: value.to_string().into_bytes(),
+                    stderr: String::new(),
+                }
+            },
+        ));
+        assert!(matches!(outcome, Ok(Outcome::Failed { .. })));
+        assert_eq!(calls.lock().unwrap().len(), 1, "a stale job never mutates");
     }
 
     #[test]
@@ -1726,7 +1975,7 @@ mod tests {
                 target.clone(),
                 action,
                 uuid::Uuid::new_v4().to_string(),
-                move |_, _| exit,
+                move |_, _| exit.clone(),
             ))
             .unwrap();
             assert!(pump.archive_termination_ids(&computer).is_empty());
@@ -1801,7 +2050,7 @@ mod tests {
                                 .push((inv.request_id.clone(), asked.clone()));
                             let receipt = serde_json::json!({
                                 "status": "submitted",
-                                "request_id": echo.unwrap_or(asked),
+                                "request_id": echo.clone().unwrap_or(asked),
                                 "name": "claude/sample-project/review",
                                 "run_id": "run-1",
                                 "conversation_id": "conv-1",

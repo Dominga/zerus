@@ -77,6 +77,18 @@ pub struct AccountsState {
     pub(crate) warmed: BTreeSet<ComputerId>,
 }
 
+impl AccountsState {
+    /// Claims one of the two shared usage-read slots, including a selected
+    /// session's inspect. The matching completion is filed through the same hub.
+    pub fn claim_usage_slot(&mut self) -> bool {
+        if self.running >= 2 {
+            return false;
+        }
+        self.running += 1;
+        true
+    }
+}
+
 /// A profile's state on its machine, as the mockup's machine tags show it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -171,8 +183,22 @@ pub struct Account {
     pub identity_note: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct BindingEvidence {
+    pub host: ComputerId,
+    pub provider: String,
+    pub id: String,
+    pub home: String,
+    pub group: String,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct AccountsView {
+    /// Current and removed profiles disambiguate older home-only session bindings.
+    /// They are evidence only, never extra chooser accounts (SessionAccounts.h).
+    pub binding_evidence: Vec<BindingEvidence>,
+    pub binding_evidence_complete: bool,
+    pub catalog_loading: bool,
     pub hosts: Vec<Host>,
     pub accounts: Vec<Account>,
     /// The Overview's cards: the same grouping without the hidden native profiles.
@@ -886,6 +912,8 @@ pub fn project(
 ) -> AccountsView {
     let hosts = hosts(fleet);
     let mut all = Vec::new();
+    let mut evidence = Vec::new();
+    let mut evidence_complete = true;
     for entry in account_fleet(fleet) {
         let Some(data) = state
             .catalogs
@@ -894,9 +922,23 @@ pub fn project(
         else {
             continue;
         };
+        evidence_complete &= data.get("removed_profiles").is_some_and(Value::is_array)
+            && ["profiles", "removed_profiles"]
+                .iter()
+                .all(|field| items(data, field).len() <= PROFILES_PER_HOST);
         for raw in items(data, "profiles").iter().take(PROFILES_PER_HOST) {
             if launchable(entry, &text(raw, "provider")) {
-                all.push(profile(entry, raw, state));
+                let p = profile(entry, raw, state);
+                evidence.push(p.clone());
+                all.push(p);
+            }
+        }
+        for raw in items(data, "removed_profiles")
+            .iter()
+            .take(PROFILES_PER_HOST)
+        {
+            if launchable(entry, &text(raw, "provider")) {
+                evidence.push(profile(entry, raw, state));
             }
         }
     }
@@ -972,6 +1014,22 @@ pub fn project(
     let mut overview = group(&visible);
     overview.truncate(ACCOUNTS);
     AccountsView {
+        catalog_loading: hosts
+            .iter()
+            .any(|h| state.catalogs.get(&h.computer).is_some_and(|s| s.pending)),
+        binding_evidence_complete: evidence_complete,
+        binding_evidence: group(&evidence)
+            .into_iter()
+            .flat_map(|a| {
+                a.members.into_iter().map(move |p| BindingEvidence {
+                    host: p.host,
+                    provider: p.provider,
+                    id: p.id,
+                    home: p.home,
+                    group: a.key.clone(),
+                })
+            })
+            .collect(),
         loading: shown.iter().any(|p| p.usage.status == "loading"),
         busy: pending > 0 || state.catalogs.values().any(|slot| slot.pending),
         accounts,
@@ -1020,6 +1078,53 @@ mod tests {
             );
         }
         state
+    }
+
+    #[test]
+    fn removed_profiles_are_binding_evidence_only_and_never_new_chooser_accounts() {
+        let mut state = loaded();
+        let data = state
+            .catalogs
+            .get_mut(&ComputerId::from(""))
+            .unwrap()
+            .data
+            .as_mut()
+            .unwrap();
+        data["removed_profiles"] = json!([{"id":"retired", "provider":"claude", "home":"/srv/example/reused", "label":"Old", "installed":false}]);
+        let view = project(
+            &[entry("", "live", 0)],
+            &state,
+            &mut AccountsDisplay::default(),
+        );
+        assert!(view
+            .binding_evidence
+            .iter()
+            .any(|e| e.id == "retired" && e.home == "/srv/example/reused"));
+        assert!(view
+            .accounts
+            .iter()
+            .all(|a| a.members.iter().all(|p| p.id != "retired")));
+        assert!(view.binding_evidence.len() <= HOSTS * PROFILES_PER_HOST * 2);
+        assert!(view.binding_evidence_complete);
+        state
+            .catalogs
+            .get_mut(&ComputerId::from(""))
+            .unwrap()
+            .data
+            .as_mut()
+            .unwrap()["removed_profiles"] = json!(vec![
+            json!({"id":"old", "provider":"claude", "home":"/srv/example/reused"});
+            PROFILES_PER_HOST + 1
+        ]);
+        let partial = project(
+            &[entry("", "live", 0)],
+            &state,
+            &mut AccountsDisplay::default(),
+        );
+        assert!(
+            !partial.binding_evidence_complete,
+            "a capped history must never prove a home alias"
+        );
     }
 
     fn inspected(

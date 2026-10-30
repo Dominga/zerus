@@ -7,7 +7,7 @@ describe("shortcut help", () => {
 
   it("includes every command and the fixed rows in Qt's order", () => {
     const rows = shortcutHelpRows();
-    expect(rows[0]).toMatchObject({ group: "Go to", title: "Go to Overview", chord: "Ctrl+1" });
+    expect(rows[0]).toMatchObject({ group: "Navigation", title: "Go to Overview", chord: "Ctrl+1" });
     expect(rows.at(-1)).toEqual({ group: "Fixed keys", title: "Reorder projects in the Projects dialog", chord: "Alt+Up, Alt+Down" });
     expect(rows.filter((row) => row.group === "Fixed keys")).toHaveLength(12);
   });

@@ -6,6 +6,7 @@ mod claude_app;
 mod cli;
 mod config;
 mod external_workstreams;
+mod desktop;
 mod download;
 mod host;
 mod machines;

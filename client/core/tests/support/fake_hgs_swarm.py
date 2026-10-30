@@ -17,10 +17,13 @@ args = sys.argv[1:]
 data = sys.stdin.read()
 with open(os.path.join(here, "log.ndjson"), "a") as log:
     log.write(json.dumps({"argv": args, "stdin": data}) + "\n")
-if len(args) != 2 or args[0] != "swarm" or args[1] not in ("get", "apply"):
+if args in (["swarm", "initialize", "--g3-status", "--json"], ["swarm", "initialize", "--g3", "--json"]):
+    action = "g3-status" if args[2] == "--g3-status" else "g3-import"
+elif len(args) == 2 and args[0] == "swarm" and args[1] in ("get", "apply"):
+    action = args[1]
+else:
     sys.stderr.write("fake hgs: unexpected call\n")
     sys.exit(2)
-action = args[1]
 with open(os.path.join(here, "config.json")) as config_file:
     replies = json.load(config_file)[action]
 counts_path = os.path.join(here, "counts.json")

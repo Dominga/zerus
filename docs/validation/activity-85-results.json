@@ -1,0 +1,229 @@
+{
+  "bead": "zerus-5wmh.85",
+  "environment": "Tauri media/custom-protocol build, WebKitGTK, private Xvfb and D-Bus, isolated HOME/XDG/TMPDIR, synthetic replay and fake CLI",
+  "bisect_method": "Same native runtime and Phase 4 smoke; swap only the Activity frontend and its helpers/style/transcript to the named revision.",
+  "bisect": [
+    {
+      "activity_revision": "b81eb477d905363be94673f8579924baada650d4",
+      "phase4": "passed",
+      "selection_before": {
+        "top": 1164,
+        "height": 1762
+      },
+      "selection_after": {
+        "top": 1164,
+        "height": 1762
+      },
+      "application_scroll_writes": 0
+    },
+    {
+      "activity_revision": "ee14288e499c431e8c48a1c384978fa61b1a14a7",
+      "phase4": "failed at send-follow",
+      "selection_before": {
+        "top": 1121,
+        "height": 1719
+      },
+      "selection_after": {
+        "top": 1099,
+        "height": 1697
+      },
+      "application_scroll_writes": 0
+    },
+    {
+      "activity_revision": "87810569cdcfe0550573d566e6d1111203283246",
+      "phase4": "failed at send-follow",
+      "selection_before": {
+        "top": 1121,
+        "height": 1719
+      },
+      "selection_after": {
+        "top": 1099,
+        "height": 1697
+      },
+      "application_scroll_writes": 0
+    }
+  ],
+  "fixed": {
+    "phase4_steps_passed": [
+      "terminal",
+      "saved-drafts-dialog",
+      "drafts",
+      "saved-drafts-go-to",
+      "attach",
+      "send",
+      "cold",
+      "start",
+      "processes",
+      "preview",
+      "question",
+      "approval",
+      "queue",
+      "image-paste",
+      "clear-close-order",
+      "send-follow"
+    ],
+    "pending_layout": "Six streamed journal appends and one offscreen disclosure collapse; selection held beyond idle timeout.",
+    "hold": {
+      "selectedTop": 1121,
+      "selectedHeight": 1719,
+      "writes": [],
+      "frames": 30
+    },
+    "frames": [
+      {
+        "n": 0,
+        "top": 1121,
+        "height": 1719
+      },
+      {
+        "n": 1,
+        "top": 1121,
+        "height": 1719
+      },
+      {
+        "n": 2,
+        "top": 1121,
+        "height": 1719
+      },
+      {
+        "n": 3,
+        "top": 1121,
+        "height": 1719
+      },
+      {
+        "n": 4,
+        "top": 1121,
+        "height": 1719
+      },
+      {
+        "n": 5,
+        "top": 1121,
+        "height": 1719
+      },
+      {
+        "n": 6,
+        "top": 1121,
+        "height": 1719
+      },
+      {
+        "n": 7,
+        "top": 1121,
+        "height": 1719
+      },
+      {
+        "n": 8,
+        "top": 1121,
+        "height": 1719
+      },
+      {
+        "n": 9,
+        "top": 1121,
+        "height": 1719
+      },
+      {
+        "n": 10,
+        "top": 1121,
+        "height": 1719
+      },
+      {
+        "n": 11,
+        "top": 1121,
+        "height": 1719
+      },
+      {
+        "n": 12,
+        "top": 1121,
+        "height": 1719
+      },
+      {
+        "n": 13,
+        "top": 1121,
+        "height": 1719
+      },
+      {
+        "n": 14,
+        "top": 1121,
+        "height": 1719
+      },
+      {
+        "n": 15,
+        "top": 1121,
+        "height": 1719
+      },
+      {
+        "n": 16,
+        "top": 1121,
+        "height": 1719
+      },
+      {
+        "n": 17,
+        "top": 1121,
+        "height": 1719
+      },
+      {
+        "n": 18,
+        "top": 1121,
+        "height": 1719
+      },
+      {
+        "n": 19,
+        "top": 1121,
+        "height": 1719
+      },
+      {
+        "n": 20,
+        "top": 1121,
+        "height": 1719
+      },
+      {
+        "n": 21,
+        "top": 1121,
+        "height": 1719
+      },
+      {
+        "n": 22,
+        "top": 1121,
+        "height": 1719
+      },
+      {
+        "n": 23,
+        "top": 1121,
+        "height": 1719
+      },
+      {
+        "n": 24,
+        "top": 1121,
+        "height": 1719
+      },
+      {
+        "n": 25,
+        "top": 1121,
+        "height": 1719
+      },
+      {
+        "n": 26,
+        "top": 1121,
+        "height": 1719
+      },
+      {
+        "n": 27,
+        "top": 1121,
+        "height": 1719
+      },
+      {
+        "n": 28,
+        "top": 1121,
+        "height": 1719
+      },
+      {
+        "n": 29,
+        "top": 1121,
+        "height": 1719
+      }
+    ],
+    "selected_text_survived": true,
+    "clearing_applies_latest_and_resumes_end": true,
+    "switching_session_clears_old_range_and_places_first_page": true
+  },
+  "appearance": "Compared Sessions Activity in the approved mockup with a normal built-app render. No appearance changes."
+}

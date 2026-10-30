@@ -46,6 +46,13 @@ build, before it changes anything; without `--live` (HGS_TRAY_RESTART=0, which
 replaces the GUI on disk only) it also refuses a switch between Qt and the
 client.
 
+Before Qt starts, a selected hgs with desktop-revoke-v1 must either settle
+that revocation or explicitly report no handoff. An older hgs keeps the plain
+path only when no desktop state entry exists; any such entry keeps Qt stopped.
+A failed, pending, mismatched or timed-out receipt keeps Qt stopped. Recovery
+reads only the same request ID; it never invents a new UUID or stops another
+service.
+
 Native agents, tmux servers and other services are never signalled. When a check
 fails, the private draft snapshot is kept and its location printed.
 HGS_TRAY_QUIT_TIMEOUT and HGS_TRAY_START_TIMEOUT (seconds, default 35) bound the
@@ -67,6 +74,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 
 MAC = sys.platform == 'darwin'
 HOME = Path.home()
@@ -845,7 +853,8 @@ def check_replace(built, installed, live=False):
     refusal = numbered_refusal(installed_build_info(installed), build_info(built))
     if refusal:
         raise UpdateError(refusal + ' Nothing was replaced.')
-    if not live and bundle_kind(built) != bundle_kind(installed):
+    built_kind, installed_kind = bundle_kind(built), bundle_kind(installed)
+    if not live and built_kind != installed_kind and (MAC or (built_kind is not None and installed_kind is not None)):
         raise UpdateError('switching between the Qt GUI and the Tauri client needs the live update; '
                           'run tray/install.sh without HGS_TRAY_RESTART=0. Nothing was replaced.')
     return 0
@@ -923,19 +932,140 @@ def settings_report(before_qt=False):
     return problems, notes
 
 
+REVOKE_MARKER = 'Desktop revoke ABI: desktop-revoke-v1'
+REVOKE_SECONDS = float(os.environ.get('HGS_DESKTOP_REVOKE_TIMEOUT') or 30)
+
+
+def revocation_receipt(result, request_id, configuration):
+    """Only a settled revocation or the explicit no-handoff no-op is authority."""
+    if not isinstance(result, dict):
+        return False
+    if result.get('request_id') != request_id or result.get('configuration') != configuration:
+        return False
+    settled = all(result.get(key) is True for key in ('accepted', 'durable', 'revoked', 'checkpointed'))
+    absent = (result.get('applicable') is False and result.get('handoff') == 'none'
+              and result.get('revoked') is True and result.get('nothing_written') is True)
+    return settled or absent
+
+
+def legacy_desktop_state_absent():
+    """An old CLI is compatible only on a host with no desktop state entry."""
+    if 'HGS_STATE_DIR' in os.environ:
+        raw_state = os.environ['HGS_STATE_DIR']
+    else:
+        base = (os.environ['XDG_STATE_HOME'] if 'XDG_STATE_HOME' in os.environ
+                else f'{HOME}/.local/state')
+        raw_state = f'{base}/hgs/sessions'
+    state = Path(raw_state)
+    if not state.is_absolute():
+        state = Path.cwd() / state
+    desktop = state / 'desktop'
+    try:
+        os.lstat(desktop)
+    except FileNotFoundError:
+        return True
+    except OSError as error:
+        raise UpdateError(f'cannot inspect {desktop} without following links; keep Qt stopped: {error}')
+    raise UpdateError(f'the selected hgs lacks {REVOKE_MARKER}, but {desktop} exists; '
+                      'cannot check desktop revocation; keep Qt stopped and upgrade or repair hgs')
+
+
+def revoke_configuration():
+    """The selected CLI's supported, read-only configuration, never an approximation."""
+    try:
+        help_result = subprocess.run([CLI, '--help'], capture_output=True, text=True, timeout=10)
+    except FileNotFoundError as error:
+        # A GUI installed before hgs (no zerus-setup yet) has nothing to revoke
+        # unless desktop state exists; the same rule as a CLI that predates it.
+        if legacy_desktop_state_absent():
+            say('no hgs is installed and there is no desktop state; keeping the plain Qt path')
+            return None
+        raise UpdateError(f'cannot probe the selected hgs for {REVOKE_MARKER}: {error}; keep Qt stopped')
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise UpdateError(f'cannot probe the selected hgs for {REVOKE_MARKER}: {error}; keep Qt stopped')
+    if help_result.returncode != 0 or REVOKE_MARKER not in help_result.stdout:
+        if legacy_desktop_state_absent():
+            say('selected hgs predates desktop revocation and has no desktop state; keeping the plain Qt path')
+            return None
+    try:
+        status = subprocess.run([CLI, 'desktop', 'status', '--json'], capture_output=True, text=True, timeout=10)
+        result = json.loads(status.stdout)
+    except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+        raise UpdateError(f'cannot read the desktop configuration; keep Qt stopped: {error}')
+    if status.returncode != 0 or not isinstance(result, dict) or not result.get('configuration'):
+        raise UpdateError('the selected hgs did not report a canonical desktop configuration; keep Qt stopped')
+    return result['configuration']
+
+
+def revocation_refusal(request_id, receipt=None):
+    """Bounded exact-identity diagnostics, with no manager action or new ID."""
+    message = f'desktop revocation is not settled; keep Qt stopped and inspect request {request_id}'
+    detail = receipt.get('resource_custody') if isinstance(receipt, dict) and receipt.get('request_id') == request_id else None
+    if isinstance(detail, dict) and detail.get('revoke_request_id') == request_id:
+        attempt = detail.get('attempt_id')
+        try:
+            exact = isinstance(attempt, str) and str(uuid.UUID(attempt)) == attempt
+        except (ValueError, AttributeError):
+            exact = False
+        state = detail.get('helper_state')
+        pid = detail.get('helper_pid')
+        if exact and state in ('running', 'exited', 'unavailable'):
+            helper = str(pid) if type(pid) is int and 0 < pid <= 2147483647 else 'unavailable'
+            message += f'; operation attempt {attempt}, helper {helper} is {state}'
+    return (message + '. Check hgs desktop status --json. Wait for the named helper, or stop only that helper yourself. '
+            'Then restart only hgs-desktop through its service manager and retry the original revoke request. '
+            'Reboot only as a last resort.')
+
+
+def revoke_before_qt():
+    """Revoke migrated writers before any Qt start, with one retained request ID."""
+    configuration = revoke_configuration()
+    if configuration is None:
+        return
+    request_id = str(uuid.uuid4())
+    args = [CLI, 'desktop', 'revoke', '--json', '--request-id', request_id, '--reason', 'rollback']
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, timeout=REVOKE_SECONDS)
+    except (OSError, subprocess.TimeoutExpired):
+        result = None
+    if result is not None and result.returncode == 0:
+        try:
+            receipt = json.loads(result.stdout)
+        except ValueError as error:
+            raise UpdateError(f'desktop revocation returned malformed JSON; keep Qt stopped: {error}')
+        if not revocation_receipt(receipt, request_id, configuration):
+            raise UpdateError(revocation_refusal(request_id, receipt))
+        say(f'desktop writers revoked before Qt starts (request {request_id})')
+        return
+    # An uncertain invocation never gets a new ID. The exact read may find the
+    # transition that already settled, but it never resumes pending work.
+    try:
+        query = subprocess.run([CLI, 'desktop', 'request', '--json'],
+                               input=json.dumps({'op': 'revoke_status', 'request_id': request_id}),
+                               capture_output=True, text=True, timeout=10)
+        receipt = json.loads(query.stdout)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        query = receipt = None
+    if query is None or query.returncode != 0 or not revocation_receipt(receipt, request_id, configuration):
+        raise UpdateError(revocation_refusal(request_id, receipt))
+    say(f'desktop writers revoked before Qt starts (request {request_id})')
+
+
 def update(built, installed, rollback=False):
     built, installed = built.resolve(), installed.absolute()
     refuse_links(installed)
     info = build_info(built)
     slot = ROLLBACK / installed.name
     new_info = bundle_info(built) if MAC else info
-    old_info = (bundle_info(installed) if MAC else build_info(installed)) if installed.exists() else {}
+    old_info = (bundle_info(installed) if MAC else installed_build_info(installed) or {}) if installed.exists() else {}
     old_kind = bundle_kind(installed)
     new_kind = bundle_kind(built)
     if not rollback and installed.exists():
         refusal = numbered_refusal(installed_build_info(installed), info)
         if refusal:
             raise UpdateError(refusal + ' Nothing was replaced.')
+    if new_kind == 'qt':
+        revoke_before_qt()
     switching = MAC and old_kind == 'qt' and new_kind == 'tauri'
     # Qt's settings follow the direction of the change: leaving the client for
     # Qt checks them before Qt runs again and writes its own (and can still

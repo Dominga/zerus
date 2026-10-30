@@ -49,7 +49,7 @@ pub const INTERRUPTED: &str =
 pub const ALREADY_EXISTS: &str =
     "Another draft already exists here. Recover the previous one from Saved drafts.";
 /// Saved drafts skips larger manifests.
-const MAX_MANIFEST: u64 = 1024 * 1024;
+pub(crate) const MAX_MANIFEST: u64 = 1024 * 1024;
 const PREVIEW_CHARS: usize = 200;
 
 /// One stored draft: the composer's text and attachments and what Qt keeps
@@ -335,6 +335,23 @@ fn save_direct(root: &Path, key: &str, draft: &StoredDraft) -> Result<(), String
     Ok(())
 }
 
+/// Pure original manifest header decoding, shared with read-only migration.
+/// No attachments are opened and sending/uncertain flags are not normalized.
+pub(crate) fn decode_manifest(key: &str, bytes: &[u8]) -> Option<Map<String, Value>> {
+    if bytes.len() as u64 > MAX_MANIFEST {
+        return None;
+    }
+    match serde_json::from_slice::<Value>(bytes).ok()? {
+        Value::Object(object)
+            if object.get("version").and_then(Value::as_i64) == Some(1)
+                && object.get("key").and_then(Value::as_str) == Some(key) =>
+        {
+            Some(object)
+        }
+        _ => None,
+    }
+}
+
 /// One read of a draft (`loadDirect`): what could be restored, and whether
 /// the manifest and every attachment were valid.
 fn load_once(root: &Path, key: &str) -> (StoredDraft, bool) {
@@ -345,14 +362,9 @@ fn load_once(root: &Path, key: &str) -> (StoredDraft, bool) {
     }
     let object = match read_bounded(&manifest, MAX_MANIFEST)
         .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .and_then(|bytes| decode_manifest(key, &bytes))
     {
-        Some(Value::Object(object))
-            if object.get("version").and_then(Value::as_i64) == Some(1)
-                && object.get("key").and_then(Value::as_str) == Some(key) =>
-        {
-            object
-        }
+        Some(object) => object,
         _ => return (StoredDraft::default(), false),
     };
     let text = |name: &str| {
@@ -725,6 +737,85 @@ impl DraftStore {
             key,
             false,
             Box::new(move || done(loaded(load_once(&root, &owned)))),
+        );
+    }
+
+    /// Clear a successfully submitted snapshot only while its content still
+    /// matches. The comparison and save share one writer job: an edit queued
+    /// before it is preserved, and an edit queued after it wins afterwards.
+    pub fn clear_if_unchanged(
+        &self,
+        key: &str,
+        expected: Draft,
+        done: impl FnOnce(Result<bool, String>) + Send + 'static,
+    ) {
+        self.settle_if_unchanged(key, expected, true, done);
+    }
+
+    /// Ends a verified attempt only if its saved content still matches.
+    /// Recovery of an older note may preserve the newer draft's content.
+    pub fn settle_if_unchanged(
+        &self,
+        key: &str,
+        expected: Draft,
+        clear: bool,
+        done: impl FnOnce(Result<bool, String>) + Send + 'static,
+    ) {
+        let (root, owned) = (self.root.clone(), key.to_owned());
+        self.writer.enqueue(
+            key,
+            false,
+            Box::new(move || {
+                let (mut current, valid) = load_once(&root, &owned);
+                let result = if !valid {
+                    Err(NOT_RESTORED.to_owned())
+                } else if current.draft.text != expected.text
+                    || current.draft.attachments != expected.attachments
+                {
+                    Ok(false)
+                } else {
+                    if clear {
+                        current.draft = Draft::default();
+                        current.position = 0;
+                        current.anchor = 0;
+                    }
+                    current.sending = false;
+                    current.uncertain = false;
+                    save_direct(&root, &owned, &current).map(|()| true)
+                };
+                done(result);
+            }),
+        );
+    }
+
+    /// Replace a private form only if its complete checkpoint still matches.
+    /// Form fields can hold a reserved request identity; text equality alone
+    /// must never authorize clearing or overwriting that identity.
+    pub fn replace_if_unchanged(
+        &self,
+        key: &str,
+        expected: StoredDraft,
+        next: StoredDraft,
+        done: impl FnOnce(Result<bool, String>) + Send + 'static,
+    ) {
+        let (root, owned) = (self.root.clone(), key.to_owned());
+        self.writer.enqueue(
+            key,
+            false,
+            Box::new(move || {
+                let (mut current, valid) = load_once(&root, &owned);
+                let mut expected = expected;
+                current.uncertain |= current.sending;
+                expected.uncertain |= expected.sending;
+                let result = if !valid {
+                    Err(NOT_RESTORED.to_owned())
+                } else if current != expected {
+                    Ok(false)
+                } else {
+                    save_direct(&root, &owned, &next).map(|()| true)
+                };
+                done(result);
+            }),
         );
     }
 

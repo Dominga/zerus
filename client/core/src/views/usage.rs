@@ -52,6 +52,8 @@ pub struct Credits {
 /// One account's usage as the screens show it.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct Usage {
+    /// The account profile id, when the source reports one.
+    pub id: String,
     /// `ok`, `loading`, `unavailable`, `offline`, `configured`, `signed_out`,
     /// `expired`, `credentials_locked`, `desktop_session_unavailable` or
     /// `credentials_unavailable`.
@@ -194,6 +196,7 @@ pub fn window(value: &Value) -> Option<Window> {
 pub fn usage(value: &Value) -> Usage {
     let identity = value.get("identity").unwrap_or(&Value::Null);
     Usage {
+        id: text(value, "id"),
         status: text(value, "status"),
         provider: text(value, "provider"),
         label: text(value, "label"),

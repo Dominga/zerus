@@ -2595,6 +2595,13 @@ for that session, and the project settings can keep agents to their own
 session or limit how many tasks they start per hour. `settings --set` reads a
 JSON object and changes only the fields it names.
 
+The desktop cancellation dialog uses `hgs task cancel-execution REF --project P --json`,
+with schema 1 JSON on stdin: `dispatch_id`, `stage_at`, executor `machine` and `session_id`,
+and `reason`. It checks the exact active execution while holding the project lock,
+including after forwarding or offline fallback, and returns a compact task plus
+`cancel_message`. Peers without this command refuse it; no legacy cancellation
+fallback is attempted. `hgs task cancel` retains its existing full response.
+
 Task links retain the computer and immutable launch identity (a run identity for
 older bindings). The session name is a display and routing hint: renaming changes
 the shown label and keeps current-session emphasis and filtering. A different

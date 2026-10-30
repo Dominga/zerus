@@ -270,3 +270,26 @@ mod assignment_tests {
         assert!(assignment_target(&row, &target, "launch_id:launch").is_err());
     }
 }
+
+/// The UI has already shown the cancel dialog for this exact execution.
+#[tauri::command]
+pub async fn task_cancel_execution(
+    state: State<'_, TaskWrites>,
+    project: String,
+    task: String,
+    execution: zerus_client_core::task_cancel::Execution,
+    reason: String,
+) -> Result<Option<String>, String> {
+    if crate::actions::blocked() {
+        return Err(crate::screens::REPLAY_NEEDS_HGS.into());
+    }
+    let permit = state.begin()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _permit = permit;
+        zerus_client_core::task_cancel::apply(&project, &task, &execution, &reason, |call| {
+            tasks_write::run(&zerus_client_core::default_hgs(), call)
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}

@@ -1,3 +1,5 @@
+import { createTaskReason } from "./TaskReason";
+import { canCancel, requestTaskCancellation, PAUSE_REASON } from "../../store/taskCancel";
 import { For, Show, Suspense, createEffect, createMemo, createSignal, lazy, on, onCleanup } from "solid-js";
 import { Icon } from "../lib/icons";
 import { statusOf } from "../sessions/SessionCard";
@@ -21,6 +23,8 @@ const EMPTY = { current: "No tasks in progress or review", review: "Nothing to r
 export function TasksPanel() {
   const [stage, setStage] = createSignal<Filter>("current"), [older, setOlder] = createSignal(false), [at, setAt] = createSignal(0);
   const [assignment, setAssignment] = createSignal<Task>(), [query, setQuery] = createSignal("");
+  const { show: showReason, clear: clearReason, Tip: ReasonTip } = createTaskReason();
+  createEffect(on(() => project()?.id, clearReason));
   const only = () => flag("tasks/onlySession") ? selected() : undefined;
   const ageNow = createMemo(() => Math.floor(now() / 60) * 60_000);
   const stageRows = (filter: Filter, old = false) => filter === "current" ? rows().filter((t) => ["review", "active"].includes(t.stage) && (!only() || belongsTo(t, only()!))) : boardRows(rows(), filter, only(), ageNow(), old);
@@ -73,10 +77,11 @@ export function TasksPanel() {
     if (!e.dataTransfer?.types.includes(TASK_MIME) || writingTask() || !stageDropAction(drag(), filter)) return false;
     e.preventDefault(); e.stopPropagation(); e.dataTransfer.dropEffect = "move"; endDrag(); return true;
   };
-  const menu = (e: MouseEvent | KeyboardEvent, t: Task) => { e.preventDefault(); e.stopPropagation(); const el = (e.currentTarget as HTMLElement).getBoundingClientRect(), projectId = project()!.id; setMenu({ x: el.left, y: el.bottom, items: [
+  const menu = (e: MouseEvent | KeyboardEvent, t: Task) => { e.preventDefault(); e.stopPropagation(); const anchor = e.currentTarget as HTMLElement, el = anchor.getBoundingClientRect(), projectId = project()!.id; setMenu({ x: el.left, y: el.bottom, items: [
     { label: "Task details", icon: "file-text", action: () => openTask(projectId, t.uuid) },
     { label: "Rename…", icon: "pencil", disabled: !t.writable || !!writingTask(), action: () => requestTaskRename(projectId, t.uuid) },
     ...boardActions(t.stage).map((action) => ({ label: ACTION_LABEL[action], icon: ACTION_ICON[action], disabled: !t.writable || !!writingTask(), action: () => void actOnTask(projectId, t, { kind: action }) })),
+    ...(t.stage === "active" ? [{ label: "Cancel task…", icon: "x", danger: true, disabled: !canCancel(t) || !!writingTask(), action: () => requestTaskCancellation(projectId, t, anchor) }] : []),
     { label: "Assign to session…", icon: "user-round-cog", disabled: !canAssign(t, projectId) || !!assigningTask(), action: () => { if (project()?.id !== projectId) return; setQuery(""); setAssignment(t); } },
   ] }); };
   let picker!: HTMLDivElement;
@@ -95,12 +100,13 @@ export function TasksPanel() {
       <div class="tk-scroll" ref={scroller} onDragOver={over} onDrop={dropped} onDragLeave={(e) => { if (!scroller.contains(e.relatedTarget as Node)) endDrag(); }}><div class="tk-cards" ref={cards} role="list" aria-label={`${LABEL[stage()]} tasks`}><For each={shown()}>{(t) => <article class={`tk-card st-${t.stage}`} data-task={t.uuid} data-stage={t.stage} classList={{ sel: selectedTask()?.uuid === t.uuid, mine: !!selected() && belongsTo(t, selected()!), quiet: ["backlog", "done"].includes(t.stage), dragging: draggedTask()?.uuid === t.uuid }} tabindex="0" role="listitem" aria-label={`${t.id}: ${t.title}`} draggable={canDrag(t) && !writingTask()} onDragStart={(e) => taskDragStart(e, t)} onDragEnd={() => { setDraggedTask(undefined); setDropTile(undefined); endDrag(); }} onClick={() => openTask(project()!.id, t.uuid)} onContextMenu={(e) => menu(e, t)} onKeyDown={(e) => { if (e.target !== e.currentTarget) return; if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openTask(project()!.id, t.uuid); } else if (e.key === "ContextMenu" || e.shiftKey && e.key === "F10") menu(e, t); }}>
         <span class={`tk-glyph st-${t.stage}`} aria-hidden="true"><Show when={t.stage === "todo"}>{t.queue}</Show><Show when={["review", "done"].includes(t.stage)}><Icon name="check" size={11} /></Show></span>
         <div class="tk-card-main"><div class="tk-card-title">{t.title || "Untitled task"}</div><div class="tk-meta"><Show when={stage() === "current"}><span class="tk-meta-stage">{STAGE_LABEL[t.stage as Stage]}</span></Show><span class="mono tk-id">{t.id}</span><span class="tk-target ell" title={assignmentLabel(t)}>{t.worker ? `Subagent: ${t.worker}` : assignmentLabel(t)}</span><Show when={t.stage === "active" && find()(executorRef(t))}>{(s) => <span class={`hbadge t-${statusOf(s())}`}>{s().caption}</span>}</Show></div><Show when={t.stage === "review" && (t.summary || t.cancelReason)}><p class="tk-summary">{t.cancelReason || t.summary}</p></Show></div>
-        <div class="tk-card-acts"><Show when={primaryAction(t.stage)}>{(action) => <button class="icon-btn tk-act tk-primary" aria-label={ACTION_LABEL[action()]} title={ACTION_LABEL[action()]} disabled={!t.writable || !!writingTask()} onClick={(e) => { e.stopPropagation(); void actOnTask(project()!.id, t, { kind: action() }); }}><Icon name={ACTION_ICON[action()]} size={15} /></button>}</Show><button class="icon-btn tk-act" aria-label="Task actions" title="Task actions" aria-haspopup="menu" onClick={(e) => menu(e, t)}><Icon name="ellipsis" size={15} /></button></div>
+        <div class="tk-card-acts"><Show when={t.stage === "active"}><button class="icon-btn tk-act tk-primary blocked" aria-label="Pause task" aria-description={PAUSE_REASON} title={PAUSE_REASON} onClick={(e) => { e.stopPropagation(); openTask(project()!.id, t.uuid); showReason(e.currentTarget, PAUSE_REASON); }}><Icon name="pause" size={15} /></button></Show><Show when={primaryAction(t.stage)}>{(action) => <button class="icon-btn tk-act tk-primary" aria-label={ACTION_LABEL[action()]} title={ACTION_LABEL[action()]} disabled={!t.writable || !!writingTask()} onClick={(e) => { e.stopPropagation(); void actOnTask(project()!.id, t, { kind: action() }); }}><Icon name={ACTION_ICON[action()]} size={15} /></button>}</Show><button class="icon-btn tk-act" aria-label="Task actions" title="Task actions" aria-haspopup="menu" onClick={(e) => menu(e, t)}><Icon name="ellipsis" size={15} /></button></div>
       </article>}</For><div class="tk-dropline" classList={{ on: lineAt() !== undefined }} style={{ translate: `0 ${lineAt() ?? 0}px` }} aria-hidden="true" /></div><Show when={!visible().length && !tasks.error()}><div class="tk-empty"><Icon name={ICON[stage()]} size={20} /><span>{!project()!.accessible ? "This project is unavailable on this computer." : tasks.loaded() ? EMPTY[stage()] : "Loading tasks…"}</span></div></Show>
         <Show when={stage() === "done" && stageRows("done", true).length}><button class="tk-older" onClick={() => setOlder(!older())}>{older() ? "Hide older" : `Show older (${stageRows("done", true).length})`}</button></Show>
       </div>
       <Show when={visible().length > TASK_PAGE}><div class="tasks-navigation"><span class="muted">{at() + 1}–{Math.min(at() + TASK_PAGE, visible().length)} of {visible().length}</span><span class="grow" /><button class="btn small" disabled={!at()} onClick={() => setAt(Math.max(0, at() - TASK_PAGE))}>Previous</button><button class="btn small" disabled={at() + TASK_PAGE >= visible().length} onClick={() => setAt(at() + TASK_PAGE)}>Next</button></div></Show>
     </Show>
     <Show when={assignment()}>{(task) => <div ref={picker} class="tk-assign menu" data-shortcut-context="none" role="dialog" aria-label="Assign to session" onKeyDown={(e) => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); setAssignment(undefined); } }}><b>Assign to session…</b><input class="field tk-assign-search" placeholder="Search sessions…" aria-label="Search sessions" value={query()} onInput={(e) => setQuery(e.currentTarget.value)} /><div class="tk-assign-list"><button class="menu-item" onClick={() => { void assign(project()!.id, task()); setAssignment(undefined); }}>Any session</button><For each={choices().slice(0, 50)}>{(s) => <button class="menu-item" onClick={() => { void assign(project()!.id, task(), { ...s }); setAssignment(undefined); }}>{s.title} <span class="muted">@{s.machine}</span></button>}</For><Show when={choices().length > 50}><div class="hint">Refine the search to see more sessions.</div></Show></div></div>}</Show>
+    <ReasonTip />
   </div>;
 }

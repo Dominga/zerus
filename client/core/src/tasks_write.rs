@@ -82,12 +82,12 @@ impl TaskCall {
         }
     }
 
-    /// `hgs task ...` with Qt's timeouts: 90 s for `send`, `cancel` and
+    /// `hgs task ...` with Qt's timeouts: 90 s for `send`, `cancel`, `cancel-execution` and
     /// `message`, otherwise 30 s.
     pub fn invocation(&self) -> Invocation {
         let long = matches!(
             self.args.first().map(String::as_str),
-            Some("send" | "cancel" | "message")
+            Some("send" | "cancel" | "cancel-execution" | "message")
         );
         let mut args = vec!["task".to_owned()];
         args.extend(self.args.iter().cloned());

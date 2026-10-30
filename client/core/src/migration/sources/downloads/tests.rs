@@ -299,6 +299,10 @@ fn index_import_never_acquires_lock_or_opens_changes_and_unknown_cache_files() {
         )
     });
     let folder = fs::canonicalize(&scratch.0).unwrap();
+    // Windows canonical paths are verbatim (\\?\C:\...), which the source
+    // refuses as a device path; Settings stores the plain drive form.
+    #[cfg(windows)]
+    let folder = std::path::PathBuf::from(folder.to_str().unwrap().trim_start_matches(r"\\?\"));
     let path = folder.join(".zerus-files.json");
     let stream = download_index(folder.to_str().unwrap(), &fs::read(&path).unwrap())
         .unwrap()

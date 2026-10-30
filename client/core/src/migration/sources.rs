@@ -27,6 +27,8 @@ mod provider;
 pub use provider::provider_operations;
 mod worktrees;
 pub use worktrees::{next_worktree_snapshots, qt_worktree_snapshots};
+mod drafts;
+pub use drafts::draft_checkpoint;
 
 #[derive(Clone, Copy)]
 pub enum Origin {

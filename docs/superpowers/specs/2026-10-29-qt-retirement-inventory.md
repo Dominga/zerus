@@ -386,9 +386,10 @@ identity and persists new choices without rereading a handled Qt family.
 `client/core::migration` supplies bounded staged evidence over the existing
 creation/read/task/launch decoders, separate repository-clone checkpoints,
 download indexes, organization observations/backups/drafts, provider operations
-and non-authoritative worktree caches. Original states, identities and private
-unknown fields are preserved without replay. Its transport client streams to G1's
-selected publisher with exact capability/configuration checks, bounded pipes
+and non-authoritative worktree caches, plus original draft-operation manifests
+and attachment references through the existing draft decoder. Original states,
+identities and private unknown fields are preserved without replay. Its transport
+client streams to G1's selected publisher with exact capability/configuration checks, bounded pipes
 and source rechecks; it has no startup hook. The shared handoff contract lives
 in `crates/desktop-migration`; G1 owns the executable transport, secure publisher,
 marker phases and current drain. The first-G3 `task-preferences` family also

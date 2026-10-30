@@ -40,6 +40,9 @@ impl ReadMark {
     }
 }
 
+#[cfg(test)]
+mod tests;
+
 pub const FIRST_BACKOFF_MS: i64 = 10_000;
 pub const MAX_BACKOFF_MS: i64 = 300_000;
 pub const CONFIRMED_RESEND_MS: i64 = 120_000;

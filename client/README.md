@@ -804,11 +804,12 @@ visible during refresh and offline states. The Context chip opens the Session
 usage section in a popover, with no side panel required.
 
 The Recovery chip and panel use only the followed inspection's recovery job and
-provider error. Retry now and Cancel retry run through the action lane as
-`hgs [@host] recovery action --scoped-json`, pinned to a fresh request id and the
-exact session, run, conversation and waiting job. The durable receipt must echo
-all of them; a failed, uncertain, timed-out or malformed outcome is never
-replayed. Attempts, Open Terminal, Refresh usage and Settings follow Qt's paths.
+provider error. Immediately before Retry now or Cancel retry, the action lane
+reads a fresh full inspection and refuses unless it still names the exact
+session, run, conversation and waiting job. It then makes Qt's
+`hgs [@host] recovery action` call with `{name, id, action}` and accepts only
+the matching updated job. A failed, uncertain, timed-out or malformed outcome is
+never replayed. Attempts, Open Terminal, Refresh usage and Settings follow Qt's paths.
 No additional background poller runs for these chips; the durable fanout remains
 G1's work.
 

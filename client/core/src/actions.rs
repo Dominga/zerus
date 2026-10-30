@@ -393,23 +393,16 @@ pub fn invocation(
                 return Err("Recovery needs its exact session, run, conversation and job.".into());
             }
             let input = json!({
-                "request_id": request_id,
                 "name": target.name,
-                "expected_run_id": target.run_id,
-                "expected_conversation_id": target.conversation_id,
-                "job_id": job_id,
+                "id": job_id,
                 "action": action.as_str(),
             });
             (
-                vec![
-                    "recovery".to_owned(),
-                    "action".to_owned(),
-                    "--scoped-json".to_owned(),
-                ],
+                vec!["recovery".to_owned(), "action".to_owned()],
                 Some(serde_json::to_vec(&input).map_err(|error| error.to_string())?),
                 10,
                 25,
-                Some(request_id.to_owned()),
+                None,
             )
         }
         Action::Pause => (vec!["pause".to_owned(), name], None, 45, 45, None),
@@ -1041,6 +1034,34 @@ fn trimmed_stderr(stderr: &str) -> Option<String> {
     (!text.is_empty()).then(|| text.chars().take(STDERR_CHARS).collect())
 }
 
+/// Qt's recovery action is admitted only after a fresh full inspection still
+/// names the same session, run, conversation and waiting job.
+pub fn recovery_preflight(target: &Target, action: &Action, exit: Exit) -> Result<(), String> {
+    let Action::Recovery { job_id, .. } = action else {
+        return Ok(());
+    };
+    let Exit::Code {
+        code: 0, stdout, ..
+    } = exit
+    else {
+        return Err(
+            "Recovery state could not be confirmed. Reload its state before trying again.".into(),
+        );
+    };
+    let details: Value = serde_json::from_slice(&stdout).unwrap_or(Value::Null);
+    let job = &details["recovery"];
+    if details["run_id"] == target.run_id
+        && details["conversation_id"] == target.conversation_id
+        && job["name"] == target.name
+        && job["id"] == *job_id
+        && job["state"] == "waiting"
+    {
+        Ok(())
+    } else {
+        Err("This scheduled recovery is no longer current; nothing was changed".into())
+    }
+}
+
 pub fn classify(target: &Target, action: &Action, invocation: &Invocation, exit: Exit) -> Outcome {
     match action {
         Action::Interrupt { .. } | Action::CompactContext => {
@@ -1335,12 +1356,11 @@ fn classify_send_now(
     }
 }
 
-/// The scoped recovery edit's durable receipt. Only the exact waiting job,
-/// session, run and conversation confirms a change; an unknown outcome is
-/// never replayed.
+/// Qt's recovery edit returns the updated job. Its identity and resulting
+/// state must match; an unknown outcome is never replayed.
 fn classify_recovery(
     target: &Target,
-    invocation: &Invocation,
+    _invocation: &Invocation,
     job_id: &str,
     action: RecoveryControl,
     exit: Exit,
@@ -1361,42 +1381,18 @@ fn classify_recovery(
                 .unwrap_or_else(|| "Could not update recovery. Reload its state.".into()),
         ),
         Exit::Code { stdout, .. } => {
-            let receipt: Value = serde_json::from_slice(&stdout).unwrap_or(Value::Null);
-            let field = |key: &str| receipt.get(key).and_then(Value::as_str);
-            let identity = invocation.request_id.is_some()
-                && field("request_id") == invocation.request_id.as_deref()
-                && field("name") == Some(target.name.as_str())
-                && field("run_id") == Some(target.run_id.as_str())
-                && field("conversation_id") == Some(target.conversation_id.as_str())
-                && field("job_id") == Some(job_id)
-                && field("action") == Some(action.as_str());
-            let reason: String = field("error")
-                .unwrap_or("")
-                .trim()
-                .chars()
-                .take(STDERR_CHARS)
-                .collect();
-            let succeeded = match action {
-                RecoveryControl::Now => "scheduled",
-                RecoveryControl::Cancel => "cancelled",
-            };
-            match field("status") {
-                Some(status)
-                    if identity && status == succeeded && receipt["recovery"].is_object() =>
-                {
-                    done(receipt, None)
+            let job: Value = serde_json::from_slice(&stdout).unwrap_or(Value::Null);
+            let identity = job["id"] == job_id && job["name"] == target.name;
+            let settled = match action {
+                RecoveryControl::Now => {
+                    job["state"] == "waiting" && job["due_at"].as_f64().is_some_and(f64::is_finite)
                 }
-                Some("failed") if identity => failed(if reason.is_empty() {
-                    "Could not update recovery. Reload its state.".into()
-                } else {
-                    reason
-                }),
-                Some("uncertain") if identity => uncertain(if reason.is_empty() {
-                    "Recovery was not confirmed. Reload its state before trying again.".into()
-                } else {
-                    reason
-                }),
-                _ => uncertain("Invalid recovery response. Reload its state before trying again."),
+                RecoveryControl::Cancel => job["state"] == "cancelled",
+            };
+            if identity && settled {
+                done(job, None)
+            } else {
+                uncertain("Invalid recovery response. Reload its state before trying again.")
             }
         }
     }
@@ -3771,7 +3767,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_actions_are_scoped_and_use_the_durable_receipt() {
+    fn recovery_actions_use_qt_payload_preflight_and_updated_job() {
         const JOB: &str = "11111111-1111-4111-8111-111111111111";
         const REQUEST: &str = "22222222-2222-4222-8222-222222222222";
         let target = target("studio");
@@ -3780,52 +3776,41 @@ mod tests {
             action: RecoveryControl::Now,
         };
         let inv = invocation(&target, &action, REQUEST).unwrap();
-        assert_eq!(inv.args, ["@studio", "recovery", "action", "--scoped-json"]);
+        assert_eq!(inv.args, ["@studio", "recovery", "action"]);
         assert_eq!(inv.timeout, Duration::from_secs(25));
+        assert_eq!(inv.request_id, None);
         let input: Value = serde_json::from_slice(inv.stdin.as_deref().unwrap()).unwrap();
         assert_eq!(
             input,
-            json!({
-                "request_id": REQUEST,
-                "name": target.name,
-                "expected_run_id": "run-1",
-                "expected_conversation_id": "conv-1",
-                "job_id": JOB,
-                "action": "now",
-            })
+            json!({"name": target.name, "id": JOB, "action": "now"})
         );
-        let receipt = json!({
-            "request_id": REQUEST, "name": target.name, "run_id": "run-1",
-            "conversation_id": "conv-1", "job_id": JOB, "action": "now",
-            "status": "scheduled", "recovery": {"id": JOB, "state": "waiting"},
+
+        let fresh = json!({
+            "run_id": "run-1", "conversation_id": "conv-1",
+            "recovery": {"id": JOB, "name": target.name, "state": "waiting"},
         });
+        assert_eq!(
+            recovery_preflight(&target, &action, reply_exit(&fresh)),
+            Ok(())
+        );
+        let stale = json!({
+            "run_id": "run-2", "conversation_id": "conv-1",
+            "recovery": {"id": JOB, "name": target.name, "state": "waiting"},
+        });
+        assert!(recovery_preflight(&target, &action, reply_exit(&stale)).is_err());
+        let already_cancelled = json!({
+            "run_id": "run-1", "conversation_id": "conv-1",
+            "recovery": {"id": JOB, "name": target.name, "state": "cancelled"},
+        });
+        assert!(recovery_preflight(&target, &action, reply_exit(&already_cancelled)).is_err());
+        assert!(recovery_preflight(&target, &action, Exit::TimedOut).is_err());
+
+        let updated = json!({"id": JOB, "name": target.name, "state": "waiting", "due_at": 123});
         assert!(matches!(
-            classify(&target, &action, &inv, reply_exit(&receipt)),
+            classify(&target, &action, &inv, reply_exit(&updated)),
             Outcome::Done { .. }
         ));
-        let failed_receipt = json!({
-            "request_id": REQUEST, "name": target.name, "run_id": "run-1",
-            "conversation_id": "conv-1", "job_id": JOB, "action": "now",
-            "status": "failed", "error": "job changed",
-        });
-        assert_eq!(
-            classify(&target, &action, &inv, reply_exit(&failed_receipt)),
-            failed("job changed")
-        );
-        let uncertain_receipt = json!({
-            "request_id": REQUEST, "name": target.name, "run_id": "run-1",
-            "conversation_id": "conv-1", "job_id": JOB, "action": "now",
-            "status": "uncertain", "error": "interrupted",
-        });
-        assert_eq!(
-            classify(&target, &action, &inv, reply_exit(&uncertain_receipt)),
-            uncertain("interrupted")
-        );
-        let wrong = json!({
-            "request_id": REQUEST, "name": target.name, "run_id": "run-2",
-            "conversation_id": "conv-1", "job_id": JOB, "action": "now",
-            "status": "scheduled", "recovery": {},
-        });
+        let wrong = json!({"id": JOB, "name": target.name, "state": "waiting", "due_at": "later"});
         assert!(matches!(
             classify(&target, &action, &inv, reply_exit(&wrong)),
             Outcome::Uncertain { .. }

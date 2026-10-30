@@ -1478,6 +1478,21 @@ phase 37. Lanes are balanced by volume and cost (U28 rule 9), not by count.
   filters, a command that names the affected tests of a change with their
   time, a testing policy in every hand-off and the lead's guide, and full-run
   templates that need the owner's grant.
+- Test requests go to a queue: Zerus runs them as a milestone when the
+  machine has room (suites declare CPU, GPU and RAM needs), returns each
+  result to whoever submitted it, and anyone may force one test to run now.
+- Every result goes to a local database with its time, commit and a short
+  log excerpt; the lead gets a card linking to it and reads it only when
+  needed. A suite whose inputs did not change reuses its last result, marked
+  as reused and due for a new measurement; when enough reused results pile
+  up, Zerus proposes a full run.
+- A suite that fails and then passes on one retry is marked flaky with its
+  history; three flaky episodes become a lead item. A suite that grows more
+  than half over its recorded time is flagged.
+- The team gets a Tests view (queue, running, history, flaky, reused), and
+  the profiler and a task's drawer show its test runs.
+- A test that touches the user's own paths (settings, zerus.log, the temp or
+  crash dump folders outside its own) fails a check.
 
 ## Order of work (proposal)
 

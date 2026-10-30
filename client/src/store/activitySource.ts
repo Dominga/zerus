@@ -25,10 +25,24 @@ export interface ActivitySource {
   /** Why the last read failed; a read-only source shows it as a notice while set. */
   error(): string | undefined;
   /**
-   * Recorded Activity that is only read: no live states, no composer, no send
-   * or interrupt. The live follow leaves it out.
+   * Recorded Activity that is only read: no live states, send or interrupt.
+   * Its separate composer may still edit the archived draft. The live follow leaves it out.
    */
   readonly readOnly?: boolean;
+  /** Where its attachments are read from; undefined while nothing is shown. A source without it opens no attachment. */
+  attachmentScope?(): AttachmentScope | undefined;
+}
+
+/**
+ * The conversation an Activity's attachments belong to (Qt's
+ * AttachmentLoader::fetch arguments): its computer, session, conversation and
+ * archive. The main Activity's messages are the session's own (no subagent).
+ */
+export interface AttachmentScope {
+  computer: string;
+  name: string;
+  conversation_id: string;
+  archive_id: string | null;
 }
 
 type Holds<T extends true> = T;
@@ -38,7 +52,7 @@ export type LiveIsSource = Holds<ActivityStore extends ActivitySource ? true : f
 /**
  * True for an archived row (`archive:<archive id>`, as a catalog key or a row
  * id): its Activity is recorded and read-only, and it is never streamed. The
- * composer hides itself for it.
+ * separate composer keeps the archived draft editable, with Send blocked.
  */
 export function activityReadOnly(key: string): boolean {
   return key.slice(key.lastIndexOf("\n") + 1).startsWith("archive:");

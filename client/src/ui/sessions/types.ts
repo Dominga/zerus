@@ -1,3 +1,4 @@
+import type { Reply } from "../../types";
 // View models the session list and Activity render. A `Session` is the
 // catalog store's row: the Rust view row plus the presentation fields derived
 // from it once per upsert (store/catalog.ts `toSession`).
@@ -149,6 +150,37 @@ export interface Session {
   notificationRevision?: number;
 }
 
+/** A file of a message, as Qt's attachment card shows it (ActivityView.cpp:759-782). */
+export interface ItemAttachment {
+  name: string;
+  /** `{reference }{name}`. */
+  caption: string;
+  mime: string;
+  /** "{n} KiB", or "File" when its size is unknown. */
+  meta: string;
+  /** The message's request and the file's place in it; the request is empty when the message saved no reference. */
+  request_id: string;
+  index: number;
+  /** An image the card shows a thumbnail of: any image but SVG. */
+  image: boolean;
+}
+
+/** A local message row's state (ActivityView.cpp:1053-1068). */
+export interface LocalItem {
+  /** The row's id (its request id). */
+  id: string;
+  /** "Sending…", "Not sent", "Delivery not confirmed" or "Submitted to terminal". */
+  stamp: string;
+  /** A failed row's error line. */
+  error: string;
+  uncertain: boolean;
+  /** Retry and Delete for a definite failure; Check and Delete for an uncertain one. */
+  actions: ("retry" | "inspect" | "delete")[];
+  inspectLabel: string;
+  /** Per file: whether it can be opened (Qt's request_id or local_path rule). */
+  available: boolean[];
+}
+
 export interface ActivityItem {
   id: string;
   kind: "user" | "agent" | "tool" | "tools" | "question" | "approval" | "system" | "receipt" | "thinking" | "report" | "voice" | "cleared" | "context";
@@ -157,14 +189,18 @@ export interface ActivityItem {
   body?: string;
   code?: string;
   lines?: string[];
-  attachments?: { name: string; size: string; kind: "image" | "file" }[];
+  attachments?: ItemAttachment[];
   sender?: string;
   /** Receipt line under a user message ("Sent", "Queued at this time"). */
   receipt?: string;
   /** Operational group that contains an attention event (approval, failure). */
   warn?: boolean;
-  /** A header other than "You" or "Agent" (recorded context). */
+  /** A header other than "You" or "Agent" (recorded context, answers). */
   label?: string;
+  /** A local message row (this app's send) and its buttons. */
+  local?: LocalItem;
+  /** Codex question replies the message holds, shown as Question and Your answer blocks (ActivityView.cpp:347-363). */
+  replies?: Reply[];
 }
 
 export type VoiceState =

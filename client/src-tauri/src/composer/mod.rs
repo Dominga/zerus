@@ -23,11 +23,15 @@
 //! one for the life of the process, and tests keep theirs, since a store
 //! dropped on its own writer thread would wait for itself.
 
+pub mod fetch;
 pub mod files;
+pub mod questions;
+pub mod queue;
+pub mod saved;
 pub mod send;
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -39,6 +43,7 @@ use zerus_client_core::cache::Chip;
 use zerus_client_core::drafts::{DraftStore, IndexPage, Loaded, StoredDraft, ALREADY_EXISTS};
 use zerus_client_core::local_messages::{LocalMessage, LocalMessages};
 use zerus_client_core::send::{CompactSend, StartSend};
+use zerus_client_core::session_usage::ContextChip;
 use zerus_client_core::{Action, Batch, Outcome, Target, ViewRow};
 
 use crate::actions::WriteKind;
@@ -77,6 +82,24 @@ const EVENTS: usize = 500;
 /// Sessions whose draft key the hub remembers by catalog key, as S4 keeps
 /// the local rows of at most 512 sessions.
 const OPENED: usize = 512;
+/// At most this many composer events wait for the next batch; older ones go
+/// first.
+const COMPOSER_EVENTS: usize = 16;
+
+/// What Rust tells the webview besides the views: a notice (Qt's
+/// `showNotice`), or the Terminal tab to open. Drained with each batch.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ComposerEvent {
+    Notice {
+        text: String,
+        error: bool,
+        transient: bool,
+    },
+    OpenTerminal {
+        key: String,
+    },
+}
 
 pub struct Deps {
     pub spawn: Spawn,
@@ -93,6 +116,33 @@ pub struct Config {
     /// The private attachment cache (`files::Cache`): the app's own cache
     /// folder, never Qt's.
     pub cache: PathBuf,
+    /// Qt's draft store ([`qt_store`]), only ever read: Saved drafts' "From
+    /// the previous Zerus app", its previews, Recover and Restore.
+    pub qt_drafts: Option<PathBuf>,
+    /// The dev app's draft stores, only ever read: the previews and Restore
+    /// of the drafts the switch import left there (Saved drafts' conflicts).
+    pub dev_drafts: Vec<PathBuf>,
+}
+
+/// Qt's draft store, read-only, unless it is, holds or sits inside the
+/// client's own root: then it is left out, so nothing the client writes can
+/// land in Qt's folder. The same rule as the switch import's sources
+/// (`drafts::import_sources`), which also compares folders not created yet
+/// by their longest existing ancestor.
+pub fn qt_store(own: &Path, qt: Option<PathBuf>) -> Option<PathBuf> {
+    zerus_client_core::drafts::import_sources(own, qt, Vec::new())
+        .into_iter()
+        .next()
+        .map(|source| source.root)
+}
+
+/// The dev app's draft stores, without any that is, holds or sits inside
+/// the client's own root.
+pub fn dev_stores(own: &Path, dev: Vec<PathBuf>) -> Vec<PathBuf> {
+    zerus_client_core::drafts::import_sources(own, None, dev)
+        .into_iter()
+        .map(|source| source.root)
+        .collect()
 }
 
 /// The session a composer belongs to, as the webview opened it.
@@ -104,6 +154,27 @@ pub struct SessionRef {
     pub name: String,
     #[serde(default)]
     pub archive_id: Option<String>,
+}
+
+impl SessionRef {
+    /// Archive selection is an identity boundary even if an older caller omits its id.
+    pub(crate) fn archived(&self) -> bool {
+        self.key.starts_with("archive:")
+            || self.archive_id.as_ref().is_some_and(|id| !id.is_empty())
+    }
+}
+
+/// Archived rows are paged outside the live catalog. Give their composers
+/// a stopped context without falling back to a live row of the same name.
+/// The caller supplies the computer's current online state separately.
+pub fn archived_row(key: &str, name: &str) -> Option<ViewRow> {
+    let id = key.strip_prefix("archive:")?;
+    Some(ViewRow {
+        name: name.into(),
+        state: "archived".into(),
+        archive_id: Some(id.into()),
+        ..ViewRow::default()
+    })
 }
 
 /// Qt's draft key: `machine\nsession[\narchive]` (`SessionsWindow.cpp:438`).
@@ -164,10 +235,16 @@ pub struct ComposerView {
     pub session_status: String,
     pub session_status_error: bool,
     pub session_blocks_input: bool,
+    /// The open session's last read failed (Qt's `m_inspectError`): its
+    /// Activity reads as unavailable, so the compaction indicator hides
+    /// (`SessionsWindow.cpp:3975`).
+    pub inspect_error: bool,
     /// The cache chip, its popover's warning and its detail lines.
     pub cache: Chip,
     pub cache_warning: String,
     pub cache_details: String,
+    /// The Context chip (R1, Qt's `SessionUsage::ContextButton`).
+    pub context: ContextChip,
     /// The session's local message rows (at most 50): what was sent until
     /// the agent's own history shows it, and what failed.
     pub local: Vec<LocalMessage>,
@@ -178,6 +255,12 @@ pub struct ComposerView {
     pub compacting: bool,
     /// Clear session and the cache popover's Clear context (`clearContext`).
     pub clear: send::ClearControl,
+    /// The agent's question card shown in the composer (A2-1).
+    pub question: Option<questions::QuestionView>,
+    pub queue: Option<zerus_client_core::input_queue::QueueView>,
+    /// The editor and the action row show: false while a required card
+    /// stands in for them (`MessageComposer::setInputVisible`).
+    pub input_visible: bool,
 }
 
 /// One composer's draft and state (`MessageComposer::Draft` plus its sets).
@@ -376,6 +459,16 @@ pub(crate) struct Hub {
     /// The draft key whose context reset runs: one at a time across all
     /// sessions (Qt's `m_clearKey` while `m_clearRequest`).
     pub(crate) clearing: Option<String>,
+    /// The agent's question cards: their answer drafts and the shown card.
+    pub(crate) answers: questions::Answers,
+    /// How long a failed read of the open session waits before it is tried
+    /// again while another detail tab shows: Qt's `backgroundMs` behind
+    /// Terminal or Native UI, `activeMs` behind Processes
+    /// (`SessionsWindow.cpp:2013-2016`); None is Activity's 2.5 s.
+    pub(crate) poll: Option<f64>,
+    pub(crate) queue: queue::Queue,
+    /// Events for the next batch (`composer_events`), at most 16.
+    pub(crate) events: VecDeque<ComposerEvent>,
 }
 
 impl Hub {
@@ -397,6 +490,11 @@ pub(crate) struct Shared {
     pub(crate) store: Arc<DraftStore>,
     /// The private attachment cache the `zerus-file` scheme serves.
     pub(crate) cache: Arc<files::Cache>,
+    /// Qt's draft store, read-only (`Config::qt_drafts`, checked again by
+    /// [`qt_store`]).
+    pub(crate) qt: Option<PathBuf>,
+    /// The dev app's draft stores, read-only.
+    pub(crate) dev: Vec<PathBuf>,
     pub(crate) deps: Deps,
     /// Counts `changed` calls.
     changes: AtomicU64,
@@ -448,6 +546,8 @@ impl Composers {
     pub fn new(drafts: Arc<DraftStore>, config: Config, deps: Deps) -> Self {
         let composers = Composers(Arc::new(Shared {
             hub: Mutex::new(Hub::default()),
+            qt: qt_store(drafts.root(), config.qt_drafts),
+            dev: dev_stores(drafts.root(), config.dev_drafts),
             store: drafts,
             cache: files::Cache::new(config.cache),
             deps,
@@ -506,10 +606,17 @@ impl Composers {
     /// catalog row under a new name is a rename: its draft moves (`renameDraft`).
     pub fn open(&self, session: Option<SessionRef>) -> Option<ComposerView> {
         let mut hub = self.lock();
+        let next = session
+            .as_ref()
+            .map(|s| draft_key(&s.computer, &s.name, s.archive_id.as_deref()));
+        self.push_selection(&mut hub, next.as_deref());
         let Some(session) = session else {
             hub.open = None;
             hub.open_key = None;
             hub.followed = Followed::default();
+            // Qt clears the details with the selection (SessionsWindow.cpp:451):
+            // the card shown on a later selection is built again.
+            hub.answers.deselect();
             drop(hub);
             self.changed();
             return None;
@@ -557,6 +664,7 @@ impl Composers {
         self.trim(&mut hub);
         let view = self.view_of(&hub, &key);
         drop(hub);
+        self.sync_questions();
         self.changed();
         view
     }
@@ -1202,6 +1310,7 @@ impl Composers {
                 kept.pop_front();
             }
         }
+        let accepted_details = followed && matches!(update, Some(Some(_)));
         let state_changed = match update.filter(|_| followed) {
             Some(Some((details, expiry))) => {
                 hub.followed.details = Some(details);
@@ -1225,7 +1334,7 @@ impl Composers {
         let touched = hub.open.as_ref().is_some_and(|open| touches(batch, open));
         drop(hub);
         if state_changed {
-            self.after_observe();
+            self.after_observe(accepted_details);
         } else if new_events {
             // New events alone change the view only when they reconcile a row.
             if self.reconcile() || touched {
@@ -1237,24 +1346,48 @@ impl Composers {
     }
 
     /// What a change of the followed session's Activity sets off: the
-    /// local rows it shows go (`reconcileMessages`), and a continuation
+    /// local rows it shows go (`reconcileMessages`), a continuation
     /// waiting for the open session reads the new details (Qt's
-    /// `continueAfterCompact` and `continueAfterStart`, 3607).
-    fn after_observe(&self) {
+    /// `continueAfterCompact` and `continueAfterStart`, 3607), and the
+    /// question cards follow (`renderQuestion`).
+    fn after_observe(&self, accepted_details: bool) {
         self.reconcile();
         self.continue_open();
+        self.sync_questions();
+        // Qt's pushInspected runs only for an accepted details read (3627,
+        // 3653), never for an ended frame or an inspection failure.
+        if accepted_details {
+            self.queue_observed();
+        }
         self.changed();
     }
 
-    /// A reloaded webview gets the view and the draft keys again.
+    /// A reloaded webview gets the view and the draft keys again. Its
+    /// cold-cache question for an answer is gone with it, so nothing waits
+    /// for that answer any more.
     pub fn resend(&self) {
         let mut hub = self.lock();
         hub.last_view = None;
         hub.sent_keys = None;
         hub.view_taken = None;
         hub.keys_taken = None;
+        hub.answers.cold = None;
         drop(hub);
         self.changed();
+    }
+
+    /// Queues an event; the caller wakes the pump (`changed`) after it
+    /// drops the hub.
+    pub(crate) fn event(&self, hub: &mut Hub, event: ComposerEvent) {
+        hub.events.push_back(event);
+        while hub.events.len() > COMPOSER_EVENTS {
+            hub.events.pop_front();
+        }
+    }
+
+    /// The events since the last batch.
+    pub fn take_events(&self) -> Vec<ComposerEvent> {
+        self.lock().events.drain(..).collect()
     }
 
     /// The app quits (`exit` in lib.rs, before the store's own flush): no
@@ -1277,6 +1410,7 @@ impl Composers {
     pub(crate) fn view_of(&self, hub: &Hub, key: &str) -> Option<ComposerView> {
         let composer = hub.composers.get(key)?;
         let session = send::session_view(self, hub, composer);
+        let (question, input_visible) = self.question_part(hub);
         let attachments_blocked =
             !composer.draft.attachments.is_empty() && !session.attachments_available;
         let too_long = composer.draft.text.len() > MAX_TEXT_BYTES;
@@ -1374,14 +1508,19 @@ impl Composers {
             session_status: session.session_status,
             session_status_error: session.session_status_error,
             session_blocks_input: session.session_blocks_input,
+            inspect_error: session.inspect_error,
             cache: session.cache,
             cache_warning: session.cache_warning,
             cache_details: session.cache_details,
+            context: session.context,
             local: hub.local.rows(&composer.key).to_vec(),
             cancel_send: hub.compacts.contains_key(key)
                 || hub.start.as_ref().is_some_and(|(p, _)| p.key == key),
             compacting: hub.compacts.contains_key(key),
             clear: session.clear,
+            question,
+            queue: self.queue_part(hub),
+            input_visible,
         })
     }
 }
@@ -1508,6 +1647,24 @@ pub fn composer_allow_retry(state: State<'_, Composers>, handle: u64) {
     state.allow_retry(handle);
 }
 
+/// Refresh in the composer's status line (Qt's `sessionRefreshRequested`).
+#[tauri::command]
+pub fn composer_refresh(state: State<'_, Composers>, handle: u64) {
+    state.refresh(handle);
+}
+
+/// The detail tab that shows. Terminal and Native UI retry a failed read at
+/// Settings > Processes' background interval, Processes at its active one,
+/// as Qt's poll timer does (`SessionsWindow.cpp:2013-2016`).
+#[tauri::command]
+pub fn composer_tab(
+    state: State<'_, Composers>,
+    settings: State<'_, crate::settings::Store>,
+    tab: String,
+) {
+    state.set_poll(send::poll_seconds(&tab, |name| settings.0.number(name)));
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -1582,6 +1739,23 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn hub_on(store: &Arc<DraftStore>) -> (Composers, Arc<AtomicUsize>) {
+        hub_with_qt(store, None)
+    }
+
+    /// A hub whose Qt draft store is `qt` (read-only).
+    pub(crate) fn hub_with_qt(
+        store: &Arc<DraftStore>,
+        qt: Option<PathBuf>,
+    ) -> (Composers, Arc<AtomicUsize>) {
+        hub_with_stores(store, qt, Vec::new())
+    }
+
+    /// A hub with Qt's and the dev app's draft stores (read-only).
+    pub(crate) fn hub_with_stores(
+        store: &Arc<DraftStore>,
+        qt: Option<PathBuf>,
+        dev: Vec<PathBuf>,
+    ) -> (Composers, Arc<AtomicUsize>) {
         let notified = Arc::new(AtomicUsize::new(0));
         let count = Arc::clone(&notified);
         let composers = Composers::new(
@@ -1589,6 +1763,8 @@ pub(crate) mod tests {
             // The `cache` folder beside the test's `drafts`.
             Config {
                 cache: store.root().with_file_name("cache"),
+                qt_drafts: qt,
+                dev_drafts: dev,
             },
             Deps {
                 spawn: Arc::new(|job: Job| {

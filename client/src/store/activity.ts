@@ -210,7 +210,16 @@ export function createActivity(port: ActivityPort) {
     if (older && olderFrom !== undefined) settleOlder();
   }
 
-  return { target, events, summary, ended, loaded, loadingOlder, olderDone, error, follow, loadOlder, applyActivity };
+  /** The followed session's conversation: its inspection's, else the row's (Qt's m_details conversation_id). */
+  const attachmentScope = () => {
+    const t = target();
+    if (!t) return undefined;
+    const inspected = summary()?.conversation_id;
+    const conversation = typeof inspected === "string" && inspected ? inspected : t.conversationId ?? "";
+    return { computer: t.computer, name: t.name, conversation_id: conversation, archive_id: null };
+  };
+
+  return { target, events, summary, ended, loaded, loadingOlder, olderDone, error, follow, loadOlder, applyActivity, attachmentScope };
 }
 
 export type ActivityStore = ReturnType<typeof createActivity>;

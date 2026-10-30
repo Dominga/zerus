@@ -466,17 +466,18 @@ class WorkflowSecurityTests(unittest.TestCase):
 
     def test_checks_gate_requires_exactly_the_selected_suites(self):
         gate = job((ROOT / ".github/workflows/checks.yml").read_text(), "gate")
-        self.assertIn("needs: [source, quick, relay, connector, connector-macos, ios, android, cli, cli-macos-debug, cli-macos-core, cli-macos-native, cli-macos, arch, arch-package, "
-                      "mac-desktop, windows-desktop, windows-host]", gate)
+        self.assertIn("needs: [source, quick, relay, connector, connector-macos, ios, android, client-native-linux, client-native-macos-core, client-native-macos-tauri, client-native-windows, cli, "
+                      "cli-macos-debug, cli-macos-core, cli-macos-native, cli-macos, arch, arch-package, mac-desktop, windows-desktop, windows-host]", gate)
         self.assertIn("RUN_WINDOWS: ${{ needs.source.outputs.run_windows == 'true' }}", gate)
         script = re.search(r"(?s)python3 - <<'PY'\n(.*?)\n          PY", gate)[1]
         code = compile(textwrap.dedent(script), "workflow-checks-gate", "exec")
         base = {"source": "success", "quick": "success", "relay": "success", "connector": "success",
-                "android": "success", "cli": "success", "cli-macos-debug": "success",
-                "cli-macos-core": "success", "cli-macos-native": "success", "cli-macos": "success", "arch": "success", "arch-package": "success",
+                "android": "success", "client-native-linux": "success", "client-native-macos-core": "success",
+                "client-native-macos-tauri": "success", "cli": "success", "cli-macos-debug": "success", "cli-macos-core": "success",
+                "cli-macos-native": "success", "cli-macos": "success", "arch": "success", "arch-package": "success",
                 "mac-desktop": "success", "connector-macos": "success", "ios": "success"}
-        # Both Windows jobs are selected together, and each must pass on its own.
-        windows = ("windows-desktop", "windows-host")
+        # All Windows jobs are selected together, and each must pass on its own.
+        windows = ("client-native-windows", "windows-desktop", "windows-host")
         for name in windows:
             for selected, result, success in [("true", "success", True), ("true", "failure", False),
                                               ("true", "skipped", False), ("true", "cancelled", False),
@@ -502,6 +503,9 @@ class WorkflowSecurityTests(unittest.TestCase):
             ({**base, "connector": "cancelled"}, "true", False), ({**arch_skipped, "connector": "skipped"}, "false", False),
             ({**base, "android": "failure"}, "true", False), ({**base, "android": "skipped"}, "true", False),
             ({**base, "android": "cancelled"}, "true", False), ({**arch_skipped, "android": "skipped"}, "false", False),
+            ({**base, "client-native-linux": "failure"}, "true", False),
+            ({**base, "client-native-macos-core": "failure"}, "true", False),
+            ({**base, "client-native-macos-tauri": "failure"}, "true", False),
             ({**base, "arch-package": "failure"}, "true", False), ({**base, "arch-package": "skipped"}, "true", False),
             ({**base, "arch-package": "cancelled"}, "true", False), (arch_skipped, "false", True),
             ({**arch_skipped, "arch-package": "success"}, "false", False),
@@ -515,6 +519,61 @@ class WorkflowSecurityTests(unittest.TestCase):
                 else:
                     with self.assertRaises(SystemExit):
                         exec(code, {})
+
+    def test_native_client_jobs_cover_media_and_platform_code(self):
+        checks = (ROOT / ".github/workflows/checks.yml").read_text()
+        macos_steps = {
+            "client-native-macos-core": (("Core tests", "core", ""), ("Media and video check", "media", "")),
+            "client-native-macos-tauri": (("Tauri clippy", "tauri-clippy", "        if: always()\n        timeout-minutes: 25\n"),),
+        }
+        self.assertNotIn("name: Tauri tests\n", job(checks, "client-native-macos-tauri"))
+        for name, runner, selected, timeout in (("client-native-linux", "ubuntu-24.04", "linux", "45"),
+                                                ("client-native-macos-core", "macos-15", "macos", "90"),
+                                                ("client-native-macos-tauri", "macos-15", "macos", "90"),
+                                                ("client-native-windows", "windows-2025", "windows", "60")):
+            native = job(checks, name)
+            with self.subTest(job=name):
+                self.assertEqual(field(native, "runs-on"), runner)
+                self.assertEqual(field(native, "needs"), "source")
+                self.assertEqual(field(native, "if"), f"needs.source.outputs.run_{selected} == 'true'")
+                self.assertEqual(field(native, "timeout-minutes"), timeout)
+                self.assertIn("ref: ${{ needs.source.outputs.commit }}\n          persist-credentials: false", native)
+                if name in macos_steps:
+                    for step_name, stage, settings in macos_steps[name]:
+                        self.assertIn(f"name: {step_name}\n{settings}        run: bash scripts/ci/client-native.sh {selected} {stage}", native)
+                else:
+                    self.assertIn(f"run: bash scripts/ci/client-native.sh {selected}", native)
+                self.assertIn("CARGO_INCREMENTAL: 0", native)
+                if selected != "linux":
+                    self.assertIn("CARGO_PROFILE_DEV_DEBUG: 0", native)
+                    self.assertIn("CARGO_PROFILE_TEST_DEBUG: 0", native)
+                self.assertIn("hashFiles('client/core/Cargo.lock', 'client/media/Cargo.lock', 'client/src-tauri/Cargo.lock')", native)
+                cache = self.checks_step(name, "rust-cache")
+                self.assertNotIn("run_id", cache)
+                self.assertEqual(self.step_paths(cache), ["~/.cargo/registry", "~/.cargo/git"])
+        self.assertNotIn("actions/cache/save@", job(checks, "client-native-macos-core"))
+        self.assertIn("actions/cache/save@", job(checks, "client-native-macos-tauri"))
+        linux = job(checks, "client-native-linux")
+        for package in ("libasound2-dev", "libgstreamer1.0-dev", "libgstreamer-plugins-base1.0-dev",
+                        "gstreamer1.0-plugins-base", "gstreamer1.0-plugins-good", "gstreamer1.0-plugins-bad",
+                        "gstreamer1.0-libav", "libgtk-3-dev", "libwebkit2gtk-4.1-dev", "xvfb"):
+            self.assertIn(package, linux)
+        self.assertNotIn("libasound2-dev", job(checks, "quick"))
+        script = (ROOT / "scripts/ci/client-native.sh").read_text()
+        for command in (
+            "env -u DISPLAY WAYLAND_DISPLAY=zerus-none GDK_BACKEND=x11 WEBKIT_DISABLE_DMABUF_RENDERER=1 ZERUS_CLIENT_HEADLESS=1",
+            "xvfb-run -a -s \"-screen 0 1440x900x24\"",
+            "cargo +1.99.1 test --locked --manifest-path client/media/Cargo.toml --features video",
+            "cargo +1.99.1 clippy --locked --manifest-path client/src-tauri/Cargo.toml --all-targets --features video -- -D warnings",
+            "cargo +1.99.1 test --locked --manifest-path client/core/Cargo.toml",
+            "cargo +1.99.1 test --locked --manifest-path client/src-tauri/Cargo.toml",
+            "cargo +1.99.1 check --locked --manifest-path client/media/Cargo.toml --all-targets --features video",
+            "cargo +1.99.1 clippy --locked --manifest-path client/src-tauri/Cargo.toml --all-targets -- -D warnings",
+        ):
+            self.assertIn(command, script)
+        self.assertNotIn("cargo +1.99.1 check --locked --manifest-path client/src-tauri/Cargo.toml --all-targets\n", script)
+        for stage in ("macos:core", "macos:media", "macos:tauri-test", "macos:tauri-clippy"):
+            self.assertIn(stage, script)
 
     def checks_steps(self, name):
         """One checks.yml job's steps, each with its indented body."""
@@ -552,8 +611,8 @@ class WorkflowSecurityTests(unittest.TestCase):
                      "cargo +1.99.1 test --locked --manifest-path crates/watch-protocol/Cargo.toml --target-dir target/watch-protocol",
                      'run: python3 scripts/collect-licenses.py "$RUNNER_TEMP/rust-licenses"'):
             self.assertIn(line, quick)
-        for name in ("quick", "relay", "connector", "connector-macos", "android", "cli", "cli-macos-debug", "arch", "arch-package",
-                     "mac-desktop", "windows-desktop", "windows-host"):
+        for name in ("quick", "relay", "connector", "connector-macos", "android", "client-native-linux", "client-native-macos-core",
+                     "client-native-macos-tauri", "client-native-windows", "cli", "cli-macos-debug", "arch", "arch-package", "mac-desktop", "windows-desktop", "windows-host"):
             with self.subTest(job=name):
                 self.assertEqual(field(job(checks, name), "needs"), "source")
                 self.assertIn("ref: ${{ needs.source.outputs.commit }}", job(checks, name))
@@ -703,13 +762,16 @@ class WorkflowSecurityTests(unittest.TestCase):
         gate = job(checks, "gate")
         script = re.search(r"(?s)python3 - <<'PY'\n(.*?)\n          PY", gate)[1]
         code = compile(textwrap.dedent(script), "workflow-checks-gate", "exec")
-        names = ("source", "quick", "relay", "connector", "connector-macos", "ios", "android", "cli", "cli-macos-debug", "cli-macos-core", "cli-macos-native", "cli-macos", "arch", "arch-package",
+        names = ("source", "quick", "relay", "connector", "connector-macos", "ios", "android", "client-native-linux", "client-native-macos-core", "client-native-macos-tauri", "client-native-windows",
+                 "cli", "cli-macos-debug", "cli-macos-core", "cli-macos-native", "cli-macos", "arch", "arch-package",
                  "mac-desktop", "windows-desktop", "windows-host")
         for run_macos, smoke_result, success in [("true", "success", True), ("true", "failure", False),
                                                  ("true", "skipped", False), ("false", "skipped", True),
                                                  ("false", "success", False)]:
             results = dict.fromkeys(names, "success")
             if run_macos == "false":
+                results["client-native-macos-core"] = "skipped"
+                results["client-native-macos-tauri"] = "skipped"
                 results["mac-desktop"] = "skipped"
                 results["ios"] = "skipped"
                 for name in ("cli-macos-debug", "cli-macos-core", "cli-macos-native", "cli-macos"):
@@ -744,7 +806,8 @@ class WorkflowSecurityTests(unittest.TestCase):
         gate = job(checks, "gate")
         script = re.search(r"(?s)python3 - <<'PY'\n(.*?)\n          PY", gate)[1]
         code = compile(textwrap.dedent(script), "workflow-checks-gate", "exec")
-        names = ("source", "quick", "relay", "connector", "connector-macos", "ios", "android", "cli", "cli-macos-debug", "cli-macos-core", "cli-macos-native", "cli-macos", "arch", "arch-package",
+        names = ("source", "quick", "relay", "connector", "connector-macos", "ios", "android", "client-native-linux", "client-native-macos-core", "client-native-macos-tauri", "client-native-windows",
+                 "cli", "cli-macos-debug", "cli-macos-core", "cli-macos-native", "cli-macos", "arch", "arch-package",
                  "mac-desktop", "windows-desktop", "windows-host")
         for run_ios, ios_result, success in [("true", "success", True), ("true", "failure", False),
                                                ("true", "skipped", False), ("true", "cancelled", False),
@@ -826,9 +889,8 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertEqual(set(re.findall(r"uses: (actions/cache[\w/]*)@", checks)),
                          {"actions/cache/restore", "actions/cache/save"})
         names = re.findall(r"(?m)^  ([a-z][\w-]*):\n", checks.split("\njobs:\n", 1)[1])
-        # windows-host restores the Rust cache that windows-desktop saves, and
-        # never saves it: two jobs saving one key would race.
-        read_only = {"windows-host": {"rust-cache"}}
+        # Restore-only consumers never save: two jobs saving one key would race.
+        read_only = {"windows-host": {"rust-cache"}, "client-native-macos-core": {"rust-cache"}}
         saves = 0
         for name in names:
             restores, saved = {}, []

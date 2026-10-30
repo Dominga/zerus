@@ -13,7 +13,10 @@ catalog snapshot in pages, then deltas separated by heartbeats (the replay
 pauses one interval per heartbeat and loops the deltas). Activity frames are
 held by the replay and served on follow, as the stream does after a subscribe.
 This computer's stream also offers the `organization` topic: one snapshot of
-the organization's rows follows `catalog.meta`.
+the organization's rows follows `catalog.meta`. Every stream offers the
+`processes` topic; this computer's holds one `processes` state, for
+claude/sample-project/api-refactor, which the replay serves when the
+Processes tab follows that session.
 """
 import json
 import pathlib
@@ -68,6 +71,11 @@ CHUNK = 1000
 # The rank step of the Rust grouping (client/core/src/swarm/layout.rs GAP).
 RANK_GAP = 1 << 20
 NEEDS_APP = "Project changes need the desktop app."
+# The session whose processes the replay serves.
+PROCESS_SESSION = "claude/sample-project/api-refactor"
+# The smoke's driven sessions stay fixed while the rest of the fleet replays deltas.
+PHASE4_STABLE = {PROCESS_SESSION, "claude/sample-project/review", "codex/sample-project/pagination",
+                 "claude/sample-project/docs-pass", "kimi/sample-project/flaky-test", "codex/sample-project/release-notes"}
 THOUGHTS = ["The test builds the cursor from the last row, so an empty page needs its own branch.", "Checking whether the retry cap is configurable before changing it."]
 
 
@@ -91,12 +99,14 @@ def session_rows(projects, host_seed):
                 "tag": tag,
                 "run_id": run,
                 "conversation_id": f"conv-{run}",
+                "tracked": True,
                 "cwd": f"/home/example/src/{project}",
                 "git_branch": tag if i % 3 else "main",
                 "model": model,
                 "effort": effort,
                 "phase": {"idle": "idle", "working": "working", "tool": "tool", "approval": "approval", "input": "input", "error": "error", "paused": "idle"}[state],
                 "activity": "busy" if state in ("working", "tool") else "idle",
+                "state": "paused" if state == "paused" else "running",
                 "runtime_state": "paused" if state == "paused" else "live",
                 "process_state": "stopped" if state == "paused" else "running",
                 "conversation_state": "active",
@@ -147,12 +157,95 @@ def events_for(row, count):
     return events[-count:] if len(events) > count else events
 
 
+def phase4_rows(rows):
+    """The deterministic sessions the Part A smoke drives, whatever the random fleet does."""
+    states = {
+        "claude/sample-project/api-refactor": ("idle", "idle", "live", "running"),
+        "codex/sample-project/pagination": ("idle", "idle", "live", "running"),
+        "claude/sample-project/docs-pass": ("input", "busy", "live", "running"),
+        "kimi/sample-project/flaky-test": ("approval", "idle", "live", "running"),
+        "codex/sample-project/release-notes": ("working", "busy", "live", "running"),
+    }
+    for row in rows:
+        if row["name"] == "claude/sample-project/review":
+            row.update(phase="idle", activity="idle", state="paused", runtime_state="paused", process_state="stopped", resumable=True)
+        elif row["name"] in states:
+            phase, activity, runtime, process = states[row["name"]]
+            row.update(phase=phase, activity=activity, state="running", runtime_state=runtime, process_state=process)
+    return rows
+
+
+def phase4_question(row):
+    return {"question_id": "tool:fixture-1", "question_hash": "0123456789abcdef" * 4,
+            "run_id": row["run_id"], "conversation_id": row["conversation_id"], "source": "hook",
+            "answer_transport": "claude_hook", "created_at": BASE_AT, "optional": False,
+            "can_answer": True, "can_skip": False,
+            "questions": [{"id": "q_0", "question": "Which checks should run?", "header": "Checks",
+                           "options": [{"id": "opt_0_0", "label": "Unit"}, {"id": "opt_0_1", "label": "UI"}],
+                           "allow_other": True}]}
+
+
+def phase4_approval(row):
+    return {"question_id": "tool:fixture-approval", "question_hash": "fedcba9876543210" * 4,
+            "run_id": row["run_id"], "conversation_id": row["conversation_id"], "source": "kimi_tool_approval",
+            "created_at": BASE_AT, "optional": False, "can_answer": True, "can_skip": False,
+            "approval": True, "approval_choices": False,
+            "questions": [{"id": "q_0", "question": "Run rm -rf build?", "body": "rm -rf build",
+                           "options": [{"id": "allow", "label": "Allow"}, {"id": "deny", "label": "Deny"}]}]}
+
+
 def state_for(row):
-    return {"name": row["name"], "phase": row["phase"], "activity": row["activity"], "current_tool": row["current_tool"],
-            "activity_summary": row["activity_summary"], "turn_started": row["turn_started"], "pending_questions": [], "history_truncated": False}
+    state = {"name": row["name"], "phase": row["phase"], "activity": row["activity"], "current_tool": row["current_tool"],
+             "activity_summary": row["activity_summary"], "turn_started": row["turn_started"], "pending_questions": [], "history_truncated": False,
+             "tracked": True, "run_id": row["run_id"], "conversation_id": row["conversation_id"],
+             "runtime_state": row["runtime_state"], "process_state": row["process_state"]}
+    if row["name"] == "claude/sample-project/api-refactor":
+        state["session_usage"] = {"prompt_cache": {"status": "warm", "expires_at": BASE_AT + 1800}}
+        state["clear_context_supported"] = True
+    elif row["name"] == "codex/sample-project/pagination":
+        state.update(cache_hint={"status": "cold", "tokens": 120000}, compact_context_supported=True, clear_context_supported=True)
+    elif row["name"] == "claude/sample-project/review":
+        state.update(resumable=True, compact_context_supported=True, clear_context_supported=True)
+    elif row["name"] == "claude/sample-project/docs-pass":
+        state["pending_questions"] = [phase4_question(row)]
+    elif row["name"] == "kimi/sample-project/flaky-test":
+        state["pending_questions"] = [phase4_approval(row)]
+    elif row["name"] == "codex/sample-project/release-notes":
+        state["input_queue"] = {"id": "queue-fixture", "text": "↳ also update the changelog", "can_send_now": True,
+                                "hint": "Interrupt the current turn and send pending messages now"}
+    return state
 
 
 CAPTIONS = {"attention": None, "error": "Rate limit reached", "paused": "Paused", "ready": "Ready"}
+
+
+def processes_for(row):
+    """The `processes` topic's value for one session: `processes` and `process_work`
+    as `hgs inspect` reports them, without the `run_id` the topic strips
+    (src/watch/processes.rs). A live `cargo test` tree (an OS tree's output stays in
+    the recorded command or Terminal), a recorded build with no live confirmation
+    and a finished fetch, whose output both can be read."""
+    at = row["last_event_at"]
+
+    def item(id, **fields):
+        return {"id": id, "owner": "main", "provider": row["agent"], "run_id": row["run_id"],
+                "conversation_id": row["conversation_id"], "cwd": row["cwd"], **fields}
+
+    items = [
+        item("tree-cargo-test", source="process_tree", command="cargo test --workspace", status="running",
+             started_at=at - 95, updated_at=at, observed=True, background=True, os_pid=48211, child_count=3,
+             description="PID 48211 (3 child processes)", capabilities={"output": False, "stop": True, "stdin": False}),
+        item("call-npm-build", call_id="toolu_build", source="hooks", command="npm run build", status="unknown",
+             last_status="running", started_at=at - 300, updated_at=at - 240, observed=False, background=True,
+             capabilities={"output": True, "stop": False, "stdin": False}),
+        item("call-git-fetch", call_id="toolu_fetch", source="hooks", command="git fetch", status="finished",
+             started_at=at - 600, updated_at=at - 598, ended_at=at - 598, exit_code=0, output_at=at - 598,
+             observed=True, background=False, capabilities={"output": True, "stop": False, "stdin": False}),
+    ]
+    processes = {"items": items, "active_count": 0, "live_count": 1, "unknown_count": 1, "complete": True,
+                 "sampled_at": at, "notes": []}
+    return {"processes": processes,
+            "process_work": {"count": 1, "started_at": at - 95, "command": "cargo test --workspace", "sampled_at": at}}
 
 
 def view_row(row, machine):
@@ -172,8 +265,9 @@ def view_row(row, machine):
 
 def deltas_for(rows):
     """A loop of changes that ends where it starts: tool progress, a finished turn, a replaced run."""
-    working = [r for r in rows if r["activity"] == "busy"][:3]
-    idle = [r for r in rows if r["phase"] == "idle" and r["runtime_state"] == "live"][:2]
+    volatile = [r for r in rows if r["name"] not in PHASE4_STABLE]
+    working = [r for r in volatile if r["activity"] == "busy"][:3]
+    idle = [r for r in volatile if r["phase"] == "idle" and r["runtime_state"] == "live"][:2]
     steps = []
     for n in range(12):
         upserts = []
@@ -308,6 +402,21 @@ def group_out(computer, host, row, places):
     return {"computer": computer, "key": key_of(row), "group": group, "rank": rank}
 
 
+def phase4_attachments(row):
+    """A sent file and a real image for Task 9's fetch and convertFileSrc paths."""
+    if row["name"] != "claude/sample-project/api-refactor":
+        return []
+    at = row["last_event_at"] + 60
+    return [
+        {"seq": next_seq(), "type": "UserPromptSubmit", "source": "claude_hooks", "detail": "The orders are attached.", "at": at,
+         "attachments": [{"name": "orders.json", "request_id": "req-fixture-1", "index": 0,
+                          "mime": "application/json", "size": 812, "bytes": 812, "reference": "[File #1]"}]},
+        {"seq": next_seq(), "type": "UserPromptSubmit", "source": "claude_hooks", "detail": "The tiny image is attached too.", "at": at + 1,
+         "attachments": [{"name": "pixel.png", "request_id": "req-fixture-image", "index": 0,
+                          "mime": "image/png", "size": 68, "bytes": 68, "reference": "[Image #1]"}]},
+    ]
+
+
 def stream(host, rows, long_key, topic_rows=None):
     frames = []
     seq = [0]
@@ -318,9 +427,9 @@ def stream(host, rows, long_key, topic_rows=None):
 
     frame("hello", machine_id="00000000-0000-4000-8000-0000000000" + ("01" if host == "workstation" else "02"), host=host, hgs_version="1.56.0",
           stream=f"stream-{host}", heartbeat_ms=10000, max_frame_bytes=1 << 20,
-          topics=["catalog", "catalog.meta", "activity", "git"] + (["organization"] if topic_rows is not None else []),
+          topics=["catalog", "catalog.meta", "activity", "git", "processes"] + (["organization"] if topic_rows is not None else []),
           limits={"activity_subscriptions": 16, "page_bytes": 524288, "queue_bytes": 4194304, "activity_tail": 100, "activity_read": 200,
-                  "control_line_bytes": 65536, "git_subscriptions": 64})
+                  "control_line_bytes": 65536, "git_subscriptions": 64, "processes_subscriptions": 16})
     half = len(rows) // 2
     pages = [rows[:half], rows[half:]]
     for page, chunk in enumerate(pages):
@@ -332,14 +441,19 @@ def stream(host, rows, long_key, topic_rows=None):
     activity = {}
     for r in rows:
         count = 1100 if key_of(r) == long_key else rng.randint(8, 40)
-        events = events_for(r, count)
+        events = events_for(r, count) + phase4_attachments(r)
         activity[key_of(r)] = (events, state_for(r))
     # Activity first, so the replay holds every session's log before the deltas loop.
     for key, (events, state) in activity.items():
         for start in range(0, len(events), 200):
             chunk = events[start:start + 200]
             frame("events", topic="activity", key=key, events=chunk, cursor=chunk[-1]["seq"])
-        frame("state", topic="activity", key=key, value=state, rev=1)
+        if state["name"] != "claude/sample-project/review":
+            frame("state", topic="activity", key=key, value=state, rev=1)
+    # Held by the replay like Activity, and served when the Processes tab follows the session.
+    for r in rows:
+        if r["name"] == PROCESS_SESSION:
+            frame("state", topic="processes", key=key_of(r), value=processes_for(r), rev=1)
     for n, step in enumerate(deltas_for(rows)):
         frame("heartbeat", at=BASE_AT + n)
         frame("delta", topic="catalog", upsert=[{"key": key_of(r), "row": r} for r in step["upsert"]], remove=step["remove"], cursor=2 + n)
@@ -348,7 +462,7 @@ def stream(host, rows, long_key, topic_rows=None):
 
 def main():
     ROOT.mkdir(parents=True, exist_ok=True)
-    local_rows = session_rows(PROJECTS, 0)
+    local_rows = phase4_rows(session_rows(PROJECTS, 0))
     # The long Activity (1 100 events) belongs to the first working session.
     long_key = key_of(next(r for r in local_rows if r["activity"] == "busy"))
     mac_rows = session_rows(MAC_PROJECTS, 7)

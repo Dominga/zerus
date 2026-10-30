@@ -169,6 +169,30 @@ impl Fleet {
         handle.follow_processes(session)
     }
 
+    /// Changes one processes subscription's interval (1–600 seconds), keeping
+    /// its current inventory and carrying the choice across reconnects.
+    pub fn set_processes_interval(
+        &self,
+        computer: &ComputerId,
+        key: &str,
+        interval_ms: u64,
+    ) -> Result<(), FollowError> {
+        let streams = guard(&self.shared.streams);
+        streams
+            .get(computer)
+            .ok_or(FollowError::UnknownComputer)?
+            .set_processes_interval(key, interval_ms)
+    }
+
+    /// Requests one read after the server's minimum gap, without clearing state.
+    pub fn refresh_processes(&self, computer: &ComputerId, key: &str) -> Result<(), FollowError> {
+        let streams = guard(&self.shared.streams);
+        streams
+            .get(computer)
+            .ok_or(FollowError::UnknownComputer)?
+            .refresh_processes(key)
+    }
+
     /// Stops following a session's processes; false when it was not followed.
     pub fn unfollow_processes(&self, computer: &ComputerId, key: &str) -> bool {
         guard(&self.shared.streams)

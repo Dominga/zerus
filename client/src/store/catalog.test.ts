@@ -139,3 +139,24 @@ describe("toSession", () => {
     expect(toSession("", "run:a", view("x/a", { agent: "sh" }))).toMatchObject({ agent: "claude", cmd: "sh" });
   });
 });
+
+describe("setDraftKeys", () => {
+  it("marks the rows with a nonempty draft, also rows that arrive later or change", () => {
+    createRoot((dispose) => {
+      const { catalog, applyBatch, setDraftKeys } = createCatalog();
+      applyBatch(batchOf({ replaces: [{ computer: "mac", rows: [row("run:a", "claude/p/a", {}, "mac"), row("run:b", "claude/p/b", {}, "mac")] }] }));
+      // Draft keys are `computer + "\n" + name`; an archived draft's key also names its archive.
+      setDraftKeys(["mac\nclaude/p/a", "mac\nclaude/p/c", "mac\nclaude/p/b\narchive-1"]);
+      expect(catalog.rows[rowId("mac", "run:a")].draft).toBe(true);
+      expect(catalog.rows[rowId("mac", "run:b")].draft).toBe(false);
+      // An update keeps the mark; a row listed later takes it.
+      applyBatch(batchOf({ upserts: [row("run:a", "claude/p/a", { summary: "Bash: cargo test" }, "mac"), row("run:c", "claude/p/c", {}, "mac")] }));
+      expect(catalog.rows[rowId("mac", "run:a")].draft).toBe(true);
+      expect(catalog.rows[rowId("mac", "run:c")].draft).toBe(true);
+      setDraftKeys([]);
+      expect(catalog.rows[rowId("mac", "run:a")].draft).toBe(false);
+      expect(catalog.rows[rowId("mac", "run:c")].draft).toBe(false);
+      dispose();
+    });
+  });
+});

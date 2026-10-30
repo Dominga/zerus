@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """A fake `hgs` for the zerus-client-core tests; never the real CLI.
 
-Tests copy this file as `hgs` into a scratch folder next to a `config.json`:
+Tests link or copy this file as `hgs` into a scratch folder next to a `config.json`.
+On Windows, the copied `hgs.exe` launcher invokes it with Python:
 
     {"fixtures": "/abs/tests/fixtures",
      "hosts": {"": {"marker": true, "probe_exit": 0,

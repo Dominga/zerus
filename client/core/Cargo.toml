@@ -40,3 +40,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 
 [features]
 konsole = ["dep:dbus"]
+
+[[bin]]
+name = "fake-hgs-launcher"
+path = "tests/support/fake_hgs_launcher.rs"

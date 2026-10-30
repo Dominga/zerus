@@ -38,6 +38,6 @@ Members:
   {"owner_word":{"text":"plan approved"}} with approve/approve-phase.
 - Sub-lead: hgs team sub-lead {"member":"qalead","sub":true}; reports-to
   {member, parent} sets who it reviews.
-- Cancel empty tasks first; when all are decided, extend or finish: hgs team
-  finish --json. The owner may finish too; its stop is final.
+- Cancel empty tasks first; when all are decided, extend or hgs team finish
+  --json. The owner may finish too; its stop is final.
 Sub-teams: hgs guide team-tree.

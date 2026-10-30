@@ -146,6 +146,19 @@ mod tests {
         assert!(lead.contains("Work ahead is for review drafts"), "{lead}");
     }
 
+    /// #742: no agent installs a tool; the lead's and the tests' pages say a
+    /// missing one is offered to the owner and proposed on the question card.
+    #[test]
+    fn agents_propose_a_missing_tool_and_never_install_it() {
+        for name in ["team-lead", "tests"] {
+            let page = TOPICS.iter().find(|(topic, _)| *topic == name).unwrap().1;
+            assert!(page.contains("Never install a tool"), "{name}");
+            assert!(page.contains("question card"), "{name}");
+        }
+        let tests = TOPICS.iter().find(|(topic, _)| *topic == "tests").unwrap().1;
+        assert!(tests.contains("hgs test tools") && tests.contains("work without it"), "{tests}");
+    }
+
     #[test]
     fn topics_and_arguments_are_exact() {
         assert!(dispatch(&[]).is_ok());

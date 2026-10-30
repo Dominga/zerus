@@ -3763,6 +3763,10 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
     if op == "decide-proposal" {
         return decide_proposal(input);
     }
+    // #742: the owner's Allow or Deny of a missing tool's install; not a team's.
+    if op == "decide-tool" {
+        return crate::test_discipline::tools::decide(input);
+    }
     match op {
         "create" => create(input),
         "answer" => answer(input),
@@ -3781,11 +3785,17 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
         }
         // U50: what waits for the owner across every team, read only.
         "waiting" => {
+            // #742: a missing tool's offer waits for the owner with or without a team.
+            let tools = crate::test_discipline::tools::waiting_items();
             if !store::path().exists() {
-                return Ok(super::owner_waiting::page(&[], None, None));
+                let items = super::owner_waiting::sorted(tools);
+                let before = Some(&input["before"]).filter(|cursor| !cursor.is_null());
+                return Ok(super::owner_waiting::page(&items, before, input["limit"].as_u64()));
             }
             let teams = active_team_records(&Store::open(false)?)?;
-            let items = super::owner_waiting::items(&teams, super::super::now());
+            let mut items = super::owner_waiting::items(&teams, super::super::now());
+            items.extend(tools);
+            let items = super::owner_waiting::sorted(items);
             let before = Some(&input["before"]).filter(|cursor| !cursor.is_null());
             Ok(super::owner_waiting::page(&items, before, input["limit"].as_u64()))
         }

@@ -63,6 +63,22 @@ tool = "sccache"
 [merge_queue]
 enabled = false
 
+# #742: tools beyond the providers' runners. Zerus offers a missing one to the
+# owner once per computer (Waiting for you); nobody else installs it.
+[[tool]]
+name = "cargo-llvm-cov"
+why = "measuring Rust modules against the test map (hgs test coverage)"
+
+[[tool]]
+name = "OpenCppCoverage"
+why = "measuring Qt test binaries against the test map on Windows"
+platforms = ["windows"]
+
+[[tool]]
+name = "gcovr"
+why = "measuring Qt test binaries against the test map (gcov)"
+platforms = ["linux", "macos"]
+
 [resources.gui]
 cpu = 2
 ram_mb = 2048

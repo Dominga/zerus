@@ -52,6 +52,9 @@ TeamWaitingPage::Item TeamWaitingPage::parse(const QJsonObject &item)
     out.member = item["member"].toString(); out.proposal = item["proposal"].toString(); out.since = item["since"].toDouble();
     out.memberId = item["member_id"].toString();
     out.phase = item["phase"].toInt(); out.task = item["task"].toInt();
+    out.offer = item["offer"].toString(); out.tool = item["tool"].toString(); out.why = item["why"].toString();
+    out.saves = item["saves"].toString(); out.command = item["command"].toString(); out.output = item["output"].toString();
+    out.toolState = item["state"].toString();
     if (out.teamName.isEmpty()) out.teamName = out.team;
     return out;
 }
@@ -65,6 +68,7 @@ QString TeamWaitingPage::kindLabel(const QString &kind)
     if (kind == "owner_word_asked") return tr("Your word");
     if (kind == "task_waits_owner") return tr("Held task");
     if (kind == "team_finished") return tr("All decided");
+    if (kind == "tool_missing") return tr("Tool");
     return kind;
 }
 
@@ -77,6 +81,7 @@ QString TeamWaitingPage::kindIcon(const QString &kind)
     if (kind == "owner_word_asked") return QStringLiteral("key");
     if (kind == "task_waits_owner") return QStringLiteral("clock");
     if (kind == "team_finished") return QStringLiteral("check-circle");
+    if (kind == "tool_missing") return QStringLiteral("terminal");
     return QStringLiteral("warning");
 }
 
@@ -259,7 +264,9 @@ QWidget *TeamWaitingPage::rowFor(const Item &item)
     auto *meta = row(8);
     auto *kind = label(kindName, tone, 11, true, "teamWaitingKind");
     auto *team = new QLabel(item.teamName); team->setObjectName("teamWaitingTeam"); team->setTextFormat(Qt::PlainText);
-    team->setToolTip(tr("Team %1").arg(item.teamName));
+    // #742: a tool's offer belongs to a project, not a team.
+    const bool teamless = item.team.isEmpty();
+    team->setToolTip(teamless ? tr("Project %1").arg(item.teamName) : tr("Team %1").arg(item.teamName));
     meta->addWidget(kind); meta->addWidget(team); meta->addStretch();
     text->addLayout(meta);
     h->addLayout(text, 1);
@@ -290,12 +297,14 @@ QWidget *TeamWaitingPage::rowFor(const Item &item)
         });
         h->addWidget(toggle);
     }
-    auto *open = button(tr("Open team"), "teamWaitingOpen");
-    if (inPlace) open->setProperty("ghost", true);
-    open->setAccessibleName(tr("Open team %1").arg(item.teamName));
-    h->addWidget(open);
-    const auto go = [this, item] { if (openTeam) openTeam(item); };
-    QObject::connect(open, &QPushButton::clicked, frame, go);
+    const auto go = [this, item] { if (openTeam && !item.team.isEmpty()) openTeam(item); };
+    if (!teamless) {
+        auto *open = button(tr("Open team"), "teamWaitingOpen");
+        if (inPlace) open->setProperty("ghost", true);
+        open->setAccessibleName(tr("Open team %1").arg(item.teamName));
+        h->addWidget(open);
+        QObject::connect(open, &QPushButton::clicked, frame, go);
+    }
     // A click in an open answer stays there.
     frame->clicked = [this, id = item.id, go] { if (!m_answers.value(id)) go(); };
     if (shown) {
@@ -327,11 +336,11 @@ void TeamWaitingPage::render()
     }
     if (m_total < 0) m_count->setText(m_error.isEmpty() ? tr("Reading the teams") : QString());
     else {
-        QSet<QString> teams; for (const auto &item : std::as_const(m_items)) teams.insert(item.team);
+        // #742: a tool's offer belongs to a project, not a team.
+        QSet<QString> teams; for (const auto &item : std::as_const(m_items)) if (!item.team.isEmpty()) teams.insert(item.team);
         const int shown = int(teams.size());
-        m_count->setText(m_total == 0 ? tr("Nothing waits for you")
-                         : (m_total == 1 ? tr("1 item") : tr("%1 items").arg(m_total)) + QStringLiteral("   ")
-                               + (shown == 1 ? tr("from 1 team shown") : tr("from %1 teams shown").arg(shown)));
+        const QString from = shown == 0 ? QString() : QStringLiteral("   ") + (shown == 1 ? tr("from 1 team shown") : tr("from %1 teams shown").arg(shown));
+        m_count->setText(m_total == 0 ? tr("Nothing waits for you") : (m_total == 1 ? tr("1 item") : tr("%1 items").arg(m_total)) + from);
     }
     if (!m_error.isEmpty()) m_rows->addWidget(refusal(tr("The waiting list was not read: %1").arg(m_error), c, "teamWaitingError"));
     if (m_total == 0 && m_items.isEmpty()) {

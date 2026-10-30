@@ -46,6 +46,29 @@ pub struct TestsConfig {
     pub resources: std::collections::BTreeMap<String, Resources>,
     #[serde(default, rename = "provider", skip_serializing_if = "Vec::is_empty")]
     pub providers: Vec<Provider>,
+    /// #742: further tools the project's tests or builds need (coverage, a
+    /// linter); Zerus offers a missing one to the owner.
+    #[serde(default, rename = "tool", skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<ToolNeed>,
+}
+
+/// A `[[tool]]` entry: a tool, why the project needs it and what it saves;
+/// `programs` and `install` (by manager: winget, brew, pacman, apt, cargo,
+/// pip) only for a tool Zerus's catalog does not know.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ToolNeed {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub why: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub saves: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub programs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub platforms: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub install: std::collections::BTreeMap<String, String>,
 }
 
 fn version() -> u32 {
@@ -65,6 +88,7 @@ impl Default for TestsConfig {
             merge_queue: MergeQueue::default(),
             resources: std::collections::BTreeMap::new(),
             providers: Vec::new(),
+            tools: Vec::new(),
         }
     }
 }
@@ -436,6 +460,9 @@ fn merge_providers(base: &mut Value, over: &Value) {
 
 fn validate(config: &TestsConfig) -> anyhow::Result<()> {
     anyhow::ensure!(config.version == 1, "The test configuration's version is 1, not {}", config.version);
+    for tool in &config.tools {
+        anyhow::ensure!(!tool.name.trim().is_empty(), "Every [[tool]] has a name");
+    }
     let mut names = std::collections::BTreeSet::new();
     for provider in &config.providers {
         anyhow::ensure!(!provider.name.trim().is_empty(), "Every test provider has a name");

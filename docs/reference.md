@@ -5674,6 +5674,37 @@ enforced: a team without a configuration keeps today's flow.
   file the map does not give the target is a gap. The weekly
   `test-map-coverage.yml` workflow measures every Rust module and Qt binary.
 
+#### Missing tools (#742)
+
+A tool the tests or builds need and this computer lacks is offered to the
+owner, never installed by an agent and never left to fail quietly. What a
+project needs: the build cache's `sccache` and `ccache` (`[build_cache]`, with
+the owner's override), each provider's runner (cargo, ctest, python, pytest,
+npm, a JDK for Gradle) on the platforms it runs on, and its `[[tool]]` entries
+(`name`, `why`, `saves`, `platforms`; `programs` and `install` by manager for a
+tool Zerus's catalog does not know). `hgs test tools [--json]` lists them for
+this computer with their state; `hgs test affected` and a template run whose
+build cache misses its tool (the run's note says so) record the offers too.
+
+- Each missing tool is offered once per computer and project (every worktree
+  of a repository is one project): an item of Waiting for you (`kind`
+  `tool_missing`, action `decide_tool`) with the tool, why it is needed, what
+  it saves and the install command of this computer's manager: `winget
+  install --id ID --exact --scope user` on Windows, `brew install` on macOS,
+  `sudo -n pacman -S --needed --noconfirm` or `sudo -n apt-get install -y` on
+  Linux, else `cargo install --locked` or `python -m pip install --user`.
+- The owner answers with `{"offer":ID,"allow":true|false,"by":"human",
+  "reason":"..."} | hgs team decide-tool --json` (the desktop sends the same).
+  Only the owner decides: an agent session is refused. Deny is remembered for
+  that project on that computer. Allow starts the install as the owner's
+  operation in a detached runner (`hgs test tools --install ID`, which refuses
+  any offer the owner did not allow); its exit and output are recorded, a
+  failed install shows them and may be allowed again or denied, and a tool
+  found later leaves the list. The offers live in the state folder's
+  `tests/tool-offers.json`.
+- Agents never install tools: every hand-out and the team guides say to work
+  without it and to propose it on the question card.
+
 The file's fields: `version = 1`; `[map]` `file`, `durations`, `unmapped`
 (`report` or `all`), `ignore` (never hides a file the map knows, such as a text
 a module compiles in); `[full]` `where` (`here`, `ci`, `runner`), `policy`

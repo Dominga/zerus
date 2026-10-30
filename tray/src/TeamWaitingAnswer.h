@@ -12,6 +12,7 @@
 
 class QLabel;
 class QVBoxLayout;
+namespace TeamUi { struct Colors; }
 class TeamController;
 class TeamProposalCards;
 
@@ -27,7 +28,10 @@ class TeamProposalCards;
 // - a permission escalated to the owner: the command, Deny with an optional
 //   reason and Allow, bound to the question's id and hash;
 // - a phase or plan draft: Approve…, asking the team view's question
-//   (Teams::phaseApproval, Teams::planApproval).
+//   (Teams::phaseApproval, Teams::planApproval);
+// - #742: a tool the project lacks on this computer: why, what it saves and
+//   the install command; Deny with a reason, or Allow, which Zerus runs as the
+//   owner's operation (hgs team decide-tool). It has no team to read.
 // It reads the team's status before it shows anything and again before it
 // sends: an item decided, withdrawn or changed meanwhile says so and sends
 // nothing. A report to accept and a held task are read in the team first and
@@ -76,6 +80,9 @@ private:
     QHash<QString, QSet<QString>> m_chosen;   // by question id
     QHash<QString, QString> m_otherText;
     QSet<QString> m_otherOn;
+    // #742: Allow or Deny of a missing tool's install.
+    void sendTool(bool allow);
+    void renderTool(const TeamUi::Colors &c, bool waiting);
     TeamController *m_teams;
     Item m_item;
     std::optional<Teams::Team> m_team;

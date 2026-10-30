@@ -29,6 +29,8 @@ public:
     struct Item {
         QString id, team, teamName, kind, title, action, member, proposal;
         QString memberId;   // #740: the member answered ("member" names its role)
+        // #742: a missing tool's offer (no team: teamName is the project).
+        QString offer, tool, why, saves, command, output, toolState;
         double since = 0;
         int phase = 0, task = 0;
     };

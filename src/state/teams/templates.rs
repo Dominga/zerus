@@ -355,7 +355,11 @@ pub(crate) fn cache_use(template: &str, folder: &Path) -> CacheUse {
                     used.env.push(("SCCACHE_SERVER_PORT".into(), port.to_string()));
                 }
             }
-            None => used.note = "build cache: sccache was not found; this run built without it".into(),
+            None => {
+                // #742: the owner is offered it in Waiting for you, once.
+                crate::test_discipline::tools::offer_missing(folder, "sccache");
+                used.note = "build cache: sccache was not found; this run built without it. Zerus offers it to the owner in Waiting for you; never install it yourself".into();
+            }
         }
     }
     if qt {
@@ -375,7 +379,8 @@ pub(crate) fn cache_use(template: &str, folder: &Path) -> CacheUse {
             }
             None => {
                 used.launcher = Some(String::new());
-                used.note = "build cache: ccache was not found; this run built without it".into();
+                crate::test_discipline::tools::offer_missing(folder, "ccache");
+                used.note = "build cache: ccache was not found; this run built without it. Zerus offers it to the owner in Waiting for you; never install it yourself".into();
             }
         }
     }
@@ -1796,6 +1801,33 @@ mod tests {
         assert_eq!(qt.launcher.as_deref(), Some(""));
         tools_override(None);
         settings_override(None);
+    }
+
+    /// #742: a cache tool a run misses is offered to the owner, once, and the
+    /// run's note says so instead of leaving the member to install it.
+    #[test]
+    fn a_missing_cache_tool_is_offered_to_the_owner() {
+        let dir = temp();
+        let state = temp();
+        crate::state::with_test_state_root(state.path(), || {
+            settings_override(Some(dir.path().join("templates.json")));
+            project(dir.path(), &format!("[build_cache]\nenabled = true\ndir = '{}'\n", dir.path().join("cache").display()));
+            tools_override(Some(std::collections::HashMap::new()));
+            let cargo = cache_use("cargo-build", dir.path());
+            assert!(cargo.note.contains("Zerus offers it to the owner in Waiting for you; never install it yourself"), "{cargo:?}");
+            let qt = cache_use("qt-configure", dir.path());
+            assert!(qt.note.contains("ccache was not found") && qt.note.contains("Waiting for you"), "{qt:?}");
+            cache_use("cargo-test", dir.path());
+            let items = crate::test_discipline::tools::waiting_items();
+            for tool in ["sccache", "ccache"] {
+                // Offered unless this computer has it after all.
+                if crate::test_discipline::tools::find_program(tool).is_none() {
+                    assert_eq!(items.iter().filter(|item| item["tool"] == tool).count(), 1, "{items:?}");
+                }
+            }
+            tools_override(None);
+            settings_override(None);
+        });
     }
 
     // A run with the cache on and its tools missing still runs and exits as

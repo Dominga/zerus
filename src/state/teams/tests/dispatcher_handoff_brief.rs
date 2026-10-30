@@ -27,6 +27,8 @@ fn the_hand_off_names_the_attempt_and_how_to_report() {
     assert!(text.contains("Your task and attempt again: {\"attempt\":\"A-ID\"} | hgs @msi team current --json"), "{text}");
     assert!(text.contains("Report once at the end: hgs @msi team report --json"), "{text}");
     assert!(text.contains("A progress line is not a report; a question is not a report."), "{text}");
+    // #742: an agent never installs a tool; Zerus offers it to the owner.
+    assert!(text.contains("Never install a tool yourself: a missing test or build tool is offered to the owner in Waiting for you"), "{text}");
     let local = hand_off_text(&team, task, &attempt, "msi", "");
     assert!(local.contains("hgs team report --json"));
     assert!(local.contains("hgs team ask --json") && local.contains("hgs team current --json"), "{local}");

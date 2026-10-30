@@ -17,8 +17,14 @@ pub(crate) fn items(teams: &[Team], now: f64) -> Vec<Value> {
     for team in teams {
         team_items(team, now, &mut out);
     }
-    out.sort_by(|a, b| since(b).total_cmp(&since(a)).then_with(|| id(a).cmp(id(b))));
-    out
+    sorted(out)
+}
+
+/// Newest first, ties in id order: the page order, also of items from beyond
+/// the teams (#742's tool offers).
+pub(crate) fn sorted(mut items: Vec<Value>) -> Vec<Value> {
+    items.sort_by(|a, b| since(b).total_cmp(&since(a)).then_with(|| id(a).cmp(id(b))));
+    items
 }
 
 fn since(item: &Value) -> f64 {

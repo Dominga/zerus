@@ -107,12 +107,18 @@ impl Drop for Permit {
 }
 
 fn serve(location: Location) -> Result<()> {
+    let _signals = platform::ShutdownGuard::install()?;
+    // This dedicated service process has no workers yet. Make socket creation
+    // private too, so a concurrent status probe never sees the pre-chmod mode.
+    #[cfg(unix)]
+    unsafe {
+        libc::umask(0o077);
+    }
     location.prepare()?;
     let _lock = location.lock()?;
     let listener = Arc::new(Listener::bind(&location)?);
     let epoch = uuid::Uuid::new_v4().to_string();
     let store = Store::open(&location, &epoch)?;
-    let _signals = platform::ShutdownGuard::install()?;
     let stopped = Arc::new(AtomicBool::new(false));
     let active = Arc::new(AtomicUsize::new(0));
     // At most 16 bounded control lines, plus at most 12 bounded parsers. No

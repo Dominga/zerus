@@ -58,8 +58,11 @@ class Desktop(unittest.TestCase):
                 self.assertEqual(process.returncode, 0, error + output)
 
     def serve(self):
+        # The service must create a private endpoint even when its launcher
+        # supplies a permissive mask; probing readiness races socket creation.
+        options = {'umask': 0} if os.name != 'nt' else {}
         process = subprocess.Popen([str(HGS), 'desktop', 'serve'], env=self.env,
-                                   stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                                   stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **options)
         self.addCleanup(self.stop, process)
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:

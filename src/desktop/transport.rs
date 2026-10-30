@@ -91,8 +91,8 @@ mod native {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => (),
                 Err(error) => return Err(error.into()),
             }
-            // The enclosing desktop directory is verified 0700 before bind;
-            // other users cannot reach the socket before its mode becomes 0600.
+            // The enclosing desktop directory is verified 0700 before bind,
+            // and the service's 0077 umask keeps the pre-chmod socket private.
             let socket = UnixListener::bind(&path)?;
             fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
             socket.set_nonblocking(true)?;

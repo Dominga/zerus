@@ -4,3 +4,7 @@
 # tag and default rule scanned; never replace these with path or rule ignores.
 54ece01be80c6dfb552eb9fc31a6455011fda1a2:mobile/ios/ZerusKit/Tests/ZerusKitTests/TasksPresentationTests.swift:generic-api-key:148
 54ece01be80c6dfb552eb9fc31a6455011fda1a2:mobile/android/app/src/test/java/app/zerus/mobile/TasksPresentationTest.kt:generic-api-key:134
+# Reviewed false positive: a synthetic loopback launch URL in the native UI
+# policy tests (#633). Its token is a fixture, not a credential; later commits
+# use a low-entropy fixture that the scan does not flag.
+907468c65d867742cca2ce8342cf3d5107ac4823:client/src-tauri/src/native_ui.rs:generic-api-key:138

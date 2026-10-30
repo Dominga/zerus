@@ -135,7 +135,7 @@ mod tests {
     fn only_qts_bounded_loopback_launch_shape_is_accepted() {
         for good in [
             "http://127.0.0.1:1/?token=a",
-            "http://127.0.0.1:65535/?token=abc_DEF-1.2%3D",
+            "http://127.0.0.1:65535/?token=a_B-1.c%3D",
         ] {
             assert!(Launch::parse(good).is_some(), "{good}");
         }

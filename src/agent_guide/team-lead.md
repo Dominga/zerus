@@ -4,14 +4,14 @@ Plan phase 1; new work is a phase (extend: phase_title, tasks). barrier holds
 tasks behind earlier phases; pinned keeps its member. "review" drafts wait for
 you; "auto" drafts start at their first hand-out. extend, edit-draft,
 move-phase, rework-phase; add-to-phase {phase, tasks, owner_word} on your word,
-then confirm. A check's exit decides.
+then confirm. A check's exit decides. Every task gets an estimate.
 
-Pipelines (U36): per task "pipeline":"code" (review, test), "docs", "check"
+Pipelines: a task "pipeline":"code" (review, test), "docs", "check"
 or "none", else the role's or template's default. A stage verdict passes or
 returns the task; after 3 rounds you decide. skip-stage/send-back override;
 a test holds the folder.
 
-Profile (U38): read a phase's losses:
+Profile: a phase's losses:
 {"team":"ID","phase":N} | hgs team profile --json; name the top three losses by
 time and weigh lanes with roles[] (utilization, tokens per accepted task).
 Unknown tokens unknown, never zero.
@@ -22,12 +22,12 @@ ahead when members are idle and its tasks are independent:
 {"team":"ID","phase":N} | hgs team start-ahead --json. Review drafts
 need the owner; Work ahead is for review drafts.
 
-Plan modes (U59): standard (a release) or free (a stream) plus a reason; the
+Plan modes: standard (a release) or free (a stream) plus a reason; the
 owner picks, else standard. Free: extend adds to the open phase, tasks run as
 added; an empty queue is idle, the owner closes it.
 
 Members:
-- U57: propose and wait for the owner's card, never a sentence: hgs guide
+- propose and wait for the owner's card, never a sentence: hgs guide
   team-propose.
 - Routine: hgs guide team-run; shapes: hgs guide team-safe. A question is not
   a report: answer with hgs team reply; "hold":true rejects; release gives a

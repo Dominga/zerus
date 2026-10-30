@@ -566,6 +566,9 @@ pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<
     strip_stage_facts(&mut value);
     // C7: the plan-health block, with the members starving on the plan now.
     let now = super::super::now();
+    // Owner 2026-10-31: every task carries its time estimate and, while it
+    // runs, the time spent against it; accepted tasks refresh the history.
+    super::estimates::fill_status(&mut value, team, now);
     let mut validation = plan::validate(team, &BTreeSet::new());
     validation.health.starved = plan::starved(team, now);
     for starving in &validation.health.starved {
@@ -2332,10 +2335,20 @@ fn spans_view(input: &Value) -> anyhow::Result<Value> {
         None => (Vec::new(), false),
     };
     let holders = spans::holders(&team, now);
+    // Owner 2026-10-31: each timeline carries the task's estimate and, while it
+    // runs, the time spent against it.
+    let history = super::estimates::load();
     let tasks: Vec<Value> = chosen
         .iter()
         .map(|task| {
             let mut value = spans::spans(&team, task, &journal, &holders, now);
+            let estimate = super::estimates::estimate_from(&history, &team, task);
+            value["estimate_minutes"] = estimate.minutes.map_or(Value::Null, |minutes| json!(minutes));
+            value["estimate_source"] = json!(estimate.source);
+            value["estimate_text"] = json!(estimate.text());
+            if let Some(spent) = super::estimates::spent_minutes(task, now) {
+                value["estimate_spent_minutes"] = json!(spent.round());
+            }
             if cut {
                 let mut unknown: BTreeSet<String> = serde_json::from_value(value["unknown"].clone()).unwrap_or_default();
                 unknown.insert("events".into());
@@ -5082,6 +5095,41 @@ mod tests {
 
     fn finding(severity: &str, title: &str) -> Value {
         json!({"severity":severity,"title":title,"scenario":"two saves at once","task":1})
+    }
+
+    /// Owner 2026-10-31: every task carries its estimate in status and in its
+    /// timeline, and a running one the time spent against it.
+    #[test]
+    fn status_and_spans_carry_each_tasks_estimate() {
+        let (mut team, _, _) = review_team();
+        if let Some(task) = team.task_mut(1) {
+            task.estimate_minutes = Some(40.0);
+            task.estimate_source = "lead".into();
+        }
+        if let Some(task) = team.task_mut(2) {
+            task.status = crate::state::teams::model::TaskStatus::InProgress;
+            task.attempts = vec![crate::state::teams::model::Attempt {
+                n: 1,
+                member: "qa".into(),
+                sent_at: crate::state::now() - 3600.0,
+                delivered_at: Some(crate::state::now() - 3600.0),
+                ..Default::default()
+            }];
+        }
+        with_review_team(&team, || {
+            let status = call("status", json!({})).unwrap();
+            let one = status["tasks"].as_array().unwrap().iter().find(|task| task["id"] == 1).unwrap();
+            assert_eq!(one["estimate_minutes"], json!(40.0));
+            assert_eq!(one["estimate_source"], json!("lead"));
+            assert_eq!(one["estimate_text"], json!("40 min"));
+            let running = status["tasks"].as_array().unwrap().iter().find(|task| task["id"] == 2).unwrap();
+            assert!(running["estimate_spent_minutes"].as_f64().unwrap() >= 59.0, "{running}");
+            assert!(running["estimate_minutes"].is_null(), "no history yet: {running}");
+            assert_eq!(running["estimate_text"], json!("no estimate yet"));
+            let spans = call("spans", json!({"task":1})).unwrap();
+            assert_eq!(spans["tasks"][0]["estimate_minutes"], json!(40.0));
+            assert_eq!(spans["tasks"][0]["estimate_text"], json!("40 min"));
+        });
     }
 
     /// U36 through `hgs team`: the implementer's report enters review, status

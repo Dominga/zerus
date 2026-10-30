@@ -334,6 +334,15 @@ fn parse_task(value: &Value) -> anyhow::Result<Task> {
     if let Some(lane) = task.lane.as_mut() {
         clean_lane(lane, task.id)?;
     }
+    // Owner 2026-10-31: the lead's estimate is in minutes; a task without one
+    // gets Zerus' own from the per-computer history when it is shown.
+    if let Some(minutes) = task.estimate_minutes {
+        ensure!((1.0..=1440.0).contains(&minutes), "Task #{}: an estimate is 1 to 1440 minutes", task.id);
+        task.estimate_minutes = Some(minutes.round());
+        task.estimate_source = "lead".into();
+    } else {
+        task.estimate_source = "none".into();
+    }
     task.status = TaskStatus::Draft;
     // `plan` (and `create`'s planning tasks) always start phase 1; `extend`
     // sets the computed phase afterwards.
@@ -2119,6 +2128,25 @@ fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<
             }
             task.pinned = pinned;
             fields.push("pinned");
+        }
+        // Owner 2026-10-31: the lead's estimate in minutes; null clears it and
+        // Zerus computes it from the history again.
+        if let Some(value) = value.get("estimate_minutes") {
+            let old = task.estimate_minutes.map(|minutes| format!("{} min", minutes.round() as u64)).unwrap_or_else(|| "no estimate".into());
+            task.estimate_minutes = match value {
+                Value::Null => None,
+                _ => {
+                    let minutes = value.as_f64().context("estimate_minutes is a number of minutes or null")?;
+                    ensure!((1.0..=1440.0).contains(&minutes), "Task #{id}: an estimate is 1 to 1440 minutes");
+                    Some(minutes.round())
+                }
+            };
+            task.estimate_source = if task.estimate_minutes.is_some() { "lead".into() } else { "none".into() };
+            let new = task.estimate_minutes.map(|minutes| format!("{} min", minutes.round() as u64)).unwrap_or_else(|| "no estimate".into());
+            if old != new {
+                changes.push(json!({"kind":"changed","task":id,"title":task.title,"field":"estimate_minutes","from":old,"to":new}));
+            }
+            fields.push("estimate_minutes");
         }
         // U36: the pipeline the task takes when it is assigned.
         if let Some(value) = value.get("pipeline") {
@@ -4928,6 +4956,57 @@ mod tests {
         .unwrap();
         approve(&mut team, &json!({}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
         team
+    }
+
+    #[test]
+    fn the_lead_sets_a_tasks_estimate_in_the_plan_and_edits_it_in_the_draft() {
+        let (mut team, _) = create(
+            "t",
+            &json!({"name":"Checkout","lead":{"id":"lead","agent":"claude","session":{"name":"claude/x/lead"}}}),
+        )
+        .unwrap();
+        let lead = Actor::Member("lead".into());
+        let mut events = Vec::new();
+        plan(
+            &mut team,
+            &json!({"members":[{"id":"dev","role":"Backend","agent":"codex"}],
+                "tasks":[{"id":1,"title":"API","assignee":"dev","estimate_minutes":45}]}),
+            &lead,
+            &mut events,
+        )
+        .unwrap();
+        let task = team.task(1).unwrap();
+        assert_eq!((task.estimate_minutes, task.estimate_source.as_str()), (Some(45.0), "lead"));
+        // A plan estimate is in minutes and bounded.
+        let (mut bad, _) = create(
+            "b",
+            &json!({"name":"Bad","lead":{"id":"lead","agent":"claude","session":{"name":"claude/x/lead"}}}),
+        )
+        .unwrap();
+        let error = plan(
+            &mut bad,
+            &json!({"members":[{"id":"dev","role":"Backend","agent":"codex"}],
+                "tasks":[{"id":1,"title":"API","assignee":"dev","estimate_minutes":0}]}),
+            &lead,
+            &mut Vec::new(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("1 to 1440"), "{error}");
+        // The lead sets the estimate on a later phase too (extend parses the
+        // tasks like the plan does).
+        approve(&mut team, &json!({}), &Actor::Human, &BTreeSet::new(), &mut Vec::new()).unwrap();
+        apply(
+            &mut team,
+            "extend",
+            &json!({"phase_title":"Next","tasks":[{"id":2,"title":"Next API","assignee":"dev","estimate_minutes":60}]}),
+            &lead,
+            &BTreeSet::new(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        let extended = team.task(2).unwrap();
+        assert_eq!((extended.estimate_minutes, extended.estimate_source.as_str()), (Some(60.0), "lead"));
     }
 
     #[test]

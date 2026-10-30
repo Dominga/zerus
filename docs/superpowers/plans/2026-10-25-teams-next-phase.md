@@ -1431,6 +1431,27 @@ phase 37. Lanes are balanced by volume and cost (U28 rule 9), not by count.
   protocol and docs. The dialog is its own confirmation bound to the request
   id; U57 (phase 45) later moves it onto the shared confirmation card.
 
+## Model servers in phase 48 (owner, 2026-10-30)
+
+- U60: phase 48 is a general model servers feature, not one machine. A model
+  server is any computer on the LAN, or this one, that serves LLMs through an
+  OpenAI- or Anthropic-compatible API (vLLM, llama.cpp, Ollama, LM Studio,
+  LiteLLM or similar). Code, docs and tests never name a particular server,
+  host, model size or vendor command.
+- Configuration is per computer, local and never committed: a name, the API
+  URL and its kind, an optional key in the private store, an optional SSH
+  host (one of Zerus's Machines or an alias, reached through hgs's own SSH
+  transport) and optional control commands for status, up, down and logs.
+  Status reads a Zerus JSON contract or plain `NAME: STATE` lines. Without
+  control commands the server is read only, from the API's model list.
+- LLM access: New session starts a chosen agent on this computer (Codex,
+  OpenCode, Claude Code) on the server's API and model with session-scoped
+  provider settings, as the local agents design separates the agent from its
+  inference provider (2026-10-13-local-agents-design.md).
+- A server may be shared: every down asks first and says so, and nothing
+  retries on its own. A computer without a server shows no tab. Image
+  generation is a later phase.
+
 ## Order of work (proposal)
 
 1. Delivery and reports: A1-A6, H5.

@@ -861,6 +861,14 @@ void TestSessionsWindow::subordinateSessionsFollowTheirLead()
     QTRY_VERIFY(SessionLeads::lead(identities.last()).isEmpty());
     QTRY_VERIFY(!list->item(rowOf(identities.last()))->data(SessionRoles::Subordinate).toBool());
     QTRY_VERIFY(panel->findChild<QComboBox *>("sessionLeadChoice"));
+    // #648: one Reports to select, "nobody" first; choosing a session links it.
+    auto *choice = panel->findChild<QComboBox *>("sessionLeadChoice");
+    QCOMPARE(choice->itemText(0), QString("nobody")); QVERIFY(!panel->findChild<QPushButton *>("linkSessionLead"));
+    emit choice->activated(0); QVERIFY(SessionLeads::lead(identities.last()).isEmpty());
+    QVERIFY(choice->count() > 1); const auto lead = choice->itemData(1).toString(); QVERIFY(!lead.isEmpty());
+    emit choice->activated(1);
+    QTRY_COMPARE(SessionLeads::lead(identities.last()), lead);
+    QTRY_VERIFY(panel->findChild<QLabel *>("sessionLeadName"));
 }
 
 // WhiteWh fork: agent teams. A team's header stands above its lead, its
@@ -1518,6 +1526,20 @@ void TestSessionsWindow::inspectorIsAColumnOfCards()
         QVERIFY(window.findChild<QFrame *>("sessionInspectorPanel")->grab().save(QDir(shots).filePath(name + "-" + theme + ".png")));
     };
     shot("ux-6-inspector-top");
+    // #648: the Tasks card as the prototype: "Main agent · <state word>", the
+    // plan as a checklist, one muted subagent line and one Reports to row.
+    {auto *tasks = inspectorCard(window, "tasks");
+     const auto text = tasks->findChild<QTextBrowser *>("subagents")->toPlainText();
+     QVERIFY2(text.contains("Main agent · "), qPrintable(text.left(300)));
+     QVERIFY(text.contains("Plan Checkout v2 with the team")); QVERIFY(text.contains("Planned")); QVERIFY(text.contains("Done"));
+     QVERIFY(!text.contains("TASKS")); QVERIFY(!text.contains("No task list reported")); QVERIFY(!text.contains("SUBAGENTS"));
+     QVERIFY(text.contains("No subagent activity yet"));
+     QVERIFY(!tasks->findChild<QPushButton *>("linkSessionLead"));
+     if (auto *lead = tasks->findChild<QComboBox *>("sessionLeadChoice")) {
+         QCOMPARE(lead->itemText(0), QString("nobody")); QCOMPARE(lead->accessibleName(), QString("Lead session"));
+         auto *label = tasks->findChild<QLabel *>("sessionLeadLabel"); QVERIFY(label); QCOMPARE(label->text(), QString("Reports to"));
+     }
+     if (!shots.isEmpty()) { QTest::qWait(150); QVERIFY(tasks->grab().save(QDir(shots).filePath("648-tasks-card-" + theme + ".png"))); }}
     // Links from outside unfold the right card: the git chip opens Changes,
     // N iron rules opens Iron rules, the context indicator opens Context.
     emit window.findChild<SessionList *>("sessionList")->gitActivated("arch\ncodex/hgs/dashboard");
@@ -9643,7 +9665,8 @@ void TestSessionsWindow::inspectorPreservesWorkspaceAndReportsTasks()
         }}};
     auto *client = window.findChild<HgsClient *>(); client->inspectionReady({}, "codex/hgs/dashboard", data);
     auto *roster = window.findChild<QTextBrowser *>("subagents"); const auto text = roster->toPlainText();
-    QVERIFY(text.contains("Inspect <source> & hooks")); QVERIFY(text.contains("1 of 2 completed"));
+    QVERIFY(text.contains("Inspect <source> & hooks")); QVERIFY(!text.contains("1 of 2 completed"));
+    QCOMPARE(inspectorCard(window, "tasks")->findChild<QLabel *>("inspectorCardValue")->text(), QString("1 of 2 completed"));
     QVERIFY(text.contains("In progress")); QVERIFY(text.contains("Reviewer")); QVERIFY(text.contains("Last recorded"));
     {   // WhiteWh fork: while the session works, the line above the message field names the plan's current step.
         auto *working = static_cast<WorkingLine *>(window.findChild<QWidget *>("workingLine")); QVERIFY(working); QVERIFY(!working->isVisible());
@@ -10682,6 +10705,15 @@ void TestSessionsWindow::tasksCardShowsBackgroundJobsAndFoldsFinishedChildren()
     QVERIFY(!text.contains("Done child one")); QVERIFY(text.contains("2 finished"));
     QVERIFY(!text.contains("must not be the state"));
     QVERIFY(text.contains("Bash: cargo test"));
+    QVERIFY2(text.contains("Main agent · "), qPrintable(text.left(300)));
+    QVERIFY(text.contains("1 active / 3 total")); QVERIFY(!text.contains("SUBAGENTS"));
+    // #648: a summary that is only the state word, with the prompt as its
+    // detail, shows nothing more than the state.
+    {auto prompt = details; prompt["activity_summary"] = "Working"; prompt["activity_detail"] = "a long prompt that must not be the state";
+     client->inspectionReady({}, session.name, prompt);
+     const auto shown = roster->toPlainText();
+     QVERIFY(shown.contains("Main agent · ")); QVERIFY2(!shown.contains("must not be the state"), qPrintable(shown.left(300)));
+     QVERIFY(!shown.contains("Working: "));}
     // "show" opens the finished children.
     emit roster->anchorClicked(QUrl("hgs-children:finished"));
     client->inspectionReady({}, session.name, details);
@@ -11177,7 +11209,7 @@ void TestSessionsWindow::subagentGroupsAndUnavailableActivity()
     details["subagent_groups"] = QJsonObject{}; details["subagents"] = QJsonObject{};
     client->inspectionReady({}, session.name, details);
     QVERIFY(roster->toPlainText().contains("Exact subagent counts are unavailable"));
-    QVERIFY(!roster->toPlainText().contains("No subagent activity has been reported yet"));
+    QVERIFY(!roster->toPlainText().contains("No subagent activity yet"));
     details["subagent_source"] = "unavailable"; client->inspectionReady({}, session.name, details);
     QVERIFY(roster->toPlainText().contains("activity is unavailable")); QVERIFY(!roster->toPlainText().contains("0 active"));
 }

@@ -1628,7 +1628,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     // The card's header names the rules and counts them.
     for(const char *name:{"inspectorPanelTitle","ironRulesCount"})if(auto *label=m_ironRules->findChild<QLabel *>(name))label->hide();
     m_leadPanel->setLead=[this](const QString &identity,const QString &lead){
-        if(!SessionLeads::setLead(identity,lead)){showNotice(tr("A lead cannot report to another session, and a subordinate cannot lead."),true);return;}
+        if(!SessionLeads::setLead(identity,lead)){showNotice(tr("A lead cannot report to another session, and a subordinate cannot lead."),true);updateLeadPanel();return;}
         rebuild();updateLeadPanel();
     };
     m_leadPanel->open=[this](const QString &identity){
@@ -4942,13 +4942,50 @@ void SessionsWindow::renderDetails()
     const auto elide = [&](const QString &text, int width) { return htmlText(metrics.elidedText(text.simplified(), Qt::ElideRight, width)); };
     const bool currentChildren = currentActivity(s, entry->online);
     QString children = QString("<style>body{color:%1;font-size:12px;}p{margin:5px 0 9px;}td{padding:7px 0;}h3{font-size:12px;margin:16px 0 8px;}</style>").arg(m_fg);
-    // Owner, 2026-10-28: the main agent's state word and the tool it runs now;
-    // the latest prompt is not its state.
-    children += QString("<p><b>%1</b> <span style='color:%2'>%3</span></p>").arg(tr("Main agent"), m_muted, htmlText(state));
+    // Owner, 2026-10-28 (#648): "Main agent · Ready", the state word only, and
+    // the tool it runs now; the latest prompt never shows, nor a summary that
+    // is only a state ("Working: <prompt>").
+    children += QString("<p style='margin:2px 0 10px;'><span style='color:%1'>⊙</span> <b>%2</b></p>").arg(m_muted, htmlText(tr("Main agent") + QStringLiteral(" · ") + state));
     {const QString tool = m_details.value("activity_summary").toString();
-     const QString detail = m_details.value("activity_detail").toString().simplified();
-     if (currentChildren && m_details.value("activity").toString() == "busy" && !tool.isEmpty())
+     QString detail = m_details.value("activity_detail").toString().simplified();
+     for (const char *key : {"prompt", "last_prompt"})
+         if (!detail.isEmpty() && detail == m_details.value(key).toString().simplified()) detail.clear();
+     static const QStringList stateWords{"Working", "Ready", "Needs attention", "Stopped", "Status unavailable"};
+     if (currentChildren && m_details.value("activity").toString() == "busy" && !tool.isEmpty() && tool != state && !stateWords.contains(tool))
          children += QString("<p style='color:%1'>%2</p>").arg(m_muted, elide(detail.isEmpty() || detail == tool ? tool : tool + QStringLiteral(": ") + detail, rosterWidth));}
+    // The agent's own plan as a checklist under it, its count on the card's
+    // header; another owner's list (a subagent's, the session's) keeps its name.
+    const auto taskLists = m_details.value("task_lists").toObject();
+    QStringList taskOwners = taskLists.keys(); taskOwners.removeAll("main");
+    if (taskLists.contains("main")) taskOwners.prepend("main");
+    for (const auto &owner : taskOwners) {
+        const auto list = taskLists.value(owner).toObject(); const auto items = list.value("items").toArray();
+        QString ownerLabel = list.value("source").toString().startsWith("Task") ? tr("Session tasks") : tr("Main agent");
+        if (owner.startsWith("agent:")) {
+            const QString id = owner.mid(6); const auto agent = agents.value(id).toObject();
+            ownerLabel = agent.value("label").toString(agent.value("name").toString(id));
+        }
+        int done = 0; for (const auto &value : items) if (value.toObject().value("status").toString() == "completed") ++done;
+        const bool recorded = !currentChildren || list.value("run_id").toString() != m_details.value("run_id").toString();
+        if (owner != taskOwners.first() || ownerLabel != tr("Main agent"))
+            children += QString("<p style='margin:12px 0 6px;'><b>%1</b><br><span style='color:%2'>%3%4</span></p>").arg(htmlText(ownerLabel), m_muted,
+                tr("%1 of %2 completed").arg(done).arg(items.size()), recorded ? tr(" (Last recorded)") : QString());
+        else if (recorded) children += QString("<p style='color:%1;font-size:11px'>%2</p>").arg(m_muted, tr("Last recorded"));
+        if (items.isEmpty()) children += QString("<p style='color:%1'>%2</p>").arg(m_muted, tr("The agent cleared this list."));
+        for (const auto &value : items) {
+            const auto task = value.toObject(); const QString taskState = task.value("status").toString();
+            const QString marker = taskState == "completed" ? QStringLiteral("✓") : taskState == "in_progress" ? QStringLiteral("◉") : QStringLiteral("○");
+            const QString stateLabel = taskState == "completed" ? tr("Done") : taskState == "in_progress" ? tr("In progress") : taskState == "pending" ? tr("Planned") : tr("Unknown");
+            const QString color = taskState == "in_progress" && !recorded ? m_accent : m_muted;
+            const QString markColor = taskState == "completed" ? tone("Working", m_dark).name() : color;
+            children += QString("<table width='100%' cellspacing='0' cellpadding='0' style='margin:0 0 8px;'><tr><td width='22' valign='top' style='color:%1;padding:1px 0'>%2</td>"
+                                "<td style='padding:1px 0'><span style='color:%3'>%4</span><br><span style='font-size:11px;color:%5'>%6%7</span></td></tr></table>")
+                .arg(markColor, marker, m_fg, htmlText(task.value("title").toString()), color, stateLabel,
+                    task.value("owner").toString().isEmpty() ? QString() : " / " + htmlText(task.value("owner").toString()));
+        }
+        if (list.value("truncated").toBool()) children += QString("<p style='color:%1'>%2</p>").arg(m_muted, tr("Showing the first 100 tasks."));
+    }
+    if (taskLists.isEmpty()) children += QString("<p style='color:%1'>%2</p>").arg(m_muted, tr("No task list yet"));
     // Owner, 2026-10-28: the agent's background commands (a build, a test run)
     // are its work too: the running ones, newest first. Claude reports a
     // background command's end only in a later prompt; one with no end seen
@@ -4987,48 +5024,26 @@ void SessionsWindow::renderDetails()
     } else if (m_details.value("goal_source") == "unavailable") {
         children += QString("<h3>%1</h3><p style='color:%2'>%3</p>").arg(tr("Goal"), m_muted, tr("Goal data is unavailable for this conversation or agent version."));
     }
-    const auto taskLists = m_details.value("task_lists").toObject();
-    children += QString("<h3>%1</h3>").arg(tr("Tasks"));
-    if (taskLists.isEmpty()) children += QString("<p style='color:%1'>%2</p>").arg(m_muted, tr("No task list reported yet. Tasks appear when the agent updates its plan."));
-    QStringList taskOwners = taskLists.keys(); taskOwners.removeAll("main");
-    if (taskLists.contains("main")) taskOwners.prepend("main");
-    for (const auto &owner : taskOwners) {
-        const auto list = taskLists.value(owner).toObject(); const auto items = list.value("items").toArray();
-        QString ownerLabel = list.value("source").toString().startsWith("Task") ? tr("Session tasks") : tr("Main agent");
-        if (owner.startsWith("agent:")) {
-            const QString id = owner.mid(6); const auto agent = agents.value(id).toObject();
-            ownerLabel = agent.value("label").toString(agent.value("name").toString(id));
-        }
-        int done = 0; for (const auto &value : items) if (value.toObject().value("status").toString() == "completed") ++done;
-        const bool recorded = !currentChildren || list.value("run_id").toString() != m_details.value("run_id").toString();
-        children += QString("<p><b>%1</b><br><span style='color:%2'>%3%4</span></p>").arg(htmlText(ownerLabel), m_muted,
-            tr("%1 of %2 completed").arg(done).arg(items.size()), recorded ? tr(" (Last recorded)") : QString());
-        if (items.isEmpty()) children += QString("<p style='color:%1'>%2</p>").arg(m_muted, tr("The agent cleared this list."));
-        for (const auto &value : items) {
-            const auto task = value.toObject(); const QString taskState = task.value("status").toString();
-            const QString marker = taskState == "completed" ? QStringLiteral("✓") : taskState == "in_progress" ? QStringLiteral("◉") : QStringLiteral("○");
-            const QString stateLabel = taskState == "completed" ? tr("Done") : taskState == "in_progress" ? tr("In progress") : taskState == "pending" ? tr("Planned") : tr("Unknown");
-            const QString color = taskState == "in_progress" && !recorded ? m_accent : m_muted;
-            children += QString("<p style='margin:7px 0 10px;'><span style='color:%1'>%2</span> %3<br><span style='font-size:11px;color:%1'>%4%5</span></p>")
-                .arg(color, marker, htmlText(task.value("title").toString()), stateLabel,
-                    task.value("owner").toString().isEmpty() ? QString() : " / " + htmlText(task.value("owner").toString()));
-        }
-        if (list.value("truncated").toBool()) children += QString("<p style='color:%1'>%2</p>").arg(m_muted, tr("Showing the first 100 tasks."));
-    }
     // U25 part 6: the Tasks card's "N of M completed" for the main agent's list.
     {const auto main = taskLists.value(taskOwners.isEmpty() ? QString() : taskOwners.first()).toObject().value("items").toArray();
      int doneMain = 0; for (const auto &value : main) if (value.toObject().value("status").toString() == "completed") ++doneMain;
      m_inspector->setValue(InspectorCards::Tasks, main.isEmpty() ? QString() : tr("%1 of %2 completed").arg(doneMain).arg(main.size()));}
-    children += QString("<h3>%1 <span style='color:%2;font-weight:normal'>%3</span></h3>")
-        .arg(source == "hook_profiles" ? tr("Profile groups") : tr("Subagents"), m_muted,
-            currentChildren ? childCount(s, true) : tr("Last recorded"));
+    // #648: no Subagents heading; the active ones, or one muted line.
+    m_children->document()->addResource(QTextDocument::ImageResource, QUrl(QStringLiteral("hgs-icon:users")),
+        workspaceIcon(QStringLiteral("users"), QColor(m_muted)).pixmap(14, 14));
+    const QString people = QStringLiteral("<img src='hgs-icon:users' width='14' height='14' style='vertical-align:middle'>&nbsp;&nbsp;");
+    if (source == "hook_profiles")
+        children += QString("<p style='margin-top:12px;'>%1<b>%2</b> <span style='color:%3'>%4</span></p>")
+            .arg(people, tr("Profile groups"), m_muted, currentChildren ? childCount(s, true) : tr("Last recorded"));
+    else if (!currentChildren && !roster.isEmpty())
+        children += QString("<p style='margin-top:12px;color:%1'>%2%3</p>").arg(m_muted, people, tr("Subagents") + QStringLiteral(" · ") + tr("Last recorded"));
     if (source == "hook_profiles") children += QString("<p style='color:%1'>%2</p>").arg(m_muted, tr("Observed runs grouped by profile; individual agent identities are not reported."));
     if (roster.isEmpty()) {
         const bool unavailable = source == "unavailable" || !s.tracked;
         const QString emptyHint = unavailable ? tr("Subagent activity is unavailable for this session.") :
             source == "hook_profiles" && !s.subagentCountsComplete ? tr("Exact subagent counts are unavailable for this run.") :
-            tr("No subagent activity has been reported yet.");
-        children += QString("<p style='color:%1'>%2</p>").arg(m_muted, emptyHint);
+            tr("No subagent activity yet");
+        children += QString("<p style='margin-top:12px;color:%1'>%2%3</p>").arg(m_muted, people, emptyHint);
     } else {
         // Owner, 2026-10-28: finished children fold into a count, unless
         // workspace/inspectorFinishedSubagents is set or the owner
@@ -5043,9 +5058,10 @@ void SessionsWindow::renderDetails()
             if (!showFinished && currentChildren && !working && !child.value("group").toBool()) { ++finished; continue; }
             shownRoster.append(child);
         }
-        if (shownRoster.isEmpty()) children += QString("<p style='color:%1'>%2</p>").arg(m_muted, tr("No subagent works now."));
-        if (finished) children += QString("<p style='color:%1'>%2 · <a href='hgs-children:finished' style='color:%3;text-decoration:none'>%4</a></p>")
-                                      .arg(m_muted, finished == 1 ? tr("1 finished") : tr("%1 finished").arg(finished), m_accent, tr("show"));
+        const QString folded = finished ? QString(" · %1 · <a href='hgs-children:finished' style='color:%2;text-decoration:none'>%3</a>")
+            .arg(finished == 1 ? tr("1 finished") : tr("%1 finished").arg(finished), m_accent, tr("show")) : QString();
+        if (shownRoster.isEmpty()) children += QString("<p style='margin-top:12px;color:%1'>%2%3%4</p>").arg(m_muted, people, tr("No subagent activity yet"), folded);
+        else if (currentChildren && source != "hook_profiles") children += QString("<p style='margin-top:12px;color:%1'>%2%3%4</p>").arg(m_muted, people, htmlText(childCount(s, true)), folded);
         children += "<table width='100%' cellspacing='0' cellpadding='0'>";
         for (const auto &child : shownRoster) {
             QString name = child.value("label").toString();

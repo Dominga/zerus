@@ -1460,7 +1460,24 @@ pub(crate) fn work_ahead_tasks(team: &Team) -> Vec<u32> {
 /// or (U31) a task of the next draft phase an idle member works ahead on. A
 /// draft phase's tasks are Draft, which `plan::ready` never lists.
 fn can_hand_out(team: &Team, task_id: u32) -> bool {
-    team.status == TeamStatus::Running && (plan::ready(team).contains(&task_id) || work_ahead_tasks(team).contains(&task_id))
+    if team.status != TeamStatus::Running {
+        return false;
+    }
+    if plan::ready(team).contains(&task_id) || work_ahead_tasks(team).contains(&task_id) {
+        return true;
+    }
+    // U61: a draft the lead started ahead lets its independent tasks run before
+    // the phases ahead are done; the first hand-out accepts the phase.
+    team.task(task_id).is_some_and(|task| {
+        team.settings.auto_accept
+            && team.phases.iter().any(|phase| {
+                phase.n == task.phase
+                    && phase.state.is_draft()
+                    && phase.start_ahead
+                    && phase.approval == Approval::Auto
+            })
+            && plan::ready_ahead(team, task.phase).contains(&task_id)
+    })
 }
 
 /// At most one message reaches the free lead per tick; the others wait for the
@@ -3688,6 +3705,9 @@ fn hand_out_now(
             }
         }
         anyhow::ensure!(can_hand_out(team, task_id), "no longer ready");
+        // U61: the first hand-out of an auto-accepted draft fixes it by Auto in
+        // this same change, so its reports need no owner approval.
+        super::ops::accept_phase_on_hand_out(team, task_id, events);
         // U45: a task for a role becomes its chosen member's before its
         // pipeline is taken from that member's role.
         if from == Some("") {

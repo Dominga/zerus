@@ -245,6 +245,19 @@ pub(crate) fn ready(team: &Team) -> Vec<u32> {
     out
 }
 
+/// U61: the independent tasks of a draft the lead started ahead: ready by
+/// their dependencies, not held by the draft's barrier.
+pub(crate) fn ready_ahead(team: &Team, phase: u32) -> Vec<u32> {
+    let cycles = cycle_tasks(&team.tasks);
+    team.tasks
+        .iter()
+        .filter(|task| task.phase == phase && task.status == TaskStatus::Pending && !cycles.contains(&task.id))
+        .filter(|task| task.hold.is_none() && task.waits.is_none())
+        .filter(|task| task.deps.iter().all(|dep| satisfied(team, dep.task, dep.kind)))
+        .map(|task| task.id)
+        .collect()
+}
+
 /// D2: a task of an urgent phase.
 fn urgent(team: &Team, id: u32) -> bool {
     team.task(id).is_some_and(|task| task.phase > 1 && team.phases.iter().any(|phase| phase.n == task.phase && phase.urgent))
@@ -646,6 +659,10 @@ pub(crate) fn phase_summary(team: &Team) -> Vec<serde_json::Value> {
                 "done": done,
                 "total": tasks.len(),
                 "barrier": record.is_some_and(|phase| phase.barrier),
+                // U61: a draft that Auto will accept at its first hand-out, and
+                // whether the lead started it ahead.
+                "auto": record.is_some_and(|phase| phase.approval == super::model::Approval::Auto),
+                "start_ahead": record.is_some_and(|phase| phase.start_ahead),
                 "health_line": line,
             })
         })

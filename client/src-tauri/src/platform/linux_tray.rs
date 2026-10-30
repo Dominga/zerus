@@ -761,9 +761,14 @@ fn dispatch(app: &AppHandle, action: MenuAction, token: Option<String>) {
             present(&target, token.as_deref());
             crate::desk::open_session(&target, &computer, &key);
         }
-        MenuAction::Session { computer, name, .. } => {
+        MenuAction::Session {
+            computer,
+            name,
+            tty,
+            ..
+        } => {
             let target = target.clone();
-            std::thread::spawn(move || crate::desk::open_running(&target, &computer, &name));
+            std::thread::spawn(move || crate::desk::open_running(&target, &computer, &name, &tty));
         }
         MenuAction::Mode(mode) => crate::desk::set_mode(&target, mode),
         MenuAction::Updates => {
@@ -792,7 +797,7 @@ pub fn present(app: &AppHandle, token: Option<&str>) {
         }
     }
 }
-pub fn open_running(app: &AppHandle, computer: &ComputerId, name: &str) {
+pub fn open_running(app: &AppHandle, computer: &ComputerId, name: &str, tty: &str) {
     use zerus_client_core::terminal_launch::{Launcher, Opened, Settings};
     let conf = crate::desk::tray_conf();
     let mode = app
@@ -835,7 +840,11 @@ pub fn open_running(app: &AppHandle, computer: &ComputerId, name: &str) {
         &zerus_client_core::default_hgs().to_string_lossy(),
         &computer.0,
         name,
-        "",
+        if computer == &ComputerId::local() {
+            tty
+        } else {
+            ""
+        },
     ) {
         Ok(Opened::Opened {
             advisory: Some(text),
@@ -1114,6 +1123,7 @@ mod tests {
                 name: name.into(),
                 text: name.into(),
                 running: false,
+                tty: String::new(),
             },
             Entry::OpenIn(OpenMode::Automatic),
             Entry::Quit,

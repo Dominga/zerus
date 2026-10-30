@@ -21,7 +21,10 @@ export function createActivityEnd(read: () => ScrollGeometry, writeEnd: () => vo
       if (mine !== epoch || !active || disposed) return;
       frame = undefined;
       if (!canWrite()) return;
-      writeEnd();
+      const now = read();
+      // A stable verification frame must not write the same position again:
+      // WebKit sends overflow scrolling through its asynchronous compositor.
+      if (Math.abs(now.top - Math.max(0, now.height - now.viewport)) > 1) writeEnd();
       last = read();
       if (verify) schedule(false);
     });

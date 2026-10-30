@@ -13,12 +13,12 @@ export interface ReadingRows {
  * user scroll, retain it across updates, then correct only its pixel drift.
  * A virtualizer can supply measured offsets for a key before it remounts.
  */
-export function createActivityAnchor(rows: ReadingRows, released: () => boolean, frames: AnimationFrames = animationFrames) {
+export function createActivityAnchor(rows: ReadingRows, released: () => boolean, frames: AnimationFrames = animationFrames, canWrite: () => boolean = () => true) {
   let corrected: ReadingAnchor | undefined;
   let anchors: readonly ReadingAnchor[] = [], frame: number | undefined, disposed = false;
   const cancel = () => { if (frame !== undefined) frames.cancel(frame); frame = undefined; };
   const correct = () => {
-    if (disposed || !released()) return;
+    if (disposed || !released() || !canWrite()) return;
     for (const anchor of anchors) {
       const offset = rows.offset(anchor.key);
       if (offset === undefined) continue;
@@ -33,7 +33,7 @@ export function createActivityAnchor(rows: ReadingRows, released: () => boolean,
     }
   };
   const changed = () => {
-    if (disposed || !released() || !anchors.length) return;
+    if (disposed || !released() || !canWrite() || !anchors.length) return;
     correct(); // ResizeObserver and mutation delivery run before paint.
     if (frame !== undefined) return;
     frame = frames.request(() => { frame = undefined; correct(); });

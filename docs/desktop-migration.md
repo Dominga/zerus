@@ -232,3 +232,13 @@ structural results with fresh runtime evidence before taking writer authority;
 the G3 importer and G1 integration are separate implementation slices. Client
 settings, local layout and drafts retain their existing owners. G1 takes no
 connector, draft or run-layout writer and never restarts agents or other services.
+
+The existing organization-layout owner uses `Layout::try_from_json` before
+enabling saves. It accepts the legacy unversioned/v1 shape within its existing
+byte/member/run limits and preserves unknown extension fields on later saves.
+Malformed/newer/over-limit layouts and repeated member/run identities refuse;
+an unreadable original also pauses layout saves and the Qt run seed for that
+startup. In-memory presentation changes never authorize replacing the retained
+file with defaults. A fresh start must validate it again before writes resume.
+`Layout::from_json` remains a compatibility projection for read-only callers;
+file owners must not use its fallback to authorize a replacement.

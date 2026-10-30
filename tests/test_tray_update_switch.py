@@ -102,7 +102,8 @@ class Switch(Fixture):
         with mock.patch.object(updater, 'MAC', False):
             self.assertEqual(updater.client_drafts_root('dev.zerus.next'),
                              self.home / '.local/share/dev.zerus.next/drafts')
-        with mock.patch.object(updater, 'INSTALL_PREFIX', self.root / 'prefix'):
+        with mock.patch.object(updater, 'MAC', False), \
+                mock.patch.object(updater, 'INSTALL_PREFIX', self.root / 'prefix'):
             self.assertEqual(updater.client_drafts_root('dev.zerus.next'),
                              self.root / 'prefix/share/dev.zerus.next/drafts')
 

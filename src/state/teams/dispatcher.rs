@@ -337,6 +337,9 @@ pub(crate) enum Step {
     StageOut { task: u32, member: String },
     /// U36: an ended stage's detached checkout and temporary folder go.
     StageCleanup { task: u32, run: String },
+    /// #538 N4: a closed stage's own run ended; its folder and checkout are
+    /// released.
+    StageRunEnded { task: u32, run: String },
     /// Tells the lead, in one message, which open tasks Zerus gave to
     /// another member with the same role.
     Rebalanced { tasks: Vec<u32> },
@@ -1074,6 +1077,10 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     }
     for (task, run) in super::stages::to_clean(team) {
         steps.push(Step::StageCleanup { task, run });
+    }
+    // #538 N4: a closed stage's own run ended; its folder and checkout are let go.
+    for (task, run) in super::stages::runs_ended(team) {
+        steps.push(Step::StageRunEnded { task, run });
     }
     // C6: among a member's ready tasks the one with the most transitive
     // dependants goes first, then the lowest number.
@@ -3742,6 +3749,24 @@ fn stage_clean_up(store: &mut Store, team: &Team, task_id: u32, run_id: &str) ->
     })
 }
 
+/// #538 N4: a closed stage's own run ended: release its folder and let its
+/// checkout and temporary folder go (the next tick's StageCleanup removes them).
+fn stage_run_ended(store: &mut Store, team: &Team, task_id: u32, run_id: &str) -> anyhow::Result<()> {
+    change(store, &team.id, |team, events| {
+        if !super::stages::release(team, task_id, run_id) {
+            return Ok(());
+        }
+        let (kind, round) = team
+            .task(task_id)
+            .and_then(|task| task.pipeline_run.as_ref())
+            .and_then(|pipeline| pipeline.runs.iter().find(|run| run.id == run_id))
+            .map(|run| (run.kind.clone(), run.round))
+            .unwrap_or_default();
+        events.push(Event::new("stage_run_ended", json!({"task":task_id,"stage":kind,"round":round,"run":run_id})));
+        Ok(())
+    })
+}
+
 /// U46: records a prepared hand-out that waits for its context action. The
 /// task's `waits` names the request, so the next tick - or a restarted
 /// worker - only reads the session record; the action is not run again.
@@ -4993,9 +5018,33 @@ fn send_all_decided(store: &mut Store, team_id: &str) -> anyhow::Result<()> {
     })
 }
 
+/// U58: a reply that only says it waits (a build lock, a queue) is the member's
+/// status, never its report: the attempt shows No report instead of storing the
+/// wait as the task's outcome.
+fn waits_only(reply: &str) -> bool {
+    let text = reply.trim().to_lowercase();
+    if text.is_empty() || text.chars().count() > 400 {
+        return false;
+    }
+    let waits = [
+        "waiting", "wait for", "wait until", "waiting on", "blocked", "queued", "in the queue", "build lock",
+        "lock is held", "жду", "ожида", "в очереди", "заблокир", "подож",
+    ];
+    if !waits.iter().any(|phrase| text.contains(phrase)) {
+        return false;
+    }
+    let reports = [
+        "report", "done", "finished", "complete", "passed", "failed", "commit", "pushed", "merged", "tests", "fixed",
+        "implemented", "acceptance", "отчёт", "готово", "сделал", "прошл", "провал", "коммит", "исправ", "тест", "принят",
+    ];
+    !reports.iter().any(|marker| text.contains(marker))
+}
+
 /// A2: records the member's last reply as the attempt's report and marks it
 /// captured, so the member may replace it while the task is undecided (A6).
 fn capture_report(store: &mut Store, team_id: &str, task_id: u32, reply: &str, expected_reply: &str) -> anyhow::Result<()> {
+    // U58: a waiting-only reply is a status; the attempt then shows No report.
+    anyhow::ensure!(!waits_only(reply), "the reply only says it waits; it is a status, not a report");
     change(store, team_id, |team, events| {
         let task = team.task(task_id).context("unknown task")?;
         anyhow::ensure!(!task.is_check(), "a check task reports its exit code, not a reply");
@@ -5025,6 +5074,8 @@ fn capture_report(store: &mut Store, team_id: &str, task_id: u32, reply: &str, e
 /// last reply as its report in one change, so the next tick cannot read it as a
 /// resumed turn and clear it.
 fn capture_quiet(store: &mut Store, team_id: &str, task_id: u32, reply: &str) -> anyhow::Result<()> {
+    // U58: a waiting-only reply is a status; the attempt then shows No report.
+    anyhow::ensure!(!waits_only(reply), "the reply only says it waits; it is a status, not a report");
     change(store, team_id, |team, events| {
         let task = team.task(task_id).context("unknown task")?;
         anyhow::ensure!(!task.is_check(), "a check task reports its exit code, not a reply");
@@ -5289,6 +5340,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
         Step::Rebalance { task, from, to } => hand_out(store, &team.id, *task, to, Some(from), host),
         Step::StageOut { task, member } => stage_hand_out(store, &team.id, *task, member, host),
         Step::StageCleanup { task, run } => stage_clean_up(store, team, *task, run),
+        Step::StageRunEnded { task, run } => stage_run_ended(store, team, *task, run),
         Step::StageCommand { task, run } => start_stage_command(store, team, *task, run),
         Step::StageCommandEnded { task, run } => settle_stage_command(store, team, *task, run),
         Step::TellStop { stop } => tell_stop(store, team, stop),
@@ -5661,6 +5713,14 @@ fn inside(folder: &str, root: &str) -> bool {
     folder != root && folder.starts_with(&root)
 }
 
+/// U36/#538: whether `attempt` is this member's: its own attempt, or a stage
+/// run given to it while the stage is open. A stage that ended is neither, so
+/// a run that started too late is refused rather than run elsewhere.
+fn attempt_of(team: &Team, attempt: &str, member: &str) -> bool {
+    team.tasks.iter().any(|task| task.attempts.iter().any(|found| found.id == attempt && found.member == member))
+        || super::pipeline::open_run_task(team, attempt, member).is_some()
+}
+
 /// U21/C1: one queued run, executed outside the member's sandbox. N1: the merge
 /// runs in the member's own folder and only when that is not the team's.
 fn run_outcome(team: &Team, member: &Member, folder: &Path, request: &Value) -> anyhow::Result<super::templates::Outcome> {
@@ -5793,10 +5853,24 @@ fn start_run(
     // on a half-linked binary); the request stays queued for a later tick.
     // #680: a command or land stage's own `team_stage` run in the folder counts
     // too, so a member's run never races the stage it is being checked by.
-    if !super::outbox::running_all(folder).is_empty()
-        || super::super::builds::running_in(folder, now()).iter().any(|claim| claim["source"] == "team_stage")
-    {
-        return Ok(None);
+    // #538 N4: a stage's runs are serialized by the stage's folder as well - the
+    // tester's claim sits in its own folder while the run goes in the
+    // implementer's.
+    let target_attempt = request["attempt"].as_str().unwrap_or_default();
+    let target_template = request["template"].as_str().unwrap_or_default();
+    let mut racing: Vec<PathBuf> = vec![folder.to_path_buf()];
+    if let Ok(Some((stage_folder, _))) = super::stages::run_folder(team, &member.id, target_attempt, target_template) {
+        let known = racing.iter().any(|known| same_path(&known.display().to_string(), &stage_folder.display().to_string()));
+        if !known {
+            racing.push(stage_folder);
+        }
+    }
+    for racing_folder in &racing {
+        if !super::outbox::running_all(racing_folder).is_empty()
+            || super::super::builds::running_in(racing_folder, now()).iter().any(|claim| claim["source"] == "team_stage")
+        {
+            return Ok(None);
+        }
     }
     if request["team"].as_str() != Some(team.id.as_str()) {
         return refuse("a request for another team".into());
@@ -5806,9 +5880,7 @@ fn start_run(
     }
     let attempt = request["attempt"].as_str().unwrap_or_default();
     // U36: a test stage builds under its stage run, as an attempt.
-    if !team.tasks.iter().any(|task| task.open_attempt().is_some_and(|found| found.id == attempt && found.member == member.id))
-        && super::pipeline::open_run_task(team, attempt, &member.id).is_none()
-    {
+    if !attempt_of(team, attempt, &member.id) {
         return refuse(format!("attempt {attempt} does not run for this member"));
     }
     let template = request["template"].as_str().unwrap_or_default();
@@ -5942,11 +6014,9 @@ fn run_request(store: &mut Store, folder: &Path, request: &Value) {
         );
         let attempt = request["attempt"].as_str().unwrap_or_default();
         // C1: the attempt may have ended while the command ran; the result is
-        // still its own, so the claim is not refused for that.
-        anyhow::ensure!(
-            team.tasks.iter().any(|task| task.attempts.iter().any(|found| found.id == attempt && found.member == member.id)),
-            "attempt {attempt} is not this member's"
-        );
+        // still its own, so the claim is not refused for that. U36/#538: a
+        // stage run given to the member is its attempt too.
+        anyhow::ensure!(attempt_of(&team, attempt, &member.id), "attempt {attempt} is not this member's");
         let outcome = run_outcome(&team, &member, folder, request)?;
         Ok(record_run(store, &team, &member, request, &outcome))
     })();
@@ -6383,8 +6453,10 @@ mod tests {
     #[test]
     fn a_held_folder_keeps_the_implementers_next_task_back() {
         let mut t = staged("C:\\proj");
-        // While #1 is in review, dev takes #2 as usual.
-        assert!(steps(&t, &free_sessions(), 100.0).contains(&Step::HandOut { task: 2, member: "dev".into() }));
+        // #538 N5: from the report the test stage ahead holds the folder, so
+        // dev's #2 waits while the review runs too.
+        let found = steps(&t, &free_sessions(), 100.0);
+        assert!(!found.iter().any(|step| matches!(step, Step::HandOut { task: 2, .. } | Step::Rebalance { task: 2, .. })), "{found:?}");
         let run = super::super::pipeline::give_stage(&mut t, 1, "rev").unwrap();
         let mut events = Vec::new();
         ops::apply(&mut t, "report", &json!({"task":1,"attempt":run,"verdict":"pass"}), &Actor::Member("rev".into()), &BTreeSet::new(), &mut events).unwrap();
@@ -7223,6 +7295,49 @@ mod tests {
     }
 
     #[test]
+    fn a_reply_that_only_waits_is_a_status_not_a_report() {
+        // A reply that only says it waits uses these phrases.
+        for text in [
+            "Waiting for the build lock to be released.",
+            "Still queued behind QA's build; I'll wait.",
+            "Жду, пока освободится сборка.",
+        ] {
+            assert!(waits_only(text), "{text}");
+        }
+        // A reply that reports work, even while it waits, is not only a wait.
+        for text in [
+            "Done: the API is in and its tests passed.",
+            "Waiting for the build; meanwhile I fixed the parser and committed it.",
+            "Tests pass, but the build lock is still queued.",
+        ] {
+            assert!(!waits_only(text), "{text}");
+        }
+        // A captured waiting reply stays a status: no report is stored.
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        delivered(&mut t);
+        {
+            let attempt = &mut t.task_mut(1).unwrap().attempts[0];
+            attempt.turn_ended_at = Some(50.0);
+            attempt.turn_reply = "r7".into();
+            attempt.report_ready_at = Some(50.0);
+        }
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+        let error = capture_report(&mut store, &t.id, 1, "Waiting for the build lock held by QA.", "r7").unwrap_err().to_string();
+        assert_eq!(error, "the reply only says it waits; it is a status, not a report");
+        let saved = store.load(&t.id).unwrap().unwrap();
+        let attempt = saved.task(1).unwrap().attempts.last().unwrap();
+        assert_eq!((attempt.state, attempt.report.is_some()), (AttemptState::Delivered, false));
+        // A real report is still captured on the same attempt.
+        capture_report(&mut store, &t.id, 1, "Done: the API is in and its tests passed.", "r7").unwrap();
+        assert!(store.load(&t.id).unwrap().unwrap().task(1).unwrap().attempts.last().unwrap().report.is_some());
+        // The quiet capture refuses a waiting reply too.
+        let error = capture_quiet(&mut store, &t.id, 2, "Queued behind the build.").unwrap_err().to_string();
+        assert_eq!(error, "the reply only says it waits; it is a status, not a report");
+    }
+
+    #[test]
     fn a_closed_question_is_never_sent() {
         let mut team = team();
         delivered(&mut team);
@@ -7632,6 +7747,7 @@ mod tests {
                 folder: "hold".into(),
                 accept: "lead".into(),
                 round: 1,
+                hold_from_report: false,
                 runs: vec![StageRun {
                     id: "S1".into(),
                     stage: 0,
@@ -11921,6 +12037,74 @@ mod tests {
         assert_eq!(started.borrow().as_slice(), [id.to_owned()]);
         crate::state::teams::templates::settings_override(None);
         });
+    }
+
+    /// #538 N4: a stage's runs are serialized by the stage's folder, not only by
+    /// the requester's: the claim sits in the tester's folder while the run goes
+    /// in the implementer's.
+    #[test]
+    fn a_stage_run_is_serialized_by_the_stage_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let lead = dir.path().join("lead");
+            let dev = dir.path().join("dev");
+            let qa = dir.path().join("qa");
+            for folder in [&lead, &dev, &qa] {
+                std::fs::create_dir_all(folder).unwrap();
+            }
+            let mut t = staged(&lead.display().to_string());
+            // Distinct folders: dev's worktree is where a test builds; qa's own
+            // folder only holds its outbox.
+            for member in &mut t.members {
+                member.directory = match member.id.as_str() {
+                    "dev" => dev.display().to_string(),
+                    "qa" => qa.display().to_string(),
+                    _ => lead.display().to_string(),
+                };
+            }
+            // The review passes and the test stage is delivered to qa.
+            super::super::pipeline::give_stage(&mut t, 1, "rev").unwrap();
+            let review = t.task(1).unwrap().pipeline_run.as_ref().unwrap().open_run().unwrap().id.clone();
+            let mut events = Vec::new();
+            ops::apply(&mut t, "report", &json!({"task":1,"attempt":review,"verdict":"pass","text":"Fine"}), &Actor::Member("rev".into()), &BTreeSet::new(), &mut events).unwrap();
+            let prepared = super::super::stages::prepare(&t, 1).unwrap();
+            let stage_id = super::super::pipeline::give_stage(&mut t, 1, "qa").unwrap();
+            super::super::stages::record(&mut t, 1, &stage_id, &prepared);
+            assert_eq!(t.task(1).unwrap().status, TaskStatus::InTest);
+            let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+            // A run is going in the stage's folder (dev's worktree).
+            let other = "88888888-8888-4888-8888-888888888888";
+            let marker = json!({"request_id":other,"started":crate::state::now(),"timeout_secs":3600.0,"label":"cargo-test","command":"cargo test"});
+            super::super::outbox::write_running(&dev, other, &marker).unwrap();
+            // qa's own folder is free, but the stage's is not: its claim waits.
+            let id = "77777777-7777-4777-8777-777777777777";
+            let request = json!({"op":"run","request_id":id,"team":t.id,"member":"qa","attempt":stage_id,"template":"cargo-test","args":{},
+                "input":{"request_id":id,"team":t.id,"member":"qa","attempt":stage_id,"template":"cargo-test","args":{}}});
+            let started = std::cell::RefCell::new(Vec::<String>::new());
+            let spawn = |_: &Path, request: &Value| {
+                started.borrow_mut().push(request["request_id"].as_str().unwrap_or_default().to_owned());
+                Ok(())
+            };
+            let member = t.member("qa").unwrap().clone();
+            start_run(&mut store, &t, &member, &qa, &request, &spawn).unwrap();
+            assert!(started.borrow().is_empty(), "the stage folder's run holds the claim");
+            // It ends: the same claim starts.
+            std::fs::remove_file(super::super::outbox::running_path(&dev, other)).unwrap();
+            start_run(&mut store, &t, &member, &qa, &request, &spawn).unwrap();
+            assert_eq!(started.borrow().as_slice(), [id.to_owned()]);
+        });
+    }
+
+    #[test]
+    fn a_stage_run_is_the_stage_members_attempt() {
+        let mut t = staged("C:\\proj");
+        super::super::pipeline::give_stage(&mut t, 1, "rev").unwrap();
+        let review = t.task(1).unwrap().pipeline_run.as_ref().unwrap().open_run().unwrap().id.clone();
+        assert!(attempt_of(&t, &review, "rev"), "the stage member's open stage run");
+        assert!(!attempt_of(&t, &review, "qa"), "another member's stage run");
+        assert!(attempt_of(&t, "a1", "dev"), "the implementer's own attempt");
+        assert!(!attempt_of(&t, "nope", "dev"));
     }
 
     #[test]

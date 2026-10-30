@@ -588,10 +588,15 @@ pub(crate) fn phase_summary(team: &Team) -> Vec<serde_json::Value> {
                 team.tasks.iter().any(|task| task.phase != n && order_of(task.phase) < target && !task.status.finished())
             };
             let blocked = blocked || queued;
+            // U58: a phase whose tasks are all cancelled reads cancelled; the
+            // dashboard hides it with its tasks unless the caller asks for them.
+            let cancelled = phase_cancelled(team, n);
             // N41 (spec 10.2): nothing is approved before Approve & Run, phase
             // 1 included.
             let approved = !planning && (n == 1 || record.is_some_and(|phase| phase.state.is_accepted()));
-            let status = if !approved || record.is_some_and(|phase| phase.state.is_draft()) {
+            let status = if cancelled {
+                "cancelled"
+            } else if !approved || record.is_some_and(|phase| phase.state.is_draft()) {
                 "draft"
             } else if open == 0 {
                 "done"
@@ -604,7 +609,9 @@ pub(crate) fn phase_summary(team: &Team) -> Vec<serde_json::Value> {
             };
             // U25: the owner's phase model - draft, rejected (sent back),
             // queued, running, done; every phase is "planned" while planning.
-            let state = if planning {
+            let state = if cancelled {
+                "cancelled"
+            } else if planning {
                 "planned"
             } else if record.is_some_and(|phase| phase.state == PhaseState::Rejected) {
                 "rejected"
@@ -643,6 +650,23 @@ pub(crate) fn phase_summary(team: &Team) -> Vec<serde_json::Value> {
             })
         })
         .collect()
+}
+
+/// U58: a phase whose tasks are all cancelled reads cancelled - it is hidden
+/// with its tasks unless the caller asks for cancelled work. A discarded phase
+/// keeps its own state, and a phase with no tasks is not cancelled.
+pub(crate) fn phase_cancelled(team: &Team, n: u32) -> bool {
+    if team.phases.iter().find(|phase| phase.n == n).is_some_and(|phase| phase.state == PhaseState::Discarded) {
+        return false;
+    }
+    let mut any = false;
+    for task in team.tasks.iter().filter(|task| task.phase == n) {
+        any = true;
+        if task.status != TaskStatus::Cancelled {
+            return false;
+        }
+    }
+    any
 }
 
 /// U25: the open tasks of the running phases, the only ones that can make a

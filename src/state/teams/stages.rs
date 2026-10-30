@@ -77,13 +77,50 @@ fn file_state(folder: &Path, file: &str) -> Value {
 }
 
 /// What changed in the checked attempt: its commits (B4) in a Git checkout,
-/// otherwise the report's changed files with their state now.
+/// otherwise the report's changed files as they were at the report (#538 N5),
+/// or - for an old record that kept no report state - as they are now.
 pub(crate) fn changed(task: &Task, run: &StageRun, folder: &str, git: bool) -> Vec<Value> {
     let Some(attempt) = checked_attempt(task, run) else { return Vec::new() };
     if git && !attempt.commits.is_empty() {
         return attempt.commits.iter().map(|commit| json!({"commit":commit.sha,"files":commit.files})).collect();
     }
+    if !attempt.report_files.is_empty() {
+        return attempt.report_files.clone();
+    }
     reported_files(attempt).iter().map(|file| file_state(Path::new(folder), file)).collect()
+}
+
+/// #538 N5: the reported files' state at the report itself, kept on the
+/// attempt: a later stage hashes the files the report named as the report left
+/// them, not as another task left them by the stage's delivery.
+pub(crate) fn report_files(team: &Team, task: &Task) -> Vec<Value> {
+    let Some(attempt) = task.attempts.iter().rev().find(|attempt| attempt.state == AttemptState::Reported) else { return Vec::new() };
+    let folder = task_folder(team, task, &StageRun { attempt: attempt.n, ..Default::default() }).unwrap_or_default();
+    reported_files(attempt).iter().map(|file| file_state(Path::new(&folder), file)).collect()
+}
+
+/// #538 N5: whether the task's test stage may need the implementer's
+/// folder, so it is held from the report: the hold rule, or a checkout rule
+/// that will fall back (the attempt made no commits, or the folder has no Git).
+pub(crate) fn hold_from_report(team: &Team, task_id: u32) -> bool {
+    let Some(task) = team.task(task_id) else { return false };
+    let Some(pipeline) = task.pipeline_run.as_ref() else { return false };
+    if !pipeline.stages.iter().any(|stage| stage.kind == "test") {
+        return false;
+    }
+    if pipeline.folder == "hold" {
+        return true;
+    }
+    if pipeline.folder != "checkout" {
+        return false;
+    }
+    let Some(attempt) = task.attempts.iter().rev().find(|attempt| attempt.state == AttemptState::Reported) else { return false };
+    if attempt.commits.is_empty() {
+        return true;
+    }
+    task_folder(team, task, &StageRun { attempt: attempt.n, ..Default::default() })
+        .map(|folder| !is_git(&folder))
+        .unwrap_or(false)
 }
 
 /// Where a stage works, prepared before its hand-off.
@@ -198,24 +235,45 @@ pub(crate) fn record(team: &mut Team, task_id: u32, run_id: &str, prepared: &Pre
 /// holds it under the hold rule; a command or land stage holds it from the
 /// report on whatever its folder rule, so the checked commit stays checked and
 /// landable (a checkout only keeps the command off the implementer's folder).
+/// #538 N5: a test stage that may need the folder holds it from the report,
+/// before it opens. #538 N4: a stage that ended while its own run went on keeps
+/// the folder (or its checkout's folder) until that run ends.
 pub(crate) fn held(team: &Team, member: &str) -> Option<u32> {
+    let folder = team.member(member).and_then(|member| member_folder_path(team, member).ok()).unwrap_or_default();
     team.tasks.iter().find_map(|task| {
         let pipeline = task.pipeline_run.as_ref()?;
+        if pipeline.runs.iter().any(|run| run.awaiting_run && same_folder(&run.folder, &folder) && run_live(team, run)) {
+            return Some(task.id);
+        }
         let run = pipeline.open_run()?;
         let holds = match run.kind.as_str() {
             "test" => {
                 if run.state == StageState::Waiting {
-                    pipeline.folder != "checkout"
+                    // #538 N5: a checkout that will fall back holds the folder
+                    // from the report on; one that checks a commit does not.
+                    pipeline.folder != "checkout" || pipeline.hold_from_report
                 } else {
                     run.holds
                 }
             }
             "command" | "land" => true,
-            _ => false,
+            // #538 N5: a review (or any stage) before a test that may need the
+            // folder holds it from the report.
+            _ => pipeline.hold_from_report && pipeline.stages.iter().skip(run.stage + 1).any(|stage| stage.kind == "test"),
         };
         let implementer = checked_attempt(task, run).map(|attempt| attempt.member.as_str()).unwrap_or(task.assignee.as_str());
         (holds && implementer == member).then_some(task.id)
     })
+}
+
+/// Whether two folder paths name the same place (the dispatcher's rule).
+fn same_folder(left: &str, right: &str) -> bool {
+    let key = |path: &str| {
+        let path = path.strip_prefix(r"\\?\").unwrap_or(path).replace('\\', "/");
+        let path = path.trim_end_matches('/').to_owned();
+        if path.as_bytes().get(1) == Some(&b':') { path.to_lowercase() } else { path }
+    };
+    !left.is_empty() && key(left) == key(right)
 }
 
 /// The members busy with a stage they were given.
@@ -244,14 +302,67 @@ pub(crate) fn waiting(team: &Team) -> Vec<(u32, Vec<String>)> {
 }
 
 /// The stages that ended with a checkout or a temporary folder left to remove.
+/// #538 N4: a stage whose own run still goes keeps them until that run ends.
 pub(crate) fn to_clean(team: &Team) -> Vec<(u32, String)> {
     team.tasks
         .iter()
         .filter_map(|task| task.pipeline_run.as_ref().map(|run| (task.id, run)))
         .flat_map(|(id, pipeline)| {
-            pipeline.runs.iter().filter(|run| !run.state.open() && (!run.checkout.is_empty() || !run.temp.is_empty())).map(move |run| (id, run.id.clone()))
+            pipeline
+                .runs
+                .iter()
+                .filter(|run| !run.state.open() && (!run.awaiting_run || !run_live(team, run)) && (!run.checkout.is_empty() || !run.temp.is_empty()))
+                .map(move |run| (id, run.id.clone()))
         })
         .collect()
+}
+
+/// #538 N4: the closed stages whose own run ended, so the dispatcher releases
+/// their folder and lets the checkout and temporary folder go.
+pub(crate) fn runs_ended(team: &Team) -> Vec<(u32, String)> {
+    team.tasks
+        .iter()
+        .filter_map(|task| task.pipeline_run.as_ref().map(|pipeline| (task.id, pipeline)))
+        .flat_map(|(id, pipeline)| {
+            pipeline
+                .runs
+                .iter()
+                .filter(|run| run.awaiting_run && !run_live(team, run))
+                .map(move |run| (id, run.id.clone()))
+        })
+        .collect()
+}
+
+/// #538 N4: the closed stage's own run ended: release its folder and let its
+/// checkout and temporary folder go.
+pub(crate) fn release(team: &mut Team, task_id: u32, run_id: &str) -> bool {
+    let Some(run) = team
+        .task_mut(task_id)
+        .and_then(|task| task.pipeline_run.as_mut())
+        .and_then(|pipeline| pipeline.runs.iter_mut().find(|run| run.id == run_id))
+    else {
+        return false;
+    };
+    let was = run.awaiting_run;
+    run.awaiting_run = false;
+    was
+}
+
+/// #538 N4: whether a closed stage's own run still goes: a `hgs team run` claim
+/// in its member's folder (past its bound is not), or Zerus's own stage build.
+fn run_live(team: &Team, run: &StageRun) -> bool {
+    if let Some(member) = team.member(&run.member) {
+        if let Ok(folder) = member_folder_path(team, member) {
+            if let Some(marker) = super::outbox::running(Path::new(&folder), &run.id) {
+                let started = marker["started"].as_f64().unwrap_or(0.0);
+                let bound = marker["timeout_secs"].as_f64().unwrap_or(1800.0);
+                if started > 0.0 && super::super::now() <= started + bound + 120.0 {
+                    return true;
+                }
+            }
+        }
+    }
+    super::super::builds::record(&run.id, super::super::now()).is_some_and(|record| record["status"] == "running")
 }
 
 /// A member's stage queue for status: the stage it has, then the waiting
@@ -276,7 +387,20 @@ pub(crate) fn queue(team: &Team, member: &str) -> Vec<Value> {
 /// A review runs nothing; a test runs builds and tests only, in the stage's
 /// folder, and only while the stage is open.
 pub(crate) fn run_folder(team: &Team, member: &str, attempt: &str, template: &str) -> anyhow::Result<Option<(PathBuf, String)>> {
-    let Some(task) = pipeline::open_run_task(team, attempt, member) else { return Ok(None) };
+    let Some(task) = pipeline::open_run_task(team, attempt, member) else {
+        // #538 N4: a stage that ended before its run started never falls back to
+        // the member's own folder; the request is refused instead. An open stage
+        // of another member is simply not this member's run.
+        let open_any = team
+            .tasks
+            .iter()
+            .any(|task| task.pipeline_run.as_ref().and_then(PipelineRun::open_run).is_some_and(|run| run.id == attempt));
+        ensure!(
+            open_any || pipeline::run_member(team, attempt).is_none(),
+            "The stage ended before this run started; ask again with a new request_id"
+        );
+        return Ok(None);
+    };
     let run = team.task(task).and_then(|task| task.pipeline_run.as_ref()).and_then(PipelineRun::open_run).context("The stage ended")?;
     ensure!(run.kind == "test", "A review stage reads the task's files; it runs no command");
     ensure!(TEST_TEMPLATES.contains(&template), "A test stage runs builds and tests only ({}), not {template}", TEST_TEMPLATES.join(", "));
@@ -382,6 +506,11 @@ mod tests {
             .unwrap();
         assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
         String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    /// The team as the store keeps it: serde_json::to_string, then read back.
+    fn round_trip(team: &Team) -> Team {
+        serde_json::from_str(&serde_json::to_string(team).unwrap()).unwrap()
     }
 
     fn write(folder: &Path, file: &str, text: &str) {
@@ -526,7 +655,9 @@ mod tests {
             assert!(text.contains(&format!("- commit {} (2 files)", &sha[..12])), "{text}");
             assert!(text.contains("Acceptance criteria:\n- Paged") && text.contains("Backend's report:\nDone: two() added"), "{text}");
             assert!(text.contains(&format!("\"attempt\":\"{review}\"")) && text.contains("Read only: a review runs no command"), "{text}");
-            assert_eq!(held(&team, "dev"), None, "a review does not hold the folder");
+            // #538 N5: the test stage ahead holds the folder from the report,
+            // so the implementer's next task waits during the review.
+            assert_eq!(held(&team, "dev"), Some(1), "the test ahead holds the folder from the report");
             verdict(&mut team, "rev", &review);
             // The test holds the worktree from the moment it waits: dev's #2
             // waits and says so.
@@ -540,7 +671,10 @@ mod tests {
             assert_eq!(held(&team, "dev"), Some(1));
             verdict(&mut team, "qa", &test);
             assert_eq!(held(&team, "dev"), None, "the hold ends with the test");
-            // The ended test's temporary folder goes.
+            // The stage closed; its own run (there was none) is released on the
+            // dispatcher's tick, then the temporary folder goes.
+            assert_eq!(runs_ended(&team), [(1, test.clone())]);
+            assert!(release(&mut team, 1, &test));
             let ended = run_of(&team, &test);
             assert_eq!(to_clean(&team), [(1, test.clone())]);
             clean_up(&ended).unwrap();
@@ -647,12 +781,127 @@ mod tests {
             // Only its own member, and the implementer never.
             assert_eq!(run_folder(&team, "dev", &test, "cargo-test").unwrap(), None);
             assert_eq!(run_folder(&team, "rev", &test, "cargo-test").unwrap(), None);
-            // The stage ends: the same request is no longer a stage's.
+            // The stage ends: the same request is refused - it never falls back
+            // to the member's own folder - and it is no stage of this member any
+            // more.
             verdict(&mut team, "qa", &test);
-            assert_eq!(run_folder(&team, "qa", &test, "cargo-test").unwrap(), None);
+            let error = run_folder(&team, "qa", &test, "cargo-test").unwrap_err().to_string();
+            assert!(error.contains("The stage ended before this run started"), "{error}");
             assert_eq!(pipeline::open_run_task(&team, &test, "qa"), None);
             clean_up(&run_of(&team, &test)).unwrap();
             assert!(!Path::new(&temp).exists(), "its temporary folder goes with it");
+        });
+    }
+
+    #[test]
+    fn a_checkout_test_holds_the_folder_from_the_report_only_when_it_will_fall_back() {
+        isolated(|dir| {
+            // A folder without Git: the checkout cannot be made, so the test
+            // will work in the implementer's folder; the report holds it at once.
+            let project = project(dir, false);
+            let (mut team, folder) = team_in(&project, MemberFolder::Shared, &checkout_catalog(), "code");
+            report(&mut team, &folder, false);
+            // The store saves the team and every tick reads it back: the hold
+            // from the report must survive that.
+            let mut team = round_trip(&team);
+            let (review, prepared) = give(&mut team, "rev");
+            assert!(!prepared.holds && prepared.checkout.is_empty(), "the review prepares nothing");
+            assert_eq!(held(&team, "dev"), Some(1), "the checkout will fall back, so the folder is held from the report");
+            verdict(&mut team, "rev", &review);
+            let (_, prepared) = give(&mut team, "qa");
+            assert!(prepared.holds && Path::new(&prepared.folder) == folder, "the test falls back to the held folder");
+        });
+    }
+
+    #[test]
+    fn the_reported_files_are_hashed_at_the_report_not_at_the_stage() {
+        isolated(|dir| {
+            let project = project(dir, false);
+            let (mut team, folder) = team_in(&project, MemberFolder::Shared, &builtin(), "code");
+            report(&mut team, &folder, false);
+            // The report's file state is saved with the team and read back.
+            let mut team = round_trip(&team);
+            let reported = team.task(1).unwrap().attempts[0].report_files.clone();
+            let before = reported.iter().find(|item| item["path"] == "src/lib.rs").cloned().unwrap();
+            assert!(before["size"].as_u64().unwrap_or(0) > 0, "{before}");
+            // Another task edits the report's file before the review is given.
+            write(&folder, "src/lib.rs", "pub fn one() {}\npub fn two() {}\npub fn three() {}\n");
+            let (_, prepared) = give(&mut team, "rev");
+            let after = prepared.changed.iter().find(|item| item["path"] == "src/lib.rs").cloned().unwrap();
+            assert_eq!(after, before, "the stage sees the report's state, not the later one");
+        });
+    }
+
+    #[test]
+    fn a_closed_stage_holds_its_folder_until_its_own_run_ends() {
+        isolated(|dir| {
+            let project = project(dir, true);
+            let (mut team, worktree) = team_in(&project, MemberFolder::Worktree, &builtin(), "code");
+            report(&mut team, &worktree, true);
+            let (review, _) = give(&mut team, "rev");
+            verdict(&mut team, "rev", &review);
+            let (test, _) = give(&mut team, "qa");
+            // The tester's run is claimed in the tester's own folder under the
+            // stage's id, and it goes in the stage's folder (dev's worktree).
+            let tester = member_folder_path(&team, team.member("qa").unwrap()).unwrap();
+            let marker = json!({"request_id":test,"started":crate::state::now(),"timeout_secs":3600.0,"label":"cargo-test","command":"cargo test"});
+            super::super::outbox::write_running(Path::new(&tester), &test, &marker).unwrap();
+            // The lead accepts: the stage ends, but its run still goes.
+            let mut events = Vec::new();
+            apply(&mut team, "accept", &json!({"task":1,"reason":"Fine"}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+            // The store saves the team and the next tick reads it back: the
+            // closed stage's run must survive that.
+            let mut team = round_trip(&team);
+            assert_eq!(held(&team, "dev"), Some(1), "the folder stays held while the run goes");
+            assert!(to_clean(&team).is_empty(), "the test's temporary folder stays too");
+            assert!(runs_ended(&team).is_empty(), "the run is still going");
+            // It ends: the folder and the temporary folder are released.
+            std::fs::remove_file(super::super::outbox::running_path(Path::new(&tester), &test)).unwrap();
+            assert_eq!(runs_ended(&team), [(1, test.clone())]);
+            assert!(release(&mut team, 1, &test));
+            assert_eq!(held(&team, "dev"), None);
+            assert_eq!(to_clean(&team), [(1, test.clone())]);
+            clean_up(&run_of(&team, &test)).unwrap();
+        });
+    }
+
+    #[test]
+    fn the_stage_facts_survive_a_save_and_reload_and_stay_out_of_the_status_wire() {
+        isolated(|dir| {
+            let project = project(dir, true);
+            let (mut team, worktree) = team_in(&project, MemberFolder::Worktree, &builtin(), "code");
+            report(&mut team, &worktree, true);
+            // The hold from the report and the report's file state are saved
+            // with the team and read back (the store writes serde_json::to_string).
+            let mut team = round_trip(&team);
+            assert!(team.task(1).unwrap().pipeline_run.as_ref().unwrap().hold_from_report);
+            assert!(!team.task(1).unwrap().attempts[0].report_files.is_empty());
+            assert_eq!(held(&team, "dev"), Some(1), "the hold survives the save");
+            // They never reach a client.
+            let view = super::super::commands::view_with(&team, &[], None);
+            assert!(view["tasks"][0]["attempts"][0].get("report_files").is_none(), "{view}");
+            assert!(view["tasks"][0]["pipeline_run"].get("hold_from_report").is_none(), "{view}");
+            // A closed stage's run is saved too and keeps the folder held.
+            let (review, _) = give(&mut team, "rev");
+            verdict(&mut team, "rev", &review);
+            let (test, _) = give(&mut team, "qa");
+            let tester = member_folder_path(&team, team.member("qa").unwrap()).unwrap();
+            let marker = json!({"request_id":test,"started":crate::state::now(),"timeout_secs":3600.0,"label":"cargo-test","command":"cargo test"});
+            super::super::outbox::write_running(Path::new(&tester), &test, &marker).unwrap();
+            let mut events = Vec::new();
+            apply(&mut team, "accept", &json!({"task":1,"reason":"Fine"}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+            let mut team = round_trip(&team);
+            assert!(team.task(1).unwrap().pipeline_run.as_ref().unwrap().runs.iter().any(|run| run.id == test && run.awaiting_run));
+            assert_eq!(held(&team, "dev"), Some(1), "the hold survives the save");
+            let view = super::super::commands::view_with(&team, &[], None);
+            assert!(
+                view["tasks"][0]["pipeline_run"]["runs"].as_array().unwrap().iter().all(|run| run.get("awaiting_run").is_none()),
+                "{view}"
+            );
+            std::fs::remove_file(super::super::outbox::running_path(Path::new(&tester), &test)).unwrap();
+            assert_eq!(runs_ended(&team), [(1, test.clone())]);
+            assert!(release(&mut team, 1, &test));
+            assert_eq!(held(&team, "dev"), None);
         });
     }
 

@@ -728,6 +728,34 @@ impl DraftStore {
         );
     }
 
+    /// Clear a successfully submitted snapshot only while its content still
+    /// matches. The comparison and save share one writer job: an edit queued
+    /// before it is preserved, and an edit queued after it wins afterwards.
+    pub fn clear_if_unchanged(
+        &self,
+        key: &str,
+        expected: Draft,
+        done: impl FnOnce(Result<bool, String>) + Send + 'static,
+    ) {
+        let (root, owned) = (self.root.clone(), key.to_owned());
+        self.writer.enqueue(key, false, Box::new(move || {
+            let (mut current, valid) = load_once(&root, &owned);
+            let result = if !valid {
+                Err(NOT_RESTORED.to_owned())
+            } else if current.draft.text != expected.text || current.draft.attachments != expected.attachments {
+                Ok(false)
+            } else {
+                current.draft = Draft::default();
+                current.position = 0;
+                current.anchor = 0;
+                current.sending = false;
+                current.uncertain = false;
+                save_direct(&root, &owned, &current).map(|()| true)
+            };
+            done(result);
+        }));
+    }
+
     /// One page of Saved drafts, after every save queued before it.
     pub fn index(&self, page: IndexPage, done: impl FnOnce(Page) + Send + 'static) {
         let root = self.root.clone();

@@ -33,6 +33,15 @@ describe("selected task draft editor", () => {
     s.follow(target("one")); await tick(); await s.submit(); await tick(); expect(p.submit).toHaveBeenCalledTimes(1); expect(s.view()?.recovery).toBe(true);
     await s.submit(true); expect(p.submit).toHaveBeenNthCalledWith(2, 1, 0, true);
   });
+  it("passes an explicit feedback snapshot once and ignores changed choices during recovery", async () => {
+    const p = port({ submit: vi.fn().mockResolvedValueOnce(view("one", { recovery: true, error: "unknown" })).mockResolvedValueOnce(view("one", { saved: true, text: "" })) }), s = createTaskEditor(p);
+    const delivery = { mode: "send" as const, stage_at: 123, dispatch_id: "original" };
+    s.follow(target("one")); await tick(); await s.submit(false, delivery);
+    expect(p.submit).toHaveBeenNthCalledWith(1, 1, 0, false, delivery);
+    await tick(); expect(p.submit).toHaveBeenCalledOnce();
+    await s.submit(true, { mode: "reopen", stage_at: 456, dispatch_id: "changed" });
+    expect(p.submit).toHaveBeenNthCalledWith(2, 1, 0, true);
+  });
   it("checkpoints an attachment save failure before switching away", async () => {
     const file = { path: "cache/example/file.txt", name: "file.txt", mime: "text/plain", bytes: 4, thumbnail: false, reference: "[File #1]" };
     const p = port({ pick: vi.fn().mockResolvedValue(view("one", { files: [file], unsaved: true, error: "disk full", rev: 1 })) }), s = createTaskEditor(p);

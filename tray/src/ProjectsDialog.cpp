@@ -39,6 +39,7 @@
 #include <QSignalBlocker>
 #include <QSplitter>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QTableWidget>
 #include <QVBoxLayout>
 #include <QAction>
@@ -404,7 +405,9 @@ ProjectsDialog::ProjectsDialog(HgsClient *client, QWidget *parent, bool embedded
     m_folders->verticalHeader()->hide(); m_folders->verticalHeader()->setDefaultSectionSize(31); m_folders->setShowGrid(false);
     m_folders->setSelectionBehavior(QAbstractItemView::SelectRows); m_folders->setSelectionMode(QAbstractItemView::SingleSelection);
     m_folders->setWordWrap(false); m_folders->setTextElideMode(Qt::ElideMiddle);m_folders->setFrameShape(QFrame::NoFrame);
-    m_folders->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);m_folders->setFocusPolicy(Qt::StrongFocus);
+    // #700 (L3): Name and Kind shrink first; narrower still, the table scrolls sideways.
+    m_folders->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);m_folders->setFocusPolicy(Qt::StrongFocus);
+    m_folders->installEventFilter(this);
     m_folders->setItemDelegateForColumn(1,new FolderMachineDelegate(m_folders));
     m_folders->setEditTriggers(QAbstractItemView::NoEditTriggers); folderLayout->addWidget(m_folders);
     auto *folderActions = new QHBoxLayout; folderActions->setSpacing(6);
@@ -425,12 +428,13 @@ ProjectsDialog::ProjectsDialog(HgsClient *client, QWidget *parent, bool embedded
     m_folderSplitter->handle(1)->setToolTip(tr("Drag to resize the folder's worktrees."));
     // #646: the folders keep their rows' height; dragging the handle sizes
     // the selected folder's worktrees, remembered for the next time.
-    connect(m_folderSplitter,&QSplitter::splitterMoved,this,[this]{
-        if(!m_folderSplitInitialized||!m_worktrees->isVisible())return;
-        m_worktreeHeight=qMax(120,m_folderSplitter->sizes().value(1));
-        QSettings().setValue("workspace/projectFolderWorktrees",m_worktreeHeight);
-        QTimer::singleShot(0,this,[this]{fitFolders();});
-    });
+    // #700 (N3): the handle's drag sets the worktrees' height from where it
+    // was pressed: the mouse's distance from the press, counted once, in its
+    // bounds (fitFolders moves the handle back after every refit, so Qt's
+    // own splitter move would count the distance again). It also grows the
+    // worktrees when the folder rows are already at their minimum. The
+    // height is remembered when the handle is let go.
+    m_folderSplitter->handle(1)->installEventFilter(this);
     m_worktrees->filterRequested=[this](const QString &path,bool checkout){const auto folder=selectedFolder();emit folderSessionsRequested(folder.machine==m_fleet.local().host?QString():folder.machine,path,checkout);};
     m_worktrees->sessionRequested=[this](const QString &name,const QString &archive){const auto folder=selectedFolder();emit relatedSessionRequested(folder.machine==m_fleet.local().host?QString():folder.machine,name,archive);};
     m_worktrees->launchRequested=[this](const QString &path){const auto folder=selectedFolder();if(folderLaunchProblem(folder).isEmpty())emit newPathSessionRequested(currentId(),folder.machine==m_fleet.local().host?QString():folder.machine,path);};
@@ -469,14 +473,19 @@ ProjectsDialog::ProjectsDialog(HgsClient *client, QWidget *parent, bool embedded
     for(const char *name:{"inspectorPanelTitle","ironRulesCount"})if(auto *own=m_rules->findChild<QLabel *>(name))own->hide();
     m_rules->changed=[this](int count){m_rulesBlock->setNote(QString::number(count));};
     auto *foot = new QHBoxLayout; m_remove = smallButton(tr("Delete project…"),"deleteProject"); PageCards::danger(m_remove); foot->addWidget(m_remove); foot->addStretch(); form->addLayout(foot);
-    m_status = new QLabel; m_status->setObjectName("projectsStatus"); m_status->setTextFormat(Qt::PlainText); m_status->setWordWrap(true); form->addWidget(m_status);
+    // #700 (N4): the page's message stays in view under the details, outside their scroll.
+    m_status = new QLabel; m_status->setObjectName("projectsStatus"); m_status->setTextFormat(Qt::PlainText); m_status->setWordWrap(true);
+    m_status->setContentsMargins(22,6,22,8); m_status->hide();
     // The room left over goes under the blocks.
     form->addStretch(1);
     // U25: a short window scrolls the project instead of squeezing its blocks.
     auto *rightScroll=new QScrollArea;rightScroll->setObjectName("projectDetailsScroll");rightScroll->setWidgetResizable(true);
     rightScroll->setFrameShape(QFrame::NoFrame);rightScroll->setWidget(right);rightScroll->setAutoFillBackground(false);
     rightScroll->viewport()->setAutoFillBackground(false);right->setAutoFillBackground(false);
-    split->addWidget(rightScroll); split->setStretchFactor(0,0); split->setStretchFactor(1,1); split->setSizes({300,900});
+    auto *rightBox=new QWidget;rightBox->setObjectName("projectDetailsColumn");
+    auto *rightColumn=new QVBoxLayout(rightBox);rightColumn->setContentsMargins(0,0,0,0);rightColumn->setSpacing(0);
+    rightColumn->addWidget(rightScroll,1);rightColumn->addWidget(m_status);
+    split->addWidget(rightBox); split->setStretchFactor(0,0); split->setStretchFactor(1,1); split->setSizes({300,900});
     if (!embedded) { auto *close = new QDialogButtonBox(QDialogButtonBox::Close); close->setContentsMargins(22,0,22,0); connect(close,&QDialogButtonBox::rejected,this,&QDialog::accept); root->addWidget(close); }
     connect(m_add,&QPushButton::clicked,this,&ProjectsDialog::addProject);
     connect(m_remove,&QPushButton::clicked,this,&ProjectsDialog::removeProject);
@@ -486,7 +495,7 @@ ProjectsDialog::ProjectsDialog(HgsClient *client, QWidget *parent, bool embedded
     connect(m_removeFolder,&QPushButton::clicked,this,[this]{
         // U25 (spec 7): a team member's own worktree or clone goes with its team.
         bool team=false;folderKind(selectedFolder(),&team);
-        if(team){m_status->setText(tr("Team folders are removed with the team"));m_status->setProperty("pageError",true);m_status->style()->polish(m_status);return;}
+        if(team){setStatus(tr("Team folders are removed with the team"),true);return;}
         removeFolder(currentId(),selectedFolder().id);
     });
     connect(m_editFolder,&QPushButton::clicked,this,[this]{const int row=m_folders->currentRow();if(row>=0)editFolder(m_folders->item(row,0)->data(Qt::UserRole).toString());});
@@ -499,6 +508,7 @@ ProjectsDialog::ProjectsDialog(HgsClient *client, QWidget *parent, bool embedded
     connect(m_name,&QLineEdit::editingFinished,this,[this]{finishRename(true);});
     connect(m_color,&QPushButton::clicked,this,&ProjectsDialog::chooseColor);
     m_worktreeHeight=QSettings().value("workspace/projectFolderWorktrees",0).toInt();
+    if(m_worktreeHeight>0)m_worktreeHeight=boundedWorktrees(m_worktreeHeight);
     m_live=new QTimer(this);m_live->setSingleShot(true);m_live->setInterval(1000);
     connect(m_live,&QTimer::timeout,this,&ProjectsDialog::refreshLive);
     connect(m_client,&HgsClient::projectsForHostReady,this,&ProjectsDialog::importLegacy);
@@ -507,6 +517,21 @@ ProjectsDialog::ProjectsDialog(HgsClient *client, QWidget *parent, bool embedded
 }
 bool ProjectsDialog::eventFilter(QObject *watched, QEvent *event)
 {
+    if(m_folderSplitter&&m_folderSplitter->count()>1&&watched==m_folderSplitter->handle(1)){
+        const auto *mouse=static_cast<QMouseEvent *>(event);
+        if(event->type()==QEvent::MouseButtonPress&&mouse->button()==Qt::LeftButton&&m_worktrees->isVisible()){
+            m_dragging=true;m_dragFrom=m_folderSplitter->sizes().value(1);m_dragY=qRound(mouse->globalPosition().y());return true;
+        }
+        if(event->type()==QEvent::MouseMove&&m_dragging){
+            const int height=boundedWorktrees(m_dragFrom-(qRound(mouse->globalPosition().y())-m_dragY));
+            if(height!=m_worktreeHeight){m_worktreeHeight=height;fitFolders();}
+            return true;
+        }
+        if(event->type()==QEvent::MouseButtonRelease&&m_dragging){
+            m_dragging=false;QSettings().setValue("workspace/projectFolderWorktrees",m_worktreeHeight);return true;
+        }
+    }
+    if(m_folders&&watched==m_folders&&event->type()==QEvent::Resize)QTimer::singleShot(0,this,[this]{fitFolderColumns();});
     if(watched==m_headerName&&event->type()==QEvent::MouseButtonRelease&&static_cast<QMouseEvent *>(event)->button()==Qt::LeftButton){startRename();return true;}
     if(watched==m_name&&event->type()==QEvent::KeyPress){
         // Both keys stop here: QLineEdit passes Enter on, and the dialog
@@ -517,9 +542,42 @@ bool ProjectsDialog::eventFilter(QObject *watched, QEvent *event)
     }
     return QDialog::eventFilter(watched,event);
 }
+int ProjectsDialog::boundedWorktrees(int height) const
+{
+    // At least a few rows; at most two thirds of the page.
+    return qBound(120,height,qMax(240,this->height()*2/3));
+}
+void ProjectsDialog::fitFolderColumns()
+{
+    // Computer keeps its width; Name and Kind give up room first, down to
+    // 110 px each, while Folder stretches. Narrower still, Folder keeps 180 px
+    // and the table scrolls sideways to Kind.
+    const int available=m_folders->viewport()->width();
+    if(available<=0)return;
+    const int computer=m_folders->columnWidth(1),folder=180,name=240,kind=220,least=110;
+    const int spare=available-computer-folder;
+    const double share=spare>=name+kind?1.0:std::max(0.0,double(spare)/double(name+kind));
+    const int nameWidth=std::max(least,int(name*share)),kindWidth=std::max(least,int(kind*share));
+    auto *header=m_folders->horizontalHeader();
+    const bool scroll=spare<2*least;
+    const auto mode=scroll?QHeaderView::Interactive:QHeaderView::Stretch;
+    if(header->sectionResizeMode(2)!=mode){header->setSectionResizeMode(2,mode);if(scroll)m_folders->setColumnWidth(2,folder);}
+    if(m_folders->columnWidth(0)!=nameWidth)m_folders->setColumnWidth(0,nameWidth);
+    if(m_folders->columnWidth(3)!=kindWidth)m_folders->setColumnWidth(3,kindWidth);
+    QTimer::singleShot(0,this,[this]{fitFolders();});
+}
+void ProjectsDialog::setStatus(const QString &text, bool error)
+{
+    // #700 (L1, N4): every message says whether it is a refusal; an empty
+    // one hides the line.
+    m_status->setText(text);m_status->setVisible(!text.isEmpty());
+    if(m_status->property("pageError").toBool()!=error){m_status->setProperty("pageError",error);m_status->style()->unpolish(m_status);m_status->style()->polish(m_status);}
+}
 void ProjectsDialog::startRename()
 {
     const auto *project=m_projects->group(currentId());if(!project)return;
+    // #700 (L2): the rename belongs to this project, whatever the list selects later.
+    m_renameId=project->id;
     m_name->setText(project->name);m_headerName->hide();m_name->show();m_name->setFocus(Qt::OtherFocusReason);m_name->selectAll();
 }
 void ProjectsDialog::finishRename(bool save)
@@ -529,7 +587,11 @@ void ProjectsDialog::finishRename(bool save)
     const bool editing=!m_name->isHidden();
     const auto name=m_name->text().trimmed();
     bool renamed=false;
-    if(save&&!name.isEmpty()&&m_projects->group(currentId())&&name!=m_projects->group(currentId())->name){m_projects->renameGroup(currentId(),m_name->text());changed();renamed=true;}
+    // The project the rename started on, or the selected one when the field
+    // is set without opening it; a project that is gone takes no name.
+    const QString target=editing&&!m_renameId.isEmpty()?m_renameId:currentId();
+    if(save&&!name.isEmpty()&&m_projects->group(target)&&name!=m_projects->group(target)->name){m_projects->renameGroup(target,m_name->text());changed();renamed=true;}
+    m_renameId.clear();
     if(editing){m_name->hide();m_headerName->show();}
     if(save||editing)emit catalogDraftEditing(false);
     if(!renamed&&(editing||name.isEmpty()))showProject();
@@ -560,6 +622,8 @@ void ProjectsDialog::updateSwarmConnections()
 void ProjectsDialog::refresh()
 {
     if (m_worktreeOverview) m_worktreeOverview->setContext(*m_projects, m_fleet, m_allProjects->isChecked());
+    // #700 (L2): a rename whose project is gone is cancelled.
+    if (!m_name->isHidden() && !m_renameId.isEmpty() && !m_projects->group(m_renameId)) finishRename(false);
     const auto selected = currentId(); const QSignalBlocker block(m_list); m_list->clear();
     const auto counts = m_countsProvider ? m_countsProvider() : QHash<QString, int>();
     for (const auto &project : m_projects->groups()) {
@@ -629,8 +693,10 @@ void ProjectsDialog::fitFolders()
     // #646: the table is as tall as its rows (twelve, then it scrolls), never
     // the empty height of the page; the selected folder's worktrees follow.
     const int rowHeight=m_folders->verticalHeader()->defaultSectionSize(),header=m_folders->horizontalHeader()->height();
-    const int table=header+qMax(1,qMin(m_folders->rowCount(),12))*rowHeight+8;   // room under the rows: a right-click there adds a folder
-    m_folders->setMinimumHeight(header+rowHeight+8);m_folders->setMaximumHeight(table);
+    // #700 (L3): a sideways scrollbar adds its height, so it covers no row.
+    const int bar=m_folders->horizontalScrollBar()->isVisible()?m_folders->horizontalScrollBar()->sizeHint().height():0;
+    const int table=header+qMax(1,qMin(m_folders->rowCount(),12))*rowHeight+8+bar;   // room under the rows: a right-click there adds a folder
+    m_folders->setMinimumHeight(header+rowHeight+8+bar);m_folders->setMaximumHeight(table);
     auto *pane=m_folderSplitter->widget(0);
     const int paneHeight=table+pane->layout()->spacing()+m_editFolder->sizeHint().height();
     if(m_worktrees->isHidden()){m_folderSplitter->setFixedHeight(paneHeight);return;}
@@ -769,7 +835,7 @@ void ProjectsDialog::changed()
         const QJsonDocument document(m_projects->toJson()); const auto bytes = document.toJson(QJsonDocument::Compact);
         QSettings().setValue("workspace/organization", bytes); SettingsJson::remember("workspace/organization", bytes, document);
     }
-    emit organizationChanged(); refresh(); m_status->setText(tr("Saved"));
+    emit organizationChanged(); refresh(); setStatus(tr("Saved"));
 }
 void ProjectsDialog::selectProject(const QString &id)
 {
@@ -812,7 +878,7 @@ void ProjectsDialog::importLegacy(const QString &host,const QList<ProjectInfo> &
     else m_importDeferred.insert(machine);
     changed();
     if (!rejected.isEmpty())
-        m_status->setText(tr("Could not add %n hgs project folder(s) of %1: %2","",rejected.size()).arg(machine,rejected.join(QStringLiteral(", "))));
+        setStatus(tr("Could not add %n hgs project folder(s) of %1: %2","",rejected.size()).arg(machine,rejected.join(QStringLiteral(", "))),true);
 }
 void ProjectsDialog::setProjects(const QList<ProjectInfo> &projects) { importLegacy(m_host,projects); }
 void ProjectsDialog::addProject()
@@ -856,9 +922,9 @@ void ProjectsDialog::cloneRepository()
     CloneRepositoryDialog dialog(m_client,host,machine,style,*m_projects,currentId(),false,this);
     if(dialog.exec()!=QDialog::Accepted)return;
     auto project=dialog.projectId();
-    if(!project.isEmpty()&&!m_projects->group(project)){m_status->setText(tr("Project changed. Checkout kept at %1 on %2.").arg(dialog.createdPath(),machine));return;}
+    if(!project.isEmpty()&&!m_projects->group(project)){setStatus(tr("Project changed. Checkout kept at %1 on %2.").arg(dialog.createdPath(),machine),true);return;}
     if(project.isEmpty())project=m_projects->createGroup(dialog.newProjectName());
-    if(m_projects->addFolder(project,machine,dialog.createdPath(),{},style).isEmpty()){m_status->setText(tr("Checkout kept at %1. Add its folder to the project.").arg(dialog.createdPath()));return;}
+    if(m_projects->addFolder(project,machine,dialog.createdPath(),{},style).isEmpty()){setStatus(tr("Checkout kept at %1. Add its folder to the project.").arg(dialog.createdPath()),true);return;}
     changed();selectProject(project);
 }
 
@@ -933,23 +999,23 @@ void ProjectsDialog::transferFolder(const QString &projectId, const SessionOrgan
             present = true;
             break;
         }
-    if (!present) { m_status->setText(tr("This project folder changed. Select it again.")); return; }
+    if (!present) { setStatus(tr("This project folder changed. Select it again."), true); return; }
     const auto *target = m_projects->group(destination);
     if (!target || destination == projectId || (!target->accessible && !m_allProjects->isChecked())) {
-        m_status->setText(tr("The destination project is no longer available. Select it again."));
+        setStatus(tr("The destination project is no longer available. Select it again."), true);
         return;
     }
     const auto name = target->name;
     const auto before = m_projects->toJson();
     const auto id = copy ? m_projects->copyFolder(projectId, folder.id, destination)
                          : m_projects->moveFolder(projectId, folder.id, destination);
-    if (id.isEmpty()) { m_status->setText(tr("Could not transfer this project folder.")); return; }
+    if (id.isEmpty()) { setStatus(tr("Could not transfer this project folder."), true); return; }
     if (before == m_projects->toJson()) {
-        m_status->setText(tr("This folder is already in %1.").arg(name));
+        setStatus(tr("This folder is already in %1.").arg(name));
         return;
     }
     changed();
-    m_status->setText(copy ? tr("Folder copied to %1.").arg(name) : tr("Folder moved to %1.").arg(name));
+    setStatus(copy ? tr("Folder copied to %1.").arg(name) : tr("Folder moved to %1.").arg(name));
 }
 MachinePlatform::Style ProjectsDialog::folderStyle(const QString &machine) const
 {
@@ -976,7 +1042,7 @@ void ProjectsDialog::updateFolderActions()
 {
     const auto folder=selectedFolder(); const auto problem=folderOpenProblem(folder);
     m_worktrees->setVisible(!folder.id.isEmpty());
-    m_folderSplitInitialized=true;fitFolders();
+    fitFolders();
     m_worktrees->setContext(folder.machine==m_fleet.local().host?QString():folder.machine,folder.path,m_fleet);
     m_editFolder->setEnabled(!folder.id.isEmpty());m_removeFolder->setEnabled(!folder.id.isEmpty());
     m_openFolder->setEnabled(problem.isEmpty());
@@ -1000,15 +1066,15 @@ void ProjectsDialog::newFolderSession(const QString &projectId,const SessionOrga
     const auto *project=m_projects->group(projectId);bool present=false;
     if(project)for(const auto &current:project->folders)
         if(current.id==folder.id&&current.machine==folder.machine&&current.path==folder.path){present=true;break;}
-    if(!present){m_status->setText(tr("This project folder changed. Select it again."));return;}
-    const auto problem=folderLaunchProblem(folder);if(!problem.isEmpty()){m_status->setText(problem);return;}
+    if(!present){setStatus(tr("This project folder changed. Select it again."),true);return;}
+    const auto problem=folderLaunchProblem(folder);if(!problem.isEmpty()){setStatus(problem,true);return;}
     emit newSessionRequested(projectId,folder.machine==m_fleet.local().host?QString():folder.machine,folder.id);
 }
 void ProjectsDialog::openFolder(const SessionOrganization::Folder &folder)
 {
     const auto problem=folderOpenProblem(folder);
-    if(!problem.isEmpty()){m_status->setText(problem);return;}
-    if(!QDesktopServices::openUrl(QUrl::fromLocalFile(folder.path)))m_status->setText(tr("Could not open the folder in the file manager."));
+    if(!problem.isEmpty()){setStatus(problem,true);return;}
+    if(!QDesktopServices::openUrl(QUrl::fromLocalFile(folder.path)))setStatus(tr("Could not open the folder in the file manager."),true);
 }
 void ProjectsDialog::showFolderMenu(const QPoint &position)
 {

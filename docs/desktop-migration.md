@@ -368,6 +368,31 @@ credential read or operation replay runs. Credentials remain in their existing
 processing-computer stores. Current drain, source discovery, G2 receipt checks
 and consumer integration remain separate.
 
+`qt_worktree_snapshots(&QtSnapshot)` preserves Qt's
+`workspace/worktreeSnapshots` as `qt-worktree-snapshots`, schema 1, with the
+existing Qt source format/hash. `next_worktree_snapshots(bytes)` preserves
+`worktree-snapshots.json` as `next-worktree-snapshots`, schema 1, format
+`worktree-snapshots-json-v1`, with its exact source hash. It shares the pure
+bounded saved-cache decoder with the existing Tauri loader and the existing
+catalog shape check with `Catalogs::accept`.
+
+A private `{kind:"worktree-cache-header",present}` precedes
+`{entries:[{cache_key,record}]}` pages. Missing Qt keys differ from empty
+caches. The original 64-lowercase-hex cache key hashes the original executable,
+host and path; it remains opaque without that exact tuple. Never invert it or
+infer ownership from the currently selected CLI, alias or lexical path.
+Original timestamps, stale/partial flags, checkout fields and unknown data stay
+unchanged. They establish no present freshness, process exclusion or cleanup
+permission.
+
+The writer's 64-snapshot/8 MiB serialized-cache caps apply; Next's input keeps
+the existing 16 MiB read cap, private pages the 64-entry/1 MiB body cap. An
+oversized individual catalog, invalid key, malformed shape or source recheck
+failure prevents the final record. No oldest-entry pruning, truncation,
+redating, live `Catalogs` construction, catalog/status read, checkout access,
+creation or removal runs in these adapters. Source discovery and G1's fresh
+drain/publication remain separate; evidence stays Staged and grants no action.
+
 `approval_policies(&QtSnapshot, next_settings_bytes)` inspects both policy
 stores before returning either `qt-approval-policy` or `next-approval-policy`
 stream. It reuses the existing Qt flag conversion and bounded Next settings

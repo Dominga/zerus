@@ -384,12 +384,10 @@ private quarantine metadata and retries for failed families. Row density keeps
 Qt's bounded packed hashes, matches exact host/raw-command/archive/conversation
 identity and persists new choices without rereading a handled Qt family.
 `client/core::migration` supplies bounded staged evidence over the existing
-creation/read decoders, task forms/delivery records, Qt pending/executor launches
-and separate repository-clone checkpoints plus the shared download-index
-metadata through the existing cache decoder, Qt organization observations and
-backups, the existing Next organization draft and paired provider-operation
-checkpoints through the existing pending decoder; original states and
-identities are preserved without replay. Its transport client streams to G1's
+creation/read/task/launch decoders, separate repository-clone checkpoints,
+download indexes, organization observations/backups/drafts, provider operations
+and non-authoritative worktree caches. Original states, identities and private
+unknown fields are preserved without replay. Its transport client streams to G1's
 selected publisher with exact capability/configuration checks, bounded pipes
 and source rechecks; it has no startup hook. The shared handoff contract lives
 in `crates/desktop-migration`; G1 owns the executable transport, secure publisher,
@@ -407,9 +405,8 @@ and the earlier run-memory seed never repeat. Legacy groups/pinned recovery,
 project vivid state and local Windows folders remain separate.
 
 Remaining source coverage includes `projectFolderSplit`,
-`removeWorktreeAfterTermination`, worktree snapshots,
-`tray.conf`, task inspector
-geometry, downloaded content and the rest of the interim stores listed below.
+`removeWorktreeAfterTermination`, `tray.conf`, task inspector geometry,
+downloaded content and the rest of the interim stores listed below.
 Source discovery and production integration remain separate; adapters do not
 by themselves publish eligible evidence or transfer writer authority. The
 `approval_policies` adapter inspects Qt and interim Next choices together,

@@ -25,6 +25,8 @@ mod organization;
 pub use organization::{next_organization_draft, qt_organization_checkpoints};
 mod provider;
 pub use provider::provider_operations;
+mod worktrees;
+pub use worktrees::{next_worktree_snapshots, qt_worktree_snapshots};
 
 #[derive(Clone, Copy)]
 pub enum Origin {

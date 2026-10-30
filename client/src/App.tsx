@@ -20,6 +20,7 @@ import { installShortcutRouter, onCommand } from "./store/shortcuts";
 import { updateCommands, updates } from "./store/updates";
 import { openUpdates } from "./store/desk";
 import { ZerusLogo } from "./ui/components/ZerusLogo";
+import { SessionUsageStrip } from "./ui/components/SessionUsageStrip";
 import type { BridgeMode } from "./bridge";
 
 // The client shell: the rail, the pages and the status bar.
@@ -72,6 +73,7 @@ function StatusBar(props: { mode: () => BridgeMode | "starting" }) {
           <ZerusLogo attention={false} motion="spin" size={14} />Restart to finish update
         </button>
       </Show>
+      <SessionUsageStrip />
     </footer>
   );
 }

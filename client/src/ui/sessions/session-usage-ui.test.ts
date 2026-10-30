@@ -1,7 +1,21 @@
 import { describe, expect, it } from "vitest";
-import { sessionUsageView } from "./session-usage-ui";
+import { footerUsageSummary, sessionUsageView, usageStripVisible } from "./session-usage-ui";
+import { toSession } from "../../store/catalog";
+import { emptyUsage } from "../../types";
 
 describe("SessionUsage::html projection", () => {
+  it("keeps the footer visible for Qt's tracked current sessions only", () => {
+    const s = toSession("", "run:r1", { name: "codex/sample-project/a", tracked: true, state: "running", run_id: "r1" });
+    expect(usageStripVisible("sessions", s, undefined)).toBe(true);
+    expect(usageStripVisible("sessions", { ...s, state: "paused" }, undefined)).toBe(true);
+    expect(usageStripVisible("accounts", s, undefined)).toBe(false);
+    expect(usageStripVisible("sessions", s, "child")).toBe(false);
+    expect(usageStripVisible("sessions", { ...s, archiveId: "archive-1" }, undefined)).toBe(false);
+    expect(usageStripVisible("sessions", { ...s, state: "archived" }, undefined)).toBe(false);
+    expect(usageStripVisible("sessions", { ...s, tracked: false }, undefined)).toBe(false);
+    expect(footerUsageSummary({ ...emptyUsage(), status: "unavailable" })).toBe("limits n/a");
+    expect(footerUsageSummary({ ...emptyUsage("opencode"), status: "configured" })).toBe("Configured");
+  });
   it("keeps Qt's rows, notes, context and partial explanation", () => {
     const view = sessionUsageView({
       status: "ok", requests: 3, cost_usd: 1.25, cost_stale: true, partial: true,

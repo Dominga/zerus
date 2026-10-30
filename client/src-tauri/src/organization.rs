@@ -106,9 +106,7 @@ pub fn run_seed_source(
     identifier: &str,
     replay: bool,
 ) -> Option<zerus_client_core::settings::QtStore> {
-    (!replay)
-        .then(|| crate::settings::seed_source(identifier))
-        .flatten()
+    crate::settings::seed_source(identifier, replay)
 }
 
 #[derive(Default)]
@@ -1468,7 +1466,7 @@ mod tests {
         assert!(run_seed_source(crate::settings::SWITCH_IDENTITY, true).is_none());
         assert_eq!(
             run_seed_source(crate::settings::SWITCH_IDENTITY, false),
-            crate::settings::seed_source(crate::settings::SWITCH_IDENTITY)
+            crate::settings::seed_source(crate::settings::SWITCH_IDENTITY, false)
         );
     }
 

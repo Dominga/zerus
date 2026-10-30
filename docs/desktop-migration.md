@@ -303,6 +303,47 @@ no current content identity, cleanup permission or reuse authority. G1's
 current drain/publication and G2's fresh content/ownership guards remain
 separate. This is Staged evidence only, with no discovery or startup hook.
 
+`qt_organization_checkpoints(&QtSnapshot)` preserves these separate objects
+through the existing QtStore/Qt JSON decoder:
+
+- `workspace/organization` (the desired local state);
+- `workspace/organizationBeforeProjects` and `workspace/organizationBeforeSwarm`;
+- `swarm/observedOrganization` and `swarm/observedVersions`.
+
+Its family is `qt-organization-checkpoints`, schema 1, with the existing Qt
+format and raw source hash. Missing keys differ from empty objects. Legacy
+groups, local Windows folders, unknown fields and causal heads remain original
+evidence; they are not converted, merged or treated as fresh observations.
+The schema describes this evidence envelope, not a validated apply request.
+Non-object checkpoints and unknown declared organization versions refuse;
+the causal map has no inferred organization version. The total Qt input is
+bounded at 16 MiB.
+
+`next_organization_draft(bytes)` validates the existing `organization-draft.json`
+through `swarm::draft::Draft::from_json`, without its filesystem loader or live
+controller. Its family is `next-organization-draft`, schema 1, format
+`organization-draft-json-v1`, with the original file hash and existing 24 MiB
+input cap. A private `{kind:"draft-header",content}` preserves version and
+unknown root extensions. `base`, `desired` and `versions` remain separate
+original objects; pending edits are not acknowledged or applied.
+
+Both adapters page an object with
+`{kind:"organization-header",scope,present,fields:{<field>:"array"|"value"}}`
+followed by `{entries:[{scope,field,index?,value}]}`. `scope` is the exact Qt
+key or Next `base`, `desired`, `versions`. Array entries carry zero-based
+contiguous indexes; empty arrays have their descriptor and no entries. Other
+values, including empty/nested objects and null, keep their original value
+without an index. Each object is bounded at 50,000 fields/items, private pages
+at 64 entries/1 MiB; an oversized individual project/value/header refuses
+without truncation or a final manifest. Attach fresh source identity/hash
+rechecks to both streams before publication.
+
+These checkpoints never enter `Draft::load/set_aside/store`,
+`Controller::restore/due`, the missing-field initializer or the one-time local
+presentation seed. They add no apply request, source write, currentness,
+settlement, replay or service authority. Production discovery and G1's fresh
+drain remain separate.
+
 `approval_policies(&QtSnapshot, next_settings_bytes)` inspects both policy
 stores before returning either `qt-approval-policy` or `next-approval-policy`
 stream. It reuses the existing Qt flag conversion and bounded Next settings

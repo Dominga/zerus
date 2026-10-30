@@ -386,7 +386,8 @@ identity and persists new choices without rereading a handled Qt family.
 `client/core::migration` supplies bounded staged evidence over the existing
 creation/read decoders, task forms/delivery records, Qt pending/executor launches
 and separate repository-clone checkpoints plus the shared download-index
-metadata through the existing cache decoder; original states and
+metadata through the existing cache decoder, Qt organization observations and
+backups, and the existing Next organization draft; original states and
 identities are preserved without replay. Its transport client streams to G1's
 selected publisher with exact capability/configuration checks, bounded pipes
 and source rechecks; it has no startup hook. The shared handoff contract lives
@@ -406,7 +407,7 @@ project vivid state and local Windows folders remain separate.
 
 Remaining source coverage includes `projectFolderSplit`,
 `removeWorktreeAfterTermination`, worktree snapshots,
-`swarm/observed*`, `tray.conf`, task inspector
+`tray.conf`, task inspector
 geometry, downloaded content and the rest of the interim stores listed below.
 Source discovery and production integration remain separate; adapters do not
 by themselves publish eligible evidence or transfer writer authority. The

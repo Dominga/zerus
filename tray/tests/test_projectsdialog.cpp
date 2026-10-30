@@ -154,9 +154,12 @@ void TestProjectsDialog::projectPageHasHeaderAndCollapsibleBlocks()
     auto *foldersCard=dialog.findChild<QWidget *>("projectFoldersCard"),*sessionsCard=dialog.findChild<QWidget *>("projectSessionsCard");
     auto *foldersHeader=folders->findChild<QPushButton *>("collapsibleHeader");
     // #646: the card is as tall as its rows and actions, never the page's empty height.
-    const int open=foldersCard->height();
+    // The selection above changed the splitter's height: the page lays out
+    // again on the event loop (without shots nothing waited for it, #649).
     auto *split=dialog.findChild<QSplitter *>("projectFolderSplitter");
-    QVERIFY2(open<=split->height()+90,qPrintable(QStringLiteral("%1 %2").arg(open).arg(split->height())));
+    const auto fits=[&]{return foldersCard->height()<=split->height()+foldersHeader->height()+40;};
+    QTRY_VERIFY2(fits(),qPrintable(QStringLiteral("card %1, splitter %2").arg(foldersCard->height()).arg(split->height())));
+    const int open=foldersCard->height();
     QVERIFY(table->height()<=table->horizontalHeader()->height()+3*table->verticalHeader()->defaultSectionSize()+8);
     foldersHeader->click();
     QVERIFY(!folders->findChild<QWidget *>("collapsibleBody")->isVisible());

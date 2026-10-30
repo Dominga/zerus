@@ -71,12 +71,18 @@ data class TeamPipelineRun(
     val accept: String,
     val round: Int,
     val runs: List<TeamStageRun>,
+    /** #635 L2: the returns of the runs the host trimmed past its 64. */
+    val trimmedReturns: Int = 0,
 ) {
     val openRun: TeamStageRun? get() = runs.lastOrNull { it.state.open }
-    /** The rounds stage members returned; the round limit counts these. */
-    val returned: Int get() = runs.count { it.state == TeamStageState.Returned }
-    /** Every returned round's findings, which the lead decides with after the last round. */
-    val findings: Int get() = runs.filter { it.state == TeamStageState.Returned }.sumOf { it.findings.size }
+    /** The rounds stage members returned, the trimmed ones included; the round limit counts these. */
+    val returned: Int get() = trimmedReturns + runs.count { it.state == TeamStageState.Returned }
+    /**
+     * Every returned round's findings, which the lead decides with after the last round; a
+     * command or land return counts at least one (#635 L3, the desktop's findingsCount).
+     */
+    val findings: Int get() = runs.filter { it.state == TeamStageState.Returned }
+        .sumOf { if (TeamPipeline.runsCommand(it.kind)) maxOf(1, it.findings.size) else it.findings.size }
     /** Who accepts once the stages pass: auto, sub_lead or lead. */
     val acceptKind: String get() = if (accept == "auto" || accept == "sub_lead") accept else "lead"
 }
@@ -113,8 +119,12 @@ object TeamPipeline {
             accept = raw.string("accept"),
             round = raw.optInt("round", 1).coerceAtLeast(1),
             runs = raw.optJSONArray("runs")?.objects().orEmpty().take(MaxRuns).map { stageRun(it) },
+            trimmedReturns = raw.optInt("trimmed_returns").coerceAtLeast(0),
         )
     }
+
+    /** A stage Zerus runs itself, with no member: a command or a land. */
+    fun runsCommand(kind: String): Boolean = kind == "command" || kind == "land"
 
     private fun stageRun(raw: JSONObject): TeamStageRun = TeamStageRun(
         id = raw.string("id"),
@@ -154,6 +164,7 @@ object TeamPipeline {
     /**
      * The card's stage chip, or null when the task has no pipeline or no stage to name:
      * - in a stage: "Review r1/3" with its member, or "Review waits" until a member takes it;
+     *   a command or land stage "Command running" while Zerus runs it, "Command queued" before;
      * - back with the implementer after a return: "Review returned r1";
      * - reported after the last round returned it: "Lead decides · N findings" in the warning color;
      * - reported with the stages done: who accepts, "Lead", "Sub-lead" or "Auto".
@@ -164,6 +175,11 @@ object TeamPipeline {
         val open = run.openRun
         if (status.inStage && open != null) {
             val label = kindLabel(open.kind)
+            // #635 L4 (the desktop's #538 N8): Zerus runs a command or land stage itself, with no member.
+            if (runsCommand(open.kind)) {
+                val running = open.state == TeamStageState.Delivered
+                return TeamStageChip(open.kind, if (running) "$label running" else "$label queued", "", kindTone(open.kind), outlined = !running)
+            }
             return if (open.member.isEmpty()) TeamStageChip(open.kind, "$label waits", "", kindTone(open.kind), outlined = true)
             else TeamStageChip(open.kind, "$label r${open.round}/${run.maxRounds}", open.member, kindTone(open.kind), outlined = false)
         }

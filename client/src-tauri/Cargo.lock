@@ -5998,6 +5998,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "socket2",
  "time",
  "windows-sys 0.61.2",
  "zerus-desktop-migration",

@@ -4,6 +4,7 @@ mod fanout;
 mod feed;
 mod handoff;
 mod import_evidence;
+mod owner;
 mod presence_admission;
 mod protocol;
 mod registration;
@@ -29,7 +30,7 @@ use std::{
 use store::{Location, Store};
 use transport::{Listener, Stream, TIMEOUT};
 
-const USAGE: &str = "usage: hgs desktop serve [--config-dir DIR --state-dir DIR] | status [--json] | watch --json | feed --json | request --json | registration --json | revoke --json [--request-id UUID] [--reason rollback] | import-evidence --json | import-status --json --import-id UUID";
+const USAGE: &str = "usage: hgs desktop serve [--config-dir DIR --state-dir DIR] | status [--json] | owner-status --json | watch --json | feed --json | request --json | registration --json | revoke --json [--request-id UUID] [--reason rollback] | import-evidence --json | import-status --json --import-id UUID";
 const HEARTBEAT: Duration = Duration::from_secs(10);
 pub const STARTUP_REFUSED: i32 = 78;
 
@@ -119,6 +120,10 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
             }
             ["import-status", "--json", "--import-id", id] => {
                 println!("{}", import_evidence::status(&location, id)?);
+                Ok(())
+            }
+            ["owner-status", "--json"] => {
+                println!("{}", owner::status(&location));
                 Ok(())
             }
             ["status", "--json"] => {

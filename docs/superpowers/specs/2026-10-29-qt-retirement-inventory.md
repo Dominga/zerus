@@ -387,7 +387,8 @@ identity and persists new choices without rereading a handled Qt family.
 creation/read decoders, task forms/delivery records, Qt pending/executor launches
 and separate repository-clone checkpoints plus the shared download-index
 metadata through the existing cache decoder, Qt organization observations and
-backups, and the existing Next organization draft; original states and
+backups, the existing Next organization draft and paired provider-operation
+checkpoints through the existing pending decoder; original states and
 identities are preserved without replay. Its transport client streams to G1's
 selected publisher with exact capability/configuration checks, bounded pipes
 and source rechecks; it has no startup hook. The shared handoff contract lives

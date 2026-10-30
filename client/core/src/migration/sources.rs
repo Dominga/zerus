@@ -23,6 +23,8 @@ mod downloads;
 pub use downloads::download_index;
 mod organization;
 pub use organization::{next_organization_draft, qt_organization_checkpoints};
+mod provider;
+pub use provider::provider_operations;
 
 #[derive(Clone, Copy)]
 pub enum Origin {

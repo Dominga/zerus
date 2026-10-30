@@ -47,11 +47,21 @@ limits (hello 16 KiB). The root database additionally retains its existing hard
 page cap; SQLite overhead and WAL are outside the charged row budget. Alias
 retirement and whole-service disk/RSS qualification remain integration work.
 
-`collect` removes at most 256 rows from one indexed obsolete generation per
-transaction, then removes its empty metadata. `Some(0)` means an empty generation
+`collect` removes at most 256 rows and 4 MiB of charged rows from one indexed
+obsolete generation per transaction, then removes its empty metadata. `Some(0)` means an empty generation
 was collected; `None` means no obsolete generation remains. The actor yields
 between calls and runs collection outside input transactions. Capacity pressure
 refuses coverage rather than evicting visible rows or unrelated durable intent.
+
+The service actor now runs one such batch on a maintenance turn, waiting at
+least 250 ms after progress and 10 seconds after idle/failure. It checks control
+requests between turns, including after a successful watch attachment. Startup
+marks interrupted staging obsolete, so the same bounded path reclaims it.
+`catalog_projection` status reports retained source metadata, maintained row/byte
+totals, obsolete generation count and collection failure. These are storage
+diagnostics, not live upstream counts or freshness. Collection errors pause
+that component and retry at the idle interval; other durable journals remain
+available. The service still starts no fleet or effect workers.
 
 Focused tests walk 100,000 synthetic rows, check query plans without scans or
 temporary sorting, replace snapshots, collect obsolete rows in bounded steps,

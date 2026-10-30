@@ -215,6 +215,7 @@ fn projection(
         "running":true,"ownership":"passive","writers_enabled":false,"handoff":"required",
         "upstreams":[],"complete":false,"subscribers":subscribers,"automatic_approvals":false,
         "pending":{"reads":store.read_status()["pending"],"posting":0,"approvals":0},"errors":[],"migration":migration,"effect_journal":store.effect_status(),"read_queue":store.read_status(),
+        "catalog_projection":store.catalog_status(),
         "limits":{"subscribers":protocol::SUBSCRIBERS,"queue_bytes":protocol::QUEUE_BYTES,
             "frame_bytes":protocol::FRAME_BYTES,"control_bytes":protocol::CONTROL_BYTES,"ingress_bytes":16<<20},
         "components":{"fleet":"awaiting_handoff","presence":"awaiting_handoff","reads":"awaiting_handoff","attention":"awaiting_handoff","approvals":"awaiting_handoff"}})
@@ -295,11 +296,13 @@ fn serve(location: Location) -> Result<()> {
     let mut migration = handoff::inspect(&location);
     let mut seq = 0;
     let mut heartbeat = Instant::now() + HEARTBEAT;
+    let mut collect_at = Instant::now();
     let mut failed = false;
     while platform::shutdown_signal() == 0 {
         match receive.recv_timeout(Duration::from_millis(200)) {
             Ok(Event::Command(hello, queue)) => {
                 let value = projection(&location, &store, &epoch, fanout.len(), &migration);
+                let mut streaming = false;
                 let reply = if hello.abi != ABI || hello.configuration != location.configuration {
                     frame(
                         &epoch,
@@ -309,10 +312,11 @@ fn serve(location: Location) -> Result<()> {
                     )
                 } else if hello.op == "watch" && hello.request.is_none() {
                     if fanout.subscribe(queue.clone()) {
-                        queue.offer(protocol::encode(&frame(&epoch, seq, "hello", value))?.into());
-                        continue;
+                        streaming = true;
+                        frame(&epoch, seq, "hello", value)
+                    } else {
+                        frame(&epoch, seq, "error", json!({"code":"subscriber_limit"}))
                     }
-                    frame(&epoch, seq, "error", json!({"code":"subscriber_limit"}))
                 } else if hello.op == "status" && hello.request.is_none() {
                     frame(&epoch, seq, "status", value)
                 } else if hello.op == "request" {
@@ -328,13 +332,23 @@ fn serve(location: Location) -> Result<()> {
                     )
                 };
                 queue.offer(protocol::encode(&reply)?.into());
-                queue.close();
+                if !streaming {
+                    queue.close();
+                }
             }
             Ok(Event::ListenerFailed) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                 failed = true;
                 break;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => (),
+        }
+        if Instant::now() >= collect_at {
+            let delay = if store.collect_catalog() {
+                Duration::from_millis(250)
+            } else {
+                HEARTBEAT
+            };
+            collect_at = Instant::now() + delay;
         }
         if Instant::now() >= heartbeat {
             store.recover_effects(&epoch);

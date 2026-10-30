@@ -14,6 +14,7 @@ pub const PAGE_ROWS: usize = 128;
 // One legal near-frame-sized row must still be readable without being dropped.
 pub const PAGE_BYTES: usize = watch::MAX_FRAME_BYTES;
 pub const GC_ROWS: usize = 256;
+pub const GC_BYTES: usize = 4 << 20;
 
 /// Selected alias (empty is local), actor lifetime and exact source callback.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -64,6 +65,32 @@ pub struct Status {
     pub stored_rows: i64,
     pub stored_bytes: i64,
     pub complete: bool,
+}
+
+/// Configuration totals: two bounded metadata tables and one maintained row.
+#[derive(Debug)]
+pub struct Totals {
+    pub retained_sources: i64,
+    pub stored_rows: i64,
+    pub stored_bytes: i64,
+    pub obsolete_generations: i64,
+}
+
+pub fn totals(db: &Connection) -> Result<Totals> {
+    Ok(db.query_row(
+        "SELECT (SELECT count(*) FROM desktop_catalog_sources), rows, bytes,
+         (SELECT count(*) FROM desktop_catalog_generations WHERE obsolete=1)
+         FROM desktop_catalog_totals WHERE id=1",
+        [],
+        |r| {
+            Ok(Totals {
+                retained_sources: r.get(0)?,
+                stored_rows: r.get(1)?,
+                stored_bytes: r.get(2)?,
+                obsolete_generations: r.get(3)?,
+            })
+        },
+    )?)
 }
 
 pub fn migrate(db: &Connection) -> Result<()> {
@@ -428,8 +455,9 @@ pub fn status(db: &Connection, computer: &str) -> Result<Status> {
     })
 }
 
-/// One indexed obsolete generation, at most 256 deletes. No cascade or full
-/// catalog scan; the actor yields between calls. Call outside input transactions.
+/// One indexed obsolete generation, at most 256 deletes and 4 MiB charged rows.
+/// No cascade or full catalog scan; the actor yields between calls. Call outside
+/// input transactions.
 pub fn collect(db: &mut Connection) -> Result<Option<usize>> {
     let tx = db.transaction()?;
     let generation: Option<i64> = tx
@@ -442,7 +470,30 @@ pub fn collect(db: &mut Connection) -> Result<Option<usize>> {
     let Some(generation) = generation else {
         return Ok(None);
     };
-    let deleted = tx.execute("DELETE FROM desktop_catalog_rows WHERE id IN (SELECT id FROM desktop_catalog_rows WHERE generation=?1 ORDER BY id LIMIT ?2)", params![generation, GC_ROWS as i64])?;
+    let through = {
+        let mut statement = tx.prepare(
+            "SELECT id,bytes FROM desktop_catalog_rows WHERE generation=?1 ORDER BY id LIMIT ?2",
+        )?;
+        let mut rows = statement.query(params![generation, GC_ROWS as i64])?;
+        let (mut through, mut bytes) = (0i64, 0usize);
+        while let Some(row) = rows.next()? {
+            let charge: i64 = row.get(1)?;
+            ensure!(
+                charge > 0 && charge as usize <= PAGE_BYTES,
+                "invalid stored catalog row"
+            );
+            if bytes + charge as usize > GC_BYTES {
+                break;
+            }
+            bytes += charge as usize;
+            through = row.get(0)?;
+        }
+        through
+    };
+    let deleted = tx.execute(
+        "DELETE FROM desktop_catalog_rows WHERE generation=?1 AND id<=?2",
+        params![generation, through],
+    )?;
     tx.execute(
         "DELETE FROM desktop_catalog_generations WHERE id=?1 AND rows=0",
         [generation],

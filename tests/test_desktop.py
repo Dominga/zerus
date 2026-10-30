@@ -409,6 +409,28 @@ class Desktop(unittest.TestCase):
             self.assertEqual(db.execute('SELECT count(*) FROM desktop_catalog_sources').fetchone()[0], 0)
             self.assertEqual(db.execute('SELECT configuration FROM service').fetchone()[0], configuration)
 
+    def test_catalog_collection_progresses_without_a_frontend(self):
+        process, _ = self.serve()
+        self.stop(process)
+        with closing(sqlite3.connect(self.desktop / 'state.sqlite3')) as db, db:
+            db.execute("INSERT INTO desktop_catalog_generations(computer,obsolete) VALUES('peer',1)")
+            generation = db.execute('SELECT last_insert_rowid()').fetchone()[0]
+            db.executemany('INSERT INTO desktop_catalog_rows(generation,key,json,bytes) VALUES(?,?,?,?)',
+                           ((generation, f'run:{n}', '{}', 64) for n in range(768)))
+        _, status = self.serve()
+        deadline = time.monotonic() + 5
+        while status['catalog_projection']['stored_rows'] and time.monotonic() < deadline:
+            time.sleep(0.02)
+            status = self.cli('desktop', 'status', '--json')
+            self.assertEqual(status['subscribers'], 0)
+            self.assertFalse(status['writers_enabled'])
+        self.assertEqual(status['catalog_projection']['stored_rows'], 0)
+        self.assertEqual(status['catalog_projection']['stored_bytes'], 0)
+        self.assertEqual(status['catalog_projection']['obsolete_generations'], 0)
+        self.assertFalse(status['catalog_projection']['collection_error'])
+        self.assertTrue(status['effect_journal']['revoked'])
+        self.assertEqual(status['read_queue']['pending'], 0)
+
     def test_revoke_without_handoff_or_service_writes_nothing(self):
         help_result = subprocess.run([str(HGS), '--help'], env=self.env, capture_output=True, text=True, timeout=5)
         self.assertEqual(help_result.returncode, 0, help_result.stderr)

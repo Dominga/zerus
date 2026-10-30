@@ -109,6 +109,11 @@ fn snapshot_swap_is_atomic_and_preserves_exact_private_rows() {
     assert_eq!(s.visible_rows, 2);
     assert_eq!(s.stored_rows, 3);
     assert!(s.complete);
+    let counts = totals(&db).unwrap();
+    assert_eq!(counts.retained_sources, 1);
+    assert_eq!(counts.obsolete_generations, 1);
+    assert_eq!(counts.stored_rows, s.stored_rows);
+    assert_eq!(counts.stored_bytes, s.stored_bytes);
     assert_eq!(collect(&mut db).unwrap(), Some(1));
     assert_eq!(status(&db, "peer").unwrap().stored_rows, 2);
 }
@@ -461,6 +466,36 @@ fn source_and_empty_generation_admission_are_bounded() {
         calls += 1;
     }
     assert_eq!(calls, MAX_GENERATIONS);
+}
+
+#[test]
+fn collection_caps_large_payload_bytes_as_well_as_row_count() {
+    let (mut db, source) = setup();
+    for n in 0..9 {
+        let mut large = item(n);
+        large.row["synthetic"] = "x".repeat(800 << 10).into();
+        put(
+            &mut db,
+            &source,
+            &snapshot(n as u64 + 2, n as u32, n == 8, 1, vec![large]),
+        );
+    }
+    put(&mut db, &source, &snapshot(11, 0, true, 2, vec![]));
+    let before = totals(&db).unwrap().stored_bytes;
+    assert_eq!(collect(&mut db).unwrap(), Some(5));
+    let after = totals(&db).unwrap().stored_bytes;
+    assert!(before - after <= GC_BYTES as i64);
+    assert_eq!(collect(&mut db).unwrap(), Some(4));
+    assert_eq!(collect(&mut db).unwrap(), None);
+    db.execute(
+        "INSERT INTO desktop_catalog_generations(computer,obsolete) VALUES('peer',1)",
+        [],
+    )
+    .unwrap();
+    let generation = db.last_insert_rowid();
+    db.execute("INSERT INTO desktop_catalog_rows(id,generation,key,json,bytes) VALUES(?1,?2,'run:old','{}',64)",
+        params![i64::from(i32::MAX)+1,generation]).unwrap();
+    assert_eq!(collect(&mut db).unwrap(), Some(1));
 }
 
 #[test]

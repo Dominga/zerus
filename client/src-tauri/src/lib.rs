@@ -66,6 +66,7 @@ mod speech_settings;
 mod task_details;
 #[cfg(feature = "live")]
 mod task_editor;
+mod task_forms;
 #[cfg(feature = "live")]
 mod terminal;
 #[cfg(feature = "live")]
@@ -347,6 +348,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(task_details::TaskReads::default());
                 app.manage(task_details::TaskWrites::default());
                 app.manage(task_editor::TaskEditor::default());
+                app.manage(task_forms::TaskForms::default());
                 app.manage(actions::ActivityReads::default());
                 app.manage(actions::Attention::new(dir.join(actions::attention_file(replay))));
                 let pump = app.state::<commands::AppState>().pump();
@@ -987,6 +989,10 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         task_editor::task_editor_files,
         task_editor::task_editor_pick,
         task_editor::task_editor_submit,
+        task_forms::task_form_open,
+        task_forms::task_form_edit,
+        task_forms::task_form_submit,
+        task_forms::task_form_cancel,
         task_details::task_attachment_open,
         actions::pending_read_marks,
         actions::queue_read_marks,

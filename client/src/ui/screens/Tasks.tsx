@@ -1,7 +1,7 @@
-import { For, Show, createEffect, createMemo, createSignal, on, onCleanup } from "solid-js";
+import { For, Show, Suspense, createEffect, createMemo, createSignal, lazy, on, onCleanup } from "solid-js";
 import { Icon } from "../lib/icons";
 import { statusOf } from "../sessions/SessionCard";
-import { selectedTask, openTask } from "../../store/taskNavigation";
+import { selectedTask, openTask, requestTaskRename } from "../../store/taskNavigation";
 import { tasks } from "../../store/tasks";
 import { flag, setSetting } from "../../store/settings";
 import { now, selected, setMenu } from "../../store/ui";
@@ -10,6 +10,8 @@ import { assign, assigningTask, canAssign, draggedTask, setDraggedTask, taskDrag
 import { ACTION_ICON, ACTION_LABEL, actOnTask, boardActions, canDrag, primaryAction, reorderGap, stageDropAction, writingTask } from "../../store/taskBoard";
 import { taskProject as project, projectSessions as sessions, findTaskSession as find, projectTasks as rows } from "../../store/taskContext";
 import "../styles/tasks.css";
+
+const TaskCreate = lazy(() => import("./TaskCreate"));
 
 export function TaskTabBadge() { return <Show when={project() && tasks.loaded()}><span class="tk-tabbadge"><Show when={rows().filter((t) => t.stage === "review").length}>{(n) => <span class="tk-tb review">{n()}</span>}</Show><Show when={rows().filter((t) => t.stage === "todo").length}>{(n) => <span class="tk-tb todo">{n()}</span>}</Show></span></Show>; }
 const FILTERS = ["current", ...STAGES] as const;
@@ -73,17 +75,17 @@ export function TasksPanel() {
   };
   const menu = (e: MouseEvent | KeyboardEvent, t: Task) => { e.preventDefault(); e.stopPropagation(); const el = (e.currentTarget as HTMLElement).getBoundingClientRect(), projectId = project()!.id; setMenu({ x: el.left, y: el.bottom, items: [
     { label: "Task details", icon: "file-text", action: () => openTask(projectId, t.uuid) },
+    { label: "Rename…", icon: "pencil", disabled: !t.writable || !!writingTask(), action: () => requestTaskRename(projectId, t.uuid) },
     ...boardActions(t.stage).map((action) => ({ label: ACTION_LABEL[action], icon: ACTION_ICON[action], disabled: !t.writable || !!writingTask(), action: () => void actOnTask(projectId, t, { kind: action }) })),
     { label: "Assign to session…", icon: "user-round-cog", disabled: !canAssign(t, projectId) || !!assigningTask(), action: () => { if (project()?.id !== projectId) return; setQuery(""); setAssignment(t); } },
   ] }); };
   let picker!: HTMLDivElement;
   createEffect(() => { if (!assignment()) return; const close = (e: PointerEvent) => { if (!picker?.contains(e.target as Node)) setAssignment(undefined); }; document.addEventListener("pointerdown", close); onCleanup(() => document.removeEventListener("pointerdown", close)); queueMicrotask(() => picker?.querySelector<HTMLInputElement>("input")?.focus()); });
   const choices = () => sessions().filter((s) => canAssign(assignment()!, project()!.id, s) && `${s.title} ${s.name} ${s.machine}`.toLowerCase().includes(query().toLowerCase()));
-  return <div class="tk-panel"><div class="tk-head"><span class="tk-scope">{project() ? `${rows().length} tasks` : "Tasks"}</span>
-    <button class="tk-sq add" aria-label="New task" title="New task" disabled><Icon name="plus" size={16} /></button>
+  return <div class="tk-panel"><Suspense><TaskCreate project={project()?.id} scope={project() ? `${visible().length} ${visible().length === 1 ? "task" : "tasks"}` : "Open a project session to see tasks"} accessible={!!project()?.accessible} backlog={stage() === "backlog"}>
     <button class="tk-sq" classList={{ on: flag("tasks/onlySession") }} aria-label="Only this session" title="Only this session" aria-pressed={flag("tasks/onlySession")} disabled={!project()} onClick={() => void setSetting("tasks/onlySession", !flag("tasks/onlySession"))}><Icon name="filter" size={15} /></button>
     <button class="tk-sq" aria-label="Task settings" title="Task settings" disabled><Icon name="settings" size={15} /></button>
-  </div>
+  </TaskCreate></Suspense>
     <Show when={project()} fallback={<div class="tk-empty tk-noproject"><Icon name="list-todo" size={22} /><span>{selected() && selected()!.state !== "archived" ? "Tasks belong to a project. Move this session into one to keep tasks for it." : "Open a project session to see tasks"}</span></div>}>
       <div class="tk-tiles" role="tablist" aria-label="Task stages"><For each={FILTERS}>{(s) => <button class={`tk-tile st-${s}`} classList={{ on: stage() === s, drop: dropTile() === s }} onDragOver={(e) => { if (tileOver(e, s)) setDropTile(s); }} onDragLeave={() => setDropTile(undefined)} onDrop={(e) => { setDropTile(undefined); if (!tileOver(e, s)) return; const task = readTaskDrag(e, project()!.id), action = stageDropAction(task, s); setDraggedTask(undefined); if (task && action) void actOnTask(project()!.id, task, action); }} role="tab" aria-label={`${LABEL[s]} ${stageRows(s).length}`} aria-selected={stage() === s} tabindex={stage() === s ? 0 : -1} onClick={() => setStage(s)} onKeyDown={(e) => { const i = FILTERS.indexOf(s), next = e.key === "ArrowRight" ? (i + 1) % 6 : e.key === "ArrowLeft" ? (i + 5) % 6 : e.key === "Home" ? 0 : e.key === "End" ? 5 : -1; if (next >= 0) { e.preventDefault(); setStage(FILTERS[next]); e.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>("button")[next]?.focus(); } }}><span class="tk-tile-ico"><Icon name={ICON[s]} size={14} /></span><span class="tk-tile-label">{LABEL[s]}</span><b class="tk-tile-count">{stageRows(s).length}</b></button>}</For></div>
       <Show when={tasks.error()}><div class="notice danger tk-line" role="alert">Tasks could not be read: {tasks.error()}</div></Show>

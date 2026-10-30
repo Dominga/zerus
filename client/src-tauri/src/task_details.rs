@@ -16,7 +16,7 @@ use zerus_client_core::{attachments, reads::CachedAttachment, task_details, task
 pub struct TaskReads(Arc<AtomicBool>);
 pub(crate) struct Permit(TaskReads);
 impl TaskReads {
-    fn begin(&self) -> Result<Permit, String> {
+    pub(crate) fn begin(&self) -> Result<Permit, String> {
         self.0
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .map_err(|_| "Task details are already loading.".to_owned())?;
@@ -146,7 +146,7 @@ pub async fn task_board_action(
     .map_err(|e| e.to_string())?
 }
 
-fn assignment_target(
+pub(crate) fn assignment_target(
     row: &zerus_client_core::view::ViewRow,
     target: &zerus_client_core::actions::Target,
     session_id: &str,

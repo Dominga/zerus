@@ -115,7 +115,7 @@ impl TaskEditor {
         Ok(Permit(self.clone()))
     }
 }
-fn load(store: &DraftStore, key: &str) -> Result<Loaded, String> {
+pub(crate) fn load(store: &DraftStore, key: &str) -> Result<Loaded, String> {
     let (tx, rx) = mpsc::channel();
     store.load(key, move |value| {
         let _ = tx.send(value);

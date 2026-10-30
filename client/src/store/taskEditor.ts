@@ -4,24 +4,25 @@ import { notify } from "./actions";
 import { exitFlush } from "./exitFlush";
 import type { Fetched } from "../types";
 export type TaskEditorMode = "note" | "description";
-export interface TaskEditorTarget { project: string; task: string; mode: TaskEditorMode }
-export interface TaskEditorView extends TaskEditorTarget {
+export interface TaskEditorTarget<M extends string = TaskEditorMode> { project: string; task: string; mode: M }
+export interface TaskEditorView<M extends string = TaskEditorMode> extends TaskEditorTarget<M> {
   handle: number; rev: number; text: string; position: number; anchor: number;
-  files: (Fetched & { reference: string })[]; error: string; recovery: boolean; blocked: boolean; saved: boolean; unsaved?: boolean;
+  files: (Fetched & { reference: string })[]; error: string; recovery: boolean; blocked: boolean; saved: boolean; unsaved?: boolean; read_only?: boolean; created?: string | null;
 }
-export interface TaskEditorPort {
-  open(target: TaskEditorTarget): Promise<TaskEditorView>;
-  edit(input: Pick<TaskEditorView, "handle" | "rev" | "text" | "position" | "anchor">): Promise<TaskEditorView>;
-  pick(handle: number, start: number, end: number): Promise<TaskEditorView>;
-  remove(handle: number, index: number): Promise<TaskEditorView>;
-  submit(handle: number, rev: number, recover: boolean): Promise<TaskEditorView>;
+export interface TaskEditorPort<M extends string = TaskEditorMode> {
+  open(target: TaskEditorTarget<M>): Promise<TaskEditorView<M>>;
+  edit(input: Pick<TaskEditorView<M>, "handle" | "rev" | "text" | "position" | "anchor">): Promise<TaskEditorView<M>>;
+  pick(handle: number, start: number, end: number): Promise<TaskEditorView<M>>;
+  remove(handle: number, index: number): Promise<TaskEditorView<M>>;
+  submit(handle: number, rev: number, recover: boolean): Promise<TaskEditorView<M>>;
+  discard?(handle: number, rev: number): Promise<TaskEditorView<M>>;
 }
-export function createTaskEditor(port: TaskEditorPort, report: (message: string) => void = () => {}) {
-  const [view, setView] = createSignal<TaskEditorView>(), [opening, setOpening] = createSignal(false), [busy, setBusy] = createSignal(false), [error, setError] = createSignal("");
+export function createTaskEditor<M extends string = TaskEditorMode>(port: TaskEditorPort<M>, report: (message: string) => void = () => {}) {
+  const [view, setView] = createSignal<TaskEditorView<M>>(), [opening, setOpening] = createSignal(false), [busy, setBusy] = createSignal(false), [error, setError] = createSignal("");
   let generation = 0, identity = "", dirty = false, timer: ReturnType<typeof setTimeout> | undefined;
   let selecting = Promise.resolve();
   let saving: Promise<void> | undefined, operation: Promise<boolean> | undefined;
-  const accept = (next: TaskEditorView) => { setView(next); setError(next.error); };
+  const accept = (next: TaskEditorView<M>) => { setView(next); setError(next.error); };
   const flush = async (): Promise<void> => {
     clearTimeout(timer); timer = undefined;
     if (saving) return saving;
@@ -37,7 +38,7 @@ export function createTaskEditor(port: TaskEditorPort, report: (message: string)
     })();
     try { await saving; } finally { saving = undefined; }
   };
-  const follow = (target?: TaskEditorTarget) => {
+  const follow = (target?: TaskEditorTarget<M>) => {
     const key = target ? JSON.stringify([target.project, target.task, target.mode]) : "";
     if (key === identity) return;
     identity = key; const mine = ++generation; setOpening(!!target); setError("");
@@ -60,7 +61,7 @@ export function createTaskEditor(port: TaskEditorPort, report: (message: string)
     setView((v) => v ? { ...v, text, position, anchor, rev: v.rev + 1, saved: false } : v); dirty = true;
     clearTimeout(timer); timer = setTimeout(() => { void flush().catch(() => {}); }, 250);
   };
-  const run = (call: (v: TaskEditorView) => Promise<TaskEditorView>): Promise<boolean> => {
+  const run = (call: (v: TaskEditorView<M>) => Promise<TaskEditorView<M>>): Promise<boolean> => {
     if (locked()) return Promise.resolve(false);
     const mine = generation; setBusy(true);
     operation = (async () => {
@@ -78,6 +79,7 @@ export function createTaskEditor(port: TaskEditorPort, report: (message: string)
     flushForExit: async () => { if (operation) await operation; await flush(); },
     flush, pick: () => run((v) => port.pick(v.handle, Math.min(v.position, v.anchor), Math.max(v.position, v.anchor))),
     remove: (index: number) => run((v) => port.remove(v.handle, index)),
+    discard: () => run((v) => port.discard ? port.discard(v.handle, v.rev) : Promise.reject(new Error("This draft cannot be discarded here."))),
     submit: (recover = false) => run((v) => port.submit(v.handle, v.rev, recover)),
   };
 }

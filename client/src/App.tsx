@@ -32,7 +32,6 @@ import type { BridgeMode } from "./bridge";
 // Settings and its sections load the first time Settings opens; their
 // state lives in their modules, so it stays once loaded.
 const SettingsScreen = lazy(() => import("./ui/screens/Settings").then((m) => ({ default: m.SettingsScreen })));
-const TasksScreen = lazy(() => import("./ui/screens/Tasks").then((m) => ({ default: m.TasksScreen })));
 // New session and its child dialogs load the first time it opens
 // (`newSessionOpened`), and stay mounted from then on.
 const NewSessionDialog = lazy(() => import("./ui/sessions/NewSessionDialog").then((m) => ({ default: m.NewSessionDialog })));
@@ -133,7 +132,6 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
           <Match when={page() === "machines"}><MachinesScreen /></Match>
           <Match when={page() === "accounts"}><AccountsScreen /></Match>
           <Match when={page() === "projects"}><ProjectsScreen /></Match>
-          <Match when={page() === "tasks"}><Suspense><TasksScreen /></Suspense></Match>
           <Match when={page() === "settings"}><Suspense><SettingsScreen /></Suspense></Match>
         </Switch>
       </main>

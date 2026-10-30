@@ -27,8 +27,11 @@ import { QueuePanel } from "./QueuePanel";
 import { onCommand } from "../../store/shortcuts";
 import { composer } from "../../store/composer";
 import { createSubagentIdentity } from "../../store/subagentIdentity";
-import { openTasks } from "../../store/taskNavigation";
-import { groupOf, INBOX } from "../../store/organization";
+import { selectedTask } from "../../store/taskNavigation";
+import { Inspector } from "./Inspector";
+import { TaskView, followProjectTasks } from "../screens/Tasks";
+import { inspectorOpen, setInspectorOpen, openInspector } from "../../store/inspector";
+import { sessionGoal } from "./inspector-data";
 
 // The session header and its Activity with the composer under it, after
 // design/webui SessionDetail. Processes and the side panel move in with later
@@ -190,6 +193,7 @@ const tabs = () => {
     { id: "activity" as const, label: "Activity", show: true },
     { id: "terminal" as const, label: "Terminal", show: !!terminalTexts()?.supported && !subagentOpen() },
     processesTab(flag("processes/enabled"), count),
+    { id: "taskview" as const, label: "Task View", show: detailTab() === "taskview" && !!selectedTask() },
   ];
   const s = selected();
   return s ? detailTabs(s.key, all) : all;
@@ -199,6 +203,15 @@ const tabs = () => {
 createRoot(() => createEffect(() => { if (!tabs().find((t) => t.id === detailTab())?.show) setDetailTab("activity"); }));
 
 export function SessionDetail() {
+  followProjectTasks();
+  const [available, setAvailable] = createSignal(900);
+  const measure = (el: HTMLDivElement) => {
+    const observer = new ResizeObserver(() => setAvailable(el.clientWidth)); observer.observe(el);
+    onCleanup(() => observer.disconnect());
+  };
+  const goal = createMemo(() => sessionGoal(selected() ? followedFor(selected()!.key).value : undefined));
+  const toggle = onCommand("panel.toggle", () => { if (page() === "sessions") setInspectorOpen(!inspectorOpen()); });
+  onCleanup(toggle);
   createEffect(() => {
     if (page() !== "sessions" || !selected()) return;
     // Window scope on every detail tab (SessionsWindowShortcuts.cpp:202,242).
@@ -209,22 +222,22 @@ export function SessionDetail() {
     <section class="detail" aria-label="Session">
       {/* Qt's drop overlay (SessionFileDrop): what a drop on this panel does. */}
       <Show when={drops.hint()}>{(text) => <div class="drop-overlay" aria-hidden="true"><span>{text()}</span></div>}</Show>
-      <Show when={selected()} fallback={<EmptyDetail />}>
-        <Header />
-        <div class="work">
+      <Show when={selected()}><Header /></Show>
+        <div class="work" ref={measure}>
+        <Show when={selected()} fallback={<div class="work-main"><EmptyDetail /></div>}>
           <div class="work-main">
             <div class="detail-tabs tabs" role="tablist">
               <For each={tabs().filter((t) => t.show)}>{(t) => (
                 <button class="tab" role="tab" classList={{ on: detailTab() === t.id }} aria-selected={detailTab() === t.id} onClick={() => { if (t.id === "terminal") terminal.opened(); setDetailTab(t.id); }}>{t.label}</button>
               )}</For>
               <span class="grow" />
-              <button class="btn ghost small" disabled={selected()!.state === "archived" || groupOf(selected()!.key) === INBOX}
-                title="Open this session's project tasks" onClick={() => openTasks(groupOf(selected()!.key), selected()!.key)}><Icon name="list-todo" size={14} />Tasks</button>
+              <Show when={!inspectorOpen()}><button class="icon-btn small" aria-label="Show side panel" title="Show side panel" onClick={() => setInspectorOpen(true)}><Icon name="panel-right-open" size={14} /></button></Show>
             </div>
             <div class="tab-body">
               <Switch>
                 <Match when={detailTab() === "activity"}>
-                  <div class="activity-wrap" style={columnStyle()}>
+                  <div class="activity-wrap" classList={{ "has-goal": !!goal().objective }} style={columnStyle()}>
+                    <Show when={goal().objective}><button class="goal-pill" onClick={() => openInspector("plan")}><Icon name="circle-dot" size={13} /><b>Pursuing goal</b><span class="ell">{goal().objective}</span><span class="grow" /><span>Details</span><Icon name="chevron-right" size={12} /></button></Show>
                     <ActivityView source={activitySourceFor(selected()!.key)} />
                     {/* Only the subagent view stays read-only; archives keep their editable draft (Qt 3454). */}
                     <Show when={!subagentOpen()}>
@@ -232,15 +245,17 @@ export function SessionDetail() {
                     </Show>
                   </div>
                 </Match>
+                <Match when={detailTab() === "taskview"}><TaskView /></Match>
                 <Match when={detailTab() === "terminal"}><TerminalTab /></Match>
                 <Match when={detailTab() === "processes"}><ProcessesTab /></Match>
               </Switch>
             </div>
           </div>
+        </Show>
+        <Inspector available={available()} />
         </div>
         {/* The composer's questions and Clear session, also from the header on another tab; the field takes the focus back. */}
         <ComposerDialogs onClosed={() => { if (document.activeElement === document.body) document.querySelector<HTMLTextAreaElement>(".cmp-editor")?.focus(); }} />
-      </Show>
     </section>
   );
 }

@@ -343,6 +343,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(actions::ArchiveReads::default());
                 app.manage(content_search::Searches::default());
                 app.manage(task_details::TaskReads::default());
+                app.manage(task_details::TaskWrites::default());
                 app.manage(actions::ActivityReads::default());
                 app.manage(actions::Attention::new(dir.join(actions::attention_file(replay))));
                 let pump = app.state::<commands::AppState>().pump();
@@ -976,6 +977,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         actions::inspect_subagent_identity,
         commands::tasks_follow,
         task_details::task_details,
+        task_details::task_assign,
         task_details::task_attachment_open,
         actions::pending_read_marks,
         actions::queue_read_marks,

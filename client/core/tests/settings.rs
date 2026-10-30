@@ -1005,3 +1005,18 @@ fn task_preferences_cover_existing_switches_but_never_reseed_an_old_handled_key(
     let saved: Value = serde_json::from_slice(&fs::read(kept).unwrap()).unwrap();
     assert!(saved["g3"]["families"].get("task-preferences").is_some());
 }
+
+#[test]
+fn inspector_preferences_are_device_local_and_explicit_false_wins() {
+    use zerus_client_core::settings::{default_value, effective, find};
+    let open = find("workspace/inspectorOpen").unwrap();
+    assert!(!open.seeded);
+    assert_eq!(default_value(open.kind), json!("auto"));
+    assert_eq!(effective(open.kind, Some(&json!(false))), json!(false));
+    assert_eq!(effective(open.kind, Some(&json!(true))), json!(true));
+    assert_eq!(effective(open.kind, Some(&json!("bad"))), json!("auto"));
+    let width = find("workspace/inspectorWidth").unwrap();
+    assert!(!width.seeded);
+    assert_eq!(effective(width.kind, Some(&json!(100))), json!(240));
+    assert_eq!(effective(width.kind, Some(&json!(2000))), json!(900));
+}

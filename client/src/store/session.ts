@@ -76,7 +76,7 @@ createRoot(() => {
   // The detail tab that shows: behind Terminal a failed read waits Qt's
   // background interval (Settings > Processes), which Rust reads when told.
   createEffect(on(() => [detailTab(), num("processes/backgroundSeconds"), num("processes/activeSeconds")] as const, ([tab]) => {
-    void composerTab(tab).catch(() => {});
+    void composerTab(tab === "taskview" ? "native" : tab).catch(() => {});
   }));
 });
 

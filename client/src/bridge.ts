@@ -28,6 +28,7 @@ export async function followTasks(project: string | null): Promise<void> {
   await invoke("tasks_follow", { project });
 }
 
+export const assignTask = (project: string, task: string, target: { computer: string; name: string; run_id: string; conversation_id: string } | null, catalogKey: string | null, sessionId: string | null) => desktop<void>("task_assign", { project, task, target, catalogKey, sessionId });
 export const readTaskDetails = (project: string, task: string, before: string | null) => desktop<unknown>("task_details", { project, task, before });
 export const openTaskAttachment = (path: string) => desktop<string | null>("task_attachment_open", { path });
 

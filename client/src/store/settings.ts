@@ -67,6 +67,7 @@ function storedObject(raw: string | null | undefined): Record<string, unknown> {
 
 /** A value of the same type as the setting's default, or undefined. */
 export function sameType(key: string, value: unknown): SettingValue | undefined {
+  if (key === "workspace/inspectorOpen") return typeof value === "boolean" || value === "auto" ? value : undefined;
   const fallback = DEFAULTS[key];
   if (fallback === undefined || value === null || value === undefined) return undefined;
   if (Array.isArray(fallback)) return Array.isArray(value) && value.every((item) => typeof item === "string") ? value as string[] : undefined;

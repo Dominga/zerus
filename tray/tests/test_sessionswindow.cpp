@@ -17612,10 +17612,10 @@ void TestSessionsWindow::machinesPageMatchesThePrototype()
         "if host=='studio':print('ssh: connect to host studio.example.test port 22: Connection timed out\\nhgs: studio unreachable',file=sys.stderr);sys.exit(255)\n"
         "if a==['--help']:print('usage: hgs [@host] <cmd>\\n       hgs [@host] mobile phones|invite|revoke-phone <id> --json')\n"
         "elif a[:2]==['machine','ls']:print(json.dumps({'local':'workstation','revision':'r1','machines':["
-        "{'alias':'macbook','connection':{'hostname':'macbook.local','user':'anna','port':22,'identity_file':'~/.ssh/id_ed25519','enabled':True},'enabled':True,'source':'local','inherited':False},"
+        "{'alias':'macbook','connection':{'hostname':'macbook.example','user':'user','port':22,'identity_file':'~/.ssh/id_ed25519','enabled':True},'enabled':True,'source':'local','inherited':False},"
         "{'alias':'build-01','connection':{'hostname':'build-01.example.test','enabled':True},'enabled':True,'source':'local','inherited':False},"
         "{'alias':'studio','connection':{'hostname':'studio.example.test','enabled':True},'enabled':True,'source':'local','inherited':False}]}))\n"
-        "elif a[:2]==['machine','resolve']:print(json.dumps({'alias':a[2],'effective':{'hostname':a[2]+'.local','user':'anna','port':'22','identity_files':['~/.ssh/id_ed25519']}}))\n"
+        "elif a[:2]==['machine','resolve']:print(json.dumps({'alias':a[2],'effective':{'hostname':a[2]+'.example','user':'user','port':'22','identity_files':['~/.ssh/id_ed25519']}}))\n"
         "elif a==['mobile','phones','--json']:print(json.dumps(%1 if host=='' else {'configured':False}))\n"
         "elif 'account' in a[:2]:print(json.dumps({'profiles':[]}))\n"
         "else:\n sys.argv[0]=").arg(phones) + FakeCli::pythonString(script()) + ";runpy.run_path(sys.argv[0],run_name='__main__')\n").toUtf8()));
@@ -17682,7 +17682,7 @@ void TestSessionsWindow::machinesPageMatchesThePrototype()
     QCOMPARE(page->findChild<QLabel *>("machineState")->text(), QStringLiteral("Connected · hgs 0.47.0"));
     QVERIFY(page->findChild<QFrame *>("machineConnectionCard")->isVisible());
     QVERIFY(!page->findChild<QFrame *>("machineLocalCard")->isVisible());
-    QTRY_VERIFY(page->findChild<QLabel *>("effectiveMachineConnection")->text().contains("anna@macbook.local, port 22"));
+    QTRY_VERIFY(page->findChild<QLabel *>("effectiveMachineConnection")->text().contains("user@macbook.example, port 22"));
     for (const char *name : {"saveMachine", "discardNewMachine", "checkMachine", "sshMachine", "installMachine", "resetMachine", "removeMachine", "browseMachineKey"})
         QVERIFY2(page->findChild<QPushButton *>(name)->isVisible(), name);
     save("pm-machines-remote");

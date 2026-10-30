@@ -146,6 +146,12 @@ Rollback to Qt is one command from the source checkout:
 python3 tray/update-installed.py --rollback ~/.local/bin/hgs-tray
 ```
 
+Before Qt starts, the updater probes the selected `hgs` for
+`Desktop revoke ABI: desktop-revoke-v1` and obtains either a settled revocation
+or the explicit no-handoff no-op. Failure, timeout, a malformed or pending
+receipt, or a configuration mismatch keeps Qt stopped. Recovery inspects the
+same request ID and reason; it never invents a new UUID or stops another service.
+
 The same guarded replacement and verification runs in reverse. The client then
 becomes the rollback copy, so a second `--rollback` returns to it. Drafts typed
 in the client remain in `~/.local/share/com.hgdev.hgs-tray/drafts`; Qt does not

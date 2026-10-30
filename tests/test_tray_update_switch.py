@@ -17,6 +17,8 @@ import tempfile
 import unittest
 from unittest import mock
 
+from desktop_revoke_fixture import REVOCATION_CLI
+
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('update_installed', ROOT / 'tray/update-installed.py')
 updater = importlib.util.module_from_spec(spec)
@@ -57,9 +59,17 @@ class Fixture(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
         environment = mock.patch.dict(os.environ, {'XDG_CONFIG_HOME': str(self.home / '.config'),
-                                                   'XDG_DATA_HOME': str(self.home / '.local/share')})
+                                                   'XDG_DATA_HOME': str(self.home / '.local/share'),
+                                                   'TRAY_FIXTURE': str(self.root),
+                                                   'HGS_DESKTOP_REVOKE_TIMEOUT': '1'})
         environment.start()
         self.addCleanup(environment.stop)
+        revocation_cli = self.root / 'revocation-hgs'
+        revocation_cli.write_text(REVOCATION_CLI.format(python=sys.executable))
+        revocation_cli.chmod(0o755)
+        patcher = mock.patch.object(updater, 'CLI', str(revocation_cli))
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def bundle(self, name, kind, identifier=TEST_ID):
         app = self.root / 'bundles' / name / 'hgs-tray.app'

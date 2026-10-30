@@ -224,6 +224,10 @@ public:
     void requestLocal();
     // OpenCode effort is a variant of the chosen model: it is passed only with a model.
     void launchDetachedSession(const QString &host, const QString &agent, const QString &target, const QString &name, const QString &account, const QString &launchId, const QString &model = {}, const QString &effort = {}, const QString &permissions = {}, const QString &expectedMachine = {});
+    // WhiteWh fork, U60 (#656): a new session on this computer whose agent uses
+    // a model server's API and model for this session only (hgs AGENT FOLDER
+    // --new -n TAG --model-server SERVER --model MODEL); nativeSessionLaunched follows.
+    void launchModelServerSession(const QString &agent, const QString &folder, const QString &name, const QString &server, const QString &model, const QString &launchId);
     void launchNativeSession(const QString &host, const QString &target, const QString &name, const QString &account, const QString &launchId);
     // Асинхронно: `hgs @<peer> ls --json`. Пир, который спит, — это ok:false, а не ошибка.
     // peerReady() carries a box whose host is this alias (see BoxState::host).
@@ -258,6 +262,11 @@ public:
     // `timeoutMs` 0 keeps the usual bound; a bulk account move (U54) waits
     // for each member's switch and gets a longer one.
     quint64 requestTeam(const QString &host, const QString &operation, const QJsonObject &input, int timeoutMs = 0);
+    // WhiteWh fork, U60 (#656): `hgs model-server ARGS` on this computer, with
+    // `input` on stdin when given (save and test take JSON, the key travels
+    // only there). A failed status prints its {"status":"error",...} on stdout
+    // and exits 1, so any JSON object on stdout is the answer.
+    quint64 requestModelServer(const QStringList &args, const QByteArray &input = {}, int timeoutMs = 60000);
     // The draft in the agent's own Terminal input (owner, 2026-10-28): read it,
     // or with submitHash press Enter only while it is still exactly that draft.
     // WhiteWh fork, U53: `hgs [@host] switch-account <name> --account ID
@@ -459,6 +468,8 @@ signals:
     void swarmFailed(quint64 request, const QString &error);
     void teamReady(quint64 request, const QString &host, const QString &operation, const QJsonObject &result);
     void teamFailed(quint64 request, const QString &host, const QString &operation, const QString &error);
+    void modelServerReady(quint64 request, const QJsonObject &result);
+    void modelServerFailed(quint64 request, const QString &error);
     void terminalDraftReady(quint64 request, const QJsonObject &result);
     void terminalDraftFailed(quint64 request, const QString &error);
     void switchAccountFinished(quint64 request, const QString &host, const QString &name, const QJsonObject &receipt, const QString &error);
@@ -581,6 +592,7 @@ private:
     quint64 m_mobileRequest = 0;
     quint64 m_swarmRequest = 0;
     quint64 m_teamRequest = 0;
+    quint64 m_modelServerRequest = 0;
     quint64 m_terminalDraftRequest = 0;
     quint64 m_switchAccountRequest = 0;
     quint64 m_taskRequest = 0;

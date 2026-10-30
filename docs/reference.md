@@ -3682,6 +3682,104 @@ SSH launches; an `opencode` found earlier on PATH keeps precedence.
 
 `hgs [@host] account models native-opencode [--location DIR] --json` lists every available model of that computer and folder (connected providers only, at most 10,000 models and 4 MiB; `models_truncated` reports a cut). It never starts OpenCode; with the service stopped it reports `not_running` and, for the home folder, the last known short list.
 
+<a id="model-servers"></a>
+
+## Model servers
+
+A model server is any computer on the LAN, or this one, that serves LLMs through
+an OpenAI- or Anthropic-compatible API. The agent and its tools run on this
+computer; the server only answers inference requests. Configuration is per
+computer, local and never committed: `model-servers.json` in the private config
+folder (`~/.config/hgs/` by default), written owner-only. A missing file means
+no server and no extra tab.
+
+Each server row has a `name`; the API `base_url`
+(`http://` or `https://HOST[:PORT][/path]`, no credentials or query) and its
+`kind` (`openai` or `anthropic`); an optional `key` (stored only in this private
+file, never shown by a listing); an optional `ssh` host, either one of this
+computer's Machines or an SSH alias, always reached through hgs's own SSH
+transport (BatchMode, never a piped `ssh.exe` on Windows); and optional control
+commands as argv templates for `status`, `up`, `down` and `logs`. `{model}` is
+the only input a command receives and `{server}` its server name. Commands are
+argv lists, never shell lines: locally hgs starts the program itself and over
+SSH it quotes each argument for the peer's login shell. `up_minutes` bounds a
+detached `up` (30 by default, 1 to 240).
+
+```json
+{"version":1,"servers":[
+  {"name":"lab","base_url":"https://192.0.2.10:8443","kind":"openai","key":"<private>",
+   "ssh":"labhost","up_minutes":30,
+   "status":["serve","status"],"up":["serve","up","{model}"],
+   "down":["serve","down","{model}"],"logs":["serve","logs","{model}"]}
+]}
+```
+
+Without control commands the server is read only: `status` reads `GET /v1/models`
+(with `Authorization: Bearer` for an OpenAI kind, `x-api-key` for Anthropic) and
+lists the models it returns. An `http://` server is read by hgs itself; an
+`https://` server is read through the system `curl` (`curl.exe` on Windows 10+,
+`curl` elsewhere), run with an argv list, `--fail-with-body` and `--max-time`,
+with the key in a private `--config` file in the config folder so it never
+appears on the command line. Curl's exit codes keep the errors distinct (6 and 7
+unreachable, 28 timed out, 22 an HTTP error with 401/403 unauthorized); when
+curl is missing, `status` says so as a refusal naming curl, and sessions still
+work because the agents speak TLS themselves. A control command may print the
+Zerus JSON contract
+`{"models":[{"name":"small","state":"running"}],"memory":{"free":12.5,"total":64}}`
+or plain lines `NAME: STATE`, with an optional `memory: FREE/TOTAL GB` line;
+any other line is kept as raw text. States are shown lowercased.
+
+Commands (all local to the configured computer; `--json` is available on `list`
+and `status`):
+
+```text
+hgs model-server list [--json]
+hgs model-server status SERVER [--json]
+hgs model-server up SERVER MODEL [--detach]
+hgs model-server down SERVER MODEL [--yes]
+hgs model-server logs SERVER [MODEL] [--lines N]
+hgs model-server save --json      (JSON on stdin)
+hgs model-server test --json      (JSON on stdin)
+```
+
+Settings > Model servers writes the configuration with `save --json`: stdin
+`{"by":"human","servers":[...]}` replaces the whole list atomically. Only you
+save it (an agent session cannot, as for other owner settings). Each server
+may carry `was`, its previous name: a server without `key` keeps the key stored
+under `was`, and `"key":null` removes it. Every error names the server and the
+field, nothing is written on an error, and the receipt lists the servers as
+`list --json` does, never with a key. `test --json` takes one server as
+Settings shows it, saved or not (an absent `key` means the stored key of
+`was`), runs `status` once and prints what `status --json` would, saving
+nothing. The key travels only in the stdin JSON, never in an argument. Settings
+tests the status and logs commands only; `up` and `down` belong to the Model
+servers tab with its confirmations. `list --json` also carries each server's
+command templates in `argv`.
+
+`list` shows `name`, `base_url`, `kind`, its SSH host and which control commands
+exist, never the key. `up` and `down` accept only a validated model name (letters,
+digits and `-_.:/@+`) and return a receipt; `up --detach` starts the command as a
+detached `hgs run` with the server's time limit, so the receipt carries its
+`request_id`. A server may be shared, so `down` asks first and says so: without
+`--yes` it returns `{"status":"confirm",...}` and runs nothing. `logs` keeps the
+last `--lines` lines (200 by default, at most 2000) within a fixed time and
+output bound.
+
+Unreachable (the SSH host or API address does not answer), refused (the command
+or the API answered with a failure), timed out (the fixed limit passed) and
+unauthorized (`HTTP 401/403`) are distinct errors in `--json` output, for
+example `{"status":"error","error":"unauthorized","detail":"..."}`. Nothing
+retries on its own.
+
+Choose a server's API and model for a new session with
+`hgs codex DIRECTORY --new -n TAG --model-server lab --model small`. The launch
+carries this session's provider settings only: Codex's OpenAI-compatible
+`OPENAI_BASE_URL`/`OPENAI_API_KEY` and `--model`, Claude Code's
+`ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` and model variables (an Anthropic
+server), and OpenCode's provider configuration in `OPENCODE_CONFIG_CONTENT`
+plus a `hgs-lab/small` provider model. The user's global agent configuration is
+never changed, and resuming a saved conversation keeps its original provider.
+
 <a id="deepseek"></a>
 
 ## Official DeepSeek Harness

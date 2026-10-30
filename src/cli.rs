@@ -114,6 +114,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs swarm preference get --json   shared phone notification timing
        hgs swarm preference set mobile_delivery VALUE --json   immediate|away|away_5|away_10|away_15|away_30
        hgs machine check <alias> | ssh <alias> [--directory PATH] | setup <alias> [--source <checkout>]
+       hgs model-server list [--json] | status SERVER [--json] | up SERVER MODEL [--detach] | down SERVER MODEL [--yes] | logs SERVER [MODEL] [--lines N] | save --json | test --json   model servers on this computer (local private configuration)
        hgs [@host] account ls | add ID --provider AGENT --label NAME | rm ID | restore ID | login ID
        hgs [@host] account rename ID --label NAME | inspect ID [--refresh]
        hgs [@host] account default [ID]   show or select the default account for new sessions
@@ -175,6 +176,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
   --account ID   use a named native agent profile for this session
   --permissions auto|bypass   this session's native permission mode instead of the account's (auto: claude only)
   --local-model NAME   this session's model of a local Ollama account (claude)
+  --model-server NAME   this session runs on a model server's API (needs --model MODEL; a new session)
   --model PROVIDER/MODEL   OpenCode native model for a new session
   --effort VARIANT   OpenCode effort; needs --model, one of that model's effort_options (omit for the model's default)
   --new    always create a separate session; generate a name unless -n is given
@@ -602,6 +604,16 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
         "--version" | "version" => return crate::status::version(&config, &target, args),
         // Read-only on every machine; never routed as an agent launch.
         "status" => return crate::status::run(&config, &target, args, dry),
+        // U60: model servers are configured on this computer, privately.
+        "model-server" => {
+            if !target.is_empty() && !config.is_self(&target) {
+                return Err(Error::new(2, "model-server is configured on this computer; omit @host"));
+            }
+            if dry {
+                return Err(Error::new(2, "model-server does not support --dry-run"));
+            }
+            return state::model_servers::dispatch(&config, args);
+        }
         // Text compiled into this hgs; a peer answers with its own.
         // WhiteWh fork: a build or long test Zerus tracks as this session's work.
         "run" => {
@@ -1963,6 +1975,7 @@ struct LaunchOptions {
     account: Option<String>,
     permissions: Option<String>,
     local_model: Option<String>,
+    model_server: Option<String>,
     model: Option<String>,
     effort: Option<String>,
     launch_id: Option<String>,
@@ -2001,6 +2014,7 @@ impl LaunchOptions {
                     i += 1;
                 }
                 "--model" => { options.model=Some(require(args,i+1,"--model needs provider/model")?.into()); i+=1; }
+                "--model-server" => { options.model_server=Some(require(args,i+1,"--model-server needs a server name")?.into()); i+=1; }
                 "--effort" => { options.effort=Some(require(args,i+1,"--effort needs a model variant")?.into()); i+=1; }
                 "--account" => {
                     options.account =
@@ -2190,12 +2204,33 @@ fn launch(
         if options.account.as_deref().is_some_and(|id|id!="native-opencode") {return Err(Error::new(1,"Choose native-opencode; separate OpenCode profiles are not supported"));}
         if options.resume || !options.extra.is_empty() || options.fresh || options.remote_control {return Err(Error::new(1,"Use saved HGS session names to resume OpenCode; select a model with --model provider/model"));}
         if options.effort.is_some() && options.model.is_none() {return Err(Error::new(1,"--effort needs --model"));}
+        // U60: this launch's provider is a model server's API, passed to the
+        // private host as session-scoped configuration; the user's OpenCode
+        // configuration is not changed.
+        if let Some(server) = options.model_server.as_deref() {
+            let model = options.model.as_deref().ok_or_else(|| Error::new(1, "--model-server needs --model MODEL"))?;
+            let (environment, args) = crate::state::model_servers::session_settings(config, server, "opencode", model)?;
+            for line in &environment {
+                if let Some((key, value)) = line.split_once('=') {
+                    std::env::set_var(key, value);
+                }
+            }
+            if let Some(at) = args.iter().position(|arg| arg == "--model") {
+                options.model = args.get(at + 1).cloned();
+            }
+        }
         let project=if project=="/" {"root".into()}else{sanitize(&project)};
         let tag=if options.tag.is_empty(){"main"}else{&options.tag};let name=format!("opencode/{project}/{tag}");
         state::opencode::launch(&name,&directory,options.launch_id.as_deref(),options.model.as_deref(),options.effort.as_deref(),options.dry,options.new_only).map_err(|e|Error::new(1,e))?;
         if !options.dry {println!("OpenCode session ready: {name}\nOpen this session in Zerus.");}return Ok(0);
     }
-    if options.model.is_some() || options.effort.is_some() {return Err(Error::new(1,"--model and --effort are OpenCode launch options; other agent flags go after --"));}
+    if options.model_server.is_some() {
+        if options.model.is_none() { return Err(Error::new(1, "--model-server needs --model MODEL")); }
+        if options.local_model.is_some() { return Err(Error::new(1, "Choose --model-server or --local-model, not both")); }
+        if options.resume || options.resume_id.is_some() || options.fresh {
+            return Err(Error::new(1, "--model-server starts a new session; resume keeps the conversation's original provider"));
+        }
+    } else if options.model.is_some() || options.effort.is_some() {return Err(Error::new(1,"--model and --effort are OpenCode launch options; other agent flags go after --"));}
     if command_name == "dsh" {
         if options
             .account
@@ -2323,6 +2358,15 @@ fn launch(
         let id = options.account.as_deref().ok_or_else(|| Error::new(1, "--local-model needs --account"))?;
         account_environment.extend(crate::accounts::local_model_session(config, id, &command_name, model)?);
     }
+    // U60: this session runs on a model server's API; the settings are this
+    // launch's environment only, so the global agent configuration is untouched.
+    let mut model_server_args: Vec<String> = Vec::new();
+    if let Some(server) = options.model_server.as_deref() {
+        let model = options.model.as_deref().ok_or_else(|| Error::new(1, "--model-server needs --model MODEL"))?;
+        let (environment, args) = crate::state::model_servers::session_settings(config, server, &command_name, model)?;
+        account_environment.extend(environment);
+        model_server_args = args;
+    }
     if !options.dry {
         if let Some(id) = &options.account {
             crate::accounts::prepare_local_model(config, id, &command_name)?;
@@ -2349,6 +2393,11 @@ fn launch(
         ),
         _ => (vec![command.into()], Vec::new()),
     };
+    // U60: the server's model is this launch's flag (Claude takes its model from
+    // the environment, which the settings above already set).
+    if command_name == "codex" {
+        base.extend(model_server_args.iter().cloned());
+    }
     let launcher = Path::new(&directory).join(format!("run_{command_name}.sh"));
     if !options.bare && !directory.is_empty() && platform::executable(&launcher) {
         base[0] = launcher.to_string_lossy().into_owned();

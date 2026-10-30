@@ -35,6 +35,14 @@ whose fixes were taken separately.
 
 ## Local checks
 
+A change runs only the tests it touches: `hgs test affected` names them with
+their time from `.zerus/tests.toml` and `.zerus/test-map.json`. Never run a
+full suite by hand; the full run happens before a release, after the owner
+hears its estimate and confirms. Tests are cut into small areas, never
+dropped, and a new test that repeats an existing one becomes a case of a table
+test. See `hgs guide team-tests` and the "Test discipline" section of
+`docs/reference.md`.
+
 ```sh
 python3 scripts/ci/check-source.py
 python3 -m unittest discover -s tests -p 'test_*publication.py'

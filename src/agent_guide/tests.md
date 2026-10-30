@@ -24,10 +24,11 @@ Every action takes --dir DIR, --team TEAM (the owner's override) and --json.
 .zerus/tests.toml: version = 1; [map] file, durations, unmapped (report|all),
 ignore; [full] where (here|ci|runner), policy (owner|standing|anyone), target;
 [retries] flaky, quarantine_days; [budgets] grow_percent, suite_minutes;
-[isolation] enabled (its other keys: docs/reference.md, "Test isolation"); [build_cache] enabled, tool; [merge_queue]
-enabled; [resources.NAME] cpu, ram_mb, gpu, exclusive; and [[provider]] with
-name, kind (cargo|ctest|pytest|unittest|gradle|npm|command), root, sources,
-tests, manual, elsewhere, affected (build|paths|all), [[provider.paths]]
-(files with targets or mentions), command ({targets}, {manifest},
-{build_dir}), manifest, widen (none|dependants|transitive), build_dir,
-resources, platforms, budget_minutes, disabled.
+[isolation] enabled (its other keys: docs/reference.md, "Test isolation");
+[build_cache] enabled, tool; [merge_queue] enabled; [resources.NAME] cpu,
+ram_mb, gpu, exclusive; and [[provider]] with name, kind
+(cargo|ctest|pytest|unittest|gradle|npm|command), root, sources, tests,
+manual, elsewhere, affected (build|paths|all), [[provider.paths]] (files with
+targets or mentions), command ({targets}, {manifest}, {build_dir}), manifest,
+widen (none|dependants|transitive), build_dir, resources, platforms,
+budget_minutes, disabled.

@@ -5431,3 +5431,21 @@ enforced: a team without a configuration keeps today's flow.
   `test-map-coverage.yml` workflow measures every Rust module and Qt binary.
 
 The file's fields are listed in `hgs guide tests`.
+
+#### What the team enforces (U62)
+
+A member runs only the tests the task's change touches (`hgs test affected`)
+and never a full suite; a run over 10 minutes asks the lead first. The
+hand-out and the team guides carry this rule (`hgs guide team-tests`). A phase
+integration runs the affected tests of the phase's range.
+
+The full run happens only before a release: the owner hears its estimate from
+`hgs test affected --full` and confirms; in the fork CI it is the candidate's
+run. A team setting `full_tests` says who may start one (`never`, `ask` or
+`allowed`; `ask` by default), and the owner may grant one run bound to a
+release; `hgs team run` refuses a full-suite template without that grant and
+names the estimate and the command that asks. `hgs team status` shows the
+policy and an active grant. Zerus computes a task's affected set from its own
+diff and accepts its report only with that set green on the merging commit. No
+test is dropped: a split keeps every test, counted before and after, and a new
+test that repeats an existing one becomes a case of a table test.

@@ -248,18 +248,26 @@ fn locator_work_is_shared_across_targets_in_one_step() {
     )
     .unwrap();
     let mut store = fixture.store();
-    let mut tiny = budget();
-    tiny.directory_entries = 1;
-    let progress = store
-        .step(
-            &fixture.state,
-            &[fixture.identity.clone(), second],
-            &tiny,
-            &AtomicBool::new(false),
-        )
-        .unwrap();
-    assert_eq!(progress.directory_entries, 1);
-    assert_eq!(progress.locator_probes, 1);
+    let targets = [fixture.identity.clone(), second];
+    for attempt in 0..32 {
+        let mut tiny = budget();
+        tiny.directory_entries = 1;
+        let progress = store
+            .step(&fixture.state, &targets, &tiny, &AtomicBool::new(false))
+            .unwrap();
+        // The shared one-entry/probe cap applies to every pass, even when
+        // Windows suite load expires a pass before it reaches the locator.
+        assert!(progress.directory_entries <= 1);
+        assert!(progress.locator_probes <= 1);
+        if progress.locator_probes == 1 && store.index.status().unwrap().messages == 1 {
+            assert_eq!(progress.directory_entries, 1);
+            break;
+        }
+        assert!(
+            attempt < 31,
+            "fixture locator did not finish within 32 bounded passes"
+        );
+    }
     assert_eq!(store.index.status().unwrap().messages, 1);
     assert_eq!(store.index.status().unwrap().pending_sources, 1);
 }

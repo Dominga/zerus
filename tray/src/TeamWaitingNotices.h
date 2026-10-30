@@ -5,6 +5,7 @@
 #include <QStringList>
 #include <algorithm>
 
+#include "Settings.h"
 #include "TeamAttentionNotices.h"
 #include "TeamModel.h"
 
@@ -34,7 +35,7 @@ public:
         while (m_known.size() > Limit) m_known.removeFirst();
     }
     static TeamWaitingNotices stored() { return TeamWaitingNotices(QSettings().value(QLatin1String(kSetting)).toStringList()); }
-    void store() const { QSettings().setValue(QLatin1String(kSetting), m_known); }
+    void store() const { Settings::set(QLatin1String(kSetting), m_known); }
 
     // The waiting id (owner_waiting.rs) of an attention item, empty for a kind
     // the waiting list does not carry; a replan names only its prefix.

@@ -1,4 +1,5 @@
 #pragma once
+#include "Settings.h"
 #include "ChildProcess.h"
 #include "JsonParse.h"
 #include <QCheckBox>
@@ -167,7 +168,7 @@ inline QWidget *optionsPanel()
     autostart->setObjectName("windowsConnectorAutostart");
     autostart->setChecked(startConnectorWithZerus());
     layout->addWidget(autostart);
-    QObject::connect(autostart, &QCheckBox::toggled, panel, [](bool on) { QSettings().setValue(QStringLiteral("mobile/runConnector"), on); });
+    QObject::connect(autostart, &QCheckBox::toggled, panel, [](bool on) { Settings::set(QStringLiteral("mobile/runConnector"), on); });
     if (relayBundled()) {
         auto *local = new QCheckBox(QCoreApplication::translate("WindowsMobileServices", "Run a relay on this computer (127.0.0.1:%1)").arg(relayPort()));
         local->setObjectName("windowsLocalRelay");
@@ -180,7 +181,7 @@ inline QWidget *optionsPanel()
         hint->setTextInteractionFlags(Qt::TextSelectableByMouse);
         layout->addWidget(hint);
         QObject::connect(local, &QCheckBox::toggled, panel, [](bool on) {
-            QSettings().setValue(QStringLiteral("mobile/localRelay"), on);
+            Settings::set(QStringLiteral("mobile/localRelay"), on);
             if (on && !relayRunning()) startRelay();
             if (!on) stopRelay();
         });

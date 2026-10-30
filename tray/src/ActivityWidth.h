@@ -1,4 +1,5 @@
 #pragma once
+#include "Settings.h"
 #include <QSettings>
 #include <QVBoxLayout>
 #include <QtGlobal>
@@ -17,8 +18,8 @@ inline int width()
     return ok ? clamp(width) : Default;
 }
 inline bool fullWidth() { return QSettings().value("workspace/activityFullWidth", false).toBool(); }
-inline void setWidth(int width) { QSettings().setValue("workspace/activityWidth", clamp(width)); }
-inline void setFullWidth(bool full) { QSettings().setValue("workspace/activityFullWidth", full); }
+inline void setWidth(int width) { Settings::set("workspace/activityWidth", clamp(width)); }
+inline void setFullWidth(bool full) { Settings::set("workspace/activityFullWidth", full); }
 // The column in pixels at a content scale, or 0 when Activity fills its pane.
 inline int column(double scale) { return fullWidth() ? 0 : qRound(width() * scale); }
 // The space on each side of a column centered in the available width.

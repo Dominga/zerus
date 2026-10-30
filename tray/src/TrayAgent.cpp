@@ -1,3 +1,4 @@
+#include "Settings.h"
 #include "TrayAgent.h"
 #include "EventStream.h"
 #include "ProcessRunner.h"
@@ -580,7 +581,7 @@ void TrayAgent::observePrivateStores(const QString &host, const BoxState &box)
     const auto before = m_privateStores.known();
     for (const auto &notice : m_privateStores.observe(host, host.isEmpty() ? box.host : host, box.ok, box.privateStores))
         notify(notice.title, notice.body, QSystemTrayIcon::Warning, 20000);
-    if (m_privateStores.known() != before) QSettings().setValue(QStringLiteral("privateStores/notified"), m_privateStores.known());
+    if (m_privateStores.known() != before) Settings::set(QStringLiteral("privateStores/notified"), m_privateStores.known());
 }
 
 void TrayAgent::observeAttention(const QString &host, const BoxState &box)
@@ -606,7 +607,7 @@ void TrayAgent::warmCaches(const QString &host, const BoxState &box)
     for (const auto &reply : m_keepalive->observe(host, box, QDateTime::currentMSecsSinceEpoch() / 1000.))
         marked |= m_state.markReplyRead(reply.host, reply.name, reply.conversation, reply.reply);
     if (!marked) return;
-    QSettings().setValue("attention/readReplies", QJsonDocument(m_state.readReplies()).toJson(QJsonDocument::Compact));
+    Settings::set("attention/readReplies", QJsonDocument(m_state.readReplies()).toJson(QJsonDocument::Compact));
     publishReadMarks();
 }
 
@@ -802,7 +803,7 @@ void TrayAgent::showSessions()
         // U25 (spec 2.3): team members are muted by default; known across restarts.
         connect(m_sessionsWindow, &SessionsWindow::teamMembersChanged, this, [this](const QSet<QString> &members) {
             QStringList kept(members.cbegin(), members.cend()); kept.sort(); if (kept.size() > 4096) kept = kept.mid(0, 4096);
-            QSettings().setValue("teams/mutedMembers", kept);
+            Settings::set("teams/mutedMembers", kept);
             if (!m_state.setTeamMembers(members)) return;
             observeAttention({}, m_state.local());
             for (const auto &host : m_state.peerNames()) if (const auto *box = m_state.peer(host)) observeAttention(host, *box);

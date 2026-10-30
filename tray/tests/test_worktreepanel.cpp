@@ -141,7 +141,7 @@ elif c=='dirs':dump({'path':a[1] if len(a)>1 else '','directories':[]})
 )PY");program.close();QVERIFY(FakeCli::makeRunnable(program.fileName()));
     }
     void init(){
-        QSettings().clear();for(const auto *name:{"calls","fail-create","fail-remove","old-hgs","fail-catalog","wrong-inspect","review-full.json","fail-inspect","empty-inspect","slow-inspect","cleanup-result.json","refuse-remove","remove-outcome.json"})QFile::remove(dir.filePath(name));
+        clearSettings();for(const auto *name:{"calls","fail-create","fail-remove","old-hgs","fail-catalog","wrong-inspect","review-full.json","fail-inspect","empty-inspect","slow-inspect","cleanup-result.json","refuse-remove","remove-outcome.json"})QFile::remove(dir.filePath(name));
         QFile response(dir.filePath("catalog.json"));QVERIFY(response.open(QIODevice::WriteOnly));response.write(QJsonDocument(catalog()).toJson());
         QFile reviewed(dir.filePath("review.json"));QVERIFY(reviewed.open(QIODevice::WriteOnly));reviewed.write(QJsonDocument(review()).toJson());
     }
@@ -635,7 +635,7 @@ elif c=='dirs':dump({'path':a[1] if len(a)>1 else '','directories':[]})
             QTRY_VERIFY(dialog.findChild<QPushButton *>("selectCleanupCandidates")->isEnabled());
         }
         // An expired disk catalog triggers a new bounded scan on the next opening.
-        QSettings settings;auto snapshots=QJsonDocument::fromJson(settings.value("workspace/worktreeSnapshots").toByteArray()).object();
+        QSettings settings;auto snapshots=QJsonDocument::fromJson(jsonSetting("workspace/worktreeSnapshots")).object();
         for(auto i=snapshots.begin();i!=snapshots.end();++i){auto data=i.value().toObject();data["received_at"]=QDateTime::currentSecsSinceEpoch()-3601;i.value()=data;}
         setJsonSetting("workspace/worktreeSnapshots",QJsonDocument(snapshots).toJson());
         const auto before=calls().count("worktrees --path");WorktreesDialog expired(&client,projects,fleet(),false);expired.show();

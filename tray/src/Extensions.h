@@ -1,4 +1,5 @@
 #pragma once
+#include "Settings.h"
 #include <QCoreApplication>
 #include <QList>
 #include <QSettings>
@@ -35,5 +36,5 @@ inline bool enabledByDefault()
 
 inline QString key(const QString &id) { return QStringLiteral("extensions/") + id; }
 inline bool enabled(const QString &id) { return QSettings().value(key(id), enabledByDefault()).toBool(); }
-inline void setEnabled(const QString &id, bool on) { QSettings().setValue(key(id), on); }
+inline void setEnabled(const QString &id, bool on) { Settings::set(key(id), on); }
 }

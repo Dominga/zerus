@@ -147,6 +147,7 @@ private slots:
     void stageDeliveryFixtureReadsTheDeliveredStage();
     void stageQueuesStatesAndFeedLines();
     void holdsComeFromTheStatusAndRoundsCountTrimmedReturns();
+    void visibleShapeIgnoresWhatOnlyTicks();
     void modelReadsTheTeamAndDerivesMemberStates();
     void modelReadsPhasesPinnedAndTheWaitingState();
     void cancelledWorkAndMoveTargets();
@@ -2217,6 +2218,34 @@ void TestTeams::holdsComeFromTheStatusAndRoundsCountTrimmedReturns()
     team = trim(false);
     QCOMPARE(team.task(4)->pipelineRun.returned(), 1);
     QVERIFY(TeamUi::stageLine(team, *team.task(4), c).chips[0].state != "limit");
+}
+
+// #693: what a poll changes that the views do not draw leaves the shape alone;
+// a drawn change moves it.
+void TestTeams::visibleShapeIgnoresWhatOnlyTicks()
+{
+    const auto status = [](int revision, double updated, int worked, int deps, int idle, const QString &state, int doneWorked) {
+        return QJsonObject{
+            {"id", "t"}, {"revision", revision}, {"updated", updated},
+            {"tasks", QJsonArray{
+                QJsonObject{{"id", 1}, {"status", state}, {"timing", QJsonObject{
+                    {"worked_s", worked}, {"running_since", 1000.0}, {"waits", QJsonObject{{"deps_s", deps}}},
+                    {"attempts", QJsonArray{QJsonObject{{"n", 1}, {"from", 1000.0}, {"to", QJsonValue()}, {"worked_s", worked}}}}}}},
+                QJsonObject{{"id", 2}, {"status", "accepted"}, {"timing", QJsonObject{{"worked_s", doneWorked}, {"running_since", QJsonValue()},
+                                                                                     {"waits", QJsonObject{{"deps_s", 60}}}}}}}},
+            {"health", QJsonObject{{"starved", QJsonArray{QJsonObject{{"member", "qa"}, {"minutes", idle}}}},
+                                   {"warnings", QJsonArray{QStringLiteral("starved: QA idle %1 min without a ready task").arg(idle)}}}},
+            {"validation", QJsonObject{{"health", QJsonObject{{"warnings", QJsonArray{QStringLiteral("starved: QA idle %1 min").arg(idle)}}}}}}};
+    };
+    const QByteArray first = visibleShape(status(10, 100.0, 600, 30, 11, "in_progress", 900));
+    QCOMPARE(visibleShape(status(11, 160.0, 660, 90, 12, "in_progress", 900)), first);
+    QCOMPARE(visibleShape(status(19, 999.0, 6600, 900, 59, "in_progress", 900)), first);
+    // Drawn: a status, a finished task's time.
+    QVERIFY(visibleShape(status(11, 160.0, 660, 90, 12, "submitted", 900)) != first);
+    QVERIFY(visibleShape(status(10, 100.0, 600, 30, 11, "in_progress", 960)) != first);
+    // A list item has no tasks; its revision and updated time go the same way.
+    QCOMPARE(visibleShape(QJsonObject{{"id", "t"}, {"revision", 1}, {"updated", 5.0}, {"status", "running"}}),
+             visibleShape(QJsonObject{{"id", "t"}, {"revision", 2}, {"updated", 9.0}, {"status", "running"}}));
 }
 
 QTEST_MAIN(TestTeams)

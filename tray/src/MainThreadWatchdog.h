@@ -67,6 +67,8 @@ public:
     void systemWillSleep();
     // Any thread, also for a dark wake: hold the check until the main thread beats.
     void systemPoweredOn();
+    // Any thread: how long the main thread has not beaten, for the hang's report.
+    std::int64_t hungMs() const { return nowMs() - m_lastBeatMs.load(); }
 
 private:
     using Clock = std::chrono::steady_clock;

@@ -30,6 +30,11 @@ public:
     void watch(const QString &team);
     QString watchedId() const { return m_watch; }
     const Teams::Team *watched() const { return m_watched.id.isEmpty() || m_watched.id != m_watch ? nullptr : &m_watched; }
+    // #693: what the views draw of a team (Teams::visibleShape): of the
+    // watched team's status when it is here, else of its `team list` item;
+    // and of the lead's inbox. Polls that change neither need no rebuild.
+    QByteArray shapeOf(const QString &team) const;
+    QByteArray inboxShape() const { return m_inboxShape; }
     // Feed entries, newest first, and whether older pages exist.
     QList<QJsonObject> feed() const;
     bool feedHasOlder() const { return !m_feedCursor.isNull(); }
@@ -101,6 +106,8 @@ private:
     QList<Teams::Team> m_teams;
     // The last answers, so an unchanged poll changes nothing on screen.
     QJsonObject m_lastList, m_lastStatus;
+    QByteArray m_watchedShape, m_inboxShape;
+    QHash<QString, QByteArray> m_listShapes;   // by team id
     QString m_watch;
     Teams::Team m_watched;
     QMap<qint64, QJsonObject> m_feed;   // by seq

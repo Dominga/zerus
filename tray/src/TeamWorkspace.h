@@ -67,7 +67,18 @@ protected:
     void showEvent(QShowEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
 private:
+    // A change of the owner's (a click, a view, the theme) always rebuilds.
     void scheduleRender();
+    // #693: a poll (a team list, status, inbox or feed read, a session list's
+    // showTeam) rebuilds only when what is drawn changed: the team's visible
+    // shape, the inbox, the feed's head or a member's live state. Running
+    // times and ages tick in place (tickInPlace) on the minute timer.
+    void pollRender();
+    void queueRender();
+    QByteArray pollKey() const;
+    void tickInPlace();
+    bool m_forced = false;
+    QByteArray m_renderedKey;
     void renderHeader();
     QWidget *headerStatusContent(const Teams::Team &team, const QString &status);
     QWidget *headerActionsContent(const Teams::Team &team);

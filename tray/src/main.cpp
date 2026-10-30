@@ -25,7 +25,9 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include "HgsClient.h"
+#include "HangTrace.h"
 #include "MainThreadWatchdog.h"
+#include "Settings.h"
 #include "SettingsJson.h"
 #include "WorkspaceSkin.h"
 #include "TrayAgent.h"
@@ -55,6 +57,11 @@
 #include <QFile>
 #include <QJsonObject>
 #include <QLockFile>
+
+#include <chrono>
+#include <future>
+#include <memory>
+#include <thread>
 #include <QStandardPaths>
 #include <qt_windows.h>
 #include <shellapi.h>
@@ -192,6 +199,16 @@ int main(int argc, char *argv[])
     for (int i = 0; i < argc; ++i)
         args << QString::fromLocal8Bit(argv[i]);
 #endif
+    // HGS_TRAY_HOME (a test's launch) keeps the settings out of the real
+    // profile too, not only the log and the socket (ForkLog.h): a test's tray
+    // must never write or lock the person's hgs-tray.ini.
+    if (const QString home = qEnvironmentVariable("HGS_TRAY_HOME"); !home.isEmpty()) {
+#ifdef Q_OS_WIN
+        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, home + QStringLiteral("/AppData/Roaming"));
+#else
+        QSettings::setPath(QSettings::NativeFormat, QSettings::UserScope, home + QStringLiteral("/.config"));
+#endif
+    }
 
     AppConfig cfg;
     QString parseError;
@@ -304,7 +321,7 @@ int main(int argc, char *argv[])
     // WhiteWh fork: the fork's published builds open in the WhiteWh skin until
     // the person picks another one in Settings → Appearance.
     if (ForkUpdater::installedBuild() > 0 && !QSettings().contains(QStringLiteral("workspace/skin")))
-        QSettings().setValue(QStringLiteral("workspace/skin"), QStringLiteral("whitewh"));
+        Settings::set(QStringLiteral("workspace/skin"), QStringLiteral("whitewh"));
     ZerusTranslator translator;
     QTranslator qtTranslator;
     if (!installZerusTranslation(app, translator, qtTranslator))
@@ -427,6 +444,10 @@ int main(int argc, char *argv[])
     // Nothing is shown yet: parse the saved JSON values the tray and its windows
     // read first, so the GUI thread finds them parsed (SettingsJson.h).
     SettingsJson::preload(TrayAgent::jsonSettings());
+    // A held settings lock is named in zerus.log (Settings.h).
+    Settings::setLog(&ForkLog::write);
+    Settings::watchLock();
+    HangTrace::rememberMainThread();
     WorkspaceSkin::preload();
     // KSNI derives its persistent tray ID from the initial display name. Rename
     // the UI only after constructing the icon to preserve Plasma's visibility setting.
@@ -474,12 +495,24 @@ int main(int argc, char *argv[])
     }
     _set_abort_behavior(0, _WRITE_ABORT_MSG);
 #endif
-    MainThreadWatchdog watchdog(kMainThreadHangMs, []() {
+    MainThreadWatchdog watchdog(kMainThreadHangMs, [&watchdog]() {
         std::fprintf(stderr,
                      "hgs-tray: main thread unresponsive for %d s (AppKit deadlock? see "
                      "QuietTrayIcon.h); aborting so the service manager restarts it\n",
                      kMainThreadHangMs / 1000);
         std::fflush(stderr);
+        // WhiteWh fork (owner, 2026-10-30): the hang, its length and the main
+        // thread's activity and stack go to zerus.log first. The writer runs
+        // beside this thread and gets 5 s: a main thread stopped inside the
+        // log's own lock must not keep the tray from aborting.
+        auto written = std::make_shared<std::promise<void>>();
+        auto done = written->get_future();
+        const auto hung = watchdog.hungMs();
+        std::thread([written, hung] {
+            ForkLog::write("error", HangTrace::report(hung, kMainThreadHangMs, Settings::activity()));
+            written->set_value();
+        }).detach();
+        done.wait_for(std::chrono::seconds(5));
         std::abort();
     });
 #ifdef Q_OS_MACOS

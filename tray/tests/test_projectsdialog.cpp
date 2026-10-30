@@ -104,7 +104,7 @@ void TestProjectsDialog::projectPageHasHeaderAndCollapsibleBlocks()
 {
     QTemporaryDir directory;QVERIFY(directory.isValid());
     QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,directory.path());
-    QCoreApplication::setOrganizationName("hgs-project-blocks-test");QCoreApplication::setApplicationName("projects");QSettings().clear();
+    QCoreApplication::setOrganizationName("hgs-project-blocks-test");QCoreApplication::setApplicationName("projects");clearSettings();
     HgsClient client("/nonexistent/hgs");SessionOrganization projects;const auto project=projects.createGroup("Orbit platform");
     projects.addFolder(project,"workstation","/work/orbit");
     projects.addFolder(project,"workstation","/work/orbit-team-528aebfe-backend");
@@ -210,7 +210,7 @@ void TestProjectsDialog::projectPageMatchesThePrototype()
 {
     QTemporaryDir directory;QVERIFY(directory.isValid());
     QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,directory.path());
-    QCoreApplication::setOrganizationName("hgs-project-prototype-test");QCoreApplication::setApplicationName("projects");QSettings().clear();
+    QCoreApplication::setOrganizationName("hgs-project-prototype-test");QCoreApplication::setApplicationName("projects");clearSettings();
     // #651 QA: a catalog for the selected folder, so the shots show the worktree overview.
     const auto script=directory.filePath("hgs");
     QVERIFY(FakeCli::install(script,R"PY(#!/usr/bin/env python3
@@ -373,7 +373,7 @@ void TestProjectsDialog::pageMessagesStayInViewAndOnlyRefusalsAreRed()
 {
     QTemporaryDir directory;QVERIFY(directory.isValid());
     QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,directory.path());
-    QCoreApplication::setOrganizationName("hgs-project-status-test");QCoreApplication::setApplicationName("projects");QSettings().clear();
+    QCoreApplication::setOrganizationName("hgs-project-status-test");QCoreApplication::setApplicationName("projects");clearSettings();
     HgsClient client("/nonexistent/hgs");SessionOrganization projects;const auto project=projects.createGroup("Orbit platform");
     projects.addFolder(project,"workstation","/work/orbit");
     projects.addFolder(project,"workstation","/work/orbit-team-528aebfe-backend");
@@ -412,7 +412,7 @@ void TestProjectsDialog::renameKeepsItsProjectOrIsCancelled()
 {
     QTemporaryDir directory;QVERIFY(directory.isValid());
     QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,directory.path());
-    QCoreApplication::setOrganizationName("hgs-project-rename-test");QCoreApplication::setApplicationName("projects");QSettings().clear();
+    QCoreApplication::setOrganizationName("hgs-project-rename-test");QCoreApplication::setApplicationName("projects");clearSettings();
     HgsClient client("/nonexistent/hgs");SessionOrganization projects;
     const auto alpha=projects.createGroup("Alpha"),beta=projects.createGroup("Beta");
     ProjectsDialog dialog(&client,nullptr,true,&projects);dialog.resize(1200,800);dialog.selectProject(alpha);dialog.show();
@@ -443,7 +443,7 @@ void TestProjectsDialog::narrowWindowKeepsTheKindColumnReachable()
 {
     QTemporaryDir directory;QVERIFY(directory.isValid());
     QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,directory.path());
-    QCoreApplication::setOrganizationName("hgs-project-narrow-test");QCoreApplication::setApplicationName("projects");QSettings().clear();
+    QCoreApplication::setOrganizationName("hgs-project-narrow-test");QCoreApplication::setApplicationName("projects");clearSettings();
     HgsClient client("/nonexistent/hgs");SessionOrganization projects;const auto project=projects.createGroup("Orbit platform");
     projects.addFolder(project,"workstation","/work/orbit");
     projects.addFolder(project,"build-01","/srv/builds/orbit/services/payments-gateway/releases/2026-10/checkout-v2-hotfix-rounding");
@@ -514,7 +514,7 @@ void TestProjectsDialog::folderDialogsHaveShots()
 {
     QTemporaryDir directory;QVERIFY(directory.isValid());
     QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,directory.path());
-    QCoreApplication::setOrganizationName("hgs-project-dialogs-test");QCoreApplication::setApplicationName("projects");QSettings().clear();
+    QCoreApplication::setOrganizationName("hgs-project-dialogs-test");QCoreApplication::setApplicationName("projects");clearSettings();
     const auto script=directory.filePath("hgs");
     QVERIFY(FakeCli::install(script,R"PY(#!/usr/bin/env python3
 import json,sys,time
@@ -580,7 +580,7 @@ void TestProjectsDialog::folderKindsFollowTheFleetAndTheTeams()
 {
     QTemporaryDir directory;QVERIFY(directory.isValid());
     QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,directory.path());
-    QCoreApplication::setOrganizationName("hgs-project-kinds-test");QCoreApplication::setApplicationName("projects");QSettings().clear();
+    QCoreApplication::setOrganizationName("hgs-project-kinds-test");QCoreApplication::setApplicationName("projects");clearSettings();
     HgsClient client("/nonexistent/hgs");SessionOrganization projects;const auto project=projects.createGroup("Orbit");projects.markImported("workstation");
     for(const auto &path:{"/work/orbit","/work/notes","/work/orbit-team-528aebfe-dsh","/work/orbit-mine","/work/orbit-member","/srv/orbit"})
         projects.addFolder(project,"workstation",path);
@@ -654,7 +654,7 @@ void TestProjectsDialog::projectSessionsFollowTheFleetWhileShown()
 {
     QTemporaryDir directory;QVERIFY(directory.isValid());
     QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,directory.path());
-    QCoreApplication::setOrganizationName("hgs-project-live-test");QCoreApplication::setApplicationName("projects");QSettings().clear();
+    QCoreApplication::setOrganizationName("hgs-project-live-test");QCoreApplication::setApplicationName("projects");clearSettings();
     HgsClient client("/nonexistent/hgs");SessionOrganization projects;const auto project=projects.createGroup("Orbit");projects.markImported("workstation");
     projects.addFolder(project,"workstation","/work/orbit");projects.addFolder(project,"workstation","/srv/orbit");
     BoxState ws;ws.host="workstation";ws.ok=true;ws.metrics=QJsonObject{{"platform","linux"}};
@@ -696,7 +696,7 @@ void TestProjectsDialog::projectSessionRowsAreBounded()
 {
     QTemporaryDir directory;QVERIFY(directory.isValid());
     QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,directory.path());
-    QCoreApplication::setOrganizationName("hgs-project-bounded-test");QCoreApplication::setApplicationName("projects");QSettings().clear();
+    QCoreApplication::setOrganizationName("hgs-project-bounded-test");QCoreApplication::setApplicationName("projects");clearSettings();
     HgsClient client("/nonexistent/hgs");SessionOrganization projects;const auto project=projects.createGroup("Orbit");projects.markImported("workstation");
     for(int i=0;i<40;++i)projects.addFolder(project,"workstation",QStringLiteral("/work/folder-%1").arg(i));
     BoxState ws;ws.host="workstation";ws.ok=true;ws.metrics=QJsonObject{{"platform","linux"}};
@@ -902,7 +902,7 @@ void TestProjectsDialog::folderTransfersKeepMenuTargetsAndPersist()
         if (table->item(row, 0)->data(Qt::UserRole).toString() == keep) table->setCurrentCell(row, 0);
     dialog.selectProject(target);
     QSignalSpy changed(&dialog, &ProjectsDialog::organizationChanged); action->trigger(); QCOMPARE(changed.size(), 1);
-    const SessionOrganization saved(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());
+    const SessionOrganization saved(QJsonDocument::fromJson(jsonSetting("workspace/organization")).object());
     QCOMPARE(saved.group(source)->folders.size(), copy ? 2 : 1); QCOMPARE(saved.group(target)->folders.size(), 1);
     const auto transferred = saved.group(target)->folders.first();
     QCOMPARE(transferred.machine, machine); QCOMPARE(transferred.path, path); QCOMPARE(transferred.name, QString("Transfer this"));
@@ -1023,7 +1023,7 @@ void TestProjectsDialog::folderSplitPrioritizesListAndRemembersAdjustment()
     // the worktrees, remembered for the next time.
     QTemporaryDir directory;QVERIFY(directory.isValid());
     QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,directory.path());
-    QCoreApplication::setOrganizationName("hgs-folder-split-test");QCoreApplication::setApplicationName("projects");QSettings().clear();
+    QCoreApplication::setOrganizationName("hgs-folder-split-test");QCoreApplication::setApplicationName("projects");clearSettings();
     HgsClient client("/nonexistent/hgs");SessionOrganization projects;const auto project=projects.createGroup("Work");
     projects.addFolder(project,"arch","/workspace/repo");
     ProjectsDialog dialog(&client,nullptr,true,&projects);dialog.resize(1100,1000);dialog.selectProject(project);dialog.show();
@@ -1051,15 +1051,15 @@ void TestProjectsDialog::folderSplitPrioritizesListAndRemembersAdjustment()
     drag(-60,12);   // up: the worktrees grow by the 60 px dragged, once
     QTRY_VERIFY2(qAbs(split->sizes()[1]-(initial[1]+60))<=6,qPrintable(QStringLiteral("%1 after %2 + 60").arg(split->sizes()[1]).arg(initial[1])));
     QTRY_COMPARE(table->height(),rows);QTRY_COMPARE(split->sizes()[0]+split->sizes()[1]+split->handleWidth(),split->height());
-    QCOMPARE(QSettings().value("workspace/projectFolderWorktrees").toInt(),split->sizes()[1]);
+    QTRY_COMPARE(QSettings().value("workspace/projectFolderWorktrees").toInt(),split->sizes()[1]);
     drag(400,20);   // down past the minimum: it stops at 120
     QTRY_COMPARE(split->sizes()[1],120);
     drag(-2000,20); // up past the page: at most two thirds of it
     QTRY_COMPARE(split->sizes()[1],qMax(240,dialog.height()*2/3));
-    QCOMPARE(QSettings().value("workspace/projectFolderWorktrees").toInt(),qMax(240,dialog.height()*2/3));
+    QTRY_COMPARE(QSettings().value("workspace/projectFolderWorktrees").toInt(),qMax(240,dialog.height()*2/3));
     drag(split->sizes()[1]-(initial[1]-30),10);   // down to a middle height
     const int adjusted=split->sizes()[1];QVERIFY2(qAbs(adjusted-(initial[1]-30))<=6,qPrintable(QString::number(adjusted)));
-    QCOMPARE(QSettings().value("workspace/projectFolderWorktrees").toInt(),adjusted);
+    QTRY_COMPARE(QSettings().value("workspace/projectFolderWorktrees").toInt(),adjusted);
     dialog.refresh();QTRY_COMPARE(split->sizes()[1],adjusted);
     table->clearSelection();QTRY_VERIFY(!split->widget(1)->isVisible());table->setCurrentCell(0,0);QTest::qWait(30);
     QVERIFY(qAbs(split->sizes()[1]-adjusted)<4);

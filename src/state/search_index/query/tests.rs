@@ -55,6 +55,7 @@ fn source_fixture(archive: bool) -> (tempfile::TempDir, PathBuf, PathBuf, PathBu
 fn budget() -> Budget {
     Budget {
         files: 128,
+        directory_entries: 2000,
         records: 512,
         bytes: 8 << 20,
         deadline: Instant::now() + Duration::from_secs(1),
@@ -258,7 +259,7 @@ fn unsupported_adapters_are_delegated_without_a_permanent_retirement_fence() {
         .hits
         .remove(0)
         .target;
-    target.agent = "kimi".into();
+    target.agent = "dsh".into();
     let key = store.index.register(&target).unwrap();
     store.index.source_progress(&key, false, true).unwrap();
     let reply = page(&mut store, &state, None, &budget());

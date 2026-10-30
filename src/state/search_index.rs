@@ -14,8 +14,9 @@ use std::{
 use zerus_content_search::{Index, Message, Role, Target, DEFAULT_FILE_BYTES, DOCUMENT_BYTES};
 mod catalog;
 mod query;
-pub(super) use query::read as indexed;
+mod wire;
 pub(crate) use catalog::{DiscoveryBudget, DiscoveryProgress};
+pub(super) use query::read as indexed;
 
 const ABI: &str = "content-search-index-v1";
 const INPUT_BYTES: usize = 64 << 10;
@@ -53,6 +54,7 @@ struct Request {
 
 pub(crate) struct Budget {
     pub files: usize,
+    pub directory_entries: usize,
     pub records: usize,
     pub bytes: usize,
     pub deadline: Instant,
@@ -61,6 +63,7 @@ impl Budget {
     pub fn interactive() -> Self {
         Self {
             files: 32,
+            directory_entries: 2000,
             records: 128,
             bytes: 4 << 20,
             deadline: Instant::now() + Duration::from_millis(250),
@@ -70,6 +73,8 @@ impl Budget {
 #[derive(Default, Serialize)]
 pub(crate) struct Progress {
     files: usize,
+    directory_entries: usize,
+    locator_probes: usize,
     records: usize,
     bytes: usize,
     targets: usize,
@@ -92,6 +97,7 @@ impl Progress {
 #[serde(default, deny_unknown_fields)]
 struct Cursor {
     stamp: Option<Stamp>,
+    wire: Option<wire::Locator>,
     offset: u64,
     seq: i64,
     skipping: bool,
@@ -114,6 +120,7 @@ struct Stamp {
 pub(crate) struct Store {
     directory: PathBuf,
     index: Index,
+    wire_roots: std::collections::BTreeMap<PathBuf, std::sync::Arc<wire::Snapshot>>,
 }
 impl Store {
     pub fn open(directory: &Path) -> Result<Self> {
@@ -190,6 +197,7 @@ impl Store {
         Ok(Self {
             directory: directory.to_owned(),
             index,
+            wire_roots: Default::default(),
         })
     }
 
@@ -204,6 +212,7 @@ impl Store {
     ) -> Result<Progress> {
         if targets.len() > 16
             || budget.files > 256
+            || budget.directory_entries > 2000
             || budget.records > 512
             || budget.bytes > 8 << 20
             || budget.deadline > Instant::now() + Duration::from_secs(2)
@@ -216,6 +225,7 @@ impl Store {
         {
             return Err("Search-index step configuration changed".into());
         }
+        self.wire_roots.clear();
         let mut progress = Progress::default();
         if !progress.available(budget, cancel) {
             progress.stopped = true;
@@ -406,17 +416,26 @@ impl Store {
         if !progress.available(budget, cancel) {
             return Ok(false);
         }
-        if record["backend"] == "dsh" || record["agent"] == "kimi" {
+        if record["backend"] == "dsh" {
             return Err(
                 "Native history needs legacy search until its indexed adapter is available".into(),
             );
         }
-        let path = PathBuf::from(string(record, "transcript"));
+        let path = if record["agent"] == "kimi" {
+            let Some((path, locator)) = self.locate_wire(record, budget, progress, cancel)? else {
+                return Ok(false);
+            };
+            cursor.wire = Some(locator);
+            path
+        } else {
+            PathBuf::from(string(record, "transcript"))
+        };
         if !path.is_absolute()
-            || !path.file_name().is_some_and(|name| {
-                name.to_string_lossy()
-                    .contains(string(record, "conversation_id"))
-            })
+            || (record["agent"] != "kimi"
+                && !path.file_name().is_some_and(|name| {
+                    name.to_string_lossy()
+                        .contains(string(record, "conversation_id"))
+                }))
         {
             return Err("Exact conversation transcript unavailable".into());
         }

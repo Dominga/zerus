@@ -59,6 +59,7 @@ impl Store {
         cancel: &AtomicBool,
     ) -> Result<CatchupProgress> {
         if budget.files > 256
+            || budget.directory_entries > 2000
             || budget.records > 512
             || budget.bytes > 8 << 20
             || budget.deadline > Instant::now() + Duration::from_secs(2)
@@ -152,12 +153,20 @@ impl Store {
             } else {
                 let remaining = Budget {
                     files: budget.files - progress.ingestion.files,
+                    directory_entries: budget.directory_entries.saturating_sub(
+                        progress
+                            .ingestion
+                            .directory_entries
+                            .max(progress.ingestion.locator_probes),
+                    ),
                     records: budget.records - progress.ingestion.records,
                     bytes: budget.bytes - progress.ingestion.bytes,
                     deadline: budget.deadline,
                 };
                 let read = self.step(state, &[identity], &remaining, cancel)?;
                 progress.ingestion.files += read.files;
+                progress.ingestion.directory_entries += read.directory_entries;
+                progress.ingestion.locator_probes += read.locator_probes;
                 progress.ingestion.records += read.records;
                 progress.ingestion.bytes += read.bytes;
                 progress.ingestion.targets += read.targets;

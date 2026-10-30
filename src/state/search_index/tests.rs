@@ -44,6 +44,7 @@ impl Fixture {
     fn budget(&self, records: usize) -> Budget {
         Budget {
             files: 32,
+            directory_entries: 2000,
             records,
             bytes: 4 << 20,
             deadline: Instant::now() + Duration::from_secs(1),

@@ -148,6 +148,39 @@ class SearchIndex(unittest.TestCase):
         self.assertEqual(third["results"][0]["message_id"], "new-turn")
         self.assertEqual(third["fallback"]["results"][0]["message_id"], "new-turn")
 
+    def test_indexed_kimi_uses_the_exact_unique_public_wire_without_an_engine(self):
+        identity, binding, _ = self.fixture()
+        binding.unlink()
+        identity["name"] = "kimi/example/search"
+        profile = self.root / "kimi-profile"
+        workspace = profile / "sessions" / "workspace-a"
+        wire = workspace / identity["conversation_id"] / "agents" / "main" / "wire.jsonl"
+        wire.parent.mkdir(parents=True)
+        (profile / "sessions" / "workspace-b").mkdir()
+        event = dict(type="agent.message.appended", agentId="main", time=42000,
+                     message=dict(meta=dict(messageId="kimi-public"), message=dict(role="assistant",
+                                  content=[dict(type="think", think="PRIVATE_REASONING_BODY"),
+                                           dict(type="text", text="needle kimi public message")])))
+        wire.write_text(json.dumps(event) + "\n")
+        binding = self.state / (hashlib.sha256(identity["name"].encode()).hexdigest() + ".json")
+        binding.write_text(json.dumps({**identity, "version": 1, "agent": "kimi", "agent_home": str(profile), "cwd": "/work/example"}))
+        before = wire.read_bytes()
+        reply = self.indexed()
+        self.assertEqual(reply["results"][0]["message_id"], "kimi-public")
+        self.assertEqual(reply["fallback"]["results"][0]["message_id"], "kimi-public")
+        self.assertLessEqual(reply["proof"]["directory_entries"], 2000)
+        self.assertEqual(wire.read_bytes(), before)
+        raw = (self.state / "content-search-v1" / "index.sqlite3").read_bytes()
+        self.assertNotIn(b"PRIVATE_REASONING_BODY", raw)
+        # Adding a duplicate under an existing workspace changes only its child stamp.
+        duplicate = profile / "sessions" / "workspace-b" / identity["conversation_id"] / "agents" / "main" / "wire.jsonl"
+        duplicate.parent.mkdir(parents=True)
+        duplicate.write_bytes(before)
+        unavailable = self.indexed()
+        self.assertEqual(unavailable["results"], [])
+        self.assertEqual(unavailable["fallback"]["results"], [])
+        self.assertGreater(unavailable["fallback"]["unavailable_sessions"], 0)
+
     @unittest.skipIf(os.name == "nt", "Unix private file permissions")
     def test_an_unsafe_copied_index_is_refused_and_uses_legacy_fallback(self):
         self.fixture()

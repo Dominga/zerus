@@ -1050,9 +1050,10 @@ The screenshots stay in `$S`; they are never committed.
 With `ZERUS_CLIENT_REPLAY`, the update worker never starts and makes no network
 requests. `ZERUS_CLIENT_UPDATES_FIXTURE` may name one JSON `UpdatesView` of at
 most 64 KiB; `updates_view` returns it and the service publishes it once. The
-screenshot driver uses this seam for unchecked, available, cached-with-error
-and restart-required states in both built-in themes. It checks the real
-controls before each capture:
+screenshot driver uses this seam for unchecked, available, cached-with-error,
+restart-required and full status-bar states in both built-in themes. It checks
+the real controls before each capture and isolates the single-instance runtime
+of every case:
 
 ```sh
 npm run build && RUSTUP_TOOLCHAIN=1.99.1 npx tauri build --no-bundle
@@ -1060,7 +1061,7 @@ S=$(mktemp -d)
 python3 scripts/updates-smoke.py --scratch "$S/artifacts"
 ```
 
-The eight PNGs and per-case logs stay in `$S/artifacts`; they are never committed.
+The ten PNGs and per-case logs stay in `$S/artifacts`; they are never committed.
 
 ## Projects in the Sessions list
 

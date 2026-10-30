@@ -58,6 +58,13 @@ export function openUpdates(): void {
     .catch((error) => toast("Updates", String(error), "error", true));
 }
 
+/** The Rail's version opens About, not the top of Settings. */
+export function openAbout(): void {
+  void import("../ui/screens/settings/sections")
+    .then(({ openSettings }) => openSettings("about"))
+    .catch((error) => toast("About", String(error), "error", true));
+}
+
 /**
  * Starts the wiring: it listens first and only then takes what waited, so
  * nothing falls between the two. Resolves with its stop once listening.

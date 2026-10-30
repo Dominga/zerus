@@ -779,6 +779,7 @@ export interface UpdatesView {
   download_label: string | null;
   details: { ownership: string; command: string; copy_name: string; instructions: string };
   restart_required: boolean;
+  login_item_deprioritized: boolean;
   version: string;
   /** A source or unknown dev-app installation shows status in Settings only. */
   quiet: boolean;
@@ -801,6 +802,7 @@ export const emptyUpdatesView = (): UpdatesView => ({
   download_label: null,
   details: { ownership: "", command: "", copy_name: "Copy command", instructions: "" },
   restart_required: false,
+  login_item_deprioritized: false,
   version: "",
   quiet: false,
 });

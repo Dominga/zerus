@@ -636,6 +636,9 @@ export const onOpenUpdates = (listener: () => void) => onEvent<void>("open-updat
 /** `desk-notice`: a notice for the window; resolves with the stop once listening. */
 export const onDeskNotice = (listener: (notice: DeskNotice) => void) => onEvent<DeskNotice>("desk-notice", listener);
 
+/** Qt's global Refresh: nudge this computer and every listed peer, never a new source. */
+export const fleetRefresh = () => inTauri() ? invoke<number>("fleet_refresh").then(() => undefined) : Promise.resolve();
+
 const UPDATES_DESKTOP_ONLY = "Updates need the desktop app.";
 export const updatesView = () => inTauri() ? invoke<UpdatesView>("updates_view") : Promise.resolve(emptyUpdatesView());
 export const updatesCheck = () => inTauri() ? invoke<void>("updates_check") : Promise.resolve();
@@ -645,6 +648,7 @@ export const updatesOpen = (target: "release" | "download" | "instructions") =>
   inTauri() ? invoke<void>("updates_open", { target }) : Promise.reject(UPDATES_DESKTOP_ONLY);
 export const updatesCopyCommand = () => inTauri() ? invoke<void>("updates_copy_command") : Promise.reject(UPDATES_DESKTOP_ONLY);
 export const updatesRestart = () => inTauri() ? invoke<void>("updates_restart") : Promise.reject(UPDATES_DESKTOP_ONLY);
+export const updatesFixLoginItem = (restart: boolean) => inTauri() ? invoke<string | null>("updates_fix_login_item", { restart }) : Promise.reject(UPDATES_DESKTOP_ONLY);
 /** `updates-changed`: the native worker's latest snapshot; resolves once listening. */
 export const onUpdates = (listener: (view: UpdatesView) => void) => onEvent<UpdatesView>("updates-changed", listener);
 

@@ -81,6 +81,17 @@ class SearchIndex(unittest.TestCase):
                         dict(abi="content-search-index-v1", targets=[{**identity, "extra": "rejected"}])]:
             self.assertNotEqual(self.invoke("--index-step", request, check=False).returncode, 0)
 
+    def test_discovery_queues_paths_without_reading_or_claiming_indexed_content(self):
+        _, binding, _ = self.fixture()
+        binding.write_text("PRIVATE_BINDING_BODY_NEVER_STAGED")
+        reply = self.invoke("--index-discover")
+        self.assertTrue(reply["discovery"]["complete"])
+        self.assertEqual(reply["status"]["catalog"]["queued_paths"], 1)
+        self.assertEqual(reply["status"]["catalog"]["pending_paths"], 1)
+        self.assertEqual(reply["status"]["coverage"]["messages"], 0)
+        raw = (self.state / "content-search-v1" / "index.sqlite3").read_bytes()
+        self.assertNotIn(b"PRIVATE_BINDING_BODY_NEVER_STAGED", raw)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

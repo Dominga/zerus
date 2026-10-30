@@ -20,6 +20,18 @@ starts no continuation after return. The CLI lowers only its own CPU/I/O
 priority. The exported step accepts cancellation and explicit bounded budgets
 for a later G1 owner. There is no advertised indexed-query capability yet.
 
+`hgs search --index-discover` stages candidate filenames and file stamps in the
+same capped database, without reading binding bodies or transcripts. The
+directory iterators live only for this short call. Discovery permits at most
+65,536 directory entries and 8 MiB of paths, with 256-row transactions and a
+500 ms monotonic deadline. A cancelled, interrupted or changing-directory pass
+never establishes complete discovery. Repeated passes reuse staged paths;
+an unchanged directory stamp avoids enumeration. New or changed metadata
+returns that path to pending. Status reads constant-size path/pending counters.
+Complete discovery still leaves history coverage cold or incomplete until
+queued bindings and their histories have actually been consumed; source queue
+consumption, stale queue cleanup and indexed query publication follow next.
+
 The adapter refuses copied/restored loose directory, database or auxiliary-file
 permissions and links. New index directories are 0700, database and rollback
 journal files 0600. Configuration identity prevents reusing a copied index

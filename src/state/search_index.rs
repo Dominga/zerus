@@ -12,6 +12,8 @@ use std::{
     time::{Duration, Instant},
 };
 use zerus_content_search::{Index, Message, Role, Target, DEFAULT_FILE_BYTES, DOCUMENT_BYTES};
+mod catalog;
+pub(crate) use catalog::{DiscoveryBudget, DiscoveryProgress};
 
 const ABI: &str = "content-search-index-v1";
 const INPUT_BYTES: usize = 64 << 10;
@@ -629,7 +631,7 @@ impl Store {
     pub fn status(&self) -> Result<Value> {
         let coverage = self.index.status().map_err(|e| e.to_string())?;
         Ok(
-            json!({"abi":ABI,"coverage":coverage,"disposable":true,"worker":"on_demand","catalog":"not_integrated"}),
+            json!({"abi":ABI,"coverage":coverage,"disposable":true,"worker":"on_demand","catalog":self.catalog_status()?}),
         )
     }
 
@@ -832,7 +834,11 @@ fn sample(
 
 pub(super) fn dispatch(args: &[String]) -> Option<Result<i32>> {
     let mode = match args {
-        [mode] if ["--index-status", "--index-step"].contains(&mode.as_str()) => mode,
+        [mode]
+            if ["--index-status", "--index-step", "--index-discover"].contains(&mode.as_str()) =>
+        {
+            mode
+        }
         _ => return None,
     };
     Some((|| {
@@ -845,6 +851,19 @@ pub(super) fn dispatch(args: &[String]) -> Option<Result<i32>> {
             return Ok(0);
         }
         let mut store = Store::open(&directory)?;
+        if mode == "--index-discover" {
+            lower_own_priority();
+            let progress: DiscoveryProgress = store.discover(
+                &root(),
+                &DiscoveryBudget::interactive(),
+                &AtomicBool::new(false),
+            )?;
+            println!(
+                "{}",
+                json!({"abi":ABI,"discovery":progress,"status":store.status()?})
+            );
+            return Ok(0);
+        }
         if mode == "--index-step" {
             let mut bytes = Vec::new();
             std::io::stdin()
@@ -861,14 +880,7 @@ pub(super) fn dispatch(args: &[String]) -> Option<Result<i32>> {
             }
             // Only this short CLI process is reprioritized. An eventual G1
             // owner sets priority on its owned worker, not the service actor.
-            #[cfg(unix)]
-            unsafe {
-                libc::setpriority(libc::PRIO_PROCESS, 0, 19);
-            }
-            #[cfg(target_os = "linux")]
-            unsafe {
-                libc::syscall(libc::SYS_ioprio_set, 1, 0, 3 << 13);
-            }
+            lower_own_priority();
             let progress = store.step(
                 &root(),
                 &request.targets,
@@ -884,6 +896,17 @@ pub(super) fn dispatch(args: &[String]) -> Option<Result<i32>> {
         }
         Ok(0)
     })())
+}
+
+fn lower_own_priority() {
+    #[cfg(unix)]
+    unsafe {
+        libc::setpriority(libc::PRIO_PROCESS, 0, 19);
+    }
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::syscall(libc::SYS_ioprio_set, 1, 0, 3 << 13);
+    }
 }
 
 #[cfg(test)]

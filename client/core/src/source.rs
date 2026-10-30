@@ -2,7 +2,7 @@
 //! projections. One channel belongs to one service configuration. The caller
 //! must own that configuration and verify handoff before starting any source.
 //! Creating a channel starts nothing; no registration or writer authority here.
-use crate::{stream, ComputerId, ComputerStatus, Timing};
+use crate::{legacy::spool, stream, ComputerId, ComputerStatus, Timing};
 use std::{
     collections::{BTreeMap, BTreeSet},
     io,
@@ -14,7 +14,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use zerus_watch_protocol::Frame;
+use zerus_watch_protocol::{CatalogItem, Frame};
 
 pub const INGRESS_BYTES: usize = 16 << 20;
 pub const INGRESS_ITEMS: usize = 1024;
@@ -32,8 +32,31 @@ pub struct Identity {
     pub computer: ComputerId,
     pub incarnation: u64,
 }
+/// Provisional older-peer replacement. Only Complete commits the preceding
+/// Begin and numbered pages; failure/status/replacement abandons staging.
+/// This is local transport data, never a synthesized watch hello or authority.
+#[derive(Debug)]
+pub enum Legacy {
+    Begin {
+        metadata: serde_json::Value,
+        rows: usize,
+        pages: usize,
+        input_bytes: usize,
+    },
+    Page {
+        index: usize,
+        items: Vec<CatalogItem>,
+    },
+    Complete,
+}
 #[derive(Debug)]
 pub enum Event {
+    Legacy {
+        source: Identity,
+        generation: u64,
+        update: Box<Legacy>,
+        observed_at: Instant,
+    },
     Frame {
         source: Identity,
         generation: u64,
@@ -67,6 +90,8 @@ pub struct Usage {
     /// Admitted supervisor lifetimes, including pending I/O after handle stop.
     pub workers: usize,
     pub readers: usize,
+    pub legacy_spools: usize,
+    pub legacy_reserved_bytes: usize,
     pub high_bytes: usize,
     pub high_items: usize,
 }
@@ -193,6 +218,16 @@ pub struct Sender {
     spawn: fn(&mut Command) -> io::Result<Child>,
     shared: Arc<Shared>,
     tx: mpsc::Sender<Item>,
+    legacy: Option<LegacyConfig>,
+}
+/// Runs on the existing supervisor, after reader/spool admission. Supply a
+/// new empty private ephemeral file through the host's platform checks. This
+/// layer opens no paths. Blocked I/O retains its admissions after handle stop.
+pub type SpoolFactory = Arc<dyn Fn() -> io::Result<Box<dyn spool::Storage>> + Send + Sync>;
+#[derive(Clone)]
+pub(crate) struct LegacyConfig {
+    pub factory: SpoolFactory,
+    pub pool: spool::Pool,
 }
 pub struct Receiver {
     shared: Arc<Shared>,
@@ -202,6 +237,26 @@ pub struct Receiver {
 /// creation shares the macOS descriptor-inheritance guard. No environment or
 /// arguments are changed by this hook.
 pub fn channel(spawn: fn(&mut Command) -> io::Result<Child>) -> (Sender, Receiver) {
+    channel_inner(spawn, None)
+}
+/// Opt into bounded older-peer listings. One shared two-slot spool pool covers
+/// every alias on this channel. Creating the channel starts no work.
+pub fn channel_with_legacy(
+    spawn: fn(&mut Command) -> io::Result<Child>,
+    factory: SpoolFactory,
+) -> (Sender, Receiver) {
+    channel_inner(
+        spawn,
+        Some(LegacyConfig {
+            factory,
+            pool: spool::Pool::default(),
+        }),
+    )
+}
+fn channel_inner(
+    spawn: fn(&mut Command) -> io::Result<Child>,
+    legacy: Option<LegacyConfig>,
+) -> (Sender, Receiver) {
     let shared = Arc::new(Shared::default());
     let (tx, rx) = mpsc::channel();
     (
@@ -209,6 +264,7 @@ pub fn channel(spawn: fn(&mut Command) -> io::Result<Child>) -> (Sender, Receive
             spawn,
             shared: shared.clone(),
             tx,
+            legacy,
         },
         Receiver { shared, rx },
     )
@@ -232,7 +288,12 @@ impl Drop for Receiver {
 }
 impl Sender {
     pub fn usage(&self) -> Usage {
-        self.shared.lock().usage
+        let mut usage = self.shared.lock().usage;
+        if let Some(legacy) = &self.legacy {
+            usage.legacy_spools = legacy.pool.active();
+            usage.legacy_reserved_bytes = usage.legacy_spools * spool::SPOOL_BYTES;
+        }
+        usage
     }
     pub fn spawn(&self, hgs: &Path, computer: &ComputerId, timing: Timing) -> io::Result<Handle> {
         if !computer.is_local() && !crate::fleet::valid_alias(&computer.0) {
@@ -292,7 +353,7 @@ impl Sender {
         })
     }
     fn reserve(&self, bytes: usize, stop: &AtomicBool) -> Option<Permit> {
-        self.reserve_with(bytes, stop, DATA_BYTES, DATA_ITEMS)
+        self.reserve_with(bytes, stop, DATA_BYTES, DATA_ITEMS, None)
     }
     fn reserve_with(
         &self,
@@ -300,13 +361,17 @@ impl Sender {
         stop: &AtomicBool,
         cap: usize,
         items: usize,
+        until: Option<Instant>,
     ) -> Option<Permit> {
         if bytes > cap {
             return None;
         }
         let mut state = self.shared.lock();
         loop {
-            if state.closed || stop.load(Ordering::Relaxed) {
+            if state.closed
+                || stop.load(Ordering::Relaxed)
+                || until.is_some_and(|at| Instant::now() >= at)
+            {
                 return None;
             }
             if state.usage.bytes <= cap - bytes && state.usage.items < items {
@@ -385,6 +450,44 @@ pub(crate) struct Endpoint {
     _worker: Option<Arc<Worker>>,
 }
 impl Endpoint {
+    pub fn legacy_config(&self) -> Option<LegacyConfig> {
+        self.sender.legacy.clone()
+    }
+    pub fn spawn_fn(&self) -> fn(&mut Command) -> io::Result<Child> {
+        self.sender.spawn
+    }
+    pub fn legacy(
+        &self,
+        generation: u64,
+        update: Legacy,
+        observed_at: Instant,
+        stop: &AtomicBool,
+        until: Instant,
+    ) -> bool {
+        let bytes = match &update {
+            Legacy::Begin { metadata, .. } => serde_json::to_vec(metadata).map(|b| b.len() + 1024),
+            Legacy::Page { items, .. } => serde_json::to_vec(items).map(|b| b.len() + 1024),
+            Legacy::Complete => Ok(512),
+        };
+        let Some(permit) = bytes.ok().and_then(|bytes| {
+            self.sender
+                .reserve_with(bytes, stop, DATA_BYTES, DATA_ITEMS, Some(until))
+        }) else {
+            return false;
+        };
+        self.sender
+            .tx
+            .send(Item {
+                event: Event::Legacy {
+                    source: self.identity.clone(),
+                    generation,
+                    update: Box::new(update),
+                    observed_at,
+                },
+                _permit: permit,
+            })
+            .is_ok()
+    }
     pub fn set_cancel(&mut self, cancel: stream::SourceCancel) {
         let mut state = self.sender.shared.lock();
         if state.closed {
@@ -450,7 +553,7 @@ impl Endpoint {
     pub fn status(&self, generation: u64, status: ComputerStatus, stop: &AtomicBool) -> bool {
         let Some(permit) = self
             .sender
-            .reserve_with(512, stop, INGRESS_BYTES, INGRESS_ITEMS)
+            .reserve_with(512, stop, INGRESS_BYTES, INGRESS_ITEMS, None)
         else {
             return false;
         };

@@ -172,6 +172,19 @@ pub struct Follows<'a> {
 }
 
 impl Schedule {
+    /// Raw-source resnapshots share the listing slot and a minimum one-second
+    /// start gap across generations. The GUI's offline refresh is unchanged.
+    pub(crate) fn refresh_listing_bounded(&mut self, now: Instant) {
+        let slot = Slot::Listing;
+        let Some(started) = self.started.get(&slot).copied() else {
+            return;
+        };
+        self.refreshes.insert(slot.clone());
+        if !self.running.contains_key(&slot) {
+            self.due
+                .insert(slot, now.max(started + Duration::from_secs(1)));
+        }
+    }
     /// Retry an offline listing through its existing single-flight schedule.
     pub(crate) fn refresh_listing(&mut self, now: Instant) {
         if !self.running.contains_key(&Slot::Listing) {
@@ -295,6 +308,36 @@ impl Schedule {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_listing_resnapshots_keep_a_gap_across_generations() {
+        let now = Instant::now();
+        let mut schedule = Schedule::default();
+        let follows = Follows {
+            activity: &[],
+            processes: &[],
+        };
+        schedule.due(now, &follows);
+        schedule.done(&Read::Listing, now);
+        schedule.refresh_listing_bounded(now);
+        schedule.refresh_listing_bounded(now + Duration::from_millis(10));
+        assert!(schedule
+            .due(now + Duration::from_millis(999), &follows)
+            .is_empty());
+        assert_eq!(
+            schedule.due(now + Duration::from_secs(1), &follows),
+            [Read::Listing]
+        );
+        schedule.refresh_listing_bounded(now + Duration::from_secs(1));
+        schedule.done(&Read::Listing, now + Duration::from_secs(1));
+        assert!(schedule
+            .due(now + Duration::from_millis(1999), &follows)
+            .is_empty());
+        assert_eq!(
+            schedule.due(now + Duration::from_secs(2), &follows),
+            [Read::Listing]
+        );
+    }
 
     #[test]
     fn an_offline_listing_retry_uses_the_existing_single_flight_slot() {

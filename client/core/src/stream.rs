@@ -38,6 +38,9 @@ const QUEUE_LINES: usize = 1024;
 const PROBE_BYTES: u64 = 1 << 20;
 const SOURCE_JOIN: Duration = Duration::from_secs(1);
 
+#[path = "stream_legacy_source.rs"]
+mod legacy_source;
+
 /// The delays and bounds of a stream. [`Timing::scaled`] shrinks the restart
 /// and re-probe delays for tests.
 #[derive(Clone, Debug, PartialEq)]
@@ -990,11 +993,19 @@ impl Supervisor {
                     self.legacy_windows.clear();
                 }
                 Probe::Unsupported if self.source.is_some() => {
-                    // Raw legacy conversion is a separate bounded adapter. Do
-                    // not silently start the UI's whole-catalog poll/cache.
                     self.connection = None;
                     self.status(ComputerStatus::Unsupported);
-                    if self.wait(self.timing.reprobe) {
+                    let again = if self
+                        .source
+                        .as_ref()
+                        .and_then(|s| s.legacy_config())
+                        .is_some()
+                    {
+                        self.poll_source_legacy(self.timing.reprobe)
+                    } else {
+                        self.wait(self.timing.reprobe)
+                    };
+                    if again {
                         continue;
                     }
                     break;

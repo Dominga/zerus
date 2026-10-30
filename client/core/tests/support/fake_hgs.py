@@ -164,7 +164,7 @@ def main():
             return 2
         with open(reply % "ls", encoding="utf-8") as handle:
             sys.stdout.write(handle.read())
-        return 0
+        return spec.get("listing_exit", 0)
     if args and args[0] == "inspect":
         if not os.path.exists(reply % "inspect"):
             return 2

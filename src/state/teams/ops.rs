@@ -441,6 +441,16 @@ pub(crate) fn create(id: &str, input: &Value) -> anyhow::Result<(Team, Vec<Event
 fn plan(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     ensure!(team.status == TeamStatus::Planning, "Only a team in Planning can change its plan");
     ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you can change the plan");
+    // U59: at the start of planning the lead proposes standard or free with a
+    // one-line reason; the owner's approval chooses one of the two.
+    if let Some(value) = input.get("plan_mode").filter(|value| !value.is_null()) {
+        let mode: PlanMode = serde_json::from_value(value.clone()).context("The plan mode is standard or free")?;
+        let reason = clean(text(input, "plan_mode_reason").trim(), 500, "A plan mode reason")?;
+        ensure!(!reason.is_empty(), "A plan mode proposal needs its one-line reason");
+        team.plan_mode_offer = Some(mode);
+        team.plan_mode_reason = reason.clone();
+        events.push(Event::new("plan_mode_proposed", json!({"mode":mode,"reason":reason})));
+    }
     let lead = team.member(&team.lead).cloned().context("The team has no lead")?;
     let mut members = vec![lead];
     for value in input["members"].as_array().into_iter().flatten() {
@@ -619,6 +629,14 @@ fn approve(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Str
             || (team.settings.approval == Approval::Auto && actor.is_lead(team)),
         "The lead approves only on the owner's word: pass \"owner_word\" with the owner's sentence"
     );
+    // U59: choosing at the start is the owner's own act, no proposal needed. A
+    // lead's approval or an older client that sends no mode keeps standard.
+    if let Some(value) = input.get("plan_mode").filter(|value| !value.is_null()) {
+        ensure!(matches!(actor, Actor::Human), "Only you choose the plan mode");
+        team.plan_mode = serde_json::from_value::<PlanMode>(value.clone()).context("The plan mode is standard or free")?;
+    }
+    team.plan_mode_offer = None;
+    team.plan_mode_reason.clear();
     ensure!(!team.tasks.is_empty(), "The plan has no tasks");
     let validation = plan::validate(team, offline);
     ensure!(validation.errors.is_empty(), "Fix {} plan error(s) to run: {}", validation.errors.len(),
@@ -869,6 +887,17 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
         "Only a planning, running or paused team takes a new phase"
     );
     ensure_draft_revision(team, input)?;
+    // U59: a new goal's plan may carry the lead's mode proposal as `plan` does.
+    if team.status == TeamStatus::Planning {
+        if let Some(value) = input.get("plan_mode").filter(|value| !value.is_null()) {
+            let mode: PlanMode = serde_json::from_value(value.clone()).context("The plan mode is standard or free")?;
+            let reason = clean(text(input, "plan_mode_reason").trim(), 500, "A plan mode reason")?;
+            ensure!(!reason.is_empty(), "A plan mode proposal needs its one-line reason");
+            team.plan_mode_offer = Some(mode);
+            team.plan_mode_reason = reason.clone();
+            events.push(Event::new("plan_mode_proposed", json!({"mode":mode,"reason":reason})));
+        }
+    }
     let values = input["tasks"].as_array().filter(|tasks| !tasks.is_empty()).context("A phase needs at least one task")?;
     ensure!(values.len() <= 50, "A phase has at most 50 tasks");
     ensure!(team.tasks.len() + values.len() <= 500, "A team has at most 500 tasks (it has {})", team.tasks.len());
@@ -1596,6 +1625,32 @@ fn auto_accept(team: &mut Team, offline: &BTreeSet<String>, events: &mut Vec<Eve
             json!({"phase":record.n,"title":record.title,"tasks":record.tasks.len(),"state":state}),
         ));
     }
+}
+
+/// U59: adds the free phase's ordinary build task (assigned to the lead), one
+/// open per phase, and records it in the phase's list when it has a record.
+fn add_build_task(team: &mut Team, phase: u32, by: &str, events: &mut Vec<Event>) -> anyhow::Result<u32> {
+    ensure!(
+        !team.tasks.iter().any(|task| task.phase == phase && task.phase_build && !task.status.finished()),
+        "Phase {phase} already has a build task"
+    );
+    let id = team.tasks.iter().map(|task| task.id).max().unwrap_or(0) + 1;
+    let assignee = if team.member(&team.lead).is_some() { team.lead.clone() } else { String::new() };
+    team.tasks.push(Task {
+        id,
+        title: format!("Build phase {phase}"),
+        description: "Integrate the accepted work and run the build.".into(),
+        assignee,
+        phase,
+        status: TaskStatus::Pending,
+        phase_build: true,
+        ..Default::default()
+    });
+    if let Some(at) = team.phases.iter().position(|record| record.n == phase) {
+        team.phases[at].tasks.push(id);
+    }
+    events.push(Event::new("phase_build_added", json!({"phase":phase,"task":id,"by":by})));
+    Ok(id)
 }
 
 /// U59: the open phase of a free team: the latest approved phase, or phase 1
@@ -3563,6 +3618,24 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
     task.decided_by = Some(if human { Decider::Human } else { Decider::Lead });
     task.decision_reason = reason.clone();
     let title = task.title.clone();
+    // U59: a build task's decision moves the header: accepted it is the build's
+    // proof and closes a pending close; rejected it fails the pending close and
+    // the phase stays open.
+    let phase_build = team.task(id).is_some_and(|task| task.phase_build);
+    if accept && phase_build {
+        team.last_build_at = Some(now());
+        team.free_accepted_since_build = 0;
+        if let Some(n) = team.free_close_pending.take() {
+            team.plan_mode = PlanMode::Standard;
+            events.push(Event::new("free_phase_closed", json!({"by":label,"phase":n,"build":true})));
+        }
+    } else if accept && team.plan_mode == PlanMode::Free {
+        team.free_accepted_since_build += 1;
+    } else if !accept && phase_build {
+        if let Some(n) = team.free_close_pending.take() {
+            events.push(Event::new("free_phase_build_failed", json!({"phase":n,"reason":reason})));
+        }
+    }
     // D2: accepting the report files its findings; later ones are deferred and
     // the owner hears about them once.
     if accept && !filed_before {
@@ -3657,8 +3730,15 @@ fn cancel(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
     ensure!(!task.status.finished(), "Task #{id} is already decided");
     let revoked = revoke(task, "cancelled");
     let phase = task.phase;
+    let phase_build = task.phase_build;
     task.status = TaskStatus::Cancelled;
     events.push(Event::new("cancelled", json!({"by":label,"task":id,"revoked_attempt":revoked})));
+    // U59: a cancelled build fails a pending close; the phase stays open.
+    if phase_build {
+        if let Some(n) = team.free_close_pending.take() {
+            events.push(Event::new("free_phase_build_failed", json!({"phase":n,"reason":"the build was cancelled"})));
+        }
+    }
     discard_empty_draft(team, phase, &label);
     Ok(json!({"status":"cancelled","task":id,"revoked_attempt":revoked}))
 }
@@ -3807,6 +3887,16 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
         "check" => check(team, input, actor, events),
         "expect" => expect(team, input, actor, events),
         "swap-member" => swap_member(team, input, actor, events),
+        // U59: the free phase's ordinary build task; accepting it is the
+        // build's proof and moves the header's last build time.
+        "integrate-build" => {
+            ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you start the phase build");
+            ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
+            ensure!(team.plan_mode == PlanMode::Free, "The build task belongs to a free phase");
+            let n = open_phase(team);
+            let id = add_build_task(team, n, &actor.label(team), events)?;
+            Ok(json!({"status":"build_added","phase":n,"task":id}))
+        }
         // U59: the owner closes a free phase explicitly; the team continues in
         // standard mode. Integration and a build are ordinary lead tasks, so the
         // close creates none and is never a barrier.
@@ -3829,26 +3919,18 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
                 "Phase {n} still has {} running; close it when they are decided",
                 running.iter().map(|id| format!("#{id}")).collect::<Vec<_>>().join(", ")
             );
-            // (a) the close may ask for the integration and build first; a
-            // failed build keeps the phase open and its reason reaches the lead.
-            if input["integrate"].as_bool() == Some(true) {
-                let Some(build) = input.get("build").filter(|build| build.is_object()) else {
-                    bail!("Run the integration and the build as ordinary lead tasks, then close with \"build\":{{\"status\":\"passed\"}}")
-                };
-                let detail = text(build, "detail").trim().to_owned();
-                match text(build, "status") {
-                    "passed" => team.last_build_at = Some(now()),
-                    "failed" => {
-                        events.push(Event::new(
-                            "free_phase_build_failed",
-                            json!({"phase":n,"detail":detail}),
-                        ));
-                        bail!("The build failed: {detail}; phase {n} stays open. Fix it or add the work, then close again")
-                    }
-                    _ => bail!("The build result names passed or failed"),
-                }
+            // (a) the close may ask for the integration and build first: when
+            // tasks were accepted since the last build, an ordinary lead build
+            // task is added and the close waits for its acceptance. With nothing
+            // accepted since the last build the close is immediate.
+            if input["integrate"].as_bool() == Some(true) && team.free_accepted_since_build > 0 {
+                let build = add_build_task(team, n, "You", events)?;
+                team.free_close_pending = Some(n);
+                events.push(Event::new("free_phase_close_pending", json!({"phase":n,"build":build})));
+                return Ok(json!({"status":"close_pending","phase":n,"build":build}));
             }
             team.plan_mode = PlanMode::Standard;
+            team.free_close_pending = None;
             events.push(Event::new("free_phase_closed", json!({"by":"You","phase":n,"reason":reason})));
             Ok(json!({"status":"closed","phase":n,"plan_mode":"standard","build_at":team.last_build_at}))
         }
@@ -4283,6 +4365,11 @@ mod tests {
         assert_eq!((added["phase"].as_u64(), added["tasks"].clone()), (Some(1), json!([3])));
         assert_eq!(team.task(3).unwrap().status, TaskStatus::Pending);
         assert_eq!(team.phases.len(), phases_before, "no new phase in free mode");
+        // U59: the phase build is an ordinary lead task added on request.
+        let built = apply(&mut team, "integrate-build", &json!({}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(built["status"], "build_added", "{built}");
+        let build = u32::try_from(built["task"].as_u64().unwrap()).unwrap();
+        assert!(team.task(build).unwrap().phase_build);
         for id in [1, 2, 3] {
             apply(&mut team, "cancel", &json!({"task":id}), &Actor::Human, &none, &mut events).unwrap();
         }
@@ -4369,35 +4456,74 @@ mod tests {
         for id in [1, 2] {
             apply(&mut team, "cancel", &json!({"task":id}), &Actor::Human, &none, &mut events).unwrap();
         }
-        // A failed build keeps the phase open and reaches the lead.
-        let error = apply(
-            &mut team,
-            "close-phase",
-            &json!({"integrate":true,"build":{"status":"failed","detail":"lint failed"}}),
-            &Actor::Human,
-            &none,
-            &mut events,
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("lint failed"), "{error}");
+        // U59: the build is not self-asserted. With work accepted since the last
+        // build, the close adds an ordinary lead build task and waits for it.
+        team.free_accepted_since_build = 1;
+        let pending = apply(&mut team, "close-phase", &json!({"integrate":true,"reason":"done"}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(pending["status"], "close_pending", "{pending}");
+        let build = u32::try_from(pending["build"].as_u64().unwrap()).unwrap();
+        let task = team.task(build).unwrap();
+        assert!(task.phase_build && task.assignee == "lead", "{task:?}");
+        assert_eq!(team.free_close_pending, Some(1));
         assert_eq!(team.plan_mode, PlanMode::Free);
+        // A cancelled build fails the pending close and reaches the lead; the
+        // phase stays open.
+        apply(&mut team, "cancel", &json!({"task":build}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(team.plan_mode, PlanMode::Free);
+        assert_eq!(team.free_close_pending, None);
         assert!(events.iter().any(|event| event.kind == "free_phase_build_failed"));
-        // A passed build closes it; the team is standard again and no phase or
-        // task was created by the close.
-        let closed = apply(
-            &mut team,
-            "close-phase",
-            &json!({"integrate":true,"build":{"status":"passed"}}),
-            &Actor::Human,
-            &none,
-            &mut events,
-        )
-        .unwrap();
-        assert_eq!((closed["status"].as_str(), team.plan_mode), (Some("closed"), PlanMode::Standard));
+        // The next close adds a fresh build; accepting it closes the phase.
+        let pending = apply(&mut team, "close-phase", &json!({"integrate":true}), &Actor::Human, &none, &mut events).unwrap();
+        let build = u32::try_from(pending["build"].as_u64().unwrap()).unwrap();
+        let accepted = apply(&mut team, "accept", &json!({"task":build}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(accepted["status"], "accepted");
+        assert_eq!(team.plan_mode, PlanMode::Standard, "the accepted build closes the pending phase");
         assert!(team.last_build_at.is_some());
+        assert_eq!(team.free_accepted_since_build, 0);
         assert!(events.iter().any(|event| event.kind == "free_phase_closed"));
+        // With nothing accepted since the last build the close is immediate and
+        // creates no task.
+        team.plan_mode = PlanMode::Free;
+        let tasks = team.tasks.len();
+        let closed = apply(&mut team, "close-phase", &json!({"integrate":true}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!((closed["status"].as_str(), team.plan_mode), (Some("closed"), PlanMode::Standard));
+        assert_eq!(team.tasks.len(), tasks, "the immediate close creates no build task");
         assert!(team.phases.is_empty());
+    }
+
+    /// U59: the lead proposes a mode at the start; the owner's approval chooses
+    /// one of the two, and a lead's approval or an older client keeps standard.
+    #[test]
+    fn the_owner_chooses_the_plan_mode_when_approving_the_plan() {
+        let (mut team, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        let plan_input = json!({"members":[{"id":"dev","role":"Backend","agent":"codex"}],
+            "tasks":[{"id":1,"title":"A","assignee":"dev"}],
+            "plan_mode":"free","plan_mode_reason":"a stream of small requests"});
+        plan(&mut team, &plan_input, &Actor::Member("lead".into()), &mut events).unwrap();
+        assert_eq!(team.plan_mode_offer, Some(PlanMode::Free));
+        assert_eq!(team.plan_mode_reason, "a stream of small requests");
+        // A lead cannot approve into free.
+        let word = json!({"owner_word_checked":{"text":"approve the plan","at":1.0,"event":1}});
+        let error = approve(&mut team, &json!({"plan_mode":"free","owner_word_checked":word["owner_word_checked"]}), &Actor::Member("lead".into()), &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Only you choose the plan mode"), "{error}");
+        // The owner approves standard even though free was proposed.
+        approve(&mut team, &json!({}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(team.plan_mode, PlanMode::Standard);
+        assert_eq!(team.plan_mode_offer, None);
+        // Proposed free and the owner approves free.
+        let (mut team, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
+        plan(&mut team, &plan_input, &Actor::Member("lead".into()), &mut events).unwrap();
+        approve(&mut team, &json!({"plan_mode":"free"}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(team.plan_mode, PlanMode::Free);
+        // A lead approving on the owner's word without a mode keeps standard.
+        let (mut team, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
+        plan(&mut team, &plan_input, &Actor::Member("lead".into()), &mut events).unwrap();
+        approve(&mut team, &json!({"owner_word_checked":word["owner_word_checked"]}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        assert_eq!(team.plan_mode, PlanMode::Standard);
     }
 
     #[test]

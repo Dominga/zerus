@@ -17,7 +17,7 @@ const MUTATIONS: &[&str] = &[
     "rework-phase", "reports-to", "sub-lead", "finish", "approve", "commit", "discard", "pause", "resume", "stop",
     "archive", "report", "ask", "reply", "hold", "release", "accept", "reject", "skip-stage", "send-back", "reassign", "take-over", "cancel",
     "retry", "check", "expect", "swap-member", "use-last-reply", "relaunch", "add-member", "scale", "drain", "pause-member", "resume-member", "remove-member", "settings", "finding",
-    "draft", "propose", "close-phase",
+    "draft", "propose", "close-phase", "integrate-build",
 ];
 
 fn text<'a>(input: &'a Value, key: &str) -> &'a str {
@@ -552,6 +552,10 @@ pub(super) fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::d
     // U59: the plan mode (standard or free) the team's phase runs in, and the
     // free phase's own state for the plan header.
     value["plan_mode"] = json!(team.plan_mode);
+    // U59: the lead's mode proposal at the start of planning; the owner's
+    // approval chooses one of the two.
+    value["plan_mode_offer"] = json!(team.plan_mode_offer);
+    value["plan_mode_reason"] = json!(team.plan_mode_reason);
     if team.plan_mode == super::model::PlanMode::Free {
         let n = ops::open_phase(team);
         let tasks: Vec<&super::model::Task> = team.tasks.iter().filter(|task| task.phase == n).collect();
@@ -562,7 +566,9 @@ pub(super) fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::d
             "state":if running.is_empty() { "idle" } else { "open" },
             "running":running,
             "accepted":accepted,
+            "accepted_since":team.free_accepted_since_build,
             "last_build_at":team.last_build_at,
+            "close_pending":team.free_close_pending,
         });
     }
     // U25: only the running phases' open tasks can make the team Stuck.
@@ -6441,6 +6447,13 @@ mod tests {
         assert_eq!(value["free_phase"]["state"], "open");
         assert_eq!(value["free_phase"]["running"], json!([1]));
         assert_eq!(value["free_phase"]["accepted"], 1);
+        // U59: the header's count since the last build and a pending close.
+        let mut with_build = team.clone();
+        with_build.free_accepted_since_build = 2;
+        with_build.free_close_pending = Some(1);
+        let value = view_with(&with_build, &[], None);
+        assert_eq!(value["free_phase"]["accepted_since"], 2);
+        assert_eq!(value["free_phase"]["close_pending"], 1);
         // Standard teams carry plan_mode and no free phase.
         let standard = Team { plan_mode: PlanMode::Standard, ..team.clone() };
         let value = view_with(&standard, &[], None);

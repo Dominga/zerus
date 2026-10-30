@@ -1166,6 +1166,9 @@ pub(crate) struct Task {
     /// it changes nothing about hand-out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lane: Option<Lane>,
+    /// U59: when this task is the free phase's integration-and-build task.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub phase_build: bool,
     #[serde(default)]
     pub status: TaskStatus,
     /// Held back from the dispatcher until the lead releases it (A5).
@@ -1580,6 +1583,20 @@ pub(crate) struct Team {
     /// the desktop shows it with the free phase.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_build_at: Option<f64>,
+    /// U59: the lead's proposed plan mode for the plan being made, and its
+    /// one-line reason; the owner's approval chooses one of the two.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_mode_offer: Option<PlanMode>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub plan_mode_reason: String,
+    /// U59: tasks accepted since the last build of the free phase, so the header
+    /// says how much the next build covers.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub free_accepted_since_build: u64,
+    /// U59: the free phase a pending close waits for; it closes when the build
+    /// task is accepted and stays open if the build fails.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub free_close_pending: Option<u32>,
     #[serde(default)]
     pub settings: Settings,
     /// The member id of the lead.

@@ -313,6 +313,11 @@ impl NewSession {
         answer
     }
 
+    pub(crate) fn invalidate_worktrees(&self, computer: &ComputerId, common_dir: &str) {
+        lock(&self.0.catalogs).invalidate(&computer.0, common_dir);
+        self.save();
+    }
+
     /// Create worktree in the manual dialog (`NewWorktreeDialog`, with
     /// `createWorktree` 1565-1590): one fresh request identity, no expected
     /// machine and no receipt, as Qt sends it. `catalog` is the folder's

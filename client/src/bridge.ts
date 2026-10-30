@@ -522,6 +522,13 @@ export const repositoryFields = (url: string, destination: string, style: PathSt
 export const worktreeSnapshot = (computer: ComputerId, path: string) => desktopNewSession<Record<string, unknown>>("worktree_snapshot", { computer, path });
 /** The folder's catalog: a fresh snapshot, or `hgs worktrees --path`; a rejection is its error. */
 export const worktreeCatalog = (computer: ComputerId, path: string, refresh: boolean) => desktopNewSession<Record<string, unknown>>("worktree_catalog", { computer, path, refresh });
+export const worktreeCleanupOpen = (computer: string, path: string, focus: string) => desktop<import("./store/worktreeCleanup").WorktreeReview>("worktree_cleanup_open", { computer, path, focus });
+export const worktreeCleanupView = (id: string) => desktop<import("./store/worktreeCleanup").WorktreeReview>("worktree_cleanup_view", { id });
+export const worktreeCleanupRefresh = (id: string) => desktop<import("./store/worktreeCleanup").WorktreeReview>("worktree_cleanup_refresh", { id });
+export const worktreeCleanupPrepare = (id: string, revision: number, selected: number[], branches: boolean) => desktop<import("./store/worktreeCleanup").WorktreeConfirmation>("worktree_cleanup_prepare", { id, revision, selected, branches });
+export const worktreeCleanupConfirm = (id: string, confirmation: string, consent: boolean) => desktop<import("./store/worktreeCleanup").WorktreeReview>("worktree_cleanup_confirm", { id, confirmation, consent });
+export const worktreeCleanupClose = (id: string) => desktop<void>("worktree_cleanup_close", { id });
+export const onWorktreeCleanupChanged = (changed: () => void) => inTauri() ? listen("worktree-cleanup-changed", changed) : Promise.resolve(() => {});
 /**
  * Create worktree: the new checkout and `catalog` (the folder's catalog the dialog opened with, naming the repository)
  * listing it as verified; a rejection is Qt's text. Never retried.

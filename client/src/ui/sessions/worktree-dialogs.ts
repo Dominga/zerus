@@ -49,8 +49,30 @@ export interface WorktreePickerView {
 
 /** The catalog lists at most this many worktrees (Partial catalog). */
 export const MAX_WORKTREES = 512;
+/** The same bounded catalog/fallback folder in picker and normal panel mode. */
+export function catalogRoots(data: Json, path: string): Json[] {
+  const roots = array(data.worktrees).slice(0, MAX_WORKTREES).map(object);
+  return roots.length || !path ? roots : [{ path: typeof data.path === "string" ? data.path : path, kind: "folder", available: string(data.state) !== "folder_unavailable" && Object.keys(data).length > 0 }];
+}
 /** Qt's "d MMM HH:mm:ss" in local time, with C-locale month names. */
 export const snapshotTime = (seconds: number): string => dayTime(seconds, true);
+
+/** Shared WorktreePanel status for the picker and the session side panel. */
+export function catalogStatus(path: string, machine: string, data: Json, online: boolean, reading: boolean, error = ""): string {
+  const state = string(data.state), stale = !online || flag(data, "stale") || error !== "";
+  let status: string;
+  if (!path) status = "Select a folder.";
+  else if (!online) status = "Offline. Showing the last snapshot.";
+  else if (error) status = `Catalog unavailable: ${error}`;
+  else if (reading) status = "Reading folder…";
+  else if (state === "not_repo") status = "Ordinary folder (no Git).";
+  else if (state !== "ok") status = state === "folder_unavailable" ? "Folder is missing or inaccessible." : "Git information unavailable. You can still use an accessible folder.";
+  else if (flag(data, "partial")) status = "Partial catalog (first 512 worktrees).";
+  else status = `Existing working folders on ${machine}`;
+  const sampled = typeof data.sampled_at === "number" ? data.sampled_at : 0;
+  if (sampled > 0) status += `\nSnapshot: ${snapshotTime(sampled)}${stale ? " (outdated)" : ""}`;
+  return status;
+}
 
 /** A row's label (WorktreePanel::render): its kind, branch, marks and its session count. */
 export function worktreeLabel(row: Json, sessions: number): string {
@@ -131,19 +153,8 @@ export class WorktreePicker {
 
   view(online: boolean, sessions: readonly PickerSession[], style: Style): WorktreePickerView {
     const data = this.data;
-    const state = string(data.state);
     const stale = !online || flag(data, "stale") || this.error !== "";
-    let status: string;
-    if (this.path === "") status = "Select a folder.";
-    else if (!online) status = "Offline. Showing the last snapshot.";
-    else if (this.error) status = `Catalog unavailable: ${this.error}`;
-    else if (this.request) status = "Reading folder…";
-    else if (state === "not_repo") status = "Ordinary folder (no Git).";
-    else if (state !== "ok") status = state === "folder_unavailable" ? "Folder is missing or inaccessible." : "Git information unavailable. You can still use an accessible folder.";
-    else if (flag(data, "partial")) status = "Partial catalog (first 512 worktrees).";
-    else status = `Existing working folders on ${this.machine}`;
-    const sampled = typeof data.sampled_at === "number" ? data.sampled_at : 0;
-    if (sampled > 0) status += `\nSnapshot: ${snapshotTime(sampled)}${stale ? " (outdated)" : ""}`;
+    const status = catalogStatus(this.path, this.machine, data, online, !!this.request, this.error);
 
     const rows = this.rows(data, stale, this.counts(sessions, style));
     // The kept choice, else the opened folder or its root (the last such row), else the first.
@@ -183,10 +194,7 @@ export class WorktreePicker {
   private rows(data: Json, stale: boolean, counts: Counts): WorktreeRow[] {
     const known = this.listed;
     if (known && known.data === data && known.stale === stale && known.counts === counts) return known.rows;
-    let roots = array(data.worktrees).slice(0, MAX_WORKTREES).map(object);
-    if (!roots.length && this.path !== "") {
-      roots = [{ path: typeof data.path === "string" ? data.path : this.path, kind: "folder", available: string(data.state) !== "folder_unavailable" && Object.keys(data).length > 0 }];
-    }
+    const roots = catalogRoots(data, this.path);
     const rows = roots.map((row): WorktreeRow => {
       const path = string(row.path);
       const count = (row.kind !== "folder" ? counts.roots : counts.folders).get(sameKey(path, counts.style)) ?? 0;

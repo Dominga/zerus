@@ -12,6 +12,7 @@ vi.hoisted(() => {
   vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener: () => {}, removeEventListener: () => {} }));
 });
 vi.mock("../../bridge", () => ({
+  inTauri: () => false,
   ARCHIVED_ACTIVITY_BUSY: "busy",
   archivedActivity: vi.fn(() => new Promise(() => {})),
   activityPort: { follow: vi.fn(async () => {}), unfollow: vi.fn(async () => {}) },

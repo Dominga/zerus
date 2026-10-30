@@ -1,4 +1,6 @@
 import WorktreeCleanup, { CleanupChip } from "./ui/screens/WorktreeCleanup";
+import WorktreeReviewDialog from "./ui/screens/WorktreeReviewDialog";
+import { worktreeReviewDialog } from "./store/worktreeCleanup";
 import { cleanupDialog } from "./store/terminationCleanup";
 import { taskAssignmentPopover } from "./store/taskAssignment";
 import { taskExecutorReview } from "./store/taskExecutors";
@@ -164,6 +166,7 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
       <Toasts />
       <ActionDialogs />
       <Show when={cleanupDialog()}><Suspense><WorktreeCleanup /></Suspense></Show>
+      <Show when={worktreeReviewDialog()}><Suspense><WorktreeReviewDialog /></Suspense></Show>
       <Show when={taskAssignmentPopover()}><Suspense><TaskAssignmentPopover /></Suspense></Show>
       <Show when={taskExecutorReview()}><Suspense><TaskExecutorReview /></Suspense></Show>
       <Show when={taskStartReview()}><Suspense><TaskStartReview /></Suspense></Show>

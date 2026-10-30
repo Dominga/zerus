@@ -200,6 +200,8 @@ fn exit(app: &AppHandle) {
     if let Some(dog) = app.try_state::<crate::watchdog::Watchdog>() {
         dog.stop();
     }
+    #[cfg(all(target_os = "linux", feature = "live"))]
+    crate::platform::linux_notify::stop(app);
     #[cfg(all(target_os = "macos", feature = "live"))]
     crate::platform::macos_menubar::clear_badge(app);
     // Settings, the organization, voice, composers and drafts reach the disk

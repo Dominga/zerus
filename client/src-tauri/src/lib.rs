@@ -289,6 +289,11 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
             }
         })
         .on_window_event(|window, event| {
+            #[cfg(all(target_os = "linux", feature = "live"))]
+            if window.label() == MAIN_WINDOW {
+                use tauri::Manager;
+                if let tauri::WindowEvent::Focused(focused) = event { desk::set_focused(window.app_handle(), *focused); }
+            }
             if window.label() == MAIN_WINDOW
                 && matches!(event, tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Focused(_) | tauri::WindowEvent::Moved(_))
             {
@@ -583,7 +588,20 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 {
                     let conf = desk::tray_conf();
                     platform::linux_tray::install(app.handle(), conf.as_deref());
-                    desk::start(app.handle(), &pump, dir.clone(), desk::load_linux_mode(&dir, conf.as_deref()), None);
+                    let identity = app.state::<identity::Identity>().inner().clone();
+                    let posts = identity.notifications(identity::flag("ZERUS_CLIENT_NOTIFICATIONS"), replay);
+                    let switch = identity.is_switch();
+                    let attention = posts.then(|| {
+                        let path = dir.join(desk::ATTENTION_FILE);
+                        Box::new(move || desk::Attention::load(path, || {
+                            switch.then(|| platform::linux_notify::qt_values().ok().flatten()
+                                .and_then(|values| values.get("attention/observed").map(|v| v.to_text().into_bytes()))).flatten()
+                        })) as desk::LoadAttention
+                    });
+                    desk::start(app.handle(), &pump, dir.clone(), desk::load_linux_mode(&dir, conf.as_deref()), attention);
+                    if posts {
+                        if let Some(sender) = desk::sender(app.handle()) { platform::linux_notify::install(app.handle(), dir.clone(), switch, sender); }
+                    }
                 }
                 app.manage(updates::start(app.handle()));
                 if menu_bar {

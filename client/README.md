@@ -57,6 +57,20 @@ Automatic, Tab, Window and Clipboard, reads `open-mode`/`terminal` from
 Native protocol tests create a private D-Bus daemon and fake Plasma watcher;
 they never connect to the desktop's bus.
 
+Linux attention uses `org.freedesktop.Notifications`, with Qt's literal body
+escaping, action labels, icon and hints. The existing desk decides attention;
+the adapter adds no fleet reader or detector. It stores native IDs in
+`linux-notifications.json`, bound to the notification daemon's unique owner,
+and seeds Qt's `attention/linuxOwner` and `attention/linuxTokens` read-only on
+the switch identity's first start. `attention/observed` supplies the existing
+edge seed, so historical alerts are not reposted. Expired Plasma notifications
+stay clickable in history; withdrawal removes their exact token's IDs, and
+late replies to a withdrawn post are closed. Clicks preserve the activation
+token and use the desk's guarded session resolution; update clicks verify the
+current update token separately. Unconfirmed native deliveries remain reserved
+across restart instead of being posted again. Invalid client state is preserved
+and posting stays disabled until it can be reviewed.
+
 ## Build and run
 
 ```sh

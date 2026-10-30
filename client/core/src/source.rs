@@ -64,6 +64,8 @@ pub struct Usage {
     pub items: usize,
     pub connecting: usize,
     pub sources: usize,
+    /// Admitted supervisor lifetimes, including pending I/O after handle stop.
+    pub workers: usize,
     pub readers: usize,
     pub high_bytes: usize,
     pub high_items: usize,
@@ -73,8 +75,12 @@ struct State {
     usage: Usage,
     closed: bool,
     next: u64,
-    sources: BTreeMap<ComputerId, u64>,
+    sources: BTreeMap<ComputerId, Registered>,
     readers: BTreeSet<ComputerId>,
+}
+struct Registered {
+    incarnation: u64,
+    cancel: Option<stream::SourceCancel>,
 }
 #[derive(Default)]
 struct Shared {
@@ -129,6 +135,13 @@ struct Registration {
     shared: Arc<Shared>,
     identity: Identity,
 }
+struct Worker(Arc<Shared>);
+impl Drop for Worker {
+    fn drop(&mut self) {
+        self.0.lock().usage.workers -= 1;
+        self.0.wake.notify_all();
+    }
+}
 
 /// One transient request per greeted generation, independent of input-queue
 /// pressure. Closing the connection cancels it; it never follows a reconnect.
@@ -164,7 +177,11 @@ impl Resnapshot {
 impl Drop for Registration {
     fn drop(&mut self) {
         let mut state = self.shared.lock();
-        if state.sources.get(&self.identity.computer) == Some(&self.identity.incarnation) {
+        if state
+            .sources
+            .get(&self.identity.computer)
+            .is_some_and(|entry| entry.incarnation == self.identity.incarnation)
+        {
             state.sources.remove(&self.identity.computer);
             state.usage.sources -= 1;
         }
@@ -203,7 +220,13 @@ impl Receiver {
 }
 impl Drop for Receiver {
     fn drop(&mut self) {
-        self.shared.lock().closed = true;
+        let mut state = self.shared.lock();
+        state.closed = true;
+        for entry in state.sources.values() {
+            if let Some(cancel) = &entry.cancel {
+                cancel.cancel();
+            }
+        }
         self.shared.wake.notify_all();
     }
 }
@@ -222,6 +245,7 @@ impl Sender {
             let mut state = self.shared.lock();
             if state.closed
                 || state.sources.len() >= SOURCES
+                || state.usage.workers >= SOURCES
                 || state.sources.contains_key(computer)
             {
                 return Err(io::Error::new(
@@ -237,8 +261,15 @@ impl Sender {
                 computer: computer.clone(),
                 incarnation: state.next,
             };
-            state.sources.insert(computer.clone(), identity.incarnation);
+            state.sources.insert(
+                computer.clone(),
+                Registered {
+                    incarnation: identity.incarnation,
+                    cancel: None,
+                },
+            );
             state.usage.sources += 1;
+            state.usage.workers += 1;
             identity
         };
         let slot = Registration {
@@ -249,6 +280,8 @@ impl Sender {
             sender: self.clone(),
             identity,
             resnapshot: Arc::default(),
+            cancel: None,
+            _worker: Some(Arc::new(Worker(self.shared.clone()))),
         };
         let resnapshot = endpoint.resnapshot.clone();
         let stream = stream::spawn_source(hgs, computer, timing, endpoint)?;
@@ -305,9 +338,12 @@ impl Sender {
         }
     }
 }
-/// Holds the unique source registration until its owned supervisor has stopped.
+/// Holds the unique source registration until this handle stops.
 /// The service must retire this incarnation itself when stopping intentionally;
 /// cancellation never waits for an Ended event to fit in a full channel.
+/// Stop bounds its join; pending background I/O retains worker/reader admission.
+/// A future writer drain must wait for workers, readers and connections to
+/// reach zero, plus any component-specific reservations, before taking over.
 pub struct Handle {
     stream: stream::StreamHandle,
     resnapshot: Arc<Resnapshot>,
@@ -345,13 +381,31 @@ pub(crate) struct Endpoint {
     sender: Sender,
     identity: Identity,
     pub resnapshot: Arc<Resnapshot>,
+    cancel: Option<stream::SourceCancel>,
+    _worker: Option<Arc<Worker>>,
 }
 impl Endpoint {
+    pub fn set_cancel(&mut self, cancel: stream::SourceCancel) {
+        let mut state = self.sender.shared.lock();
+        if state.closed {
+            cancel.cancel();
+        }
+        if let Some(entry) = state.sources.get_mut(&self.identity.computer) {
+            if entry.incarnation == self.identity.incarnation {
+                entry.cancel = Some(cancel.clone());
+            }
+        }
+        self.cancel = Some(cancel);
+    }
     /// A descendant retaining a pipe must not create a leaked reader on every
     /// retry. Refuse another reader group until both old pipes end.
     pub fn reader(&self) -> Option<Reader> {
         let mut state = self.sender.shared.lock();
         if state.closed
+            || self
+                .cancel
+                .as_ref()
+                .is_some_and(stream::SourceCancel::cancelled)
             || state.readers.len() >= SOURCES
             || !state.readers.insert(self.identity.computer.clone())
         {

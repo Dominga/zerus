@@ -5,7 +5,10 @@ use serde_json::json;
 use std::{
     io::Write,
     process::{Child, Command},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Mutex, OnceLock,
+    },
     time::{Duration, Instant},
 };
 use zerus_client_core::{
@@ -26,6 +29,72 @@ fn quick() -> Timing {
         silence: Duration::from_secs(5),
         ..Timing::scaled(0.01)
     }
+}
+
+#[test]
+fn receiver_drop_wakes_a_quiet_source_and_drains_its_worker() {
+    let fake = FakeHgs::new(
+        "source_quiet_close",
+        json!({"":{"runs":[[{"lines":[hello("local")]},{"serve":true}]]}}),
+    );
+    let (tx, rx) = source::channel(spawn);
+    let handle = tx
+        .spawn(&fake.path(), &ComputerId::local(), Timing::default())
+        .unwrap();
+    until(
+        &rx,
+        |event| matches!(event,Event::Frame{frame,..} if matches!(frame.body,Body::Hello(_))),
+    );
+    let began = Instant::now();
+    drop(rx);
+    eventually("quiet source cancellation", || {
+        tx.usage().workers == 0 && tx.usage().readers == 0
+    });
+    assert!(began.elapsed() < Duration::from_secs(2));
+    handle.stop();
+    assert_eq!(tx.usage().connecting, 0);
+}
+
+#[test]
+fn bounded_stop_keeps_a_blocked_background_worker_visible_until_it_ends() {
+    static ENTERED: AtomicBool = AtomicBool::new(false);
+    static RELEASE: OnceLock<Mutex<mpsc::Receiver<()>>> = OnceLock::new();
+    fn blocked_spawn(_: &mut Command) -> std::io::Result<Child> {
+        ENTERED.store(true, Ordering::Relaxed);
+        RELEASE.get().unwrap().lock().unwrap().recv().unwrap();
+        Err(std::io::Error::other("synthetic blocked spawn refused"))
+    }
+    let (release, wait) = mpsc::channel();
+    assert!(RELEASE.set(Mutex::new(wait)).is_ok());
+    let (tx, rx) = source::channel(blocked_spawn);
+    let handle = tx
+        .spawn(
+            std::path::Path::new("never-launched-source-fixture"),
+            &ComputerId::local(),
+            quick(),
+        )
+        .unwrap();
+    eventually("background hook entered", || {
+        ENTERED.load(Ordering::Relaxed)
+    });
+    assert_eq!(tx.usage().workers, 1);
+    assert_eq!(tx.usage().readers, 1);
+    drop(rx);
+    let began = Instant::now();
+    handle.stop();
+    assert!(began.elapsed() < Duration::from_secs(2));
+    assert_eq!(tx.usage().sources, 0);
+    assert_eq!(
+        tx.usage().workers,
+        1,
+        "returning a handle is not worker drain"
+    );
+    assert_eq!(tx.usage().readers, 1);
+    release.send(()).unwrap();
+    eventually("retained background ownership ends", || {
+        tx.usage().workers == 0 && tx.usage().readers == 0
+    });
+    assert_eq!(tx.usage().connecting, 0);
 }
 fn until(rx: &Receiver, mut accept: impl FnMut(&Event) -> bool) {
     let deadline = Instant::now() + Duration::from_secs(15);

@@ -72,10 +72,24 @@ cannot accumulate replacement reader threads: retry refuses until the group
 ends. It reports incomplete/reconnecting coverage and sends no native effects.
 No process groups or unrelated descendants are killed to release a pipe.
 
+Retained supervisor lifetimes have their own 64-worker admission bound,
+independent of handle registrations. The endpoint and source reader keep that
+worker reservation until their work ends. Receiver drop sets each admitted
+source's weak cancellation flag and wakes its existing control queue, so a
+quiet source does not need another frame to notice closure. Cancelled endpoints
+cannot admit another reader group.
+
 Stop cancels blocked admission, closes only the owned watch's stdin and uses the
 existing bounded child-exit grace. Old-generation input is discarded before
 reconnect status admission, so stale permits cannot deadlock a full ingress.
 The stop flag remains authoritative even when a queued stop wake is discarded.
+Source-only handle stop uses a nonblocking wake and waits at most one second
+for its supervisor. Pending OS I/O retains its worker/reader reservation after
+that bounded return; the existing GUI stream shutdown keeps its behavior.
+Returning from stop proves cancellation was requested, not that a writer drain
+finished. When the service wires sources, revocation must wait for workers,
+readers, connection attempts and component reservations to reach zero before
+settling takeover. A stuck operation keeps that drain refused.
 Per-reader line/probe buffers and decoded JSON allocation are additional bounded
 memory; the 256 MiB whole-service RSS target still requires qualification.
 

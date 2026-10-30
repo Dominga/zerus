@@ -63,9 +63,9 @@ mod signals;
 #[cfg(feature = "live")]
 mod speech_settings;
 #[cfg(feature = "live")]
-mod terminal;
-#[cfg(feature = "live")]
 mod task_details;
+#[cfg(feature = "live")]
+mod terminal;
 #[cfg(feature = "live")]
 mod updates;
 #[cfg(feature = "media")]
@@ -1138,6 +1138,18 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
     ]
 }
 
+fn app_navigation_allowed(url: &tauri::Url) -> bool {
+    if url.path() != "/" && url.path() != "/index.html" {
+        return false;
+    }
+    matches!(
+        (url.scheme(), url.host_str(), url.port()),
+        ("tauri", Some("localhost"), None)
+            | ("http", Some("tauri.localhost"), None)
+            | ("http", Some("127.0.0.1"), Some(1420))
+    )
+}
+
 /// Creates the main window and applies the platform display-rate preference:
 /// macOS before the webview is built, Linux through its public settings API.
 pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
@@ -1160,6 +1172,8 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     };
     #[allow(unused_mut)]
     let mut builder = WebviewWindowBuilder::new(app, MAIN_WINDOW, WebviewUrl::App(page.into()))
+        .on_navigation(app_navigation_allowed)
+        .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
         .title("Zerus Next")
         .visible(false)
         .inner_size(1440.0, 900.0)
@@ -1190,6 +1204,38 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
 /// frame-rate preference at its default: the must-fail control run of the measurement.
 pub fn keep_default_preference() -> bool {
     std::env::var("ZERUS_CLIENT_PERF_PREFERENCE").is_ok_and(|value| value == "default")
+}
+
+#[cfg(test)]
+mod navigation_tests {
+    use super::app_navigation_allowed;
+
+    #[test]
+    fn navigation_stays_on_the_app_entry() {
+        for url in [
+            "http://127.0.0.1:1420/",
+            "http://127.0.0.1:1420/index.html?perf=auto",
+            "tauri://localhost/index.html",
+            "http://tauri.localhost/index.html",
+        ] {
+            assert!(
+                app_navigation_allowed(&tauri::Url::parse(url).unwrap()),
+                "{url}"
+            );
+        }
+        for url in [
+            "https://example.com/",
+            "http://127.0.0.1:1420/remote/file",
+            "http://localhost:1420/",
+            "tauri://localhost/remote/file",
+            "file:///tmp/remote-file",
+        ] {
+            assert!(
+                !app_navigation_allowed(&tauri::Url::parse(url).unwrap()),
+                "{url}"
+            );
+        }
+    }
 }
 
 #[cfg(all(test, feature = "live"))]

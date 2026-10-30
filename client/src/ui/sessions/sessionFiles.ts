@@ -28,7 +28,7 @@ export function openExternal(url: string) {
 }
 
 export function openSessionFile(session: Session, href: string) {
-  void sessionFileDialog(session.computer, session.catalogKey, href, session.cwd).then(setSessionFile).catch(report);
+  void sessionFileDialog(session.computer, session.catalogKey, href, session.cwdPath || session.cwdCanonical).then(setSessionFile).catch(report);
 }
 
 export function closeSessionFile() {

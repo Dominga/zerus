@@ -2,7 +2,7 @@
 use crate::actions::{Exit, Invocation};
 use std::io::{ErrorKind, Read, Write};
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
@@ -56,7 +56,7 @@ pub fn run_limited(
     parent_env: &[(&str, &str)],
     stdout_cap: usize,
 ) -> Result<Exit, TooLarge> {
-    match run_inner(hgs, inv, parent_env, &[], stdout_cap, None) {
+    match run_inner(hgs, inv, parent_env, &[], stdout_cap, None, None) {
         Ok(exit) => Ok(exit),
         Err(Stopped::TooLarge(too_large)) => Err(too_large),
         // Nothing sets a flag when there is none.
@@ -83,7 +83,7 @@ pub fn run_cancellable(
     stdout_cap: usize,
     cancel: &AtomicBool,
 ) -> Result<Exit, Stopped> {
-    run_inner(hgs, inv, parent_env, &[], stdout_cap, Some(cancel))
+    run_inner(hgs, inv, parent_env, &[], stdout_cap, Some(cancel), None)
 }
 
 /// [`run_limited`] of another program (a connector) that also leaves out
@@ -96,12 +96,45 @@ pub fn run_without(
     remove: &[&str],
     stdout_cap: usize,
 ) -> Result<Exit, TooLarge> {
-    match run_inner(program, inv, parent_env, remove, stdout_cap, None) {
+    match run_inner(program, inv, parent_env, remove, stdout_cap, None, None) {
         Ok(exit) => Ok(exit),
         Err(Stopped::TooLarge(too_large)) => Err(too_large),
         Err(Stopped::Cancelled) => Ok(Exit::Abnormal {
             stderr: "cancelled".into(),
         }),
+    }
+}
+
+type StreamInput = Box<dyn FnOnce(ChildStdin) -> bool + Send>;
+
+/// Streams bounded input on the existing runner's writer thread. Both output
+/// pipes have a hard byte limit; exceeding either ends only this owned child.
+/// The callback must bound its own work and returns false on encoding/write
+/// failure. `inv.stdin` must be absent. A successful process exit alone does
+/// not establish that the callback completed; the caller validates its result.
+pub(crate) fn run_streamed(
+    hgs: &Path,
+    inv: &Invocation,
+    parent_env: &[(&str, &str)],
+    output_cap: usize,
+    input: impl FnOnce(ChildStdin) -> bool + Send + 'static,
+) -> Result<Exit, TooLarge> {
+    assert!(
+        inv.stdin.is_none(),
+        "streamed input cannot have a second body"
+    );
+    match run_inner(
+        hgs,
+        inv,
+        parent_env,
+        &[],
+        output_cap,
+        None,
+        Some(Box::new(input)),
+    ) {
+        Ok(exit) => Ok(exit),
+        Err(Stopped::TooLarge(error)) => Err(error),
+        Err(Stopped::Cancelled) => unreachable!("no cancellation flag"),
     }
 }
 
@@ -112,7 +145,9 @@ fn run_inner(
     remove: &[&str],
     stdout_cap: usize,
     cancel: Option<&AtomicBool>,
+    stream: Option<StreamInput>,
 ) -> Result<Exit, Stopped> {
+    let strict_outputs = stream.is_some();
     let mut command = Command::new(hgs);
     command.args(&inv.args);
     for (key, value) in parent_env {
@@ -137,8 +172,9 @@ fn run_inner(
     let input = inv.stdin.clone();
     let (write_tx, write_rx) = mpsc::channel();
     thread::spawn(move || {
-        let ok = match (stdin, input) {
-            (Some(mut pipe), Some(bytes)) => {
+        let ok = match (stdin, stream, input) {
+            (Some(pipe), Some(write), _) => write(pipe),
+            (Some(mut pipe), None, Some(bytes)) => {
                 pipe.write_all(&bytes).and_then(|_| pipe.flush()).is_ok()
             }
             _ => true,
@@ -150,11 +186,24 @@ fn run_inner(
     let limit = (stdout_cap < usize::MAX).then(|| (stdout_cap, Arc::clone(&over)));
     let out = reader(
         child.stdout.take(),
-        stdout_cap.saturating_add(1),
+        if strict_outputs {
+            stdout_cap
+        } else {
+            stdout_cap.saturating_add(1)
+        },
         done_tx.clone(),
         limit,
     );
-    let err = reader(child.stderr.take(), STDERR_CAP, done_tx, None);
+    let err = reader(
+        child.stderr.take(),
+        if strict_outputs {
+            stdout_cap
+        } else {
+            STDERR_CAP
+        },
+        done_tx,
+        strict_outputs.then(|| (stdout_cap, Arc::clone(&over))),
+    );
     let too_large = |err: &Shared| {
         Stopped::TooLarge(TooLarge {
             cap: stdout_cap,
@@ -211,7 +260,7 @@ fn run_inner(
     drain(&done_rx);
     let stdout = take(&out);
     // A child can exit before the loop sees its output pass the cap.
-    if stdout.len() > stdout_cap {
+    if stdout.len() > stdout_cap || over.load(Ordering::Relaxed) {
         return Err(too_large(&err));
     }
     let stderr = String::from_utf8_lossy(&take(&err)).into_owned();
@@ -266,15 +315,17 @@ fn reader(
     thread::spawn(move || {
         if let Some(mut pipe) = pipe {
             let mut chunk = [0u8; 8192];
+            let mut received = 0usize;
             loop {
                 match pipe.read(&mut chunk) {
                     Ok(0) => break,
                     Ok(n) => {
+                        received = received.saturating_add(n);
                         let mut kept = shared.lock().unwrap_or_else(|e| e.into_inner());
                         let room = cap.saturating_sub(kept.len()).min(n);
                         kept.extend_from_slice(&chunk[..room]);
                         if let Some((bytes, over)) = &limit {
-                            if kept.len() > *bytes {
+                            if received > *bytes {
                                 over.store(true, Ordering::Relaxed);
                             }
                         }
@@ -287,4 +338,79 @@ fn reader(
         let _ = done.send(());
     });
     buffer
+}
+
+#[cfg(all(test, unix))]
+mod stream_tests {
+    use super::*;
+
+    fn python(code: &str, timeout: Duration) -> Invocation {
+        Invocation {
+            args: vec!["-c".into(), code.into()],
+            stdin: None,
+            timeout,
+            request_id: None,
+        }
+    }
+
+    #[test]
+    fn streamed_eof_and_both_exact_output_limits_are_preserved() {
+        let code = "import sys,os; assert sys.stdin.buffer.read() == b'bounded input'; assert 'HGS_SESSION' not in os.environ; sys.stdout.write('x'*16384); sys.stderr.write('y'*16384)";
+        let exit = run_streamed(
+            Path::new("python3"),
+            &python(code, Duration::from_secs(5)),
+            &[("HGS_SESSION", "discard")],
+            16384,
+            |mut pipe| pipe.write_all(b"bounded input").is_ok(),
+        )
+        .unwrap();
+        match exit {
+            Exit::Code {
+                code: 0,
+                stdout,
+                stderr,
+            } => {
+                assert_eq!(stdout.len(), 16384);
+                assert_eq!(stderr.len(), 16384);
+            }
+            other => panic!("{other:?}"),
+        }
+        for noisy in ["stdout", "stderr"] {
+            let began = Instant::now();
+            let code = format!("import sys,time; sys.{noisy}.write('x'*16385); sys.{noisy}.flush(); time.sleep(10)");
+            let error = run_streamed(
+                Path::new("python3"),
+                &python(&code, Duration::from_secs(5)),
+                &[],
+                16384,
+                |_| true,
+            )
+            .unwrap_err();
+            assert_eq!(error.cap, 16384);
+            assert!(error.stderr.len() <= 16384);
+            assert!(began.elapsed() < Duration::from_secs(3));
+        }
+    }
+
+    #[test]
+    fn deadline_ends_owned_child_and_releases_its_blocked_pipe_writer() {
+        let (done, completed) = mpsc::channel();
+        let began = Instant::now();
+        let exit = run_streamed(
+            Path::new("python3"),
+            &python("import time; time.sleep(10)", Duration::from_millis(250)),
+            &[],
+            16384,
+            move |mut pipe| {
+                let chunk = [0; 8192];
+                let result = (0..16384).try_for_each(|_| pipe.write_all(&chunk));
+                let _ = done.send(result.is_err());
+                result.is_ok()
+            },
+        )
+        .unwrap();
+        assert_eq!(exit, Exit::TimedOut);
+        assert!(began.elapsed() < Duration::from_secs(3));
+        assert!(completed.recv_timeout(Duration::from_secs(2)).unwrap());
+    }
 }

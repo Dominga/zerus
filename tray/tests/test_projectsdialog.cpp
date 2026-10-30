@@ -22,6 +22,9 @@
 #include <QPushButton>
 #include <QSplitter>
 #include <QTableWidget>
+#include <QTreeWidget>
+#include <QScrollArea>
+#include <QScrollBar>
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QFile>
@@ -39,6 +42,10 @@ private slots:
     void cloneAddsFolderWithoutLaunchingSession();
     void projectPageHasHeaderAndCollapsibleBlocks();
     void projectPageMatchesThePrototype();
+    void pageMessagesStayInViewAndOnlyRefusalsAreRed();
+    void renameKeepsItsProjectOrIsCancelled();
+    void narrowWindowKeepsTheKindColumnReachable();
+    void folderDialogsHaveShots();
     void folderKindsFollowTheFleetAndTheTeams();
     void projectSessionsFollowTheFleetWhileShown();
     void projectSessionRowsAreBounded();
@@ -204,7 +211,21 @@ void TestProjectsDialog::projectPageMatchesThePrototype()
     QTemporaryDir directory;QVERIFY(directory.isValid());
     QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,directory.path());
     QCoreApplication::setOrganizationName("hgs-project-prototype-test");QCoreApplication::setApplicationName("projects");clearSettings();
-    HgsClient client("/nonexistent/hgs");SessionOrganization projects;
+    // #651 QA: a catalog for the selected folder, so the shots show the worktree overview.
+    const auto script=directory.filePath("hgs");
+    QVERIFY(FakeCli::install(script,R"PY(#!/usr/bin/env python3
+import json,sys,time
+a=sys.argv[1:]
+if a and a[0].startswith('@'):a.pop(0)
+if a[:1]==['worktrees']:
+ p=a[a.index('--path')+1]
+ print(json.dumps({'state':'ok','path':p,'selected_root':p,'common_dir':p+'/.git','sampled_at':time.time(),
+  'worktrees':[{'path':p,'kind':'main','branch':'main','available':True},
+               {'path':p+'/.worktrees/backend','kind':'linked','branch':'team/checkout-v2/backend','available':True}]}))
+elif a[:2]==['project','ls']:print('[]')
+else:print('{}')
+)PY"));
+    HgsClient client(FakeCli::program(script));SessionOrganization projects;
     const auto orbit=projects.createGroup("Orbit platform");projects.setColor(orbit,"#2b97ff");
     const auto infra=projects.createGroup("Infrastructure");projects.setColor(infra,"#ff9234");
     const auto wallet=projects.createGroup("Mobile wallet and the long-named partner integration");projects.setColor(wallet,"#a96bf5");
@@ -344,6 +365,211 @@ void TestProjectsDialog::projectPageMatchesThePrototype()
     PageShots::shot(dialog,true,"pm-projects-collapsed-dark");
     PageShots::shot(dialog,false,"pm-projects-collapsed-light");
     for(const char *block:{"projectSessionsBlock","projectRulesBlock"})dialog.findChild<QWidget *>(block)->findChild<QPushButton *>("collapsibleHeader")->click();
+}
+
+// #700 (N4, L1): the page's message is in view whatever the details'
+// scroll does, and only a refusal is red: a later ordinary message is not.
+void TestProjectsDialog::pageMessagesStayInViewAndOnlyRefusalsAreRed()
+{
+    QTemporaryDir directory;QVERIFY(directory.isValid());
+    QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,directory.path());
+    QCoreApplication::setOrganizationName("hgs-project-status-test");QCoreApplication::setApplicationName("projects");clearSettings();
+    HgsClient client("/nonexistent/hgs");SessionOrganization projects;const auto project=projects.createGroup("Orbit platform");
+    projects.addFolder(project,"workstation","/work/orbit");
+    projects.addFolder(project,"workstation","/work/orbit-team-528aebfe-backend");
+    ProjectsDialog dialog(&client,nullptr,true,&projects);
+    // Fifty sessions: the details scroll far past the window.
+    dialog.setSessionsProvider([](const QString &) {
+        QList<ProjectsDialog::ProjectSession> rows;
+        for(int i=0;i<50;++i)rows<<ProjectsDialog::ProjectSession{"",QStringLiteral("codex/orbit/s%1").arg(i),QStringLiteral("s%1").arg(i),"codex","","workstation","main","Ready","muted","",{},false,i};
+        return rows;
+    });
+    dialog.resize(1280,900);dialog.selectProject(project);dialog.show();
+    auto *table=dialog.findChild<QTableWidget *>("projectFolders");
+    for(int row=0;row<table->rowCount();++row)if(table->item(row,3)->text().startsWith("Team folder"))table->setCurrentCell(row,0);
+    dialog.findChild<QPushButton *>("removeProjectFolder")->click();
+    auto *status=dialog.findChild<QLabel *>("projectsStatus");
+    QCOMPARE(status->text(),QString("Team folders are removed with the team"));
+    QTRY_VERIFY(status->isVisible());
+    // Outside the details' scroll, at the page's foot: in view without scrolling.
+    QVERIFY(!dialog.findChild<QWidget *>("projectDetailsScroll")->isAncestorOf(status));
+    const QRect shown(status->mapTo(&dialog,QPoint()),status->size());
+    QVERIFY2(dialog.rect().contains(shown),qPrintable(QStringLiteral("%1,%2 %3x%4").arg(shown.x()).arg(shown.y()).arg(shown.width()).arg(shown.height())));
+    QVERIFY(status->property("pageError").toBool());
+    PageShots::shot(dialog,true,"pm700-refusal-dark");
+    PageShots::shot(dialog,false,"pm700-refusal-light");
+    // A later ordinary message is not red.
+    dialog.findChild<QCheckBox *>("defaultProject")->click();
+    QTRY_COMPARE(status->text(),QString("Saved"));
+    QVERIFY(!status->property("pageError").toBool());
+    PageShots::shot(dialog,true,"pm700-saved-dark");
+    PageShots::shot(dialog,false,"pm700-saved-light");
+}
+
+// #700 (L2): a rename renames the project it started on, whatever the list
+// selects later, and is cancelled when that project disappears.
+void TestProjectsDialog::renameKeepsItsProjectOrIsCancelled()
+{
+    QTemporaryDir directory;QVERIFY(directory.isValid());
+    QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,directory.path());
+    QCoreApplication::setOrganizationName("hgs-project-rename-test");QCoreApplication::setApplicationName("projects");clearSettings();
+    HgsClient client("/nonexistent/hgs");SessionOrganization projects;
+    const auto alpha=projects.createGroup("Alpha"),beta=projects.createGroup("Beta");
+    ProjectsDialog dialog(&client,nullptr,true,&projects);dialog.resize(1200,800);dialog.selectProject(alpha);dialog.show();
+    auto *header=dialog.findChild<QLabel *>("projectHeaderName");auto *name=dialog.findChild<QLineEdit *>("projectName");
+    // The list is rebuilt under the rename (a swarm update reorders it): Enter still renames Alpha.
+    QTest::mouseClick(header,Qt::LeftButton);QVERIFY(!name->isHidden());
+    name->selectAll();QTest::keyClicks(name,"Alpha renamed");
+    projects.moveGroup(beta,alpha);dialog.refresh();
+    QVERIFY(!name->isHidden());
+    QTest::keyClick(name,Qt::Key_Return);
+    QTRY_VERIFY(name->isHidden());
+    QCOMPARE(projects.group(alpha)->name,QString("Alpha renamed"));QCOMPARE(projects.group(beta)->name,QString("Beta"));
+    // Alpha disappears while it is renamed: the rename is cancelled, Beta keeps its name.
+    dialog.selectProject(alpha);
+    QTest::mouseClick(header,Qt::LeftButton);QVERIFY(!name->isHidden());
+    name->selectAll();QTest::keyClicks(name,"Never applied");
+    QVERIFY(projects.removeGroup(alpha,beta));dialog.refresh();
+    QTRY_VERIFY(name->isHidden());QVERIFY(!header->isHidden());
+    QCOMPARE(projects.group(beta)->name,QString("Beta"));
+    QCOMPARE(header->text(),QString("Beta"));
+    QTest::keyClick(name,Qt::Key_Return);
+    QCOMPARE(projects.group(beta)->name,QString("Beta"));
+}
+
+// #700 (L3): a narrow window keeps the Kind column reachable: Name and Kind
+// shrink first, then the table scrolls sideways; the last row stays in view.
+void TestProjectsDialog::narrowWindowKeepsTheKindColumnReachable()
+{
+    QTemporaryDir directory;QVERIFY(directory.isValid());
+    QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,directory.path());
+    QCoreApplication::setOrganizationName("hgs-project-narrow-test");QCoreApplication::setApplicationName("projects");clearSettings();
+    HgsClient client("/nonexistent/hgs");SessionOrganization projects;const auto project=projects.createGroup("Orbit platform");
+    projects.addFolder(project,"workstation","/work/orbit");
+    projects.addFolder(project,"build-01","/srv/builds/orbit/services/payments-gateway/releases/2026-10/checkout-v2-hotfix-rounding");
+    ProjectsDialog dialog(&client,nullptr,true,&projects);dialog.selectProject(project);
+    auto *table=dialog.findChild<QTableWidget *>("projectFolders");
+    const auto reachable=[&]{
+        const int end=table->horizontalHeader()->sectionViewportPosition(3)+table->columnWidth(3);
+        auto *bar=table->horizontalScrollBar();
+        return end<=table->viewport()->width()+1||(bar->isVisible()&&bar->maximum()>0&&bar->maximum()>=end-table->viewport()->width()-1);
+    };
+    // Wide: every column at its width.
+    dialog.resize(1500,900);dialog.show();
+    QTRY_COMPARE(table->columnWidth(0),240);QTRY_COMPARE(table->columnWidth(3),220);QVERIFY(reachable());
+    // Narrower: Name and Kind give up room before anything is cut.
+    dialog.resize(1050,900);
+    QTRY_VERIFY(table->columnWidth(0)<240&&table->columnWidth(3)<220);
+    QTRY_VERIFY(reachable());
+    // Narrow, with a wide project list beside the details: the details
+    // scroll sideways (and the table too, if it is still too narrow), so
+    // scrolling brings the whole Kind column into view; no row is covered.
+    dialog.resize(900,900);QTest::qWait(30);
+    auto *pages=dialog.findChild<QSplitter *>("projectsSplit");QVERIFY(pages);pages->setSizes({520,380});
+    auto *details=dialog.findChild<QScrollArea *>("projectDetailsScroll");QVERIFY(details);
+    QTRY_VERIFY2(details->viewport()->width()<420,qPrintable(QStringLiteral("split %1 %2 details %3 viewport %4 content %5").arg(pages->sizes()[0]).arg(pages->sizes()[1]).arg(details->width()).arg(details->viewport()->width()).arg(details->widget()->width())));
+    QTRY_VERIFY(details->horizontalScrollBar()->isVisible());
+    details->horizontalScrollBar()->setValue(details->horizontalScrollBar()->maximum());
+    if(table->horizontalScrollBar()->isVisible())table->horizontalScrollBar()->setValue(table->horizontalScrollBar()->maximum());
+    QTest::qWait(30);
+    const int kindEnd=table->horizontalHeader()->sectionViewportPosition(3)+table->columnWidth(3);
+    QVERIFY2(kindEnd<=table->viewport()->width()+1,qPrintable(QStringLiteral("%1 of %2").arg(kindEnd).arg(table->viewport()->width())));
+    const QRect kind(table->viewport()->mapTo(details->viewport(),QPoint(table->horizontalHeader()->sectionViewportPosition(3),0)),QSize(table->columnWidth(3),1));
+    QVERIFY2(details->viewport()->rect().contains(kind.topLeft())&&kind.right()<=details->viewport()->width(),
+             qPrintable(QStringLiteral("Kind %1..%2 in %3").arg(kind.left()).arg(kind.right()).arg(details->viewport()->width())));
+    QTRY_VERIFY(table->viewport()->height()>=table->rowCount()*table->verticalHeader()->defaultSectionSize());
+    PageShots::shot(dialog,true,"pm700-narrow-dark");
+    PageShots::shot(dialog,false,"pm700-narrow-light");
+}
+
+namespace {
+// Grabs the modal dialog named `name` in the page's theme, then answers it.
+// `fill` sets its fields before the shot. Gives up (the test then fails on a
+// dialog left open) after about three seconds.
+void grabDialog(const QString &name,const QString &shot,bool dark,const std::function<void(QDialog *)> &answer,
+                const std::function<void(QDialog *)> &fill={},int tries=300)
+{
+    QTimer::singleShot(10,qApp,[=]{
+        auto *dialog=qobject_cast<QDialog *>(QApplication::activeModalWidget());
+        if(!dialog||dialog->objectName()!=name){
+            if(tries>0)grabDialog(name,shot,dark,answer,fill,tries-1);
+            else if(dialog)dialog->reject();
+            return;
+        }
+        if(fill)fill(dialog);
+        if(const auto dir=qEnvironmentVariable("ZERUS_TEAM_SHOTS");!dir.isEmpty()){
+            dialog->setStyleSheet(PageShots::windowSheet(dark,dialog->objectName())+dialog->styleSheet());
+            QTest::qWait(120);dialog->grab().save(QDir(dir).filePath(shot+QStringLiteral(".png")));
+        }
+        answer(dialog);
+    });
+}
+}
+
+// #651 QA: the dialogs of the Projects page have shots in both themes - add
+// a folder, remove one (its confirmation), clone a repository (the computer,
+// then the form) - and the page shows the worktree overview of a real
+// catalog, not the fixture's error.
+void TestProjectsDialog::folderDialogsHaveShots()
+{
+    QTemporaryDir directory;QVERIFY(directory.isValid());
+    QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,directory.path());
+    QCoreApplication::setOrganizationName("hgs-project-dialogs-test");QCoreApplication::setApplicationName("projects");clearSettings();
+    const auto script=directory.filePath("hgs");
+    QVERIFY(FakeCli::install(script,R"PY(#!/usr/bin/env python3
+import json,sys,time
+a=sys.argv[1:]
+if a and a[0].startswith('@'):a.pop(0)
+def arg(k):return a[a.index(k)+1]
+if a==['--help']:print('repository-clone-v1')
+elif a[:1]==['worktrees']:
+ p=arg('--path')
+ print(json.dumps({'state':'ok','path':p,'selected_root':p,'common_dir':p+'/.git','sampled_at':time.time(),
+  'worktrees':[{'path':p,'kind':'main','branch':'main','available':True},
+               {'path':p+'/.worktrees/backend','kind':'linked','branch':'team/checkout-v2/backend','available':True},
+               {'path':p+'/.worktrees/frontend','kind':'linked','branch':'team/checkout-v2/frontend','available':True}]}))
+elif a[:2]==['project','ls']:print('[]')
+else:print('{}')
+)PY"));
+    HgsClient client(FakeCli::program(script));SessionOrganization projects;const auto project=projects.createGroup("Orbit platform");
+    projects.markImported("workstation");projects.markImported("build-01");
+    projects.addFolder(project,"workstation","/work/orbit","Orbit platform");
+    projects.addFolder(project,"build-01","/srv/orbit","build-01 clone");
+    ProjectsDialog dialog(&client,nullptr,true,&projects);
+    FleetState fleet;BoxState ws;ws.host="workstation";ws.ok=true;ws.localSessions=true;ws.metrics=QJsonObject{{"platform","linux"}};fleet.setLocal(ws,1);
+    BoxState b1;b1.host="build-01";b1.ok=true;b1.metrics=QJsonObject{{"platform","linux"}};fleet.setPeer(b1,1);
+    dialog.setFleet(fleet);dialog.resize(1280,1000);dialog.selectProject(project);dialog.show();
+    auto *table=dialog.findChild<QTableWidget *>("projectFolders");
+    for(int row=0;row<table->rowCount();++row)if(table->item(row,2)->text()=="/work/orbit")table->setCurrentCell(row,0);
+    // The worktree overview of the selected folder, from the catalog.
+    auto *catalog=dialog.findChild<QTreeWidget *>("worktreeCatalog");QVERIFY(catalog);
+    auto *catalogStatus=dialog.findChild<QLabel *>("worktreeStatus");QVERIFY(catalogStatus);
+    QTRY_VERIFY2(catalogStatus->text().startsWith("Existing working folders on workstation"),qPrintable(catalogStatus->text()));
+    QTRY_VERIFY(catalog->topLevelItemCount()>=3);
+    for(const bool dark:{true,false}){
+        const QString theme=dark?QStringLiteral("dark"):QStringLiteral("light");
+        PageShots::shot(dialog,dark,"pm700-worktrees-"+theme);
+        dialog.setTheme(dark);
+        // Add a folder.
+        grabDialog("projectFolderDialog","pm700-add-folder-"+theme,dark,[](QDialog *d){d->reject();});
+        dialog.findChild<QPushButton *>("addProjectFolder")->click();
+        // Remove a folder: its confirmation.
+        for(int row=0;row<table->rowCount();++row)if(table->item(row,2)->text()=="/srv/orbit")table->setCurrentCell(row,0);
+        grabDialog("removeProjectFolderConfirm","pm700-remove-folder-"+theme,dark,[](QDialog *d){d->reject();});
+        dialog.findChild<QPushButton *>("removeProjectFolder")->click();
+        QCOMPARE(projects.group(project)->folders.size(),2);
+        // Clone: the computer, then the form.
+        grabDialog("cloneRepositoryComputerDialog","pm700-clone-computer-"+theme,dark,[&,theme,dark](QDialog *choice){
+            grabDialog("cloneRepositoryDialog","pm700-clone-form-"+theme,dark,[](QDialog *form){form->reject();},[](QDialog *form){
+                form->findChild<QLineEdit *>("cloneRepositoryUrl")->setText("https://git.example.invalid/team/orbit.git");
+                form->findChild<QLineEdit *>("cloneParentFolder")->setText("/srv");
+            });
+            choice->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Ok)->click();
+        });
+        dialog.findChild<QPushButton *>("cloneProjectRepository")->click();
+        QCOMPARE(projects.group(project)->folders.size(),2);
+        for(int row=0;row<table->rowCount();++row)if(table->item(row,2)->text()=="/work/orbit")table->setCurrentCell(row,0);
+    }
 }
 
 // N24 (#386): a folder without Git is a Folder; a team member's own folder is
@@ -807,13 +1033,33 @@ void TestProjectsDialog::folderSplitPrioritizesListAndRemembersAdjustment()
     table->setCurrentCell(0,0);QTRY_VERIFY(split->widget(1)->isVisible());QTest::qWait(30);
     QCOMPARE(table->height(),rows);
     const auto initial=split->sizes();QVERIFY(initial[1]>=200);
-    // Down: the worktrees shrink; the folder rows keep their height.
-    auto *handle=split->handle(1);const auto center=handle->rect().center();
-    QTest::mousePress(handle,Qt::LeftButton,Qt::NoModifier,center);
-    QTest::mouseMove(handle,center+QPoint(0,60));QTest::mouseRelease(handle,Qt::LeftButton,Qt::NoModifier,center+QPoint(0,60));
-    QTRY_VERIFY(split->sizes()[1]<initial[1]-20);
+    // #700 (N3): a drag tracks the mouse from the press in many small moves,
+    // as a hand does; the folder rows keep their height and nothing
+    // compounds. A real mouse keeps its screen position while the handle
+    // jumps back after each refit, so each step is a global point.
+    auto *handle=split->handle(1);
+    const auto drag=[&](int dy,int steps){
+        const QPoint start=handle->mapToGlobal(handle->rect().center());
+        QTest::mousePress(handle,Qt::LeftButton,Qt::NoModifier,handle->mapFromGlobal(start));
+        for(int step=1;step<=steps;++step){
+            QTest::mouseMove(handle,handle->mapFromGlobal(start+QPoint(0,dy*step/steps)));
+            QTest::qWait(15);
+        }
+        QTest::mouseRelease(handle,Qt::LeftButton,Qt::NoModifier,handle->mapFromGlobal(start+QPoint(0,dy)));
+        QTest::qWait(30);
+    };
+    drag(-60,12);   // up: the worktrees grow by the 60 px dragged, once
+    QTRY_VERIFY2(qAbs(split->sizes()[1]-(initial[1]+60))<=6,qPrintable(QStringLiteral("%1 after %2 + 60").arg(split->sizes()[1]).arg(initial[1])));
     QTRY_COMPARE(table->height(),rows);QTRY_COMPARE(split->sizes()[0]+split->sizes()[1]+split->handleWidth(),split->height());
-    const int adjusted=split->sizes()[1];QCOMPARE(QSettings().value("workspace/projectFolderWorktrees").toInt(),adjusted);
+    QTRY_COMPARE(QSettings().value("workspace/projectFolderWorktrees").toInt(),split->sizes()[1]);
+    drag(400,20);   // down past the minimum: it stops at 120
+    QTRY_COMPARE(split->sizes()[1],120);
+    drag(-2000,20); // up past the page: at most two thirds of it
+    QTRY_COMPARE(split->sizes()[1],qMax(240,dialog.height()*2/3));
+    QTRY_COMPARE(QSettings().value("workspace/projectFolderWorktrees").toInt(),qMax(240,dialog.height()*2/3));
+    drag(split->sizes()[1]-(initial[1]-30),10);   // down to a middle height
+    const int adjusted=split->sizes()[1];QVERIFY2(qAbs(adjusted-(initial[1]-30))<=6,qPrintable(QString::number(adjusted)));
+    QTRY_COMPARE(QSettings().value("workspace/projectFolderWorktrees").toInt(),adjusted);
     dialog.refresh();QTRY_COMPARE(split->sizes()[1],adjusted);
     table->clearSelection();QTRY_VERIFY(!split->widget(1)->isVisible());table->setCurrentCell(0,0);QTest::qWait(30);
     QVERIFY(qAbs(split->sizes()[1]-adjusted)<4);

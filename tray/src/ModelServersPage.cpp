@@ -18,6 +18,9 @@
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QTimer>
+#include <QJsonArray>
+#include <QHash>
+#include <QStandardItemModel>
 
 using namespace TeamUi;
 using ModelServers::Server;
@@ -58,6 +61,43 @@ QString ago(qint64 at)
     return QObject::tr("read %1 h ago").arg(seconds / 3600);
 }
 
+// "since 09:12" today, "since 28 Oct 09:12" before.
+QString sinceText(qint64 seconds)
+{
+    const QDateTime at = QDateTime::fromSecsSinceEpoch(seconds).toLocalTime();
+    return at.date() == QDate::currentDate() ? QObject::tr("since %1").arg(at.toString(QStringLiteral("HH:mm")))
+                                             : QObject::tr("since %1").arg(at.toString(QStringLiteral("d MMM HH:mm")));
+}
+
+// Which of your sessions use a model, by name: "2 of your sessions use it: a, b".
+QString usedBy(const QStringList &names)
+{
+    if (names.isEmpty()) return QObject::tr("none of your sessions");
+    QStringList shown = names.mid(0, 3);
+    if (names.size() > 3) shown << QObject::tr("%1 more").arg(names.size() - 3);
+    return names.size() == 1 ? QObject::tr("1 of your sessions uses it: %1").arg(shown.join(QStringLiteral(", ")))
+                             : QObject::tr("%1 of your sessions use it: %2").arg(names.size()).arg(shown.join(QStringLiteral(", ")));
+}
+
+// The last line a run printed, for a failure's reason.
+QString lastLine(const QString &tail)
+{
+    const auto lines = tail.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    for (auto it = lines.crbegin(); it != lines.crend(); ++it)
+        if (const auto line = it->trimmed(); !line.isEmpty()) return line.left(200);
+    return {};
+}
+
+// The session's project from its folder, as hgs names it.
+QString projectOf(const QString &folder)
+{
+    QString base = QDir::fromNativeSeparators(folder.trimmed());
+    while (base.size() > 1 && base.endsWith(QLatin1Char('/'))) base.chop(1);
+    base = base.section(QLatin1Char('/'), -1);
+    base.replace(QLatin1Char(':'), QLatin1Char('_')).replace(QLatin1Char('.'), QLatin1Char('_'));
+    return base.isEmpty() ? QStringLiteral("root") : base;
+}
+
 QString tagFor(const QString &model)
 {
     QString tag = model.section(QLatin1Char('/'), -1).toLower();
@@ -75,12 +115,12 @@ ModelServersPage::ModelServersPage(ModelServers::Controller *servers, QWidget *p
     m_tile = new QLabel; m_tile->setObjectName("modelServersTile"); m_tile->setFixedSize(30, 30); m_tile->setAlignment(Qt::AlignCenter);
     auto *title = new QLabel(tr("Model servers")); title->setObjectName("modelServersTitle");
     m_summary = new QLabel; m_summary->setObjectName("modelServersSummary");
-    auto *refresh = small(tr("Refresh all"), "modelServersRefreshAll", QStringLiteral("refresh"), QColor());
-    refresh->setProperty("ghost", true); refresh->setToolTip(tr("Read every server once"));
-    QObject::connect(refresh, &QPushButton::clicked, this, [this] { m_servers->refreshAll(); });
-    auto *edit = small(tr("Edit servers"), "modelServersEdit", QStringLiteral("settings"), QColor());
-    QObject::connect(edit, &QPushButton::clicked, this, [this] { if (editServers) editServers({}); });
-    h->addWidget(m_tile); h->addWidget(title); h->addWidget(m_summary, 1); h->addWidget(refresh); h->addWidget(edit);
+    m_refreshAll = small(tr("Refresh all"), "modelServersRefreshAll", QStringLiteral("refresh"), QColor());
+    m_refreshAll->setProperty("ghost", true); m_refreshAll->setToolTip(tr("Read every server once"));
+    QObject::connect(m_refreshAll, &QPushButton::clicked, this, [this] { m_servers->refreshAll(); });
+    m_editServers = small(tr("Edit servers"), "modelServersEdit", QStringLiteral("settings"), QColor());
+    QObject::connect(m_editServers, &QPushButton::clicked, this, [this] { if (editServers) editServers({}); });
+    h->addWidget(m_tile); h->addWidget(title); h->addWidget(m_summary, 1); h->addWidget(m_refreshAll); h->addWidget(m_editServers);
     outer->addWidget(header);
     m_notice = new QLabel; m_notice->setObjectName("modelServersNotice"); m_notice->setWordWrap(true); m_notice->hide();
     m_notice->setContentsMargins(24, 6, 24, 6);
@@ -169,6 +209,8 @@ void ModelServersPage::render()
         for (const auto &model : status.models) running += model.state == "running";
     }
     const int count = int(m_servers->servers().size());
+    // #703 (#659 QA): with no server the page offers only Add server.
+    m_refreshAll->setVisible(count > 0); m_editServers->setVisible(count > 0);
     m_summary->setText(count == 0 ? QString()
                        : tr("%1, %2, %3 running").arg(count == 1 ? tr("1 server") : tr("%1 servers").arg(count),
                                                        models == 1 ? tr("1 model") : tr("%1 models").arg(models)).arg(running));
@@ -226,12 +268,14 @@ QWidget *ModelServersPage::serverCard(const Server &server, const ModelServers::
     auto *api = new QFrame; api->setObjectName("modelServerApi");
     auto *ah = new QHBoxLayout(api); ah->setContentsMargins(9, 3, 4, 3); ah->setSpacing(7);
     auto *kind = label(server.kind.toUpper(), c.muted, 10, true, "modelServerKind"); kind->setFont(NewSessionDense::mono(10));
-    auto *url = label(server.baseUrl, c.fg, 12, false, "modelServerUrl"); url->setFont(NewSessionDense::mono(12));
+    // #703 (#658 N2): the address an agent of this kind is given, from the root.
+    const QString address = ModelServers::agentUrl(server.baseUrl, server.kind);
+    auto *url = label(address, c.fg, 12, false, "modelServerUrl"); url->setFont(NewSessionDense::mono(12));
     url->setTextInteractionFlags(Qt::TextSelectableByMouse);
     const bool copied = m_copied == server.name;
     auto *copy = small(copied ? tr("Copied") : QString(), "modelServerCopy", copied ? QStringLiteral("check-circle") : QStringLiteral("copy"), copied ? c.accent : c.muted);
     copy->setProperty("ghost", true); copy->setToolTip(tr("Copy the API address")); copy->setAccessibleName(tr("Copy the API address of %1").arg(server.name));
-    QObject::connect(copy, &QPushButton::clicked, this, [this, name = server.name, address = server.baseUrl] {
+    QObject::connect(copy, &QPushButton::clicked, this, [this, name = server.name, address] {
         QGuiApplication::clipboard()->setText(address);
         m_copied = name; render();
         QTimer::singleShot(2000, this, [this, name] { if (m_copied == name) { m_copied.clear(); render(); } });
@@ -283,8 +327,10 @@ QWidget *ModelServersPage::serverCard(const Server &server, const ModelServers::
         auto *problem = new QFrame; problem->setObjectName("modelServerProblem");
         auto *ph = new QHBoxLayout(problem); ph->setContentsMargins(12, 9, 12, 9); ph->setSpacing(8);
         auto *icon = new QLabel; icon->setPixmap(workspaceIcon(QStringLiteral("warning"), c.danger).pixmap(14, 14)); ph->addWidget(icon, 0, Qt::AlignTop);
-        const QString why = status.error == "unauthorized" ? tr("The server refused the API key: %1").arg(status.detail)
-                          : status.detail.isEmpty() ? errorLabel(status.error) : status.detail;
+        QString why = status.error == "unauthorized" ? tr("The server refused the API key: %1").arg(status.detail)
+                    : status.detail.isEmpty() ? errorLabel(status.error) : status.detail;
+        // #703 (#658 N2): a read-only server is read at root/v1/models; say which URL.
+        if (server.readOnly() && status.error != "failed") why = tr("GET %1: %2").arg(ModelServers::modelsUrl(server.baseUrl), why);
         auto *text = label(tr("%1. Zerus tries again only when you ask.").arg(why.endsWith(QLatin1Char('.')) ? why.chopped(1) : why), c.fg, 12, false, "modelServerProblemText");
         text->setWordWrap(true); text->setTextInteractionFlags(Qt::TextSelectableByMouse);
         ph->addWidget(text, 1);
@@ -305,6 +351,7 @@ QWidget *ModelServersPage::serverCard(const Server &server, const ModelServers::
         lh->addWidget(dot);
         lh->addWidget(label(ModelServers::stateLabel(state, status.source), tone, 13, true, "modelServerModelState"));
         if (status.source == "api") lh->addWidget(label(tr("from GET /v1/models"), c.muted, 12));
+        else if (model.since > 0) lh->addWidget(label(sinceText(model.since), c.muted, 12, false, "modelServerModelSince"));
         lh->addStretch(1);
         const bool usable = state == "running" || state == "listed";
         if (usable) {
@@ -323,15 +370,10 @@ QWidget *ModelServersPage::serverCard(const Server &server, const ModelServers::
             lh->addWidget(down);
         }
         if (!server.up.isEmpty() && (state == "stopped" || state == "unloaded" || state == "idle")) {
-            auto *up = small(tr("Up"), "modelServerUp", QStringLiteral("power"), c.fg);
-            QObject::connect(up, &QPushButton::clicked, this, [this, server = server.name, name = model.name] {
-                notice(tr("Starting %1 on %2…").arg(name, server));
-                m_servers->up(server, name, [this, server, name](const QJsonObject &result, const QString &error) {
-                    const QString why = !error.isEmpty() ? error : result.value("status").toString() == "error" ? result.value("detail").toString() : QString();
-                    notice(why.isEmpty() ? tr("Up %1 on %2 started once; nothing starts it again on its own.").arg(name, server)
-                                         : tr("Up %1 on %2 failed: %3").arg(name, server, why), !why.isEmpty());
-                });
-            });
+            const bool running = m_servers->upRunning(server.name, model.name);
+            auto *up = small(running ? tr("Up running") : tr("Up"), "modelServerUp", QStringLiteral("power"), c.fg);
+            up->setEnabled(!running);
+            QObject::connect(up, &QPushButton::clicked, this, [this, server = server.name, name = model.name] { this->up(server, name); });
             lh->addWidget(up);
         }
         v->addWidget(line);
@@ -365,6 +407,36 @@ QWidget *ModelServersPage::serverCard(const Server &server, const ModelServers::
     return card;
 }
 
+void ModelServersPage::up(const QString &server, const QString &model)
+{
+    notice(tr("Up %1 on %2…").arg(model, server));
+    QPointer<ModelServersPage> guard(this);
+    m_servers->up(server, model, [this, guard, server, model](const QJsonObject &result, const QString &error) {
+        if (!guard || !error.isEmpty() || result.value("status").toString() != "started") return;
+        notice(tr("Up %1 on %2 is running once; its result shows here when it ends.").arg(model, server));
+        render();
+    }, [this, guard, server, model](const QJsonObject &result, const QString &error) {
+        if (!guard) return;
+        // #703 (#658 N5): the run's own outcome, not only that it started.
+        const QString status = result.value("status").toString();
+        const int exit = result.value("exit").toInt(-1);
+        QString why;
+        if (!error.isEmpty()) why = error;
+        else if (status == "error") why = result.value("detail").toString(result.value("error").toString());
+        else if (result.value("timed_out").toBool())
+            why = tr("stopped at its %1 min limit").arg(result.value("timeout_secs").toInt() / 60);
+        else if (status == "refused") why = result.value("error").toString(tr("it did not run"));
+        else if (status == "ran" && exit != 0) {
+            const QString line = lastLine(result.value("tail").toString());
+            why = line.isEmpty() ? tr("exit %1").arg(exit) : tr("exit %1: %2").arg(exit).arg(line);
+        }
+        notice(why.isEmpty() ? tr("Up %1 on %2 finished: exit 0. Nothing starts it again on its own.").arg(model, server)
+                             : tr("Up %1 on %2 failed: %3").arg(model, server, why), !why.isEmpty());
+        render();
+    });
+    render();
+}
+
 void ModelServersPage::askDown(const QString &serverName, const QStringList &models)
 {
     const auto *server = m_servers->server(serverName);
@@ -384,16 +456,38 @@ void ModelServersPage::askDown(const QString &serverName, const QStringList &mod
                               .arg(alpha(c.warn, .10).name(QColor::HexArgb), alpha(c.warn, .45).name(QColor::HexArgb)));
     v->addWidget(shared);
     const auto status = m_servers->status(serverName);
+    // #703 (#659 QA): which of your sessions use each model, read once.
+    QHash<QString, QLabel *> uses;
+    QHash<QString, QString> states;
     for (const auto &name : models) {
         QString state;
         for (const auto &model : status.models) if (model.name == name) state = model.state;
+        states.insert(name, state);
         auto *r = row(10);
         auto *n = label(name, c.fg, 13, true, "modelServerDownModel"); n->setFont(NewSessionDense::mono(13)); n->setMinimumWidth(200);
         r->addWidget(n);
         r->addWidget(label(ModelServers::stateLabel(state, status.source), stateColor(c, state), 13, true));
-        r->addStretch(1);
+        auto *use = label(tr("reading your sessions…"), c.muted, 12, false, "modelServerDownUse"); use->setProperty("model", name);
+        use->setWordWrap(true);
+        r->addWidget(use, 1);
+        uses.insert(name, use);
         v->addLayout(r);
     }
+    m_servers->sessions(serverName, [uses, states, guard = QPointer<QDialog>(&dialog)](const QJsonObject &result, const QString &error) {
+        if (!guard) return;
+        const QString why = !error.isEmpty() ? error : result.value("status").toString() == "error" ? result.value("detail").toString() : QString();
+        QHash<QString, QStringList> names;
+        for (const auto &value : result.value("sessions").toArray()) {
+            const auto session = value.toObject();
+            names[session.value("model").toString()] << session.value("name").toString();
+        }
+        for (auto it = uses.cbegin(); it != uses.cend(); ++it) {
+            QString text = why.isEmpty() ? usedBy(names.value(it.key())) : QObject::tr("your sessions not read: %1").arg(why);
+            // A model still loading stops loading; it serves no session yet.
+            if (states.value(it.key()) == "loading" && names.value(it.key()).isEmpty() && why.isEmpty()) text = QObject::tr("stops loading");
+            it.value()->setText(text); it.value()->setToolTip(names.value(it.key()).join(QLatin1Char('\n')));
+        }
+    });
     auto *how = label(server->ssh.isEmpty()
                           ? tr("Runs your down command on this computer once for each model. Nothing starts again on its own: Up them here when you need them.")
                           : tr("Runs your down command over SSH to %1 once for each model. Nothing starts again on its own: Up them here when you need them.").arg(server->ssh),
@@ -485,9 +579,13 @@ void ModelServersPage::newSession(const QString &serverName, const QString &mode
     key(tr("Model"), 0);
     auto *models = new QComboBox; models->setObjectName("modelServerSessionModel"); models->setFont(NewSessionDense::mono(12));
     const auto status = m_servers->status(serverName);
+    // #703 (#659 QA): every model with its state; only a running or listed one is chosen.
     for (const auto &item : status.models) {
         const QString state = item.state.isEmpty() && status.source == "api" ? QStringLiteral("listed") : item.state;
-        if (state == "running" || state == "listed") models->addItem(item.name, item.name);
+        models->addItem(QStringLiteral("%1   %2").arg(item.name, ModelServers::stateLabel(state, status.source)), item.name);
+        models->setItemData(models->count() - 1, state, Qt::UserRole + 1);
+        if (state != "running" && state != "listed")
+            if (auto *items = qobject_cast<QStandardItemModel *>(models->model())) items->item(models->count() - 1)->setEnabled(false);
     }
     if (models->findData(model) < 0) models->addItem(model, model);
     models->setCurrentIndex(models->findData(model));
@@ -501,7 +599,6 @@ void ModelServersPage::newSession(const QString &serverName, const QString &mode
     const QList<Agent> choices{
         {"codex", tr("Codex"), tr("OpenAI-compatible provider for this session"), openai,
          tr("needs an OpenAI-compatible API; %1 serves Anthropic").arg(serverName)},
-        {"opencode", tr("OpenCode"), tr("provider and model for this session"), true, {}},
         {"claude", tr("Claude Code"), tr("Anthropic base URL for this session"), !openai,
          tr("needs an Anthropic-compatible API; %1 serves OpenAI").arg(serverName)}};
     QRadioButton *first = nullptr;
@@ -532,9 +629,13 @@ void ModelServersPage::newSession(const QString &serverName, const QString &mode
     });
     folderRow->addWidget(folder, 1); folderRow->addWidget(browse);
     grid->addLayout(folderRow, 2, 1);
+    // The session's name as hgs makes it (agent/project/tag); you choose the tag.
     key(tr("Name"), 3);
-    auto *tag = new QLineEdit(tagFor(model)); tag->setObjectName("modelServerSessionTag"); tag->setMaxLength(60);
-    grid->addWidget(tag, 3, 1);
+    auto *nameRow = row(0);
+    auto *prefix = label(QString(), c.muted, 12, false, "modelServerSessionPrefix"); prefix->setFont(NewSessionDense::mono(12));
+    auto *tag = new QLineEdit(tagFor(model)); tag->setObjectName("modelServerSessionTag"); tag->setMaxLength(60); tag->setFont(NewSessionDense::mono(12));
+    nameRow->addWidget(prefix); nameRow->addWidget(tag, 1);
+    grid->addLayout(nameRow, 3, 1);
     // What this session gets; nothing else changes.
     key(tr("For this session"), 4);
     auto *summary = new QLabel; summary->setObjectName("modelServerSessionSummary"); summary->setFont(NewSessionDense::mono(12));
@@ -553,13 +654,17 @@ void ModelServersPage::newSession(const QString &serverName, const QString &mode
     const auto agentOf = [group] { auto *checked = group->checkedButton(); return checked ? checked->property("agent").toString() : QString(); };
     const auto update = [=] {
         const QString agent = agentOf(), chosen = models->currentData().toString();
-        const QString name = agent == "codex" ? tr("Codex") : agent == "opencode" ? tr("OpenCode") : tr("Claude Code");
+        const QString name = agent == "codex" ? tr("Codex") : tr("Claude Code");
+        prefix->setText(QStringLiteral("%1/%2/").arg(agent, projectOf(folder->currentText())));
+        if (!tag->isModified()) tag->setText(tagFor(chosen));
         summary->setText(QStringLiteral("agent     %1, on this computer\nprovider  %2  %3\nmodel     %4\nkey       %5")
-                             .arg(agent, serverName, server->baseUrl, chosen,
+                             .arg(agent, serverName, ModelServers::agentUrl(server->baseUrl, server->kind), chosen,
                                   server->hasKey ? tr("from the private store") : tr("none")));
         note->setText(tr("Your %1 configuration is not changed: the provider is set for this session only. If %2 stops, the session waits; Zerus does not start the model again on its own.")
                           .arg(name, chosen));
-        start->setEnabled(!agent.isEmpty() && !chosen.isEmpty() && !folder->currentText().trimmed().isEmpty() && !tag->text().trimmed().isEmpty());
+        const QString state = models->currentData(Qt::UserRole + 1).toString();
+        start->setEnabled(!agent.isEmpty() && !chosen.isEmpty() && (state.isEmpty() || state == "running" || state == "listed")
+                          && !folder->currentText().trimmed().isEmpty() && !tag->text().trimmed().isEmpty());
     };
     QObject::connect(group, &QButtonGroup::buttonToggled, &dialog, update);
     QObject::connect(models, &QComboBox::currentIndexChanged, &dialog, update);

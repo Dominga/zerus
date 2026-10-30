@@ -869,7 +869,7 @@ private:
     QSplitter *m_splitter;
     // Null until the pages exist: restoring a collapsed list runs earlier.
     QStackedWidget *m_pages = nullptr;
-    SettingsPage *m_settingsPage;
+    SettingsPage *m_settingsPage=nullptr;
     QPushButton *m_settingsNav;
     QPushButton *m_windowPin = nullptr;
     ProjectsDialog *m_projectsPage;

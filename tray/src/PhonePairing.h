@@ -87,8 +87,12 @@ public:
                    std::function<bool(const QString &phone, const QString &workspace)> confirm = {});
     void refresh();
     QList<Target> targets() const { return m_targets; }
-    // #647: the table, its notes and problem lines in the page's theme.
+    // #647: the table, its notes and problem lines in the page's theme (#650
+    // N1: the window's until a page sets it).
     void setTheme(bool dark);
+    bool dark() const { return m_dark; }
+    // #650 L6: the workspace Pair a phone… opens on (a target index).
+    int chosenWorkspace() const { return m_chosen; }
 protected:
     void showEvent(QShowEvent *) override;
 private:
@@ -98,6 +102,8 @@ private:
     void pair();
     void openPairing();
     void showStatus(const QString &text);
+    void chooseWorkspace(int index);
+    void paintGroups();
     QString m_executable;
     HgsClient *m_client;
     std::function<bool(const QString &, const QString &)> m_confirm;
@@ -106,7 +112,9 @@ private:
     // computer that did not answer (#647).
     QLabel *m_status, *m_count;
     QVBoxLayout *m_problemList;
-    QColor m_groupFill, m_warnColor;
+    QColor m_groupFill, m_warnColor, m_chosenFill;
+    int m_chosen = 0;
+    bool m_dark = false;
     QPushButton *m_pair, *m_revoke, *m_refresh;
     QList<Target> m_targets;
     QList<QJsonObject> m_lists;

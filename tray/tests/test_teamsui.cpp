@@ -893,12 +893,17 @@ elif a[:2]==['team','status']:
  sys.stdout.write(open(__file__+'.status').read())
 elif a[:2]==['team','events']:sys.stdout.write(open(__file__+'.feed').read())
 elif a[:2]==['team','profile']:
- # U38: `.profile` holds the pages by metric; a cursor names its page.
+ # U38: Heat (#666) keeps the pages by metric in `.profile`, a cursor naming
+ # its page; Profile (#665) keeps one answer there, or `.compare` for a compare.
  import os
  if os.path.exists(__file__+'.profilerefuse'):print(open(__file__+'.profilerefuse').read(),file=sys.stderr);sys.exit(1)
- pages=json.load(open(__file__+'.profile'))['tokens' if body.get('tokens') else 'time']
- c=body.get('after_tokens' if body.get('tokens') else 'after_time')
- print(json.dumps(pages[c['page'] if c else 0]))
+ name=__file__+('.compare' if 'compare' in body else '.profile')
+ data=json.load(open(name)) if os.path.exists(name) else {'summary':{}}
+ if 'compare' not in body and isinstance(data.get('time'),list) and isinstance(data.get('tokens'),list):
+  pages=data['tokens' if body.get('tokens') else 'time']
+  c=body.get('after_tokens' if body.get('tokens') else 'after_time')
+  data=pages[c['page'] if c else 0]
+ print(json.dumps(data))
 elif a[:2]==['team','waiting']:
  # U50: pages `.waiting` as hgs does: newest first, ties by id, after the cursor.
  import os
@@ -939,10 +944,6 @@ elif a[:3]==['team','catalog','decide'] or a[:3]==['team','catalog','apply']:
   try:os.replace(__file__+'.catalog.new',__file__+'.catalog');break
   except PermissionError:time.sleep(.05)   # Windows: a read holds the file
  print(json.dumps(out))
-elif a[:2]==['team','profile']:
- # U38 (#665): `.profile`, or `.compare` for a compare.
- import os
- print(open(__file__+('.compare' if 'compare' in body else '.profile')).read() if os.path.exists(__file__+('.compare' if 'compare' in body else '.profile')) else json.dumps({'summary':{}}))
 elif a[:2]==['team','spans']:
  # U38: `.spans` in pages after `after`, `limit` at a time.
  import os
@@ -1014,7 +1015,7 @@ void TestTeamsUi::init()
     QFile::remove(script() + ".refuse");
     QFile::remove(script() + ".refuseapply");
     QFile::remove(script() + ".proposalrefuse");
-    for (const char *suffix : {".profile", ".spans", ".compare"}) QFile::remove(script() + QLatin1String(suffix));
+    for (const char *suffix : {".profile", ".profilerefuse", ".spans", ".compare"}) QFile::remove(script() + QLatin1String(suffix));
     QFile::remove(script() + ".proposalstatus");
     QFile::remove(script() + ".waiting");
     QFile::remove(script() + ".waitingrefuse");

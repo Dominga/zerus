@@ -1558,11 +1558,21 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
             let first = store.mutate(Some((&operation_request, &value)), &team_id, None, |team, events| {
                 super::ops::apply(team, "add-to-phase", &value, &Actor::Human, &BTreeSet::new(), events)
             })?;
-            match first["confirm"].as_str().filter(|confirm| !confirm.is_empty()) {
+            // The first step answers a running phase with a warning and its
+            // pending id; the owner's Allow is the confirmation, so it is
+            // applied at once (the receipt names it "pending").
+            match first["confirm"].as_str().or_else(|| first["pending"].as_str()).filter(|confirm| !confirm.is_empty()) {
                 Some(confirm) => {
-                    let value = json!({"team":team_id,"request_id":operation_request,"by":"human","phase":phase,
-                        "tasks":change["tasks"],"confirm":confirm});
-                    store.mutate(Some((&operation_request, &value)), &team_id, None, |team, events| {
+                    // Its own request id, derived from the stored one, so a
+                    // replayed decision replays this step too.
+                    use sha2::{Digest, Sha256};
+                    let digest = Sha256::digest(format!("{operation_request}:confirm").as_bytes());
+                    let mut bytes = [0u8; 16];
+                    bytes.copy_from_slice(&digest[..16]);
+                    let confirm_request = uuid::Builder::from_random_bytes(bytes).into_uuid().to_string();
+                    let value = json!({"team":team_id,"request_id":confirm_request,"by":"human","phase":phase,
+                        "tasks":change["tasks"],"confirm":confirm,"confirmation":"add"});
+                    store.mutate(Some((&confirm_request, &value)), &team_id, None, |team, events| {
                         super::ops::apply(team, "add-to-phase", &value, &Actor::Human, &BTreeSet::new(), events)
                     })?
                 }
@@ -8135,6 +8145,31 @@ mod tests {
         let team = store.load("t").unwrap().unwrap();
         assert_eq!(team.proposals[1]["note"], "not now");
         assert_eq!(team.task(1).unwrap().status, before, "a Deny runs nothing");
+    }
+
+    /// U57: Allow on an add-to-phase card for the running phase adds the tasks
+    /// at once: the Allow is the confirmation the CLI route asks for after its
+    /// warning (owner, 2026-10-30: the card was accepted and nothing was added).
+    #[test]
+    fn an_allowed_addition_to_the_running_phase_adds_its_tasks() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut team = running_team();
+        let input = json!({"kind":"add-to-phase","reason":"a crash to hunt","phase":1,
+            "tasks":[{"id":2,"title":"Find the crash","assignee":"dev","criteria":["Fixed"]}]});
+        ops::apply(&mut team, "propose", &input, &Actor::Member("lead".into()), &BTreeSet::new(), &mut Vec::new()).unwrap();
+        let hash = team.proposals[0]["hash"].as_str().unwrap().to_owned();
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+        let receipt = decide_proposal_in(
+            &mut store,
+            &json!({"team":"t","proposal":"p1","accept":true,"by":"human","expected_hash":hash}),
+            &Actor::Human,
+        )
+        .unwrap();
+        assert_eq!(receipt["status"], "accepted", "{receipt}");
+        let team = store.load("t").unwrap().unwrap();
+        let added = team.task(2).expect("the allowed task is in the plan");
+        assert_eq!((added.phase, added.title.as_str()), (1, "Find the crash"));
     }
 
     /// U59: the desktop's switch dialog decides through decide-proposal; its

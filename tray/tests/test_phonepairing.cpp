@@ -1,6 +1,7 @@
 #include <QtTest>
 #include <QFile>
 #include <QClipboard>
+#include <QComboBox>
 #include <QHeaderView>
 #include <QLabel>
 #include <QPlainTextEdit>
@@ -36,7 +37,7 @@ class TestPhonePairing : public QObject {
 private slots:
     void init() {
         QVERIFY(m_dir.isValid());
-        for (const auto *name : {"calls", "revoked", "old-peer", "no-connection", "other-workspace", "fail-revoke", "long-code", "too-large-code", "fail-invite", "workspace-switched", "hold-phone-list", "phone-list-held", "release-phone-list", "unreachable"}) QFile::remove(m_dir.filePath(name));
+        for (const auto *name : {"calls", "revoked", "old-peer", "no-connection", "other-workspace", "fail-revoke", "long-code", "too-large-code", "fail-invite", "workspace-switched", "hold-phone-list", "phone-list-held", "release-phone-list", "unreachable", "second-workspace"}) QFile::remove(m_dir.filePath(name));
         m_hgs = m_dir.filePath("hgs");
         QVERIFY(FakeCli::install(m_hgs, R"PY(#!/usr/bin/env python3
 import json, pathlib, sys, time
@@ -53,6 +54,7 @@ if args == ['--help']:
 elif args == ['machine', 'ls']:
     machines = [{'alias': 'peer', 'enabled': True}, {'alias': 'off', 'enabled': False}]
     if (root / 'unreachable').exists(): machines.append({'alias': 'gone', 'enabled': True})
+    if (root / 'second-workspace').exists(): machines.append({'alias': 'peer2', 'enabled': True})
     print(json.dumps({'local': 'desk', 'machines': machines}))
 elif args == ['mobile', 'phones', '--json']:
     switched = (root / 'workspace-switched').exists()
@@ -60,7 +62,9 @@ elif args == ['mobile', 'phones', '--json']:
         (root / 'phone-list-held').touch()
         deadline = time.monotonic() + 3
         while not (root / 'release-phone-list').exists() and time.monotonic() < deadline: time.sleep(.01)
-    if host != 'peer' or (root / 'no-connection').exists():
+    if host == 'peer2':
+        print(json.dumps({'configured': True, 'server_url': 'https://relay.example.test', 'workspace_id': 'w3', 'workspace_name': 'Second workspace', 'devices': []}))
+    elif host != 'peer' or (root / 'no-connection').exists():
         print(json.dumps({'configured': False}))
     else:
         devices = [{'id': '00000000-0000-4000-8000-0000000000d1', 'name': 'Zerus iOS', 'platform': 'ios', 'paired_at': 1700000000,
@@ -70,7 +74,7 @@ elif args == ['mobile', 'phones', '--json']:
         if (root / 'revoked').exists(): devices = devices[1:]
         print(json.dumps({'configured': True, 'server_url': 'https://relay.example.test', 'workspace_id': 'w2' if switched else 'w1',
                           'workspace_name': 'Example workspace', 'devices': devices}))
-elif args[:2] == ['mobile', 'invite'] and args[2:] in (['--json'], ['--workspace', 'w1', '--server', 'https://relay.example.test', '--json'], ['--workspace', 'w2', '--server', 'https://relay.example.test', '--json']):
+elif args[:2] == ['mobile', 'invite'] and args[2:] in (['--json'], ['--workspace', 'w1', '--server', 'https://relay.example.test', '--json'], ['--workspace', 'w2', '--server', 'https://relay.example.test', '--json'], ['--workspace', 'w3', '--server', 'https://relay.example.test', '--json']):
     if (root / 'fail-invite').exists(): print('hgs: The relay is temporarily unavailable', file=sys.stderr); sys.exit(1)
     # Encoded JSON invitations have long unbroken base64url spans.
     code = 'ze1.' + ('aZ093b' * 300) if (root / 'long-code').exists() else 'synthetic_pair-code_0123456789'
@@ -238,6 +242,46 @@ else:
         QCOMPARE(tree->verticalScrollBarPolicy(), Qt::ScrollBarAlwaysOff);
         QTRY_VERIFY(tree->height() >= 3 * 29 && tree->height() <= tree->header()->height() + 3 * 29 + 8);
         QVERIFY(!tree->rootIsDecorated());
+    }
+    // #650 L6: a workspace row is not selected like a phone, but a click on it
+    // (here one with no phones) is the workspace Pair a phone… opens on; a
+    // selected phone's workspace still wins.
+    void pairAPhoneOpensOnTheWorkspaceClickedLast() {
+        touch("second-workspace");
+        QFile expires(m_dir.filePath("expires")); QVERIFY(expires.open(QIODevice::WriteOnly)); expires.write(QByteArray::number(QDateTime::currentSecsSinceEpoch() + 600)); expires.close();
+        PhonePairing::Panel panel(FakeCli::program(m_hgs)); panel.resize(900, 400); panel.show();
+        auto *tree = panel.findChild<QTreeWidget *>("linkedPhones");
+        panel.refresh();
+        QTRY_COMPARE(tree->topLevelItemCount(), 2);
+        QCOMPARE(tree->topLevelItem(1)->text(0), QString("Second workspace · via peer2"));
+        QCOMPARE(tree->topLevelItem(1)->childCount(), 0);
+        QCOMPARE(panel.chosenWorkspace(), 0);
+        // A click on the second workspace's row: not selected, but chosen and tinted.
+        const QRect row = tree->visualItemRect(tree->topLevelItem(1));
+        QTest::mouseClick(tree->viewport(), Qt::LeftButton, {}, row.center());
+        QCOMPARE(panel.chosenWorkspace(), 1);
+        QVERIFY(tree->selectedItems().isEmpty());
+        QVERIFY(tree->topLevelItem(1)->background(0).color() != tree->topLevelItem(0)->background(0).color());
+        int shown = -1;
+        QTimer closer;
+        connect(&closer, &QTimer::timeout, &panel, [&] {
+            for (auto *widget : QApplication::topLevelWidgets())
+                if (auto *dialog = dynamic_cast<PhonePairing::Dialog *>(widget); dialog && dialog->isVisible()) {
+                    if (dialog->findChild<QLabel *>("phonePairingStatus")->text().startsWith("Requesting")) continue;
+                    shown = dialog->findChild<QComboBox *>("phonePairingWorkspace")->currentIndex();
+                    dialog->reject();
+                }
+        });
+        closer.start(25);
+        QTimer::singleShot(0, &panel, [&] { panel.findChild<QPushButton *>("pairPhone")->click(); });
+        QTRY_VERIFY(shown >= 0);
+        QCOMPARE(shown, 1);
+        QTRY_VERIFY(calls().contains("@peer2 mobile invite --workspace w3 --server https://relay.example.test --json"));
+        // A phone of the first workspace, selected, takes the choice back.
+        QTRY_VERIFY(tree->topLevelItemCount() == 2 && tree->topLevelItem(0)->childCount() == 2);
+        tree->setCurrentItem(tree->topLevelItem(0)->child(0));
+        QCOMPARE(panel.chosenWorkspace(), 0);
+        closer.stop();
     }
     void phoneTimesReadShort() {
         const QDateTime now(QDate(2026, 10, 30), QTime(23, 30));

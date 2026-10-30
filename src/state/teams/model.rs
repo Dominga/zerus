@@ -1625,6 +1625,10 @@ pub(crate) struct Phase {
     /// and its tasks are handed out before other pending ones.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub urgent: bool,
+    /// U61: the lead lets idle members start this auto-accepted draft early;
+    /// its first hand-out accepts the phase.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub start_ahead: bool,
     /// Section 9.5: why a "Rework" draft was opened after the parent lead
     /// rejected the sub-team's report.
     #[serde(default, skip_serializing_if = "String::is_empty")]

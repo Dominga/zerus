@@ -108,6 +108,10 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
             std::env::remove_var(key);
         }
     }
+    // U60 (#658 N3): the model server's secret environment comes from the
+    // private file the launch left; it is applied after the account's variables
+    // so a managed account cannot strip it, and the file is removed here.
+    crate::state::model_servers::apply_session_secrets().map_err(|error| error.message)?;
     if agent == "claude" {
         // The tmux server may predate this SSH connection and still belong to
         // another security session. Join immediately before the native launch.
@@ -187,6 +191,11 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
             "transcript": null, "startup_kind":startup_kind,"launch_id":nonempty_env("HGS_LAUNCH_ID"), "account_id": nonempty_env("HGS_ACCOUNT_ID"), "agent_home": nonempty_env(home_var(&agent)?), "pid": std::process::id(),
             "process_start": process_start(std::process::id()),
             "supervisor": {"pid": std::process::id(), "start": process_start(std::process::id())}});
+        // U60 (#658 N4): the binding names the model server and model it runs
+        // on, so a later resume applies the same provider or refuses.
+        if let Some(model_server) = model_server_record() {
+            record["model_server"] = model_server;
+        }
         if let Some(parent) = nonempty_env("HGS_FORK_PARENT_ID") {
             record["fork_parent_id"] = json!(parent);
             record.as_object_mut().unwrap().remove("launch_id");
@@ -208,6 +217,10 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
                     .get(key)
                     .ok_or_else(|| format!("{name}: missing saved {key}"))?
                     .clone();
+            }
+            // U60 (#658 N4): a resumed session keeps its model server.
+            if let Some(model_server) = previous.get("model_server") {
+                record["model_server"] = model_server.clone();
             }
             let restore_id = archive_id
                 .clone()
@@ -632,6 +645,24 @@ fn session_spec(
         home_var(string(record, "agent"))?,
         string(record, "agent_home").to_owned(),
     );
+    // U60 (#658 N4): a session started on a model server resumes with the same
+    // provider and model, through the same private-file route as its launch; a
+    // server that is gone refuses the resume instead of silently falling back
+    // to the cloud account.
+    let mut model_server_vars: Vec<String> = Vec::new();
+    if let Some(model_server) = record["model_server"].as_object() {
+        let server = model_server["server"].as_str().unwrap_or_default();
+        let model = model_server["model"].as_str().unwrap_or_default();
+        let config = crate::config::Config::load().map_err(|error| error.message)?;
+        let (env, path) = super::model_servers::resume_settings(&config, server, string(record, "agent"), model)
+            .map_err(|error| format!("{name}: model server {server} cannot start this session again: {}", error.message))?;
+        model_server_vars.extend(env);
+        if let Some(path) = path {
+            environment.insert("HGS_MODEL_SERVER_ENV", path.display().to_string());
+        }
+        environment.insert("HGS_MODEL_SERVER", server.to_owned());
+        environment.insert("HGS_MODEL_SERVER_MODEL", model.to_owned());
+    }
     Ok(backend::LaunchSpec {
         name: name.into(),
         cwd: string(record, "launch_dir").to_owned(),
@@ -640,6 +671,7 @@ fn session_spec(
             .map(|(key, value)| format!("{key}={value}"))
             .chain(account_variables(record))
             .chain(hint_environment)
+            .chain(model_server_vars)
             .collect(),
         command: launch,
         detached: true,
@@ -1011,6 +1043,13 @@ pub(super) fn resume_scoped(names: &[String], dry: bool, scope: Option<&session_
     Ok(0)
 }
 
+/// U60 (#658 N4): the model server a launch names, for the binding.
+fn model_server_record() -> Option<Value> {
+    nonempty_env("HGS_MODEL_SERVER").map(|server| {
+        json!({"server": server, "model": nonempty_env("HGS_MODEL_SERVER_MODEL").unwrap_or_default()})
+    })
+}
+
 /// `hgs resume <session> --fresh`: the stopped session's own launch recipe,
 /// account and model with a new conversation, like /clear in a live agent.
 /// The earlier conversation stays in native history and above the boundary.
@@ -1096,6 +1135,18 @@ mod tests {
 #[cfg(test)]
 mod guard_tests {
     use super::*;
+
+    /// U60 (#658 N4): the binding names the model server and model the launch
+    /// chose, so a resume can apply them again.
+    #[test]
+    fn the_record_names_the_model_server_and_model() {
+        std::env::set_var("HGS_MODEL_SERVER", "lab");
+        std::env::set_var("HGS_MODEL_SERVER_MODEL", "small");
+        assert_eq!(model_server_record(), Some(json!({"server":"lab","model":"small"})));
+        std::env::remove_var("HGS_MODEL_SERVER");
+        std::env::remove_var("HGS_MODEL_SERVER_MODEL");
+        assert_eq!(model_server_record(), None);
+    }
 
     #[test]
     fn a_transcript_behind_the_events_is_detected() {

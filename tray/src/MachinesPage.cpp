@@ -1,3 +1,4 @@
+#include "Settings.h"
 #include "MachinesPage.h"
 #include <QScopedValueRollback>
 #include "HgsClient.h"
@@ -142,6 +143,11 @@ MachinesPage::MachinesPage(const QString &path, QWidget *parent) : QWidget(paren
     side->addLayout(sideHead);
     m_summary = new QLabel(tr("SSH connections and HGS setup")); m_summary->setObjectName("muted"); m_summary->setWordWrap(true);
     m_summary->setContentsMargins(4, 0, 4, 6); side->addWidget(m_summary);
+    // #650 L4: HGS_PEERS decides which machines are monitored; edits here do
+    // not change that list, and the page says so where it is seen.
+    m_peersNote = new QLabel(tr("HGS_PEERS in the environment overrides the list of monitored machines; edits here do not change it."));
+    m_peersNote->setObjectName("machinesPeersOverride"); m_peersNote->setWordWrap(true); m_peersNote->setContentsMargins(4, 0, 4, 6);
+    m_peersNote->hide(); side->addWidget(m_peersNote);
     m_list = new WorkspaceList; m_list->setObjectName("machineProfiles"); m_list->setAccessibleName(tr("Machines")); side->addWidget(m_list, 1);
     m_list->setItemDelegate(new MachineDelegate(m_list)); m_list->setMouseTracking(true); m_list->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_list->setStyleSheet("QListWidget#machineProfiles { background:transparent; border:0; outline:0; } QListWidget#machineProfiles::item { padding:0; border:0; }");
@@ -190,6 +196,9 @@ MachinesPage::MachinesPage(const QString &path, QWidget *parent) : QWidget(paren
     m_colorHint = new QLabel(tr("Saved on this device")); m_colorHint->setObjectName("muted"); appearance->addWidget(m_colorHint); appearance->addStretch();
     labelBox->addLayout(appearance);
     m_effective = new QLabel; m_effective->setObjectName("effectiveMachineConnection"); m_effective->setProperty("pageMono", true); m_effective->setWordWrap(true); m_effective->setTextFormat(Qt::PlainText); m_effective->setTextInteractionFlags(Qt::TextSelectableByMouse); labelBox->addWidget(m_effective);
+    // #650 L4: where the alias comes from, as a line under its connection.
+    m_sourceNote = new QLabel; m_sourceNote->setObjectName("machineSourceNote"); m_sourceNote->setWordWrap(true); m_sourceNote->setTextFormat(Qt::PlainText);
+    m_sourceNote->hide(); labelBox->addWidget(m_sourceNote);
     // #647: this computer is reached without SSH, and the card says so.
     m_localLine = new QLabel(tr("Local machine — no SSH connection")); m_localLine->setObjectName("machineLocalConnection"); m_localLine->setProperty("pageMono", true);
     m_localLine->setTextFormat(Qt::PlainText); m_localLine->hide(); labelBox->addWidget(m_localLine);
@@ -340,6 +349,8 @@ MachinesPage::MachinesPage(const QString &path, QWidget *parent) : QWidget(paren
             }
         }
         m_operation = remove ? "remove" : "reset";
+        // A removed machine leaves no kept overrides behind for a later one of its name.
+        if (remove) Settings::remove(otherTransportKey(target));
         m_request = m_client->requestMachines({m_operation, target, "--revision", revision}); updateControls();
     });
     connect(m_client, &HgsClient::machinesReady, this, [this](quint64 request, const QJsonObject &data) {
@@ -510,7 +521,8 @@ void MachinesPage::setTheme(bool dark) {
     m_refresh->setStyleSheet(small + QStringLiteral("QPushButton{padding:0;}")); m_refresh->setIcon(workspaceIcon("refresh", PageCards::token(dark, "text2"))); m_refresh->setIconSize(QSize(15, 15));
     m_add->setStyleSheet(small); m_add->setIcon(workspaceIcon("add", PageCards::token(dark, "text2"))); m_add->setIconSize(QSize(13, 13));
     m_refresh->setCursor(Qt::PointingHandCursor); m_add->setCursor(Qt::PointingHandCursor);
-    for (auto *note : {m_titleNote, m_stateLine, m_localHost, m_hint}) note->setStyleSheet(QStringLiteral("color:%1;font-size:12px;").arg(token("muted")));
+    for (auto *note : {m_titleNote, m_stateLine, m_localHost, m_hint, m_sourceNote}) note->setStyleSheet(QStringLiteral("color:%1;font-size:12px;").arg(token("muted")));
+    m_peersNote->setStyleSheet(QStringLiteral("color:%1;font-size:12px;").arg(token("warn")));
     m_phones->setTheme(dark);
     updateHeader();
 }
@@ -555,6 +567,7 @@ void MachinesPage::renderRows() {
     if(m_new){auto *draft=new QListWidgetItem(tr("New machine\nUnsaved connection"),m_list);draft->setData(Qt::UserRole,"@new");draft->setData(StateRole,QStringLiteral("new"));draft->setToolTip(tr("This connection is a draft. Save it to add the machine to Zerus."));}
     const auto selected=m_new?QStringLiteral("@new"):m_selected;
     for (int i = 0; i < m_list->count(); ++i) if (m_list->item(i)->data(Qt::UserRole).toString() == selected) m_list->setCurrentRow(i);
+    m_peersNote->setVisible(m_data.value("environment_override").toBool());
     m_summary->setText(tr("SSH connections and HGS setup · %1").arg(savedCount == 1 ? tr("%1 connected, 1 machine").arg(online) : tr("%1 connected, %2 machines").arg(online).arg(savedCount)));
     updateHeader();
     // N20: a fleet poll, an appearance click or a cancelled switch rebuilds
@@ -581,6 +594,20 @@ void MachinesPage::loadSelection() {
     m_wslUser->setText(wsl.value("user").toString());
     m_wslHgs->setText(wsl.value("hgs_path").toString());
     m_port->setValue(c.value("port").toInt()); m_key->setText(c.value("identity_file").toString()); m_enabled->setChecked(c.value("enabled").toBool(true));
+    // #650 N2: hgs keeps one connection type per machine. The other type's
+    // overrides, kept on this device when the machine was saved, come back
+    // into their (hidden) fields, so switching the type back restores them.
+    if (!local && !m_new) {
+        const auto other = QJsonDocument::fromJson(QSettings().value(otherTransportKey(m_selected)).toByteArray()).object();
+        if (m_transport->currentIndex() == 1) {
+            m_hostname->setText(other.value("hostname").toString()); m_user->setText(other.value("user").toString());
+            m_port->setValue(other.value("port").toInt()); m_key->setText(other.value("identity_file").toString());
+        } else {
+            const auto kept = other.value("wsl").toObject();
+            m_wslDistribution->setText(kept.value("distribution").toString()); m_wslUser->setText(kept.value("user").toString());
+            m_wslHgs->setText(kept.value("hgs_path").toString());
+        }
+    }
     // A control-only computer (hgs.exe on Windows) runs no agents of its own.
     // #647: this computer's explanation is in its card; a draft's in a line
     // under the header; a saved machine's on its effective connection.
@@ -598,6 +625,10 @@ void MachinesPage::loadSelection() {
         explain = tr("Local WSL uses the explicit distribution, user and Linux HGS executable. OpenCode must already be running; Zerus never starts or replaces it in this mode.");
     m_effective->setToolTip(local || m_new ? QString() : explain);
     m_alias->setToolTip(local || m_new ? QString() : explain);
+    // #650 L4: the alias's source in the page's text, not only its tooltip.
+    const bool fromConfig = !local && !m_new && row.value("source").toString() == "config";
+    m_sourceNote->setText(fromConfig ? tr("This alias comes from HGS configuration; the fields below are this device's overrides.") : QString());
+    m_sourceNote->setVisible(fromConfig);
     m_dirty = false; m_loading = false; m_log->hide(); report(local ? m_localNotice : QString()); updateControls(); resolveConnection();
 }
 QString MachinesPage::appearanceMachine() const {
@@ -706,9 +737,9 @@ void MachinesPage::updateControls() {
         m_form->setRowVisible(field, !console && !windows && wsl);
     for (QWidget *field : QList<QWidget *>{m_hostname, m_user, m_keyRow, m_port})
         m_form->setRowVisible(field, !console && !windows && !wsl);
-    // #647: a saved SSH machine shows the prototype's form; the connection
-    // type is chosen on a draft and shown for a WSL machine.
-    m_form->setRowVisible(m_transport, !console && !windows && (m_new || wsl));
+    // #650 N2: every remote machine, saved or not, can change its connection
+    // type here (and back); this computer has none.
+    m_form->setRowVisible(m_transport, !console && !windows && !local);
     for (auto *button : {m_save, m_check, m_ssh, m_install, m_reset, m_remove}) button->setVisible(!console && !windows);
     m_discardDraft->setVisible(!console && !windows && (m_new || !local));
     if (console || windows) m_unsaved->hide();
@@ -755,10 +786,14 @@ void MachinesPage::updateHeader()
     QString system;
     QString arch;
     if (local) {
-        system = QSysInfo::productType() == QLatin1String("windows") ? QStringLiteral("Windows %1").arg(QSysInfo::productVersion())
-               : QSysInfo::productType() == QLatin1String("macos") ? QStringLiteral("macOS %1").arg(QSysInfo::productVersion())
-               : QSysInfo::prettyProductName();
-        arch = archName(QSysInfo::currentCpuArchitecture());
+        // #650 L5: read once; on Linux each QSysInfo call reads /etc/os-release,
+        // and this runs on every edit.
+        static const QString localSystem = QSysInfo::productType() == QLatin1String("windows") ? QStringLiteral("Windows %1").arg(QSysInfo::productVersion())
+                                         : QSysInfo::productType() == QLatin1String("macos") ? QStringLiteral("macOS %1").arg(QSysInfo::productVersion())
+                                         : QSysInfo::prettyProductName();
+        static const QString localArch = archName(QSysInfo::currentCpuArchitecture());
+        system = localSystem;
+        arch = localArch;
     } else if (!m_new) {
         const auto checked = m_checks.value(m_selected);
         system = osName(checked.value("os").toString());
@@ -782,8 +817,29 @@ void MachinesPage::updateHeader()
     m_stateLine->setText(state);
     m_stateLine->setVisible(!state.isEmpty());
 }
+QString MachinesPage::otherTransportKey(const QString &machine)
+{
+    return QStringLiteral("machines/otherTransport/") + machine;
+}
+void MachinesPage::rememberOtherTransport() {
+    // #650 N2: hgs refuses SSH overrides on a WSL profile and the other way
+    // round, so the type not saved keeps its overrides on this device.
+    QJsonObject other;
+    if (m_transport->currentData().toString() == "wsl-local") {
+        if (!m_hostname->text().trimmed().isEmpty()) other["hostname"] = m_hostname->text().trimmed();
+        if (!m_user->text().trimmed().isEmpty()) other["user"] = m_user->text().trimmed();
+        if (m_port->value()) other["port"] = m_port->value();
+        if (!m_key->text().trimmed().isEmpty()) other["identity_file"] = m_key->text().trimmed();
+    } else if (!m_wslDistribution->text().trimmed().isEmpty() || !m_wslUser->text().trimmed().isEmpty() || !m_wslHgs->text().isEmpty()) {
+        other["wsl"] = QJsonObject{{"distribution", m_wslDistribution->text().trimmed()}, {"user", m_wslUser->text().trimmed()}, {"hgs_path", m_wslHgs->text()}};
+    }
+    // #694: a GUI-thread write never waits on the settings file's lock.
+    if (other.isEmpty()) Settings::remove(otherTransportKey(alias()));
+    else Settings::set(otherTransportKey(alias()), QJsonDocument(other).toJson(QJsonDocument::Compact));
+}
 void MachinesPage::save() {
     if (m_request || m_installing || (m_new && aliasExists())) return;
+    rememberOtherTransport();
     m_selected = alias(); m_operation = "set";
     QStringList arguments{"set", alias(), "--json", QString::fromUtf8(QJsonDocument(connection()).toJson(QJsonDocument::Compact)), "--revision", m_data.value("revision").toString()};
     if (m_new) arguments << "--create";

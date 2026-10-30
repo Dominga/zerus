@@ -229,6 +229,21 @@ void TestSettings::testsKeepTheLogInTheirOwnFolder()
     QFile log(ForkLog::path());
     QVERIFY(log.open(QIODevice::ReadOnly));
     QVERIFY(log.readAll().contains("test line"));
+    // U62 (#720): the settings, the temporary folder and the crash mode are the
+    // test's own too: no INI in the person's %APPDATA%, no temporary file in
+    // the person's %TEMP%, no error box (and so no dump in CrashDumps).
+    const auto below = [](const QString &path, const QString &root) {
+        return !root.isEmpty() && QDir::cleanPath(path).startsWith(QDir::cleanPath(root) + QLatin1Char('/'), Qt::CaseInsensitive);
+    };
+    QSettings defaults;
+    QVERIFY2(!below(defaults.fileName(), QDir::homePath() + QStringLiteral("/AppData/Roaming")), qPrintable(defaults.fileName()));
+    QVERIFY2(defaults.format() == QSettings::IniFormat, "never the registry");
+    if (qgetenv("ZERUS_TEST_SYSTEM_TEMP") != "1") {
+        const QString personTemp = QDir::homePath() + QStringLiteral("/AppData/Local/Temp");
+        QVERIFY2(!below(QDir::tempPath(), personTemp) && QDir::cleanPath(QDir::tempPath()).compare(QDir::cleanPath(personTemp), Qt::CaseInsensitive) != 0,
+                 qPrintable(QDir::tempPath()));
+    }
+    QVERIFY(GetErrorMode() & SEM_NOGPFAULTERRORBOX);
 #else
     QSKIP("TestIsolation is Windows-only");
 #endif

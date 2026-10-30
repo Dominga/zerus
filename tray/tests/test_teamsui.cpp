@@ -699,6 +699,7 @@ private slots:
     void permissionAnswersFoldToOneLineAndOpenToFive();
     void planningEditsSendTheWholePlan();
     void newTeamStartsTheLeadWithTheTemplate();
+    void newTeamOffersEachAgentsModels();
     void newTeamRowErrorsKeepAnOpenListOpen();
     void newTeamTabKeepsAMemberListOpenUntilItCloses();
     void newTeamMaxMembersStepsUpAndDown();
@@ -993,7 +994,9 @@ elif a[:2]==['account','ls'] and os.path.exists(__file__+'.accounts'):sys.stdout
 elif a[:2]==['account','ls']:print(json.dumps({'profiles':[{'id':'native-claude','provider':'claude','label':'Default','account_status':{'status':'ok'}},
  {'id':'work','provider':'claude','label':'Claude work','account_status':{'status':'signed_out'}}]}))
 elif a[:2]==['account','model-settings']:
- models={'native-claude':[{'id':'opus'},{'id':'sonnet'},{'id':'haiku'}],
+ # #738: `.models` holds the catalogs by account when a test sets them.
+ import os
+ models=json.load(open(__file__+'.models')) if os.path.exists(__file__+'.models') else {'native-claude':[{'id':'opus'},{'id':'sonnet'},{'id':'haiku'}],
          'native-kimi':[{'id':'kimi-code/kimi-for-coding'},{'id':'kimi-code/k3.1-pro'}]}
  print(json.dumps({'account_id':a[2],'models':models.get(a[2],[])}))
 else:print(json.dumps({'status':'ok','version':4,'request_id':body.get('request_id')}))
@@ -1014,7 +1017,7 @@ void TestTeamsUi::init()
     QFile::remove(script() + ".calls");
     QFile::remove(script() + ".draftrev");
     QFile::remove(script() + ".statushold");
-    for (const char *suffix : {".swaphold", ".swaprefuse", ".swapreceipt", ".accounts"}) QFile::remove(script() + QLatin1String(suffix));
+    for (const char *suffix : {".swaphold", ".swaprefuse", ".swapreceipt", ".accounts", ".models"}) QFile::remove(script() + QLatin1String(suffix));
     QFile::remove(script() + ".refuse");
     QFile::remove(script() + ".refuseapply");
     QFile::remove(script() + ".proposalrefuse");
@@ -13732,6 +13735,146 @@ void TestTeamsUi::waitingBannerAnswersInPlaceAndWithdrawsTheNotice()
     for (auto *window : QApplication::topLevelWidgets())
         QVERIFY2(!(window->objectName() == QLatin1String("teamWaitingAnswer") && window->isVisible()), "a stray answer window");
     feed.setActive(false);
+}
+
+// #738 (owner, 2026-10-31: with Kimi as the lead the model picker was empty):
+// New team's model pickers list the selected account's native catalog (as the
+// role editor reads it; OpenCode's model_options from its account row), fall
+// back to Teams::knownModels when the catalog is empty, refill when the agent
+// or the account changes, and keep a typed model. The effort picker follows
+// the chosen model's efforts where the catalog names them.
+void TestTeamsUi::newTeamOffersEachAgentsModels()
+{
+    const auto restore = qScopeGuard([] { darkPalette(); });
+    darkPalette();
+    const auto profile = [](const QString &id, const QString &provider, const QString &label) {
+        return QJsonObject{{"id", id}, {"provider", provider}, {"label", label}, {"account_status", QJsonObject{{"status", "ok"}}}};
+    };
+    auto opencode = profile("native-opencode", "opencode", "OpenCode");
+    opencode["model_options"] = QJsonArray{QJsonObject{{"id", "openrouter/qwen3-coder"}, {"label", "Qwen3 Coder"}, {"effort_options", QJsonArray{"low", "high"}}}};
+    const QJsonArray profiles{profile("native-claude", "claude", "Claude"), profile("work", "claude", "Claude work"),
+                              profile("native-codex", "codex", "Codex"), profile("native-kimi", "kimi", "Kimi"),
+                              profile("kimi-new", "kimi", "Kimi new"), profile("native-dsh", "dsh", "DeepSeek"), opencode};
+    QVERIFY(FakeCli::replace(script() + ".accounts", QJsonDocument(QJsonObject{{"profiles", profiles}}).toJson(QJsonDocument::Compact)));
+    const auto model = [](const QString &id, const QStringList &efforts) {
+        return QJsonObject{{"id", id}, {"effort_options", QJsonArray::fromStringList(efforts)}};
+    };
+    const QJsonObject catalogs{
+        {"native-claude", QJsonArray{model("claude-opus-4-7", {"low", "medium", "high", "xhigh"}), model("claude-sonnet-4-6", {"low", "medium", "high"}),
+                                  model("claude-haiku-4-5", {})}},
+        {"work", QJsonArray{model("claude-opus-4-6", {"low", "high"})}},
+        {"native-codex", QJsonArray{model("gpt-6.1-sol", {"low", "medium", "high", "xhigh"}), model("gpt-5.5", {"low", "medium"})}},
+        {"native-kimi", QJsonArray{model("kimi-code/k3.1-pro", {"low", "high"}), model("kimi-code/kimi-for-coding", {})}},
+        {"kimi-new", QJsonArray{}},   // not read yet: the known Kimi models
+        {"native-dsh", QJsonArray{QJsonObject{{"id", "deepseek/deepseek-v4-pro"}, {"label", "DeepSeek V4 Pro (DeepSeek)"},
+                                              {"effort_options", QJsonArray{"high", "max"}}}}}};
+    QVERIFY(FakeCli::replace(script() + ".models", QJsonDocument(catalogs).toJson(QJsonDocument::Compact)));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    controller.refreshCatalog();
+    QTRY_VERIFY(controller.catalogReady());
+    QTemporaryDir folder;
+    TeamNewDialog dialog(&controller, &client, {{QString(), "this computer", true}}, {}, QDir::toNativeSeparators(folder.path()), "Checkout");
+    dialog.resize(900, 640);
+    dialog.show();
+    auto *agent = dialog.findChild<QComboBox *>("teamNewLeadAgent");
+    auto *account = dialog.findChild<QComboBox *>("teamNewLeadAccount");
+    auto *leadModel = dialog.findChild<QComboBox *>("teamNewLeadModel");
+    auto *effort = dialog.findChild<QComboBox *>("teamNewLeadEffort");
+    QVERIFY(agent && account && leadModel && effort);
+    const auto items = [](QComboBox *box) { QStringList list; for (int i = 0; i < box->count(); ++i) list << box->itemText(i); return list; };
+    const auto efforts = [](QComboBox *box) { QStringList list; for (int i = 0; i < box->count(); ++i) list << box->itemData(i).toString(); return list; };
+    const auto choose = [](QComboBox *box, const QString &data) { box->setCurrentIndex(box->findData(data)); };
+    const auto pick = [](QComboBox *box, const QString &text) { box->setCurrentIndex(box->findText(text)); };
+    const QStringList anyEffort{"", "low", "medium", "high", "xhigh"};
+    // Kimi leads: its kimi-code models, no model chosen (the agent's default).
+    choose(agent, "kimi");
+    QTRY_COMPARE(items(leadModel), (QStringList{"kimi-code/k3.1-pro", "kimi-code/kimi-for-coding"}));
+    QCOMPARE(leadModel->currentText(), QString());
+    pick(leadModel, "kimi-code/k3.1-pro");
+    QCOMPARE(efforts(effort), (QStringList{"", "low", "high"}));
+    QCOMPARE(effort->currentData().toString(), QStringLiteral("high"));   // the lead's high stays where the model has it
+    shot(&dialog, "u738-new-team-kimi-dark");
+    // Another Kimi account whose catalog is empty: the known Kimi models.
+    choose(account, "kimi-new");
+    QTRY_COMPARE(items(leadModel), Teams::knownModels("kimi"));
+    QCOMPARE(leadModel->currentText(), QStringLiteral("kimi-code/k3.1-pro"));   // still listed: kept
+    // Claude: the default account's catalog, then the work account's.
+    choose(agent, "claude");
+    QTRY_COMPARE(items(leadModel), (QStringList{"claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"}));
+    pick(leadModel, "claude-sonnet-4-6");
+    QCOMPARE(efforts(effort), (QStringList{"", "low", "medium", "high"}));
+    shot(&dialog, "u738-new-team-claude-dark");
+    choose(account, "work");
+    QTRY_COMPARE(items(leadModel), QStringList{"claude-opus-4-6"});
+    QCOMPARE(leadModel->currentText(), QStringLiteral("claude-sonnet-4-6"));   // a model the account lacks stays as typed
+    QCOMPARE(efforts(effort), anyEffort);
+    // Codex: its models and each one's efforts.
+    choose(agent, "codex");
+    QTRY_COMPARE(items(leadModel), (QStringList{"gpt-6.1-sol", "gpt-5.5"}));
+    pick(leadModel, "gpt-6.1-sol");
+    QCOMPARE(efforts(effort), (QStringList{"", "low", "medium", "high", "xhigh"}));
+    pick(leadModel, "gpt-5.5");
+    QCOMPARE(efforts(effort), (QStringList{"", "low", "medium"}));
+    shot(&dialog, "u738-new-team-codex-dark");
+    // A typed model still goes as typed, with any effort.
+    leadModel->setEditText(QStringLiteral("gpt-6-preview"));
+    QCOMPARE(efforts(effort), anyEffort);
+    // Members: DeepSeek and OpenCode list theirs.
+    dialog.findChild<QPushButton *>("teamNewAddMember")->click();
+    QTRY_VERIFY(!dialog.findChildren<QComboBox *>("teamNewAgent").isEmpty());
+    auto *memberAgent = dialog.findChildren<QComboBox *>("teamNewAgent").last();
+    auto *memberModel = dialog.findChildren<QComboBox *>("teamNewModel").last();
+    auto *memberEffort = dialog.findChildren<QComboBox *>("teamNewEffort").last();
+    choose(memberAgent, "dsh");
+    QTRY_COMPARE(items(memberModel), QStringList{"deepseek/deepseek-v4-pro"});
+    QCOMPARE(memberModel->itemData(0, Qt::ToolTipRole).toString(), QStringLiteral("DeepSeek V4 Pro (DeepSeek)"));
+    pick(memberModel, "deepseek/deepseek-v4-pro");
+    QCOMPARE(efforts(memberEffort), (QStringList{"", "high", "max"}));
+    choose(memberEffort, "max");
+    choose(memberAgent, "opencode");
+    QTRY_COMPARE(items(memberModel), QStringList{"openrouter/qwen3-coder"});
+    pick(memberModel, "openrouter/qwen3-coder");
+    QCOMPARE(efforts(memberEffort), (QStringList{"", "low", "high"}));
+    choose(memberEffort, "high");
+    // Each catalog was read once, by its account.
+    QStringList read;
+    QFile log(script() + ".calls");
+    QVERIFY(log.open(QIODevice::ReadOnly));
+    for (const auto &line : log.readAll().split('\n')) {
+        const auto args = QJsonDocument::fromJson(line).object()["args"].toArray();
+        if (args.size() > 2 && args[0] == "account" && args[1] == "model-settings") read << args[2].toString();
+    }
+    QCOMPARE(read.size(), QSet<QString>(read.cbegin(), read.cend()).size());
+    QVERIFY(read.contains("native-kimi") && read.contains("native-codex") && read.contains("native-dsh") && read.contains("work"));
+    QVERIFY(!read.contains("native-opencode"));
+    // Create sends the typed lead model and the member's catalog model and effort.
+    dialog.findChild<QLineEdit *>("teamNewName")->setText("Checkout models");
+    auto *create = dialog.findChild<QPushButton *>("teamNewCreate");
+    QTRY_VERIFY(create->isEnabled());
+    create->click();
+    QTRY_COMPARE(calls(script(), "create").size(), 1);
+    const auto input = calls(script(), "create").first();
+    QCOMPARE(input["lead"].toObject()["model"].toString(), QStringLiteral("gpt-6-preview"));
+    const auto member = input["members"].toArray().last().toObject();
+    QCOMPARE(member["agent"].toString(), QStringLiteral("opencode"));
+    QCOMPARE(member["model"].toString(), QStringLiteral("openrouter/qwen3-coder"));
+    QCOMPARE(member["effort"].toString(), QStringLiteral("high"));
+    // The light theme: the form reads its colors when it opens.
+    lightPalette();
+    for (const auto &[lead, first] : {std::pair{QStringLiteral("kimi"), QStringLiteral("kimi-code/k3.1-pro")},
+                                      std::pair{QStringLiteral("claude"), QStringLiteral("claude-opus-4-7")},
+                                      std::pair{QStringLiteral("codex"), QStringLiteral("gpt-6.1-sol")}}) {
+        TeamNewDialog light(&controller, &client, {{QString(), "this computer", true}}, {}, QDir::toNativeSeparators(folder.path()), "Checkout");
+        light.resize(900, 640);
+        light.show();
+        auto *lightAgent = light.findChild<QComboBox *>("teamNewLeadAgent");
+        auto *lightModel = light.findChild<QComboBox *>("teamNewLeadModel");
+        choose(lightAgent, lead);
+        QTRY_COMPARE(lightModel->itemText(0), first);
+        pick(lightModel, first);
+        lightShot(&light, QStringLiteral("u738-new-team-%1-light").arg(lead));
+    }
 }
 
 #include "test_teamsui.moc"

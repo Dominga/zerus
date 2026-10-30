@@ -137,7 +137,7 @@ Design-ac and the owner then check on the real display:
 
 Run the same installer from the new exact main checkout without
 `HGS_LINUX_GUI`. The installed client remains selected, and the original Qt
-stays the rollback copy; there is no second rollback slot. The numbered Dev
+stays the rollback copy until G6 removal; there is no second rollback slot. The numbered Dev
 guard refuses an unnumbered replacement before anything changes.
 
 Rollback to Qt is one command from the source checkout:

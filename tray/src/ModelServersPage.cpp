@@ -150,7 +150,8 @@ void ModelServersPage::setDark(bool dark)
     m_dark = dark;
     const Colors c = colorsFor(dark);
     const auto a = [](const QColor &color, double value) { return alpha(color, value).name(QColor::HexArgb); };
-    setStyleSheet(teamSheet(c) + QStringLiteral(
+    // #737: its dialogs take this sheet (a dialog takes the system's palette).
+    setStyleSheet(teamSheet(c) + dialogSheet(c) + QStringLiteral(
         "QWidget#modelServersPage{background:%1;}"
         "QFrame#modelServersHeader{border-bottom:1px solid %2;}"
         "QLabel#modelServersTitle{color:%3;font-size:20px;font-weight:600;}"

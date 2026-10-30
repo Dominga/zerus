@@ -280,7 +280,7 @@ void TeamWorkspace::closePhaseDialog(const Team &team)
     dialog->setWindowTitle(tr("Close phase %1").arg(n));
     dialog->setModal(true);
     dialog->resize(540, 340);
-    dialog->setStyleSheet(QStringLiteral("QDialog{background:%1;} QLabel{background:transparent;}").arg(c.bg.name()));
+    dialog->setStyleSheet(dialogSheet(c));
     auto *v = new QVBoxLayout(dialog); v->setContentsMargins(16, 16, 16, 14); v->setSpacing(10);
     auto *head = row(12);
     auto *tile = new QLabel; tile->setFixedSize(36, 36); tile->setAlignment(Qt::AlignCenter);
@@ -400,7 +400,7 @@ void TeamWorkspace::switchModeDialog(const Team &team, const QString &proposalId
     dialog->setWindowTitle(toFree ? tr("Switch to free planning") : tr("Switch to standard planning"));
     dialog->setModal(true);
     dialog->resize(600, 460);
-    dialog->setStyleSheet(QStringLiteral("QDialog{background:%1;} QLabel{background:transparent;}").arg(c.bg.name()));
+    dialog->setStyleSheet(dialogSheet(c));
     auto *v = new QVBoxLayout(dialog); v->setContentsMargins(18, 18, 18, 14); v->setSpacing(10);
     auto *head = row(12);
     auto *tile = new QLabel; tile->setFixedSize(38, 38); tile->setAlignment(Qt::AlignCenter);

@@ -78,4 +78,5 @@ private:
     QVBoxLayout *m_rows = nullptr;
     QList<Row *> m_rowList;
     QString m_project, m_created;
+    bool m_dark = false;   // #737: the theme of the window it opened over
 };

@@ -29,9 +29,10 @@ QComboBox *combo(const char *name, int width = 0)
     if (width) c->setFixedWidth(width);
     return c;
 }
-void fillAgents(QComboBox *box, const QString &agent)
+// #737: the icons in the theme's text colour (the box's palette is the system's).
+void fillAgents(QComboBox *box, const QString &agent, const QColor &text)
 {
-    for (const auto &a : agents) box->addItem(workspaceIcon(a, box->palette().color(QPalette::Text)), agentNames.value(a), a);
+    for (const auto &a : agents) box->addItem(workspaceIcon(a, text), agentNames.value(a), a);
     box->setCurrentIndex(qMax(0, box->findData(agent.isEmpty() ? QStringLiteral("claude") : agent)));
 }
 void fillEfforts(QComboBox *box, const QString &effort)
@@ -51,14 +52,22 @@ void fillPermissions(QComboBox *box, const QString &permissions)
 
 TeamNewDialog::TeamNewDialog(TeamController *teams, HgsClient *client, const QList<Computer> &computers, const QList<Session> &sessions,
                              const QString &folder, const QString &project, QWidget *parent)
-    : QDialog(parent), m_teams(teams), m_client(client), m_computers(computers), m_sessions(sessions), m_project(project)
+    : QDialog(parent), m_teams(teams), m_client(client), m_computers(computers), m_sessions(sessions), m_project(project),
+      m_dark(dialogDark(this, parent))
 {
     setObjectName("teamNewDialog");
     setWindowTitle(tr("New team"));
     resize(780, 760);
-    // Set once: a member row with an error only flips its property (validate).
-    setStyleSheet(QStringLiteral("QFrame#teamNewMemberRow[error=\"true\"]{background:%1;border-radius:6px;}")
-                      .arg(alpha(colorsFor(palette().color(QPalette::Window).lightness() < 128).danger, .08).name(QColor::HexArgb)));
+    // #737: the window's theme, not the system's palette this window would
+    // take; a member row with an error only flips its property (validate).
+    // The goal and the members' list are not the window's styled fields.
+    const Colors theme = colorsFor(m_dark);
+    setStyleSheet(dialogSheet(theme) + QStringLiteral(
+        "QPlainTextEdit#teamNewGoal{background:%2;color:%3;border:1px solid %4;border-radius:7px;padding:4px 6px;}"
+        "QPlainTextEdit#teamNewGoal:focus{border-color:%5;}"
+        "QScrollArea#teamNewMembers,QScrollArea#teamNewMembers>QWidget,QScrollArea#teamNewMembers>QWidget>QWidget{background:transparent;border:0;}"
+        "QFrame#teamNewMemberRow[error=\"true\"]{background:%1;border-radius:6px;}")
+                      .arg(alpha(theme.danger, .08).name(QColor::HexArgb), theme.surface.name(), theme.fg.name(), theme.border.name(), theme.accent.name()));
     auto *outer = new QVBoxLayout(this);
     auto *form = new QFormLayout; form->setLabelAlignment(Qt::AlignRight);
     m_name = new QLineEdit; m_name->setObjectName("teamNewName"); m_name->setPlaceholderText(tr("Checkout redesign"));
@@ -66,7 +75,7 @@ TeamNewDialog::TeamNewDialog(TeamController *teams, HgsClient *client, const QLi
     // F6: a compact list with search and favourites; it tells the form only
     // after the whole form exists (connected at the end of the constructor).
     m_templateList = new TeamTemplateList; m_templateList->setObjectName("teamNewTemplates");
-    m_templateList->setDark(palette().color(QPalette::Window).lightness() < 128);
+    m_templateList->setDark(m_dark);
     m_templateList->setCatalog(teams->catalog());
     form->addRow(tr("Template"), m_templateList);
     m_goal = new QPlainTextEdit; m_goal->setObjectName("teamNewGoal"); m_goal->setFixedHeight(64);
@@ -114,7 +123,7 @@ TeamNewDialog::TeamNewDialog(TeamController *teams, HgsClient *client, const QLi
     form->addRow(QString(), m_gitNote);
     // The lead: a new session on this computer, or an existing one.
     auto *leadRow = new QHBoxLayout;
-    m_leadAgent = combo("teamNewLeadAgent", 130); fillAgents(m_leadAgent, "claude");
+    m_leadAgent = combo("teamNewLeadAgent", 130); fillAgents(m_leadAgent, "claude", colorsFor(m_dark).fg);
     m_leadAccount = combo("teamNewLeadAccount", 130);
     m_leadModel = combo("teamNewLeadModel", 120); m_leadModel->setEditable(true); m_leadModel->lineEdit()->setPlaceholderText(tr("default model"));
     m_leadEffort = combo("teamNewLeadEffort", 80); fillEfforts(m_leadEffort, "high");
@@ -231,7 +240,7 @@ TeamNewDialog::Row *TeamNewDialog::addRow(const Role *role, const QString &roleN
     row->role = combo("teamNewRole", 104); row->role->setEditable(true);
     for (const auto &r : m_teams->catalog().roles) if (r.id != "lead") row->role->addItem(r.name, r.id);
     row->role->setCurrentText(role ? role->name : roleName);
-    row->agent = combo("teamNewAgent", 96); fillAgents(row->agent, role ? role->agent : QStringLiteral("claude"));
+    row->agent = combo("teamNewAgent", 96); fillAgents(row->agent, role ? role->agent : QStringLiteral("claude"), colorsFor(m_dark).fg);
     row->computer = combo("teamNewComputer", 90);
     for (const auto &c : m_computers) row->computer->addItem(c.label, c.alias);
     row->computer->setCurrentIndex(qMax(0, row->computer->findData(role ? role->computer : QString())));
@@ -250,7 +259,7 @@ TeamNewDialog::Row *TeamNewDialog::addRow(const Role *role, const QString &roleN
         h->addWidget(w);
     v->addLayout(h);
     row->error = new QLabel; row->error->setObjectName("teamNewRowError"); row->error->setWordWrap(true); row->error->hide();
-    row->error->setStyleSheet(QStringLiteral("color:%1;").arg(colorsFor(palette().color(QPalette::Window).lightness() < 128).danger.name()));
+    row->error->setStyleSheet(QStringLiteral("color:%1;").arg(colorsFor(m_dark).danger.name()));
     v->addWidget(row->error);
     m_rows->insertWidget(m_rows->count() - 1, row->box);
     row->box->show();   // rows come and go while the dialog shows
@@ -317,7 +326,7 @@ void TeamNewDialog::validate()
     // B6: a combo signal may reach validate before the last widgets exist; the
     // constructor's own call runs after them all.
     if (!m_name || !m_folder || !m_folderPolicy || !m_summary || !m_create) return;
-    const Colors c = colorsFor(palette().color(QPalette::Window).lightness() < 128);
+    const Colors c = colorsFor(m_dark);
     const QString folder = m_folder->text().trimmed();
     const bool git = !folder.isEmpty() && QDir(folder).exists(QStringLiteral(".git"));
     m_worktrees->setEnabled(git);

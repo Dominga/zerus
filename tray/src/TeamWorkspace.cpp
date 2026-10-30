@@ -3616,6 +3616,7 @@ void TeamWorkspace::nextGoalDialog(const Team &team)
     const Colors c = colorsFor(m_dark);
     auto *dialog = new QDialog(this);
     dialog->setObjectName("teamNextGoalDialog");
+    dialog->setStyleSheet(dialogSheet(c));   // #737
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     dialog->setWindowTitle(tr("Next goal \u00b7 %1").arg(team.name));
     dialog->resize(560, 380);
@@ -3677,7 +3678,7 @@ void TeamWorkspace::addLateDialog(const Team &team, int phase)
     dialog->setProperty("free", free);
     dialog->setWindowTitle(free ? tr("Add a task to open phase %1").arg(phase) : tr("Add a task to running phase %1").arg(phase));
     dialog->resize(520, 420);
-    dialog->setStyleSheet(QStringLiteral("QDialog{background:%1;} QLabel{background:transparent;}").arg(c.bg.name()));
+    dialog->setStyleSheet(dialogSheet(c));
     auto *v = new QVBoxLayout(dialog);
     auto *intro = label(free ? tr("Phase %1 is open. The task joins it and starts when its member is free.").arg(phase)
                              : tr("Phase %1 is running. The task joins it only after Zerus warns what changes and you confirm.").arg(phase), c.text2, 12);
@@ -3773,6 +3774,7 @@ void TeamWorkspace::swapDialog(const Team &team, const Member &member)
     const QString role = team.roleOf(member.id);
     auto *dialog = new QDialog(this);
     dialog->setObjectName("teamSwapDialog");
+    dialog->setStyleSheet(dialogSheet(c));   // #737
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     dialog->setWindowTitle(tr("Swap %1").arg(role));
     dialog->resize(520, 300);

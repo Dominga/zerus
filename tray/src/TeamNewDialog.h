@@ -47,6 +47,10 @@ private:
     void validate();
     void create();
     void fillAccounts(QComboBox *box, const QString &agent, const QString &host, const QString &preferred = {});
+    void fillModels(QComboBox *box, QComboBox *effort, const QString &agent, const QString &host, const QString &account,
+                    const QString &preferredModel = {}, const QString &preferredEffort = {});
+    void requestModels(const QString &agent, const QString &host, const QString &account);
+    void refreshModels(const QString &key);
     QJsonObject memberJson(const Row &row, const QString &id) const;
     TeamController *m_teams;
     HgsClient *m_client;
@@ -55,6 +59,9 @@ private:
     // Accounts by computer: profile id -> (provider, label, signed in).
     struct Account { QString id, provider, label; bool signedIn = true; };
     QMap<QString, QList<Account>> m_accounts;
+    QHash<QString, QJsonObject> m_modelCatalogs;
+    QSet<QString> m_modelPending;
+    QHash<quint64, QString> m_modelRequests;
     QLineEdit *m_name = nullptr, *m_folder = nullptr;
     QComboBox *m_leadAgent = nullptr, *m_leadAccount = nullptr, *m_leadModel = nullptr, *m_leadEffort = nullptr, *m_existingLead = nullptr;
     // F6: the compact template list; "-" or empty is no template.

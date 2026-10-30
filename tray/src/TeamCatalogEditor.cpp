@@ -2,6 +2,7 @@
 #include "ProcessRunner.h"
 #include "TeamCatalogEditor.h"
 #include "TeamController.h"
+#include "TeamModelControls.h"
 #include "HgsClient.h"
 #include "TeamWidgets.h"
 #include "CollapsibleBlock.h"
@@ -962,24 +963,26 @@ QWidget *TeamCatalogEditor::roleEditor(int index)
     m_accountChoice = account; m_accountRole = index;
     // Native account models replace the offline suggestions when they arrive.
     auto *model = new QComboBox; model->setObjectName("teamRoleModel"); model->setEditable(true); model->setInsertPolicy(QComboBox::NoInsert);
-    fillModels(model, r); model->lineEdit()->setPlaceholderText(tr("default model"));
-    m_modelChoice = model; m_modelRole = index; requestModels(r);
-    auto *effort = choice({{"", "—"}, {"low", "low"}, {"medium", "medium"}, {"high", "high"}, {"xhigh", "xhigh"}}, r.effort, "teamRoleEffort");
+    model->lineEdit()->setPlaceholderText(tr("default model"));
+    auto *effort = choice({{"", "—"}}, r.effort, "teamRoleEffort");
+    m_modelChoice = model; m_effortChoice = effort; m_modelRole = index;
+    fillModels(model, effort, r); requestModels(r);
     for (auto *combo : {agent, account, model, effort}) combo->setMinimumWidth(60);
     agentRow->addWidget(logo); agentRow->addWidget(agent, 11); agentRow->addWidget(account, 10); agentRow->addWidget(model, 11); agentRow->addWidget(effort, 7);
     // Another agent: its first model and the default account (spec 11.3).
     connect(agent, &QComboBox::activated, this, [this, index, agent] {
         auto &role = m_catalog.roles[index]; const auto value = agent->currentData().toString(); if (value == role.agent) return;
-        role.agent = value; role.account.clear(); role.model = Teams::knownModels(value).value(0);
+        role.agent = value; role.account.clear(); role.model = Teams::knownModels(value).value(0); role.effort.clear();
         changed(); rebuildEditor();
     });
-    connect(account, &QComboBox::activated, this, [this, index, account, model] {
+    connect(account, &QComboBox::activated, this, [this, index, account, model, effort] {
         auto &role = m_catalog.roles[index]; role.account = account->currentData().toString(); changed();
-        fillModels(model, role); requestModels(role);
+        fillModels(model, effort, role); requestModels(role);
     });
-    const auto modelChanged = [this, index, model] {
-        const auto text = model->currentText().trimmed(); if (text == m_catalog.roles[index].model) return;
-        m_catalog.roles[index].model = text; changed();
+    const auto modelChanged = [this, index, model, effort] {
+        auto &role = m_catalog.roles[index]; const auto text = model->currentText().trimmed();
+        if (text != role.model) { role.model = text; role.effort.clear(); changed(); }
+        TeamModelControls::fillEfforts(effort, m_modelCatalogs.value(modelKey(role)), role.model, role.effort);
     };
     connect(model->lineEdit(), &QLineEdit::editingFinished, this, modelChanged);
     connect(model, &QComboBox::activated, this, modelChanged);
@@ -1756,10 +1759,10 @@ void TeamCatalogEditor::setSources(HgsClient *client, const QList<Computer> &com
         connect(m_client, &HgsClient::accountsReady, this, [this](quint64 request, const QString &host, const QJsonObject &result) {
             if (m_modelRequests.contains(request)) {
                 const QString key = m_modelRequests.take(request); m_modelPending.remove(key);
-                m_modelCatalogs.insert(key, result.value("models").toArray());
-                if (m_modelChoice && m_modelRole >= 0 && m_modelRole < m_catalog.roles.size()
+                m_modelCatalogs.insert(key, result);
+                if (m_modelChoice && m_effortChoice && m_modelRole >= 0 && m_modelRole < m_catalog.roles.size()
                     && modelKey(m_catalog.roles[m_modelRole]) == key)
-                    fillModels(m_modelChoice, m_catalog.roles[m_modelRole]);
+                    fillModels(m_modelChoice, m_effortChoice, m_catalog.roles[m_modelRole]);
                 return;
             }
             if (host != QString() && std::none_of(m_computers.cbegin(), m_computers.cend(), [&](const Computer &c) { return c.alias == host; })) return;
@@ -1795,28 +1798,20 @@ void TeamCatalogEditor::fillAccounts(QComboBox *box, const Teams::Role &role) co
 
 QString TeamCatalogEditor::modelKey(const Teams::Role &role) const
 {
-    const QString agent = role.agent.isEmpty() ? QStringLiteral("claude") : role.agent;
-    return role.computer + QLatin1Char('\n') + (role.account.isEmpty() ? QStringLiteral("native-") + agent : role.account);
+    return TeamModelControls::key(role.agent, role.computer, role.account);
 }
 
-void TeamCatalogEditor::fillModels(QComboBox *box, const Teams::Role &role) const
+void TeamCatalogEditor::fillModels(QComboBox *box, QComboBox *effort, const Teams::Role &role) const
 {
-    const QSignalBlocker blocker(box);
-    box->clear();
-    const auto models = m_modelCatalogs.value(modelKey(role));
-    if (models.isEmpty()) box->addItems(Teams::knownModels(role.agent));
-    for (const auto &value : models) {
-        const QString id = value.toObject().value("id").toString();
-        if (!id.isEmpty() && box->findText(id) < 0) box->addItem(id, id);
-    }
-    if (!role.model.isEmpty() && box->findText(role.model) < 0) box->addItem(role.model, role.model);
-    box->setCurrentText(role.model);
+    const auto catalog = m_modelCatalogs.value(modelKey(role));
+    TeamModelControls::fillModels(box, catalog, role.agent, role.model);
+    TeamModelControls::fillEfforts(effort, catalog, role.model, role.effort);
 }
 
 void TeamCatalogEditor::requestModels(const Teams::Role &role)
 {
     const QString agent = role.agent.isEmpty() ? QStringLiteral("claude") : role.agent;
-    if (!m_client || !QStringList{"claude", "codex", "kimi", "dsh"}.contains(agent)) return;
+    if (!m_client || !TeamModelControls::supportsCatalog(agent)) return;
     const QString key = modelKey(role);
     if (m_modelCatalogs.contains(key) || m_modelPending.contains(key)) return;
     const QString account = key.section(QLatin1Char('\n'), 1);

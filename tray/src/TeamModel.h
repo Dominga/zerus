@@ -16,8 +16,8 @@
 // Statuses here never change a session's own status; they are a layer on top.
 namespace Teams {
 
-// Fallback model suggestions per agent; the role editor replaces them with
-// the selected account's native catalog. A model field still takes any name
+// Fallback model suggestions per agent; team editors replace them with the
+// selected account's native catalog. A model field still takes any name
 // the agent's command line knows.
 inline QStringList knownModels(const QString &agent)
 {

@@ -638,6 +638,7 @@ private slots:
     void permissionAnswersFoldToOneLineAndOpenToFive();
     void planningEditsSendTheWholePlan();
     void newTeamStartsTheLeadWithTheTemplate();
+    void newTeamUsesNativeModelsAndEfforts();
     void newTeamRowErrorsKeepAnOpenListOpen();
     void newTeamTabKeepsAMemberListOpenUntilItCloses();
     void newTeamMaxMembersStepsUpAndDown();
@@ -833,9 +834,11 @@ elif a[:2]==['team','draft']:
 elif a[:2]==['account','ls']:print(json.dumps({'profiles':[{'id':'native-claude','provider':'claude','label':'Default','account_status':{'status':'ok'}},
  {'id':'work','provider':'claude','label':'Claude work','account_status':{'status':'signed_out'}}]}))
 elif a[:2]==['account','model-settings']:
- models={'native-claude':[{'id':'opus'},{'id':'sonnet'},{'id':'haiku'}],
-         'native-kimi':[{'id':'kimi-code/kimi-for-coding'},{'id':'kimi-code/k3.1-pro'}]}
- print(json.dumps({'account_id':a[2],'models':models.get(a[2],[])}))
+ catalogs={'native-claude':(True,[{'id':'opus','effort_options':['low','high']},{'id':'sonnet','effort_options':['low','medium']},{'id':'haiku','effort_options':['low']}]),
+           'native-codex':(True,[{'id':'gpt-5.5-codex','effort_options':['low','high','xhigh']},{'id':'gpt-5.5','effort_options':['low','medium','high']}]),
+           'native-kimi':(False,[{'id':'kimi-code/kimi-for-coding'},{'id':'kimi-code/k3.1-pro'}])}
+ supported,models=catalogs.get(a[2],(False,[]))
+ print(json.dumps({'account_id':a[2],'effort_supported':supported,'models':models}))
 else:print(json.dumps({'status':'ok','version':4,'request_id':body.get('request_id')}))
 )PY"));
 }
@@ -1533,6 +1536,73 @@ void TestTeamsUi::newTeamStartsTheLeadWithTheTemplate()
     QCOMPARE(input["lead"].toObject()["prompt"].toString(), QStringLiteral("You lead."));
 }
 
+void TestTeamsUi::newTeamUsesNativeModelsAndEfforts()
+{
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    controller.refreshCatalog();
+    QTRY_VERIFY(controller.catalogReady());
+    QTemporaryDir folder;
+    TeamNewDialog dialog(&controller, &client, {{QString(), "this computer", true}}, {},
+                         QDir::toNativeSeparators(folder.path()), "Checkout");
+    dialog.show();
+    auto *agent = dialog.findChild<QComboBox *>("teamNewLeadAgent");
+    auto *model = dialog.findChild<QComboBox *>("teamNewLeadModel");
+    auto *effort = dialog.findChild<QComboBox *>("teamNewLeadEffort");
+    QVERIFY(agent && model && effort);
+    QTRY_VERIFY(model->findText("opus") >= 0);
+    agent->setCurrentIndex(agent->findData("kimi"));
+    QTRY_VERIFY(model->findText("kimi-code/k3.1-pro") >= 0);
+    QCOMPARE(model->currentText(), QString());
+    QCOMPARE(effort->count(), 1);
+    QVERIFY(!effort->isEnabled());
+    agent->setCurrentIndex(agent->findData("claude"));
+    QTRY_VERIFY(model->findText("opus") >= 0);
+    QVERIFY(chooseTemplate(&dialog, "feature"));
+    QTRY_COMPARE(dialog.findChildren<QFrame *>("teamNewMemberRow").size(), 2);
+    model->setCurrentIndex(model->findText("opus"));
+    QTRY_VERIFY(effort->findData("high") >= 0);
+    effort->setCurrentIndex(effort->findData("high"));
+    const auto rows = dialog.findChildren<QFrame *>("teamNewMemberRow");
+    auto *backend = rows[0]->findChild<QComboBox *>("teamNewModel");
+    auto *backendEffort = rows[0]->findChild<QComboBox *>("teamNewEffort");
+    QTRY_VERIFY(backend->findText("gpt-5.5-codex") >= 0);
+    backend->setCurrentIndex(backend->findText("gpt-5.5-codex"));
+    QTRY_VERIFY(backendEffort->findData("xhigh") >= 0);
+    QCOMPARE(backendEffort->findData("medium"), -1);
+    backendEffort->setCurrentIndex(backendEffort->findData("xhigh"));
+    auto *testerEffort = rows[1]->findChild<QComboBox *>("teamNewEffort");
+    QTRY_VERIFY(rows[1]->findChild<QComboBox *>("teamNewModel")->findText("kimi-code/k3.1-pro") >= 0);
+    QVERIFY(!testerEffort->isEnabled());
+    dialog.findChild<QLineEdit *>("teamNewName")->setText("Native models");
+    auto *create = dialog.findChild<QPushButton *>("teamNewCreate");
+    QTRY_VERIFY(create->isEnabled());
+    create->click();
+    QTRY_COMPARE(dialog.result(), int(QDialog::Accepted));
+    const auto input = calls(script(), "create").last();
+    QCOMPARE(input["lead"].toObject()["model"].toString(), QStringLiteral("opus"));
+    QCOMPARE(input["lead"].toObject()["effort"].toString(), QStringLiteral("high"));
+    const auto members = input["members"].toArray();
+    QCOMPARE(members[0].toObject()["model"].toString(), QStringLiteral("gpt-5.5-codex"));
+    QCOMPARE(members[0].toObject()["effort"].toString(), QStringLiteral("xhigh"));
+    QCOMPARE(members[1].toObject()["effort"].toString(), QString());
+
+    TeamNewTab tab(&controller, &client, {{QString(), "this computer", true}}, TeamNewTab::Coordinator{}, "Checkout");
+    tab.show();
+    auto *tabModel = tab.findChild<QComboBox *>("teamNewLeadModel");
+    auto *tabEffort = tab.findChild<QComboBox *>("teamNewLeadEffort");
+    QTRY_VERIFY(tabModel->findText("opus") >= 0);
+    tabModel->setCurrentIndex(tabModel->findText("opus"));
+    QTRY_VERIFY(tabEffort->findData("high") >= 0);
+    tabEffort->setCurrentIndex(tabEffort->findData("high"));
+    tab.findChild<QLineEdit *>("teamNewFolder")->setText(QDir::toNativeSeparators(folder.path()));
+    tab.findChild<QPushButton *>("teamNewStartPlanning")->click();
+    QTRY_VERIFY(!calls(script(), "draft").isEmpty());
+    const auto draftLead = calls(script(), "draft").first()["lead"].toObject();
+    QCOMPARE(draftLead["model"].toString(), QStringLiteral("opus"));
+    QCOMPARE(draftLead["effort"].toString(), QStringLiteral("high"));
+}
+
 // A row error flips a property on its own frame instead of setting the row's
 // style sheet: that re-styled every combo of the row, popup included, and the
 // Windows 11 style closed an open list (the member's role) under the pointer.
@@ -1764,6 +1834,10 @@ void TestTeamsUi::catalogRoleChoosesAccountModelAndComputer()
     QVERIFY(account->itemText(account->findData("work")).contains("signed out"));
     account->setCurrentIndex(account->findData("native-claude")); emit account->activated(account->currentIndex());
     model->setCurrentIndex(model->findText("sonnet")); emit model->activated(model->currentIndex());
+    auto *effort = editor.findChild<QComboBox *>("teamRoleEffort");
+    QTRY_VERIFY(effort->findData("medium") >= 0);
+    QCOMPARE(effort->findData("high"), -1);
+    effort->setCurrentIndex(effort->findData("medium")); emit effort->activated(effort->currentIndex());
     computer->setCurrentIndex(2); emit computer->activated(2);
     // Accounts belong to a computer: another one clears the choice.
     auto *rebuilt = editor.findChild<QComboBox *>("teamRoleAccount");
@@ -1780,6 +1854,7 @@ void TestTeamsUi::catalogRoleChoosesAccountModelAndComputer()
     QTRY_COMPARE(calls(script(), "catalog set").size(), 1);
     const auto lead = calls(script(), "catalog set").first()["catalog"].toObject()["roles"].toArray()[0].toObject();
     QCOMPARE(lead["model"].toString(), QStringLiteral("sonnet"));
+    QCOMPARE(lead["effort"].toString(), QStringLiteral("medium"));
     QCOMPARE(lead["computer"].toString(), QStringLiteral("devbox"));
     QCOMPARE(lead["machines"].toArray(), (QJsonArray{"devbox", "laptop"}));
     QCOMPARE(lead.value("account").toString(), QString());
@@ -1787,6 +1862,7 @@ void TestTeamsUi::catalogRoleChoosesAccountModelAndComputer()
     auto *agent = editor.findChild<QComboBox *>("teamRoleAgent");
     agent->setCurrentIndex(agent->findData("kimi")); emit agent->activated(agent->currentIndex());
     QTRY_VERIFY(editor.findChild<QComboBox *>("teamRoleModel")->findText("kimi-code/k3.1-pro") >= 0);
+    QVERIFY(!editor.findChild<QComboBox *>("teamRoleEffort")->isEnabled());
 }
 
 void TestTeamsUi::designerDraftIsKeptThenApplied()

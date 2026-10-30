@@ -1,6 +1,7 @@
 #include "TeamNewTab.h"
 #include "HgsClient.h"
 #include "TeamController.h"
+#include "TeamModelControls.h"
 #include "TeamConversation.h"
 #include "TeamTemplateList.h"
 #include "TeamWidgets.h"
@@ -27,6 +28,7 @@
 #include <QTabWidget>
 #include <QToolButton>
 #include <QVBoxLayout>
+#include <algorithm>
 
 using namespace TeamUi;
 
@@ -99,7 +101,11 @@ TeamNewTab::TeamNewTab(TeamController *teams, HgsClient *client, const QList<Com
 
     // Accounts per computer, for the account combos and the signed-in check.
     if (m_client) {
-        connect(m_client, &HgsClient::accountsReady, this, [this](quint64, const QString &host, const QJsonObject &result) {
+        connect(m_client, &HgsClient::accountsReady, this, [this](quint64 request, const QString &host, const QJsonObject &result) {
+            if (m_modelRequests.contains(request)) {
+                const QString key = m_modelRequests.take(request); m_modelPending.remove(key);
+                m_modelCatalogs.insert(key, result); refreshModels(key); return;
+            }
             QList<Account> list;
             for (const auto &value : result.value("profiles").toArray()) {
                 const auto p = value.toObject();
@@ -116,6 +122,9 @@ TeamNewTab::TeamNewTab(TeamController *teams, HgsClient *client, const QList<Com
                 m_leadAccount->setCurrentIndex(qMax(0, m_leadAccount->findData(keep)));
             }
             renderMembers();
+        });
+        connect(m_client, &HgsClient::accountsFailed, this, [this](quint64 request, const QString &, const QString &) {
+            const QString key = m_modelRequests.take(request); m_modelPending.remove(key);
         });
         m_client->requestAccounts({});
         for (const auto &c : computers) if (!c.alias.isEmpty() && c.online) m_client->requestAccounts(c.alias);
@@ -308,15 +317,17 @@ QWidget *TeamNewTab::buildLead()
     auto *leadRow = new QGridLayout; leadRow->setContentsMargins(22, 0, 0, 0); leadRow->setHorizontalSpacing(6); leadRow->setVerticalSpacing(6);
     m_leadAgent = combo("teamNewLeadAgent"); m_leadAgent->setMinimumWidth(136);
     for (const auto &a : agents) m_leadAgent->addItem(workspaceIcon(a, c.fg), agentNames.value(a), a);
-    m_leadModel = combo("teamNewLeadModel"); m_leadModel->setEditable(true); m_leadModel->lineEdit()->setPlaceholderText(tr("default model"));
-    m_leadEffort = combo("teamNewLeadEffort"); m_leadEffort->addItem(QStringLiteral("—"), QString());
-    for (const auto *e : {"low", "medium", "high", "xhigh"}) m_leadEffort->addItem(QString::fromLatin1(e), QString::fromLatin1(e));
+    m_leadModel = combo("teamNewLeadModel"); m_leadModel->setEditable(true); m_leadModel->setInsertPolicy(QComboBox::NoInsert);
+    m_leadModel->lineEdit()->setPlaceholderText(tr("default model"));
+    m_leadEffort = combo("teamNewLeadEffort");
     m_leadAccount = combo("teamNewLeadAccount"); m_leadAccount->setMinimumWidth(110); m_leadAccount->addItem(tr("Default account"), QString());
+    QString leadModel, leadEffort;
     if (const auto *role = m_teams->catalog().role("lead")) {
         m_leadAgent->setCurrentIndex(qMax(0, m_leadAgent->findData(role->agent.isEmpty() ? QStringLiteral("claude") : role->agent)));
-        m_leadModel->setCurrentText(role->model);
-        m_leadEffort->setCurrentIndex(qMax(0, m_leadEffort->findData(role->effort)));
+        leadModel = role->model; leadEffort = role->effort;
     }
+    fillModels(m_leadModel, m_leadEffort, m_leadAgent->currentData().toString(), {}, {}, leadModel, leadEffort);
+    requestModels(m_leadAgent->currentData().toString(), {}, {});
     // Two rows, so the column stays narrow.
     leadRow->addWidget(m_leadAgent, 0, 0); leadRow->addWidget(m_leadModel, 0, 1);
     leadRow->addWidget(m_leadEffort, 1, 0); leadRow->addWidget(m_leadAccount, 1, 1);
@@ -345,10 +356,22 @@ QWidget *TeamNewTab::buildLead()
     m_leadStack->addWidget(chatPage);
     for (auto *radio : {m_leadThis, m_leadNew}) connect(radio, &QRadioButton::toggled, this, [this] { renderLead(); validate(); });
     connect(m_leadAgent, &QComboBox::currentIndexChanged, this, [this] {
+        const QString agent = m_leadAgent->currentData().toString();
         const QSignalBlocker block(m_leadAccount);
         m_leadAccount->clear(); m_leadAccount->addItem(tr("Default account"), QString());
-        for (const auto &a : m_accounts.value(QString())) if (a.provider == m_leadAgent->currentData().toString())
+        for (const auto &a : m_accounts.value(QString())) if (a.provider == agent)
             m_leadAccount->addItem(a.label.isEmpty() ? a.id : a.label + (a.signedIn ? QString() : tr(" (signed out)")), a.id);
+        fillModels(m_leadModel, m_leadEffort, agent, {}, m_leadAccount->currentData().toString());
+        requestModels(agent, {}, m_leadAccount->currentData().toString());
+    });
+    connect(m_leadAccount, &QComboBox::currentIndexChanged, this, [this] {
+        const QString agent = m_leadAgent->currentData().toString(), account = m_leadAccount->currentData().toString();
+        fillModels(m_leadModel, m_leadEffort, agent, {}, account, m_leadModel->currentText(), m_leadEffort->currentData().toString());
+        requestModels(agent, {}, account);
+    });
+    connect(m_leadModel, &QComboBox::currentTextChanged, this, [this](const QString &model) {
+        TeamModelControls::fillEfforts(m_leadEffort,
+            m_modelCatalogs.value(TeamModelControls::key(m_leadAgent->currentData().toString(), {}, m_leadAccount->currentData().toString())), model, {});
     });
     connect(m_start, &QPushButton::clicked, this, [this] { startPlanning(); });
     // Goal: the owner and the lead both write it; every member reads it.
@@ -626,10 +649,9 @@ void TeamNewTab::renderMembers()
         w.agent = combo("teamNewAgent");
         for (const auto &a : agents) w.agent->addItem(workspaceIcon(a, c.fg), agentNames.value(a), a);
         w.agent->setCurrentIndex(qMax(0, w.agent->findData(m.agent)));
-        w.model = combo("teamNewModel"); w.model->setEditable(true); w.model->setCurrentText(m.model); w.model->lineEdit()->setPlaceholderText(tr("default"));
-        w.effort = combo("teamNewEffort"); w.effort->addItem(QStringLiteral("—"), QString());
-        for (const auto *e : {"low", "medium", "high", "xhigh"}) w.effort->addItem(QString::fromLatin1(e), QString::fromLatin1(e));
-        w.effort->setCurrentIndex(qMax(0, w.effort->findData(m.effort)));
+        w.model = combo("teamNewModel"); w.model->setEditable(true); w.model->setInsertPolicy(QComboBox::NoInsert);
+        w.model->lineEdit()->setPlaceholderText(tr("default"));
+        w.effort = combo("teamNewEffort");
         w.permissions = combo("teamNewPermissions");
         w.permissions->addItem(tr("Account"), QString()); w.permissions->addItem(tr("Auto"), QStringLiteral("auto")); w.permissions->addItem(tr("Bypass"), QStringLiteral("bypass"));
         w.permissions->setCurrentIndex(qMax(0, w.permissions->findData(m.permissions)));
@@ -640,6 +662,8 @@ void TeamNewTab::renderMembers()
         for (const auto &a : m_accounts.value(m.computer)) if (a.provider == m.agent)
             w.account->addItem(a.label.isEmpty() ? a.id : a.label + (a.signedIn ? QString() : tr(" (signed out)")), a.id);
         w.account->setCurrentIndex(qMax(0, w.account->findData(m.account)));
+        fillModels(w.model, w.effort, m.agent, m.computer, m.account, m.model, m.effort);
+        requestModels(m.agent, m.computer, m.account);
         w.worktree = new QCheckBox; w.worktree->setObjectName("teamNewWorktree"); w.worktree->setChecked(git && m.worktree); w.worktree->setEnabled(git);
         w.worktree->setToolTip(tr("Own worktree"));
         w.duplicate = new QToolButton; w.duplicate->setIcon(workspaceIcon("copy", c.muted)); w.duplicate->setToolTip(tr("Duplicate")); w.duplicate->setAutoRaise(true);
@@ -665,8 +689,12 @@ void TeamNewTab::renderMembers()
             }, false);
         });
         connect(w.role, &QComboBox::activated, this, [update] { update([](Member &) {}, true); });
-        connect(w.agent, &QComboBox::activated, this, [update, a = w.agent] { update([a](Member &m) { m.agent = a->currentData().toString(); m.account.clear(); }, true); });
-        connect(w.model, &QComboBox::currentTextChanged, this, [update](const QString &text) { update([text](Member &m) { m.model = text.trimmed(); }, false); });
+        connect(w.agent, &QComboBox::activated, this, [update, a = w.agent] { update([a](Member &m) { m.agent = a->currentData().toString(); m.account.clear(); m.model.clear(); m.effort.clear(); }, true); });
+        connect(w.model, &QComboBox::currentTextChanged, this, [this, update, w](const QString &text) {
+            update([text](Member &m) { m.model = text.trimmed(); m.effort.clear(); }, false);
+            TeamModelControls::fillEfforts(w.effort, m_modelCatalogs.value(TeamModelControls::key(w.agent->currentData().toString(),
+                w.computer->currentData().toString(), w.account->currentData().toString())), text, {});
+        });
         connect(w.effort, &QComboBox::activated, this, [update, e = w.effort] { update([e](Member &m) { m.effort = e->currentData().toString(); }, false); });
         connect(w.permissions, &QComboBox::activated, this, [update, p = w.permissions] { update([p](Member &m) { m.permissions = p->currentData().toString(); }, false); });
         connect(w.computer, &QComboBox::activated, this, [update, k = w.computer] { update([k](Member &m) { m.computer = k->currentData().toString(); m.account.clear(); }, true); });
@@ -783,6 +811,10 @@ void TeamNewTab::renderLead()
     m_leadTitle->setText(!drafting ? QString() : m_leadSessionName.isEmpty() ? tr("new session") : m_leadSessionName);
     for (auto *w : {static_cast<QWidget *>(m_leadAgent), static_cast<QWidget *>(m_leadModel), static_cast<QWidget *>(m_leadEffort), static_cast<QWidget *>(m_leadAccount)})
         w->setEnabled(m_leadNew->isChecked() && !m_starting);
+    if (m_leadNew->isChecked() && !m_starting)
+        TeamModelControls::fillEfforts(m_leadEffort,
+            m_modelCatalogs.value(TeamModelControls::key(m_leadAgent->currentData().toString(), {}, m_leadAccount->currentData().toString())),
+            m_leadModel->currentText(), m_leadEffort->currentData().toString());
     m_start->setText(m_starting ? tr("Starting…") : tr("Start planning"));
     // The folder is the draft's from Start planning on.
     m_folder->setReadOnly(drafting);
@@ -904,6 +936,37 @@ void TeamNewTab::touch(const QString &field)
     if (m_applying) return;
     if (!m_draft.isEmpty()) { m_dirty.insert(field); m_flushTimer.start(); }
     validate();
+}
+
+void TeamNewTab::fillModels(QComboBox *box, QComboBox *effort, const QString &agent, const QString &host, const QString &account,
+                            const QString &preferredModel, const QString &preferredEffort)
+{
+    const auto catalog = m_modelCatalogs.value(TeamModelControls::key(agent, host, account));
+    TeamModelControls::fillModels(box, catalog, agent, preferredModel);
+    TeamModelControls::fillEfforts(effort, catalog, preferredModel, preferredEffort);
+}
+
+void TeamNewTab::requestModels(const QString &agent, const QString &host, const QString &account)
+{
+    if (!m_client || !TeamModelControls::supportsCatalog(agent)) return;
+    const QString key = TeamModelControls::key(agent, host, account);
+    if (m_modelCatalogs.contains(key) || m_modelPending.contains(key)) return;
+    m_modelPending.insert(key);
+    const quint64 request = m_client->requestAccounts(host, {"model-settings", key.section(QLatin1Char('\n'), 1), "--json"});
+    m_modelRequests.insert(request, key);
+}
+
+void TeamNewTab::refreshModels(const QString &key)
+{
+    if (TeamModelControls::key(m_leadAgent->currentData().toString(), {}, m_leadAccount->currentData().toString()) == key) {
+        fillModels(m_leadModel, m_leadEffort, m_leadAgent->currentData().toString(), {}, m_leadAccount->currentData().toString(),
+                   m_leadModel->currentText(), m_leadEffort->currentData().toString());
+        renderLead();
+    }
+    const bool members = std::any_of(m_members.cbegin(), m_members.cend(), [&](const Member &member) {
+        return TeamModelControls::key(member.agent, member.computer, member.account) == key;
+    });
+    if (members) renderMembers();
 }
 
 QJsonObject TeamNewTab::memberJson(const Member &m, const QString &id) const

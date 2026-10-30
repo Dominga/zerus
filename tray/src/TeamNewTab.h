@@ -108,6 +108,10 @@ private:
     QJsonArray templateTasks() const;
     QStringList rowErrors(const Member &member) const;
     QJsonObject memberJson(const Member &member, const QString &id) const;
+    void fillModels(QComboBox *box, QComboBox *effort, const QString &agent, const QString &host, const QString &account,
+                    const QString &preferredModel = {}, const QString &preferredEffort = {});
+    void requestModels(const QString &agent, const QString &host, const QString &account);
+    void refreshModels(const QString &key);
     struct Account { QString id, provider, label; bool signedIn = true; };
     TeamController *m_teams;
     HgsClient *m_client;
@@ -117,6 +121,9 @@ private:
     QList<Member> m_members;
     QList<Teams::Task> m_tasks;
     QMap<QString, QList<Account>> m_accounts;   // by computer alias
+    QHash<QString, QJsonObject> m_modelCatalogs;
+    QSet<QString> m_modelPending;
+    QHash<quint64, QString> m_modelRequests;
     bool m_dark = true, m_wide = true, m_tableMembers = true;
     // The columns' minimum widths: side by side when both fit, tabs below.
     static constexpr int settingsMinimum = 600, leadMinimum = 400;

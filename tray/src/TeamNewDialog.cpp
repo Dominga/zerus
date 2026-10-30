@@ -1,6 +1,7 @@
 #include "TeamNewDialog.h"
 #include "HgsClient.h"
 #include "TeamController.h"
+#include "TeamModelControls.h"
 #include "TeamTemplateList.h"
 #include "TeamWidgets.h"
 #include <QCheckBox>
@@ -33,12 +34,6 @@ void fillAgents(QComboBox *box, const QString &agent)
 {
     for (const auto &a : agents) box->addItem(workspaceIcon(a, box->palette().color(QPalette::Text)), agentNames.value(a), a);
     box->setCurrentIndex(qMax(0, box->findData(agent.isEmpty() ? QStringLiteral("claude") : agent)));
-}
-void fillEfforts(QComboBox *box, const QString &effort)
-{
-    box->addItem(QStringLiteral("—"), QString());
-    for (const auto &e : {"low", "medium", "high", "xhigh"}) box->addItem(QString::fromLatin1(e), QString::fromLatin1(e));
-    box->setCurrentIndex(qMax(0, box->findData(effort)));
 }
 void fillPermissions(QComboBox *box, const QString &permissions)
 {
@@ -116,8 +111,9 @@ TeamNewDialog::TeamNewDialog(TeamController *teams, HgsClient *client, const QLi
     auto *leadRow = new QHBoxLayout;
     m_leadAgent = combo("teamNewLeadAgent", 130); fillAgents(m_leadAgent, "claude");
     m_leadAccount = combo("teamNewLeadAccount", 130);
-    m_leadModel = combo("teamNewLeadModel", 120); m_leadModel->setEditable(true); m_leadModel->lineEdit()->setPlaceholderText(tr("default model"));
-    m_leadEffort = combo("teamNewLeadEffort", 80); fillEfforts(m_leadEffort, "high");
+    m_leadModel = combo("teamNewLeadModel", 120); m_leadModel->setEditable(true); m_leadModel->setInsertPolicy(QComboBox::NoInsert);
+    m_leadModel->lineEdit()->setPlaceholderText(tr("default model"));
+    m_leadEffort = combo("teamNewLeadEffort", 80);
     leadRow->addWidget(m_leadAgent); leadRow->addWidget(m_leadAccount); leadRow->addWidget(m_leadModel, 1); leadRow->addWidget(m_leadEffort);
     form->addRow(tr("Lead"), leadRow);
     auto *existingRow = new QHBoxLayout;
@@ -164,18 +160,37 @@ TeamNewDialog::TeamNewDialog(TeamController *teams, HgsClient *client, const QLi
 
     connect(m_name, &QLineEdit::textChanged, this, [this] { validate(); });
     connect(m_folder, &QLineEdit::textChanged, this, [this] { validate(); });
-    connect(m_leadAgent, &QComboBox::currentIndexChanged, this, [this] { fillAccounts(m_leadAccount, m_leadAgent->currentData().toString(), {}); validate(); });
-    connect(m_leadAccount, &QComboBox::currentIndexChanged, this, [this] { validate(); });
+    connect(m_leadAgent, &QComboBox::currentIndexChanged, this, [this] {
+        const QString agent = m_leadAgent->currentData().toString();
+        fillAccounts(m_leadAccount, agent, {});
+        fillModels(m_leadModel, m_leadEffort, agent, {}, m_leadAccount->currentData().toString());
+        requestModels(agent, {}, m_leadAccount->currentData().toString()); validate();
+    });
+    connect(m_leadAccount, &QComboBox::currentIndexChanged, this, [this] {
+        const QString agent = m_leadAgent->currentData().toString(), account = m_leadAccount->currentData().toString();
+        fillModels(m_leadModel, m_leadEffort, agent, {}, account, m_leadModel->currentText(), m_leadEffort->currentData().toString());
+        requestModels(agent, {}, account); validate();
+    });
+    connect(m_leadModel, &QComboBox::currentTextChanged, this, [this](const QString &model) {
+        TeamModelControls::fillEfforts(m_leadEffort,
+            m_modelCatalogs.value(TeamModelControls::key(m_leadAgent->currentData().toString(), {}, m_leadAccount->currentData().toString())), model, {});
+    });
     connect(m_useExisting, &QCheckBox::toggled, this, [this](bool on) {
         m_existingLead->setEnabled(on);
         for (auto *w : {static_cast<QWidget *>(m_leadAgent), static_cast<QWidget *>(m_leadAccount), static_cast<QWidget *>(m_leadModel), static_cast<QWidget *>(m_leadEffort)})
             w->setEnabled(!on);
+        if (!on) fillModels(m_leadModel, m_leadEffort, m_leadAgent->currentData().toString(), {}, m_leadAccount->currentData().toString(),
+                            m_leadModel->currentText(), m_leadEffort->currentData().toString());
         validate();
     });
     connect(m_worktrees, &QCheckBox::toggled, this, [this](bool on) { for (auto *r : m_rowList) r->worktree->setChecked(on); });
     // Accounts per computer, for the account combos and the signed-in check.
     if (m_client) {
-        connect(m_client, &HgsClient::accountsReady, this, [this](quint64, const QString &host, const QJsonObject &result) {
+        connect(m_client, &HgsClient::accountsReady, this, [this](quint64 request, const QString &host, const QJsonObject &result) {
+            if (m_modelRequests.contains(request)) {
+                const QString key = m_modelRequests.take(request); m_modelPending.remove(key);
+                m_modelCatalogs.insert(key, result); refreshModels(key); return;
+            }
             QList<Account> list;
             for (const auto &value : result.value("profiles").toArray()) {
                 const auto p = value.toObject();
@@ -187,6 +202,9 @@ TeamNewDialog::TeamNewDialog(TeamController *teams, HgsClient *client, const QLi
             for (auto *r : m_rowList) fillAccounts(r->account, r->agent->currentData().toString(), r->computer->currentData().toString(), r->account->currentData().toString());
             validate();
         });
+        connect(m_client, &HgsClient::accountsFailed, this, [this](quint64 request, const QString &, const QString &) {
+            const QString key = m_modelRequests.take(request); m_modelPending.remove(key);
+        });
         m_client->requestAccounts({});
         for (const auto &c : computers) if (!c.alias.isEmpty() && c.online) m_client->requestAccounts(c.alias);
     }
@@ -195,6 +213,9 @@ TeamNewDialog::TeamNewDialog(TeamController *teams, HgsClient *client, const QLi
     Q_UNUSED(routing);
     fillAccounts(m_leadAccount, "claude", {});
     applyTemplate();
+    fillModels(m_leadModel, m_leadEffort, m_leadAgent->currentData().toString(), {}, m_leadAccount->currentData().toString(),
+               m_leadModel->currentText(), m_leadEffort->currentData().toString());
+    requestModels(m_leadAgent->currentData().toString(), {}, m_leadAccount->currentData().toString());
     m_templateList->selected = [this](const QString &id) { m_templateId = id; applyTemplate(); };
 }
 
@@ -222,6 +243,39 @@ void TeamNewDialog::fillAccounts(QComboBox *box, const QString &agent, const QSt
     box->setCurrentIndex(qMax(0, box->findData(keep)));
 }
 
+void TeamNewDialog::fillModels(QComboBox *box, QComboBox *effort, const QString &agent, const QString &host, const QString &account,
+                               const QString &preferredModel, const QString &preferredEffort)
+{
+    const auto catalog = m_modelCatalogs.value(TeamModelControls::key(agent, host, account));
+    TeamModelControls::fillModels(box, catalog, agent, preferredModel);
+    TeamModelControls::fillEfforts(effort, catalog, preferredModel, preferredEffort);
+}
+
+void TeamNewDialog::requestModels(const QString &agent, const QString &host, const QString &account)
+{
+    if (!m_client || !TeamModelControls::supportsCatalog(agent)) return;
+    const QString key = TeamModelControls::key(agent, host, account);
+    if (m_modelCatalogs.contains(key) || m_modelPending.contains(key)) return;
+    m_modelPending.insert(key);
+    const quint64 request = m_client->requestAccounts(host, {"model-settings", key.section(QLatin1Char('\n'), 1), "--json"});
+    m_modelRequests.insert(request, key);
+}
+
+void TeamNewDialog::refreshModels(const QString &key)
+{
+    if (TeamModelControls::key(m_leadAgent->currentData().toString(), {}, m_leadAccount->currentData().toString()) == key) {
+        fillModels(m_leadModel, m_leadEffort, m_leadAgent->currentData().toString(), {}, m_leadAccount->currentData().toString(),
+                   m_leadModel->currentText(), m_leadEffort->currentData().toString());
+        if (m_useExisting->isChecked()) m_leadEffort->setEnabled(false);
+    }
+    for (auto *row : m_rowList) {
+        const QString agent = row->agent->currentData().toString(), host = row->computer->currentData().toString();
+        const QString account = row->account->currentData().toString();
+        if (TeamModelControls::key(agent, host, account) == key)
+            fillModels(row->model, row->effort, agent, host, account, row->model->currentText(), row->effort->currentData().toString());
+    }
+}
+
 TeamNewDialog::Row *TeamNewDialog::addRow(const Role *role, const QString &roleName)
 {
     auto *row = new Row;
@@ -237,9 +291,12 @@ TeamNewDialog::Row *TeamNewDialog::addRow(const Role *role, const QString &roleN
     row->computer->setCurrentIndex(qMax(0, row->computer->findData(role ? role->computer : QString())));
     row->account = combo("teamNewAccount", 96);
     fillAccounts(row->account, row->agent->currentData().toString(), row->computer->currentData().toString(), role ? role->account : QString());
-    row->model = combo("teamNewModel", 104); row->model->setEditable(true); row->model->setCurrentText(role ? role->model : QString());
+    row->model = combo("teamNewModel", 104); row->model->setEditable(true); row->model->setInsertPolicy(QComboBox::NoInsert);
     row->model->lineEdit()->setPlaceholderText(tr("default"));
-    row->effort = combo("teamNewEffort", 66); fillEfforts(row->effort, role ? role->effort : QString());
+    row->effort = combo("teamNewEffort", 66);
+    fillModels(row->model, row->effort, row->agent->currentData().toString(), row->computer->currentData().toString(),
+               row->account->currentData().toString(), role ? role->model : QString(), role ? role->effort : QString());
+    requestModels(row->agent->currentData().toString(), row->computer->currentData().toString(), row->account->currentData().toString());
     row->permissions = combo("teamNewPermissions", 70); fillPermissions(row->permissions, role ? role->permissions : QString());
     row->worktree = new QCheckBox; row->worktree->setObjectName("teamNewWorktree"); row->worktree->setToolTip(tr("Own worktree"));
     row->worktree->setChecked(m_worktrees->isChecked() && (!role || role->folder != "read_only" && role->folder != "shared"));
@@ -256,10 +313,25 @@ TeamNewDialog::Row *TeamNewDialog::addRow(const Role *role, const QString &roleN
     row->box->show();   // rows come and go while the dialog shows
     m_rowList.append(row);
     connect(row->agent, &QComboBox::currentIndexChanged, this, [this, row] {
-        fillAccounts(row->account, row->agent->currentData().toString(), row->computer->currentData().toString()); validate(); });
+        const QString agent = row->agent->currentData().toString(), host = row->computer->currentData().toString();
+        fillAccounts(row->account, agent, host);
+        fillModels(row->model, row->effort, agent, host, row->account->currentData().toString());
+        requestModels(agent, host, row->account->currentData().toString()); validate(); });
     connect(row->computer, &QComboBox::currentIndexChanged, this, [this, row] {
-        fillAccounts(row->account, row->agent->currentData().toString(), row->computer->currentData().toString()); validate(); });
-    connect(row->account, &QComboBox::currentIndexChanged, this, [this] { validate(); });
+        const QString agent = row->agent->currentData().toString(), host = row->computer->currentData().toString();
+        fillAccounts(row->account, agent, host);
+        fillModels(row->model, row->effort, agent, host, row->account->currentData().toString(),
+                   row->model->currentText(), row->effort->currentData().toString());
+        requestModels(agent, host, row->account->currentData().toString()); validate(); });
+    connect(row->account, &QComboBox::currentIndexChanged, this, [this, row] {
+        const QString agent = row->agent->currentData().toString(), host = row->computer->currentData().toString();
+        const QString account = row->account->currentData().toString();
+        fillModels(row->model, row->effort, agent, host, account, row->model->currentText(), row->effort->currentData().toString());
+        requestModels(agent, host, account); validate(); });
+    connect(row->model, &QComboBox::currentTextChanged, this, [this, row](const QString &model) {
+        TeamModelControls::fillEfforts(row->effort, m_modelCatalogs.value(TeamModelControls::key(row->agent->currentData().toString(),
+            row->computer->currentData().toString(), row->account->currentData().toString())), model, {});
+    });
     connect(row->role, &QComboBox::currentTextChanged, this, [this, row](const QString &text) {
         if (const auto *r = m_teams->catalog().roleNamed(text)) row->prompt = r->prompt;
         validate();
@@ -267,8 +339,10 @@ TeamNewDialog::Row *TeamNewDialog::addRow(const Role *role, const QString &roleN
     connect(dup, &QToolButton::clicked, this, [this, row] {
         auto *copy = addRow(nullptr, row->role->currentText());
         copy->agent->setCurrentIndex(row->agent->currentIndex()); copy->computer->setCurrentIndex(row->computer->currentIndex());
-        copy->account->setCurrentIndex(row->account->currentIndex()); copy->model->setCurrentText(row->model->currentText());
-        copy->effort->setCurrentIndex(row->effort->currentIndex()); copy->permissions->setCurrentIndex(row->permissions->currentIndex());
+        copy->account->setCurrentIndex(row->account->currentIndex());
+        fillModels(copy->model, copy->effort, copy->agent->currentData().toString(), copy->computer->currentData().toString(),
+                   copy->account->currentData().toString(), row->model->currentText(), row->effort->currentData().toString());
+        copy->permissions->setCurrentIndex(row->permissions->currentIndex());
         copy->worktree->setChecked(row->worktree->isChecked()); copy->prompt = row->prompt;
         validate();
     });
@@ -296,7 +370,9 @@ void TeamNewDialog::applyTemplate()
         if (t->maxMembers > 0) m_maxMembers->setValue(t->maxMembers);
         if (const auto *lead = m_teams->catalog().role("lead")) {
             m_leadAgent->setCurrentIndex(qMax(0, m_leadAgent->findData(lead->agent.isEmpty() ? QStringLiteral("claude") : lead->agent)));
-            m_leadModel->setCurrentText(lead->model);
+            fillModels(m_leadModel, m_leadEffort, m_leadAgent->currentData().toString(), {}, m_leadAccount->currentData().toString(),
+                       lead->model, lead->effort);
+            requestModels(m_leadAgent->currentData().toString(), {}, m_leadAccount->currentData().toString());
         }
     }
     validate();

@@ -66,7 +66,7 @@ private:
     struct Account { QString id, provider, label; bool signedIn = true; };
     void fillAccounts(QComboBox *box, const Teams::Role &role) const;
     QString modelKey(const Teams::Role &role) const;
-    void fillModels(QComboBox *box, const Teams::Role &role) const;
+    void fillModels(QComboBox *box, QComboBox *effort, const Teams::Role &role) const;
     void requestModels(const Teams::Role &role);
     enum class Tab { Roles, Templates, Routing, Rules };
     bool draftMode() const;
@@ -95,9 +95,9 @@ private:
     QHash<QString, QList<Account>> m_accounts;
     QPointer<QComboBox> m_accountChoice;
     int m_accountRole = -1;
-    QPointer<QComboBox> m_modelChoice;
+    QPointer<QComboBox> m_modelChoice, m_effortChoice;
     int m_modelRole = -1;
-    QHash<QString, QJsonArray> m_modelCatalogs;
+    QHash<QString, QJsonObject> m_modelCatalogs;
     QSet<QString> m_modelPending;
     QHash<quint64, QString> m_modelRequests;
     // The catalog the editors show: the saved one with manual edits, or the

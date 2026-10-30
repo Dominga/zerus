@@ -269,7 +269,8 @@ body.shot{overflow:hidden}
 .lane:last-child{border-bottom:0}
 .lane .who{display:flex;align-items:center;gap:6px;min-width:0;font-size:11.5px}
 .lane .who .u{margin-left:auto;padding-right:10px;color:var(--dim);font-size:10.5px}
-.trk2{position:relative;height:36px}
+.trk2{position:relative;height:36px;overflow:hidden}
+.sp.cut{border-top-right-radius:0;border-bottom-right-radius:0;-webkit-mask-image:linear-gradient(90deg,#000 calc(100% - 14px),transparent);mask-image:linear-gradient(90deg,#000 calc(100% - 14px),transparent)}
 .sp{position:absolute;top:4px;height:18px;border-radius:4px;font-size:10.5px;line-height:18px;padding:0 4px;overflow:hidden;white-space:nowrap;color:var(--accentText);font-weight:600;box-sizing:border-box}
 .sp.q{top:25px;height:8px;border-radius:3px;padding:0;font-size:0}
 .sp.cp{box-shadow:0 0 0 2px var(--fg)}
@@ -443,11 +444,15 @@ Object.assign(IC, {
 });
 // Phase 38 of team 528aebfe, read from `hgs team status` (attempts' sent, start
 // and report times; each task's timing): minutes from 16:47 on 2026-10-27.
-const T0 = 16 * 60 + 47, SPAN = 330, PX = 1000 / SPAN;
+// Positions are shares of the timeline, so every bar and label stays inside
+// the members card; a span past the phase's end is cut there (class cut).
+// PX only sizes a label against the narrowest track (about 900 px).
+const T0 = 16 * 60 + 47, SPAN = 330, PX = 900 / SPAN;
+const pct = (m) => `${(Math.min(Math.max(m, 0), SPAN) / SPAN * 100).toFixed(3)}%`;
 const hm = (m) => { const t = T0 + m; return `${String(Math.floor(t / 60) % 24).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`; };
 const dur = (m) => m >= 60 ? `${Math.floor(m / 60)}h ${String(Math.round(m % 60)).padStart(2, '0')}m` : `${Math.round(m)}m`;
-const sp = (a, b, k, label = '', o = {}) => `<span class="sp k-${k} ${o.q ? 'q' : ''} ${o.cp ? 'cp' : ''} ${['queue', 'deps', 'lead', 'unk'].includes(k) ? 'hatch' : ''}" style="left:${a * PX}px;width:${Math.max(2, (b - a) * PX)}px" title="${label}">${(b - a) * PX > 34 ? label : ''}</span>`;
-const tickAt = (m) => `<span class="tick" style="left:${m * PX}px" title="returned by the lead"></span>`;
+const sp = (a, b, k, label = '', o = {}) => `<span class="sp k-${k} ${o.q ? 'q' : ''} ${o.cp ? 'cp' : ''} ${b > SPAN ? 'cut' : ''} ${['queue', 'deps', 'lead', 'unk'].includes(k) ? 'hatch' : ''}" style="left:${pct(a)};width:max(2px, calc(${pct(b)} - ${pct(a)}))" title="${label}${b > SPAN ? ' (runs past the phase’s end)' : ''}">${(Math.min(b, SPAN) - a) * PX > 34 ? label : ''}</span>`;
+const tickAt = (m) => `<span class="tick" style="left:${pct(m)}" title="returned by the lead"></span>`;
 const AG = { dsh: 'deepseek', claude: 'claude' };
 const RK = (who) => who === 'lead' ? 'lead' : who === 'reviewer' ? 'reviewer' : who === 'qa' ? 'tester' : 'backend';
 const LANES = [
@@ -477,12 +482,12 @@ const laneHtml = (l) => {
     <div class="trk2">${l.spans.map(s => sp(s[0], s[1], s[2], s[3], { cp: cpOn(s) })).join('')}${(l.ticks || []).map(tickAt).join('')}
       ${(l.queue || []).map(s => sp(s[0], s[1], s[2], s[3], { q: true })).join('')}</div></div>`;
 };
-const axis = () => `<div class="axis"><span class="ih">Members</span><div class="ticks">${Array.from({ length: 11 }, (_, i) => i * 30).map(m => `<i style="left:${m * PX}px"></i><span style="left:${m * PX}px">${hm(m)}</span>`).join('')}</div></div>`;
+const axis = () => `<div class="axis"><span class="ih">Members</span><div class="ticks">${Array.from({ length: 12 }, (_, i) => i * 30).map(m => `<i style="left:${m >= SPAN ? 'calc(100% - 1px)' : pct(m)}"></i><span style="left:${pct(m)};transform:translateX(${m === 0 ? '0' : m >= SPAN ? '-100%' : '-50%'})">${hm(m)}</span>`).join('')}</div></div>`;
 const pathRows = () => `
   <div class="lane pathrow"><span class="who"><b>Real critical path</b><span class="u mono">5h 30m</span></span><div class="trk2">
     ${sp(0, 220, 'rework', 'backend2: #479, #477, #481, #482 one after another, 6 returns', { cp: true })}${sp(220, 236, 'unk', '')}${sp(236, 330, 'build', '#483 integrate', { cp: true })}</div></div>
   <div class="lane pathrow"><span class="who"><span class="muted">Planned path</span><span class="u mono">2h 07m</span></span><div class="trk2">
-    <span class="sp pp" style="left:0;width:${18 * PX}px">#479</span><span class="sp pp" style="left:${18 * PX}px;width:${15 * PX}px">#482</span><span class="sp pp" style="left:${33 * PX}px;width:${94 * PX}px">#483 at their first attempts</span></div></div>`;
+    <span class="sp pp" style="left:0;width:${pct(18)}">#479</span><span class="sp pp" style="left:${pct(18)};width:calc(${pct(33)} - ${pct(18)})">#482</span><span class="sp pp" style="left:${pct(33)};width:calc(${pct(127)} - ${pct(33)})">#483 at their first attempts</span></div></div>`;
 const legend = (more = '') => `<div class="legend"><span class="g">Spans</span>
   <span><i class="sw k-work"></i>Work</span><span><i class="sw k-rework"></i>Rework (a returned attempt)</span><span><i class="sw k-build"></i>Build and merge</span>
   <span><i class="sw k-review"></i>Review stage</span><span><i class="sw k-test"></i>Test stage</span><span><i class="sw k-block"></i>Blocked on a question or permission</span><span><i class="sw k-delay"></i>Delivery and start delay</span>

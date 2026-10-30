@@ -18,6 +18,7 @@
 #include "TeamPanel.h"
 #include "TeamStages.h"
 #include "TeamWaitingNotices.h"
+#include "TeamWidgets.h"
 #include <QDir>
 #include <QFileInfo>
 #include <QFile>
@@ -2249,6 +2250,22 @@ void TestTeams::visibleShapeIgnoresWhatOnlyTicks()
     // A list item has no tasks; its revision and updated time go the same way.
     QCOMPARE(visibleShape(QJsonObject{{"id", "t"}, {"revision", 1}, {"updated", 5.0}, {"status", "running"}}),
              visibleShape(QJsonObject{{"id", "t"}, {"revision", 2}, {"updated", 9.0}, {"status", "running"}}));
+    // #709 L4: minutes in a finding's text or a phase's health line too; the
+    // desktop ages only minutes in place, so other units are drawn.
+    const auto texts = [](int idle, const QString &unit) {
+        return QJsonObject{{"id", "t"},
+                           {"validation", QJsonObject{{"warnings", QJsonArray{QJsonObject{{"text", QStringLiteral("qa idle %1 %2").arg(idle).arg(unit)}}}}}},
+                           {"phase_summary", QJsonArray{QJsonObject{{"n", 1}, {"health_line", QStringLiteral("path 2, idle %1 %2").arg(idle).arg(unit)}}}}};
+    };
+    QCOMPARE(visibleShape(texts(5, "min")), visibleShape(texts(9, "min")));
+    QVERIFY(visibleShape(texts(1, "h")) != visibleShape(texts(2, "h")));
+    // They grow by the whole minutes since their read, every one of them.
+    using TeamUi::agedMinutes;
+    const QString warning = QStringLiteral("starved: QA idle 5 min without a ready task; Open: #4 (also 12 min)");
+    QCOMPARE(agedMinutes(warning, 1000, 1059), warning);
+    QCOMPARE(agedMinutes(warning, 1000, 1000 + 125), QStringLiteral("starved: QA idle 7 min without a ready task; Open: #4 (also 14 min)"));
+    QCOMPARE(agedMinutes(QStringLiteral("timeout 30 s, 2 minutes"), 1000, 1600), QStringLiteral("timeout 30 s, 2 minutes"));
+    QCOMPARE(agedMinutes(warning, 0, 1600), warning);
 }
 
 QTEST_MAIN(TestTeams)

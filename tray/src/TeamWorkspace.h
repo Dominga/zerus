@@ -63,6 +63,9 @@ public:
     void showPhase(int phase);
     void addMember(const Teams::Team &team);
     void render();
+    // U38: how old a shown heat tint is before it is read again (a minute);
+    // a test makes it due at once.
+    static void setHeatAge(int milliseconds);
 protected:
     void showEvent(QShowEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
@@ -163,6 +166,7 @@ private:
         bool reading = false;
         QString error;
         quint64 generation = 0;
+        QByteArray digest;   // #709 L6: heatDigest (or the error) of the last read that rebuilt
     };
     QHash<QString, HeatRead> m_heat;   // by metric
     // F7/F8: opens another team in this workspace (previous, next, a new one).

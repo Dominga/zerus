@@ -842,6 +842,7 @@ private slots:
     void stageOverridesReachHgsWithTheirReason();
     void planEditorPicksATasksPipeline();
     void heatTintsGraphAndBoardByTimeOrTokens();
+    void aHeatReadThatDrawsTheSameRebuildsNothing();
     void heldByFromTheStatusOnTheBoard();
     void aPollThatChangesNothingDrawnRebuildsNothing();
     void aPhaseGraphThatFitsShowsNoSidewaysBar();
@@ -11779,6 +11780,12 @@ void TestTeamsUi::aPollThatChangesNothingDrawnRebuildsNothing()
         json["revision"] = revision; json["updated"] = updated;
         json["health"] = QJsonObject{{"starved", QJsonArray{QJsonObject{{"member", "secretary"}, {"minutes", idle}}}},
                                      {"warnings", QJsonArray{QStringLiteral("starved: Secretary idle %1 min without a ready task").arg(idle)}}};
+        // #709 L4: the running phase's health names the same minutes.
+        json["phase_summary"] = QJsonArray{
+            QJsonObject{{"n", 1}, {"title", "Analysis"}, {"status", "done"}, {"done", 1}, {"total", 1}, {"health_line", ""}},
+            QJsonObject{{"n", 2}, {"title", "Build"}, {"status", "in_work"}, {"done", 0}, {"total", 14}, {"health_line", "path 4 · par 2.0 · 1 warning"}}};
+        json["phases_health"] = QJsonObject{{"2", QJsonObject{{"tasks", 14}, {"critical_path", 4}, {"parallelism", 2.0},
+                                                             {"warnings", QJsonArray{QStringLiteral("starved: Secretary idle %1 min without a ready task").arg(idle)}}}}};
         auto tasks = json["tasks"].toArray();
         for (int i = 0; i < tasks.size(); ++i) {
             auto t = tasks[i].toObject();
@@ -11841,10 +11848,18 @@ void TestTeamsUi::aPollThatChangesNothingDrawnRebuildsNothing()
         if (card->property("teamMember") == "tester") stageTitle = card->findChild<QLabel *>("teamMemberStageQueueTitle");
     QVERIFY(stageTitle);
     QCOMPARE(stageTitle->text(), QStringLiteral("Stage queue empty · 12 min in this stage"));
+    // #709 L4: the phase health's idle minutes as drawn at 44, three polls on.
+    QLabel *health = nullptr;
+    for (auto *l : workspace.findChildren<QLabel *>("teamPhaseHealth")) if (l->toolTip().contains("idle")) health = l;
+    QVERIFY(health);
+    const QString healthText = health->text();
+    QVERIFY2(health->toolTip().contains("starved: Secretary idle 44 min without a ready task"), qPrintable(health->toolTip()));
     now += 600;
     tick();
     QCOMPARE(worked->text(), QStringLiteral("26m"));
     QCOMPARE(stageTitle->text(), QStringLiteral("Stage queue empty · 22 min in this stage"));
+    QVERIFY2(health->toolTip().contains("starved: Secretary idle 54 min without a ready task"), qPrintable(health->toolTip()));
+    QCOMPARE(health->text(), healthText);
     // The fixture's team is weeks old: a day later its elapsed time moves.
     now += 86400;
     tick();
@@ -13046,7 +13061,7 @@ static QJsonObject heatTeam()
 
 // Its profile as `hgs team profile` pages it: by time in two pages (an idle
 // member's loss has no task), by tokens in one, some tokens unknown.
-static QJsonObject heatProfile()
+static QJsonObject heatProfile(int leadWait = 7200)
 {
     const auto loss = [](const QString &kind, int task, int s, QJsonObject detail = {}) {
         detail["kind"] = kind; detail["task"] = task; detail["s"] = s; detail["id"] = QStringLiteral("%1:%2").arg(kind).arg(task);
@@ -13054,7 +13069,7 @@ static QJsonObject heatProfile()
     };
     const QJsonArray time{
         QJsonObject{{"kind", "idle_member"}, {"id", "idle_member:backend4"}, {"s", 9000}, {"member", "backend4"}},
-        loss("lead_wait", 483, 7200, {{"lead_s", 6000}, {"question_s", 1200}}),
+        loss("lead_wait", 483, leadWait, {{"lead_s", leadWait - 1200}, {"question_s", 1200}}),
         loss("blocked_chain", 483, 4560, {{"deps_s", 4560}, {"folder_held_s", 0}, {"on", QJsonArray{474, 482}}, {"held_by", QJsonArray{}}}),
         loss("member_wait", 481, 4320, {{"member", "backend2"}}),
         loss("rework", 482, 3900, {{"attempt", 1}, {"cause", "returned"}, {"member", "backend2"}}),
@@ -13254,6 +13269,69 @@ void TestTeamsUi::heatTintsGraphAndBoardByTimeOrTokens()
     QTRY_VERIFY(!again->findChild<QWidget *>("teamHeatLegend"));
     QCOMPARE(TeamUi::heatMode("team-1"), QStringLiteral("off"));
     QVERIFY(!QSettings().contains("teams/heat/team-1"));
+}
+
+// #709 L6: the tint is read again a minute later; that read rebuilds Graph
+// and Board only when what the tint draws changed. A wait that grew by
+// seconds the loss does not show keeps every widget, its hover and scroll.
+void TestTeamsUi::aHeatReadThatDrawsTheSameRebuildsNothing()
+{
+    TeamUi::setHeatMode("team-1", "time");
+    const auto forget = qScopeGuard([] { TeamUi::setHeatMode("team-1", "off"); TeamWorkspace::setHeatAge(60 * 1000); });
+    setTeam(heatTeam());
+    QVERIFY(FakeCli::replace(script() + ".profile", QJsonDocument(heatProfile()).toJson(QJsonDocument::Compact)));
+    QFile::remove(script() + ".profilerefuse");
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    controller.setShowCancelled(true);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    panel.setLive(live); workspace.setLive(live);
+    darkPalette(); workspace.setTheme(true);
+    workspace.resize(2140, 900); workspace.show();
+    controller.refresh();
+    QTRY_VERIFY(controller.team("team-1"));
+    panel.showTeam("team-1"); workspace.showTeam("team-1");
+    QTRY_VERIFY(phaseScrollOf(&workspace, 38));
+    if (!phaseOpen(&workspace, 38)) togglePhase(&workspace, 38);
+    QTRY_VERIFY(phaseOpen(&workspace, 38));
+    const auto graph = [&]() -> TeamUi::TaskView * {
+        for (auto *widget : workspace.findChildren<QWidget *>("teamPhaseGraph"))
+            if (auto *view = dynamic_cast<TeamUi::TaskView *>(widget)) return view;
+        return nullptr;
+    };
+    const auto node = [&](int id) {
+        if (auto *view = graph()) for (const auto &n : view->nodes) if (n.id == id) return n;
+        return TeamUi::TaskView::Node{};
+    };
+    QTRY_COMPARE(node(483).heat, QStringLiteral("lost 3h 56m"));
+    TestWait::settle();
+    QPointer<QWidget> view = graph();
+    QPointer<QWidget> legend = workspace.findChild<QWidget *>("teamHeatLegend");
+    QVERIFY(view && legend);
+    // The minute timer finds the tint due and reads both pages again.
+    const auto reread = [&](const QJsonObject &profile) {
+        QVERIFY(FakeCli::replace(script() + ".profile", QJsonDocument(profile).toJson(QJsonDocument::Compact)));
+        const int before = calls(script(), "profile").size();
+        TeamWorkspace::setHeatAge(0);
+        QTest::qWait(5);
+        QVERIFY(QMetaObject::invokeMethod(&TeamUi::workedTicker(), "timeout"));
+        TeamWorkspace::setHeatAge(60 * 1000);
+        QTRY_COMPARE(calls(script(), "profile").size(), before + 2);
+        QTest::qWait(300);
+    };
+    reread(heatProfile());
+    QVERIFY2(view && view == graph(), "the same profile rebuilt the Graph");
+    QVERIFY(legend && legend == workspace.findChild<QWidget *>("teamHeatLegend"));
+    // The lead's wait on #483 grew by ten seconds: still "lost 3h 56m".
+    reread(heatProfile(7210));
+    QVERIFY2(view && view == graph(), "ten seconds no loss text shows rebuilt the Graph");
+    QCOMPARE(node(483).heat, QStringLiteral("lost 3h 56m"));
+    // Two minutes more: the loss reads 3h 58m, drawn again.
+    reread(heatProfile(7320));
+    QTRY_VERIFY(!view || view != graph());
+    QTRY_COMPARE(node(483).heat, QStringLiteral("lost 3h 58m"));
+    QVERIFY2(node(483).tooltip.contains("Top loss: Waited for the lead (decision 1h 42m, questions 20m), 2h 02m"), qPrintable(node(483).tooltip));
 }
 
 #include "test_teamsui.moc"

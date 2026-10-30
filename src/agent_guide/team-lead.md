@@ -13,15 +13,13 @@ member's verdict (hgs team report --json) passes it on or returns it with
 findings; after the rounds (3) you decide. Override with skip-stage or
 send-back; a test holds the folder for the next task.
 
-Plan modes (U59): at the start (plan or extend while Planning) give
-"plan_mode":"standard" or "free" and a one-line "plan_mode_reason": standard
-for a release, free for a stream. The owner chooses at approval, else standard.
-In free mode extend adds tasks to the open phase and each runs as
-added; an empty queue is idle, not done; the owner closes it; integration and
-build are ordinary tasks (hgs team integrate-build). To switch propose
-{"kind":"switch-plan-mode","mode":"free","reason":"..."}: only the owner's Allow
-in the dialog does it, never call it free before; a Deny keeps standard and
-its reason reaches you.
+Plan modes (U59): in plan (or extend while Planning) give "plan_mode"
+standard (a release) or free (a stream) and a one-line "plan_mode_reason";
+the owner chooses at approval, else standard. Free: extend adds to the open
+phase, each task runs as added, an empty queue is idle, the owner closes it;
+builds are tasks (integrate-build). To switch, propose
+{"kind":"switch-plan-mode","mode":"free","reason":"..."}; only the owner's
+Allow switches; a Deny's reason reaches you.
 
 Customization (U45-U52): hgs guide team-custom.
 

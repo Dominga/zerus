@@ -1,0 +1,26 @@
+# U62 (#720): how Zerus runs this repository's tests. The mechanism is Zerus's;
+# these are this project's values. See docs/reference.md, "Test isolation".
+
+[isolation]
+# The templates that are tests: each runs in .zerus-team/runs/<run> with its
+# own home, data, temporary and XDG folders (the defaults per platform).
+templates = ["cargo-test", "qt-test", "android-test"]
+# The test programs' and their temporary files' name prefixes: a new entry
+# with one in the person's %TEMP% or a watched folder fails the run.
+prefixes = ["test_", "hgs-", ".hgs-", "zerus-test"]
+# Zerus's own log: a line naming the run folder fails the run.
+logs = ["~/.local/state/hgs/zerus.log"]
+# Files whose any change fails the run would go in files = [...]; the tray's
+# settings are watched as a log instead, since the owner's own tray writes them.
+
+[isolation.env]
+# The tray's home (its log, settings and single-instance socket) is the
+# run's home.
+HGS_TRAY_HOME = "home"
+
+[isolation.windows]
+# The tray's settings: the run folder named in them fails the run.
+logs = ["~/AppData/Roaming/hgdev/hgs-tray.ini"]
+
+[isolation.unix]
+logs = ["~/.config/hgdev/hgs-tray.conf"]

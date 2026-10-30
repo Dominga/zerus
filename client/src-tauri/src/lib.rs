@@ -209,10 +209,12 @@ pub(crate) fn data_dir(app: &tauri::AppHandle) -> std::path::PathBuf {
 fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
     let identity = startup.identity;
     let opens_sessions = startup.opens_sessions;
-    // Only the macOS build has a menu-bar item in this phase; Linux keeps Qt.
-    // The item lists the live fleet, so a build without the data source has
+    // Linux and macOS keep the live fleet in the tray/menu bar. A build without the data source has
     // none and keeps its window as the way back.
-    let menu_bar = cfg!(all(target_os = "macos", feature = "live"));
+    let menu_bar = cfg!(all(
+        any(target_os = "macos", target_os = "linux"),
+        feature = "live"
+    ));
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let (listening, activations) = match startup.instance {
         Some(claimed) => (Some(claimed.listening), Some(claimed.activations)),
@@ -576,6 +578,12 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                             platform::macos_notify::install(app.handle(), sender);
                         }
                     }
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    let conf = desk::tray_conf();
+                    platform::linux_tray::install(app.handle(), conf.as_deref());
+                    desk::start(app.handle(), &pump, dir.clone(), desk::load_linux_mode(&dir, conf.as_deref()), None);
                 }
                 app.manage(updates::start(app.handle()));
                 if menu_bar {

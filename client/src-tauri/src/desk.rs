@@ -15,7 +15,7 @@
 //! [`Bar`] is the status item's state apart from AppKit: what reaches it
 //! ([`Gate`]), the Dock badge, the menus that are tracking, and the action
 //! each item of the menu names.
-// The menu bar exists only on macOS in this phase; Linux keeps the Qt GUI.
+// Linux shares this desk with its native SNI/DBusMenu adapter.
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -203,6 +203,21 @@ pub fn load_mode(dir: &Path, tray_conf: Option<&str>) -> OpenMode {
                 .and_then(|value| OpenMode::from_config(&value))
         })
         .unwrap_or_default()
+}
+
+#[cfg(target_os = "linux")]
+pub fn load_linux_mode(dir: &Path, tray_conf: Option<&str>) -> OpenMode {
+    std::fs::read(dir.join(MODE_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Saved>(&bytes).ok())
+        .map(|saved| saved.open_mode)
+        .filter(|mode| OpenMode::LINUX.contains(mode))
+        .or_else(|| {
+            tray_conf
+                .and_then(|text| tray_conf_value(text, "open-mode"))
+                .and_then(|value| OpenMode::from_linux_config(&value))
+        })
+        .unwrap_or(OpenMode::Automatic)
 }
 
 pub fn save_mode(dir: &Path, mode: OpenMode) -> std::io::Result<()> {
@@ -762,6 +777,8 @@ fn deliver(app: &AppHandle, changes: Changes) {
 }
 
 fn publish(app: &AppHandle, desk: &Desk, mode: OpenMode) {
+    #[cfg(target_os = "linux")]
+    crate::platform::linux_tray::offer(app, desk.face(), desk.tooltip(), desk.menu(mode));
     #[cfg(target_os = "macos")]
     {
         let (face, tooltip, menu, badge) =
@@ -771,7 +788,7 @@ fn publish(app: &AppHandle, desk: &Desk, mode: OpenMode) {
             crate::platform::macos_menubar::offer(&handle, face, tooltip, menu, badge)
         });
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     let _ = (app, desk, mode);
 }
 
@@ -891,6 +908,10 @@ pub fn tray_notify(title: &str, body: &str) {
 /// says (`TrayAgent::activateSessionWith`, `TrayAgent.cpp:631-659`). A copy
 /// is confirmed every time (`ClipboardBackend::open`); a failure of either
 /// shows the command to run by hand.
+#[cfg(target_os = "linux")]
+pub use crate::platform::linux_tray::open_running;
+
+#[cfg(not(target_os = "linux"))]
 pub fn open_running(app: &AppHandle, computer: &ComputerId, name: &str) {
     let hgs = zerus_client_core::default_hgs();
     let command = shell::open_command(
@@ -905,7 +926,9 @@ pub fn open_running(app: &AppHandle, computer: &ComputerId, name: &str) {
         .map(|state| *lock(&state.mode))
         .unwrap_or_default();
     let opened = match mode {
-        OpenMode::Terminal => open_in_terminal(&command),
+        OpenMode::Terminal | OpenMode::Automatic | OpenMode::Tab | OpenMode::Window => {
+            open_in_terminal(&command)
+        }
         OpenMode::Clipboard => {
             use tauri_plugin_clipboard_manager::ClipboardExt;
             shell::copyable(&command)
@@ -986,6 +1009,13 @@ pub fn set_mode(app: &AppHandle, mode: OpenMode) {
     let _ = lock(&state.sender).send(DeskInput::Mode(mode));
 }
 
+#[cfg(target_os = "linux")]
+pub fn current_mode(app: &AppHandle) -> OpenMode {
+    app.try_state::<DeskState>()
+        .map(|state| *lock(&state.mode))
+        .unwrap_or(OpenMode::Automatic)
+}
+
 /// Saves a chosen mode; Qt's notice when it cannot (`TrayAgent.cpp:864-872`).
 fn mode_saved(dir: &Path, mode: OpenMode) -> Result<(), Notice> {
     save_mode(dir, mode).map_err(|error| Notice {
@@ -1023,6 +1053,7 @@ pub enum MenuAction {
     },
     /// An "Open in" mode (`openModeChosen`).
     Mode(OpenMode),
+    Refresh,
     Quit,
 }
 
@@ -1126,6 +1157,10 @@ impl Bar {
 
     /// The native items of a new menu, Qt's texts (`TrayMenu::rebuild`).
     pub fn layout(&mut self, entries: &[Entry]) -> Vec<Item> {
+        self.layout_modes(entries, &OpenMode::ALL)
+    }
+
+    pub fn layout_modes(&mut self, entries: &[Entry], offered: &[OpenMode]) -> Vec<Item> {
         self.generation += 1;
         let mut actions = HashMap::new();
         let mut items = Vec::with_capacity(entries.len());
@@ -1166,8 +1201,9 @@ impl Bar {
                     },
                 ),
                 Entry::OpenIn(chosen) => {
-                    let modes = OpenMode::ALL
-                        .into_iter()
+                    let modes = offered
+                        .iter()
+                        .copied()
                         .map(|mode| {
                             let item = format!("{id}-{}", mode.label());
                             actions.insert(item.clone(), MenuAction::Mode(mode));
@@ -1179,6 +1215,7 @@ impl Bar {
                         modes,
                     }
                 }
+                Entry::Refresh => chosen_by("Refresh", MenuAction::Refresh),
                 Entry::Quit => chosen_by("Quit", MenuAction::Quit),
             });
         }

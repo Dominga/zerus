@@ -2,8 +2,8 @@
 use crate::actions::{Exit, Invocation};
 use std::io::{ErrorKind, Read, Write};
 use std::path::Path;
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -56,7 +56,15 @@ pub fn run_limited(
     parent_env: &[(&str, &str)],
     stdout_cap: usize,
 ) -> Result<Exit, TooLarge> {
-    match run_inner(hgs, inv, parent_env, &[], stdout_cap, None, None) {
+    match run_inner(
+        hgs,
+        inv,
+        parent_env,
+        &[],
+        stdout_cap,
+        None,
+        Pipes::default(),
+    ) {
         Ok(exit) => Ok(exit),
         Err(Stopped::TooLarge(too_large)) => Err(too_large),
         // Nothing sets a flag when there is none.
@@ -83,7 +91,15 @@ pub fn run_cancellable(
     stdout_cap: usize,
     cancel: &AtomicBool,
 ) -> Result<Exit, Stopped> {
-    run_inner(hgs, inv, parent_env, &[], stdout_cap, Some(cancel), None)
+    run_inner(
+        hgs,
+        inv,
+        parent_env,
+        &[],
+        stdout_cap,
+        Some(cancel),
+        Pipes::default(),
+    )
 }
 
 /// [`run_limited`] of another program (a connector) that also leaves out
@@ -96,7 +112,15 @@ pub fn run_without(
     remove: &[&str],
     stdout_cap: usize,
 ) -> Result<Exit, TooLarge> {
-    match run_inner(program, inv, parent_env, remove, stdout_cap, None, None) {
+    match run_inner(
+        program,
+        inv,
+        parent_env,
+        remove,
+        stdout_cap,
+        None,
+        Pipes::default(),
+    ) {
         Ok(exit) => Ok(exit),
         Err(Stopped::TooLarge(too_large)) => Err(too_large),
         Err(Stopped::Cancelled) => Ok(Exit::Abnormal {
@@ -106,6 +130,103 @@ pub fn run_without(
 }
 
 type StreamInput = Box<dyn FnOnce(ChildStdin) -> bool + Send>;
+type StreamOutput = Box<dyn FnOnce(ChildStdout) -> bool + Send>;
+type Spawn = fn(&mut Command) -> std::io::Result<Child>;
+
+#[derive(Default)]
+struct Pipes {
+    input: Option<StreamInput>,
+    output: Option<StreamOutput>,
+    spawn: Option<Spawn>,
+    readers: Option<Arc<dyn Send + Sync>>,
+    stop: Option<Arc<AtomicBool>>,
+}
+
+// Also cancels a decoder that is still blocked in an OS read when the runner
+// returns. Its reader guard remains held until that read actually ends.
+struct CancelOutput(Option<Arc<AtomicBool>>);
+impl Drop for CancelOutput {
+    fn drop(&mut self) {
+        if let Some(stop) = &self.0 {
+            stop.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+/// A streamed decoder never grants completion on a partial/failed child.
+/// Process and pipe errors are static categories, without child output.
+#[derive(Debug, PartialEq, Eq)]
+pub enum DecodeError<E> {
+    Decode(E),
+    Cancelled,
+    TimedOut,
+    StartFailed,
+    ChildFailed,
+    TooLarge,
+    Incomplete,
+}
+
+/// Decode stdout on the existing runner's reader thread instead of collecting
+/// it. The callback must bound input, memory and sink work, require real EOF,
+/// and poll its stop flag/deadline. Its output/pages remain provisional until
+/// this function succeeds: both pipes must end and the owned child must exit 0.
+/// Stderr is capped at 64 KiB. `inv.stdin` must be absent.
+///
+/// The host supplies its guarded spawn function and an admitted reader-group
+/// guard shared by both pipes. Admission must bound global jobs and exclude a
+/// second reader group for the same source while an old group remains alive.
+/// A descendant retaining a pipe keeps the guard after cancellation/deadline;
+/// only the owned child is killed. No callback or unrelated process is killed.
+pub fn run_decoded<T: Send + 'static, E: Send + 'static>(
+    hgs: &Path,
+    inv: &Invocation,
+    parent_env: &[(&str, &str)],
+    cancel: &AtomicBool,
+    spawn: Spawn,
+    readers: Arc<dyn Send + Sync>,
+    decode: impl FnOnce(ChildStdout, &AtomicBool, Instant) -> Result<T, E> + Send + 'static,
+) -> Result<T, DecodeError<E>> {
+    assert!(inv.stdin.is_none(), "a decoded read cannot have stdin");
+    // Refuse before spawn if the caller has already cancelled.
+    if cancel.load(Ordering::Relaxed) {
+        return Err(DecodeError::Cancelled);
+    }
+    let stop = Arc::new(AtomicBool::new(false));
+    let decoder_stop = stop.clone();
+    let deadline = Instant::now() + inv.timeout;
+    let (tx, rx) = mpsc::sync_channel(1);
+    let pipes = Pipes {
+        output: Some(Box::new(move |pipe| {
+            let result = decode(pipe, &decoder_stop, deadline);
+            let ok = result.is_ok();
+            tx.send(result).is_ok() && ok
+        })),
+        spawn: Some(spawn),
+        readers: Some(readers),
+        stop: Some(stop),
+        ..Pipes::default()
+    };
+    let exit = run_inner(hgs, inv, parent_env, &[], STDERR_CAP, Some(cancel), pipes);
+    if cancel.load(Ordering::Relaxed) {
+        return Err(DecodeError::Cancelled);
+    }
+    if Instant::now() >= deadline {
+        return Err(DecodeError::TimedOut);
+    }
+    match exit {
+        Err(Stopped::Cancelled) => return Err(DecodeError::Cancelled),
+        Err(Stopped::TooLarge(_)) => return Err(DecodeError::TooLarge),
+        Ok(Exit::TimedOut) => return Err(DecodeError::TimedOut),
+        Ok(Exit::StartFailed(_)) => return Err(DecodeError::StartFailed),
+        _ => {}
+    }
+    match rx.try_recv() {
+        Ok(Err(error)) => Err(DecodeError::Decode(error)),
+        Ok(Ok(value)) if matches!(exit, Ok(Exit::Code { code: 0, .. })) => Ok(value),
+        Ok(Ok(_)) => Err(DecodeError::ChildFailed),
+        Err(_) => Err(DecodeError::Incomplete),
+    }
+}
 
 /// Streams bounded input on the existing runner's writer thread. Both output
 /// pipes have a hard byte limit; exceeding either ends only this owned child.
@@ -130,7 +251,10 @@ pub(crate) fn run_streamed(
         &[],
         output_cap,
         None,
-        Some(Box::new(input)),
+        Pipes {
+            input: Some(Box::new(input)),
+            ..Pipes::default()
+        },
     ) {
         Ok(exit) => Ok(exit),
         Err(Stopped::TooLarge(error)) => Err(error),
@@ -145,9 +269,11 @@ fn run_inner(
     remove: &[&str],
     stdout_cap: usize,
     cancel: Option<&AtomicBool>,
-    stream: Option<StreamInput>,
+    pipes: Pipes,
 ) -> Result<Exit, Stopped> {
-    let strict_outputs = stream.is_some();
+    let consumed = pipes.output.is_some();
+    let strict_outputs = pipes.input.is_some() || consumed;
+    let _cancel_output = CancelOutput(pipes.stop);
     let mut command = Command::new(hgs);
     command.args(&inv.args);
     for (key, value) in parent_env {
@@ -159,10 +285,14 @@ fn run_inner(
     command
         .env_remove("HGS_SESSION")
         .env_remove("HGS_RUN_ID")
-        .stdin(Stdio::piped())
+        .stdin(if consumed {
+            Stdio::null()
+        } else {
+            Stdio::piped()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = match command.spawn() {
+    let mut child = match pipes.spawn.unwrap_or(Command::spawn)(&mut command) {
         Ok(child) => child,
         Err(error) => return Ok(Exit::StartFailed(error.to_string())),
     };
@@ -172,7 +302,7 @@ fn run_inner(
     let input = inv.stdin.clone();
     let (write_tx, write_rx) = mpsc::channel();
     thread::spawn(move || {
-        let ok = match (stdin, stream, input) {
+        let ok = match (stdin, pipes.input, input) {
             (Some(pipe), Some(write), _) => write(pipe),
             (Some(mut pipe), None, Some(bytes)) => {
                 pipe.write_all(&bytes).and_then(|_| pipe.flush()).is_ok()
@@ -184,16 +314,36 @@ fn run_inner(
     let (done_tx, done_rx) = mpsc::channel();
     let over = Arc::new(AtomicBool::new(false));
     let limit = (stdout_cap < usize::MAX).then(|| (stdout_cap, Arc::clone(&over)));
-    let out = reader(
-        child.stdout.take(),
-        if strict_outputs {
-            stdout_cap
-        } else {
-            stdout_cap.saturating_add(1)
-        },
-        done_tx.clone(),
-        limit,
-    );
+    let decoded = Arc::new(AtomicU8::new(0));
+    let out = if let Some(consume) = pipes.output {
+        let stdout = child.stdout.take();
+        let done = done_tx.clone();
+        let completed = decoded.clone();
+        let guard = pipes.readers.clone();
+        thread::spawn(move || {
+            let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                stdout.is_some_and(consume)
+            }))
+            .unwrap_or(false);
+            // Release the pipe group before waking a possible replacement.
+            drop(guard);
+            completed.store(if ok { 1 } else { 2 }, Ordering::Release);
+            let _ = done.send(());
+        });
+        Arc::default()
+    } else {
+        reader(
+            child.stdout.take(),
+            if strict_outputs {
+                stdout_cap
+            } else {
+                stdout_cap.saturating_add(1)
+            },
+            done_tx.clone(),
+            limit,
+            None,
+        )
+    };
     let err = reader(
         child.stderr.take(),
         if strict_outputs {
@@ -203,6 +353,7 @@ fn run_inner(
         },
         done_tx,
         strict_outputs.then(|| (stdout_cap, Arc::clone(&over))),
+        pipes.readers,
     );
     let too_large = |err: &Shared| {
         Stopped::TooLarge(TooLarge {
@@ -236,6 +387,16 @@ fn run_inner(
             drain(&done_rx);
             return Err(too_large(&err));
         }
+        if consumed && decoded.load(Ordering::Acquire) == 2 {
+            let exit = stop(
+                child,
+                Exit::Abnormal {
+                    stderr: "stdout decoder failed".into(),
+                },
+            );
+            drain(&done_rx);
+            return Ok(exit);
+        }
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => {}
@@ -253,11 +414,46 @@ fn run_inner(
             return Ok(stop(child, Exit::WriteFailed));
         }
         if now >= deadline {
-            return Ok(stop(child, Exit::TimedOut));
+            let exit = stop(child, Exit::TimedOut);
+            if consumed {
+                drain(&done_rx);
+            }
+            return Ok(exit);
         }
         thread::sleep(POLL);
     };
-    drain(&done_rx);
+    if consumed {
+        let until = deadline.min(Instant::now() + DRAIN);
+        let mut ended = 0;
+        while ended < 2 {
+            if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+                return Err(Stopped::Cancelled);
+            }
+            if over.load(Ordering::Relaxed) {
+                return Err(too_large(&err));
+            }
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Ok(if Instant::now() >= deadline {
+                    Exit::TimedOut
+                } else {
+                    Exit::Abnormal {
+                        stderr: "stdout decoder or pipe incomplete".into(),
+                    }
+                });
+            }
+            if done_rx.recv_timeout(left.min(POLL)).is_ok() {
+                ended += 1;
+            }
+        }
+        if decoded.load(Ordering::Acquire) != 1 {
+            return Ok(Exit::Abnormal {
+                stderr: "stdout decoder failed".into(),
+            });
+        }
+    } else {
+        drain(&done_rx);
+    }
     let stdout = take(&out);
     // A child can exit before the loop sees its output pass the cap.
     if stdout.len() > stdout_cap || over.load(Ordering::Relaxed) {
@@ -309,6 +505,7 @@ fn reader(
     cap: usize,
     done: Sender<()>,
     limit: Option<(usize, Arc<AtomicBool>)>,
+    guard: Option<Arc<dyn Send + Sync>>,
 ) -> Shared {
     let buffer: Shared = Arc::default();
     let shared = Arc::clone(&buffer);
@@ -335,6 +532,7 @@ fn reader(
                 }
             }
         }
+        drop(guard);
         let _ = done.send(());
     });
     buffer

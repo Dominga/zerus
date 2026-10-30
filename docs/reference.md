@@ -4239,6 +4239,13 @@ does not restart them; failures after startup still return nonzero. A refused
 service needs explicit repair and another maintained start. Native installation,
 windowless startup and Windows runtime qualification remain outstanding.
 
+`hgs desktop import-evidence --json` publishes bounded private **Staged**
+import evidence from G3's inherited-stdio stream. It reads no source store,
+starts no service and grants no writer authority. Probe the exact
+`Desktop import ABI: desktop-import-v1` help marker first. Input deadlines,
+fixed digest paths, immutable UUID commits and the read-only `import-status`
+lookup are specified in the [desktop import transport](desktop-import-transport.md).
+
 ### Event stream
 
 ```sh

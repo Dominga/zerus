@@ -1,0 +1,1 @@
+{"version":1,"collapsed":["alpha"],"default_project":"beta","order":{"alpha":["workstation\nclaude/sample-project/review","studio\ncodex/sample-project/build"],"beta":["workstation\narchive\narchive-example"]},"run_groups":[["workstation\nrun-one","alpha"],["studio\nrun-two","beta"]],"runs_seeded":true}

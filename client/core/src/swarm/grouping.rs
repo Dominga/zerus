@@ -71,6 +71,10 @@ pub struct SyncView {
     /// the JSON when there is none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notice: Option<String>,
+    /// Presentation-only status: the saved local layout was refused and is
+    /// retained. This carries no service writer/drain authority.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub layout_save_paused: bool,
 }
 
 impl Default for SyncView {
@@ -83,6 +87,7 @@ impl Default for SyncView {
             status_error: false,
             conflicts: 0,
             notice: None,
+            layout_save_paused: false,
         }
     }
 }
@@ -880,8 +885,12 @@ mod tests {
         let (_, out) = grouping.take();
         let json = serde_json::to_value(out.unwrap()).unwrap();
         assert!(json.get("notice").is_none(), "absent when there is none");
+        assert!(json.get("layout_save_paused").is_none());
+        let legacy: GroupingOut = serde_json::from_value(json).unwrap();
+        assert!(!legacy.sync.layout_save_paused);
         grouping.set_sync(SyncView {
             notice: Some("The saved project changes were not applied.".into()),
+            layout_save_paused: true,
             ..SyncView::default()
         });
         let (_, out) = grouping.take();
@@ -890,7 +899,9 @@ mod tests {
             json["notice"],
             "The saved project changes were not applied."
         );
+        assert_eq!(json["layout_save_paused"], true);
         let back: GroupingOut = serde_json::from_value(json).unwrap();
+        assert!(back.sync.layout_save_paused);
         assert_eq!(
             back.sync.notice.as_deref(),
             Some("The saved project changes were not applied.")

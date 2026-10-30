@@ -22,6 +22,8 @@ export const STARTING = "Project sync is starting.";
 export const GONE = "This project is no longer listed. Open the menu again.";
 export const conflictsText = (n: number) => `${n} project conflict(s) need review in Swarm.`;
 export const unavailable = (detail: string) => `Project sync unavailable: ${detail}`;
+export const LAYOUT_NOTICE_TITLE = "Project layout not saved";
+export const LAYOUT_NOTICE_TEXT = "The saved project layout could not be read. The original is kept unchanged. Changes to the project layout in this session will not be saved.";
 
 export const emptyGrouping = (): GroupingOut => ({
   loaded: false, default_project: INBOX, headers: [], ready: false, reason: STARTING,
@@ -31,7 +33,7 @@ export const emptyGrouping = (): GroupingOut => ({
 /** Qt's live and archive member identities (SessionOrganization.cpp:225). */
 export const memberOf = (s: Row) => s.state === "archived" ? `${s.rawMachine}\narchive\n${s.archiveId ?? ""}` : `${s.rawMachine}\n${s.name}`;
 
-type Say = (tone: "error" | "warn" | "info", text: string, sticky?: boolean, key?: string) => void;
+type Say = (tone: "error" | "warn" | "info", text: string, sticky?: boolean, key?: string, title?: string) => void;
 type Row = Pick<Session, "rawMachine" | "name"> & Partial<Pick<Session, "state" | "archiveId">>;
 export type Assignment = { group: string; rank: number };
 
@@ -41,6 +43,7 @@ export function createOrganization(say: Say, unsay: (key: string) => void = () =
   const defaultProject = createMemo(() => grouping().default_project);
   /** The hub's notice last shown; a view without one clears it. */
   let shownNotice: string | undefined;
+  let layoutPauseShown = false;
 
   /**
    * Applies a batch's grouping after the catalog applied its rows. A replace
@@ -52,6 +55,12 @@ export function createOrganization(say: Say, unsay: (key: string) => void = () =
       // The Rust side resends a kept edit; once its status is no error any more, the sync notice it raised is stale.
       if (untrack(grouping).status_error && !b.grouping.status_error) unsay(SYNC_NOTICE);
       setGrouping(b.grouping);
+      // The window's existing notice bus renders this as a titled sticky
+      // toast. Later batches and dismissals do not repeat it this startup.
+      if (b.grouping.layout_save_paused && !layoutPauseShown) {
+        layoutPauseShown = true;
+        say("warn", LAYOUT_NOTICE_TEXT, true, undefined, LAYOUT_NOTICE_TITLE);
+      }
       // The hub's one-time warning, shown once until it clears (a dropped draft's reason).
       const notice = b.grouping.notice || undefined;
       if (notice && notice !== shownNotice) say("warn", notice, true);

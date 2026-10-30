@@ -190,10 +190,12 @@ impl Pump {
         self.lock().grouping.take_layout()
     }
 
-    pub fn load_layout(&self, bytes: &[u8]) {
+    pub fn load_layout(&self, bytes: &[u8]) -> Result<(), &'static str> {
+        let layout = Layout::try_from_json(bytes)?;
         let mut inner = self.lock();
-        inner.grouping.replace_layout(Layout::from_json(bytes));
+        inner.grouping.replace_layout(layout);
         self.wake(inner);
+        Ok(())
     }
 
     pub fn take_runs(&self) -> Option<zerus_client_core::swarm::runs::Snapshot> {
@@ -1130,7 +1132,7 @@ mod tests {
         pump.push(a_row());
         present(&pump, &organization());
         let _ = pump.take(PARK);
-        pump.load_layout(br#"{"collapsed":["alpha"]}"#);
+        pump.load_layout(br#"{"collapsed":["alpha"]}"#).unwrap();
         let batch = pump.take(PARK);
         assert!(batch.grouping.unwrap().headers[0].collapsed);
         pump.resend();

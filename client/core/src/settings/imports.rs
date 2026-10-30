@@ -107,18 +107,8 @@ fn converted(key: &str, value: &QtValue) -> Result<Value, &'static str> {
         {
             return Err("invalid machine color");
         }
-    } else {
-        let valid = match value {
-            QtValue::Bool(_) | QtValue::Int(_) => true,
-            QtValue::Double(n) => n.is_finite(),
-            QtValue::Text(s) => {
-                ["", "0", "1", "true", "false"].contains(&s.to_ascii_lowercase().as_str())
-            }
-            _ => false,
-        };
-        if !valid {
-            return Err("invalid preference flag");
-        }
+    } else if super::checked_qt_flag(value).is_none() {
+        return Err("invalid preference flag");
     }
     Ok(super::from_qt(kind, value))
 }

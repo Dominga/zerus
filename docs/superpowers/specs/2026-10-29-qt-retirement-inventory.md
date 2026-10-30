@@ -397,9 +397,11 @@ Remaining source coverage includes `projectFolderSplit`,
 repository-clone pending state, `swarm/observed*`, `tray.conf`, task inspector
 geometry, `.zerus-files.json` and the rest of the interim stores listed below.
 Source discovery and production integration remain separate; adapters do not
-by themselves publish
-eligible evidence or transfer writer authority. Approval-reset evidence must
-still inspect both prior Qt and interim policy; former consent never migrates.
+by themselves publish eligible evidence or transfer writer authority. The
+`approval_policies` adapter inspects Qt and interim Next choices together,
+preserves unknown Next policy details privately and emits no consent. Source
+discovery, production publication and the service's approval-reset presentation
+remain separate integration work.
 
 Acceptance: repeated import is idempotent; every source stays unchanged; unknown/malformed fields survive in private quarantine; no dangerous feature auto-enables; no old alert/message/request replays; the client writer stops before the `hgs` writer starts.
 

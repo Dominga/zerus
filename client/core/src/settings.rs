@@ -628,6 +628,37 @@ impl Contents {
     }
 }
 
+/// The existing settings decoder, without creating a live store or writer.
+/// Migration reads only bounded original bytes and retains unsupported sources.
+pub(crate) fn snapshot_values(bytes: &[u8]) -> Result<Map<String, Value>, SnapshotError> {
+    if bytes.len() as u64 > MAX_STORE {
+        return Err(SnapshotError::TooLarge);
+    }
+    Contents::parse(bytes)
+        .map(|contents| contents.values)
+        .ok_or(SnapshotError::Unsupported)
+}
+
+pub(crate) enum SnapshotError {
+    TooLarge,
+    Unsupported,
+}
+
+/// Reject damaged/unsupported flag values before the existing Qt conversion.
+/// Migration never turns an unreadable policy into an assumed false choice.
+pub(crate) fn checked_qt_flag(value: &QtValue) -> Option<bool> {
+    let valid = match value {
+        QtValue::Bool(_) | QtValue::Int(_) => true,
+        QtValue::Double(n) => n.is_finite(),
+        QtValue::Text(s) => {
+            s.len() <= 5
+                && ["", "0", "1", "true", "false"].contains(&s.to_ascii_lowercase().as_str())
+        }
+        _ => false,
+    };
+    valid.then(|| value.to_bool())
+}
+
 /// A change other code reacts to: the setting's name, its new value and the
 /// store's revision after it. Revisions grow with every change, in the order
 /// the store took them, so a reader can drop an answer or event that arrives

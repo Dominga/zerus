@@ -208,8 +208,21 @@ with distinct project/task/request identities. A delivery is one indivisible
 item: over 1 MiB is refused before JSON allocation, never truncated. Missing or
 mismatched markers, unknown versions and orphan/unidentified files stay for
 review; this adapter does not discover or authorize them. It never reserves,
-releases, submits or reconciles a message. Approval-reset and remaining source
+releases, submits or reconciles a message. Source discovery and remaining
 families are separate slices.
+
+`approval_policies(&QtSnapshot, next_settings_bytes)` inspects both policy
+stores before returning either `qt-approval-policy` or `next-approval-policy`
+stream. It reuses the existing Qt flag conversion and bounded Next settings
+decoder without starting either settings writer. Private snapshots distinguish
+an absent key, the former enabled choice and Next's old Qt-at-switch notice;
+unknown Next policy fields survive privately. The raw source hashes remain in
+the body-free manifest. Malformed flags, unsupported schemas or oversized
+policy bodies refuse the pair and retain both originals. Attach each source's
+fresh identity/hash recheck before publication. Every snapshot/manifest keeps
+`automatic_approvals:false`; evidence grants no opt-in, writes no setting or
+approval reservation and never delivers a request. Source discovery and G1's
+policy/UI integration remain separate.
 
 ## Delivery boundary
 

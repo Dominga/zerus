@@ -10,14 +10,14 @@ use super::store::{self, canonical_uuid, Event, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|move-task|add-to-phase|approve-phase|discard-phase|return-to-draft|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|spans|profile|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|close-phase|integrate-build|start-ahead|test|run|templates|safe-action|reports-to|sub-lead --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|move-task|add-to-phase|approve-phase|discard-phase|return-to-draft|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|spans|profile|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|close-phase|integrate-build|start-ahead|full-tests|test|run|templates|safe-action|reports-to|sub-lead --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
 
 const MUTATIONS: &[&str] = &[
     "plan", "extend", "edit-draft", "move-phase", "move-task", "add-to-phase", "approve-phase", "discard-phase", "return-to-draft", "reject-phase", "undo-reject-phase",
     "rework-phase", "reports-to", "sub-lead", "finish", "approve", "commit", "discard", "pause", "resume", "stop",
     "archive", "report", "ask", "reply", "hold", "release", "accept", "reject", "skip-stage", "send-back", "reassign", "take-over", "cancel",
     "retry", "check", "expect", "swap-member", "use-last-reply", "relaunch", "add-member", "scale", "drain", "pause-member", "resume-member", "remove-member", "settings", "finding",
-    "draft", "propose", "close-phase", "integrate-build", "start-ahead",
+    "draft", "propose", "close-phase", "integrate-build", "start-ahead", "full-tests",
 ];
 
 fn text<'a>(input: &'a Value, key: &str) -> &'a str {
@@ -597,6 +597,9 @@ pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<
     // U59: the plan mode (standard or free) the team's phase runs in, and the
     // free phase's own state for the plan header.
     value["plan_mode"] = json!(team.plan_mode);
+    // U62 (#715): the full-run policy and the owner's one-time grant.
+    value["full_tests"] = json!(team.settings.full_tests);
+    value["full_tests_grant"] = json!(team.full_tests_grant);
     // U59: the lead's mode proposal at the start of planning; the owner's
     // approval chooses one of the two.
     value["plan_mode_offer"] = json!(team.plan_mode_offer);
@@ -3509,9 +3512,25 @@ fn team_run_in(folder: &std::path::Path, input: &Value, wait: bool, wait_seconds
     // Validate here too: a bad template never reaches the worker's queue.
     let template = text(input, "template").to_owned();
     super::templates::plan(&template, &input["args"], folder)?;
+    // U62 (#715): the full suite is not a member's run. The team's policy says
+    // who may start it; a one-time owner grant is bound to a release and used
+    // once. The refusal names the estimate and how to ask.
+    let full = full_test_run(&template, &input["args"]);
+    let use_grant = if full { check_full_run(&team, folder)? } else { false };
     let request = json!({"op":"run","request_id":request_id,"team":team.id,"member":member_id,"attempt":attempt_id,
         "template":template,"args":input["args"].clone(),"task":task.id,"input":input});
     let path = super::outbox::push(folder, &request)?;
+    if use_grant {
+        let mut store = Store::open(false)?;
+        let release = team.full_tests_grant.as_ref().map(|grant| grant.release.clone()).unwrap_or_default();
+        store.mutate(None, &team.id, None, |team, events| {
+            if team.full_tests_grant.is_some() {
+                team.full_tests_grant = None;
+                events.push(Event::new("full_tests_grant_used", json!({"release":release})));
+            }
+            Ok(Value::Null)
+        })?;
+    }
     let queued = json!({
         "status":"queued", "request_id":request_id, "path":path.to_string_lossy(),
         "note":"Zerus runs the template outside your sandbox; ask again with the same request_id (or --wait) to read the exit code."
@@ -3529,6 +3548,52 @@ fn team_run_in(folder: &std::path::Path, input: &Value, wait: bool, wait_seconds
 fn running_note(request_id: &str) -> Value {
     json!({"status":"running","request_id":request_id,
         "note":"Zerus is running it; ask again with the same request_id to read the exit code."})
+}
+
+/// U62 (#715): the templates that run a whole suite when nothing narrows them.
+/// A QtTest binary is one suite, a piece the map names; cargo-test without a
+/// filter, binary or package and the Android unit tests run everything.
+fn full_test_run(template: &str, args: &Value) -> bool {
+    let empty = |key: &str| text(args, key).is_empty();
+    match template {
+        "cargo-test" => empty("filter") && empty("bin") && empty("package"),
+        "android-test" => true,
+        _ => false,
+    }
+}
+
+/// U62 (#715): the full run's recorded time from the project's map, for the
+/// refusal; "unknown time" when the project has no map.
+fn full_estimate(folder: &std::path::Path, team: &Team) -> String {
+    crate::test_discipline::full_seconds(folder, Some(&team.id))
+        .ok()
+        .flatten()
+        .map(crate::test_discipline::affected::duration)
+        .unwrap_or_else(|| "unknown time".to_owned())
+}
+
+/// U62 (#715): whether a full run may start; true when it spends the owner's
+/// one-time grant. Pure, so the refusal is tested without a store.
+fn check_full_run(team: &Team, folder: &std::path::Path) -> anyhow::Result<bool> {
+    use crate::state::teams::model::FullTests;
+    let policy = team.settings.full_tests;
+    if policy == FullTests::Allowed {
+        return Ok(false);
+    }
+    let granted = team.full_tests_grant.is_some();
+    if !granted || policy == FullTests::Never {
+        let estimate = full_estimate(folder, team);
+        bail!(
+            "This is a full test run ({estimate}). The team's full_tests is {}: ask the owner for one run bound to a release, then set it with {} | hgs team full-tests --json, or the owner sets \"full_tests\":\"allowed\".",
+            match policy {
+                FullTests::Never => "\"never\"",
+                FullTests::Ask => "\"ask\"",
+                FullTests::Allowed => "\"allowed\"",
+            },
+            json!({"request_id":"<new UUID>","team":team.id,"release":"<release>"})
+        );
+    }
+    Ok(true)
 }
 
 /// U21: the built-in set, the owner's additions and the global off switch.
@@ -4345,7 +4410,41 @@ mod tests {
         assert!(!roster_word_rule(&team, "relaunch", &json!({"member":""})).needed());
     }
 
-    /// U54: a renamed session stays the member. The caller matches by its run
+    /// U62 (#715): only an unnarrowed test template is a full run; the team's
+    /// policy and the owner's one-time grant decide who may start one.
+    #[test]
+    fn a_full_test_run_needs_the_teams_policy_or_the_owners_grant() {
+        use crate::state::teams::model::{FullTests, FullTestsGrant};
+        assert!(super::full_test_run("cargo-test", &json!({})));
+        assert!(!super::full_test_run("cargo-test", &json!({"filter":"teams"})));
+        assert!(!super::full_test_run("qt-test", &json!({"suite":"test_teams"})));
+        assert!(super::full_test_run("android-test", &json!({})));
+        assert!(!super::full_test_run("cargo-build", &json!({})));
+        let mut team = running_team();
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().to_path_buf();
+        // Ask without a grant: refused with the estimate and the command.
+        team.settings.full_tests = FullTests::Ask;
+        let error = super::check_full_run(&team, &folder).unwrap_err().to_string();
+        assert!(
+            error.contains("full test run") && error.contains("full-tests") && error.contains("unknown time"),
+            "{error}"
+        );
+        // The owner's one-time grant opens one run.
+        team.full_tests_grant = Some(FullTestsGrant { release: "v1.57.0".into(), at: 1.0, by: "You".into() });
+        assert!(super::check_full_run(&team, &folder).unwrap());
+        // "allowed" opens every full run; "never" refuses even a grant.
+        team.settings.full_tests = FullTests::Allowed;
+        assert!(!super::check_full_run(&team, &folder).unwrap());
+        team.settings.full_tests = FullTests::Never;
+        assert!(super::check_full_run(&team, &folder).is_err(), "never refuses even a grant");
+        // Status shows the policy and a grant.
+        team.settings.full_tests = FullTests::Ask;
+        let value = super::view_with(&team, &[], None);
+        assert_eq!(value["full_tests"], "ask");
+        assert_eq!(value["full_tests_grant"]["release"], "v1.57.0");
+    }
+
     /// id or conversation id as well as by name, and the team record follows the
     /// rename once (the next command matches by name again).
     #[test]

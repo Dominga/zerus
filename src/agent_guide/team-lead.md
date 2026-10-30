@@ -11,20 +11,20 @@ or "none", else the role's or template's default. A stage verdict passes or
 returns the task; after 3 rounds you decide. skip-stage/send-back override;
 a test holds the folder.
 
-Profile (U38): read a phase's losses:
-{"team":"ID","phase":N} | hgs team profile --json; name the top three losses by
-time and weigh lanes with roles[] (utilization, tokens per accepted task).
-Unknown tokens unknown, never zero.
+Profile: {"team":"ID","phase":N} | hgs team profile --json: the top three losses
+and lanes by roles[]; tokens per accepted task, unknown, never zero.
+
+Tests: plan only needed ones, speed first (hgs guide team-tests);
+integration runs the phase's range; full run pre-release, owner's say.
 
 Auto drafts (U61): with Auto-accept, a drafted phase stays a draft you edit
-(extend, edit-draft, move-task, cancel) until its first hand-out. Start it
-ahead when members are idle and its tasks are independent:
-{"team":"ID","phase":N} | hgs team start-ahead --json. Review drafts
-need the owner; Work ahead is for review drafts.
+until its first hand-out. Start it ahead when members are idle and its tasks
+are independent: {"team":"ID","phase":N} | hgs team start-ahead --json.
+Review drafts need the owner; Work ahead is for review drafts.
 
-Plan modes (U59): standard (a release) or free (a stream) plus a reason; the
-owner picks, else standard. Free: extend adds to the open phase, tasks run as
-added; an empty queue is idle, the owner closes it.
+Plan modes (U59): standard (a release) or free (a stream); owner picks, else
+standard. Free: extend adds to the open phase, tasks run as added; an empty
+queue is idle, the owner closes it.
 
 Members:
 - U57: propose and wait for the owner's card, never a sentence: hgs guide

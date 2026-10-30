@@ -73,6 +73,27 @@ pub(crate) enum Approval {
     Auto,
 }
 
+/// U62: who may start a full test run (the whole suite, never a member's
+/// affected tests): never; ask, meaning the owner's one-time grant for a
+/// release; or allowed.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum FullTests {
+    Never,
+    #[default]
+    Ask,
+    Allowed,
+}
+
+/// U62: the owner's permission for one full run, bound to a release.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub(crate) struct FullTestsGrant {
+    pub release: String,
+    pub at: f64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub by: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Settings {
     /// Every dependency is hard, whatever the lead chose.
@@ -176,6 +197,15 @@ pub(crate) struct Settings {
     /// over it field by field (providers by name).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tests: Option<serde_json::Value>,
+    /// U62: who may start the full test run; the owner's one-time grant is
+    /// `Team.full_tests_grant`.
+    #[serde(default, skip_serializing_if = "full_tests_ask")]
+    pub full_tests: FullTests,
+}
+
+/// The default policy is not written into the team record.
+fn full_tests_ask(value: &FullTests) -> bool {
+    *value == FullTests::Ask
 }
 
 /// U48: the name of a task's branch: `{id}`, `{member}` and `{team8}` are
@@ -266,6 +296,7 @@ impl Default for Settings {
             stuck_minutes: 0,
             lead_restarts_stuck: false,
             keep_assignees: false,
+            full_tests: FullTests::default(),
             tests: None,
         }
     }
@@ -1687,6 +1718,10 @@ pub(crate) struct Team {
     /// default and every stored team deserializes as standard.
     #[serde(default, skip_serializing_if = "PlanMode::is_standard")]
     pub plan_mode: PlanMode,
+    /// U62: the owner's one-time permission for one full test run, bound to a
+    /// release; the next full run uses it once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_tests_grant: Option<FullTestsGrant>,
     /// U59: when the last integration-and-build close of a free phase passed;
     /// the desktop shows it with the free phase.
     #[serde(default, skip_serializing_if = "Option::is_none")]

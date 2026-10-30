@@ -112,6 +112,8 @@ pub struct Row {
     path: String,
     branch: String,
     state: String,
+    /// The table cell; `details` carries every line for its tooltip.
+    brief: String,
     details: String,
     selectable: bool,
     checked: bool,
@@ -145,8 +147,8 @@ fn details(row: &Value) -> String {
     let mut lines = review::summary(row);
     if review::local_data(row) {
         lines.push(format!(
-            "Ignored files: {} entries, {}.",
-            row["ignored_count"].as_u64().unwrap_or(0),
+            "Ignored files: {}, {}.",
+            review::entries(row["ignored_count"].as_u64().unwrap_or(0)),
             review::data_size(row["ignored_bytes"].as_f64().unwrap_or(0.))
         ));
         for item in row["ignored"].as_array().into_iter().flatten().take(5) {
@@ -208,6 +210,12 @@ impl Dialog {
                     path: text(raw, "path").into(),
                     branch: text(raw, "branch").into(),
                     state: state.into(),
+                    // A result shows its message; a fresh row the design's one-line summary.
+                    brief: if item.outcome.is_some() {
+                        detail.lines().next().unwrap_or_default().to_owned()
+                    } else {
+                        review::summary_line(raw)
+                    },
                     details: detail,
                     selectable,
                     checked: selectable
@@ -329,9 +337,9 @@ impl Dialog {
                 .filter(|r| review::local_data(r))
                 .map(|r| {
                     format!(
-                        "{}: {} entries, {}\n{}",
+                        "{}: {}, {}\n{}",
                         text(r, "path"),
-                        r["ignored_count"].as_u64().unwrap_or(0),
+                        review::entries(r["ignored_count"].as_u64().unwrap_or(0)),
                         review::data_size(r["ignored_bytes"].as_f64().unwrap_or(0.)),
                         r["ignored"]
                             .as_array()

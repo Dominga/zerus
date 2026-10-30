@@ -311,6 +311,30 @@ pub fn summary(row: &Value) -> Vec<String> {
     parts
 }
 
+/// The summary as one short table cell, as the design writes it ("Merged
+/// into main, used 9 days ago"): later phrases continue the sentence.
+pub fn summary_line(row: &Value) -> String {
+    summary(row)
+        .iter()
+        .enumerate()
+        .map(|(index, part)| {
+            let part = part.trim().trim_end_matches('.');
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) if index > 0 => first.to_lowercase().chain(chars).collect(),
+                _ => part.to_owned(),
+            }
+        })
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// "1 entry", "2 entries".
+pub fn entries(count: u64) -> String {
+    format!("{count} {}", if count == 1 { "entry" } else { "entries" })
+}
+
 /// The lines that explain a removal decision.
 pub fn decision(row: &Value) -> Vec<String> {
     let mut lines = vec![format!("Code: {} (local Git refs).", integration(row))];
@@ -751,6 +775,12 @@ mod tests {
                 "Locked by git."
             ]
         );
+        assert_eq!(
+            summary_line(&row),
+            "Merged into main, update Zerus on this computer to review local files before cleanup, 2 changed, local files outside Git, locked by git"
+        );
+        assert_eq!(entries(1), "1 entry");
+        assert_eq!(entries(2), "2 entries");
         let lines = decision(&row);
         assert_eq!(lines[0], "Code: Merged into main (local Git refs).");
         assert_eq!(lines[1], "Unsaved work: 2 changed and 0 untracked files.");

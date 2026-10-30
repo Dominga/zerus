@@ -7,7 +7,7 @@ import { createVirtualizer, elementScroll, type Range } from "@tanstack/solid-vi
 import { attachmentFetch, attachmentMedia, attachmentOpen, copyVerbatim } from "../../bridge";
 import { notify } from "../../store/actions";
 import { previews } from "../../store/attachments";
-import { mediaPlayback } from "../../store/mediaPlayback";
+import { mediaPlayback, playingId, setPlayingId } from "../../store/mediaPlayback";
 import { pageHidden } from "../../store/visibility";
 import { recordingBlob } from "./voice-playback";
 import { cardTarget, createOpen, readCards } from "./attachment-card";
@@ -265,8 +265,6 @@ function Waveform(props: { values: number[] }) {
   return <>{layer("rest")}{layer("played")}</>;
 }
 
-const [mediaOwner, setMediaOwner] = createSignal<string>();
-
 function MediaCard(props: { item: MediaMessage; scope?: AttachmentScope; expanded?: boolean; onExpanded?: (open: boolean) => void }) {
   const it = props.item;
   const video = it.media === "video";
@@ -285,7 +283,7 @@ function MediaCard(props: { item: MediaMessage; scope?: AttachmentScope; expande
   let claim: ReturnType<typeof mediaPlayback.take> | undefined;
   let pendingSeek: number | undefined;
   const clear = () => {
-    if (mediaOwner() === it.id) setMediaOwner(undefined);
+    if (claim?.current() && playingId() === it.id) setPlayingId(undefined);
     claim?.release(); claim = undefined;
     player?.pause(); setPlaying(false); setLoading(false);
     if (player) { player.removeAttribute("src"); player.load(); }
@@ -301,7 +299,7 @@ function MediaCard(props: { item: MediaMessage; scope?: AttachmentScope; expande
     if (!current || loading()) return;
     if (!claim?.current()) claim = mediaPlayback.take(clear, () => { if (loading()) clear(); else player?.pause(); });
     const mine = claim;
-    setMediaOwner(it.id);
+    setPlayingId(it.id);
     if (seekTo !== undefined) { pendingSeek = seekTo; setPosition(seekTo); }
     setError("");
     try {
@@ -314,7 +312,7 @@ function MediaCard(props: { item: MediaMessage; scope?: AttachmentScope; expande
       }
       await Promise.resolve();
       if (mine.current() && target() === current && player) await player.play();
-    } catch (failure) { if (mine.current()) { setError(`Could not play recording: ${String(failure)}`); setPlaying(false); if (mediaOwner() === it.id) setMediaOwner(undefined); } }
+    } catch (failure) { if (mine.current()) { setError(`Could not play recording: ${String(failure)}`); setPlaying(false); if (playingId() === it.id) setPlayingId(undefined); } }
     finally { if (mine.current()) setLoading(false); }
   };
   const pause = () => { player?.pause(); setPlaying(false); };
@@ -328,7 +326,7 @@ function MediaCard(props: { item: MediaMessage; scope?: AttachmentScope; expande
   const failed = (event: Event) => {
     if (!claim?.current() || !objectUrl) return;
     setPlaying(false); setLoading(false);
-    if (mediaOwner() === it.id) setMediaOwner(undefined);
+    if (playingId() === it.id) setPlayingId(undefined);
     setError(`Could not play recording: ${(event.currentTarget as HTMLMediaElement).error?.message || "Recording is unavailable."}`);
   };
   const seek = (e: MouseEvent) => {
@@ -729,7 +727,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
     return [selection.anchorNode, selection.focusNode].some((node) => !!node && scroller.contains(node));
   };
   const playingIndex = createMemo(() => {
-    const id = mediaOwner();
+    const id = playingId();
     return id ? view.items.findIndex((item) => item.id === id) : -1;
   });
   const virtualizer = createVirtualizer({

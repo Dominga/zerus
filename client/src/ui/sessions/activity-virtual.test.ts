@@ -23,6 +23,10 @@ describe("Activity copy and virtual retention", () => {
     expect(expanded).toContain("voice transcript");
   });
 
+  it("keeps a loading or playing media row mounted while it is scrolled out", () => {
+    expect(activityRange({ startIndex: 6, endIndex: 7, overscan: 1, count: 12 }, 1)).toEqual([1, 5, 6, 7, 8]);
+  });
+
   it("retains the playing row in order without duplicating visible rows", () => {
     const range = { startIndex: 4, endIndex: 5, overscan: 1, count: 10 };
     expect(activityRange(range, -1)).toEqual([3, 4, 5, 6]);

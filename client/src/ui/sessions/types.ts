@@ -200,6 +200,8 @@ export interface ActivityItem {
   at: string;
   title?: string;
   body?: string;
+  /** The native prompt echo to restore if its attachment cannot be read. */
+  echoBody?: string;
   code?: string;
   lines?: string[];
   attachments?: ItemAttachment[];

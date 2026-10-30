@@ -846,6 +846,25 @@ written, including recovery. The one exit hook closes voice and the composers,
 then flushes this store on quit and termination signals. A send whose durable
 save has not started cannot dispatch during shutdown.
 
+## Account usage and automatic recovery
+
+The session header shows the bound account's usage meters and Refresh action.
+The screens worker reads `hgs [@host] account inspect --session NAME --refresh`
+on the same five-minute schedule and two-slot queue as profile usage, retaining
+at most 64 run-scoped snapshots. The composer's Usage limit chip shows exhausted
+limits and the current Claude recovery notice; its popover keeps cached values
+visible during refresh and offline states. The Context chip opens the Session
+usage section in a popover, with no side panel required.
+
+The Recovery chip and panel use only the followed inspection's recovery job and
+provider error. Retry now and Cancel retry run through the action lane as
+`hgs [@host] recovery action --scoped-json`, pinned to a fresh request id and the
+exact session, run, conversation and waiting job. The durable receipt must echo
+all of them; a failed, uncertain, timed-out or malformed outcome is never
+replayed. Attempts, Open Terminal, Refresh usage and Settings follow Qt's paths.
+No additional background poller runs for these chips; the durable fanout remains
+G1's work.
+
 ## Attachments
 
 A message can have up to eight nonempty attachments, at most 10 MiB each and

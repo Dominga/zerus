@@ -49,6 +49,8 @@ use zerus_client_core::views::accounts::{
 use zerus_client_core::views::machines::{MachinesState, MachinesView};
 use zerus_client_core::views::projects::{ProjectsView, SwarmState};
 use zerus_client_core::views::schedule::{Screen, USAGE_INTERVAL};
+use zerus_client_core::views::session_usage::{SessionUsageRef, SessionUsageState};
+use zerus_client_core::views::usage::Usage;
 use zerus_client_core::views::FleetEntry;
 use zerus_client_core::ComputerId;
 
@@ -211,6 +213,9 @@ struct Hub {
     display: AccountsDisplay,
     machines: MachinesState,
     swarm: SwarmState,
+    /// The selected session's account usage and the view the webview last saw.
+    session_usage: SessionUsageState,
+    session_shown: Option<Value>,
     /// The view each visible screen last showed, so a change emits once.
     shown: BTreeMap<Screen, Value>,
     /// Computation order, independent of which IPC request finishes last.
@@ -255,11 +260,12 @@ impl Hub {
     }
 
     /// The queued inspects that start now: at most two in flight, each on a
-    /// host that is still reachable.
+    /// host that is still reachable. The selected session goes first.
     fn dispatch(&mut self) -> Vec<Run> {
         let Self {
             fleet,
             accounts: state,
+            session_usage,
             ..
         } = self;
         let reachable = |host: &ComputerId| {
@@ -267,13 +273,17 @@ impl Hub {
                 .iter()
                 .any(|entry| &entry.computer == host && accounts::reachable(entry))
         };
-        state
-            .dispatch(&reachable)
+        let mut runs: Vec<Run> = session_usage
+            .dispatch(&reachable, state)
             .into_iter()
-            .map(Run::Usage)
-            .collect()
+            .map(Run::SessionUsage)
+            .collect();
+        runs.extend(state.dispatch(&reachable).into_iter().map(Run::Usage));
+        runs
     }
 }
+
+type SessionNotify = Arc<dyn Fn() + Send + Sync>;
 
 struct Shared {
     hub: Mutex<Hub>,
@@ -286,6 +296,7 @@ struct Shared {
     /// Woken whenever an `account ls` reply is filed.
     catalog_done: Condvar,
     launch_notify: OnceLock<LaunchNotify>,
+    session_notify: OnceLock<SessionNotify>,
     #[cfg(test)]
     panic_projection: std::sync::atomic::AtomicU8,
     #[cfg(test)]
@@ -301,6 +312,7 @@ pub struct Screens(Arc<Shared>);
 enum Run {
     Catalog(ComputerId),
     Usage(UsageRef),
+    SessionUsage(SessionUsageRef),
     Machines,
     Resolve(String),
     Check(String),
@@ -351,6 +363,7 @@ impl Screens {
             clock,
             catalog_done: Condvar::new(),
             launch_notify: OnceLock::new(),
+            session_notify: OnceLock::new(),
             #[cfg(test)]
             panic_projection: std::sync::atomic::AtomicU8::new(0),
             #[cfg(test)]
@@ -361,6 +374,11 @@ impl Screens {
     /// Where New session hears of its computer's replies; set once.
     pub fn on_launch_change(&self, notify: LaunchNotify) {
         let _ = self.0.launch_notify.set(notify);
+    }
+
+    /// Where the composer hears that its session's usage changed; set once.
+    pub fn on_session_usage_change(&self, notify: SessionNotify) {
+        let _ = self.0.session_notify.set(notify);
     }
 
     /// The app's hub: `default_hgs()` on Tauri's blocking pool, the fleet from
@@ -374,6 +392,7 @@ impl Screens {
         );
         let started = Instant::now();
         let launch_app = app.clone();
+        let session_app = app.clone();
         let screens = Self::new(
             zerus_client_core::default_hgs(),
             allowed,
@@ -388,6 +407,9 @@ impl Screens {
         );
         screens.on_launch_change(Arc::new(move |computer: &ComputerId| {
             let _ = launch_app.emit("launch-accounts-changed", computer.0.clone());
+        }));
+        screens.on_session_usage_change(Arc::new(move || {
+            let _ = session_app.emit("session-usage-changed", ());
         }));
         screens.start_ticker();
         screens
@@ -433,10 +455,26 @@ impl Screens {
         let runs = {
             let now = self.now();
             let mut hub = self.current();
-            self.accounts_due(&mut hub, now, false)
+            let mut runs = self.accounts_due(&mut hub, now, false);
+            runs.extend(self.session_due(&mut hub, now, false));
+            runs
         };
         self.run(runs);
         self.publish();
+        self.publish_session_usage();
+    }
+
+    /// The selected session's usage read, due on the same five-minute clock
+    /// and two-slot dispatch as the account screens.
+    fn session_due(&self, hub: &mut Hub, now: u64, force: bool) -> Vec<Run> {
+        if !self.0.allowed {
+            return Vec::new();
+        }
+        let online = hub.session_usage.current().is_some_and(|target| {
+            zerus_client_core::views::session_usage::online(&hub.fleet, &target.host)
+        });
+        hub.session_usage.ensure(now, online, force);
+        hub.dispatch()
     }
 
     /// The account reads that start now: one `account ls` per newly listed
@@ -631,6 +669,28 @@ impl Screens {
                 hub.dirty.extend(ACCOUNT_SCREENS);
                 hub.dispatch()
             }
+            Run::SessionUsage(target) => {
+                let reply = if failed {
+                    None
+                } else {
+                    reads::read(
+                        hgs,
+                        &target.host,
+                        &Read::SessionAccountUsage {
+                            name: target.name.clone(),
+                        },
+                    )
+                    .ok()
+                };
+                let mut hub = self.lock();
+                let Hub {
+                    session_usage,
+                    accounts,
+                    ..
+                } = &mut *hub;
+                session_usage.finish(&target, reply, accounts);
+                hub.dispatch()
+            }
             Run::Machines => {
                 let reply = if failed {
                     Err(READ_FAILED.into())
@@ -674,6 +734,7 @@ impl Screens {
         *settled = true;
         self.run(runs);
         self.publish();
+        self.publish_session_usage();
         if let (Some(computer), Some(notify)) = (heard, self.0.launch_notify.get()) {
             notify(&computer);
         }
@@ -708,6 +769,45 @@ impl Screens {
         for screen in changed {
             (self.0.notify)(screen);
         }
+    }
+
+    fn session_usage_of(&self, hub: &Hub) -> Usage {
+        let online = hub.session_usage.current().is_some_and(|target| {
+            zerus_client_core::views::session_usage::online(&hub.fleet, &target.host)
+        });
+        hub.session_usage.view(online)
+    }
+
+    fn publish_session_usage(&self) {
+        let notify = {
+            let mut hub = self.lock();
+            let value = serde_json::to_value(self.session_usage_of(&hub)).unwrap_or(Value::Null);
+            if hub.session_shown.as_ref() == Some(&value) {
+                None
+            } else {
+                hub.session_shown = Some(value);
+                self.0.session_notify.get().cloned()
+            }
+        };
+        if let Some(notify) = notify {
+            notify();
+        }
+    }
+
+    /// Follows one live session, or None to stop. `force` is Refresh usage.
+    /// The answer carries the current cached values while any read runs.
+    pub fn session_usage(&self, target: Option<SessionUsageRef>, force: bool) -> Usage {
+        let runs = {
+            let now = self.now();
+            let mut hub = self.current();
+            hub.session_usage.follow(target);
+            self.session_due(&mut hub, now, force)
+        };
+        self.run(runs);
+        let mut hub = self.lock();
+        let view = self.session_usage_of(&hub);
+        hub.session_shown = serde_json::to_value(&view).ok();
+        view
     }
 
     fn view_of(&self, hub: &mut Hub, screen: Screen) -> Value {
@@ -1173,6 +1273,16 @@ pub fn screen_visible(
 ) -> Result<(), String> {
     state.set_visible(screen, visible);
     Ok(())
+}
+
+/// The selected session's cached usage; `target` null stops later reads.
+#[tauri::command(async)]
+pub fn session_usage(
+    state: State<'_, Screens>,
+    target: Option<SessionUsageRef>,
+    force: bool,
+) -> Usage {
+    state.session_usage(target, force)
 }
 
 #[tauri::command(async)]
@@ -2813,5 +2923,44 @@ mod tests {
                 .status,
             "ok"
         );
+    }
+
+    #[test]
+    fn a_sessions_usage_read_is_bounded_and_releases_its_shared_slot() {
+        const CALL: &str = "account inspect --session claude/sample-project/review --refresh";
+        let h = harness(
+            json!({
+                CALL: {"stdout": json!({"status": "ok", "id": "claude-work", "provider": "claude", "run_id": "run-1", "checked_at": 123, "windows": []}).to_string()}
+            }),
+            true,
+        );
+        let target = SessionUsageRef {
+            host: ComputerId::local(),
+            name: "claude/sample-project/review".into(),
+            run_id: "run-1".into(),
+        };
+        let first = h.screens.session_usage(Some(target.clone()), false);
+        assert!(first.refreshing);
+        h.drain();
+        let view = h.screens.session_usage(Some(target.clone()), false);
+        assert_eq!(view.id, "claude-work");
+        assert_eq!(view.checked_at, Some(123.0));
+        assert!(!view.refreshing && !view.refresh_error);
+        assert_eq!(h.count(CALL), 1);
+        h.screens.session_usage(Some(target.clone()), true);
+        h.drain();
+        assert_eq!(h.count(CALL), 2);
+        h.at(300_000);
+        h.screens.tick();
+        h.drain();
+        assert_eq!(
+            h.count(CALL),
+            3,
+            "the timed refresh can start after completion"
+        );
+        h.screens.session_usage(None, false);
+        h.at(600_000);
+        h.screens.tick();
+        assert_eq!(h.count(CALL), 3, "no selected session starts no more reads");
     }
 }

@@ -508,6 +508,11 @@ mod tests {
         String::from_utf8_lossy(&output.stdout).trim().to_owned()
     }
 
+    /// The team as the store keeps it: serde_json::to_string, then read back.
+    fn round_trip(team: &Team) -> Team {
+        serde_json::from_str(&serde_json::to_string(team).unwrap()).unwrap()
+    }
+
     fn write(folder: &Path, file: &str, text: &str) {
         let path = folder.join(file);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -796,6 +801,9 @@ mod tests {
             let project = project(dir, false);
             let (mut team, folder) = team_in(&project, MemberFolder::Shared, &checkout_catalog(), "code");
             report(&mut team, &folder, false);
+            // The store saves the team and every tick reads it back: the hold
+            // from the report must survive that.
+            let mut team = round_trip(&team);
             let (review, prepared) = give(&mut team, "rev");
             assert!(!prepared.holds && prepared.checkout.is_empty(), "the review prepares nothing");
             assert_eq!(held(&team, "dev"), Some(1), "the checkout will fall back, so the folder is held from the report");
@@ -811,6 +819,8 @@ mod tests {
             let project = project(dir, false);
             let (mut team, folder) = team_in(&project, MemberFolder::Shared, &builtin(), "code");
             report(&mut team, &folder, false);
+            // The report's file state is saved with the team and read back.
+            let mut team = round_trip(&team);
             let reported = team.task(1).unwrap().attempts[0].report_files.clone();
             let before = reported.iter().find(|item| item["path"] == "src/lib.rs").cloned().unwrap();
             assert!(before["size"].as_u64().unwrap_or(0) > 0, "{before}");
@@ -839,6 +849,9 @@ mod tests {
             // The lead accepts: the stage ends, but its run still goes.
             let mut events = Vec::new();
             apply(&mut team, "accept", &json!({"task":1,"reason":"Fine"}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+            // The store saves the team and the next tick reads it back: the
+            // closed stage's run must survive that.
+            let mut team = round_trip(&team);
             assert_eq!(held(&team, "dev"), Some(1), "the folder stays held while the run goes");
             assert!(to_clean(&team).is_empty(), "the test's temporary folder stays too");
             assert!(runs_ended(&team).is_empty(), "the run is still going");
@@ -849,6 +862,46 @@ mod tests {
             assert_eq!(held(&team, "dev"), None);
             assert_eq!(to_clean(&team), [(1, test.clone())]);
             clean_up(&run_of(&team, &test)).unwrap();
+        });
+    }
+
+    #[test]
+    fn the_stage_facts_survive_a_save_and_reload_and_stay_out_of_the_status_wire() {
+        isolated(|dir| {
+            let project = project(dir, true);
+            let (mut team, worktree) = team_in(&project, MemberFolder::Worktree, &builtin(), "code");
+            report(&mut team, &worktree, true);
+            // The hold from the report and the report's file state are saved
+            // with the team and read back (the store writes serde_json::to_string).
+            let mut team = round_trip(&team);
+            assert!(team.task(1).unwrap().pipeline_run.as_ref().unwrap().hold_from_report);
+            assert!(!team.task(1).unwrap().attempts[0].report_files.is_empty());
+            assert_eq!(held(&team, "dev"), Some(1), "the hold survives the save");
+            // They never reach a client.
+            let view = super::super::commands::view_with(&team, &[], None);
+            assert!(view["tasks"][0]["attempts"][0].get("report_files").is_none(), "{view}");
+            assert!(view["tasks"][0]["pipeline_run"].get("hold_from_report").is_none(), "{view}");
+            // A closed stage's run is saved too and keeps the folder held.
+            let (review, _) = give(&mut team, "rev");
+            verdict(&mut team, "rev", &review);
+            let (test, _) = give(&mut team, "qa");
+            let tester = member_folder_path(&team, team.member("qa").unwrap()).unwrap();
+            let marker = json!({"request_id":test,"started":crate::state::now(),"timeout_secs":3600.0,"label":"cargo-test","command":"cargo test"});
+            super::super::outbox::write_running(Path::new(&tester), &test, &marker).unwrap();
+            let mut events = Vec::new();
+            apply(&mut team, "accept", &json!({"task":1,"reason":"Fine"}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+            let mut team = round_trip(&team);
+            assert!(team.task(1).unwrap().pipeline_run.as_ref().unwrap().runs.iter().any(|run| run.id == test && run.awaiting_run));
+            assert_eq!(held(&team, "dev"), Some(1), "the hold survives the save");
+            let view = super::super::commands::view_with(&team, &[], None);
+            assert!(
+                view["tasks"][0]["pipeline_run"]["runs"].as_array().unwrap().iter().all(|run| run.get("awaiting_run").is_none()),
+                "{view}"
+            );
+            std::fs::remove_file(super::super::outbox::running_path(Path::new(&tester), &test)).unwrap();
+            assert_eq!(runs_ended(&team), [(1, test.clone())]);
+            assert!(release(&mut team, 1, &test));
+            assert_eq!(held(&team, "dev"), None);
         });
     }
 

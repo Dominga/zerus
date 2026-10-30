@@ -519,6 +519,33 @@ fn attempt_end(attempt: &Attempt) -> f64 {
     attempt.report.as_ref().map(|report| report.at).or(attempt.turn_ended_at).unwrap_or(f64::INFINITY)
 }
 
+/// #538: a team stores the worker's stage facts (the report's file state, the
+/// hold from the report and a closed stage's run), but they never reach a
+/// client: the status wire carries the runs' `holds`, `changed` and states.
+pub(crate) fn strip_stage_facts(value: &mut Value) {
+    let Some(tasks) = value["tasks"].as_array_mut() else { return };
+    for task in tasks {
+        let Some(task) = task.as_object_mut() else { continue };
+        if let Some(attempts) = task.get_mut("attempts").and_then(|attempts| attempts.as_array_mut()) {
+            for attempt in attempts {
+                if let Some(attempt) = attempt.as_object_mut() {
+                    attempt.remove("report_files");
+                }
+            }
+        }
+        if let Some(pipeline) = task.get_mut("pipeline_run").and_then(|pipeline| pipeline.as_object_mut()) {
+            pipeline.remove("hold_from_report");
+            if let Some(runs) = pipeline.get_mut("runs").and_then(|runs| runs.as_array_mut()) {
+                for run in runs {
+                    if let Some(run) = run.as_object_mut() {
+                        run.remove("awaiting_run");
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The team with its live members when the caller listed sessions (F7).
 #[cfg(test)]
 pub(super) fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::Seen]>) -> Value {
@@ -530,6 +557,10 @@ pub(super) fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::d
 /// keeps the whole team.
 pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::Seen]>, include_cancelled: bool) -> Value {
     let mut value = serde_json::to_value(team).unwrap_or_default();
+    // #538: the worker's own stage facts are stored with the team but are not
+    // part of the status wire (the desktop and Android read the runs and the
+    // hold through `holds`, `changed` and the stages' states).
+    strip_stage_facts(&mut value);
     // C7: the plan-health block, with the members starving on the plan now.
     let now = super::super::now();
     let mut validation = plan::validate(team, &BTreeSet::new());

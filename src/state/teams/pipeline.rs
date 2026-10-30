@@ -1204,22 +1204,29 @@ mod tests {
     }
 
     /// The shared fixture the desktop and Android read for the stage statuses
-    /// and a task's pipeline is exactly what the model writes; with
+    /// and a task's pipeline is exactly what the status writes; with
     /// ZERUS_WRITE_FIXTURES=1 the test writes it.
     #[test]
     fn the_shared_pipeline_fixture_matches_the_model() {
+        // #538: the worker's own stage facts (the report's file state, the hold
+        // from the report and a closed stage's run) are stored, never served.
+        let served = |tasks: &[Task]| {
+            let mut value = json!({"tasks":tasks});
+            super::super::commands::strip_stage_facts(&mut value);
+            value["tasks"].clone()
+        };
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/team-pipeline-tasks.json");
         if std::env::var("ZERUS_WRITE_FIXTURES").as_deref() == Ok("1") {
-            let text = serde_json::to_string_pretty(&json!({"tasks":fixture_tasks()})).unwrap() + "
+            let text = serde_json::to_string_pretty(&json!({"tasks":served(&fixture_tasks())})).unwrap() + "
 ";
             std::fs::write(&path, text).unwrap();
         }
-        assert_eq!(serde_json::to_value(fixture_tasks()).unwrap(), serde_json::from_str::<Value>(&std::fs::read_to_string(&path).unwrap()).unwrap()["tasks"]);
+        assert_eq!(served(&fixture_tasks()), serde_json::from_str::<Value>(&std::fs::read_to_string(&path).unwrap()).unwrap()["tasks"]);
         let fixture: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let tasks: Vec<Task> = serde_json::from_value(fixture["tasks"].clone()).unwrap();
         let statuses: Vec<TaskStatus> = tasks.iter().map(|task| task.status).collect();
         assert_eq!(statuses, [TaskStatus::InReview, TaskStatus::InTest, TaskStatus::Pending, TaskStatus::Submitted]);
-        assert_eq!(serde_json::to_value(&tasks).unwrap(), fixture["tasks"], "the fixture is what the server writes");
+        assert_eq!(served(&tasks), fixture["tasks"], "the fixture is what the server writes");
         let first = tasks[0].pipeline_run.as_ref().unwrap();
         assert_eq!((first.open_run().unwrap().kind.as_str(), first.round), ("review", 1));
         assert_eq!(tasks[2].pipeline_run.as_ref().unwrap().returned(), 1);

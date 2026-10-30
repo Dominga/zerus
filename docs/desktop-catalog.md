@@ -62,7 +62,8 @@ delegation and writer fences. Processing an old queued heartbeat must not renew
 freshness. **Any storage error pauses that component**, even if recording its
 incomplete state also fails. This crate supplies no effect admissions.
 
-`page` returns at most 128 rows and 1 MiB of charged row bytes (JSON, key and
+The [private read ABI](desktop-catalog-read.md) wraps internal cursors in bounded,
+opaque one-use continuations. `page` returns at most 128 rows and 1 MiB of charged row bytes (JSON, key and
 64 bytes of envelope allowance). It reads sizes before allocating row strings.
 Its internal cursor binds alias, visible generation and an insertion watermark;
 new inserts cannot extend that walk, updates/removals may change it, and a

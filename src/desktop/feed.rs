@@ -264,6 +264,14 @@ impl Broker {
             "ingress_bytes":usage.bytes,"ingress_items":usage.items,"high_ingress_bytes":usage.high_bytes,
             "sources":self.sources.iter().map(|(computer,e)|json!({"computer":computer,"incarnation":e.source.incarnation,"generation":e.source.generation,"complete":e.complete && active,"authority":false})).collect::<Vec<_>>()})
     }
+    pub fn coverage(&self, computer: &str) -> bool {
+        !self.error
+            && self.producer.as_ref().is_some_and(|p| p.alive())
+            && self
+                .sources
+                .get(computer)
+                .is_some_and(|entry| entry.complete)
+    }
     pub fn failed(&mut self, producer: &Producer) {
         producer.close();
         if self

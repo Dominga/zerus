@@ -1,6 +1,6 @@
 /* Application shell: side rail, pages, status bar. */
 @layer components {
-  .app { display: grid; grid-template-columns: var(--rail-w) 1fr; grid-template-rows: 1fr auto; height: 100vh; background: var(--z-color-page); }
+  .app { --z-agent-sh: var(--z-agent-codex); display: grid; grid-template-columns: var(--rail-w) 1fr; grid-template-rows: 1fr auto; height: 100vh; background: var(--z-color-page); }
   .app.rail-labeled { --rail-w: 84px; }
 
   .rail { grid-row: 1 / 3; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 10px 0 8px; background: var(--z-color-surface); border-right: 1px solid var(--z-color-divider); }

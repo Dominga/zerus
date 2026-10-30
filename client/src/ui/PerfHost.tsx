@@ -991,6 +991,10 @@ export function PerfHost() {
       const { worktreeReviewSmoke } = await import("../perf/worktreeReviewSmoke");
       void worktreeReviewSmoke(!!config().replay && !!config().actions_smoke);
     }
+    if (new URLSearchParams(location.search).has("shell-badge-smoke") && inTauri()) {
+      const { shellBadgeSmoke } = await import("../perf/shellBadgeSmoke");
+      void shellBadgeSmoke(!!config().replay && !!config().actions_smoke);
+    }
     if (new URLSearchParams(location.search).has("termination-cleanup-smoke") && inTauri()) {
       const { terminationCleanupSmoke } = await import("../perf/terminationCleanupSmoke");
       void terminationCleanupSmoke(!!config().replay && !!config().actions_smoke);

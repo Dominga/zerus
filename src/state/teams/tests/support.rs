@@ -210,3 +210,29 @@ pub(super) fn live_session(session: &SessionRef) -> Seen {
         ..Default::default()
     }
 }
+
+/// What the dispatcher records for a delivered hand-off.
+pub(super) fn hand_out(team: &mut Team, id: u32) -> String {
+    let task = team.task_mut(id).unwrap();
+    let n = task.attempts.len() as u32 + 1;
+    let attempt = format!("00000000-0000-4000-8000-00000000000{n}");
+    task.attempts.push(Attempt { n, id: attempt.clone(), member: task.assignee.clone(), state: AttemptState::Delivered, ..Default::default() });
+    task.status = TaskStatus::InProgress;
+    attempt
+}
+
+/// The running team with "qalead" as the Tester's sub-lead (spec 5.6).
+pub(super) fn team_with_sub_lead() -> Team {
+    let mut team = running_team();
+    let none = BTreeSet::new();
+    let mut events = Vec::new();
+    apply(&mut team, "add-member", &json!({"member":{"id":"qalead","role":"QA lead","agent":"codex"}}), &Actor::Human, &none, &mut events)
+        .unwrap();
+    apply(&mut team, "sub-lead", &json!({"member":"qalead","sub":true}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+    apply(&mut team, "reports-to", &json!({"member":"qa","parent":"qalead"}), &Actor::Human, &none, &mut events).unwrap();
+    team
+}
+
+pub(super) fn kinds(events: &[Event]) -> Vec<String> {
+    events.iter().map(|event| event.kind.to_owned()).collect()
+}

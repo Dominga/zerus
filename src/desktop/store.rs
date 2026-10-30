@@ -9,7 +9,7 @@ use std::{
 };
 use zerus_desktop_migration::{canonical, configuration, HANDOFF_LOCK};
 
-pub const SCHEMA: i64 = 4;
+pub const SCHEMA: i64 = 5;
 pub struct HandoffLock {
     _lock: platform::FileLock,
     root: PathBuf,
@@ -251,6 +251,13 @@ impl Store {
             tx.execute_batch("PRAGMA user_version=4;")?;
             tx.commit()?;
         }
+        if version < 5 {
+            let tx = db.transaction()?;
+            zerus_desktop_catalog::migrate(&tx)?;
+            tx.execute_batch("PRAGMA user_version=5;")?;
+            tx.commit()?;
+        }
+        zerus_desktop_catalog::begin_service(&mut db, epoch)?;
         // No marker or previous policy re-enables a worker after restart.
         zerus_desktop_ledger::begin_service(&mut db, epoch)?;
         zerus_desktop_ledger::recover_batch(&mut db, epoch)?;

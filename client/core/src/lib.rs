@@ -33,6 +33,7 @@ pub mod marks;
 pub mod menubar;
 pub mod migration;
 pub mod mobile;
+pub mod operation_recovery;
 pub mod organization;
 pub mod paths;
 pub mod process_view;

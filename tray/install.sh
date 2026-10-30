@@ -81,9 +81,13 @@ if [ "${GUI}" = "client" ]; then
     (cd "${CLIENT_DIR}" && "${NPM}" ci --no-audit --no-fund)
     SWITCH_CONFIG="${CLIENT_DIR}/src-tauri/target/switch.conf.json"
     python3 "${CLIENT_DIR}/scripts/switch-config.py" "${SWITCH_CONFIG}"
-    # Voice capture (events M1c) ships whenever the client has its feature.
+    # Voice and round video ship together when the client has the video feature.
     FEATURES=()
-    if grep -q '^media = ' "${CLIENT_DIR}/src-tauri/Cargo.toml" 2>/dev/null; then FEATURES=(--features media); fi
+    if grep -q '^video = ' "${CLIENT_DIR}/src-tauri/Cargo.toml" 2>/dev/null; then
+        FEATURES=(--features video)
+    elif grep -q '^media = ' "${CLIENT_DIR}/src-tauri/Cargo.toml" 2>/dev/null; then
+        FEATURES=(--features media)
+    fi
     # ZERUS_DEV_BUILD_NUMBER reaches the client's build.rs through the environment.
     (cd "${CLIENT_DIR}" && "${NPM}" exec -- tauri build --config "${SWITCH_CONFIG}" --bundles app ${FEATURES[@]+"${FEATURES[@]}"})
     BUILD_APP="${CLIENT_DIR}/src-tauri/target/release/bundle/macos/Zerus.app"
@@ -204,51 +208,91 @@ HINT_LOG="Agent stderr:                ${LOG_FILE}"
 else
 
 # =============================== Linux =======================================
+PREFIX="${HGS_INSTALL_PREFIX:-${HOME}/.local}"
+BIN_DEST="${PREFIX}/bin/hgs-tray"
+BUILD_BIN="${SCRIPT_DIR}/build/hgs-tray"
+SCRATCH=0
+if [ -n "${HGS_INSTALL_PREFIX:-}" ]; then SCRATCH=1; fi
+LIVE="${RESTART_RUNNING}"
+if [ "${SCRATCH}" = "1" ]; then LIVE=0; fi
+GUI="${HGS_LINUX_GUI:-}"
+if [ -z "${GUI}" ]; then
+    GUI=qt
+    if [ "$(python3 "${SCRIPT_DIR}/update-installed.py" --installed-gui "${BIN_DEST}" 2>/dev/null)" = "tauri" ]; then
+        GUI=client
+    fi
+fi
+case "${GUI}" in qt|client) ;; *) echo "HGS_LINUX_GUI must be qt or client" >&2; exit 1 ;; esac
+
 # --- 1. build -----------------------------------------------------------------
 echo "[1/4] Building..."
-cmake -B "${SCRIPT_DIR}/build" -S "${SCRIPT_DIR}" -DCMAKE_BUILD_TYPE=Release
-cmake --build "${SCRIPT_DIR}/build" -j"${JOBS}"
+if [ "${GUI}" = "client" ]; then
+    CLIENT_DIR="$(cd "${SCRIPT_DIR}/../client" && pwd)"
+    NPM="$(command -v npm)" || { echo "hgs-tray: npm not found" >&2; exit 1; }
+    export PATH="${HOME}/.cargo/bin:$(dirname "${NPM}"):${PATH}"
+    export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-1.99.1}"
+    export CARGO_TARGET_DIR="${CLIENT_DIR}/src-tauri/target"
+    export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-${JOBS}}"
+    (cd "${CLIENT_DIR}" && "${NPM}" ci --no-audit --no-fund)
+    FEATURES=()
+    if grep -q '^video = ' "${CLIENT_DIR}/src-tauri/Cargo.toml" 2>/dev/null; then
+        if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists gstreamer-1.0 gstreamer-app-1.0; then
+            FEATURES=(--features video)
+        else
+            echo "hgs-tray: GStreamer development files not found; building with media only, without round video."
+            FEATURES=(--features media)
+        fi
+    elif grep -q '^media = ' "${CLIENT_DIR}/src-tauri/Cargo.toml" 2>/dev/null; then
+        FEATURES=(--features media)
+    fi
+    # ZERUS_DEV_BUILD_NUMBER reaches the client's build.rs through the environment.
+    (cd "${CLIENT_DIR}" && "${NPM}" exec -- tauri build --config "${CLIENT_DIR}/src-tauri/tauri.switch.linux.conf.json" --no-bundle ${FEATURES[@]+"${FEATURES[@]}"})
+    BUILD_BIN="${CARGO_TARGET_DIR}/release/hgs-tray"
+else
+    cmake -B "${SCRIPT_DIR}/build" -S "${SCRIPT_DIR}" -DCMAKE_BUILD_TYPE=Release
+    cmake --build "${SCRIPT_DIR}/build" -j"${JOBS}"
+fi
 
 # --- 2. binary ------------------------------------------------------------------
-echo "[2/4] Installing binary to ~/.local/bin..."
-BIN_DEST="${HOME}/.local/bin/hgs-tray"
+echo "[2/4] Installing binary to ${PREFIX}/bin..."
+CHECK=(--check "${BUILD_BIN}" "${BIN_DEST}")
+if [ "${LIVE}" = "1" ]; then CHECK+=(--live); fi
 # The numbered Dev guard before anything is replaced (docs/reference.md).
-python3 "${SCRIPT_DIR}/update-installed.py" --check "${SCRIPT_DIR}/build/hgs-tray" "${BIN_DEST}" --live
+python3 "${SCRIPT_DIR}/update-installed.py" "${CHECK[@]}"
 RELOAD=0
-mkdir -p "${HOME}/.local/bin"
-if ! cmp -s "${SCRIPT_DIR}/build/hgs-tray" "${BIN_DEST}" 2>/dev/null; then
-    if [ "${RESTART_RUNNING}" = "1" ]; then
+mkdir -p "${PREFIX}/bin"
+if ! cmp -s "${BUILD_BIN}" "${BIN_DEST}" 2>/dev/null; then
+    if [ "${LIVE}" = "1" ]; then
         # Replaced in step 4, once the unit below is current.
         UPDATE=1
     else
-        install -Dm755 "${SCRIPT_DIR}/build/hgs-tray" "${BIN_DEST}.new"
+        install -Dm755 "${BUILD_BIN}" "${BIN_DEST}.new"
         mv -f "${BIN_DEST}.new" "${BIN_DEST}"
         RELOAD=1
     fi
     CHANGED=1
 fi
 
-# The optional embedded DeepSeek native UI: the build makes it when Qt WebEngine
-# is installed (HGS_NATIVE_UI_PLUGIN in CMakeLists.txt). It is placed before the
-# GUI is replaced; a running GUI keeps the copy it already loaded. Without it the
-# native UI opens in the browser, and an older plugin is removed so that it never
-# runs with a newer GUI.
+# The optional embedded DeepSeek native UI belongs to Qt. Client installs keep
+# it for the one-command Qt rollback; Qt installs maintain it as before.
 PLUGIN_BUILD="${SCRIPT_DIR}/build/plugins/libhgs-tray-native-ui.so"
-PLUGIN_DEST="${HOME}/.local/lib/hgs-tray/plugins/libhgs-tray-native-ui.so"
-if [ -f "${PLUGIN_BUILD}" ]; then
-    if ! cmp -s "${PLUGIN_BUILD}" "${PLUGIN_DEST}" 2>/dev/null; then
-        install -Dm755 "${PLUGIN_BUILD}" "${PLUGIN_DEST}.new"
-        mv -f "${PLUGIN_DEST}.new" "${PLUGIN_DEST}"
+PLUGIN_DEST="${PREFIX}/lib/hgs-tray/plugins/libhgs-tray-native-ui.so"
+if [ "${GUI}" = "qt" ]; then
+    if [ -f "${PLUGIN_BUILD}" ]; then
+        if ! cmp -s "${PLUGIN_BUILD}" "${PLUGIN_DEST}" 2>/dev/null; then
+            install -Dm755 "${PLUGIN_BUILD}" "${PLUGIN_DEST}.new"
+            mv -f "${PLUGIN_DEST}.new" "${PLUGIN_DEST}"
+            CHANGED=1
+        fi
+    elif [ -e "${PLUGIN_DEST}" ]; then
+        rm -f "${PLUGIN_DEST}"
         CHANGED=1
     fi
-elif [ -e "${PLUGIN_DEST}" ]; then
-    rm -f "${PLUGIN_DEST}"
-    CHANGED=1
 fi
 
 # --- 3. systemd --user unit + autostart .desktop -------------------------------
 echo "[3/4] Installing the systemd --user unit and the .desktop launcher..."
-ICON_ROOT="${HOME}/.local/share/icons/hicolor"
+ICON_ROOT="${PREFIX}/share/icons/hicolor"
 ICON_CHANGED=0
 DESKTOP_CHANGED=0
 for size in 16 24 32 48 64 128 256 512 1024; do
@@ -272,27 +316,24 @@ fi
 if [ "${ICON_CHANGED}" = "1" ] && command -v gtk-update-icon-cache >/dev/null 2>&1; then
     gtk-update-icon-cache -f -t "${ICON_ROOT}" >/dev/null 2>&1 || true
 fi
-UNIT_DEST="${HOME}/.config/systemd/user/hgs-tray.service"
-mkdir -p "${HOME}/.config/systemd/user"
-# %h -- специфик systemd (см. systemd.unit(5)), разворачивается самим systemd при
-# старте юнита, копируем как есть.
-if ! cmp -s "${SCRIPT_DIR}/packaging/hgs-tray.service" "${UNIT_DEST}" 2>/dev/null; then
-    install -Dm644 "${SCRIPT_DIR}/packaging/hgs-tray.service" "${UNIT_DEST}"
+if [ "${SCRATCH}" = "1" ]; then
+    UNIT_DEST="${PREFIX}/lib/systemd/user/hgs-tray.service"
+else
+    UNIT_DEST="${HOME}/.config/systemd/user/hgs-tray.service"
+fi
+mkdir -p "$(dirname "${UNIT_DEST}")"
+# The service starts the binary this installer selected, without opening a window.
+NEW_UNIT="$(sed -e "s|^ExecStart=.*|ExecStart=${BIN_DEST}|" "${SCRIPT_DIR}/packaging/hgs-tray.service")"
+if [ "$(cat "${UNIT_DEST}" 2>/dev/null || true)" != "${NEW_UNIT}" ]; then
+    printf '%s\n' "${NEW_UNIT}" > "${UNIT_DEST}"
     CHANGED=1
 fi
 
-DESKTOP_DEST="${HOME}/.local/share/applications/hgs-tray.desktop"
-mkdir -p "${HOME}/.local/share/applications"
-# В отличие от systemd, ключ Exec= в .desktop-файле полей спецификации вида %h не знает
-# (desktop-file-validate отвергает его как invalid field code) -- нужен реальный путь,
-# подстановкой пути в Exec=. Это НЕ
-# автозапуск: файл ставится в ~/.local/share/applications (пункт меню приложений), а не
-# в ~/.config/autostart, так что X-GNOME-Autostart-enabled/X-KDE-autostart-phase здесь
-# ни на что не влияют -- единственный автозапуск ниже, через systemd --user.
-# Resolve Icon to its actual file as well: Plasma's task icon renderer may
-# substitute a generic executable icon for a newly installed local theme name.
-# An absolute SVG path also works for the launcher and survives theme changes.
-NEW_DESKTOP="$(sed -e "s|^Exec=.*|Exec=${HOME}/.local/bin/hgs-tray --sessions|" \
+DESKTOP_DEST="${PREFIX}/share/applications/hgs-tray.desktop"
+mkdir -p "${DESKTOP_DEST%/*}"
+# The launcher opens Sessions through the running instance; login start is only
+# through the service above, never another copy of this desktop file.
+NEW_DESKTOP="$(sed -e "s|^Exec=.*|Exec=${BIN_DEST} --sessions|" \
                   -e "s|^Icon=.*|Icon=${SYMBOLIC_DEST}|" "${SCRIPT_DIR}/packaging/hgs-tray.desktop")"
 if [ "$(cat "${DESKTOP_DEST}" 2>/dev/null || true)" != "${NEW_DESKTOP}" ]; then
     printf '%s\n' "${NEW_DESKTOP}" > "${DESKTOP_DEST}"
@@ -307,23 +348,35 @@ if { [ "${ICON_CHANGED}" = "1" ] || [ "${DESKTOP_CHANGED}" = "1" ]; } && command
 fi
 
 # --- 4. enable + start ----------------------------------------------------------
-echo "[4/4] Reloading and enabling hgs-tray.service..."
-systemctl --user daemon-reload
-if [ "$(systemctl --user is-enabled hgs-tray.service 2>/dev/null || true)" != "enabled" ]; then
-    CHANGED=1
+if [ "${SCRATCH}" = "1" ]; then
+    echo "[4/4] Scratch prefix ${PREFIX}: no service-manager action."
+else
+    echo "[4/4] Reloading and enabling hgs-tray.service..."
+    systemctl --user daemon-reload
+    if [ "$(systemctl --user is-enabled hgs-tray.service 2>/dev/null || true)" != "enabled" ]; then
+        CHANGED=1
+    fi
+    if [ "$(systemctl --user is-active hgs-tray.service 2>/dev/null || true)" != "active" ]; then
+        CHANGED=1
+    fi
+    if [ "${UPDATE}" = "1" ]; then
+        # Quits a running GUI, swaps the binary and starts the unit again.
+        python3 "${SCRIPT_DIR}/update-installed.py" "${BUILD_BIN}" "${BIN_DEST}"
+    fi
+    # enable --now: start -- не restart, поэтому уже активный трей второй раз не дёргает.
+    systemctl --user enable --now hgs-tray.service
 fi
-if [ "$(systemctl --user is-active hgs-tray.service 2>/dev/null || true)" != "active" ]; then
-    CHANGED=1
-fi
-if [ "${UPDATE}" = "1" ]; then
-    # Quits a running GUI, swaps the binary and starts the unit again.
-    python3 "${SCRIPT_DIR}/update-installed.py" "${SCRIPT_DIR}/build/hgs-tray" "${BIN_DEST}"
-fi
-# enable --now: start -- не restart, поэтому уже активный трей второй раз не дёргает.
-systemctl --user enable --now hgs-tray.service
 
-HINT_SELFTEST="Check without a display:  ~/.local/bin/hgs-tray --selftest"
-HINT_STATUS="Unit status:              systemctl --user status hgs-tray.service"
+if [ "${GUI}" = "client" ]; then
+    HINT_SELFTEST="Check without a display:  ${BIN_DEST} --build-info"
+else
+    HINT_SELFTEST="Check without a display:  ${BIN_DEST} --selftest"
+fi
+if [ "${SCRATCH}" = "1" ]; then
+    HINT_STATUS="Unit file (not loaded):     ${UNIT_DEST}"
+else
+    HINT_STATUS="Unit status:              systemctl --user status hgs-tray.service"
+fi
 
 fi
 

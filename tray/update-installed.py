@@ -70,12 +70,14 @@ import time
 
 MAC = sys.platform == 'darwin'
 HOME = Path.home()
-SHARE = HOME / '.local/share/hgs'
+INSTALL_PREFIX = None if MAC else os.environ.get('HGS_INSTALL_PREFIX')
+SHARE = (Path(INSTALL_PREFIX) / 'share/hgs') if INSTALL_PREFIX else (HOME / '.local/share/hgs')
 ROLLBACK = SHARE / 'desktop-previous'
 PROVENANCE = SHARE / 'build-provenance.json'
-SNAPSHOTS = HOME / '.local/state/hgs/desktop-update'
-CLI = HOME / '.local/bin/hgs'
-HELPER = HOME / '.local/bin/hgs_state.py'
+SNAPSHOTS = ((Path(INSTALL_PREFIX) / 'state/hgs/desktop-update') if INSTALL_PREFIX
+             else (HOME / '.local/state/hgs/desktop-update'))
+CLI = (Path(INSTALL_PREFIX) / 'bin/hgs') if INSTALL_PREFIX else (HOME / '.local/bin/hgs')
+HELPER = (Path(INSTALL_PREFIX) / 'bin/hgs_state.py') if INSTALL_PREFIX else (HOME / '.local/bin/hgs_state.py')
 LABEL = 'com.hgdev.hgs-tray'
 PLIST = HOME / f'Library/LaunchAgents/{LABEL}.plist'
 UNIT = 'hgs-tray.service'
@@ -410,6 +412,8 @@ def client_drafts_root(identifier):
     app_data_dir formula with the running bundle's identifier."""
     if MAC:
         return HOME / 'Library/Application Support' / identifier / 'drafts'
+    if INSTALL_PREFIX:
+        return Path(INSTALL_PREFIX) / 'share' / identifier / 'drafts'
     return Path(os.environ.get('XDG_DATA_HOME') or str(HOME / '.local/share')) / identifier / 'drafts'
 
 

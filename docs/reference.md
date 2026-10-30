@@ -3744,6 +3744,8 @@ work because the agents speak TLS themselves. A control command may print the
 Zerus JSON contract
 `{"models":[{"name":"small","state":"running"}],"memory":{"free":12.5,"total":64}}`
 or plain lines `NAME: STATE`, with an optional `memory: FREE/TOTAL GB` line;
+a model in the JSON contract may carry `since`, when its state began (seconds
+since the epoch, or an RFC 3339 time), which the tab shows as "since 09:12";
 any other line is kept as raw text. States are shown lowercased. A `NAME: STATE`
 line splits at the last `": "`, so a model named with a tag (`coder-a:q4:
 running`) keeps its whole name and `Down` targets exactly that model; a name
@@ -3756,6 +3758,8 @@ and `status`):
 hgs model-server list [--json]
 hgs model-server status SERVER [--json]
 hgs model-server up SERVER MODEL [--detach]
+hgs model-server up-result REQUEST_ID --json
+hgs model-server sessions SERVER --json
 hgs model-server down SERVER MODEL [--yes]
 hgs model-server logs SERVER [MODEL] [--lines N]
 hgs model-server save --json      (JSON on stdin)
@@ -3781,7 +3785,16 @@ exist, never the key. `up` and `down` accept only a validated model name (letter
 digits and `-_.:/@+`, no leading `-`) and return a receipt; `up --detach` starts
 the command as a detached `hgs run` with the server's time limit, so the receipt
 carries its `request_id`. The run receives an argv, not a shell line, so a
-Windows path or a quoted remote command arrives as one argument. A server may be
+Windows path or a quoted remote command arrives as one argument. `up-result
+REQUEST_ID --json` reads that run's outcome: `status` `running`, `ran` (with
+`exit`, `timed_out` and the last 1000 characters of its output in `tail`) or
+`refused`, with its `server` and `model`; it reads only a detached up's own run
+and refuses any other id. The Model servers tab reads it every few seconds
+until the run ends, within its time limit, and shows the exit (with the last
+line of a failure's output), the time limit or the refusal. `sessions SERVER
+--json` lists this computer's live sessions whose binding names the server, as
+`{"server":...,"sessions":[{"name":...,"model":...}]}`; Down and Down all name
+them beside each model. A server may be
 shared, so `down` asks first and says so: without `--yes` it returns
 `{"status":"confirm",...}` and runs nothing. `logs` keeps the last `--lines`
 lines (200 by default, at most 2000) within a fixed time and output bound.

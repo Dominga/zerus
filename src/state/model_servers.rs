@@ -510,6 +510,16 @@ fn split_state(line: &str) -> Option<(&str, &str)> {
     }
 }
 
+/// A model's optional `since`: seconds since the epoch, or an RFC 3339 time;
+/// anything else is left out.
+fn since(value: &Value) -> Option<Value> {
+    match value {
+        Value::Number(number) => number.as_f64().filter(|seconds| *seconds > 0.0 && seconds.is_finite()).map(|seconds| json!(seconds)),
+        Value::String(text) => chrono::DateTime::parse_from_rfc3339(text.trim()).ok().map(|time| json!(time.timestamp() as f64)),
+        _ => None,
+    }
+}
+
 fn parse_status(text: &str) -> Parsed {
     let mut parsed = Parsed::default();
     let trimmed = text.trim();
@@ -519,7 +529,12 @@ fn parse_status(text: &str) -> Parsed {
                 for model in models.iter().take(MAX_MODELS) {
                     let Some(name) = model["name"].as_str().filter(|name| !name.is_empty() && !name.starts_with('-')) else { continue };
                     let state = model["state"].as_str().unwrap_or("unknown").to_ascii_lowercase();
-                    parsed.models.push(json!({"name": name, "state": state}));
+                    let mut row = json!({"name": name, "state": state});
+                    // #703: when the state began, if the command says so.
+                    if let Some(since) = since(&model["since"]) {
+                        row["since"] = since;
+                    }
+                    parsed.models.push(row);
                 }
                 if let Some(memory) = value["memory"].as_object() {
                     if let (Some(free), Some(total)) = (memory["free"].as_f64(), memory["total"].as_f64()) {
@@ -914,6 +929,51 @@ fn detached_argv(config: &Config, server: &Server, argv: &[String]) -> Vec<Strin
     }
 }
 
+/// #703: a detached up's outcome, read by its receipt's `request_id`: the run's
+/// record while it runs and once it ended (exit, time limit, the last lines of
+/// its output). Only a detached up's own run is read, never another run.
+pub(crate) fn up_result(id: &str) -> std::result::Result<Value, Failure> {
+    let unknown = || Failure::Refused(format!("No detached up with request_id {id}"));
+    if uuid::Uuid::parse_str(id).map(|parsed| parsed.hyphenated().to_string() != id).unwrap_or(true) {
+        return Err(unknown());
+    }
+    let record = crate::state::builds::record(id, crate::state::now()).ok_or_else(unknown)?;
+    let label = record["label"].as_str().unwrap_or_default();
+    if !label.starts_with("up ") || !record["argv"].is_array() {
+        return Err(unknown());
+    }
+    let mut words = label.splitn(3, ' ').skip(1);
+    let (server, model) = (words.next().unwrap_or_default(), words.next().unwrap_or_default());
+    let tail = record["tail"].as_str().unwrap_or_default();
+    let tail: String = tail.chars().rev().take(UP_TAIL_CHARS).collect::<Vec<_>>().into_iter().rev().collect();
+    Ok(json!({"request_id":id,"server":server,"model":model,"status":record["status"],"exit":record["exit"],
+        "timed_out":record["timed_out"].as_bool().unwrap_or(false),"error":record["error"],"tail":tail,
+        "started":record["started"],"ended":record["ended"],"timeout_secs":record["timeout_secs"]}))
+}
+
+/// The last characters of a detached up's output that `up-result` returns.
+const UP_TAIL_CHARS: usize = 1000;
+
+/// #703: this computer's live sessions that run on a server, with their model,
+/// so Down can say whose sessions stop getting answers. Only live sessions are
+/// read: their bindings, one each.
+pub(crate) fn server_sessions(server: &str) -> std::result::Result<Value, Failure> {
+    let live = super::storage::live().map_err(Failure::Refused)?;
+    let records = live.keys().take(MAX_LIVE_SESSIONS).filter_map(|name| super::storage::read(name).ok().map(|record| (name.clone(), record)));
+    Ok(json!({"server":server,"sessions":sessions_using(server, records)}))
+}
+
+/// The sessions among `records` (name, binding) whose binding names `server`.
+fn sessions_using(server: &str, records: impl Iterator<Item = (String, Value)>) -> Vec<Value> {
+    records
+        .filter(|(_, record)| record["model_server"]["server"].as_str() == Some(server))
+        .map(|(name, record)| json!({"name":name,"model":record["model_server"]["model"].as_str().unwrap_or_default()}))
+        .collect()
+}
+
+/// The live sessions `sessions` reads at most.
+const MAX_LIVE_SESSIONS: usize = 2000;
+
 /// `down` asks first: a server may be shared, so it runs only with `--yes`
 /// (the receipt says what it would do).
 pub(crate) fn down(config: &Config, server: &Server, model: &str, yes: bool) -> std::result::Result<Value, Failure> {
@@ -1072,7 +1132,7 @@ pub(crate) fn apply_session_secrets() -> Result<()> {
     Ok(())
 }
 
-/// `hgs model-server list|status|up|down|logs`.
+/// `hgs model-server list|status|up|up-result|sessions|down|logs|save|test`.
 pub(crate) fn dispatch(config: &Config, args: &[String]) -> Result<i32> {
     let command = args.first().map(String::as_str).unwrap_or("list");
     let servers = load(config)?;
@@ -1093,12 +1153,23 @@ pub(crate) fn dispatch(config: &Config, args: &[String]) -> Result<i32> {
             }
             Ok(0)
         }
-        "status" | "up" | "down" | "logs" => {
+        "up-result" => {
+            let id = args.get(1).filter(|arg| !arg.starts_with('-')).ok_or_else(|| Error::new(2, "hgs model-server up-result REQUEST_ID --json"))?;
+            match up_result(id) {
+                Ok(value) => { println!("{value}"); Ok(0) }
+                Err(failure) => fail(&failure),
+            }
+        }
+        "status" | "up" | "down" | "logs" | "sessions" => {
             let name = args.get(1).filter(|arg| !arg.starts_with('-')).ok_or_else(|| Error::new(2, format!("hgs model-server {command} SERVER {}", if command == "status" { "" } else { "MODEL" })))?;
             let server = servers.iter().find(|server| &server.name == name).ok_or_else(|| Error::new(1, format!("Unknown model server {name}")))?;
             let json_out = args.iter().any(|arg| arg == "--json");
             let flag = |name: &str| args.iter().position(|arg| arg == name).and_then(|at| args.get(at + 1)).map(String::as_str);
             match command {
+                "sessions" => match server_sessions(&server.name) {
+                    Ok(value) => { println!("{value}"); Ok(0) }
+                    Err(failure) => fail(&failure),
+                },
                 "status" => match status(config, server) {
                     Ok(value) => {
                         if json_out { println!("{value}"); } else { print_status(&value); }
@@ -1149,7 +1220,7 @@ pub(crate) fn dispatch(config: &Config, args: &[String]) -> Result<i32> {
             let _ = servers;
             Err(Error::new(1, "The model servers are configured in Settings > Model servers; the file is model-servers.json in the private config folder"))
         }
-        other => Err(Error::new(2, format!("Unknown model-server command {other}; use list, status, up, down, logs, save or test"))),
+        other => Err(Error::new(2, format!("Unknown model-server command {other}; use list, status, up, up-result, sessions, down, logs, save or test"))),
     }
 }
 
@@ -1562,6 +1633,64 @@ mod tests {
             assert_eq!(record["timeout_secs"], 7 * 60);
             crate::state::builds::INLINE_RUNNER.with(|flag| flag.set(false));
         });
+    }
+
+    #[test]
+    fn a_detached_ups_outcome_is_read_by_its_request_id_and_only_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let config = config(&dir.path().join("config"));
+            std::fs::create_dir_all(&config.dir).unwrap();
+            let mut server = server();
+            #[cfg(windows)]
+            let failing = vec!["cmd.exe".to_owned(), "/C".to_owned(), "echo loading {model} failed& exit 3".to_owned()];
+            #[cfg(not(windows))]
+            let failing = vec!["sh".to_owned(), "-c".to_owned(), "echo loading {model} failed; exit 3".to_owned()];
+            server.up = failing;
+            crate::state::builds::INLINE_RUNNER.with(|flag| flag.set(true));
+            let started = up(&config, &server, "small", true).unwrap();
+            crate::state::builds::INLINE_RUNNER.with(|flag| flag.set(false));
+            let id = started["request_id"].as_str().unwrap();
+            // The run's real outcome, not only that it started.
+            let done = up_result(id).unwrap();
+            assert_eq!((done["status"].as_str(), done["exit"].as_i64()), (Some("ran"), Some(3)), "{done}");
+            assert_eq!((done["server"].as_str(), done["model"].as_str()), (Some("lab"), Some("small")));
+            assert!(done["tail"].as_str().unwrap().contains("loading small failed"), "{done}");
+            assert_eq!(done["timed_out"], false);
+            // An unknown id, a malformed one and another kind of run are refused alike.
+            for other in ["55555555-5555-4555-8555-555555555555", "../builds", ""] {
+                assert!(matches!(up_result(other), Err(Failure::Refused(_))), "{other}");
+            }
+            let build = "66666666-6666-4666-8666-666666666666";
+            crate::state::builds::INLINE_RUNNER.with(|flag| flag.set(true));
+            crate::state::builds::start_for(build, "cargo test", "exit 0", dir.path(), json!({"name":"","run_id":"","conversation_id":""}), 1, &[]).unwrap();
+            crate::state::builds::INLINE_RUNNER.with(|flag| flag.set(false));
+            assert!(crate::state::builds::record(build, crate::state::now()).is_some());
+            assert!(matches!(up_result(build), Err(Failure::Refused(_))), "another run's output stays its own");
+        });
+    }
+
+    #[test]
+    fn a_status_keeps_a_models_since_when_it_is_a_time() {
+        let parsed = parse_status(r#"{"models":[{"name":"a","state":"running","since":1761800000},
+            {"name":"b","state":"running","since":"2026-10-30T09:12:00+04:00"},
+            {"name":"c","state":"loading","since":"after lunch"},{"name":"d","state":"stopped","since":-5}]}"#);
+        assert_eq!(json!(parsed.models), json!([
+            {"name":"a","state":"running","since":1761800000.0},
+            {"name":"b","state":"running","since":1793337120.0},
+            {"name":"c","state":"loading"},{"name":"d","state":"stopped"}]));
+    }
+
+    #[test]
+    fn sessions_on_a_server_are_named_with_their_model() {
+        let records = vec![
+            ("codex/orbit/a".to_owned(), json!({"agent":"codex","model_server":{"server":"lab","model":"coder-a"}})),
+            ("claude/orbit/b".to_owned(), json!({"agent":"claude"})),
+            ("codex/orbit/c".to_owned(), json!({"agent":"codex","model_server":{"server":"other","model":"coder-a"}})),
+            ("codex/orbit/d".to_owned(), json!({"agent":"codex","model_server":{"server":"lab","model":"chat-general"}})),
+        ];
+        assert_eq!(json!(sessions_using("lab", records.into_iter())), json!([
+            {"name":"codex/orbit/a","model":"coder-a"},{"name":"codex/orbit/d","model":"chat-general"}]));
     }
 
     #[test]

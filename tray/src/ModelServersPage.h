@@ -5,6 +5,7 @@
 #include <functional>
 
 class QLabel;
+class QPushButton;
 class QScrollArea;
 class QVBoxLayout;
 
@@ -39,10 +40,12 @@ private:
     QWidget *serverCard(const ModelServers::Server &server, const ModelServers::Status &status);
     QString hostText(const ModelServers::Server &server) const;
     void notice(const QString &text, bool error = false);
+    void up(const QString &server, const QString &model);
     ModelServers::Controller *m_servers;
     QScrollArea *m_scroll;
     QWidget *m_list = nullptr;
     QLabel *m_summary, *m_notice, *m_tile;
+    QPushButton *m_refreshAll, *m_editServers;
     QString m_copied, m_noticeText;
     bool m_noticeError = false, m_dark = true;
 };

@@ -28,6 +28,8 @@ export interface ViewRow {
   notification_revision?: number | null;
   /** `created`, in whole seconds (it keys a conversation-less attention mark). */
   created?: number;
+  /** Exact/fallback Qt row-density hashes with this computer's configured identity. */
+  compact_keys?: [string, string];
   /** What a local attention mark compares (Qt's `attentionFingerprint`). */
   attention_fingerprint?: string;
   /** The session needs the person's action (approval, input, error, recovery). */

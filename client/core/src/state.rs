@@ -200,7 +200,7 @@ impl CatalogState {
                     else {
                         continue;
                     };
-                    staged.insert(key.to_owned(), project(row, &machine));
+                    staged.insert(key.to_owned(), project(row, &machine, computer));
                 }
                 if snapshot.last {
                     let rows = self.staged.take().unwrap_or_default();
@@ -248,7 +248,7 @@ impl CatalogState {
                 let mut upserts: Vec<(&String, ViewRow)> = delta
                     .upsert
                     .iter()
-                    .map(|item| (&item.key, project(&item.row, &machine)))
+                    .map(|item| (&item.key, project(&item.row, &machine, computer)))
                     .collect();
                 // The rows before this frame are Qt's `before`, read once per frame.
                 Before::index(&self.rows, upserts.iter().map(|(_, row)| row))
@@ -501,7 +501,7 @@ impl CatalogState {
             .filter_map(|row| {
                 let name = row["name"].as_str()?;
                 let key = zerus_watch_protocol::key_for(row["run_id"].as_str(), name);
-                Some((key, project(row, &machine)))
+                Some((key, project(row, &machine, computer)))
             })
             .collect();
         let mut changes = self.replace_rows(computer, rows);
@@ -980,9 +980,10 @@ impl<'a> Before<'a> {
     }
 }
 
-fn project(row: &Value, machine: &str) -> ViewRow {
+fn project(row: &Value, machine: &str, computer: &ComputerId) -> ViewRow {
     let mut view = view::row(row);
     view.machine = machine.to_owned();
+    view.compact_keys = crate::row_preferences::keys(&computer.0, &view);
     view
 }
 

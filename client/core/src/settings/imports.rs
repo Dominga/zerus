@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 const VERSION: u32 = 1;
 const MAX_KEYS: usize = 4096;
-const FAMILIES: &[&str] = &["machine-appearance", "project-view"];
+const FAMILIES: &[&str] = &["machine-appearance", "project-view", "row-density"];
 
 #[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -84,11 +84,15 @@ fn matches(family: &str, key: &str) -> bool {
             key.starts_with("machines/colors/") || key.starts_with("machines/vivid/")
         }
         "project-view" => key == "workspace/allSwarmProjects",
+        "row-density" => key == crate::row_preferences::KEY,
         _ => false,
     }
 }
 
 fn converted(key: &str, value: &QtValue) -> Result<Value, &'static str> {
+    if key == crate::row_preferences::KEY {
+        return crate::row_preferences::from_qt(value).ok_or("invalid packed row-density keys");
+    }
     let kind = super::find(key).ok_or("invalid preference identity")?.kind;
     if key.starts_with("machines/colors/") {
         let text = value.to_text();

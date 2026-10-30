@@ -866,3 +866,89 @@ fn an_overlapping_source_is_preserved_without_even_a_family_record_write() {
     drop(settings);
     assert_eq!(fs::read(path).unwrap(), before);
 }
+
+#[test]
+fn row_density_imports_once_preserves_empty_next_values_and_retries_bad_packing() {
+    let scratch = Scratch::new("g3-row-density");
+    let qt = scratch.0.join("qt.conf");
+    let original = format!(
+        "[workspace]\ncollapsedSessionRows=@ByteArray({})\n",
+        "\\xab".repeat(32)
+    );
+    fs::write(&qt, &original).unwrap();
+    let path = scratch.0.join("settings.json");
+    legacy_switch(&path, json!({}));
+    let settings = Settings::open(path.clone(), Some(QtStore::Ini(qt.clone())));
+    assert_eq!(
+        settings.all()["workspace/collapsedSessionRows"],
+        json!(["ab".repeat(32)])
+    );
+    assert!(settings.flush_within(FLUSH));
+    drop(settings);
+    let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(
+        saved["g3"]["families"]["row-density"]["sha256"],
+        zerus_desktop_migration::sha256(original.as_bytes())
+    );
+    assert_eq!(fs::read_to_string(&qt).unwrap(), original);
+    let reopened = Settings::open(path.clone(), Some(QtStore::Ini(qt.clone())));
+    reopened
+        .set("workspace/collapsedSessionRows", json!([]))
+        .unwrap();
+    assert!(reopened.flush_within(FLUSH));
+    drop(reopened);
+    let again = Settings::open(path.clone(), Some(QtStore::Ini(qt.clone())));
+    assert_eq!(again.all()["workspace/collapsedSessionRows"], json!([]));
+    drop(again);
+    // Existing explicit empty values win even before this family's first import.
+    let empty = scratch.0.join("empty.json");
+    legacy_switch(&empty, json!({"workspace/collapsedSessionRows":[]}));
+    let settings = Settings::open(empty, Some(QtStore::Ini(qt.clone())));
+    assert_eq!(settings.all()["workspace/collapsedSessionRows"], json!([]));
+    assert!(settings.flush_within(FLUSH));
+    drop(settings);
+    let bad = scratch.0.join("retry.json");
+    legacy_switch(&bad, json!({}));
+    fs::write(
+        &qt,
+        b"[workspace]\ncollapsedSessionRows=@ByteArray(short)\n",
+    )
+    .unwrap();
+    let settings = Settings::open(bad.clone(), Some(QtStore::Ini(qt.clone())));
+    assert!(!settings.contains("workspace/collapsedSessionRows"));
+    assert!(settings.flush_within(FLUSH));
+    drop(settings);
+    let saved: Value = serde_json::from_slice(&fs::read(&bad).unwrap()).unwrap();
+    assert!(saved["g3"]["families"].get("row-density").is_none());
+    assert_eq!(
+        saved["g3"]["quarantine"]["row-density"]["preserved_in"],
+        "source"
+    );
+    fs::write(&qt, original).unwrap();
+    let retried = Settings::open(bad, Some(QtStore::Ini(qt)));
+    assert_eq!(
+        retried.all()["workspace/collapsedSessionRows"],
+        json!(["ab".repeat(32)])
+    );
+    assert!(retried.flush_within(FLUSH));
+}
+
+#[test]
+fn oversized_preferences_cannot_make_the_existing_store_unreadable() {
+    let scratch = Scratch::new("g3-store-limit");
+    let path = scratch.0.join("settings.json");
+    let settings = Settings::open(path.clone(), None);
+    settings.set("workspace/theme", json!("dark")).unwrap();
+    assert!(settings.flush_within(FLUSH));
+    let before = fs::read(&path).unwrap();
+    assert!(settings
+        .set("workspace/launchAccounts", json!("x".repeat(4 << 20)))
+        .is_err());
+    assert_eq!(settings.text("workspace/theme"), "dark");
+    assert!(settings.flush_within(FLUSH));
+    drop(settings);
+    assert_eq!(fs::read(&path).unwrap(), before);
+    let reopened = Settings::open(path, None);
+    assert!(reopened.error().is_none());
+    assert_eq!(reopened.text("workspace/theme"), "dark");
+}

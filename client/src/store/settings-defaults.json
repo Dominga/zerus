@@ -30,6 +30,7 @@
   "workspace/allSwarmProjects": false,
   "workspace/alwaysOnTop": false,
   "workspace/animateActivity": true,
+  "workspace/collapsedSessionRows": [],
   "workspace/compact": false,
   "workspace/contentScale": 1.0,
   "workspace/expandSessionsOnHover": true,

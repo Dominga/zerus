@@ -32,7 +32,8 @@ Development identities never seed, and a replay uses `settings-replay.json`
 without reading Qt, including when launched from the installed switch.
 
 G3 adds one versioned first import for each previously unhandled preference
-family. Machine color/vivid choices and Projects' All swarm projects preference
+family. Machine color/vivid choices, Projects' All swarm projects preference and
+per-conversation collapsed session rows
 use the same settings reader and writer, including on a switch that already has
 its original seed record. Existing Next values win. `settings.json` keeps private
 `g3.families` metadata (family/schema/source path/time/key names/exact byte hash)
@@ -42,6 +43,16 @@ private quarantine metadata pointing to its untouched source, stays unhandled
 and retries next start. Handled families do not reread Qt after rollback. The
 original settings seed, draft seed and run-layout seed retain their own existing
 one-time records. Newer settings/G3 schemas are preserved without reseeding.
+
+Collapsed row preferences keep Qt's packed SHA-256 identities as at most 50,000
+hex keys in the existing settings store. Rust projects exact/fallback keys using
+the configured peer alias (empty for local), raw command, archive and conversation
+identity; a displayed machine name never substitutes for them. A matching
+conversation-less fallback upgrades only when that row is observed. Compact and
+Expand choices persist through the same writer, and Expand all also clears
+unloaded/filtered hashes. Malformed packing leaves this family unhandled for
+retry, and an existing empty Next choice wins. Settings writes that would exceed
+the store's read bound are refused before changing existing values.
 
 ## Menu bar, single instance and notifications (macOS)
 

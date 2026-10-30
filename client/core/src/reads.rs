@@ -707,7 +707,11 @@ pub fn archive_page_cancellable(
     if let Some(error) = archive_failure(hgs, &exit) {
         return Err(error);
     }
-    Ok(page(&decode(&request, exit)?))
+    let mut page = page(&decode(&request, exit)?);
+    for row in &mut page.rows {
+        row.compact_keys = crate::row_preferences::keys(&computer.0, row);
+    }
+    Ok(page)
 }
 
 /// Standard error an archive page failure shows, at most (Qt's `left(4000)`).

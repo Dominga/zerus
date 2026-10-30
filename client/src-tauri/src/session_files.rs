@@ -68,7 +68,9 @@ pub struct SessionFiles {
 }
 
 fn now_ms() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |time| time.as_millis() as i64)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |time| time.as_millis() as i64)
 }
 
 fn lock<T>(value: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -77,7 +79,14 @@ fn lock<T>(value: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 impl SessionFiles {
     pub fn new(app: AppHandle, hgs: PathBuf, opener: Opener, spawn: Spawn) -> Arc<Self> {
-        Arc::new(Self { app, hgs, opener, spawn, next: AtomicU64::new(1), dialogs: Mutex::new(HashMap::new()) })
+        Arc::new(Self {
+            app,
+            hgs,
+            opener,
+            spawn,
+            next: AtomicU64::new(1),
+            dialogs: Mutex::new(HashMap::new()),
+        })
     }
 
     fn view(&self, id: u64, closed: bool) -> Option<SessionFileView> {
@@ -92,9 +101,19 @@ impl SessionFiles {
             path: dialog.resolved.clone(),
             location: dialog.location.clone(),
             remote,
-            title: if remote { format!("File on {}", dialog.computer) } else { "File on this machine".into() },
-            local_path: dialog.local_path.as_ref().map_or_else(String::new, |path| path.to_string_lossy().into_owned()),
-            copy_path: dialog.copy_path.as_ref().map_or_else(String::new, |path| path.to_string_lossy().into_owned()),
+            title: if remote {
+                format!("File on {}", dialog.computer)
+            } else {
+                "File on this machine".into()
+            },
+            local_path: dialog
+                .local_path
+                .as_ref()
+                .map_or_else(String::new, |path| path.to_string_lossy().into_owned()),
+            copy_path: dialog
+                .copy_path
+                .as_ref()
+                .map_or_else(String::new, |path| path.to_string_lossy().into_owned()),
             checking: dialog.checking,
             downloading: dialog.downloading,
             saved: dialog.saved,
@@ -115,25 +134,43 @@ impl SessionFiles {
         let remote = !computer.is_empty();
         let style = if remote { Style::Posix } else { paths::build() };
         let target = session_file_reference::parse(&href, style);
-        let home = std::env::var("HOME").ok();
-        let resolved = session_file_reference::resolve(&target, &cwd, home.as_deref(), style);
+        let home = if remote {
+            None
+        } else {
+            std::env::var("HOME").ok()
+        };
+        let mut resolved = session_file_reference::resolve(&target, &cwd, home.as_deref(), style);
+        if remote && resolved.is_empty() && target.path.starts_with("~/") {
+            resolved = target.path.clone();
+        }
         let mut dialog = Dialog {
             computer: computer.clone(),
             key,
             href,
             resolved: resolved.clone(),
-            location: target.location,
+            location: target.location.clone(),
             local_path: (!remote && !resolved.is_empty()).then(|| PathBuf::from(&resolved)),
             copy_path: None,
             checking: false,
             downloading: false,
             saved: false,
-            error: if target.valid() && !resolved.is_empty() { String::new() } else { "The file reference is invalid.".into() },
+            error: if target.valid() && !resolved.is_empty() {
+                String::new()
+            } else {
+                "The file reference is invalid.".into()
+            },
             notice: String::new(),
         };
         if remote && target.valid() && !resolved.is_empty() {
             let root = download_cache::folder("", None, &PathBuf::from(home.unwrap_or_default()));
-            match download_cache::lookup(&root, &Source { host: computer, path: resolved }, now_ms()) {
+            match download_cache::lookup(
+                &root,
+                &Source {
+                    host: computer,
+                    path: resolved,
+                },
+                now_ms(),
+            ) {
                 Ok(cached) => dialog.local_path = cached,
                 Err(error) => dialog.notice = error,
             }
@@ -148,15 +185,22 @@ impl SessionFiles {
             let dialogs = lock(&self.dialogs);
             let dialog = dialogs.get(&id)?;
             (!dialog.computer.is_empty()).then_some((
-                download_cache::folder("", None, &PathBuf::from(std::env::var("HOME").unwrap_or_default())),
-                Source { host: dialog.computer.clone(), path: dialog.resolved.clone() },
+                download_cache::folder(
+                    "",
+                    None,
+                    &PathBuf::from(std::env::var("HOME").unwrap_or_default()),
+                ),
+                Source {
+                    host: dialog.computer.clone(),
+                    path: dialog.resolved.clone(),
+                },
                 true,
             ))?
         };
         let result = download_cache::lookup(&root, &source, now_ms());
         {
             let mut dialogs = lock(&self.dialogs);
-            let Some(dialog) = dialogs.get_mut(&id) else { return None };
+            let dialog = dialogs.get_mut(&id)?;
             dialog.checking = false;
             match result {
                 Ok(cached) => dialog.local_path = cached,
@@ -168,7 +212,12 @@ impl SessionFiles {
         self.view(id, false)
     }
 
-    fn start_download(&self, id: u64, destination: Destination, open: bool) -> Option<SessionFileView> {
+    fn start_download(
+        self: &Arc<Self>,
+        id: u64,
+        destination: Destination,
+        open: bool,
+    ) -> Option<SessionFileView> {
         let dialog = {
             let mut dialogs = lock(&self.dialogs);
             let dialog = dialogs.get_mut(&id)?;
@@ -189,18 +238,32 @@ impl SessionFiles {
         self.view(id, false)
     }
 
-    fn download(&self, dialog: &Dialog, destination: Destination) -> Result<(PathBuf, Option<String>), String> {
-        let root = download_cache::folder("", None, &PathBuf::from(std::env::var("HOME").unwrap_or_default()));
+    fn download(
+        &self,
+        dialog: &Dialog,
+        destination: Destination,
+    ) -> Result<(PathBuf, Option<String>), String> {
+        let root = download_cache::folder(
+            "",
+            None,
+            &PathBuf::from(std::env::var("HOME").unwrap_or_default()),
+        );
         let (part, direct) = match destination {
             Destination::Cache => (Some(download_cache::reserve(&root)?), None),
             Destination::Direct(path) => {
                 if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent).map_err(|_| "Cannot prepare the local download.".to_owned())?;
+                    std::fs::create_dir_all(parent)
+                        .map_err(|_| "Cannot prepare the local download.".to_owned())?;
                 }
                 (None, Some(path))
             }
         };
-        let output = direct.clone().unwrap_or_else(|| part.as_ref().expect("a cache download").path().to_path_buf());
+        let output = direct.clone().unwrap_or_else(|| {
+            part.as_ref()
+                .expect("a cache download")
+                .path()
+                .to_path_buf()
+        });
         let args = vec![
             format!("@{}", dialog.computer),
             "download".into(),
@@ -209,16 +272,37 @@ impl SessionFiles {
             "--output".into(),
             output.to_string_lossy().into_owned(),
         ];
-        let invocation = Invocation { args, stdin: None, timeout: Duration::from_secs(135), request_id: None };
-        let exit = run_limited(&self.hgs, &invocation, &[], 64 * 1024).map_err(|_| INVALID_RESPONSE.to_owned())?;
+        let invocation = Invocation {
+            args,
+            stdin: None,
+            timeout: Duration::from_secs(135),
+            request_id: None,
+        };
+        let exit = run_limited(&self.hgs, &invocation, &[], 64 * 1024)
+            .map_err(|_| INVALID_RESPONSE.to_owned())?;
         match exit {
-            Exit::Code { code: 0, stdout, .. } => {
-                let reply: serde_json::Value = serde_json::from_slice(&stdout).map_err(|_| INVALID_RESPONSE.to_owned())?;
-                let host = reply.get("host").and_then(serde_json::Value::as_str).unwrap_or("");
-                let path = reply.get("path").and_then(serde_json::Value::as_str).unwrap_or("");
-                let local = reply.get("local_path").and_then(serde_json::Value::as_str).unwrap_or("");
+            Exit::Code {
+                code: 0, stdout, ..
+            } => {
+                let reply: serde_json::Value =
+                    serde_json::from_slice(&stdout).map_err(|_| INVALID_RESPONSE.to_owned())?;
+                let host = reply
+                    .get("host")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                let path = reply
+                    .get("path")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                let local = reply
+                    .get("local_path")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
                 let bytes = reply.get("bytes").and_then(serde_json::Value::as_u64);
-                if host != dialog.computer || path != dialog.resolved || local != output.to_string_lossy() {
+                if host != dialog.computer
+                    || path != dialog.resolved
+                    || local != output.to_string_lossy()
+                {
                     return Err(INVALID_RESPONSE.into());
                 }
                 if bytes != std::fs::metadata(&output).ok().map(|meta| meta.len()) {
@@ -226,21 +310,42 @@ impl SessionFiles {
                 }
             }
             Exit::Code { stderr, stdout, .. } => return Err(detail(&stderr, &stdout)),
-            Exit::Abnormal { stderr } => return Err(detail(&stderr, &[]),
+            Exit::Abnormal { stderr } => return Err(detail(&stderr, &[])),
+            Exit::TimedOut => return Err("The file transfer timed out.".into()),
+            Exit::StartFailed(error) => {
+                return Err(format!("Could not start the file transfer: {error}"))
+            }
+            Exit::WriteFailed => return Err("Could not send the file transfer request.".into()),
         }
         match direct {
             Some(path) => Ok((path, None)),
             None => {
-                let completed = download_cache::complete(part.expect("a cache download"), &dialog.resolved, Some(&Source { host: dialog.computer.clone(), path: dialog.resolved.clone() }), now_ms())?;
+                let completed = download_cache::complete(
+                    part.expect("a cache download"),
+                    &dialog.resolved,
+                    Some(&Source {
+                        host: dialog.computer.clone(),
+                        path: dialog.resolved.clone(),
+                    }),
+                    now_ms(),
+                )?;
                 Ok((completed.path, completed.warning))
             }
         }
     }
 
-    fn finish_download(&self, id: u64, result: Result<(PathBuf, Option<String>), String>, open: bool, copy: bool) {
+    fn finish_download(
+        self: &Arc<Self>,
+        id: u64,
+        result: Result<(PathBuf, Option<String>), String>,
+        open: bool,
+        copy: bool,
+    ) {
         {
             let mut dialogs = lock(&self.dialogs);
-            let Some(dialog) = dialogs.get_mut(&id) else { return };
+            let Some(dialog) = dialogs.get_mut(&id) else {
+                return;
+            };
             dialog.downloading = false;
             match result {
                 Ok((path, warning)) => {
@@ -261,8 +366,12 @@ impl SessionFiles {
         }
     }
 
-    fn trim(&self) {
-        let root = download_cache::folder("", None, &PathBuf::from(std::env::var("HOME").unwrap_or_default()));
+    fn trim(self: &Arc<Self>) {
+        let root = download_cache::folder(
+            "",
+            None,
+            &PathBuf::from(std::env::var("HOME").unwrap_or_default()),
+        );
         let _ = download_cache::trim(&root, 0, now_ms());
         let me = Arc::clone(self);
         (self.spawn)(Box::new(move || {
@@ -278,20 +387,42 @@ impl SessionFiles {
             let dialog = dialogs.get(&id)?;
             match action {
                 "open_copy" => (dialog.copy_path.clone(), Origin::OtherMachine),
-                _ => (dialog.local_path.clone(), if dialog.computer.is_empty() { Origin::ThisComputer } else { Origin::OtherMachine }),
+                _ => (
+                    dialog.local_path.clone(),
+                    if dialog.computer.is_empty() {
+                        Origin::ThisComputer
+                    } else {
+                        Origin::OtherMachine
+                    },
+                ),
             }
         };
-        let Some(path) = path else { return self.view(id, false) };
+        let Some(path) = path else {
+            return self.view(id, false);
+        };
         let outcome = match action {
             "open_folder" | "show_file" => {
-                let shown = if action == "open_folder" { path.parent().unwrap_or(&path) } else { &path };
-                if (self.opener.reveal)(shown) { Outcome::Opened } else { Outcome::RevealFailed }
+                let shown = if action == "open_folder" {
+                    path.parent().unwrap_or(&path)
+                } else {
+                    &path
+                };
+                if (self.opener.reveal)(shown) {
+                    Outcome::Opened
+                } else {
+                    Outcome::RevealFailed
+                }
             }
-            _ => external_file::open(&path, origin, |path| (self.opener.open)(path), |path| (self.opener.reveal)(path)),
+            _ => external_file::open(
+                &path,
+                origin,
+                |path| (self.opener.open)(path),
+                |path| (self.opener.reveal)(path),
+            ),
         };
         {
             let mut dialogs = lock(&self.dialogs);
-            let Some(dialog) = dialogs.get_mut(&id) else { return None };
+            let dialog = dialogs.get_mut(&id)?;
             match outcome {
                 Outcome::Opened => dialog.notice.clear(),
                 Outcome::Revealed => dialog.notice = external_file::revealed_notice(&path),
@@ -305,7 +436,14 @@ impl SessionFiles {
 
     fn close(&self, id: u64) {
         lock(&self.dialogs).remove(&id);
-        let _ = self.app.emit("session-file-changed", SessionFileView { id, closed: true, ..Default::default() });
+        let _ = self.app.emit(
+            "session-file-changed",
+            SessionFileView {
+                id,
+                closed: true,
+                ..Default::default()
+            },
+        );
     }
 }
 
@@ -316,51 +454,101 @@ enum Destination {
 }
 
 fn detail(stderr: &str, stdout: &[u8]) -> String {
-    let text = if stderr.is_empty() { String::from_utf8_lossy(stdout).into_owned() } else { stderr.to_owned() };
+    let text = if stderr.is_empty() {
+        String::from_utf8_lossy(stdout).into_owned()
+    } else {
+        stderr.to_owned()
+    };
     text.trim().trim_start_matches("hgs: ").to_owned()
 }
 
 #[tauri::command]
-pub fn session_file_dialog(files: tauri::State<'_, Arc<SessionFiles>>, computer: String, key: String, href: String, cwd: String) -> SessionFileView {
+pub fn session_file_dialog(
+    files: tauri::State<'_, Arc<SessionFiles>>,
+    computer: String,
+    key: String,
+    href: String,
+    cwd: String,
+) -> SessionFileView {
     files.dialog(computer, key, href, cwd)
 }
 
 #[tauri::command]
-pub fn session_file_check(files: tauri::State<'_, Arc<SessionFiles>>, id: u64) -> Option<SessionFileView> {
+pub fn session_file_check(
+    files: tauri::State<'_, Arc<SessionFiles>>,
+    id: u64,
+) -> Option<SessionFileView> {
     files.check(id)
 }
 
 #[tauri::command]
-pub fn session_file_download(files: tauri::State<'_, Arc<SessionFiles>>, id: u64, open: bool) -> Option<SessionFileView> {
+pub fn session_file_download(
+    files: tauri::State<'_, Arc<SessionFiles>>,
+    id: u64,
+    open: bool,
+) -> Option<SessionFileView> {
     files.start_download(id, Destination::Cache, open)
 }
 
 #[tauri::command]
-pub async fn session_file_save(app: AppHandle, files: tauri::State<'_, Arc<SessionFiles>>, id: u64) -> Option<SessionFileView> {
+pub async fn session_file_save(
+    app: AppHandle,
+    files: tauri::State<'_, Arc<SessionFiles>>,
+    id: u64,
+) -> Result<Option<SessionFileView>, String> {
     let (name, title) = {
         let files = files.inner().clone();
         let dialogs = lock(&files.dialogs);
-        let dialog = dialogs.get(&id)?;
-        (download_cache::filename(&dialog.resolved), "Save local copy".to_owned())
+        let Some(dialog) = dialogs.get(&id) else {
+            return Ok(None);
+        };
+        (
+            download_cache::filename(&dialog.resolved),
+            "Save local copy".to_owned(),
+        )
     };
-    let start = PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("Downloads").join(name);
+    let start = PathBuf::from(std::env::var("HOME").unwrap_or_default())
+        .join("Downloads")
+        .join(name);
     let picked = tauri::async_runtime::spawn_blocking(move || {
         use tauri_plugin_dialog::DialogExt;
-        app.dialog().file().set_title(title).set_directory(start.parent().unwrap_or(Path::new("."))).set_file_name(start.file_name().unwrap_or_default().to_string_lossy().into_owned()).blocking_save_file()
-    }).await.map_err(|error| error.to_string()).ok()??;
-    files.start_download(id, Destination::Direct(picked), false)
+        app.dialog()
+            .file()
+            .set_title(title)
+            .set_directory(start.parent().unwrap_or(Path::new(".")))
+            .set_file_name(
+                start
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+            .blocking_save_file()
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+    let Some(path) = picked.and_then(|file| file.into_path().ok()) else {
+        return Ok(None);
+    };
+    Ok(files.start_download(id, Destination::Direct(path), false))
 }
 
 #[tauri::command]
 pub fn session_file_external(url: String) -> Result<(), String> {
-    if !(url.starts_with("https://") || url.starts_with("http://")) || url.chars().any(char::is_control) {
+    if !(url.starts_with("https://") || url.starts_with("http://"))
+        || url.chars().any(char::is_control)
+    {
         return Err("The external link is invalid.".into());
     }
     crate::settings::open_url(&url).map_err(|error| format!("Could not open {url}: {error}"))
 }
 
 #[tauri::command]
-pub fn session_file_act(files: tauri::State<'_, Arc<SessionFiles>>, id: u64, action: String) -> Option<SessionFileView> {
+pub fn session_file_act(
+    files: tauri::State<'_, Arc<SessionFiles>>,
+    id: u64,
+    action: String,
+) -> Option<SessionFileView> {
     files.act(id, &action)
 }
 

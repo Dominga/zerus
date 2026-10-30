@@ -75,8 +75,12 @@ pub fn parse(href: &str, style: Style) -> Target {
     if source.contains('?') {
         return Target::default();
     }
-    let (before_fragment, fragment) = source.split_once('#').map_or((source.as_str(), ""), |parts| parts);
-    let scheme_end = before_fragment.find(':');
+    let (before_fragment, fragment) = source
+        .split_once('#')
+        .map_or((source.as_str(), ""), |parts| parts);
+    let scheme_end = before_fragment
+        .find(':')
+        .filter(|at| !before_fragment[..*at].contains('/'));
     let scheme = scheme_end.map_or("", |at| &before_fragment[..at]);
     if !scheme.is_empty() && scheme != "file" {
         return Target::default();
@@ -102,7 +106,11 @@ pub fn parse(href: &str, style: Style) -> Target {
     if path.is_empty() || path.starts_with("//") || path.len() > 8192 || !valid_text(&path) {
         return Target::default();
     }
-    if windows && path.len() > 1 && path.starts_with(['/', '\\']) && path[1..].starts_with(['/', '\\']) {
+    if windows
+        && path.len() > 1
+        && path.starts_with(['/', '\\'])
+        && path[1..].starts_with(['/', '\\'])
+    {
         return Target::default();
     }
     let Some(location) = decoded(fragment) else {
@@ -111,7 +119,11 @@ pub fn parse(href: &str, style: Style) -> Target {
     if location.len() > 2048 || !valid_text(&location) {
         return Target::default();
     }
-    let mut location = if location.is_empty() { String::new() } else { format!("#{location}") };
+    let mut location = if location.is_empty() {
+        String::new()
+    } else {
+        format!("#{location}")
+    };
     if location.is_empty() {
         if let Some((at, suffix)) = line_suffix(&path) {
             location = suffix;
@@ -129,7 +141,9 @@ pub fn resolve(target: &Target, cwd: &str, local_home: Option<&str>, style: Styl
         return paths::clean(&target.path, style);
     }
     if let Some(rest) = target.path.strip_prefix("~/") {
-        return local_home.map_or_else(String::new, |home| paths::clean(&paths::join(home, rest), style));
+        return local_home.map_or_else(String::new, |home| {
+            paths::clean(&paths::join(home, rest), style)
+        });
     }
     if !paths::absolute(cwd, style) {
         return String::new();
@@ -143,26 +157,65 @@ mod tests {
 
     #[test]
     fn plain_and_file_urls_keep_their_location() {
-        for href in ["/work/a report.md#part", "file:///work/a%20report.md:12:4", "docs/notes.md:8"] {
+        for href in [
+            "/work/a report.md#part",
+            "file:///work/a%20report.md:12:4",
+            "docs/notes.md:8",
+        ] {
             let target = parse(href, Style::Posix);
             assert!(target.valid(), "{href}");
             assert!(!target.location.is_empty(), "{href}");
         }
-        assert_eq!(parse("file:///work/a%20report.md:12:4", Style::Posix), Target { path: "/work/a report.md".into(), location: ":12:4".into() });
-        assert_eq!(parse("docs/notes.md:8", Style::Posix), Target { path: "docs/notes.md".into(), location: ":8".into() });
+        assert_eq!(
+            parse("file:///work/a%20report.md:12:4", Style::Posix),
+            Target {
+                path: "/work/a report.md".into(),
+                location: ":12:4".into()
+            }
+        );
+        assert_eq!(
+            parse("docs/notes.md:8", Style::Posix),
+            Target {
+                path: "docs/notes.md".into(),
+                location: ":8".into()
+            }
+        );
+        assert_eq!(
+            parse("/work/notes.md:12", Style::Posix),
+            Target {
+                path: "/work/notes.md".into(),
+                location: ":12".into()
+            }
+        );
     }
 
     #[test]
     fn windows_paths_work_on_every_host() {
-        assert_eq!(parse(r"C:\work\a.cpp:12", Style::Windows), Target { path: r"C:\work\a.cpp".into(), location: ":12".into() });
-        assert_eq!(parse("file:///C:/work/a.cpp", Style::Windows).path, "C:/work/a.cpp");
+        assert_eq!(
+            parse(r"C:\work\a.cpp:12", Style::Windows),
+            Target {
+                path: r"C:\work\a.cpp".into(),
+                location: ":12".into()
+            }
+        );
+        assert_eq!(
+            parse("file:///C:/work/a.cpp", Style::Windows).path,
+            "C:/work/a.cpp"
+        );
         assert!(!parse(r"\\server\share\a.cpp", Style::Windows).valid());
         assert!(!parse(r"C:\work\a.cpp", Style::Posix).valid());
     }
 
     #[test]
     fn unsafe_or_foreign_references_are_rejected() {
-        for href in ["https://example.com/a", "file://host/a", "file:///tmp/a?download=1", "file://user@/a", "//server/share/a", "file:///tmp/%ZZ"] {
+        for href in [
+            "https://example.com/a",
+            "file://host/a",
+            "file:///tmp/a?download=1",
+            "file://user@/a",
+            "//server/share/a",
+            "file:///tmp/%ZZ",
+        ] {
             assert!(!parse(href, Style::Posix).valid(), "{href}");
         }
     }
@@ -170,11 +223,20 @@ mod tests {
     #[test]
     fn resolution_uses_the_sessions_cwd_and_only_local_home() {
         let target = parse("docs/notes.md:8", Style::Posix);
-        assert_eq!(resolve(&target, "/work/session", None, Style::Posix), "/work/session/docs/notes.md");
+        assert_eq!(
+            resolve(&target, "/work/session", None, Style::Posix),
+            "/work/session/docs/notes.md"
+        );
         let home = parse("~/notes.md", Style::Posix);
-        assert_eq!(resolve(&home, "/work/session", Some("/home/person"), Style::Posix), "/home/person/notes.md");
+        assert_eq!(
+            resolve(&home, "/work/session", Some("/home/person"), Style::Posix),
+            "/home/person/notes.md"
+        );
         assert_eq!(resolve(&home, "/work/session", None, Style::Posix), "");
         let relative = parse("../shared/notes.md", Style::Posix);
-        assert_eq!(resolve(&relative, "/work/session", None, Style::Posix), "/work/shared/notes.md");
+        assert_eq!(
+            resolve(&relative, "/work/session", None, Style::Posix),
+            "/work/shared/notes.md"
+        );
     }
 }

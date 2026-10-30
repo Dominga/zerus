@@ -41,7 +41,7 @@ describe("session file dialogs", () => {
   });
 
   it("uses the session computer, catalog key and cwd, never a local replacement", async () => {
-    openSessionFile({ computer: "peer", catalogKey: "run:1", cwd: "/remote/work" } as Session, "/remote/report.md");
+    openSessionFile({ computer: "peer", catalogKey: "run:1", cwd: "work", cwdPath: "/remote/work" } as Session, "/remote/report.md");
     await vi.waitFor(() => expect(sessionFile()).toEqual(view));
     expect(calls.dialog).toHaveBeenCalledWith("peer", "run:1", "/remote/report.md", "/remote/work");
     actOnSessionFile("open_file");

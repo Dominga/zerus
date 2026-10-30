@@ -769,6 +769,7 @@ dependencies = [
  "unicode-width",
  "uuid",
  "windows-sys",
+ "zerus-content-search",
  "zerus-desktop-ledger",
  "zerus-desktop-migration",
  "zerus-replica",
@@ -2288,6 +2289,21 @@ name = "zeroize"
 version = "1.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
+
+[[package]]
+name = "zerus-content-search"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "regex",
+ "regex-syntax",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "uuid",
+]
 
 [[package]]
 name = "zerus-desktop-ledger"

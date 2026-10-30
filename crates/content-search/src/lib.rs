@@ -159,6 +159,12 @@ pub struct Index {
 }
 
 impl Index {
+    /// Adapter-owned cursor/queue tables belong on this same capped connection.
+    /// The adapter must keep its own statements bounded and must not create WAL.
+    pub fn connection(&self) -> &Connection {
+        &self.db
+    }
+
     /// Use a dedicated, private connection, never an authoritative hgs DB.
     /// The caller creates the directory 0700 and files 0600 (owner ACL on
     /// Windows), rejects links and removes/rebuilds a damaged index. No WAL or

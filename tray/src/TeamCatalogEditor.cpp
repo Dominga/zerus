@@ -252,7 +252,7 @@ QPlainTextEdit *area(const QString &text, const char *name, int minLines = 2, in
 
 // Remembered fold of a catalog block, under the one collapsible block's key
 // (spec 1.5); its header sits in the label column, as in the prototype.
-bool folded(const QString &key) { return !QSettings().value(CollapsibleBlock::settingsKey(QStringLiteral("catalog-") + key), true).toBool(); }
+bool folded(const QString &key) { return !Settings::value(CollapsibleBlock::settingsKey(QStringLiteral("catalog-") + key), true).toBool(); }
 void setFolded(const QString &key, bool on) { Settings::set(CollapsibleBlock::settingsKey(QStringLiteral("catalog-") + key), !on); }
 
 QString markText(const Teams::Proposal &p)
@@ -1584,7 +1584,7 @@ QWidget *TeamCatalogEditor::templateEditor(int index)
             seats->addWidget(chipOf(*lead, m_dark, {}, false, 170), line, 0);
             seats->addWidget(label(tr("1 · the session that starts the team (coordinator)"), c.muted, 12), line++, 1, 1, 3);
         }
-        const bool hideUnused = QSettings().value(QStringLiteral("ui/catalogHideUnusedRoles"), false).toBool();
+        const bool hideUnused = Settings::value(QStringLiteral("ui/catalogHideUnusedRoles"), false).toBool();
         int unused = 0;
         for (const auto &role : m_catalog.roles) {
             if (role.id == "lead") continue;

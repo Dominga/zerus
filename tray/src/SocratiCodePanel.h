@@ -1,4 +1,5 @@
 #pragma once
+#include "Settings.h"
 #include "HgsClient.h"
 #include <QDateTime>
 #include <QHBoxLayout>
@@ -150,7 +151,7 @@ private:
     }
 public:
     // Settings > Sessions: SocratiCode on a native Qdrant instead of its Docker one.
-    static bool nativeQdrant() { return QSettings().value(QStringLiteral("socraticode/nativeQdrant"), false).toBool(); }
+    static bool nativeQdrant() { return Settings::value(QStringLiteral("socraticode/nativeQdrant"), false).toBool(); }
 
 private:
     static QString ago(qint64 seconds)

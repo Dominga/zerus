@@ -18,7 +18,7 @@ void TeamAttentionWatch::setActive(bool active)
 {
     if (active == isActive()) return;
     // The window may have changed the known items since this watch last ran.
-    if (active) m_notices = std::make_unique<TeamAttentionNotices>(QSettings().value("teams/attentionNotified").toStringList());
+    if (active) m_notices = std::make_unique<TeamAttentionNotices>(Settings::value("teams/attentionNotified").toStringList());
     else m_notices.reset();
     m_teams->setActive(active);
     // An unchanged list is not announced again: compare the teams read before.

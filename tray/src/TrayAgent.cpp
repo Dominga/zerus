@@ -164,7 +164,7 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
     , m_peerTimer(this)
 {
     m_icons.setForegroundOverride(m_cfg.iconColor);
-    { const auto members = QSettings().value("teams/mutedMembers").toStringList(); m_state.setTeamMembers(QSet<QString>(members.cbegin(), members.cend())); }
+    { const auto members = Settings::value("teams/mutedMembers").toStringList(); m_state.setTeamMembers(QSet<QString>(members.cbegin(), members.cend())); }
     auto *updates=UpdateController::instance();
     connect(updates,&UpdateController::changed,this,[this]{if(!m_menu.isOpen())m_menu.rebuild(m_state);});
     connect(updates,&UpdateController::newerReleaseVerified,this,[this](const QString &token,const QString &version){m_notifier->post(token,tr("Zerus update available"),tr("Zerus %1 is available. Open Updates for installation instructions.").arg(version));});

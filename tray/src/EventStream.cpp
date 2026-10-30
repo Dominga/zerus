@@ -1,4 +1,5 @@
 #include "EventStream.h"
+#include "Settings.h"
 
 #include "ChildProcess.h"
 #include "JsonParse.h"
@@ -503,7 +504,7 @@ EventStreams *EventStreams::instance() { return s_instance; }
 bool EventStreams::enabled()
 {
     if (qEnvironmentVariable("ZERUS_EVENT_STREAM") == QLatin1String("0")) return false;
-    return QSettings().value(QStringLiteral("dataPlane/eventStream"), true).toBool();
+    return Settings::value(QStringLiteral("dataPlane/eventStream"), true).toBool();
 }
 
 void EventStreams::setHosts(const QStringList &hosts)

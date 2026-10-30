@@ -78,7 +78,7 @@ TasksView::TasksView(HgsClient *client, QWidget *parent) : QWidget(parent), m_cl
         button->setCursor(Qt::PointingHandCursor); return button;
     };
     m_only = square("taskOnlySession"); m_only->setCheckable(true);
-    m_only->setChecked(QSettings().value("tasks/onlySession").toBool());
+    m_only->setChecked(Settings::value("tasks/onlySession").toBool());
     connect(m_only, &QToolButton::toggled, this, [this](bool only) {
         Settings::set("tasks/onlySession", only);
         const auto colors = TaskColors::of(m_dark); m_only->setIcon(workspaceIcon(QStringLiteral("task-funnel"), only ? colors.accent : colors.muted));
@@ -749,7 +749,7 @@ void TasksView::recoverTaskMessage(const QString &uuid, std::function<void(const
 }
 
 void TasksView::releaseTaskMessage(const QString &uuid, std::function<void()> released, std::function<void(const QString &)> refused) {
-    const auto project = m_projectId; const auto id = QSettings().value(TaskMessageOutbox::key(project, uuid)).toString();
+    const auto project = m_projectId; const auto id = Settings::value(TaskMessageOutbox::key(project, uuid)).toString();
     AttachmentFiles::runAsync<QString>(this, [project, uuid, id] { return TaskMessageOutbox::release(project, uuid, id); }, [released, refused](const QString &error) {
         if (error.isEmpty()) released(); else refused(error);
     });

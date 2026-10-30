@@ -146,7 +146,7 @@ public:
         auto *body=new QHBoxLayout;body->setSpacing(24);nav=new QListWidget;nav->setObjectName("settingsSections");nav->setFixedWidth(180);nav->addItems({tr("Appearance"),tr("Sessions"),tr("Automatic recovery"),tr("Processes"),tr("Updates"),tr("Mobile connection"),tr("Files"),tr("Automatic approvals"),tr("Voice input"),tr("Keyboard"),tr("Private analytics"),tr("Extensions"),tr("About")});body->addWidget(nav);
         pages=new QStackedWidget;pages->setMinimumWidth(0);body->addWidget(pages,1);outer->addLayout(body,1);
         auto makePage=[&](const QString &heading){auto *content=new QWidget;content->setMaximumWidth(850);auto *layout=new QVBoxLayout(content);layout->setContentsMargins(0,0,12,0);layout->setSpacing(18);auto *h=new QLabel(heading);h->setObjectName("heading");layout->addWidget(h);addPage(content);return layout;};
-        auto *appearance=makePage(tr("Appearance"));auto *theme=new QComboBox;theme->setObjectName("workspaceTheme");theme->addItem(tr("Follow system appearance"),"system");theme->addItem(tr("Dark"),"dark");theme->addItem(tr("Light"),"light");theme->setCurrentIndex(qMax(0,theme->findData(QSettings().value("workspace/theme","system"))));appearance->addWidget(new QLabel(tr("Theme")));appearance->addWidget(theme);
+        auto *appearance=makePage(tr("Appearance"));auto *theme=new QComboBox;theme->setObjectName("workspaceTheme");theme->addItem(tr("Follow system appearance"),"system");theme->addItem(tr("Dark"),"dark");theme->addItem(tr("Light"),"light");theme->setCurrentIndex(qMax(0,theme->findData(Settings::value("workspace/theme","system"))));appearance->addWidget(new QLabel(tr("Theme")));appearance->addWidget(theme);
         appearance->addWidget(new QLabel(tr("Interface language")));
         appearance->addWidget(zerusLanguageChoice());
         auto *languageHint=new QLabel(tr("Restart Zerus to apply the interface language. Agent sessions keep running."));
@@ -156,7 +156,7 @@ public:
         if(zerusUiLanguage()=="ru")nav->setFixedWidth(qMax(180,nav->sizeHintForColumn(0)+32));
         auto *usageIndicator=new QComboBox;usageIndicator->setObjectName("workspaceUsageIndicator");
         usageIndicator->addItem(tr("Usage and elapsed time bars"),"rails");usageIndicator->addItem(tr("Pace marker"),"marker");usageIndicator->addItem(tr("Pace marker and reset countdown"),"marker-countdown");
-        usageIndicator->setCurrentIndex(qMax(0,usageIndicator->findData(QSettings().value("workspace/usageIndicator","rails"))));
+        usageIndicator->setCurrentIndex(qMax(0,usageIndicator->findData(Settings::value("workspace/usageIndicator","rails"))));
         appearance->addWidget(new QLabel(tr("Usage limit indicator")));appearance->addWidget(usageIndicator);
         auto *usageHint=new QLabel(tr("Compares used quota with the elapsed part of each limit window. The bars show usage above elapsed time; the marker shows elapsed time on the usage bar. Colors warn when the current pace would use up the limit before it resets."));usageHint->setWordWrap(true);appearance->addWidget(usageHint);
         connect(usageIndicator,&QComboBox::currentIndexChanged,this,[this,usageIndicator]{Settings::set("workspace/usageIndicator",usageIndicator->currentData());if(appearanceChanged)appearanceChanged();});
@@ -230,9 +230,9 @@ public:
         connect(theme,&QComboBox::currentIndexChanged,this,[this,theme]{Settings::set("workspace/theme",theme->currentData());if(appearanceChanged)appearanceChanged();});
         auto *sessions=makePage(tr("Sessions"));
         for(const auto &option:QList<QStringList>{{"workspaceCompact","workspace/compact",tr("Compact session rows"),"false"},{"workspaceExpandSessionsOnHover","workspace/expandSessionsOnHover",tr("Expand the collapsed session list on hover"),"true"},{"workspaceHideEmptyProjects","workspace/hideEmptyProjects",tr("Hide projects without active sessions"),"true"},{"workspaceAnimateActivity","workspace/animateActivity",tr("Animate working sessions"),"true"}}){
-            auto *check=new QCheckBox(option[2]);check->setObjectName(option[0]);check->setChecked(QSettings().value(option[1],option[3]=="true").toBool());sessions->addWidget(check);connect(check,&QCheckBox::toggled,this,[this,key=option[1]](bool on){Settings::set(key,on);if(appearanceChanged)appearanceChanged();});
+            auto *check=new QCheckBox(option[2]);check->setObjectName(option[0]);check->setChecked(Settings::value(option[1],option[3]=="true").toBool());sessions->addWidget(check);connect(check,&QCheckBox::toggled,this,[this,key=option[1]](bool on){Settings::set(key,on);if(appearanceChanged)appearanceChanged();});
         }
-        auto *completed=new QCheckBox(tr("Show completed subagents"));completed->setObjectName("workspaceShowCompletedSubagents");completed->setChecked(QSettings().value("workspace/showCompletedSubagents",false).toBool());sessions->addWidget(completed);
+        auto *completed=new QCheckBox(tr("Show completed subagents"));completed->setObjectName("workspaceShowCompletedSubagents");completed->setChecked(Settings::value("workspace/showCompletedSubagents",false).toBool());sessions->addWidget(completed);
         auto *completedHint=new QLabel(tr("Include agents whose latest turn has finished in the session list and its counts. Plan & agents always shows all reported agents. Agents with unknown status remain visible."));completedHint->setWordWrap(true);sessions->addWidget(completedHint);
         connect(completed,&QCheckBox::toggled,this,[this](bool on){Settings::set("workspace/showCompletedSubagents",on);if(appearanceChanged)appearanceChanged();});
         auto *optionalQuestions=new QCheckBox(tr("Notify about optional questions"));optionalQuestions->setObjectName("notifyOptionalQuestions");optionalQuestions->setChecked(QuestionNotificationSettings::enabled());sessions->addWidget(optionalQuestions);
@@ -306,7 +306,7 @@ public:
             auto *options=new QWidget;auto *optionsLayout=new QVBoxLayout(options);optionsLayout->setContentsMargins(24,0,0,0);optionsLayout->setSpacing(6);options->setEnabled(check->isChecked());
             if(extension.id==QLatin1String("socraticode")){
                 auto *nativeQdrant=new QCheckBox(tr("Run SocratiCode on a native Qdrant (no Docker)"));nativeQdrant->setObjectName("socratiCodeNativeQdrant");
-                nativeQdrant->setChecked(QSettings().value("socraticode/nativeQdrant",false).toBool());optionsLayout->addWidget(nativeQdrant);
+                nativeQdrant->setChecked(Settings::value("socraticode/nativeQdrant",false).toBool());optionsLayout->addWidget(nativeQdrant);
                 auto *nativeHint=new QLabel(tr("Off by default: SocratiCode keeps each folder's index in its own Qdrant container in Docker. On: Zerus uses a Qdrant program on 127.0.0.1:6333, which it can install and start, with Ollama for embeddings. Folders whose Claude Code settings name a Qdrant always use that one."));
                 nativeHint->setWordWrap(true);optionsLayout->addWidget(nativeHint);
                 connect(nativeQdrant,&QCheckBox::toggled,this,[](bool on){Settings::set("socraticode/nativeQdrant",on);});

@@ -274,7 +274,7 @@ void SessionsWindow::runSelectionAction(SelectionAction action, const QList<Entr
         QCheckBox *cleanup=nullptr;
         if(action==SelectionAction::Terminate && std::any_of(targets.cbegin(),targets.cend(),[](const Entry &entry){return entry.session.gitWorktree;})) {
             cleanup=new QCheckBox(tr("Remove working folders after stopping"),&dialog);cleanup->setObjectName("removeTerminatedWorktrees");
-            cleanup->setChecked(QSettings().value("workspace/removeWorktreeAfterTermination",false).toBool());
+            cleanup->setChecked(Settings::value("workspace/removeWorktreeAfterTermination",false).toBool());
             cleanup->setToolTip(tr("Keep branches and conversations. Cleanup runs in the background; folders that need review stay on disk."));
             dialog.setCheckBox(cleanup);
         }

@@ -24,6 +24,7 @@
 #include "FakeCli.h"
 #include "PopupMouse.h"
 #include "MachinesPage.h"
+#include "Settings.h"
 #include "MessageBoxIcons.h"
 #include "MachineAppearance.h"
 #include "MachinePlatform.h"
@@ -39,6 +40,7 @@ private slots:
     void localReadOnlyAndNewProfileCannotOverwrite();
     void wslProfileKeepsItsTargetAcrossSaveAndReload();
     void aSavedMachineSwitchesToWslAndBackKeepingItsOverrides();
+    void otherTransportSavedBehindAHeldLockReadsBack();
     void aConfiguredAliasSaysWhereItComesFrom();
     void newMachineDraftCancelAndDiscard_data();
     void newMachineDraftCancelAndDiscard();
@@ -320,6 +322,60 @@ void TestMachinesPage::aSavedMachineSwitchesToWslAndBackKeepingItsOverrides()
     transport->setCurrentIndex(transport->findData("wsl-local"));
     QCOMPARE(widget<QLineEdit>(page, "machineWslDistribution")->text(), QString("Ubuntu-24.04"));
     QCOMPARE(widget<QLineEdit>(page, "machineWslHgs")->text(), QString("/home/alice/bin/hgs"));
+}
+
+// #729 (#709 L8): the other type's overrides are saved through Settings; with
+// the INI's lock held by another program the save is queued, and the machine
+// shown again still reads them back (the queue is an overlay), not empty fields.
+void TestMachinesPage::otherTransportSavedBehindAHeldLockReadsBack()
+{
+    flag("data.json", R"({"local":"arch","revision":"revision-1","machines":[{"alias":"ubuntu","connection":{"enabled":true,"hostname":"ubuntu.example","user":"alice","port":2222},"enabled":true,"source":"local"}]})");
+    // Another computer's program holds the lock (a lock of this process would
+    // be a leftover the writer removes).
+    QDir().mkpath(QFileInfo(Settings::lockPath()).absolutePath());
+    QFile lock(Settings::lockPath());
+    QVERIFY(lock.open(QIODevice::WriteOnly));
+    lock.write("4\nhgs-tray\nelsewhere.example\n");
+    lock.close();
+    // A failed check must not leave the lock for the next tests.
+    // The writer may be reading the lock that instant, which fails a delete on
+    // Windows: the release tries for a while.
+    struct Release {
+        bool done()
+        {
+            for (int attempt = 0; attempt < 100; ++attempt) {
+                if (QFile::remove(Settings::lockPath()) || !QFileInfo::exists(Settings::lockPath())) return true;
+                QThread::msleep(20);
+            }
+            return false;
+        }
+        ~Release() { done(); Settings::flush(); }
+    } release;
+    MachinesPage page(FakeCli::program(m_script)); start(page);
+    page.selectMachine("ubuntu");
+    auto *transport = widget<QComboBox>(page, "machineTransport");
+    QTRY_VERIFY(transport->isVisible() && transport->isEnabled());
+    transport->setCurrentIndex(transport->findData("wsl-local"));
+    widget<QLineEdit>(page, "machineWslDistribution")->setText("Ubuntu-24.04");
+    widget<QLineEdit>(page, "machineWslHgs")->setText("/home/alice/bin/hgs");
+    transport->setCurrentIndex(transport->findData("ssh"));
+    widget<QSpinBox>(page, "machinePort")->setValue(2223);
+    auto *save = widget<QPushButton>(page, "saveMachine");
+    QTRY_VERIFY(save->isEnabled()); save->click();
+    QTRY_VERIFY(!save->isEnabled() && transport->isEnabled());
+    QVERIFY(Settings::queued());
+    QVERIFY(!QSettings().contains(QStringLiteral("machines/otherTransport/ubuntu")));
+    // Shown again: the WSL overrides come back from the queued save.
+    page.selectMachine({});
+    page.selectMachine("ubuntu");
+    QTRY_VERIFY(transport->isVisible() && transport->isEnabled());
+    QCOMPARE(widget<QLineEdit>(page, "machineWslDistribution")->text(), QString("Ubuntu-24.04"));
+    QCOMPARE(widget<QLineEdit>(page, "machineWslHgs")->text(), QString("/home/alice/bin/hgs"));
+    // The lock goes; the save lands.
+    QVERIFY(release.done());
+    Settings::flush();
+    QVERIFY(!Settings::queued());
+    QVERIFY(QSettings().value(QStringLiteral("machines/otherTransport/ubuntu")).toByteArray().contains("Ubuntu-24.04"));
 }
 
 // #650 L4: a machine whose alias comes from HGS configuration says so on the

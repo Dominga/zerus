@@ -31,7 +31,7 @@ inline QColor paletteColor(const QString &machine) {
 inline QColor color(const QString &machine) {
     auto &colors = cache().colors;
     if (const auto it = colors.constFind(machine); it != colors.cend()) return *it;
-    QColor result(QSettings().value("machines/colors/" + machine).toString());
+    QColor result(Settings::value("machines/colors/" + machine).toString());
     if (!result.isValid()) result = paletteColor(machine);
     colors.insert(machine, result);
     return result;
@@ -44,7 +44,7 @@ inline void resetColor(const QString &machine) { Settings::remove("machines/colo
 inline bool vivid(const QString &machine) {
     auto &vivid = cache().vivid;
     if (const auto it = vivid.constFind(machine); it != vivid.cend()) return *it;
-    return *vivid.insert(machine, QSettings().value("machines/vivid/" + machine, false).toBool());
+    return *vivid.insert(machine, Settings::value("machines/vivid/" + machine, false).toBool());
 }
 inline void setVivid(const QString &machine, bool enabled) {
     if (machine.isEmpty()) return;

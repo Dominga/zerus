@@ -54,7 +54,7 @@ public:
         m_bodyWidget = new QWidget; m_bodyWidget->setObjectName("collapsibleBody");
         m_body = new QVBoxLayout(m_bodyWidget); m_body->setContentsMargins(0, 0, 0, 0); m_body->setSpacing(6);
         v->addWidget(m_bodyWidget);
-        m_expanded = m_key.isEmpty() ? expandedByDefault : QSettings().value(settingsKey(m_key), expandedByDefault).toBool();
+        m_expanded = m_key.isEmpty() ? expandedByDefault : Settings::value(settingsKey(m_key), expandedByDefault).toBool();
         QObject::connect(m_header, &QPushButton::clicked, this, [this] { setExpanded(!m_expanded); });
         QObject::connect(m_summary, &QPushButton::clicked, this, [this] { setExpanded(true); });
         setDark(true);

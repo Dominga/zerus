@@ -11,7 +11,7 @@
 WindowLayer::WindowLayer(QWidget *window)
     : QObject(window), m_window(window), m_wayland(QGuiApplication::platformName().startsWith("wayland")), m_poll(this)
 {
-    m_desired = QSettings().value("workspace/alwaysOnTop", false).toBool();
+    m_desired = Settings::value("workspace/alwaysOnTop", false).toBool();
     if (!m_wayland) { m_supported = true; m_onTop = m_desired; applyQt(m_onTop); return; }
 #ifdef Q_OS_LINUX
     m_kwin = new KWinWindowLayer(this);
@@ -32,7 +32,7 @@ WindowLayer::WindowLayer(QWidget *window)
                 m_restore = false;
                 if (m_desired != on) { request(m_desired); return; }
             }
-            if (QSettings().value("workspace/alwaysOnTop", false).toBool() != on)
+            if (Settings::value("workspace/alwaysOnTop", false).toBool() != on)
                 Settings::set("workspace/alwaysOnTop", on);
             if (m_queued) { const bool desired = *m_queued; m_queued.reset(); request(desired); return; }
         } else {
@@ -99,7 +99,7 @@ bool WindowLayer::eventFilter(QObject *object, QEvent *event)
 #endif
         m_id.clear(); m_supported = false; m_attempts = 0;
         if (event->type() == QEvent::Show) {
-            m_restore = true; m_desired = QSettings().value("workspace/alwaysOnTop", false).toBool();
+            m_restore = true; m_desired = Settings::value("workspace/alwaysOnTop", false).toBool();
             QTimer::singleShot(100, this, [this, epoch] { if (epoch == m_epoch) probe(); });
         }
     }

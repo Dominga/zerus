@@ -1,4 +1,5 @@
 #pragma once
+#include "Settings.h"
 #include <QSettings>
 
 namespace ProcessSettings {
@@ -7,9 +8,9 @@ namespace ProcessSettings {
 inline double testPollFloor = 0;
 inline void setPollFloorForTests(double seconds){testPollFloor=seconds;}
 inline double pollFloor(double minimum){return testPollFloor>0?qMin(minimum,testPollFloor):minimum;}
-inline bool enabled(){return QSettings().value("processes/enabled",false).toBool();}
+inline bool enabled(){return Settings::value("processes/enabled",false).toBool();}
 inline int milliseconds(const char *key,double fallback,double minimum,double maximum) {
-    return qRound(qBound(minimum,QSettings().value(QStringLiteral("processes/")+QLatin1String(key),fallback).toDouble(),maximum)*1000);
+    return qRound(qBound(minimum,Settings::value(QStringLiteral("processes/")+QLatin1String(key),fallback).toDouble(),maximum)*1000);
 }
 inline int activeMs(){return milliseconds("activeSeconds",2.5,pollFloor(1),60);}
 inline int backgroundMs(){return milliseconds("backgroundSeconds",30,pollFloor(5),600);}

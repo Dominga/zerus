@@ -177,7 +177,7 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     // only arranges them (buildClassicLayout, buildDenseLayout).
     m_project=new NewSessionDense::MenuCombo;m_project->setObjectName("launchProject");m_project->setAccessibleName(tr("Project"));
     m_project->setMinimumContentsLength(10);m_project->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
-    const auto theme=QSettings().value("workspace/theme","system").toString();
+    const auto theme=Settings::value("workspace/theme","system").toString();
     const bool dark=theme=="dark"||(theme!="light"&&palette().color(QPalette::Window).lightness()<128);
     const QColor iconColor(dark?"#a1adbb":"#647386");
     m_generatedBranch="work-"+QUuid::createUuid().toString(QUuid::Id128).left(8);
@@ -254,14 +254,14 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     m_worktreeTarget=plainLabel();m_worktreeTarget->setObjectName("launchWorktreeTarget");m_worktreeTarget->setTextInteractionFlags(Qt::TextSelectableByMouse);
     // WhiteWh fork: the worktree type chosen for the last started session is
     // the next default; an explicit folder or worktree choice does not change it.
-    m_autoPreferred=QSettings().value("workspace/launchWorktree").toString()!="none";
+    m_autoPreferred=Settings::value("workspace/launchWorktree").toString()!="none";
     connect(m_autoWorktree,&QPushButton::clicked,this,[this]{m_autoPreferred=true;m_worktreeChosen=true;updateForm();});
     connect(m_plainFolder,&QPushButton::clicked,this,[this]{m_autoPreferred=false;m_worktreeChosen=true;updateForm();});
     connect(m_worktrees,&QAction::triggered,this,&NewSessionDialog::chooseWorktree);
     connect(m_newWorktree,&QAction::triggered,this,&NewSessionDialog::createWorktree);
     m_agents={"codex","claude","kimi","dsh","opencode"};
     if(!agent.isEmpty()&&agent!="sh"&&!m_agents.contains(agent))m_agents.append(agent);
-    const auto lastAgent=QSettings().value("workspace/launchAgent").toString();
+    const auto lastAgent=Settings::value("workspace/launchAgent").toString();
     m_preferredAgent=!agent.isEmpty()?agent:m_agents.contains(lastAgent)||lastAgent=="sh"?lastAgent:QString("codex");
     m_account=new WorkspaceList;m_account->setObjectName("launchAccount");m_account->setAccessibleName(tr("Account and agent"));
     m_account->setProperty("hgsDark",dark);
@@ -303,7 +303,7 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     m_name=new QLineEdit(m_generatedBranch);m_name->setObjectName("launchName");
     m_nameError=plainLabel();m_nameError->setObjectName("launchNameError");m_nameError->hide();
     m_openTerminal=new QCheckBox(tr("Open terminal window"));m_openTerminal->setObjectName("launchOpenTerminal");
-    m_openTerminal->setChecked(QSettings().value("workspace/launchOpenTerminal",false).toBool());
+    m_openTerminal->setChecked(Settings::value("workspace/launchOpenTerminal",false).toBool());
     m_error=plainLabel();m_error->setObjectName("launchError");
     auto *buttons=new QDialogButtonBox(QDialogButtonBox::Cancel);m_cancel=buttons->button(QDialogButtonBox::Cancel);m_start=new NewSessionDense::HintButton(tr("Start session"));buttons->addButton(m_start,QDialogButtonBox::AcceptRole);m_start->setObjectName("primary");
     // Without a computer to start on, it only opens Machines with this computer

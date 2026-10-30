@@ -4,9 +4,9 @@
 #include <QSettings>
 
 namespace AutomaticApprovalPolicy {
-bool enabled() { return QSettings().value("automaticApprovals/enabled", false).toBool(); }
+bool enabled() { return Settings::value("automaticApprovals/enabled", false).toBool(); }
 void setEnabled(bool enabled) { Settings::set("automaticApprovals/enabled", enabled); }
-QString error() { return QSettings().value("automaticApprovals/error").toString(); }
+QString error() { return Settings::value("automaticApprovals/error").toString(); }
 }
 namespace {
 QString key(const QString &host, const QString &name) { return host + '\n' + name; }

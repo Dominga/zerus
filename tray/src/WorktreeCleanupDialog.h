@@ -39,7 +39,7 @@ public:
         m_details=label();m_details->setObjectName("worktreeCleanupDetails");m_details->setTextInteractionFlags(Qt::TextSelectableByMouse);layout->addWidget(m_details);
         m_branches=new QCheckBox(tr("Also delete merged branches"));m_branches->setObjectName("deleteMergedBranches");
         m_branches->setToolTip(tr("Uses git branch -d after the worktree is removed. Branches with commits that are not merged are always kept."));
-        m_branches->setChecked(QSettings().value("workspace/worktreeCleanupDeleteBranches",false).toBool());layout->addWidget(m_branches);
+        m_branches->setChecked(Settings::value("workspace/worktreeCleanupDeleteBranches",false).toBool());layout->addWidget(m_branches);
         m_status=label();m_status->setObjectName("worktreeCleanupStatus");layout->addWidget(m_status);
         auto *buttons=new QDialogButtonBox;m_review=buttons->addButton(tr("Review again"),QDialogButtonBox::ResetRole);m_review->setObjectName("reviewWorktreesAgain");
         m_close=buttons->addButton(QDialogButtonBox::Close);m_remove=buttons->addButton(tr("Remove selected…"),QDialogButtonBox::ActionRole);m_remove->setObjectName("removeSelectedWorktrees");

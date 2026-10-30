@@ -1,4 +1,5 @@
 #pragma once
+#include "Settings.h"
 
 #include <QList>
 #include <QObject>
@@ -58,7 +59,7 @@ private:
     void observeAttention(const QString &host, const BoxState &box);
     // WhiteWh fork, #569: a refused private store, once per (computer, path, reason).
     void observePrivateStores(const QString &host, const BoxState &box);
-    PrivateStoreNotices m_privateStores{QSettings().value(QStringLiteral("privateStores/notified")).toStringList()};
+    PrivateStoreNotices m_privateStores{Settings::value(QStringLiteral("privateStores/notified")).toStringList()};
     void migrateReadMarks(const QString &host);
     void publishReadMarks();
     void warmCaches(const QString &host, const BoxState &box);

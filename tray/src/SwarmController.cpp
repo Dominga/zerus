@@ -90,7 +90,7 @@ SwarmController::SwarmController(HgsClient *client, QObject *parent) : QObject(p
 void SwarmController::start(const QJsonObject &organization)
 {
     if(m_started)return;m_started=true;m_desired=organization;
-    if(!QSettings().contains("workspace/organizationBeforeSwarm"))Settings::set("workspace/organizationBeforeSwarm",QJsonDocument(organization).toJson(QJsonDocument::Compact));
+    if(!Settings::contains("workspace/organizationBeforeSwarm"))Settings::set("workspace/organizationBeforeSwarm",QJsonDocument(organization).toJson(QJsonDocument::Compact));
     m_base=SettingsJson::object("swarm/observedOrganization");
     m_versions=SettingsJson::object("swarm/observedVersions");
     m_ready=!m_base.isEmpty();

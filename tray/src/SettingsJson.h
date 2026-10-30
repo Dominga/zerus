@@ -24,10 +24,13 @@ class QSettings;
 // snapshots, the organization and swarm's observed copies, 250 KB of a 275 KB
 // file) live in JSON files of their own beside it (filePath()). Each is read
 // once - at start by preload(), or by its first read - and is the truth from
-// then on; a store() writes it with QSaveFile on a worker thread. A value an
-// older build left in the INI moves into its file on that first read and
-// leaves the INI. Every other key is written through Settings::set(), so no
-// GUI-thread store waits for the INI's lock (Settings.h).
+// then on; a store() writes it with QSaveFile on a worker thread. #729 (#709
+// N7): for at least one release each also stays in the INI, with a stamp (the
+// time and hash of the bytes this build stored), so the updater's rollback
+// build keeps its projects and folders; on the first read the newer copy wins
+// and is written to the other. Every other key is written through
+// Settings::set() and read through Settings::value(), so no GUI-thread store
+// waits for the INI's lock and a queued store reads back at once (Settings.h).
 namespace SettingsJson {
 
 // A stored value over maximumBytes (0: any size) reads as empty.

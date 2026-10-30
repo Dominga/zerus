@@ -35,6 +35,6 @@ inline bool enabledByDefault()
 }
 
 inline QString key(const QString &id) { return QStringLiteral("extensions/") + id; }
-inline bool enabled(const QString &id) { return QSettings().value(key(id), enabledByDefault()).toBool(); }
+inline bool enabled(const QString &id) { return Settings::value(key(id), enabledByDefault()).toBool(); }
 inline void setEnabled(const QString &id, bool on) { Settings::set(key(id), on); }
 }

@@ -50,6 +50,7 @@ void moveTemporaryFiles()
 void quietCrashes()
 {
     SetErrorMode(SetErrorMode(0) | SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+    qputenv("ZERUS_TEST_ERROR_MODE", QByteArray::number(uint(GetErrorMode())));
 }
 
 void isolateSettings()

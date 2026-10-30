@@ -46,7 +46,7 @@ const char *wingetIdentifier="ufna.Zerus";
 bool matches(const QString &s,const char *pattern){return QRegularExpression(QString::fromLatin1(pattern)).match(s).hasMatch();}
 bool integer(const QJsonValue &v,qint64 low,qint64 high){double n=v.toDouble(-1);return v.isDouble()&&std::isfinite(n)&&std::floor(n)==n&&n>=low&&n<=high;}
 bool safe(const QString &s){return matches(s,"\\A[A-Za-z0-9][A-Za-z0-9._+-]{0,179}\\z")&&!s.contains("..");}
-QString configuredChannel(){QString c=QSettings().value("updates/channel","stable").toString();return c=="nightly"||c=="dev"?c:"stable";}
+QString configuredChannel(){QString c=Settings::value("updates/channel","stable").toString();return c=="nightly"||c=="dev"?c:"stable";}
 bool macosInstallation(const DesktopInstallation &installation){return installation.kind=="homebrew-cask"||installation.kind=="macos-bundle";}
 // The portable zip (also through winget) and the per-user installer: Windows builds
 // learn about newer ones from the feed and link their release pages.
@@ -484,7 +484,7 @@ UpdateController::UpdateController(QObject *parent,QString executable,std::funct
 }
 QString UpdateController::channel() const{return configuredChannel();}
 void UpdateController::setChannel(const QString &value){if(value!="stable"&&value!="nightly"&&value!="dev")return;++m_checkGeneration;m_automaticInFlight=false;if(m_activeReply)m_activeReply->abort();Settings::set("updates/channel",value);m_freshForNotification=false;m_feed={};m_notice.clear();m_error.clear();m_comparison.clear();m_lastSuccess=0;m_cached=false;m_available=false;m_message="Updates have not been checked for this channel.";restoreCatalog();++m_checkGeneration;m_busy=false;emit changed();compare();checkAutomatically();}
-bool UpdateController::automaticChecks() const{return QSettings().value("updates/automatic",true).toBool();}
+bool UpdateController::automaticChecks() const{return Settings::value("updates/automatic",true).toBool();}
 void UpdateController::setAutomaticChecks(bool enabled){
     Settings::set("updates/automatic",enabled);
     if(!enabled){m_startCheck=false;m_freshForNotification=false;if(m_automaticInFlight){++m_checkGeneration;m_busy=false;m_automaticInFlight=false;m_freshForNotification=false;if(m_activeReply)m_activeReply->abort();}}
@@ -492,7 +492,7 @@ void UpdateController::setAutomaticChecks(bool enabled){
 }
 void UpdateController::checkOnStart(){if(!automaticChecks())return;m_startCheck=true;if(m_installation.kind!="checking")emit changed();}
 void UpdateController::checkAutomatically(){
-    if(!automaticChecks())return;if(m_installation.kind=="checking"){m_startCheck=true;return;}auto now=QDateTime::currentSecsSinceEpoch();auto last=QSettings().value("updates/lastAttempt/"+channel(),0).toLongLong();
+    if(!automaticChecks())return;if(m_installation.kind=="checking"){m_startCheck=true;return;}auto now=QDateTime::currentSecsSinceEpoch();auto last=Settings::value("updates/lastAttempt/"+channel(),0).toLongLong();
     // Dev builds carry no Windows zip: a portable build has nothing to poll for.
     const int interval=windowsBuild(m_installation)?automaticInterval("stable"):automaticInterval(channel());if(last<=0||last>now||now-last>=interval)startCheck(true);
 }
@@ -579,7 +579,7 @@ void UpdateController::detectInstallation(const QString &executable){
     if(mac.kind.isEmpty())mac=macosBundleInstallation(canonical);
     if(macosInstallation(mac)){
         m_installation=mac;
-        if(!QSettings().contains("updates/channel")){Settings::set("updates/channel",preferredChannel(m_installation));m_feed={};restoreCatalog();}
+        if(!Settings::contains("updates/channel")){Settings::set("updates/channel",preferredChannel(m_installation));m_feed={};restoreCatalog();}
         emit changed();compare();return;
     }
 #endif
@@ -589,7 +589,7 @@ void UpdateController::detectInstallation(const QString &executable){
             if(!okay||!matches(owner,"\\A[A-Za-z0-9][A-Za-z0-9@._+-]{0,119}\\z")){sourceInstallation(canonical);return;}
             m_installation.kind="package";m_installation.package=owner;
             run(pacman,{"-Q","--",owner},[this,owner](bool success,QString raw){if(success&&raw.startsWith(owner+" ")&&!raw.contains('\n')){QString version=raw.mid(owner.size()+1);if(matches(version,"\\A[0-9][A-Za-z0-9.+_~:-]{0,159}\\z"))m_installation.version=version;}
-                if(prefersNightly(m_installation)&&!QSettings().contains("updates/channel")){Settings::set("updates/channel","nightly");m_feed={};restoreCatalog();}emit changed();compare();});
+                if(prefersNightly(m_installation)&&!Settings::contains("updates/channel")){Settings::set("updates/channel","nightly");m_feed={};restoreCatalog();}emit changed();compare();});
         });return;
     }
 #endif

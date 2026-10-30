@@ -25,7 +25,7 @@ public:
 inline QString zerusUiLanguage() {
     // English stays the default on every OS. An unsupported/old "system"
     // preference does not silently opt an installed desktop into translation.
-    return QSettings().value("workspace/language", "en").toString() == "ru" ? "ru" : "en";
+    return Settings::value("workspace/language", "en").toString() == "ru" ? "ru" : "en";
 }
 
 inline QComboBox *zerusLanguageChoice(QWidget *parent = nullptr) {

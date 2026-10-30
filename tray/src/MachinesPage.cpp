@@ -598,7 +598,8 @@ void MachinesPage::loadSelection() {
     // overrides, kept on this device when the machine was saved, come back
     // into their (hidden) fields, so switching the type back restores them.
     if (!local && !m_new) {
-        const auto other = QJsonDocument::fromJson(QSettings().value(otherTransportKey(m_selected)).toByteArray()).object();
+        // #709 L8: through the overlay, so a save still queued behind the lock reads back.
+        const auto other = QJsonDocument::fromJson(Settings::value(otherTransportKey(m_selected)).toByteArray()).object();
         if (m_transport->currentIndex() == 1) {
             m_hostname->setText(other.value("hostname").toString()); m_user->setText(other.value("user").toString());
             m_port->setValue(other.value("port").toInt()); m_key->setText(other.value("identity_file").toString());

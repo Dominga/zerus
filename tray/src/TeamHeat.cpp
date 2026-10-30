@@ -1,10 +1,10 @@
 #include "TeamHeat.h"
+#include "Settings.h"
 #include "WorkspaceIcons.h"
 #include <QHBoxLayout>
 #include <QJsonArray>
 #include <QLinearGradient>
 #include <QPainter>
-#include <QSettings>
 #include <algorithm>
 
 namespace TeamUi {
@@ -65,15 +65,15 @@ double Heat::share(int task) const
 
 QString heatMode(const QString &team)
 {
-    const QString mode = QSettings().value(QStringLiteral("teams/heat/") + team).toString();
+    const QString mode = Settings::value(QStringLiteral("teams/heat/") + team).toString();
     return mode == QLatin1String("time") || mode == QLatin1String("tokens") ? mode : QStringLiteral("off");
 }
 
+// #729 (#709 N6): through Settings, so a click never waits on the INI's lock.
 void setHeatMode(const QString &team, const QString &mode)
 {
-    QSettings settings;
-    if (mode == QLatin1String("time") || mode == QLatin1String("tokens")) settings.setValue(QStringLiteral("teams/heat/") + team, mode);
-    else settings.remove(QStringLiteral("teams/heat/") + team);
+    if (mode == QLatin1String("time") || mode == QLatin1String("tokens")) Settings::set(QStringLiteral("teams/heat/") + team, mode);
+    else Settings::remove(QStringLiteral("teams/heat/") + team);
 }
 
 QJsonValue addHeatPage(Heat &heat, const QJsonObject &profile)

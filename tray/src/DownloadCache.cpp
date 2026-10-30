@@ -207,9 +207,9 @@ namespace DownloadCache {
 QString directory() {
     const auto downloads = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
     const auto fallback = QDir(downloads.isEmpty() ? QDir::home().filePath("Downloads") : downloads).filePath("Zerus Files");
-    return QFileInfo(QSettings().value("downloads/folder", fallback).toString()).absoluteFilePath();
+    return QFileInfo(Settings::value("downloads/folder", fallback).toString()).absoluteFilePath();
 }
-qint64 limitBytes() { return qMax(qint64(0), QSettings().value("downloads/cacheBytes", 0).toLongLong()); }
+qint64 limitBytes() { return qMax(qint64(0), Settings::value("downloads/cacheBytes", 0).toLongLong()); }
 void setLimitBytes(qint64 bytes) { Settings::set("downloads/cacheBytes", qMax(qint64(0), bytes)); }
 Pending::~Pending() {
     if (QFileInfo(root).canonicalFilePath() == canonicalRoot && QFileInfo(path).absolutePath() == root

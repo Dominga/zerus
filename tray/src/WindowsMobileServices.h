@@ -38,10 +38,10 @@ inline QString relayDatabase()
     QDir().mkpath(stateDirectory() + QStringLiteral("/relay"));
     return QDir::toNativeSeparators(stateDirectory() + QStringLiteral("/relay/relay.sqlite3"));
 }
-inline int relayPort() { return QSettings().value(QStringLiteral("mobile/localRelayPort"), 8787).toInt(); }
+inline int relayPort() { return Settings::value(QStringLiteral("mobile/localRelayPort"), 8787).toInt(); }
 // Off until chosen: most gateways use a relay elsewhere.
-inline bool runRelay() { return QSettings().value(QStringLiteral("mobile/localRelay"), false).toBool(); }
-inline bool startConnectorWithZerus() { return QSettings().value(QStringLiteral("mobile/runConnector"), true).toBool(); }
+inline bool runRelay() { return Settings::value(QStringLiteral("mobile/localRelay"), false).toBool(); }
+inline bool startConnectorWithZerus() { return Settings::value(QStringLiteral("mobile/runConnector"), true).toBool(); }
 
 // The bundled relay's copy for this exact build, made once.
 inline QString relay()
@@ -137,7 +137,7 @@ inline void ensureInBackground(const QString &config)
 // peer (src/windows_peer.rs) never starts the host itself, and a host exits a
 // few seconds after its last session, so this computer keeps one running with
 // `hgs session-host start` while the option is on.
-inline bool residentHost() { return QSettings().value(QStringLiteral("machines/residentHost"), false).toBool(); }
+inline bool residentHost() { return Settings::value(QStringLiteral("machines/residentHost"), false).toBool(); }
 inline void keepResidentHost(const QString &hgs)
 {
     if (!residentHost() || hgs.isEmpty()) return;

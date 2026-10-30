@@ -5,6 +5,8 @@
 #include "Settings.h"
 
 #include <QCoreApplication>
+#include <QCryptographicHash>
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -137,16 +139,43 @@ void queueFile(const QString &path, std::optional<QByteArray> bytes)
     f.wake.notify_all();
 }
 
-// A file key's stored bytes: its file, or once, the INI value it replaces,
-// which then moves into the file and leaves the INI.
+// #729 (#709 N7): the updater's rollback build reads these values only from
+// the INI, so for at least one release each stays there too, with a stamp: the
+// time and hash of the bytes this build stored last.
+QString stampKey(const QString &key) { return QStringLiteral("settingsJson/") + fileNames().value(key); }
+QByteArray hashOf(const QByteArray &bytes) { return QCryptographicHash::hash(bytes, QCryptographicHash::Sha1).toHex(); }
+QString stampOf(const QByteArray &bytes)
+{
+    return QString::number(QDateTime::currentMSecsSinceEpoch()) + QLatin1Char(':') + QString::fromLatin1(hashOf(bytes));
+}
+
+// Stores the INI copy and its stamp in one queued batch.
+void storeCopy(const QString &key, const QByteArray &bytes)
+{
+    Settings::set(key, bytes);
+    Settings::set(stampKey(key), stampOf(bytes));
+}
+
+// A file key's stored bytes. The newer copy wins: the INI's when someone else
+// (the rollback build) changed it after this build's last store, or when this
+// build's file write was lost; the file's otherwise. The winner is written to
+// the other copy, so both agree again.
 QByteArray loadFile(const QString &key)
 {
     const QString path = filePath(key);
     QFile file(path);
-    if (file.open(QIODevice::ReadOnly)) return file.size() > MaximumFileBytes ? QByteArray() : file.readAll();
-    const QByteArray legacy = QSettings().value(key).toByteArray();
-    if (!legacy.isEmpty() && writeFile(path, legacy)) Settings::remove(key);
-    return legacy;
+    const bool haveFile = file.open(QIODevice::ReadOnly) && file.size() <= MaximumFileBytes;
+    const QByteArray fileBytes = haveFile ? file.readAll() : QByteArray();
+    file.close();
+    const QByteArray ini = Settings::value(key).toByteArray();
+    const QByteArray stamped = Settings::value(stampKey(key)).toString().section(QLatin1Char(':'), 1).toLatin1();
+    if (!ini.isEmpty() && ini != fileBytes && (!haveFile || hashOf(ini) != stamped || hashOf(fileBytes) != stamped)) {
+        if (writeFile(path, ini)) Settings::set(stampKey(key), stampOf(ini));
+        return ini;
+    }
+    // A file an earlier build moved out of the INI: the copy comes back.
+    if (haveFile && ini.isEmpty() && !fileBytes.isEmpty()) storeCopy(key, fileBytes);
+    return fileBytes;
 }
 
 QStringList expand(const QStringList &patterns)
@@ -184,7 +213,7 @@ void parseStored(const QStringList &keys)
             if (inFile(key) && s_entries.value(key).loaded) continue;
             writes = s_writes.value(key);
         }
-        parseRead(key, inFile(key) ? loadFile(key) : QSettings().value(key).toByteArray(), writes, __FILE__, __LINE__);
+        parseRead(key, inFile(key) ? loadFile(key) : Settings::value(key).toByteArray(), writes, __FILE__, __LINE__);
     }
 }
 
@@ -227,7 +256,7 @@ QJsonDocument readFileKey(const QString &key, qsizetype maximumBytes, const char
         return maximumBytes > 0 && bytes.size() > maximumBytes ? QJsonDocument() : document;
     }
     // Nothing stored anywhere: nothing to parse.
-    if (!QFileInfo::exists(filePath(key)) && !QSettings().contains(key)) {
+    if (!QFileInfo::exists(filePath(key)) && !Settings::contains(key)) {
         s_entries.insert(key, {QByteArray(), QJsonDocument(), true});
         s_mutex.unlock();
         return {};
@@ -239,7 +268,7 @@ QJsonDocument read(const QString &key, qsizetype maximumBytes, const char *file,
 {
     countRead(key);
     if (inFile(key)) return readFileKey(key, maximumBytes, file, line);
-    const QByteArray bytes = QSettings().value(key).toByteArray();
+    const QByteArray bytes = Settings::value(key).toByteArray();
     if (maximumBytes > 0 && bytes.size() > maximumBytes) return {};
     s_mutex.lock();
     const auto found = s_entries.constFind(key);
@@ -285,7 +314,7 @@ QJsonArray array(const QString &key, const char *file, int line) { return read(k
 
 QByteArray bytes(const QString &key)
 {
-    if (!inFile(key)) return QSettings().value(key).toByteArray();
+    if (!inFile(key)) return Settings::value(key).toByteArray();
     {
         QMutexLocker lock(&s_mutex);
         const auto found = s_entries.constFind(key);
@@ -294,7 +323,7 @@ QByteArray bytes(const QString &key)
     return loadFile(key);
 }
 
-bool contains(const QString &key) { return inFile(key) ? !bytes(key).isEmpty() : QSettings().contains(key); }
+bool contains(const QString &key) { return inFile(key) ? !bytes(key).isEmpty() : Settings::contains(key); }
 
 void remember(const QString &key, const QByteArray &bytes, const QJsonDocument &document)
 {
@@ -306,8 +335,12 @@ void remember(const QString &key, const QByteArray &bytes, const QJsonDocument &
 void store(const QString &key, const QByteArray &bytes, const QJsonDocument &document)
 {
     remember(key, bytes, document);
-    if (inFile(key)) queueFile(filePath(key), bytes);
-    else Settings::set(key, bytes);
+    if (inFile(key)) {
+        queueFile(filePath(key), bytes);
+        storeCopy(key, bytes);
+    } else {
+        Settings::set(key, bytes);
+    }
 }
 
 void store(QSettings &, const QString &key, const QJsonDocument &document)
@@ -334,8 +367,9 @@ void remove(const QString &key)
     remember(key, QByteArray(), QJsonDocument());
     if (inFile(key)) {
         queueFile(filePath(key), std::nullopt);
-        // A value an older build left in the INI goes too.
-        if (QSettings().contains(key)) Settings::remove(key);
+        // Its INI copy and stamp go too.
+        Settings::remove(key);
+        Settings::remove(stampKey(key));
     } else {
         Settings::remove(key);
     }

@@ -27,7 +27,10 @@ use zerus_client_core::actions::{
     change_notifications, classify, invocation, parse_reference, reference_invocation,
     ALREADY_ANSWERING, ALREADY_SENDING,
 };
-use zerus_client_core::details::{details_invocation, parse_details, Details};
+use zerus_client_core::details::{
+    details_invocation, parse_details, parse_subagent_identity, subagent_identity_invocation,
+    Details, SubagentIdentity,
+};
 use zerus_client_core::marks::{AttentionMarks, Mark};
 use zerus_client_core::readmarks::{ReadMark, ReadMarks};
 use zerus_client_core::reads::{self, ArchivePage};
@@ -977,6 +980,26 @@ pub async fn inspect_session(target: Target, archive_id: Option<String>) -> Opti
         .await
         .ok()?;
     parse_details(&target, exit)
+}
+
+/// Read once on opening a child; no timer or separate subscription.
+#[tauri::command]
+pub async fn inspect_subagent_identity(
+    target: Target,
+    archive_id: Option<String>,
+    agent_id: String,
+) -> Option<SubagentIdentity> {
+    if blocked() {
+        return None;
+    }
+    let inv = subagent_identity_invocation(&target, archive_id.as_deref(), &agent_id)?;
+    let hgs = default_hgs();
+    let exit = tauri::async_runtime::spawn_blocking(move || {
+        zerus_client_core::run_limited(&hgs, &inv, &[], 4 * 1024 * 1024).ok()
+    })
+    .await
+    .ok()??;
+    parse_subagent_identity(&target, &agent_id, exit)
 }
 
 /// `hgs reference` for the session: its `zerus://session?...` URI, or why it

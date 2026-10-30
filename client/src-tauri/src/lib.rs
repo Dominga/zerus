@@ -365,7 +365,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(mobile::start(app.handle()));
                 // A replay never touches the real read or attention marks.
                 let actions = actions::Actions::new(dir.join(actions::marks_file(replay)));
-                readsync::start(actions.clone());
+                app.manage(readsync::start(actions.clone()));
                 app.manage(actions);
                 app.manage(actions::ArchiveReads::default());
                 app.manage(content_search::Searches::default());

@@ -93,6 +93,16 @@ An exit flush, timer, timeout, claimed count or imported record is insufficient.
 The existing Exit versus updater Quit ordering remains unchanged. No gate close
 automatically signals an agent, process group or unrelated service.
 
+The read-delivery integration retains its existing one loop and four delivery
+slots. App state holds a dormant `ReadDelivery` control handle; only a future
+explicit stop closes that loop's gate, wakes it and cancels its owned reads.
+There is no producer-control caller yet. Each callback and its actual child,
+stdin writer and output readers retain the same admitted group. A returned
+outcome releases neither a blocked pipe nor its capacity. The selected read
+argv, payload, local/peer deadlines, settlement and backoff stay unchanged;
+stdout is now bounded to 1 MiB. The separate pending-mark store can still accept
+writes, so delivery Idle is not a complete Read role or handoff proof.
+
 ## Fresh capture and publication boundary
 
 G1 supplies G3 an opaque, non-serializing capture context only after the exact

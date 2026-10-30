@@ -1054,42 +1054,45 @@ mod tests {
     #[test]
     fn settings_save_keeps_or_removes_the_key_and_never_returns_it() {
         let dir = tempfile::tempdir().unwrap();
-        let config = config(dir.path());
-        save(&config, &[server()]).unwrap();
-        let human = |servers: Value| json!({"by": "human", "servers": servers});
-        // Renamed, its key kept through `was`; a second one added without a key.
-        let saved = save_request(&config, &human(json!([
-            {"was": "lab", "name": "lab-a", "base_url": "http://127.0.0.1:11434", "kind": "openai",
-             "status": ["serve", "status"], "down": ["serve", "down", "{model}"]},
-            {"name": "gate", "base_url": "https://gate.example/v1", "kind": "anthropic"}
-        ]))).unwrap();
-        assert_eq!(saved["status"], "saved");
-        assert!(!saved.to_string().contains("sk-test"), "{saved}");
-        assert_eq!(saved["servers"][0]["key"], true);
-        assert_eq!(saved["servers"][0]["argv"]["down"], json!(["serve", "down", "{model}"]));
-        let found = load(&config).unwrap();
-        assert_eq!((found[0].name.as_str(), found[0].key.as_str()), ("lab-a", "sk-test"));
-        assert_eq!((found[1].name.as_str(), found[1].key.as_str()), ("gate", ""));
-        // A new key replaces it; null removes it.
-        save_request(&config, &human(json!([{"was": "lab-a", "name": "lab-a", "base_url": "http://127.0.0.1:11434", "kind": "openai", "key": "sk-new"}]))).unwrap();
-        assert_eq!(load(&config).unwrap()[0].key, "sk-new");
-        save_request(&config, &human(json!([{"was": "lab-a", "name": "lab-a", "base_url": "http://127.0.0.1:11434", "kind": "openai", "key": null}]))).unwrap();
-        assert_eq!(load(&config).unwrap()[0].key, "");
-        // Errors name the server and the field; nothing is written.
-        let refused = |servers: Value| save_request(&config, &human(servers)).unwrap_err().message;
-        let error = refused(json!([{"name": "bad", "base_url": "ftp://x", "kind": "openai"}]));
-        assert!(error.starts_with("Server bad: The API URL"), "{error}");
-        let error = refused(json!([{"name": "bad", "base_url": "http://x", "kind": "openai", "colour": "red"}]));
-        assert!(error.starts_with("Server bad: unknown field `colour`"), "{error}");
-        let error = refused(json!([{"name": "x", "base_url": "http://x", "kind": "openai"}, {"name": "x", "base_url": "http://y", "kind": "openai"}]));
-        assert!(error.contains("Server x: name is already used"), "{error}");
-        let error = refused(json!([{"name": "x", "base_url": "http://x", "kind": "openai", "up": ["serve", "up"]}]));
-        assert!(error.starts_with("Server x: The up command"), "{error}");
-        assert_eq!(load(&config).unwrap().len(), 1);
-        // Only you: no "by":"human", nothing saved.
-        let error = save_request(&config, &json!({"servers": []})).unwrap_err().message;
-        assert!(error.contains("by"), "{error}");
-        assert_eq!(load(&config).unwrap().len(), 1);
+        // The test process may run inside an agent session; save is the owner's.
+        crate::state::with_test_state_root(dir.path(), || {
+            let config = config(dir.path());
+            save(&config, &[server()]).unwrap();
+            let human = |servers: Value| json!({"by": "human", "servers": servers});
+            // Renamed, its key kept through `was`; a second one added without a key.
+            let saved = save_request(&config, &human(json!([
+                {"was": "lab", "name": "lab-a", "base_url": "http://127.0.0.1:11434", "kind": "openai",
+                 "status": ["serve", "status"], "down": ["serve", "down", "{model}"]},
+                {"name": "gate", "base_url": "https://gate.example/v1", "kind": "anthropic"}
+            ]))).unwrap();
+            assert_eq!(saved["status"], "saved");
+            assert!(!saved.to_string().contains("sk-test"), "{saved}");
+            assert_eq!(saved["servers"][0]["key"], true);
+            assert_eq!(saved["servers"][0]["argv"]["down"], json!(["serve", "down", "{model}"]));
+            let found = load(&config).unwrap();
+            assert_eq!((found[0].name.as_str(), found[0].key.as_str()), ("lab-a", "sk-test"));
+            assert_eq!((found[1].name.as_str(), found[1].key.as_str()), ("gate", ""));
+            // A new key replaces it; null removes it.
+            save_request(&config, &human(json!([{"was": "lab-a", "name": "lab-a", "base_url": "http://127.0.0.1:11434", "kind": "openai", "key": "sk-new"}]))).unwrap();
+            assert_eq!(load(&config).unwrap()[0].key, "sk-new");
+            save_request(&config, &human(json!([{"was": "lab-a", "name": "lab-a", "base_url": "http://127.0.0.1:11434", "kind": "openai", "key": null}]))).unwrap();
+            assert_eq!(load(&config).unwrap()[0].key, "");
+            // Errors name the server and the field; nothing is written.
+            let refused = |servers: Value| save_request(&config, &human(servers)).unwrap_err().message;
+            let error = refused(json!([{"name": "bad", "base_url": "ftp://x", "kind": "openai"}]));
+            assert!(error.starts_with("Server bad: The API URL"), "{error}");
+            let error = refused(json!([{"name": "bad", "base_url": "http://x", "kind": "openai", "colour": "red"}]));
+            assert!(error.starts_with("Server bad: unknown field `colour`"), "{error}");
+            let error = refused(json!([{"name": "x", "base_url": "http://x", "kind": "openai"}, {"name": "x", "base_url": "http://y", "kind": "openai"}]));
+            assert!(error.contains("Server x: name is already used"), "{error}");
+            let error = refused(json!([{"name": "x", "base_url": "http://x", "kind": "openai", "up": ["serve", "up"]}]));
+            assert!(error.starts_with("Server x: The up command"), "{error}");
+            assert_eq!(load(&config).unwrap().len(), 1);
+            // Only you: no "by":"human", nothing saved.
+            let error = save_request(&config, &json!({"servers": []})).unwrap_err().message;
+            assert!(error.contains("by"), "{error}");
+            assert_eq!(load(&config).unwrap().len(), 1);
+        });
     }
 
     /// U60 (#656): `test --json` reads status once for an unsaved server,

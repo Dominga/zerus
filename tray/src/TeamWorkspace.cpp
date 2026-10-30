@@ -1266,13 +1266,10 @@ private:
         if (sizeHint().width() > width()) {
             row->setSpacing(0); row->setContentsMargins(0, 8, 0, 6);
         }
-        // Still too wide (U38 added Profile): the zoom group goes; Fit stays
-        // a click away in a wider window and the graph still scrolls.
-        for (auto *w : findChildren<QWidget *>()) if (w->property("compactDrop").toBool() && sizeHint().width() > width()) w->hide();
     }
     // Steps: first the switch labels go (their switches keep them as
-    // tooltips), then the filter's words, then every button's words; an
-    // icon-only row still too wide drops the zoom group.
+    // tooltips), then the filter's words, then every button's words (the
+    // icon-only row leaves out Hide finished and the zoom group).
     void refit()
     {
         if (m_level == 0) {
@@ -1292,7 +1289,9 @@ private:
         m_level = level;
         const bool compact = level == 3;
         for (auto *l : findChildren<QLabel *>()) if (l->property("compactHide").toBool()) l->setVisible(level == 0);
-        if (level < 3) for (auto *w : findChildren<QWidget *>()) if (w->property("compactDrop").toBool()) w->show();
+        // The icon-only row leaves out a view preference (Hide finished, which
+        // stays set) and the zoom group.
+        for (auto *w : findChildren<QWidget *>()) if (w->property("compactDrop").toBool()) w->setVisible(level < 3);
         // Icon-only buttons take their icon's width, not the style's text
         // minimum, and the row draws its groups closer together.
         if (auto *row = qobject_cast<QHBoxLayout *>(layout())) {
@@ -1391,6 +1390,7 @@ QWidget *TeamWorkspace::toolbar(const Team &team)
         // Owner, 2026-10-30: hide the phases whose tasks are all decided.
         if (const int finished = finishedPhases(team); finished || m_hideFinished) {
             auto *hideSwitch = new ToggleSwitch(c); hideSwitch->setObjectName("teamWorkspaceHideFinished"); hideSwitch->setChecked(m_hideFinished);
+            hideSwitch->setProperty("compactDrop", true);
             hideSwitch->setAccessibleName(tr("Hide finished"));
             hideSwitch->setToolTip(finished == 1 ? tr("1 phase has every task decided") : tr("%1 phases have every task decided").arg(finished));
             QObject::connect(hideSwitch, &QAbstractButton::clicked, this, [this](bool on) {

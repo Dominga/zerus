@@ -741,6 +741,7 @@ private slots:
     void draftCreateSavesFirstAndShowsBlockersInRed();
     void templatesAreCompactWithSearchAndFavourites();
     void templateListHidesItsOldRowsAtOnce();
+    void hideFinishedLeavesOutDecidedPhases();
     void dialogTemplateListAppliesOnlyWhenChosen();
     void designerSessionKeepsItsNameAndLeadsNoTeam();
     void nextGoalFromADoneTeam();
@@ -5366,6 +5367,43 @@ static QJsonObject timingTeam()
     }
     t["tasks"] = tasks;
     return t;
+}
+
+// Owner, 2026-10-30: Hide finished leaves out a phase whose tasks are all
+// decided, with its tasks, in Graph, Board and Layers, and is remembered.
+void TestTeamsUi::hideFinishedLeavesOutDecidedPhases()
+{
+    QSettings().remove("teams/hideFinished");
+    const auto team = Teams::parse(phasedTeam());
+    QVERIFY(phaseFinished(team, 1) && !phaseFinished(team, 2) && !phaseFinished(team, 3));
+    QCOMPARE(finishedPhases(team), 1);
+    const auto shown = withoutFinished(team);
+    QVERIFY(shown.cancelledHidden);
+    QVERIFY(!shown.task(1) && !shown.task(2) && shown.task(3) && shown.task(4) && shown.task(5));
+    setTeam(phasedTeam());
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    panel.setLive(live); workspace.setLive(live);
+    workspace.resize(1300, 820); workspace.show();
+    controller.refresh();
+    QTRY_VERIFY(controller.team("team-1"));
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    QTRY_VERIFY(workspace.findChild<QAbstractButton *>("teamWorkspaceHideFinished"));
+    QTRY_VERIFY(phaseScrollOf(&workspace, 2));
+    QVERIFY(!workspace.findChild<QAbstractButton *>("teamWorkspaceHideFinished")->isChecked());
+    QVERIFY(phaseScrollOf(&workspace, 1));
+    workspace.findChild<QAbstractButton *>("teamWorkspaceHideFinished")->click();
+    QTRY_VERIFY(!phaseScrollOf(&workspace, 1));
+    QVERIFY(phaseScrollOf(&workspace, 2) && phaseScrollOf(&workspace, 3));
+    QVERIFY(QSettings().value("teams/hideFinished").toBool());
+    QTRY_VERIFY(workspace.findChild<QAbstractButton *>("teamWorkspaceHideFinished")->isChecked());
+    shot(&workspace, "hide-finished-dark");
+    workspace.findChild<QAbstractButton *>("teamWorkspaceHideFinished")->click();
+    QTRY_VERIFY(phaseScrollOf(&workspace, 1));
+    QSettings().remove("teams/hideFinished");
 }
 
 // U58: the phased team with a cancelled task in phase 2 and an approved phase 4

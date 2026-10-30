@@ -1470,14 +1470,19 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
     if state != "open" {
         return Ok(json!({"status":state,"proposal":id}));
     }
-    let accept = input["accept"].as_bool() == Some(true);
+    // An answer is explicit: a missing or misspelled "accept" never becomes a
+    // rejection (RogueDOD, 2026-10-30: "decision":"allow" rejected a proposal).
+    let accept = input["accept"].as_bool().context(
+        "decide-proposal needs \"accept\": true or false, with \"proposal\" and \"expected_hash\" from the proposal; nothing was decided",
+    )?;
     let reason = text(input, "reason").trim().to_owned();
     ensure!(reason.chars().count() <= 2000, "A reason has at most 2000 characters");
     // U57: the owner's Allow is bound to this id and the proposal's content
     // hash; a changed proposal never applies. An older proposal without a hash
     // stays decidable.
     if let Some(hash) = team.proposals[at]["hash"].as_str().filter(|hash| !hash.is_empty()) {
-        let expected = text(input, "expected_hash");
+        // The proposal's receipt names it "hash"; both spellings are read.
+        let expected = Some(text(input, "expected_hash")).filter(|value| !value.is_empty()).unwrap_or_else(|| text(input, "hash"));
         ensure!(
             !expected.is_empty() && expected == hash,
             "The proposal changed; reload the card and answer again with its hash"
@@ -7922,6 +7927,12 @@ mod tests {
         let first = team.proposals[0]["hash"].as_str().unwrap().to_owned();
         let second = team.proposals[1]["hash"].as_str().unwrap().to_owned();
         store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+        // A guessed field never decides: no "accept" is an error, not a rejection.
+        let error = decide_proposal_in(&mut store, &json!({"team":"t","proposal":"p1","decision":"allow","hash":first}), &Actor::Human)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("accept") && error.contains("nothing was decided"), "{error}");
+        assert_eq!(store.load("t").unwrap().unwrap().proposals[0]["state"], "open");
         let denied = decide_proposal_in(
             &mut store,
             &json!({"team":"t","proposal":"p1","accept":false,"reason":"not yet","expected_hash":first}),
@@ -7934,7 +7945,7 @@ mod tests {
         assert!(feed.contains("plan_mode_denied") && feed.contains("not yet"), "{feed}");
         let receipt = decide_proposal_in(
             &mut store,
-            &json!({"team":"t","proposal":"p2","accept":true,"by":"human","expected_hash":second}),
+            &json!({"team":"t","proposal":"p2","accept":true,"by":"human","hash":second}),
             &Actor::Human,
         )
         .unwrap();

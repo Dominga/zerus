@@ -218,6 +218,8 @@ private:
     Teams::LiveLookup m_live;
     QList<Computer> m_computers;
     QString m_team, m_view = QStringLiteral("graph"), m_filter = QStringLiteral("all"), m_focus;
+    // Owner, 2026-10-30: Graph, Board and Layers leave out finished phases.
+    bool m_hideFinished = false;
     QString m_error;
     // Answer focused this exact question's Allow; rebuilds in the next few
     // seconds focus it again, even when the focus was already lost.

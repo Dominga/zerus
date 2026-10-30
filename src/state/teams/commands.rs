@@ -2934,8 +2934,11 @@ fn roster_word_rule(team: &Team, op: &str, input: &Value) -> super::owner_word::
         }
         "relaunch" => {
             // U54: the lead relaunches a member's session on the owner's word.
+            // #728 (#709 N4): with lead_restarts_stuck, a member Zerus marks
+            // stuck is the lead's to restart without a word.
             let id = text(input, "member");
-            if id.is_empty() {
+            let stuck = team.member(id).is_some_and(|member| member.stuck.is_some());
+            if id.is_empty() || (team.settings.lead_restarts_stuck && stuck) {
                 WordRule::default()
             } else {
                 WordRule {
@@ -5005,6 +5008,44 @@ mod tests {
             let phase = run("spans", &json!({"team":"rv","phase":2}), false).unwrap();
             assert_eq!(phase["tasks"].as_array().unwrap().len(), 1);
             assert!(run("spans", &json!({"team":"rv","task":99}), false).is_err());
+        });
+    }
+
+    /// #728 (#709 N4, #645 N2) through `hgs team`: with lead_restarts_stuck the
+    /// lead restarts a stuck member without the owner's word, and the step is
+    /// a restart request the worker carries out; without the setting the lead
+    /// needs the word, and the owner always has the same route.
+    #[test]
+    fn the_lead_restarts_a_stuck_member_on_the_owners_setting_without_a_word() {
+        use crate::state::teams::model::{MemberStuck, SessionRef};
+        let (mut team, _, _) = review_team();
+        for member in team.members.iter_mut().filter(|member| member.id == "dev" || member.id == "qa") {
+            member.session = Some(SessionRef { name: format!("codex/x/{}", member.id), run_id: "r1".into(), conversation_id: format!("c-{}", member.id), ..Default::default() });
+            member.stuck = Some(MemberStuck { at: 1.0, reason: "compaction_timeout".into(), phase: "compacting".into(), ..Default::default() });
+        }
+        with_review_team(&team, || {
+            assert!(MUTATIONS.contains(&"relaunch") && USAGE.contains("|relaunch|"));
+            let error = as_lead(|| call("relaunch", json!({"member":"dev"}))).unwrap_err().to_string();
+            assert!(error.contains("owner_word"), "{error}");
+            assert!(stored().member("dev").unwrap().restart.is_none());
+            call("settings", json!({"settings":{"lead_restarts_stuck":true},"by":"human"})).unwrap();
+            let receipt = as_lead(|| call("relaunch", json!({"member":"dev"}))).unwrap();
+            assert_eq!(receipt["status"], "restarting", "{receipt}");
+            let dev = stored().member("dev").unwrap().clone();
+            assert!(dev.stuck.is_none());
+            assert_eq!(dev.restart.as_ref().map(|restart| (restart.by.as_str(), restart.reason.as_str())), Some(("Lead", "compaction_timeout")));
+            // The worker's step is planned for it.
+            let steps = super::super::dispatcher::steps(&stored(), &[], 10.0);
+            assert!(steps.contains(&super::super::dispatcher::Step::RestartStuck { member: "dev".into() }), "{steps:?}");
+            // A member that is not stuck still needs the word, and is no restart.
+            assert!(as_lead(|| call("relaunch", json!({"member":"lead"}))).is_err());
+            // The owner restarts a stuck, live member by the same route.
+            let receipt = call("relaunch", json!({"member":"qa","by":"human"})).unwrap();
+            assert_eq!(receipt["status"], "restarting", "{receipt}");
+            assert_eq!(stored().member("qa").unwrap().restart.as_ref().map(|restart| restart.by.as_str()), Some("You"));
+            let events = Store::open(false).unwrap().events("rv", None, 50).unwrap();
+            let requested = events["items"].as_array().unwrap().iter().filter(|event| event["kind"] == "member_restart_requested").count();
+            assert_eq!(requested, 2);
         });
     }
 
@@ -8226,7 +8267,7 @@ mod tests {
         dev.seen_phase = "tool".into();
         dev.seen_activity = "busy".into();
         dev.seen_event_at = Some(crate::state::now() - 25.0 * 60.0);
-        dev.stuck = Some(MemberStuck { at: crate::state::now() - 15.0 * 60.0, reason: "no_progress".into(), phase: "tool".into() });
+        dev.stuck = Some(MemberStuck { at: crate::state::now() - 15.0 * 60.0, reason: "no_progress".into(), phase: "tool".into(), ..Default::default() });
         let value = view_with(&team, &[], None);
         let dev = value["members"].as_array().unwrap().iter().find(|member| member["id"] == "dev").unwrap();
         assert_eq!((dev["phase"].as_str(), dev["activity"].as_str()), (Some("tool"), Some("busy")));

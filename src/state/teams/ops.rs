@@ -4416,22 +4416,22 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
                 "Only you relaunch a member; the lead needs your word, or the owner's setting lead_restarts_stuck for a stuck member (hgs team settings with {{\"lead_restarts_stuck\":true}})"
             );
             let id = member_id;
-            let lead_stuck = team.settings.lead_restarts_stuck && matches!(actor, Actor::Member(lead) if *lead == team.lead);
+            let by = actor.label(team);
             let member = team.members.iter_mut().find(|m| m.id == id).context("Unknown member")?;
-            if member.stuck.is_some() && lead_stuck {
-                // U56/N2: the lead's real route for a stuck member: interrupt the
-                // session (the launch stops it) and relaunch it in its folder and
-                // conversation. The session reference stays, the mark goes.
-                member.error.clear();
-                member.launch_id.clear();
-                member.stuck = None;
-                member.seen = None;
+            if member.session.is_some() && member.stuck.is_some() {
+                // #728 (#709 N4, #645 N2): the real route for a stuck member, the
+                // owner's and, with lead_restarts_stuck, the lead's. The worker
+                // interrupts the session's turn and continues it, or relaunches
+                // the session in its own conversation (dispatcher::restart_stuck).
+                // The request is spent once; the stuck mark goes now.
+                let stuck = member.stuck.take().unwrap_or_default();
+                member.restart = Some(MemberRestart { at: now(), by: by.clone(), reason: stuck.reason.clone() });
                 member.seen_phase.clear();
                 member.seen_activity.clear();
                 member.seen_event_at = None;
-                events.push(Event::new("member_interrupted", json!({"by":"Lead","member":id})));
-                events.push(Event::new("member_relaunched", json!({"by":"Lead","member":id})));
-                return Ok(json!({"status":"relaunched","member":id}));
+                let role = team.role_of(&id);
+                events.push(Event::new("member_restart_requested", json!({"by":by,"member":role,"reason":stuck.reason})));
+                return Ok(json!({"status":"restarting","member":id}));
             }
             ensure!(member.session.is_none() && !member.error.is_empty(), "This member's session did not fail to start");
             member.error.clear();
@@ -6711,15 +6711,21 @@ mod tests {
         let lead = Actor::Member("lead".into());
         let none = BTreeSet::new();
         let mut events = Vec::new();
-        team.members.iter_mut().find(|member| member.id == "qa").unwrap().stuck =
-            Some(MemberStuck { at: 1.0, reason: "no_progress".into(), phase: "tool".into() });
+        {
+            let qa = team.members.iter_mut().find(|member| member.id == "qa").unwrap();
+            qa.stuck = Some(MemberStuck { at: 1.0, reason: "no_progress".into(), phase: "tool".into(), ..Default::default() });
+            qa.session = Some(SessionRef { name: "kimi/x/qa".into(), run_id: "r1".into(), conversation_id: "c".into(), ..Default::default() });
+        }
         let error = apply(&mut team, "relaunch", &json!({"member":"qa"}), &lead, &none, &mut events).unwrap_err().to_string();
         assert!(error.contains("lead_restarts_stuck"), "{error}");
         team.settings.lead_restarts_stuck = true;
         let receipt = apply(&mut team, "relaunch", &json!({"member":"qa"}), &lead, &none, &mut events).unwrap();
-        assert_eq!((receipt["status"].as_str(), receipt["member"].as_str()), (Some("relaunched"), Some("qa")));
-        assert!(team.members.iter().find(|member| member.id == "qa").unwrap().stuck.is_none());
-        assert!(events.iter().any(|event| event.kind == "member_relaunched"));
+        assert_eq!((receipt["status"].as_str(), receipt["member"].as_str()), (Some("restarting"), Some("qa")));
+        // #728: the step is real: a restart request the worker spends.
+        let qa = team.member("qa").unwrap();
+        assert!(qa.stuck.is_none());
+        assert_eq!(qa.restart.as_ref().map(|restart| (restart.by.as_str(), restart.reason.as_str())), Some(("Lead", "no_progress")));
+        assert!(events.iter().any(|event| event.kind == "member_restart_requested"));
     }
 
     #[test]

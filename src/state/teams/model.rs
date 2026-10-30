@@ -449,6 +449,12 @@ pub(crate) struct Member {
     /// reason and the phase it was in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stuck: Option<MemberStuck>,
+    /// #728: the restart of a stuck member the owner, or the lead with
+    /// lead_restarts_stuck, asked for. The worker spends it once: it interrupts
+    /// the session's turn and continues it, or relaunches the session in its
+    /// own conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart: Option<MemberRestart>,
     /// The permission request the lead last heard about (B1): the exact
     /// command, where it came from and the agent's reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -607,6 +613,20 @@ pub(crate) struct MemberStuck {
     pub reason: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub phase: String,
+    /// #728: the member's last progress Zerus saw (its last event, or the
+    /// start of the tool call it waits in); its minutes are the stuck time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<f64>,
+}
+
+/// #728: a requested restart of a stuck member: who asked, when, and the
+/// stuck mark it replaced.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct MemberRestart {
+    pub at: f64,
+    pub by: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
 }
 
 impl Member {
@@ -1137,6 +1157,10 @@ pub(crate) struct Attempt {
     /// on every tick.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity_at: Option<f64>,
+    /// #728 (#709 L2): when the worker last read a quiet DeepSeek member's
+    /// session for this attempt; it reads again at most once a minute.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_read_at: Option<f64>,
     /// The lead was reminded once that this report still waits for a decision
     /// (C4); absent until it was.
     #[serde(default, skip_serializing_if = "Option::is_none")]

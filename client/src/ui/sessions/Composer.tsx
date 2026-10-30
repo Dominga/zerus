@@ -1,6 +1,7 @@
 import { Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
 import { Icon } from "../lib/icons";
 import { composer } from "../../store/composer";
+import { suggestions, suggestedInput } from "../../store/suggestions";
 import { contentScale, selected } from "../../store/ui";
 import { computerFresh, computerOffline } from "../../store/catalog";
 import { detailsFor, followedFor } from "../../store/actions";
@@ -159,6 +160,14 @@ export function Composer() {
     return s().tracked && online() && !v()?.inspect_error && s().state === "running" && state.phase === "compacting" && state.runtime_state === "live"
       && state.process_state === "running" && state.state !== "archived";
   });
+  createEffect(() => {
+    const row = s(), state = followedFor(row.key).value ?? {};
+    const raw = state.prompt_suggestion as { text?: unknown; at?: unknown } | undefined;
+    const phase = typeof state.phase === "string" ? state.phase : row.phase;
+    const active = phase === "idle" && online() && row.state === "running";
+    suggestions.set(row.catalogKey, active && typeof raw?.text === "string" ? raw.text : "", typeof raw?.at === "number" ? raw.at : 0);
+  });
+  const suggestion = () => suggestions.get(s().catalogKey, !!v()?.sending || !!v()?.waiting);
   const [compact, setCompact] = createSignal(false);
   let root!: HTMLDivElement;
   let editor!: HTMLTextAreaElement;
@@ -185,6 +194,16 @@ export function Composer() {
   };
   const onKey = (e: KeyboardEvent) => {
     if (e.isComposing || e.keyCode === 229) return;
+    if (e.key === "Tab" && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      const next = suggestedInput(composer.text(), suggestion(), composer.locked());
+      if (next) {
+        e.preventDefault();
+        editor.value = next;
+        editor.setSelectionRange(next.length, next.length);
+        composer.input(next, next.length, next.length);
+      }
+      return;
+    }
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void composer.send(); return; }
     // Like Escape in Terminal: stop a working turn, otherwise leave the field (ComposeEdit::keyPressEvent).
     if (e.key === "Escape") { e.preventDefault(); if (!stopTurn()) editor.blur(); }
@@ -258,7 +277,7 @@ export function Composer() {
         <SessionUsageChip />
       </div>
       <textarea ref={editor} class="cmp-editor" hidden={!input()} style={{ height: `${editorHeight() * contentScale()}px` }} aria-label="Message to selected agent"
-        placeholder="Message this agent…" readOnly={composer.locked()} disabled={!v()} value={composer.text()} title={editorTip()}
+        placeholder={suggestion() || "Message this agent…"} readOnly={composer.locked()} disabled={!v()} value={composer.text()} title={editorTip()}
         onInput={(e) => { const c = caret(); composer.input(e.currentTarget.value, c.anchor, c.position); }}
         onSelect={remember} onKeyUp={remember} onMouseUp={remember}
         onBlur={() => { void composer.flush(); }} onKeyDown={onKey} onPaste={onPaste} />

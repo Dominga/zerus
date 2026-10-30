@@ -425,6 +425,17 @@ fn run_inner(
         Ok(child) => child,
         Err(error) => return Ok(Exit::StartFailed(error.to_string())),
     };
+    if pipes.require_complete
+        && (child.stdin.is_none() || child.stdout.is_none() || child.stderr.is_none())
+    {
+        return Ok(stop(
+            child,
+            Exit::Abnormal {
+                stderr: "owned exchange requires all three pipes".into(),
+            },
+            pipes.child_exited.as_deref(),
+        ));
+    }
     let deadline = Instant::now() + inv.timeout;
 
     let stdin = child.stdin.take();

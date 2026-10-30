@@ -28,6 +28,7 @@
 #include "HangTrace.h"
 #include "MainThreadWatchdog.h"
 #include "Settings.h"
+#include "SlowEventLog.h"
 #include "SettingsJson.h"
 #include "WorkspaceSkin.h"
 #include "TrayAgent.h"
@@ -177,6 +178,29 @@ private:
     QApplication &m_app;
 };
 
+// WhiteWh fork (owner, 2026-10-30: "the UI lags"): with the slow-event log on,
+// every event the GUI thread handles is timed and the slow ones go to zerus.log
+// (SlowEventLog.h). Off, notify() costs one pointer check.
+class ZerusApplication : public QApplication {
+public:
+    using QApplication::QApplication;
+    ~ZerusApplication() override { SlowEventLog::Meter::setActive(nullptr); }
+    void watchSlowEvents(int thresholdMs)
+    {
+        m_meter = std::make_unique<SlowEventLog::Meter>(SlowEventLog::Config{thresholdMs},
+                                                        [](const QString &line) { ForkLog::write("warning", line); });
+        SlowEventLog::Meter::setActive(m_meter.get());
+    }
+    bool notify(QObject *receiver, QEvent *event) override
+    {
+        if (!m_meter) return QApplication::notify(receiver, event);
+        return m_meter->measure(receiver, event, [&] { return QApplication::notify(receiver, event); });
+    }
+
+private:
+    std::unique_ptr<SlowEventLog::Meter> m_meter;
+};
+
 // Порог сторожа главного потока (см. MainThreadWatchdog.h). Полминуты -- на порядок
 // больше любой честной паузы цикла событий (модальные диалоги его не останавливают) и
 // на порядки меньше недели, которую трей однажды простоял повисшим в AppKit.
@@ -288,7 +312,7 @@ int main(int argc, char *argv[])
     // default QoS, not this one.
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
 #endif
-    QApplication app(argc, argv);
+    ZerusApplication app(argc, argv);
 #ifdef Q_OS_WIN
     // WhiteWh fork: started from its own folder (a double click in Explorer), Zerus
     // and every program it starts would hold that folder as their current one,
@@ -318,6 +342,13 @@ int main(int argc, char *argv[])
     QApplication::setQuitOnLastWindowClosed(false);
     ForkLog::install();
     ForkLog::launch(QCoreApplication::applicationPid());
+    // The slow-event log, on request: ZERUS_SLOW_EVENTS or debug/slowEventsMs.
+    if (const int slow = SlowEventLog::thresholdFromEnvironment() ? SlowEventLog::thresholdFromEnvironment()
+                                                                 : QSettings().value(QStringLiteral("debug/slowEventsMs"), 0).toInt();
+        slow > 0) {
+        app.watchSlowEvents(slow);
+        ForkLog::write("info", QStringLiteral("Slow GUI event log on: events of %1 ms or more").arg(slow));
+    }
     // WhiteWh fork: the fork's published builds open in the WhiteWh skin until
     // the person picks another one in Settings → Appearance.
     if (ForkUpdater::installedBuild() > 0 && !QSettings().contains(QStringLiteral("workspace/skin")))

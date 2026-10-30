@@ -272,6 +272,22 @@ add_executable(test_settings test_settings.cpp)
 target_include_directories(test_settings PRIVATE ../src)
 target_link_libraries(test_settings PRIVATE Qt6::Test Qt6::Gui hgs-tray-core)
 zerus_add_test(settings test_settings)
+add_executable(test_sloweventlog test_sloweventlog.cpp)
+target_include_directories(test_sloweventlog PRIVATE ../src)
+target_link_libraries(test_sloweventlog PRIVATE Qt6::Test hgs-tray-core)
+zerus_add_test(sloweventlog test_sloweventlog)
+# The GUI profile of the main screens (#704), run by hand (test_guiprofile.cpp):
+# not a ctest, since its sessions scene still crashes the tray under load
+# (the #704 report) and offscreen's FreeType crashes it at exit.
+add_executable(test_guiprofile test_guiprofile.cpp ../resources.qrc)
+target_include_directories(test_guiprofile PRIVATE ../src)
+target_compile_definitions(test_guiprofile PRIVATE HGS_TRAY_VERSION="${PROJECT_VERSION}")
+target_link_libraries(test_guiprofile PRIVATE Qt6::Test Qt6::Widgets hgs-terminal hgs-markdown hgs-window-layer hgs-speech hgs-external-file
+    hgs-tray-views hgs-updates)
+if(MSVC)
+    # A PDB of public symbols, so a crash's stack names its functions.
+    target_link_options(test_guiprofile PRIVATE /DEBUG)
+endif()
 
 add_executable(test_processrunner test_processrunner.cpp)
 target_include_directories(test_processrunner PRIVATE ../src)

@@ -58,6 +58,7 @@ pub mod speech_settings;
 pub mod state;
 pub mod stream;
 pub mod swarm;
+pub mod task_board;
 pub mod task_details;
 pub mod task_view;
 pub mod tasks;

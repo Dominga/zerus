@@ -14,7 +14,7 @@ use zerus_client_core::{attachments, reads::CachedAttachment, task_details, task
 
 #[derive(Clone, Default)]
 pub struct TaskReads(Arc<AtomicBool>);
-struct Permit(TaskReads);
+pub(crate) struct Permit(TaskReads);
 impl TaskReads {
     fn begin(&self) -> Result<Permit, String> {
         self.0
@@ -116,6 +116,35 @@ mod tests {
 /// once to the caller; there is no retry or intent replay.
 #[derive(Clone, Default)]
 pub struct TaskWrites(TaskReads);
+impl TaskWrites {
+    pub(crate) fn begin(&self) -> Result<Permit, String> {
+        self.0
+            .begin()
+            .map_err(|_| "Another task change is still in progress.".to_owned())
+    }
+}
+
+#[tauri::command]
+pub async fn task_board_action(
+    state: State<'_, TaskWrites>,
+    project: String,
+    task: String,
+    expected_stage: String,
+    action: zerus_client_core::task_board::Action,
+) -> Result<(), String> {
+    if crate::actions::blocked() {
+        return Err(crate::screens::REPLAY_NEEDS_HGS.into());
+    }
+    let permit = state.begin()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _permit = permit;
+        zerus_client_core::task_board::apply(&project, &task, &expected_stage, &action, |call| {
+            tasks_write::run(&zerus_client_core::default_hgs(), call)
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
 
 fn assignment_target(
     row: &zerus_client_core::view::ViewRow,
@@ -166,7 +195,7 @@ pub async fn task_assign(
     let mut read = task_details::call(&project, &task, None)?;
     let n = read.args.len();
     read.args[n - 1] = "1".into();
-    let permit = state.0.begin()?;
+    let permit = state.begin()?;
     let pump = app.pump();
     tauri::async_runtime::spawn_blocking(move || {
         let _permit = permit;
@@ -204,6 +233,15 @@ pub async fn task_assign(
 mod assignment_tests {
     use super::*;
     use zerus_client_core::{actions::Target, view::ViewRow};
+    #[test]
+    fn task_writes_are_nonqueued_and_share_one_lane() {
+        let writes = TaskWrites::default();
+        let shared = writes.clone();
+        let first = writes.begin().unwrap();
+        assert!(shared.begin().is_err());
+        drop(first);
+        assert!(shared.begin().is_ok());
+    }
     #[test]
     fn assignment_checks_run_conversation_and_stable_launch() {
         let mut row = ViewRow {

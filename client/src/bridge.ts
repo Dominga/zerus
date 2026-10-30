@@ -33,6 +33,7 @@ export const taskEditorEdit = (input: Pick<import("./store/taskEditor").TaskEdit
 export const taskEditorPick = (handle: number, start: number, end: number) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_pick", { handle, start, end });
 export const taskEditorRemove = (handle: number, index: number) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_files", { handle, change: { kind: "remove", index } });
 export const taskEditorSubmit = (handle: number, rev: number, recover: boolean) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_submit", { handle, rev, recover });
+export const taskBoardAction = (project: string, task: string, expectedStage: string, action: import("./store/taskBoard").BoardAction) => desktop<void>("task_board_action", { project, task, expectedStage, action });
 export const assignTask = (project: string, task: string, target: { computer: string; name: string; run_id: string; conversation_id: string } | null, catalogKey: string | null, sessionId: string | null) => desktop<void>("task_assign", { project, task, target, catalogKey, sessionId });
 export const readTaskDetails = (project: string, task: string, before: string | null) => desktop<unknown>("task_details", { project, task, before });
 export const openTaskAttachment = (path: string) => desktop<string | null>("task_attachment_open", { path });

@@ -527,7 +527,7 @@ fields under the design owner's 2026-10-30 ruling:
 | --- | --- | --- |
 | `workspace/projectFolderSplit` | `qt-retained-project-folder-split` | Private evidence only. Never decode/seed QSplitter bytes, including when Next's Projects folder/worktree splitter lands; Next keeps its default. |
 | `tasks/inspectorSplit` | `qt-retained-task-inspector-split` | Private evidence only. The mockup has no board/inspector splitter; never map this onto `workspace/inspectorWidth`. |
-| `workspace/removeWorktreeAfterTermination` | `qt-retained-termination-remove-default` | Private evidence until the Terminate dialog owner (`zerus-5wmh.10`) wires its checkbox. That owner may prefill once under the presentation exception, with explicit confirmation every time; never automatic-maintenance consent. |
+| `workspace/removeWorktreeAfterTermination` | `qt-retained-termination-remove-default` | The `.10.17` Terminate checkbox imports once through the existing `termination-default` G3 family only when Next has no value; an explicit current false wins. Its remembered state only prefills the dialog. Every Terminate/removal still needs explicit confirmation; never automatic-maintenance consent. |
 
 The mockup targets are `design/webui/src/screens/Projects.tsx` and
 `design/webui/src/dialogs/SessionDialogs.tsx`. The private body is

@@ -1,3 +1,5 @@
+import WorktreeCleanup, { CleanupChip } from "./ui/screens/WorktreeCleanup";
+import { cleanupDialog } from "./store/terminationCleanup";
 import { taskAssignmentPopover } from "./store/taskAssignment";
 import { taskExecutorReview } from "./store/taskExecutors";
 import { taskStartReview } from "./store/taskStart";
@@ -97,6 +99,7 @@ function StatusBar(props: { mode: () => BridgeMode | "starting" }) {
           onClick={() => { void updateCommands.restart().catch((error) => toast("Updates", String(error), "error", true)); }}>Restart to finish update</button>
       </Show>
       <LoginItemButton />
+      <CleanupChip />
       <span class="grow" />
       <SessionUsageStrip />
     </footer>
@@ -160,6 +163,7 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
       <MenuLayer />
       <Toasts />
       <ActionDialogs />
+      <Show when={cleanupDialog()}><Suspense><WorktreeCleanup /></Suspense></Show>
       <Show when={taskAssignmentPopover()}><Suspense><TaskAssignmentPopover /></Suspense></Show>
       <Show when={taskExecutorReview()}><Suspense><TaskExecutorReview /></Suspense></Show>
       <Show when={taskStartReview()}><Suspense><TaskStartReview /></Suspense></Show>

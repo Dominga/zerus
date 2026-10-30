@@ -1462,3 +1462,19 @@ A blank window is not detected. Known gap: on the GL path a minimised window kee
 - `src/ui/lib/os-icons.ts` embeds two Tabler Icons outlines (MIT, see
   `licenses/`); `src/ui/lib/icons.generated.ts` is markup generated from
   `lucide-solid` (ISC).
+
+The Terminate dialog offers **Remove the working folder after stopping** for a
+freshly verified tracked agent in a linked worktree. The choice admits background
+cleanup only after the exact scoped termination and archive receipt. The statusbar
+chip opens the mockup's recorded cleanup review; opening never checks or removes
+anything. A kept folder needs **Check again** and the displayed manual consents;
+an unknown outcome cannot be retried. Branches and archive restore identity stay.
+The remembered checkbox imports once through the existing G3 settings importer;
+an explicit Next false wins and no maintenance policy is changed.
+
+On Linux, run `python3 client/scripts/termination-cleanup-smoke.py --app target/tauri/debug/zerus-client`
+from the repository root. It walks the
+built app using a private D-Bus/Xvfb, private state and fake hgs. It covers recorded
+outcomes, explicit discard, unknown non-replay, source-change refusal, inspection,
+Escape and Keep, with captures of the approved chip/dialog states. The fixture
+never deletes even its own synthetic worktree files.

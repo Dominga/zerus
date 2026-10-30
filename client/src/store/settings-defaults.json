@@ -44,6 +44,7 @@
   "workspace/launchAgent": "",
   "workspace/launchOpenTerminal": false,
   "workspace/reduceMotion": false,
+  "workspace/removeWorktreeAfterTermination": false,
   "workspace/showCompletedSubagents": false,
   "workspace/theme": "system",
   "workspace/usageIndicator": "rails"

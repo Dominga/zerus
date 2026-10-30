@@ -11,7 +11,7 @@ export interface SearchHit {
   at: number; role: string; snippet: string; event: ActivityEvent; content_truncated: boolean;
   session: ViewRow | null; group: string;
 }
-export interface SearchReply { query: string; results: SearchHit[]; truncated: boolean; unavailable_sessions: number }
+export interface SearchReply { query: string; results: SearchHit[]; truncated: boolean; unavailable_sessions: number; contents_unavailable?: boolean }
 export interface SearchHost { computer: string; machine: string; online: boolean }
 export interface FoundHit { computer: string; machine: string; hit: SearchHit }
 export interface SearchPort {
@@ -46,6 +46,7 @@ export function createContentSearch(port: SearchPort) {
         batch(() => {
           setLimited((old) => old || reply.truncated || reply.results.length > room);
           setUnavailable((old) => Math.min(1_000_000, old + reply.unavailable_sessions));
+          if (reply.contents_unavailable || reply.unavailable_sessions) setErrors((old) => [...old, `${host.machine}: contents unavailable`].slice(0, SEARCH_HOSTS));
           setHits((old) => [...old, ...reply.results.slice(0, room).map((hit) => ({ computer: host.computer, machine: host.machine, hit }))]);
         });
       }).catch((error) => {
@@ -65,7 +66,7 @@ export function createContentSearch(port: SearchPort) {
     if ([...query].length > 256 || /\p{Cc}/u.test(query)) { setErrors(["Search requires 2..256 printable characters."]); return; }
     timer = later(() => {
       timer = undefined;
-      setErrors(hosts.filter((h) => !h.online).map((h) => `${h.machine}: Machine offline; contents unavailable`));
+      setErrors(hosts.filter((h) => !h.online).map((h) => `${h.machine}: machine offline; contents unavailable`));
       queue = hosts.filter((h) => h.online); drain();
     }, SEARCH_DELAY);
     updateBusy();
@@ -85,4 +86,20 @@ export function metadataMatches(row: Session, query: string): boolean {
   return [row.name, row.title, row.machine, row.model, row.effort, row.cwdPath, row.branch, row.worktree,
     row.conversationId, row.runId, row.archiveId, ...(row.subagents ?? []).map((s) => s.id)]
     .some((text) => text?.toLowerCase().includes(needle));
+}
+
+/** A session keeps its position and row identity as metadata and host replies
+ * arrive. The newest matching message supplies its single excerpt. */
+export function mergeSessionMatch<T extends { id: string; session: Session; found?: FoundHit }>(items: T[], positions: Map<string, number>, item: T, cap: number): boolean {
+  const index = positions.get(item.session.key);
+  if (index !== undefined) {
+    const previous = items[index];
+    if (item.found && (!previous.found || item.found.hit.at > previous.found.hit.at)) items[index] = { ...item, id: previous.id };
+    return true;
+  }
+  if (items.length >= cap) return false;
+  positions.set(item.session.key, items.length); items.push(item); return true;
+}
+export function searchCount(messages: number, sessions: number): string {
+  return `${messages} ${messages === 1 ? "message" : "messages"}, ${sessions} ${sessions === 1 ? "session" : "sessions"}`;
 }

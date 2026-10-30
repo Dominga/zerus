@@ -22,10 +22,12 @@ export async function contentSearchSmoke(allowed: boolean) {
     await until(() => !!catalog.rows["\nrun:run-review-1"], "replay catalog did not arrive");
     setPage("sessions"); setStateFilter("all"); setSearch("needle");
     await until(() => searchItems().filter((item) => item.found).length === 2 && !contentSearch.busy(), "live and archive contents did not arrive");
-    require(searchStatus().includes("Limited history searched") && searchStatus().includes("Some history unavailable"), "partial coverage was hidden");
+    require(new Set(searchItems().map((item) => item.session.key)).size === searchItems().length, "a session appeared more than once");
+    require(searchStatus().includes("Limited history searched") && searchStatus().includes(": contents unavailable"), "partial coverage was hidden");
     await until(() => document.querySelectorAll(".content-search-row mark").length >= 2, "excerpts were not highlighted");
     const live = searchItems().find((item) => item.found && !item.session.archiveId)!;
     const archived = searchItems().find((item) => item.found && item.session.archiveId)!;
+    require(archived.found!.hit.event.detail === "needle archive exact historical message", "an indexed copy replaced the fresh fallback hit");
     const liveButton = [...document.querySelectorAll<HTMLButtonElement>(".content-search-row")].find((button) => button.textContent?.includes("needle live"));
     liveButton!.click();
     await until(() => searchPreview()?.hit.message_id === "live-match" && !!document.querySelector(".search-preview"), "click did not show the exact live match");

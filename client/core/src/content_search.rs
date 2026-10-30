@@ -15,6 +15,7 @@ pub const MAX_HITS: usize = 100;
 pub const MAX_REPLY: usize = 8 << 20;
 pub const INVALID: &str = "Invalid search response; update hgs on this machine.";
 const MARKER: &str = "hgs [@host] search --query";
+const INDEX_MARKER: &str = "content-search-query-v1";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Hit {
@@ -46,6 +47,8 @@ pub struct Reply {
     pub truncated: bool,
     #[serde(default)]
     pub unavailable_sessions: u64,
+    #[serde(default)]
+    pub contents_unavailable: bool,
 }
 fn empty_string<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
     Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
@@ -82,6 +85,65 @@ pub fn invocation(computer: &ComputerId, query: &str) -> Result<Invocation, Read
     })
 }
 pub fn decode(query: &str, value: Value) -> Result<Reply, ReadError> {
+    let Some(abi) = value.get("abi") else {
+        return decode_channel(query, value);
+    };
+    if abi != INDEX_MARKER
+        || !matches!(
+            value["index_coverage"]["state"].as_str(),
+            Some("ready" | "cold" | "indexing" | "partial" | "unavailable")
+        )
+    {
+        return Err(invalid());
+    }
+    let has_cursor = match &value["next_cursor"] {
+        Value::Null => false,
+        Value::String(cursor) if !cursor.is_empty() && printable(cursor, 1024) => true,
+        _ => return Err(invalid()),
+    };
+    let value_coverage_incomplete = value["index_coverage"]["state"] != "ready";
+    let incomplete = value_coverage_incomplete || has_cursor;
+    let fallback = value.get("fallback").cloned().ok_or_else(invalid)?;
+    let mut reply = decode_channel(query, value)?;
+    reply.truncated |= incomplete;
+    reply.contents_unavailable |= value_coverage_incomplete;
+    if !fallback.is_null() {
+        let fallback = decode_channel(query, fallback)?;
+        reply.truncated |= fallback.truncated;
+        reply.unavailable_sessions = reply
+            .unavailable_sessions
+            .saturating_add(fallback.unavailable_sessions);
+        reply.contents_unavailable |= fallback.contents_unavailable;
+        let primary = std::mem::replace(&mut reply.results, fallback.results);
+        for hit in primary {
+            if !reply
+                .results
+                .iter()
+                .any(|existing| same_hit(existing, &hit))
+            {
+                reply.results.push(hit);
+            }
+        }
+        reply.results.sort_by(|a, b| {
+            b.at.total_cmp(&a.at)
+                .then_with(|| a.name.cmp(&b.name))
+                .then_with(|| a.message_id.cmp(&b.message_id))
+        });
+        if reply.results.len() > MAX_HITS {
+            reply.results.truncate(MAX_HITS);
+            reply.truncated = true;
+        }
+    }
+    Ok(reply)
+}
+fn same_hit(a: &Hit, b: &Hit) -> bool {
+    a.run_id == b.run_id
+        && a.conversation_id == b.conversation_id
+        && a.archive_id == b.archive_id
+        && a.message_id == b.message_id
+}
+
+fn decode_channel(query: &str, value: Value) -> Result<Reply, ReadError> {
     let mut reply: Reply = serde_json::from_value(value).map_err(|_| invalid())?;
     if reply.query != query || reply.results.len() > MAX_HITS {
         return Err(invalid());
@@ -95,7 +157,7 @@ pub fn decode(query: &str, value: Value) -> Result<Reply, ReadError> {
             || hit.message_id.is_empty()
             || !printable(&hit.message_id, 1024)
             || !hit.at.is_finite()
-            || !["user", "assistant", "tool"].contains(&hit.role.as_str())
+            || !["user", "assistant", "tool", "event"].contains(&hit.role.as_str())
             || hit.snippet.chars().count() > 1024
             || !hit.event.is_object()
             || hit.event["detail"]
@@ -166,7 +228,7 @@ pub fn read(
     query: &str,
     cancel: &AtomicBool,
 ) -> Result<Reply, ReadError> {
-    let request = invocation(computer, query)?;
+    let mut request = invocation(computer, query)?;
     let run = |inv: &Invocation, cap| {
         run_cancellable(hgs, inv, &[], cap, cancel).map_err(|error| match error {
             Stopped::Cancelled => ReadError::Superseded,
@@ -177,15 +239,22 @@ pub fn read(
     help.args.truncate(usize::from(!computer.is_local()));
     help.args.push("--help".into());
     // Older CLIs must never interpret an unknown read verb as a launch.
-    match run(&help, 128 << 10)? {
+    let indexed = match run(&help, 128 << 10)? {
         Exit::Code {
             code: 0, stdout, ..
-        } if String::from_utf8_lossy(&stdout).contains(MARKER) => {}
+        } if String::from_utf8_lossy(&stdout).contains(MARKER) => {
+            String::from_utf8_lossy(&stdout).contains(INDEX_MARKER)
+        }
         Exit::Code { code: 0, .. } => return Err(ReadError::Unsupported),
         exit => {
             crate::reads::decode(&Read::Recovery, exit)?;
             return Err(ReadError::Unsupported);
         }
+    };
+    if indexed {
+        request
+            .args
+            .insert(usize::from(!computer.is_local()) + 1, "--indexed".into());
     }
     let value = crate::reads::decode(&Read::Recovery, run(&request, MAX_REPLY)?)?;
     decode(query, value)
@@ -252,5 +321,93 @@ mod tests {
         assert!(reply.results[0].conversation_id.is_empty());
         legacy["session"] = json!({"state":"archived","archive_id":"archive-one"});
         assert!(decode("needle", json!({"query":"needle","results":[legacy]})).is_err());
+    }
+    fn indexed(results: Vec<Value>, fallback: Value) -> Value {
+        json!({"abi":INDEX_MARKER,"query":"needle","results":results,
+            "next_cursor":null,"index_coverage":{"state":"indexing"},"fallback":fallback})
+    }
+    #[test]
+    fn indexed_channels_are_validated_independently_and_keep_one_bounded_sorted_page() {
+        let mut primary = Vec::new();
+        let mut legacy = Vec::new();
+        for i in 0..100 {
+            let mut item = hit();
+            item["message_id"] = json!(format!("m{i}"));
+            item["at"] = json!(i);
+            item["event"]["detail"] = json!(format!("needle {i}"));
+            primary.push(item.clone());
+            item["message_id"] = json!(format!("m{}", i + 100));
+            item["at"] = json!(i + 100);
+            item["event"]["detail"] = json!(format!("needle {}", i + 100));
+            legacy.push(item);
+        }
+        let reply = decode(
+            "needle",
+            indexed(primary, json!({"query":"needle","results":legacy})),
+        )
+        .unwrap();
+        assert_eq!(reply.results.len(), 100);
+        assert_eq!(reply.results[0].at, 199.0);
+        assert_eq!(reply.results[99].at, 100.0);
+        assert!(reply.truncated);
+        assert!(reply.contents_unavailable);
+        let old = hit();
+        let mut fresh = hit();
+        fresh["event"]["detail"] = json!("needle fresh public message");
+        let preferred = decode(
+            "needle",
+            indexed(vec![old], json!({"query":"needle","results":[fresh]})),
+        )
+        .unwrap();
+        assert_eq!(preferred.results.len(), 1);
+        assert_eq!(
+            preferred.results[0].event["detail"],
+            "needle fresh public message"
+        );
+        assert!(decode("needle", indexed(vec![hit(); 101], Value::Null)).is_err());
+        assert!(decode(
+            "needle",
+            indexed(vec![], json!({"query":"needle","results":vec![hit();101]}))
+        )
+        .is_err());
+    }
+    #[test]
+    fn indexed_abi_coverage_cursor_and_fallback_query_are_checked() {
+        let good = indexed(vec![hit()], Value::Null);
+        for (key, bad) in [
+            ("abi", json!("unknown")),
+            ("index_coverage", json!({"state":"invented"})),
+            ("next_cursor", json!("x".repeat(1025))),
+            ("fallback", json!({"query":"different","results":[]})),
+        ] {
+            let mut value = good.clone();
+            value[key] = bad;
+            assert!(decode("needle", value).is_err(), "{key}");
+        }
+        let mut event = hit();
+        event["role"] = json!("event");
+        assert_eq!(
+            decode("needle", indexed(vec![event], Value::Null))
+                .unwrap()
+                .results[0]
+                .role,
+            "event"
+        );
+    }
+    #[test]
+    fn a_ready_indexed_archive_keeps_the_exact_read_only_navigation_row() {
+        let mut item = hit();
+        item["archive_id"] = json!("archive-one");
+        item["session"] = json!({"name":item["name"],"run_id":item["run_id"],
+            "conversation_id":item["conversation_id"],"archive_id":"archive-one",
+            "state":"archived","project":"example","tag":"search","cmd":"codex","archived_at":42});
+        let mut value = indexed(vec![item], Value::Null);
+        value["index_coverage"]["state"] = json!("ready");
+        let reply = decode("needle", value).unwrap();
+        assert!(!reply.truncated);
+        let row = reply.results[0].session.as_ref().unwrap();
+        assert_eq!(row["archive_id"], "archive-one");
+        assert_eq!(row["run_id"], "run-one");
+        assert_eq!(row["title"], "example / search");
     }
 }

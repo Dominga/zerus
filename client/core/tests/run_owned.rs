@@ -5,7 +5,7 @@
 use std::{
     io,
     path::Path,
-    process::{Child, Command},
+    process::{Child, Command, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
@@ -145,6 +145,34 @@ fn guarded_spawn_refusal_exposes_no_private_error_and_releases_admission() {
     assert_eq!(result, Err(OwnedError::StartFailed));
     assert!(!format!("{result:?}").contains("private"));
     assert!(dropped.load(Ordering::Acquire));
+}
+
+#[test]
+fn a_guarded_spawn_cannot_succeed_without_every_owned_pipe() {
+    for missing in 0..3 {
+        let (resources, dropped) = guard();
+        let result = run_owned(
+            Path::new("python3"),
+            &invocation("print('{}')", vec![], Duration::from_secs(5)),
+            &[],
+            &AtomicBool::new(false),
+            move |command| {
+                match missing {
+                    0 => command.stdin(Stdio::null()),
+                    1 => command.stdout(Stdio::null()),
+                    _ => command.stderr(Stdio::null()),
+                };
+                spawn(command)
+            },
+            resources,
+        );
+        assert_eq!(
+            result,
+            Err(OwnedError::Incomplete),
+            "missing pipe {missing}"
+        );
+        wait_for_release(&dropped);
+    }
 }
 
 #[test]

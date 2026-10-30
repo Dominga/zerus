@@ -562,12 +562,27 @@ fn transcript(record: &Value) -> Result<(String, String, PathBuf, PathBuf)> {
 /// (epoch seconds), per provider and model, from the usage history the cached
 /// transcript scan keeps. It reads only the bytes after the cached offset; a
 /// provider or a window without timestamped counters is unknown, never zero.
+#[cfg(test)]
 pub(super) fn span(record: &Value, from: f64, to: f64) -> Value {
+    span_many(record, &[(from, to)])
+}
+
+/// #736: the tokens and cost spent inside any of `windows` (disjoint, ordered),
+/// so a task's own attempt and stage spans count and its member's other work in
+/// the same hours does not. The span reaches from the first to the last window;
+/// tokens are the request counters of the samples inside the windows, cost and
+/// work the sum of each window's two-end readings. A window without timestamped
+/// counters makes the whole span unknown, never zero.
+pub(super) fn span_many(record: &Value, windows: &[(f64, f64)]) -> Value {
     let provider = string(record, "agent");
+    let (from, to) = match (windows.first(), windows.last()) {
+        (Some(first), Some(last)) => (first.0, last.1),
+        _ => (0.0, 0.0),
+    };
     let unknown = |reason: &str| {
         json!({"status":"unknown","scope":"span","source":provider,"from":from,"to":to,"reason":reason})
     };
-    if !(from.is_finite() && to.is_finite() && from > 0.0 && to > from) {
+    if windows.is_empty() || windows.iter().any(|(low, high)| !(low.is_finite() && high.is_finite() && *low > 0.0 && high > low)) {
         return unknown("A span needs two ordered moments");
     }
     let (provider, id, path, cache) = match transcript(record) {
@@ -586,14 +601,14 @@ pub(super) fn span(record: &Value, from: f64, to: f64) -> Value {
     if history.is_empty() {
         return unknown("No timestamped counters");
     }
-    if state["history_truncated"] == true && oldest > from {
+    if state["history_truncated"] == true && oldest > windows[0].0 {
         return unknown("The cached history does not reach back to the window");
     }
-    // Request counters per provider and model, the samples wholly in the span.
+    // Request counters per provider and model, the samples wholly in a window.
     let mut models: BTreeMap<(String, String), (Value, u64)> = BTreeMap::new();
     for sample in &history {
         let at = sample["at"].as_f64().unwrap_or(0.0);
-        if at <= from || at > to {
+        if !windows.iter().any(|(low, high)| at > *low && at <= *high) {
             continue;
         }
         let Some(tokens) = sample["tokens"].as_object() else { continue };
@@ -612,7 +627,7 @@ pub(super) fn span(record: &Value, from: f64, to: f64) -> Value {
     if models.is_empty() {
         return unknown("No timestamped counters in the window");
     }
-    // Cost and work are cumulative readings on a cost-state; the span is the
+    // Cost and work are cumulative readings on a cost-state; each window is the
     // difference of the readings at its two ends.
     let reading = |key: &str, moment: f64| -> Option<f64> {
         history
@@ -623,12 +638,14 @@ pub(super) fn span(record: &Value, from: f64, to: f64) -> Value {
             })
             .next_back()
     };
-    let difference = |key: &str| match (reading(key, from), reading(key, to)) {
-        (Some(from), Some(to)) if to >= from => json!(to - from),
-        _ => Value::Null,
+    let difference = |key: &str| -> Option<f64> {
+        windows.iter().try_fold(0.0, |total, (low, high)| {
+            let (low, high) = (reading(key, *low)?, reading(key, *high)?);
+            (high >= low).then_some(total + high - low)
+        })
     };
-    let cost = difference("cost_usd");
-    let work = difference("work_ms");
+    let cost = difference("cost_usd").map_or(Value::Null, |cost| json!(cost));
+    let work = difference("work_ms").map_or(Value::Null, |work| json!(work));
     let mut per_provider: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     for ((name, model), (tokens, requests)) in models {
         per_provider.entry(name).or_default().push(json!({
@@ -924,6 +941,36 @@ mod tests {
             assert!(!models.iter().any(|model| model.to_string().contains("999")), "a request outside the window is not counted");
             assert!((provider["cost_usd"].as_f64().unwrap() - 0.7).abs() < 1e-9, "{provider}");
             assert_eq!(provider["work_ms"].as_f64(), Some(485.0), "the work readings differ across the window");
+        });
+    }
+
+    /// #736: several windows count only the samples inside them: the gap
+    /// between a task's own spans is not read.
+    #[test]
+    fn a_span_many_counts_only_the_samples_inside_its_windows() {
+        let temp = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(temp.path(), || {
+            let id = "33333333-3333-4333-8333-333333333333";
+            let path = temp.path().join(format!("{id}.jsonl"));
+            let lines = [
+                json!({"type":"assistant","sessionId":id,"timestamp":"2026-10-11T05:00:00Z","message":{"id":"r1","model":"opus","usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}),
+                json!({"type":"assistant","sessionId":id,"timestamp":"2026-10-11T05:01:00Z","message":{"id":"r2","model":"opus","usage":{"input_tokens":500,"output_tokens":500,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}),
+                json!({"type":"assistant","sessionId":id,"timestamp":"2026-10-11T05:02:00Z","message":{"id":"r3","model":"opus","usage":{"input_tokens":7,"output_tokens":3,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}),
+            ];
+            let text = lines.iter().map(|line| line.to_string() + "\n").collect::<String>();
+            fs::write(&path, text).unwrap();
+            let record = json!({"agent":"claude","conversation_id":id,"transcript":path.to_string_lossy()});
+            let result = span_many(
+                &record,
+                &[
+                    (moment(&json!("2026-10-11T04:59:40Z")), moment(&json!("2026-10-11T05:00:10Z"))),
+                    (moment(&json!("2026-10-11T05:01:50Z")), moment(&json!("2026-10-11T05:02:10Z"))),
+                ],
+            );
+            assert_eq!(result["status"], "ok", "{result}");
+            let tokens = &result["providers"][0]["models"][0]["tokens"];
+            assert_eq!((tokens["uncached_input"].clone(), tokens["output"].clone()), (json!(17), json!(8)), "{result}");
+            assert_eq!(result["providers"][0]["models"][0]["requests"], 2);
         });
     }
 

@@ -2405,13 +2405,16 @@ fn profile_of(store: &Store, team: &Team, chosen: &[&Task], page: &super::profil
     };
     let holders = spans::holders(team, now);
     let timelines: Vec<Value> = chosen.iter().map(|task| spans::spans(team, task, &journal, &holders, now)).collect();
+    // #736: every phase's timelines decide whether a member was really idle:
+    // work on another phase's task (or one moved between phases) is not idle.
+    let all: Vec<Value> = team.tasks.iter().map(|task| spans::spans(team, task, &journal, &holders, now)).collect();
     let asks = profile::asks(&timelines, now);
     let (tokens, capped) = if read {
         profile::read_tokens(team, &asks)
     } else {
         (asks.iter().map(|ask| ((ask.task, ask.part.clone()), None)).collect(), false)
     };
-    let mut value = profile::profile(team, chosen, &timelines, &tokens, page, now);
+    let mut value = profile::profile(team, chosen, &timelines, &all, &tokens, page, now);
     value["events"] = json!({"read":journal.len(),"truncated":cut});
     value["token_reads"] = json!({"asked":asks.len(),"read":if read { asks.len().min(profile::TOKEN_READS) } else { 0 },"truncated":capped});
     Ok(value)

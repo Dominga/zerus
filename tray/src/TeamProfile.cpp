@@ -498,7 +498,7 @@ public:
         m_rows = rows; m_assignees = assignees; m_dark = dark;
         m_max = 1;
         for (const auto &row : rows) m_max = std::max<qint64>(m_max, qint64(row.toObject().value("tokens").toObject().value("total").toDouble()));
-        setFixedHeight(30 + 34 * int(rows.size()));
+        setFixedHeight(30 + 46 * int(rows.size()));
         update();
     }
     std::function<void(int task)> clicked;
@@ -514,43 +514,51 @@ protected:
         p.drawText(QRect(6, 0, 70, 26), Qt::AlignVCenter, tr("TASK"));
         p.drawText(QRect(80, 0, 300, 26), Qt::AlignVCenter, tr("TITLE"));
         p.drawText(QRect(barLeft - 150, 0, 140, 26), Qt::AlignVCenter, tr("MEMBER"));
-        p.drawText(QRect(barLeft, 0, 100, 26), Qt::AlignVCenter, tr("TOKENS"));
+        p.drawText(QRect(barLeft, 0, barRight - barLeft, 26), Qt::AlignVCenter, tr("TOKENS  IN / OUT / CACHE W / CACHE R"));
         p.drawText(QRect(width() - 160, 0, 154, 26), Qt::AlignVCenter | Qt::AlignRight, tr("TOTAL"));
         int y = 30;
         for (const auto &value : m_rows) {
             const auto row = value.toObject();
             const int task = row.value("task").toInt();
             const auto spent = row.value("tokens").toObject();
-            const bool unknown = spent.value("unknown").toBool() || !spent.contains("total");
+            const bool notStarted = spent.value("not_started").toBool();
+            const bool unknown = !notStarted && (spent.value("unknown").toBool() || !spent.contains("total"));
             const qint64 total = qint64(spent.value("total").toDouble()), rework = qint64(row.value("rework_tokens").toDouble());
             const bool cancelled = row.value("status").toString() == "cancelled";
-            p.setPen(alpha(c.border, .5)); p.drawLine(0, y + 33, width(), y + 33);
+            p.setPen(alpha(c.border, .5)); p.drawLine(0, y + 45, width(), y + 45);
             p.setFont(mono); p.setPen(cancelled ? c.dim : c.fg);
-            p.drawText(QRect(6, y, 70, 34), Qt::AlignVCenter, QStringLiteral("#%1").arg(task));
+            p.drawText(QRect(6, y, 70, 46), Qt::AlignVCenter, QStringLiteral("#%1").arg(task));
             p.setFont(normal);
-            p.drawText(QRect(80, y, barLeft - 240, 34), Qt::AlignVCenter, QFontMetrics(normal).elidedText(row.value("title").toString(), Qt::ElideRight, barLeft - 240));
+            p.drawText(QRect(80, y, barLeft - 240, 46), Qt::AlignVCenter, QFontMetrics(normal).elidedText(row.value("title").toString(), Qt::ElideRight, barLeft - 240));
             p.setPen(c.text2);
-            p.drawText(QRect(barLeft - 150, y, 140, 34), Qt::AlignVCenter, m_assignees.value(task));
-            const QRectF track(barLeft, y + 11, barRight - barLeft, 12);
+            p.drawText(QRect(barLeft - 150, y, 140, 46), Qt::AlignVCenter, m_assignees.value(task));
+            const QRectF track(barLeft, y + 7, barRight - barLeft, 12);
             if (unknown) {
                 p.setPen(Qt::NoPen); p.setBrush(QBrush(c.muted, Qt::DiagCrossPattern)); p.drawRoundedRect(QRectF(track.left(), track.top(), 75, 12), 3, 3);
-            } else {
+            } else if (!notStarted) {
                 const double w = track.width() * double(total) / double(m_max), r = total > 0 ? w * double(rework) / double(total) : 0;
                 p.setPen(Qt::NoPen);
                 p.setBrush(kindColor("work", {}, m_dark)); p.drawRoundedRect(QRectF(track.left(), track.top(), w - r, 12), 3, 3);
                 if (r > 0) { p.setBrush(kindColor("rework", {}, m_dark)); p.drawRoundedRect(QRectF(track.left() + w - r, track.top(), r, 12), 3, 3); }
+                // #736: the four token buckets stay apart: fresh input, output,
+                // cache writes and cache reads, never folded into the total.
+                p.setFont(small); p.setPen(c.muted);
+                p.drawText(QRect(barLeft, y + 24, barRight - barLeft, 16), Qt::AlignVCenter,
+                           tr("in %1 · out %2 · cache w %3 · cache r %4")
+                               .arg(tokens(qint64(spent.value("uncached_input").toDouble())), tokens(qint64(spent.value("output").toDouble())),
+                                    tokens(qint64(spent.value("cache_write").toDouble())), tokens(qint64(spent.value("cache_read").toDouble()))));
             }
             p.setFont(mono); p.setPen(c.fg);
             const QString share = row.contains("rework_share") && row.value("rework_share").toDouble() > 0
                 ? tr("%1% rework").arg(qRound(row.value("rework_share").toDouble() * 100)) : QString();
-            p.drawText(QRect(width() - 170, y, 164, 34), Qt::AlignVCenter | Qt::AlignRight,
-                       unknown ? tr("unknown") : share.isEmpty() ? tokens(total) : QStringLiteral("%1  %2").arg(tokens(total), share));
-            y += 34;
+            p.drawText(QRect(width() - 170, y, 164, 46), Qt::AlignVCenter | Qt::AlignRight,
+                       notStarted ? tr("not started") : unknown ? tr("unknown") : share.isEmpty() ? tokens(total) : QStringLiteral("%1  %2").arg(tokens(total), share));
+            y += 46;
         }
     }
     void mousePressEvent(QMouseEvent *event) override
     {
-        const int at = (int(event->position().y()) - 30) / 34;
+        const int at = (int(event->position().y()) - 30) / 46;
         if (at >= 0 && at < m_rows.size() && clicked) clicked(m_rows[at].toObject().value("task").toInt());
     }
 private:
@@ -863,6 +871,12 @@ QWidget *TeamProfileView::tokensPage()
     head->addWidget(label(m_phase ? tr("TOKENS PER TASK, PHASE %1").arg(m_phase) : tr("TOKENS PER TASK, THE PLAN"), c.muted, 11, true));
     if (summary.value("partial").toBool() || summary.value("unknown").toBool())
         head->addWidget(label(tr("partial: some sessions are on another computer or not recorded"), c.violet, 11, false, "teamProfileTokensPartial"));
+    // #736: the four buckets apart; the total counts the fresh input and output.
+    if (summary.contains("total"))
+        head->addWidget(label(tr("fresh in %1 · out %2 · cache w %3 · cache r %4")
+                                  .arg(tokens(qint64(summary.value("uncached_input").toDouble())), tokens(qint64(summary.value("output").toDouble())),
+                                       tokens(qint64(summary.value("cache_write").toDouble())), tokens(qint64(summary.value("cache_read").toDouble()))),
+                              c.muted, 11, false, "teamProfileTokensBuckets"));
     head->addStretch(1);
     v->addLayout(head);
     auto *bars = new TeamProfileBars;

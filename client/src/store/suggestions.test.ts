@@ -1,8 +1,28 @@
 import { describe, expect, it } from "vitest";
-import { createRoot } from "solid-js";
+import { createComputed, createRoot, createSignal } from "solid-js";
 import { createSuggestions, suggestedInput } from "./suggestions";
 
 describe("composer suggestions", () => {
+  it("publishes from a reactive source without subscribing to its own cache", () => createRoot((dispose) => {
+    const s = createSuggestions(), [text, setText] = createSignal("");
+    let publications = 0;
+    createComputed(() => {
+      const value = text();
+      if (++publications < 6) s.set("one", value, 10);
+    });
+    s.set("two", "another session", 11);
+    expect(publications).toBe(1);
+    setText("next step");
+    expect(publications).toBe(2);
+    expect(s.get("one")).toBe("next step");
+    setText("");
+    expect(publications).toBe(3);
+    expect(s.get("one")).toBe("");
+    s.set("one", "", 0);
+    expect(publications).toBe(3);
+    dispose();
+  }));
+
   it("keeps one placeholder per session key and hides it while sending waits", () => createRoot((dispose) => {
     const s = createSuggestions();
     s.set("one", "run the focused tests", 10);

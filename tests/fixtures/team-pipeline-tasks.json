@@ -154,6 +154,7 @@
           "no_report": false,
           "notice": "none",
           "notice_id": "",
+          "pipeline_return": true,
           "report": {
             "at": 1800000100.0,
             "text": "Done",
@@ -226,6 +227,7 @@
           "no_report": false,
           "notice": "none",
           "notice_id": "",
+          "pipeline_return": true,
           "report": {
             "at": 1800000100.0,
             "text": "Done",
@@ -244,6 +246,7 @@
           "no_report": false,
           "notice": "none",
           "notice_id": "",
+          "pipeline_return": true,
           "report": {
             "at": 1800001100.0,
             "text": "Done",

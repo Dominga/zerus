@@ -49,15 +49,18 @@ are bounded to 2048 bytes. No dry run or child/archive selector is accepted.
 ```
 
 A known new conversation has revision 0. `muted` is false, except for a session
-that is a non-lead member of an active team (planning, running or paused) with
-no recorded choice: the host applies the team's mute itself, so the preference
-reads `muted:true` at revision 0 and every desktop and the phone follow it. A
-recorded choice (revision 1 or more) always wins, and a session that leads any
-active team is never muted by this default. The default is computed on read: it
-writes nothing, keeps the revision 0 and leaves the suppression baseline empty;
-an owner's unmute writes revision 1 with `muted:false`. Corrupt/unreadable
-preference storage yields null in a listing and refuses writes; it never resets
-to an unmuted preference. Untracked rows yield null.
+on this computer that is a non-lead member of an active team (planning, running
+or paused) with no recorded choice: the host applies the team's mute itself, so
+the preference reads `muted:true` at revision 0 and every desktop and the phone
+that follow this host see it. A recorded choice (revision 1 or more) always
+wins, and a session that leads any active team is never muted by this default.
+The default is computed on read: it writes nothing, keeps the revision 0 and
+leaves the suppression baseline empty; an owner's unmute writes revision 1 with
+`muted:false`. A member on another computer is not muted by this default there:
+its own hgs has no team record, so its notifications stay on and its desktop
+shows no team mute unless the owner records a choice on that host. Corrupt/
+unreadable preference storage yields null in a listing and refuses writes; it
+never resets to an unmuted preference. Untracked rows yield null.
 
 A successful response exits 0 and has exactly the current identities and
 preference:

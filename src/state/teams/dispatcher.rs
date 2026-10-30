@@ -353,6 +353,9 @@ pub(crate) enum Step {
     Quiet { member: String, session: SessionRef, muted: bool, revision: u64 },
     /// U47/U48: start a command or land stage that waits for Zerus.
     StageCommand { task: u32, run: String },
+    /// #630 N7: an open stage whose member left the roster or whose hand-off
+    /// was never confirmed goes back to Waiting.
+    StageStalled { task: u32, run: String, reason: String },
     /// U47/U48: read a started command or land stage's run record.
     StageCommandEnded { task: u32, run: String },
     /// #511 N3: tell a member its worked-ahead attempt was revoked with its
@@ -787,7 +790,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         }
     }
     // The lead's answer reaches the member as a message, once its session is
-    // live (A3).
+    // live (A3). #630 N6: a stage member's answer goes to its run.
     'answers: for task in &team.tasks {
         for attempt in &task.attempts {
             for question in &attempt.questions {
@@ -796,6 +799,19 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                     if live {
                         steps.push(Step::AnswerQuestion { task: task.id, question: question.id.clone() });
                         break 'answers;
+                    }
+                }
+            }
+        }
+        if let Some(pipeline) = task.pipeline_run.as_ref() {
+            for run in &pipeline.runs {
+                for question in &run.questions {
+                    if !question.open() && question.notice == Notice::Pending {
+                        let live = team.member(&run.member).and_then(|m| session_of(m, seen)).is_some_and(|s| s.live);
+                        if live {
+                            steps.push(Step::AnswerQuestion { task: task.id, question: question.id.clone() });
+                            break 'answers;
+                        }
                     }
                 }
             }
@@ -1082,6 +1098,11 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     for (task, run) in super::stages::runs_ended(team) {
         steps.push(Step::StageRunEnded { task, run });
     }
+    // #630 N7: a stage given to a member that was removed or paused, or whose
+    // hand-off was never confirmed, goes back to Waiting for a free member.
+    for (task, run, reason) in super::stages::stalled(team, now) {
+        steps.push(Step::StageStalled { task, run, reason });
+    }
     // C6: among a member's ready tasks the one with the most transitive
     // dependants goes first, then the lowest number.
     let ready = plan::dispatch_order(team, ready_ids);
@@ -1101,7 +1122,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                 let member = team.member(&pending.member);
                 let found = member.and_then(|member| session_of(member, seen));
                 if let (Some(member), Some(_)) = (member, found.filter(|found| super::models::confirmed(pending, &found.model, &found.effort))) {
-                    if switching.contains(member.id.as_str()) && available(member, &BTreeSet::new()) {
+                    if switching.contains(member.id.as_str()) && available(member, &BTreeSet::new()) && super::stages::held(team, &member.id).is_none() {
                         switching.remove(member.id.as_str());
                         steps.push(deliver(task, member));
                     }
@@ -1114,7 +1135,13 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                 steps.push(Step::TaskWaits { task: id, reason: super::models::no_fit_reason(team, task) });
                 continue;
             }
-            let failed = |m: &Member| !task.pinned && task.attempts.iter().any(|a| a.member == m.id && matches!(a.state, AttemptState::Rejected | AttemptState::Refused));
+            let failed = |m: &Member| {
+                !task.pinned
+                    && task
+                        .attempts
+                        .iter()
+                        .any(|a| a.member == m.id && matches!(a.state, AttemptState::Rejected | AttemptState::Refused) && !super::pipeline::pipeline_returned(a))
+            };
             let candidates = super::models::candidates(team, task);
             let fits: Vec<(&Member, super::models::Fit)> = candidates
                 .iter()
@@ -1176,7 +1203,11 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         // a free member with the same role may take it.
         let held = super::stages::held(team, &member.id).is_some();
         if !task.pinned {
-            let failed = |m: &Member| task.attempts.iter().any(|a| a.member == m.id && matches!(a.state, AttemptState::Rejected | AttemptState::Refused));
+            let failed = |m: &Member| {
+            task.attempts
+                .iter()
+                .any(|a| a.member == m.id && matches!(a.state, AttemptState::Rejected | AttemptState::Refused) && !super::pipeline::pipeline_returned(a))
+        };
             let assignee_fits = available(member, &busy) && !failed(member) && !held;
             if !assignee_fits {
                 let role = team.role_of(&member.id);
@@ -1531,7 +1562,10 @@ pub(crate) fn hand_off_text_with(
             let stage = run.runs.iter().rev().find(|stage| stage.attempt == previous.n && stage.state != super::model::StageState::Revoked)?;
             (stage.state == super::model::StageState::Returned).then(|| (stage.clone(), run.max_rounds))
         });
-        if let Some((stage, max_rounds)) = returned {
+        // #630 N2: once the lead or you decided the task (a round-limit return,
+        // then a rejection, or a send-back), that decision is the latest word,
+        // not the stage run that preceded it.
+        if let Some((stage, max_rounds)) = returned.filter(|_| task.decided_by.is_none()) {
             text += &format!("\nAttempt {} was returned by the {} of {} (round {} of {max_rounds}). Fix these findings:\n", previous.n, stage.kind, stage.by, stage.round);
             if !stage.text.trim().is_empty() {
                 text += &format!("{}\n", stage.text.trim());
@@ -3382,11 +3416,14 @@ fn start_stage_command(store: &mut Store, team: &Team, task_id: u32, run_id: &st
         clean(&prepared);
         return Ok(());
     }
-    // #680: a land stage lands the checked commit and nothing else.
-    if stage.kind == "land" {
+    // #680/#684: a land stage lands the checked commit and nothing else. In a
+    // Git folder a missing recorded commit is refused rather than reading HEAD
+    // at the stage's start; in a folder without Git there is no HEAD to check,
+    // and the hold rule keeps the folder as the implementer left it (N2).
+    if stage.kind == "land" && prepared.git {
         if prepared.commit.is_empty() {
             clean(&prepared);
-            return not_run(store, "The attempt has no commit for the land stage to check".into());
+            return not_run(store, "The attempt recorded no commit for the land stage to check; commit with hgs team commit (or git) before reporting".into());
         }
         let head = git_at(&prepared.folder, &["rev-parse", "HEAD"]).unwrap_or_default();
         if head != prepared.commit {
@@ -3401,19 +3438,25 @@ fn start_stage_command(store: &mut Store, team: &Team, task_id: u32, run_id: &st
             );
         }
     }
-    // The task's own branch, else the implementer's folder's: what the command
-    // sees. The implementer's folder is held from the report on, so its branch
-    // is the checked one even when the stage itself works in a checkout.
+    // The task's own branch, else the branch the attempt reported, else the
+    // implementer's folder's: what the command sees.
+    let reported_branch = task.attempts.iter().find(|attempt| attempt.n == open.attempt).map(|attempt| attempt.folder_branch.clone()).unwrap_or_default();
     let live = super::stages::task_folder(team, task, &open).unwrap_or_default();
     let branch = task_branch(team, task_id, &author)
+        .or_else(|| (!reported_branch.is_empty()).then_some(reported_branch))
         .or_else(|| git_at(&live, &["rev-parse", "--abbrev-ref", "HEAD"]).filter(|branch| branch != "HEAD"))
         .unwrap_or_default();
     let commit = prepared.commit.clone();
-    change(store, &team.id, |team, events| {
+    // #684 L1: a checkout prepare() made goes if the start is not recorded
+    // (a store error here, or a crash between prepare and this change).
+    if let Err(error) = change(store, &team.id, |team, events| {
         super::pipeline::command_started(team, task_id, run_id, &commit, events)?;
         super::stages::record(team, task_id, run_id, &prepared);
         Ok(())
-    })?;
+    }) {
+        clean(&prepared);
+        return Err(error);
+    }
     let command = stage.command.clone().unwrap_or_default();
     let session = member.session.as_ref().map_or_else(
         || json!({}),
@@ -3717,9 +3760,26 @@ fn stage_hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &st
                 events.push(Event::new("stage_refused", json!({"task":task_id,"stage":run.kind,"error":error})));
             }
             Sent::Uncertain(error) => {
+                // #630 N7: a hand-off that may not have arrived is not
+                // confirmed; after a grace it goes back to Waiting.
+                run.unconfirmed = true;
                 events.push(Event::new("stage_unconfirmed", json!({"task":task_id,"stage":run.kind,"error":error})));
             }
         }
+        Ok(())
+    })
+}
+
+/// #630 N7: takes a stalled stage back to Waiting and frees its checkout.
+fn stall_stage_command(store: &mut Store, team: &Team, task_id: u32, run_id: &str, reason: &str) -> anyhow::Result<()> {
+    let Some(run) = team.task(task_id).and_then(|task| task.pipeline_run.as_ref()).and_then(|run| run.runs.iter().find(|run| run.id == run_id)).cloned() else {
+        return Ok(());
+    };
+    if !run.checkout.is_empty() || !run.temp.is_empty() {
+        let _ = super::stages::clean_up(&run);
+    }
+    change(store, &team.id, |team, events| {
+        super::pipeline::stall_stage(team, task_id, run_id, reason, events);
         Ok(())
     })
 }
@@ -4045,7 +4105,8 @@ fn tell_lead_start_late(store: &mut Store, team: &Team, task_id: u32) -> anyhow:
 /// Gives the member the lead's answer as a message, once (A3).
 fn send_answer(store: &mut Store, team: &Team, task_id: u32, question_id: &str) -> anyhow::Result<()> {
     let task = team.task(task_id).context("unknown task")?;
-    let (attempt, question) = task
+    // #630 N6: the answer may belong to an attempt or to a stage member's run.
+    let (asked_by, question) = task
         .attempts
         .iter()
         .rev()
@@ -4054,19 +4115,34 @@ fn send_answer(store: &mut Store, team: &Team, task_id: u32, question_id: &str) 
                 .questions
                 .iter()
                 .find(|question| question.id == question_id && !question.open() && question.notice == Notice::Pending)
-                .map(|question| (attempt, question))
+                .map(|question| (attempt.member.clone(), question.clone()))
+        })
+        .or_else(|| {
+            task.pipeline_run.as_ref().and_then(|pipeline| {
+                pipeline.runs.iter().rev().find_map(|run| {
+                    run.questions
+                        .iter()
+                        .find(|question| question.id == question_id && !question.open() && question.notice == Notice::Pending)
+                        .map(|question| (run.member.clone(), question.clone()))
+                })
+            })
         })
         .context("the answer is no longer waiting")?;
-    let session = team.member(&attempt.member).and_then(|m| m.session.clone()).context("the member has no session")?;
+    let session = team.member(&asked_by).and_then(|m| m.session.clone()).context("the member has no session")?;
     let notice_id = uuid::Uuid::new_v4().to_string();
-    let outcome = send(&session, &notice_id, &answer_to_member_text(task, question));
+    let outcome = send(&session, &notice_id, &answer_to_member_text(task, &question));
     if matches!(outcome, Sent::Refused(_)) {
         return Ok(());
     }
     change(store, &team.id, |team, _| {
-        let question = team
-            .task_mut(task_id)
-            .and_then(|task| task.attempts.iter_mut().flat_map(|attempt| attempt.questions.iter_mut()).find(|question| question.id == question_id));
+        let task = team.task_mut(task_id);
+        let question = task.and_then(|task| {
+            task.attempts
+                .iter_mut()
+                .flat_map(|attempt| attempt.questions.iter_mut())
+                .find(|question| question.id == question_id)
+                .or_else(|| task.pipeline_run.as_mut().and_then(|pipeline| pipeline.runs.iter_mut().flat_map(|run| run.questions.iter_mut()).find(|question| question.id == question_id)))
+        });
         if let Some(question) = question {
             if question.notice == Notice::Pending {
                 question.notice = match outcome {
@@ -4377,7 +4453,14 @@ fn check_dsh_silent(store: &mut Store, team: &Team, task_id: u32, listing_last: 
     let Some(member) = team.member(&attempt.member) else { return Ok(()) };
     let Some(session) = member.session.clone() else { return Ok(()) };
     // A record from another run is not this member's activity.
-    let newest = inspect_reply(&session)
+    let inspected = inspect_reply(&session);
+    // #595 L3: when the events cannot be read (an offline computer, another
+    // run's record), the lead is told so instead of only "silent".
+    let unreadable = match &inspected {
+        Ok(record) => record["run_id"].as_str().unwrap_or_default() != session.run_id,
+        Err(_) => true,
+    };
+    let newest = inspected
         .ok()
         .filter(|record| record["run_id"].as_str().unwrap_or_default() == session.run_id)
         .and_then(|record| newest_event(&record));
@@ -4395,7 +4478,7 @@ fn check_dsh_silent(store: &mut Store, team: &Team, task_id: u32, listing_last: 
         Ok(())
     })?;
     if quiet >= SILENT_MINUTES * 60.0 {
-        tell_lead_silent(store, team, task_id, (quiet / 60.0).round().max(1.0) as u64)?;
+        tell_lead_silent(store, team, task_id, (quiet / 60.0).round().max(1.0) as u64, unreadable)?;
     }
     Ok(())
 }
@@ -4411,17 +4494,23 @@ fn newest_event(record: &Value) -> Option<f64> {
         .max_by(f64::total_cmp)
 }
 
-fn tell_lead_silent(store: &mut Store, team: &Team, task_id: u32, minutes: u64) -> anyhow::Result<()> {
+fn tell_lead_silent(store: &mut Store, team: &Team, task_id: u32, minutes: u64, unreadable: bool) -> anyhow::Result<()> {
     let task = team.task(task_id).context("unknown task")?;
     let attempt = task.open_attempt().context("no open attempt")?.clone();
     let member = team.member(&attempt.member).context("unknown member")?;
     let session = member.session.as_ref().map(|session| session.name.clone()).unwrap_or_default();
     let lead = team.member(&team.lead).and_then(|m| m.session.clone()).context("the lead has no session")?;
+    let seen = if unreadable {
+        "and Zerus could not read its events (its computer did not answer, or the record is from another run), \
+         so a question or Background work may be open"
+    } else {
+        "and Zerus sees no question or Background work"
+    };
     let text = format!(
         "[Zerus team \u{b7} from: Zerus \u{b7} task: #{} \u{b7} silent {minutes} min]\n\
-         {} is in its turn on #{} {} but has reported nothing for {minutes} min, and Zerus sees no question or \
-         Background work. A prompt Zerus cannot read (a permission of a subagent call, a dialog) may hold it: look at \
-         its terminal, or interrupt the turn with the owner's word (hgs interrupt {session} --json) and tell it how to go on.",
+         {} is in its turn on #{} {} but has reported nothing for {minutes} min, {seen}. A prompt Zerus cannot read \
+         (a permission of a subagent call, a dialog) may hold it: look at its terminal, or interrupt the turn with the \
+         owner's word (hgs interrupt {session} --json) and tell it how to go on.",
         task.id,
         team.role_of(&attempt.member),
         task.id,
@@ -5192,7 +5281,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
         Step::BudgetRed { member } => tell_lead_budget_red(store, team, member, false, String::new(), 0.0),
         Step::BackgroundRed { member, command, since } => tell_lead_budget_red(store, team, member, true, command.clone(), *since),
         Step::CheckSilent { task, last } => check_dsh_silent(store, team, *task, *last),
-        Step::Silent { task, minutes } => tell_lead_silent(store, team, *task, *minutes),
+        Step::Silent { task, minutes } => tell_lead_silent(store, team, *task, *minutes, false),
         Step::Quiet { member, session, muted, revision } => {
             if !*muted {
                 let input = json!({"run_id":session.run_id,"conversation_id":session.conversation_id,"muted":true,"expected_revision":revision});
@@ -5343,6 +5432,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
         Step::StageRunEnded { task, run } => stage_run_ended(store, team, *task, run),
         Step::StageCommand { task, run } => start_stage_command(store, team, *task, run),
         Step::StageCommandEnded { task, run } => settle_stage_command(store, team, *task, run),
+        Step::StageStalled { task, run, reason } => stall_stage_command(store, team, *task, run, reason),
         Step::TellStop { stop } => tell_stop(store, team, stop),
         Step::Rebalanced { tasks } => tell_lead_rebalanced(store, team, tasks),
         Step::TurnEnded { task, at, reply } => change(store, &team.id, |team, _| {
@@ -9472,6 +9562,46 @@ mod tests {
         assert!(page["items"].as_array().unwrap().iter().any(|event| event["kind"] == "member_silent"), "{page}");
     }
 
+    /// #595 L3: an inspect that fails (here: a record from another run) does not
+    /// become a plain "silent": the lead hears that Zerus could not read it.
+    #[test]
+    fn a_dsh_member_whose_events_cannot_be_read_is_told_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        t.status = TeamStatus::Running;
+        {
+            let dev = t.members.iter_mut().find(|member| member.id == "dev").unwrap();
+            dev.agent = "dsh".into();
+            dev.session = Some(SessionRef { name: "dsh/x/dev".into(), run_id: "r1".into(), conversation_id: "c".into(), ..Default::default() });
+        }
+        {
+            let task = t.tasks.iter_mut().find(|task| task.assignee == "dev").unwrap();
+            task.attempts.push(Attempt { n: 1, id: "A1".into(), member: "dev".into(), state: AttemptState::Delivered,
+                sent_at: 10.0, delivered_at: Some(10.0), started_at: Some(11.0), ..Default::default() });
+            task.status = TaskStatus::InProgress;
+        }
+        let id = t.tasks.iter().find(|task| task.assignee == "dev").unwrap().id;
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+        let at = crate::state::now();
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+        let record = sent.clone();
+        inspect_override(Some(json!({"run_id":"another-run","conversation_id":"c","activity":"busy","phase":"tool","events":[]})));
+        set_fake_hgs(Some(Box::new(move |_, args: &[&str], input: Option<&Value>| match args.first().copied() {
+            Some("send") => {
+                *record.borrow_mut() = input.unwrap()["text"].as_str().unwrap_or_default().to_owned();
+                Ok(fake_output(0, r#"{"status":"submitted"}"#, ""))
+            }
+            other => panic!("unexpected hgs {other:?}"),
+        })));
+        run_step(&mut store, &t, &Step::CheckSilent { task: id, last: at - 25.0 * 60.0 }, "").unwrap();
+        set_fake_hgs(None);
+        inspect_override(None);
+        let text = sent.borrow().clone();
+        assert!(text.contains("could not read its events"), "{text}");
+        assert!(text.contains("silent 25 min"), "{text}");
+    }
+
     /// N6: one NoReport step with a given `hgs inspect` record.
     fn capture_with(reply: Value) -> (tempfile::TempDir, Store, String, u32) {
         let dir = tempfile::tempdir().unwrap();
@@ -10070,6 +10200,23 @@ mod tests {
         seen[2].free = false;
         let now = steps(&team, &seen, 1.0);
         assert!(now.contains(&Step::HandOut { task: 1, member: "dev".into() }), "{now:?}");
+    }
+
+    #[test]
+    fn a_stage_returned_task_stays_with_its_implementer_not_a_peer() {
+        // #630 C2: a return's attempt is not failed(); the implementer keeps
+        // the task, while a lead's rejection still rebalances it.
+        let (mut team, seen) = team_with_two_backends();
+        let task = team.task_mut(1).unwrap();
+        task.attempts.push(Attempt { n: 1, member: "dev".into(), state: AttemptState::Rejected, pipeline_return: true, ..Default::default() });
+        task.status = TaskStatus::Pending;
+        let now = steps(&team, &seen, 1.0);
+        assert!(now.contains(&Step::HandOut { task: 1, member: "dev".into() }), "{now:?}");
+        assert!(!now.iter().any(|step| matches!(step, Step::Rebalance { task: 1, .. })), "{now:?}");
+        let mut rejected = team.clone();
+        rejected.task_mut(1).unwrap().attempts[0].pipeline_return = false;
+        let now = steps(&rejected, &seen, 1.0);
+        assert!(now.contains(&Step::Rebalance { task: 1, from: "dev".into(), to: "dev2".into() }), "{now:?}");
     }
 
     #[test]
@@ -11787,6 +11934,22 @@ mod tests {
         catalog
     }
 
+    /// #683: Deliver - review, then the command, then land - under the hold rule.
+    fn deliver_preset() -> super::super::catalog::Catalog {
+        let mut catalog = command_preset("command", "git status --porcelain".into(), &[]);
+        let pipeline = catalog.pipelines.last_mut().unwrap();
+        pipeline.id = "deliver".into();
+        pipeline.folder = "hold".into();
+        pipeline.stages.insert(0, super::super::catalog::Stage { kind: "review".into(), role: "reviewer".into(), ..Default::default() });
+        pipeline.stages.push(super::super::catalog::Stage {
+            kind: "land".into(),
+            command: Some(Check { command: "git status --porcelain".into(), expect_exit: 0, timeout_minutes: 5 }),
+            exits: [("0".to_owned(), "accepted".to_owned())].into_iter().collect(),
+            ..Default::default()
+        });
+        catalog
+    }
+
     /// #680: a stage command that writes the environment it got into `env.txt`.
     fn env_command() -> String {
         if cfg!(windows) {
@@ -11951,6 +12114,52 @@ mod tests {
         });
     }
 
+    /// #683: with the hold rule, the review before the command and land stage
+    /// holds the implementer's folder from the report on, so #2 waits.
+    #[test]
+    fn a_review_before_a_command_or_land_stage_holds_the_folder_under_the_hold_rule() {
+        let root = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(root.path(), || {
+            let (lead, dev) = stage_repo(root.path());
+            let team = stage_team(&lead, &dev, "deliver", &|_| deliver_preset());
+            let mut store = Store::open_at(&super::super::store::path(), true).unwrap();
+            store.create(&uuid::Uuid::new_v4().to_string(), &json!({}), team, vec![]).unwrap();
+            deliver_all();
+            hand_out(&mut store, STAGE_TEAM, 1, "dev", None, "").unwrap();
+            stage_report(&mut store, 1);
+            let team = store.load(STAGE_TEAM).unwrap().unwrap();
+            assert_eq!(super::super::stages::held(&team, "dev"), Some(1), "the review before a command and land stage holds the folder");
+            let seen = [session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", true)];
+            let found = steps(&team, &seen, now());
+            assert!(!found.iter().any(|step| matches!(step, Step::HandOut { task: 2, .. })), "no second task while the review is open: {found:?}");
+            set_fake_hgs(None);
+        });
+    }
+
+    /// #683: under the checkout rule the later command and land read their own
+    /// detached checkout, so the review does not hold the implementer.
+    #[test]
+    fn a_review_before_a_command_or_land_stage_does_not_hold_under_the_checkout_rule() {
+        let root = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(root.path(), || {
+            let (lead, dev) = stage_repo(root.path());
+            let mut catalog = deliver_preset();
+            catalog.pipelines.last_mut().unwrap().folder = "checkout".into();
+            let team = stage_team(&lead, &dev, "deliver", &|_| catalog.clone());
+            let mut store = Store::open_at(&super::super::store::path(), true).unwrap();
+            store.create(&uuid::Uuid::new_v4().to_string(), &json!({}), team, vec![]).unwrap();
+            deliver_all();
+            hand_out(&mut store, STAGE_TEAM, 1, "dev", None, "").unwrap();
+            stage_report(&mut store, 1);
+            let team = store.load(STAGE_TEAM).unwrap().unwrap();
+            assert_eq!(super::super::stages::held(&team, "dev"), None, "the checkout rule holds nothing for a review");
+            let seen = [session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", true)];
+            let found = steps(&team, &seen, now());
+            assert!(found.contains(&Step::HandOut { task: 2, member: "dev".into() }), "{found:?}");
+            set_fake_hgs(None);
+        });
+    }
+
     /// #680: a land stage refuses a folder moved off the checked commit, and
     /// runs nothing.
     #[test]
@@ -12105,6 +12314,110 @@ mod tests {
         assert!(!attempt_of(&t, &review, "qa"), "another member's stage run");
         assert!(attempt_of(&t, "a1", "dev"), "the implementer's own attempt");
         assert!(!attempt_of(&t, "nope", "dev"));
+    }
+
+    /// #684 N1: a plain git commit (not `hgs team commit`) is still the commit
+    /// the attempt reported, so a folder moved afterwards is refused.
+    #[test]
+    fn a_land_stage_refuses_a_folder_moved_after_a_plain_git_commit() {
+        let root = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(root.path(), || {
+            crate::state::builds::INLINE_RUNNER.with(|inline| inline.set(true));
+            let (lead, dev) = stage_repo(root.path());
+            let mut team = stage_team(&lead, &dev, "gate", &|_| command_preset("land", "git status --porcelain".into(), &[("0", "accepted")]));
+            team.settings.land_allowed = true;
+            let mut store = Store::open_at(&super::super::store::path(), true).unwrap();
+            store.create(&uuid::Uuid::new_v4().to_string(), &json!({}), team, vec![]).unwrap();
+            deliver_all();
+            hand_out(&mut store, STAGE_TEAM, 1, "dev", None, "").unwrap();
+            std::fs::write(dev.join("a.txt"), "one\n").unwrap();
+            git_in(&dev, &["add", "-A"]);
+            git_in(&dev, &["commit", "-q", "-m", "Task 1"]);
+            stage_report(&mut store, 1);
+            // The next task moves the live folder before the land stage runs.
+            git_in(&dev, &["checkout", "-q", "-b", "task/2", "main"]);
+            std::fs::write(dev.join("b.txt"), "two\n").unwrap();
+            git_in(&dev, &["add", "-A"]);
+            git_in(&dev, &["commit", "-q", "-m", "Task 2 work"]);
+            let run = run_stage(&mut store);
+            let team = store.load(STAGE_TEAM).unwrap().unwrap();
+            let task = team.task(1).unwrap();
+            let ended = task.pipeline_run.as_ref().unwrap().runs[0].clone();
+            assert_eq!(ended.outcome, "refused", "{ended:?}");
+            assert!(task.hold.as_ref().unwrap().reason.contains("checked commit"), "{:?}", task.hold);
+            assert!(crate::state::builds::record(&run, now()).is_none(), "the land command did not run");
+            set_fake_hgs(None);
+            crate::state::builds::INLINE_RUNNER.with(|inline| inline.set(false));
+        });
+    }
+
+    /// #684 N2: a land stage in a folder without Git runs; there is no HEAD to
+    /// check, and the hold rule keeps the folder.
+    #[test]
+    fn a_land_stage_in_a_folder_without_git_runs() {
+        let root = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(root.path(), || {
+            crate::state::builds::INLINE_RUNNER.with(|inline| inline.set(true));
+            let plain = root.path().join("plain");
+            std::fs::create_dir_all(&plain).unwrap();
+            let mut team = team();
+            team.id = STAGE_TEAM.into();
+            team.folder = plain.display().to_string();
+            for member in &mut team.members {
+                member.folder = MemberFolder::Shared;
+            }
+            team.settings.land_allowed = true;
+            let catalog = command_preset("land", "echo landed".into(), &[("0", "accepted")]);
+            team.task_mut(1).unwrap().pipeline = "gate".into();
+            super::super::pipeline::snapshot_with(&mut team, 1, &catalog);
+            let mut store = Store::open_at(&super::super::store::path(), true).unwrap();
+            store.create(&uuid::Uuid::new_v4().to_string(), &json!({}), team, vec![]).unwrap();
+            deliver_all();
+            hand_out(&mut store, STAGE_TEAM, 1, "dev", None, "").unwrap();
+            stage_report(&mut store, 1);
+            run_stage(&mut store);
+            let team = store.load(STAGE_TEAM).unwrap().unwrap();
+            let task = team.task(1).unwrap();
+            assert_eq!((task.status, task.decided_by), (TaskStatus::Accepted, Some(Decider::Zerus)), "{:?}", task.pipeline_run);
+            set_fake_hgs(None);
+            crate::state::builds::INLINE_RUNNER.with(|inline| inline.set(false));
+        });
+    }
+
+    /// #684 L1: a checkout prepare() made is removed when the start cannot be
+    /// recorded (a store error), so the next tick is not refused by it.
+    #[test]
+    fn a_checkout_prepared_for_a_start_that_is_not_recorded_is_removed() {
+        let root = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(root.path(), || {
+            let (lead, dev) = stage_repo(root.path());
+            let team = stage_team(&lead, &dev, "gate", &|_| checkout_command_preset("command", "echo ok".into()));
+            let mut store = Store::open_at(&super::super::store::path(), true).unwrap();
+            store.create(&uuid::Uuid::new_v4().to_string(), &json!({}), team, vec![]).unwrap();
+            deliver_all();
+            hand_out(&mut store, STAGE_TEAM, 1, "dev", None, "").unwrap();
+            std::fs::write(dev.join("a.txt"), "one\n").unwrap();
+            let team = store.load(STAGE_TEAM).unwrap().unwrap();
+            let attempt = team.task(1).unwrap().open_attempt().unwrap().id.clone();
+            super::super::commands::commit_in_team(
+                &team,
+                "dev",
+                &json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":STAGE_TEAM,"attempt":attempt,"message":"Task 1"}),
+            )
+            .unwrap();
+            stage_report(&mut store, 1);
+            let team = store.load(STAGE_TEAM).unwrap().unwrap();
+            let run_id = team.task(1).unwrap().pipeline_run.as_ref().unwrap().open_run().unwrap().id.clone();
+            // A read-only store makes command_started fail after prepare made
+            // the checkout; the prepared checkout must go.
+            let mut read_only = Store::open_at(&super::super::store::path(), false).unwrap();
+            let error = start_stage_command(&mut read_only, &team, 1, &run_id).unwrap_err().to_string();
+            let leftovers = std::fs::read_dir(root.path().join("teams/stages"))
+                .map(|entries| entries.flatten().filter(|entry| entry.path().is_dir()).count())
+                .unwrap_or(0);
+            assert_eq!(leftovers, 0, "the prepared checkout is cleaned: {error}");
+            set_fake_hgs(None);
+        });
     }
 
     #[test]

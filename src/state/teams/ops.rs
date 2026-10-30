@@ -2533,6 +2533,22 @@ fn report(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
     };
     let label = actor.label(team);
     let team_lead = team.lead.clone();
+    // #684 N1: the attempt records its folder's HEAD and branch at the report,
+    // so a later stage checks that commit and never reads HEAD at its start.
+    let (folder_head, folder_branch) = if by_member.is_empty() {
+        (String::new(), String::new())
+    } else {
+        let folder = team.member(&by_member).and_then(|member| super::dispatcher::member_folder_path(team, member).ok()).unwrap_or_default();
+        if folder.is_empty() || !std::path::Path::new(&folder).is_dir() || !super::stages::is_git(&folder) {
+            (String::new(), String::new())
+        } else {
+            let head = super::dispatcher::git_at(&folder, &["rev-parse", "HEAD"]).unwrap_or_default();
+            let branch = super::dispatcher::task_branch(team, id, &by_member)
+                .or_else(|| super::dispatcher::git_at(&folder, &["rev-parse", "--abbrev-ref", "HEAD"]).filter(|branch| branch != "HEAD"))
+                .unwrap_or_default();
+            (head, branch)
+        }
+    };
     // C1: the lead reports its own task and accepts it in one step; nobody
     // else accepts on a report.
     let accept = input["accept"].as_bool() == Some(true);
@@ -2565,6 +2581,8 @@ fn report(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
         let attempt = task.attempts.iter_mut().find(|a| a.id == open_id).unwrap();
         attempt.state = AttemptState::Reported;
         attempt.report = Some(Report { text: body, at: now(), structured: structured.clone(), unstructured: structured.is_none(), ..Default::default() });
+        attempt.folder_head = folder_head.clone();
+        attempt.folder_branch = folder_branch.clone();
         attempt.no_report = false;
         attempt.check = check_result;
         // The lead hears of a report unless it wrote it.
@@ -3021,6 +3039,18 @@ fn next_question(team: &Team) -> String {
 
 /// A member asks the lead about its open attempt (A3). The attempt stays open
 /// and is not captured while the question is open.
+/// #630 N6: what a member asks about: an open attempt or an open stage run.
+enum AskTarget {
+    Attempt(usize),
+    Stage(usize),
+}
+
+/// #630 N6: where a question waits: on an attempt or on a stage run.
+enum AskedWhere {
+    Attempt(usize),
+    Stage(usize),
+}
+
 fn ask(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
     let Actor::Member(member) = actor else {
@@ -3030,7 +3060,8 @@ fn ask(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -
     let body = clean(text(input, "text").trim(), 4000, "A question")?;
     ensure!(!body.is_empty(), "A question needs text");
     let given = input["task"].as_u64().and_then(|id| u32::try_from(id).ok());
-    // Only an attempt that is still open belongs to the caller.
+    // Only an attempt, or a stage run given to the caller, that is still open
+    // belongs to the caller (#630 N6: a stage member asks about its stage).
     let open: Vec<(usize, usize)> = team
         .tasks
         .iter()
@@ -3039,34 +3070,68 @@ fn ask(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -
             value.attempts.iter().rposition(|attempt| attempt.state.open() && attempt.member == *member).map(|attempt| (task, attempt))
         })
         .collect();
-    let (task, attempt) = match given {
-        Some(id) => open
-            .iter()
-            .copied()
-            .find(|(task, _)| team.tasks[*task].id == id)
-            .with_context(|| format!("Task #{id} has no open attempt of yours"))?,
-        None => match open.as_slice() {
-            [only] => *only,
-            [] => bail!("You have no open attempt to ask about"),
-            many => bail!(
-                "You have {} open attempts: {}; name one with \"task\"",
-                many.len(),
-                many.iter().map(|(task, _)| format!("#{}", team.tasks[*task].id)).collect::<Vec<_>>().join(", ")
-            ),
+    let stages: Vec<(usize, usize)> = team
+        .tasks
+        .iter()
+        .enumerate()
+        .filter_map(|(task, value)| {
+            let pipeline = value.pipeline_run.as_ref()?;
+            let run = pipeline.open_run().filter(|run| run.state == StageState::Delivered && !run.member.is_empty() && run.member == *member)?;
+            pipeline.runs.iter().rposition(|found| found.id == run.id).map(|run| (task, run))
+        })
+        .collect();
+    let target = |task: usize| team.tasks[task].id;
+    let (task, asked) = match given {
+        Some(id) => {
+            let found = open
+                .iter()
+                .find(|(task, _)| target(*task) == id)
+                .map(|(task, attempt)| (*task, AskTarget::Attempt(*attempt)))
+                .or_else(|| stages.iter().find(|(task, _)| target(*task) == id).map(|(task, run)| (*task, AskTarget::Stage(*run))));
+            found.with_context(|| format!("Task #{id} has no open attempt or stage of yours"))?
+        }
+        None => match (open.as_slice(), stages.as_slice()) {
+            ([only], []) => (only.0, AskTarget::Attempt(only.1)),
+            ([], [only]) => (only.0, AskTarget::Stage(only.1)),
+            ([], []) => bail!("You have no open attempt or stage to ask about"),
+            (open, stages) => {
+                let tasks: Vec<String> = open.iter().chain(stages).map(|(task, _)| format!("#{}", target(*task))).collect();
+                bail!("You have {} open pieces of work: {}; name one with \"task\"", tasks.len(), tasks.join(", "));
+            }
         },
     };
-    let attempt_value = &team.tasks[task].attempts[attempt];
-    ensure!(attempt_value.questions.len() < 20, "This attempt has 20 questions already (the most allowed)");
-    ensure!(
-        attempt_value.questions.iter().filter(|question| question.open()).count() < 3,
-        "This attempt has 3 open questions; wait for the lead's answer"
-    );
-    let (task_id, n) = (team.tasks[task].id, attempt_value.n);
     let question = next_question(team);
     let role = team.role_of(member);
-    team.tasks[task].attempts[attempt].questions.push(Question { id: question.clone(), text: body, at: now(), ..Default::default() });
-    events.push(Event::new("question_asked", json!({"by":role,"task":task_id,"attempt":n,"question":question})));
-    Ok(json!({"status":"asked","question":question,"task":task_id,"attempt":n}))
+    let task_id = team.tasks[task].id;
+    match asked {
+        AskTarget::Stage(run) => {
+            let (round, kind, run_id) = {
+                let found = team.tasks[task].pipeline_run.as_ref().and_then(|pipeline| pipeline.runs.get(run)).context("The stage ended")?;
+                (found.round, found.kind.clone(), found.id.clone())
+            };
+            let found = team.tasks[task].pipeline_run.as_mut().and_then(|pipeline| pipeline.runs.get_mut(run)).context("The stage ended")?;
+            ensure!(found.questions.len() < 20, "This stage has 20 questions already (the most allowed)");
+            ensure!(
+                found.questions.iter().filter(|question| question.open()).count() < 3,
+                "This stage has 3 open questions; wait for the lead's answer"
+            );
+            found.questions.push(Question { id: question.clone(), text: body, at: now(), ..Default::default() });
+            events.push(Event::new("question_asked", json!({"by":role,"task":task_id,"stage":kind,"round":round,"question":question})));
+            Ok(json!({"status":"asked","question":question,"task":task_id,"attempt":run_id,"stage":kind,"round":round}))
+        }
+        AskTarget::Attempt(attempt) => {
+            let n = team.tasks[task].attempts[attempt].n;
+            let found = &mut team.tasks[task].attempts[attempt];
+            ensure!(found.questions.len() < 20, "This attempt has 20 questions already (the most allowed)");
+            ensure!(
+                found.questions.iter().filter(|question| question.open()).count() < 3,
+                "This attempt has 3 open questions; wait for the lead's answer"
+            );
+            found.questions.push(Question { id: question.clone(), text: body, at: now(), ..Default::default() });
+            events.push(Event::new("question_asked", json!({"by":role,"task":task_id,"attempt":n,"question":question})));
+            Ok(json!({"status":"asked","question":question,"task":task_id,"attempt":n}))
+        }
+    }
 }
 
 /// The lead (or you) answers one of a member's questions (A3); the member gets
@@ -3080,25 +3145,37 @@ fn reply(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>)
     ensure!(!question.is_empty(), "A question id is required");
     let body = clean(text(input, "text").trim(), 4000, "An answer")?;
     ensure!(!body.is_empty(), "An answer needs text");
-    // A question id names one question of the team; find it and its attempt.
-    let mut found = None;
-    for (task, value) in team.tasks.iter().enumerate() {
+    // A question id names one question of the team; it belongs to an attempt or
+    // to a stage run (#630 N6).
+    let mut found: Option<(usize, AskedWhere, usize)> = None;
+    'tasks: for (task, value) in team.tasks.iter().enumerate() {
         for (attempt, value) in value.attempts.iter().enumerate() {
             if let Some(question_at) = value.questions.iter().position(|q| q.id == question) {
-                found = Some((task, attempt, question_at));
-                break;
+                found = Some((task, AskedWhere::Attempt(attempt), question_at));
+                break 'tasks;
             }
         }
-        if found.is_some() {
-            break;
+        if let Some(pipeline) = value.pipeline_run.as_ref() {
+            for (run, value) in pipeline.runs.iter().enumerate() {
+                if let Some(question_at) = value.questions.iter().position(|q| q.id == question) {
+                    found = Some((task, AskedWhere::Stage(run), question_at));
+                    break 'tasks;
+                }
+            }
         }
     }
-    let Some((task, attempt, question_at)) = found else {
+    let Some((task, where_at, question_at)) = found else {
         bail!("Unknown question {question}")
     };
-    let asked_by = team.tasks[task].attempts[attempt].member.clone();
+    let asked_by = match where_at {
+        AskedWhere::Attempt(attempt) => team.tasks[task].attempts[attempt].member.clone(),
+        AskedWhere::Stage(run) => team.tasks[task].pipeline_run.as_ref().and_then(|pipeline| pipeline.runs.get(run)).map(|run| run.member.clone()).unwrap_or_default(),
+    };
     ensure!(actor.reviews(team, &asked_by), "Only the lead or you answer a member's question");
-    let asked = &team.tasks[task].attempts[attempt].questions[question_at];
+    let asked = match where_at {
+        AskedWhere::Attempt(attempt) => &team.tasks[task].attempts[attempt].questions[question_at],
+        AskedWhere::Stage(run) => &team.tasks[task].pipeline_run.as_ref().and_then(|pipeline| pipeline.runs.get(run)).context("The stage ended")?.questions[question_at],
+    };
     ensure!(
         !team.tasks[task].status.finished(),
         "Task #{} is decided; its question {question} is closed",
@@ -3110,16 +3187,31 @@ fn reply(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>)
             if asked.answer.is_empty() { "closed with its attempt" } else { "already answered" }
         );
     }
-    let (task_id, n) = (team.tasks[task].id, team.tasks[task].attempts[attempt].n);
+    let task_id = team.tasks[task].id;
     let label = actor.label(team);
-    let asked = &mut team.tasks[task].attempts[attempt].questions[question_at];
+    let asked = match where_at {
+        AskedWhere::Attempt(attempt) => &mut team.tasks[task].attempts[attempt].questions[question_at],
+        AskedWhere::Stage(run) => &mut team.tasks[task].pipeline_run.as_mut().and_then(|pipeline| pipeline.runs.get_mut(run)).context("The stage ended")?.questions[question_at],
+    };
     asked.answer = body;
     asked.answered_at = Some(now());
     asked.by = label.clone();
     // The answer reaches the member as a message; the dispatcher sends it once
     // its session is live (A3).
     asked.notice = Notice::Pending;
-    events.push(Event::new("question_answered", json!({"by":label,"task":task_id,"attempt":n,"question":question})));
+    match where_at {
+        AskedWhere::Attempt(attempt) => {
+            let n = team.tasks[task].attempts[attempt].n;
+            events.push(Event::new("question_answered", json!({"by":label,"task":task_id,"attempt":n,"question":question})));
+        }
+        AskedWhere::Stage(run) => {
+            let (stage, round) = {
+                let found = &team.tasks[task].pipeline_run.as_ref().and_then(|pipeline| pipeline.runs.get(run)).context("The stage ended")?;
+                (found.kind.clone(), found.round)
+            };
+            events.push(Event::new("question_answered", json!({"by":label,"task":task_id,"stage":stage,"round":round,"question":question})));
+        }
+    }
     Ok(json!({"status":"answered","question":question}))
 }
 
@@ -3706,6 +3798,26 @@ fn decide_proposal(team: &mut Team, input: &Value, actor: &Actor, offline: &BTre
     Ok(json!({"status":"accepted","proposal":id,"result":result}))
 }
 
+/// #630 N7: the stage runs given to `member` go back to Waiting when its
+/// member is removed or paused; the lead hears each as stalled.
+fn stall_stages_of(team: &mut Team, member: &str, reason: &str, events: &mut Vec<Event>) {
+    let mut stalled = Vec::new();
+    for task in &team.tasks {
+        let Some(run) = task.pipeline_run.as_ref().and_then(|pipeline| pipeline.open_run()) else { continue };
+        // A command or land stage names Zerus, never a member.
+        if run.member != member || run.member.is_empty() {
+            continue;
+        }
+        if !run.checkout.is_empty() || !run.temp.is_empty() {
+            let _ = super::stages::clean_up(run);
+        }
+        stalled.push((task.id, run.id.clone()));
+    }
+    for (task, run) in stalled {
+        super::pipeline::stall_stage(team, task, &run, reason, events);
+    }
+}
+
 fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     let id = task_id(input)?;
     let human = matches!(actor, Actor::Human);
@@ -4198,6 +4310,10 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
                 (false, None) => MemberState::NotCreated,
             };
             let role = team.role_of(&id);
+            if pause {
+                // #630 N7: a paused member's stage goes back to the pool.
+                stall_stages_of(team, &id, &format!("{role} was paused"), events);
+            }
             events.push(Event::new(if pause { "member_paused" } else { "member_resumed" }, json!({"by":label,"member":role})));
             Ok(json!({"status":if pause {"paused"} else {"resumed"},"member":id}))
         }
@@ -4390,6 +4506,8 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
             member.state = MemberState::Removed;
             // U49: a member removed by hand is no longer draining.
             member.draining = false;
+            // #630 N7: its stage runs go back to Waiting for a free member.
+            stall_stages_of(team, &id, &format!("{role} was removed"), events);
             let by = if input["roster_word"].as_bool() == Some(true) { "Lead on your word" } else { "You" };
             let quote = input["owner_word_checked"]["text"].as_str().unwrap_or_default();
             events.push(Event::new("member_removed", json!({"by":by,"member":role,"owner_word":quote})));
@@ -6561,16 +6679,16 @@ mod tests {
         let error = apply(&mut team, "ask", &json!({"task":2,"text":"Which?"}), &Actor::Member("dev".into()), &none, &mut events)
             .unwrap_err()
             .to_string();
-        assert_eq!(error, "Task #2 has no open attempt of yours");
+        assert_eq!(error, "Task #2 has no open attempt or stage of yours");
         let error = apply(&mut team, "ask", &json!({"text":"Which?"}), &Actor::Member("qa".into()), &none, &mut events)
             .unwrap_err()
             .to_string();
-        assert_eq!(error, "You have no open attempt to ask about");
+        assert_eq!(error, "You have no open attempt or stage to ask about");
         // Two open attempts need a task number.
         team.task_mut(2).unwrap().assignee = "dev".into();
         hand_out(&mut team, 2);
         let error = apply(&mut team, "ask", &json!({"text":"Which?"}), &Actor::Member("dev".into()), &none, &mut events).unwrap_err().to_string();
-        assert_eq!(error, "You have 2 open attempts: #1, #2; name one with \"task\"");
+        assert_eq!(error, "You have 2 open pieces of work: #1, #2; name one with \"task\"");
         let asked = apply(&mut team, "ask", &json!({"task":2,"text":"Which tests?"}), &Actor::Member("dev".into()), &none, &mut events).unwrap();
         assert_eq!((asked["question"].as_str(), asked["task"].as_u64()), (Some("q2"), Some(2)));
         // Only a running or paused team takes questions.

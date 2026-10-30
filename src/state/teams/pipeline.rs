@@ -354,6 +354,8 @@ pub(crate) fn give_stage(team: &mut Team, id: u32, member: &str) -> anyhow::Resu
     run.member = member.to_owned();
     run.state = StageState::Delivered;
     run.delivered_at = Some(now());
+    run.stalled.clear();
+    run.unconfirmed = false;
     Ok(run.id.clone())
 }
 
@@ -427,10 +429,43 @@ fn returned(team: &mut Team, id: u32, run: &StageRun, by: &str, findings: Vec<St
     // Back to the implementer as a new attempt, without the lead.
     if let Some(attempt) = task.attempts.iter_mut().rev().find(|attempt| attempt.state == AttemptState::Reported) {
         attempt.state = AttemptState::Rejected;
+        // #630 C2: the implementer keeps the task for this return.
+        attempt.pipeline_return = true;
     }
     task.status = TaskStatus::Pending;
     task.decided_by = None;
     Ok(json!({"status":"pending","task":id,"stage":run.kind,"round":run.round,"returned":true}))
+}
+
+/// #630 C2: the attempt a stage return or a send-back closed keeps the task for
+/// its implementer: failed() does not count it.
+pub(crate) fn pipeline_returned(attempt: &Attempt) -> bool {
+    attempt.pipeline_return
+}
+
+/// #630 N7: an open stage whose member was removed, paused or never confirmed
+/// goes back to Waiting for a free member, and the lead hears it stalled.
+pub(crate) fn stall_stage(team: &mut Team, id: u32, run_id: &str, reason: &str, events: &mut Vec<Event>) -> bool {
+    let Some(task) = team.task_mut(id) else { return false };
+    let Some(run) = task.pipeline_run.as_mut().and_then(|pipeline| pipeline.runs.iter_mut().find(|run| run.id == run_id)) else {
+        return false;
+    };
+    if !matches!(run.state, StageState::Waiting | StageState::Delivered) {
+        return false;
+    }
+    let (stage, round) = (run.kind.clone(), run.round);
+    run.state = StageState::Waiting;
+    run.member.clear();
+    run.delivered_at = None;
+    run.folder.clear();
+    run.checkout.clear();
+    run.checkout_repo.clear();
+    run.temp.clear();
+    run.holds = false;
+    run.unconfirmed = false;
+    run.stalled = reason.to_owned();
+    events.push(Event::new("stage_stalled", json!({"task":id,"stage":stage,"round":round,"reason":reason})));
+    true
 }
 
 /// U47/U48: the command or land stages that wait for Zerus to start them.
@@ -707,6 +742,8 @@ pub(crate) fn send_back(team: &mut Team, input: &Value, actor: &Actor, events: &
     let attempt = reported_attempt(task);
     if let Some(found) = task.attempts.iter_mut().rev().find(|found| found.state == AttemptState::Reported) {
         found.state = AttemptState::Rejected;
+        // #630 C2: a send-back also keeps the task for its implementer.
+        found.pipeline_return = true;
     }
     task.status = TaskStatus::Pending;
     task.decided_by = Some(if human { Decider::Human } else { Decider::Lead });
@@ -874,6 +911,48 @@ mod tests {
         // Its report is round 2, in review again.
         let value = report(&mut team, &second);
         assert_eq!((value["status"].clone(), value["round"].clone()), (json!("in_review"), json!(2)));
+    }
+
+    #[test]
+    fn a_return_keeps_the_task_for_its_implementer() {
+        // #630 C2: the attempt a return closes is marked, so failed() never
+        // sends the next round to a peer.
+        let mut team = team_with("code", &builtin());
+        let first = hand(&mut team);
+        report(&mut team, &first);
+        verdict(&mut team, "rev", "return", &["Page size is unbounded"]).unwrap();
+        assert!(team.task(1).unwrap().attempts[0].pipeline_return);
+        assert!(pipeline_returned(&team.task(1).unwrap().attempts[0]));
+        // A lead's rejection is a decision, not a pipeline return.
+        let second = hand(&mut team);
+        report(&mut team, &second);
+        run(&mut team, "reject", json!({"task":1,"reason":"Not now"}), &member("lead")).unwrap();
+        assert!(!team.task(1).unwrap().attempts[1].pipeline_return);
+        // A send-back is a pipeline return too.
+        let third = hand(&mut team);
+        report(&mut team, &third);
+        run(&mut team, "send-back", json!({"task":1,"reason":"Try again"}), &member("lead")).unwrap();
+        assert!(team.task(1).unwrap().attempts[2].pipeline_return);
+    }
+
+    #[test]
+    fn the_leads_rejection_after_the_round_limit_reaches_the_next_hand_out() {
+        // #630 N2: the round-limit return is followed by the lead's rejection;
+        // the next hand-out names the rejection, not the stage run.
+        let mut catalog = builtin();
+        catalog.pipelines[0].max_rounds = 1;
+        let mut team = team_with("code", &catalog);
+        let first = hand(&mut team);
+        report(&mut team, &first);
+        verdict(&mut team, "rev", "return", &["Round one finding"]).unwrap();
+        assert_eq!(team.task(1).unwrap().status, TaskStatus::Submitted);
+        run(&mut team, "reject", json!({"task":1,"reason":"Use the paged API"}), &member("lead")).unwrap();
+        let second = hand(&mut team);
+        let task = team.task(1).unwrap().clone();
+        let text = crate::state::teams::dispatcher::hand_off_text(&team, &task, task.attempts.last().unwrap(), "", "");
+        assert!(text.contains("Attempt 1 was rejected: Use the paged API"), "{text}");
+        assert!(!text.contains("was returned by the review"), "{text}");
+        assert!(!second.is_empty());
     }
 
     #[test]

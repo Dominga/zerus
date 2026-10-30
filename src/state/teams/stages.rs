@@ -132,10 +132,13 @@ pub(crate) struct Prepared {
     pub holds: bool,
     pub changed: Vec<Value>,
     pub temp: String,
-    /// The commit the stage checks: the checked attempt's last commit, else the
-    /// folder's HEAD when the stage began. A command gets it as an environment
-    /// variable; a land stage refuses a folder on another commit.
+    /// The commit the stage checks: the checked attempt's recorded commit, else
+    /// its folder's HEAD at the report (#684 N1, never HEAD when the stage
+    /// starts). A command gets it as an environment variable; a land stage in a
+    /// Git folder refuses a folder on another commit.
     pub commit: String,
+    /// Whether the checked folder is a Git work tree at all.
+    pub git: bool,
     /// Why a checkout rule fell back to holding the folder.
     pub note: String,
 }
@@ -160,11 +163,18 @@ pub(crate) fn prepare(team: &Team, task_id: u32) -> anyhow::Result<Prepared> {
     let earlier = pipeline.runs.iter().find(|other| other.round == run.round && other.id != run.id && !other.changed.is_empty());
     let changed = earlier.map(|other| other.changed.clone()).unwrap_or_else(|| changed(task, run, &folder, git));
     let recorded = checked_attempt(task, run).and_then(|attempt| attempt.commits.last()).map(|commit| commit.sha.clone());
-    // The commit the stage checks: the attempt's recorded last commit, else the
-    // folder's HEAD when the stage begins (a member may commit outside Zerus).
-    let head = || git.then(|| git_at(&folder, &["rev-parse", "HEAD"])).flatten().unwrap_or_default();
-    let commit = recorded.clone().unwrap_or_else(head);
-    let mut prepared = Prepared { folder: folder.clone(), changed, commit, ..Default::default() };
+    // #684 N1: the commit the stage checks is the attempt's recorded commit, or
+    // the folder's HEAD as the attempt reported. It is never the folder's HEAD
+    // when the stage starts: a member that commits with plain git is checked on
+    // the commit it reported, and a later task that moved the folder does not
+    // become the checked one.
+    let reported = checked_attempt(task, run).map(|attempt| attempt.folder_head.clone()).unwrap_or_default();
+    // A detached checkout needs a commit the attempt recorded; its folder's
+    // HEAD alone may be older than uncommitted work. The land check and the
+    // command's environment use either, never HEAD at the stage's start.
+    let checked = recorded.clone();
+    let commit = recorded.clone().or_else(|| (!reported.is_empty()).then(|| reported.clone())).unwrap_or_default();
+    let mut prepared = Prepared { folder: folder.clone(), changed, commit, git, ..Default::default() };
     // A review reads the task's files and holds nothing.
     if run.kind == "review" {
         return Ok(prepared);
@@ -175,9 +185,19 @@ pub(crate) fn prepare(team: &Team, task_id: u32) -> anyhow::Result<Prepared> {
         prepared.temp = temp.display().to_string();
     }
     let kind = if run.kind == "test" { "test" } else { "stage" };
-    match (pipeline.folder.as_str(), git, recorded) {
+    match (pipeline.folder.as_str(), git, checked) {
         ("checkout", true, Some(sha)) => {
             let path = stage_dir(team, run, "");
+            // #684 L1: a checkout an earlier prepare left at this run's path is
+            // stale (a crash, or a start that was never recorded): remove it
+            // before making the new one, so the stage is not refused forever.
+            if path.exists() {
+                let _ = git_command(&folder).args(["worktree", "remove", "--force"]).arg(&path).output();
+                if path.exists() {
+                    let _ = std::fs::remove_dir_all(&path);
+                }
+                let _ = git_command(&folder).args(["worktree", "prune"]).output();
+            }
             let output = git_command(&folder)
                 .args(["worktree", "add", "--detach"])
                 .arg(&path)
@@ -191,7 +211,7 @@ pub(crate) fn prepare(team: &Team, task_id: u32) -> anyhow::Result<Prepared> {
         }
         ("checkout", true, None) => {
             prepared.holds = true;
-            prepared.note = format!("The attempt made no commits, so the {kind} works in the task's folder, which is held.");
+            prepared.note = format!("The attempt recorded no commit, so the {kind} works in the task's folder, which is held.");
         }
         ("checkout", false, _) => {
             prepared.holds = true;
@@ -230,6 +250,35 @@ pub(crate) fn record(team: &mut Team, task_id: u32, run_id: &str, prepared: &Pre
     run.temp = prepared.temp.clone();
 }
 
+/// #630 N7: how long an unconfirmed stage hand-off keeps its member before the
+/// stage goes back to Waiting.
+pub(crate) const STAGE_UNCONFIRMED_GRACE: f64 = 120.0;
+
+/// #630 N7: open stage runs whose member left the roster (removed or paused) or
+/// whose hand-off was never confirmed long enough: each goes back to Waiting
+/// and the lead hears why.
+pub(crate) fn stalled(team: &Team, at: f64) -> Vec<(u32, String, String)> {
+    team.tasks
+        .iter()
+        .filter_map(|task| {
+            let run = task.pipeline_run.as_ref()?.open_run()?;
+            if run.state != StageState::Delivered || run.member.is_empty() {
+                return None;
+            }
+            let member = team.member(&run.member);
+            let reason = match member.map(|member| member.state) {
+                Some(MemberState::Removed) => format!("{} was removed", team.role_of(&run.member)),
+                Some(MemberState::Paused) => format!("{} was paused", team.role_of(&run.member)),
+                _ if run.unconfirmed && at - run.delivered_at.unwrap_or(run.at) >= STAGE_UNCONFIRMED_GRACE => {
+                    "the stage hand-off was not confirmed".to_owned()
+                }
+                _ => return None,
+            };
+            Some((task.id, run.id.clone(), reason))
+        })
+        .collect()
+}
+
 /// The task whose stage holds `member`'s folder: the implementer's next task
 /// there waits until the stage ends. A test waiting for its member already
 /// holds it under the hold rule; a command or land stage holds it from the
@@ -238,6 +287,10 @@ pub(crate) fn record(team: &mut Team, task_id: u32, run_id: &str, prepared: &Pre
 /// #538 N5: a test stage that may need the folder holds it from the report,
 /// before it opens. #538 N4: a stage that ended while its own run went on keeps
 /// the folder (or its checkout's folder) until that run ends.
+/// #683: so does a review the preset puts before a command or land stage under
+/// the hold rule: the later stage lands the commit the review reads, so the
+/// implementer's folder must not move meanwhile. Under the checkout rule the
+/// later stage reads its own detached checkout, and nothing changes.
 pub(crate) fn held(team: &Team, member: &str) -> Option<u32> {
     let folder = team.member(member).and_then(|member| member_folder_path(team, member).ok()).unwrap_or_default();
     team.tasks.iter().find_map(|task| {
@@ -257,8 +310,13 @@ pub(crate) fn held(team: &Team, member: &str) -> Option<u32> {
                 }
             }
             "command" | "land" => true,
-            // #538 N5: a review (or any stage) before a test that may need the
-            // folder holds it from the report.
+            // #683: under the hold rule a review before a command or land stage
+            // holds the folder from the report; #538 N5: so does any stage before
+            // a test that may need the folder.
+            "review" => {
+                (pipeline.folder != "checkout" && pipeline.stages.iter().skip(run.stage + 1).any(|stage| stage.runs_command()))
+                    || (pipeline.hold_from_report && pipeline.stages.iter().skip(run.stage + 1).any(|stage| stage.kind == "test"))
+            }
             _ => pipeline.hold_from_report && pipeline.stages.iter().skip(run.stage + 1).any(|stage| stage.kind == "test"),
         };
         let implementer = checked_attempt(task, run).map(|attempt| attempt.member.as_str()).unwrap_or(task.assignee.as_str());
@@ -484,6 +542,14 @@ pub(crate) fn hand_off_text(team: &Team, task: &Task, run: &StageRun, prepared: 
     text += &format!(
         "\nReport once with your verdict: pass, or return with each finding in \"findings\" (it goes back to {implementer} as a new attempt):\n{verdict} | hgs {at}team report --json\n"
     );
+    // H5 for a stage member (#630 N6): the question route, the current-stage
+    // route, and the capture rule: a reply is not a verdict.
+    let ask = json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":team.id,"task":task.id,"text":"..."});
+    text += &format!(
+        "Questions for the lead: {ask} | hgs {at}team ask --json\n\
+         Your stage and attempt again: hgs {at}team current --json\n\
+         A reply in your turn is not a verdict: end with the report command above. Without one, Zerus keeps the stage waiting and tells the lead it stalled.\n"
+    );
     text
 }
 
@@ -683,6 +749,91 @@ mod tests {
     }
 
     #[test]
+    fn a_stage_member_asks_and_the_answer_reaches_its_run() {
+        isolated(|dir| {
+            let project = project(dir, true);
+            let (mut team, _) = team_in(&project, MemberFolder::Shared, &builtin(), "code");
+            report(&mut team, &project, true);
+            let (run, prepared) = give(&mut team, "rev");
+            let mut events = Vec::new();
+            let none = BTreeSet::new();
+            let asked = apply(&mut team, "ask", &json!({"task":1,"text":"Which line?"}), &Actor::Member("rev".into()), &none, &mut events).unwrap();
+            assert_eq!((asked["status"].as_str(), asked["stage"].as_str(), asked["task"].as_u64()), (Some("asked"), Some("review"), Some(1)));
+            let question = asked["question"].as_str().unwrap().to_owned();
+            let stage = run_of(&team, &run);
+            assert_eq!((stage.questions.len(), stage.questions[0].text.as_str()), (1, "Which line?"), "{stage:?}");
+            // The lead's inbox lists the stage member's question.
+            let items = crate::state::teams::inbox::items(&team);
+            assert!(items.iter().any(|item| item.kind == "question" && item.summary == "Which line?"), "{items:?}");
+            // The lead answers it; the answer stays on the stage run.
+            apply(&mut team, "reply", &json!({"question":question,"text":"Line 3"}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+            let stage = run_of(&team, &run);
+            assert_eq!((stage.questions[0].answer.as_str(), stage.questions[0].notice), ("Line 3", Notice::Pending));
+            assert_eq!(events.last().unwrap().kind, "question_answered");
+            assert_eq!(events.last().unwrap().payload["stage"], "review");
+            // The hand-off names the ask and current routes and the capture rule.
+            let text = hand_off_text(&team, team.task(1).unwrap(), &run_of(&team, &run), &prepared, "");
+            for line in ["hgs team ask --json", "hgs team current --json", "A reply in your turn is not a verdict"] {
+                assert!(text.contains(line), "{line} missing: {text}");
+            }
+        });
+    }
+
+    #[test]
+    fn a_removed_or_paused_stage_member_frees_the_stage_and_the_lead_hears_it() {
+        isolated(|dir| {
+            let project = project(dir, true);
+            // Removed: rev has no open task of its own.
+            let (mut team, _) = team_in(&project, MemberFolder::Shared, &builtin(), "code");
+            report(&mut team, &project, true);
+            let (run, _) = give(&mut team, "rev");
+            let mut events = Vec::new();
+            apply(&mut team, "remove-member", &json!({"member":"rev"}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+            let stage = run_of(&team, &run);
+            assert_eq!((stage.state, stage.member.as_str()), (StageState::Waiting, ""), "{stage:?}");
+            assert!(stage.stalled.contains("was removed"), "{stage:?}");
+            let items = crate::state::teams::inbox::items(&team);
+            assert!(items.iter().any(|item| item.kind == "stage_stalled" && item.task == Some(1)), "{items:?}");
+            // Paused: the same reset with its reason.
+            let (mut team, _) = team_in(&project, MemberFolder::Shared, &builtin(), "code");
+            report(&mut team, &project, false);
+            let (run, _) = give(&mut team, "rev");
+            apply(&mut team, "pause-member", &json!({"member":"rev"}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+            let stage = run_of(&team, &run);
+            assert_eq!((stage.state, stage.member.as_str()), (StageState::Waiting, ""), "{stage:?}");
+            assert!(stage.stalled.contains("was paused"), "{stage:?}");
+            let items = crate::state::teams::inbox::items(&team);
+            assert!(items.iter().any(|item| item.kind == "stage_stalled" && item.summary.contains("was paused")), "{items:?}");
+        });
+    }
+
+    #[test]
+    fn an_unconfirmed_stage_hand_off_goes_back_to_waiting() {
+        isolated(|dir| {
+            let project = project(dir, true);
+            let (mut team, _) = team_in(&project, MemberFolder::Shared, &builtin(), "code");
+            report(&mut team, &project, true);
+            let (run_id, _) = give(&mut team, "rev");
+            let delivered = run_of(&team, &run_id).delivered_at.unwrap();
+            {
+                let found = team.task_mut(1).unwrap().pipeline_run.as_mut().unwrap().runs.iter_mut().find(|stage| stage.id == run_id).unwrap();
+                found.unconfirmed = true;
+                found.delivered_at = Some(delivered - STAGE_UNCONFIRMED_GRACE - 1.0);
+            }
+            let found = stalled(&team, delivered);
+            assert_eq!(found.len(), 1, "{found:?}");
+            assert!(found[0].2.contains("not confirmed"), "{found:?}");
+            let mut events = Vec::new();
+            assert!(pipeline::stall_stage(&mut team, 1, &run_id, &found[0].2, &mut events));
+            let stage = run_of(&team, &run_id);
+            assert_eq!((stage.state, stage.member.as_str(), stage.unconfirmed), (StageState::Waiting, "", false), "{stage:?}");
+            assert!(stage.stalled.contains("not confirmed"), "{stage:?}");
+            let items = crate::state::teams::inbox::items(&team);
+            assert!(items.iter().any(|item| item.kind == "stage_stalled" && item.task == Some(1)), "{items:?}");
+        });
+    }
+
+    #[test]
     fn a_clone_task_is_tested_on_a_detached_checkout_that_goes_after_the_stage() {
         isolated(|dir| {
             let project = project(dir, true);
@@ -711,6 +862,32 @@ mod tests {
     }
 
     #[test]
+    fn a_stale_checkout_at_the_stage_path_is_removed_and_replaced() {
+        isolated(|dir| {
+            let project = project(dir, true);
+            let (mut team, folder) = team_in(&project, MemberFolder::Worktree, &checkout_catalog(), "code");
+            report(&mut team, &folder, true);
+            let sha = team.task(1).unwrap().attempts[0].commits[0].sha.clone();
+            let (review, _) = give(&mut team, "rev");
+            verdict(&mut team, "rev", &review);
+            let first = prepare(&team, 1).unwrap();
+            assert!(Path::new(&first.checkout).is_dir(), "{first:?}");
+            // #684 L1: the same run prepared again (a crash, or a start never
+            // recorded) must not be refused by the worktree already at its path.
+            let second = prepare(&team, 1).unwrap();
+            assert_eq!(second.checkout, first.checkout);
+            assert_eq!(git(Path::new(&second.folder), &["rev-parse", "HEAD"]), sha);
+            clean_up(&StageRun {
+                checkout: second.checkout,
+                checkout_repo: second.checkout_repo,
+                temp: second.temp,
+                ..Default::default()
+            })
+            .unwrap();
+        });
+    }
+
+    #[test]
     fn a_shared_folder_task_lists_its_files_and_a_checkout_without_commits_holds() {
         isolated(|dir| {
             let project = project(dir, true);
@@ -733,8 +910,8 @@ mod tests {
             assert!(text.contains("- src/lib.rs (32 bytes, sha256 ") && text.contains("- old.txt (deleted)"), "{text}");
             verdict(&mut team, "rev", &review);
             let (_, prepared) = give(&mut team, "qa");
-            assert!(prepared.holds && prepared.checkout.is_empty());
-            assert!(prepared.note.contains("made no commits"), "{prepared:?}");
+            assert!(prepared.holds && prepared.checkout.is_empty(), "{prepared:?}");
+            assert!(prepared.note.contains("recorded no commit"), "{prepared:?}");
             assert_eq!(held(&team, "dev"), Some(1), "the implementer's next task in the shared folder waits");
             assert_eq!(held(&team, "rev"), None, "other members keep working there");
         });

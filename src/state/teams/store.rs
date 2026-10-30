@@ -146,6 +146,17 @@ impl Store {
         rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
     }
 
+    /// The sum of the active teams' revisions, without reading their payloads:
+    /// U43's read-time default keys its cache by it, so a member added and one
+    /// removed between two equal-length writes still refreshes the set.
+    pub(crate) fn active_revision(&self) -> anyhow::Result<i64> {
+        Ok(self.db.query_row(
+            "SELECT COALESCE(SUM(revision),0) FROM teams WHERE status IN ('planning','running','paused')",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
     /// The stored receipt of an identical request, read only: a retry returns
     /// it before the request does any outside work (L4).
     pub(crate) fn receipt(&self, id: &str, input: &Value) -> anyhow::Result<Option<Value>> {
@@ -328,6 +339,22 @@ mod tests {
         assert!(store.create(REQUEST, &json!({"name":"Other"}), team("t2"), vec![]).is_err());
         assert!(store.create("not-a-uuid", &input, team("t3"), vec![]).is_err());
         assert_eq!(store.load("t1").unwrap().unwrap().revision, 1);
+    }
+
+    #[test]
+    fn the_active_revision_changes_with_a_team_change() {
+        // #595 L2: the U43 default's cache key carries this revision, so a
+        // change between two equal-length writes still refreshes the set.
+        let (_dir, mut store) = store();
+        store.create(REQUEST, &json!({}), team("t1"), vec![]).unwrap();
+        let first = store.active_revision().unwrap();
+        store
+            .mutate(None, "t1", None, |team, _| {
+                team.name = "Renamed".into();
+                Ok(json!({}))
+            })
+            .unwrap();
+        assert!(store.active_revision().unwrap() > first);
     }
 
     #[test]

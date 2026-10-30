@@ -792,15 +792,21 @@ old events when it reconnects. This does not mark the underlying work as read.
 muted or acknowledging pending work. Muted sessions remain available in the
 Needs attention filter.
 
-A team member is muted on every device by default. While a session is a
-non-lead member of an active team (planning, running or paused) and the owner
-has not recorded a choice, its host reports `notification_preferences.muted`
-true at revision 0, so every desktop and the phone follow one preference; the
-team's lead is never muted this way. The default is computed when the host is
-read and writes nothing. Unmuting records a choice at revision 1 or more, which
-wins on every device. A desktop whose host predates the shared default still
-mutes the member locally and says "Muted on this computer"; an updated host
-reports the shared mute, and the desktop says "Muted on all devices".
+A team member on this computer is muted on every device by default. While a
+session on this computer is a non-lead member of an active team (planning,
+running or paused) and the owner has not recorded a choice, its host reports
+`notification_preferences.muted` true at revision 0, so every desktop and the
+phone that follow this host see one preference; the team's lead is never muted
+this way. The default is computed when the host is read and writes nothing.
+Unmuting records a choice at revision 1 or more, which wins on every device. A
+desktop whose host predates the shared default still mutes the member locally
+and says "Muted on this computer"; an updated host reports the shared mute, and
+the desktop says "Muted on all devices". A member on another computer is not
+muted by this default there: its own hgs has no team record, so its
+notifications stay on and its desktop shows no team mute unless the owner
+records a choice on that host. "Muted on all devices" is true for the members on
+the computer that runs the team; the phone and the other desktops follow the
+preference that host reports.
 
 Notifications open Activity for the exact requesting run and conversation,
 including remote or renamed sessions. Polling and restarts do not repeat the same
@@ -1361,6 +1367,9 @@ covers one add per count it names: the same sentence cannot add a second
 member. `remove-member` and `swap-member` still need the member's id in the
 sentence, and a separate lead `settings` cap change still names the new cap.
 The team's roster and feed say "Added by Lead on your word" with the quote.
+A refusal is never the owner's word: a sentence carrying a negation ("Don't
+remove backend2", "не надо добавлять второго тестера") authorizes no roster,
+scale, drain or phase change in either language.
 
 ### Task pipelines and stage verdicts
 
@@ -1528,18 +1537,29 @@ A command or land stage names no role or member: Zerus runs it in the stage's
 folder as a detached `hgs run`, with no model, so the session shows Building
 and the output is kept in the run log. The folder follows the preset's `folder`
 rule exactly as a test's does: `checkout` gives a detached checkout of the
-checked attempt's last commit, and otherwise the command runs in the task's
-folder, which the stage holds from the report on, so the implementer gets no
-next task there until the stage ends. The command gets the task as
+checked attempt's commit, and otherwise the command runs in the task's folder,
+which the stage holds from the report on, so the implementer gets no next task
+there until the stage ends. The checked commit is the attempt's recorded commit
+(`hgs team commit`), else the folder's HEAD as the attempt reported; it is never
+the folder's HEAD when the stage starts. A land stage in a Git folder refuses to
+run when that commit is missing or the folder's HEAD is another commit (the task
+waits for the lead, and the feed says why); in a folder without Git there is no
+HEAD to check, and the stage runs in the held folder (a checkout needs Git).
+Under the hold rule a review the preset puts before a command or land stage also
+holds the implementer's folder from the report on: the later stage checks and
+lands the very commit the review reads, even while that earlier review is open.
+Under the checkout rule the later stage reads its own detached checkout and
+nothing changes. In short, a test under the hold rule holds the folder from the
+moment it waits; a review, command or land stage holds it from the report on
+when the preset's folder rule is hold; under the checkout rule nothing holds it.
+The command gets the task as
 `HGS_TASK_ID`, its branch as `HGS_TASK_BRANCH` and the checked commit as
-`HGS_TASK_COMMIT`. A land stage refuses to run when the stage's folder HEAD is
-not that commit (the task waits for the lead, and the feed says why). The exit
-code is the verdict: the expected one passes; any other returns the task to the
-implementer with the last 4000 characters of the output as the finding,
-counting toward the preset's rounds. The same output on the same commit twice
-in a row is marked `flaky` and goes to the lead; a timeout returns "timed out
-after N min". The plan chooses a preset, never a command: only the owner's
-catalog writes it.
+`HGS_TASK_COMMIT`. The exit code is the verdict: the expected one passes; any
+other returns the task to the implementer with the last 4000 characters of the
+output as the finding, counting toward the preset's rounds. The same output on
+the same commit twice in a row is marked `flaky` and goes to the lead; a timeout
+returns "timed out after N min". The plan chooses a preset, never a command:
+only the owner's catalog writes it.
 
 A `land` stage runs once every earlier stage passed and is the preset's last
 stage. Its `exits` map an exit code to `accepted` (Zerus accepts the task,
@@ -1549,6 +1569,19 @@ output). The default is 0 accepted and any other held. Because a land stage may
 push, it needs the owner's `"land_allowed":true`: without it a plan choosing
 the preset is refused, and a team that turns it off later holds the task for
 the lead instead of running the stage.
+
+A stage's return or a send-back goes back to the implementer, never to a peer:
+the next hand-out names the stage's findings (or the send-back's reason), and
+that attempt is not counted as a failed member. Once the preset's rounds run
+out, the lead's decision is the last word: a rejection reaches the next
+hand-out with its reason, not the returned stage it followed.
+
+A stage member may ask the lead with `hgs team ask` (its question belongs to the
+stage run and the lead answers it with `hgs team reply`), and the stage hand-off
+names that route, `hgs team current` and the rule that a reply in its turn is
+not a verdict. A stage given to a member that was removed or paused, or whose
+hand-off was never confirmed, goes back to `Waiting` for a free member, and the
+lead gets a stalled-stage item.
 
 `Settings.branch_per_task` gives each task its own branch: `{"template":
 "task/{id}"}` fills `{id}`, `{member}` and `{team8}` and must be a valid Git

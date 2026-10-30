@@ -5884,9 +5884,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let now = crate::state::now();
         owner_word_events(dir.path(), &[
-            (now - 60.0, "discard phase 3, we do not need it"),
+            (now - 60.0, "discard phase 3, it is stale"),
             (now - 60.0, "верни фазу 2 в черновик"),
             (now - 60.0, "phase 2 looks fine"),
+            (now - 60.0, "Don't discard phase 3, rework it"),
+            (now - 60.0, "не отменяй фазу 2"),
+            (now - 60.0, "phase 2 is not a draft any more"),
         ]);
         crate::state::with_test_state_root(dir.path(), || {
             set_test_caller_identities(Some((Some("c1".into()), None, None)));
@@ -5919,8 +5922,19 @@ mod tests {
             // A discard sentence names its own phase only.
             let error = call("discard-phase", "44444444-4444-4444-8444-444444444444", 2, Some("discard phase 3")).unwrap_err().to_string();
             assert!(error.contains("has not asked to discard phase 2"), "{error}");
-            // The owner's discard of phase 3 is the lead's word for it.
-            let discarded = call("discard-phase", "55555555-5555-4555-8555-555555555555", 3, Some("discard phase 3")).unwrap();
+            // #595 C1: a refusal never authorizes the change, in either language,
+            // and the quote is the owner's whole sentence, never a fragment.
+            let error = call("discard-phase", "4a444444-4444-4444-8444-444444444444", 3, Some("Don't discard phase 3")).unwrap_err().to_string();
+            assert!(error.contains("has not asked to discard phase 3"), "{error}");
+            let error = call("discard-phase", "4b444444-4444-4444-8444-444444444444", 2, Some("не отменяй фазу 2")).unwrap_err().to_string();
+            assert!(error.contains("has not asked to discard phase 2"), "{error}");
+            let error = call("return-to-draft", "4c444444-4444-4444-8444-444444444444", 2, Some("phase 2 is not a draft any more")).unwrap_err().to_string();
+            assert!(error.contains("has not asked to return phase 2 to a draft"), "{error}");
+            let error = call("discard-phase", "4d444444-4444-4444-8444-444444444444", 3, Some("discard phase 3")).unwrap_err().to_string();
+            assert!(error.contains("has not asked to discard phase 3"), "a fragment is not the sentence: {error}");
+            // The owner's discard of phase 3 is the lead's word for it: the whole
+            // sentence, as the owner wrote it.
+            let discarded = call("discard-phase", "55555555-5555-4555-8555-555555555555", 3, Some("discard phase 3, it is stale")).unwrap();
             assert_eq!(discarded["status"], "phase_discarded");
             // The Russian sentence returns phase 2 to a draft.
             let returned = call("return-to-draft", "66666666-6666-4666-8666-666666666666", 2, Some("верни фазу 2 в черновик")).unwrap();

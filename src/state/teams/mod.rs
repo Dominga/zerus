@@ -22,25 +22,33 @@ pub(crate) mod waiting;
 
 use std::collections::BTreeSet;
 
-/// U43: the sessions of non-lead members of active teams (Planning, Running,
-/// Paused). hgs mutes such a member by default unless the owner recorded a
-/// notification choice, so Android and every desktop follow one preference.
-/// A session that leads any active team is never muted by this default.
-pub(crate) fn muted_member_names() -> BTreeSet<String> {
+/// U43/N3: the sessions of non-lead members of active teams (Planning, Running,
+/// Paused), keyed by (host, name) and only for sessions on this computer. hgs
+/// mutes such a member by default unless the owner recorded a notification
+/// choice, so Android and every desktop here follow one preference. A member on
+/// another computer keeps its notifications there: its hgs has no team record,
+/// which docs/reference.md states. A session that leads any active team is
+/// never muted by this default.
+pub(crate) fn muted_member_sessions() -> BTreeSet<(String, String)> {
     let Ok(store) = store::Store::open(false) else { return BTreeSet::new() };
     let Ok(teams) = store.active_teams(200) else { return BTreeSet::new() };
     let mut members = BTreeSet::new();
     let mut leads = BTreeSet::new();
     for team in teams {
         for member in &team.members {
-            let Some(session) = member.session.as_ref().filter(|session| !session.name.is_empty()) else { continue };
+            // A session on another computer is not this hgs's to mute.
+            if !member.computer.is_empty() {
+                continue;
+            }
+            let Some(session) = member.session.as_ref().filter(|session| !session.name.is_empty() && session.host.is_empty()) else { continue };
+            let key = (session.host.clone(), session.name.clone());
             if member.id == team.lead {
-                leads.insert(session.name.clone());
+                leads.insert(key);
             } else {
-                members.insert(session.name.clone());
+                members.insert(key);
             }
         }
     }
-    members.retain(|name| !leads.contains(name));
+    members.retain(|key| !leads.contains(key));
     members
 }

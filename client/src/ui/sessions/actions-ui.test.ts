@@ -226,7 +226,7 @@ describe("rename", () => {
 describe("details", () => {
   it("reads the inspection fields of an inspect reply or a state value", () => {
     expect(detailsFromInspection({ run_id: "r", conversation_id: "c", phase: "tool", turn_started: 1.5, interrupt_supported: true, allowed_actions: ["pause", 3], action_reasons: { resume: "busy", x: 1 } }))
-      .toEqual({ run_id: "r", conversation_id: "c", auth_required: false, expected_id: "", resume_message_can_send: false, allowed_actions: ["pause"],
+      .toEqual({ run_id: "r", conversation_id: "c", auth_required: false, expected_id: "", resume_message_can_send: false, fork_supported: false, fork_reason: "", allowed_actions: ["pause"],
         action_reasons: { resume: "busy" }, interrupt_supported: true, turn_started: 1.5, phase: "tool", cwd: null, terminal_supported: null, terminal_attach_supported: null });
     expect(detailsFromInspection(null)).toBeUndefined();
     expect(detailsFromInspection([1])).toBeUndefined();

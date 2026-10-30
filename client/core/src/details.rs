@@ -16,6 +16,10 @@ pub struct Details {
     pub auth_required: bool,
     pub expected_id: String,
     pub resume_message_can_send: bool,
+    #[serde(default)]
+    pub fork_supported: bool,
+    #[serde(default)]
+    pub fork_reason: String,
     pub allowed_actions: Option<Vec<String>>,
     pub action_reasons: BTreeMap<String, String>,
     /// Stop is offered only when the host can interrupt this turn
@@ -172,6 +176,8 @@ pub fn parse_details(target: &Target, exit: Exit) -> Option<Details> {
         auth_required: flag(&value, "auth_required"),
         expected_id: text(&value, "expected_id"),
         resume_message_can_send: flag(&value, "resume_message_can_send"),
+        fork_supported: flag(&value, "fork_supported"),
+        fork_reason: text(&value, "fork_reason"),
         allowed_actions,
         action_reasons,
         interrupt_supported: flag(&value, "interrupt_supported"),
@@ -195,6 +201,36 @@ pub fn parse_details(target: &Target, exit: Exit) -> Option<Details> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fork_capability_survives_the_bounded_inspection_projection() {
+        let target = Target {
+            computer: "studio".into(),
+            name: "codex/example/review".into(),
+            run_id: "run".into(),
+            conversation_id: "conversation".into(),
+        };
+        let parse = |body: &str| {
+            parse_details(
+                &target,
+                Exit::Code {
+                    code: 0,
+                    stdout: body.as_bytes().to_vec(),
+                    stderr: String::new(),
+                },
+            )
+            .unwrap()
+        };
+        let details = parse(
+            r#"{"run_id":"run","conversation_id":"conversation","fork_supported":true,"fork_reason":"Ready to fork"}"#,
+        );
+        assert!(details.fork_supported);
+        assert_eq!(details.fork_reason, "Ready to fork");
+        let absent =
+            parse(r#"{"run_id":"run","conversation_id":"conversation","fork_supported":"true"}"#);
+        assert!(!absent.fork_supported);
+        assert!(absent.fork_reason.is_empty());
+    }
 
     #[test]
     fn child_identity_uses_the_inspected_conversation_and_checks_parent_and_child() {

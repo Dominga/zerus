@@ -96,7 +96,7 @@ function Header() {
     { label: identity().caption, icon: "copy", disabled: !identity().value, action: copyId },
     { separator: true },
     act().rename,
-    { label: "Fork session…", icon: "git-fork", disabled: true },
+    act().fork,
     { separator: true },
     copies().command,
     act().change,

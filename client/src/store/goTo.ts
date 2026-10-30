@@ -27,23 +27,23 @@ export function goToItems(): GoToItem[] {
     return {
       kind: GoToKind.Session, id: session.catalogKey, host: session.computer,
       title: session.title,
-      detail: [group, session.machine, statusCaption(session)].filter(Boolean).join(" / "),
+      detail: [group, session.machine, statusCaption(session)].filter((part): part is string => !!part),
       recency: recent.indexOf(session.key),
     };
   });
   for (const header of groupHeaders()) {
     if (!header.name) continue;
-    items.push({ kind: GoToKind.Project, id: header.id, host: "", title: header.name, detail: `Project / ${counts.get(header.id) ?? 0} session(s)`, recency: -1 });
+    items.push({ kind: GoToKind.Project, id: header.id, host: "", title: header.name, detail: ["Project", `${counts.get(header.id) ?? 0} session(s)`], recency: -1 });
   }
   for (const account of accountsPage().accounts) {
     for (const profile of account.members) {
       items.push({ kind: GoToKind.Account, id: profile.id, host: profile.host, title: profile.label || profile.id,
-        detail: ["Account", profile.provider, profile.machine].filter(Boolean).join(" / "), recency: -1 });
+        detail: ["Account", profile.provider, profile.machine].filter((part): part is string => !!part), recency: -1 });
     }
   }
   for (const machine of machineChoices()) {
     items.push({ kind: GoToKind.Machine, id: machine.computer, host: machine.computer, title: machine.label,
-      detail: machine.computer ? "Machine" : "Machine / this computer", recency: -1 });
+      detail: machine.computer ? "Machine" : ["Machine", "this computer"], recency: -1 });
   }
   for (const [id, title] of SECTIONS) {
     items.push({ kind: GoToKind.Section, id, host: "", title, detail: "Section", chord: chord(id), recency: -1 });

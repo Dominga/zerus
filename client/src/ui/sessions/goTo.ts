@@ -8,10 +8,13 @@ export interface GoToItem {
   id: string;
   host: string;
   title: string;
-  detail: string;
+  detail: string | readonly string[];
   chord?: string;
   recency: number;
 }
+
+export const goToKindLabel = (kind: GoToKind) => ["SESSION", "PROJECT", "ACCOUNT", "MACHINE", "SECTION", "COMMAND"][kind];
+export const goToDetails = (detail: GoToItem["detail"]) => (Array.isArray(detail) ? detail : [detail]).filter(Boolean);
 
 let recent: string[] = [];
 export function rememberRecentSession(key: string | undefined) {
@@ -59,7 +62,7 @@ export function rankGoTo(items: readonly GoToItem[], query: string): GoToItem[] 
   if (commandsOnly) q = q.slice(1).trim();
   const entries = items.flatMap((item, order) => {
     if (commandsOnly && item.kind !== GoToKind.Command && item.kind !== GoToKind.Section) return [];
-    const score = goToScore(q, `${item.title} ${item.detail}`);
+    const score = goToScore(q, `${item.title} ${goToDetails(item.detail).join(" ")}`);
     return score < 0 ? [] : [{ item, score, order }];
   });
   entries.sort((a, b) => {

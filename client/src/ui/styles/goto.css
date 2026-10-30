@@ -1,22 +1,17 @@
 @layer components {
-  .go-to { position: fixed; z-index: 40; top: 12px; left: 50%; transform: translateX(-50%); width: min(640px, calc(100vw - 32px));
-    display: flex; flex-direction: column; gap: 6px; padding: 6px; border: 1px solid var(--z-color-border); border-radius: var(--z-radius-lg);
-    background: var(--z-color-raised); color: var(--z-color-text); box-shadow: var(--z-shadow-popover); }
-  .go-to-query { box-sizing: border-box; width: 100%; min-height: 30px; padding: 4px 8px; border: 1px solid var(--z-color-border); border-radius: var(--z-radius-sm);
-    background: var(--z-color-field); color: var(--z-color-text); outline: none; }
-  .go-to-query:focus { border-color: var(--z-color-accent-muted); }
-  .go-to-results { max-height: 360px; overflow-y: auto; }
-  .go-to-row { display: flex; align-items: center; gap: 8px; width: 100%; height: 30px; padding: 0 10px; border: 0; border-radius: var(--z-radius-sm);
-    background: transparent; color: var(--z-color-text); text-align: left; cursor: default; }
-  .go-to-row.on { background: var(--z-color-hover); }
-  .go-to-main { flex: none; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
-  .go-to-detail { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--z-color-muted); }
-  .go-to-chord { flex: none; color: var(--z-color-dim); font-size: var(--fs-xs); }
-  .go-to-empty { height: 30px; padding: 4px 10px; color: var(--z-color-muted); }
+  .goto-scrim { position: fixed; inset: 0; z-index: 75; background: color-mix(in srgb, var(--z-color-backdrop) 50%, transparent); animation: fadeIn var(--z-motion-fast) both; }
+  .goto { position: absolute; left: 50%; top: 12px; translate: -50% 0; width: clamp(200px, calc(100vw - 32px), 640px); background: var(--z-color-raised); border: 1px solid var(--z-color-border); border-radius: var(--z-radius-xl); box-shadow: var(--z-shadow-dialog); overflow: hidden; animation: drop var(--z-motion-base) var(--ease) both; }
+  .goto-field { display: flex; align-items: center; gap: 10px; padding: 0 12px; height: 44px; border-bottom: 1px solid var(--z-color-divider); color: var(--z-color-dim); }
+  .goto-field input { flex: 1; min-width: 0; border: 0; background: transparent; outline: none; color: var(--z-color-text); font-size: var(--fs-md); }
+  .goto-list { max-height: calc(12 * 30px + 8px); overflow-y: auto; padding: 4px; }
+  .goto-list li { display: flex; align-items: center; gap: 10px; height: 30px; padding: 0 8px; border-radius: var(--z-radius-md); font-size: var(--fs-sm); cursor: pointer; }
+  .goto-list li.on { background: var(--z-color-segment-on); }
+  .goto-kind { flex: none; width: 64px; font-size: var(--fs-2xs); color: var(--z-color-dim); text-transform: uppercase; letter-spacing: .4px; }
+  .goto-empty { color: var(--z-color-dim); justify-content: center; }
 
-  .shortcut-help { width: min(560px, calc(100vw - 32px)); height: min(640px, calc(100vh - 32px)); }
-  .shortcut-help-list { max-height: 480px; overflow-y: auto; margin-top: 8px; }
-  .shortcut-help-list h3 { margin: 10px 0 4px; color: var(--z-color-accent); font-size: var(--fs-sm); }
-  .shortcut-help-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; padding: 2px 0; }
-  .shortcut-help-chord { color: var(--z-color-muted); white-space: nowrap; }
+  dialog.shortcut-help { width: min(580px, calc(100vw - 32px)); height: min(640px, calc(100vh - 32px)); }
+  .shortcut-help-filter { width: 100%; margin-bottom: 8px; }
+  .shortcut-help-list { max-height: 480px; overflow-y: auto; }
+  .sc-group { margin: 6px 0 12px; }
+  .sc-group .kv { grid-template-columns: 1fr auto; }
 }

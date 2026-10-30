@@ -836,6 +836,7 @@ private slots:
     void stageOverridesReachHgsWithTheirReason();
     void planEditorPicksATasksPipeline();
     void heatTintsGraphAndBoardByTimeOrTokens();
+    void heldByFromTheStatusOnTheBoard();
 private:
     QString script() const { return m_dir.filePath("hgs"); }
     void setTeam(const QJsonObject &value) { QVERIFY(FakeCli::replace(script() + ".status", QJsonDocument(value).toJson(QJsonDocument::Compact))); }
@@ -11192,7 +11193,7 @@ void TestTeamsUi::stageColumnsAndChipsOnTheBoard()
     QCOMPARE(chips.value(4), QStringList{"Test r2/3"});
     QCOMPARE(chips.value(17), QStringList{QStringLiteral("Test r1/3 · 4 files")});
     QCOMPARE(chips.value(18), QStringList{QStringLiteral("Test r1/3 · detached")});
-    QCOMPARE(chips.value(9), QStringList{"Folder held by the test of #4"});
+    QCOMPARE(chips.value(9), QStringList{"Folder held by the test stage of #4"});
     QCOMPARE(chips.value(2), QStringList{"Review returned r1"});
     QCOMPARE(chips.value(5), QStringList{QStringLiteral("Lead decides · 7 findings")});
     QCOMPARE(chips.value(16), (QStringList{"Review skipped", "Lead"}));
@@ -11233,7 +11234,7 @@ void TestTeamsUi::stageColumnsAndChipsOnTheBoard()
     QVERIFY(row && row->property("task").toInt() == 10);
     QCOMPARE(memberStatus(*controller.team("team-1"), *controller.team("team-1")->member("reviewer"), Live{}).text, QStringLiteral("Reviewing #3 Card form UI · round 1"));
     QCOMPARE(memberStatus(*controller.team("team-1"), *controller.team("team-1")->member("tester"), Live{}).text, QStringLiteral("Testing #4 Address validation · round 2"));
-    QCOMPARE(memberStatus(*controller.team("team-1"), *controller.team("team-1")->member("frontend"), Live{}).text, QStringLiteral("Waits: its folder is held by the test of #4"));
+    QCOMPARE(memberStatus(*controller.team("team-1"), *controller.team("team-1")->member("frontend"), Live{}).text, QStringLiteral("Waits: its folder is held by the test stage of #4"));
     // A queued stage opens its task.
     row->click();
     QTRY_VERIFY(static_cast<TeamTaskCard *>(workspace.findChild<QWidget *>("teamWorkspaceDrawer"))->isVisible());
@@ -11265,6 +11266,67 @@ void TestTeamsUi::stageColumnsAndChipsOnTheBoard()
     shot(&workspace, "u36-layers-dark");
     workspace.setTheme(false);
     lightShot(&workspace, "u36-layers-light");
+}
+
+// #635 N4: the status's held_by names the stage that holds a member's folder;
+// a review holds the implementer's folder here (the server's rule since #683),
+// which the old test-only rule could not see. The held card's chip, the
+// member's status and the phase note say "the review stage of #3". Shots in
+// both themes.
+void TestTeamsUi::heldByFromTheStatusOnTheBoard()
+{
+    QSettings().setValue("workspace/skin", "whitewh");
+    TeamUi::workedClock() = &stageNow;
+    const auto restore = qScopeGuard([] {
+        QSettings().remove("workspace/skin"); darkPalette();
+        TeamUi::workedClock() = [] { return double(QDateTime::currentSecsSinceEpoch()); };
+    });
+    auto json = pipelineTeam();
+    auto members = json["members"].toArray();
+    for (int i = 0; i < members.size(); ++i) {
+        auto m = members[i].toObject();
+        if (m["id"] == "frontend") { m["held_by"] = QJsonObject{{"task", 3}, {"stage", "review"}}; members[i] = m; }
+    }
+    json["members"] = members;
+    auto tasks = json["tasks"].toArray();
+    for (int i = 0; i < tasks.size(); ++i) {
+        auto t = tasks[i].toObject();
+        if (t["id"].toInt() == 9) { t["waits"] = QJsonObject{{"for", "folder"}, {"on", QJsonArray{"#3"}}, {"unblock", "folder held by the stage of #3"}}; tasks[i] = t; }
+    }
+    json["tasks"] = tasks;
+    setTeam(json);
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    darkPalette(); workspace.setTheme(true);
+    workspace.resize(2000, 960); workspace.show();
+    controller.refresh(); panel.showTeam("team-1"); workspace.showTeam("team-1");
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceView"));
+    for (auto *b : workspace.findChild<QWidget *>("teamWorkspaceView")->findChildren<QPushButton *>()) if (b->property("segment") == "board") b->click();
+    const auto area = [&] { return workspace.findChild<QScrollArea *>("teamWorkspaceBoard"); };
+    QTRY_VERIFY(area() && boardCard(area(), 9));
+    const auto *team = controller.team("team-1");
+    QVERIFY(team);
+    QCOMPARE(team->member("frontend")->heldBy.task, 3);
+    // #4's test no longer counts: the status names the review as the hold.
+    QCOMPARE(boardChips(area()).value(9), QStringList{"Folder held by the review stage of #3"});
+    QCOMPARE(memberStatus(*team, *team->member("frontend"), Live{}).text, QStringLiteral("Waits: its folder is held by the review stage of #3"));
+    QString tip;
+    for (auto *chip : boardCard(area(), 3)->findChildren<QWidget *>("teamStageChip")) tip = chip->toolTip();
+    QVERIFY2(tip.contains("Holds Frontend's folder"), qPrintable(tip));
+    tip.clear();
+    for (auto *chip : boardCard(area(), 4)->findChildren<QWidget *>("teamStageChip")) tip = chip->toolTip();
+    QVERIFY2(!tip.contains("Holds Frontend's folder"), qPrintable(tip));
+    auto *held = workspace.findChild<QLabel *>("teamPhaseHeld");
+    QVERIFY(held);
+    QCOMPARE(held->text(), QStringLiteral("1 folder held"));
+    QVERIFY2(held->toolTip().contains("Frontend's folder: held by the review stage of #3"), qPrintable(held->toolTip()));
+    if (auto *all = workspace.findChild<QPushButton *>("teamWorkspaceExpandAll"); all && all->text() == QStringLiteral("Expand all")) all->click();
+    shot(&workspace, "u687-held-by-review-dark");
+    workspace.setTheme(false);
+    lightShot(&workspace, "u687-held-by-review-light");
 }
 
 // U36: the inspector's Pipeline section: the flow, where the test works, what
@@ -11525,7 +11587,7 @@ void TestTeamsUi::commandStagesShowTheirCommandExitAndTail()
     QLabel *held = nullptr;
     QTRY_VERIFY((held = area()->findChild<QLabel *>("teamPhaseHeld")) || (held = workspace.findChild<QLabel *>("teamPhaseHeld")));
     QCOMPARE(held->text(), QStringLiteral("1 folder held"));
-    QVERIFY2(held->toolTip().contains("Frontend's folder: held by the test of #4"), qPrintable(held->toolTip()));
+    QVERIFY2(held->toolTip().contains("Frontend's folder: held by the test stage of #4"), qPrintable(held->toolTip()));
     QVERIFY(held->isVisibleTo(&workspace));
     if (auto *all = workspace.findChild<QPushButton *>("teamWorkspaceExpandAll"); all && all->text() == QStringLiteral("Expand all")) all->click();
     shot(&workspace, "u47-board-command-dark");

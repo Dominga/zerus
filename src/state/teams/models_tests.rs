@@ -139,6 +139,43 @@ fn a_stage_returned_task_stays_with_its_implementer_on_the_models_path() {
 }
 
 #[test]
+fn a_pending_switch_does_not_deliver_into_a_held_folder() {
+    // #684 L2: the Ready/Switch path checks stages::held; the pending path must
+    // too, or a confirmed switch delivers into a stage-held folder.
+    use crate::state::teams::model::{PipelineRun, PipelineStage, StageRun, StageState};
+    let mut t = switching();
+    let held = t.task_mut(2).unwrap();
+    held.status = TaskStatus::InTest;
+    held.pipeline_run = Some(PipelineRun {
+        id: "p".into(),
+        name: "P".into(),
+        stages: vec![PipelineStage { kind: "test".into(), role: "tester".into(), ..Default::default() }],
+        max_rounds: 3,
+        folder: "hold".into(),
+        accept: "lead".into(),
+        round: 1,
+        runs: vec![StageRun { id: "s".into(), stage: 0, kind: "test".into(), round: 1, attempt: 1, state: StageState::Waiting, at: 1.0, ..Default::default() }],
+    });
+    held.attempts.push(Attempt { n: 1, id: "A2".into(), member: "dev".into(), state: AttemptState::Reported, ..Default::default() });
+    let (_dir, mut store) = stored(&t);
+    fake(|| Ok(fake_output(0, r#"{"status":"applied"}"#, "")));
+    let switch = Step::SwitchModel { task: 1, member: "dev".into(), from: "gpt-5@medium".into(), model: "gpt-5.5".into(), effort: "high".into() };
+    run_step(&mut store, &t, &switch, "").unwrap();
+    set_fake_hgs(None);
+    let saved = store.load(&t.id).unwrap().unwrap();
+    assert!(super::super::stages::held(&saved, "dev").is_some(), "the test stage holds dev");
+    let now_on = [lead_seen(), on("codex/x/dev", "gpt-5.5", "high", true)];
+    let found = steps(&saved, &now_on, 1000.0);
+    assert!(!found.iter().any(|step| matches!(step, Step::HandOut { task: 1, .. })), "no delivery into the held folder: {found:?}");
+    // Without the hold the confirmed switch delivers.
+    let mut free = saved.clone();
+    free.task_mut(2).unwrap().pipeline_run = None;
+    free.task_mut(2).unwrap().status = TaskStatus::Pending;
+    let found = steps(&free, &now_on, 1000.0);
+    assert!(found.iter().any(|step| matches!(step, Step::HandOut { task: 1, .. })), "{found:?}");
+}
+
+#[test]
 fn a_switch_is_confirmed_by_the_session_before_the_hand_out() {
     let t = switching();
     let old = [lead_seen(), on("codex/x/dev", "gpt-5", "medium", true)];

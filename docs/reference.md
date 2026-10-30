@@ -1537,23 +1537,29 @@ A command or land stage names no role or member: Zerus runs it in the stage's
 folder as a detached `hgs run`, with no model, so the session shows Building
 and the output is kept in the run log. The folder follows the preset's `folder`
 rule exactly as a test's does: `checkout` gives a detached checkout of the
-checked attempt's last commit, and otherwise the command runs in the task's
-folder, which the stage holds from the report on, so the implementer gets no
-next task there until the stage ends. Under the hold rule a review the preset
-puts before a command or land stage also holds the implementer's folder from
-the report on: the later stage checks and lands the very commit the review
-reads, even while that earlier review is open. Under the checkout rule the
-later stage reads its own detached checkout and nothing changes. The command
-gets the task as
+checked attempt's commit, and otherwise the command runs in the task's folder,
+which the stage holds from the report on, so the implementer gets no next task
+there until the stage ends. The checked commit is the attempt's recorded commit
+(`hgs team commit`), else the folder's HEAD as the attempt reported; it is never
+the folder's HEAD when the stage starts. A land stage in a Git folder refuses to
+run when that commit is missing or the folder's HEAD is another commit (the task
+waits for the lead, and the feed says why); in a folder without Git there is no
+HEAD to check, and the stage runs in the held folder (a checkout needs Git).
+Under the hold rule a review the preset puts before a command or land stage also
+holds the implementer's folder from the report on: the later stage checks and
+lands the very commit the review reads, even while that earlier review is open.
+Under the checkout rule the later stage reads its own detached checkout and
+nothing changes. In short, a test under the hold rule holds the folder from the
+moment it waits; a review, command or land stage holds it from the report on
+when the preset's folder rule is hold; under the checkout rule nothing holds it.
+The command gets the task as
 `HGS_TASK_ID`, its branch as `HGS_TASK_BRANCH` and the checked commit as
-`HGS_TASK_COMMIT`. A land stage refuses to run when the stage's folder HEAD is
-not that commit (the task waits for the lead, and the feed says why). The exit
-code is the verdict: the expected one passes; any other returns the task to the
-implementer with the last 4000 characters of the output as the finding,
-counting toward the preset's rounds. The same output on the same commit twice
-in a row is marked `flaky` and goes to the lead; a timeout returns "timed out
-after N min". The plan chooses a preset, never a command: only the owner's
-catalog writes it.
+`HGS_TASK_COMMIT`. The exit code is the verdict: the expected one passes; any
+other returns the task to the implementer with the last 4000 characters of the
+output as the finding, counting toward the preset's rounds. The same output on
+the same commit twice in a row is marked `flaky` and goes to the lead; a timeout
+returns "timed out after N min". The plan chooses a preset, never a command:
+only the owner's catalog writes it.
 
 A `land` stage runs once every earlier stage passed and is the preset's last
 stage. Its `exits` map an exit code to `accepted` (Zerus accepts the task,

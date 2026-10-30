@@ -2446,6 +2446,22 @@ fn report(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
     };
     let label = actor.label(team);
     let team_lead = team.lead.clone();
+    // #684 N1: the attempt records its folder's HEAD and branch at the report,
+    // so a later stage checks that commit and never reads HEAD at its start.
+    let (folder_head, folder_branch) = if by_member.is_empty() {
+        (String::new(), String::new())
+    } else {
+        let folder = team.member(&by_member).and_then(|member| super::dispatcher::member_folder_path(team, member).ok()).unwrap_or_default();
+        if folder.is_empty() || !std::path::Path::new(&folder).is_dir() || !super::stages::is_git(&folder) {
+            (String::new(), String::new())
+        } else {
+            let head = super::dispatcher::git_at(&folder, &["rev-parse", "HEAD"]).unwrap_or_default();
+            let branch = super::dispatcher::task_branch(team, id, &by_member)
+                .or_else(|| super::dispatcher::git_at(&folder, &["rev-parse", "--abbrev-ref", "HEAD"]).filter(|branch| branch != "HEAD"))
+                .unwrap_or_default();
+            (head, branch)
+        }
+    };
     // C1: the lead reports its own task and accepts it in one step; nobody
     // else accepts on a report.
     let accept = input["accept"].as_bool() == Some(true);
@@ -2478,6 +2494,8 @@ fn report(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
         let attempt = task.attempts.iter_mut().find(|a| a.id == open_id).unwrap();
         attempt.state = AttemptState::Reported;
         attempt.report = Some(Report { text: body, at: now(), structured: structured.clone(), unstructured: structured.is_none(), ..Default::default() });
+        attempt.folder_head = folder_head.clone();
+        attempt.folder_branch = folder_branch.clone();
         attempt.no_report = false;
         attempt.check = check_result;
         // The lead hears of a report unless it wrote it.

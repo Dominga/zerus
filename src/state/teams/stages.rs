@@ -95,10 +95,13 @@ pub(crate) struct Prepared {
     pub holds: bool,
     pub changed: Vec<Value>,
     pub temp: String,
-    /// The commit the stage checks: the checked attempt's last commit, else the
-    /// folder's HEAD when the stage began. A command gets it as an environment
-    /// variable; a land stage refuses a folder on another commit.
+    /// The commit the stage checks: the checked attempt's recorded commit, else
+    /// its folder's HEAD at the report (#684 N1, never HEAD when the stage
+    /// starts). A command gets it as an environment variable; a land stage in a
+    /// Git folder refuses a folder on another commit.
     pub commit: String,
+    /// Whether the checked folder is a Git work tree at all.
+    pub git: bool,
     /// Why a checkout rule fell back to holding the folder.
     pub note: String,
 }
@@ -123,11 +126,18 @@ pub(crate) fn prepare(team: &Team, task_id: u32) -> anyhow::Result<Prepared> {
     let earlier = pipeline.runs.iter().find(|other| other.round == run.round && other.id != run.id && !other.changed.is_empty());
     let changed = earlier.map(|other| other.changed.clone()).unwrap_or_else(|| changed(task, run, &folder, git));
     let recorded = checked_attempt(task, run).and_then(|attempt| attempt.commits.last()).map(|commit| commit.sha.clone());
-    // The commit the stage checks: the attempt's recorded last commit, else the
-    // folder's HEAD when the stage begins (a member may commit outside Zerus).
-    let head = || git.then(|| git_at(&folder, &["rev-parse", "HEAD"])).flatten().unwrap_or_default();
-    let commit = recorded.clone().unwrap_or_else(head);
-    let mut prepared = Prepared { folder: folder.clone(), changed, commit, ..Default::default() };
+    // #684 N1: the commit the stage checks is the attempt's recorded commit, or
+    // the folder's HEAD as the attempt reported. It is never the folder's HEAD
+    // when the stage starts: a member that commits with plain git is checked on
+    // the commit it reported, and a later task that moved the folder does not
+    // become the checked one.
+    let reported = checked_attempt(task, run).map(|attempt| attempt.folder_head.clone()).unwrap_or_default();
+    // A detached checkout needs a commit the attempt recorded; its folder's
+    // HEAD alone may be older than uncommitted work. The land check and the
+    // command's environment use either, never HEAD at the stage's start.
+    let checked = recorded.clone();
+    let commit = recorded.clone().or_else(|| (!reported.is_empty()).then(|| reported.clone())).unwrap_or_default();
+    let mut prepared = Prepared { folder: folder.clone(), changed, commit, git, ..Default::default() };
     // A review reads the task's files and holds nothing.
     if run.kind == "review" {
         return Ok(prepared);
@@ -138,9 +148,19 @@ pub(crate) fn prepare(team: &Team, task_id: u32) -> anyhow::Result<Prepared> {
         prepared.temp = temp.display().to_string();
     }
     let kind = if run.kind == "test" { "test" } else { "stage" };
-    match (pipeline.folder.as_str(), git, recorded) {
+    match (pipeline.folder.as_str(), git, checked) {
         ("checkout", true, Some(sha)) => {
             let path = stage_dir(team, run, "");
+            // #684 L1: a checkout an earlier prepare left at this run's path is
+            // stale (a crash, or a start that was never recorded): remove it
+            // before making the new one, so the stage is not refused forever.
+            if path.exists() {
+                let _ = git_command(&folder).args(["worktree", "remove", "--force"]).arg(&path).output();
+                if path.exists() {
+                    let _ = std::fs::remove_dir_all(&path);
+                }
+                let _ = git_command(&folder).args(["worktree", "prune"]).output();
+            }
             let output = git_command(&folder)
                 .args(["worktree", "add", "--detach"])
                 .arg(&path)
@@ -154,7 +174,7 @@ pub(crate) fn prepare(team: &Team, task_id: u32) -> anyhow::Result<Prepared> {
         }
         ("checkout", true, None) => {
             prepared.holds = true;
-            prepared.note = format!("The attempt made no commits, so the {kind} works in the task's folder, which is held.");
+            prepared.note = format!("The attempt recorded no commit, so the {kind} works in the task's folder, which is held.");
         }
         ("checkout", false, _) => {
             prepared.holds = true;
@@ -706,6 +726,32 @@ mod tests {
     }
 
     #[test]
+    fn a_stale_checkout_at_the_stage_path_is_removed_and_replaced() {
+        isolated(|dir| {
+            let project = project(dir, true);
+            let (mut team, folder) = team_in(&project, MemberFolder::Worktree, &checkout_catalog(), "code");
+            report(&mut team, &folder, true);
+            let sha = team.task(1).unwrap().attempts[0].commits[0].sha.clone();
+            let (review, _) = give(&mut team, "rev");
+            verdict(&mut team, "rev", &review);
+            let first = prepare(&team, 1).unwrap();
+            assert!(Path::new(&first.checkout).is_dir(), "{first:?}");
+            // #684 L1: the same run prepared again (a crash, or a start never
+            // recorded) must not be refused by the worktree already at its path.
+            let second = prepare(&team, 1).unwrap();
+            assert_eq!(second.checkout, first.checkout);
+            assert_eq!(git(Path::new(&second.folder), &["rev-parse", "HEAD"]), sha);
+            clean_up(&StageRun {
+                checkout: second.checkout,
+                checkout_repo: second.checkout_repo,
+                temp: second.temp,
+                ..Default::default()
+            })
+            .unwrap();
+        });
+    }
+
+    #[test]
     fn a_shared_folder_task_lists_its_files_and_a_checkout_without_commits_holds() {
         isolated(|dir| {
             let project = project(dir, true);
@@ -728,8 +774,8 @@ mod tests {
             assert!(text.contains("- src/lib.rs (32 bytes, sha256 ") && text.contains("- old.txt (deleted)"), "{text}");
             verdict(&mut team, "rev", &review);
             let (_, prepared) = give(&mut team, "qa");
-            assert!(prepared.holds && prepared.checkout.is_empty());
-            assert!(prepared.note.contains("made no commits"), "{prepared:?}");
+            assert!(prepared.holds && prepared.checkout.is_empty(), "{prepared:?}");
+            assert!(prepared.note.contains("recorded no commit"), "{prepared:?}");
             assert_eq!(held(&team, "dev"), Some(1), "the implementer's next task in the shared folder waits");
             assert_eq!(held(&team, "rev"), None, "other members keep working there");
         });

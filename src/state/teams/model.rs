@@ -1058,6 +1058,13 @@ pub(crate) struct Attempt {
     /// implementer keeps the task and is not counted as failed for it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pipeline_return: bool,
+    /// #684 N1: the folder's HEAD and branch when this attempt reported, so a
+    /// later stage checks that commit and never the folder's HEAD at the
+    /// stage's own start.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub folder_head: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub folder_branch: String,
     #[serde(default)]
     pub sent_at: f64,
     #[serde(default)]

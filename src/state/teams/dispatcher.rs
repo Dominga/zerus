@@ -1115,7 +1115,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                 let member = team.member(&pending.member);
                 let found = member.and_then(|member| session_of(member, seen));
                 if let (Some(member), Some(_)) = (member, found.filter(|found| super::models::confirmed(pending, &found.model, &found.effort))) {
-                    if switching.contains(member.id.as_str()) && available(member, &BTreeSet::new()) {
+                    if switching.contains(member.id.as_str()) && available(member, &BTreeSet::new()) && super::stages::held(team, &member.id).is_none() {
                         switching.remove(member.id.as_str());
                         steps.push(deliver(task, member));
                     }
@@ -3409,11 +3409,14 @@ fn start_stage_command(store: &mut Store, team: &Team, task_id: u32, run_id: &st
         clean(&prepared);
         return Ok(());
     }
-    // #680: a land stage lands the checked commit and nothing else.
-    if stage.kind == "land" {
+    // #680/#684: a land stage lands the checked commit and nothing else. In a
+    // Git folder a missing recorded commit is refused rather than reading HEAD
+    // at the stage's start; in a folder without Git there is no HEAD to check,
+    // and the hold rule keeps the folder as the implementer left it (N2).
+    if stage.kind == "land" && prepared.git {
         if prepared.commit.is_empty() {
             clean(&prepared);
-            return not_run(store, "The attempt has no commit for the land stage to check".into());
+            return not_run(store, "The attempt recorded no commit for the land stage to check; commit with hgs team commit (or git) before reporting".into());
         }
         let head = git_at(&prepared.folder, &["rev-parse", "HEAD"]).unwrap_or_default();
         if head != prepared.commit {
@@ -3428,19 +3431,25 @@ fn start_stage_command(store: &mut Store, team: &Team, task_id: u32, run_id: &st
             );
         }
     }
-    // The task's own branch, else the implementer's folder's: what the command
-    // sees. The implementer's folder is held from the report on, so its branch
-    // is the checked one even when the stage itself works in a checkout.
+    // The task's own branch, else the branch the attempt reported, else the
+    // implementer's folder's: what the command sees.
+    let reported_branch = task.attempts.iter().find(|attempt| attempt.n == open.attempt).map(|attempt| attempt.folder_branch.clone()).unwrap_or_default();
     let live = super::stages::task_folder(team, task, &open).unwrap_or_default();
     let branch = task_branch(team, task_id, &author)
+        .or_else(|| (!reported_branch.is_empty()).then_some(reported_branch))
         .or_else(|| git_at(&live, &["rev-parse", "--abbrev-ref", "HEAD"]).filter(|branch| branch != "HEAD"))
         .unwrap_or_default();
     let commit = prepared.commit.clone();
-    change(store, &team.id, |team, events| {
+    // #684 L1: a checkout prepare() made goes if the start is not recorded
+    // (a store error here, or a crash between prepare and this change).
+    if let Err(error) = change(store, &team.id, |team, events| {
         super::pipeline::command_started(team, task_id, run_id, &commit, events)?;
         super::stages::record(team, task_id, run_id, &prepared);
         Ok(())
-    })?;
+    }) {
+        clean(&prepared);
+        return Err(error);
+    }
     let command = stage.command.clone().unwrap_or_default();
     let session = member.session.as_ref().map_or_else(
         || json!({}),
@@ -12120,6 +12129,110 @@ mod tests {
         take_outbox_with(&mut store, &current, &[dev], &spawn).unwrap();
         assert_eq!(started.borrow().as_slice(), [id.to_owned()]);
         crate::state::teams::templates::settings_override(None);
+        });
+    }
+
+    /// #684 N1: a plain git commit (not `hgs team commit`) is still the commit
+    /// the attempt reported, so a folder moved afterwards is refused.
+    #[test]
+    fn a_land_stage_refuses_a_folder_moved_after_a_plain_git_commit() {
+        let root = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(root.path(), || {
+            crate::state::builds::INLINE_RUNNER.with(|inline| inline.set(true));
+            let (lead, dev) = stage_repo(root.path());
+            let mut team = stage_team(&lead, &dev, "gate", &|_| command_preset("land", "git status --porcelain".into(), &[("0", "accepted")]));
+            team.settings.land_allowed = true;
+            let mut store = Store::open_at(&super::super::store::path(), true).unwrap();
+            store.create(&uuid::Uuid::new_v4().to_string(), &json!({}), team, vec![]).unwrap();
+            deliver_all();
+            hand_out(&mut store, STAGE_TEAM, 1, "dev", None, "").unwrap();
+            std::fs::write(dev.join("a.txt"), "one\n").unwrap();
+            git_in(&dev, &["add", "-A"]);
+            git_in(&dev, &["commit", "-q", "-m", "Task 1"]);
+            stage_report(&mut store, 1);
+            // The next task moves the live folder before the land stage runs.
+            git_in(&dev, &["checkout", "-q", "-b", "task/2", "main"]);
+            std::fs::write(dev.join("b.txt"), "two\n").unwrap();
+            git_in(&dev, &["add", "-A"]);
+            git_in(&dev, &["commit", "-q", "-m", "Task 2 work"]);
+            let run = run_stage(&mut store);
+            let team = store.load(STAGE_TEAM).unwrap().unwrap();
+            let task = team.task(1).unwrap();
+            let ended = task.pipeline_run.as_ref().unwrap().runs[0].clone();
+            assert_eq!(ended.outcome, "refused", "{ended:?}");
+            assert!(task.hold.as_ref().unwrap().reason.contains("checked commit"), "{:?}", task.hold);
+            assert!(crate::state::builds::record(&run, now()).is_none(), "the land command did not run");
+            set_fake_hgs(None);
+            crate::state::builds::INLINE_RUNNER.with(|inline| inline.set(false));
+        });
+    }
+
+    /// #684 N2: a land stage in a folder without Git runs; there is no HEAD to
+    /// check, and the hold rule keeps the folder.
+    #[test]
+    fn a_land_stage_in_a_folder_without_git_runs() {
+        let root = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(root.path(), || {
+            crate::state::builds::INLINE_RUNNER.with(|inline| inline.set(true));
+            let plain = root.path().join("plain");
+            std::fs::create_dir_all(&plain).unwrap();
+            let mut team = team();
+            team.id = STAGE_TEAM.into();
+            team.folder = plain.display().to_string();
+            for member in &mut team.members {
+                member.folder = MemberFolder::Shared;
+            }
+            team.settings.land_allowed = true;
+            let catalog = command_preset("land", "echo landed".into(), &[("0", "accepted")]);
+            team.task_mut(1).unwrap().pipeline = "gate".into();
+            super::super::pipeline::snapshot_with(&mut team, 1, &catalog);
+            let mut store = Store::open_at(&super::super::store::path(), true).unwrap();
+            store.create(&uuid::Uuid::new_v4().to_string(), &json!({}), team, vec![]).unwrap();
+            deliver_all();
+            hand_out(&mut store, STAGE_TEAM, 1, "dev", None, "").unwrap();
+            stage_report(&mut store, 1);
+            run_stage(&mut store);
+            let team = store.load(STAGE_TEAM).unwrap().unwrap();
+            let task = team.task(1).unwrap();
+            assert_eq!((task.status, task.decided_by), (TaskStatus::Accepted, Some(Decider::Zerus)), "{:?}", task.pipeline_run);
+            set_fake_hgs(None);
+            crate::state::builds::INLINE_RUNNER.with(|inline| inline.set(false));
+        });
+    }
+
+    /// #684 L1: a checkout prepare() made is removed when the start cannot be
+    /// recorded (a store error), so the next tick is not refused by it.
+    #[test]
+    fn a_checkout_prepared_for_a_start_that_is_not_recorded_is_removed() {
+        let root = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(root.path(), || {
+            let (lead, dev) = stage_repo(root.path());
+            let team = stage_team(&lead, &dev, "gate", &|_| checkout_command_preset("command", "echo ok".into()));
+            let mut store = Store::open_at(&super::super::store::path(), true).unwrap();
+            store.create(&uuid::Uuid::new_v4().to_string(), &json!({}), team, vec![]).unwrap();
+            deliver_all();
+            hand_out(&mut store, STAGE_TEAM, 1, "dev", None, "").unwrap();
+            std::fs::write(dev.join("a.txt"), "one\n").unwrap();
+            let team = store.load(STAGE_TEAM).unwrap().unwrap();
+            let attempt = team.task(1).unwrap().open_attempt().unwrap().id.clone();
+            super::super::commands::commit_in_team(
+                &team,
+                "dev",
+                &json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":STAGE_TEAM,"attempt":attempt,"message":"Task 1"}),
+            )
+            .unwrap();
+            stage_report(&mut store, 1);
+            let team = store.load(STAGE_TEAM).unwrap().unwrap();
+            let run_id = team.task(1).unwrap().pipeline_run.as_ref().unwrap().open_run().unwrap().id.clone();
+            // A read-only store makes command_started fail after prepare made
+            // the checkout; the prepared checkout must go.
+            let mut read_only = Store::open_at(&super::super::store::path(), false).unwrap();
+            let error = start_stage_command(&mut read_only, &team, 1, &run_id).unwrap_err().to_string();
+            let leftovers = std::fs::read_dir(root.path().join("teams/stages"))
+                .map(|entries| entries.flatten().filter(|entry| entry.path().is_dir()).count())
+                .unwrap_or(0);
+            assert_eq!(leftovers, 0, "the prepared checkout is cleaned: {error}");
+            set_fake_hgs(None);
         });
     }
 

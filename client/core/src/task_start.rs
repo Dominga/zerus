@@ -167,9 +167,10 @@ fn outcome(
         .ok_or_else(|| "The start outcome could not be read. Recovery data was kept.".into())
 }
 
+/// Prepare an exact immutable request without reserving or delivering it.
+/// A caller must durably reserve the entire returned plan before fresh delivery.
 #[allow(clippy::too_many_arguments)]
-pub fn start(
-    store: &Path,
+pub fn prepare(
     project: &str,
     task: &str,
     stage_at: i64,
@@ -177,11 +178,7 @@ pub fn start(
     selection: &Selection,
     id: &str,
     mut run: impl FnMut(&TaskCall) -> Result<Map<String, Value>, String>,
-) -> Result<View, String> {
-    let previous = load(store, project, task)?;
-    if previous.as_ref().is_some_and(pending) {
-        return open(store, project, task, None);
-    }
+) -> Result<Value, String> {
     if !canonical_uuid(id) || stage_at <= 0 {
         return Err(CHANGED.into());
     }
@@ -231,10 +228,29 @@ pub fn start(
             "The task start plan did not match the selected executor. Nothing was sent.".into(),
         );
     }
+    Ok(plan.clone())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn start(
+    store: &Path,
+    project: &str,
+    task: &str,
+    stage_at: i64,
+    assignment: &Assignment,
+    selection: &Selection,
+    id: &str,
+    mut run: impl FnMut(&TaskCall) -> Result<Map<String, Value>, String>,
+) -> Result<View, String> {
+    let previous = load(store, project, task)?;
+    if previous.as_ref().is_some_and(pending) {
+        return open(store, project, task, None);
+    }
+    let plan = prepare(project, task, stage_at, assignment, selection, id, &mut run)?;
     let mut record = previous.clone().unwrap_or_else(|| json!({}));
     record["schema"] = json!(1);
     record["id"] = json!(id);
-    record["intent"] = json!({"plan":plan});
+    record["intent"] = json!({"plan":&plan});
     record["phase"] = json!("delivering");
     record["error"] = json!("");
     record["session"] = json!(format!(
@@ -259,7 +275,7 @@ pub fn start(
     }
     // The original plan and its exact marker are now durable. Every subsequent
     // operation on this record is read-only recovery or an explicit release.
-    let result = run(&call("start-deliver", project, task, plan, false));
+    let result = run(&call("start-deliver", project, task, &plan, false));
     let (state, error) = match result {
         Ok(reply) => match outcome(&reply, project, task, id) {
             Ok(state) => (

@@ -40,6 +40,12 @@ export const assignmentLabel = (t: Task) => queued(t)
     : t.targetKind === "subagent" ? `Subagent — coordinate through ${sessionLabel(t.target)}`
     : t.target.name ? sessionLabel(t.target) : "Any available session"
   : t.executor.name ? sessionLabel(t.executor) : "Unconfirmed";
+export function assignmentText(t: Task, main?: Session): string {
+  if (!queued(t)) return `${t.stage === "active" ? "Executor" : "Last executor"}: ${t.executor.name ? sessionLabel(t.executor) : "Unconfirmed"}`;
+  const assigned = !t.target.name ? "Any available session" : sessionLabel(t.target);
+  const label = t.targetKind === "new_session" ? "New session, created when started" : t.targetKind === "subagent" ? `Subagent coordinated through ${assigned}` : main && t.target.id === sessionIdentity(main) && t.target.host === main.computer ? `Main session: ${assigned}` : assigned;
+  return `Planned: ${label}`;
+}
 export function belongsTo(t: Task, s: Session): boolean {
   const r = executorRef(t);
   return r.known && r.host === s.computer && (r.id ? r.id === sessionIdentity(s) : !!r.name && r.name === s.name);

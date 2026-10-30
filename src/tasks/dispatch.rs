@@ -101,10 +101,15 @@ fn destination(task: &TaskDoc, selection: &Selection, machines: &Machines) -> Re
         &args,
     )?;
     let current = task.view().map_err(fail)?;
-    if matches!(current.target, Target::NewSession { .. }) {
-        return Err(fail(
-            "start this task in Zerus to configure its new session",
-        ));
+    if let Target::NewSession { parent } = &current.target {
+        // The desktop reserved this exact fresh launch before creation. Its
+        // immutable target still pins the original parent; a name or run ID
+        // alone never authorizes a new executor's dispatch.
+        if parent.machine.is_empty() || parent.session_id.is_empty()
+            || !selection.session_id.strip_prefix("launch_id:").is_some_and(id)
+        {
+            return Err(fail(CHANGED));
+        }
     }
     let assigned = match current.target {
         Target::Session(key) | Target::Subagent { parent: key } => Some(key),

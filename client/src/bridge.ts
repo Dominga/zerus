@@ -34,6 +34,10 @@ export const taskEditorPick = (handle: number, start: number, end: number) => de
 export const taskEditorRemove = (handle: number, index: number) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_files", { handle, change: { kind: "remove", index } });
 export const taskEditorSubmit = (handle: number, rev: number, recover: boolean, delivery?: import("./store/taskEditor").TaskMessageDelivery) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_submit", { input: { handle, rev, recover, delivery: delivery ?? null } });
 export const taskEditorRelease = (handle: number, rev: number, record: import("./store/taskEditor").TaskRecoveryRecord) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_release", { input: { handle, rev, ...record } });
+export const taskExecutorSubmit = (input: import("./store/taskExecutors").TaskLaunchContext & { plan: LaunchPlan }) => desktop<CreationAdmission>("task_executor_submit", { input });
+export const taskExecutorOpen = (project: string, task: string) => desktop<import("./store/taskExecutors").ExecutorView | null>("task_executor_open", { project, task });
+export const taskExecutorRelease = (id: string, snapshot: string) => desktop<void>("task_executor_release", { id, snapshot });
+export const onTaskExecutors = (listener: () => void) => onEvent<null>("task-executors", listener);
 export const taskStartOpen = (project: string, task: string) => desktop<import("./store/taskStart").StartView>("task_start_open", { project, task });
 export const readTaskSettings = (project: string) => desktop<import("./store/taskSettings").TaskSettings>("task_settings", { project, changes: null });
 export const saveTaskSettings = (project: string, changes: Partial<import("./store/taskSettings").TaskSettings>) => desktop<import("./store/taskSettings").TaskSettings>("task_settings", { project, changes });
@@ -45,7 +49,7 @@ export const taskFormOpen = (target: import("./store/taskEditor").TaskEditorTarg
 export const taskFormEdit = (kind: import("./store/taskForms").FormKind, input: Pick<import("./store/taskEditor").TaskEditorView, "handle" | "rev" | "text" | "position" | "anchor">) => desktop<import("./store/taskEditor").TaskEditorView<import("./store/taskForms").FormKind>>("task_form_edit", { kind, input });
 export const taskFormSubmit = (input: import("./store/taskForms").FormSubmit) => desktop<import("./store/taskEditor").TaskEditorView<import("./store/taskForms").FormKind>>("task_form_submit", { input });
 export const taskFormCancel = (kind: import("./store/taskForms").FormKind, handle: number, rev: number) => desktop<import("./store/taskEditor").TaskEditorView<import("./store/taskForms").FormKind>>("task_form_cancel", { kind, handle, rev });
-export const assignTask = (project: string, task: string, target: { computer: string; name: string; run_id: string; conversation_id: string } | null, catalogKey: string | null, sessionId: string | null) => desktop<void>("task_assign", { project, task, target, catalogKey, sessionId });
+export const assignTask = (project: string, task: string, target: { computer: string; name: string; run_id: string; conversation_id: string } | null, catalogKey: string | null, sessionId: string | null, mode?: "session" | "subagent" | "new_session") => desktop<void>("task_assign", { input: { project, task, target, catalog_key: catalogKey, session_id: sessionId, mode: mode ?? null } });
 export const readTaskDetails = (project: string, task: string, before: string | null) => desktop<unknown>("task_details", { project, task, before });
 export const openTaskAttachment = (path: string) => desktop<string | null>("task_attachment_open", { path });
 
@@ -212,9 +216,9 @@ export async function inspectSession(target: Target, archiveId: string | null): 
 }
 
 /** Child identity from its own inspection, read once when it opens. */
-export async function inspectSubagentIdentity(target: Target, archiveId: string | null, agentId: string): Promise<{ agent_id: string; conversation_id: string } | null> {
+export async function inspectSubagentIdentity(target: Target, archiveId: string | null, agentId: string): Promise<{ agent_id: string; conversation_id: string; cwd?: string | null } | null> {
   if (!inTauri()) return null;
-  return (await invoke<{ agent_id: string; conversation_id: string } | null>("inspect_subagent_identity", { target, archiveId, agentId })) ?? null;
+  return (await invoke<{ agent_id: string; conversation_id: string; cwd?: string | null } | null>("inspect_subagent_identity", { target, archiveId, agentId })) ?? null;
 }
 
 /** Read marks whose delivery has not been confirmed yet; undefined outside the app, which keeps no list. */
@@ -348,6 +352,11 @@ export async function moveToProject(members: string[], project: string, before: 
 export async function createProject(name: string, members: string[]): Promise<EditOutcome> {
   if (!inTauri()) return refusedOutside();
   return invoke<EditOutcome>("create_project", { name, members });
+}
+
+export async function setProjectColor(project: string, color: string): Promise<EditOutcome> {
+  if (!inTauri()) return refusedOutside();
+  return invoke<EditOutcome>("set_project_color", { project, color });
 }
 
 export async function renameProject(project: string, name: string): Promise<EditOutcome> {
@@ -785,6 +794,7 @@ export async function attachmentOpenDraft(path: string): Promise<string | null> 
 
 export interface SessionFileView {
   id: number;
+  revision: number;
   computer: string;
   key: string;
   href: string;
@@ -792,26 +802,27 @@ export interface SessionFileView {
   location: string;
   remote: boolean;
   title: string;
-  local_path: string;
-  copy_path: string;
+  local_available: boolean;
+  can_download: boolean;
   checking: boolean;
   downloading: boolean;
-  saved: boolean;
+  picking: boolean;
+  hint: string;
   error: string;
-  notice: string;
   closed: boolean;
 }
 
 export const sessionFileDialog = (computer: string, key: string, href: string, cwd: string) =>
   desktop<SessionFileView>("session_file_dialog", { computer, key, href, cwd });
-export const sessionFileCheck = (id: number) => desktop<SessionFileView>("session_file_check", { id });
-export const sessionFileDownload = (id: number, open: boolean) => desktop<SessionFileView>("session_file_download", { id, open });
-export const sessionFileSave = (id: number) => desktop<SessionFileView>("session_file_save", { id });
+export const sessionFileCheck = (id: number) => desktop<SessionFileView | null>("session_file_check", { id });
+export const sessionFileDownload = (id: number, open: boolean) => desktop<SessionFileView | null>("session_file_download", { id, open });
+export const sessionFileSave = (id: number) => desktop<SessionFileView | null>("session_file_save", { id });
 export const sessionFileExternal = (url: string) => desktop<void>("session_file_external", { url });
 export const sessionFileAct = (id: number, action: "open_file" | "open_folder" | "open_copy" | "show_file" | "open_ssh") =>
-  desktop<SessionFileView>("session_file_act", { id, action });
+  desktop<SessionFileView | null>("session_file_act", { id, action });
 export const sessionFileClose = (id: number) => desktop<void>("session_file_close", { id });
 export const onSessionFileChanged = (listener: (view: SessionFileView) => void) => onEvent<SessionFileView>("session-file-changed", listener);
+export const onSessionFileNotice = (listener: (notice: { text: string; warn: boolean }) => void) => onEvent<{ text: string; warn: boolean }>("session-file-notice", listener);
 
 // Saved drafts (src-tauri composer/saved.rs). Qt's and the dev app's stores
 // are only read; each page is one bounded read.
@@ -825,3 +836,39 @@ export const savedDraft = (source: DraftSource, key: string) => desktop<SavedDra
 export const draftRecover = (key: string) => desktop<void>("draft_recover", { key });
 /** Replaces the open composer's draft with the selected one; rejects with why not. */
 export const draftRestore = (handle: number, source: DraftSource, key: string) => desktop<void>("draft_restore", { handle, source, key });
+
+/** Availability is a local folder stat; opening does a fresh identity/directory check. */
+export const sessionFolderStatus = (computer: string, directory: string) => desktop<import("./store/sessionFolders").FolderStatus>("session_folder_status", { computer, directory });
+export const sessionFolderOpen = (input: import("./store/sessionFolders").FolderRequest, kind: "folder" | "shell") => desktop<string | null>("session_folder_open", { input, kind });
+
+export const terminationCleanupConfirm = (id: string) => desktop<Outcome>("termination_cleanup_confirm", { id });
+export const terminationCleanupOffer = (target: Target) => desktop<{ id: string; checked: boolean } | null>("termination_cleanup_offer", { target });
+export const terminationCleanupCancel = (id: string) => desktop<void>("termination_cleanup_cancel", { id });
+export const terminationCleanupView = () => desktop<import("./store/terminationCleanup").CleanupView>("termination_cleanup_view", {});
+export const terminationCleanupCheck = (id: string) => desktop<import("./store/terminationCleanup").CleanupView>("termination_cleanup_check", { id });
+export const terminationCleanupRemove = (revision: number, consents: import("./store/terminationCleanup").Consents) => desktop<import("./store/terminationCleanup").CleanupView>("termination_cleanup_remove", { revision, consents });
+export const terminationCleanupKeep = (revision: number) => desktop<import("./store/terminationCleanup").CleanupView>("termination_cleanup_keep", { revision });
+export const terminationCleanupInspect = (id: string, file = "", offset = 0) => desktop<import("./store/terminationCleanup").Inspection>("termination_cleanup_inspect", { id, file, offset });
+export const onTerminationCleanupChanged = (changed: () => void) => inTauri() ? listen("termination-cleanup-changed", changed) : Promise.resolve(() => {});
+export const onTerminationFolderRemoved = (changed: (label: string) => void) => inTauri() ? listen<string>("termination-folder-removed", (e) => changed(e.payload)) : Promise.resolve(() => {});
+
+/** Voice owns one native driver per mounted main composer; only Play reads a raw preview copy. */
+export async function voiceOpen(key: string, out: (event: import("./store/voice").VoiceOut) => void, frame: (bytes: Uint8Array) => void): Promise<void> {
+  if (!inTauri()) throw "Voice recording needs the desktop app.";
+  const support = await invoke<{ available: boolean; reason: string }>("voice_support");
+  if (!support.available) throw support.reason;
+  const events = new Channel<import("./store/voice").VoiceOut>();
+  events.onmessage = out;
+  const frames = new Channel<ArrayBuffer | number[]>();
+  frames.onmessage = (bytes) => frame(bytes instanceof ArrayBuffer ? new Uint8Array(bytes) : Uint8Array.from(bytes));
+  await invoke("voice_open", { key, events, frames });
+}
+export const voiceInput = (key: string, handle: number, input: import("./store/voice").VoiceInput) => desktop<void>("voice_input", { key, handle, input });
+export const voiceClose = (key: string) => desktop<void>("voice_close", { key });
+export async function voicePreview(key: string, id: string): Promise<ArrayBuffer> {
+  const reply = await desktop<ArrayBuffer | number[]>("voice_preview", { key, id });
+  return reply instanceof ArrayBuffer ? reply : Uint8Array.from(reply).buffer;
+}
+export const voiceVideo = () => desktop<{ available: boolean; reason: string | null }>("voice_video", {});
+export const voicePermission = () => desktop<{ text: string; can_open: boolean }>("voice_permission", {});
+export const voiceOpenSettings = () => desktop<void>("voice_open_settings", {});

@@ -3,8 +3,8 @@
 G1 owns `zerus-desktop-ledger::operations` and the service's schema transaction,
 separately from native notification `Kind` and attempt policy. G2 owns the pure
 `operation_recovery::task_start` verifier and proposals. The storage APIs are
-internal actor calls. There is no positive frontend operation IPC, worker,
-scheduler or execution admission in this slice. The service stays passive.
+internal actor calls. There is no positive frontend operation IPC, executing
+operation worker or execution admission in this slice. The service stays passive.
 Imported state and a Complete marker cannot grant execution authority.
 
 The actor must first verify G2's complete original record, exact frozen input,
@@ -87,3 +87,58 @@ that belongs to the executing actor/worker integration in G1 .66.3.22.
 
 See [G2 policy](desktop-operations.md) and
 [read-only delegation identity](desktop-delegation-hello.md).
+
+## Prepared custody and resource recovery
+
+Schema 8 adds `desktop_operation_custody`, keyed by the exact attempt UUID and
+ticket fingerprint. Its immutable, bounded Prepared record contains version,
+configuration, complete Ticket, kernel boot identity, service PID/birth and
+private file device/inode/change time/length/SHA-256. The helper PID/birth may be
+registered once. These identities are diagnostics and bindings; process names,
+elapsed time, environment scans and imported evidence never release a charge.
+
+Any future real helper must use `operations::custody::reserve`, which commits
+reservation and custody together. The root first creates and syncs the private,
+create-new `desktop/operation-custody/<attempt UUID>.lock`, its closed header and
+directory entries, while retaining the [inherited flock](desktop-owned-runner.md).
+It must register the helper durably before returning Child to the input writer.
+An exact coalesced reservation remains status-only. Failure before that atomic
+commit cannot leave a half-reservation; failure afterwards keeps custody charged.
+An uncommitted file is never reused. The older storage-only `reserve` primitive
+cannot admit execution without this custody path and the current runtime guards.
+
+File preparation has no production caller yet. Recovery opens only the exact
+existing file, checks the private directory, no-follow single-link leaf, bounded
+header and stored file identity, then tries the nonblocking lock. Only successful
+acquisition of that same file may release the exact terminal attempt. The proof
+guard stays held through the actor's drain commit. Missing, replaced, altered,
+linked, nonprivate, held or unsupported state remains charged and review-only.
+No custody file is removed while charged. Linux currently qualifies ext-family,
+Btrfs, XFS, tmpfs and overlay filesystem types; macOS requires a local mount.
+This restriction affects operation custody, not existing CLI path selection.
+
+One background inspection can be outstanding. The actor does bounded indexed
+zero-or-one candidate reads and polls the result without file I/O. A stuck read
+keeps its one slot; it never launches another inspection or clears a charge.
+Retries after held/unavailable results are bounded to once per ten seconds.
+Restart still turns old reservations into immutable Unknown before recovery;
+acquiring custody never rewrites that outcome or starts another lookup.
+Unregistered prepared custody follows the same lock proof, covering a host
+crash before helper registration without requiring an environment scan.
+
+An offline revoke first excludes a live service with owner.lock. With existing
+state, it may wait up to two seconds for this same background proof; timeout is
+not proof. A never-used service still returns the no-handoff no-op before any
+store or directory creation. Status and pending revoke replies name the attempt,
+recorded helper state and original revoke UUID. The updater keeps Qt stopped and
+gives manual steps: wait or stop only that helper, restart only hgs-desktop through
+its manager and retry the original revoke, with reboot as the last resort.
+No process, service or machine is stopped automatically by recovery.
+
+SQL tests cover atomic reservation/custody failure, exact replay, immutable
+registration and missing-custody refusal. Isolated host/helper tests cover a
+real host exit and file-backed journal reopen while its helper still holds
+custody, followed by verified release without changing Unknown. No owner reboot
+is performed; boot changes alone do not bypass file verification. These tests
+qualify custody mechanisms, not the still-fenced G2 execution/drain integration
+or native Windows custody. Current producer drain in G1 .23 remains mandatory.

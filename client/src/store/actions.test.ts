@@ -9,6 +9,7 @@ import { emptyBatch, type Action, type Batch, type Details, type Outcome, type R
 
 vi.mock("../bridge", () => ({
   runAction: vi.fn(),
+  terminationCleanupConfirm: vi.fn(),
   inspectSession: vi.fn(),
   pendingReadMarks: vi.fn(),
   attentionMarks: vi.fn(async () => ({ marks: {}, replies: {} })),
@@ -47,6 +48,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(1_790_000_000_000);
   mocked.runAction.mockReset();
+  mocked.terminationCleanupConfirm.mockReset();
   mocked.inspectSession.mockReset();
   mocked.pendingReadMarks.mockReset();
   mocked.sessionReference.mockReset();
@@ -252,7 +254,10 @@ describe("perform", () => {
       mocked.runAction.mockResolvedValueOnce({ outcome: "failed", detail: "kept" });
       await a.perform(session(), { kind: "pause" });
       mocked.runAction.mockResolvedValue(done());
+      // A repeated passing result shows once (the bus coalesces it).
       for (let i = 0; i < 6; i++) await a.perform(session(), { kind: "pause" });
+      expect(a.notices().map((n) => n.text)).toEqual(["kept", "Session updated. Refreshing…"]);
+      for (let i = 0; i < 6; i++) a.notify("info", `passing ${i}`);
       expect(a.notices()).toHaveLength(5);
       expect(a.notices()[0]).toMatchObject({ text: "kept", sticky: true });
       mocked.runAction.mockResolvedValue({ outcome: "failed", detail: "x" });
@@ -317,7 +322,8 @@ describe("targets", () => {
         expect((await a.perform(row, action)).outcome).toBe("failed");
       }
       expect(mocked.runAction).not.toHaveBeenCalled();
-      expect(a.notices().map((n) => n.text)).toEqual(Array(3).fill("This session changed. Open its actions again."));
+      // Each refusal says so; the repeated passing notice shows once.
+      expect(a.notices().map((n) => n.text)).toEqual(["This session changed. Open its actions again."]);
       dispose();
     });
   });
@@ -1087,6 +1093,38 @@ describe("archived rows (the Archive view)", () => {
       const rename = { kind: "rename", new_name: "claude/sample-project/b", archive_id: ARCHIVE_ID } as const;
       expect(await a.perform(snapshotOf(row), rename)).toMatchObject({ outcome: "done" });
       expect(mocked.runAction).toHaveBeenCalledWith({ computer: "", name: "claude/sample-project/a", run_id: "run-1", conversation_id: "conv-1" }, rename);
+      dispose();
+    });
+  });
+});
+
+
+describe("explicit cleanup confirmation", () => {
+  it("holds the existing pending lane and never falls back to legacy terminate", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup();
+      let settle!: (out: Outcome) => void;
+      mocked.terminationCleanupConfirm.mockReturnValue(new Promise((resolve) => { settle = resolve; }));
+      const pending = a.end(session(), "terminate", "opaque-rust-offer");
+      expect(a.updating("", "claude/sample-project/a")).toBe(true);
+      await a.end(session(), "terminate", "opaque-rust-offer");
+      expect(mocked.terminationCleanupConfirm).toHaveBeenCalledTimes(1);
+      expect(mocked.terminationCleanupConfirm).toHaveBeenCalledWith("opaque-rust-offer");
+      settle({ outcome: "failed", detail: "Unknown. Check the session before retrying." });
+      expect((await pending).outcome).toBe("failed");
+      expect(mocked.runAction).not.toHaveBeenCalled();
+      expect(a.updating("", "claude/sample-project/a")).toBe(false);
+      dispose();
+    });
+  });
+  it("refuses a changed run before submitting a retained cleanup offer", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup();
+      const opening = session();
+      a.applyBatch(batchOf({ upserts: [rowOut({ run_id: "replacement" })] }));
+      expect((await a.end(opening, "terminate", "old-offer")).outcome).toBe("failed");
+      expect(mocked.terminationCleanupConfirm).not.toHaveBeenCalled();
+      expect(mocked.runAction).not.toHaveBeenCalled();
       dispose();
     });
   });

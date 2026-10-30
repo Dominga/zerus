@@ -751,7 +751,8 @@ impl Grouping {
                 }
                 self.layout.forget(project);
             }
-            Intent::Rename { .. }
+            Intent::Color { .. }
+            | Intent::Rename { .. }
             | Intent::Reorder { .. }
             | Intent::Renamed { .. }
             | Intent::AddFolder { .. } => {}

@@ -92,6 +92,22 @@ Automatic, Tab, Window and Clipboard, reads `open-mode`/`terminal` from
 Native protocol tests create a private D-Bus daemon and fake Plasma watcher;
 they never connect to the desktop's bus.
 
+A running local tray session captures its first attached client's TTY from the
+existing listing, as Qt does. The existing terminal launcher raises a matching
+Konsole tab when possible and otherwise opens the normal attach terminal.
+Peer, detached and saved rows never use that TTY to select a local tab; a menu
+action keeps the terminal it showed even if the listing changes before its click.
+
+The same Linux connection exports Qt's launcher badge at
+`/org/hgdev/Zerus/LauncherEntry`, using `com.canonical.Unity.LauncherEntry`
+`Query`/`Update` for `application://hgs-tray.desktop`. Its signed 64-bit `count`
+and `count-visible` follow the existing desk attention count even while a menu
+is open; zero or unavailable counters hide it. The existing tray worker watches
+Plasma/Unity registration and coalesces republication after one second, without
+another poller or thread. Normal exit clears the badge and fences late offers.
+The shell owns its appearance; the tray tile, menu and activation routes stay
+unchanged. This remains the GUI's legacy authority until a G1 writer handoff.
+
 Linux attention uses `org.freedesktop.Notifications`, with Qt's literal body
 escaping, action labels, icon and hints. The existing desk decides attention;
 the adapter adds no fleet reader or detector. It stores native IDs in
@@ -117,10 +133,16 @@ and posting stays disabled until it can be reviewed.
 The pure `zerus_client_core::linux_notify` module shares the existing schema-1
 saved-state decoder, namespace quarantine and literal body escaping. Its values
 are retained evidence, not authenticated connections or permission to post. It
-opens no files or buses and adds no dependencies. The GUI still owns its secure
+opens no files or buses in the default build. The GUI still owns its secure
 reader, Qt seed, persistence and OS calls. Importers must retain original source
 bytes and unknown fields separately from this projection. A future service
 transport and writer handoff require G1 admission and current producer drain.
+
+The explicit, default-off `linux-native-notify` core feature exposes a bounded
+method transport for later service integration. It has no GUI or service caller,
+worker, signal consumer, persistence or retry queue. The root CLI keeps it off.
+See [the method-port contract](../docs/desktop-linux-notifications.md) for its
+namespace, outcome and actual-drain boundaries.
 
 ## Build and run
 
@@ -927,6 +949,35 @@ whose type runs programs is revealed in the file manager instead of opened.
 These rules follow `AttachmentViewer.h`, `MessageComposer.cpp` and
 `ExternalFile.cpp`.
 
+## File references
+
+Activity's existing File reference dialog keeps destinations behind a Rust
+id. Download… uses the native Save local copy dialog; Download and open uses
+Settings > Files' configured DownloadCache root. Automatic requests join by
+(root, machine, remote path), with a requested refresh winning over an older
+cache lookup. The existing cache worker owns lookup, reserve, publication and
+trim; one timer repeats trim after the opening grace period plus five seconds.
+
+Downloads continue after Close or Escape. A successful requested open still
+runs, a manual save reports its destination, and a failed closed download posts
+a sticky warning through the window's notice bus. Local opens retain this
+computer's origin; downloaded copies use the shared external-file safeguards.
+The established dialog frame follows the mockup; the missing file actions and
+states follow Qt, as approved for the #521 shell. SSH terminal stays with its
+separate action owner.
+
+On Linux, after building the frontend and the media/custom-protocol app, run
+from the repository root:
+
+```sh
+python3 client/scripts/file-reference-smoke.py --app target/tauri/debug/zerus-client
+```
+
+This walk creates private D-Bus, Xvfb, HOME, XDG, temporary and tmux directories
+from a fresh environment, selects a fake hgs, and mocks open/show effects. It
+walks the real native save chooser, cached open/show, failure, Escape/focus and
+completion after close. Captures and logs remain in its printed scratch root.
+
 ## Questions and the native queue
 
 Question cards keep the native question id, hash, run, conversation, schema and
@@ -1411,3 +1462,19 @@ A blank window is not detected. Known gap: on the GL path a minimised window kee
 - `src/ui/lib/os-icons.ts` embeds two Tabler Icons outlines (MIT, see
   `licenses/`); `src/ui/lib/icons.generated.ts` is markup generated from
   `lucide-solid` (ISC).
+
+The Terminate dialog offers **Remove the working folder after stopping** for a
+freshly verified tracked agent in a linked worktree. The choice admits background
+cleanup only after the exact scoped termination and archive receipt. The statusbar
+chip opens the mockup's recorded cleanup review; opening never checks or removes
+anything. A kept folder needs **Check again** and the displayed manual consents;
+an unknown outcome cannot be retried. Branches and archive restore identity stay.
+The remembered checkbox imports once through the existing G3 settings importer;
+an explicit Next false wins and no maintenance policy is changed.
+
+On Linux, run `python3 client/scripts/termination-cleanup-smoke.py --app target/tauri/debug/zerus-client`
+from the repository root. It walks the
+built app using a private D-Bus/Xvfb, private state and fake hgs. It covers recorded
+outcomes, explicit discard, unknown non-replay, source-change refusal, inspection,
+Escape and Keep, with captures of the approved chip/dialog states. The fixture
+never deletes even its own synthetic worktree files.

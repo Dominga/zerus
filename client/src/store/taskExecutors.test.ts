@@ -1,0 +1,57 @@
+import { beforeEach, expect, it, vi } from "vitest";
+vi.mock("../bridge", () => ({ taskExecutorOpen: vi.fn(), taskExecutorRelease: vi.fn() }));
+vi.mock("../ui/sessions/newsession-view", () => ({ loadNewSession: vi.fn() }));
+vi.mock("./actions", () => ({ notify: vi.fn() }));
+vi.mock("./notices", () => ({ toast: vi.fn() }));
+vi.mock("./taskBoard", async () => { const { createSignal } = await import("solid-js"); const [writingTask, setWritingTask] = createSignal<string>(); return { writingTask, setWritingTask }; });
+import { taskExecutorRelease } from "../bridge";
+import { notify } from "./actions";
+import { toast } from "./notices";
+import { setWritingTask } from "./taskBoard";
+import { createTaskExecutors, releaseTaskExecutor, type ExecutorView } from "./taskExecutors";
+import { taskItem } from "../ui/screens/tasks-ui";
+const view = (task = "task"): ExecutorView => ({ project: "example", task, id: "launch", session: "worker", phase: "review", snapshot: "exact", error: "Unknown delivery" });
+const tick = async () => { for(let i=0;i<8;i++) await Promise.resolve(); };
+beforeEach(() => { vi.clearAllMocks(); setWritingTask(undefined); });
+it("bounds reads to the latest selection and never acts on loaded recovery evidence", async () => {
+  let finish!: (v: ExecutorView) => void;
+  const read = vi.fn().mockImplementationOnce(() => new Promise<ExecutorView>((r) => { finish=r; })).mockImplementation(async (_, task) => view(task));
+  const store = createTaskExecutors(read);
+  store.follow("example","old"); store.follow("example","middle"); store.follow("example","latest");
+  expect(read.mock.calls).toEqual([["example","old"]]);
+  finish(view("old")); await tick();
+  expect(read.mock.calls).toEqual([["example","old"],["example","latest"]]);
+  expect(store.view()?.task).toBe("latest"); expect(taskExecutorRelease).not.toHaveBeenCalled();
+  store.follow(); expect(store.view()).toBeUndefined();
+});
+it("ignores a stale refresh and refuses a wrong task identity", async () => {
+  const read = vi.fn().mockResolvedValue(view("other")); const store = createTaskExecutors(read);
+  store.follow("example","task"); await tick();
+  expect(store.error()).toContain("did not match"); expect(store.view()).toBeUndefined();
+  read.mockResolvedValueOnce(view()); store.refresh(); await tick();
+  expect(store.error()).toBe(""); expect(store.view()?.snapshot).toBe("exact");
+});
+it("removes confirmed released evidence before returning focus and rejects a stale read", async () => {
+  let finish!: (v: ExecutorView) => void;
+  const read = vi.fn().mockResolvedValueOnce(view()).mockImplementationOnce(() => new Promise<ExecutorView>((resolve) => { finish = resolve; })).mockResolvedValue(null);
+  const store = createTaskExecutors(read);
+  store.follow("example", "task"); await tick();
+  store.refresh(); store.released("another-launch"); expect(store.view()?.id).toBe("launch");
+  store.released("launch"); expect(store.view()).toBeUndefined();
+  finish(view()); await tick();
+  expect(store.view()).toBeUndefined(); expect(read).toHaveBeenCalledTimes(3);
+  expect(taskExecutorRelease).not.toHaveBeenCalled();
+});
+it("releases only an explicit exact reviewed snapshot and never an in-flight launch", async () => {
+  const review = { task: taskItem({ uuid:"task", id:"T-one" }), view:view(), origin:{} as HTMLElement };
+  expect(await releaseTaskExecutor({ ...review, view: { ...view(), phase:"waiting" } })).toBe(false);
+  expect(taskExecutorRelease).not.toHaveBeenCalled();
+  vi.mocked(taskExecutorRelease).mockResolvedValueOnce(undefined);
+  expect(await releaseTaskExecutor(review)).toBe(true);
+  expect(taskExecutorRelease).toHaveBeenCalledExactlyOnceWith("launch","exact");
+  expect(toast).toHaveBeenCalledWith("Launch record released", "Another launch is allowed. Nothing was stopped or sent again.");
+  vi.mocked(taskExecutorRelease).mockRejectedValueOnce(new Error("changed"));
+  expect(await releaseTaskExecutor(review)).toBe(false);
+  expect(notify).toHaveBeenCalledWith("error", "Could not release the executor launch record.", true);
+  expect(taskExecutorRelease).toHaveBeenCalledTimes(2);
+});

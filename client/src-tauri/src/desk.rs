@@ -210,6 +210,27 @@ pub fn load_mode(dir: &Path, tray_conf: Option<&str>) -> OpenMode {
         .unwrap_or_default()
 }
 
+/// The same configured launch terminal for New session and folder shells.
+pub fn terminal_settings(dir: &Path) -> zerus_client_core::terminal_launch::Settings {
+    let conf = tray_conf();
+    let value = |key| {
+        conf.as_deref()
+            .and_then(|text| tray_conf_value(text, key))
+            .unwrap_or_default()
+    };
+    zerus_client_core::terminal_launch::Settings {
+        template: value("terminal"),
+        open_mode: if cfg!(target_os = "macos") {
+            serde_json::to_value(load_mode(dir, conf.as_deref()))
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .unwrap_or_default()
+        } else {
+            value("open-mode")
+        },
+    }
+}
+
 #[cfg(target_os = "linux")]
 pub fn load_linux_mode(dir: &Path, tray_conf: Option<&str>) -> OpenMode {
     std::fs::read(dir.join(MODE_FILE))
@@ -801,7 +822,13 @@ fn deliver(app: &AppHandle, changes: Changes) {
 
 fn publish(app: &AppHandle, desk: &Desk, mode: OpenMode) {
     #[cfg(target_os = "linux")]
-    crate::platform::linux_tray::offer(app, desk.face(), desk.tooltip(), desk.menu(mode));
+    crate::platform::linux_tray::offer(
+        app,
+        desk.face(),
+        desk.tooltip(),
+        desk.menu(mode),
+        desk.badge(),
+    );
     #[cfg(target_os = "macos")]
     {
         let (face, tooltip, menu, badge) =
@@ -1073,6 +1100,7 @@ pub enum MenuAction {
         key: String,
         name: String,
         running: bool,
+        tty: String,
     },
     /// An "Open in" mode (`openModeChosen`).
     Mode(OpenMode),
@@ -1214,6 +1242,7 @@ impl Bar {
                     name,
                     text,
                     running,
+                    tty,
                 } => chosen_by(
                     text,
                     MenuAction::Session {
@@ -1221,6 +1250,7 @@ impl Bar {
                         key: key.clone(),
                         name: name.clone(),
                         running: *running,
+                        tty: tty.clone(),
                     },
                 ),
                 Entry::OpenIn(chosen) => {
@@ -2404,6 +2434,7 @@ mod tests {
             name: name.into(),
             text: name.into(),
             running,
+            tty: String::new(),
         }
     }
 
@@ -2460,6 +2491,7 @@ mod tests {
                 key: "run:a".into(),
                 name: "claude/sample-project/a".into(),
                 running: true,
+                tty: String::new(),
             })
         );
         assert!(matches!(
@@ -2521,5 +2553,27 @@ mod tests {
             None,
             "a menu shown since replaces the old one"
         );
+    }
+
+    #[test]
+    fn a_tray_action_keeps_the_shown_tty_when_the_listing_changes() {
+        let mut bar = Bar::default();
+        let mut entry = session("run:a", "sh/sample-project", true);
+        if let Entry::Session { computer, tty, .. } = &mut entry {
+            *computer = ComputerId::local();
+            *tty = "/dev/pts/7".into();
+        }
+        let first = bar.layout(&[entry.clone()]);
+        bar.began();
+        assert!(bar.ended());
+        if let Entry::Session { tty, .. } = &mut entry {
+            *tty = "/dev/pts/8".into();
+        }
+        bar.layout(&[entry]);
+        assert!(
+            matches!(bar.action(id(&first[0])), Some(MenuAction::Session { tty, .. }) if tty == "/dev/pts/7")
+        );
+        bar.began();
+        assert_eq!(bar.action(id(&first[0])), None);
     }
 }

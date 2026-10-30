@@ -236,7 +236,7 @@ pub enum Outcome {
     },
 }
 
-fn failed(detail: impl Into<String>) -> Outcome {
+pub(crate) fn failed(detail: impl Into<String>) -> Outcome {
     Outcome::Failed {
         detail: detail.into(),
     }
@@ -695,22 +695,7 @@ pub fn invocation(
             )
         }
         Action::ForgetBinding => {
-            if target.run_id.is_empty() || target.conversation_id.is_empty() {
-                return Err("the session has no run or conversation to forget".into());
-            }
-            let input = json!({
-                "request_id": request_id,
-                "action": "forget",
-                "expected_run_id": target.run_id,
-                "expected_conversation_id": target.conversation_id,
-            });
-            (
-                vec!["session-action".to_owned(), name, "--json".to_owned()],
-                Some(serde_json::to_vec(&input).map_err(|error| error.to_string())?),
-                15,
-                45,
-                Some(request_id.to_owned()),
-            )
+            return scoped_lifecycle_invocation(target, "forget", request_id, 15, 45)
         }
     };
     let peer_call = prepend_alias(&mut args, &target.computer);
@@ -719,6 +704,33 @@ pub fn invocation(
         stdin,
         timeout: Duration::from_secs(if peer_call { peer } else { local }),
         request_id: request,
+    })
+}
+
+/// Shared native lifecycle envelope. The operation is chosen in Rust; this is
+/// not a webview-selected command or a handoff/execution permission.
+pub(crate) fn scoped_lifecycle_invocation(
+    target: &Target,
+    operation: &str,
+    request_id: &str,
+    local: u64,
+    peer: u64,
+) -> Result<Invocation, String> {
+    if target.run_id.is_empty() || target.conversation_id.is_empty() {
+        return Err("the session has no run or conversation to forget".into());
+    }
+    let input = json!({"request_id":request_id,"action":operation,"expected_run_id":target.run_id,"expected_conversation_id":target.conversation_id});
+    let mut args = vec![
+        "session-action".into(),
+        target.name.clone(),
+        "--json".into(),
+    ];
+    let remote = prepend_alias(&mut args, &target.computer);
+    Ok(Invocation {
+        args,
+        stdin: Some(serde_json::to_vec(&input).map_err(|error| error.to_string())?),
+        timeout: Duration::from_secs(if remote { peer } else { local }),
+        request_id: Some(request_id.into()),
     })
 }
 
@@ -1137,7 +1149,9 @@ pub fn classify(target: &Target, action: &Action, invocation: &Invocation, exit:
         Action::Recovery { job_id, action } => {
             classify_recovery(target, invocation, job_id, *action, exit)
         }
-        Action::ForgetBinding => classify_forget_binding(target, invocation, exit),
+        Action::ForgetBinding => {
+            classify_scoped_lifecycle(target, invocation, exit, "The session was not forgotten.")
+        }
         Action::MarkRead { .. } => classify_read(target, exit),
         Action::Archive | Action::Terminate => classify_write(exit, true),
         _ => classify_write(exit, false),
@@ -1625,7 +1639,12 @@ pub fn clearable(details: &Value) -> bool {
 /// The scoped `runSessionAction` (`HgsClient.cpp:2169-2245`) for the OpenCode
 /// forget: only a `completed` receipt naming this request, session, run and
 /// conversation is done; a durable `failed` or `uncertain` one is never retried.
-fn classify_forget_binding(target: &Target, invocation: &Invocation, exit: Exit) -> Outcome {
+pub(crate) fn classify_scoped_lifecycle(
+    target: &Target,
+    invocation: &Invocation,
+    exit: Exit,
+    not_completed: &str,
+) -> Outcome {
     const FALLBACK: &str = "Could not complete the request. Check the session before retrying.";
     match exit {
         Exit::TimedOut => failed("Request timed out. Check the session before retrying."),
@@ -1650,7 +1669,7 @@ fn classify_forget_binding(target: &Target, invocation: &Invocation, exit: Exit)
                 .filter(|text| !text.is_empty());
             match (identity, field("status")) {
                 (true, Some("failed")) => {
-                    failed(reason.unwrap_or_else(|| "The session was not forgotten.".to_owned()))
+                    failed(reason.unwrap_or_else(|| not_completed.to_owned()))
                 }
                 (true, Some("uncertain")) => failed(match reason {
                     Some(reason) => format!(
@@ -1745,7 +1764,7 @@ fn classify_write(exit: Exit, may_clean_up: bool) -> Outcome {
 
 /// The single worktree report line; anything else (none, several, a partial
 /// object) is not trusted to name a worktree.
-fn cleanup_line(stderr: &str) -> Option<WorktreeCleanup> {
+pub(crate) fn cleanup_line(stderr: &str) -> Option<WorktreeCleanup> {
     let mut lines = stderr
         .lines()
         .filter_map(|line| line.strip_prefix(CLEANUP_PREFIX));

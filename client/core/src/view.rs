@@ -164,6 +164,9 @@ pub struct ViewRow {
 pub struct NotifyFacts {
     /// `attached > 0`: a terminal client is attached (`TrayMenu.cpp:30` shows "● ").
     pub attached: bool,
+    /// First listed terminal client's TTY, retained only while attached.
+    /// Native menus capture this value; peer TTYs never select a local tab.
+    pub client_tty: String,
     /// `SessionInfo::needsAction` (`tray/src/HgsClient.h:109-116`).
     pub needs_action: bool,
     /// The host's read mark names the current attention signature. The
@@ -1085,6 +1088,18 @@ fn notify_facts(value: &Value, session: &Session) -> NotifyFacts {
     children.sort_by(|a, b| a.id.cmp(&b.id));
     NotifyFacts {
         attached: value.get("attached").and_then(Value::as_i64).unwrap_or(0) > 0,
+        client_tty: value
+            .get("clients")
+            .and_then(Value::as_array)
+            .and_then(|clients| clients.first())
+            .and_then(Value::as_str)
+            .filter(|tty| {
+                value.get("attached").and_then(Value::as_i64).unwrap_or(0) > 0
+                    && tty.len() <= 4096
+                    && !tty.chars().any(char::is_control)
+            })
+            .unwrap_or_default()
+            .to_owned(),
         needs_action: session.needs_action(),
         acknowledged: session.attention_acknowledged(),
         cmd: text(value, "cmd").to_owned(),
@@ -1915,6 +1930,30 @@ mod tests {
         assert!(!quiet.notify.attached && !quiet.notify.needs_action && !quiet.notify.acknowledged);
         // The frontend never receives the facts.
         assert!(serde_json::to_value(&busy).unwrap().get("notify").is_none());
+    }
+
+    #[test]
+    fn a_terminal_target_keeps_only_the_first_bounded_attached_client_tty() {
+        let mut value = json!({"name":"sh/sample-project", "attached":2,
+            "clients":["/dev/pts/7", "/dev/pts/8"]});
+        assert_eq!(row(&value).notify.client_tty, "/dev/pts/7");
+        // This private hint never goes to the webview.
+        assert!(!serde_json::to_string(&row(&value))
+            .unwrap()
+            .contains("/dev/pts/7"));
+        for clients in [
+            json!([]),
+            json!([7, "/dev/pts/8"]),
+            json!(["bad\ntty"]),
+            json!(["x".repeat(4097)]),
+            json!({"0":"/dev/pts/7"}),
+        ] {
+            value["clients"] = clients;
+            assert_eq!(row(&value).notify.client_tty, "");
+        }
+        value["clients"] = json!(["/dev/pts/7"]);
+        value["attached"] = json!(0);
+        assert_eq!(row(&value).notify.client_tty, "");
     }
 
     fn fingerprint_row() -> Value {

@@ -21,10 +21,12 @@ import { startUpdates } from "./store/updates";
 import { composer } from "./store/composer";
 import { exitFlush } from "./store/exitFlush";
 import { startMotion } from "./ui/motion";
+import { platform } from "./store/shortcuts";
 
 const [mode, setMode] = createSignal<BridgeMode | "starting">("starting");
 
-// The motion attributes are on the root before the first frame.
+// The motion and platform attributes are on the root before the first frame.
+document.documentElement.dataset.platform = platform;
 exitFlush.register(composer.flushForExit);
 void exitFlush.start().catch((error) => console.warn("Zerus Next: exit flush listener did not start", error));
 startMotion();

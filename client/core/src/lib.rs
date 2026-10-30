@@ -3,7 +3,7 @@
 //! Activity state and handed out as keyed [`Change`]s that a [`Coalescer`]
 //! folds into one [`Batch`] per display frame.
 //!
-//! Pure Rust with no Tauri or async runtime, so it tests fast. See
+//! Pure Rust with no Tauri or async runtime by default, so it tests fast. See
 //! `docs/superpowers/plans/2026-10-28-tauri-client-phase1.md` (Tasks 3 and 4)
 //! and the "Event stream" section of `docs/reference.md`.
 
@@ -23,6 +23,7 @@ pub mod details;
 pub mod download_cache;
 pub mod drafts;
 pub mod external_file;
+pub mod file_download;
 pub mod fleet;
 pub mod fsx;
 pub mod input_queue;
@@ -64,6 +65,7 @@ pub mod swarm;
 pub mod task_board;
 pub mod task_cancel;
 pub mod task_details;
+pub mod task_executor;
 pub mod task_feedback;
 pub mod task_settings;
 pub mod task_start;

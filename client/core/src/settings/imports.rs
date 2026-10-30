@@ -13,6 +13,8 @@ const FAMILIES: &[&str] = &[
     "project-view",
     "row-density",
     "task-preferences",
+    "termination-default",
+    "project-vivid",
 ];
 
 #[derive(Default, Serialize, Deserialize)]
@@ -249,7 +251,9 @@ fn matches(family: &str, key: &str) -> bool {
             key.starts_with("machines/colors/") || key.starts_with("machines/vivid/")
         }
         "project-view" => key == "workspace/allSwarmProjects",
+        "project-vivid" => key == crate::swarm::qt_import::KEY,
         "row-density" => key == crate::row_preferences::KEY,
+        "termination-default" => key == "workspace/removeWorktreeAfterTermination",
         "task-preferences" => key == "tasks/onlySession",
         _ => false,
     }
@@ -271,6 +275,57 @@ fn converted(key: &str, value: &QtValue) -> Result<Value, &'static str> {
         return Err("invalid preference flag");
     }
     Ok(super::from_qt(kind, value))
+}
+
+/// Expand only the local fill preference from the existing organization
+/// decoder. Evidence continues to name/hash the original Qt store and key,
+/// never synthetic flattened Qt keys or a rewritten organization checkpoint.
+fn project_vivid(
+    value: &QtValue,
+    contents: &Contents,
+    handled_keys: &BTreeSet<String>,
+) -> Result<Map<String, Value>, &'static str> {
+    let bytes = match value {
+        QtValue::Bytes(bytes) => bytes.as_slice(),
+        QtValue::Text(text) => text.as_bytes(),
+        _ => return Err("invalid project fill source"),
+    };
+    let organization = crate::swarm::qt_import::decode(bytes)?;
+    let projects = organization["projects"]
+        .as_array()
+        .ok_or("invalid project fill source")?;
+    let mut ids = BTreeSet::new();
+    let mut values = Map::new();
+    for project in projects {
+        let id = project["id"]
+            .as_str()
+            .filter(|s| {
+                !s.is_empty()
+                    && s.len() <= 128
+                    && *s != "pinned"
+                    && !s.chars().any(char::is_control)
+            })
+            .ok_or("invalid project fill identity")?;
+        if !ids.insert(id)
+            || !project["name"].as_str().is_some_and(|s| {
+                !s.trim().is_empty() && s.len() <= 320 && !s.chars().any(char::is_control)
+            })
+        {
+            return Err("ambiguous project fill identity");
+        }
+        let key = format!("projects/vivid/{id}");
+        // Presence is decisive: explicit Next false is never an empty default.
+        if contents.values.contains_key(&key) || handled_keys.contains(&key) {
+            continue;
+        }
+        if let Some(vivid) = project.get("vivid") {
+            values.insert(
+                key,
+                Value::Bool(vivid.as_bool().ok_or("invalid project fill flag")?),
+            );
+        }
+    }
+    Ok(values)
 }
 
 pub(super) fn apply(
@@ -310,6 +365,13 @@ pub(super) fn apply(
         let mut candidate = contents.clone();
         let converted: Result<Map<String, Value>, _> = if entries.len() > MAX_KEYS {
             Err("family exceeds its key limit")
+        } else if *family == "project-vivid" {
+            match entries.first() {
+                Some((key, value)) if !handled_keys.contains(*key) => {
+                    project_vivid(value, contents, &handled_keys)
+                }
+                _ => Ok(Map::new()),
+            }
         } else {
             entries
                 .iter()

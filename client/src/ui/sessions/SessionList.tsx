@@ -1,3 +1,5 @@
+import { sessionFolderStatus } from "../../bridge";
+import { folderEntries, folderRequest, type FolderStatus } from "../../store/sessionFolders";
 import { groupOf } from "../../store/organization";
 import { taskDragOver, taskDrop } from "../../store/taskAssignment";
 import { For, Show, Suspense, createMemo, createEffect, createSignal, lazy, on, onCleanup } from "solid-js";
@@ -176,11 +178,13 @@ function clearEntry(s: Session): MenuEntry {
   };
 }
 
-export function sessionMenu(s: Session): MenuEntry[] {
+export function sessionMenu(s: Session, folderStatus?: { request: ReturnType<typeof folderRequest>; status: FolderStatus }): MenuEntry[] {
   // The selected row's menu reads the same details as the header (Qt's m_details).
   const details = s.key === selectedKey() && !subagentOpen() ? detailsFor(s, !computerOffline(s.computer), followedFor(s.key)) : undefined;
   const act = actionEntries(s, undefined, { context: true });
   const cp = copyEntries(s, details);
+  const request = folderRequest(s, details);
+  const folders = folderEntries(s, request, folderStatus && JSON.stringify(folderStatus.request) === JSON.stringify(request) ? folderStatus.status : undefined);
   const mute = muteEntry(s);
   const mark = markEntry(s);
   const fresh = freshActionEntry(s);
@@ -193,8 +197,8 @@ export function sessionMenu(s: Session): MenuEntry[] {
     // An archived row has no terminal, and no Mute or Mark group (Qt's `if (!archived)`).
     ...(archived ? [] : [s.agent === "deepseek" ? { label: "Open native DeepSeek UI", icon: "external-link", disabled: LATER } : { label: "Open terminal", icon: "square-terminal", disabled: LATER }]),
     ...(commands ? [commands] : []),
-    { label: "Open folder", icon: "folder-open", disabled: LATER },
-    { label: "Open shell in session folder", icon: "terminal", disabled: LATER },
+    folders.folder,
+    { ...folders.shell, icon: "terminal" },
     cp.command,
     ...(archived ? [] : [{ separator: true } as const, ...(mute ? [mute] : []), ...(mark ? [mark] : [])]),
     { separator: true },
@@ -211,6 +215,18 @@ export function sessionMenu(s: Session): MenuEntry[] {
     { separator: true },
     act.end,
   ];
+}
+
+/** Only an explicitly opened menu checks its folder; no per-row filesystem reads. */
+function openSessionMenu(e: MouseEvent, s: Session) {
+  const details = s.key === selectedKey() && !subagentOpen() ? detailsFor(s, !computerOffline(s.computer), followedFor(s.key)) : undefined;
+  const request = folderRequest(s, details);
+  const items = sessionMenu(s);
+  openMenu(e, items);
+  void sessionFolderStatus(request.target.computer, request.directory).then((status) => {
+    const shown = menu();
+    if (shown?.items === items) setMenu({ ...shown, items: sessionMenu(s, { request, status }) });
+  }).catch(() => { /* Keep explicit unavailable states, with no automatic retry. */ });
 }
 
 /** The project header's menu (SessionsWindow.cpp:2568-2616); its rules are organization-ui.ts's. */
@@ -674,7 +690,7 @@ function ListRow(props: { id: string; list: RowSource }) {
               // macOS turns Control-click into a context click; Control keeps its selection meaning here.
               if (e.ctrlKey && e.button === 0 && IS_MAC) { e.preventDefault(); selectSession(v().session.key, e); return; }
               if (multi[v().session.key] && selectedRows(listRows()).length > 1) { openMenu(e, selectionContextMenu(listRows())); return; }
-              if (!multi[v().session.key]) selectSession(v().session.key); openMenu(e, sessionMenu(v().session));
+              if (!multi[v().session.key]) selectSession(v().session.key); openSessionMenu(e, v().session);
             }}
             onDblClick={(e) => { if (!e.ctrlKey && !e.metaKey && !e.shiftKey) setRowCompact(v().session.key, !compactRows[v().session.key]); }}>
             <Show when={!v().compactRow} fallback={<CompactCard session={v().session} selected={selectedKey() === v().session.key || !!multi[v().session.key]} onExpand={() => setRowCompact(v().session.key, false)} />}>
@@ -811,7 +827,7 @@ function StripTile(props: { row: Extract<Row, { type: "card" }> }) {
   const tip = () => [`${s().name}: ${statusCaption(s())}`, s().summary, `${folderOf(s())}${s().branch ? ` / ${s().branch}` : ""} on ${s().machine}`, s().git ? gitTooltip(s()) : "", s().optionalQuestions ? `${s().optionalQuestions} optional question(s) waiting` : ""].filter(Boolean).join("\n");
   return (
     <button class="strip-tile" classList={{ selected: selectedKey() === s().key }} data-frame={frame()} title={tip()} onClick={() => selectSession(s().key)}
-      onContextMenu={(e) => { selectSession(s().key); openMenu(e, sessionMenu(s())); }}>
+      onContextMenu={(e) => { selectSession(s().key); openSessionMenu(e, s()); }}>
       <span class="st-block">
         <span class="st-top">
           <span class="st-status">

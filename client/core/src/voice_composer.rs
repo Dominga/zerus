@@ -328,6 +328,14 @@ pub struct Provider {
     pub profile: Map<String, Value>,
 }
 
+/// An exact saved recording, read by the native preview host only.
+/// The native host sends a bounded raw copy only when Play is requested.
+pub struct Preview {
+    pub id: String,
+    pub pcm: Vec<u8>,
+    pub video: Vec<u8>,
+}
+
 /// One composer's voice recording.
 pub struct VoiceComposer {
     state: State,
@@ -493,6 +501,19 @@ impl VoiceComposer {
     /// The recording's message ID, empty without one.
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    /// A Play request can only read this exact saved recording, never live capture.
+    pub fn preview(&self, id: &str) -> Option<Preview> {
+        (matches!(self.state, State::Preview | State::Uncertain)
+            && !id.is_empty()
+            && self.id == id
+            && !self.pcm.is_empty())
+        .then(|| Preview {
+            id: self.id.clone(),
+            pcm: self.pcm.clone(),
+            video: self.video.clone(),
+        })
     }
 
     /// The draft store key of the loaded session.
@@ -1881,6 +1902,8 @@ impl VoiceComposer {
 /// What the voice controls show.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Shown {
+    pub key: String,
+    pub id: String,
     pub state: State,
     /// The composer shows its recording state.
     pub recording: bool,
@@ -1927,6 +1950,8 @@ pub fn shown(composer: &VoiceComposer, playing: bool) -> Shown {
     let selected = c.selected_profile();
     let (notice_kind, notice_detail) = c.notice();
     Shown {
+        key: current.key.clone(),
+        id: c.id.clone(),
         state: c.state,
         recording: recording
             || c.state == State::Starting

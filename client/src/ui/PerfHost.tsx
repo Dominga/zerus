@@ -983,6 +983,18 @@ export function PerfHost() {
       const { contentSearchSmoke } = await import("../perf/contentSearchSmoke");
       void contentSearchSmoke(!!config().actions_smoke);
     }
+    if (new URLSearchParams(location.search).has("project-vivid-smoke") && inTauri()) {
+      const { projectVividSmoke } = await import("../perf/projectVividSmoke");
+      void projectVividSmoke(!!config().replay && !!config().actions_smoke, new URLSearchParams(location.search).get("project-vivid-smoke") === "restored");
+    }
+    if (new URLSearchParams(location.search).has("termination-cleanup-smoke") && inTauri()) {
+      const { terminationCleanupSmoke } = await import("../perf/terminationCleanupSmoke");
+      void terminationCleanupSmoke(!!config().replay && !!config().actions_smoke);
+    }
+    if (new URLSearchParams(location.search).has("file-reference-smoke") && inTauri()) {
+      const { fileReferenceSmoke } = await import("../perf/fileReferenceSmoke");
+      void fileReferenceSmoke(!!config().replay && !!config().actions_smoke);
+    }
     if (new URLSearchParams(location.search).has("markdown-smoke") && inTauri()) {
       const { markdownSmoke } = await import("../perf/markdownSmoke");
       void markdownSmoke(!!config().replay && !!config().actions_smoke);

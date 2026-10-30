@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+pub(super) const OPERATION_REMEDIATION: &str = "Keep Qt stopped. Wait for the named helper, or stop only that helper yourself. Then restart only hgs-desktop through its service manager and retry the original revoke request. Reboot only as a last resort.";
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum Reason {
@@ -185,9 +187,11 @@ fn response(location: &Location, store: &mut Store, command: &Command) -> Value 
                 .ok()
                 .flatten()
                 .is_some_and(|r| r.fingerprint == command.fingerprint(location));
-            json!({"request_id":command.request_id,"accepted":accepted,"durable":accepted,
+            let mut value = json!({"request_id":command.request_id,"accepted":accepted,"durable":accepted,
                 "revoked":false,"checkpointed":false,
-                "code":error.downcast_ref::<Declined>().map(|e|e.0).unwrap_or("revocation_not_settled")})
+                "code":error.downcast_ref::<Declined>().map(|e|e.0).unwrap_or("revocation_not_settled")});
+            remediation(store, &command.request_id, &mut value);
+            value
         }
     }
 }
@@ -272,10 +276,20 @@ pub fn request(location: &Location, store: &mut Store, value: &Value) -> Value {
 }
 fn query_result(location: &Location, store: &Store, id: &str) -> Value {
     query(location, store, id).unwrap_or_else(|error| {
-        json!({"request_id":id,
+        let mut value = json!({"request_id":id,
         "accepted":false,"revoked":false,"checkpointed":false,
-        "code":error.downcast_ref::<Declined>().map(|e|e.0).unwrap_or("audit_unavailable")})
+        "code":error.downcast_ref::<Declined>().map(|e|e.0).unwrap_or("audit_unavailable")});
+        remediation(store, id, &mut value);
+        value
     })
+}
+
+fn remediation(store: &Store, id: &str, value: &mut Value) {
+    let status = store.operation_status();
+    if status["undrained"] != 0 {
+        value["resource_custody"] = status["resource_custody"].clone();
+        value["resource_custody"]["revoke_request_id"] = id.into();
+    }
 }
 
 /// Exact CLI spelling for installers; callers may retain an explicit request
@@ -356,6 +370,20 @@ pub fn offline(location: &Location, command: &Command) -> Result<Value> {
     let _owner = location.lock()?;
     let epoch = uuid::Uuid::new_v4().to_string();
     let mut store = Store::open(location, &epoch)?;
+    // No service is running under owner.lock. Inspect exact existing custody
+    // off-thread; a bounded return never substitutes for a completed proof.
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        store.recover_operation_custody(location);
+        let status = store.operation_status();
+        if status["undrained"] == 0
+            || status["resource_custody"]["state"] != "probing"
+            || std::time::Instant::now() >= until
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     Ok(response(location, &mut store, command))
 }
 

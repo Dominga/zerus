@@ -1,5 +1,7 @@
 //! Durable desktop service kernel. Pre-handoff it owns no fleet or effect writer.
 mod catalog_read;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod custody;
 mod fanout;
 mod feed;
 mod handoff;
@@ -140,6 +142,19 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
                         "not running"
                     }
                 );
+                let custody = &status["operation_queue"]["resource_custody"];
+                if let Some(remediation) = custody["remediation"].as_str() {
+                    println!(
+                        "Operation attempt {}: helper {} is {}; revoke request {}.\n{}",
+                        custody["attempt_id"].as_str().unwrap_or("unavailable"),
+                        custody["helper_pid"],
+                        custody["helper_state"].as_str().unwrap_or("unavailable"),
+                        custody["revoke_request_id"]
+                            .as_str()
+                            .unwrap_or("unavailable"),
+                        remediation
+                    );
+                }
                 Ok(())
             }
             ["watch", "--json"] => watch(&location),
@@ -321,6 +336,7 @@ fn serve(location: Location) -> Result<()> {
     let mut collect_at = Instant::now();
     let mut failed = false;
     while platform::shutdown_signal() == 0 {
+        store.recover_operation_custody(&location);
         match receive.recv_timeout(Duration::from_millis(200)) {
             Ok(Event::Command(hello, queue)) => {
                 let value = projection(

@@ -9,7 +9,7 @@ use std::{
 };
 use zerus_desktop_migration::{canonical, configuration, HANDOFF_LOCK};
 
-pub const SCHEMA: i64 = 7;
+pub const SCHEMA: i64 = 8;
 pub struct HandoffLock {
     _lock: platform::FileLock,
     root: PathBuf,
@@ -185,6 +185,8 @@ pub struct Store {
     read_recovery_error: bool,
     operation_recovery_error: bool,
     catalog_collection_error: bool,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    custody: super::custody::Recovery,
 }
 impl Store {
     pub fn open(location: &Location, epoch: &str) -> Result<Self> {
@@ -271,6 +273,12 @@ impl Store {
             tx.execute_batch("PRAGMA user_version=7;")?;
             tx.commit()?;
         }
+        if version < 8 {
+            let tx = db.transaction()?;
+            zerus_desktop_ledger::operations::custody::migrate(&tx)?;
+            tx.execute_batch("CREATE INDEX desktop_commands_pending ON desktop_commands(state,at,request_id); PRAGMA user_version=8;")?;
+            tx.commit()?;
+        }
         zerus_desktop_catalog::begin_service(&mut db, epoch)?;
         // No marker or previous policy re-enables a worker after restart.
         zerus_desktop_ledger::begin_service(&mut db, epoch)?;
@@ -300,6 +308,8 @@ impl Store {
             read_recovery_error,
             operation_recovery_error,
             catalog_collection_error: false,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            custody: super::custody::Recovery::default(),
         })
     }
     pub fn checkpoint(&self) -> Result<()> {
@@ -331,7 +341,7 @@ impl Store {
         status
     }
     pub fn operation_status(&self) -> serde_json::Value {
-        match zerus_desktop_ledger::operations::totals(&self.db) {
+        let mut status = match zerus_desktop_ledger::operations::totals(&self.db) {
             Ok(totals) => {
                 serde_json::json!({"unsettled":totals.unsettled,"undrained":totals.undrained,
                 "admissions_paused":true,"recovery_error":self.operation_recovery_error})
@@ -340,7 +350,43 @@ impl Store {
                 serde_json::json!({"unsettled":null,"undrained":null,"admissions_paused":true,
                 "error":"operation_store_unavailable","recovery_error":self.operation_recovery_error})
             }
+        };
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            status["resource_custody"] = self.custody.status();
         }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            status["resource_custody"] =
+                serde_json::json!({"supported":false,"helper_state":"unavailable"});
+        }
+        if status["undrained"] != 0 {
+            use rusqlite::OptionalExtension;
+            if let Ok(Some((attempt, record))) =
+                zerus_desktop_ledger::operations::custody::pending(&self.db)
+            {
+                if status["resource_custody"]["attempt_id"] != attempt.ticket.attempt_id {
+                    status["resource_custody"] = serde_json::json!({"state":"unavailable","attempt_id":attempt.ticket.attempt_id,
+                        "helper_state":"unavailable","helper_pid":record.and_then(|r|r.helper.map(|h|h.pid))});
+                }
+            }
+            let request = self.db.query_row("SELECT request_id FROM desktop_commands WHERE state='prepared' ORDER BY at,request_id LIMIT 1",[],|r|r.get::<_,String>(0)).optional().ok().flatten();
+            status["resource_custody"]["revoke_request_id"] = request.into();
+            status["resource_custody"]["remediation"] = super::revoke::OPERATION_REMEDIATION.into();
+        }
+        status
+    }
+    pub fn recover_operation_custody(&mut self, location: &Location) {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if self.custody.tick(location, &mut self.db).is_err() {
+            self.operation_recovery_error = true;
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let _ = location;
+    }
+    #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+    pub(super) fn retry_operation_custody(&mut self) {
+        self.custody.retry_now();
     }
     pub fn catalog_status(&self) -> serde_json::Value {
         match zerus_desktop_catalog::totals(&self.db) {

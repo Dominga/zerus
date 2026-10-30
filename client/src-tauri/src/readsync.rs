@@ -13,11 +13,13 @@
 //! `Actions::observe`.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use zerus_client_core::actions::{classify, invocation};
+use zerus_client_core::desktop::drain::{Charge, Closed, Gate, Role};
 use zerus_client_core::readmarks::ReadMark;
 use zerus_client_core::readsync::{applied_all, ReadSync};
 use zerus_client_core::{default_hgs, Action, Exit, Invocation, Outcome, Target};
@@ -52,7 +54,7 @@ impl Wake {
 }
 
 /// Runs one invocation (in the app: `run` with `default_hgs()`).
-type Runner = Arc<dyn Fn(&Invocation) -> Exit + Send + Sync>;
+type Runner = Arc<dyn Fn(&Invocation, Charge, &AtomicBool) -> Exit + Send + Sync>;
 /// Milliseconds on a monotonic clock.
 type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
 
@@ -64,6 +66,28 @@ struct Worker {
     clock: Clock,
     /// False in a replay without `ZERUS_CLIENT_HGS`: marks are saved, never sent.
     deliver: bool,
+    gate: Gate,
+    cancel: Arc<AtomicBool>,
+}
+
+/// The future frontend handoff controller can stop this loop without blocking
+/// the GUI thread. Normal GUI execution does not close it yet. This covers delivery
+/// resources only; mark-store admission and flush need their own later barrier.
+/// Dropping a handle does not claim stop or drain, and never reopens its gate.
+#[derive(Clone)]
+pub struct ReadDelivery {
+    gate: Gate,
+    cancel: Arc<AtomicBool>,
+    wake: Wake,
+}
+
+impl ReadDelivery {
+    pub fn stop(&self) -> Closed {
+        let closed = self.gate.close();
+        self.cancel.store(true, Ordering::Release);
+        self.wake.notify();
+        closed
+    }
 }
 
 impl Worker {
@@ -74,6 +98,18 @@ impl Worker {
             run,
             clock,
             deliver,
+            // One loop plus the existing four in-flight read slots. Orphan
+            // pipes retain capacity even after ReadSync receives an outcome.
+            gate: Gate::new(5).expect("fixed read delivery capacity"),
+            cancel: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn control(&self) -> ReadDelivery {
+        ReadDelivery {
+            gate: self.gate.clone(),
+            cancel: self.cancel.clone(),
+            wake: self.actions.wake.clone(),
         }
     }
 
@@ -81,6 +117,9 @@ impl Worker {
     /// session's read lane is free goes to its own thread; one whose lane is
     /// busy is left for the next wake. Returns the delivery threads.
     fn pump(&self) -> Vec<JoinHandle<()>> {
+        if self.cancel.load(Ordering::Acquire) {
+            return Vec::new();
+        }
         // Saved before any call (`ReadMarkStore::add` before `setPending`).
         self.actions.flush_marks();
         if !self.deliver {
@@ -94,6 +133,10 @@ impl Worker {
         };
         let mut threads = Vec::new();
         for mark in due {
+            let Ok(charge) = self.gate.admit(Role::ReadDelivery) else {
+                lock(&self.sync).not_sent(&mark);
+                continue;
+            };
             let Some(claim) = self
                 .actions
                 .claim_lane(&mark.computer, &mark.name, Lane::Read)
@@ -105,7 +148,7 @@ impl Worker {
             let sent = mark.clone();
             let spawned = std::thread::Builder::new()
                 .name("zerus-read-mark".into())
-                .spawn(move || worker.deliver(&sent, claim));
+                .spawn(move || worker.deliver(&sent, claim, charge));
             match spawned {
                 Ok(thread) => threads.push(thread),
                 // The claim went with the closure.
@@ -117,7 +160,8 @@ impl Worker {
 
     /// Runs `hgs [@host] read` for the mark and reports how it ended. An
     /// unset part is sent as null, which hosts never apply (`ReadMark::payload`).
-    fn deliver(&self, mark: &ReadMark, claim: Claim) {
+    fn deliver(&self, mark: &ReadMark, claim: Claim, charge: Charge) {
+        let _callback = charge.clone();
         let target = Target {
             computer: mark.computer.clone(),
             name: mark.name.clone(),
@@ -132,9 +176,14 @@ impl Worker {
         // A panic still frees the slot, as a failed call.
         let outcome = catch_unwind(AssertUnwindSafe(|| {
             let request_id = uuid::Uuid::new_v4().to_string();
-            invocation(&target, &action, &request_id)
-                .ok()
-                .map(|inv| classify(&target, &action, &inv, (self.run)(&inv)))
+            invocation(&target, &action, &request_id).ok().map(|inv| {
+                classify(
+                    &target,
+                    &action,
+                    &inv,
+                    (self.run)(&inv, charge, &self.cancel),
+                )
+            })
         }));
         drop(claim);
         let (delivered, all) = match outcome {
@@ -145,6 +194,35 @@ impl Worker {
         // Qt pumps after each answer: the freed slot goes to the next mark.
         self.actions.wake.notify();
     }
+
+    fn start(self) -> ReadDelivery {
+        let control = self.control();
+        let wake = self.actions.wake.clone();
+        let charged = self.gate.admit(Role::ReadDelivery);
+        let spawned = charged.ok().and_then(|charge| {
+            std::thread::Builder::new()
+                .name("zerus-read-marks".into())
+                .spawn(move || {
+                    let _loop = charge;
+                    loop {
+                        // The first wake keeps the existing Qt interval.
+                        wake.wait(INTERVAL);
+                        if self.cancel.load(Ordering::Acquire) {
+                            break;
+                        }
+                        // Jobs may outlive this turn; their guards remain in
+                        // the actual callback and every owned pipe worker.
+                        drop(self.pump());
+                    }
+                })
+                .ok()
+        });
+        if spawned.is_none() {
+            control.stop();
+            eprintln!("zerus-client: the read-mark worker did not start");
+        }
+        control
+    }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -154,26 +232,28 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// Starts the worker for the app's marks. In replay mode without an explicit
 /// `ZERUS_CLIENT_HGS` it only saves queued marks and sends nothing, so a
 /// replay never drives the real CLI.
-pub fn start(actions: Actions) {
+pub fn start(actions: Actions) -> ReadDelivery {
     let deliver = !crate::actions::blocked();
     let started = Instant::now();
-    let run: Runner = Arc::new(|inv: &Invocation| zerus_client_core::run(&default_hgs(), inv));
+    let run: Runner = Arc::new(|inv: &Invocation, charge, cancel| {
+        match zerus_client_core::run::run_accounted(
+            &default_hgs(),
+            inv,
+            &[],
+            1 << 20,
+            cancel,
+            Arc::new(charge),
+        ) {
+            Ok(exit) => exit,
+            Err(_) => Exit::Abnormal {
+                stderr: String::new(),
+            },
+        }
+    });
     let clock: Clock =
         Arc::new(move || i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX));
-    let wake = actions.wake.clone();
     let worker = Worker::new(actions, run, clock, deliver);
-    let spawned = std::thread::Builder::new()
-        .name("zerus-read-marks".into())
-        .spawn(move || loop {
-            // The first wake comes after one interval, as Qt starts once the
-            // first snapshot has settled what it can, or when marks are queued.
-            wake.wait(INTERVAL);
-            // The deliveries run on; their threads are not joined.
-            drop(worker.pump());
-        });
-    if let Err(error) = spawned {
-        eprintln!("zerus-client: the read-mark worker did not start: {error}");
-    }
+    worker.start()
 }
 
 #[cfg(test)]
@@ -245,7 +325,7 @@ mod tests {
             let calls = Arc::new(Mutex::new(Vec::new()));
             let now = Arc::new(AtomicI64::new(0));
             let recorded = Arc::clone(&calls);
-            let run: Runner = Arc::new(move |inv: &Invocation| {
+            let run: Runner = Arc::new(move |inv: &Invocation, _charge, _cancel| {
                 recorded.lock().unwrap().push(inv.clone());
                 answer(inv)
             });
@@ -557,5 +637,51 @@ mod tests {
         std::thread::sleep(Duration::from_millis(20));
         wake.notify();
         assert!(waiter.join().unwrap());
+    }
+
+    #[test]
+    fn explicit_stop_keeps_pending_marks_and_never_starts_another_delivery() {
+        use zerus_client_core::desktop::drain::Observation;
+        let f = Fixture::new("drain-before-pump", |_| exit(0, serde_json::json!({})));
+        f.actions
+            .queue_marks(vec![mark("", "waiting", Some("reply"), None)]);
+        let closed = f.worker.control().stop();
+        assert_eq!(f.pump(), 0);
+        assert_eq!(closed.wait_until(Instant::now()), Observation::Idle);
+        assert_eq!(f.actions.pending_marks().len(), 1);
+        assert!(f.calls().is_empty());
+        f.at(i64::MAX);
+        f.actions.wake.notify();
+        assert_eq!(f.pump(), 0);
+    }
+
+    #[test]
+    fn stop_waits_for_the_real_delivery_callback_and_wakes_the_loop() {
+        use zerus_client_core::desktop::drain::Observation;
+        let (started, begun) = std::sync::mpsc::sync_channel(1);
+        let released = Arc::new((Mutex::new(false), Condvar::new()));
+        let ready = released.clone();
+        let f = Fixture::new("drain-callback", move |_| {
+            started.send(()).unwrap();
+            let _done = ready.1.wait_while(lock(&ready.0), |done| !*done).unwrap();
+            exit(1, serde_json::json!({}))
+        });
+        f.actions
+            .queue_marks(vec![mark("", "waiting", Some("reply"), None)]);
+        let control = f.worker.clone().start();
+        begun.recv_timeout(Duration::from_secs(2)).unwrap();
+        let closed = control.stop();
+        assert_eq!(closed.wait_until(Instant::now()), Observation::Pending);
+        *lock(&released.0) = true;
+        released.1.notify_all();
+        assert_eq!(
+            closed.wait_until(Instant::now() + Duration::from_secs(2)),
+            Observation::Idle
+        );
+        assert_eq!(f.actions.pending_marks().len(), 1);
+        f.at(i64::MAX);
+        f.actions.wake.notify();
+        assert_eq!(f.pump(), 0);
+        assert_eq!(f.calls().len(), 1);
     }
 }

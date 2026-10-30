@@ -527,7 +527,7 @@ fields under the design owner's 2026-10-30 ruling:
 | --- | --- | --- |
 | `workspace/projectFolderSplit` | `qt-retained-project-folder-split` | Private evidence only. Never decode/seed QSplitter bytes, including when Next's Projects folder/worktree splitter lands; Next keeps its default. |
 | `tasks/inspectorSplit` | `qt-retained-task-inspector-split` | Private evidence only. The mockup has no board/inspector splitter; never map this onto `workspace/inspectorWidth`. |
-| `workspace/removeWorktreeAfterTermination` | `qt-retained-termination-remove-default` | Private evidence until the Terminate dialog owner (`zerus-5wmh.10`) wires its checkbox. That owner may prefill once under the presentation exception, with explicit confirmation every time; never automatic-maintenance consent. |
+| `workspace/removeWorktreeAfterTermination` | `qt-retained-termination-remove-default` | The `.10.17` Terminate checkbox imports once through the existing `termination-default` G3 family only when Next has no value; an explicit current false wins. Its remembered state only prefills the dialog. Every Terminate/removal still needs explicit confirmation; never automatic-maintenance consent. |
 
 The mockup targets are `design/webui/src/screens/Projects.tsx` and
 `design/webui/src/dialogs/SessionDialogs.tsx`. The private body is
@@ -667,11 +667,20 @@ retries pending bytes, and an unhandled family retries at the next startup.
 A handled family skips Qt before reading it, across rollback and a second
 switch. This never seeds `run_groups`, run tokens, shared membership, project
 vivid state or local Windows folders. The design owner's 2026-10-30 ruling
-keeps those in the original private organization checkpoint: project vivid
-waits on the UI's Soft/Bright fill control and consumers (`.66.2.30`), then
-G3 `.66.5.3.9` may seed `projects/vivid/<exact-project-id>` once with every
-existing Next value winning. It never belongs in organization-layout/shared
-state. Local Windows drive/UNC folders wait on the Windows Next Projects local
+keeps their original bytes in the private organization checkpoint. With the
+approved Project color Soft/Bright fill consumer merged (`.66.2.30`), the
+Settings first-G3 `project-vivid` family (`.66.5.3.9`, schema 1) imports only
+explicit boolean `vivid` fields into `projects/vivid/<exact-project-id>` once.
+Every existing Next value, including false, wins. Absent flags remain absent;
+names never substitute for IDs. The existing organization decoder normalizes
+legacy groups and removes the obsolete pinned bucket. Duplicate, oversized or
+malformed identities and malformed candidate flags refuse the whole family,
+without partial values; it retries at the next startup. The usual Settings
+writer commits values with the handled record, naming the original
+`workspace/organization` key and the exact Qt store hash, path, time and
+mtime-after-switch condition. A handled family stays handled across rollback;
+the Qt store is never written. Vivid never belongs in organization-layout/shared
+state. Local Windows drive/UNC folders still wait on the Windows Next Projects local
 folder model (`.66.2.31`, G3 dependent `.66.5.3.10`); no independent G3 folder
 stack is created. No G1 evidence/marker or effect authority is added.
 

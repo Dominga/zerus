@@ -593,6 +593,23 @@ class TrayUpdate(unittest.TestCase):
                 self.assertEqual(self.running(), [])
                 self.assertFalse((self.root / 'systemctl').exists())
 
+    def test_undrained_operation_names_exact_attempt_and_manual_remediation(self):
+        self.env['REVOCATION_MODE'] = 'resources'
+        self.build('first', self.installed)
+        result = self.update(self.build('second'))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('33333333-3333-4333-8333-333333333333', result.stderr)
+        self.assertIn('helper 7654321 is running', result.stderr)
+        calls = [call for call in self.revocation_calls() if call['args'][:2] == ['desktop', 'revoke']]
+        self.assertEqual(len(calls), 1)
+        self.assertIn(calls[0]['request_id'], result.stderr)
+        self.assertIn('stop only that helper yourself', result.stderr)
+        self.assertIn('restart only hgs-desktop', result.stderr)
+        self.assertLess(result.stderr.index('Wait for'), result.stderr.index('restart only'))
+        self.assertLess(result.stderr.index('restart only'), result.stderr.index('Reboot only'))
+        self.assertEqual(self.running(), [])
+        self.assertFalse((self.root / 'systemctl').exists())
+
     def test_rollback_without_a_copy_changes_nothing(self):
         self.build('first', self.installed)
         result = self.rollback()

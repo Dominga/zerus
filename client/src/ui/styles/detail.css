@@ -484,6 +484,7 @@
 .qcard-status.error { color: var(--z-color-danger); }
 .wrap-pre { white-space: pre-wrap; }
 .session-file-path { overflow-wrap: anywhere; }
+.session-file-hint { white-space: pre-wrap; overflow-wrap: anywhere; }
 .act-reply-q { color: var(--z-color-muted); font-size: 10px; margin-bottom: 3px; }
 .act-reply-a { border: 1px solid var(--z-color-border); background: var(--z-color-code-bg); padding: 10px; border-radius: var(--z-radius-md); margin-bottom: 10px; }
 .act-reply-a b { color: var(--z-color-accent); font-size: 10px; }
@@ -499,3 +500,10 @@
   .cmp-settings-hint { white-space: pre-line; margin: 12px 0; }
   .cmp-settings-notice { margin-top: 10px; }
 }
+
+/* .9.38: Qt-only recording preview, between the mockup toolbar and editor. */
+.cmp-voice-preview { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 4px 14px; font-size: var(--fs-sm); }
+.cmp-voice-preview > .field { flex: 1; min-width: 140px; width: auto; font-size: var(--fs-sm); }
+.cmp-voice-hint { margin: 4px 14px; font-size: var(--fs-sm); }
+.cmp-voice-round { width: 200px; max-width: 100%; aspect-ratio: 1; border-radius: 50%; overflow: hidden; margin: 6px auto; background: var(--z-color-tile); }
+.cmp-voice-round > img, .cmp-voice-round > video { display: block; width: 100%; height: 100%; object-fit: cover; }

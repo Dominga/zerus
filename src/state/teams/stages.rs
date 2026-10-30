@@ -289,11 +289,16 @@ pub(crate) fn stalled(team: &Team, _at: f64) -> Vec<(u32, String, String)> {
 /// implementer's folder must not move meanwhile. Under the checkout rule the
 /// later stage reads its own detached checkout, and nothing changes.
 pub(crate) fn held(team: &Team, member: &str) -> Option<u32> {
+    held_by(team, member).map(|(task, _)| task)
+}
+
+/// #635 N4: the task and stage whose hold keeps `member`'s folder, for status.
+pub(crate) fn held_by(team: &Team, member: &str) -> Option<(u32, String)> {
     let folder = team.member(member).and_then(|member| member_folder_path(team, member).ok()).unwrap_or_default();
     team.tasks.iter().find_map(|task| {
         let pipeline = task.pipeline_run.as_ref()?;
-        if pipeline.runs.iter().any(|run| run.awaiting_run && same_folder(&run.folder, &folder) && run_live(team, run)) {
-            return Some(task.id);
+        if let Some(run) = pipeline.runs.iter().find(|run| run.awaiting_run && same_folder(&run.folder, &folder) && run_live(team, run)) {
+            return Some((task.id, run.kind.clone()));
         }
         let run = pipeline.open_run()?;
         let holds = match run.kind.as_str() {
@@ -317,7 +322,7 @@ pub(crate) fn held(team: &Team, member: &str) -> Option<u32> {
             _ => pipeline.hold_from_report && pipeline.stages.iter().skip(run.stage + 1).any(|stage| stage.kind == "test"),
         };
         let implementer = checked_attempt(task, run).map(|attempt| attempt.member.as_str()).unwrap_or(task.assignee.as_str());
-        (holds && implementer == member).then_some(task.id)
+        (holds && implementer == member).then(|| (task.id, run.kind.clone()))
     })
 }
 

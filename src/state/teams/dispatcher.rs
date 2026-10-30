@@ -3503,6 +3503,14 @@ fn start_stage_command(store: &mut Store, team: &Team, task_id: u32, run_id: &st
     if !member.computer.is_empty() {
         return not_run(store, format!("the stage's folder is on {}; Zerus runs a command stage on this computer only", member.computer));
     }
+    // #635 L1: no command or land stage of this task starts while an earlier
+    // run of the task is awaiting_run and live; a replaced report restarts the
+    // stage on the next tick after that run ends instead of beside it.
+    if team.task(task_id).and_then(|task| task.pipeline_run.as_ref()).is_some_and(|pipeline| {
+        pipeline.runs.iter().any(|run| run.awaiting_run && super::stages::run_live(team, run))
+    }) {
+        return Ok(());
+    }
     // #680 C1: the stage's folder by the preset's rule, exactly as a test's:
     // a detached checkout of the checked commit, or the task's held folder.
     let prepared = match super::stages::prepare(team, task_id) {
@@ -13144,6 +13152,116 @@ mod tests {
         assert!(!attempt_of(&t, &review, "qa"), "another member's stage run");
         assert!(attempt_of(&t, "a1", "dev"), "the implementer's own attempt");
         assert!(!attempt_of(&t, "nope", "dev"));
+    }
+
+    /// #635 N5: a real report replacing a captured one records the folder's
+    /// current HEAD again, so the land stage lands B, not the capture's A.
+    #[test]
+    fn a_replaced_captured_report_refreshes_the_folder_head_for_the_land_stage() {
+        let root = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(root.path(), || {
+            crate::state::builds::INLINE_RUNNER.with(|inline| inline.set(true));
+            let (lead, dev) = stage_repo(root.path());
+            let mut team = stage_team(&lead, &dev, "gate", &|_| command_preset("land", "git rev-parse HEAD > landed.txt".into(), &[("0", "accepted")]));
+            team.settings.land_allowed = true;
+            let mut store = Store::open_at(&super::super::store::path(), true).unwrap();
+            store.create(&uuid::Uuid::new_v4().to_string(), &json!({}), team, vec![]).unwrap();
+            deliver_all();
+            hand_out(&mut store, STAGE_TEAM, 1, "dev", None, "").unwrap();
+            let team = store.load(STAGE_TEAM).unwrap().unwrap();
+            let attempt = team.task(1).unwrap().open_attempt().unwrap().id.clone();
+            // A captured reply at HEAD A.
+            store
+                .mutate(None, STAGE_TEAM, None, |team, events| {
+                    ops::apply(
+                        team,
+                        "capture-report",
+                        &json!({"task":1,"attempt":attempt,"text":"Queued, after #12"}),
+                        &Actor::Member("dev".into()),
+                        &BTreeSet::new(),
+                        events,
+                    )
+                })
+                .unwrap();
+            // The member then commits with plain git (HEAD B) and sends the real report.
+            std::fs::write(dev.join("a.txt"), "one\n").unwrap();
+            git_in(&dev, &["add", "-A"]);
+            git_in(&dev, &["commit", "-q", "-m", "Task 1"]);
+            let head = git_in(&dev, &["rev-parse", "HEAD"]);
+            store
+                .mutate(None, STAGE_TEAM, None, |team, events| {
+                    ops::apply(
+                        team,
+                        "report",
+                        &json!({"task":1,"attempt":attempt,"text":"Done"}),
+                        &Actor::Member("dev".into()),
+                        &BTreeSet::new(),
+                        events,
+                    )
+                })
+                .unwrap();
+            let team = store.load(STAGE_TEAM).unwrap().unwrap();
+            assert_eq!(team.task(1).unwrap().attempts[0].folder_head, head, "the replacement records HEAD B");
+            run_stage(&mut store);
+            let team = store.load(STAGE_TEAM).unwrap().unwrap();
+            assert_eq!(team.task(1).unwrap().status, TaskStatus::Accepted, "{:?}", team.task(1).unwrap().pipeline_run);
+            assert_eq!(std::fs::read_to_string(dev.join("landed.txt")).unwrap().trim(), head, "the land stage landed B");
+            set_fake_hgs(None);
+            crate::state::builds::INLINE_RUNNER.with(|inline| inline.set(false));
+        });
+    }
+
+    /// #635 L1: a command or land stage of a task does not start while an
+    /// earlier run of the task is awaiting_run and live.
+    #[test]
+    fn a_command_stage_waits_for_an_earlier_run_of_the_task_that_is_awaiting() {
+        let root = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(root.path(), || {
+            crate::state::builds::INLINE_RUNNER.with(|inline| inline.set(true));
+            let (lead, dev) = stage_repo(root.path());
+            let team = stage_team(&lead, &dev, "gate", &|_| command_preset("command", "echo ok".into(), &[]));
+            let mut store = Store::open_at(&super::super::store::path(), true).unwrap();
+            store.create(&uuid::Uuid::new_v4().to_string(), &json!({}), team, vec![]).unwrap();
+            deliver_all();
+            hand_out(&mut store, STAGE_TEAM, 1, "dev", None, "").unwrap();
+            stage_report(&mut store, 1);
+            let previous = "99999999-9999-4999-8999-999999999999";
+            let dev_path = dev.display().to_string();
+            store
+                .mutate(None, STAGE_TEAM, None, |team, _| {
+                    let task = team.task_mut(1).unwrap();
+                    let pipeline = task.pipeline_run.as_mut().unwrap();
+                    pipeline.runs.insert(
+                        0,
+                        StageRun {
+                            id: previous.into(),
+                            stage: 0,
+                            kind: "test".into(),
+                            round: 0,
+                            attempt: 1,
+                            state: StageState::Passed,
+                            awaiting_run: true,
+                            folder: dev_path.clone(),
+                            ..Default::default()
+                        },
+                    );
+                    Ok(json!({}))
+                })
+                .unwrap();
+            let claim = crate::state::builds::test_running_claim(previous, Path::new(&dev_path), "team_stage");
+            let team = store.load(STAGE_TEAM).unwrap().unwrap();
+            let run_id = team.task(1).unwrap().pipeline_run.as_ref().unwrap().open_run().unwrap().id.clone();
+            start_stage_command(&mut store, &team, 1, &run_id).unwrap();
+            assert!(crate::state::builds::record(&run_id, now()).is_none(), "the stage did not start beside the live run");
+            assert_ne!(team.task(1).unwrap().status, TaskStatus::Accepted, "{:?}", team.task(1).unwrap().pipeline_run);
+            // The earlier run ends: the stage starts on the next tick.
+            std::fs::remove_file(&claim).unwrap();
+            run_stage(&mut store);
+            let team = store.load(STAGE_TEAM).unwrap().unwrap();
+            assert_eq!(team.task(1).unwrap().status, TaskStatus::Submitted, "{:?}", team.task(1).unwrap().pipeline_run);
+            set_fake_hgs(None);
+            crate::state::builds::INLINE_RUNNER.with(|inline| inline.set(false));
+        });
     }
 
     /// #684 N1: a plain git commit (not `hgs team commit`) is still the commit

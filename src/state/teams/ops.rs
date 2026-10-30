@@ -2675,6 +2675,13 @@ fn report_with(team: &mut Team, input: &Value, actor: &Actor, captured: bool, ev
         report.structured = structured.clone();
         report.unstructured = structured.is_none();
         report.at = now();
+        // #635 N5: a replacement (a captured reply's real report) records the
+        // folder's HEAD and branch again, so the stage checks the commit the
+        // member reports, not the capture's.
+        if !by_member.is_empty() {
+            attempt.folder_head = folder_head.clone();
+            attempt.folder_branch = folder_branch.clone();
+        }
         let was_captured = std::mem::take(&mut report.captured);
         attempt.no_report = false;
         // The lead hears the real report as a report, not as the captured one;

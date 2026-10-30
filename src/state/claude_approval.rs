@@ -43,10 +43,10 @@ fn gutter(row:&str)->&str {row.strip_prefix("│ ").unwrap_or(row)}
 
 // This advisory counts down, then disappears when the user starts navigating.
 // It is not the command's warning or a permission choice. Preserve display
-// text, but exclude only this exact native advisory from the decision identity.
+// text, but exclude only these exact native advisories from the decision identity.
 fn identity_body(panel:&Panel)->Vec<String> {
     static TIMER:std::sync::OnceLock<regex::Regex>=std::sync::OnceLock::new();
-    let timer=TIMER.get_or_init(||regex::Regex::new(r"^⚠ Claude Code will automatically deny this request in [0-9]{1,3}:[0-9]{2}, to avoid blocking progress on an unattended session$").unwrap());
+    let timer=TIMER.get_or_init(||regex::Regex::new(r"^⚠ Claude Code will automatically (?:deny this request in [0-9]{1,3}:[0-9]{2}, to avoid blocking progress on an unattended session|block this request in [0-9]{1,3}:[0-9]{2}, to avoid holding up an unattended session)$").unwrap());
     let after_fence=panel.body.iter().rposition(|r|rule(r,'╌')||rule(r,'─'))
         .map_or(if panel.title=="Bash safety confirmation"{0}else{panel.body.len()},|i|i+1);
     let mut result=Vec::new();let mut index=0;
@@ -893,6 +893,12 @@ pub(super) fn reconcile(record:Value)->Value {
         assert_eq!(q["question_hash"],card(&r,&wrapped.replace("in 2:00,","in 1:59,"))["question_hash"]);
         assert_eq!(q["question_hash"],card(&r,&SAFETY.replace(advisory,""))["question_hash"]);
         assert_ne!(q["question_hash"],card(&r,&SAFETY.replace(advisory,&format!("{advisory} Changed warning")))["question_hash"]);
+        let current_advisory="⚠ Claude Code will automatically block this request in 2:00, to avoid holding up an unattended session";
+        let current=SAFETY.replace(advisory,current_advisory);
+        assert_eq!(q["question_hash"],card(&r,&current)["question_hash"]);
+        assert_eq!(q["question_hash"],card(&r,&current.replace("in 2:00,","in 1:59,"))["question_hash"]);
+        assert!(string(&card(&r,&current)["questions"][0],"body").contains(current_advisory));
+        assert_ne!(q["question_hash"],card(&r,&current.replace("holding up","blocking progress"))["question_hash"]);
         let mut command_panel=parse(SAFETY).unwrap();
         let fence=command_panel.body.iter().rposition(|row|rule(row,'╌')).unwrap();
         command_panel.body.insert(fence,advisory.into());

@@ -316,6 +316,13 @@ pub(crate) enum Step {
     /// The dispatcher saw a member's session live or stopped; status derives
     /// `stopped` from it without a listing of its own (L3).
     Liveness { member: String, live: bool },
+    /// U56: the member's phase and activity as the dispatcher saw them, so
+    /// status shows them without an inspect.
+    Watch { member: String, phase: String, activity: String, last_event_at: Option<f64> },
+    /// U56: a busy member with no session event for stuck_minutes is stuck.
+    MarkStuck { member: String, reason: String, phase: String },
+    /// U56: the member reported again or is idle: no longer stuck.
+    Unstuck { member: String },
     /// U52: the member's session exited on its own and the team setting lets
     /// Zerus launch it again into the same conversation.
     Restart { member: String },
@@ -698,6 +705,31 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                 .any(|(old, new)| old.name != new.name || old.command != new.command || old.since != new.since);
         if changed {
             steps.push(Step::Services { member: member.id.clone(), services: found.services.clone() });
+        }
+        // U56: the member's phase and activity feed status; a busy member with
+        // no session event for stuck_minutes is marked stuck, once per episode.
+        // A question, a Zerus build or Background work is never stuck.
+        if found.live {
+            if member.seen_phase != found.phase || member.seen_activity != found.activity || member.seen_event_at != found.last_event_at {
+                steps.push(Step::Watch {
+                    member: member.id.clone(),
+                    phase: found.phase.clone(),
+                    activity: found.activity.clone(),
+                    last_event_at: found.last_event_at,
+                });
+            }
+            let busy = found.activity == "busy" || matches!(found.phase.as_str(), "working" | "tool" | "compacting");
+            let quiet = found.last_event_at.map(|at| now - at).unwrap_or(0.0);
+            let limit = super::ops::stuck_minutes(team) * 60.0;
+            let stuck = busy && !found.asking && !found.background && !found.building && quiet >= limit;
+            if stuck && member.stuck.is_none() {
+                let reason = if found.phase == "compacting" { "compaction_timeout" } else { "no_progress" };
+                steps.push(Step::MarkStuck { member: member.id.clone(), reason: reason.into(), phase: found.phase.clone() });
+            } else if !stuck && member.stuck.is_some() {
+                steps.push(Step::Unstuck { member: member.id.clone() });
+            }
+        } else if member.stuck.is_some() {
+            steps.push(Step::Unstuck { member: member.id.clone() });
         }
     }
     // U52: a member session that exited on its own is launched again into its
@@ -5342,6 +5374,30 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             }
             Ok(())
         }),
+        Step::Watch { member, phase, activity, last_event_at } => change(store, &team.id, |team, _| {
+            let found = team.members.iter_mut().find(|found| found.id == *member).context("unknown member")?;
+            found.seen_phase = phase.clone();
+            found.seen_activity = activity.clone();
+            found.seen_event_at = *last_event_at;
+            Ok(())
+        }),
+        Step::MarkStuck { member, reason, phase } => {
+            let role = team.role_of(member);
+            change(store, &team.id, |team, events| {
+                let found = team.members.iter_mut().find(|found| found.id == *member).context("unknown member")?;
+                found.stuck = Some(MemberStuck { at: now(), reason: reason.clone(), phase: phase.clone() });
+                events.push(Event::new(
+                    "member_stuck",
+                    json!({"member":role,"id":member,"reason":reason,"phase":phase}),
+                ));
+                Ok(())
+            })
+        }
+        Step::Unstuck { member } => change(store, &team.id, |team, _| {
+            let found = team.members.iter_mut().find(|found| found.id == *member).context("unknown member")?;
+            found.stuck = None;
+            Ok(())
+        }),
         Step::Liveness { member, live } => change(store, &team.id, |team, _| {
             // The dispatcher sees the live sessions: one recorded liveness per
             // change lets status derive `stopped` by itself (L3).
@@ -9262,6 +9318,86 @@ mod tests {
         // Once told, the lead is not told again for the attempt.
         t.tasks.iter_mut().find(|task| task.id == id).unwrap().attempts[0].told_lead.push("silent".into());
         assert!(!steps(&t, &[lead, dev], at).iter().any(|step| matches!(step, Step::Silent { .. })));
+    }
+
+    /// #628: a DeepSeek session's listing `last_event_at` does not advance with
+    /// its dsh_native tool events; the newest event in the session decides,
+    /// and a working member is not called silent.
+    /// U56: a busy member with no session event for stuck_minutes is stuck with
+    /// its reason; a question, Background work or a fresh event is not stuck.
+    #[test]
+    fn a_stuck_member_is_marked_when_busy_without_events() {
+        let at = 10_000.0;
+        let mut t = team();
+        let lead = session("claude/x/lead", "r0", true);
+        let mut dev = session("codex/x/dev", "r1", true);
+        dev.activity = "busy".into();
+        dev.phase = "tool".into();
+        dev.last_event_at = Some(at - 11.0 * 60.0);
+        let found = steps(&t, &[lead.clone(), dev.clone()], at);
+        assert!(
+            found.iter().any(|step| matches!(step, Step::MarkStuck { member, reason, .. } if member == "dev" && reason == "no_progress")),
+            "{found:?}"
+        );
+        // A question, Background work, a Zerus build or a fresh event is not stuck.
+        for cleared in [
+            { let mut seen = dev.clone(); seen.asking = true; seen },
+            { let mut seen = dev.clone(); seen.background = true; seen },
+            { let mut seen = dev.clone(); seen.building = true; seen },
+            { let mut seen = dev.clone(); seen.last_event_at = Some(at - 60.0); seen },
+        ] {
+            assert!(
+                !steps(&t, &[lead.clone(), cleared.clone()], at).iter().any(|step| matches!(step, Step::MarkStuck { .. })),
+                "{:?}",
+                cleared
+            );
+        }
+        // Compaction is named by its own reason.
+        let mut compacting = dev.clone();
+        compacting.phase = "compacting".into();
+        let found = steps(&t, &[lead.clone(), compacting], at);
+        assert!(
+            found.iter().any(|step| matches!(step, Step::MarkStuck { reason, .. } if reason == "compaction_timeout")),
+            "{found:?}"
+        );
+        // stuck_minutes moves the limit: 5 minutes marks the 6-minute silence.
+        t.settings.stuck_minutes = 5;
+        let mut five = dev.clone();
+        five.last_event_at = Some(at - 6.0 * 60.0);
+        assert!(steps(&t, &[lead.clone(), five], at).iter().any(|step| matches!(step, Step::MarkStuck { .. })));
+        // Marked once: the same state is not marked again, and a member that
+        // reports again is unmarked.
+        t.members.iter_mut().find(|member| member.id == "dev").unwrap().stuck =
+            Some(MemberStuck { at, reason: "no_progress".into(), phase: "tool".into() });
+        assert!(!steps(&t, &[lead.clone(), dev.clone()], at).iter().any(|step| matches!(step, Step::MarkStuck { .. })));
+        let mut fresh = dev.clone();
+        fresh.last_event_at = Some(at - 5.0);
+        assert!(steps(&t, &[lead, fresh], at).iter().any(|step| matches!(step, Step::Unstuck { member } if member == "dev")));
+    }
+
+    /// U56: marking a member stuck records it, the feed says so, and the lead's
+    /// inbox has one item naming the id, phase, duration and waiting tasks.
+    #[test]
+    fn a_stuck_member_gets_one_item_and_a_feed_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let t = team();
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+        run_step(
+            &mut store,
+            &t,
+            &Step::MarkStuck { member: "dev".into(), reason: "no_progress".into(), phase: "tool".into() },
+            "",
+        )
+        .unwrap();
+        let saved = store.load(&t.id).unwrap().unwrap();
+        assert!(saved.member("dev").unwrap().stuck.is_some());
+        let items = super::inbox::items(&saved);
+        let item = items.iter().find(|item| item.kind == "member_stuck").expect("a member_stuck item");
+        assert!(item.summary.contains("dev (Backend)") && item.summary.contains("phase tool"), "{}", item.summary);
+        assert!(item.command.contains("pause-member"), "{}", item.command);
+        let feed = store.events(&t.id, None, 20).unwrap().to_string();
+        assert!(feed.contains("member_stuck"), "{feed}");
     }
 
     /// #628: a DeepSeek session's listing `last_event_at` does not advance with

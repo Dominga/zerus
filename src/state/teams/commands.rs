@@ -841,6 +841,13 @@ pub(super) fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::d
             // U54: the real account of the member's session, beside its
             // configured one.
             entry["session_account"] = json!(session_account(member));
+            // U56: each member's session phase, activity and minutes without an
+            // event, and whether Zerus marks it stuck - status without inspect.
+            entry["phase"] = json!(member.seen_phase);
+            entry["activity"] = json!(member.seen_activity);
+            entry["minutes_without_progress"] =
+                json!(member.seen_event_at.map(|at| ((crate::state::now() - at) / 60.0).max(0.0).round() as u64));
+            entry["stuck"] = serde_json::to_value(&member.stuck).unwrap_or(Value::Null);
             let folder = super::dispatcher::member_folder_path(team, member).unwrap_or_default();
             // C11: a member on another computer works in a folder there; this
             // computer cannot read it, so its facts stay empty rather than
@@ -7688,6 +7695,24 @@ mod tests {
         let team = store.load("t").unwrap().unwrap();
         assert_eq!(team.proposals[1]["note"], "not now");
         assert_eq!(team.task(1).unwrap().status, before, "a Deny runs nothing");
+    }
+
+    /// U56: status shows each member's phase, activity and minutes without
+    /// progress, and whether it is stuck, from the dispatcher's last view.
+    #[test]
+    fn status_shows_each_members_phase_activity_and_minutes_without_progress() {
+        use super::super::model::MemberStuck;
+        let mut team = running_team();
+        let dev = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
+        dev.seen_phase = "tool".into();
+        dev.seen_activity = "busy".into();
+        dev.seen_event_at = Some(crate::state::now() - 25.0 * 60.0);
+        dev.stuck = Some(MemberStuck { at: crate::state::now() - 15.0 * 60.0, reason: "no_progress".into(), phase: "tool".into() });
+        let value = view_with(&team, &[], None);
+        let dev = value["members"].as_array().unwrap().iter().find(|member| member["id"] == "dev").unwrap();
+        assert_eq!((dev["phase"].as_str(), dev["activity"].as_str()), (Some("tool"), Some("busy")));
+        assert_eq!(dev["minutes_without_progress"], 25);
+        assert_eq!(dev["stuck"]["reason"], "no_progress");
     }
 
     #[test]

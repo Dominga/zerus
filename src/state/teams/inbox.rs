@@ -213,6 +213,45 @@ fn all_items(team: &Team) -> Vec<Item> {
             detail: format!("{role} is draining. {listed} keep it open: {why}."),
         });
     }
+    // U56: a stuck member is one item with its id, phase, duration and the
+    // tasks that wait for it, and the commands that free it.
+    for member in team.members.iter().filter(|member| member.state != MemberState::Removed && member.stuck.is_some()) {
+        let stuck = member.stuck.as_ref().unwrap();
+        let waiting: Vec<u32> = team
+            .tasks
+            .iter()
+            .filter(|task| task.assignee == member.id && !task.status.finished())
+            .map(|task| task.id)
+            .collect();
+        let minutes = ((crate::state::now() - stuck.at) / 60.0).max(0.0).round() as u64;
+        let why = if stuck.reason == "compaction_timeout" { "is stuck in compaction" } else { "has made no progress" };
+        let listed = if waiting.is_empty() {
+            String::new()
+        } else {
+            format!("; waiting for {}", waiting.iter().map(|id| format!("#{id}")).collect::<Vec<_>>().join(" "))
+        };
+        let phase = if stuck.phase.is_empty() { "unknown".to_owned() } else { stuck.phase.clone() };
+        let label = format!("{} ({})", member.id, team.role_of(&member.id));
+        items.push(Item {
+            subagents: Value::Null,
+            kind: "member_stuck",
+            key: format!("member_stuck:{}", member.id),
+            task: waiting.first().copied(),
+            member: label.clone(),
+            since: stuck.at,
+            summary: summary(&format!("{label} {why} for {minutes} min (phase {phase}){listed}")),
+            command: format!(
+                "{} | hgs team pause-member --json",
+                json!({"request_id":PLACEHOLDER,"team":team.id,"member":member.id})
+            ),
+            detail: format!(
+                "{}{}. The lead may interrupt it with pause-member and resume it with resume-member{}.",
+                if stuck.reason == "compaction_timeout" { "The member's context compaction did not finish. " } else { "" },
+                if team.settings.lead_restarts_stuck { "" } else { "; the owner sets lead_restarts_stuck to allow the lead to restart it" },
+                listed
+            ),
+        });
+    }
     // U52: a member whose session crashed too often this hour stays stopped
     // until the owner or the lead starts it again.
     for member in team.members.iter().filter(|member| member.id != team.lead && member.crash_told).filter(|_| active) {

@@ -209,6 +209,14 @@ pub struct BuildCache {
     /// The tool, such as sccache or ccache.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub tool: String,
+    /// The shared cache folder, its size and the compilers it serves
+    /// ("rust", "cxx"); the team runner reads them (#721).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub dir: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub size: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compilers: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]

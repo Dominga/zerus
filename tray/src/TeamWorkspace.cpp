@@ -1438,13 +1438,27 @@ private:
     {
         if (m_fitting) return;
         const QScopedValueRollback<bool> once(m_fitting, true);
-        int level = 0;
-        for (; level < 3; ++level) {
-            apply(level);
-            if (sizeHint().width() <= width()) break;
+        // whitewh-115: the shortened toolbar jumped between two steps at the
+        // boundaries because a step's own hiding changed the row it was
+        // measured from. Measure every step with its own controls first, from
+        // the same width, then choose: the step it was decided from never
+        // depends on the step currently applied.
+        int need[4] = {0, 0, 0, 0};
+        for (int step = 0; step < 4; ++step) {
+            apply(step);
+            need[step] = sizeHint().width();
         }
-        if (level == 3) apply(3);
+        const int room = width();
+        int level = m_level < 0 ? 0 : qBound(0, m_level, 3);
+        while (level < 3 && need[level] > room) ++level;
+        // Hysteresis: widening needs a little slack beyond the narrower step's
+        // own measure, so a poll or a refit exactly at the boundary keeps the
+        // step it is on instead of flipping back and forth.
+        while (level > 0 && need[level - 1] <= room - kGrowSlack) --level;
+        apply(level);
     }
+    /// The slack a refit needs before it widens the toolbar by one step.
+    static constexpr int kGrowSlack = 8;
     void apply(int level)
     {
         if (level == m_level) { if (level == 3) fitCompactSpacing(); return; }

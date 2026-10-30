@@ -831,6 +831,7 @@ private slots:
     void leadHeaderShots();
     void phaseScrollsInEveryView();
     void aNarrowToolbarKeepsOnlyItsIcons();
+    void theNarrowToolbarSettlesOnOneStep();
     void phaseScrollDecisions();
     void sideListsAndMemberTasks();
     void waitingPageListsEveryKindAcrossTeams();
@@ -10650,6 +10651,104 @@ void TestTeamsUi::aNarrowToolbarKeepsOnlyItsIcons()
     split->setSizes({1100, 340});
     QTRY_COMPARE(segment("teamWorkspaceView", "graph")->text(), QStringLiteral("Graph"));
     QTRY_COMPARE(segment("teamWorkspaceFilter", "problems")->text(), QStringLiteral("Problems"));
+    QSettings().remove("workspace/skin");
+}
+
+// whitewh-115: in the shortened mode the toolbar jumped between its fit steps
+// at the boundaries. Each step is measured with its own controls now, and the
+// choice only widens with slack; at a boundary it must settle on one step and
+// keep it across refits and polls.
+void TestTeamsUi::theNarrowToolbarSettlesOnOneStep()
+{
+    QSettings().setValue("workspace/skin", "whitewh");
+    setTeam(prototypeTeam());
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(prototypeLive);
+    darkPalette(); workspace.setTheme(true);
+    workspace.resize(1440, 900); workspace.show();
+    controller.refresh(); panel.showTeam("team-1"); workspace.showTeam("team-1");
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceFilter"));
+    auto *split = workspace.findChild<QSplitter *>("teamWorkspaceSplit");
+    QVERIFY(split);
+    const auto bar = [&] { return workspace.findChild<QWidget *>("teamWorkspaceToolbar"); };
+    const auto segment = [&](const char *group, const char *value) -> QPushButton * {
+        auto *found = workspace.findChild<QWidget *>(group);
+        if (!found) return nullptr;
+        for (auto *b : found->findChildren<QPushButton *>()) if (b->property("segment") == value) return b;
+        return nullptr;
+    };
+    // What the row settled on: the wide Heat switch, its one-button menu, the
+    // words on the view and filter segments, and Hide finished tell the four
+    // steps apart.
+    const auto signature = [&]() -> QString {
+        QString s;
+        auto *graph = segment("teamWorkspaceView", "graph");
+        auto *problems = segment("teamWorkspaceFilter", "problems");
+        const auto shown = [&](const char *name) { auto *w = workspace.findChild<QWidget *>(name); return w && w->isVisible(); };
+        s += graph && !graph->text().isEmpty() ? QLatin1Char('v') : QLatin1Char('V');
+        s += problems && !problems->text().isEmpty() ? QLatin1Char('f') : QLatin1Char('F');
+        s += shown("teamWorkspaceHeatWide") ? QLatin1Char('w') : QLatin1Char('-');
+        s += shown("teamWorkspaceHeatBox") ? QLatin1Char('b') : QLatin1Char('-');
+        s += shown("teamWorkspaceHeatMenu") ? QLatin1Char('m') : QLatin1Char('-');
+        s += shown("teamWorkspaceHideFinished") ? QLatin1Char('h') : QLatin1Char('-');
+        return s;
+    };
+    const auto settle = [&](int width) {
+        split->setSizes({width, 1440 - width});
+        QCoreApplication::processEvents();
+        return signature();
+    };
+    // One refit at the same width: a hide/show (the row refits on show) and a
+    // one-pixel nudge there and back (two resize refits).
+    const auto refit = [&](int width) {
+        auto *row = bar();
+        row->hide(); row->show();
+        split->setSizes({width - 1, 1440 - width + 1});
+        QCoreApplication::processEvents();
+        split->setSizes({width, 1440 - width});
+        QCoreApplication::processEvents();
+        return signature();
+    };
+    // The steps across a range of widths; a change between neighbours is a
+    // boundary.
+    QMap<int, QString> steps;
+    for (int width = 400; width <= 1040; width += 4) steps.insert(width, settle(width));
+    QList<int> boundaries;
+    for (int width = 404; width <= 1040; width += 4)
+        if (steps.value(width) != steps.value(width - 4)) boundaries << width;
+    QVERIFY2(boundaries.size() >= 2, "the scan found the toolbar's steps");
+    // Repeated refits at both sides of every boundary keep exactly the step the
+    // width decided on; hiding a control never changes the step it started from.
+    for (int boundary : boundaries) {
+        for (int width : {boundary - 1, boundary, boundary + 1}) {
+            const QString settled = settle(width);
+            for (int pass = 0; pass < 5; ++pass) {
+                QCOMPARE(refit(width), settled);
+                QCOMPARE(settle(width), settled);
+            }
+        }
+    }
+    // A poll rebuilds the row; at the same width it settles on the same step.
+    for (int boundary : boundaries) {
+        const QString settled = settle(boundary);
+        controller.refresh();
+        QTRY_VERIFY(bar() && bar()->isVisible());
+        QTest::qWait(50);
+        QCOMPARE(signature(), settled);
+    }
+    // Shots: the icon-only toolbar in both themes (the existing narrow test's
+    // 430 px height of the split).
+    const int narrow = 430;
+    settle(narrow);
+    QTest::qWait(100);
+    shot(bar(), "team-toolbar-settled-dark");
+    lightPalette(); workspace.setTheme(false);
+    settle(narrow);
+    QTest::qWait(100);
+    lightShot(bar(), "team-toolbar-settled-light");
     QSettings().remove("workspace/skin");
 }
 

@@ -10,14 +10,14 @@ use super::store::{self, canonical_uuid, Event, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|add-to-phase|approve-phase|discard-phase|return-to-draft|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|run|templates|safe-action|reports-to|sub-lead --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|add-to-phase|approve-phase|discard-phase|return-to-draft|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|close-phase|run|templates|safe-action|reports-to|sub-lead --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
 
 const MUTATIONS: &[&str] = &[
     "plan", "extend", "edit-draft", "move-phase", "add-to-phase", "approve-phase", "discard-phase", "return-to-draft", "reject-phase", "undo-reject-phase",
     "rework-phase", "reports-to", "sub-lead", "finish", "approve", "commit", "discard", "pause", "resume", "stop",
     "archive", "report", "ask", "reply", "hold", "release", "accept", "reject", "skip-stage", "send-back", "reassign", "take-over", "cancel",
     "retry", "check", "expect", "swap-member", "use-last-reply", "relaunch", "add-member", "scale", "drain", "pause-member", "resume-member", "remove-member", "settings", "finding",
-    "draft", "propose",
+    "draft", "propose", "close-phase", "integrate-build",
 ];
 
 fn text<'a>(input: &'a Value, key: &str) -> &'a str {
@@ -549,6 +549,28 @@ pub(super) fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::d
     value["ready"] = json!(plan::ready(team));
     value["waiting_for_lead"] = json!(waiting_for_lead(team));
     value["pending_phase"] = json!(pending_phase(team));
+    // U59: the plan mode (standard or free) the team's phase runs in, and the
+    // free phase's own state for the plan header.
+    value["plan_mode"] = json!(team.plan_mode);
+    // U59: the lead's mode proposal at the start of planning; the owner's
+    // approval chooses one of the two.
+    value["plan_mode_offer"] = json!(team.plan_mode_offer);
+    value["plan_mode_reason"] = json!(team.plan_mode_reason);
+    if team.plan_mode == super::model::PlanMode::Free {
+        let n = ops::open_phase(team);
+        let tasks: Vec<&super::model::Task> = team.tasks.iter().filter(|task| task.phase == n).collect();
+        let running: Vec<u32> = tasks.iter().filter(|task| !task.status.finished()).map(|task| task.id).collect();
+        let accepted = tasks.iter().filter(|task| task.status == TaskStatus::Accepted).count();
+        value["free_phase"] = json!({
+            "phase":n,
+            "state":if running.is_empty() { "idle" } else { "open" },
+            "running":running,
+            "accepted":accepted,
+            "accepted_since":team.free_accepted_since_build,
+            "last_build_at":team.last_build_at,
+            "close_pending":team.free_close_pending,
+        });
+    }
     // U25: only the running phases' open tasks can make the team Stuck.
     value["stuck_scope"] = json!(plan::stuck_scope(team));
     // U21: the command templates Zerus runs outside a member's sandbox: the
@@ -927,6 +949,7 @@ fn summary(team: &Team) -> Value {
         .collect();
     json!({
         "id":team.id,"name":team.name,"status":team.status,"project":team.project,"folder":team.folder,
+        "plan_mode":team.plan_mode,
         "lead":team.lead,"members":members,"tasks":tasks,"phases":phases,
         "accepted":count(TaskStatus::Accepted),"submitted":count(TaskStatus::Submitted),
         "in_review":count(TaskStatus::InReview),"in_test":count(TaskStatus::InTest),
@@ -6402,6 +6425,40 @@ mod tests {
             assert!(MUTATIONS.contains(&op), "{op} is not a mutation");
             assert!(USAGE.contains(op), "{op} is not in the usage");
         }
+    }
+
+    #[test]
+    fn status_shows_the_plan_mode_and_the_free_phases_state() {
+        use super::super::model::{PlanMode, Task, TaskStatus};
+        let team = Team {
+            id: "t".into(),
+            name: "T".into(),
+            lead: "lead".into(),
+            plan_mode: PlanMode::Free,
+            tasks: vec![
+                Task { id: 1, title: "A".into(), assignee: "dev".into(), phase: 1, status: TaskStatus::InProgress, ..Default::default() },
+                Task { id: 2, title: "B".into(), assignee: "dev".into(), phase: 1, status: TaskStatus::Accepted, ..Default::default() },
+            ],
+            ..Default::default()
+        };
+        let value = view_with(&team, &[], None);
+        assert_eq!(value["plan_mode"], "free");
+        assert_eq!(value["free_phase"]["phase"], 1);
+        assert_eq!(value["free_phase"]["state"], "open");
+        assert_eq!(value["free_phase"]["running"], json!([1]));
+        assert_eq!(value["free_phase"]["accepted"], 1);
+        // U59: the header's count since the last build and a pending close.
+        let mut with_build = team.clone();
+        with_build.free_accepted_since_build = 2;
+        with_build.free_close_pending = Some(1);
+        let value = view_with(&with_build, &[], None);
+        assert_eq!(value["free_phase"]["accepted_since"], 2);
+        assert_eq!(value["free_phase"]["close_pending"], 1);
+        // Standard teams carry plan_mode and no free phase.
+        let standard = Team { plan_mode: PlanMode::Standard, ..team.clone() };
+        let value = view_with(&standard, &[], None);
+        assert_eq!(value["plan_mode"], "standard");
+        assert!(value["free_phase"].is_null());
     }
 
     #[test]

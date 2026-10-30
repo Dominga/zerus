@@ -95,6 +95,10 @@ pub(crate) struct Prepared {
     pub holds: bool,
     pub changed: Vec<Value>,
     pub temp: String,
+    /// The commit the stage checks: the checked attempt's last commit, else the
+    /// folder's HEAD when the stage began. A command gets it as an environment
+    /// variable; a land stage refuses a folder on another commit.
+    pub commit: String,
     /// Why a checkout rule fell back to holding the folder.
     pub note: String,
 }
@@ -104,9 +108,10 @@ fn stage_dir(team: &Team, run: &StageRun, suffix: &str) -> PathBuf {
     root().join("teams").join("stages").join(format!("{}-{}{suffix}", short(&team.id), short(&run.id)))
 }
 
-/// Prepares the open stage of `task_id`: its folder, a detached checkout
-/// for a test with the checkout rule, what changed, and a test's own temporary
-/// folder.
+/// Prepares the open stage of `task_id`: its folder, a detached checkout for a
+/// test, command or land stage with the checkout rule, what changed, and a
+/// test's own temporary folder. A command or land stage runs on the checked
+/// commit like a test: its checkout, or the task's held folder.
 pub(crate) fn prepare(team: &Team, task_id: u32) -> anyhow::Result<Prepared> {
     let task = team.task(task_id).context("Unknown task")?;
     let pipeline = task.pipeline_run.as_ref().context("The task has no pipeline")?;
@@ -117,15 +122,23 @@ pub(crate) fn prepare(team: &Team, task_id: u32) -> anyhow::Result<Prepared> {
     // Each stage of one round reads the files as the first stage found them.
     let earlier = pipeline.runs.iter().find(|other| other.round == run.round && other.id != run.id && !other.changed.is_empty());
     let changed = earlier.map(|other| other.changed.clone()).unwrap_or_else(|| changed(task, run, &folder, git));
-    let mut prepared = Prepared { folder: folder.clone(), changed, ..Default::default() };
-    if run.kind != "test" {
+    let recorded = checked_attempt(task, run).and_then(|attempt| attempt.commits.last()).map(|commit| commit.sha.clone());
+    // The commit the stage checks: the attempt's recorded last commit, else the
+    // folder's HEAD when the stage begins (a member may commit outside Zerus).
+    let head = || git.then(|| git_at(&folder, &["rev-parse", "HEAD"])).flatten().unwrap_or_default();
+    let commit = recorded.clone().unwrap_or_else(head);
+    let mut prepared = Prepared { folder: folder.clone(), changed, commit, ..Default::default() };
+    // A review reads the task's files and holds nothing.
+    if run.kind == "review" {
         return Ok(prepared);
     }
-    let temp = stage_dir(team, run, "-tmp");
-    std::fs::create_dir_all(&temp).with_context(|| format!("Could not create the stage's temporary folder {}", temp.display()))?;
-    prepared.temp = temp.display().to_string();
-    let sha = checked_attempt(task, run).and_then(|attempt| attempt.commits.last()).map(|commit| commit.sha.clone());
-    match (pipeline.folder.as_str(), git, sha) {
+    if run.kind == "test" {
+        let temp = stage_dir(team, run, "-tmp");
+        std::fs::create_dir_all(&temp).with_context(|| format!("Could not create the stage's temporary folder {}", temp.display()))?;
+        prepared.temp = temp.display().to_string();
+    }
+    let kind = if run.kind == "test" { "test" } else { "stage" };
+    match (pipeline.folder.as_str(), git, recorded) {
         ("checkout", true, Some(sha)) => {
             let path = stage_dir(team, run, "");
             let output = git_command(&folder)
@@ -141,11 +154,11 @@ pub(crate) fn prepare(team: &Team, task_id: u32) -> anyhow::Result<Prepared> {
         }
         ("checkout", true, None) => {
             prepared.holds = true;
-            prepared.note = "The attempt made no commits, so the test works in the task's folder, which is held.".into();
+            prepared.note = format!("The attempt made no commits, so the {kind} works in the task's folder, which is held.");
         }
         ("checkout", false, _) => {
             prepared.holds = true;
-            prepared.note = "The task's folder has no Git, so the test works in it, and it is held.".into();
+            prepared.note = format!("The task's folder has no Git, so the {kind} works in it, and it is held.");
         }
         _ => prepared.holds = true,
     }
@@ -180,14 +193,26 @@ pub(crate) fn record(team: &mut Team, task_id: u32, run_id: &str, prepared: &Pre
     run.temp = prepared.temp.clone();
 }
 
-/// The task whose test stage holds `member`'s folder: the implementer's next
-/// task there waits until the test ends. A test waiting for its member already
-/// holds it under the hold rule.
+/// The task whose stage holds `member`'s folder: the implementer's next task
+/// there waits until the stage ends. A test waiting for its member already
+/// holds it under the hold rule; a command or land stage holds it from the
+/// report on whatever its folder rule, so the checked commit stays checked and
+/// landable (a checkout only keeps the command off the implementer's folder).
 pub(crate) fn held(team: &Team, member: &str) -> Option<u32> {
     team.tasks.iter().find_map(|task| {
         let pipeline = task.pipeline_run.as_ref()?;
         let run = pipeline.open_run()?;
-        let holds = run.kind == "test" && if run.state == StageState::Waiting { pipeline.folder != "checkout" } else { run.holds };
+        let holds = match run.kind.as_str() {
+            "test" => {
+                if run.state == StageState::Waiting {
+                    pipeline.folder != "checkout"
+                } else {
+                    run.holds
+                }
+            }
+            "command" | "land" => true,
+            _ => false,
+        };
         let implementer = checked_attempt(task, run).map(|attempt| attempt.member.as_str()).unwrap_or(task.assignee.as_str());
         (holds && implementer == member).then_some(task.id)
     })
@@ -507,7 +532,7 @@ mod tests {
             // waits and says so.
             assert_eq!(held(&team, "dev"), Some(1));
             let waits = crate::state::teams::inbox::waits(&team, team.task(2).unwrap(), true).unwrap();
-            assert_eq!(waits["unblock"], "folder held by the test of #1", "{waits}");
+            assert_eq!(waits["unblock"], "folder held by the stage of #1", "{waits}");
             let (test, prepared) = give(&mut team, "qa");
             assert!(prepared.holds && Path::new(&prepared.folder) == worktree);
             assert!(Path::new(&prepared.temp).is_dir(), "the test's own temporary folder");

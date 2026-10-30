@@ -3308,9 +3308,17 @@ fn tell_stop(store: &mut Store, team: &Team, id: &str) -> anyhow::Result<()> {
     })
 }
 
+/// #680: a commit in a message: its first 12 characters.
+fn short_sha(sha: &str) -> &str {
+    sha.get(..12).unwrap_or(sha)
+}
+
 /// U47/U48: starts a command or land stage as a detached `hgs run` in the
-/// stage's folder (the folder of the member whose attempt it checks), with no
-/// model. The command is the task's snapshot of the owner's catalog; a land
+/// stage's folder, with no model. C1 (#680): the folder follows the preset's
+/// rule like a test's: a detached checkout of the checked attempt's last commit
+/// for "checkout", the task's held folder otherwise; the command gets the task,
+/// its branch and that commit, and a land stage refuses a folder on another
+/// commit. The command is the task's snapshot of the owner's catalog; a land
 /// stage runs only when the owner allowed landing in this team.
 fn start_stage_command(store: &mut Store, team: &Team, task_id: u32, run_id: &str) -> anyhow::Result<()> {
     let Some((open, stage)) = super::pipeline::command_of(team, task_id, run_id) else { return Ok(()) };
@@ -3326,24 +3334,76 @@ fn start_stage_command(store: &mut Store, team: &Team, task_id: u32, run_id: &st
     if !member.computer.is_empty() {
         return not_run(store, format!("the stage's folder is on {}; Zerus runs a command stage on this computer only", member.computer));
     }
-    let folder = match member_folder_path(team, member) {
-        Ok(folder) if Path::new(&folder).is_dir() => folder,
-        Ok(folder) => return not_run(store, format!("the stage's folder {folder} does not exist")),
+    // #680 C1: the stage's folder by the preset's rule, exactly as a test's:
+    // a detached checkout of the checked commit, or the task's held folder.
+    let prepared = match super::stages::prepare(team, task_id) {
+        Ok(prepared) => prepared,
         Err(error) => return not_run(store, format!("{error:#}")),
     };
+    let clean = |prepared: &super::stages::Prepared| {
+        let _ = super::stages::clean_up(&StageRun {
+            checkout: prepared.checkout.clone(),
+            checkout_repo: prepared.checkout_repo.clone(),
+            temp: prepared.temp.clone(),
+            ..Default::default()
+        });
+    };
+    if !Path::new(&prepared.folder).is_dir() {
+        clean(&prepared);
+        return not_run(store, format!("the stage's folder {} does not exist", prepared.folder));
+    }
     // N11: one run per folder at a time; the stage starts on a later tick.
-    if !super::outbox::running_all(Path::new(&folder)).is_empty() {
+    if !super::outbox::running_all(Path::new(&prepared.folder)).is_empty()
+        || !super::super::builds::running_in(Path::new(&prepared.folder), now()).is_empty()
+    {
+        clean(&prepared);
         return Ok(());
     }
-    let commit = git_at(&folder, &["rev-parse", "HEAD"]).unwrap_or_default();
-    change(store, &team.id, |team, events| super::pipeline::command_started(team, task_id, run_id, &commit, events))?;
+    // #680: a land stage lands the checked commit and nothing else.
+    if stage.kind == "land" {
+        if prepared.commit.is_empty() {
+            clean(&prepared);
+            return not_run(store, "The attempt has no commit for the land stage to check".into());
+        }
+        let head = git_at(&prepared.folder, &["rev-parse", "HEAD"]).unwrap_or_default();
+        if head != prepared.commit {
+            clean(&prepared);
+            return not_run(
+                store,
+                format!(
+                    "The stage's folder is on {} but the checked commit is {}; the next task may have moved it",
+                    short_sha(&head),
+                    short_sha(&prepared.commit)
+                ),
+            );
+        }
+    }
+    // The task's own branch, else the implementer's folder's: what the command
+    // sees. The implementer's folder is held from the report on, so its branch
+    // is the checked one even when the stage itself works in a checkout.
+    let live = super::stages::task_folder(team, task, &open).unwrap_or_default();
+    let branch = task_branch(team, task_id, &author)
+        .or_else(|| git_at(&live, &["rev-parse", "--abbrev-ref", "HEAD"]).filter(|branch| branch != "HEAD"))
+        .unwrap_or_default();
+    let commit = prepared.commit.clone();
+    change(store, &team.id, |team, events| {
+        super::pipeline::command_started(team, task_id, run_id, &commit, events)?;
+        super::stages::record(team, task_id, run_id, &prepared);
+        Ok(())
+    })?;
     let command = stage.command.clone().unwrap_or_default();
     let session = member.session.as_ref().map_or_else(
         || json!({}),
         |session| json!({"name":session.name,"run_id":session.run_id,"conversation_id":session.conversation_id}),
     );
     let label = format!("{} stage of #{task_id}", stage.kind);
-    if let Err(error) = super::super::builds::start_for(run_id, &label, &command.command, Path::new(&folder), session, command.timeout_minutes) {
+    let task_text = task_id.to_string();
+    let env = [
+        ("HGS_TASK_ID", task_text.as_str()),
+        ("HGS_TASK_BRANCH", branch.as_str()),
+        ("HGS_TASK_COMMIT", commit.as_str()),
+    ];
+    if let Err(error) = super::super::builds::start_for(run_id, &label, &command.command, Path::new(&prepared.folder), session, command.timeout_minutes, &env) {
         let reason = format!("the stage's command did not start: {error}");
         change(store, &team.id, |team, events| super::pipeline::command_not_run(team, task_id, run_id, "refused", &reason, events).map(drop))?;
     }
@@ -5715,7 +5775,11 @@ fn start_run(
     // N11: one run per member folder at a time. A second claim while the first
     // runner works would run beside it in the same folder (a build and a test
     // on a half-linked binary); the request stays queued for a later tick.
-    if !super::outbox::running_all(folder).is_empty() {
+    // #680: a command or land stage's own `team_stage` run in the folder counts
+    // too, so a member's run never races the stage it is being checked by.
+    if !super::outbox::running_all(folder).is_empty()
+        || super::super::builds::running_in(folder, now()).iter().any(|claim| claim["source"] == "team_stage")
+    {
         return Ok(None);
     }
     if request["team"].as_str() != Some(team.id.as_str()) {
@@ -11584,6 +11648,22 @@ mod tests {
         catalog
     }
 
+    /// #680: the same preset with the checkout rule.
+    fn checkout_command_preset(kind: &str, command: String) -> super::super::catalog::Catalog {
+        let mut catalog = command_preset(kind, command, &[("0", "accepted")]);
+        catalog.pipelines.last_mut().unwrap().folder = "checkout".into();
+        catalog
+    }
+
+    /// #680: a stage command that writes the environment it got into `env.txt`.
+    fn env_command() -> String {
+        if cfg!(windows) {
+            "> env.txt echo %HGS_TASK_ID%^|%HGS_TASK_BRANCH%^|%HGS_TASK_COMMIT%".to_owned()
+        } else {
+            "echo \"$HGS_TASK_ID|$HGS_TASK_BRANCH|$HGS_TASK_COMMIT\" > env.txt".to_owned()
+        }
+    }
+
     /// The member reports its open attempt of `task`, as `hgs team report` does.
     fn stage_report(store: &mut Store, task: u32) {
         let team = store.load(STAGE_TEAM).unwrap().unwrap();
@@ -11675,6 +11755,155 @@ mod tests {
             for kind in ["stage_started", "stage_command_started", "stage_returned", "stage_passed", "stages_passed"] {
                 assert!(kinds.iter().any(|found| found == kind), "{kind} missing in {kinds:?}");
             }
+        });
+    }
+
+    /// #680 C1: a command stage with the checkout rule checks the attempt's
+    /// commit in a detached checkout, gets the task, branch and commit as
+    /// environment variables, and holds the implementer's folder meanwhile.
+    #[test]
+    fn a_command_stage_with_the_checkout_rule_checks_the_checked_commit_and_holds_the_folder() {
+        let root = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(root.path(), || {
+            crate::state::builds::INLINE_RUNNER.with(|inline| inline.set(true));
+            let (lead, dev) = stage_repo(root.path());
+            let mut team = stage_team(&lead, &dev, "gate", &|_| checkout_command_preset("command", env_command()));
+            team.settings.branch_per_task = Some(BranchPerTask { template: "task/{id}".into() });
+            let mut store = Store::open_at(&super::super::store::path(), true).unwrap();
+            store.create(&uuid::Uuid::new_v4().to_string(), &json!({}), team, vec![]).unwrap();
+            deliver_all();
+            hand_out(&mut store, STAGE_TEAM, 1, "dev", None, "").unwrap();
+            std::fs::write(dev.join("a.txt"), "one\n").unwrap();
+            let team = store.load(STAGE_TEAM).unwrap().unwrap();
+            let attempt = team.task(1).unwrap().open_attempt().unwrap().id.clone();
+            let committed = super::super::commands::commit_in_team(
+                &team,
+                "dev",
+                &json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":STAGE_TEAM,"attempt":attempt,"message":"Task 1"}),
+            )
+            .unwrap();
+            let sha = committed["sha"].as_str().unwrap().to_owned();
+            stage_report(&mut store, 1);
+            let team = store.load(STAGE_TEAM).unwrap().unwrap();
+            assert_eq!(super::super::stages::held(&team, "dev"), Some(1), "a command stage holds the implementer from the report on");
+            let seen = [session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", true)];
+            let found = steps(&team, &seen, now());
+            assert!(
+                !found.iter().any(|step| matches!(step, Step::HandOut { task: 2, .. } | Step::Rebalance { task: 2, .. })),
+                "no next task in the held folder: {found:?}"
+            );
+            // The old bug: the next task moves the live folder. The stage still
+            // checks the attempt's commit, in its own detached checkout.
+            git_in(&dev, &["checkout", "-q", "-b", "task/2", "main"]);
+            std::fs::write(dev.join("b.txt"), "two\n").unwrap();
+            git_in(&dev, &["add", "-A"]);
+            git_in(&dev, &["commit", "-q", "-m", "Task 2 work"]);
+            let run = run_stage(&mut store);
+            let team = store.load(STAGE_TEAM).unwrap().unwrap();
+            let ended = team.task(1).unwrap().pipeline_run.as_ref().unwrap().runs[0].clone();
+            assert!(!ended.folder.is_empty() && !same_path(&ended.folder, &dev.display().to_string()), "the stage ran in a checkout: {ended:?}");
+            let checkout = PathBuf::from(&ended.folder);
+            assert_eq!(git_in(&checkout, &["rev-parse", "HEAD"]), sha, "the checked commit, not task/2's");
+            assert!(!checkout.join("b.txt").exists(), "the next task's work is not in the checkout");
+            let env = std::fs::read_to_string(checkout.join("env.txt")).unwrap();
+            assert_eq!(env.trim(), format!("1|task/1|{sha}"), "task id, its branch and the checked commit");
+            assert_eq!(ended.check.as_ref().map(|check| check.exit), Some(0));
+            let record = crate::state::builds::record(&run, now()).unwrap();
+            assert_eq!(record["source"], "team_stage");
+            assert!(same_path(record["cwd"].as_str().unwrap(), &checkout.display().to_string()), "{record}");
+            // The hold ends with the stage: the next task goes ahead.
+            assert_eq!(super::super::stages::held(&store.load(STAGE_TEAM).unwrap().unwrap(), "dev"), None);
+            hand_out(&mut store, STAGE_TEAM, 2, "dev", None, "").unwrap();
+            set_fake_hgs(None);
+            crate::state::builds::INLINE_RUNNER.with(|inline| inline.set(false));
+        });
+    }
+
+    /// #680: a land stage refuses a folder moved off the checked commit, and
+    /// runs nothing.
+    #[test]
+    fn a_land_stage_refuses_a_folder_moved_from_the_checked_commit() {
+        let root = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(root.path(), || {
+            crate::state::builds::INLINE_RUNNER.with(|inline| inline.set(true));
+            let (lead, dev) = stage_repo(root.path());
+            let mut team = stage_team(&lead, &dev, "gate", &|_| command_preset("land", "git status --porcelain".into(), &[("0", "accepted")]));
+            team.settings.land_allowed = true;
+            team.settings.branch_per_task = Some(BranchPerTask { template: "task/{id}".into() });
+            let mut store = Store::open_at(&super::super::store::path(), true).unwrap();
+            store.create(&uuid::Uuid::new_v4().to_string(), &json!({}), team, vec![]).unwrap();
+            deliver_all();
+            hand_out(&mut store, STAGE_TEAM, 1, "dev", None, "").unwrap();
+            std::fs::write(dev.join("a.txt"), "one\n").unwrap();
+            let team = store.load(STAGE_TEAM).unwrap().unwrap();
+            let attempt = team.task(1).unwrap().open_attempt().unwrap().id.clone();
+            super::super::commands::commit_in_team(
+                &team,
+                "dev",
+                &json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":STAGE_TEAM,"attempt":attempt,"message":"Task 1"}),
+            )
+            .unwrap();
+            stage_report(&mut store, 1);
+            // The next task moves the live folder before the land stage runs.
+            git_in(&dev, &["checkout", "-q", "-b", "task/2", "main"]);
+            std::fs::write(dev.join("b.txt"), "two\n").unwrap();
+            git_in(&dev, &["add", "-A"]);
+            git_in(&dev, &["commit", "-q", "-m", "Task 2 work"]);
+            let run = run_stage(&mut store);
+            let team = store.load(STAGE_TEAM).unwrap().unwrap();
+            let task = team.task(1).unwrap();
+            let ended = task.pipeline_run.as_ref().unwrap().runs[0].clone();
+            assert_eq!(ended.outcome, "refused", "{ended:?}");
+            assert!(ended.commit.is_empty(), "the land command never started");
+            assert!(task.hold.as_ref().unwrap().reason.contains("checked commit"), "{:?}", task.hold);
+            assert!(feed_kinds(&store).iter().any(|kind| kind == "stage_not_run"));
+            assert!(crate::state::builds::record(&run, now()).is_none(), "the land command did not run");
+            set_fake_hgs(None);
+            crate::state::builds::INLINE_RUNNER.with(|inline| inline.set(false));
+        });
+    }
+
+    /// #680 N11: a member's run waits while the stage's own `team_stage` run is
+    /// live in the same folder.
+    #[test]
+    fn a_members_run_waits_for_the_stages_own_team_stage_run() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        t.status = TeamStatus::Running;
+        let folder = dir.path().join("work");
+        std::fs::create_dir_all(&folder).unwrap();
+        t.folder = folder.display().to_string();
+        let task = t.tasks.iter_mut().find(|task| task.assignee == "dev").unwrap();
+        task.attempts.push(Attempt { n: 1, id: "A1".into(), member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
+        task.status = TaskStatus::InProgress;
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+        let settings = dir.path().join("templates.json");
+        crate::state::teams::templates::settings_override(Some(settings));
+        crate::state::teams::templates::set_additions(&[json!({"id":"say","program":"cmd","args":["/c","echo run-ok"]})]).unwrap();
+        let claim = crate::state::builds::test_running_claim("88888888-8888-4888-8888-888888888888", &folder, "team_stage");
+        let id = "77777777-7777-4777-8777-777777777771";
+        let request = json!({"op":"run","request_id":id,"team":t.id,"member":"dev","attempt":"A1","template":"say","args":{},
+            "input":{"request_id":id,"team":t.id,"attempt":"A1","template":"say","args":{}}});
+        super::super::outbox::push(&folder, &request).unwrap();
+        let mut dev = session("codex/x/dev", "r1", true);
+        dev.cwd = folder.display().to_string();
+        let started = std::cell::RefCell::new(Vec::<String>::new());
+        let spawn = |_: &Path, request: &Value| {
+            started.borrow_mut().push(request["request_id"].as_str().unwrap_or_default().to_owned());
+            Ok(())
+        };
+        let current = store.load(&t.id).unwrap().unwrap();
+        take_outbox_with(&mut store, &current, &[dev.clone()], &spawn).unwrap();
+        assert!(started.borrow().is_empty(), "the stage's run holds the folder");
+        assert!(super::super::outbox::request_path(&folder, id).exists(), "the member's run waits");
+        // The stage's run ends; the member's run starts on the next tick.
+        std::fs::remove_file(&claim).unwrap();
+        let current = store.load(&t.id).unwrap().unwrap();
+        take_outbox_with(&mut store, &current, &[dev], &spawn).unwrap();
+        assert_eq!(started.borrow().as_slice(), [id.to_owned()]);
+        crate::state::teams::templates::settings_override(None);
         });
     }
 

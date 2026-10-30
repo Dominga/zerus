@@ -147,6 +147,7 @@
   .appr-detail .appr-text { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
   dialog.dlg.wide { width: min(760px, calc(100vw - 48px)); }
   .an-json { margin: 10px 0 0; padding: 10px 12px; max-height: 360px; overflow: auto; border-radius: var(--z-radius-md); background: var(--z-color-code-bg); font-family: var(--z-font-mono); font-size: var(--fs-xs); white-space: pre; }
+  .upd-login { align-items: center; }
 }
 
 /* Mobile connection: the pinned pair and revoke commands, copyable whole. */

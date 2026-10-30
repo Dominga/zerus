@@ -11,7 +11,7 @@ import { agentKind, catalog, orderedRows } from "../../store/catalog";
 import { machineCards, requestMachine } from "../../store/machines";
 import { accountsPage, loadAccounts, setAccountMachine, setRequestedProfile } from "../../store/accounts";
 import { createOverview, type MachineCardModel, type OverviewStats } from "../../store/overview";
-import { setMachineFilter, setPage, setProjectFilter, setSelectedKey, setStateFilter, type StateFilter } from "../../store/ui";
+import { setMachineFilter, setPage, setProjectFilter, setAccountFilter, setFolderFilter, setSelectedKey, setStateFilter, type StateFilter } from "../../store/ui";
 import { flag, num, setSetting } from "../../store/settings";
 import { accountTooltip, clock, summaryText, usageLoading, windowsAt } from "../lib/usage";
 import { machineKey } from "./machines-ui";
@@ -41,7 +41,7 @@ function MachineCard(props: { m: MachineCardModel; stats: OverviewStats; now: nu
   const memory = () => memoryFigure(props.m.meta);
   const counts = () => props.stats.per[props.m.computer] ?? { sessions: 0, attention: 0 };
   const note = () => sampleNote(props.m.meta, c(), props.now);
-  const openSessions = () => { setMachineFilter([props.m.filter]); setProjectFilter([]); setStateFilter("all"); setPage("sessions"); };
+  const openSessions = () => { setMachineFilter([props.m.filter]); setProjectFilter([]); setAccountFilter([]); setFolderFilter(undefined); setStateFilter("all"); setPage("sessions"); };
   return (
     <article class="ov-mcard box" classList={{ stale: !c().fresh }} aria-label={props.m.local ? "This machine" : props.m.name}>
       <header class="ov-mtop">
@@ -220,7 +220,7 @@ export function OverviewScreen() {
   const now = useNow(15_000);
   const view = accountsPage;
   const online = () => ov.cards().filter((m) => m.connection.fresh).length;
-  const go = (filter: StateFilter) => { setMachineFilter([]); setProjectFilter([]); setStateFilter(filter); setPage("sessions"); };
+  const go = (filter: StateFilter) => { setMachineFilter([]); setProjectFilter([]); setAccountFilter([]); setFolderFilter(undefined); setStateFilter(filter); setPage("sessions"); };
   return (
     <div class="su-page ov-page" ref={scroller}>
       <div class="ov-content" classList={{ full: overviewFullWidth() }} style={{ "--ovw": `${overviewWidth()}px` }}>

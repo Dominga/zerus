@@ -33,9 +33,9 @@ export interface CatalogState {
 }
 
 const KINDS = new Set<Status>(["attention", "working", "background", "scheduled", "ready", "error", "offline", "paused", "waiting", "starting", "ended"]);
-const AGENTS = new Set<AgentKind>(["claude", "codex", "kimi", "deepseek", "opencode"]);
+const AGENTS = new Set<AgentKind>(["claude", "codex", "kimi", "deepseek", "opencode", "sh"]);
 
-/** The agent kind of a view row; DeepSeek's command is `dsh`. Unknown agents draw as Claude. */
+/** The presentation kind of a view row; Qt gives `sh` its own Shell badge. */
 export function agentKind(agent: string | undefined): AgentKind {
   const a = (agent ?? "").toLowerCase();
   if (a === "dsh") return "deepseek";
@@ -113,7 +113,7 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow, marks: 
     effort: optional(v.effort),
     cwd: text(v.folder),
     branch: optional(v.branch),
-    worktree: undefined,
+    worktree: optional(v.worktree),
     git: undefined,
     status,
     caption,
@@ -124,7 +124,7 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow, marks: 
     muted: !!v.muted,
     attention,
     scheduleNext: undefined,
-    backgroundJobs: undefined,
+    backgroundJobs: typeof v.background === "number" ? v.background : undefined,
     subagents: undefined,
     reviewLater: false,
     attentionNeeded: typeof v.needs_attention === "boolean" ? v.needs_attention : undefined,
@@ -133,8 +133,14 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow, marks: 
     updatedAt: typeof v.updated_at === "number" ? v.updated_at : undefined,
     turnStarted: typeof v.turn_started === "number" && v.turn_started > 0 ? v.turn_started : undefined,
     runId: optional(v.run_id),
+    launchId: optional(v.launch_id),
     conversationId: optional(v.conversation_id),
+    compactKeys: v.compact_keys,
     cmd: text(v.agent),
+    accountProvider: text(v.account_provider) || (v.agent === "deepseek" ? "dsh" : text(v.agent)),
+    accountId: text(v.account_id),
+    accountHome: text(v.account_home),
+    accountReported: v.account_binding_reported ?? (typeof v.account_id === "string" || typeof v.account_home === "string"),
     // A row without a state is running, as Qt's HgsClient reads it.
     state: typeof v.state === "string" ? v.state : "running",
     tracked: !!v.tracked,

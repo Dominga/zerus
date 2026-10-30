@@ -237,6 +237,28 @@ fn preview() -> Driver {
 }
 
 #[test]
+fn playback_reads_only_the_exact_saved_recording_without_any_delivery_effect() {
+    let mut driver = preview();
+    let id = driver.composer.id().to_owned();
+    assert_eq!(driver.shown().key, target().key);
+    assert_eq!(driver.shown().id, id);
+    let before = (driver.saves.len(), driver.calls.len());
+    let saved = driver.composer.preview(&id).unwrap();
+    assert_eq!(saved.pcm, pcm(3));
+    assert!(saved.video.is_empty());
+    assert_eq!(saved.id, id);
+    assert!(driver.composer.preview("").is_none());
+    assert!(driver.composer.preview("another-recording").is_none());
+    assert_eq!(before, (driver.saves.len(), driver.calls.len()));
+    let effects = driver.composer.send();
+    driver.take(effects);
+    assert!(
+        driver.composer.preview(&id).is_none(),
+        "delivery locks playback"
+    );
+}
+
+#[test]
 fn preview_then_send_and_a_lost_answer_is_only_checked() {
     let mut driver = preview();
     let shown = driver.shown();

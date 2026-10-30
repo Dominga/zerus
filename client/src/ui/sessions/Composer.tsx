@@ -1,6 +1,12 @@
 import { Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
+import { createVoice, voicePort } from "../../store/voice";
+import { VoiceToolbar, VoicePreview } from "./VoiceControls";
+import { pageHidden } from "../../store/visibility";
+import { flag } from "../../store/settings";
+import { subagentOpen } from "../../store/ui";
 import { Icon } from "../lib/icons";
 import { composer } from "../../store/composer";
+import { suggestions, suggestedInput } from "../../store/suggestions";
 import { contentScale, selected } from "../../store/ui";
 import { computerFresh, computerOffline } from "../../store/catalog";
 import { detailsFor, followedFor } from "../../store/actions";
@@ -8,7 +14,10 @@ import { onCommand } from "../../store/shortcuts";
 import { actionEntries } from "./ActionDialogs";
 import { snapshotOf } from "./actions-ui";
 import { markReadChip, runMarkRead } from "./mark-entries";
+import { ModelSettingsButton } from "./ModelSettings";
 import { AttachmentsChip } from "./Attachments";
+import { RecoveryChip } from "./RecoveryChip";
+import { SessionUsageChip, UsageLimitChip } from "./UsageChips";
 import { moveFocusOff } from "./composer-ui";
 import { focusTranscript, following, jumpToLatest, unseen } from "./Activity";
 import type { ChipTone } from "../../types";
@@ -16,9 +25,9 @@ import type { ChipTone } from "../../types";
 // The message composer (Qt MessageComposer, 300-366), after the mockup's
 // structure: an edge grip, the 34 px toolbar, the editor (76-720 px) and the
 // action row. The toolbar keeps Qt's slots (ComposerToolbar.h, Slot): the
-// leading zone holds Attachments, the voice slot (Task 13), Latest, Mark as
-// read, the compaction indicator and Cancel send; the grip fills the space
-// between; the trailing zone holds the cache and Context chips. The action
+// leading zone holds Attachments, the voice slot (Task 13), Mark as read,
+// Latest, the compaction indicator and Cancel send; the grip fills the space
+// between; the trailing zone holds Recovery, Usage, Cache and Context. The action
 // row holds Attach, Reference file, the status line, Refresh, Allow retry,
 // the model button, Stop and Send (364). The store (store/composer.ts) owns
 // the text and the locks; Rust owns the draft, the attachments and the send.
@@ -119,8 +128,7 @@ function CacheChip(props: { compact: boolean }) {
             setOpen(!open());
             if (open()) queueMicrotask(() => (e.detail === 0 ? pop?.querySelector<HTMLElement>("button:not(:disabled)") ?? pop : pop)?.focus({ preventScroll: true }));
           }}>
-          {/* A warm cache shows no icon; every other state the warning glyph (CacheStatus.h refresh()). */}
-          <Show when={v().cache.tone !== "success"}><Icon name="context-warning" size={13} /></Show>
+          <Icon name={v().cache.tone === "success" ? "timer" : "context-warning"} size={13} />
           {props.compact ? v().cache.short_label : v().cache.label}
         </button>
         <Show when={open()}>
@@ -130,7 +138,6 @@ function CacheChip(props: { compact: boolean }) {
             <Show when={v().cache_warning}><p class="cache-warning">{v().cache_warning}</p></Show>
             <p class="cache-detail">{v().cache_details}</p>
             <div class="cache-actions">
-              <button type="button" class="btn small" disabled title="Arrives with the side panel.">Usage details</button>
               {/* Shown with a warning only (3793); enabled by the cache rule, not Clear session's (3794). */}
               <Show when={v().cache_warning}>
                 <button type="button" class="btn small" disabled={!v().clear.cache_enabled} title={v().clear.cache_reason || USUAL_CACHE_CLEAR}
@@ -147,8 +154,16 @@ function CacheChip(props: { compact: boolean }) {
 export function Composer() {
   const s = () => selected()!;
   const v = () => composer.view();
+  const voice = createVoice(voicePort);
+  onCleanup(() => { void voice.close(); });
   const online = () => !computerOffline(s().computer);
   const details = createMemo(() => detailsFor(s(), online(), followedFor(s().key)));
+  createEffect(() => {
+    const view = v(), row = s(), d = details();
+    voice.follow(view ? { handle: view.handle, key: view.key, visible: !pageHidden() && !subagentOpen() && view.input_visible,
+      revision: JSON.stringify([view.loaded, view.sending, view.waiting, view.attaching, view.available, view.block_reason, view.inspect_error, row.runId, row.conversationId, d?.run_id, d?.conversation_id,
+        flag("speech/video_mode"), flag("speech/preview_before_send")]) } : undefined);
+  });
   const act = createMemo(() => actionEntries(s(), details()));
   const mark = createMemo(() => markReadChip(s(), computerFresh(s().computer)));
   // Qt's compaction indicator (ActivityView.cpp 1899-1901) over the details it is given (3974-3975: an
@@ -158,6 +173,14 @@ export function Composer() {
     return s().tracked && online() && !v()?.inspect_error && s().state === "running" && state.phase === "compacting" && state.runtime_state === "live"
       && state.process_state === "running" && state.state !== "archived";
   });
+  createEffect(() => {
+    const row = s(), state = followedFor(row.key).value ?? {};
+    const raw = state.prompt_suggestion as { text?: unknown; at?: unknown } | undefined;
+    const phase = typeof state.phase === "string" ? state.phase : row.phase;
+    const active = phase === "idle" && online() && row.state === "running";
+    suggestions.set(row.catalogKey, active && typeof raw?.text === "string" ? raw.text : "", typeof raw?.at === "number" ? raw.at : 0);
+  });
+  const suggestion = () => suggestions.get(s().catalogKey, !!v()?.sending || !!v()?.waiting);
   const [compact, setCompact] = createSignal(false);
   let root!: HTMLDivElement;
   let editor!: HTMLTextAreaElement;
@@ -184,6 +207,16 @@ export function Composer() {
   };
   const onKey = (e: KeyboardEvent) => {
     if (e.isComposing || e.keyCode === 229) return;
+    if (e.key === "Tab" && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      const next = suggestedInput(composer.text(), suggestion(), composer.locked());
+      if (next) {
+        e.preventDefault();
+        editor.value = next;
+        editor.setSelectionRange(next.length, next.length);
+        composer.input(next, next.length, next.length);
+      }
+      return;
+    }
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void composer.send(); return; }
     // Like Escape in Terminal: stop a working turn, otherwise leave the field (ComposeEdit::keyPressEvent).
     if (e.key === "Escape") { e.preventDefault(); if (!stopTurn()) editor.blur(); }
@@ -198,6 +231,15 @@ export function Composer() {
   };
 
   onMount(() => {
+    const stopVoice = (event: KeyboardEvent) => {
+      if (!voice.shown()?.recording || event.isComposing || document.querySelector("dialog[open]")) return;
+      if (event.code !== "Space" && event.key !== "Escape") return;
+      event.preventDefault(); event.stopImmediatePropagation();
+      void voice.input({ kind: "stop", forget_send: false });
+    };
+    const blurVoice = () => { if (voice.shown()?.recording) void voice.input({ kind: "stop", forget_send: true }); };
+    addEventListener("keydown", stopVoice, true); addEventListener("blur", blurVoice);
+    onCleanup(() => { removeEventListener("keydown", stopVoice, true); removeEventListener("blur", blurVoice); });
     // Composer chords go through the window router (store/shortcuts.ts) while the focus is in the field.
     const stops = [onCommand("message.send", () => { void composer.send(); }, editor)];
     const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(() => setCompact(root.clientWidth < COMPACT_WIDTH * contentScale()));
@@ -226,11 +268,7 @@ export function Composer() {
       <ResizeHandle edge hidden={!input()} />
       <div class="cmp-toolbar">
         <AttachmentsChip compact={compact()} />
-        {/* The voice slot: Task 13. */}
-        <Show when={!following()}>
-          <button type="button" class="tchip icon" title={jumpCaption()} aria-label={jumpCaption()}
-            onClick={(e) => { if (document.activeElement === e.currentTarget) moveFocusOff(focusTranscript, editor); jumpToLatest(); }}><Icon name="chevrons-down" size={14} /></button>
-        </Show>
+        <VoiceToolbar voice={voice} compact={compact()} />
         <Show when={mark().active}>
           <button type="button" class="tchip accent" classList={{ icon: compact() }} title={mark().detail} aria-label="Mark as read"
             onClick={(e) => {
@@ -238,8 +276,12 @@ export function Composer() {
               if (document.activeElement === e.currentTarget) moveFocusOff(focusTranscript, editor);
               runMarkRead(snapshotOf(s()));
             }}>
-            <Icon name="read-all" size={13} /><Show when={!compact()}>Mark as read</Show>
+            <Icon name="check-check" size={13} /><Show when={!compact()}>Mark as read</Show>
           </button>
+        </Show>
+        <Show when={!following()}>
+          <button type="button" class="tchip icon" title={jumpCaption()} aria-label={jumpCaption()}
+            onClick={(e) => { if (document.activeElement === e.currentTarget) moveFocusOff(focusTranscript, editor); jumpToLatest(); }}><Icon name="chevrons-down" size={14} /></button>
         </Show>
         <Show when={compacting()}>
           <span class="tchip cmp-compaction" title="The agent is compressing conversation context." role="status">
@@ -251,18 +293,14 @@ export function Composer() {
         </Show>
         <ResizeHandle hidden={!input()} />
         <Show when={!input()}><span class="grow" /></Show>
+        <RecoveryChip session={s()} compact={compact()} />
+        <UsageLimitChip session={s()} compact={compact()} />
         <Show when={v()}><CacheChip compact={compact()} /></Show>
-        <Show when={v()?.context.visible}>
-          <span class={`tchip ${toneClass(v()!.context.tone)}`} title={v()!.context.tooltip} aria-label={v()!.context.accessible_name}>
-            <Show when={v()!.context.warning} fallback={<span class="ctx-ring" style={{ "--p": `${Math.max(0, Math.min(100, v()!.context.percent ?? 0))}%` }} />}>
-              <Icon name="context-warning" size={13} />
-            </Show>
-            {v()!.context.text}
-          </span>
-        </Show>
+        <SessionUsageChip />
       </div>
+      <VoicePreview voice={voice} />
       <textarea ref={editor} class="cmp-editor" hidden={!input()} style={{ height: `${editorHeight() * contentScale()}px` }} aria-label="Message to selected agent"
-        placeholder="Message this agent…" readOnly={composer.locked()} disabled={!v()} value={composer.text()} title={editorTip()}
+        placeholder={suggestion() || "Message this agent…"} readOnly={composer.locked()} disabled={!v()} value={composer.text()} title={editorTip()}
         onInput={(e) => { const c = caret(); composer.input(e.currentTarget.value, c.anchor, c.position); }}
         onSelect={remember} onKeyUp={remember} onMouseUp={remember}
         onBlur={() => { void composer.flush(); }} onKeyDown={onKey} onPaste={onPaste} />
@@ -286,9 +324,7 @@ export function Composer() {
           <button type="button" class="btn ghost" title="Check the terminal before sending again to avoid a duplicate message"
             onClick={() => { void composer.allowRetry(); editor.focus(); }}><Icon name="refresh-cw" size={13} />Allow retry</button>
         </Show>
-        <button type="button" class="btn ghost cmp-model" disabled aria-label="Model and reasoning effort for this session" title="Arrives with model settings.">
-          {s().model} <span class="dim">{s().effort}</span><Icon name="chevron-down" size={12} />
-        </button>
+        <ModelSettingsButton />
         <Show when={act().stop.shown}>
           <button type="button" class="btn" aria-label="Stop current turn" title={act().stop.hint ?? USUAL_STOP} disabled={act().stop.disabled}
             onClick={() => { stopTurn(); }}><Icon name="square" size={12} />Stop</button>

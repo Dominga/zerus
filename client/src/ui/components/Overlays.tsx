@@ -1,7 +1,10 @@
 import { For, Show, createEffect, onCleanup } from "solid-js";
 import { Icon } from "../lib/icons";
+import { ProviderGlyph } from "../sessions/SessionCard";
+import { agentKind } from "../../store/catalog";
 import { menuItemActivates } from "../sessions/actions-ui";
-import { menu, setMenu, toasts } from "../../store/ui";
+import { menu, setMenu } from "../../store/ui";
+import { dismissNotice, notices } from "../../store/notices";
 
 /** Context and dropdown menus share one positioned popover. */
 export function MenuLayer() {
@@ -49,8 +52,9 @@ export function MenuLayer() {
                   aria-checked={item.checked} aria-disabled={item.disabled} title={item.hint}
                   onClick={() => { if (!menuItemActivates(item)) return; setMenu(undefined); item.action?.(); }}>
                   <Show when={item.checked !== undefined} fallback={<Show when={item.icon} fallback={<span style={{ width: "14px" }} />}><Icon name={item.icon!} size={14} /></Show>}>
-                    <Icon name={item.checked ? "check" : "minus"} size={14} style={{ opacity: item.checked ? 1 : 0 }} />
+                    <Icon name={item.checked && item.checked !== "mixed" ? "check" : "minus"} size={14} style={{ opacity: item.checked ? 1 : 0 }} />
                   </Show>
+                  <Show when={item.agent}><span class="menu-agent" style={{ color: `var(--z-agent-${agentKind(item.agent)})` }}><ProviderGlyph agent={agentKind(item.agent)} size={13} /></span></Show>
                   <span>{item.label}</span>
                   <Show when={item.kbd}><span class="kbd">{item.kbd}</span></Show>
                 </button>
@@ -63,14 +67,20 @@ export function MenuLayer() {
   );
 }
 
+/**
+ * The window's one notice bus, in the design's bottom-right corner: copies,
+ * action results, updates and refusals. Notices let clicks through to the
+ * controls under them; only a sticky notice's Dismiss takes a click.
+ */
 export function Toasts() {
   return (
     <div class="toasts" aria-live="polite">
-      <For each={toasts.items}>
-        {(t) => (
-          <div class="toast">
-            <b>{t.title}</b>
-            <span class="muted">{t.text}</span>
+      <For each={notices()}>
+        {(n) => (
+          <div class={`toast ${n.tone}`} classList={{ sticky: n.sticky }}>
+            <Show when={n.sticky}><button class="icon-btn dismiss" aria-label="Dismiss" onClick={() => dismissNotice(n.id)}><Icon name="x" size={14} /></button></Show>
+            <Show when={n.title}><b>{n.title}</b></Show>
+            <span class="note" classList={{ muted: !!n.title }}>{n.text}</span>
           </div>
         )}
       </For>

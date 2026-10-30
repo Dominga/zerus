@@ -54,6 +54,8 @@ export const newSessionFromRail = () => open((loaded) => ({ computer: loaded.sel
 export const newSessionFromPanel = () => open((loaded) => ({ computer: loaded.selectedHostTarget() }));
 /** A project header's "New session…" (showGroupMenu 2572-2573); `project` is its id or name. */
 export const newSessionForProject = (project: string) => open((loaded) => ({ project, computer: loaded.selectedHostTarget() }));
+/** The Worktrees tab's selected checkout, without creating it by inspection. */
+export const newSessionFromWorktree = (project: string, computer: string, path: string) => open(() => ({ project, computer, path }));
 
 /**
  * Projects' "New session…" for a folder (ProjectsDialog::newFolderSession

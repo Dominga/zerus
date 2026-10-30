@@ -1,0 +1,49 @@
+{
+  "bead": "zerus-5wmh.10.14",
+  "mockup": [
+    "screens/sessions/SessionDetail.tsx:138-160",
+    "screens/sessions/SessionList.tsx:113-114"
+  ],
+  "behavior": "Qt SessionsWindow openSessionFolder/openFolderShell",
+  "isolation": [
+    "private D-Bus",
+    "private Xvfb",
+    "private HOME, XDG, TMPDIR and tmux directory",
+    "synthetic local and peer watch streams",
+    "file-manager and configured terminal stubs"
+  ],
+  "native_walk": {
+    "menu_open_launches": 0,
+    "local_file_manager_launches": 1,
+    "local_shell_launches": 1,
+    "peer_shell_launches": 1,
+    "peer_file_manager_enabled": false,
+    "peer_path_metacharacters_preserved": true,
+    "changed_identity_additional_launches": 0,
+    "missing_directory_additional_launches": 0
+  },
+  "focused_tests": {
+    "native_folder": 4,
+    "core_details": 11,
+    "core_folder_shell": 3,
+    "frontend_folder_and_child": 9
+  },
+  "full_frontend_tests": {
+    "passed": 1985,
+    "skipped": 1
+  },
+  "phase4": {
+    "steps": 16,
+    "exit": 0
+  },
+  "checks": [
+    "npm run check",
+    "npm run build",
+    "entry bundle below 500000 bytes",
+    "core all-target Clippy",
+    "Tauri all-target Clippy: default, media, video and no-default-features",
+    "source privacy guard",
+    "UI separator guard"
+  ],
+  "root_hgs_changed": false
+}

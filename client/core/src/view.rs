@@ -26,6 +26,11 @@ pub struct ViewRow {
     pub display_title: String,
     /// `claude`, `codex`, `kimi`, `deepseek`, `opencode`, `sh` or what `hgs` reports.
     pub agent: String,
+    /// Recorded account binding from the listing, never the host's current default.
+    pub account_provider: String,
+    pub account_id: String,
+    pub account_home: String,
+    pub account_binding_reported: bool,
     /// The presentation status: `attention`, `error`, `working`, `background`,
     /// `waiting`, `scheduled`, `ready`, `paused`, `starting` or `ended`. A computer
     /// that is not live shows its rows as offline; the view applies that.
@@ -53,6 +58,10 @@ pub struct ViewRow {
     pub notification_error: Option<String>,
     /// `created`, truncated to whole seconds.
     pub created: i64,
+    /// Qt-compatible exact/fallback row-density hashes, filled only with the
+    /// configured host identity. Unknown raw command identity leaves them absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compact_keys: Option<[String; 2]>,
     /// The compact JSON the attention marks compare (`attentionFingerprint`).
     pub attention_fingerprint: String,
     /// The session needs the person's action (approval, input, error, recovery).
@@ -104,6 +113,8 @@ pub struct ViewRow {
     pub resumable: bool,
     pub activity: String,
     pub process_state: String,
+    /// `process_work.count`, -1 when unknown.
+    pub background: i64,
     pub archive_id: Option<String>,
     /// The latest reply and the attention it raised, for marking them read.
     pub reply_id: Option<String>,
@@ -125,6 +136,10 @@ pub struct ViewRow {
     /// The checkout's root (`git_root`), empty outside Git. The worktree
     /// picker counts sessions by it.
     pub git_root: String,
+    /// Linked checkout name from the existing Git worktree metadata. Main
+    /// checkouts and rows without verified metadata leave the chip absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
     /// The row's `terminal_supported`, else true unless the agent is
     /// `dsh` or `opencode` (`HgsClient.cpp:217`).
     pub terminal_supported: bool,
@@ -149,6 +164,9 @@ pub struct ViewRow {
 pub struct NotifyFacts {
     /// `attached > 0`: a terminal client is attached (`TrayMenu.cpp:30` shows "● ").
     pub attached: bool,
+    /// First listed terminal client's TTY, retained only while attached.
+    /// Native menus capture this value; peer TTYs never select a local tab.
+    pub client_tty: String,
     /// `SessionInfo::needsAction` (`tray/src/HgsClient.h:109-116`).
     pub needs_action: bool,
     /// The host's read mark names the current attention signature. The
@@ -1070,6 +1088,18 @@ fn notify_facts(value: &Value, session: &Session) -> NotifyFacts {
     children.sort_by(|a, b| a.id.cmp(&b.id));
     NotifyFacts {
         attached: value.get("attached").and_then(Value::as_i64).unwrap_or(0) > 0,
+        client_tty: value
+            .get("clients")
+            .and_then(Value::as_array)
+            .and_then(|clients| clients.first())
+            .and_then(Value::as_str)
+            .filter(|tty| {
+                value.get("attached").and_then(Value::as_i64).unwrap_or(0) > 0
+                    && tty.len() <= 4096
+                    && !tty.chars().any(char::is_control)
+            })
+            .unwrap_or_default()
+            .to_owned(),
         needs_action: session.needs_action(),
         acknowledged: session.attention_acknowledged(),
         cmd: text(value, "cmd").to_owned(),
@@ -1129,6 +1159,11 @@ pub fn row(value: &Value) -> ViewRow {
         title: session.title(),
         display_title: session.display_title(),
         agent: if agent == "dsh" { "deepseek" } else { agent }.to_owned(),
+        account_provider: cmd.to_owned(),
+        account_id: text(value, "account_id").to_owned(),
+        account_home: text(value, "account_home").to_owned(),
+        account_binding_reported: value.get("account_id").is_some_and(Value::is_string)
+            || value.get("account_home").is_some_and(Value::is_string),
         status: status.to_owned(),
         caption,
         phase: some(session.phase),
@@ -1143,6 +1178,7 @@ pub fn row(value: &Value) -> ViewRow {
         notification_error: None,
         created: number(value, "created").unwrap_or(0.0) as i64,
         attention_fingerprint: session.attention_fingerprint(),
+        compact_keys: None,
         needs_action: session.needs_action(),
         needs_attention: attention_needed(
             session.needs_action(),
@@ -1180,6 +1216,7 @@ pub fn row(value: &Value) -> ViewRow {
             .unwrap_or(false),
         activity: session.activity.to_owned(),
         process_state: session.process_state.to_owned(),
+        background: session.background,
         archive_id: some(text(value, "archive_id")),
         reply_id: some(text(value, "reply_id")),
         attention_signature: some(text(value, "attention_signature")),
@@ -1205,6 +1242,14 @@ pub fn row(value: &Value) -> ViewRow {
         cwd: text(value, "cwd").to_owned(),
         cwd_canonical: text(value, "cwd_canonical").to_owned(),
         git_root: text(value, "git_root").to_owned(),
+        worktree: (value.get("git_worktree").and_then(Value::as_bool) == Some(true))
+            .then(|| {
+                path_parts(text(value, "git_root"))
+                    .last()
+                    .filter(|s| !s.is_empty())
+                    .map(|s| (*s).to_owned())
+            })
+            .flatten(),
         terminal_supported: flag("terminal_supported").unwrap_or(cmd != "dsh" && cmd != "opencode"),
         terminal_reported: flag("terminal_supported").is_some(),
         terminal_attach_supported: flag("terminal_attach_supported").unwrap_or(false),
@@ -1218,6 +1263,23 @@ pub fn row(value: &Value) -> ViewRow {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn account_binding_comes_from_the_listing_even_when_the_provider_is_presented_differently() {
+        let view = row(
+            &json!({"cmd":"dsh", "account_id":"recorded-profile", "account_home":"/srv/example/old-home", "agent_home":"/srv/example/current-home"}),
+        );
+        assert_eq!(view.agent, "deepseek");
+        assert_eq!(view.account_provider, "dsh");
+        assert_eq!(view.account_id, "recorded-profile");
+        assert_eq!(view.account_home, "/srv/example/old-home");
+        let unknown = row(&json!({"cmd":"claude", "agent_home":"/srv/example/current-home"}));
+        assert!(unknown.account_id.is_empty());
+        assert!(
+            unknown.account_home.is_empty(),
+            "a current agent home is not a recorded binding"
+        );
+    }
 
     #[test]
     fn a_busy_tool_row_maps_the_card_fields() {
@@ -1495,6 +1557,7 @@ mod tests {
                 attention_fingerprint: "[\"\",\"\",\"\",null,{}]".into(),
                 // Qt's default for a row without a state (`HgsClient.cpp`).
                 state: "running".into(),
+                background: -1,
                 terminal_supported: true,
                 bulk_lifecycle_supported: true,
                 // Unknown counts are -1, never 0 (`HgsClient.cpp:169-174`, `:194-201`).
@@ -1666,6 +1729,9 @@ mod tests {
         );
         assert_eq!(view.summary, "2 running commands: npm run dev");
         assert_eq!(view.turn_started, Some(1787840000.0));
+        assert_eq!(view.background, 2);
+        assert_eq!(serde_json::to_value(&view).unwrap()["background"], 2);
+        assert_eq!(row(&json!({})).background, -1);
     }
 
     #[test]
@@ -1874,6 +1940,30 @@ mod tests {
         assert!(serde_json::to_value(&busy).unwrap().get("notify").is_none());
     }
 
+    #[test]
+    fn a_terminal_target_keeps_only_the_first_bounded_attached_client_tty() {
+        let mut value = json!({"name":"sh/sample-project", "attached":2,
+            "clients":["/dev/pts/7", "/dev/pts/8"]});
+        assert_eq!(row(&value).notify.client_tty, "/dev/pts/7");
+        // This private hint never goes to the webview.
+        assert!(!serde_json::to_string(&row(&value))
+            .unwrap()
+            .contains("/dev/pts/7"));
+        for clients in [
+            json!([]),
+            json!([7, "/dev/pts/8"]),
+            json!(["bad\ntty"]),
+            json!(["x".repeat(4097)]),
+            json!({"0":"/dev/pts/7"}),
+        ] {
+            value["clients"] = clients;
+            assert_eq!(row(&value).notify.client_tty, "");
+        }
+        value["clients"] = json!(["/dev/pts/7"]);
+        value["attached"] = json!(0);
+        assert_eq!(row(&value).notify.client_tty, "");
+    }
+
     fn fingerprint_row() -> Value {
         json!({"name": "claude/sample-project/review", "run_id": "run-1", "conversation_id": "c",
             "tracked": true, "phase": "approval", "activity": "busy", "attention_id": "att-1",
@@ -2027,6 +2117,34 @@ mod tests {
             let view = with_preferences(case);
             assert!(!view.shared_notifications && !view.muted, "{name}");
             assert_eq!(view.notification_revision, None, "{name}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod worktree_chip_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn linked_checkout_chip_uses_recorded_git_metadata() {
+        assert_eq!(row(&json!({"git_worktree":true,"git_root":"/srv/example/api-work","cwd":"/srv/example/api-work/src"})).worktree.as_deref(), Some("api-work"));
+        assert_eq!(
+            row(&json!({"git_worktree":true,"git_root":"C:\\workspace\\api-work"}))
+                .worktree
+                .as_deref(),
+            Some("api-work")
+        );
+        for value in [
+            json!({"git_worktree":false,"git_root":"/srv/example/api-work"}),
+            json!({"git_root":"/srv/example/api-work"}),
+            json!({"git_worktree":true,"cwd":"/srv/example/api-work"}),
+        ] {
+            let projected = row(&value);
+            assert_eq!(projected.worktree, None);
+            assert!(serde_json::to_value(projected)
+                .unwrap()
+                .get("worktree")
+                .is_none());
         }
     }
 }

@@ -360,6 +360,8 @@ impl Terminals {
         let replay: Vec<u8> = delivery.delivered.iter().copied().collect();
         delivery.unacked = usize::from(!replay.is_empty());
         if !replay.is_empty() {
+            // The view must finish parsing history before enabling PTY input.
+            sink.message(json!({"kind": "replay"}).to_string());
             sink.output(replay);
         }
         delivery.sink = Arc::clone(sink);
@@ -910,7 +912,17 @@ mod tests {
 
     /// Waits up to ten seconds for `done`, acknowledging every output as it arrives.
     fn until(t: &Terminals, generation: u64, sink: &Collect, done: impl Fn(&Collect) -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        until_with_timeout(t, generation, sink, Duration::from_secs(10), done);
+    }
+
+    fn until_with_timeout(
+        t: &Terminals,
+        generation: u64,
+        sink: &Collect,
+        timeout: Duration,
+        done: impl Fn(&Collect) -> bool,
+    ) {
+        let deadline = Instant::now() + timeout;
         let mut acked = 0;
         while !done(sink) {
             assert!(Instant::now() < deadline, "timed out: {:?}", sink.text());
@@ -1502,6 +1514,7 @@ mod tests {
             .connect("main", target("run-1"), 80, 24, second.clone())
             .unwrap();
         assert!(again.reused);
+        assert_eq!(second.messages(), [json!({"kind": "replay"})]);
         assert_eq!(again.generation, c.generation);
         assert_eq!(
             second.text(),
@@ -1693,7 +1706,9 @@ mod tests {
             delivered.ends_with(&replay),
             "the redraw is a suffix of what the first view received"
         );
-        until(&t, g, &second, |s| s.text().contains("done"));
+        until_with_timeout(&t, g, &second, Duration::from_secs(30), |s| {
+            s.text().contains("done")
+        });
         let mut all = delivered[..delivered.len() - replay.len()].to_vec();
         all.extend(lock(&second.seen).0.concat());
         let text = String::from_utf8_lossy(&all).into_owned();

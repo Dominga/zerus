@@ -1065,3 +1065,25 @@ describe("the batch envelope", () => {
     });
   });
 });
+
+describe("suggestion dismissal", () => {
+  it("answers valid field sends and pushes, never queue-only or disabled sends", async () => {
+    const f = fakes(), dismissed: string[] = [];
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers, undefined, f.notify, (key) => dismissed.push(key));
+      await c.open(SESSION);
+      c.input("draft", 5, 5);
+      await c.send();
+      expect(dismissed).toEqual([SESSION.key]);
+      c.apply(view({ text: "next", text_epoch: 2 }));
+      await c.push();
+      expect(dismissed).toEqual([SESSION.key, SESSION.key]);
+      c.apply(view({ text: "", text_epoch: 3, sending: true }));
+      await c.push();
+      expect(dismissed).toHaveLength(2);
+      c.apply(view({ text: "blocked", text_epoch: 4, sending: false, available: false }));
+      await c.send();
+      expect(dismissed).toHaveLength(2);
+    });
+  });
+});

@@ -1308,7 +1308,15 @@ pub fn process_alive(pid: u32) -> bool {
 /// Volume and file index identify the file itself; creation times do not,
 /// because NTFS tunnelling gives a replacement under the same name the old one.
 pub fn file_identity(path: &Path) -> Option<FileIdentity> {
-    FileIdentity::of(&fs::File::open(path).ok()?).ok()
+    FileIdentity::of(&open_for_identity(path).ok()?).ok()
+}
+/// Opens a file or a directory for its identity, following links. Windows opens a
+/// directory only with backup semantics; `fs::metadata` opens paths the same way.
+fn open_for_identity(path: &Path) -> io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
 }
 /// Not read on Windows: callers compare the file at the path they started from.
 pub fn image_identity() -> Option<FileIdentity> {
@@ -1321,7 +1329,7 @@ impl FileIdentity {
     }
     /// The identity and metadata of the file `path` names, following links.
     pub fn at(path: &Path) -> io::Result<(Self, fs::Metadata)> {
-        Self::with_metadata(&fs::File::open(path)?)
+        Self::with_metadata(&open_for_identity(path)?)
     }
     /// The identity of a file this process has open.
     pub fn of(file: &fs::File) -> io::Result<Self> {
@@ -3365,6 +3373,17 @@ mod tests {
         fs::hard_link(&file, folder.join("second")).unwrap();
         assert!(!verify_private(&file, Private::File).unwrap());
         assert!(verify_private(&folder.join("missing"), Private::File).is_err());
+    }
+
+    #[test]
+    fn a_directory_has_an_identity_like_a_file() {
+        // Directories open only with backup semantics; the search catalog stamps them.
+        let dir = tempfile::tempdir().unwrap();
+        let (identity, metadata) = FileIdentity::at(dir.path()).unwrap();
+        assert!(metadata.is_dir());
+        assert_eq!(file_identity(dir.path()), Some(identity));
+        fs::write(dir.path().join("file"), b"x").unwrap();
+        assert_eq!(FileIdentity::at(dir.path()).unwrap().0.inode, identity.inode);
     }
 
     #[test]

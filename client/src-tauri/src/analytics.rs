@@ -406,7 +406,7 @@ pub async fn analytics_save_review(
     let Some(text) = inner.take_review() else {
         return Ok(());
     };
-    let window = app.get_webview_window(crate::MAIN_WINDOW);
+    let window = crate::main_window(&app);
     let handle = app.clone();
     let chosen = tauri::async_runtime::spawn_blocking(move || {
         // The window handle is asked of the main thread: never block it here.

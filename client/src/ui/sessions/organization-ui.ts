@@ -89,7 +89,7 @@ export function moveChoices(g: GroupingOut, current: readonly string[]): (Header
 export const projectColor = (h: Pick<HeaderOut, "color" | "palette">) => h.color ?? `var(--z-entity-palette-${h.palette})`;
 
 /** A Sessions list filter chip: a machine, or a project by its id. */
-export interface FilterChip { id: string; label: string; kind: "m" | "p" }
+export interface FilterChip { id: string; label: string; kind: "m" | "p" | "a"; provider?: string }
 /**
  * A project chip matches its header band; a machine chip, or a project no
  * longer listed, takes its name's palette slot (`slot`, SessionCard's paletteIndex).
@@ -97,6 +97,7 @@ export interface FilterChip { id: string; label: string; kind: "m" | "p" }
 export function chipColor(c: FilterChip, headerOf: (project: string) => Pick<HeaderOut, "color" | "palette"> | undefined,
                           slot: (name: string) => number): string {
   const h = c.kind === "p" ? headerOf(c.id) : undefined;
+  if (c.kind === "a") return "var(--z-entity-palette-6)";
   return h ? projectColor(h) : `var(--z-entity-palette-${slot(c.label)})`;
 }
 

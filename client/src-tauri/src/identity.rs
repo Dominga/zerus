@@ -43,6 +43,12 @@ impl Identity {
         self.bundle_id == SWITCH_ID
     }
 
+    /// Only the installed switch imports Qt state. A replay uses isolated
+    /// stores even when it runs from the production application.
+    pub fn seeds_qt(&self, replay: bool) -> bool {
+        self.is_switch() && !replay
+    }
+
     /// The single-instance name: Qt's `hgs-tray` for the switch bundle; any
     /// other build only on request (`ZERUS_CLIENT_SINGLE_INSTANCE=1`), under
     /// its own name, so parallel dev runs and Qt's socket stay apart.
@@ -189,6 +195,28 @@ pub fn flag(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_platform_switch_uses_one_identity_and_replay_never_seeds() {
+        let home = Path::new("/fixture/example");
+        let production = Identity::new(SWITCH_ID);
+        for platform in [Platform::Mac, Platform::Linux, Platform::Windows] {
+            let data = production.data_dir(platform, home, None, None);
+            assert_eq!(data.file_name().unwrap(), SWITCH_ID);
+            assert!(production.seeds_qt(false));
+            assert!(!production.seeds_qt(true));
+            assert_eq!(production.instance_name(false).as_deref(), Some("hgs-tray"));
+        }
+        for id in [
+            "dev.zerus.next",
+            "dev.zerus.next.phase2",
+            "com.hgdev.hgs-tray.local",
+        ] {
+            let dev = Identity::new(id);
+            assert!(!dev.seeds_qt(false));
+            assert!(!dev.seeds_qt(true));
+        }
+    }
 
     #[test]
     fn the_switch_bundle_takes_qt_names_and_others_keep_their_own() {

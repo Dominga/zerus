@@ -92,17 +92,89 @@ export function attachments(e: ActivityEvent): ActivityItem["attachments"] {
   });
 }
 
+interface AttachmentEcho {
+  reference: string;
+  kind: "Image" | "File";
+  path: string;
+}
+
+/** The numbered terminal echoes produced by attachments::terminal_text. */
+export function attachmentEchoes(text: string): AttachmentEcho[] {
+  const pattern = /\[(Image|File) #([1-9][0-9]{0,8})\] ?\((Inspect the attached image at|Read the attached file at) ("(?:[^"\\]|\\.)*") ?\)/g;
+  const echoes: AttachmentEcho[] = [];
+  for (const found of text.matchAll(pattern)) {
+    const kind = found[1] as AttachmentEcho["kind"];
+    if ((kind === "Image") !== (found[3] === "Inspect the attached image at")) continue;
+    try {
+      const path = JSON.parse(found[4]);
+      if (typeof path === "string") echoes.push({ reference: found[0].slice(0, found[0].indexOf("]") + 1), kind, path });
+    } catch { /* A malformed path stays ordinary message text. */ }
+  }
+  return echoes;
+}
+
+function echoMatchesFiles(text: string, files: ActivityEvent["attachments"]): boolean {
+  const echoes = attachmentEchoes(text);
+  if (!files?.length || echoes.length !== files.length) return false;
+  return echoes.every((echo, index) => {
+    const file = files[index];
+    const name = typeof file?.name === "string" ? file.name : "";
+    const reference = typeof file?.reference === "string" ? file.reference : "";
+    const mime = typeof file?.mime === "string" ? file.mime : "";
+    const filename = `${String(index + 1).padStart(2, "0")}-${name.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 100)}`;
+    const path = echo.path.replaceAll("\\", "/");
+    return echo.reference === reference && (echo.kind === "Image") === mime.startsWith("image/")
+      && /(?:^|\/)attachments\/message-[A-Za-z0-9]+\/[^/]+$/.test(path) && path.split("/").at(-1) === filename;
+  });
+}
+
+/**
+ * Reconciles a native numbered prompt echo with its one exact delivery receipt.
+ * Public receipt metadata supplies the request and index; an echoed host path
+ * is never used to read a file. Unknown or ambiguous echoes stay untouched.
+ */
+export function mergeAttachmentMessages(given: readonly ActivityEvent[], summary?: Record<string, unknown>): readonly ActivityEvent[] {
+  const receipts = Array.isArray(summary?.attachment_messages) ? summary.attachment_messages as ActivityEvent[] : [];
+  if (!receipts.length) return given;
+  const events = [...given];
+  let changed = false;
+  for (const receipt of receipts) {
+    const files = Array.isArray(receipt.attachments) ? receipt.attachments : [];
+    const submitted = typeof receipt.submitted_text === "string" ? receipt.submitted_text.trim() : "";
+    if (receipt.source !== "hgs_delivery" || !files.length || !submitted || !echoMatchesFiles(submitted, files)) continue;
+    if (receipts.filter((other) => typeof other.submitted_text === "string" && other.submitted_text.trim() === submitted).length !== 1) continue;
+    const exact: number[] = [];
+    events.forEach((event, index) => {
+      if (event.source !== "hgs_voice" && !event.agent_id && !event.attachments?.length && PROMPTS.has(event.type ?? "")
+        && (event.detail ?? "").trim() === submitted) exact.push(index);
+    });
+    if (exact.length !== 1) continue;
+    const at = exact[0];
+    const event = events[at];
+    events[at] = {
+      ...event, detail: typeof receipt.detail === "string" ? receipt.detail : "", attachments: files,
+      attachment_echo: event.detail, attachment_request_id: receipt.message_id, attachment_submitted_text: receipt.submitted_text,
+    };
+    changed = true;
+  }
+  return changed ? events : given;
+}
+
 function media(e: ActivityEvent, id: string): MediaMessage {
   const voice = (e.voice ?? {}) as Record<string, unknown>;
   const audio = (voice.audio ?? {}) as Record<string, unknown>;
   const video = (voice.video ?? undefined) as Record<string, unknown> | undefined;
   const state = String(voice.state ?? "uncertain") as VoiceState;
   const waveform = Array.isArray(audio.waveform) ? (audio.waveform as unknown[]).map((v) => Math.max(0, Math.min(255, Number(v) || 0))) : [];
+  const file = video && Object.keys(video).length ? video : audio;
+  const index = Number(file.index);
   return {
     id, kind: "media", media: video && Object.keys(video).length ? "video" : "voice", at: timeText(e.at),
     state: state in VOICE_STATE_LABEL ? state : "uncertain",
     durationMs: Math.max(0, Number(audio.duration_ms) || 0),
     waveform: waveform.length === 64 ? waveform : [],
+    file: typeof audio.request_id === "string" && !!audio.request_id && typeof file.request_id === "string" && !!file.request_id
+      && typeof file.index === "number" && Number.isSafeInteger(index) && index >= 0 ? { request_id: file.request_id, index } : undefined,
     transcript: typeof voice.transcript === "string" && voice.transcript ? voice.transcript : undefined,
     error: typeof voice.error === "string" && voice.error ? voice.error : undefined,
   };
@@ -184,24 +256,32 @@ function localEvent(row: LocalMessage): ActivityEvent {
  * nearest prompt within 10 s that starts like it. Every other row is placed by
  * its time, after the events of the same time.
  */
-export function mergeLocal(events: readonly ActivityEvent[], local: readonly LocalMessage[]): ActivityEvent[] {
+export function mergeLocal(events: readonly ActivityEvent[], local: readonly LocalMessage[], bindingOnly: readonly LocalMessage[] = []): ActivityEvent[] {
   const source = events.slice();
   const appended: ActivityEvent[] = [];
-  for (const row of local) {
+  const claimed = new Set<number>();
+  const candidates = [...local, ...bindingOnly];
+  for (const row of candidates) {
+    const append = local.includes(row);
     if (row.source === "hgs_voice") {
-      if (!source.some((e) => e.source === "hgs_voice" && e.message_id === row.message_id)) appended.push(localEvent(row));
+      if (append && !source.some((e) => e.source === "hgs_voice" && e.message_id === row.message_id)) appended.push(localEvent(row));
       continue;
     }
     const submitted = submittedOf(row);
-    const sent = row.status === "sent";
+    const sent = row.status !== "error";
     let match = -1;
     const exact: number[] = [];
-    if (sent && row.attachments.length) {
+    const eligible = (e: ActivityEvent, i: number) => !claimed.has(i) && !e.agent_id && e.source !== "hgs_voice" && PROMPTS.has(e.type ?? "")
+      && (!e.activity_display_key || e.activity_display_key === `local-${row.id}`);
+    if (sent) match = source.findIndex((e, i) => eligible(e, i) && e.activity_display_key === `local-${row.id}`);
+    if (sent && match < 0) match = source.findIndex((e, i) => eligible(e, i)
+      && !!(e.message_id || e.attachment_request_id) && [row.id, row.message_id].some(id => !!id && (e.message_id === id || e.attachment_request_id === id)));
+    if (sent && match < 0 && row.attachments.length) {
       source.forEach((e, i) => {
-        if (e.source !== "hgs_voice" && !e.agent_id && !e.attachments?.length && PROMPTS.has(e.type ?? "")
+        if (eligible(e, i) && !e.attachments?.length
           && submitted && (e.detail ?? "").trim() === submitted) exact.push(i);
       });
-      const competing = local.filter((other) => other.status === "sent" && other.attachments.length && submittedOf(other) === submitted).length;
+      const competing = candidates.filter((other) => other.status !== "error" && other.attachments.length && submittedOf(other) === submitted).length;
       // Qt also remembers which of several exact events a row was bound to; with one it is that one.
       if (competing === 1 && exact.length === 1) match = exact[0];
     }
@@ -209,7 +289,7 @@ export function mergeLocal(events: readonly ActivityEvent[], local: readonly Loc
       let nearest = NEAREST;
       const head = submitted.slice(0, 1000);
       source.forEach((e, i) => {
-        if (e.agent_id || !PROMPTS.has(e.type ?? "")) return;
+        if (!eligible(e, i)) return;
         const body = (e.detail ?? "").trim();
         const distance = Math.abs((e.at ?? NaN) - row.submitted_at);
         if (e.source !== "hgs_voice" && !e.attachments?.length && distance <= nearest && submitted && body
@@ -217,13 +297,14 @@ export function mergeLocal(events: readonly ActivityEvent[], local: readonly Loc
       });
     }
     if (match >= 0) {
+      claimed.add(match);
       source[match] = {
-        ...source[match], activity_key: `local-${row.id}`, detail: row.text,
-        attachments: row.attachments as ActivityEvent["attachments"], attachment_submitted_text: row.submitted_text,
+        ...source[match], activity_journal_key: eventKey(source[match]), activity_key: `local-${row.id}`, activity_display_key: `local-${row.id}`, detail: row.text,
+        attachments: source[match].attachments?.length ? source[match].attachments : row.attachments as ActivityEvent["attachments"], attachment_submitted_text: row.submitted_text,
       };
       continue;
     }
-    appended.push(localEvent(row));
+    if (append) appended.push(localEvent(row));
   }
   if (!appended.length) return source;
   // Placed by time, after the events of the same time (Qt's stable sort by `at`).
@@ -239,17 +320,100 @@ export function mergeLocal(events: readonly ActivityEvent[], local: readonly Loc
   return merged;
 }
 
+const PROVIDER_SOURCES = new Set(["codex_transcript", "claude_transcript", "kimi_wire"]);
+const isExcerpt = (excerpt: string, full: string) => {
+  const prefix = excerpt.endsWith("…") ? excerpt.slice(0, -1) : excerpt;
+  return !!prefix && full.startsWith(prefix);
+};
+
+/**
+ * Qt's provider_messages merge: watch event frames also arrive here, folded
+ * into the summary by the core. Keep journal cursors intact and project the
+ * bounded provider window at render time, including progress between tools.
+ */
+export function mergeProvider(given: readonly ActivityEvent[], summary?: Record<string, unknown>): readonly ActivityEvent[] {
+  if (!Array.isArray(summary?.provider_messages) || !summary.provider_messages.length) return given;
+  const events = [...given];
+  const matchedStops = new Set<number>();
+  const identities = new Set<string>();
+  const seconds = new Map<number, number[]>();
+  const nativeKey = (e: ActivityEvent) => e.message_id ? `${e.source}:${e.type}:${e.message_id}` : "";
+  const at = (e: ActivityEvent) => {
+    const value = e.at;
+    return typeof value === "number" && Number.isFinite(value) ? value : 0;
+  };
+  // Index only matching candidates once, rather than scanning every loaded
+  // journal page for each provider row on every streaming rebuild.
+  const index = (e: ActivityEvent, i: number) => {
+    if (e.agent_id || (e.type !== "Stop" && !PROVIDER_SOURCES.has(e.source ?? ""))) return;
+    const key = nativeKey(e);
+    if (key) identities.add(key);
+    const second = Math.floor(at(e));
+    const bucket = seconds.get(second);
+    if (bucket) bucket.push(i); else seconds.set(second, [i]);
+  };
+  events.forEach(index);
+  let inserted = false;
+  for (const value of summary.provider_messages.slice(-100)) {
+    if (!value || typeof value !== "object") continue;
+    const message = value as ActivityEvent;
+    if (!PROVIDER_SOURCES.has(message.source ?? "") || message.agent_id
+      || (message.type !== "AgentMessage" && !(message.type === "AgentThinking" && message.source === "claude_transcript"))) continue;
+    const key = nativeKey(message);
+    if (key && identities.has(key)) continue;
+    const when = at(message);
+    const nearby: number[] = [];
+    for (let offset = -3; offset <= 3; offset++) {
+      for (const i of seconds.get(Math.floor(when) + offset) ?? []) if (Math.abs(at(events[i]) - when) <= 3) nearby.push(i);
+    }
+    nearby.sort((a, b) => a - b);
+    const same = nearby.some((i) => {
+      const e = events[i];
+      return e.type === message.type && e.source === message.source
+        && !(message.message_id && e.message_id && message.message_id !== e.message_id)
+        && e.detail === message.detail && Math.abs(at(e) - when) < 3;
+    });
+    if (same) continue;
+    // The hook's final excerpt and the provider's full response are one row.
+    // An empty Stop never absorbs commentary immediately before completion.
+    const stop = message.type === "AgentMessage" ? nearby.find((i) => !matchedStops.has(i) && events[i].type === "Stop"
+      && Math.abs(at(events[i]) - when) <= 2
+      && (events[i].detail ? isExcerpt(events[i].detail!, message.detail ?? "") : message.message_phase !== "commentary")) : undefined;
+    if (stop !== undefined) {
+      matchedStops.add(stop);
+      events[stop] = { ...events[stop], detail: message.detail, source: message.source, message_id: message.message_id };
+      if (key) identities.add(key);
+    } else {
+      index(message, events.length);
+      events.push(message);
+      inserted = true;
+    }
+  }
+  // Preserve journal order when no row was inserted, or occurrence times are
+  // incomplete. Fully timed rows use occurrence time with sequence tie breaks.
+  if (inserted && events.every((e) => at(e) > 0)) {
+    events.sort((a, b) => at(a) - at(b) || ((a.seq ?? 0) > 0 && (b.seq ?? 0) > 0 ? a.seq! - b.seq! : 0));
+  }
+  return events;
+}
+
 /**
  * The items of a transcript, oldest first; ids are stable while events only
  * append. `local` are the open session's local rows (the composer view's).
  */
 export function buildTranscript(given: readonly ActivityEvent[], summary?: Record<string, unknown>, local: readonly LocalMessage[] = []): TranscriptItem[] {
-  if (!given.length && !local.length) return recordedContext(summary);
-  const items: TranscriptItem[] = given.length ? [] : recordedContext(summary);
-  const events = local.length ? mergeLocal(given, local) : given;
+  const provider = mergeProvider(given, summary);
+  if (!provider.length && !local.length) return recordedContext(summary);
+  const events = mergeAttachmentMessages(local.length ? mergeLocal(provider, local) : provider, summary);
+  return transcriptItems(events, summary, !provider.length);
+}
+
+/** Journal identity stays intact in the store; only rendered rows adopt a send's key. */
+function transcriptItems(events: readonly ActivityEvent[], summary?: Record<string, unknown>, context = false): TranscriptItem[] {
+  const items: TranscriptItem[] = context ? recordedContext(summary) : [];
   for (let i = 0; i < events.length;) {
     const e = events[i];
-    const id = eventKey(e);
+    const id = typeof e.activity_display_key === "string" ? e.activity_display_key : eventKey(e);
     const role = messageRole(e);
     const at = timeText(e.at);
     if (e.type === "SessionCleared") {
@@ -291,7 +455,9 @@ export function buildTranscript(given: readonly ActivityEvent[], summary?: Recor
       // Qt's order: a queued prompt first, then an answer (ActivityView.cpp:1036-1038).
       const label = role !== "user" ? undefined : e.type === "UserPromptQueued" ? "You (queued)"
         : e.type === "QuestionAnswered" || replies ? "You (answer)" : undefined;
-      items.push({ id, kind: role === "user" ? "user" : "agent", at, body: e.detail ?? "", attachments: attachments(e), receipt, label, replies });
+      items.push({ id, kind: role === "user" ? "user" : "agent", at, body: e.detail ?? "",
+        echoBody: typeof e.attachment_echo === "string" ? e.attachment_echo : undefined,
+        attachments: attachments(e), receipt, label, replies });
       i++; continue;
     }
     // Adjacent operational events form one group; messages and attention stay boundaries.
@@ -316,4 +482,40 @@ export function buildTranscript(given: readonly ActivityEvent[], summary?: Recor
     }
   }
   return items;
+}
+
+/** One open Activity only. Remember at most 50 local receipts and 1000 small
+ * journal/display-key bindings; never retain another session's transcript.
+ * Rust may drop its local row before the corresponding activity batch arrives. */
+export function createTranscriptProjection() {
+  const recent = new Map<string, LocalMessage>(), bindings = new Map<string, string>();
+  const trim = <T>(map: Map<string, T>, limit: number) => { while (map.size > limit) map.delete(map.keys().next().value!); };
+  return {
+    reset() { recent.clear(); bindings.clear(); },
+    build(given: readonly ActivityEvent[], summary?: Record<string, unknown>, local: readonly LocalMessage[] = []): TranscriptItem[] {
+      for (const row of local) { recent.set(row.id, row); }
+      trim(recent, 50);
+      const present = new Set(local.map(row => row.id));
+      const bound = new Set(bindings.values());
+      const missing = [...recent.values()].filter(row => !present.has(row.id) && row.status !== "error" && row.source !== "hgs_voice");
+      // A confirmed local receipt can leave Rust's view one batch before its
+      // journal event. Keep that one row through the handoff, without actions.
+      const waiting = missing.filter(row => !bound.has(`local-${row.id}`));
+      const bindingOnly = missing.filter(row => bound.has(`local-${row.id}`));
+      const provider = mergeProvider(given, summary);
+      const aliased = provider.map(event => {
+        const id = bindings.get(eventKey(event));
+        return id ? { ...event, activity_display_key: id } : event;
+      });
+      let events = mergeLocal(aliased, [...local, ...waiting], bindingOnly);
+      events = events.map(event => {
+        const key = typeof event.activity_journal_key === "string" ? event.activity_journal_key : eventKey(event);
+        if (typeof event.activity_display_key === "string") bindings.set(key, event.activity_display_key);
+        const id = bindings.get(key);
+        return id ? { ...event, activity_display_key: id } : event;
+      });
+      trim(bindings, 1000);
+      return transcriptItems(mergeAttachmentMessages(events, summary), summary, !provider.length);
+    },
+  };
 }

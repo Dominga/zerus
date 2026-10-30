@@ -29,6 +29,8 @@ pub mod questions;
 pub mod queue;
 pub mod saved;
 pub mod send;
+#[cfg(feature = "media")]
+mod voice;
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -216,6 +218,7 @@ pub struct ComposerView {
     pub removed: Option<String>,
     pub attaching: bool,
     pub sending: bool,
+    pub recording: bool,
     pub waiting: Option<String>,
     pub uncertain: bool,
     pub status: String,
@@ -279,6 +282,7 @@ pub(crate) struct Composer {
     pub(crate) rev: u64,
     pub(crate) text_epoch: u64,
     pub(crate) sending: bool,
+    pub(crate) recording_owner: Option<String>,
     pub(crate) waiting: Option<String>,
     pub(crate) uncertain: bool,
     pub(crate) error: bool,
@@ -324,6 +328,7 @@ impl Composer {
             rev: 0,
             text_epoch: 0,
             sending: false,
+            recording_owner: None,
             waiting: None,
             uncertain: false,
             error: false,
@@ -347,7 +352,11 @@ impl Composer {
     }
 
     pub(crate) fn busy(&self) -> bool {
-        self.sending || self.waiting.is_some() || self.attaching || self.renaming
+        self.sending
+            || self.recording_owner.is_some()
+            || self.waiting.is_some()
+            || self.attaching
+            || self.renaming
     }
 
     /// Only the memory holds a change the disk may lack, so the composer
@@ -1417,7 +1426,9 @@ impl Composers {
         let attachments_blocked =
             !composer.draft.attachments.is_empty() && !session.attachments_available;
         let too_long = composer.draft.text.len() > MAX_TEXT_BYTES;
-        let mut status = if let Some(error) = &composer.storage_error {
+        let mut status = if composer.recording_owner.is_some() {
+            "Recording voice. Space / Esc to stop.".into()
+        } else if let Some(error) = &composer.storage_error {
             error.clone()
         } else if let Some(waiting) = &composer.waiting {
             waiting.clone()
@@ -1484,6 +1495,7 @@ impl Composers {
             removed: composer.removed.as_ref().map(|(_, a)| a.name.clone()),
             attaching: composer.attaching,
             sending: composer.sending,
+            recording: composer.recording_owner.is_some(),
             waiting: composer.waiting.clone(),
             uncertain: composer.uncertain,
             status,
@@ -1564,13 +1576,12 @@ pub async fn composer_pick(
     start: usize,
     end: usize,
 ) -> Result<(), String> {
-    use tauri::Manager;
     use tauri_plugin_dialog::DialogExt;
     let composers = state.inner().clone();
     if !composers.can_attach(handle) {
         return Ok(());
     }
-    let window = app.get_webview_window(crate::MAIN_WINDOW);
+    let window = crate::main_window(&app);
     let picked = tauri::async_runtime::spawn_blocking(move || {
         // The window handle is asked of the main thread: never block it here.
         let mut dialog = app.dialog().file().set_title("Attach files");

@@ -199,7 +199,7 @@ export function SavedDraftsDialog() {
   const copy = () => {
     const text = savedDrafts.detail()?.text ?? "";
     if (!text) return;
-    void navigator.clipboard?.writeText(text).then(() => toast("Copied", "The draft's text is on the clipboard"), () => toast("Not copied", "The clipboard is unavailable"));
+    void bridge.copyVerbatim(text).then(() => toast("Copied", "The draft's text is on the clipboard"), () => toast("Not copied", "The clipboard is unavailable", "error"));
   };
 
   const detailLine = () => {

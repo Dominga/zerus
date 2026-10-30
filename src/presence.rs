@@ -53,6 +53,8 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> cli::Result<i32>
         .read_to_end(&mut bytes)
         .map_err(|e| cli::Error::new(1, format!("read presence: {e}")))?;
     let input = parse(crate::state::without_bom(&bytes)).map_err(|e| cli::Error::new(1, format!("{e:#}")))?;
+    let _admission = crate::desktop::legacy_presence(config)
+        .map_err(|e| cli::Error::new(1, format!("{e:#}")))?;
     write(&config.state, &input, now()).map_err(|e| cli::Error::new(1, format!("{e:#}")))?;
     println!("{}", json!({"ok": true}));
     Ok(0)
@@ -88,7 +90,20 @@ fn next(previous: Option<&Record>, input: &Input, at: f64) -> Record {
 }
 
 fn read(path: &Path) -> Option<Record> {
-    let record: Record = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    crate::platform::no_follow(&mut options);
+    #[cfg(windows)]
+    crate::platform::refuse_link(&mut options);
+    let file = options.open(path).ok()?;
+    if !crate::platform::verify_private_file(&file).ok()? {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_INPUT_BYTES + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 > MAX_INPUT_BYTES { return None; }
+    let record: Record = serde_json::from_slice(&bytes).ok()?;
     (record.idle_seconds.is_finite() && record.idle_seconds >= 0.0 && record.written_at.is_finite())
         .then_some(record)
 }
@@ -172,6 +187,29 @@ mod tests {
         ];
         for input in bad {
             assert!(parse(input).is_err(), "{}", String::from_utf8_lossy(input));
+        }
+    }
+
+    #[test]
+    fn oversized_and_special_presence_leaves_never_supply_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE);
+        write(dir.path(), &Input { idle_seconds: 0.0, locked: false }, 100.0).unwrap();
+        fs::write(&path, vec![b' '; MAX_INPUT_BYTES as usize + 1]).unwrap();
+        assert_eq!(listing(dir.path(), 100.0), None);
+        #[cfg(unix)]
+        {
+            fs::remove_file(&path).unwrap();
+            let foreign = dir.path().join("foreign");
+            fs::write(&foreign, b"preserved").unwrap();
+            std::os::unix::fs::symlink(&foreign, &path).unwrap();
+            assert_eq!(listing(dir.path(), 100.0), None);
+            assert_eq!(fs::read(&foreign).unwrap(), b"preserved");
+            fs::remove_file(&path).unwrap();
+            use std::os::unix::ffi::OsStrExt;
+            let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+            assert_eq!(listing(dir.path(), 100.0), None);
         }
     }
 

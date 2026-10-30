@@ -41,7 +41,7 @@ export const COMPOSER_HINT = "Drop files to attach to this message";
  * must go to the target the drag entered with.
  */
 export function routeDrop(s: DropState): DropRoute {
-  if (!s.selected) return { kind: "none" };
+  if (!s.selected || s.tab === "taskview") return { kind: "none" };
   if (s.tab === "terminal") {
     return s.online && s.terminal.connected && s.terminal.generation !== 0
       ? { kind: "terminal", key: `${s.selected}\n${s.terminal.generation}` } : { kind: "none" };

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { toSession } from "../../store/catalog";
 import {
-  canStartStopped, headerClearSlot, copyState, detailsFromInspection, freshCopy, freshEntry, freshStillValid, identityOk, notificationsState, notificationsStillAllowed, dialogReducer, menuItemActivates, menuState, renameParts, renameProblem, snapshotOf, tagProblem, terminal, terminateCopy, forgetCopy, forgetsBindingOnly, forgetOpening, forgetArchivedCopy, archiveNameOccupied, liveNameIndex, nameKey,
+  canStartStopped, headerClearSlot, sessionIdentity, copyState, detailsFromInspection, freshCopy, freshEntry, freshStillValid, identityOk, notificationsState, notificationsStillAllowed, dialogReducer, menuItemActivates, menuState, renameParts, renameProblem, snapshotOf, tagProblem, terminal, terminateCopy, forgetCopy, forgetsBindingOnly, forgetOpening, forgetArchivedCopy, archiveNameOccupied, liveNameIndex, nameKey,
 } from "./actions-ui";
 import fixture from "../../../core/tests/fixtures/action-rows.json";
 import type { Details, ViewRow } from "../../types";
@@ -226,7 +226,7 @@ describe("rename", () => {
 describe("details", () => {
   it("reads the inspection fields of an inspect reply or a state value", () => {
     expect(detailsFromInspection({ run_id: "r", conversation_id: "c", phase: "tool", turn_started: 1.5, interrupt_supported: true, allowed_actions: ["pause", 3], action_reasons: { resume: "busy", x: 1 } }))
-      .toEqual({ run_id: "r", conversation_id: "c", auth_required: false, expected_id: "", resume_message_can_send: false, allowed_actions: ["pause"],
+      .toEqual({ run_id: "r", conversation_id: "c", auth_required: false, expected_id: "", resume_message_can_send: false, fork_supported: false, fork_reason: "", allowed_actions: ["pause"],
         action_reasons: { resume: "busy" }, interrupt_supported: true, turn_started: 1.5, phase: "tool", cwd: null, terminal_supported: null, terminal_attach_supported: null });
     expect(detailsFromInspection(null)).toBeUndefined();
     expect(detailsFromInspection([1])).toBeUndefined();
@@ -340,6 +340,24 @@ describe("terminal", () => {
     expect(terminal(row({ agent: "opencode", terminal_supported: true }))).toBe(false);
     expect(terminal(row({ agent: "opencode", terminal_supported: true, terminal_reported: true }))).toBe(true);
     expect(terminal(row({ agent: "opencode" }), details({ terminal_supported: true }))).toBe(true);
+  });
+});
+
+describe("header session identity", () => {
+  it("copies the conversation ID, preferring inspected identity", () => {
+    expect(sessionIdentity(row())).toEqual({ value: "c1", title: "Session ID", caption: "Copy session ID" });
+    expect(sessionIdentity(row(), details({ conversation_id: "inspected" })).value).toBe("inspected");
+  });
+  it("falls back to run ID with its own caption when no conversation is known", () => {
+    expect(sessionIdentity(row(), details({ conversation_id: "", run_id: "inspected-run" }))).toEqual({ value: "inspected-run", title: "Run ID", caption: "Copy run ID" });
+    expect(sessionIdentity(row({ conversation_id: undefined }))).toEqual({ value: "r1", title: "Run ID", caption: "Copy run ID" });
+  });
+  it("a child uses its own conversation ID or agent ID, never the parent's", () => {
+    expect(sessionIdentity(row(), details(), { id: "agent-1", conversationId: "child-conversation" })).toEqual({ value: "child-conversation", title: "Session ID", caption: "Copy session ID" });
+    expect(sessionIdentity(row(), details(), { id: "agent-1" })).toEqual({ value: "agent-1", title: "Agent ID", caption: "Copy agent ID" });
+  });
+  it("has no copy value when neither conversation nor run is confirmed", () => {
+    expect(sessionIdentity(row({ conversation_id: undefined, run_id: undefined }))).toEqual({ value: "", title: "Session ID", caption: "Copy session ID" });
   });
 });
 

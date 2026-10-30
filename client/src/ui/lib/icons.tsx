@@ -16,6 +16,7 @@ const AGENT_GLYPHS: Record<AgentKind, string> = {
   kimi: `<path d="M6 4V20M6 12L18 4M6 12L18 20"/>`,
   opencode: `<path d="M8 5L3 12L8 19M16 5L21 12L16 19M14 5L10 19"/>`,
   deepseek: `<path d="M3 10C5 5 15 4 18 10L23 7L22 13L18 13C15 22 3 19 3 10Z"/><circle cx="8" cy="10" r=".6" fill="currentColor"/>`,
+  sh: QT_ICONS.terminal.body,
 };
 
 export const AGENT_LABEL: Record<AgentKind, string> = {
@@ -24,6 +25,7 @@ export const AGENT_LABEL: Record<AgentKind, string> = {
   kimi: "Kimi",
   deepseek: "DeepSeek",
   opencode: "OpenCode",
+  sh: "Shell",
 };
 
 // Lucide names used across the mockup that mean the same thing as a Qt glyph.

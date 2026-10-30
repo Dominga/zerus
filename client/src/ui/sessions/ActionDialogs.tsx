@@ -1,7 +1,7 @@
-import { For, Show, createEffect, createMemo, createSignal, onCleanup, untrack } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, lazy, onCleanup, onMount, untrack } from "solid-js";
 import { Icon } from "../lib/icons";
 import { catalog, computerOffline } from "../../store/catalog";
-import { GONE, change, copyCommand, copyFolder, copyName, copyReference, dismiss, end, forget, interrupting, notices, notify, perform, stillListed, pendingNotifications, toggleMute, updating } from "../../store/actions";
+import { GONE, change, copyCommand, copyFolder, copyName, copyReference, end, forget, interrupting, notify, perform, stillListed, pendingNotifications, toggleMute, updating } from "../../store/actions";
 import { bindBatchConfirm, running } from "../../store/batch";
 import { cancelRestoreFollow, forgetArchived, refreshArchiveWhenDone, restoreSession } from "../../store/restores";
 import type { MenuEntry } from "../../store/ui";
@@ -9,10 +9,17 @@ import type { Details, Outcome } from "../../types";
 import type { Session } from "./types";
 import { FRESH_CHANGED, STATE_CHANGED, archiveNameOccupied, canStartStopped, FRESH_TIP, copyState, dialogReducer, freshCopy, freshEntry, freshStillValid, menuState, notificationsState, renameParts, renameProblem, forgetArchivedCopy, forgetCopy, forgetOpening, snapshotOf, terminateCopy, terminates, type ForgetScope, type ActionRow, type DialogEvent } from "./actions-ui";
 import type { BatchConfirmation } from "./selection";
+import { terminationCleanupOffer, terminationCleanupCancel } from "../../bridge";
+import { targetOf } from "../../store/actions";
+import { setSetting } from "../../store/settings";
+import { sessionForks } from "../../store/sessionForks";
+import { FORK_CHECKING, FORK_HINT } from "./fork-ui";
+
+const ForkDialog = lazy(() => import("./ForkDialog"));
 
 // The guarded session actions: the entries both menus share, the Rename,
-// Terminate, Forget (saved or archived), Start fresh and selection dialogs,
-// and the notices the action store raises. An archived row's change entry is
+// Terminate, Forget (saved or archived), Start fresh and selection dialogs.
+// Their notices go to the window's notice bus (store/notices.ts). An archived row's change entry is
 // Restore session (store/restores.ts). While a selection batch runs
 // (store/batch.ts, Qt's m_pending) every write entry here is off. A
 // successful Rename or Move to archive reloads the archive pages (Qt's
@@ -37,7 +44,7 @@ type Item = Extract<MenuEntry, { label: string }> & { action: () => void };
  * snapshot of the row as it is now, which the store checks against the
  * listed row when they run.
  */
-export function actionEntries(s: Session, details?: Details, options: { context?: boolean } = {}): { change: Item; stop: Item & { shown: boolean }; rename: Item; archive?: Item; end: Item } {
+export function actionEntries(s: Session, details?: Details, options: { context?: boolean } = {}): { change: Item; stop: Item & { shown: boolean }; rename: Item; fork: Item; archive?: Item; end: Item } {
   const row = snapshotOf(s);
   const archived = row.state === "archived";
   const m = menuState(row, !computerOffline(s.computer), updating(s.computer, s.name), details, {
@@ -56,6 +63,7 @@ export function actionEntries(s: Session, details?: Details, options: { context?
       action: () => { if (details) void perform(row, { kind: "interrupt", turn_started: details.turn_started }); },
     },
     rename: { label: "Rename…", icon: "pencil", disabled: !m.rename, action: () => send({ type: "open", kind: "rename", row }) },
+    fork: forkEntry(s, details),
     archive: m.archive.visible
       ? { label: "Move to archive", icon: "archive", disabled: !m.archive.enabled, hint: hint(m.archive.enabled, m.archive.reason), action: () => { void perform(row, { kind: "archive" }).then(refreshArchiveWhenDone); } }
       : undefined,
@@ -73,6 +81,15 @@ export function actionEntries(s: Session, details?: Details, options: { context?
         send({ type: "open", kind: "forget", ...opening });
       },
     },
+  };
+}
+
+/** Both menus share the inspected source and the one guarded Fork path. */
+export function forkEntry(s: Session, details?: Details): Item {
+  const row = snapshotOf(s);
+  return { label: "Fork session…", icon: "git-fork", disabled: !sessionForks.available(row, details),
+    hint: details ? details.fork_reason || FORK_HINT : FORK_CHECKING,
+    action: () => { if (details && sessionForks.available(row, details)) send({ type: "open", kind: "fork", row, details: { ...details } }); },
   };
 }
 
@@ -178,17 +195,40 @@ function RenameDialog(props: { row: ActionRow; close: () => void }) {
 
 function TerminateDialog(props: { row: ActionRow; close: () => void }) {
   const copy = terminateCopy(props.row);
+  const [offer, setOffer] = createSignal<string>();
+  const [remove, setRemove] = createSignal(false);
+  let closed = false, consumed = false;
+  onMount(() => {
+    const target = targetOf(props.row, "terminate");
+    if (copy.action !== "terminate" || !target) return;
+    void terminationCleanupOffer(target).then((value) => {
+      if (!value) return;
+      if (closed) { void terminationCleanupCancel(value.id); return; }
+      setOffer(value.id); setRemove(value.checked);
+    }).catch(() => { /* The ordinary guarded Terminate stays available. */ });
+  });
+  onCleanup(() => { closed = true; const id = offer(); if (id && !consumed) void terminationCleanupCancel(id); });
+  const submit = () => {
+    const id = remove() ? offer() : undefined;
+    consumed = !!id;
+    if (offer() && !remove()) void setSetting("workspace/removeWorktreeAfterTermination", false);
+    props.close(); void end(props.row, copy.action, id);
+  };
   return (
     <>
       <div class="dlg-head"><Icon name="triangle-alert" size={18} class="accent" /><h2 id="action-dlg-title">{copy.title}</h2></div>
       <div class="dlg-body">
         <div class="confirm-body" id="action-dlg-body">{copy.text}</div>
         <div class="dlg-detail">{copy.detail}</div>
+        <Show when={offer()}>
+          <label class="check" style={{ "margin-top": "10px" }}><input type="checkbox" checked={remove()} onChange={(e) => setRemove(e.currentTarget.checked)} /> Remove the working folder after stopping</label>
+          <p class="hint" style={{ "margin-top": "6px" }}>Removal runs in the background after exact successful termination, only for a verified generated worktree. Unknown local data keeps the folder for review. Computer: {props.row.machine}</p>
+        </Show>
       </div>
       <div class="dlg-foot">
         <span class="spacer" />
         <button type="button" class="btn primary" data-initial autofocus onClick={props.close}>Cancel</button>
-        <button type="button" class="btn solid-danger" onClick={() => { props.close(); void end(props.row, copy.action); }}>{copy.confirm}</button>
+        <button type="button" class="btn solid-danger" onClick={submit}>{offer() ? remove() ? "Stop and remove folder" : "Stop and archive" : copy.confirm}</button>
       </div>
     </>
   );
@@ -283,33 +323,17 @@ export function ActionDialogs() {
     queueMicrotask(() => {
       const initial = el?.querySelector<HTMLElement>("[data-initial]");
       initial?.focus();
-      if (state.kind === "rename" && initial instanceof HTMLInputElement) initial.select();
+      if ((state.kind === "rename" || state.kind === "fork") && initial instanceof HTMLInputElement) initial.select();
     });
   });
   return (
-    <dialog class="dlg" ref={el} role={open()?.kind === "rename" || !open() ? "dialog" : "alertdialog"} aria-labelledby="action-dlg-title"
-      aria-describedby={open() && open()?.kind !== "rename" ? "action-dlg-body" : undefined} style={{ width: "460px" }} onClose={closeDialog}>
+    <dialog class="dlg" ref={el} role={open()?.kind === "rename" || open()?.kind === "fork" || !open() ? "dialog" : "alertdialog"} aria-labelledby="action-dlg-title"
+      aria-describedby={open() && open()?.kind !== "rename" && open()?.kind !== "fork" ? "action-dlg-body" : undefined} style={{ width: open()?.kind === "fork" ? "480px" : "460px" }} onClose={closeDialog}>
       <Show when={open()} keyed>
-        {(p) => (p.kind === "rename" ? <RenameDialog row={p.row} close={closeDialog} />
+        {(p) => (p.kind === "fork" ? <ForkDialog row={p.row} details={p.details} close={closeDialog} /> : p.kind === "rename" ? <RenameDialog row={p.row} close={closeDialog} />
           : p.kind === "fresh" ? <FreshDialog row={p.row} close={closeDialog} /> : p.kind === "forget" ? <ForgetDialog row={p.row} bound={p.bound} close={closeDialog} />
           : p.kind === "batch" ? <BatchDialog copy={p.copy} answer={p.answer} close={closeDialog} /> : p.kind === "terminate" ? <TerminateDialog row={p.row} close={closeDialog} /> : null)}
       </Show>
     </dialog>
-  );
-}
-
-/** The action store's notices, as toasts. Errors and warnings stay until dismissed. */
-export function ActionNotices() {
-  return (
-    <div class="toasts" aria-live="polite" style={{ bottom: "auto", top: "16px" }}>
-      <For each={notices()}>
-        {(n) => (
-          <div class={`toast ${n.tone}`}>
-            <Show when={n.sticky}><button class="icon-btn dismiss" aria-label="Dismiss" onClick={() => dismiss(n.id)}><Icon name="x" size={14} /></button></Show>
-            <span class="note">{n.text}</span>
-          </div>
-        )}
-      </For>
-    </div>
   );
 }

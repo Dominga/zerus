@@ -8,14 +8,13 @@
 //! [`MAX_BACKOFF_MS`], and at most [`MAX_IN_FLIGHT`] writes (SSH to peers) run
 //! at once, each free slot going to the computer with the fewest.
 use crate::readmarks::ReadMark;
-use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 
-pub const FIRST_BACKOFF_MS: i64 = 10_000;
-pub const MAX_BACKOFF_MS: i64 = 300_000;
-pub const CONFIRMED_RESEND_MS: i64 = 120_000;
-pub const MAX_UNAPPLIED_RESEND_MS: i64 = 960_000;
-pub const MAX_IN_FLIGHT: usize = 4;
+use zerus_desktop_read_policy::Retry;
+pub use zerus_desktop_read_policy::{
+    applied_all, CONFIRMED_RESEND_MS, FIRST_BACKOFF_MS, MAX_BACKOFF_MS, MAX_IN_FLIGHT,
+    MAX_UNAPPLIED_RESEND_MS,
+};
 
 /// Qt's `ReadMark::key`: computer, session name and conversation.
 type Key = (String, String, String);
@@ -31,8 +30,7 @@ fn key(mark: &ReadMark) -> Key {
 struct Attempt {
     sent: ReadMark,
     due_at: i64,
-    failures: u32,
-    unapplied: u32,
+    retry: Retry,
     in_flight: bool,
 }
 
@@ -106,13 +104,11 @@ impl ReadSync {
             let attempt = self.attempts.entry(key).or_insert_with(|| Attempt {
                 sent: mark.clone(),
                 due_at: 0,
-                failures: 0,
-                unapplied: 0,
+                retry: Retry::default(),
                 in_flight: false,
             });
             if attempt.sent != mark {
-                attempt.failures = 0;
-                attempt.unapplied = 0;
+                attempt.retry = Retry::default();
                 attempt.sent = mark.clone();
             }
             attempt.in_flight = true;
@@ -143,24 +139,7 @@ impl ReadSync {
             return;
         }
         attempt.in_flight = false;
-        if delivered {
-            attempt.failures = 0;
-            attempt.due_at = now_ms
-                + if applied_all {
-                    CONFIRMED_RESEND_MS
-                } else {
-                    MAX_UNAPPLIED_RESEND_MS.min(CONFIRMED_RESEND_MS << attempt.unapplied.min(3))
-                };
-            attempt.unapplied = if applied_all {
-                0
-            } else {
-                attempt.unapplied.saturating_add(1)
-            };
-        } else {
-            attempt.due_at =
-                now_ms + MAX_BACKOFF_MS.min(FIRST_BACKOFF_MS << attempt.failures.min(5));
-            attempt.failures = attempt.failures.saturating_add(1);
-        }
+        attempt.due_at = attempt.retry.finished(delivered, applied_all, now_ms);
     }
 
     /// A mark [`ReadSync::due`] handed out was not sent after all (its
@@ -199,21 +178,6 @@ fn sendable(mark: &ReadMark) -> bool {
         && !mark.name.is_empty()
         && !mark.run_id.is_empty()
         && !mark.conversation_id.is_empty()
-}
-
-/// Whether the host applied every part `mark` sets, by the `applied` object of
-/// its receipt (`ReadMarkSync::finished`). A `not_found` receipt applies none.
-pub fn applied_all(mark: &ReadMark, receipt: &Value) -> bool {
-    let applied = |field: &str| {
-        receipt
-            .get("applied")
-            .and_then(|applied| applied.get(field))
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-    };
-    let unset = |part: &Option<String>| part.as_deref().is_none_or(str::is_empty);
-    (unset(&mark.reply_id) || applied("reply_id"))
-        && (unset(&mark.attention_signature) || applied("attention_signature"))
 }
 
 #[cfg(test)]

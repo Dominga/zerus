@@ -9,17 +9,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
-use zerus_client_core::actions::{Exit, Invocation};
 use zerus_client_core::download_cache::{self, Source};
 use zerus_client_core::external_file::{self, Origin, Outcome};
 use zerus_client_core::paths::{self, Style};
-use zerus_client_core::{run_limited, session_file_reference};
+use zerus_client_core::{file_download, session_file_reference};
 
 use crate::composer::fetch::Opener;
 use crate::composer::Spawn;
-
-const INVALID_RESPONSE: &str = "Invalid file transfer response.";
-const UNCONFIRMED: &str = "The file transfer did not confirm the saved local file.";
 
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -264,59 +260,7 @@ impl SessionFiles {
                 .path()
                 .to_path_buf()
         });
-        let args = vec![
-            format!("@{}", dialog.computer),
-            "download".into(),
-            "--path".into(),
-            dialog.resolved.clone(),
-            "--output".into(),
-            output.to_string_lossy().into_owned(),
-        ];
-        let invocation = Invocation {
-            args,
-            stdin: None,
-            timeout: Duration::from_secs(135),
-            request_id: None,
-        };
-        let exit = run_limited(&self.hgs, &invocation, &[], 64 * 1024)
-            .map_err(|_| INVALID_RESPONSE.to_owned())?;
-        match exit {
-            Exit::Code {
-                code: 0, stdout, ..
-            } => {
-                let reply: serde_json::Value =
-                    serde_json::from_slice(&stdout).map_err(|_| INVALID_RESPONSE.to_owned())?;
-                let host = reply
-                    .get("host")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("");
-                let path = reply
-                    .get("path")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("");
-                let local = reply
-                    .get("local_path")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("");
-                let bytes = reply.get("bytes").and_then(serde_json::Value::as_u64);
-                if host != dialog.computer
-                    || path != dialog.resolved
-                    || local != output.to_string_lossy()
-                {
-                    return Err(INVALID_RESPONSE.into());
-                }
-                if bytes != std::fs::metadata(&output).ok().map(|meta| meta.len()) {
-                    return Err(UNCONFIRMED.into());
-                }
-            }
-            Exit::Code { stderr, stdout, .. } => return Err(detail(&stderr, &stdout)),
-            Exit::Abnormal { stderr } => return Err(detail(&stderr, &[])),
-            Exit::TimedOut => return Err("The file transfer timed out.".into()),
-            Exit::StartFailed(error) => {
-                return Err(format!("Could not start the file transfer: {error}"))
-            }
-            Exit::WriteFailed => return Err("Could not send the file transfer request.".into()),
-        }
+        file_download::download(&self.hgs, &[], &dialog.computer, &dialog.resolved, &output)?;
         match direct {
             Some(path) => Ok((path, None)),
             None => {
@@ -388,7 +332,8 @@ impl SessionFiles {
                 return self.view(id, false);
             }
             if let Err(error) = crate::settings::open_url(&format!("ssh://{computer}")) {
-                lock(&self.dialogs).get_mut(&id)?.error = format!("Could not open the SSH terminal: {error}");
+                lock(&self.dialogs).get_mut(&id)?.error =
+                    format!("Could not open the SSH terminal: {error}");
                 self.emit(id, false);
             }
             return self.view(id, false);
@@ -462,15 +407,6 @@ impl SessionFiles {
 enum Destination {
     Cache,
     Direct(PathBuf),
-}
-
-fn detail(stderr: &str, stdout: &[u8]) -> String {
-    let text = if stderr.is_empty() {
-        String::from_utf8_lossy(stdout).into_owned()
-    } else {
-        stderr.to_owned()
-    };
-    text.trim().trim_start_matches("hgs: ").to_owned()
 }
 
 #[tauri::command]

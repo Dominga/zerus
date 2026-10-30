@@ -23,6 +23,7 @@ pub mod details;
 pub mod download_cache;
 pub mod drafts;
 pub mod external_file;
+pub mod file_download;
 pub mod fleet;
 pub mod fsx;
 pub mod input_queue;

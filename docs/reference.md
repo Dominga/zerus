@@ -1476,6 +1476,37 @@ continues in standard mode. The feed records `plan_mode_proposed`,
 `plan_mode_switched`, `plan_mode_denied`, `phase_build_added`,
 `free_phase_close_pending`, `free_phase_closed` and `free_phase_build_failed`.
 
+### Auto-accepted drafts: start-ahead
+
+With Auto-accept drafts on (`settings.auto_accept`), a drafted phase whose
+approval is `auto` is not accepted when it is added. While the current phase
+runs and no member has taken one of its tasks, it stays a draft the lead edits
+freely: `extend`, `edit-draft`, `move-task` and `cancel` all work on it. Status
+carries each phase's `state` (`draft` and the rest), `auto` (true for these) and
+`start_ahead`.
+
+The phase is accepted with `phase_auto_accepted`, by Auto, at the moment its
+first task is handed out: when every phase ahead of it is done, or earlier when
+the lead starts it ahead. Its tasks' reports need no owner approval. The lead
+starts a phase ahead per phase (not the owner):
+
+```sh
+{"request_id":"<uuid>","team":"<id>","phase":2} | hgs team start-ahead --json
+{"request_id":"<uuid>","team":"<id>","phase":2,"undo":true} | hgs team start-ahead --json
+```
+
+Only an `auto` draft is eligible, only while the team runs or is paused, and
+only before any of its tasks was handed out; `undo` takes the start-ahead back
+the same way, before the first hand-out. The feed records `phase_started_ahead`
+and `phase_start_ahead_undone`. The hand-out admits the draft's independent
+tasks (dependencies met, no barrier, not held or waiting) through the same
+work-ahead step, and the first hand-out accepts the phase in the same change by
+turning its `draft` tasks `pending`; a second hand-out does not accept it again.
+
+A review draft keeps the owner's approval, and `settings.work_ahead` keeps its
+meaning for review drafts: starting an auto draft ahead is the lead's decision,
+not a change of the review rules.
+
 ### A model per task, a task for a role, and the context before one
 
 The owner's catalog gives a role the models its members may switch between,
@@ -1653,6 +1684,94 @@ kept); each restart returns the member's open attempt to the lead as
 one inbox item and `member_crashed`; pausing the team stops restarts, a member
 the team paused is never restarted, and a launch that fails records
 `restart_failed`.
+
+### The profile of the work: losses, spans and unknown
+
+`hgs team profile` reads a scope after the work: where its time and tokens
+went and what was lost. It is read only, computed on request from the tasks'
+timelines (the same spans U37's `timing` reads) and the tokens the members'
+sessions spent inside them. Input is one JSON object:
+
+```text
+{"team":"ID"}                      the plan: every task that is not a draft
+{"team":"ID","phase":2}            one phase
+{"team":"ID","task":7}             one task
+{"team":"ID","compare":[1,2]}      two phases side by side
+{"team":"ID","phase":2,"limit":20}     20 losses a page (20, at most 100)
+{"team":"ID","phase":2,"after_time":{"s":600,"id":"rework:7:a1"}}     next page
+{"team":"ID","phase":2,"after_tokens":{"tokens":12000,"id":"..."}}    next page
+{"team":"ID","phase":2,"after_task":50}                              next task page
+{"team":"ID","phase":2,"tokens":false}   no session reads, every token unknown
+```
+
+Canceled work stays in its phase's profile: its time was spent. A draft has no
+timeline yet. Every list is a stable page with a cursor, so a record that
+arrives between two reads never repeats or skips one.
+
+A timeline is a list of spans, one lane per task, that never overlap: a
+question inside the work cuts the work, a stage after the report covers the
+lead's wait. Each span has `kind`, `from`, `to`, `s` (seconds) and, where they
+apply, `member`, `attempt`, `stage`, `round`, `stage_kind`, `state`, `by`,
+`held_by`, `template` and `exit`. The span kinds are:
+
+- `work` and `rework`: an attempt's work; `rework` is a rejected or returned
+  attempt.
+- `deps`: waiting for a dependency; `member`: waiting for a free member;
+  `folder_held`: another task's stage holds the folder (`held_by`).
+- `delivery`: the hand-off to its delivery; `start_delay`: delivered to
+  started (A1); `lead`: waiting for the lead's decision; `hold`: a hold
+  (`by`).
+- `question` and `permission`: blocked on a native question or permission
+  request (`by` is who answered).
+- `stage_wait`: waiting for a stage member; `stage`: a U36 stage of a round
+  (`stage_kind`, `round`).
+- `background`: Background work (U30); `no_report`: a task without a report;
+  `stop`: a stop.
+- `unknown`: a gap nothing recorded, with `from`, `to` and `s` null (never
+  guessed). Builds lie on top of the lane in `overlay` as `build` spans with
+  their `template` and `exit`.
+
+The output is one JSON object:
+
+- `summary`: `tasks`, `accepted`, `from`, `to`, `elapsed_s`, `worked_s`
+  (work + rework + stage), `totals` per span kind, and `tokens` with `total`,
+  `cost_usd` and `partial`, or `{"unknown":true}` when no part is known.
+- `losses.by_time` and `losses.by_tokens`: ranked pages of `items` with
+  `next_cursor` and `total`. Each loss has `id` (stable, kind first), `kind`,
+  `s`, and `tokens`/`cost_usd` when its part's session is known. The kinds are
+  `rework` (per rejected or returned attempt, with `cause`, `share` of the
+  task's tokens and `tokens_unknown`), `lead_wait` (`lead_s`, `question_s`),
+  `permission_wait` (`answered_by`), `blocked_chain` (`deps_s`,
+  `folder_held_s`, `on`, `held_by`), `member_wait`, `idle_member` (`open_s`,
+  `from`, `to`), `long_test` (a test stage or test build of at least 300 s),
+  `merge` and `conflict` (a `git-merge-lead` run, or a land stage, that did
+  not merge cleanly). `by_tokens` ranks only the losses whose tokens are
+  known.
+- `critical_path`: `planned` (the longest dependency chain by task count,
+  ties to the lower ids), `real` (from the task that ended last back through
+  the dependency that ended last each time, with `s`), `off_plan` and
+  `matches`.
+- `members`, `roles` and `models`: `busy_s`, `idle_s`, `utilization`,
+  `accepted`, `tokens`, `tokens_unknown` and, where both are known,
+  `tokens_per_accepted`. A member is idle only where a task of the scope was
+  open after it joined.
+- `tasks`: a page of rows (`task`, `title`, `status`, `phase`, `elapsed_s`,
+  `worked_s`, `rework_s`, `tokens`, and `rework_tokens`/`rework_share` when
+  known), with `next_cursor`.
+- `events` (`read`, `truncated`: the bounded journal window was cut) and
+  `token_reads` (`asked`, `read`, `truncated`: at most 200 session reads).
+
+Unknown is never zero: a member on another computer, a missing session record,
+a provider without counters, or a read past the 200-read bound leaves those
+tokens unknown, and `summary.tokens` says `partial` or `unknown`. A `compare`
+answer has `a` and `b`, each a phase's summary and top three losses by time,
+and `delta` with the changes in `elapsed_s`, `worked_s`, `tasks`, `accepted`,
+`tokens` and per-kind `totals`.
+
+The lead's phase report names the phase's top three losses by time
+(`losses.by_time.items`), and planning weighs lanes with the per-role numbers
+(`roles[]`: utilization and tokens per accepted task) of the last finished
+phase.
 
 <a id="activity"></a>
 

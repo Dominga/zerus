@@ -259,7 +259,8 @@ fn locator_work_is_shared_across_targets_in_one_step() {
         // Windows suite load expires a pass before it reaches the locator.
         assert!(progress.directory_entries <= 1);
         assert!(progress.locator_probes <= 1);
-        if progress.locator_probes == 1 && store.index.status().unwrap().messages == 1 {
+        let status = store.index.status().unwrap();
+        if progress.locator_probes == 1 && status.messages == 1 && status.pending_sources == 1 {
             assert_eq!(progress.directory_entries, 1);
             break;
         }

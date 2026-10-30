@@ -333,7 +333,7 @@ class TrayUpdate(unittest.TestCase):
 
     def test_client_install_is_prefix_private_and_stays_selected(self):
         install = self.client_installer(self.build('client-1'))
-        prefix = self.root / 'prefix'
+        prefix = self.root / 'prefix%dev'
         plugin = prefix / 'lib/hgs-tray/plugins/libhgs-tray-native-ui.so'
         plugin.parent.mkdir(parents=True)
         plugin.write_bytes(b'for the Qt rollback')
@@ -344,7 +344,8 @@ class TrayUpdate(unittest.TestCase):
         self.assertTrue(binary.is_file())
         self.assertIn("'client-1'", binary.read_text())
         unit = prefix / 'lib/systemd/user/hgs-tray.service'
-        self.assertIn(f'ExecStart={binary}', unit.read_text())
+        escaped = str(binary).replace('%', '%%')
+        self.assertIn(f'ExecStart="{escaped}"', unit.read_text())
         self.assertNotIn('--sessions', unit.read_text())
         desktop = (prefix / 'share/applications/hgs-tray.desktop').read_text()
         self.assertIn(f'Exec={binary} --sessions', desktop)
@@ -378,6 +379,13 @@ class TrayUpdate(unittest.TestCase):
             self.assertIn('Installed hgs-tray.', result.stdout)
             self.assertEqual(installed.read_bytes() if installed.exists() else None, expected)
             self.assertFalse(installed.with_name(installed.name + '.new').exists())
+
+    def test_default_install_keeps_the_packaged_unit_byte_identical(self):
+        result = subprocess.run(['bash', str(self.installer(self.build('first')))], env=self.env,
+                                capture_output=True, text=True, timeout=90)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        installed = self.home / '.config/systemd/user/hgs-tray.service'
+        self.assertEqual(installed.read_bytes(), (REPO / 'tray/packaging/hgs-tray.service').read_bytes())
 
     def test_installer_replaces_a_running_gui_through_the_updater(self):
         install = self.installer(self.build('second'))

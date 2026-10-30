@@ -322,8 +322,16 @@ else
     UNIT_DEST="${HOME}/.config/systemd/user/hgs-tray.service"
 fi
 mkdir -p "$(dirname "${UNIT_DEST}")"
-# The service starts the binary this installer selected, without opening a window.
-NEW_UNIT="$(sed -e "s|^ExecStart=.*|ExecStart=${BIN_DEST}|" "${SCRIPT_DIR}/packaging/hgs-tray.service")"
+# The default unit stays byte-identical to the packaged %h form. Only a scratch
+# prefix needs a literal path, quoted and escaped as systemd requires.
+if [ "${SCRATCH}" = "1" ]; then
+    SYSTEMD_BIN_DEST="${BIN_DEST//\\/\\\\}"
+    SYSTEMD_BIN_DEST="${SYSTEMD_BIN_DEST//\"/\\\"}"
+    SYSTEMD_BIN_DEST="${SYSTEMD_BIN_DEST//%/%%}"
+    NEW_UNIT="$(sed -e "s|^ExecStart=.*|ExecStart=\"${SYSTEMD_BIN_DEST}\"|" "${SCRIPT_DIR}/packaging/hgs-tray.service")"
+else
+    NEW_UNIT="$(cat "${SCRIPT_DIR}/packaging/hgs-tray.service")"
+fi
 if [ "$(cat "${UNIT_DEST}" 2>/dev/null || true)" != "${NEW_UNIT}" ]; then
     printf '%s\n' "${NEW_UNIT}" > "${UNIT_DEST}"
     CHANGED=1

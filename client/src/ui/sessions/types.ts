@@ -87,6 +87,7 @@ export interface Session {
   /** Seconds since the Unix epoch when the current turn started (the Working clock). */
   turnStarted?: number;
   runId?: string;
+  launchId?: string;
   conversationId?: string;
   // What the guarded actions read, copied flat from the core's row: a nested
   // row in the store would double the cost of reconciling a large catalog.

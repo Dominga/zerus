@@ -1,0 +1,30 @@
+@layer components {
+  .tasks-page { display: flex; flex-direction: column; overflow: hidden; padding: 18px 20px 12px; }
+  .tasks-head { flex-wrap: wrap; }
+  .tasks-head select { width: min(320px, 40vw); }
+  .tasks-stages { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+  .tasks-stage { flex: 1; min-width: 100px; }
+  .tasks-stage b { margin-left: auto; }
+  .tasks-split { flex: 1; display: grid; grid-template-columns: minmax(240px, 1fr) minmax(280px, 1fr); min-height: 0; gap: 16px; }
+  .tasks-board { display: flex; flex-direction: column; min-height: 0; }
+  .tasks-list { flex: 1; min-height: 0; overflow: auto; }
+  .tasks-row { display: flex; text-align: left; width: 100%; gap: 10px; padding: 12px 10px; border-radius: var(--z-radius-md); border-bottom: 1px solid var(--z-color-divider); }
+  .tasks-row:hover { background: var(--z-color-hover); }
+  .tasks-row.on { background: var(--z-color-row-selected); }
+  .tasks-row > svg { flex: none; margin-top: 2px; color: var(--z-color-accent); }
+  .tasks-row-body { display: flex; flex-direction: column; gap: 7px; min-width: 0; flex: 1; }
+  .tasks-meta, .tasks-detail-head { display: flex; gap: 10px; align-items: center; font-size: var(--fs-xs); color: var(--z-color-muted); }
+  .tasks-meta > .mono { flex: none; }
+  .tasks-meta .ell { flex: 1; }
+  .tasks-row strong, .tasks-detail h2 { overflow-wrap: anywhere; }
+  .tasks-row strong, .tasks-excerpt { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+  .tasks-excerpt { color: var(--z-color-muted); font-size: var(--fs-sm); }
+  .tasks-navigation { display: flex; align-items: center; gap: 8px; padding-top: 10px; }
+  .tasks-empty { color: var(--z-color-muted); padding: 30px 16px; text-align: center; }
+  .tasks-detail { overflow: auto; min-width: 0; border-left: 1px solid var(--z-color-divider); padding: 0 14px; user-select: text; }
+  .tasks-detail h2 { font-size: var(--fs-lg); margin: 16px 0 10px; }
+  .tasks-detail h3 { font-size: var(--fs-sm); color: var(--z-color-muted); margin: 20px 0 10px; }
+  .tasks-document { line-height: 1.6; overflow-wrap: anywhere; white-space: pre-wrap; }
+  .tasks-document p { margin: 8px 0; }
+  @media (max-width: 800px) { .tasks-split { grid-template-columns: 1fr; grid-template-rows: minmax(120px, 1fr) minmax(180px, 1fr); } .tasks-detail { border-left: 0; border-top: 1px solid var(--z-color-divider); padding-top: 12px; } }
+}

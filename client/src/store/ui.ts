@@ -14,14 +14,14 @@ export type MenuEntry =
   | { separator: true }
   | { heading: string };
 
-export type Page = "dashboard" | "sessions" | "projects" | "machines" | "accounts" | "settings";
+export type Page = "dashboard" | "sessions" | "tasks" | "projects" | "machines" | "accounts" | "settings";
 export type StateFilter = "all" | "attention" | "active" | "paused" | "archived";
 /** The Zerus mark's motion; the owner chose the two-turn spin-up (2026-10-27). */
 export type LogoMotion = "spin";
 
 const params = new URLSearchParams(location.search);
 
-const PAGES: Page[] = ["dashboard", "sessions", "projects", "machines", "accounts", "settings"];
+const PAGES: Page[] = ["dashboard", "sessions", "tasks", "projects", "machines", "accounts", "settings"];
 // `?page=settings` opens a screen (headless screenshots), as in the mockup.
 export const [page, setPage] = createSignal<Page>(PAGES.find((p) => p === params.get("page")) ?? "sessions");
 export const [selectedKey, setSelectedKey] = createSignal<string | undefined>();

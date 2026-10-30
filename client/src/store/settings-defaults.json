@@ -22,6 +22,7 @@
   "speech/profile_revision": 0,
   "speech/providerOperation": "",
   "speech/video_mode": false,
+  "tasks/onlySession": false,
   "updates/automatic": true,
   "updates/channel": "stable",
   "workspace/activityFullWidth": false,

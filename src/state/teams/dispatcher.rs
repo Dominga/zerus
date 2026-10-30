@@ -4993,9 +4993,33 @@ fn send_all_decided(store: &mut Store, team_id: &str) -> anyhow::Result<()> {
     })
 }
 
+/// U58: a reply that only says it waits (a build lock, a queue) is the member's
+/// status, never its report: the attempt shows No report instead of storing the
+/// wait as the task's outcome.
+fn waits_only(reply: &str) -> bool {
+    let text = reply.trim().to_lowercase();
+    if text.is_empty() || text.chars().count() > 400 {
+        return false;
+    }
+    let waits = [
+        "waiting", "wait for", "wait until", "waiting on", "blocked", "queued", "in the queue", "build lock",
+        "lock is held", "жду", "ожида", "в очереди", "заблокир", "подож",
+    ];
+    if !waits.iter().any(|phrase| text.contains(phrase)) {
+        return false;
+    }
+    let reports = [
+        "report", "done", "finished", "complete", "passed", "failed", "commit", "pushed", "merged", "tests", "fixed",
+        "implemented", "acceptance", "отчёт", "готово", "сделал", "прошл", "провал", "коммит", "исправ", "тест", "принят",
+    ];
+    !reports.iter().any(|marker| text.contains(marker))
+}
+
 /// A2: records the member's last reply as the attempt's report and marks it
 /// captured, so the member may replace it while the task is undecided (A6).
 fn capture_report(store: &mut Store, team_id: &str, task_id: u32, reply: &str, expected_reply: &str) -> anyhow::Result<()> {
+    // U58: a waiting-only reply is a status; the attempt then shows No report.
+    anyhow::ensure!(!waits_only(reply), "the reply only says it waits; it is a status, not a report");
     change(store, team_id, |team, events| {
         let task = team.task(task_id).context("unknown task")?;
         anyhow::ensure!(!task.is_check(), "a check task reports its exit code, not a reply");
@@ -5025,6 +5049,8 @@ fn capture_report(store: &mut Store, team_id: &str, task_id: u32, reply: &str, e
 /// last reply as its report in one change, so the next tick cannot read it as a
 /// resumed turn and clear it.
 fn capture_quiet(store: &mut Store, team_id: &str, task_id: u32, reply: &str) -> anyhow::Result<()> {
+    // U58: a waiting-only reply is a status; the attempt then shows No report.
+    anyhow::ensure!(!waits_only(reply), "the reply only says it waits; it is a status, not a report");
     change(store, team_id, |team, events| {
         let task = team.task(task_id).context("unknown task")?;
         anyhow::ensure!(!task.is_check(), "a check task reports its exit code, not a reply");
@@ -7220,6 +7246,49 @@ mod tests {
         let attempt = saved.task(id).unwrap().attempts.last().unwrap();
         assert_eq!((attempt.state, attempt.report.is_some()), (AttemptState::Delivered, false));
         assert_eq!(saved.task(id).unwrap().status, TaskStatus::InProgress);
+    }
+
+    #[test]
+    fn a_reply_that_only_waits_is_a_status_not_a_report() {
+        // A reply that only says it waits uses these phrases.
+        for text in [
+            "Waiting for the build lock to be released.",
+            "Still queued behind QA's build; I'll wait.",
+            "Жду, пока освободится сборка.",
+        ] {
+            assert!(waits_only(text), "{text}");
+        }
+        // A reply that reports work, even while it waits, is not only a wait.
+        for text in [
+            "Done: the API is in and its tests passed.",
+            "Waiting for the build; meanwhile I fixed the parser and committed it.",
+            "Tests pass, but the build lock is still queued.",
+        ] {
+            assert!(!waits_only(text), "{text}");
+        }
+        // A captured waiting reply stays a status: no report is stored.
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        delivered(&mut t);
+        {
+            let attempt = &mut t.task_mut(1).unwrap().attempts[0];
+            attempt.turn_ended_at = Some(50.0);
+            attempt.turn_reply = "r7".into();
+            attempt.report_ready_at = Some(50.0);
+        }
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+        let error = capture_report(&mut store, &t.id, 1, "Waiting for the build lock held by QA.", "r7").unwrap_err().to_string();
+        assert_eq!(error, "the reply only says it waits; it is a status, not a report");
+        let saved = store.load(&t.id).unwrap().unwrap();
+        let attempt = saved.task(1).unwrap().attempts.last().unwrap();
+        assert_eq!((attempt.state, attempt.report.is_some()), (AttemptState::Delivered, false));
+        // A real report is still captured on the same attempt.
+        capture_report(&mut store, &t.id, 1, "Done: the API is in and its tests passed.", "r7").unwrap();
+        assert!(store.load(&t.id).unwrap().unwrap().task(1).unwrap().attempts.last().unwrap().report.is_some());
+        // The quiet capture refuses a waiting reply too.
+        let error = capture_quiet(&mut store, &t.id, 2, "Queued behind the build.").unwrap_err().to_string();
+        assert_eq!(error, "the reply only says it waits; it is a status, not a report");
     }
 
     #[test]

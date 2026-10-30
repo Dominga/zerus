@@ -135,6 +135,29 @@ fn clean(value: &str, max: usize, what: &str) -> anyhow::Result<String> {
     Ok(value.to_owned())
 }
 
+/// U58: role and task text keeps LF newlines - CRLF and a lone CR become LF -
+/// and a refused control character names the field and its position.
+fn clean_text(value: &str, max: usize, what: &str) -> anyhow::Result<String> {
+    let value = value.replace("\r\n", "\n").replace('\r', "\n");
+    ensure!(value.chars().count() <= max, "{what} is too long");
+    if let Some((at, _)) = value.char_indices().find(|(_, ch)| ch.is_control() && *ch != '\n' && *ch != '\t') {
+        bail!("{what} has a control character at position {}", value[..at].chars().count() + 1);
+    }
+    Ok(value)
+}
+
+/// U58: whether a task has started: any attempt that may have reached the
+/// member (a refused one never did).
+fn task_started(task: &Task) -> bool {
+    task.attempts.iter().any(|attempt| attempt.state != AttemptState::Refused)
+}
+
+/// U58: whether no task of a phase has started, so a queued or approved phase
+/// may still be edited like a draft.
+fn phase_untouched(team: &Team, phase: &Phase) -> bool {
+    team.tasks.iter().filter(|task| task.phase == phase.n).all(|task| !task_started(task))
+}
+
 fn member_id(value: &str) -> anyhow::Result<String> {
     ensure!(
         !value.is_empty() && value.len() <= 40 && value.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
@@ -182,7 +205,7 @@ fn validate_settings(settings: &Settings) -> anyhow::Result<()> {
 fn parse_member(value: &Value) -> anyhow::Result<Member> {
     let mut member: Member = serde_json::from_value(value.clone()).context("Invalid member")?;
     member.id = member_id(&member.id)?;
-    member.role = clean(&member.role, 60, "A role")?;
+    member.role = clean_text(&member.role, 60, "A role")?;
     ensure!(!member.agent.is_empty(), "Member {} needs an agent", member.id);
     // C3: `permissions` is the launch mode, the profile an agent's mode.
     ensure!(
@@ -204,7 +227,7 @@ fn parse_member(value: &Value) -> anyhow::Result<Member> {
     if !member.parent.is_empty() {
         member.parent = member_id(&member.parent)?;
     }
-    member.prompt = clean(&member.prompt, 8000, "A role prompt")?;
+    member.prompt = clean_text(&member.prompt, 8000, "A role prompt")?;
     // N3: copy the role's prompt blocks now; a later catalog edit changes no
     // running team mid-phase. An old member loaded from the store keeps None.
     if member.prompt_snapshot.is_none() {
@@ -271,9 +294,11 @@ fn clean_lane(lane: &mut super::model::Lane, task: u32) -> anyhow::Result<()> {
 fn parse_task(value: &Value) -> anyhow::Result<Task> {
     let mut task: Task = serde_json::from_value(value.clone()).context("Invalid task")?;
     ensure!(task.id > 0, "Task numbers start at 1");
-    task.title = clean(&task.title, 200, "A task title")?;
+    task.title = clean_text(&task.title, 200, "A task title")?;
     ensure!(!task.title.trim().is_empty(), "Task #{} needs a title", task.id);
-    task.description = clean(&task.description, 20_000, "A task description")?;
+    task.description = clean_text(&task.description, 20_000, "A task description")?;
+    // U58: a task for a role keeps the role's text clean too.
+    task.role = clean_text(&task.role, 60, "A task role")?;
     // C5: a check carries its exact command and expected exit code; a plan
     // task may not hide one.
     match task.kind {
@@ -295,7 +320,7 @@ fn parse_task(value: &Value) -> anyhow::Result<Task> {
         }
     }
     for criterion in &mut task.criteria {
-        *criterion = clean(criterion, 500, "An acceptance criterion")?;
+        *criterion = clean_text(criterion, 500, "An acceptance criterion")?;
     }
     let mut seen = BTreeSet::new();
     task.deps.retain(|dep| seen.insert(dep.task));
@@ -903,6 +928,7 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
     ensure!(team.tasks.len() + values.len() <= 500, "A team has at most 500 tasks (it has {})", team.tasks.len());
     ensure!(team.phases.len() < 100, "A team has at most 100 phases");
     // F10: with "phase": N the tasks join that draft phase instead of a new one.
+    // U58: a queued or approved phase with no delivered attempt takes them too.
     let target = match input.get("phase") {
         None => None,
         Some(value) => {
@@ -911,7 +937,7 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
                 .and_then(|phase| u32::try_from(phase).ok())
                 .filter(|phase| *phase > 0)
                 .context("A phase number is required")?;
-            Some(draft_phase(team, n)?)
+            Some(editable_phase(team, n)?)
         }
     };
     // D2: an urgent phase runs at once: no approval under review, no barrier,
@@ -922,13 +948,18 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
     // phase and no approval; they run as added.
     let free_open = (team.plan_mode == PlanMode::Free && target.is_none()).then(|| open_phase(team));
     // Several drafts may queue, in order; a phase added while an earlier one is
-    // still a Draft is a Draft too, whatever the approval says (F9).
-    let drafting = free_open.is_none()
-        && !urgent
-        && (target.is_some()
-            || team.status == TeamStatus::Planning
-            || team.phases.iter().any(|phase| phase.state.is_draft())
-            || approval == Approval::Review);
+    // still a Draft is a Draft too, whatever the approval says (F9). U58: tasks
+    // added to an accepted phase are Pending, not Draft.
+    let target_draft = target.is_some_and(|at| team.phases[at].state.is_draft());
+    let drafting = if target.is_some() {
+        target_draft
+    } else {
+        free_open.is_none()
+            && !urgent
+            && (team.status == TeamStatus::Planning
+                || team.phases.iter().any(|phase| phase.state.is_draft())
+                || approval == Approval::Review)
+    };
     let title = clean(text(input, "phase_title").trim(), 120, "A phase title")?;
     let mut tasks = values.iter().map(parse_task).collect::<anyhow::Result<Vec<Task>>>()?;
     // Ids continue after the highest live number: a discarded draft frees its
@@ -1816,6 +1847,22 @@ fn draft_phase(team: &Team, n: u32) -> anyhow::Result<usize> {
     Ok(at)
 }
 
+/// U58: the phase numbered `n` and its index while it can still change: a
+/// draft, or a queued/approved phase whose work has not started (the scope the
+/// owner approved is the work, not its numbering).
+fn editable_phase(team: &Team, n: u32) -> anyhow::Result<usize> {
+    let at = team.phases.iter().position(|phase| phase.n == n).with_context(|| format!("Unknown phase {n}"))?;
+    let phase = &team.phases[at];
+    ensure!(phase.state != PhaseState::Discarded, "Phase {n} is discarded");
+    if !phase.state.is_draft() {
+        ensure!(
+            phase_untouched(team, phase),
+            "Phase {n} has started; only a phase with no delivered attempt can change"
+        );
+    }
+    Ok(at)
+}
+
 /// F10: edits a draft phase until the owner approves it - its title, its
 /// barrier, fields of its draft tasks by id, and task removals. The event
 /// carries the diff the owner sees.
@@ -1832,7 +1879,7 @@ fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<
         .filter(|phase| *phase > 0)
         .context("A phase number is required")?;
     let mut proposed = team.clone();
-    let at = draft_phase(&proposed, n)?;
+    let at = editable_phase(&proposed, n)?;
     let by = actor.label(team);
     let mut diff = json!({"updated":[],"removed":[]});
     let mut changes: Vec<Value> = Vec::new();
@@ -1861,11 +1908,16 @@ fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<
             ensure!(proposed.member(assignee).is_some_and(|member| member.state != MemberState::Removed), "Unknown member {assignee}");
         }
         let task = proposed.task_mut(id).context("Unknown task")?;
-        ensure!(task.status == TaskStatus::Draft, "Task #{id} is not a draft");
+        // U58: a draft, or a task waiting in a queued/approved phase that has
+        // not started, is edited like a draft.
+        ensure!(
+            matches!(task.status, TaskStatus::Draft | TaskStatus::Pending) && !task_started(task),
+            "Task #{id} is not a draft or waiting in an unstarted phase"
+        );
         let mut fields: Vec<&str> = Vec::new();
         if let Some(value) = value.get("title") {
             let old = task.title.clone();
-            task.title = clean(value.as_str().unwrap_or_default().trim(), 200, "A task title")?;
+            task.title = clean_text(value.as_str().unwrap_or_default().trim(), 200, "A task title")?;
             ensure!(!task.title.is_empty(), "Task #{id} needs a title");
             if old != task.title {
                 changes.push(json!({"kind":"changed","task":id,"title":task.title,"field":"title","from":old,"to":task.title}));
@@ -1874,7 +1926,7 @@ fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<
         }
         if let Some(value) = value.get("description") {
             let old = task.description.clone();
-            task.description = clean(value.as_str().unwrap_or_default(), 20_000, "A task description")?;
+            task.description = clean_text(value.as_str().unwrap_or_default(), 20_000, "A task description")?;
             if old != task.description {
                 changes.push(json!({"kind":"changed","task":id,"title":task.title,"field":"description","from":brief(&old),"to":brief(&task.description)}));
             }
@@ -1885,7 +1937,7 @@ fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<
             let old = task.criteria.join("; ");
             task.criteria = list
                 .iter()
-                .map(|item| clean(item.as_str().unwrap_or_default(), 500, "An acceptance criterion"))
+                .map(|item| clean_text(item.as_str().unwrap_or_default(), 500, "An acceptance criterion"))
                 .collect::<anyhow::Result<Vec<_>>>()?;
             if old != task.criteria.join("; ") {
                 changes.push(json!({"kind":"changed","task":id,"title":task.title,"field":"criteria","from":brief(&old),"to":brief(&task.criteria.join("; "))}));
@@ -1938,7 +1990,7 @@ fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<
                 fields.push("models");
             }
             if let Some(role) = value.get("role") {
-                task.role = role.as_str().context("role is a role name or empty")?.to_owned();
+                task.role = clean_text(role.as_str().context("role is a role name or empty")?, 60, "A task role")?;
                 if !task.role.trim().is_empty() {
                     task.assignee.clear();
                     task.pinned = false;
@@ -1982,7 +2034,10 @@ fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<
     for value in input["tasks_remove"].as_array().into_iter().flatten() {
         let id = value.as_u64().and_then(|id| u32::try_from(id).ok()).filter(|id| *id > 0).context("A task id is required")?;
         ensure!(proposed.phases[at].tasks.contains(&id), "Task #{id} is not in phase {n}");
-        ensure!(proposed.task(id).is_some_and(|task| task.status == TaskStatus::Draft), "Task #{id} is not a draft");
+        ensure!(
+            proposed.task(id).is_some_and(|task| matches!(task.status, TaskStatus::Draft | TaskStatus::Pending) && !task_started(task)),
+            "Task #{id} is not a draft or waiting in an unstarted phase"
+        );
         ensure!(!removed.contains(&id), "Task #{id} is removed twice");
         removed.push(id);
     }
@@ -3693,6 +3748,80 @@ fn reassign(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
     Ok(json!({"status":"reassigned","task":id,"revoked_attempt":revoked}))
 }
 
+/// U58: moves a task that has not started (no delivered attempt) to another
+/// phase, keeping its id; its deps must not stay in a later phase than the
+/// target. A task that has started, or is decided, never moves.
+fn move_task(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you move a task");
+    ensure!(
+        matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused),
+        "Only a planning, running or paused team moves a task"
+    );
+    ensure_draft_revision(team, input)?;
+    let id = task_id(input)?;
+    let n = phase_number(input)?;
+    let task = team.task(id).context("Unknown task")?;
+    ensure!(!task.status.finished(), "Task #{id} is already decided");
+    ensure!(!task_started(task), "Task #{id} has started; only a task with no delivered attempt moves");
+    let from = task.phase;
+    ensure!(from != n, "Task #{id} is already in phase {n}");
+    // Phase 1 is the plan's own phase and has no record until work is added to
+    // it; every later phase needs its record.
+    let at = team.phases.iter().position(|phase| phase.n == n);
+    if n > 1 {
+        ensure!(at.is_some(), "Unknown phase {n}");
+        ensure!(team.phases[at.unwrap()].state != PhaseState::Discarded, "Phase {n} is discarded");
+    }
+    // The task's deps keep their phases: a dep in a later phase than the target
+    // would make the task wait for work that starts after it.
+    let order = |phase: u32| team.phases.iter().find(|found| found.n == phase).map_or(phase, |found| found.order());
+    let target = order(n);
+    for dep in &task.deps {
+        let Some(found) = team.task(dep.task) else { continue };
+        ensure!(
+            order(found.phase) <= target,
+            "Task #{id} depends on #{}, which stays in a later phase ({}); move it first",
+            found.id,
+            found.phase
+        );
+    }
+    // U58: a task moved into a draft phase (or the plan) is a Draft again; one
+    // moved into an approved phase is Pending.
+    let draft = match at {
+        Some(at) => team.phases[at].state.is_draft(),
+        None => team.status == TeamStatus::Planning,
+    };
+    let mut proposed = team.clone();
+    if let Some(old) = proposed.phases.iter_mut().find(|phase| phase.n == from) {
+        old.tasks.retain(|task| *task != id);
+    }
+    let moved = proposed.task_mut(id).context("Unknown task")?;
+    moved.phase = n;
+    moved.status = if draft { TaskStatus::Draft } else { TaskStatus::Pending };
+    let by = actor.label(team);
+    if let Some(at) = at {
+        proposed.phases[at].tasks.push(id);
+        proposed.phases[at].tasks.sort_unstable();
+        record_change(&mut proposed.phases[at], json!({"kind":"moved","task":id,"from":from,"to":n}));
+    }
+    let validation = plan::validate(&proposed, &BTreeSet::new());
+    let errors: Vec<plan::Finding> = validation
+        .errors
+        .iter()
+        .filter(|finding| finding.task == Some(id) || (finding.kind == "cycle" && finding.tasks.contains(&id)))
+        .cloned()
+        .collect();
+    ensure!(
+        errors.is_empty(),
+        "Fix {} plan error(s) to move it: {}",
+        errors.len(),
+        errors_text(&errors)
+    );
+    *team = proposed;
+    events.push(Event::new("task_moved", json!({"by":by,"task":id,"from":from,"to":n})));
+    Ok(json!({"status":"moved","task":id,"from":from,"to":n}))
+}
+
 fn retry(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     let id = task_id(input)?;
     let assignee = team.task(id).map(|task| task.assignee.clone()).unwrap_or_default();
@@ -3780,8 +3909,13 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
     if let Some(event) = input["owner_word_event"].as_i64() {
         let allowed = input["owner_word_count"].as_u64().unwrap_or(1).max(1) as usize;
         let change = input["owner_word_change"].as_str().unwrap_or("this change");
+        // U58: one sentence naming a member and its tasks pays for both, the
+        // member first: the roster add, then its tasks' phase request.
+        let its_tasks = op == "add-to-phase"
+            && change == "the request to add to a running phase"
+            && team.owner_word_allows_its_tasks(event);
         ensure!(
-            team.owner_word_allowed_again(event, allowed, change),
+            its_tasks || team.owner_word_allowed_again(event, allowed, change),
             "That word was already used for {}; ask the owner again",
             team.owner_word_used(event).unwrap_or_default()
         );
@@ -3878,6 +4012,8 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
         "accept" => decide(team, input, actor, true, events),
         "reject" => decide(team, input, actor, false, events),
         "reassign" => reassign(team, input, actor, events),
+        // U58: move a task that has not started to another phase, keeping its id.
+        "move-task" => move_task(team, input, actor, events),
         // U36: the lead's and the owner's pipeline overrides.
         "skip-stage" => super::pipeline::skip_stage(team, input, actor, events),
         "send-back" => super::pipeline::send_back(team, input, actor, events),
@@ -7114,6 +7250,208 @@ mod tests {
     }
 
     #[test]
+    fn a_task_that_has_not_started_moves_between_phases_keeping_its_id() {
+        let mut team = running_team();
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        // A second phase, accepted while phase 1 runs: it queues, so none of its
+        // tasks has started.
+        let added = extend(
+            &mut team,
+            &json!({"phase_title":"Next","tasks":[{"id":3,"title":"D","assignee":"dev"},{"id":4,"title":"E","assignee":"dev"}]}),
+            &Actor::Human,
+            &none,
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(added["phase"], 2);
+        apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(team.phases[0].state, PhaseState::Queued);
+        // #4 moves to phase 1, the plan's own phase (which has no record): the
+        // id stays, the task is Pending there, and the phase record moves it.
+        let moved = apply(&mut team, "move-task", &json!({"task":4,"phase":1}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        assert_eq!(
+            (moved["status"].as_str(), moved["task"].as_u64(), moved["from"].as_u64(), moved["to"].as_u64()),
+            (Some("moved"), Some(4), Some(2), Some(1))
+        );
+        let task = team.task(4).unwrap();
+        assert_eq!((task.id, task.phase, task.status), (4, 1, TaskStatus::Pending));
+        assert_eq!(team.phases[0].tasks, vec![3]);
+        assert!(events.iter().any(|event| event.kind == "task_moved" && event.payload["task"] == 4));
+        // It cannot move to the phase it is in.
+        let error = apply(&mut team, "move-task", &json!({"task":4,"phase":1}), &Actor::Human, &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "Task #4 is already in phase 1");
+        // A task that has started never moves.
+        team.task_mut(3).unwrap().attempts.push(Attempt { member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
+        let error = apply(&mut team, "move-task", &json!({"task":3,"phase":1}), &Actor::Human, &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "Task #3 has started; only a task with no delivered attempt moves");
+        // A decided task never moves.
+        apply(&mut team, "cancel", &json!({"task":1}), &Actor::Human, &none, &mut events).unwrap();
+        let error = apply(&mut team, "move-task", &json!({"task":1,"phase":2}), &Actor::Human, &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "Task #1 is already decided");
+        // A member that is not the lead does not move tasks.
+        let error = apply(&mut team, "move-task", &json!({"task":3,"phase":1}), &Actor::Member("dev".into()), &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "Only the lead or you move a task");
+        // An unknown target phase is refused.
+        let error = apply(&mut team, "move-task", &json!({"task":4,"phase":9}), &Actor::Human, &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "Unknown phase 9");
+    }
+
+    #[test]
+    fn moving_a_task_checks_its_dependencies_against_the_target_phase() {
+        let mut team = running_team();
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        // Phase 2: #3, and #4 depends on #3.
+        extend(
+            &mut team,
+            &json!({"phase_title":"Next","tasks":[{"id":3,"title":"D","assignee":"dev"},{"id":4,"title":"E","assignee":"dev","deps":[{"task":3,"kind":"hard"}]}]}),
+            &Actor::Human,
+            &none,
+            &mut events,
+        )
+        .unwrap();
+        apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap();
+        // #4 cannot go before its dependency.
+        let error = apply(&mut team, "move-task", &json!({"task":4,"phase":1}), &Actor::Human, &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "Task #4 depends on #3, which stays in a later phase (2); move it first");
+        // The dependency moves first, then its dependent.
+        apply(&mut team, "move-task", &json!({"task":3,"phase":1}), &Actor::Human, &none, &mut events).unwrap();
+        let moved = apply(&mut team, "move-task", &json!({"task":4,"phase":1}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(moved["status"], "moved");
+        assert_eq!((team.task(3).unwrap().phase, team.task(4).unwrap().phase), (1, 1));
+    }
+
+    #[test]
+    fn a_queued_phase_with_nothing_started_edits_like_a_draft() {
+        let mut team = running_team();
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        extend(&mut team, &json!({"phase_title":"Next","tasks":[{"id":3,"title":"D","assignee":"dev"}]}), &Actor::Human, &none, &mut events).unwrap();
+        apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(team.phases[0].state, PhaseState::Queued);
+        // extend adds Pending tasks to the queued phase, with no new phase.
+        let added = extend(&mut team, &json!({"phase":2,"tasks":[{"id":4,"title":"E","assignee":"dev"}]}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        assert_eq!((added["status"].as_str(), added["phase"].as_u64()), (Some("edited"), Some(2)));
+        assert_eq!(team.phases.len(), 1);
+        assert_eq!((team.task(4).unwrap().phase, team.task(4).unwrap().status), (2, TaskStatus::Pending));
+        // edit-draft changes and removes its waiting tasks.
+        let edited = apply(
+            &mut team,
+            "edit-draft",
+            &json!({"phase":2,"tasks_update":[{"id":3,"title":"D2"}],"tasks_remove":[4]}),
+            &Actor::Member("lead".into()),
+            &none,
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(edited["status"], "draft_edited");
+        assert_eq!(team.task(3).unwrap().title, "D2");
+        assert!(team.task(4).is_none());
+        // Once a task of the phase has started, the phase no longer changes.
+        team.task_mut(3).unwrap().attempts.push(Attempt { member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
+        let error = extend(&mut team, &json!({"phase":2,"tasks":[{"id":5,"title":"F","assignee":"dev"}]}), &Actor::Member("lead".into()), &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "Phase 2 has started; only a phase with no delivered attempt can change");
+        let error = apply(&mut team, "edit-draft", &json!({"phase":2,"tasks_update":[{"id":3,"title":"D3"}]}), &Actor::Member("lead".into()), &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "Phase 2 has started; only a phase with no delivered attempt can change");
+    }
+
+    #[test]
+    fn one_sentence_pays_for_a_member_and_then_its_tasks() {
+        let mut team = running_team();
+        let none = BTreeSet::new();
+        let mut events = Vec::new();
+        let word = |change: &str| {
+            json!({"roster_word":true,"owner_word_event":9,"owner_word_change":change,
+                "owner_word_checked":{"text":"add a Backend and its tasks","at":1.0,"event":9}})
+        };
+        let mut add = word("adding Backend");
+        add["member"] = json!({"id":"dev2","role":"Backend","agent":"codex"});
+        apply(&mut team, "add-member", &add, &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        assert_eq!(team.owner_word_uses(9), 1);
+        // Its tasks, on the same sentence: the pair's second half.
+        let mut tasks = word("the request to add to a running phase");
+        tasks["phase"] = json!(1);
+        tasks["tasks"] = json!([{"id":3,"title":"Its task","assignee":"dev2"}]);
+        let warned = apply(&mut team, "add-to-phase", &tasks, &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        assert_eq!(warned["status"], "warning", "{warned}");
+        assert_eq!(team.owner_word_uses(9), 2);
+        // The sentence is spent: neither a second request nor another member add.
+        let error = apply(&mut team, "add-to-phase", &tasks, &Actor::Member("lead".into()), &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("already used"), "{error}");
+        let mut again = word("adding Backend");
+        again["member"] = json!({"id":"dev3","role":"Backend","agent":"codex"});
+        let error = apply(&mut team, "add-member", &again, &Actor::Member("lead".into()), &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("already used"), "{error}");
+    }
+
+    #[test]
+    fn a_failed_change_does_not_spend_the_owners_word() {
+        let mut team = running_team();
+        let none = BTreeSet::new();
+        let mut events = Vec::new();
+        let word = |change: &str| {
+            json!({"roster_word":true,"owner_word_event":11,"owner_word_change":change,
+                "owner_word_checked":{"text":"add a Backend and its tasks","at":1.0,"event":11}})
+        };
+        // A failed change: the task ids skip a number, so nothing is added and
+        // the word stays unspent.
+        let mut bad = word("the request to add to a running phase");
+        bad["phase"] = json!(1);
+        bad["tasks"] = json!([{"id":9,"title":"Bad","assignee":"dev"}]);
+        let error = apply(&mut team, "add-to-phase", &bad, &Actor::Member("lead".into()), &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("New tasks are numbered from"), "{error}");
+        assert_eq!(team.owner_word_used(11), None, "the failed change spent the word");
+        // The same word still pays for the valid change.
+        let mut good = word("the request to add to a running phase");
+        good["phase"] = json!(1);
+        good["tasks"] = json!([{"id":3,"title":"Good","assignee":"dev"}]);
+        let warned = apply(&mut team, "add-to-phase", &good, &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        assert_eq!(warned["status"], "warning", "{warned}");
+        assert_eq!(team.owner_word_uses(11), 1);
+    }
+
+    #[test]
+    fn role_and_task_text_normalises_crlf_and_names_a_control_character() {
+        // CRLF and a lone CR become LF.
+        let task = parse_task(&json!({"id":1,"title":"A\r\nB","description":"C\rD","criteria":["E\r\nF"],"assignee":"dev"})).unwrap();
+        assert_eq!((task.title.as_str(), task.description.as_str(), task.criteria[0].as_str()), ("A\nB", "C\nD", "E\nF"));
+        let member = parse_member(&json!({"id":"dev","role":"Back\r\nend","agent":"codex"})).unwrap();
+        assert_eq!(member.role, "Back\nend");
+        // A refused control character names the field and its position.
+        let error = parse_task(&json!({"id":1,"title":"A\u{7}B","assignee":"dev"})).unwrap_err().to_string();
+        assert_eq!(error, "A task title has a control character at position 2");
+        let error = parse_task(&json!({"id":1,"title":"A","description":"B\u{7}","assignee":"dev"})).unwrap_err().to_string();
+        assert_eq!(error, "A task description has a control character at position 2");
+        let error = parse_member(&json!({"id":"dev","role":"B\u{7}","agent":"codex"})).unwrap_err().to_string();
+        assert_eq!(error, "A role has a control character at position 2");
+        let error = parse_member(&json!({"id":"dev","role":"Backend","agent":"codex","prompt":"P\u{7}"})).unwrap_err().to_string();
+        assert_eq!(error, "A role prompt has a control character at position 2");
+    }
+
+    #[test]
     fn moving_a_draft_changes_the_approval_order() {
         let mut team = running_team();
         let mut events = Vec::new();
@@ -7323,7 +7661,7 @@ mod tests {
     }
 
     #[test]
-    fn approved_phases_refuse_every_edit() {
+    fn an_approved_phase_edits_until_its_work_starts() {
         let mut team = running_team();
         let mut events = Vec::new();
         let none = BTreeSet::new();
@@ -7332,19 +7670,28 @@ mod tests {
             apply(&mut team, "cancel", &json!({"task":id}), &Actor::Human, &none, &mut events).unwrap();
         }
         apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap();
-        for (op, input) in [
-            ("edit-draft", json!({"phase":2,"title":"Later"})),
-            ("move-phase", json!({"phase":2,"to":3,"position":"before"})),
-        ] {
-            let error = apply(&mut team, op, &input, &Actor::Human, &none, &mut events).unwrap_err().to_string();
-            assert_eq!(error, "Phase 2 is approved or discarded; only a draft phase can change", "{op}");
-        }
-        let error = extend(&mut team, &json!({"phase":2,"tasks":[{"id":4,"title":"More","assignee":"dev"}]}), &Actor::Member("lead".into()), &none, &mut events)
+        // U58: an approved phase whose work has not started is edited like a
+        // draft; move-phase stays the drafts' own operation.
+        let edited = apply(&mut team, "edit-draft", &json!({"phase":2,"title":"Later"}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(edited["status"], "draft_edited");
+        let added = extend(&mut team, &json!({"phase":2,"tasks":[{"id":4,"title":"More","assignee":"dev"}]}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        assert_eq!((added["status"].as_str(), added["phase"].as_u64()), (Some("edited"), Some(2)));
+        let error = apply(&mut team, "move-phase", &json!({"phase":2,"to":3,"position":"before"}), &Actor::Human, &none, &mut events)
             .unwrap_err()
             .to_string();
         assert_eq!(error, "Phase 2 is approved or discarded; only a draft phase can change");
+        // Once a task of the phase has started, the phase no longer changes.
+        team.task_mut(3).unwrap().attempts.push(Attempt { member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
+        let error = apply(&mut team, "edit-draft", &json!({"phase":2,"title":"Later"}), &Actor::Human, &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "Phase 2 has started; only a phase with no delivered attempt can change");
+        let error = extend(&mut team, &json!({"phase":2,"tasks":[{"id":5,"title":"More","assignee":"dev"}]}), &Actor::Member("lead".into()), &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "Phase 2 has started; only a phase with no delivered attempt can change");
         // The lead discards its own draft, and the owner still approves (F10).
-        let added = extend(&mut team, &json!({"tasks":[{"id":4,"title":"Next","assignee":"dev"}]}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        let added = extend(&mut team, &json!({"tasks":[{"id":5,"title":"Next","assignee":"dev"}]}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
         assert_eq!(added["phase"], 3);
         let discarded = apply(&mut team, "discard-phase", &json!({"phase":3}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
         assert_eq!(discarded["status"], "phase_discarded");

@@ -1757,6 +1757,17 @@ impl Team {
         }
     }
 
+    /// U58: one sentence naming a member and its tasks pays for both changes,
+    /// the member first: the roster add spent once, then its tasks' phase
+    /// request. A word used for anything else, or already twice, never does.
+    pub(crate) fn owner_word_allows_its_tasks(&self, event: i64) -> bool {
+        self.used_owner_words.iter().any(|used| {
+            used["event"].as_i64() == Some(event)
+                && used["change"].as_str().is_some_and(|change| change.starts_with("adding "))
+                && used["uses"].as_u64().unwrap_or(1) == 1
+        })
+    }
+
     pub(crate) fn record_owner_word(&mut self, event: i64, change: &str) {
         if let Some(used) = self.used_owner_words.iter_mut().find(|used| used["event"].as_i64() == Some(event)) {
             used["uses"] = serde_json::json!(used["uses"].as_u64().unwrap_or(1) + 1);

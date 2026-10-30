@@ -10,10 +10,10 @@ use super::store::{self, canonical_uuid, Event, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|add-to-phase|approve-phase|discard-phase|return-to-draft|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|close-phase|integrate-build|run|templates|safe-action|reports-to|sub-lead --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|move-task|add-to-phase|approve-phase|discard-phase|return-to-draft|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|close-phase|integrate-build|run|templates|safe-action|reports-to|sub-lead --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
 
 const MUTATIONS: &[&str] = &[
-    "plan", "extend", "edit-draft", "move-phase", "add-to-phase", "approve-phase", "discard-phase", "return-to-draft", "reject-phase", "undo-reject-phase",
+    "plan", "extend", "edit-draft", "move-phase", "move-task", "add-to-phase", "approve-phase", "discard-phase", "return-to-draft", "reject-phase", "undo-reject-phase",
     "rework-phase", "reports-to", "sub-lead", "finish", "approve", "commit", "discard", "pause", "resume", "stop",
     "archive", "report", "ask", "reply", "hold", "release", "accept", "reject", "skip-stage", "send-back", "reassign", "take-over", "cancel",
     "retry", "check", "expect", "swap-member", "use-last-reply", "relaunch", "add-member", "scale", "drain", "pause-member", "resume-member", "remove-member", "settings", "finding",
@@ -518,7 +518,16 @@ fn attempt_end(attempt: &Attempt) -> f64 {
 }
 
 /// The team with its live members when the caller listed sessions (F7).
-pub(super) fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::Seen]>) -> Value {    let mut value = serde_json::to_value(team).unwrap_or_default();
+#[cfg(test)]
+pub(super) fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::Seen]>) -> Value {
+    view_with_cancelled(team, teams, sessions, true)
+}
+
+/// U58: `hgs team status` hides cancelled tasks and the phases whose tasks are
+/// all cancelled unless the caller asks for cancelled work; every other view
+/// keeps the whole team.
+pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::Seen]>, include_cancelled: bool) -> Value {
+    let mut value = serde_json::to_value(team).unwrap_or_default();
     // C7: the plan-health block, with the members starving on the plan now.
     let now = super::super::now();
     let mut validation = plan::validate(team, &BTreeSet::new());
@@ -873,6 +882,46 @@ pub(super) fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::d
     let deferred = team.findings.iter().filter(|finding| finding.state == "deferred").count();
     value["findings_summary"] = json!({"open":{"critical":open("critical"),"normal":open("normal"),"later":open("later")},"deferred":deferred});
     value["findings"] = findings_page(team, None);
+    // U58: a phase whose tasks are all cancelled reads cancelled; the status
+    // hides cancelled tasks and those phases unless the caller asks for them.
+    if let Some(phases) = value["phases"].as_array_mut() {
+        for (phase, value) in team.phases.iter().zip(phases.iter_mut()) {
+            if plan::phase_cancelled(team, phase.n) {
+                value["state"] = json!("cancelled");
+            }
+        }
+    }
+    if !include_cancelled {
+        let cancelled: BTreeSet<u32> = team
+            .phases
+            .iter()
+            .filter(|phase| plan::phase_cancelled(team, phase.n))
+            .map(|phase| phase.n)
+            .collect();
+        if let Some(tasks) = value["tasks"].as_array_mut() {
+            let kept: Vec<Value> = team
+                .tasks
+                .iter()
+                .zip(std::mem::take(tasks))
+                .filter(|(task, _)| task.status != TaskStatus::Cancelled)
+                .map(|(_, value)| value)
+                .collect();
+            *tasks = kept;
+        }
+        if let Some(phases) = value["phases"].as_array_mut() {
+            let kept: Vec<Value> = team
+                .phases
+                .iter()
+                .zip(std::mem::take(phases))
+                .filter(|(phase, _)| !cancelled.contains(&phase.n))
+                .map(|(_, value)| value)
+                .collect();
+            *phases = kept;
+        }
+        if let Some(summary) = value["phase_summary"].as_array_mut() {
+            summary.retain(|phase| phase["n"].as_u64().is_none_or(|n| !cancelled.contains(&(n as u32))));
+        }
+    }
     value
 }
 
@@ -911,8 +960,16 @@ fn session_account(member: &Member) -> String {
 /// A team as the session list shows it: members with their sessions and each
 /// task's state, without descriptions, reports or the feed. The list never
 /// reads the live session listing: the desktop polls it often (C1).
-fn summary(team: &Team) -> Value {
+fn summary(team: &Team, include_cancelled: bool) -> Value {
     let count = |status: TaskStatus| team.tasks.iter().filter(|task| task.status == status).count();
+    // U58: the dashboard hides cancelled tasks and the phases whose tasks are
+    // all cancelled, unless it asks for them.
+    let cancelled: BTreeSet<u32> = team
+        .phases
+        .iter()
+        .filter(|phase| plan::phase_cancelled(team, phase.n))
+        .map(|phase| phase.n)
+        .collect();
     let members: Vec<Value> = team
         .members
         .iter()
@@ -932,6 +989,7 @@ fn summary(team: &Team) -> Value {
     let tasks: Vec<Value> = team
         .tasks
         .iter()
+        .filter(|task| include_cancelled || task.status != TaskStatus::Cancelled)
         .map(|t| {
             let attempt = t.attempts.last();
             json!({"id":t.id,"title":t.title,"status":t.status,"assignee":t.assignee,"phase":t.phase,
@@ -941,10 +999,13 @@ fn summary(team: &Team) -> Value {
         .collect();
     // G8: the session row counts the phase in work and every phase, so it needs
     // each task's phase and the phase records (without their change history).
+    // U58: a phase whose tasks are all cancelled reads cancelled.
     let phases: Vec<Value> = team
         .phases
         .iter()
-        .map(|p| json!({"n":p.n,"order":p.order,"title":p.title,"barrier":p.barrier,"state":p.state,"tasks":p.tasks,
+        .filter(|p| include_cancelled || !cancelled.contains(&p.n))
+        .map(|p| json!({"n":p.n,"order":p.order,"title":p.title,"barrier":p.barrier,
+            "state":if cancelled.contains(&p.n) { json!("cancelled") } else { json!(p.state) },"tasks":p.tasks,
             "note":p.note,"rejection":p.rejection}))
         .collect();
     json!({
@@ -2442,8 +2503,8 @@ fn active_team_records(store: &Store) -> anyhow::Result<Vec<Team>> {
 }
 
 /// The stored team list the desktop polls: no live session listing (C1).
-fn list_items(teams: &[Team]) -> Value {
-    json!({"items":teams.iter().map(summary).collect::<Vec<_>>()})
+fn list_items(teams: &[Team], include_cancelled: bool) -> Value {
+    json!({"items":teams.iter().map(|team| summary(team, include_cancelled)).collect::<Vec<_>>()})
 }
 
 /// The lead's inbox (C2): every report, question, permission request, its own
@@ -2729,7 +2790,12 @@ fn check_phase_word(
     };
     let verified = verify(team, word, phase, kind, after, super::super::now())?;
     if let Some(used) = team.owner_word_used(verified.event) {
-        bail!("That word was already used for {used}; ask the owner again");
+        // U58: one sentence naming a member and its tasks pays for both, the
+        // member first: the roster add, then this request for its tasks.
+        ensure!(
+            team.owner_word_allows_its_tasks(verified.event),
+            "That word was already used for {used}; ask the owner again"
+        );
     }
     filled["owner_word_checked"] = serde_json::to_value(&verified)?;
     filled["owner_word_event"] = json!(verified.event);
@@ -3275,7 +3341,7 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             }
             // Stored teams only: a live session listing belongs to status, not
             // to this list the desktop polls (C1).
-            Ok(list_items(&teams))
+            Ok(list_items(&teams, input["include_cancelled"].as_bool() == Some(true)))
         }
         "status" => {
             let store = Store::open(false)?;
@@ -3299,7 +3365,10 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                     teams.push(child);
                 }
             }
-            let mut value = view_with(&team, &teams, sessions.as_deref());
+            // U58: cancelled tasks and phases stay out of the status unless the
+            // caller asks for them.
+            let include_cancelled = input["include_cancelled"].as_bool() == Some(true);
+            let mut value = view_with_cancelled(&team, &teams, sessions.as_deref(), include_cancelled);
             // D2: the findings page takes a before cursor.
             value["findings"] = findings_page(&team, input["before"].as_u64());
             Ok(value)
@@ -4649,7 +4718,7 @@ mod tests {
             assert_eq!(task["waits"]["for"], "stage", "{task}");
             assert_eq!(task["stage_spans"][0]["kind"], "review");
             // The polled team list (without `list`, which may start the worker).
-            let list = list_items(&[stored()]);
+            let list = list_items(&[stored()], true);
             let summary = list["items"][0].clone();
             assert_eq!(summary["in_review"], 1, "{summary}");
             // Stage delivery (#532) gives the review to rev.
@@ -6397,7 +6466,7 @@ mod tests {
         team.tasks.push(crate::state::teams::model::Task { id: 1, phase: 1, ..Default::default() });
         team.tasks.push(crate::state::teams::model::Task { id: 2, phase: 2, ..Default::default() });
         team.phases.push(crate::state::teams::model::Phase { n: 2, title: "Fixes".into(), tasks: vec![2], ..Default::default() });
-        let value = super::summary(&team);
+        let value = super::summary(&team, true);
         assert_eq!(value["tasks"][1]["phase"], 2);
         assert_eq!(value["phases"][0]["n"], 2);
         assert_eq!(value["phases"][0]["tasks"][0], 2);
@@ -6425,6 +6494,45 @@ mod tests {
             assert!(MUTATIONS.contains(&op), "{op} is not a mutation");
             assert!(USAGE.contains(op), "{op} is not in the usage");
         }
+    }
+
+    #[test]
+    fn a_phase_whose_tasks_are_all_cancelled_reads_cancelled_and_is_hidden() {
+        let mut team = running_team();
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        ops::apply(
+            &mut team,
+            "extend",
+            &json!({"phase_title":"Next","tasks":[{"id":2,"title":"D","assignee":"dev"},{"id":3,"title":"E","assignee":"dev"}]}),
+            &Actor::Human,
+            &none,
+            &mut events,
+        )
+        .unwrap();
+        ops::apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap();
+        for id in [2, 3] {
+            ops::apply(&mut team, "cancel", &json!({"task":id}), &Actor::Human, &none, &mut events).unwrap();
+        }
+        // The status hides the cancelled phase and its tasks by default.
+        let hidden = view_with_cancelled(&team, &[], None, false);
+        let phases: Vec<u64> = hidden["phases"].as_array().unwrap().iter().map(|phase| phase["n"].as_u64().unwrap()).collect();
+        assert!(!phases.contains(&2), "{hidden}");
+        assert!(hidden["tasks"].as_array().unwrap().iter().all(|task| task["phase"] != 2), "{hidden}");
+        assert!(hidden["phase_summary"].as_array().unwrap().iter().all(|phase| phase["n"] != 2), "{hidden}");
+        // Asked for, the phase reads cancelled and its tasks are listed.
+        let shown = view_with_cancelled(&team, &[], None, true);
+        let phase = shown["phases"].as_array().unwrap().iter().find(|phase| phase["n"] == 2).unwrap();
+        assert_eq!(phase["state"], "cancelled", "{shown}");
+        assert_eq!(shown["tasks"].as_array().unwrap().iter().filter(|task| task["phase"] == 2).count(), 2);
+        let header = shown["phase_summary"].as_array().unwrap().iter().find(|phase| phase["n"] == 2).unwrap();
+        assert_eq!((header["status"].clone(), header["state"].clone()), (json!("cancelled"), json!("cancelled")), "{shown}");
+        // A phase with one task still open is not cancelled and stays visible.
+        ops::apply(&mut team, "extend", &json!({"phase":2,"tasks":[{"id":4,"title":"Back","assignee":"dev"}]}), &Actor::Human, &none, &mut events).unwrap();
+        let partial = view_with_cancelled(&team, &[], None, false);
+        assert!(partial["phases"].as_array().unwrap().iter().any(|phase| phase["n"] == 2), "{partial}");
+        // The plain view (used inside the dispatcher) keeps the whole team.
+        assert!(view_with(&team, &[], None)["phases"].as_array().unwrap().iter().any(|phase| phase["n"] == 2));
     }
 
     #[test]
@@ -6513,7 +6621,7 @@ mod tests {
         // Even with the report reminder off, and the team list carries it too.
         team.settings.remind_owner_minutes = 0;
         team.settings.auto_accept = true;
-        let listed = summary(&team);
+        let listed = summary(&team, true);
         assert_eq!(listed["attention"][0]["phase"], 3);
         assert_eq!((listed["stuck_scope"].clone(), listed["auto_accept"].clone()), (json!([2]), json!(true)));
         assert_eq!(listed["phases"][1]["state"], "draft");
@@ -6553,7 +6661,7 @@ mod tests {
         paused.status = TeamStatus::Paused;
         assert_eq!(view_with(&paused, &[], None)["waiting_for_lead"], false);
         // The session list carries both too.
-        let listed = summary(&paused);
+        let listed = summary(&paused, true);
         assert_eq!((listed["waiting_for_lead"].as_bool(), listed["pending_phase"].as_u64()), (Some(false), Some(2)));
         // A team that is over shows no pending phase, even with a stale record.
         let mut done = team.clone();
@@ -7009,7 +7117,7 @@ mod tests {
         assert_eq!(members.iter().find(|member| member["id"] == "dev").unwrap()["queue"], expected);
         assert_eq!(members.iter().find(|member| member["id"] == "lead").unwrap()["queue"], json!([]));
         // The session list carries the same queue.
-        let listed = summary(&team);
+        let listed = summary(&team, true);
         assert_eq!(listed["members"].as_array().unwrap().iter().find(|member| member["id"] == "dev").unwrap()["queue"], expected);
     }
 
@@ -7019,7 +7127,7 @@ mod tests {
         let dev = |value: &Value| value["members"].as_array().unwrap().iter().find(|member| member["id"] == "dev").unwrap().clone();
         // Nothing holds dev: the field is absent, so the JSON is unchanged.
         assert!(dev(&view_with(&team, &[], None)).get("captured_hold").is_none());
-        assert!(dev(&summary(&team)).get("captured_hold").is_none());
+        assert!(dev(&summary(&team, true)).get("captured_hold").is_none());
         // A7: its report on #1 was captured from its last reply.
         let task = team.task_mut(1).unwrap();
         task.status = TaskStatus::Submitted;
@@ -7028,7 +7136,7 @@ mod tests {
         attempt.report = Some(Report { text: "Queued, after FU-trees".into(), at: 20.0, captured: true, ..Default::default() });
         let expected = json!({"task":1,"text":"No new work: the captured report on #1 awaits a decision"});
         assert_eq!(dev(&view_with(&team, &[], None))["captured_hold"], expected);
-        assert_eq!(dev(&summary(&team))["captured_hold"], expected);
+        assert_eq!(dev(&summary(&team, true))["captured_hold"], expected);
         // An explicit report holds nothing.
         team.task_mut(1).unwrap().attempts.last_mut().unwrap().report.as_mut().unwrap().captured = false;
         assert!(dev(&view_with(&team, &[], None)).get("captured_hold").is_none());
@@ -7153,7 +7261,7 @@ mod tests {
         team.status = TeamStatus::Done;
         assert_eq!(view_with(&team, &[], Some(&[]))["left_running"], json!([]));
         // The session list never carries a live listing: only status does (C1).
-        assert!(summary(&team).get("left_running").is_none());
+        assert!(summary(&team, true).get("left_running").is_none());
     }
 
     #[test]
@@ -7256,7 +7364,7 @@ mod tests {
         done.status = TeamStatus::Done;
         // A list item comes from the stored record alone: no left_running, no
         // live session listing (C1).
-        let items = list_items(&[done]);
+        let items = list_items(&[done], true);
         assert_eq!(items["items"].as_array().unwrap().len(), 1);
         assert!(items["items"][0].get("left_running").is_none());
         assert!(items["items"][0]["members"][0]["queue"].is_array());
@@ -7285,7 +7393,7 @@ mod tests {
         assert_eq!(value["attention"][0]["kind"], "report");
         assert_eq!(value["attention"][0]["task"], 1);
         // The polled team list names the same attention items.
-        assert_eq!(summary(&old)["attention"][0]["task"], 1);
+        assert_eq!(summary(&old, true)["attention"][0]["task"], 1);
         old.settings.remind_owner_minutes = 0;
         assert_eq!(view_with(&old, &[], None)["attention"], json!([]));
         // The settings are optional with the spec's defaults (C2, C4, U18).

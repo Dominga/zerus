@@ -13,12 +13,13 @@ pub mod detect;
 pub mod durations;
 pub mod glob;
 pub mod map;
+pub mod tools;
 
 use crate::cli::{Error, Result};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
-const USAGE: &str = "usage: hgs test config [--propose|--write-proposal] | map [--write|--check] | affected [RANGE] [--staged] [--files FILE...] [--full] | durations --record FILE... --provider NAME [--target ID] | coverage --provider NAME --report TARGET=FILE... [--fail-on-gaps]; each takes --dir DIR, --team TEAM and --json";
+const USAGE: &str = "usage: hgs test config [--propose|--write-proposal] | map [--write|--check] | affected [RANGE] [--staged] [--files FILE...] [--full] | durations --record FILE... --provider NAME [--target ID] | coverage --provider NAME --report TARGET=FILE... [--fail-on-gaps] | tools; each takes --dir DIR, --team TEAM and --json";
 
 fn fail(message: impl Into<String>) -> Error {
     Error::new(1, message)
@@ -102,6 +103,7 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
         "affected" => affected_tests(&options),
         "durations" => record_durations(&options),
         "coverage" => compare_coverage(&options),
+        "tools" => missing_tools(&options),
         "-h" | "--help" | "help" => {
             println!("{USAGE}");
             Ok(0)
@@ -339,7 +341,13 @@ fn affected_tests(options: &Options) -> Result<i32> {
     if full && config.full.policy == config::FullPolicy::Owner {
         text.push_str("\nThe full run is the owner's call: ask with this time before starting it.\n");
     }
-    print(options, json!({"active": loaded.active(), "full_policy": config.full.policy, "full_place": config.full.place, "selection": selection}), &text);
+    // #742: a tool these tests need and this computer lacks is offered to the owner.
+    let offers = tools::refresh(&options.root, config).unwrap_or_default();
+    let waiting: Vec<&str> = offers.iter().filter(|offer| offer.state == "offered").map(|offer| offer.tool.as_str()).collect();
+    if !waiting.is_empty() {
+        text.push_str(&format!("\nMissing here, offered to the owner in Waiting for you: {}. Never install them yourself; work without them.\n", waiting.join(", ")));
+    }
+    print(options, json!({"active": loaded.active(), "full_policy": config.full.policy, "full_place": config.full.place, "selection": selection, "tools": offers}), &text);
     Ok(0)
 }
 
@@ -391,6 +399,45 @@ fn record_durations(options: &Options) -> Result<i32> {
     }
     write_json(&path, &durations)?;
     print(options, json!({"recorded": count, "file": config.map.durations}), &format!("Recorded {count} time(s) in {}.\n", config.map.durations));
+    Ok(0)
+}
+
+/// #742: the tools the project needs on this computer, offered to the owner
+/// when missing (the Tests view's lines); `--install ID` is the install runner
+/// the owner's Allow starts, and refuses any offer the owner did not allow.
+fn missing_tools(options: &Options) -> Result<i32> {
+    if let Some(at) = options.rest.iter().position(|arg| arg == "--install") {
+        let id = options.rest.get(at + 1).ok_or_else(usage)?;
+        tools::install(id).map_err(|error| fail(format!("{error:#}")))?;
+        return Ok(0);
+    }
+    let loaded = load(&options.root, options.team.as_deref())?;
+    let config = &loaded.config;
+    let needs = tools::needs(&options.root, config, tools::os(), &|manager| tools::find_program(manager.program()).is_some());
+    let offers = tools::refresh(&options.root, config).map_err(|error| fail(format!("{error:#}")))?;
+    let mut lines = Vec::new();
+    let mut text = String::new();
+    for need in &needs {
+        let offer = offers.iter().find(|offer| offer.tool.eq_ignore_ascii_case(&need.tool));
+        let state = match offer.map(|offer| offer.state.as_str()) {
+            None | Some("present") => "here",
+            Some("offered") => "missing, offered in Waiting for you",
+            Some("denied") => "missing, denied by the owner",
+            Some("installing") => "installing",
+            Some("installed") => "installed",
+            Some(_) => "missing, the install failed",
+        };
+        text.push_str(&format!("  {}: {state} ({}; saves {})\n", need.tool, need.why, if need.saves.is_empty() { "-" } else { need.saves.as_str() }));
+        if state.starts_with("missing") {
+            let command = need.command.join(" ");
+            text.push_str(&format!("    {}\n", if command.is_empty() { "no package manager here installs it".to_owned() } else { command }));
+        }
+        lines.push(json!({"tool":need.tool,"why":need.why,"saves":need.saves,"source":need.source,"command":need.command.join(" "),
+            "state":offer.map_or("present", |offer| offer.state.as_str()),"offer":offer.map(|offer| offer.id.clone()),
+            "output":offer.map(|offer| offer.output.clone()).unwrap_or_default()}));
+    }
+    let text = if needs.is_empty() { "This project needs no tools Zerus knows of.\n".to_owned() } else { format!("Tools the tests need on this computer:\n{text}") };
+    print(options, json!({"tools": lines}), &text);
     Ok(0)
 }
 

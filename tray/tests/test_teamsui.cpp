@@ -840,6 +840,7 @@ private slots:
     void waitingPagePagesStayStableWhileItemsArrive();
     void waitingPageEmptyAndRefused();
     void waitingItemsAreAnsweredInPlace();
+    void waitingToolOffersAreAnsweredInPlace();
     void waitingBannerAnswersInPlaceAndWithdrawsTheNotice();
     void stageColumnsAndChipsOnTheBoard();
     void inspectorShowsThePipelineAndOverridesAskForAReason();
@@ -13772,6 +13773,96 @@ void TestTeamsUi::waitingItemsAreAnsweredInPlace()
     // An answer between rebuilds never shows as a window of its own.
     for (auto *window : QApplication::topLevelWidgets())
         QVERIFY2(!(window->objectName() == QLatin1String("teamWaitingAnswer") && window->isVisible()), "a stray answer window");
+}
+
+// #742 (owner, 2026-10-31): a test or build tool the project lacks on this
+// computer is offered in Waiting for you, without a team: why it is needed,
+// what it saves and the install command; Deny with a reason, or Allow, sent as
+// the owner's decide-tool. A failed install shows its output and retries.
+void TestTeamsUi::waitingToolOffersAreAnsweredInPlace()
+{
+    QSettings().setValue("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([] { QSettings().remove("workspace/skin"); darkPalette(); });
+    const double now = double(QDateTime::currentSecsSinceEpoch());
+    setTeam(answerTeam());
+    const auto tool = [now](const QString &offer, const QString &name, const QString &state, const QString &command, double age) {
+        return QJsonObject{{"id", "tools/" + offer}, {"team", ""}, {"team_name", "Zerus"}, {"kind", "tool_missing"},
+                           {"title", QStringLiteral("Zerus needs %1: the shared build cache").arg(name)}, {"since", now - age},
+                           {"action", "decide_tool"}, {"offer", offer}, {"tool", name},
+                           {"why", "the shared build cache ([build_cache]) for Rust"},
+                           {"saves", "rebuilding the same crates in every worktree of the team"}, {"command", command},
+                           {"state", state}, {"output", state == "failed" ? QStringLiteral("No package found matching input criteria.") : QString()}};
+    };
+    const QJsonArray items{tool("a1", "sccache", "offered", "winget install --id Mozilla.sccache --exact --scope user --silent", 30),
+                           tool("b2", "ccache", "failed", "winget install --id Ccache.Ccache --exact --scope user --silent", 60),
+                           tool("c3", "gcovr", "offered", "", 90)};
+    QVERIFY(writeWaiting(script() + ".waiting", items));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamWaitingPage page(&controller);
+    QStringList answered, opened;
+    page.answered = [&](const TeamWaitingPage::Item &item) { answered << item.id; };
+    page.openTeam = [&](const TeamWaitingPage::Item &item) { opened << item.id; };
+    darkPalette(); page.setDark(true);
+    page.resize(900, 900); page.show();
+    const auto row = [&](const QString &id) -> QFrame * {
+        for (auto *frame : page.findChildren<QFrame *>("teamWaitingRow")) if (frame->property("itemId") == id) return frame;
+        return nullptr;
+    };
+    QTRY_VERIFY(row("tools/a1") && row("tools/b2") && row("tools/c3"));
+    // Offers of a project are no team's: the header counts no team for them.
+    QCOMPARE(page.findChild<QLabel *>("teamWaitingCount")->text(), QStringLiteral("3 items"));
+    // A project's offer has no team to open; a click on its row opens nothing.
+    QVERIFY(!row("tools/a1")->findChild<QPushButton *>("teamWaitingOpen"));
+    QCOMPARE(row("tools/a1")->findChild<QLabel *>("teamWaitingKind")->text(), QStringLiteral("Tool"));
+    QCOMPARE(row("tools/a1")->findChild<QLabel *>("teamWaitingTeam")->toolTip(), QStringLiteral("Project Zerus"));
+    QTest::mouseClick(row("tools/a1"), Qt::LeftButton, {}, QPoint(row("tools/a1")->width() / 3, row("tools/a1")->height() / 2));
+    QVERIFY(opened.isEmpty());
+    for (const auto &id : {"tools/a1", "tools/b2", "tools/c3"}) row(id)->findChild<QPushButton *>("teamWaitingAnswerToggle")->click();
+    QTRY_VERIFY(row("tools/a1")->findChild<QFrame *>("teamWaitingTool") && row("tools/b2")->findChild<QFrame *>("teamWaitingTool")
+                && row("tools/c3")->findChild<QFrame *>("teamWaitingTool"));
+    auto *offer = row("tools/a1")->findChild<QFrame *>("teamWaitingTool");
+    QCOMPARE(offer->findChild<QLabel *>("teamWaitingToolHead")->text(), QStringLiteral("Install sccache on this computer?"));
+    QVERIFY(offer->findChild<QLabel *>("teamWaitingToolWhy")->text().contains(QStringLiteral("shared build cache")));
+    QVERIFY(offer->findChild<QLabel *>("teamWaitingToolSaves")->text().contains(QStringLiteral("every worktree")));
+    QCOMPARE(offer->findChild<QLabel *>("teamWaitingToolCommand")->text(), QStringLiteral("winget install --id Mozilla.sccache --exact --scope user --silent"));
+    QVERIFY(offer->findChild<QPushButton *>("teamWaitingToolAllow")->isEnabled());
+    // No manager here installs it: Allow is off, Deny still answers.
+    auto *none = row("tools/c3")->findChild<QFrame *>("teamWaitingTool");
+    QVERIFY(!none->findChild<QPushButton *>("teamWaitingToolAllow")->isEnabled());
+    QVERIFY(none->findChild<QPushButton *>("teamWaitingToolDeny")->isEnabled());
+    QVERIFY(none->findChild<QLabel *>("teamWaitingToolCommand")->text().contains(QStringLiteral("No package manager")));
+    // A failed install shows its output and retries.
+    auto *failed = row("tools/b2")->findChild<QFrame *>("teamWaitingTool");
+    QCOMPARE(failed->findChild<QLabel *>("teamWaitingToolHead")->text(), QStringLiteral("Installing ccache failed"));
+    QVERIFY(failed->findChild<QLabel *>("teamWaitingToolOutput")->text().contains(QStringLiteral("No package found")));
+    QCOMPARE(failed->findChild<QPushButton *>("teamWaitingToolAllow")->text(), QStringLiteral("Retry install"));
+    for (auto *label : page.findChildren<QLabel *>()) QVERIFY2(!label->text().contains(QStringLiteral(" · ")), qPrintable(label->text()));
+    TestWait::settle();
+    shot(&page, "u742-tool-offers-dark");
+    page.setDark(false);
+    lightShot(&page, "u742-tool-offers-light");
+    darkPalette(); page.setDark(true);
+    QTRY_VERIFY(row("tools/a1")->findChild<QFrame *>("teamWaitingTool"));
+    // Deny with its reason: remembered by hgs, sent as the owner.
+    row("tools/a1")->findChild<QLineEdit *>("teamWaitingToolDenyReason")->setText("Not on this laptop");
+    row("tools/a1")->findChild<QPushButton *>("teamWaitingToolDeny")->click();
+    QTRY_COMPARE(calls(script(), "decide-tool").size(), 1);
+    auto sent = calls(script(), "decide-tool").first();
+    QCOMPARE(sent["offer"].toString(), QStringLiteral("a1"));
+    QCOMPARE(sent["allow"].toBool(), false);
+    QCOMPARE(sent["reason"].toString(), QStringLiteral("Not on this laptop"));
+    QCOMPARE(sent["by"].toString(), QStringLiteral("human"));
+    QTRY_VERIFY(!row("tools/a1"));
+    QVERIFY(writeWaiting(script() + ".waiting", QJsonArray{items[1], items[2]}));
+    // Allow of the failed one: the install runs again as the owner's operation.
+    row("tools/b2")->findChild<QPushButton *>("teamWaitingToolAllow")->click();
+    QTRY_COMPARE(calls(script(), "decide-tool").size(), 2);
+    sent = calls(script(), "decide-tool").at(1);
+    QCOMPARE(sent["offer"].toString(), QStringLiteral("b2"));
+    QCOMPARE(sent["allow"].toBool(), true);
+    QVERIFY(!sent.contains("reason"));
+    QTRY_COMPARE(answered, (QStringList{"tools/a1", "tools/b2"}));
 }
 
 // #724: the banner answers in its row too; an item answered there leaves the

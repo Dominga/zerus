@@ -14,6 +14,7 @@ enforced, and the team keeps today's flow.
                                     test file in no provider's map
   hgs test map --write              refresh the committed snapshot of the map
   hgs test durations --record LOG --provider NAME   keep a run's times
+  hgs test tools                    the tools the tests need here
 
 The map is read from the sources when you ask, so a merge never leaves it
 behind; the committed file stands in only for a build this checkout cannot
@@ -26,6 +27,8 @@ A file the map does not know runs its whole area; a file in no area is named,
 never skipped. Tests marked manual (real agents, hosts) run only by hand;
 tests built elsewhere run in the CI.
 Every action takes --dir DIR, --team TEAM (the owner's override) and --json.
+Never install a tool: Zerus offers a missing one to the owner (Waiting for
+you). Propose it on the question card and work without it.
 
 .zerus/tests.toml: [map], [full] (where, policy), [retries], [budgets],
 [isolation], [build_cache], [merge_queue], [resources.NAME] and [[provider]]

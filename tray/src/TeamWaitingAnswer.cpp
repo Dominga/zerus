@@ -20,7 +20,8 @@ const QString additionPrefix = QStringLiteral("/owner_word_asked/addition-");
 
 bool TeamWaitingAnswer::opensCard(const QString &action)
 {
-    return action == QLatin1String("decide_proposal") || action == QLatin1String("confirm_addition") || action == QLatin1String("answer_permission");
+    return action == QLatin1String("decide_proposal") || action == QLatin1String("confirm_addition") || action == QLatin1String("answer_permission")
+           || action == QLatin1String("decide_tool");
 }
 
 bool TeamWaitingAnswer::approves(const QString &action)
@@ -70,7 +71,8 @@ TeamWaitingAnswer::TeamWaitingAnswer(TeamController *teams, const Item &item, bo
             });
         };
     }
-    if (opensCard(item.action)) read([](const Team *) {});
+    // #742: a tool's offer has no team to read; the item carries all of it.
+    if (opensCard(item.action) && item.action != QLatin1String("decide_tool")) read([](const Team *) {});
     else render();
 }
 
@@ -251,12 +253,83 @@ void TeamWaitingAnswer::sendAddition()
     });
 }
 
+void TeamWaitingAnswer::sendTool(bool allow)
+{
+    if (busy() || m_done || !m_teams) return;
+    m_notice.clear();
+    // The owner's answer: Allow installs with the command shown; Deny is
+    // remembered for this project on this computer.
+    QJsonObject input{{"offer", m_item.offer}, {"allow", allow}};
+    if (!allow && !m_reason.trimmed().isEmpty()) input.insert("reason", m_reason.trimmed());
+    m_sending = true; render();
+    QPointer<TeamWaitingAnswer> guard(this);
+    m_teams->act(QStringLiteral("decide-tool"), input, [guard, allow](bool ok, const QString &message) {
+        if (!guard) return;
+        guard->m_sending = false;
+        if (!ok) { guard->m_notice = message; guard->render(); return; }
+        guard->finish();
+        if (guard && allow) { guard->m_notice = tr("Installing; its output shows here if it fails"); guard->render(); }
+    });
+}
+
 void TeamWaitingAnswer::finish()
 {
     m_done = true;
     m_notice = tr("Answered");
     render();
     if (answered) answered(m_item);
+}
+
+// #742: the offer of a missing tool: why, what it saves, the exact command
+// and, after a failed install, its output; Deny with a reason, or Allow.
+void TeamWaitingAnswer::renderTool(const Colors &c, bool waiting)
+{
+    auto *box = new QFrame; box->setObjectName("teamWaitingTool");
+    box->setProperty("offer", m_item.offer);
+    box->setStyleSheet(QStringLiteral("QFrame#teamWaitingTool{background:%1;border:1px solid %2;border-radius:7px;}")
+                           .arg(alpha(c.warn, .10).name(QColor::HexArgb), alpha(c.warn, .40).name(QColor::HexArgb)));
+    auto *v = new QVBoxLayout(box); v->setContentsMargins(8, 5, 8, 6); v->setSpacing(3);
+    const bool failed = m_item.toolState == QLatin1String("failed");
+    auto *head = label(failed ? tr("Installing %1 failed").arg(m_item.tool) : tr("Install %1 on this computer?").arg(m_item.tool),
+                       c.fg, 12, true, "teamWaitingToolHead");
+    head->setWordWrap(true);
+    v->addWidget(head);
+    if (!m_item.why.isEmpty()) {
+        auto *why = label(tr("Needed for %1").arg(m_item.why), c.text2, 11, false, "teamWaitingToolWhy");
+        why->setWordWrap(true); v->addWidget(why);
+    }
+    if (!m_item.saves.isEmpty()) {
+        auto *saves = label(tr("Saves %1").arg(m_item.saves), c.text2, 11, false, "teamWaitingToolSaves");
+        saves->setWordWrap(true); v->addWidget(saves);
+    }
+    const bool installable = !m_item.command.isEmpty();
+    auto *command = label(installable ? m_item.command : tr("No package manager on this computer installs it; install it yourself or deny."),
+                          installable ? c.fg : c.warn, 11, false, "teamWaitingToolCommand");
+    if (installable) command->setFont(NewSessionDense::mono(11));
+    command->setWordWrap(true);
+    command->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    v->addWidget(command);
+    if (failed && !m_item.output.isEmpty()) {
+        auto *output = label(m_item.output.right(1200), c.text3, 10, false, "teamWaitingToolOutput");
+        output->setFont(NewSessionDense::mono(10));
+        output->setWordWrap(true);
+        output->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        v->addWidget(output);
+    }
+    auto *answers = row(6);
+    auto *reasonEdit = new QLineEdit(m_reason); reasonEdit->setObjectName("teamWaitingToolDenyReason");
+    reasonEdit->setPlaceholderText(tr("Why deny? Remembered for this project here"));
+    QObject::connect(reasonEdit, &QLineEdit::textChanged, this, [this](const QString &text) { m_reason = text; });
+    auto *deny = button(tr("Deny"), "teamWaitingToolDeny"); deny->setProperty("danger", true);
+    deny->setToolTip(tr("Zerus does not offer it again for this project on this computer"));
+    auto *allow = button(failed ? tr("Retry install") : tr("Allow install"), "teamWaitingToolAllow", true);
+    allow->setToolTip(tr("Runs the command shown as your operation and records its output"));
+    allow->setEnabled(installable && !waiting); deny->setEnabled(!waiting); reasonEdit->setEnabled(!waiting);
+    QObject::connect(deny, &QPushButton::clicked, this, [this] { sendTool(false); });
+    QObject::connect(allow, &QPushButton::clicked, this, [this] { sendTool(true); });
+    answers->addWidget(reasonEdit, 1); answers->addWidget(deny); answers->addWidget(allow);
+    v->addLayout(answers);
+    m_layout->addWidget(box);
 }
 
 void TeamWaitingAnswer::render()
@@ -279,6 +352,11 @@ void TeamWaitingAnswer::render()
     }
     // A card of a decided proposal never shows again (its own late render).
     if (m_cards && (m_done || !stale.isEmpty())) m_cards->setTeam(nullptr);
+    if (m_item.action == QLatin1String("decide_tool")) {
+        if (!m_done) renderTool(c, waiting);
+        if (parentWidget()) setVisible(hasContent());
+        return;
+    }
     if (m_done || !m_team || !stale.isEmpty() || !opensCard(m_item.action)) {
         // Parentless (between the row rebuilds) it never shows as a window.
     if (parentWidget()) setVisible(hasContent());

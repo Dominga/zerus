@@ -1846,6 +1846,8 @@ pub(crate) fn hand_off_text_with(
          Report once at the end: hgs {at}team report --json, with JSON on stdin:\n  {report}\n\
          A progress line is not a report; a question is not a report.\n\
          Never repair file permissions or ACLs yourself; report the exact error to {boss} with the folder and the command.\n\
+         Never install a tool yourself: a missing test or build tool is offered to the owner in Waiting for you \
+         (hgs test tools); ask {boss} about it and work without it.\n\
          Summarize what changed, where, and how you checked it. If you cannot run that command, end your turn with \
          the report as your last message: Zerus gives it to {boss}. A blocker goes to {boss} too: ask it, not the owner.",
         ask = json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":team.id,"task":task.id,"attempt":attempt.id,"text":"..."}),
@@ -12020,6 +12022,8 @@ mod tests {
         assert!(text.contains("Your task and attempt again: {\"attempt\":\"A-ID\"} | hgs @msi team current --json"), "{text}");
         assert!(text.contains("Report once at the end: hgs @msi team report --json"), "{text}");
         assert!(text.contains("A progress line is not a report; a question is not a report."), "{text}");
+        // #742: an agent never installs a tool; Zerus offers it to the owner.
+        assert!(text.contains("Never install a tool yourself: a missing test or build tool is offered to the owner in Waiting for you"), "{text}");
         let local = hand_off_text(&team, task, &attempt, "msi", "");
         assert!(local.contains("hgs team report --json"));
         assert!(local.contains("hgs team ask --json") && local.contains("hgs team current --json"), "{local}");

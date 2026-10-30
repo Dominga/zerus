@@ -82,9 +82,8 @@ private:
     bool returnPhaseToDraft(const QString &team, int phase);
     void movePhase(const Teams::Team &team, int phase, int to, const QString &position);
     QWidget *inboxStrip(const Teams::Team &team, const QList<Teams::InboxItem> &items);
-    // F8: the lead's open membership proposals with Accept and Reject; remove
-    // and swap ask for confirmation. A decision goes out once.
-    QWidget *proposalsStrip(const Teams::Team &team);
+    // F8, U57: the proposals answered (the coordinator's cards, the plan-mode
+    // dialog) until the store takes them; a decision goes out once.
     QSet<QString> m_decidedProposals;
     // F7: a Done team starts the next goal with the same folder, settings,
     // lead and members (their live sessions adopted).
@@ -270,6 +269,7 @@ private:
     QScrollArea *m_members;
     QWidget *m_coordinator, *m_coordinatorHead;
     TeamConversation *m_conversation;
+    class TeamProposalCards *m_proposalCards = nullptr;
     QLabel *m_empty;
     TeamTaskCard *m_drawer;
     QPointer<QFrame> m_popover;

@@ -6,6 +6,7 @@
 #include "HgsClient.h"
 #include "TeamController.h"
 #include "TeamConversation.h"
+#include "TeamProposalCard.h"
 #include "TeamPanel.h"
 #include "TeamSettingsDialog.h"
 #include "TeamTaskCard.h"
@@ -123,6 +124,23 @@ TeamWorkspace::TeamWorkspace(TeamController *teams, TeamPanel *panel, QWidget *p
     m_conversation->setPlaceholder(tr("Message the coordinator…"));
     m_conversation->setAgentName(tr("the lead"));
     m_conversation->openTerminal = [this](const QString &host, const QString &session) { if (openTerminal) openTerminal(host, session); };
+    // U57: the lead's open proposals as cards in the lead's conversation.
+    m_proposalCards = new TeamProposalCards;
+    m_proposalCards->decide = [this](const QJsonObject &input, const TeamProposalCards::Done &done) {
+        const QString id = input.value("proposal").toString();
+        m_decidedProposals.insert(id);
+        m_panel->act("decide-proposal", input, [this, id, done](bool ok, const QString &message) {
+            if (!ok) m_decidedProposals.remove(id);
+            done(ok, message);
+            scheduleRender();
+        });
+    };
+    m_proposalCards->current = [this]() -> const Team * { return currentTeam(m_team); };
+    m_proposalCards->confirm = [this](const QString &title, const QString &text, const QString &action) {
+        return m_panel->confirm("teamProposalConfirm", title, text, action);
+    };
+    m_proposalCards->details = [this](const QString &proposal) { if (const auto *team = currentTeam(m_team)) switchModeDialog(*team, proposal); };
+    m_conversation->setCards(m_proposalCards);
     cv->addWidget(m_coordinatorHead); cv->addWidget(m_conversation, 1);
     m_sideSplit->addWidget(m_members); m_sideSplit->addWidget(m_coordinator);
     m_sideSplit->setStretchFactor(0, 45); m_sideSplit->setStretchFactor(1, 55);
@@ -212,7 +230,7 @@ void TeamWorkspace::setTheme(bool dark)
     // The prototype's .btn.sm buttons and its header pills (.pill.planp, .pill.acc).
     const auto a = [](const QColor &color, double value) { return alpha(color, value).name(QColor::HexArgb); };
     const QString selBorder = WorkspaceSkin::color(WorkspaceSkin::active(), dark, QStringLiteral("cardSelBorder")).name();
-    if (!m_headerStatus || !m_headerActions) { m_conversation->setTheme(dark); scheduleRender(); return; }
+    if (!m_headerStatus || !m_headerActions) { m_conversation->setTheme(dark); m_proposalCards->setDark(dark); scheduleRender(); return; }
     m_headerActions->setStyleSheet(QStringLiteral(
         "QPushButton{background:%1;color:%2;border:1px solid %3;border-radius:7px;padding:2px 9px;font-size:11px;min-height:17px;}"
         "QPushButton:hover{background:%4;color:%5;}"
@@ -235,6 +253,7 @@ void TeamWorkspace::setTheme(bool dark)
         .arg(a(c.folder, .13), c.folder.name(), a(c.folder, .6), a(c.folder, .22), a(c.accent, .10), c.accent.name(), a(c.accent, .18)));
     m_headerStrip->setStyleSheet(QStringLiteral("QFrame#teamWorkspaceHeader{border-bottom:1px solid %1;}").arg(c.border.name()));
     m_conversation->setTheme(dark);
+    m_proposalCards->setDark(dark);
     scheduleRender();
 }
 
@@ -322,8 +341,13 @@ void TeamWorkspace::render()
         // B5: a plan that widens a role's permissions waits for the owner's
         // explicit confirmation; the strip names what widens.
         if (!team->widenings.isEmpty()) tv->addWidget(wideningStrip(*team));
-        // F8: the lead's open membership proposals.
-        if (auto *proposals = proposalsStrip(*team)) tv->addWidget(proposals);
+        // F8, U57: the lead's open proposals are cards in the coordinator's
+        // conversation; the decided ones leave the sent set.
+        {
+            QSet<QString> open;
+            for (const auto &proposal : team->proposals) if (proposal.open()) open << proposal.id;
+            m_decidedProposals.intersect(open);
+        }
         // U59: a request to switch to free opens its own dialog, once.
         popSwitchRequest(*team);
         // C4: the owner's attention list is the first group of the side
@@ -3284,71 +3308,6 @@ void TeamWorkspace::openOtherTeam(const QString &team)
     showTeam(team);
 }
 
-QWidget *TeamWorkspace::proposalsStrip(const Team &team)
-{
-    QList<Team::Proposal> open;
-    QSet<QString> openIds;
-    for (const auto &proposal : team.proposals) if (proposal.open()) { open << proposal; openIds << proposal.id; }
-    m_decidedProposals.intersect(openIds);   // decided ones the store has taken
-    if (open.isEmpty()) return nullptr;
-    const Colors c = colorsFor(m_dark);
-    auto *strip = new QFrame; strip->setObjectName("teamWorkspaceProposals");
-    strip->setStyleSheet(QStringLiteral("QFrame#teamWorkspaceProposals{background:%1;border-bottom:1px solid %2;}")
-                             .arg(alpha(c.accent, .07).name(QColor::HexArgb), alpha(c.accent, .35).name(QColor::HexArgb)));
-    auto *v = new QVBoxLayout(strip); v->setContentsMargins(12, 6, 12, 6); v->setSpacing(4);
-    for (const auto &proposal : open) {
-        auto *line = new QWidget; line->setObjectName("teamProposal"); line->setProperty("proposal", proposal.id);
-        line->setProperty("kind", proposal.kind);
-        auto *h = new QHBoxLayout(line); h->setContentsMargins(0, 0, 0, 0); h->setSpacing(8);
-        const QString what = proposalText(team, proposal);
-        h->addWidget(label(tr("%1 proposes").arg(proposal.by.isEmpty() ? tr("The lead") : proposal.by), c.muted, 11));
-        h->addWidget(label(what, c.fg, 12, true, "teamProposalText"));
-        auto *reason = elided(proposal.reason, c.text2, 11); reason->setToolTip(proposal.reason); h->addWidget(reason, 1);
-        const bool sent = m_decidedProposals.contains(proposal.id);
-        // U59: a plan-mode switch is answered only in its own dialog, bound to
-        // the request's id and hash.
-        if (proposal.kind == "switch-plan-mode") {
-            auto *openDialog = button(tr("Answer…"), "teamProposalOpen", true);
-            openDialog->setEnabled(!sent);
-            openDialog->setToolTip(tr("Open the request's dialog"));
-            QObject::connect(openDialog, &QPushButton::clicked, this, [this, id = team.id, proposal = proposal.id] {
-                QTimer::singleShot(0, this, [this, id, proposal] { if (const auto *current = currentTeam(id)) switchModeDialog(*current, proposal); });
-            });
-            h->addWidget(openDialog);
-            v->addWidget(line);
-            continue;
-        }
-        auto *reject = button(tr("Reject"), "teamProposalReject");
-        auto *accept = button(tr("Accept"), "teamProposalAccept", true);
-        reject->setEnabled(!sent); accept->setEnabled(!sent);
-        // Remove and swap change who works: they ask first.
-        const bool ask = proposal.kind == "remove-member" || proposal.kind == "swap-member";
-        const auto decide = [this, id = proposal.id](bool yes) {
-            if (m_decidedProposals.contains(id)) return;
-            m_decidedProposals.insert(id);
-            m_panel->act("decide-proposal", {{"proposal", id}, {"accept", yes}},
-                         [this, id](bool ok, const QString &message) {
-                             if (!ok) { m_decidedProposals.remove(id); m_error = message; }
-                             scheduleRender();
-                         });
-            scheduleRender();
-        };
-        QObject::connect(accept, &QPushButton::clicked, this, [this, decide, ask, what, kind = proposal.kind] {
-            if (ask && !m_panel->confirm("teamProposalConfirm", kind == "swap-member" ? tr("Swap member?") : tr("Remove member?"),
-                                         kind == "swap-member"
-                                             ? tr("%1? Its open task goes to the new session with what was done so far; the old session keeps running for you to stop.").arg(what)
-                                             : tr("%1? Its session keeps running; it gets no more tasks.").arg(what),
-                                         kind == "swap-member" ? tr("Swap") : tr("Remove")))
-                return;
-            decide(true);
-        });
-        QObject::connect(reject, &QPushButton::clicked, this, [decide] { decide(false); });
-        h->addWidget(reject); h->addWidget(accept);
-        v->addWidget(line);
-    }
-    return strip;
-}
-
 void TeamWorkspace::nextGoalDialog(const Team &team)
 {
     if (auto *open = findChild<QDialog *>("teamNextGoalDialog")) { open->raise(); open->activateWindow(); return; }
@@ -3672,6 +3631,7 @@ void TeamWorkspace::renderCoordinator(const Team &team)
     h->addWidget(open, 0, Qt::AlignTop);
     outer->addWidget(inner); inner->show();
     }
+    m_proposalCards->setTeam(&team);
     // U35: the coordinator has no quick-ask chips; the owner writes to the lead.
     m_conversation->setSession(lead ? lead->host : QString(), lead ? lead->session : QString());
     // U53: the lead is a member; its account changes only with swap-member.

@@ -958,7 +958,26 @@ fn summary(team: &Team) -> Value {
         "stuck_scope":plan::stuck_scope(team),"auto_accept":team.settings.auto_accept,
         // C4: the owner's attention list, also from the polled team list.
         "attention":super::inbox::attention(team, super::super::now()),
+        // U57: the lead's open proposals (at most 50), so the lead's session
+        // window shows their cards from the polled list.
+        "proposals":open_proposals(team),
     })
+}
+
+/// U57: the open proposals as the owner's card shows them, without the
+/// stored request id their decision replays under.
+fn open_proposals(team: &Team) -> Vec<Value> {
+    team.proposals
+        .iter()
+        .filter(|proposal| proposal["state"] == "open")
+        .map(|proposal| {
+            let mut shown = proposal.clone();
+            if let Some(object) = shown.as_object_mut() {
+                object.remove("operation_request");
+            }
+            shown
+        })
+        .collect()
 }
 
 /// N7: stops the lead's session of a discarded draft, when the owner asked for
@@ -7632,6 +7651,28 @@ mod tests {
             assert!(owner_without_team(&owner, record, dsh, env, run).is_err(), "{record} {dsh} {env} {run}");
         }
         assert!(owner_without_team(&json!({}), false, false, false, false).is_err());
+    }
+
+    /// U57: the polled list carries the open proposals with their change and
+    /// hash for the lead's cards, never a decided one or the replay request id.
+    #[test]
+    fn the_team_list_carries_the_open_proposals_for_their_cards() {
+        let mut team = running_team();
+        let lead = Actor::Member("lead".into());
+        for input in [
+            json!({"kind":"cancel-tasks","reason":"drop","tasks":[2]}),
+            json!({"kind":"discard-phase","reason":"nothing started","phase":2}),
+        ] {
+            ops::apply(&mut team, "propose", &input, &lead, &BTreeSet::new(), &mut Vec::new()).unwrap();
+        }
+        team.proposals[1]["state"] = json!("rejected");
+        let listed = summary(&team);
+        let proposals = listed["proposals"].as_array().unwrap();
+        assert_eq!(proposals.len(), 1, "{listed}");
+        assert_eq!(proposals[0]["id"], "p1");
+        assert_eq!(proposals[0]["change"]["tasks"], json!([2]));
+        assert_eq!(proposals[0]["hash"], team.proposals[0]["hash"]);
+        assert!(proposals[0].get("operation_request").is_none(), "{}", proposals[0]);
     }
 
     /// U57: Allow applies exactly the proposed change once, bound to the id and

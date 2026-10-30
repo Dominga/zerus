@@ -482,11 +482,11 @@ QJsonObject proposalsTeam(double resetsAt)
     t["hosts"] = QJsonArray{QJsonObject{{"agent", "dsh"}, {"pid", 4242}, {"started", 1000.0}, {"members", QJsonArray{"backend", "tester"}}}};
     t["proposals"] = QJsonArray{
         QJsonObject{{"id", "p1"}, {"kind", "add-member"}, {"by", "Lead"}, {"at", 2000.0}, {"state", "open"}, {"reason", "The UI needs a designer"},
-                    {"member", QJsonObject{{"role", "Designer"}, {"agent", "claude"}, {"model", "sonnet"}}}},
+                    {"member", QJsonObject{{"role", "Designer"}, {"agent", "claude"}, {"model", "sonnet"}}}, {"hash", "h1"}},
         QJsonObject{{"id", "p2"}, {"kind", "swap-member"}, {"by", "Lead"}, {"at", 2100.0}, {"state", "open"}, {"reason", "Backend hit its limit"},
-                    {"member", QJsonObject{{"member", "backend"}, {"agent", "codex"}, {"model", "gpt-5.5"}}}},
+                    {"member", QJsonObject{{"member", "backend"}, {"agent", "codex"}, {"model", "gpt-5.5"}}}, {"hash", "h2"}},
         QJsonObject{{"id", "p3"}, {"kind", "remove-member"}, {"by", "Lead"}, {"at", 2200.0}, {"state", "open"}, {"reason", "Testing is done"},
-                    {"member", "tester"}},
+                    {"member", "tester"}, {"hash", "h3"}},
         QJsonObject{{"id", "p4"}, {"kind", "next-goal"}, {"by", "Lead"}, {"at", 1900.0}, {"state", "rejected"}, {"reason", "Later"},
                     {"goal", "Saved cards"}}};
     t["swapped"] = QJsonArray{QJsonObject{{"member", "Backend"}, {"old", "dsh/checkout/backend-old"}, {"at", 1800.0}, {"by", "You"}}};
@@ -745,6 +745,7 @@ private slots:
     void designerSessionKeepsItsNameAndLeadsNoTeam();
     void nextGoalFromADoneTeam();
     void proposalsAreAcceptedOrRejectedOnce();
+    void proposalCardsNameTheChangeAndAStaleCardSendsNothing();
     void planModeIsChosenWhenThePlanIsApproved();
     void switchToFreeOpensOneDialogBoundToTheRequest();
     void freePhaseReadsIdleBuildsAndClosesOnConfirmation();
@@ -908,6 +909,13 @@ elif a[:3]==['team','catalog','decide'] or a[:3]==['team','catalog','apply']:
   try:os.replace(__file__+'.catalog.new',__file__+'.catalog');break
   except PermissionError:time.sleep(.05)   # Windows: a read holds the file
  print(json.dumps(out))
+elif a[:2]==['team','decide-proposal']:
+ # U57: the receipt names the stored decision; `.proposalrefuse` refuses it,
+ # `.proposalstatus` names an earlier decision (a replay).
+ import os
+ if os.path.exists(__file__+'.proposalrefuse'):print(open(__file__+'.proposalrefuse').read(),file=sys.stderr);sys.exit(1)
+ status=open(__file__+'.proposalstatus').read() if os.path.exists(__file__+'.proposalstatus') else ('accepted' if body.get('accept') else 'rejected')
+ print(json.dumps({'status':status,'proposal':body.get('proposal')}))
 elif a[:2]==['team','approve-phase'] and body.get('phase')==9:
  print('hgs: Phase 9 is not waiting for approval',file=sys.stderr);sys.exit(1)
 elif a[:2]==['team','intake-key']:
@@ -965,6 +973,8 @@ void TestTeamsUi::init()
     for (const char *suffix : {".swaphold", ".swaprefuse", ".swapreceipt", ".accounts"}) QFile::remove(script() + QLatin1String(suffix));
     QFile::remove(script() + ".refuse");
     QFile::remove(script() + ".refuseapply");
+    QFile::remove(script() + ".proposalrefuse");
+    QFile::remove(script() + ".proposalstatus");
     QFile::remove(script() + ".waiting");
     QFile::remove(script() + ".waitingrefuse");
     // Decisions and Apply change the fake catalog: each test starts from the fixture.
@@ -3997,7 +4007,11 @@ void TestTeamsUi::waitingPageListsEveryKindAcrossTeams()
         QVERIFY(!row->findChild<QLabel *>("teamWaitingKindIcon")->pixmap().isNull());
         QVERIFY(!row->findChild<QLabel *>("teamWaitingItemTitle")->text().isEmpty());
     }
-    QCOMPARE(kinds, (QStringList{"Plan", "Phase draft", "Permission", "Your word", "Report", "Held task", "All decided"}));
+    QCOMPARE(kinds, (QStringList{"Plan", "Phase draft", "Permission", "Proposal", "Report", "Held task", "All decided"}));
+    // U57: a lead's proposal is answered on its card in the lead's chat.
+    for (auto *row : page.findChildren<QFrame *>("teamWaitingRow"))
+        QCOMPARE(row->findChild<QPushButton *>("teamWaitingOpen")->text(),
+                 row->property("itemId") == "team-2/owner_word_asked/proposal-p3" ? QStringLiteral("Answer") : QStringLiteral("Open team"));
     QCOMPARE(teams.size(), 6);
     const QString count = page.findChild<QLabel *>("teamWaitingCount")->text();
     QVERIFY2(count.contains("7 items") && count.contains("6 teams"), qPrintable(count));
@@ -8344,8 +8358,10 @@ void TestTeamsUi::nextGoalFromADoneTeam()
     workspace.setTheme(true); workspace.render();
 }
 
-// F8: the lead's open proposals show with Accept and Reject; remove and swap
-// ask first, a cancel sends nothing, and a decision goes out once.
+// F8, U57: the lead's open proposals are cards in the coordinator's
+// conversation, drawn like the member permission card. Deny carries its
+// reason; remove and swap ask first, a cancel sends nothing; every answer
+// carries the proposal's hash and goes out once.
 void TestTeamsUi::proposalsAreAcceptedOrRejectedOnce()
 {
     setTeam(proposalsTeam(QDateTime::currentSecsSinceEpoch() + 3600));
@@ -8358,47 +8374,174 @@ void TestTeamsUi::proposalsAreAcceptedOrRejectedOnce()
     controller.refresh();
     panel.showTeam("team-1");
     workspace.showTeam("team-1");
-    QTRY_VERIFY(workspace.findChild<QFrame *>("teamWorkspaceProposals"));
-    const auto rowOf = [&](const QString &id) -> QWidget * {
-        for (auto *row : workspace.findChildren<QWidget *>("teamProposal")) if (row->property("proposal") == id) return row;
+    const auto cardOf = [&](const QString &id) -> QFrame * {
+        for (auto *card : workspace.findChildren<QFrame *>("teamProposalCard")) if (card->property("proposal") == id) return card;
         return nullptr;
     };
-    QTRY_VERIFY(rowOf("p1") && rowOf("p2") && rowOf("p3"));
-    QVERIFY(!rowOf("p4"));   // decided ones are gone
-    QCOMPARE(rowOf("p1")->findChild<QLabel *>("teamProposalText")->text(), QStringLiteral("Add Designer (claude \u00b7 sonnet)"));
-    QCOMPARE(rowOf("p2")->findChild<QLabel *>("teamProposalText")->text(), QStringLiteral("Swap Backend to codex \u00b7 gpt-5.5"));
-    QCOMPARE(rowOf("p3")->findChild<QLabel *>("teamProposalText")->text(), QStringLiteral("Remove Tester"));
-    shot(&workspace, "f8-proposals");
+    QTRY_VERIFY(cardOf("p1") && cardOf("p2") && cardOf("p3"));
+    QVERIFY(!cardOf("p4"));   // decided ones are gone
+    QVERIFY(!workspace.findChild<QFrame *>("teamWorkspaceProposals"));
+    // In the lead's conversation, above the composer.
+    auto *conversation = workspace.findChild<QWidget *>("teamConversation");
+    QVERIFY(conversation && conversation->isAncestorOf(cardOf("p1")));
+    QCOMPARE(cardOf("p1")->findChild<QLabel *>("teamProposalWhat")->text(), QStringLiteral("Add Designer (claude · sonnet)"));
+    QCOMPARE(cardOf("p2")->findChild<QLabel *>("teamProposalWhat")->text(), QStringLiteral("Swap Backend to codex · gpt-5.5"));
+    QCOMPARE(cardOf("p3")->findChild<QLabel *>("teamProposalWhat")->text(), QStringLiteral("Remove Tester"));
+    QCOMPARE(cardOf("p3")->property("hash").toString(), QStringLiteral("h3"));
+    QVERIFY(cardOf("p1")->findChild<QLabel *>("teamProposalBy")->text().startsWith("Lead asks"));
+    QCOMPARE(cardOf("p1")->findChild<QLabel *>("teamProposalReason")->text(), QStringLiteral("Lead: The UI needs a designer"));
+    // The member permission card's parts: a Deny reason, Deny and Allow.
+    for (const char *name : {"teamProposalDenyReason", "teamProposalDeny", "teamProposalAllow"}) QVERIFY(cardOf("p1")->findChild<QWidget *>(name));
+    QVERIFY(cardOf("p1")->findChild<QPushButton *>("teamProposalDeny")->property("danger").toBool());
+    QVERIFY(cardOf("p1")->findChild<QPushButton *>("teamProposalAllow")->property("primary").toBool());
+    shot(&workspace, "u57-proposal-cards");
     workspace.setTheme(false); workspace.render();
-    lightShot(&workspace, "f8-proposals-light");
+    lightShot(&workspace, "u57-proposal-cards-light");
     darkPalette();
     workspace.setTheme(true); workspace.render();
-    workspace.render();
-    // Reject sends at once.
-    QTRY_VERIFY(rowOf("p1"));
-    rowOf("p1")->findChild<QPushButton *>("teamProposalReject")->click();
+    // A typed reason survives a rebuild; Deny sends it with the hash.
+    QTRY_VERIFY(cardOf("p1"));
+    cardOf("p1")->findChild<QLineEdit *>("teamProposalDenyReason")->setText("Not before the release");
+    workspace.setTheme(true); controller.refresh();
+    QTRY_VERIFY(cardOf("p1"));
+    QCOMPARE(cardOf("p1")->findChild<QLineEdit *>("teamProposalDenyReason")->text(), QStringLiteral("Not before the release"));
+    cardOf("p1")->findChild<QPushButton *>("teamProposalDeny")->click();
     QTRY_COMPARE(calls(script(), "decide-proposal").size(), 1);
-    QCOMPARE(calls(script(), "decide-proposal").first()["proposal"].toString(), QStringLiteral("p1"));
-    QVERIFY(!calls(script(), "decide-proposal").first()["accept"].toBool());
+    auto input = calls(script(), "decide-proposal").first();
+    QCOMPARE(input["proposal"].toString(), QStringLiteral("p1"));
+    QVERIFY(!input["accept"].toBool());
+    QCOMPARE(input["expected_hash"].toString(), QStringLiteral("h1"));
+    QCOMPARE(input["reason"].toString(), QStringLiteral("Not before the release"));
+    QCOMPARE(input["team"].toString(), QStringLiteral("team-1"));
     // A swap asks first: Cancel sends nothing; the confirmation sends once.
-    QTRY_VERIFY(rowOf("p2"));
+    QTRY_VERIFY(cardOf("p2"));
     armConfirm(&panel, true);
-    rowOf("p2")->findChild<QPushButton *>("teamProposalAccept")->click();
+    cardOf("p2")->findChild<QPushButton *>("teamProposalAllow")->click();
     QTest::qWait(100);
     QCOMPARE(calls(script(), "decide-proposal").size(), 1);
-    QTRY_VERIFY(rowOf("p2") && rowOf("p2")->findChild<QPushButton *>("teamProposalAccept")->isEnabled());
+    QTRY_VERIFY(cardOf("p2") && cardOf("p2")->findChild<QPushButton *>("teamProposalAllow")->isEnabled());
     armConfirm(&panel, false);
-    rowOf("p2")->findChild<QPushButton *>("teamProposalAccept")->click();
+    cardOf("p2")->findChild<QPushButton *>("teamProposalAllow")->click();
     QTRY_COMPARE(calls(script(), "decide-proposal").size(), 2);
-    QCOMPARE(calls(script(), "decide-proposal").last()["proposal"].toString(), QStringLiteral("p2"));
-    QVERIFY(calls(script(), "decide-proposal").last()["accept"].toBool());
-    // Until the store has taken it, the row's buttons stay off.
-    QTRY_VERIFY(rowOf("p2") && !rowOf("p2")->findChild<QPushButton *>("teamProposalAccept")->isEnabled());
+    input = calls(script(), "decide-proposal").last();
+    QCOMPARE(input["proposal"].toString(), QStringLiteral("p2"));
+    QVERIFY(input["accept"].toBool());
+    QCOMPARE(input["expected_hash"].toString(), QStringLiteral("h2"));
+    QVERIFY(!input.contains("reason"));
+    // Until the store has taken it, the card's buttons stay off.
+    QTRY_VERIFY(cardOf("p2") && !cardOf("p2")->findChild<QPushButton *>("teamProposalAllow")->isEnabled());
     // A remove asks too.
     armConfirm(&panel, false);
-    rowOf("p3")->findChild<QPushButton *>("teamProposalAccept")->click();
+    cardOf("p3")->findChild<QPushButton *>("teamProposalAllow")->click();
     QTRY_COMPARE(calls(script(), "decide-proposal").size(), 3);
     QCOMPARE(calls(script(), "decide-proposal").last()["proposal"].toString(), QStringLiteral("p3"));
+    QCOMPARE(calls(script(), "decide-proposal").last()["expected_hash"].toString(), QStringLiteral("h3"));
+}
+
+// U57: a card names the exact change of every new kind (the members, a running
+// phase's new tasks, the tasks to cancel, the phase to discard). A proposal
+// that changed while the owner confirmed sends nothing and says so; a
+// refusal or an earlier decision shows on its card.
+void TestTeamsUi::proposalCardsNameTheChangeAndAStaleCardSendsNothing()
+{
+    auto running = phasedTeam();
+    const QJsonObject designer{{"id", "designer"}, {"role", "Designer"}, {"agent", "claude"}, {"model", "sonnet"}};
+    const QJsonObject writer{{"id", "writer"}, {"role", "Writer"}, {"agent", "codex"}};
+    running["proposals"] = QJsonArray{
+        QJsonObject{{"id", "p1"}, {"kind", "add-member"}, {"by", "Lead"}, {"at", 2000.0}, {"state", "open"}, {"hash", "h1"},
+                    {"reason", "Two pages need design and copy"}, {"change", QJsonObject{{"members", QJsonArray{designer, writer}}}}},
+        QJsonObject{{"id", "p2"}, {"kind", "add-to-phase"}, {"by", "Lead"}, {"at", 2100.0}, {"state", "open"}, {"hash", "h2"},
+                    {"reason", "QA found two gaps"},
+                    {"change", QJsonObject{{"phase", 2}, {"tasks", QJsonArray{QJsonObject{{"title", "Saved card list"}, {"assignee", "backend"}},
+                                                                             QJsonObject{{"title", "Empty state"}}}}}}},
+        QJsonObject{{"id", "p3"}, {"kind", "cancel-tasks"}, {"by", "Lead"}, {"at", 2200.0}, {"state", "open"}, {"hash", "h3"},
+                    {"reason", "The tests moved to phase 3"}, {"change", QJsonObject{{"tasks", QJsonArray{4}}}}},
+        QJsonObject{{"id", "p4"}, {"kind", "discard-phase"}, {"by", "Lead"}, {"at", 2300.0}, {"state", "open"}, {"hash", "h4"},
+                    {"reason", "Nothing in it started"}, {"change", QJsonObject{{"phase", 3}}}}};
+    setTeam(running);
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(1400, 900); workspace.show();
+    controller.refresh();
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    const auto cardOf = [&](const QString &id) -> QFrame * {
+        for (auto *card : workspace.findChildren<QFrame *>("teamProposalCard")) if (card->property("proposal") == id) return card;
+        return nullptr;
+    };
+    const auto linesOf = [&](const QString &id) {
+        QStringList lines; for (auto *line : cardOf(id)->findChildren<QLabel *>("teamProposalChange")) lines << line->text();
+        return lines;
+    };
+    const auto noticeOf = [&](const QString &id) {
+        auto *notice = cardOf(id) ? cardOf(id)->findChild<QLabel *>("teamProposalNotice") : nullptr;
+        return notice ? notice->text() : QString();
+    };
+    QTRY_VERIFY(cardOf("p1") && cardOf("p2") && cardOf("p3") && cardOf("p4"));
+    QCOMPARE(cardOf("p1")->findChild<QLabel *>("teamProposalWhat")->text(), QStringLiteral("Add 2 members"));
+    QCOMPARE(linesOf("p1"), (QStringList{"Designer (claude · sonnet)", "Writer (codex)"}));
+    QCOMPARE(cardOf("p2")->findChild<QLabel *>("teamProposalWhat")->text(), QStringLiteral("Add 2 tasks to phase 2 (QA fixes)"));
+    QCOMPARE(linesOf("p2"), (QStringList{"Saved card list, for Backend", "Empty state"}));
+    QCOMPARE(cardOf("p3")->findChild<QLabel *>("teamProposalWhat")->text(), QStringLiteral("Cancel 1 task"));
+    QCOMPARE(linesOf("p3").size(), 1);
+    QVERIFY2(linesOf("p3").first().startsWith("#4 Unit tests ("), qPrintable(linesOf("p3").first()));
+    QCOMPARE(cardOf("p4")->findChild<QLabel *>("teamProposalWhat")->text(), QStringLiteral("Discard phase 3 (Polish)"));
+    QCOMPARE(linesOf("p4").size(), 1);
+    QVERIFY2(linesOf("p4").first().startsWith("#5 Code review ("), qPrintable(linesOf("p4").first()));
+    shot(&workspace, "u57-proposal-kinds");
+    workspace.setTheme(false); workspace.render();
+    lightShot(&workspace, "u57-proposal-kinds-light");
+    darkPalette();
+    workspace.setTheme(true); workspace.render();
+    // The lead changes p3 while the owner reads the confirmation: nothing is sent.
+    QTRY_VERIFY(cardOf("p3"));
+    armConfirmAfter(&panel, [&] {
+        auto proposals = running["proposals"].toArray();
+        auto changed = proposals[2].toObject();
+        changed["hash"] = "h3b"; changed["change"] = QJsonObject{{"tasks", QJsonArray{4, 5}}};
+        proposals[2] = changed; running["proposals"] = proposals;
+        setTeam(running);
+        controller.refresh();
+        QTRY_VERIFY(([&] {
+            const auto *watched = controller.watched();
+            if (!watched) return false;
+            for (const auto &proposal : watched->proposals) if (proposal.id == "p3") return proposal.hash == "h3b";
+            return false;
+        })());
+    });
+    cardOf("p3")->findChild<QPushButton *>("teamProposalAllow")->click();
+    QTRY_VERIFY(noticeOf("p3").contains("changed this proposal"));
+    QVERIFY(calls(script(), "decide-proposal").isEmpty());
+    QCOMPARE(cardOf("p3")->property("hash").toString(), QStringLiteral("h3b"));
+    QCOMPARE(cardOf("p3")->findChild<QLabel *>("teamProposalWhat")->text(), QStringLiteral("Cancel 2 tasks"));
+    // A server refusal of a changed card stays on it; nothing applied.
+    { QFile refuse(script() + ".proposalrefuse"); QVERIFY(refuse.open(QIODevice::WriteOnly));
+      refuse.write("hgs: The proposal changed; reload the card and answer again with its hash"); }
+    cardOf("p2")->findChild<QPushButton *>("teamProposalAllow")->click();
+    QTRY_COMPARE(calls(script(), "decide-proposal").size(), 1);
+    QCOMPARE(calls(script(), "decide-proposal").first()["expected_hash"].toString(), QStringLiteral("h2"));
+    QTRY_VERIFY(noticeOf("p2").contains("nothing was applied"));
+    QTRY_VERIFY(cardOf("p2") && cardOf("p2")->findChild<QPushButton *>("teamProposalAllow")->isEnabled());
+    QFile::remove(script() + ".proposalrefuse");
+    // Discard asks; an earlier decision (a replay) shows on a card of its own.
+    { QFile status(script() + ".proposalstatus"); QVERIFY(status.open(QIODevice::WriteOnly)); status.write("rejected"); }
+    armConfirm(&panel, false);
+    cardOf("p4")->findChild<QPushButton *>("teamProposalAllow")->click();
+    QTRY_COMPARE(calls(script(), "decide-proposal").size(), 2);
+    QCOMPARE(calls(script(), "decide-proposal").last()["proposal"].toString(), QStringLiteral("p4"));
+    QCOMPARE(calls(script(), "decide-proposal").last()["expected_hash"].toString(), QStringLiteral("h4"));
+    QTRY_VERIFY(noticeOf("p4").contains("already denied"));
+    QFile::remove(script() + ".proposalstatus");
+    auto proposals = running["proposals"].toArray();
+    auto decided = proposals[3].toObject(); decided["state"] = "rejected"; proposals[3] = decided;
+    running["proposals"] = proposals; setTeam(running);
+    QTRY_VERIFY(([&] { controller.refresh(); return cardOf("p4") && cardOf("p4")->property("stale").toBool(); })());
+    QVERIFY(!cardOf("p4")->findChild<QPushButton *>("teamProposalAllow"));
+    cardOf("p4")->findChild<QPushButton *>("teamProposalDismiss")->click();
+    QTRY_VERIFY(!cardOf("p4"));
 }
 
 // U59: Start planning shows the lead's proposed mode and its reason; the owner
@@ -8534,7 +8677,7 @@ void TestTeamsUi::switchToFreeOpensOneDialogBoundToTheRequest()
     QVERIFY(dialog->findChild<QPushButton *>("teamSwitchModeKeep"));
     QCOMPARE(dialog->findChild<QPushButton *>("teamSwitchModeSwitch")->text(), QStringLiteral("Switch to free"));
     for (auto *text : dialog->findChildren<QLabel *>()) QVERIFY2(!text->text().contains(QChar(0x00b7)), qPrintable(text->text()));
-    // The strip answers only through the dialog.
+    // U57: its card in the lead's conversation reopens the dialog (Details…).
     QTRY_VERIFY(workspace.findChild<QPushButton *>("teamProposalOpen"));
     QVERIFY(!workspace.findChild<QPushButton *>("teamProposalAccept"));
     // The header names the mode beside the phase.

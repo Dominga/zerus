@@ -22,7 +22,7 @@ class TeamController;
 class TeamWaitingPage : public QWidget {
 public:
     struct Item {
-        QString id, team, teamName, kind, title, action, member;
+        QString id, team, teamName, kind, title, action, member, proposal;
         double since = 0;
         int phase = 0, task = 0;
     };

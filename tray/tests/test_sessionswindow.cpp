@@ -322,6 +322,7 @@ private slots:
     void teamLeftoverStopAsksTheRealAction();
     void readmeScreenshots();
     void leadSessionHeaderCarriesTheTeam();
+    void leadSessionAnswersAProposalOnItsCard();
     void teamAttentionReachesTheNotifications();
     void designerSessionDropsTheTeamHeader();
     void liveStreamFollowsGitFoldersInsteadOfPolling();
@@ -1406,7 +1407,10 @@ elif c=='team':
  elif op=='status':out(d['team'])
  elif op=='events':out(d['feed'])
  elif op=='catalog' and a[2:3]==['get']:out(d['catalog'])
- else:out({'status':'ok'})
+ else:
+  # A change is kept for the test to read (U57: decide-proposal).
+  open(__file__+'.calls','a',encoding='utf-8').write(json.dumps({'args':a,'input':json.loads(sys.stdin.read() or '{}')})+'\n')
+  out({'status':'accepted' if op=='decide-proposal' else 'ok'})
 elif c=='git-status' and 'git' in d:out(d['git'].get(host+'\n'+a[a.index('--path')+1],{'state':'not_repo'}))
 elif c=='ls':out({'host':host or 'workstation','ok':True,'sessions':[]})
 elif c=='swarm':out({'schema':1,'organization':d['organization'],'node_id':'node-workstation','versions':{},'written':{},'conflicts':[],
@@ -2592,6 +2596,79 @@ void TestSessionsWindow::designerSessionDropsTheTeamHeader()
     // And back: the lead's header returns.
     window.showSession({}, "claude/orbit/checkout");
     QTRY_VERIFY(shown("teamHeaderStatus") && shown("teamWorkspacePause"));
+}
+
+// U57: the lead's own session shows its team's open proposals as cards above
+// the composer, read from the polled team list; a member's session shows
+// none. Allow sends decide-proposal with the proposal's id and its hash.
+void TestSessionsWindow::leadSessionAnswersAProposalOnItsCard()
+{
+    const QStringList keys{"workspace/skin", "workspace/theme", "workspace/organization", "workspace/inspectorVisible", "workspace/collapsedTeams"};
+    const auto restore = qScopeGuard([keys] { for (const auto &key : keys) QSettings().remove(key); });
+    QSettings().setValue("workspace/skin", "whitewh");
+    setJsonSetting("workspace/organization", QJsonDocument(ReadmeShots::organization()).toJson(QJsonDocument::Compact));
+    QSettings().setValue("workspace/inspectorVisible", false);
+    const double now = QDateTime::currentSecsSinceEpoch();
+    const auto plain = ReadmeShots::fleet(now);
+    auto team = ReadmeShots::team(now);
+    const QString hash = QStringLiteral("5d1c0e9a7b3f4c2d8e6a1b0c9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c");
+    const QJsonObject designer{{"id", "designer"}, {"role", "Designer"}, {"agent", "claude"}, {"model", "sonnet"}};
+    auto second = designer; second["id"] = "designer-2";
+    team["proposals"] = QJsonArray{
+        QJsonObject{{"id", "p1"}, {"kind", "add-member"}, {"by", "Lead"}, {"at", now - 120}, {"state", "open"}, {"hash", hash},
+                    {"reason", "The checkout form and the receipt page need a designer each"},
+                    {"change", QJsonObject{{"members", QJsonArray{designer, second}}}}},
+        QJsonObject{{"id", "p0"}, {"kind", "remove-member"}, {"by", "Lead"}, {"at", now - 900}, {"state", "rejected"}, {"member", "tester"},
+                    {"reason", "Later"}}};
+    const QJsonObject data{{"inspect", ReadmeShots::conversations(plain, now)}, {"accounts", ReadmeShots::accounts(now)}, {"team", team},
+                           {"feed", ReadmeShots::feed(now)}, {"catalog", ReadmeShots::catalog()}, {"organization", ReadmeShots::organization()}};
+    const QString fixture = m_dir->filePath("hgs-lead-proposal");
+    QVERIFY(FakeCli::install(fixture, ReadmeShots::program));
+    QVERIFY(FakeCli::replace(fixture + ".json", QJsonDocument(data).toJson(QJsonDocument::Compact)));
+    const auto shots = qEnvironmentVariable("ZERUS_TEAM_SHOTS");
+    for (const QString theme : {"dark", "light"}) {
+        QSettings().setValue("workspace/theme", theme);
+        QFile::remove(fixture + ".calls");
+        SessionsWindow window(FakeCli::program(fixture)); window.resize(1440, 900); window.setFleet(plain); window.show();
+        auto *controller = window.findChild<TeamController *>(); QVERIFY(controller);
+        QTRY_COMPARE_WITH_TIMEOUT(controller->teams().size(), 1, 10000);
+        // A member's session has no cards.
+        window.showSession({}, "dsh/orbit/checkout-api");
+        auto *cards = window.findChild<QWidget *>("mainProposalCards"); QVERIFY(cards);
+        QTest::qWait(100);
+        QVERIFY(!cards->isVisible());
+        window.showSession({}, "claude/orbit/checkout");
+        QFrame *card = nullptr;
+        QTRY_VERIFY_WITH_TIMEOUT((card = cards->findChild<QFrame *>("teamProposalCard")) && card->isVisible(), 10000);
+        QCOMPARE(cards->findChildren<QFrame *>("teamProposalCard").size(), 1);   // the decided one is gone
+        QCOMPARE(card->property("proposal").toString(), QStringLiteral("p1"));
+        QCOMPARE(card->findChild<QLabel *>("teamProposalWhat")->text(), QStringLiteral("Add 2 members"));
+        QStringList lines; for (auto *line : card->findChildren<QLabel *>("teamProposalChange")) lines << line->text();
+        QCOMPARE(lines, (QStringList{"Designer (claude · sonnet)", "Designer (claude · sonnet)"}));
+        QVERIFY(card->findChild<QLabel *>("teamProposalBy")->text().startsWith("Lead asks, "));
+        QVERIFY(card->findChild<QLabel *>("teamProposalReason")->text().contains("need a designer each"));
+        // Above the composer, in the Activity column.
+        auto *composer = window.findChild<MessageComposer *>("messageComposer"); QVERIFY(composer);
+        QVERIFY(card->mapTo(&window, QPoint()).y() < composer->mapTo(&window, QPoint()).y());
+        if (!shots.isEmpty()) { TestWait::settle(); QVERIFY(window.grab().save(QDir(shots).filePath(QStringLiteral("u57-session-card-%1.png").arg(theme)))); }
+        card->findChild<QPushButton *>("teamProposalAllow")->click();
+        QJsonObject input;
+        QTRY_VERIFY_WITH_TIMEOUT(([&] {
+            QFile file(fixture + ".calls");
+            if (!file.open(QIODevice::ReadOnly)) return false;
+            for (const auto &line : file.readAll().split('\n')) {
+                const auto call = QJsonDocument::fromJson(line).object();
+                if (call["args"].toArray().at(1).toString() == "decide-proposal") input = call["input"].toObject();
+            }
+            return !input.isEmpty();
+        })(), 10000);
+        QCOMPARE(input["team"].toString(), QStringLiteral("team-checkout"));
+        QCOMPARE(input["proposal"].toString(), QStringLiteral("p1"));
+        QVERIFY(input["accept"].toBool());
+        QCOMPARE(input["expected_hash"].toString(), hash);
+        QCOMPARE(input["by"].toString(), QStringLiteral("human"));
+        QVERIFY(!input.contains("reason"));
+    }
 }
 
 void TestSessionsWindow::leadSessionHeaderCarriesTheTeam()

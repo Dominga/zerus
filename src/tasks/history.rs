@@ -42,7 +42,9 @@ fn open(dir: &Path) -> Result<Connection> {
             }
         }
     }
-    let path = dir.join(CACHE);
+    // SQLite NOFOLLOW rejects symlinks in every path component, including
+    // macOS's /var -> /private/var; resolve the verified directory only.
+    let path = platform::canonical(dir).map_err(fail)?.join(CACHE);
     if !path.exists() {
         platform::private_open(fs::OpenOptions::new().write(true).create_new(true))
             .open(&path)

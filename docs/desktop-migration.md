@@ -393,6 +393,33 @@ redating, live `Catalogs` construction, catalog/status read, checkout access,
 creation or removal runs in these adapters. Source discovery and G1's fresh
 drain/publication remain separate; evidence stays Staged and grants no action.
 
+`draft_checkpoint(origin, key, manifest_bytes)` preserves original per-draft
+metadata through the pure header decoder shared with the existing DraftStore
+loader. Families are `qt-draft-checkpoint/<key-sha256>` and
+`next-draft-checkpoint/<key-sha256>`, schema 1, format `qt-draft-manifest-v1`,
+with the hash of the exact manifest bytes. The existing readers discover and
+verify the key/folder binding, process bounded source batches within shared
+bundle limits, and attach a fresh file/folder identity/hash recheck.
+
+One private body is
+`{kind:"draft-checkpoint",key,record,attachment_bytes_included:false}`.
+Original text, cursor/anchor, label, form state, request/voice/transcription
+fields, sending/uncertain flags and unknown fields remain unchanged. Optional
+older v1 fields stay absent; no defaults or uncertainty normalization is
+manufactured. Malformed present fields, wrong key/version and oversized input
+or body refuse. The existing 1 MiB manifest/body, eight-attachment, 10 MiB
+individual and 20 MiB total attachment-reference limits apply; references
+carry fixed lower-case digests and original lengths, never a supplied blob path.
+
+This is metadata/reference evidence only: it neither opens, copies nor verifies
+attachment content, including audio. Bytes stay in the existing stores and
+read-only draft import path. No live DraftStore/composer, `loaded()` flag
+normalization, recording, status request, send, recovery or reseeding runs.
+Successful earlier draft seeds remain handled. A consumer needs the existing
+blob readers and fresh exact content/receipt checks before any effect; a saved
+submitted/sending flag grants no replay authority. Source discovery and G1's
+current drain remain separate; evidence stays Staged.
+
 `approval_policies(&QtSnapshot, next_settings_bytes)` inspects both policy
 stores before returning either `qt-approval-policy` or `next-approval-policy`
 stream. It reuses the existing Qt flag conversion and bounded Next settings

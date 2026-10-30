@@ -154,6 +154,8 @@ fn a_pending_switch_does_not_deliver_into_a_held_folder() {
         folder: "hold".into(),
         accept: "lead".into(),
         round: 1,
+        hold_from_report: false,
+        trimmed_returns: 0,
         runs: vec![StageRun { id: "s".into(), stage: 0, kind: "test".into(), round: 1, attempt: 1, state: StageState::Waiting, at: 1.0, ..Default::default() }],
     });
     held.attempts.push(Attempt { n: 1, id: "A2".into(), member: "dev".into(), state: AttemptState::Reported, ..Default::default() });

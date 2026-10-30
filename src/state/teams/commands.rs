@@ -7825,7 +7825,7 @@ mod tests {
             ops::apply(&mut team, "propose", &input, &lead, &BTreeSet::new(), &mut Vec::new()).unwrap();
         }
         team.proposals[1]["state"] = json!("rejected");
-        let listed = summary(&team);
+        let listed = summary(&team, false);
         let proposals = listed["proposals"].as_array().unwrap();
         assert_eq!(proposals.len(), 1, "{listed}");
         assert_eq!(proposals[0]["id"], "p1");

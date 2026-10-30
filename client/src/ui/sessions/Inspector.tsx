@@ -1,6 +1,6 @@
 import { For, Show, Switch, Match, createEffect, createMemo, createSignal, onCleanup, on, type JSX } from "solid-js";
 import { Icon } from "../lib/icons";
-import { selected, setSubagentOpen, setDetailTab, setSelectedKey } from "../../store/ui";
+import { selected, folderFilter, setSubagentOpen, setDetailTab, setSelectedKey } from "../../store/ui";
 import { inspectorOpen, inspectorTab, inspectorWidth, inspectorClosed, setInspectorOpen, setInspectorTab, setInspectorWidth, toggleInspectorCard, panelGeometry, inspectorHint, INSPECTOR_TABS, type InspectorTab } from "../../store/inspector";
 import { followedFor, detailsFor, copyIdentity } from "../../store/actions";
 import { computerOffline, orderedRows } from "../../store/catalog";
@@ -9,6 +9,10 @@ import { sessionIdentity, snapshotOf } from "./actions-ui";
 import { TasksPanel, TaskTabBadge } from "../screens/Tasks";
 import { object, text } from "../screens/tasks-ui";
 import { sessionGoal, sessionPlan, usageRows } from "./inspector-data";
+import { machineCards } from "../../store/machines";
+import { filterFolder, clearFolderFilter } from "../../store/folderFilter";
+import { of, sameKey, native } from "./paths";
+import type { Session } from "./types";
 import { accountsPage } from "../../store/accounts";
 import { sessionUsage, sessionUsageTarget } from "../../store/sessionUsage";
 import { sessionUsageView } from "./session-usage-ui";
@@ -17,9 +21,9 @@ import "../styles/inspector.css";
 
 const LABEL: Record<InspectorTab, string> = { plan: "Plan & agents", details: "Details", worktrees: "Worktrees", tasks: "Tasks" };
 const raw = () => selected() ? followedFor(selected()!.key).value : undefined;
-function Card(props: { id: string; title: JSX.Element; aside?: JSX.Element; children: JSX.Element }) {
+function Card(props: { id: string; title: JSX.Element; aside?: JSX.Element; class?: string; classList?: Record<string, boolean>; children: JSX.Element }) {
   const open = () => !inspectorClosed().has(props.id);
-  return <section class="icard" classList={{ closed: !open() }}><header class="icard-head">
+  return <section class={`icard ${props.class ?? ""}`} classList={{ closed: !open(), ...props.classList }}><header class="icard-head">
     <button class="icard-toggle" aria-expanded={open()} aria-controls={`icard-${props.id}`} onClick={() => toggleInspectorCard(props.id)}><span class="icard-title">{props.title}</span><Icon name="chevron-down" size={12} class="icard-chev" /></button>
     <Show when={props.aside}><span class="icard-aside">{props.aside}</span></Show>
   </header><Show when={open()}><div class="icard-body" id={`icard-${props.id}`}>{props.children}</div></Show></section>;
@@ -70,10 +74,30 @@ function Worktrees() {
   };
   createEffect(() => { context(); ++wanted; setCatalog({}); void read(); });
   onCleanup(() => { disposed = true; ++wanted; });
-  const trees = () => Array.isArray(catalog().worktrees) ? (catalog().worktrees as unknown[]).slice(0, 128).map(object) : [];
+  const style = () => of(machineCards[""]?.platform, selected()?.computer === "", /Win/.test(navigator.platform) ? "windows" : "posix");
+  const trees = createMemo(() => Array.isArray(catalog().worktrees) ? (catalog().worktrees as unknown[]).slice(0, 128).map(object)
+    : catalog().state === "not_repo" && context() ? [{ kind: "folder", path: selected()?.cwdCanonical || context()!.path }] : []);
+  // One catalog pass, retaining at most fifty shown sessions per displayed folder/checkout.
+  const sessions = createMemo(() => {
+    const roots = new Map<string, Session[]>(), folders = new Map<string, Session[]>();
+    for (const tree of trees()) (tree.kind === "folder" ? folders : roots).set(sameKey(text(tree.path), style()), []);
+    for (const s of orderedRows()) {
+      if (s.computer !== selected()?.computer) continue;
+      const root = roots.get(sameKey(s.gitRoot, style())), folder = folders.get(sameKey(s.cwdCanonical, style()));
+      if (root && root.length < 50) root.push(s);
+      if (folder && folder.length < 50) folder.push(s);
+    }
+    return (tree: Record<string, unknown>) => (tree.kind === "folder" ? folders : roots).get(sameKey(text(tree.path), style())) ?? [];
+  });
   return <div class="insp-body"><div class="insp-h"><b>Folder and worktrees</b><span class="grow" /><button class="icon-btn small" aria-label="Refresh" title="Refresh" disabled={reading() || !context()} onClick={() => void read(true)}><Icon name="refresh-cw" size={13} /></button></div>
     <div class="hint">{reading() ? "Reading folder…" : catalog().state === "ok" ? "Folder and worktrees on this computer" : catalog().state === "not_repo" ? "This folder is not a Git repository." : "Worktrees are unavailable for this session."}</div>
-    <For each={trees()}>{(tree) => <Card id={`wt-${text(tree.path)}`} title={tree.kind === "main" ? "Main checkout" : "Linked worktree"} aside={<span class="dim">{text(tree.branch)}{tree.available === false ? " (unavailable)" : ""}</span>}><Row icon="folder" label="folder" mono title={text(tree.path)}>{text(tree.path)}</Row><For each={orderedRows().filter((s) => s.computer === selected()?.computer && s.cwdPath === tree.path).slice(0, 50)}>{(s) => <Row icon="corner-down-right" label={s.caption}><button class="link" onClick={() => { setSelectedKey(s.key); setDetailTab("activity"); }}>{s.title}</button></Row>}</For></Card>}</For>
+    <For each={trees()}>{(tree) => <Card id={`wt-${text(tree.path)}`} class="wt" classList={{ on: sameKey(text(tree.path), style()) === sameKey(folderFilter()?.computer === selected()?.computer ? folderFilter()!.path : text(catalog().selected_root), style()), gone: tree.available === false }} title={tree.kind === "folder" ? "Folder" : tree.kind === "main" ? "Main checkout" : tree.kind === "bare" ? "Bare repository" : "Linked worktree"} aside={<span class="dim">{text(tree.branch)}{tree.available === false ? " (unavailable)" : ""}</span>}>
+      <button class="irow wt-path" title="Show the sessions in this folder" onClick={() => { const host = selected()?.computer; if (host !== undefined) filterFolder({ computer: host, path: text(tree.path), checkout: tree.kind !== "folder", style: style() }); }}>
+        <span class="irow-ico"><Icon name={tree.kind === "folder" ? "folder" : tree.kind === "main" ? "folder-git-2" : tree.kind === "bare" ? "box" : "git-branch"} size={16} stroke={1.75} /></span><span class="irow-val ell mono">{native(text(tree.path), style())}</span><span class="irow-label">folder</span>
+      </button>
+      <For each={sessions()(tree)}>{(s) => <Row icon="corner-down-right" label={s.caption}><button class="link" onClick={() => { setSelectedKey(s.key); setDetailTab("activity"); }}>{s.title}</button></Row>}</For>
+    </Card>}</For>
+    <div class="insp-foot"><button class="btn small" onClick={clearFolderFilter}>All sessions</button></div>
   </div>;
 }
 export function Inspector(props: { available: number }) {

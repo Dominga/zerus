@@ -26,6 +26,11 @@ pub struct ViewRow {
     pub display_title: String,
     /// `claude`, `codex`, `kimi`, `deepseek`, `opencode`, `sh` or what `hgs` reports.
     pub agent: String,
+    /// Recorded account binding from the listing, never the host's current default.
+    pub account_provider: String,
+    pub account_id: String,
+    pub account_home: String,
+    pub account_binding_reported: bool,
     /// The presentation status: `attention`, `error`, `working`, `background`,
     /// `waiting`, `scheduled`, `ready`, `paused`, `starting` or `ended`. A computer
     /// that is not live shows its rows as offline; the view applies that.
@@ -1137,6 +1142,11 @@ pub fn row(value: &Value) -> ViewRow {
         title: session.title(),
         display_title: session.display_title(),
         agent: if agent == "dsh" { "deepseek" } else { agent }.to_owned(),
+        account_provider: cmd.to_owned(),
+        account_id: text(value, "account_id").to_owned(),
+        account_home: text(value, "account_home").to_owned(),
+        account_binding_reported: value.get("account_id").is_some_and(Value::is_string)
+            || value.get("account_home").is_some_and(Value::is_string),
         status: status.to_owned(),
         caption,
         phase: some(session.phase),
@@ -1235,6 +1245,23 @@ pub fn row(value: &Value) -> ViewRow {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn account_binding_comes_from_the_listing_even_when_the_provider_is_presented_differently() {
+        let view = row(
+            &json!({"cmd":"dsh", "account_id":"recorded-profile", "account_home":"/srv/example/old-home", "agent_home":"/srv/example/current-home"}),
+        );
+        assert_eq!(view.agent, "deepseek");
+        assert_eq!(view.account_provider, "dsh");
+        assert_eq!(view.account_id, "recorded-profile");
+        assert_eq!(view.account_home, "/srv/example/old-home");
+        let unknown = row(&json!({"cmd":"claude", "agent_home":"/srv/example/current-home"}));
+        assert!(unknown.account_id.is_empty());
+        assert!(
+            unknown.account_home.is_empty(),
+            "a current agent home is not a recorded binding"
+        );
+    }
 
     #[test]
     fn a_busy_tool_row_maps_the_card_fields() {

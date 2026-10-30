@@ -104,7 +104,7 @@
   .wt-tree li:hover { background: var(--z-color-hover); }
   .wt-tree li.on { background: var(--z-color-row-selected); }
   .wt-tree li.off { color: var(--z-color-muted); }
-  .wt-path { font-size: var(--fs-xs); color: var(--z-color-text-3); }
+  .wt-tree .wt-path { font-size: var(--fs-xs); color: var(--z-color-text-3); }
 
   /* Create manually… (NewWorktreeDialog.tsx): Qt's 640 x 440 dialog, at least 580 wide. */
   dialog.nw-dlg { width: min(640px, calc(100vw - 48px)); min-width: min(580px, calc(100vw - 48px)); }

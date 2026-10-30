@@ -3,7 +3,8 @@ import * as bridge from "../bridge";
 import { bindArchivedRows as bindActionRows } from "./actions";
 import { catalog, toSession, type ComputerState } from "./catalog";
 import type { RowMarks } from "./marks";
-import { bindArchivedRows as bindSelectedRows, compactRows, machineFilter, page, projectFilter, search, stateFilter } from "./ui";
+import { bindArchivedRows as bindSelectedRows, compactRows, machineFilter, page, projectFilter, accountFilterSet, folderFilter, search, stateFilter } from "./ui";
+import { acceptsAccount, acceptsFolder } from "../ui/sessions/scope-filters";
 import { initialRange, rangeBounds, type DateRange } from "../ui/sessions/archive-dates";
 import { bindArchivedGroups, emptyGrouping, grouping } from "./organization";
 import { groupRows, type Row } from "../ui/sessions/group-rows";
@@ -170,6 +171,7 @@ export interface ListScope {
   projects?: readonly string[];
   includes(archivedAt: number): boolean;
   compact(key: string): boolean;
+  accepts?(s: Session): boolean;
 }
 
 export const inScope = (s: Pick<Session, "machine">, scope: Pick<ListScope, "machines">) =>
@@ -185,7 +187,7 @@ export function archiveListRows(rows: readonly ArchivedSession[], scope: ListSco
   }
   return groupRows({
     grouping: organization, members, projects: scope.projects ?? [],
-    visible: (s) => scope.includes((s as ArchivedSession).archivedAt) && inScope(s, scope), online: () => false,
+    visible: (s) => scope.includes((s as ArchivedSession).archivedAt) && inScope(s, scope) && (scope.accepts?.(s) ?? true), online: () => false,
     expanded: () => false, compact: scope.compact, children: false,
   });
 }
@@ -439,11 +441,13 @@ export const { archive, archiveRows, archiveCount, archiveTip } = createRoot(() 
   });
   const archiveRows = createMemo(() => archiveListRows(archive.rows(), {
     machines: machineFilter(), projects: projectFilter(), includes: archive.includes, compact: (key) => !!compactRows[key],
+    accepts: (s) => acceptsAccount(s, accountFilterSet()) && acceptsFolder(s, folderFilter()),
   }, grouping()));
   const counted = createMemo(() => {
     const scope = { machines: machineFilter() };
     const projects = projectFilter();
-    return archive.rows().filter((s) => inScope(s, scope) && (!projects.length || projects.includes(s.group))).length;
+    return archive.rows().filter((s) => inScope(s, scope) && (!projects.length || projects.includes(s.group))
+      && acceptsAccount(s, accountFilterSet()) && acceptsFolder(s, folderFilter())).length;
   });
   return { archive, archiveRows, archiveCount: () => archive.countText(counted()), archiveTip: () => archive.tipText("Archive", counted()) };
 });

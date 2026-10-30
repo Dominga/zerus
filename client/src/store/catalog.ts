@@ -137,6 +137,10 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow, marks: 
     conversationId: optional(v.conversation_id),
     compactKeys: v.compact_keys,
     cmd: text(v.agent),
+    accountProvider: text(v.account_provider) || (v.agent === "deepseek" ? "dsh" : text(v.agent)),
+    accountId: text(v.account_id),
+    accountHome: text(v.account_home),
+    accountReported: v.account_binding_reported ?? (typeof v.account_id === "string" || typeof v.account_home === "string"),
     // A row without a state is running, as Qt's HgsClient reads it.
     state: typeof v.state === "string" ? v.state : "running",
     tracked: !!v.tracked,

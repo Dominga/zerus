@@ -3,12 +3,12 @@ import { taskDragOver, taskDrop } from "../../store/taskAssignment";
 import { For, Show, Suspense, createMemo, createEffect, createSignal, lazy, on, onCleanup } from "solid-js";
 import { createVirtualizer } from "@tanstack/solid-virtual";
 import { Icon } from "../lib/icons";
-import { listRows, rowHeight, shownSummary, machineChoices, projectChoices, type Row } from "./model";
+import { listRows, rowHeight, shownSummary, machineChoices, projectChoices, filterCounts as counts, pickerCounts, type Row } from "./model";
 import {
   SessionCard, ChildCard, CompactCard, AgentBadge, StatusBadge, badgeKind, statusCaption, stripCaption,
-  emphasis, childStatus, gitTooltip, paletteIndex, folderOf,
+  emphasis, childStatus, gitTooltip, paletteIndex, folderOf, ProviderGlyph,
 } from "./SessionCard";
-import { catalog, computerFresh, computerOffline } from "../../store/catalog";
+import { agentKind, catalog, computerFresh, computerOffline } from "../../store/catalog";
 import { visibleUnreadReply } from "../../store/attention";
 import { runningCommandsEntry } from "../../store/processes";
 import { flag } from "../../store/settings";
@@ -30,13 +30,17 @@ import { CreationCard, CreationTile } from "./CreationCard";
 import { creationCount, creationFooter, creationStatusMenu } from "../../store/creations";
 import {
   selectedKey, setSelectedKey, setExpandedChildren, expandedChildren,
-  setCompactRows, compactRows, expandCompactRows, hasCompactRows, stateFilter, setStateFilter, counts, search, setSearch, stripMode, setStripMode,
-  setMenu, machineFilter, setMachineFilter, projectFilter, setProjectFilter, setPage,
+  setCompactRows, compactRows, expandCompactRows, hasCompactRows, stateFilter, setStateFilter, search, setSearch, stripMode, setStripMode,
+  setMenu, machineFilter, setMachineFilter, projectFilter, setProjectFilter, accountFilterSet, setAccountFilter, folderFilter, setPage,
   multi, setMulti, peek, setPeek, setSubagentOpen, sessionsWidth, setSessionsWidth, menu, subagentOpen,
   revealing, setRevealing, setDetailTab,
   type StateFilter, type MenuEntry,
 } from "../../store/ui";
 import type { Session } from "./types";
+import { filterAccounts, selectedFilterAccounts, chooseFilterAccounts, toggleFilterAccount, openFilterAccounts, cancelFilterAccountReads } from "../../store/accountFilters";
+import { clearFolderScope } from "../../store/folderFilter";
+import { leaf, native } from "./paths";
+import { appendAccountChoices, bindingState, type AccountChoice } from "./scope-filters";
 import type { ClearControl, SessionRef } from "../../types";
 import { motionReduced } from "../motion";
 import { composer } from "../../store/composer";
@@ -268,16 +272,30 @@ function selectSession(key: string, e?: MouseEvent) {
 }
 
 
-function ScopeButton(props: { icon: string; label: string; selected: string[]; set: (v: string[]) => void; choices: { id: string; label: string; count: number }[] }) {
+type ScopeChoice = { id: string; label: string; count: number; provider?: string; bindings?: string[] };
+function ScopeButton(props: { icon: string; label: string; selected: string[]; set: (v: string[]) => void; open?: () => void; total?: number; choices: ScopeChoice[] }) {
+  let ownItems: MenuEntry[] | undefined;
+  let shown: ScopeChoice[] = [];
+  const syncChoices = () => { shown = props.label === "accounts" ? appendAccountChoices(shown as AccountChoice[], props.choices as AccountChoice[]) as ScopeChoice[] : props.choices; };
+  const items = (): MenuEntry[] => [
+    { heading: `Choose ${props.label}` },
+    { label: `All ${props.label} (${props.total ?? props.choices.reduce((a, c) => a + c.count, 0)})`, action: () => props.set([]) },
+    { separator: true },
+    ...shown.map((c) => {
+      const checked = c.bindings ? bindingState(c as AccountChoice, accountFilterSet()) : props.selected.includes(c.id);
+      const count = c.bindings ? c.bindings.reduce((n, b) => n + (pickerCounts().account.get(b) ?? 0), 0) : c.count;
+      return { label: `${c.label} (${count})`, agent: c.provider ? agentKind(c.provider) : undefined, checked,
+        action: () => c.bindings ? toggleFilterAccount(c as AccountChoice, checked !== true) : props.set(props.selected.includes(c.id) ? props.selected.filter((x) => x !== c.id) : [...props.selected, c.id]) };
+    }),
+  ];
+  // Account replies may arrive while the menu is open. on() leaves the menu snapshot untracked.
+  createEffect(on(() => [props.choices, props.selected, props.total], () => {
+    const m = menu();
+    if (ownItems && m?.items === ownItems) { syncChoices(); ownItems = items(); setMenu({ ...m, items: ownItems }); }
+  }));
   return (
-    <button class="scope-btn" classList={{ on: props.selected.length > 0 }} data-tip={props.selected.length ? `${props.selected.length} ${props.label} selected; click to change` : `All ${props.label}: choose one or more`}
-      onClick={(e) => openMenu(e, [
-        { heading: `Choose ${props.label}` },
-        { label: `All ${props.label} (${props.choices.reduce((a, c) => a + c.count, 0)})`, action: () => props.set([]) },
-        { separator: true },
-        ...props.choices.map((c) => ({ label: `${c.label} (${c.count})`, checked: props.selected.includes(c.id),
-          action: () => props.set(props.selected.includes(c.id) ? props.selected.filter((x) => x !== c.id) : [...props.selected, c.id]) })),
-      ])}>
+    <button class="scope-btn" aria-label={`Filter sessions by ${props.label}`} classList={{ on: props.selected.length > 0 }} data-tip={props.selected.length ? `${props.selected.length} ${props.label} selected; click to change` : `All ${props.label}: choose one or more`}
+      onClick={(e) => { props.open?.(); shown = props.choices; ownItems = items(); openMenu(e, ownItems); }}>
       <Icon name={props.icon} size={14} />
       <Show when={props.selected.length}><span class="tabular">{props.selected.length}</span></Show>
     </button>
@@ -288,14 +306,17 @@ function FilterChips() {
   const chips = (): FilterChip[] => [
     ...machineFilter().map((m) => ({ id: m, label: m, kind: "m" as const })),
     ...projectFilter().map((p) => ({ id: p, label: headerOf(p)?.name ?? p, kind: "p" as const })),
+    ...selectedFilterAccounts().map((a) => ({ id: a.id, label: a.label, kind: "a" as const, provider: a.provider })),
   ];
   const remove = (c: FilterChip) =>
-    c.kind === "m" ? setMachineFilter(machineFilter().filter((x) => x !== c.id)) : setProjectFilter(projectFilter().filter((x) => x !== c.id));
+    c.kind === "m" ? setMachineFilter(machineFilter().filter((x) => x !== c.id)) : c.kind === "p" ? setProjectFilter(projectFilter().filter((x) => x !== c.id))
+      : (() => { const account = selectedFilterAccounts().find((a) => a.id === c.id); if (account) toggleFilterAccount(account, false); })();
   return (
     <Show when={chips().length}>
       <div class="filter-chips">
         <For each={chips()}>{(c) => (
           <button class="fchip-sel entity" style={{ "--entity": chipColor(c, headerOf, paletteIndex) }} title="Remove filter" onClick={() => remove(c)}>
+            <Show when={c.provider}><span class="menu-agent" style={{ color: `var(--z-agent-${agentKind(c.provider)})` }}><ProviderGlyph agent={agentKind(c.provider)} size={12} /></span></Show>
             <span class="ell">{c.label}</span><Icon name="x" size={11} />
           </button>
         )}</For>
@@ -389,6 +410,9 @@ function slide(el: HTMLElement | undefined, width: number, opening: boolean, don
 }
 
 export function SessionList() {
+  const refreshAccounts = () => { void openFilterAccounts().catch(() => {}); };
+  onCleanup(cancelFilterAccountReads);
+  const accountChoices = createMemo(() => filterAccounts().map((a) => ({ ...a, count: a.bindings.reduce((n, b) => n + (pickerCounts().account.get(b) ?? 0), 0) })));
   const list = useRows(false);
   // A row the menu bar or a notification opened (Qt's revealRow): scrolled to
   // once the list has it; another selection drops the request.
@@ -521,8 +545,10 @@ export function SessionList() {
           </For>
           <ScopeButton icon="machines" label="machines" selected={machineFilter()} set={setMachineFilter} choices={machineChoices()} />
           <ScopeButton icon="projects" label="projects" selected={projectFilter()} set={setProjectFilter} choices={projectChoices()} />
+          <ScopeButton icon="accounts" label="accounts" selected={selectedFilterAccounts().map((a) => a.id)} set={chooseFilterAccounts} choices={accountChoices()} total={[...pickerCounts().account.values()].reduce((n, v) => n + v, 0)} open={refreshAccounts} />
         </div>
         <FilterChips />
+        <Show when={folderFilter()}>{(folder) => <div class="filter-chips"><button class="fchip-sel" title={`${native(folder().path, folder().style)}\nClear folder filter`} onClick={clearFolderScope}>Folder: {leaf(folder().path, folder().style)}<Icon name="x" size={11} /></button></div>}</Show>
 
         <Show when={stateFilter() === "archived"}><ArchiveBar contentSearch={!!search().trim()} /></Show>
         <Show when={search().trim()} fallback={<>
@@ -668,7 +694,7 @@ function NoMatches() {
       <Icon name="funnel-x" size={28} />
       <h3>No matching sessions</h3>
       <p>The current filters hide every session. Filters change only this list, never the open conversation.</p>
-      <button class="btn small" onClick={() => { setSearch(""); setStateFilter("all"); setMachineFilter([]); setProjectFilter([]); }}>Show all sessions</button>
+      <button class="btn small" onClick={() => { setSearch(""); setStateFilter("all"); setMachineFilter([]); setProjectFilter([]); setAccountFilter([]); }}>Show all sessions</button>
     </div>
   );
 }

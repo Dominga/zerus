@@ -165,17 +165,19 @@ describe("grouped rows", () => {
     dispose();
   }));
 
-  it("offers the projects with members in the organization's order, by id with the header's name", () => createRoot((dispose) => {
+  it("offers accessible projects in the organization's order, including zero-count choices as Qt does", () => createRoot((dispose) => {
     applyBatch(batchOf({ upserts: [rowOut("", 11), rowOut("", 12), rowOut("", 13)] }));
     const all = catalog.order.map((id) => id.slice(1));
     applyGrouping(batchOf({
       grouping: grouping([header("beta"), header("ungrouped"), header("alpha"), header("gamma")]),
       groups: all.map((key, i) => ({ computer: "", key, group: key === "run:13" ? "alpha" : "beta", rank: i })),
     }));
-    // The empty Inbox and gamma are left out.
+    // Accessible projects stay selectable even with no matches in the other scopes.
     expect(projectChoices()).toEqual([
       { id: "beta", label: "BETA", count: all.length - 1 },
+      { id: "ungrouped", label: "UNGROUPED", count: 0 },
       { id: "alpha", label: "ALPHA", count: 1 },
+      { id: "gamma", label: "GAMMA", count: 0 },
     ]);
     dispose();
   }));

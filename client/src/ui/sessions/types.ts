@@ -95,6 +95,10 @@ export interface Session {
   // row in the store would double the cost of reconciling a large catalog.
   /** The agent as the core reports it (`deepseek` for `dsh`); `agent` draws unknown agents as Claude. */
   cmd: string;
+  accountProvider?: string;
+  accountId?: string;
+  accountHome?: string;
+  accountReported?: boolean;
   /** The raw state (`running`, `paused`, `stopped`, `archived`, ...). */
   state: string;
   tracked: boolean;

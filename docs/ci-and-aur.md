@@ -861,6 +861,11 @@ Targets are `linux-x64`, `linux-x64-baseline`, `darwin-arm64` and `win32-x64`.
 From 2.1.304 Claude also
 records each API request as an `api-request-blob` transcript row and can defer
 WebFetch behind ToolSearch (its approval fixture sets `ENABLE_TOOL_SEARCH=false`).
+Reviewed 2.1.314 against 2.1.312: its unattended approval countdown says
+"automatically block" and "avoid holding up" instead of "automatically deny"
+and "avoid blocking progress". Either exact advisory is outside question identity
+because it counts down and disappears on navigation; the command, warning and
+choices remain bound, and altered wording still refuses delivery.
 Claude offers a one-time default permission mode change; fixtures set
 `hasSeenAutoDefaultNudge` except the suite that answers that offer. OpenCode has
 a supported minimum of 2.0.32; CI tests its latest release on Linux and macOS.

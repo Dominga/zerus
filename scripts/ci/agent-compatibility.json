@@ -29,22 +29,22 @@
       "integrity": "sha512-+m01urgelnI+VJxPaKPEK0wixgq42uZ8PeCaUk5tX/8YoDBvSmC/REVQG2jQfJAr8dxunpjJ600FvLrcj1WWTw=="
     },
     {
-      "version": "2.1.308",
+      "version": "2.1.314",
       "target": "linux-x64",
-      "url": "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/claude-code-linux-x64-2.1.308.tgz",
-      "integrity": "sha512-ffUryevpH7POStPJ/xpUI5R1ozYbH9o/Dbh/xPSmyVJehELnRMZmRnejdQmq0TejOW/SbNnJFhCGMgwIsOqFTQ=="
+      "url": "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/claude-code-linux-x64-2.1.314.tgz",
+      "integrity": "sha512-Yg0a5mpdkGClK0rgFMxbCWZW3wZtqgOhYjbISALqyL5tfADHhX9Ms6ExA0/effgSJ9MaWfHMPntryeOG6Mk6HQ=="
     },
     {
-      "version": "2.1.308",
+      "version": "2.1.314",
       "target": "darwin-arm64",
-      "url": "https://registry.npmjs.org/@anthropic-ai/claude-code-darwin-arm64/-/claude-code-darwin-arm64-2.1.308.tgz",
-      "integrity": "sha512-fdIEbsrjlOiB8XLD3HWMi7fFGNrRzz7vPUmstgL/7qf4DLWzoWpgpCYaovrX8fp2wRsexiNok/9WZea938jJUw=="
+      "url": "https://registry.npmjs.org/@anthropic-ai/claude-code-darwin-arm64/-/claude-code-darwin-arm64-2.1.314.tgz",
+      "integrity": "sha512-kJ6VL1bKqDQuehX854xQnEu6siu4g0YESCB837pzDtsTvJeyruqE0EO4kZbSwH01LABGMs/WK5pMLkKABB8p4w=="
     },
     {
-      "version": "2.1.308",
+      "version": "2.1.314",
       "target": "win32-x64",
-      "url": "https://registry.npmjs.org/@anthropic-ai/claude-code-win32-x64/-/claude-code-win32-x64-2.1.308.tgz",
-      "integrity": "sha512-OxskS6onyOdKqdvd9/33M5//ItBdAnoI/cjdp0PU47KDMDF5WWE82Slo0ISq8kpNr2wK0lXB5Z2Rv1weJR0znw=="
+      "url": "https://registry.npmjs.org/@anthropic-ai/claude-code-win32-x64/-/claude-code-win32-x64-2.1.314.tgz",
+      "integrity": "sha512-2G/cedIZd28TUgsL2tGMFILlCwU4qRw6PP1VtH0ANe2oJCenJEWJC2GvQqXM5EhzW7QqxmcWry4SVlt6UO3OLg=="
     }
   ],
   "opencode": [
@@ -88,7 +88,7 @@
       "url": "https://registry.npmjs.org/@anthropic-ai/claude-code/latest",
       "version_path": ["version"],
       "notes": "https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md",
-      "reviewed_versions": ["2.1.296", "2.1.308"]
+      "reviewed_versions": ["2.1.296", "2.1.314"]
     },
     {
       "name": "OpenCode",

@@ -41,6 +41,9 @@ pub struct TestsConfig {
     pub build_cache: BuildCache,
     #[serde(default)]
     pub merge_queue: MergeQueue,
+    /// U62 (#717): the night window in which long suites may run.
+    #[serde(default)]
+    pub schedule: Schedule,
     /// Resource classes by name: what a suite needs of the machine.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub resources: std::collections::BTreeMap<String, Resources>,
@@ -50,6 +53,45 @@ pub struct TestsConfig {
 
 fn version() -> u32 {
     1
+}
+
+/// U62 (#717): the night window, local hours; `night_start > night_end` wraps
+/// midnight. A suite longer than the configured budget runs only inside it, or
+/// the CI runs it.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Schedule {
+    #[serde(default = "night_start")]
+    pub night_start: u32,
+    #[serde(default = "night_end")]
+    pub night_end: u32,
+}
+
+fn night_start() -> u32 {
+    22
+}
+
+fn night_end() -> u32 {
+    6
+}
+
+impl Default for Schedule {
+    fn default() -> Self {
+        Self { night_start: night_start(), night_end: night_end() }
+    }
+}
+
+/// Whether `hour` (local, 0-23) is inside the night window.
+pub fn is_night(hour: u32, schedule: &Schedule) -> bool {
+    let (start, end) = (schedule.night_start % 24, schedule.night_end % 24);
+    if start == end {
+        return false;
+    }
+    if start < end {
+        hour >= start && hour < end
+    } else {
+        hour >= start || hour < end
+    }
 }
 
 impl Default for TestsConfig {
@@ -63,6 +105,7 @@ impl Default for TestsConfig {
             isolation: Isolation::default(),
             build_cache: BuildCache::default(),
             merge_queue: MergeQueue::default(),
+            schedule: Schedule::default(),
             resources: std::collections::BTreeMap::new(),
             providers: Vec::new(),
         }

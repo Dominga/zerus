@@ -329,6 +329,34 @@ fn all_items(team: &Team) -> Vec<Item> {
             ),
         });
     }
+    // U62 (#717): each test result is one card linking its record - suite,
+    // status, time, the submitter - never the log, which stays in the database.
+    for notice in team.test_notices.iter().rev().take(20) {
+        items.push(Item {
+            subagents: Value::Null,
+            kind: "test_result",
+            key: format!("test_result:{}", notice.record),
+            task: None,
+            member: notice.asked_by.clone(),
+            since: notice.at,
+            summary: summary(&format!(
+                "Test {} {} in {} s (record {})",
+                notice.suite,
+                notice.status,
+                notice.duration_ms / 1000,
+                notice.record
+            )),
+            command: format!(
+                "{} | hgs team test results --json",
+                json!({"request_id":PLACEHOLDER,"team":team.id,"record":notice.record})
+            ),
+            detail: format!(
+                "Asked by {}. The log and excerpt stay in record {}; read them with hgs team test results --json, not from this card.",
+                if notice.asked_by.is_empty() { "an unknown caller" } else { notice.asked_by.as_str() },
+                notice.record
+            ),
+        });
+    }
     // U52: a member whose session crashed too often this hour stays stopped
     // until the owner or the lead starts it again.
     for member in team.members.iter().filter(|member| member.id != team.lead && member.crash_told).filter(|_| active) {

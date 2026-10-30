@@ -661,6 +661,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn socket_requires_private_permissions_and_schema() {
+        use std::io::BufRead;
         use std::os::unix::{fs::PermissionsExt, net::UnixListener};
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("service.sock");
@@ -674,7 +675,9 @@ mod tests {
         let worker = std::thread::spawn(move || {
             let (mut connection, _) = listener.accept().unwrap();
             let mut input = String::new();
-            connection.read_to_string(&mut input).unwrap();
+            std::io::BufReader::new(&mut connection)
+                .read_line(&mut input)
+                .unwrap();
             assert_eq!(input, "{\"action\":\"providers\"}\n");
             connection.write_all(b"{\"schema\":2}\n").unwrap();
         });

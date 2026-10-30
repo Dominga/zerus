@@ -230,7 +230,18 @@ impl Model {
                 rows.first().map(|r| r.label.as_str()).unwrap_or("")
             )
         } else {
-            format!("Working folders: {removed} removed  {kept} kept  {unknown} unknown")
+            // Only what the chip still holds: a finished removal has its own
+            // notice, so a "0 removed" beside it would read as a contradiction.
+            let parts: Vec<String> = [(removed, "removed"), (kept, "kept"), (unknown, "unknown")]
+                .into_iter()
+                .filter(|(count, _)| *count > 0)
+                .map(|(count, word)| format!("{count} {word}"))
+                .collect();
+            if parts.is_empty() {
+                "Working folders need review".into()
+            } else {
+                format!("Working folders: {}", parts.join("  "))
+            }
         };
         let mut title = text.clone();
         if let Some(reason) = self.jobs.iter().find_map(|j| j.cleanup.retained_reason()) {
@@ -638,7 +649,7 @@ mod tests {
         let view = m.view();
         assert_eq!(view.kept, 1);
         assert!(view.rows[1].can_check);
-        assert!(view.text.contains("1 kept  1 unknown"));
+        assert_eq!(view.text, "Working folders: 1 kept  1 unknown");
         m.jobs[1].busy = true;
         assert_eq!(m.view().text, "Cleaning working folders…");
     }

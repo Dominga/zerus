@@ -23,6 +23,31 @@ describe("the window's notice bus", () => {
     });
   });
 
+  it("shows a repeated passing message once, for the time of its latest copy", () => {
+    createRoot((dispose) => {
+      const b = createNoticeBus();
+      b.notify("info", "Session updated. Refreshing…");
+      vi.advanceTimersByTime(NOTICE_MS - 100);
+      b.notify("info", "Session updated. Refreshing…");
+      b.notify("info", "Session updated. Refreshing…");
+      b.notify("warn", "Session updated. Refreshing…");
+      b.notify("info", "Folder removed", false, undefined, "clean");
+      expect(b.notices().map((n) => [n.tone, n.text])).toEqual([
+        ["info", "Session updated. Refreshing…"], ["warn", "Session updated. Refreshing…"], ["info", "Folder removed"],
+      ]);
+      vi.advanceTimersByTime(100);
+      expect(b.notices()).toHaveLength(3);
+      vi.advanceTimersByTime(NOTICE_MS);
+      expect(b.notices()).toEqual([]);
+      // Errors that wait for the reader still show once per refusal.
+      b.notify("error", "Stop failed.", true);
+      b.notify("error", "Stop failed.", true);
+      b.notify("error", "Stop failed.");
+      expect(b.notices().map((n) => n.sticky)).toEqual([true, true, false]);
+      dispose();
+    });
+  });
+
   it("replaces a notice with the same key and caps the stack, oldest passing notice first", () => {
     createRoot((dispose) => {
       const b = createNoticeBus();

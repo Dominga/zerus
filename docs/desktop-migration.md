@@ -485,13 +485,27 @@ one-time recovery on its organization worker. No GUI/pump/writer lock is held
 across Qt, settings or CLI I/O. `swarm::qt_import` uses `QtStore::snapshot` to
 read the current `workspace/organization` only. Backups, `swarm/observed*`,
 pending edits, local layout/default/collapse/order and run memory are not
-initialization sources. Supported current project fields are validated within
+initialization sources. Supported project fields are validated within
 the existing project/folder/member limits, then the existing shared projection
 filters implicit membership and this computer's Windows folders. Source
 extensions and local fields remain untouched in Qt for their separate families.
-Malformed, ambiguous, legacy pinned/groups, future and over-limit input refuses
-without marking the family handled. An existing Qt store missing the current
-organization is not treated as empty.
+Malformed, ambiguous, future and over-limit input refuses without marking the
+family handled. An existing Qt store missing the current organization is not
+treated as empty.
+
+The shared pure decoder also follows `SessionOrganization`'s constructor for
+the legacy `groups` spelling and obsolete `pinned` bucket. A present `projects`
+key takes precedence over `groups`; a malformed `projects` never falls back.
+Known missing legacy arrays/color use Qt's constructor defaults. The fixed
+General project is appended under Qt's original default-project rule. Pins
+return to their exact `before_pin` project when it survives, otherwise to the
+validated default, appended in their original order. Qt's move makes those
+restored placements explicit. Both shared recovery and local presentation use
+this same decoded copy; original bytes, unknown fields, backups, run memory and
+evidence hashes stay unchanged. Duplicate identities, a pin bucket with folders,
+missing folder IDs and a pin-only cache with no surviving default refuse rather
+than discard data or generate an ownership ID. Existing handled records are
+never cleared or replayed; a previously refused, unhandled family can retry.
 
 Recovery uses the existing `hgs swarm initialize` / `import_missing` writer:
 
@@ -539,9 +553,10 @@ The existing production-switch recovery hook queues the read on the existing
 organization worker, even without an organization-topic update. No GUI, hub,
 pump or writer lock spans Qt I/O. The existing QtStore and G3 family metadata
 builder validate the bounded current source and freshly recheck its canonical
-path/raw hash; overlapping source/target, malformed/future/legacy groups or
-pinned shapes and duplicate/oversized identities refuse. Unsupported local
-layout files still pause all layout seeds and writes for that startup.
+path/raw hash. The same bounded legacy groups/pin decoder used by shared
+recovery supplies presentation identities and order. Overlapping source/target,
+malformed/future shapes and duplicate/oversized identities refuse. Unsupported
+local layout files still pause all layout seeds and writes for that startup.
 
 Values and `g3_organization_presentation` commit together in the existing local
 `organization-layout.json` writer. The record uses the same family/schema/

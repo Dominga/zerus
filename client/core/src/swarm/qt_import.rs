@@ -15,13 +15,20 @@ pub const CHANGED: &str = "The Qt project organization changed during import. Th
 pub const NEEDS_HGS: &str = "Project import needs an updated HGS installation.";
 pub const IMPORT_FAILED: &str = "Project import could not be confirmed. Recovery data is kept; it will be checked at the next start.";
 const MAX_INPUT: usize = 16 << 20;
+mod legacy;
+
+/// One bounded decoder shared by recovery and local presentation. Legacy
+/// spelling/pin restoration follows Qt; validation never edits source bytes.
+pub(crate) fn decode(bytes: &[u8]) -> Result<Value, &'static str> {
+    legacy::decode(bytes)
+}
 
 fn label(text: &str, cap: usize) -> bool {
     !text.is_empty() && text.len() <= cap && !text.chars().any(char::is_control)
 }
 
-/// Strictly decode the current saved organization, never an observed cache
-/// or a backup. Unsupported legacy/future shapes stay untouched for review.
+/// Strictly decode the saved organization, never an observed cache or backup.
+/// Unsupported or ambiguous shapes stay untouched for review.
 /// Local Windows folders and implicit placement follow Qt's shared filter.
 pub fn shared(snapshot: Option<&QtSnapshot>, node: &str) -> Result<Value, &'static str> {
     let value = snapshot.and_then(|s| s.values.get(KEY));
@@ -41,16 +48,7 @@ pub fn shared(snapshot: Option<&QtSnapshot>, node: &str) -> Result<Value, &'stat
         crate::settings::qt::QtValue::Text(text) => text.as_bytes(),
         _ => return Err(SOURCE_FAILED),
     };
-    if bytes.len() > MAX_INPUT {
-        return Err(SOURCE_FAILED);
-    }
-    let mut local: Value = serde_json::from_slice(bytes).map_err(|_| SOURCE_FAILED)?;
-    if !local.is_object()
-        || local.get("version").is_some_and(|v| v != 1 && v != 2)
-        || local.get("groups").is_some()
-    {
-        return Err(SOURCE_FAILED);
-    }
+    let mut local = decode(bytes)?;
     let projects = local
         .get_mut("projects")
         .and_then(Value::as_array_mut)

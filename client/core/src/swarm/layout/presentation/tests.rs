@@ -133,11 +133,11 @@ fn future_or_malformed_handled_metadata_is_preserved_and_never_replaced() {
 }
 
 #[test]
-fn malformed_legacy_future_duplicate_or_oversized_source_stays_unhandled() {
+fn malformed_future_duplicate_or_oversized_source_stays_unhandled() {
     let mut candidates = vec![
         json!({}),
         json!({"version":3,"projects":[]}),
-        json!({"groups":[]}),
+        json!({"groups":null}),
         json!({"projects":{}}),
     ];
     for field in ["collapsed", "id", "sessions"] {
@@ -147,9 +147,6 @@ fn malformed_legacy_future_duplicate_or_oversized_source_stays_unhandled() {
     }
     let mut value = organization();
     value["default_project"] = json!("missing");
-    candidates.push(value);
-    let mut value = organization();
-    value["projects"][0]["id"] = json!("pinned");
     candidates.push(value);
     let mut value = organization();
     value["projects"][1] = value["projects"][0].clone();
@@ -175,6 +172,46 @@ fn malformed_legacy_future_duplicate_or_oversized_source_stays_unhandled() {
 }
 
 #[test]
+fn legacy_presentation_uses_the_same_restored_membership_as_shared_recovery_once() {
+    let original = json!({"groups":[
+        {"id":"alpha","name":"Alpha","collapsed":true,"sessions":["peer\ncodex/example/one"]},
+        {"id":"pinned","name":"Pinned","collapsed":true,"sessions":["peer\ncodex/example/two","peer\ncodex/example/three"]},
+        {"id":"beta","name":"Beta"}],"default_project":"beta",
+        "before_pin":{"peer\ncodex/example/two":"alpha"},"run_groups":{"original":"pinned"}});
+    let qt = snapshot(original.clone());
+    let store = QtStore::Ini("synthetic-qt.conf".into());
+    let shared = crate::swarm::qt_import::shared(Some(&qt), "synthetic-node").unwrap();
+    let seed = decode(&store, Some(&qt), None).unwrap();
+    let mut layout = Layout::default();
+    layout.set_collapsed("next-choice", true);
+    layout.seed_presentation(seed).unwrap();
+    let saved = saved(&layout);
+    assert_eq!(saved["collapsed"], json!(["next-choice"]));
+    assert_eq!(saved["default_project"], "beta");
+    for p in shared["projects"].as_array().unwrap() {
+        assert_eq!(saved["order"][p["id"].as_str().unwrap()], p["sessions"]);
+    }
+    assert!(saved["order"].get("pinned").is_none());
+    assert_eq!(saved[RECORD]["sha256"], qt.sha256);
+    assert_eq!(
+        saved["run_groups"],
+        json!([]),
+        "the earlier run-memory family stays separate"
+    );
+    let mut reloaded = Layout::try_from_json(&layout.to_json()).unwrap();
+    reloaded.set_default_project(Some("next-choice".into()));
+    let before = reloaded.to_json();
+    assert!(!reloaded
+        .seed_presentation(decode(&store, Some(&qt), None).unwrap())
+        .unwrap());
+    assert_eq!(reloaded.to_json(), before);
+    assert_eq!(
+        qt.values[KEY],
+        QtValue::Bytes(serde_json::to_vec(&original).unwrap())
+    );
+}
+
+#[test]
 fn exceeding_target_bytes_cannot_commit_partial_values_or_a_handled_record() {
     let mut layout = Layout::default();
     layout.extra.insert(
@@ -194,8 +231,23 @@ fn the_existing_qt_readers_keep_source_bytes_and_mtime_and_refuse_overlap() {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     let root = std::env::temp_dir().join(format!("zerus-g3-presentation-{}", std::process::id()));
     std::fs::create_dir(&root).unwrap();
-    for mac in [false, true] {
-        let text = organization().to_string();
+    for (mac, legacy) in [(false, false), (true, false), (false, true), (true, true)] {
+        let mut value = organization();
+        if legacy {
+            let mut projects = value.as_object_mut().unwrap().remove("projects").unwrap();
+            let member = projects[0]["sessions"]
+                .as_array_mut()
+                .unwrap()
+                .pop()
+                .unwrap();
+            value["before_pin"] = json!({member.as_str().unwrap():"alpha"});
+            projects
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"id":"pinned","name":"Pinned","sessions":[member]}));
+            value["groups"] = projects;
+        }
+        let text = value.to_string();
         let (store, bytes) = if mac {
             (QtStore::Plist{path:root.join("synthetic.plist"),domain:None}, format!("<plist version=\"1.0\"><dict><key>workspace.organization</key><data>{}</data></dict></plist>",STANDARD.encode(text)).into_bytes())
         } else {

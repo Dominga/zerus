@@ -789,6 +789,7 @@ export async function attachmentOpenDraft(path: string): Promise<string | null> 
 
 export interface SessionFileView {
   id: number;
+  revision: number;
   computer: string;
   key: string;
   href: string;
@@ -796,26 +797,27 @@ export interface SessionFileView {
   location: string;
   remote: boolean;
   title: string;
-  local_path: string;
-  copy_path: string;
+  local_available: boolean;
+  can_download: boolean;
   checking: boolean;
   downloading: boolean;
-  saved: boolean;
+  picking: boolean;
+  hint: string;
   error: string;
-  notice: string;
   closed: boolean;
 }
 
 export const sessionFileDialog = (computer: string, key: string, href: string, cwd: string) =>
   desktop<SessionFileView>("session_file_dialog", { computer, key, href, cwd });
-export const sessionFileCheck = (id: number) => desktop<SessionFileView>("session_file_check", { id });
-export const sessionFileDownload = (id: number, open: boolean) => desktop<SessionFileView>("session_file_download", { id, open });
-export const sessionFileSave = (id: number) => desktop<SessionFileView>("session_file_save", { id });
+export const sessionFileCheck = (id: number) => desktop<SessionFileView | null>("session_file_check", { id });
+export const sessionFileDownload = (id: number, open: boolean) => desktop<SessionFileView | null>("session_file_download", { id, open });
+export const sessionFileSave = (id: number) => desktop<SessionFileView | null>("session_file_save", { id });
 export const sessionFileExternal = (url: string) => desktop<void>("session_file_external", { url });
 export const sessionFileAct = (id: number, action: "open_file" | "open_folder" | "open_copy" | "show_file" | "open_ssh") =>
-  desktop<SessionFileView>("session_file_act", { id, action });
+  desktop<SessionFileView | null>("session_file_act", { id, action });
 export const sessionFileClose = (id: number) => desktop<void>("session_file_close", { id });
 export const onSessionFileChanged = (listener: (view: SessionFileView) => void) => onEvent<SessionFileView>("session-file-changed", listener);
+export const onSessionFileNotice = (listener: (notice: { text: string; warn: boolean }) => void) => onEvent<{ text: string; warn: boolean }>("session-file-notice", listener);
 
 // Saved drafts (src-tauri composer/saved.rs). Qt's and the dev app's stores
 // are only read; each page is one bounded read.

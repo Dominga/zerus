@@ -943,6 +943,35 @@ whose type runs programs is revealed in the file manager instead of opened.
 These rules follow `AttachmentViewer.h`, `MessageComposer.cpp` and
 `ExternalFile.cpp`.
 
+## File references
+
+Activity's existing File reference dialog keeps destinations behind a Rust
+id. Download… uses the native Save local copy dialog; Download and open uses
+Settings > Files' configured DownloadCache root. Automatic requests join by
+(root, machine, remote path), with a requested refresh winning over an older
+cache lookup. The existing cache worker owns lookup, reserve, publication and
+trim; one timer repeats trim after the opening grace period plus five seconds.
+
+Downloads continue after Close or Escape. A successful requested open still
+runs, a manual save reports its destination, and a failed closed download posts
+a sticky warning through the window's notice bus. Local opens retain this
+computer's origin; downloaded copies use the shared external-file safeguards.
+The established dialog frame follows the mockup; the missing file actions and
+states follow Qt, as approved for the #521 shell. SSH terminal stays with its
+separate action owner.
+
+On Linux, after building the frontend and the media/custom-protocol app, run
+from the repository root:
+
+```sh
+python3 client/scripts/file-reference-smoke.py --app target/tauri/debug/zerus-client
+```
+
+This walk creates private D-Bus, Xvfb, HOME, XDG, temporary and tmux directories
+from a fresh environment, selects a fake hgs, and mocks open/show effects. It
+walks the real native save chooser, cached open/show, failure, Escape/focus and
+completion after close. Captures and logs remain in its printed scratch root.
+
 ## Questions and the native queue
 
 Question cards keep the native question id, hash, run, conversation, schema and

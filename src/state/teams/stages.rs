@@ -818,18 +818,33 @@ mod tests {
             let mut events = Vec::new();
             apply(&mut team, "remove-member", &json!({"member":"rev"}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
             let stage = run_of(&team, &run);
-            assert_eq!((stage.state, stage.member.as_str()), (StageState::Waiting, "rev"), "the member stays for a late verdict: {stage:?}");
+            assert_eq!((stage.state, stage.member.as_str(), stage.stalled_member.as_str()), (StageState::Waiting, "", "rev"), "the member is kept for its late verdict, not as the stage's owner: {stage:?}");
             assert!(stage.stalled.contains("was removed"), "{stage:?}");
             assert!(!stage.awaiting_run && stage.checkout.is_empty() && stage.temp.is_empty(), "{stage:?}");
             let items = crate::state::teams::inbox::items(&team);
             assert!(items.iter().any(|item| item.kind == "stage_stalled" && item.task == Some(1)), "{items:?}");
+            // #727: a peer takes the stalled stage; the removed member does not
+            // reserve it.
+            team.members.push(Member {
+                id: "rev2".into(),
+                role: "Reviewer".into(),
+                agent: "claude".into(),
+                state: MemberState::Active,
+                folder: MemberFolder::Shared,
+                session: Some(SessionRef { name: "claude/x/rev2".into(), run_id: "r4".into(), ..Default::default() }),
+                ..Default::default()
+            });
+            assert!(waiting(&team).iter().any(|(task, candidates)| *task == 1 && candidates.contains(&"rev2".to_owned())), "{:?}", waiting(&team));
+            pipeline::give_stage(&mut team, 1, "rev2").unwrap();
+            let stage = run_of(&team, &run);
+            assert_eq!((stage.state, stage.member.as_str()), (StageState::Delivered, "rev2"), "{stage:?}");
             // Paused: the same reset with its reason.
             let (mut team, _) = team_in(&project, MemberFolder::Shared, &builtin(), "code");
             report(&mut team, &project, false);
             let (run, _) = give(&mut team, "rev");
             apply(&mut team, "pause-member", &json!({"member":"rev"}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
             let stage = run_of(&team, &run);
-            assert_eq!((stage.state, stage.member.as_str()), (StageState::Waiting, "rev"), "{stage:?}");
+            assert_eq!((stage.state, stage.member.as_str(), stage.stalled_member.as_str()), (StageState::Waiting, "", "rev"), "{stage:?}");
             assert!(stage.stalled.contains("was paused"), "{stage:?}");
             let items = crate::state::teams::inbox::items(&team);
             assert!(items.iter().any(|item| item.kind == "stage_stalled" && item.summary.contains("was paused")), "{items:?}");
@@ -857,7 +872,7 @@ mod tests {
             let mut events = Vec::new();
             assert!(pipeline::stall_stage(&mut team, 1, &run_id, "the stage hand-off was not confirmed", &mut events));
             let stage = run_of(&team, &run_id);
-            assert_eq!((stage.state, stage.member.as_str(), stage.unconfirmed), (StageState::Waiting, "rev", false), "{stage:?}");
+            assert_eq!((stage.state, stage.member.as_str(), stage.stalled_member.as_str(), stage.unconfirmed), (StageState::Waiting, "", "rev", false), "{stage:?}");
             assert!(stage.stalled.contains("not confirmed"), "{stage:?}");
             let items = crate::state::teams::inbox::items(&team);
             assert!(items.iter().any(|item| item.kind == "stage_stalled" && item.task == Some(1)), "{items:?}");
@@ -887,7 +902,7 @@ mod tests {
             let mut events = Vec::new();
             apply(&mut team, "pause-member", &json!({"member":"qa"}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
             let stage = run_of(&team, &run_id);
-            assert_eq!((stage.state, stage.member.as_str()), (StageState::Waiting, "qa"), "{stage:?}");
+            assert_eq!((stage.state, stage.member.as_str(), stage.stalled_member.as_str()), (StageState::Waiting, "", "qa"), "{stage:?}");
             assert!(stage.awaiting_run && stage.stalled.contains("was paused"), "{stage:?}");
             assert_eq!(stage.checkout, prepared.checkout, "the checkout stays while the run is live");
             assert!(checkout.exists(), "the live run's checkout is not removed under it");

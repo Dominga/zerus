@@ -246,7 +246,12 @@ async function startStep() {
 async function processesStep() {
   await select(API);
   await setSetting("processes/enabled", true);
-  setDetailTab("processes");
+  document.querySelector<HTMLElement>(".scard.selected")!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 400, clientY: 300 }));
+  await until(() => [...document.querySelectorAll<HTMLButtonElement>("button")].some((candidate) => candidate.textContent?.trim() === "Show running commands"), 3000, "the background-job menu entry did not appear");
+  const commands = button("Show running commands");
+  if (commands.disabled) throw new Error("the background-job menu entry stayed disabled with live jobs and Processes on");
+  commands.click();
+  await until(() => processes.view()?.groups.length === 3, 15_000, "the menu did not open the process groups");
   await until(() => flag("processes/enabled") && processes.view()?.groups.length === 3, 15_000, "the three process groups did not appear")
     .catch((error) => {
       const view = processes.view();

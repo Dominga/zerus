@@ -124,7 +124,7 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow, marks: 
     muted: !!v.muted,
     attention,
     scheduleNext: undefined,
-    backgroundJobs: undefined,
+    backgroundJobs: typeof v.background === "number" ? v.background : undefined,
     subagents: undefined,
     reviewLater: false,
     attentionNeeded: typeof v.needs_attention === "boolean" ? v.needs_attention : undefined,

@@ -172,6 +172,8 @@ def phase4_rows(rows):
         elif row["name"] in states:
             phase, activity, runtime, process = states[row["name"]]
             row.update(phase=phase, activity=activity, state="running", runtime_state=runtime, process_state=process)
+        if row["name"] == PROCESS_SESSION:
+            row["process_work"] = processes_for(row)["process_work"]
     return rows
 
 
@@ -229,6 +231,7 @@ def state_for(row):
         state["session_usage"] = {"prompt_cache": {"status": "warm", "expires_at": BASE_AT + 1800}}
         state["clear_context_supported"] = True
         state["attachment_messages"] = phase4_echoes(row)[1]
+        state["process_work"] = processes_for(row)["process_work"]
     elif row["name"] == "codex/sample-project/pagination":
         state.update(cache_hint={"status": "cold", "tokens": 120000}, compact_context_supported=True, clear_context_supported=True)
     elif row["name"] == "claude/sample-project/review":
@@ -287,7 +290,8 @@ def view_row(row, machine):
             "attention": "approval" if phase == "approval" else "question" if phase == "input" else None, "unread": unread, "muted": False,
             "machine": machine, "project": row["project"], "folder": row["cwd"].rstrip("/").rsplit("/", 1)[-1], "branch": row["git_branch"] or None,
             "model": row["model"] or None, "effort": row["effort"] or None, "summary": row["activity_summary"], "updated_at": row["last_event_at"],
-            "turn_started": row["turn_started"] or None, "run_id": row["run_id"], "conversation_id": row["conversation_id"]}
+            "turn_started": row["turn_started"] or None, "run_id": row["run_id"], "conversation_id": row["conversation_id"],
+            "background": (row.get("process_work") or {}).get("count", -1)}
 
 
 def deltas_for(rows):

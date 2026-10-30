@@ -66,6 +66,8 @@ export interface ViewRow {
   resumable?: boolean;
   activity?: string;
   process_state?: string;
+  /** `process_work.count`, -1 when unknown. */
+  background?: number;
   archive_id?: string | null;
   /** The latest reply and the attention it raised, for marking them read. */
   reply_id?: string | null;

@@ -79,9 +79,55 @@ fn parse(args: &[String]) -> Result<(String, String, String)> {
     Ok((name, account, request))
 }
 
+/// #581 L5: a switch keeps its receipt by request id once it stops the agent,
+/// so a retry with the same id returns that outcome and never runs it again.
+fn receipt_path(request: &str) -> PathBuf {
+    root().join("account_switches").join(format!("{request}.json"))
+}
+
+/// The receipt a retry returns: the finished switch's own, an uncertain one
+/// when the switch that stopped the agent never finished, or its error. The
+/// id belongs to one session and account.
+fn earlier(name: &str, account: &str, request: &str) -> Result<Option<Value>> {
+    let Ok(text) = fs::read_to_string(receipt_path(request)) else { return Ok(None) };
+    let stored: Value = serde_json::from_str(&text).map_err(|error| format!("The receipt of request {request} is unreadable: {error}"))?;
+    if string(&stored, "session") != name || string(&stored, "account") != account {
+        return Err(format!("--request-id {request} was used for another switch; use a new UUID for every request"));
+    }
+    match string(&stored, "state") {
+        "done" => Ok(Some(stored["receipt"].clone())),
+        "error" => Err(string(&stored, "error").to_owned()),
+        _ => Ok(Some(json!({"status":"uncertain","session":name,"request_id":request,
+            "note":"an earlier switch with this request id stopped the agent and did not finish; it is never run again"}))),
+    }
+}
+
+fn keep(request: &str, name: &str, account: &str, outcome: Value) -> Result<()> {
+    let mut stored = json!({"session":name,"account":account,"request_id":request,"at":now()});
+    stored.as_object_mut().unwrap().extend(outcome.as_object().cloned().unwrap_or_default());
+    atomic(&receipt_path(request), &stored.to_string())
+}
+
 /// The switch itself. A team member's account changes only with
 /// `hgs team swap-member`, which uses this same path for the same agent.
 fn switch(config: &crate::config::Config, name: &str, account: &str, request: &str, member: bool) -> Result<Value> {
+    if let Some(receipt) = earlier(name, account, request)? {
+        return Ok(receipt);
+    }
+    let mut reserved = false;
+    let result = switch_once(config, name, account, request, member, &mut reserved);
+    if reserved {
+        let outcome = match &result {
+            Ok(receipt) => json!({"state":"done","receipt":receipt}),
+            Err(error) => json!({"state":"error","error":error}),
+        };
+        // A receipt that cannot be kept leaves "started": a retry says uncertain.
+        let _ = keep(request, name, account, outcome);
+    }
+    result
+}
+
+fn switch_once(config: &crate::config::Config, name: &str, account: &str, request: &str, member: bool, reserved: &mut bool) -> Result<Value> {
     let record = {
         let _guard = lock(None)?;
         read(name)?
@@ -134,10 +180,22 @@ fn switch(config: &crate::config::Config, name: &str, account: &str, request: &s
     // Everything that can fail is checked before the agent is stopped.
     plan_copies(&record, &old_home, &home, &conversation)?;
     let old = json!({"account_id":record["account_id"],"agent_home":record["agent_home"],"transcript":record["transcript"]});
+    // The request is reserved before anything changes; a concurrent or later
+    // request with the same id returns this one's outcome.
+    {
+        let _guard = lock(None)?;
+        if let Some(receipt) = earlier(name, account, request)? {
+            return Ok(receipt);
+        }
+        keep(request, name, account, json!({"state":"started"}))?;
+        *reserved = true;
+    }
     // Stop first: the old account's native store is final only after the agent's
     // own exit (Claude writes a cost-state row while stopping), so the copy is
     // taken afterwards and holds every record the old conversation has.
     lifecycle::pause_one_quiet(&record, None, true)?;
+    #[cfg(test)]
+    tests::after_stop();
     let stopped = read(name)?;
     let (copies, transcript) = match plan_copies(&stopped, &old_home, &home, &conversation)
         .and_then(|planned| write_copies(&planned.0).map(|()| planned))
@@ -151,9 +209,12 @@ fn switch(config: &crate::config::Config, name: &str, account: &str, request: &s
         }
     };
     let _ = copies;
-    // A binding that changed under the stop stays on its old account.
-    move_binding(name, &record, account, &home, &transcript)
-        .map_err(|error| format!("{error}; the session was stopped on its old account"))?;
+    // A binding that changed under the stop stays on its old account, and the
+    // stopped agent is relaunched there, as a failed launch is (#581 L5).
+    if let Err(error) = move_binding(name, &record, account, &home, &transcript) {
+        let run_id = uuid::Uuid::new_v4().to_string();
+        return Ok(rollback(config, name, &old, &conversation, request, &run_id, &error));
+    }
     let receipt = |status: &str, run_id: &str, extra: Value| {
         let mut receipt = json!({"status":status,"session":name,"request_id":request,"conversation_id":conversation,
             "from":{"account_id":current,"label":crate::accounts::label(config, &current),"home":old_home},
@@ -473,6 +534,18 @@ mod tests {
         static TEST_START: Cell<Option<TestStart>> = const { Cell::new(None) };
         static TEST_BOUNDS: Cell<Option<(Duration, Duration)>> = const { Cell::new(None) };
         static BEFORE_CONFIRM_POLL: Cell<Option<fn()>> = const { Cell::new(None) };
+        static AFTER_STOP: Cell<Option<fn()>> = const { Cell::new(None) };
+    }
+
+    /// A test changing the binding while the agent stops.
+    pub(super) fn set_after_stop(hook: Option<fn()>) {
+        AFTER_STOP.with(|cell| cell.set(hook));
+    }
+
+    pub(super) fn after_stop() {
+        if let Some(hook) = AFTER_STOP.with(Cell::get) {
+            hook();
+        }
     }
 
     pub(super) fn test_start() -> Option<TestStart> {
@@ -742,6 +815,7 @@ mod switch_tests {
             crate::state::backend::with_fake(&Backend, || body(&config, &mut record));
             tests::set(None, None);
             tests::set_before_confirm_poll(None);
+            tests::set_after_stop(None);
             WORLD.with(|slot| *slot.borrow_mut() = None);
         });
     }
@@ -953,6 +1027,70 @@ mod switch_tests {
             }
         }
         assert!(error.message.contains("not signed in"), "{}", error.message);
+    }
+
+    /// The launches the active test world saw.
+    fn starts() -> usize {
+        WORLD.with(|world| world.borrow().expect("test world").lock().unwrap().starts)
+    }
+
+    /// #581 L5: a retry with the same request id returns the kept receipt and
+    /// never runs the switch again; the id belongs to one session and account.
+    #[test]
+    fn a_retry_with_the_same_request_returns_the_kept_receipt() {
+        run_test("claude", false, "88888888-8888-4888-8888-888888888888", |config, _| {
+            let first = switch(config, "claude/project/account", "second", &request(), false).unwrap();
+            assert_eq!(first["status"], json!("switched"), "{first}");
+            let launched = starts();
+            let again = switch(config, "claude/project/account", "second", &request(), false).unwrap();
+            assert_eq!(again, first);
+            assert_eq!(starts(), launched, "the retry launched nothing");
+            let other = switch(config, "claude/project/account", "work", &request(), false).unwrap_err();
+            assert!(other.contains("used for another switch"), "{other}");
+            // A switch that stopped the agent and never finished is uncertain on
+            // a retry, never run again.
+            let unfinished = "99999999-9999-4999-8999-999999999999";
+            keep(unfinished, "claude/project/account", "work", json!({"state":"started"})).unwrap();
+            let retry = switch(config, "claude/project/account", "work", unfinished, false).unwrap();
+            assert_eq!(retry["status"], json!("uncertain"), "{retry}");
+            assert_eq!(starts(), launched);
+        });
+    }
+
+    /// A refusal before the agent stops changes nothing and keeps nothing.
+    #[test]
+    fn a_refused_switch_keeps_no_receipt() {
+        run_test("claude", false, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", |config, _| {
+            let error = switch(config, "claude/project/account", "work", &request(), false).unwrap_err();
+            assert!(error.contains("already runs on account work"), "{error}");
+            assert!(!receipt_path(&request()).exists());
+        });
+    }
+
+    /// #581 L5: a binding that changed while the agent stopped keeps its old
+    /// account, and the agent is relaunched there instead of staying paused.
+    #[test]
+    fn a_binding_changed_under_the_stop_relaunches_the_old_account() {
+        fn rebind() {
+            let mut record = read("claude/project/account").unwrap();
+            record["run_id"] = json!("run-elsewhere");
+            write(&mut record).unwrap();
+        }
+        run_test("claude", false, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", |config, record| {
+            tests::set_after_stop(Some(rebind));
+            let receipt = switch(config, "claude/project/account", "second", &request(), false).unwrap();
+            assert_eq!(receipt["status"], json!("rolled_back"), "{receipt}");
+            assert_eq!(receipt["relaunched"], json!(true), "{receipt}");
+            assert!(receipt["reason"].as_str().unwrap().contains("binding changed"), "{receipt}");
+            let saved = read("claude/project/account").unwrap();
+            assert_eq!(saved["account_id"], json!("work"));
+            assert_ne!(saved["paused"], json!(true), "the session is not left paused");
+            assert_eq!(saved["run_id"], receipt["run_id"], "it runs the relaunch");
+            assert_eq!(saved["agent_home"], record["agent_home"]);
+            assert_eq!(starts(), 1);
+            // The kept receipt is what a retry gets.
+            assert_eq!(switch(config, "claude/project/account", "second", &request(), false).unwrap(), receipt);
+        });
     }
 
     #[test]

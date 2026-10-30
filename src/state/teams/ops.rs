@@ -780,10 +780,11 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
         let member = team.members.iter_mut().find(|member| member.id == id).with_context(|| format!("Unknown member {id}"))?;
         // U46: the context before a task only changes the next hand-out, so the
         // owner may set it on a running member that has a session too; every
-        // other field still changes only on a member without one.
+        // other field still changes only on a member without one. #581 N6: so
+        // does its model list (U45), which only the next switch reads.
         let context_only = update.as_object().is_some_and(|fields| {
-            fields.contains_key("context_before_task")
-                && fields.keys().all(|key| key == "id" || key == "context_before_task")
+            fields.keys().any(|key| key == "context_before_task" || key == "models")
+                && fields.keys().all(|key| key == "id" || key == "context_before_task" || key == "models")
         });
         ensure!(
             planning || member.session.is_none() || context_only,
@@ -821,6 +822,16 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
             let context = context.as_str().unwrap_or_default().to_owned();
             ensure!(matches!(context.as_str(), "" | "none" | "compact" | "clear"), "A context before a task is none, compact or clear");
             member.context_before_task = context;
+        }
+        // #581 N6, spec 2: the owner edits the models a member may switch
+        // between; an empty list leaves only its launch model.
+        if let Some(models) = update.get("models") {
+            ensure!(matches!(actor, Actor::Human), "Only you set a member's models");
+            let models: Vec<ModelChoice> = serde_json::from_value(models.clone()).context("Models are a list of {\"model\",\"effort\"}")?;
+            let models: Vec<ModelChoice> =
+                models.into_iter().map(|choice| ModelChoice { model: choice.model.trim().to_owned(), effort: choice.effort.trim().to_owned() }).collect();
+            super::models::check_choices(&models)?;
+            member.models = models;
         }
         changed.push(json!(id));
     }
@@ -2503,6 +2514,12 @@ fn checked_finding(team: &Team, finding: &Value) -> anyhow::Result<CheckedFindin
 }
 
 fn report(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    report_with(team, input, actor, false, events)
+}
+
+/// `captured`: Zerus records the member's last reply (A2); it never enters the
+/// pipeline's stages (#538 C1).
+fn report_with(team: &mut Team, input: &Value, actor: &Actor, captured: bool, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     let id = task_id(input)?;
     // U36: a stage member's verdict names its stage run as the attempt.
     if let Some(result) = super::pipeline::stage_report(team, input, actor, events)? {
@@ -2580,7 +2597,7 @@ fn report(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
         };
         let attempt = task.attempts.iter_mut().find(|a| a.id == open_id).unwrap();
         attempt.state = AttemptState::Reported;
-        attempt.report = Some(Report { text: body, at: now(), structured: structured.clone(), unstructured: structured.is_none(), ..Default::default() });
+        attempt.report = Some(Report { text: body, at: now(), structured: structured.clone(), unstructured: structured.is_none(), captured, ..Default::default() });
         attempt.folder_head = folder_head.clone();
         attempt.folder_branch = folder_branch.clone();
         attempt.no_report = false;
@@ -2604,7 +2621,12 @@ fn report(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
             // C5: the check decides, without the lead.
             return decide_check(team, id, n, events);
         }
-        // U36: a task with a pipeline goes to its first stage.
+        // U36: a task with a pipeline goes to its first stage. #538 C1: a
+        // captured reply stays Submitted for the member's real report (A6)
+        // or the lead's decision; the real report enters the stages.
+        if captured {
+            return Ok(json!({"status":"submitted","task":id,"attempt":n}));
+        }
         if let Some(result) = super::pipeline::on_report(team, id, events)? {
             return Ok(result);
         }
@@ -2642,19 +2664,33 @@ fn report(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
         report.structured = structured.clone();
         report.unstructured = structured.is_none();
         report.at = now();
-        report.captured = false;
+        let was_captured = std::mem::take(&mut report.captured);
         attempt.no_report = false;
         // The lead hears the real report as a report, not as the captured one;
         // U36: a stage still reading it tells the lead after the last stage.
         if member != team_lead && task.status == TaskStatus::Submitted {
             attempt.notice = Notice::Pending;
         }
+        let (in_stage, submitted) = (task.status.in_stage(), task.status == TaskStatus::Submitted);
         let title = task.title.clone();
         let role = team.role_of(&member);
         events.push(Event::new(
             "report_replaced",
             json!({"by":role,"task":id,"title":title,"attempt":n,"human":by_member.is_empty()}),
         ));
+        // #538 C1: the real report that replaces a captured one enters the
+        // stages; #595 N4: one replaced while a stage reads it starts that
+        // stage again on the new text.
+        let staged = if in_stage {
+            super::pipeline::restart_open(team, id, events)?
+        } else if submitted && was_captured {
+            super::pipeline::on_report(team, id, events)?
+        } else {
+            None
+        };
+        if let Some(result) = staged {
+            return Ok(result);
+        }
         return Ok(json!({"status":"submitted","task":id,"attempt":n}));
     }
     // A late report of a revoked or replaced attempt is refused and shown.
@@ -3844,6 +3880,8 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
     let lead_id = team.lead.clone();
     let task = team.task_mut(id).context("Unknown task")?;
     ensure!(!(task.decided_by == Some(Decider::Human) && task.status.finished()), "You already decided task #{id}");
+    // #538 N1: accepting over an open stage names why, as skip-stage does.
+    ensure!(!accept || !task.status.in_stage() || !reason.is_empty(), "Accepting task #{id} in a stage needs a reason");
     if human {
         ensure!(!matches!(task.status, TaskStatus::Draft | TaskStatus::Cancelled), "Task #{id} cannot be decided now");
     } else {
@@ -4215,6 +4253,13 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
             ensure!(op == "report" || matches!(actor, Actor::Human), "Only you use a last reply as the report");
             ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
             report(team, input, actor, events)
+        }
+        // A2: the dispatcher's capture of a member's last reply; no command
+        // reaches this operation.
+        "capture-report" => {
+            ensure!(matches!(actor, Actor::Member(_)), "Zerus captures a member's reply");
+            ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
+            report_with(team, input, actor, true, events)
         }
         "ask" => ask(team, input, actor, events),
         "reply" => reply(team, input, actor, events),
@@ -6608,6 +6653,7 @@ mod tests {
                 accept: "lead".into(),
                 round: 1,
                 hold_from_report: false,
+                trimmed_returns: 0,
                 runs: Vec::new(),
             });
         }
@@ -7312,6 +7358,44 @@ mod tests {
         assert_eq!(error, "A running team changes only members without a session");
         let error = set_running(&mut running, json!({"id":"dev","role":"API"})).unwrap_err().to_string();
         assert_eq!(error, "A running team changes only members without a session");
+    }
+
+    /// #581 N6, spec 2: the owner edits a member's model list in the team
+    /// settings, a running member with a session included.
+    #[test]
+    fn the_owner_edits_a_running_members_models() {
+        let mut team = running_team();
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().session =
+            Some(SessionRef { name: "codex/x/dev".into(), run_id: "r1".into(), ..Default::default() });
+        let set = |team: &mut Team, actor: &Actor, update: Value| {
+            let mut events = Vec::new();
+            apply(team, "settings", &json!({"members_update":[update]}), actor, &BTreeSet::new(), &mut events)
+        };
+        let models = json!([{"model":" gpt-5.5 ","effort":"high"},{"model":"opus"}]);
+        let value = set(&mut team, &Actor::Human, json!({"id":"dev","models":models})).unwrap();
+        assert_eq!(value["members"], json!(["dev"]), "{value}");
+        let dev = team.member("dev").unwrap();
+        assert_eq!(
+            dev.models,
+            vec![ModelChoice { model: "gpt-5.5".into(), effort: "high".into() }, ModelChoice { model: "opus".into(), effort: String::new() }]
+        );
+        // With the context action in the same update too.
+        set(&mut team, &Actor::Human, json!({"id":"dev","models":[{"model":"opus"}],"context_before_task":"compact"})).unwrap();
+        assert_eq!((team.member("dev").unwrap().models.len(), team.member("dev").unwrap().context_before_task.as_str()), (1, "compact"));
+        // An empty list leaves only the launch model.
+        set(&mut team, &Actor::Human, json!({"id":"dev","models":[]})).unwrap();
+        assert!(team.member("dev").unwrap().models.is_empty());
+        // The lead does not, a bad entry is refused, and other fields still
+        // need a member without a session.
+        let error = set(&mut team, &Actor::Member("lead".into()), json!({"id":"dev","models":[{"model":"opus"}]})).unwrap_err().to_string();
+        assert_eq!(error, "Only you set a member's models");
+        assert!(set(&mut team, &Actor::Human, json!({"id":"dev","models":[{"model":"two words"}]})).is_err());
+        assert!(set(&mut team, &Actor::Human, json!({"id":"dev","models":"opus"})).is_err());
+        let many: Vec<Value> = (0..21).map(|n| json!({"model":format!("m{n}")})).collect();
+        assert!(set(&mut team, &Actor::Human, json!({"id":"dev","models":many})).unwrap_err().to_string().contains("at most"));
+        let error = set(&mut team, &Actor::Human, json!({"id":"dev","models":[],"role":"API"})).unwrap_err().to_string();
+        assert_eq!(error, "A running team changes only members without a session");
+        assert!(team.member("dev").unwrap().models.is_empty());
     }
 
     #[test]

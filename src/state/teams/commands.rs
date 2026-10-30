@@ -6992,6 +6992,7 @@ mod tests {
                 accept: "lead".into(),
                 round: 1,
                 hold_from_report: false,
+                trimmed_returns: 0,
                 runs: vec![StageRun {
                     id: "stage-run-1".into(),
                     stage: 0,

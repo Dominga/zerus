@@ -116,6 +116,8 @@ pub(crate) fn items_for(team: &Team, reviewer: &str) -> Vec<Item> {
 
 fn reviewer_of(team: &Team, item: &Item) -> String {
     match (item.kind, item.task.and_then(|id| team.task(id))) {
+        // #538 N3: a report a sub-lead may not accept is the lead's.
+        ("report", Some(task)) if super::pipeline::lead_accepts_only(task) => team.lead.clone(),
         // The lead's own task has no reviewer: it stays the lead's.
         ("report" | "question" | "stalled", Some(task)) if !task.assignee.is_empty() && task.assignee != team.lead => {
             team.reviewer_of(&task.assignee)

@@ -1398,6 +1398,10 @@ pub(crate) struct PipelineRun {
     /// Every stage run, oldest first, at most 64.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runs: Vec<StageRun>,
+    /// #538 L2: the stage returns among the runs trimmed away, so the round
+    /// limit still counts them.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub trimmed_returns: u32,
 }
 
 fn first_round() -> u32 {
@@ -1414,7 +1418,7 @@ impl PipelineRun {
     }
     /// The rounds stage members returned; the round limit counts these.
     pub(crate) fn returned(&self) -> u32 {
-        self.runs.iter().filter(|run| run.state == StageState::Returned).count() as u32
+        self.trimmed_returns + self.runs.iter().filter(|run| run.state == StageState::Returned).count() as u32
     }
 }
 
@@ -1852,7 +1856,8 @@ impl Team {
         }
         self.tasks
             .iter()
-            .filter(|task| task.status == TaskStatus::Submitted)
+            // #538 C1: a captured report holds its member at any stage too.
+            .filter(|task| task.status.reported())
             .filter(|task| {
                 task.attempts.iter().rev().find(|attempt| attempt.state == AttemptState::Reported).is_some_and(|attempt| {
                     attempt.member == member && attempt.report.as_ref().is_some_and(|report| report.captured)

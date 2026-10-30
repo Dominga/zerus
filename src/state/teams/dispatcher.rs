@@ -5151,9 +5151,7 @@ fn capture_report(store: &mut Store, team_id: &str, task_id: u32, reply: &str, e
         let (attempt_id, member) = (attempt.id.clone(), attempt.member.clone());
         let input = json!({"task":task_id,"attempt":attempt_id,
             "text":format!("(From {role}'s last reply; it ran no hgs team report.)\n\n{reply}")});
-        ops::apply(team, "report", &input, &ops::Actor::Member(member), &BTreeSet::new(), events)?;
-        let found = team.task_mut(task_id).and_then(|task| task.attempts.last_mut()).context("the captured attempt")?;
-        found.report.as_mut().context("the captured report")?.captured = true;
+        ops::apply(team, "capture-report", &input, &ops::Actor::Member(member), &BTreeSet::new(), events)?;
         Ok(())
     })
 }
@@ -5178,9 +5176,8 @@ fn capture_quiet(store: &mut Store, team_id: &str, task_id: u32, reply: &str) ->
         let (attempt_id, member) = (attempt.id.clone(), attempt.member.clone());
         let input = json!({"task":task_id,"attempt":attempt_id,
             "text":format!("(From {role}'s last reply; it ran no hgs team report.)\n\n{reply}")});
-        ops::apply(team, "report", &input, &ops::Actor::Member(member), &BTreeSet::new(), events)?;
+        ops::apply(team, "capture-report", &input, &ops::Actor::Member(member), &BTreeSet::new(), events)?;
         let found = team.task_mut(task_id).and_then(|task| task.attempts.last_mut()).context("the captured attempt")?;
-        found.report.as_mut().context("the captured report")?.captured = true;
         found.turn_ended_at = Some(at);
         found.turn_reply.clear();
         Ok(())
@@ -7838,6 +7835,7 @@ mod tests {
                 accept: "lead".into(),
                 round: 1,
                 hold_from_report: false,
+                trimmed_returns: 0,
                 runs: vec![StageRun {
                     id: "S1".into(),
                     stage: 0,

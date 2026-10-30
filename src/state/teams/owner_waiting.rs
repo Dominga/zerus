@@ -3,7 +3,7 @@
 //! reads only what the teams record (the attention list, phases, proposals,
 //! holds and decisions) and stores nothing; `hgs team waiting --json` pages it
 //! newest first.
-use super::model::{PhaseState, Team, TeamStatus};
+use super::model::{PhaseState, TaskStatus, Team, TeamStatus};
 use serde_json::{json, Value};
 
 /// A page holds at most this many items.
@@ -148,6 +148,25 @@ fn team_items(team: &Team, now: f64, out: &mut Vec<Value>) {
         found["task"] = json!(task.id);
         out.push(found);
     }
+    // #581 N7, spec 7: a task waiting for a step Zerus could not take (U45
+    // model, U46 context, U48 branch) waits for the lead or the owner, with
+    // its reason and the retry that starts the step again, as in the lead's
+    // inbox. A context action that still runs waits for nobody.
+    for task in team.tasks.iter().filter(|task| task.status == TaskStatus::Pending) {
+        let Some(wait) = task.waits.as_ref().filter(|wait| !wait.running()) else { continue };
+        let mut found = item(
+            team,
+            "task_waits_owner",
+            &format!("waits-{}", task.id),
+            format!("#{} {} waits: {}", task.id, task.title, wait.reason),
+            wait.at,
+            "retry_task",
+        );
+        found["task"] = json!(task.id);
+        found["reason"] = json!(wait.reason);
+        found["waits_for"] = json!(wait.waits_for);
+        out.push(found);
+    }
     // Every task decided: the team waits for the owner (or the lead) to finish
     // it or add the next phase; no draft phase is waiting.
     if super::ops::all_decided(team) && !team.phases.iter().any(|phase| phase.state == PhaseState::Draft) {
@@ -171,7 +190,7 @@ fn team_items(team: &Team, now: f64, out: &mut Vec<Value>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::teams::model::{Attempt, AttemptState, Hold, Member, PendingAddition, Phase, Report, Task, TaskStatus};
+    use crate::state::teams::model::{Attempt, AttemptState, Hold, Member, PendingAddition, Phase, Report, Task, TaskWait};
 
     fn team(id: &str, status: TeamStatus) -> Team {
         Team {
@@ -278,6 +297,35 @@ mod tests {
         let empty = Team { tasks: Vec::new(), ..team("e", TeamStatus::Planning) };
         assert!(items(&[reported.clone(), auto, empty], 1000.0 + 60.0).is_empty());
         assert_eq!(kinds(&items(&[reported], 1000.0 + 31.0 * 60.0)), ["report_escalated"]);
+    }
+
+    /// #581 N7: a task whose step Zerus could not take waits for the owner
+    /// too, with its reason and the retry; one whose context action still
+    /// runs, or that is no longer pending, does not.
+    #[test]
+    fn a_waiting_task_is_listed_with_its_reason_and_the_retry() {
+        let wait = |state: &str, at: f64| TaskWait {
+            waits_for: "zerus".into(),
+            on: vec!["model".into()],
+            reason: "hgs: unknown model gpt-5.5 for this account".into(),
+            at,
+            state: state.into(),
+            ..Default::default()
+        };
+        let mut waiting = team("t", TeamStatus::Running);
+        waiting.tasks[0].waits = Some(wait("refused", 700.0));
+        waiting.tasks.push(Task { id: 2, title: "Docs".into(), waits: Some(wait("waiting", 800.0)), ..Default::default() });
+        waiting.tasks.push(Task { id: 3, title: "Old".into(), status: TaskStatus::Accepted, waits: Some(wait("uncertain", 900.0)), ..Default::default() });
+        waiting.tasks[0].hold = Some(Hold { by: "You".into(), at: 600.0, ..Default::default() });
+        let list = items(&[waiting], 1000.0);
+        assert_eq!(kinds(&list), ["task_waits_owner", "task_waits_owner"], "{list:#?}");
+        let found = &list[0];
+        assert_eq!((found["id"].as_str(), found["task"].as_u64(), found["action"].as_str()), (Some("t/task_waits_owner/waits-1"), Some(1), Some("retry_task")));
+        assert_eq!((found["since"].as_f64(), found["waits_for"].as_str()), (Some(700.0), Some("zerus")));
+        assert_eq!(found["reason"], "hgs: unknown model gpt-5.5 for this account");
+        assert_eq!(found["title"], "#1 API waits: hgs: unknown model gpt-5.5 for this account");
+        // The owner's hold on the same task stays its own item.
+        assert_eq!((list[1]["id"].as_str(), list[1]["action"].as_str()), (Some("t/task_waits_owner/1"), Some("release_task")));
     }
 
     #[test]

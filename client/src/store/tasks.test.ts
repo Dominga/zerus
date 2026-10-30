@@ -47,4 +47,11 @@ describe("project task stream", () => {
   it("a tasks-only batch is content and cannot be dropped by the frontend pump", () => {
     expect(isEmptyBatch({ ...emptyBatch(), tasks: [list()] })).toBe(false);
   });
+  it("retains journal-only revision changes for the selected inspector", () => {
+    const store = createTasks(vi.fn().mockResolvedValue(undefined)); store.follow("p1");
+    store.apply([list("p1", [{ ...row(), history_revision: "first" }])]);
+    expect(store.tasks()[0].historyRevision).toBe("first");
+    store.apply([list("p1", [{ ...row(), history_revision: "after-note" }])]);
+    expect(store.tasks()[0].historyRevision).toBe("after-note");
+  });
 });

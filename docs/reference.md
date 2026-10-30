@@ -2579,6 +2579,9 @@ history entry, so new records and receipt refinements preserve an older page.
 Omit the cursor to return to the latest page. The local indexed projection keeps
 one task per project and is rebuilt when its source changes; it is never
 replicated and does not change the task document format.
+Task list rows also include a bounded `history_revision` token. A journal-only
+note or delivery receipt changes it, so the existing task stream can refresh the
+selected inspector without transferring the journal or adding a polling loop.
 
 Send pastes the task prompt into its session through the same input path as
 `hgs send`; the task becomes In progress, and Zerus does not

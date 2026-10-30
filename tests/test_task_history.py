@@ -6,6 +6,18 @@ from test_tasks import Fixture, agent_record
 
 
 class TaskHistory(Fixture):
+    def test_journal_only_edits_change_the_streamed_listing_revision(self):
+        task = self.add("Canonical description")
+        def listed():
+            return self.hgs("list", "--project", "orchard")["tasks"][0]
+        before = listed()
+        self.assertEqual(before["history_revision"], listed()["history_revision"])
+        self.hgs("comment", task["uuid"], "--project", "orchard", text="External note")
+        after = listed()
+        self.assertNotEqual(before.pop("history_revision"), after.pop("history_revision"))
+        self.assertEqual(before, after, "a comment changes no canonical list field")
+        self.assertNotIn("history_revision", self.hgs("get", task["uuid"], "--project", "orchard")["task"])
+
     def test_bounded_pages_match_the_unchanged_legacy_journal(self):
         task = self.add("Canonical description")
         for n in range(6):

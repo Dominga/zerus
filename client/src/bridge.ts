@@ -28,6 +28,9 @@ export async function followTasks(project: string | null): Promise<void> {
   await invoke("tasks_follow", { project });
 }
 
+export const readTaskDetails = (project: string, task: string, before: string | null) => desktop<unknown>("task_details", { project, task, before });
+export const openTaskAttachment = (path: string) => desktop<string | null>("task_attachment_open", { path });
+
 /** `next_batch` answers with raw JSON bytes (`ipc::Response`), so large batches skip script evaluation. */
 function decodeBatch(reply: unknown): Batch {
   if (reply instanceof ArrayBuffer) return JSON.parse(new TextDecoder().decode(reply)) as Batch;

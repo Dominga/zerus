@@ -290,6 +290,9 @@ fn view(task: &TaskDoc, project_name: &str, with_log: bool, machines: &Machines)
     let dispatch_id = task_view.execution_id();
     let mut value = serde_json::to_value(task_view).map_err(fail)?;
     value["dispatch_id"] = json!(dispatch_id);
+    // A note or receipt changes no other list field. Its clock must change
+    // the tasks-topic digest so the selected inspector can refresh.
+    if !with_log { value["history_revision"] = json!(task.revision()); }
     label_view(value, project_name, with_log, &files, machines)
 }
 

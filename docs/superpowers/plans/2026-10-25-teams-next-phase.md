@@ -1519,6 +1519,16 @@ phase 37. Lanes are balanced by volume and cost (U28 rule 9), not by count.
     suites first; long ones go to the night run or the CI.
   - Later (phase 57): remote runners on the owner's other computers over
     hgs's SSH for Linux, macOS and Android suites.
+- Every project configures it (owner, 2026-10-30: another user may want the
+  tests set up differently): the mechanism is Zerus's, this repository's
+  values are one configuration. A project file (.zerus/tests.toml) names its
+  test providers (cargo, ctest, pytest, gradle, npm or any command), how the
+  affected set is found (from the build, from a path map, or everything), the
+  resource and platform classes, where the full run happens (here, a CI, a
+  runner), the full-run policy, retries, budgets, the isolated environment
+  and whether the build cache and the merge queue are on; the owner may
+  override it in the team's settings. Without the file Zerus detects common
+  stacks and proposes defaults, and a team without any keeps today's flow.
 
 ## Order of work (proposal)
 

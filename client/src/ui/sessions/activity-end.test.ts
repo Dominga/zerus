@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { createActivityEnd, newLocalSends, type ScrollGeometry } from "./activity-end";
 
-function fixture(canWrite?: () => boolean) {
+function fixture(canWrite?: () => boolean, placed?: () => void) {
   const geometry: ScrollGeometry = { top: 0, height: 2000, viewport: 500 };
   const queued = new Map<number, () => void>();
   let serial = 0, writes = 0;
   const end = createActivityEnd(() => ({ ...geometry }), () => { writes++; geometry.top = Math.max(0, geometry.height - geometry.viewport); }, {
     request: (callback) => { const id = ++serial; queued.set(id, callback); return id; }, cancel: (id) => { queued.delete(id); },
-  }, canWrite);
+  }, canWrite, placed);
   const frame = () => { const callbacks = [...queued.values()]; queued.clear(); callbacks.forEach((callback) => callback()); };
   return { end, geometry, queued, frame, writes: () => writes };
 }
@@ -93,6 +93,16 @@ describe("Activity end settling", () => {
     expect(f.queued.size).toBe(1); f.frame(); f.frame(); expect(f.writes()).toBe(1);
     f.end.changed(); f.end.dispose(); f.frame(); f.end.pin(); f.end.changed();
     expect(f.queued.size).toBe(0); expect(f.writes()).toBe(1);
+  });
+  it("reveals cached and delayed first pages only after their content is placed at the end", () => {
+    let loaded=false, visible=false;
+    const f=fixture(undefined,()=>{if(loaded)visible=true;});
+    f.geometry.height=100;f.geometry.top=0;f.end.pin();f.frame();f.frame();
+    expect(visible).toBe(false);
+    loaded=true;f.geometry.height=9000;f.end.changed();
+    expect(visible).toBe(false);f.frame();expect(visible).toBe(true);expect(f.geometry.top).toBe(8500);
+    visible=false;f.geometry.height=4000;f.geometry.top=0;f.end.pin();
+    expect(visible).toBe(false);f.frame();expect(visible).toBe(true);expect(f.geometry.top).toBe(3500);
   });
   it("streams while pinned without repeating writes for an unchanged layout", () => {
     const f = fixture(); f.end.pin(); f.frame(); f.frame();

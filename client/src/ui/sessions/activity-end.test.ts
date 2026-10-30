@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createActivityEnd, type ScrollGeometry } from "./activity-end";
+import { createActivityEnd, newLocalSends, type ScrollGeometry } from "./activity-end";
 
 function fixture() {
   const geometry: ScrollGeometry = { top: 0, height: 2000, viewport: 500 };
@@ -75,5 +75,15 @@ describe("Activity end settling", () => {
     expect(f.queued.size).toBe(1); f.frame(); f.frame(); expect(f.writes()).toBe(2);
     f.end.changed(); f.end.dispose(); f.frame(); f.end.pin(); f.end.changed();
     expect(f.queued.size).toBe(0); expect(f.writes()).toBe(2);
+  });
+});
+
+describe("local send detection", () => {
+  it("does not jump for the initial load or a status update, only for a new send", () => {
+    const initial = newLocalSends(undefined, ["local-1", "local-2"]);
+    expect(initial.added).toEqual([]);
+    expect(initial.baseline).toEqual(new Set(["local-1", "local-2"]));
+    expect(newLocalSends(initial.baseline, ["local-1", "local-2"]).added).toEqual([]);
+    expect(newLocalSends(initial.baseline, ["local-1", "local-2", "local-3"]).added).toEqual(["local-3"]);
   });
 });

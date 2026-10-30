@@ -12,7 +12,7 @@ fn location(path: &Path) -> Location {
     ))
     .unwrap();
     Location {
-        root: path.join("state/desktop"),
+        root: zerus_desktop_migration::canonical(&path.join("state/desktop")).unwrap(),
         configuration: vector["binding"]["key"]["configuration"]
             .as_str()
             .unwrap()

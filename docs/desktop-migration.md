@@ -328,6 +328,35 @@ retry or settles a read. The existing initial seed still prefers Next's own
 file, even if malformed. Native Linux owner/token maps, current producer drain,
 source discovery and production handoff remain separate.
 
+`qt_local_read_marks(&QtSnapshot)` preserves the separate
+`attention/sessionMarks` and `attention/readReplies` maps together as
+`qt-local-read-marks`, schema 1, using the original Qt format/raw-store hash.
+Each private `{kind:"local-read-header",scope,present}` precedes pages of
+`{scope,key,value}` entries. Absent maps differ from explicit empty maps.
+Known mark fields use the existing `marks::Mark` serde decoder; unknown mark
+fields and explicit false/empty acknowledgements/replies remain original.
+
+`next_local_read_marks(bytes)` preserves `attention-marks.json` as
+`next-local-read-marks`, schema 1, format `attention-marks-json-v1`, with its
+raw-file hash. The existing ordered file decoder is reused without constructing
+the live store. The private header is
+`{kind:"local-read-file-header",fields:{marks:bool,replies:bool},content}`;
+`content` retains original other root fields. Pages contain
+`{scope:"marks"|"replies",index,key,value}` in original pair order, including
+duplicates. Missing optional mark fields stay missing. No live cap, deduplication
+or normalized reserialization replaces this evidence.
+
+Keys keep their original JSON text, including whitespace and the distinct Qt
+raw command versus Next frontend-agent spelling. Only their existing 3-string
+conversation tuple or 4-part fallback tuple (marks only, integer creation time)
+is checked. No key conversion, alias inference or current identity proof occurs.
+Both adapters are bounded at 16 MiB; Qt has a 50,000-entry cap per map and Next
+uses the current writer's 20,000-pair cap per map. The existing 64-entry/1 MiB
+pages, total bundle bounds and fresh source rechecks still apply. Unsupported,
+future, oversized or changed sources cannot complete the family. Neither
+adapter sets/clears a mark, migrates a fallback, marks a reply read, settles a
+pending read, drops an orphan, seeds a live store or grants replay authority.
+
 `qt_organization_checkpoints(&QtSnapshot)` preserves these separate objects
 through the existing QtStore/Qt JSON decoder:
 
@@ -591,8 +620,14 @@ failed file commit cannot leave a completed family on disk; the existing writer
 retries pending bytes, and an unhandled family retries at the next startup.
 A handled family skips Qt before reading it, across rollback and a second
 switch. This never seeds `run_groups`, run tokens, shared membership, project
-vivid state or local Windows folders; those retain their existing owners or
-separate unhandled families. No G1 evidence/marker or effect authority is added.
+vivid state or local Windows folders. The design owner's 2026-10-30 ruling
+keeps those in the original private organization checkpoint: project vivid
+waits on the UI's Soft/Bright fill control and consumers (`.66.2.30`), then
+G3 `.66.5.3.9` may seed `projects/vivid/<exact-project-id>` once with every
+existing Next value winning. It never belongs in organization-layout/shared
+state. Local Windows drive/UNC folders wait on the Windows Next Projects local
+folder model (`.66.2.31`, G3 dependent `.66.5.3.10`); no independent G3 folder
+stack is created. No G1 evidence/marker or effect authority is added.
 
 ## Delivery boundary
 

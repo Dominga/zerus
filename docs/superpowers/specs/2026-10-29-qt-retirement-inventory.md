@@ -390,8 +390,10 @@ and non-authoritative worktree caches, plus original draft-operation manifests
 and attachment references through the existing draft decoder. Qt and interim
 Next attention-observed history also has private bounded evidence through the
 existing seed parser, without notification delivery, withdrawal or token replay.
-Original states, identities and private unknown fields are preserved without
-replay. Its transport
+Qt and Next local attention marks/read replies also retain original keys,
+unknown fields and pair order through the existing mark/file decoders, without
+applying, settling or converting them. Original states, identities and private
+unknown fields are preserved without replay. Its transport
 client streams to G1's selected publisher with exact capability/configuration checks, bounded pipes
 and source rechecks; it has no startup hook. The shared handoff contract lives
 in `crates/desktop-migration`; G1 owns the executable transport, secure publisher,
@@ -408,7 +410,12 @@ three fields may fill empty/null Next defaults under the coordinator's explicit
 and the earlier run-memory seed never repeat. Both decoders share Qt's bounded
 legacy `groups` and `before_pin` restoration rules, preserving exact project
 and session identities without generating missing folder IDs or discarding an
-ambiguous bucket. Project vivid state and local Windows folders remain separate.
+ambiguous bucket. Project vivid state remains private evidence until the UI
+consumer (`.66.2.30`, G3 dependent `.66.5.3.9`) lands; the approved future local
+setting is `projects/vivid/<exact-project-id>` with existing Next values winning.
+Local Windows folders remain private evidence until the Windows Next Projects
+model (`.66.2.31`, G3 dependent `.66.5.3.10`) exists. Neither creates a new
+organization-layout field or an independent G3 folder stack.
 
 The design owner's 2026-10-30 ruling retains `projectFolderSplit` and
 `tasks/inspectorSplit` as private typed evidence, with no Qt splitter decoding

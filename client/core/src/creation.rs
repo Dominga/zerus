@@ -362,6 +362,31 @@ pub fn valid_operation(id: &str, value: &Value) -> bool {
     !flag(value, "repository") || safe_repository_url(text(value, "url"))
 }
 
+/// Decode the existing bounded journal without changing states or emitting
+/// effects. Unknown fields are retained. A damaged entry refuses the whole
+/// source, so a caller cannot mistake a partial journal for a handled family.
+pub fn decode_journal(bytes: &[u8]) -> Result<Map<String, Value>, &'static str> {
+    if bytes.len() > JOURNAL_LIMIT {
+        return Err(READ_FAILED);
+    }
+    let object: Map<String, Value> = serde_json::from_slice(bytes).map_err(|_| UNSUPPORTED)?;
+    if object.get("schema").and_then(Value::as_f64) != Some(1.0) {
+        return Err(UNSUPPORTED);
+    }
+    let operations = object
+        .get("operations")
+        .and_then(Value::as_object)
+        .filter(|operations| operations.len() <= OPERATIONS)
+        .ok_or(UNSUPPORTED)?;
+    if operations
+        .iter()
+        .any(|(id, value)| !valid_operation(id, value))
+    {
+        return Err(INVALID_IDENTITY);
+    }
+    Ok(object)
+}
+
 /// A state's caption on its card.
 pub fn caption(state: &str) -> &'static str {
     match state {
@@ -1335,31 +1360,20 @@ impl Creations {
         match journal {
             Journal::Missing => {}
             Journal::Unreadable => error = READ_FAILED.into(),
-            Journal::Bytes(bytes) if bytes.len() > JOURNAL_LIMIT => error = READ_FAILED.into(),
-            Journal::Bytes(bytes) => match serde_json::from_slice::<Value>(&bytes) {
-                Ok(Value::Object(object))
-                    if object.get("schema").and_then(Value::as_f64) == Some(1.0)
-                        && object
-                            .get("operations")
-                            .and_then(Value::as_object)
-                            .is_some_and(|operations| operations.len() <= OPERATIONS) =>
-                {
-                    saved = object["operations"]
-                        .as_object()
-                        .cloned()
-                        .unwrap_or_default();
+            Journal::Bytes(bytes) => match decode_journal(&bytes) {
+                Ok(mut object) => {
+                    let Some(Value::Object(operations)) = object.remove("operations") else {
+                        unreachable!()
+                    };
+                    saved = operations;
                 }
-                _ => error = UNSUPPORTED.into(),
+                Err(reason) => error = reason.into(),
             },
         }
         self.loaded = true;
         self.storage_error = error;
         if self.storage_error.is_empty() {
             for (id, value) in saved {
-                if !valid_operation(&id, &value) {
-                    self.storage_error = INVALID_IDENTITY.into();
-                    break;
-                }
                 if self.operations.contains_key(&id) {
                     continue;
                 }

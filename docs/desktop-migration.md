@@ -141,6 +141,27 @@ file/directory flushes and atomic final record publication. Existing UUIDs,
 held locks and partial/newer/mismatched bundles refuse publication. G3 writes no
 service files and has no marker, drain or effect authority.
 
+`migration::sources` supplies the first existing-decoder adapters:
+
+- `creations(Origin::Qt | Origin::Next, bytes)` reuses
+  `creation::decode_journal` (128 operations, 8 MiB). It preserves original
+  dispatched/unknown states, request IDs and unknown header/operation fields;
+  it does not call the live creation state machine. The same decoder now
+  validates the entire journal before the client loads any operation.
+- `qt_pending_reads`, `qt_shared_read_migrated` and `next_pending_reads` retain
+  exact host/run/conversation/reply/attention identities. Qt's compound key must
+  match its value. Unknown private fields are retained alongside the existing
+  `ReadMark` decoder's normalized shape. Queues are bounded at 16 MiB and 50,000
+  entries, in private pages of at most 64 entries/1 MiB. Nothing queues a read,
+  retries delivery or changes a host's read state.
+
+Attach `SourceStream::recheck` using the same existing source reader after
+decoding. It runs once on exhaustion and refuses changed hashes or read errors
+before a final manifest. G1 still checks source identity and its current drain;
+this callback creates no runtime authority. Unsupported/oversized sources stay
+unchanged and unhandled. Approval-reset, task/outbox and other source adapters
+remain separate slices; these APIs do not imply a complete production import.
+
 ## Delivery boundary
 
 The shared crate validates no running process and offers no `ReadyForWrites`

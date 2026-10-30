@@ -17,6 +17,8 @@ use zerus_desktop_migration::{
     MAX_IMPORT_RECORD_BYTES, MAX_SNAPSHOT_BYTES, SOURCE, VERSION,
 };
 
+pub mod sources;
+
 /// Redacted failures; source payloads and filesystem paths never enter errors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SourceError {
@@ -61,6 +63,43 @@ impl SourceStream {
             identity,
             chunks: Box::new(chunks),
         }
+    }
+
+    /// Recheck the exact source after its decoder finishes. The caller uses
+    /// the existing source reader under G1's current drain, checking path/file
+    /// identity there too. An error or changed hash prevents a final manifest.
+    pub fn recheck(self, verify: impl FnOnce() -> SourceResult<String> + Send + 'static) -> Self {
+        struct Checked<F> {
+            chunks: Box<dyn Iterator<Item = SourceResult<Value>> + Send>,
+            expected: String,
+            verify: Option<F>,
+            ended: bool,
+        }
+        impl<F: FnOnce() -> SourceResult<String>> Iterator for Checked<F> {
+            type Item = SourceResult<Value>;
+            fn next(&mut self) -> Option<Self::Item> {
+                if self.ended {
+                    return None;
+                }
+                if let Some(item) = self.chunks.next() {
+                    return Some(item);
+                }
+                self.ended = true;
+                let check = self.verify.take().unwrap()().and_then(|actual| {
+                    (actual == self.expected)
+                        .then_some(())
+                        .ok_or(SourceError::SourceChanged)
+                });
+                check.err().map(Err)
+            }
+        }
+        let chunks = Checked {
+            chunks: self.chunks,
+            expected: self.identity.sha256.clone(),
+            verify: Some(verify),
+            ended: false,
+        };
+        Self::new(self.identity, chunks)
     }
 }
 

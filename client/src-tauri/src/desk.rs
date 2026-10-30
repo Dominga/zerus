@@ -64,6 +64,11 @@ pub enum DeskInput {
     },
     /// A notification's default action (`MacAttentionNotifier.mm:20-28`).
     Clicked(String),
+    #[cfg(target_os = "linux")]
+    LinuxClicked {
+        token: String,
+        activation: String,
+    },
     /// A delivery failed (`AttentionNotifier::failed`).
     Failed {
         token: String,
@@ -473,6 +478,8 @@ pub struct Outcome {
     pub save_mode: Option<OpenMode>,
     /// A notification was clicked: open the window (`showSessions`).
     pub show: bool,
+    #[cfg(target_os = "linux")]
+    pub activation: Option<String>,
     /// Banners to withdraw, then post.
     pub changes: Changes,
     /// The clicked notification's session.
@@ -573,6 +580,17 @@ impl DeskLoop {
                             deadline: cx.now + CLICK_WAIT,
                         });
                         outcome.show = true;
+                    }
+                }
+                #[cfg(target_os = "linux")]
+                DeskInput::LinuxClicked { token, activation } => {
+                    if let Some(target) = attention::target(&token) {
+                        self.click = Some(Click {
+                            target,
+                            deadline: cx.now + CLICK_WAIT,
+                        });
+                        outcome.show = true;
+                        outcome.activation = (!activation.is_empty()).then_some(activation);
                     }
                 }
                 DeskInput::Failed { token, detail } => {
@@ -734,6 +752,9 @@ fn apply(app: &AppHandle, outcome: Outcome) {
     if outcome.show {
         let handle = app.clone();
         let _ = app.run_on_main_thread(move || {
+            #[cfg(target_os = "linux")]
+            crate::platform::linux_tray::present(&handle, outcome.activation.as_deref());
+            #[cfg(not(target_os = "linux"))]
             if let Err(error) = crate::lifecycle::show_main(&handle) {
                 eprintln!("zerus-client: could not open the window: {error}");
             }
@@ -772,7 +793,9 @@ fn deliver(app: &AppHandle, changes: Changes) {
             crate::platform::macos_notify::deliver(&handle, changes.cleared, changes.raised)
         });
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    crate::platform::linux_notify::deliver(app, changes.cleared, changes.raised);
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     let _ = (app, changes);
 }
 
@@ -1900,6 +1923,32 @@ mod tests {
             thread.round(4.0, Vec::new()).notices,
             Vec::<String>::new(),
             "once"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_linux_notification_keeps_its_activation_token_and_exact_session() {
+        let dir = scratch("linux-click");
+        let mut thread = Thread::new(&dir);
+        let first = thread.round(0.0, live("fixture", vec![asking("claude/p/exact")]));
+        let token = first.changes.raised[0].token.clone();
+        let clicked = thread.round(
+            1.0,
+            vec![DeskInput::LinuxClicked {
+                token,
+                activation: "fixture-wayland-activation".into(),
+            }],
+        );
+        assert!(clicked.show);
+        assert_eq!(
+            clicked.activation.as_deref(),
+            Some("fixture-wayland-activation")
+        );
+        assert_eq!(
+            clicked.open,
+            Some((ComputerId::from("fixture"), "run:claude/p/exact".into()))
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

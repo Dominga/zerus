@@ -310,6 +310,7 @@ body.shot{overflow:hidden}
 .trow.h{color:var(--label);font-size:10.5px;text-transform:uppercase;letter-spacing:.3px}
 .tbar{display:flex;height:12px;border-radius:3px;overflow:hidden;background:var(--hover)}
 .tbar i{display:block;height:100%}
+.cache{display:block;font-size:10px;color:var(--muted);margin-top:2px;white-space:nowrap}
 .ptab{width:100%;border-collapse:collapse;font-size:12px}
 .ptab th{color:var(--label);font-weight:400;font-size:10.5px;text-transform:uppercase;letter-spacing:.3px;text-align:right;padding:6px 10px;border-bottom:1px solid var(--cardBorder)}
 .ptab th:first-child,.ptab td:first-child{text-align:left}
@@ -542,17 +543,19 @@ const TASKS = [
 const MAXT = Math.max(...TASKS.map(t => (t[4] + t[5]) * TK));
 const fmtk = (k) => k >= 1000 ? `${(k / 1000).toFixed(2)}M` : `${Math.round(k)}k`;
 V.tokens = { w: 1600, h: 640, title: 'Tokens: a bar per task and the losses by tokens',
-  cap: 'Each task’s tokens split into the accepted attempt, the returned attempts (rework) and integration or build; stages add their own segments. The losses rank by tokens the same way. Phases 36 to 41 recorded no token counts, so the numbers here are a sample scaled from the real worked minutes; a provider without counters shows unknown.',
+  cap: 'Each task’s tokens split into the accepted attempt, the returned attempts (rework) and integration or build; stages add their own segments. The four buckets stay apart (fresh input, output, cache writes, cache reads); the total and the ranking count fresh input plus output, never the cache reads. A task that never started says so, and a provider without counters shows unknown. Phases 36 to 41 recorded no token counts, so the numbers here are a sample scaled from the real worked minutes.',
   html: () => `${header(3, 1)}
   <div class="pbody"><div class="pmain">
     <div class="row"><span class="ih">Tokens per task, phase 38</span><span class="sample">${ic('alert', 's10')}sample values: not recorded in phases 36 to 41</span><span class="grow"></span>
       <span class="legend"><span><i class="sw k-work"></i>Accepted attempt</span><span><i class="sw k-rework"></i>Returned attempts</span><span><i class="sw k-build"></i>Integration and build</span><span><i class="sw k-review"></i>Stages</span><span><i class="sw k-unk"></i>Unknown</span></span></div>
-    <div><div class="trow h"><span>Task</span><span>Title</span><span>Member</span><span>Tokens</span><span style="text-align:right">Total</span></div>
-    ${TASKS.map(t => { const a = t[4] * TK, r = t[5] * TK, tot = a + r; return `<div class="trow"><span class="mono">#${t[0]}</span><span class="ell">${t[1]}</span>
+    <div><div class="trow h"><span>Task</span><span>Title</span><span>Member</span><span>Tokens · in / out / cache w / cache r</span><span style="text-align:right">Total</span></div>
+    ${TASKS.map(t => { const a = t[4] * TK, r = t[5] * TK, tot = a + r; const cin = Math.round(tot * .6), cout = Math.round(tot * .4), cw = Math.round(tot * .3), cr = Math.round(tot * 4); return `<div class="trow"><span class="mono">#${t[0]}</span><span class="ell">${t[1]}</span>
       <span class="row">${tile(AG[t[3]], 't16')}<span class="muted">${t[2]}</span></span>
-      <span class="tbar" style="width:${Math.max(4, 400 * tot / MAXT)}px"><i class="${t[6] ? 'k-build' : 'k-work'}" style="width:${100 * a / tot}%"></i><i class="k-rework" style="width:${100 * r / tot}%"></i></span>
+      <span><span class="tbar" style="width:${Math.max(4, 400 * tot / MAXT)}px"><i class="${t[6] ? 'k-build' : 'k-work'}" style="width:${100 * a / tot}%"></i><i class="k-rework" style="width:${100 * r / tot}%"></i></span>
+      <span class="cache">in ${fmtk(cin)} · out ${fmtk(cout)} · cache w ${fmtk(cw)} · cache r ${fmtk(cr)}</span></span>
       <span class="mono" style="text-align:right">${fmtk(tot)}${r ? `<span class="warn" style="font-size:10.5px"> ${Math.round(100 * r / tot)}% rework</span>` : ''}</span></div>`; }).join('')}
-    <div class="trow"><span class="mono dim">#484</span><span class="ell dim">Review phase 38 (cancelled)</span><span class="row">${tile('claude', 't16')}<span class="muted">reviewer</span></span><span class="tbar" style="width:60px"><i class="k-unk" style="width:100%"></i></span><span class="mono dim" style="text-align:right">none</span></div></div></div>
+    <div class="trow"><span class="mono dim">#484</span><span class="ell dim">Review phase 38 (cancelled)</span><span class="row">${tile('claude', 't16')}<span class="muted">reviewer</span></span><span class="tbar" style="width:60px"><i class="k-unk" style="width:100%"></i></span><span class="mono dim" style="text-align:right">unknown</span></div>
+    <div class="trow"><span class="mono dim">#486</span><span class="ell dim">Phase 39: never handed out</span><span class="row">${tile('codex', 't16')}<span class="muted">backend</span></span><span class="dim">no spans</span><span class="mono dim" style="text-align:right">not started</span></div></div></div>
   <div class="pside"><div class="row"><h3 style="margin:0;font-size:13px">Top losses</h3><span class="grow"></span>${seg(['By time', 'By tokens'], 1, 'sm')}</div>
     ${loss(1, 'Rework tokens', '828k', '14% of the phase’s 5.82M tokens went to 8 returned attempts; #479 lost 83% of its tokens to two returns, #481 68%.', ['#479', '#481', '#477', '#482'], 100, true)}
     ${loss(2, 'The largest task: #482', '1.09M', 'One task of 14 used 19% of the phase: two attempts on backend2, the second 1h 46m.', ['#482'], 70)}

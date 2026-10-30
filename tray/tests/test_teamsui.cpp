@@ -9214,7 +9214,8 @@ QJsonObject profileOfPhase2()
         {"team", "team-1"}, {"scope", QJsonObject{{"phase", 2}}},
         {"summary", QJsonObject{{"tasks", 2}, {"accepted", 1}, {"from", t0}, {"to", t0 + 21600}, {"elapsed_s", 21600}, {"worked_s", 15000},
                                 {"totals", QJsonObject{{"work", 12000}, {"rework", 3000}, {"member", 4000}, {"deps", 1200}, {"lead", 600}}},
-                                {"tokens", QJsonObject{{"total", 2400000}}}}},
+                                {"tokens", QJsonObject{{"total", 2400000}, {"uncached_input", 1600000}, {"output", 800000},
+                                                        {"cache_read", 9000000}, {"cache_write", 1000000}}}}},
         {"losses", QJsonObject{{"by_time", QJsonObject{{"items", byTime}, {"next_cursor", QJsonValue()}}},
                                {"by_tokens", QJsonObject{{"items", byTokens}, {"next_cursor", QJsonValue()}}}}},
         {"critical_path", QJsonObject{{"planned", QJsonObject{{"tasks", QJsonArray{3, 4}}, {"length", 2}}},
@@ -9229,9 +9230,13 @@ QJsonObject profileOfPhase2()
         {"models", QJsonArray{QJsonObject{{"model", "gpt-5.5-codex"}, {"busy_s", 15000}, {"idle_s", 3000}, {"utilization", 0.83}, {"accepted", 1}, {"tokens", 2000000}}}},
         {"tasks", QJsonObject{{"items", QJsonArray{
             QJsonObject{{"task", 3}, {"title", "Address form UI"}, {"status", "accepted"}, {"phase", 2}, {"elapsed_s", 15600}, {"worked_s", 14640},
-                        {"rework_s", 3000}, {"tokens", QJsonObject{{"total", 2000000}}}, {"rework_tokens", 900000}, {"rework_share", 0.45}},
+                        {"rework_s", 3000}, {"tokens", QJsonObject{{"total", 2000000}, {"uncached_input", 1400000}, {"output", 600000},
+                                                                  {"cache_read", 7000000}, {"cache_write", 800000}}}, {"rework_tokens", 900000}, {"rework_share", 0.45}},
             QJsonObject{{"task", 4}, {"title", "Unit tests"}, {"status", "in_progress"}, {"phase", 2}, {"elapsed_s", 21600}, {"worked_s", 2000},
-                        {"rework_s", 0}, {"tokens", QJsonObject{{"total", 400000}}}}}}, {"next_cursor", QJsonValue()}}},
+                        {"rework_s", 0}, {"tokens", QJsonObject{{"total", 400000}, {"uncached_input", 300000}, {"output", 100000},
+                                                                {"cache_read", 2000000}, {"cache_write", 200000}}}},
+            QJsonObject{{"task", 5}, {"title", "Never handed out"}, {"status", "pending"}, {"phase", 2}, {"elapsed_s", 0}, {"worked_s", 0},
+                        {"started", false}, {"tokens", QJsonObject{{"not_started", true}}}}}}, {"next_cursor", QJsonValue()}}},
         {"events", QJsonObject{{"read", 40}, {"truncated", false}}}};
 }
 

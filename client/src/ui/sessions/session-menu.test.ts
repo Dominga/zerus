@@ -31,6 +31,9 @@ vi.mock("../../bridge", () => ({
   localRetry: vi.fn(), localDelete: vi.fn(async () => {}), localInspect: vi.fn(async () => null),
   savedDrafts: vi.fn(), draftConflicts: vi.fn(), savedDraft: vi.fn(), draftRecover: vi.fn(), draftRestore: vi.fn(),
   composerClearControl: vi.fn(async () => null),
+  // Content search (store/contentSearch.ts) and the creation cards start with the list.
+  inTauri: () => false,
+  onCreations: vi.fn(async () => () => {}),
 }));
 
 import { sessionMenu } from "./SessionList";

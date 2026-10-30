@@ -382,6 +382,27 @@ create no live notifier/lock/source reader and seed or rewrite no file. G4
 retains its secure reads and native effects; G1 retains the runtime admission
 and drain. This evidence remains Staged and cannot authorize historical effects.
 
+`recovery_policy_caches(&QtSnapshot, next_settings_bytes)` decodes both former
+`recovery/sharedPolicy` values before returning either source stream. Families
+`qt-recovery-policy-cache` and `next-recovery-policy-cache` use schema 1 and
+the original Qt raw-store/Next raw-settings hash; Next's format is
+`settings-json-v1`. It reuses the original `RecoverySync::new` cached-envelope
+parser, extracted verbatim as `recovery_settings::decode_cached`.
+
+Each private `{kind:"recovery-policy-cache",key,present,cleared,record}` keeps
+the original policy/order and unknown envelope or policy fields. Absent keys,
+explicit empty text and an empty cached object remain distinct. Unsupported
+envelopes and oversized bodies refuse both streams, with a 1 MiB input/body
+limit per cache and the existing 4 MiB Next Settings decoder limit. Both source
+rechecks must succeed before a final Staged record.
+
+The existing parser validates envelope shape, not a current revision or consent.
+Unknown policy versions remain private historical evidence, never execution
+authority. The adapter constructs no RecoverySync, compares or reconciles no
+policy, starts no timer/worker and invokes no get/set/sync command. Authoritative
+policy and current causal proof stay with `hgs`; no cached enable flag changes
+them. Existing seed/parser behavior is unchanged.
+
 `qt_organization_checkpoints(&QtSnapshot)` preserves these separate objects
 through the existing QtStore/Qt JSON decoder:
 

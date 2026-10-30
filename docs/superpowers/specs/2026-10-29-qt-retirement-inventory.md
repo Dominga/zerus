@@ -387,7 +387,9 @@ identity and persists new choices without rereading a handled Qt family.
 creation/read/task/launch decoders, separate repository-clone checkpoints,
 download indexes, organization observations/backups/drafts, provider operations
 and non-authoritative worktree caches, plus original draft-operation manifests
-and attachment references through the existing draft decoder. Qt and interim
+and attachment references through the existing draft decoder. Historical Qt
+and Next recovery-policy caches use the existing envelope decoder, retaining
+policy/order/unknown fields without reconciliation or execution. Qt and interim
 Next attention-observed history also has private bounded evidence through the
 existing seed parser, without notification delivery, withdrawal or token replay.
 Qt and Next local attention marks/read replies also retain original keys,
@@ -427,8 +429,9 @@ confirmation every time, never automatic-maintenance consent.
 
 The shared `tray.conf` also has bounded private evidence through its existing
 key parser; it preserves the original text without changing the selected CLI,
-terminal, polling or service settings. Remaining source coverage includes
-downloaded content and the rest of the interim stores listed below. Linux
+terminal, polling or service settings. Downloaded content stays untouched in
+its existing shared cache folder; migration copies no content or edited/unknown
+files. Remaining production integration covers the interim stores listed below. Linux
 notification owner/token and Next unknown-delivery data also have bounded
 private evidence through G4's shared Saved decoder/validator, retaining original
 fields separately from the typed projection. The existing secure native reader

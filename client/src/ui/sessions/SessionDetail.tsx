@@ -15,8 +15,8 @@ import { activity } from "../../store/session";
 import { activityReadOnly, type ActivitySource } from "../../store/activitySource";
 import { archiveActivity } from "../../store/archiveActivity";
 import { computerOffline } from "../../store/catalog";
-import { copyName, detailsFor, followedFor } from "../../store/actions";
-import { headerClearSlot } from "./actions-ui";
+import { copyIdentity, detailsFor, followedFor } from "../../store/actions";
+import { headerClearSlot, sessionIdentity } from "./actions-ui";
 import { actionEntries, freshActionEntry } from "./ActionDialogs";
 import { snapshotOf } from "./actions-ui";
 import { markEntry } from "./mark-entries";
@@ -52,6 +52,12 @@ function Header() {
   // Details come from the followed session's Activity state value; the store
   // inspects only once that subscription answered without one.
   const details = createMemo(() => detailsFor(s(), !computerOffline(s().computer), followedFor(s().key)));
+  const child = () => {
+    const id = subagentOpen();
+    return id ? { id, conversationId: s().subagents?.find((agent) => agent.id === id)?.conversationId } : undefined;
+  };
+  const identity = () => sessionIdentity(s(), details(), child());
+  const copyId = () => { void copyIdentity(snapshotOf(s()), details(), child()); };
   const act = createMemo(() => actionEntries(s(), details()));
   const mark = createMemo(() => markEntry(s()));
   const slot = () => headerClearSlot(!subagentOpen(), s().state);
@@ -70,7 +76,7 @@ function Header() {
   const actions = (): MenuEntry[] => [
     { label: "Open folder", icon: "folder-open", disabled: true },
     { label: "Open shell in session folder", icon: "square-terminal", disabled: true },
-    { label: "Copy session name", icon: "copy", action: () => { void copyName(snapshotOf(s())); } },
+    { label: identity().caption, icon: "copy", disabled: !identity().value, action: copyId },
     { separator: true },
     act().rename,
     { label: "Fork session…", icon: "git-fork", disabled: true },
@@ -100,7 +106,7 @@ function Header() {
           onClick={() => act().change.action()}><Icon name={act().change.icon!} size={16} /></button>
         <button class="icon-btn" data-tip="Open session folder in file manager" disabled><Icon name="folder-open" size={16} /></button>
         <button class="icon-btn" data-tip="Open shell in session folder" disabled><Icon name="square-terminal" size={16} /></button>
-        <button class="icon-btn" data-tip="Copy session name" onClick={() => { void copyName(snapshotOf(s())); }}><Icon name="copy" size={15} /></button>
+        <button class="icon-btn" data-tip={identity().caption} aria-label={identity().caption} disabled={!identity().value} onClick={copyId}><Icon name="copy" size={15} /></button>
         <Show when={slot() === "clear"}>
           <button class="icon-btn" data-tip={clear()?.reason || "Clear session"}
             aria-label={clear()?.running ? "Clearing…" : "Clear session"} disabled={!clear()?.enabled} onClick={() => composer.openClear()}><Icon name="clear" size={15} /></button>

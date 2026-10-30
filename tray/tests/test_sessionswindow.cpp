@@ -70,6 +70,7 @@
 #include <QWindow>
 #include <utility>
 #include "SessionsWindow.h"
+#include "CacheKeepalive.h"
 #include "Extensions.h"
 #include "InspectorCards.h"
 #include "JsonParse.h"
@@ -311,6 +312,7 @@ private slots:
     void socratiCodeIsAnOptionalExtension();
     void subordinateSessionsFollowTheirLead();
     void leadPanelKeepsItsRowsWhenNothingChanges();
+    void aRowUpdateReadsLeadLinksAndKeepWarmHoursOnce();
     void agentTeamsGroupTheirSessions();
     void waitingBannersShowInTheChatAndTheTeamView();
     void teamTreeShowsSubteamsAndRollsUp();
@@ -902,6 +904,67 @@ void TestSessionsWindow::leadPanelKeepsItsRowsWhenNothingChanges()
     QCOMPARE(rebuilt->count(), 2);
     panel.setContext("arch\nrun-1", {"arch\nrun-2", "web"}, {}, {});
     QTRY_VERIFY(panel.findChild<QLabel *>("sessionLeadName"));
+}
+
+// #705: a row update and the details it renders read the lead links and the
+// keep-warm hours a few times, not once or twice for every session (each read
+// goes through QSettings: about 90 ms and 40 ms of the GUI thread with 400
+// sessions in the GUI profile). The lead panel still offers the project's
+// other unlinked sessions.
+void TestSessionsWindow::aRowUpdateReadsLeadLinksAndKeepWarmHoursOnce()
+{
+    const auto restore = qScopeGuard([] { QSettings().remove("workspace/sessionLeads"); QSettings().remove("workspace/cacheKeepWarm"); });
+    auto state = fleet();
+    auto box = state.local();
+    const auto base = box.sessions.first();
+    for (int i = 0; i < 200; ++i) {
+        auto s = base; s.tag = QStringLiteral("s%1").arg(i, 3, 10, QLatin1Char('0')); s.name = "codex/hgs/" + s.tag;
+        s.runId = QStringLiteral("run-%1").arg(i); s.conversationId = QStringLiteral("conversation-%1").arg(i);
+        s.activity = "idle"; s.phase = "idle"; s.currentTool.clear();
+        box.sessions << s;
+    }
+    state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(FakeCli::program(script())); window.resize(1280, 760); window.setFleet(state); window.show();
+    auto *list = window.findChild<SessionList *>("sessionList");
+    QTRY_VERIFY(list->count() >= 200);
+    QHash<int, QString> identities;   // by the session's number
+    int selectedRow = -1;
+    for (int i = 0; i < list->count(); ++i) {
+        const auto *item = list->item(i);
+        if (item->data(SessionRoles::Header).toBool() || !item->data(SessionRoles::ChildId).toString().isEmpty()) continue;
+        if (item->data(SessionRoles::Key).toString().endsWith("codex/hgs/s002")) selectedRow = i;
+        const auto key = item->data(SessionRoles::Key).toString();
+        if (const auto at = key.indexOf("codex/hgs/s"); at >= 0) identities.insert(key.mid(at + 11).toInt(), item->data(SessionRoles::Identity).toString());
+    }
+    QCOMPARE(identities.size(), 200);
+    QVERIFY(selectedRow >= 0);
+    // One subordinate of s000, and one session kept warm: both loops run.
+    QVERIFY(SessionLeads::setLead(identities[1], identities[0]));
+    CacheKeepalive::setHours({}, box.sessions.last(), 2);
+    list->setCurrentRow(selectedRow);
+    auto *panel = window.findChild<QWidget *>("sessionLeadPanel"); QVERIFY(panel);
+    QTRY_VERIFY(panel->findChild<QComboBox *>("sessionLeadChoice"));
+    QTest::qWait(50);
+    const auto leads = SettingsJson::readCount("workspace/sessionLeads"), warm = SettingsJson::readCount("workspace/cacheKeepWarm");
+    QSignalSpy applied(&window, &SessionsWindow::rowsApplied);
+    window.setFleet(state);
+    QTRY_VERIFY(applied.size() >= 1);
+    QTest::qWait(50);
+    const auto leadReads = SettingsJson::readCount("workspace/sessionLeads") - leads, warmReads = SettingsJson::readCount("workspace/cacheKeepWarm") - warm;
+    // A few per render (an update renders the details several times), never
+    // one per session: reading per session made it 400 or more here.
+    QVERIFY2(leadReads <= 30, qPrintable(QStringLiteral("%1 reads of the lead links for 200 sessions").arg(leadReads)));
+    QVERIFY2(warmReads <= 30, qPrintable(QStringLiteral("%1 reads of the keep-warm hours for 200 sessions").arg(warmReads)));
+    QVERIFY(leadReads >= 1 && warmReads >= 1);
+    // s000 leads s001. s002's select offers nobody and the project's other
+    // unlinked sessions: the lead s000, not the subordinate s001, not itself.
+    QTRY_VERIFY(panel->findChild<QComboBox *>("sessionLeadChoice"));
+    const auto *choice = panel->findChild<QComboBox *>("sessionLeadChoice");
+    QStringList offered;
+    for (int i = 1; i < choice->count(); ++i) offered << choice->itemData(i).toString();
+    QVERIFY(offered.contains(identities[0]) && offered.contains(identities[199]));
+    QVERIFY(!offered.contains(identities[1]) && !offered.contains(identities[2]));
+    QCOMPARE(CacheKeepalive::hours({}, box.sessions.last()), 2);
 }
 
 // U55: what waits for the owner shows as a banner at the top of the session's

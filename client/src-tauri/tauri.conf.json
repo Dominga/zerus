@@ -11,6 +11,7 @@
   },
   "app": {
     "windows": [],
+    "enableGTKAppId": true,
     "withGlobalTauri": false,
     "security": {
       "csp": {

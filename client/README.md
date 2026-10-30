@@ -1239,6 +1239,22 @@ it. The Working clocks stop too, as Qt stops its timers when a window hides.
 
 ## Settings and motion
 
+The Rail pin and Appearance's “Keep Zerus above other windows” checkbox share
+`workspace/alwaysOnTop`. Native confirmation drives both controls, including
+changes from KDE's window menu. macOS, X11 and Windows apply the saved native
+level before the first show. KDE Wayland uses Qt's temporary KWin script path:
+one normal window matched by PID, application ID and caption, then its UUID;
+no global window rules or installed scripts. Unsupported desktops show Qt's
+explanation, and refusals use the sticky notice bus. Pending changes leave the
+focused controls enabled. GTK publishes the app identifier for this exact scope.
+
+The opt-in replay query `window-layer-smoke=first` exercises both controls,
+focus and hint geometry, then leaves the preference on; `window-layer-smoke=restart`
+verifies the next launch restores it and clears it. Use a private data directory,
+Xvfb, `GDK_BACKEND=x11`, a nonexistent `WAYLAND_DISPLAY`, a private D-Bus session
+and `ZERUS_CLIENT_PERF=1`, as for the other native replay smokes. Ordinary
+KWin protocol tests create their own fake compositor bus.
+
 The Settings screen has, so far, the two motion settings of the Qt GUI with its
 QSettings keys and defaults: Animate working sessions
 (`workspace/animateActivity`, on) and Reduce motion (`workspace/reduceMotion`,

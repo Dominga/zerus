@@ -11,7 +11,7 @@ export const text = (v: unknown) => typeof v === "string" ? v : "";
 const number = (v: unknown) => typeof v === "number" && Number.isFinite(v) ? v : 0;
 export interface TaskRef { host: string | null; name: string; id: string; known: boolean }
 export interface Task {
-  uuid: string; id: string; ref: string; title: string; text: string; stage: string; summary: string; cancelReason: string;
+  uuid: string; id: string; ref: string; title: string; text: string; stage: string; summary: string; cancelReason: string; historyRevision: string;
   createdAt: number; stageAt: number; cancelledAt: number; queue: number; writable: boolean;
   target: TaskRef; executor: TaskRef; author: TaskRef; targetKind: string; worker: string; attachments: number;
 }
@@ -22,7 +22,7 @@ const reference = (v: unknown): TaskRef => {
 export function taskItem(value: unknown, queue = 0): Task {
   const t = object(value), target = object(t.target), author = object(t.author);
   return { uuid: text(t.uuid), id: text(t.id), ref: text(t.ref), title: text(t.title) || text(t.text).split("\n", 1)[0],
-    text: text(t.text), stage: text(t.stage), summary: text(t.summary), cancelReason: text(t.cancel_reason),
+    text: text(t.text), stage: text(t.stage), summary: text(t.summary), cancelReason: text(t.cancel_reason), historyRevision: text(t.history_revision),
     createdAt: number(t.created_at), stageAt: number(t.stage_at), cancelledAt: number(t.cancelled_at), queue, writable: t.writable !== false,
     target: reference(target.kind === "any" ? undefined : target.parent ?? target), executor: reference(t.session),
     author: reference(author.kind === "agent" ? author : undefined), targetKind: text(target.kind), worker: text(object(t.worker).name),

@@ -40,9 +40,10 @@ const TABS = ["Overview", "Result", "History"] as const;
 export function TaskInspector(props: { project: string; task: Task; presentation?: Task; executorAvailable: boolean; openExecutor: () => void }) {
   const [tab, setTab] = createSignal<typeof TABS[number]>("Overview"), [count, setCount] = createSignal(8);
   const identity = createMemo(() => `${props.project}\n${props.task.uuid}`);
+  const revision = createMemo(() => JSON.stringify([props.project, props.task.uuid, props.task.historyRevision || props.task]));
   let selected = "";
-  createEffect(on(() => [props.project, props.task] as const, ([project, task]) => {
-    const key = `${project}\n${task.uuid}`;
+  createEffect(on(revision, () => {
+    const task = props.task, key = identity();
     if (key !== selected) { selected = key; taskDetails.select(props.project, task.uuid); }
     else taskDetails.refresh();
   }));

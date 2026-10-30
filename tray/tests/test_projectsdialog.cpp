@@ -210,12 +210,12 @@ void TestProjectsDialog::projectPageMatchesThePrototype()
     const auto win=MachinePlatform::Style::Windows,posix=MachinePlatform::Style::Posix;
     projects.addFolder(orbit,"workstation","D:/work/orbit","Orbit platform",win);
     projects.addFolder(orbit,"workstation","D:/work/orbit/.worktrees/backend","Team · Backend",win);
-    projects.addFolder(orbit,"macbook","/Users/anna/code/orbit/.worktrees/frontend","Team · Frontend",posix);
+    projects.addFolder(orbit,"macbook","/Users/user/code/orbit/.worktrees/frontend","Team · Frontend",posix);
     projects.addFolder(orbit,"workstation","D:/work/orbit-design-assets","Design assets",win);
     projects.addFolder(orbit,"build-01","/srv/orbit","build-01 clone",posix);
     projects.addFolder(orbit,"build-01","/srv/builds/orbit/services/payments-gateway/releases/2026-10/checkout-v2-hotfix-rounding","Payments hotfix checkout",posix);
     projects.addFolder(orbit,"build-02","/srv/orbit","build-02 clone",posix);
-    projects.addFolder(orbit,"macbook","/Users/anna/code/orbit","MacBook clone",posix);
+    projects.addFolder(orbit,"macbook","/Users/user/code/orbit","MacBook clone",posix);
     projects.addFolder(infra,"build-01","/srv/infra",{},posix);
     IronRules::setRules(orbit,{"Use pnpm for web and cargo for services.","Never log card numbers or provider tokens."});
     FleetState fleet;
@@ -225,8 +225,8 @@ void TestProjectsDialog::projectPageMatchesThePrototype()
                  folderSession("claude/orbit/design","D:/work/orbit-design-assets",{},{},false)};
     fleet.setLocal(ws,1);
     BoxState mac;mac.host="macbook";mac.ok=true;mac.metrics=QJsonObject{{"platform","macos"}};
-    mac.sessions={folderSession("codex/orbit/frontend","/Users/anna/code/orbit/.worktrees/frontend","/Users/anna/code/orbit/.worktrees/frontend","team/checkout-v2/frontend",true),
-                  folderSession("claude/orbit/ios","/Users/anna/code/orbit","/Users/anna/code/orbit","main",false)};
+    mac.sessions={folderSession("codex/orbit/frontend","/Users/user/code/orbit/.worktrees/frontend","/Users/user/code/orbit/.worktrees/frontend","team/checkout-v2/frontend",true),
+                  folderSession("claude/orbit/ios","/Users/user/code/orbit","/Users/user/code/orbit","main",false)};
     fleet.setPeer(mac,1);
     BoxState b1;b1.host="build-01";b1.ok=true;b1.metrics=QJsonObject{{"platform","linux"}};
     b1.sessions={folderSession("kimi/orbit/tester","/srv/orbit","/srv/orbit","main",false),
@@ -248,13 +248,13 @@ void TestProjectsDialog::projectPageMatchesThePrototype()
         };
         row("","claude/orbit/checkout","checkout","claude","Lead","workstation","feat/checkout-v2","Ready","muted","team-1","D:/work/orbit",false);
         row("","dsh/orbit/backend","Backend","dsh","Backend","workstation","team/checkout-v2/backend","Needs approval","warn","team-1","D:/work/orbit/.worktrees/backend",true);
-        row("macbook","codex/orbit/frontend","Frontend","codex","Frontend","macbook","team/checkout-v2/frontend","Ready","muted","team-1","/Users/anna/code/orbit/.worktrees/frontend",true);
+        row("macbook","codex/orbit/frontend","Frontend","codex","Frontend","macbook","team/checkout-v2/frontend","Ready","muted","team-1","/Users/user/code/orbit/.worktrees/frontend",true);
         row("build-01","kimi/orbit/tester","Tester","kimi","Tester","build-01","main","Working","active","team-1","/srv/orbit",false);
         row("","codex/orbit/search","search","codex","","workstation","feat/search-index","Working","active","","D:/work/orbit",false);
         row("build-02","dsh/orbit/review","review","dsh","","build-02","release/2.4","Offline","offline","","/srv/orbit",false);
         row("build-01","opencode/orbit/hotfix","payments-hotfix-with-a-long-session-name","opencode","","build-01","hotfix/payments-rounding","New reply","warn","",
             "/srv/builds/orbit/services/payments-gateway/releases/2026-10/checkout-v2-hotfix-rounding",false);
-        row("macbook","claude/orbit/ios","ios-shell","claude","","macbook","feat/ios-wallet","Paused","paused","","/Users/anna/code/orbit",false);
+        row("macbook","claude/orbit/ios","ios-shell","claude","","macbook","feat/ios-wallet","Paused","paused","","/Users/user/code/orbit",false);
         return rows;
     });
     dialog.setSessionCountsProvider([orbit,infra,general]{return QHash<QString,int>{{orbit,8},{infra,1},{general,3}};});
@@ -284,7 +284,7 @@ void TestProjectsDialog::projectPageMatchesThePrototype()
     auto *table=dialog.findChild<QTableWidget *>("projectFolders");QCOMPARE(table->rowCount(),8);
     QCOMPARE(folderKindAt(table,"D:\\work\\orbit"),QString("Main checkout · main"));
     bool team=false;QCOMPARE(folderKindAt(table,"D:\\work\\orbit\\.worktrees\\backend",&team),QString("Worktree · team/checkout-v2/backend"));QVERIFY(team);
-    QCOMPARE(folderKindAt(table,"/Users/anna/code/orbit/.worktrees/frontend",&team),QString("Worktree · team/checkout-v2/frontend"));QVERIFY(team);
+    QCOMPARE(folderKindAt(table,"/Users/user/code/orbit/.worktrees/frontend",&team),QString("Worktree · team/checkout-v2/frontend"));QVERIFY(team);
     QCOMPARE(folderKindAt(table,"D:\\work\\orbit-design-assets"),QString("Folder"));
     QCOMPARE(folderKindAt(table,"/srv/builds/orbit/services/payments-gateway/releases/2026-10/checkout-v2-hotfix-rounding"),QString("Clone · hotfix/payments-rounding"));
     int offline=0;for(int row=0;row<table->rowCount();++row)if(table->item(row,1)->data(Qt::UserRole+2).toBool()){

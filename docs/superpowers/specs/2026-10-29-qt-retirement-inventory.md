@@ -429,8 +429,10 @@ The shared `tray.conf` also has bounded private evidence through its existing
 key parser; it preserves the original text without changing the selected CLI,
 terminal, polling or service settings. Remaining source coverage includes
 downloaded content and the rest of the interim stores listed below. Linux
-notification owner/token sources await the native worker/lease ownership seam;
-the existing native reader and one-time seed remain unchanged.
+notification owner/token and Next unknown-delivery data also have bounded
+private evidence through G4's shared Saved decoder/validator, retaining original
+fields separately from the typed projection. The existing secure native reader
+and one-time seed remain unchanged; runtime worker/lease admission stays separate.
 Source discovery and production integration remain separate; adapters do not
 by themselves publish eligible evidence or transfer writer authority. The
 `approval_policies` adapter inspects Qt and interim Next choices together,

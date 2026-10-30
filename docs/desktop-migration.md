@@ -357,6 +357,31 @@ future, oversized or changed sources cannot complete the family. Neither
 adapter sets/clears a mark, migrates a fallback, marks a reply read, settles a
 pending read, drops an orphan, seeds a live store or grants replay authority.
 
+`qt_linux_notifications(&QtSnapshot)` and `next_linux_notifications(bytes)`
+preserve `qt-linux-notification-identities` and
+`next-linux-notification-identities`, schema 1. Qt's `attention/linuxOwner`
+and `attention/linuxTokens` keep the existing Qt source format/raw-store hash;
+Next's `linux-notifications.json` uses `linux-notifications-json-v1` and its
+original file hash. Validation reuses G4's pure `linux_notify::Saved::valid`
+and `decode_saved`; the typed projection never replaces original evidence.
+
+Private `{kind:"linux-notification-header",fields,content}` retains the
+original owner, optional bus ID and unknown Next header fields. Qt's fields
+record owner presence and token state `absent`, `empty-text` or `object`;
+Next's fields record optional bus-ID and uncertain-array presence. Pages have
+`{kind:"token",id:<original string key>,token}` and
+`{kind:"uncertain",index,token}`. Original unknown-delivery array order and
+duplicates survive; typed map/set coalescing never reduces the admitted raw
+entry count. Missing legacy lineage is never filled with the current daemon.
+
+The existing 16 MiB file and combined 8,192-entry policy caps apply to the
+original data too, along with 64-entry/1 MiB pages and fresh source rechecks.
+No bus, daemon, endpoint or producer lease is authenticated by these values.
+The adapters call no namespace adoption, post, close, activation or retry,
+create no live notifier/lock/source reader and seed or rewrite no file. G4
+retains its secure reads and native effects; G1 retains the runtime admission
+and drain. This evidence remains Staged and cannot authorize historical effects.
+
 `qt_organization_checkpoints(&QtSnapshot)` preserves these separate objects
 through the existing QtStore/Qt JSON decoder:
 

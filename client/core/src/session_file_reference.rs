@@ -75,9 +75,7 @@ pub fn parse(href: &str, style: Style) -> Target {
     if source.contains('?') {
         return Target::default();
     }
-    let (before_fragment, fragment) = source
-        .split_once('#')
-        .map_or((source.as_str(), ""), |parts| parts);
+    let (before_fragment, fragment) = source.split_once('#').unwrap_or((source.as_str(), ""));
     let scheme_end = before_fragment
         .find(':')
         .filter(|at| !before_fragment[..*at].contains('/'));

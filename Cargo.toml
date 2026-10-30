@@ -37,6 +37,7 @@ zerus-replica = { path = "crates/replica" }
 zerus-watch-protocol = { path = "crates/watch-protocol" }
 zerus-desktop-migration = { path = "crates/desktop-migration" }
 zerus-desktop-ledger = { path = "crates/desktop-ledger" }
+zerus-desktop-catalog = { path = "crates/desktop-catalog" }
 zerus-content-search = { path = "crates/content-search" }
 
 [target.'cfg(windows)'.dependencies]

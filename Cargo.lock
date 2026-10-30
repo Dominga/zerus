@@ -770,6 +770,7 @@ dependencies = [
  "uuid",
  "windows-sys",
  "zerus-content-search",
+ "zerus-desktop-catalog",
  "zerus-desktop-ledger",
  "zerus-desktop-migration",
  "zerus-replica",
@@ -2303,6 +2304,16 @@ dependencies = [
  "serde_json",
  "sha2",
  "uuid",
+]
+
+[[package]]
+name = "zerus-desktop-catalog"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rusqlite",
+ "serde_json",
+ "zerus-watch-protocol",
 ]
 
 [[package]]

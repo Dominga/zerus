@@ -17,6 +17,23 @@ pub(crate) enum TeamStatus {
     Archived,
 }
 
+/// U59: how a team plans. Standard plans, approves, runs and closes each phase;
+/// free keeps one open phase that takes tasks as they come until the owner
+/// closes it. Only the owner switches, on a request bound to its id and content.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PlanMode {
+    #[default]
+    Standard,
+    Free,
+}
+
+impl PlanMode {
+    pub(crate) fn is_standard(&self) -> bool {
+        *self == Self::Standard
+    }
+}
+
 /// F5: a draft team's editing state: who changed what since the other side last
 /// looked, so the owner's edit always wins and the lead sees the changes.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -1554,6 +1571,15 @@ pub(crate) struct Team {
     pub template: String,
     #[serde(default)]
     pub status: TeamStatus,
+    /// U59: standard planning (phases planned, approved, run and closed) or the
+    /// free mode, whose open phase never closes by itself. Standard is the
+    /// default and every stored team deserializes as standard.
+    #[serde(default, skip_serializing_if = "PlanMode::is_standard")]
+    pub plan_mode: PlanMode,
+    /// U59: when the last integration-and-build close of a free phase passed;
+    /// the desktop shows it with the free phase.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_build_at: Option<f64>,
     #[serde(default)]
     pub settings: Settings,
     /// The member id of the lead.

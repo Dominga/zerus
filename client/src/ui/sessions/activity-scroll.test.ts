@@ -50,6 +50,38 @@ it("holds scrollbar and selection drags until release, and drops obsolete layout
   motion.intent();motion.update(()=>{applied++;});motion.dispose();c.advance(1000);c.frame();c.frame();expect(applied).toBe(1);
 });
 
+it("holds a persistent selection after pointerup, applies only the latest layout, then resumes the pin", () => {
+  const c = clock();
+  let top = 1500, height = 2000, commits = 0, writes = 0;
+  const end = createActivityEnd(() => ({ top, height, viewport: 500 }), () => { writes++; top = height - 500; }, c.host, () => !motion.active());
+  const motion = createActivityScroll(() => top, (flush) => { flush(); end.changed(); }, c.host);
+  end.pin(); c.frame(); c.frame();
+  motion.hold(); motion.selection(true); motion.release();
+  for (let n = 1; n <= 20; n++) {
+    motion.update(() => { commits++; height = 2000 + n * 100; });
+    end.changed(); c.advance(500); c.frame(); c.frame();
+    expect(top).toBe(1500); expect(height).toBe(2000);
+    expect(writes).toBe(0); expect(commits).toBe(0);
+  }
+  motion.selection(false); c.advance(249); c.frame(); c.frame(); expect(commits).toBe(0);
+  c.advance(1); c.frame(); c.frame(); c.frame(); c.frame();
+  expect(commits).toBe(1); expect(height).toBe(4000); expect(top).toBe(3500); expect(writes).toBe(1);
+});
+
+it("a programmatic selection also holds a released reading anchor until the range clears", () => {
+  const c = clock(); let top = 400, above = 100, writes = 0;
+  const anchor = createActivityAnchor({ visible: () => [{ key: "reading", offset: above - top }], offset: () => above - top, adjust: (delta) => { writes++; top += delta; } }, () => true, c.host, () => !motion.active());
+  const motion = createActivityScroll(() => top, (flush) => { anchor.remember(); flush(); anchor.changed(); }, c.host);
+  anchor.remember(); motion.selection(true);
+  motion.update(() => { above = 350; anchor.changed(); });
+  c.advance(10000); c.frame(); c.frame(); anchor.changed();
+  expect(motion.active()).toBe(true); expect(writes).toBe(0); expect(top).toBe(400);
+  motion.selection(false); c.advance(250); c.frame(); c.frame(); c.frame();
+  expect(top).toBe(650); expect(writes).toBe(1);
+  motion.selection(true); motion.update(() => { above = 900; }); motion.reset();
+  motion.selection(false); c.advance(1000); c.frame(); c.frame(); expect(above).toBe(350);
+});
+
 it("opens a measured long history and scrolls slowly without new events or corrective writes",()=>{
   const c=clock(), rows=Array.from({length:200},(_,n)=>({key:`row-${n}`,height:20+n%7*127}));
   let top=rows.reduce((sum,row)=>sum+row.height,0)-600,writes=0;

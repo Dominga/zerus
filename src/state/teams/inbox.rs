@@ -551,21 +551,40 @@ fn all_items(team: &Team) -> Vec<Item> {
     // next free member take it.
     for task in team.tasks.iter().filter(|_| active) {
         let Some(run) = task.pipeline_run.as_ref().and_then(|pipeline| pipeline.open_run()) else { continue };
-        if run.stalled.is_empty() {
+        let (stalled, silent) = (!run.stalled.is_empty(), !run.silent.is_empty());
+        if !stalled && !silent {
             continue;
         }
-        let role = if run.member.is_empty() { "Zerus".to_owned() } else { team.name_of(&run.member) };
-        items.push(Item {
-            kind: "stage_stalled",
-            key: format!("stage_stalled:{}:{}", task.id, run.id),
-            task: Some(task.id),
-            member: role,
-            since: run.delivered_at.unwrap_or(run.at),
-            summary: summary(&format!("The {} stage of #{} is stalled: {}; it waits for a free member", run.kind, task.id, run.stalled)),
-            command: format!("{} | hgs team send-back --json", json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id,"reason":"..."})),
-            detail: String::new(),
-            subagents: Value::Null,
-        });
+        let member = if !run.member.is_empty() { &run.member } else { &run.stalled_member };
+        let role = if member.is_empty() { "Zerus".to_owned() } else { team.name_of(member) };
+        if stalled {
+            items.push(Item {
+                kind: "stage_stalled",
+                key: format!("stage_stalled:{}:{}", task.id, run.id),
+                task: Some(task.id),
+                member: role.clone(),
+                since: run.delivered_at.unwrap_or(run.at),
+                summary: summary(&format!("The {} stage of #{} is stalled: {}; it waits for a free member", run.kind, task.id, run.stalled)),
+                command: format!("{} | hgs team send-back --json", json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id,"reason":"..."})),
+                detail: String::new(),
+                subagents: Value::Null,
+            });
+        }
+        if silent {
+            // #635 N1: the member's turn ended without a verdict; the stage is
+            // still its own, so the lead may skip it or send the task back.
+            items.push(Item {
+                kind: "stage_stalled",
+                key: format!("stage_stalled:{}:{}:silent", task.id, run.id),
+                task: Some(task.id),
+                member: role,
+                since: run.delivered_at.unwrap_or(run.at),
+                summary: summary(&format!("The {} stage of #{} stalled: {}", run.kind, task.id, run.silent)),
+                command: format!("{} | hgs team send-back --json", json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id,"reason":"..."})),
+                detail: String::new(),
+                subagents: Value::Null,
+            });
+        }
     }
     // The permission requests the dispatcher read from the members' sessions
     // (C2): each is answerable by its own question id and hash.

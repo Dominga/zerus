@@ -108,6 +108,10 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
             std::env::remove_var(key);
         }
     }
+    // U60 (#658 N3): the model server's secret environment comes from the
+    // private file the launch left; it is applied after the account's variables
+    // so a managed account cannot strip it, and the file is removed here.
+    crate::state::model_servers::apply_session_secrets().map_err(|error| error.message)?;
     if agent == "claude" {
         // The tmux server may predate this SSH connection and still belong to
         // another security session. Join immediately before the native launch.
@@ -187,6 +191,11 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
             "transcript": null, "startup_kind":startup_kind,"launch_id":nonempty_env("HGS_LAUNCH_ID"), "account_id": nonempty_env("HGS_ACCOUNT_ID"), "agent_home": nonempty_env(home_var(&agent)?), "pid": std::process::id(),
             "process_start": process_start(std::process::id()),
             "supervisor": {"pid": std::process::id(), "start": process_start(std::process::id())}});
+        // U60 (#658 N4): the binding names the model server and model it runs
+        // on, so a later resume applies the same provider or refuses.
+        if let Some(model_server) = model_server_record() {
+            record["model_server"] = model_server;
+        }
         if let Some(parent) = nonempty_env("HGS_FORK_PARENT_ID") {
             record["fork_parent_id"] = json!(parent);
             record.as_object_mut().unwrap().remove("launch_id");
@@ -208,6 +217,10 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
                     .get(key)
                     .ok_or_else(|| format!("{name}: missing saved {key}"))?
                     .clone();
+            }
+            // U60 (#658 N4): a resumed session keeps its model server.
+            if let Some(model_server) = previous.get("model_server") {
+                record["model_server"] = model_server.clone();
             }
             let restore_id = archive_id
                 .clone()
@@ -571,7 +584,7 @@ pub(super) fn resume_spec(
     record: &Value,
     run_id: &str,
     archive_id: Option<&str>,
-) -> Result<backend::LaunchSpec> {
+) -> Result<(backend::LaunchSpec, Vec<String>)> {
     let argv = recipes::resume_argv(
         string(record, "agent"),
         &recipes::argv(record)?,
@@ -586,15 +599,18 @@ pub(super) fn resume_spec(
     )
 }
 
-/// The saved recipe relaunched in its own tmux slot. `replaces` starts a new
-/// conversation in place of that exact stopped run instead of resuming it.
+/// U60 (#709 L1): the saved recipe's spec and its model-server secret lines.
+/// The spec names no key file: one is written right before the backend launch
+/// (`start_with_secrets`) and removed when that launch fails; `hgs --run`
+/// removes the one it reads on success. A dry-run or an already-live session
+/// therefore leaves no file behind.
 fn session_spec(
     record: &Value,
     argv: Vec<String>,
     run_id: &str,
     archive_id: Option<&str>,
     replaces: Option<&str>,
-) -> Result<backend::LaunchSpec> {
+) -> Result<(backend::LaunchSpec, Vec<String>)> {
     let name = string(record, "name");
     if !(Path::new(string(record, "launch_dir")).is_dir() || archive_id.is_some() && super::worktree_lifecycle::restorable(record)) {
         return Err(format!(
@@ -632,18 +648,74 @@ fn session_spec(
         home_var(string(record, "agent"))?,
         string(record, "agent_home").to_owned(),
     );
-    Ok(backend::LaunchSpec {
-        name: name.into(),
-        cwd: string(record, "launch_dir").to_owned(),
-        env: environment
-            .into_iter()
-            .map(|(key, value)| format!("{key}={value}"))
-            .chain(account_variables(record))
-            .chain(hint_environment)
-            .collect(),
-        command: launch,
-        detached: true,
-    })
+    // U60 (#658 N4): a session started on a model server resumes with the same
+    // provider and model; the secret lines come with the spec and are written
+    // only right before the backend launch (#709 L1). A server that is gone
+    // refuses the resume instead of silently falling back to the cloud account.
+    let mut model_server_vars: Vec<String> = Vec::new();
+    let mut model_server_secrets: Vec<String> = Vec::new();
+    if let Some(model_server) = record["model_server"].as_object() {
+        let server = model_server["server"].as_str().unwrap_or_default();
+        let model = model_server["model"].as_str().unwrap_or_default();
+        let config = crate::config::Config::load().map_err(|error| error.message)?;
+        let (env, secrets) = super::model_servers::resume_environment(&config, server, string(record, "agent"), model)
+            .map_err(|error| format!("{name}: model server {server} cannot start this session again: {}", error.message))?;
+        model_server_vars.extend(env);
+        model_server_secrets.extend(secrets);
+        environment.insert("HGS_MODEL_SERVER", server.to_owned());
+        environment.insert("HGS_MODEL_SERVER_MODEL", model.to_owned());
+    }
+    Ok((
+        backend::LaunchSpec {
+            name: name.into(),
+            cwd: string(record, "launch_dir").to_owned(),
+            env: environment
+                .into_iter()
+                .map(|(key, value)| format!("{key}={value}"))
+                .chain(account_variables(record))
+                .chain(hint_environment)
+                .chain(model_server_vars)
+                .collect(),
+            command: launch,
+            detached: true,
+        },
+        model_server_secrets,
+    ))
+}
+
+/// Writes the session's model-server secret file right before the backend
+/// launch and removes it if that launch fails (#709 L1); on success the pane's
+/// `hgs --run` reads and removes it. No secrets mean no file at all.
+pub(super) fn start_with_secrets(spec: &backend::LaunchSpec, secrets: &[String]) -> Result<()> {
+    launch_with_secrets(spec, secrets, |spec| backend::current().start(spec))
+}
+
+/// The shared launch step: writes the key file right before `start`, removes it
+/// when `start` fails, and leaves it for `hgs --run` on success (#709 L1).
+fn launch_with_secrets<T>(
+    spec: &backend::LaunchSpec,
+    secrets: &[String],
+    start: impl FnOnce(&backend::LaunchSpec) -> Result<T>,
+) -> Result<T> {
+    if secrets.is_empty() {
+        return start(spec);
+    }
+    let path = super::model_servers::write_secret_file(&absolute_root()?, secrets).map_err(|error| error.message)?;
+    let mut launch = backend::LaunchSpec {
+        name: spec.name.clone(),
+        cwd: spec.cwd.clone(),
+        env: spec.env.clone(),
+        command: spec.command.clone(),
+        detached: spec.detached,
+    };
+    launch.env.push(format!("HGS_MODEL_SERVER_ENV={}", path.display()));
+    match start(&launch) {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            let _ = std::fs::remove_file(&path);
+            Err(error)
+        }
+    }
 }
 
 fn print_resume(spec: &backend::LaunchSpec) {
@@ -663,7 +735,7 @@ fn resume_archive(name: &str, id: &str, dry: bool, scope: Option<&session_action
     }
     if !dry { super::worktree_lifecycle::restore(&archived)?; }
     let run_id = uuid::Uuid::new_v4().to_string();
-    let spec = resume_spec(&archived, &run_id, Some(id))?;
+    let (spec, secrets) = resume_spec(&archived, &run_id, Some(id))?;
     let _guard = lock(None)?;
     if live()?.contains_key(name) || record_path(name).exists() {
         return Err(format!("{name}: a live or saved session already uses this name; finish or archive it before restoring"));
@@ -709,7 +781,7 @@ fn resume_archive(name: &str, id: &str, dry: bool, scope: Option<&session_action
     pending["process_start"] = json!("");
     if let Some(scope)=scope {scope.changing();}
     write(&mut pending)?;
-    if let Err(error) = backend::current().start(&spec) {
+    if let Err(error) = start_with_secrets(&spec, &secrets) {
         let mut failed = read(name)?;
         if string(&failed, "run_id") == run_id {
             failed["error"] = json!(error);
@@ -960,11 +1032,11 @@ pub(super) fn resume_scoped(names: &[String], dry: bool, scope: Option<&session_
         recipes::verify_history(&record, true)?;
         let restore_id = nonempty_value(&record, "restore_archive_id");
         let new_run=uuid::Uuid::new_v4().to_string();
-        let spec = resume_spec(&record, &new_run, restore_id.as_deref())?;
-        recipes.push((name, spec, record["run_id"].clone(), record["conversation_id"].clone(),new_run));
+        let (spec, secrets) = resume_spec(&record, &new_run, restore_id.as_deref())?;
+        recipes.push((name, spec, secrets, record["run_id"].clone(), record["conversation_id"].clone(),new_run));
     }
     let _guard = lock(None)?;
-    for (name, spec, original_run, original_conversation,new_run) in recipes {
+    for (name, spec, secrets, original_run, original_conversation,new_run) in recipes {
         let current_snapshot = live()?;
         let current = read(&name)?;
         if let Some(scope)=scope {scope.check(&current)?;}
@@ -982,7 +1054,7 @@ pub(super) fn resume_scoped(names: &[String], dry: bool, scope: Option<&session_
             print_resume(&spec);
         } else {
             if let Some(scope)=scope {scope.changing();}
-            backend::current().start(&spec)?;
+            start_with_secrets(&spec, &secrets)?;
             // U3: the resumed session reads the recovered dialogue first.
             if let Some((path, transcript_at)) = recovered.get(&name) {
                 let message = recovery_message(*transcript_at, path);
@@ -1011,6 +1083,13 @@ pub(super) fn resume_scoped(names: &[String], dry: bool, scope: Option<&session_
     Ok(0)
 }
 
+/// U60 (#658 N4): the model server a launch names, for the binding.
+fn model_server_record() -> Option<Value> {
+    nonempty_env("HGS_MODEL_SERVER").map(|server| {
+        json!({"server": server, "model": nonempty_env("HGS_MODEL_SERVER_MODEL").unwrap_or_default()})
+    })
+}
+
 /// `hgs resume <session> --fresh`: the stopped session's own launch recipe,
 /// account and model with a new conversation, like /clear in a live agent.
 /// The earlier conversation stays in native history and above the boundary.
@@ -1027,7 +1106,7 @@ pub(super) fn fresh(args: &[String], dry: bool) -> Result<i32> {
     }
     let argv = recipes::fresh_argv(string(&record, "agent"), &recipes::argv(&record)?)?;
     let run_id = uuid::Uuid::new_v4().to_string();
-    let spec = session_spec(
+    let (spec, secrets) = session_spec(
         &record,
         effort::resume_argv(&record, argv),
         &run_id,
@@ -1055,7 +1134,7 @@ pub(super) fn fresh(args: &[String], dry: bool) -> Result<i32> {
         print_resume(&spec);
         return Ok(0);
     }
-    backend::current().start(&spec)?;
+    start_with_secrets(&spec, &secrets)?;
     println!("hgs: starting {name} with a fresh conversation");
     Ok(0)
 }
@@ -1096,6 +1175,63 @@ mod tests {
 #[cfg(test)]
 mod guard_tests {
     use super::*;
+
+    /// U60 (#658 N4): the binding names the model server and model the launch
+    /// chose, so a resume can apply them again.
+    #[test]
+    fn the_record_names_the_model_server_and_model() {
+        std::env::set_var("HGS_MODEL_SERVER", "lab");
+        std::env::set_var("HGS_MODEL_SERVER_MODEL", "small");
+        assert_eq!(model_server_record(), Some(json!({"server":"lab","model":"small"})));
+        std::env::remove_var("HGS_MODEL_SERVER");
+        std::env::remove_var("HGS_MODEL_SERVER_MODEL");
+        assert_eq!(model_server_record(), None);
+    }
+
+    /// U60 (#709 L1): the key file is written right before the backend start
+    /// and removed when that start fails; a success leaves it for `hgs --run`.
+    #[test]
+    fn a_launch_writes_its_key_file_right_before_the_start_and_cleans_up_a_failure() {
+        let root = tempfile::tempdir().unwrap();
+        with_test_state_root(root.path(), || {
+            let spec = backend::LaunchSpec {
+                name: "claude/p/t".into(),
+                cwd: root.path().display().to_string(),
+                env: vec!["HGS_SESSION=claude/p/t".into()],
+                command: vec!["claude".into()],
+                detached: true,
+            };
+            let seen = std::cell::RefCell::new(None);
+            let failed: Result<()> = launch_with_secrets(&spec, &["ANTHROPIC_AUTH_TOKEN=sk-test".into()], |launch| {
+                let line = launch
+                    .env
+                    .iter()
+                    .find(|line| line.starts_with("HGS_MODEL_SERVER_ENV="))
+                    .expect("the key file path is in the launch environment");
+                let path = PathBuf::from(line.trim_start_matches("HGS_MODEL_SERVER_ENV="));
+                assert!(path.is_file(), "the key file exists when the backend starts");
+                assert!(std::fs::read_to_string(&path).unwrap().contains("sk-test"));
+                *seen.borrow_mut() = Some(path);
+                Err("the backend refused".to_string())
+            });
+            assert!(failed.is_err());
+            assert!(!seen.borrow().as_ref().unwrap().exists(), "a failed launch removes its key file");
+            // A successful start leaves the file for the pane's `hgs --run`.
+            let kept: Result<()> = launch_with_secrets(&spec, &["HGS_MODEL_SERVER_KEY=sk".into()], |launch| {
+                let line = launch.env.iter().find(|line| line.starts_with("HGS_MODEL_SERVER_ENV=")).unwrap();
+                *seen.borrow_mut() = Some(PathBuf::from(line.trim_start_matches("HGS_MODEL_SERVER_ENV=")));
+                Ok(())
+            });
+            assert!(kept.is_ok());
+            assert!(seen.borrow().as_ref().unwrap().is_file(), "a successful start leaves the file for hgs --run");
+            // No secrets mean no file and the original spec goes through.
+            let untouched: Result<()> = launch_with_secrets(&spec, &[], |launch| {
+                assert!(!launch.env.iter().any(|line| line.starts_with("HGS_MODEL_SERVER_ENV=")));
+                Ok(())
+            });
+            assert!(untouched.is_ok());
+        });
+    }
 
     #[test]
     fn a_transcript_behind_the_events_is_detected() {

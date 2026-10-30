@@ -75,6 +75,11 @@ private:
     void finishRename(bool save);
     // The folder table as tall as its rows, the worktrees under it.
     void fitFolders();
+    // #700: the folder columns for the table's width (Name and Kind shrink
+    // first), the worktrees' height in its bounds, and the page's message.
+    void fitFolderColumns();
+    int boundedWorktrees(int height) const;
+    void setStatus(const QString &text, bool error = false);
     struct FolderKind { QString text; bool team = false; };
     void showProject();
     // The Sessions rows and the folders' kinds again, from the fleet the page
@@ -117,9 +122,8 @@ private:
     QSet<QString> m_importDeferred;
     QListWidget *m_list;
     QAction *m_moveUp,*m_moveDown;
-    QTableWidget *m_folders;
-    QSplitter *m_folderSplitter;
-    bool m_folderSplitInitialized = false;
+    QTableWidget *m_folders = nullptr;
+    QSplitter *m_folderSplitter = nullptr;
     WorktreePanel *m_worktrees;
     QPointer<WorktreesDialog> m_worktreeOverview;
     QLineEdit *m_name;
@@ -138,7 +142,9 @@ private:
     // U25 part 7: the header, the three blocks and the sessions table.
     QLabel *m_headerIcon = nullptr, *m_headerName = nullptr, *m_summary = nullptr;
     QPushButton *m_newTeam = nullptr, *m_add = nullptr, *m_addFolder = nullptr;
-    int m_worktreeHeight = 0;
+    int m_worktreeHeight = 0, m_dragFrom = 0, m_dragY = 0;
+    bool m_dragging = false;
+    QString m_renameId;   // the project a rename in progress belongs to
     bool m_renaming = false;
     std::function<QHash<QString, int>()> m_countsProvider;
     CollapsibleBlock *m_foldersBlock = nullptr, *m_sessionsBlock = nullptr, *m_rulesBlock = nullptr;

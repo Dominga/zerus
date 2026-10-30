@@ -1,4 +1,5 @@
 #pragma once
+#include "Settings.h"
 #include "PhonePairing.h"
 #include "RecoverySettings.h"
 #include "ActivityWidth.h"
@@ -158,14 +159,14 @@ public:
         usageIndicator->setCurrentIndex(qMax(0,usageIndicator->findData(QSettings().value("workspace/usageIndicator","rails"))));
         appearance->addWidget(new QLabel(tr("Usage limit indicator")));appearance->addWidget(usageIndicator);
         auto *usageHint=new QLabel(tr("Compares used quota with the elapsed part of each limit window. The bars show usage above elapsed time; the marker shows elapsed time on the usage bar. Colors warn when the current pace would use up the limit before it resets."));usageHint->setWordWrap(true);appearance->addWidget(usageHint);
-        connect(usageIndicator,&QComboBox::currentIndexChanged,this,[this,usageIndicator]{QSettings().setValue("workspace/usageIndicator",usageIndicator->currentData());if(appearanceChanged)appearanceChanged();});
+        connect(usageIndicator,&QComboBox::currentIndexChanged,this,[this,usageIndicator]{Settings::set("workspace/usageIndicator",usageIndicator->currentData());if(appearanceChanged)appearanceChanged();});
         appearance->addWidget(new QLabel(tr("Content scale")));
         auto *scaleRow=new QHBoxLayout;scaleRow->setSpacing(4);auto *scale=new QSlider(Qt::Horizontal);scale->setObjectName("workspaceContentScale");
         // Twentieths keep the slider on 5% steps for both dragging and the keyboard.
         scale->setRange(qRound(ContentScale::Minimum*20),qRound(ContentScale::Maximum*20));scale->setPageStep(5);
         const auto scaleFactor=ContentScale::factor();scale->setValue(qRound(scaleFactor*20));
         // Normalize preferences saved by older versions to the current bounds.
-        QSettings().setValue("workspace/contentScale",scaleFactor);
+        Settings::set("workspace/contentScale",scaleFactor);
         scale->setAccessibleName(tr("Content scale"));scale->setMaximumWidth(360);
         // A value keeps its widest text's width, so the reset button right after it stays put while dragging.
         auto *scaleValue=new QLabel;scaleValue->setObjectName("workspaceContentScaleValue");scaleValue->setMinimumWidth(scaleValue->fontMetrics().horizontalAdvance("200%")+2);
@@ -177,7 +178,7 @@ public:
         auto *scaleApply=new QTimer(this);scaleApply->setSingleShot(true);scaleApply->setInterval(150);
         connect(scaleApply,&QTimer::timeout,this,[this]{if(contentScaleChanged)contentScaleChanged();});
         auto showScale=[scaleValue](int steps){scaleValue->setText(QStringLiteral("%1%").arg(steps*5));};showScale(scale->value());
-        connect(scale,&QSlider::valueChanged,this,[scaleApply,showScale](int steps){QSettings().setValue("workspace/contentScale",steps/20.);showScale(steps);scaleApply->start();});
+        connect(scale,&QSlider::valueChanged,this,[scaleApply,showScale](int steps){Settings::set("workspace/contentScale",steps/20.);showScale(steps);scaleApply->start();});
         appearance->addWidget(new QLabel(tr("Activity width")));
         auto *widthRow=new QHBoxLayout;widthRow->setSpacing(4);activityWidth=new QSlider(Qt::Horizontal);activityWidth->setObjectName("workspaceActivityWidth");
         activityWidth->setRange(ActivityWidth::Minimum,ActivityWidth::Maximum);activityWidth->setSingleStep(10);activityWidth->setPageStep(100);
@@ -216,24 +217,24 @@ public:
         auto *skinHint=new QLabel(tr("Colors, window shape and screen layouts. Duplicate a skin to edit it."));
         skinHint->setObjectName("muted");skinHint->setToolTip(tr("A duplicate is a JSON file in the skins folder; saved changes apply at once."));
         appearance->insertWidget(5,skinHint);
-        connect(skin,&QComboBox::currentIndexChanged,this,[this,skin]{QSettings().setValue("workspace/skin",skin->currentData());if(appearanceChanged)appearanceChanged();});
+        connect(skin,&QComboBox::currentIndexChanged,this,[this,skin]{Settings::set("workspace/skin",skin->currentData());if(appearanceChanged)appearanceChanged();});
         connect(duplicateSkin,&QPushButton::clicked,this,[this,fillSkins]{
             const auto current=WorkspaceSkin::current();bool ok=false;
             const auto name=QInputDialog::getText(this,tr("Duplicate skin"),tr("Name of the copy"),QLineEdit::Normal,tr("%1 copy").arg(current.name),&ok);
             if(!ok)return;
             QString error;const auto id=WorkspaceSkin::duplicate(current,name,&error);
             if(id.isEmpty()){QMessageBox::warning(this,tr("Duplicate skin"),error);return;}
-            QSettings().setValue("workspace/skin",id);fillSkins();if(appearanceChanged)appearanceChanged();
+            Settings::set("workspace/skin",id);fillSkins();if(appearanceChanged)appearanceChanged();
         });
         connect(skinFolder,&QPushButton::clicked,this,[]{QDir().mkpath(WorkspaceSkin::directory());QDesktopServices::openUrl(QUrl::fromLocalFile(WorkspaceSkin::directory()));});
-        connect(theme,&QComboBox::currentIndexChanged,this,[this,theme]{QSettings().setValue("workspace/theme",theme->currentData());if(appearanceChanged)appearanceChanged();});
+        connect(theme,&QComboBox::currentIndexChanged,this,[this,theme]{Settings::set("workspace/theme",theme->currentData());if(appearanceChanged)appearanceChanged();});
         auto *sessions=makePage(tr("Sessions"));
         for(const auto &option:QList<QStringList>{{"workspaceCompact","workspace/compact",tr("Compact session rows"),"false"},{"workspaceExpandSessionsOnHover","workspace/expandSessionsOnHover",tr("Expand the collapsed session list on hover"),"true"},{"workspaceHideEmptyProjects","workspace/hideEmptyProjects",tr("Hide projects without active sessions"),"true"},{"workspaceAnimateActivity","workspace/animateActivity",tr("Animate working sessions"),"true"}}){
-            auto *check=new QCheckBox(option[2]);check->setObjectName(option[0]);check->setChecked(QSettings().value(option[1],option[3]=="true").toBool());sessions->addWidget(check);connect(check,&QCheckBox::toggled,this,[this,key=option[1]](bool on){QSettings().setValue(key,on);if(appearanceChanged)appearanceChanged();});
+            auto *check=new QCheckBox(option[2]);check->setObjectName(option[0]);check->setChecked(QSettings().value(option[1],option[3]=="true").toBool());sessions->addWidget(check);connect(check,&QCheckBox::toggled,this,[this,key=option[1]](bool on){Settings::set(key,on);if(appearanceChanged)appearanceChanged();});
         }
         auto *completed=new QCheckBox(tr("Show completed subagents"));completed->setObjectName("workspaceShowCompletedSubagents");completed->setChecked(QSettings().value("workspace/showCompletedSubagents",false).toBool());sessions->addWidget(completed);
         auto *completedHint=new QLabel(tr("Include agents whose latest turn has finished in the session list and its counts. Plan & agents always shows all reported agents. Agents with unknown status remain visible."));completedHint->setWordWrap(true);sessions->addWidget(completedHint);
-        connect(completed,&QCheckBox::toggled,this,[this](bool on){QSettings().setValue("workspace/showCompletedSubagents",on);if(appearanceChanged)appearanceChanged();});
+        connect(completed,&QCheckBox::toggled,this,[this](bool on){Settings::set("workspace/showCompletedSubagents",on);if(appearanceChanged)appearanceChanged();});
         auto *optionalQuestions=new QCheckBox(tr("Notify about optional questions"));optionalQuestions->setObjectName("notifyOptionalQuestions");optionalQuestions->setChecked(QuestionNotificationSettings::enabled());sessions->addWidget(optionalQuestions);
         auto *optionalHint=new QLabel(tr("Off by default. Shows a system notification once for each new optional question, which the agent keeps working without. It is withdrawn when the questions are answered or skipped, or the session is marked as read. Questions that need an answer always notify."));optionalHint->setWordWrap(true);sessions->addWidget(optionalHint);
         connect(optionalQuestions,&QCheckBox::toggled,this,[](bool on){QuestionNotificationSettings::setEnabled(on);});
@@ -253,17 +254,17 @@ public:
         residentHost->setChecked(WindowsMobileServices::residentHost());sessions->addWidget(residentHost);
         auto *residentHint=new QLabel(tr("Off by default. On: Zerus keeps this computer's session host running, so the Zerus desktop of another computer can start sessions here over SSH. A session host is never started from an SSH session."));
         residentHint->setWordWrap(true);sessions->addWidget(residentHint);
-        connect(residentHost,&QCheckBox::toggled,this,[executable](bool on){QSettings().setValue(QStringLiteral("machines/residentHost"),on);if(on)WindowsMobileServices::keepResidentHost(executable);});
+        connect(residentHost,&QCheckBox::toggled,this,[executable](bool on){Settings::set(QStringLiteral("machines/residentHost"),on);if(on)WindowsMobileServices::keepResidentHost(executable);});
 #endif
         auto *hint=new QLabel(tr("Closing Zerus keeps agents running. Projects and the arrangement of your workspace are saved on this device."));hint->setWordWrap(true);sessions->addWidget(hint);sessions->addStretch();
         sync=new RecoverySync(executable,this);recovery=new RecoverySettings(sync);recovery->setMaximumWidth(850);addPage(recovery);
         auto *processes=makePage(tr("Processes"));
         auto *enabled=new QCheckBox(tr("Enable Processes tab"));enabled->setObjectName("processesEnabled");enabled->setChecked(ProcessSettings::enabled());processes->addWidget(enabled);
         auto *timings=new QWidget;auto *form=new QFormLayout(timings);form->setContentsMargins(0,0,0,0);form->setFieldGrowthPolicy(QFormLayout::FieldsStayAtSizeHint);timings->setEnabled(enabled->isChecked());processes->addWidget(timings);
-        connect(enabled,&QCheckBox::toggled,this,[this,timings](bool on){QSettings().setValue("processes/enabled",on);timings->setEnabled(on);if(pollingChanged)pollingChanged();});
+        connect(enabled,&QCheckBox::toggled,this,[this,timings](bool on){Settings::set("processes/enabled",on);timings->setEnabled(on);if(pollingChanged)pollingChanged();});
         auto timing=[&](const char *key,const QString &label,int value,double low,double high){
             auto *spin=new QDoubleSpinBox;spin->setObjectName(QLatin1String(key));spin->setRange(low,high);spin->setDecimals(1);spin->setSingleStep(0.5);spin->setSuffix(tr(" s"));spin->setValue(value/1000.);form->addRow(label,spin);
-            connect(spin,&QDoubleSpinBox::valueChanged,this,[this,key](double seconds){QSettings().setValue(QStringLiteral("processes/")+QLatin1String(key),seconds);if(pollingChanged)pollingChanged();});
+            connect(spin,&QDoubleSpinBox::valueChanged,this,[this,key](double seconds){Settings::set(QStringLiteral("processes/")+QLatin1String(key),seconds);if(pollingChanged)pollingChanged();});
         };
         timing("activeSeconds",tr("Open Processes tab"),ProcessSettings::activeMs(),1,60);
         timing("backgroundSeconds",tr("Background process count"),ProcessSettings::backgroundMs(),5,600);
@@ -287,7 +288,7 @@ public:
         legacy->setEnabled(false);legacy->hide();mobileLayout->addWidget(legacy);
         connect(legacyToggle,&QToolButton::toggled,this,[legacy,legacyToggle](bool show){legacy->setVisible(show);legacyToggle->setArrowType(show?Qt::DownArrow:Qt::RightArrow);});
         workspaceConnection->protectionChanged=[legacy,legacyToggle](bool encrypted){legacy->setEnabled(!encrypted);legacyToggle->setEnabled(!encrypted);if(encrypted){legacyToggle->setChecked(false);legacy->hide();}};
-        auto *phones=new PhonePairing::Panel(executable);mobileLayout->addWidget(phones);
+        auto *phones=new PhonePairing::Panel(executable);phones->setObjectName("settingsPhonesPanel");phonesPanel=phones;mobileLayout->addWidget(phones);
         workspaceConnection->connectionChanged=[phones]{phones->refresh();};
         mobileDelivery=new MobileDeliverySettings(executable);mobileLayout->addWidget(mobileDelivery);mobileLayout->addStretch();addPage(mobile);
         files=new DownloadCacheSettings;addPage(files);
@@ -308,7 +309,7 @@ public:
                 nativeQdrant->setChecked(QSettings().value("socraticode/nativeQdrant",false).toBool());optionsLayout->addWidget(nativeQdrant);
                 auto *nativeHint=new QLabel(tr("Off by default: SocratiCode keeps each folder's index in its own Qdrant container in Docker. On: Zerus uses a Qdrant program on 127.0.0.1:6333, which it can install and start, with Ollama for embeddings. Folders whose Claude Code settings name a Qdrant always use that one."));
                 nativeHint->setWordWrap(true);optionsLayout->addWidget(nativeHint);
-                connect(nativeQdrant,&QCheckBox::toggled,this,[](bool on){QSettings().setValue("socraticode/nativeQdrant",on);});
+                connect(nativeQdrant,&QCheckBox::toggled,this,[](bool on){Settings::set("socraticode/nativeQdrant",on);});
             }
             QPointer<QWidget> kept;if(optionsLayout->count()){extensions->addWidget(options);kept=options;}else delete options;
             connect(check,&QCheckBox::toggled,this,[this,id=extension.id,kept](bool on){Extensions::setEnabled(id,on);if(kept)kept->setEnabled(on);if(extensionsChanged)extensionsChanged();});
@@ -408,6 +409,9 @@ public:
         activityFullWidth->setChecked(ActivityWidth::fullWidth());activityWidth->setEnabled(!activityFullWidth->isChecked());
         updateResets();
     }
+    // #650 N1: the Phones panel of Mobile connection draws its own colours,
+    // so it takes the window's theme here, and again on each change.
+    void setDark(bool dark){if(phonesPanel)phonesPanel->setTheme(dark);}
     // Keyboard zoom changes the content scale; the window applies it itself.
     void syncContentScale(){
         auto *scale=findChild<QSlider *>("workspaceContentScale");if(!scale)return;
@@ -420,6 +424,7 @@ private:
     HgsClient *versionClient;QLabel *cliVersion;MobileDeliverySettings *mobileDelivery;
     QLabel *forkStatus=nullptr;QPushButton *forkUpdate=nullptr;   // WhiteWh fork: About
     WorkspaceSettings::Panel *workspaceConnection;
+    PhonePairing::Panel *phonesPanel=nullptr;
     SpeechSettings *speech;
     DownloadCacheSettings *files;
     AutomaticApprovalSettings *approvals;

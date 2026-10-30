@@ -56,13 +56,33 @@ Status parseStatus(const QJsonObject &status)
     out.source = status.value("source").toString();
     for (const auto &value : status.value("models").toArray()) {
         const auto row = value.toObject();
-        if (const auto name = row.value("name").toString(); !name.isEmpty()) out.models << Model{name, row.value("state").toString().toLower()};
+        if (const auto name = row.value("name").toString(); !name.isEmpty())
+            out.models << Model{name, row.value("state").toString().toLower(), qint64(row.value("since").toDouble())};
     }
     if (const auto memory = status.value("memory").toObject(); !memory.isEmpty()) {
         out.free = memory.value("free").toDouble(-1); out.total = memory.value("total").toDouble(-1);
     }
     out.raw = strings(status.value("raw"));
     return out;
+}
+
+QString rootOf(const QString &baseUrl)
+{
+    QString root = baseUrl.trimmed();
+    while (root.endsWith(QLatin1Char('/'))) root.chop(1);
+    if (root.endsWith(QStringLiteral("/v1"))) root.chop(3);
+    while (root.endsWith(QLatin1Char('/'))) root.chop(1);
+    return root;
+}
+
+QString modelsUrl(const QString &baseUrl)
+{
+    return rootOf(baseUrl) + QStringLiteral("/v1/models");
+}
+
+QString agentUrl(const QString &baseUrl, const QString &kind)
+{
+    return kind == QLatin1String("anthropic") ? rootOf(baseUrl) : rootOf(baseUrl) + QStringLiteral("/v1");
 }
 
 QString stateLabel(const QString &state, const QString &source)
@@ -178,12 +198,49 @@ void Controller::setActive(bool active)
     for (const auto &server : std::as_const(m_servers)) if (!m_status.value(server.name).known) refreshStatus(server.name);
 }
 
-void Controller::up(const QString &server, const QString &model, const Reply &done)
+void Controller::up(const QString &server, const QString &model, const Reply &started, const Reply &finished)
 {
-    call({QStringLiteral("up"), server, model, QStringLiteral("--detach")}, {}, 60000, [this, server, done](const QJsonObject &result, const QString &error) {
-        if (done) done(result, error);
+    const QString key = server + QLatin1Char('\n') + model;
+    if (m_upping.contains(key)) return;
+    m_upping << key;
+    emit changed();
+    call({QStringLiteral("up"), server, model, QStringLiteral("--detach")}, {}, 60000, [this, server, key, started, finished](const QJsonObject &result, const QString &error) {
+        if (started) started(result, error);
+        const QString id = result.value("request_id").toString();
+        if (!error.isEmpty() || result.value("status").toString() != "started" || id.isEmpty()) {
+            // Refused, or an hgs that ran it at once: that answer is the outcome.
+            m_upping.remove(key);
+            if (finished) finished(result, error);
+            refreshStatus(server);
+            return;
+        }
         refreshStatus(server);
+        // The run's own time limit, and two minutes for its runner to report.
+        const qint64 limit = qint64(result.value("timeout_minutes").toInt(30)) * 60000 + 120000;
+        pollUp(key, id, QDateTime::currentMSecsSinceEpoch() + limit, finished);
     });
+}
+
+void Controller::pollUp(const QString &key, const QString &id, qint64 until, const Reply &finished)
+{
+    QTimer::singleShot(m_upPoll, this, [this, key, id, until, finished] {
+        call({QStringLiteral("up-result"), id, QStringLiteral("--json")}, {}, 30000, [this, key, id, until, finished](const QJsonObject &result, const QString &error) {
+            const QString status = result.value("status").toString();
+            if (error.isEmpty() && status == "running" && QDateTime::currentMSecsSinceEpoch() < until) { pollUp(key, id, until, finished); return; }
+            m_upping.remove(key);
+            const QString server = key.section(QLatin1Char('\n'), 0, 0);
+            if (finished) {
+                if (error.isEmpty() && status == "running") finished(result, tr("No result within its time limit; it may still be running (hgs run %1)").arg(id));
+                else finished(result, error);
+            }
+            refreshStatus(server);
+        });
+    });
+}
+
+void Controller::sessions(const QString &server, const Reply &done)
+{
+    call({QStringLiteral("sessions"), server, QStringLiteral("--json")}, {}, 30000, done);
 }
 
 void Controller::down(const QString &server, const QString &model, const Reply &done)

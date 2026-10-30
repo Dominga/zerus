@@ -1,3 +1,4 @@
+#include "Settings.h"
 #include "ArchiveBrowser.h"
 #include "NativeSessionCapabilities.h"
 #include "SessionsWindow.h"
@@ -285,7 +286,7 @@ void SessionsWindow::runSelectionAction(SelectionAction action, const QList<Entr
         dialog.setDefaultButton(QMessageBox::Cancel); dialog.setEscapeButton(QMessageBox::Cancel); dialog.exec();
         if (dialog.clickedButton() != confirm) return;
         removeWorktrees=cleanup && cleanup->isChecked();
-        if(cleanup)QSettings().setValue("workspace/removeWorktreeAfterTermination",cleanup->isChecked());
+        if(cleanup)Settings::set("workspace/removeWorktreeAfterTermination",cleanup->isChecked());
     }
     // Spec D5: one question before resuming or restoring sessions of this computer.
     if (action == SelectionAction::Resume

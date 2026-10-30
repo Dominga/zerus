@@ -1352,12 +1352,12 @@ fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, of
     // erased. Only a plain draft waits for approval.
     let draft = team.phases.iter().any(|phase| phase.n == n && phase.state.is_draft());
     let accepted = !approve && team.phases.iter().any(|phase| phase.n == n && phase.state.is_accepted());
-    // U56: a phase left with no tasks (they were moved out, U58) holds no work,
-    // so the lead discards it without your word, a draft or an accepted one.
-    let empty = !approve
-        && team.phases.iter().any(|phase| phase.n == n && phase.tasks.is_empty() && (phase.state.is_draft() || phase.state.is_accepted()));
+    // U56: an accepted phase left with no tasks (they were moved out, U58) is
+    // not done: it stays yours to discard, or the lead's on your word. An empty
+    // draft is the lead's to discard like any draft (#645 N5).
+    let empty = accepted && team.phases.iter().any(|phase| phase.n == n && phase.tasks.is_empty());
     if !approve {
-        if draft || empty {
+        if draft {
             ensure!(
                 matches!(actor, Actor::Human) || actor.is_lead(team) || parent_approves(team, actor),
                 "Only the lead or you discard a phase"
@@ -2764,6 +2764,13 @@ fn report_with(team: &mut Team, input: &Value, actor: &Actor, captured: bool, ev
         report.structured = structured.clone();
         report.unstructured = structured.is_none();
         report.at = now();
+        // #635 N5: a replacement (a captured reply's real report) records the
+        // folder's HEAD and branch again, so the stage checks the commit the
+        // member reports, not the capture's.
+        if !by_member.is_empty() {
+            attempt.folder_head = folder_head.clone();
+            attempt.folder_branch = folder_branch.clone();
+        }
         let was_captured = std::mem::take(&mut report.captured);
         attempt.no_report = false;
         // The lead hears the real report as a report, not as the captured one;
@@ -3943,9 +3950,6 @@ fn stall_stages_of(team: &mut Team, member: &str, reason: &str, events: &mut Vec
         // A command or land stage names Zerus, never a member.
         if run.member != member || run.member.is_empty() {
             continue;
-        }
-        if !run.checkout.is_empty() || !run.temp.is_empty() {
-            let _ = super::stages::clean_up(run);
         }
         stalled.push((task.id, run.id.clone()));
     }
@@ -5299,10 +5303,10 @@ mod tests {
         assert_eq!(error, "Phase 3 opens after the previous phase is approved");
     }
 
-    /// U56: a phase whose tasks were all moved out holds no work; the lead
-    /// discards it without your word, a draft or an accepted one.
+    /// U56/#645 N5: a draft whose tasks were all moved out is the lead's to
+    /// discard; an approved or queued phase stays on your word even when empty.
     #[test]
-    fn the_lead_discards_an_empty_phase() {
+    fn the_lead_discards_an_empty_draft_only() {
         let none = BTreeSet::new();
         let lead = Actor::Member("lead".into());
         let mut events = Vec::new();
@@ -5313,13 +5317,26 @@ mod tests {
         let discarded = apply(&mut team, "discard-phase", &json!({"phase":2}), &lead, &none, &mut events).unwrap();
         assert_eq!((discarded["status"].as_str(), discarded["tasks"].clone()), (Some("phase_discarded"), json!([])));
         assert!(team.task(3).is_some(), "the moved task stays");
-        // An accepted phase left empty goes the same way.
+        // An approved and a queued phase left empty stay on your word: the
+        // lead alone is refused, the lead on your word and you discard them.
         let mut accepted = running_team();
-        extend(&mut accepted, &json!({"tasks":[{"id":3,"title":"T","assignee":"dev"}]}), &lead, &none, &mut events).unwrap();
+        for id in [3, 4] {
+            extend(&mut accepted, &json!({"tasks":[{"id":id,"title":"T","assignee":"dev"}]}), &lead, &none, &mut events).unwrap();
+        }
         apply(&mut accepted, "approve-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap();
-        apply(&mut accepted, "move-task", &json!({"task":3,"phase":1}), &lead, &none, &mut events).unwrap();
-        apply(&mut accepted, "discard-phase", &json!({"phase":2}), &lead, &none, &mut events).unwrap();
-        assert!(accepted.phases.iter().all(|phase| phase.n != 2));
+        apply(&mut accepted, "approve-phase", &json!({"phase":3}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(accepted.phases.iter().find(|phase| phase.n == 3).unwrap().state, PhaseState::Queued);
+        for id in [3, 4] {
+            apply(&mut accepted, "move-task", &json!({"task":id,"phase":1}), &lead, &none, &mut events).unwrap();
+        }
+        for phase in [2, 3] {
+            let error = apply(&mut accepted, "discard-phase", &json!({"phase":phase}), &lead, &none, &mut events).unwrap_err().to_string();
+            assert!(error.contains("Only you discard an accepted phase"), "{phase}: {error}");
+        }
+        let word = json!({"phase":3,"owner_word_checked":{"text":"discard phase 3","at":1.0,"event":5}});
+        apply(&mut accepted, "discard-phase", &word, &lead, &none, &mut events).unwrap();
+        apply(&mut accepted, "discard-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap();
+        assert!(accepted.phases.iter().all(|phase| phase.n != 2 && phase.n != 3), "{:?}", accepted.phases);
         // A phase with a task in it still needs your word.
         let mut kept = running_team();
         extend(&mut kept, &json!({"tasks":[{"id":3,"title":"T","assignee":"dev"}]}), &lead, &none, &mut events).unwrap();

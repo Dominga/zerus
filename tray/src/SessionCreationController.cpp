@@ -1,3 +1,4 @@
+#include "Settings.h"
 #include "JsonParse.h"
 #include "SessionCreationController.h"
 #include "MachinePlatform.h"
@@ -241,12 +242,12 @@ void SessionCreationController::persist(const QString &id,std::function<void()> 
         if(bytes.size()>JournalLimit||!QDir().mkpath(QFileInfo(path).absolutePath())||!file.open(QIODevice::WriteOnly)||!file.setPermissions(QFile::ReadOwner|QFile::WriteOwner)
             ||file.write(bytes)!=bytes.size()||!file.commit())error=tr("Could not save creation progress. No further setup step was sent.");
         if(error.isEmpty()&&remember){
-            QSettings settings;settings.setValue("workspace/launchOpenTerminal",choices.value("terminal").toBool());
-            settings.setValue("workspace/launchAgent",choices.value("cmd").toString());
+            Settings::set("workspace/launchOpenTerminal",choices.value("terminal").toBool());
+            Settings::set("workspace/launchAgent",choices.value("cmd").toString());
             if(!choices.value("account").toString().isEmpty()){
                 auto accounts=SettingsJson::object(QStringLiteral("workspace/launchAccounts"));
                 auto machine=accounts[choices.value("host").toString()].toObject();machine[choices.value("cmd").toString()]=choices.value("account");
-                accounts[choices.value("host").toString()]=machine;SettingsJson::store(settings,QStringLiteral("workspace/launchAccounts"),QJsonDocument(accounts));
+                accounts[choices.value("host").toString()]=machine;SettingsJson::store(QStringLiteral("workspace/launchAccounts"),QJsonDocument(accounts));
             }
         }
         QMetaObject::invokeMethod(QCoreApplication::instance(),[guard,id,revision,error,after]{

@@ -551,6 +551,15 @@ public:
         setToolTip(tip);
     }
     QSize sizeHint() const override { return {fontMetrics().horizontalAdvance(m_text) + 18, 18}; }
+    QString text() const { return m_text; }
+    // #706: a member's live state changes its mark in place.
+    void setState(const QString &text, const QColor &color, const QString &kind, const QString &tooltip = {})
+    {
+        if (text == m_text && color == m_color && kind == m_kind) return;
+        m_text = text; m_color = color; m_kind = kind;
+        setToolTip(tooltip.isEmpty() ? text : text.isEmpty() ? tooltip : tooltip + QLatin1Char('\n') + text);
+        updateGeometry(); update();
+    }
 protected:
     void paintEvent(QPaintEvent *) override
     {
@@ -758,7 +767,10 @@ public:
         bool late = false;
         // U37: the working time after the activity label; a running one
         // ticks from `runningSince` on the shared minute timer.
-        QString worked; double runningSince = 0; };
+        QString worked; double runningSince = 0;
+        // U38: the heat tint's fill and the loss at the second line's end
+        // (it takes the working time's place).
+        QColor heatFill, heatColor; QString heat; };
     // A phase group as the plan, board and layers show it: the heading is
     // "Phase 2 · QA fixes · 3/5". A finished phase starts collapsed; its tasks
     // are in `tasks` but no node is built, and one summary node stands in.
@@ -774,6 +786,7 @@ public:
         bool alongside = false;   // F12/N40: Approve runs it beside a running phase
         int changes = 0;      // the lead's pending edits on a draft
         QStringList changeLines;   // those edits as a diff, for the header's tooltip
+        bool autoDraft = false, startAhead = false;   // U61: Auto accepts it at its first hand-out
     };
     TaskView(const Colors &colors, Mode mode, QWidget *parent = nullptr) : QWidget(parent), m_c(colors), m_mode(mode)
     {
@@ -798,6 +811,15 @@ public:
             n.worked = text;
         }
         if (changed) update();
+    }
+    // #706: a member's live state changes its nodes' activity labels and
+    // working dots in place; the layout stays.
+    void refreshLive(const std::function<void(Node &)> &apply)
+    {
+        bool working = false;
+        for (auto &n : nodes) { apply(n); working = working || n.working; }
+        if (m_mode == Wide && working && AgentWorking::animated()) m_dots.start(); else m_dots.stop();
+        update();
     }
     // Compatibility with the two-mode form.
     TaskView(const Colors &colors, bool graph, QWidget *parent = nullptr) : TaskView(colors, graph ? Graph : List, parent) {}
@@ -1263,6 +1285,7 @@ protected:
         QColor fill = m_c.surface;
         if (n.error) fill = alpha(m_c.danger, m_c.dark ? .1 : .08);
         else if (target) fill = alpha(m_c.accent, .08);
+        else if (n.heatFill.isValid()) fill = n.heatFill;   // U38: the tint only; stroke and edge stay
         QPainterPath box; box.addRoundedRect(r.adjusted(.5, .5, -.5, -.5), 9, 9);
         p.setPen(QPen(stroke, 1, n.draft ? Qt::DashLine : Qt::SolidLine)); p.setBrush(fill); p.drawPath(box);
         // The 3 px status edge on the left.
@@ -1307,12 +1330,22 @@ protected:
         QFont metaFont = font(); metaFont.setPixelSize(11);
         const QFontMetrics metaMetrics(metaFont);
         const double timeRoom = n.worked.isEmpty() ? 0.0 : qMax(metaMetrics.horizontalAdvance(n.worked), workedRoom(metaMetrics, n.runningSince)) + 6;
+        // U38: the loss sits at the line's end, bold in its heat color; the
+        // texts before it keep to the room left of it.
+        double end = r.right() - 8;
+        if (!n.heat.isEmpty()) {
+            QFont heat = font(); heat.setPixelSize(11); heat.setWeight(n.heatFill.isValid() ? QFont::DemiBold : QFont::Normal);
+            p.setFont(heat); p.setPen(n.heatColor);
+            const double w = qMin(double(QFontMetrics(heat).horizontalAdvance(n.heat)), qMax(0.0, end - right));
+            p.drawText(QRectF(end - w, line2, w, lineH), Qt::AlignRight | Qt::AlignVCenter, QFontMetrics(heat).elidedText(n.heat, Qt::ElideRight, int(w)));
+            end -= w + 8;
+        }
         if (!n.activity.isEmpty()) {
             // The owner's small activity label: muted text3 at 11 px, right of
             // the role chip and the model tile, and elided before a problem
             // text would lose room to it.
             QFont meta = font(); meta.setPixelSize(11); p.setFont(meta); p.setPen(m_c.text3);
-            const double w = qMax(0.0, r.right() - 8 - right - timeRoom);
+            const double w = qMax(0.0, end - right - timeRoom);
             const QString shown = QFontMetrics(meta).elidedText(n.activity, Qt::ElideRight, int(w));
             p.drawText(QRectF(right, line2, w, lineH), Qt::AlignLeft | Qt::AlignVCenter, shown);
             right += qMin(w, double(QFontMetrics(meta).horizontalAdvance(shown))) + 6;
@@ -1322,14 +1355,14 @@ protected:
             // a running one keeps the room it grows to.
             QFont meta = font(); meta.setPixelSize(11); p.setFont(meta); p.setPen(m_c.text3);
             const QFontMetrics metrics(meta);
-            const double w = qMax(0.0, r.right() - 8 - right);
+            const double w = qMax(0.0, end - right);
             const QString shown = metrics.elidedText(n.worked, Qt::ElideRight, int(w));
             p.drawText(QRectF(right, line2, w, lineH), Qt::AlignLeft | Qt::AlignVCenter, shown);
             right += qMin(w, double(qMax(metrics.horizontalAdvance(shown), workedRoom(metrics, n.runningSince)))) + 6;
         }
         if (!n.problemText.isEmpty()) {
             QFont meta = font(); meta.setPixelSize(11); p.setFont(meta); p.setPen(n.tone);
-            const double w = qMax(0.0, r.right() - 8 - right);
+            const double w = qMax(0.0, end - right);
             p.drawText(QRectF(right, line2, w, lineH), Qt::AlignLeft | Qt::AlignVCenter, QFontMetrics(meta).elidedText(n.problemText, Qt::ElideRight, int(w)));
         }
         if (n.error) { p.setPen(m_c.danger); p.setFont(small); p.drawText(QRectF(r.right() - 16, r.top() + 4, 12, 12), Qt::AlignCenter, QStringLiteral("!")); }
@@ -1404,7 +1437,10 @@ protected:
         } else {
             m_approve.remove(band.n); m_discard.remove(band.n); m_moveUp.remove(band.n); m_moveDown.remove(band.n);
         }
-        if (!band.status.isEmpty()) {
+        if (band.autoDraft) {
+            // U61: a draft Auto accepts at its first hand-out, not one waiting for you.
+            pill(band.startAhead ? QCoreApplication::translate("TeamPanel", "Draft (auto), started ahead") : Teams::autoDraftBadge(), m_c.folder);
+        } else if (!band.status.isEmpty()) {
             pill(phaseStatusText(band.status), phaseStatusColor(m_c, band.status));
         } else if (band.draft) {
             pill(QCoreApplication::translate("TeamPanel", "draft"), m_c.warn);
@@ -1933,6 +1969,7 @@ inline QList<TaskView::PhaseBand> phaseBands(const Team &team, const std::functi
         band.n = group.n; band.title = group.title; band.heading = phaseHeading(group);
         band.barrier = group.barrier; band.draft = group.draft; band.done = group.done; band.total = group.tasks.size();
         band.tasks = group.tasks; band.collapsed = !open(group);
+        if (const auto *record = team.phase(group.n); record && record->autoDraft()) { band.autoDraft = true; band.startAhead = record->startAhead; }
         if (const auto *summary = team.phaseSummaryOf(group.n)) {
             band.status = summary->status;
             band.healthLine = summary->healthLine;
@@ -2232,6 +2269,31 @@ inline QString duration(double seconds)
     if (days < 1) return QCoreApplication::translate("TeamPanel", "%1h %2m").arg(hours).arg(minutes % 60);
     if (days < 7) return QCoreApplication::translate("TeamPanel", "%1d %2h").arg(days).arg(hours % 24);
     return QCoreApplication::translate("TeamPanel", "%1w %2d").arg(days / 7).arg(days % 7);
+}
+
+// #693: a label that names an age keeps its start, its format ("%1 in this
+// stage") and its kind ("duration": 3h 12m, "age": 3 min) and is set again
+// in place on the minute timer (tickAged), so a poll needs no rebuild for it.
+inline QString agedText(const QString &format, const QString &kind, double since, double now)
+{
+    const QString value = kind == QLatin1String("duration") ? duration(now - since)
+                                                             : agoText(since, now).remove(QCoreApplication::translate("TeamPanel", " ago"));
+    return format.arg(value);
+}
+inline QLabel *aged(QLabel *label, const QString &format, const QString &kind, double since, double now = -1)
+{
+    label->setProperty("agedSince", since); label->setProperty("agedFormat", format); label->setProperty("agedKind", kind);
+    label->setText(agedText(format, kind, since, now < 0 ? workedClock()() : now));
+    return label;
+}
+inline void tickAged(QWidget *root, double now)
+{
+    for (auto *label : root->findChildren<QLabel *>()) {
+        const QVariant since = label->property("agedSince");
+        if (!since.isValid()) continue;
+        const QString text = agedText(label->property("agedFormat").toString(), label->property("agedKind").toString(), since.toDouble(), now);
+        if (text != label->text()) label->setText(text);
+    }
 }
 
 // The WhiteWh look of team surfaces: ghost buttons, accent primary ones,

@@ -38,6 +38,8 @@ private slots:
     void removalRequiresExplicitConfirmationOfSameConnection();
     void localReadOnlyAndNewProfileCannotOverwrite();
     void wslProfileKeepsItsTargetAcrossSaveAndReload();
+    void aSavedMachineSwitchesToWslAndBackKeepingItsOverrides();
+    void aConfiguredAliasSaysWhereItComesFrom();
     void newMachineDraftCancelAndDiscard_data();
     void newMachineDraftCancelAndDiscard();
     void editsKeepDraftWhileFleetRefreshesAndFailuresAreVisible();
@@ -258,6 +260,81 @@ void TestMachinesPage::wslProfileKeepsItsTargetAcrossSaveAndReload()
     QCOMPARE(profile["transport"].toString(),QString("wsl-local"));
     QCOMPARE(profile["wsl"].toObject()["user"].toString(),QString("bob"));
     QVERIFY(!profile.contains("hostname")); QVERIFY(!profile.contains("identity_file"));
+}
+
+// #650 N2: a saved SSH machine changes to Local WSL and back from the same
+// form; hgs keeps one type per machine, and the other type's overrides come
+// back from this device. L4: the HGS_PEERS override and a configured alias
+// say so on the page.
+void TestMachinesPage::aSavedMachineSwitchesToWslAndBackKeepingItsOverrides()
+{
+    flag("data.json", R"({"local":"arch","revision":"revision-1","environment_override":true,"machines":[{"alias":"ubuntu","connection":{"enabled":true,"hostname":"ubuntu.example","user":"alice","port":2222,"identity_file":"~/.ssh/ubuntu"},"enabled":true,"source":"local"}]})");
+    MachinesPage page(FakeCli::program(m_script)); start(page);
+    QVERIFY(widget<QLabel>(page, "machinesPeersOverride")->isVisible());
+    QVERIFY(widget<QLabel>(page, "machinesPeersOverride")->text().contains("HGS_PEERS"));
+    page.selectMachine("ubuntu");
+    auto *transport = widget<QComboBox>(page, "machineTransport");
+    auto *hostname = widget<QLineEdit>(page, "machineHostname");
+    QTRY_VERIFY(transport->isVisible() && transport->isEnabled());
+    QCOMPARE(hostname->text(), QString("ubuntu.example"));
+    QVERIFY(!widget<QLabel>(page, "machineSourceNote")->isVisible());   // a local alias
+    const auto lastSet = [&] {
+        QJsonObject profile;
+        for (const auto &call : calls()) {
+            const auto args = call.toArray();
+            if (args.size() > 4 && args[1].toString() == "set") profile = QJsonDocument::fromJson(args[4].toString().toUtf8()).object();
+        }
+        return profile;
+    };
+    QSignalSpy changed(&page, &MachinesPage::machinesChanged);
+    // To WSL: the row stays, the SSH fields hide; the save carries WSL only.
+    transport->setCurrentIndex(transport->findData("wsl-local"));
+    QVERIFY(transport->isVisible());
+    QVERIFY(hostname->isHidden());
+    widget<QLineEdit>(page, "machineWslDistribution")->setText("Ubuntu-24.04");
+    widget<QLineEdit>(page, "machineWslUser")->setText("alice");
+    widget<QLineEdit>(page, "machineWslHgs")->setText("/home/alice/bin/hgs");
+    auto *save = widget<QPushButton>(page, "saveMachine");
+    QTRY_VERIFY(save->isEnabled()); save->click();
+    QTRY_COMPARE(changed.size(), 1);
+    QTRY_VERIFY(!save->isEnabled() && transport->isEnabled());
+    QCOMPARE(lastSet()["transport"].toString(), QString("wsl-local"));
+    QVERIFY(!lastSet().contains("hostname"));
+    QCOMPARE(transport->currentData().toString(), QString("wsl-local"));
+    QVERIFY(transport->isVisible());
+    // Back to SSH: the overrides it had come back, and are saved again.
+    transport->setCurrentIndex(transport->findData("ssh"));
+    QVERIFY(!hostname->isHidden());
+    QCOMPARE(hostname->text(), QString("ubuntu.example"));
+    QCOMPARE(widget<QLineEdit>(page, "machineUser")->text(), QString("alice"));
+    QCOMPARE(widget<QSpinBox>(page, "machinePort")->value(), 2222);
+    QCOMPARE(widget<QLineEdit>(page, "machineKey")->text(), QString("~/.ssh/ubuntu"));
+    QTRY_VERIFY(save->isEnabled()); save->click();
+    QTRY_COMPARE(changed.size(), 2);
+    QTRY_VERIFY(!save->isEnabled() && transport->isEnabled());
+    const auto ssh = lastSet();
+    QCOMPARE(ssh["hostname"].toString(), QString("ubuntu.example"));
+    QCOMPARE(ssh["port"].toInt(), 2222);
+    QVERIFY(!ssh.contains("wsl"));
+    // And the WSL profile is kept for the next switch.
+    transport->setCurrentIndex(transport->findData("wsl-local"));
+    QCOMPARE(widget<QLineEdit>(page, "machineWslDistribution")->text(), QString("Ubuntu-24.04"));
+    QCOMPARE(widget<QLineEdit>(page, "machineWslHgs")->text(), QString("/home/alice/bin/hgs"));
+}
+
+// #650 L4: a machine whose alias comes from HGS configuration says so on the
+// page, not only in a tooltip; without HGS_PEERS no override line shows.
+void TestMachinesPage::aConfiguredAliasSaysWhereItComesFrom()
+{
+    MachinesPage page(FakeCli::program(m_script)); start(page);
+    QVERIFY(!widget<QLabel>(page, "machinesPeersOverride")->isVisible());
+    page.selectMachine("mac");
+    auto *note = widget<QLabel>(page, "machineSourceNote");
+    QTRY_VERIFY(note->isVisible());
+    QVERIFY(note->text().contains("HGS configuration"));
+    page.selectMachine({});
+    QTRY_VERIFY(!note->isVisible());
+    QVERIFY(!widget<QComboBox>(page, "machineTransport")->isVisible());
 }
 
 void TestMachinesPage::newMachineDraftCancelAndDiscard_data()

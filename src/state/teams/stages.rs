@@ -254,10 +254,10 @@ pub(crate) fn record(team: &mut Team, task_id: u32, run_id: &str, prepared: &Pre
 /// stage goes back to Waiting.
 pub(crate) const STAGE_UNCONFIRMED_GRACE: f64 = 120.0;
 
-/// #630 N7: open stage runs whose member left the roster (removed or paused) or
-/// whose hand-off was never confirmed long enough: each goes back to Waiting
-/// and the lead hears why.
-pub(crate) fn stalled(team: &Team, at: f64) -> Vec<(u32, String, String)> {
+/// #630 N7: open stage runs whose member left the roster (removed or paused):
+/// each goes back to Waiting and the lead hears why. #635 N3: an unconfirmed
+/// hand-off is handled by the dispatcher only with evidence it did not arrive.
+pub(crate) fn stalled(team: &Team, _at: f64) -> Vec<(u32, String, String)> {
     team.tasks
         .iter()
         .filter_map(|task| {
@@ -269,9 +269,6 @@ pub(crate) fn stalled(team: &Team, at: f64) -> Vec<(u32, String, String)> {
             let reason = match member.map(|member| member.state) {
                 Some(MemberState::Removed) => format!("{} was removed", team.name_of(&run.member)),
                 Some(MemberState::Paused) => format!("{} was paused", team.name_of(&run.member)),
-                _ if run.unconfirmed && at - run.delivered_at.unwrap_or(run.at) >= STAGE_UNCONFIRMED_GRACE => {
-                    "the stage hand-off was not confirmed".to_owned()
-                }
                 _ => return None,
             };
             Some((task.id, run.id.clone(), reason))
@@ -292,11 +289,16 @@ pub(crate) fn stalled(team: &Team, at: f64) -> Vec<(u32, String, String)> {
 /// implementer's folder must not move meanwhile. Under the checkout rule the
 /// later stage reads its own detached checkout, and nothing changes.
 pub(crate) fn held(team: &Team, member: &str) -> Option<u32> {
+    held_by(team, member).map(|(task, _)| task)
+}
+
+/// #635 N4: the task and stage whose hold keeps `member`'s folder, for status.
+pub(crate) fn held_by(team: &Team, member: &str) -> Option<(u32, String)> {
     let folder = team.member(member).and_then(|member| member_folder_path(team, member).ok()).unwrap_or_default();
     team.tasks.iter().find_map(|task| {
         let pipeline = task.pipeline_run.as_ref()?;
-        if pipeline.runs.iter().any(|run| run.awaiting_run && same_folder(&run.folder, &folder) && run_live(team, run)) {
-            return Some(task.id);
+        if let Some(run) = pipeline.runs.iter().find(|run| run.awaiting_run && same_folder(&run.folder, &folder) && run_live(team, run)) {
+            return Some((task.id, run.kind.clone()));
         }
         let run = pipeline.open_run()?;
         let holds = match run.kind.as_str() {
@@ -320,12 +322,12 @@ pub(crate) fn held(team: &Team, member: &str) -> Option<u32> {
             _ => pipeline.hold_from_report && pipeline.stages.iter().skip(run.stage + 1).any(|stage| stage.kind == "test"),
         };
         let implementer = checked_attempt(task, run).map(|attempt| attempt.member.as_str()).unwrap_or(task.assignee.as_str());
-        (holds && implementer == member).then_some(task.id)
+        (holds && implementer == member).then(|| (task.id, run.kind.clone()))
     })
 }
 
 /// Whether two folder paths name the same place (the dispatcher's rule).
-fn same_folder(left: &str, right: &str) -> bool {
+pub(super) fn same_folder(left: &str, right: &str) -> bool {
     let key = |path: &str| {
         let path = path.strip_prefix(r"\\?\").unwrap_or(path).replace('\\', "/");
         let path = path.trim_end_matches('/').to_owned();
@@ -381,7 +383,9 @@ pub(crate) fn to_clean(team: &Team) -> Vec<(u32, String)> {
             pipeline
                 .runs
                 .iter()
-                .filter(|run| !run.state.open() && (!run.awaiting_run || !run_live(team, run)) && (!run.checkout.is_empty() || !run.temp.is_empty()))
+                // #635 N2: a stalled (Waiting) stage's folder and checkout are
+                // cleaned once its live run ends, like a closed stage's.
+                .filter(|run| (!run.state.open() || !run.stalled.is_empty()) && (!run.awaiting_run || !run_live(team, run)) && (!run.checkout.is_empty() || !run.temp.is_empty()))
                 .map(move |run| (id, run.id.clone()))
         })
         .collect()
@@ -415,22 +419,34 @@ pub(crate) fn release(team: &mut Team, task_id: u32, run_id: &str) -> bool {
     };
     let was = run.awaiting_run;
     run.awaiting_run = false;
+    run.stalled_member.clear();
     was
 }
 
 /// #538 N4: whether a closed stage's own run still goes: a `hgs team run` claim
-/// in its member's folder (past its bound is not), or Zerus's own stage build.
-fn run_live(team: &Team, run: &StageRun) -> bool {
-    if let Some(member) = team.member(&run.member) {
-        if let Ok(folder) = member_folder_path(team, member) {
-            if let Some(marker) = super::outbox::running(Path::new(&folder), &run.id) {
-                let started = marker["started"].as_f64().unwrap_or(0.0);
-                let bound = marker["timeout_secs"].as_f64().unwrap_or(1800.0);
-                if started > 0.0 && super::super::now() <= started + bound + 120.0 {
+/// in its member's folder (past its bound is not), in the stage's own folder,
+/// or Zerus's own stage build. #635 N2 also checks the member a stall kept.
+pub(crate) fn run_live(team: &Team, run: &StageRun) -> bool {
+    let claim = |folder: &str| -> bool {
+        let Some(marker) = super::outbox::running(Path::new(folder), &run.id) else { return false };
+        let started = marker["started"].as_f64().unwrap_or(0.0);
+        let bound = marker["timeout_secs"].as_f64().unwrap_or(1800.0);
+        started > 0.0 && super::super::now() <= started + bound + 120.0
+    };
+    for member in [run.member.as_str(), run.stalled_member.as_str()] {
+        if member.is_empty() {
+            continue;
+        }
+        if let Some(found) = team.member(member) {
+            if let Ok(folder) = member_folder_path(team, found) {
+                if claim(&folder) {
                     return true;
                 }
             }
         }
+    }
+    if !run.folder.is_empty() && claim(&run.folder) {
+        return true;
     }
     super::super::builds::record(&run.id, super::super::now()).is_some_and(|record| record["status"] == "running")
 }
@@ -802,17 +818,33 @@ mod tests {
             let mut events = Vec::new();
             apply(&mut team, "remove-member", &json!({"member":"rev"}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
             let stage = run_of(&team, &run);
-            assert_eq!((stage.state, stage.member.as_str()), (StageState::Waiting, ""), "{stage:?}");
+            assert_eq!((stage.state, stage.member.as_str(), stage.stalled_member.as_str()), (StageState::Waiting, "", "rev"), "the member is kept for its late verdict, not as the stage's owner: {stage:?}");
             assert!(stage.stalled.contains("was removed"), "{stage:?}");
+            assert!(!stage.awaiting_run && stage.checkout.is_empty() && stage.temp.is_empty(), "{stage:?}");
             let items = crate::state::teams::inbox::items(&team);
             assert!(items.iter().any(|item| item.kind == "stage_stalled" && item.task == Some(1)), "{items:?}");
+            // #727: a peer takes the stalled stage; the removed member does not
+            // reserve it.
+            team.members.push(Member {
+                id: "rev2".into(),
+                role: "Reviewer".into(),
+                agent: "claude".into(),
+                state: MemberState::Active,
+                folder: MemberFolder::Shared,
+                session: Some(SessionRef { name: "claude/x/rev2".into(), run_id: "r4".into(), ..Default::default() }),
+                ..Default::default()
+            });
+            assert!(waiting(&team).iter().any(|(task, candidates)| *task == 1 && candidates.contains(&"rev2".to_owned())), "{:?}", waiting(&team));
+            pipeline::give_stage(&mut team, 1, "rev2").unwrap();
+            let stage = run_of(&team, &run);
+            assert_eq!((stage.state, stage.member.as_str()), (StageState::Delivered, "rev2"), "{stage:?}");
             // Paused: the same reset with its reason.
             let (mut team, _) = team_in(&project, MemberFolder::Shared, &builtin(), "code");
             report(&mut team, &project, false);
             let (run, _) = give(&mut team, "rev");
             apply(&mut team, "pause-member", &json!({"member":"rev"}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
             let stage = run_of(&team, &run);
-            assert_eq!((stage.state, stage.member.as_str()), (StageState::Waiting, ""), "{stage:?}");
+            assert_eq!((stage.state, stage.member.as_str(), stage.stalled_member.as_str()), (StageState::Waiting, "", "rev"), "{stage:?}");
             assert!(stage.stalled.contains("was paused"), "{stage:?}");
             let items = crate::state::teams::inbox::items(&team);
             assert!(items.iter().any(|item| item.kind == "stage_stalled" && item.summary.contains("was paused")), "{items:?}");
@@ -820,7 +852,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unconfirmed_stage_hand_off_goes_back_to_waiting() {
+    fn an_unconfirmed_stage_hand_off_alone_is_not_stalled() {
         isolated(|dir| {
             let project = project(dir, true);
             let (mut team, _) = team_in(&project, MemberFolder::Shared, &builtin(), "code");
@@ -832,16 +864,55 @@ mod tests {
                 found.unconfirmed = true;
                 found.delivered_at = Some(delivered - STAGE_UNCONFIRMED_GRACE - 1.0);
             }
-            let found = stalled(&team, delivered);
-            assert_eq!(found.len(), 1, "{found:?}");
-            assert!(found[0].2.contains("not confirmed"), "{found:?}");
+            // #635 N3: the age alone is not evidence; the dispatcher stalls it
+            // only when the member is idle and free with no question or run.
+            assert!(stalled(&team, delivered).is_empty(), "an unconfirmed hand-off is not stalled by time alone");
+            // Once the dispatcher has its evidence it resets the run and the
+            // lead hears it; the member stays for a late verdict.
             let mut events = Vec::new();
-            assert!(pipeline::stall_stage(&mut team, 1, &run_id, &found[0].2, &mut events));
+            assert!(pipeline::stall_stage(&mut team, 1, &run_id, "the stage hand-off was not confirmed", &mut events));
             let stage = run_of(&team, &run_id);
-            assert_eq!((stage.state, stage.member.as_str(), stage.unconfirmed), (StageState::Waiting, "", false), "{stage:?}");
+            assert_eq!((stage.state, stage.member.as_str(), stage.stalled_member.as_str(), stage.unconfirmed), (StageState::Waiting, "", "rev", false), "{stage:?}");
             assert!(stage.stalled.contains("not confirmed"), "{stage:?}");
             let items = crate::state::teams::inbox::items(&team);
             assert!(items.iter().any(|item| item.kind == "stage_stalled" && item.task == Some(1)), "{items:?}");
+        });
+    }
+
+    /// #635 N2: pausing a member during its live test run keeps the folder and
+    /// checkout until the run ends, and StageCleanup removes them after.
+    #[test]
+    fn a_pause_during_a_live_test_run_keeps_the_folder_and_checkout() {
+        isolated(|dir| {
+            let project = project(dir, true);
+            let (mut team, _) = team_in(&project, MemberFolder::Worktree, &checkout_catalog(), "code");
+            report(&mut team, &project, true);
+            let (review, _) = give(&mut team, "rev");
+            verdict(&mut team, "rev", &review);
+            let (run_id, prepared) = give(&mut team, "qa");
+            assert!(!prepared.checkout.is_empty(), "{prepared:?}");
+            let checkout = PathBuf::from(&prepared.checkout);
+            let qa_folder = member_folder_path(&team, team.member("qa").unwrap()).unwrap();
+            super::super::outbox::write_running(
+                Path::new(&qa_folder),
+                &run_id,
+                &json!({"request_id":run_id,"started":crate::state::now(),"timeout_secs":1800,"label":"cargo-test"}),
+            )
+            .unwrap();
+            let mut events = Vec::new();
+            apply(&mut team, "pause-member", &json!({"member":"qa"}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+            let stage = run_of(&team, &run_id);
+            assert_eq!((stage.state, stage.member.as_str(), stage.stalled_member.as_str()), (StageState::Waiting, "", "qa"), "{stage:?}");
+            assert!(stage.awaiting_run && stage.stalled.contains("was paused"), "{stage:?}");
+            assert_eq!(stage.checkout, prepared.checkout, "the checkout stays while the run is live");
+            assert!(checkout.exists(), "the live run's checkout is not removed under it");
+            // The run ends: the folder and checkout are released and cleaned.
+            super::super::outbox::settle_running(Path::new(&qa_folder), &run_id, &json!({"status":"ran","exit":0})).unwrap();
+            assert!(runs_ended(&team).iter().any(|(task, run)| *task == 1 && *run == run_id), "the ended run is released");
+            assert!(release(&mut team, 1, &run_id));
+            assert!(to_clean(&team).iter().any(|(task, run)| *task == 1 && *run == run_id), "its checkout is cleaned once the run ended");
+            clean_up(&run_of(&team, &run_id)).unwrap();
+            assert!(!checkout.exists(), "the checkout is removed after the run ended");
         });
     }
 

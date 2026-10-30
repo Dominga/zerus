@@ -1,16 +1,25 @@
 #include "TeamController.h"
 #include "HgsClient.h"
+#include "SlowEventLog.h"
 #include <QJsonDocument>
 #include <QUuid>
 
 namespace {
 int pollInterval = 3000;
+// #706: reads change nothing, so their answers ask for no new poll (the
+// waiting list's every 30 s, the profile and heat reads).
+bool readOnly(const QString &operation)
+{
+    static const QStringList reads{"waiting", "profile", "spans", "status", "events", "inbox", "list"};
+    return reads.contains(operation);
+}
 }
 
 void TeamController::setPollInterval(int milliseconds) { pollInterval = milliseconds; }
 
 TeamController::TeamController(HgsClient *client, QObject *parent) : QObject(parent), m_client(client)
 {
+    m_poll.setObjectName(QStringLiteral("teamPoll"));
     m_poll.setInterval(pollInterval);
     connect(&m_poll, &QTimer::timeout, this, &TeamController::refresh);
     connect(m_client, &HgsClient::teamReady, this, [this](quint64 request, const QString &host, const QString &operation, const QJsonObject &result) {
@@ -57,6 +66,12 @@ void TeamController::setShowCancelled(bool on)
     emit showCancelledChanged();
 }
 
+QByteArray TeamController::shapeOf(const QString &team) const
+{
+    if (watched() && m_watched.id == team && !m_watchedShape.isEmpty()) return m_watchedShape;
+    return m_listShapes.value(team);
+}
+
 const Teams::Team *TeamController::team(const QString &id) const
 {
     for (const auto &t : m_teams) if (t.id == id) return &t;
@@ -73,7 +88,7 @@ void TeamController::watch(const QString &team)
 {
     if (m_watch == team) return;
     m_watch = team;
-    m_watched = {}; m_lastStatus = {};
+    m_watched = {}; m_lastStatus = {}; m_watchedShape.clear(); m_inboxShape.clear();
     m_feed.clear(); m_feedCursor = QJsonValue();
     m_statusRequest = m_feedRequest = m_olderRequest = 0;
     m_inbox.clear(); m_lastInbox = {}; m_inboxRequest = 0;
@@ -214,12 +229,15 @@ void TeamController::draftCall(const QString &operation, const Reply &done)
 
 void TeamController::received(quint64 request, const QString &operation, const QJsonObject &result)
 {
+    // The slow-event log ranks each read apart (SlowEventLog.h).
+    const SlowEventLog::Scope scope(this, request == m_listRequest ? "team list" : request == m_statusRequest ? "team status"
+                                          : request == m_inboxRequest ? "team inbox" : request == m_feedRequest ? "team events" : "team call");
     if (m_calls.contains(request)) {
         const auto done = m_calls.take(request);
         if (done) done(true, result, {});
         if (operation.startsWith("catalog ")) {
             if (operation != "catalog get" && operation != "catalog route") refreshCatalog();
-        } else refresh();
+        } else if (!readOnly(operation)) refresh();
         return;
     }
     if (m_actions.contains(request)) {
@@ -230,22 +248,38 @@ void TeamController::received(quint64 request, const QString &operation, const Q
     }
     if (request == m_listRequest) {
         m_listRequest = 0;
+        const bool first = !m_available;
         m_available = true;
         if (result == m_lastList) return;
         m_lastList = result;
         m_teams = Teams::parseList(result);
-        emit teamsChanged();
+        // #706: a running team's item moves its revision, updated time and
+        // running times on every read. The teams keep the new values; their
+        // listeners (the session list's rebuild among them) hear only of a
+        // change they show.
+        QStringList order;
+        QHash<QString, QByteArray> shapes;
+        for (const auto &item : result.value("items").toArray()) {
+            const auto object = item.toObject();
+            order << object.value("id").toString();
+            shapes.insert(order.last(), Teams::visibleShape(object));
+        }
+        const bool changed = first || order != m_listOrder || shapes != m_listShapes;
+        m_listOrder = order; m_listShapes = shapes;
+        if (changed) emit teamsChanged();
     } else if (request == m_statusRequest) {
         m_statusRequest = 0;
         const auto team = Teams::parse(result);
         if (team.id != m_watch || (result == m_lastStatus && m_watched.id == m_watch)) return;
         m_lastStatus = result;
         m_watched = team;
+        m_watchedShape = Teams::visibleShape(result);
         emit watchedChanged();
     } else if (request == m_inboxRequest) {
         m_inboxRequest = 0;
         if (result == m_lastInbox) return;
         m_lastInbox = result;
+        m_inboxShape = QJsonDocument(result).toJson(QJsonDocument::Compact);
         m_inbox = Teams::parseInbox(result);
         emit inboxChanged();
     } else if (request == m_feedRequest || request == m_olderRequest) {
@@ -282,7 +316,7 @@ void TeamController::failed(quint64 request, const QString &operation, const QSt
     if (request == m_listRequest) {
         m_listRequest = 0;
         // No teams yet (or an hgs without them): nothing to show.
-        if (m_available || !m_teams.isEmpty()) { m_teams.clear(); m_lastList = {}; emit teamsChanged(); }
+        if (m_available || !m_teams.isEmpty()) { m_teams.clear(); m_lastList = {}; m_listShapes.clear(); m_listOrder.clear(); emit teamsChanged(); }
         m_available = false;
     } else if (request == m_statusRequest) m_statusRequest = 0;
     else if (request == m_inboxRequest) m_inboxRequest = 0;

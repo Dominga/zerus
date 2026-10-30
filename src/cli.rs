@@ -850,6 +850,9 @@ fn run(args: &[String]) -> Result<i32> {
     let _stops = platform::ShutdownGuard::install()?;
     #[cfg(windows)]
     crate::host::supervisor::open();
+    // U60 (#658 N3): an untracked launch takes the model server's secret
+    // environment from the private file the launch left and removes it.
+    crate::state::model_servers::apply_session_secrets()?;
     if n != 0 {
         let start = Instant::now();
         let rc = run_resume(resume)?;
@@ -2204,20 +2207,11 @@ fn launch(
         if options.account.as_deref().is_some_and(|id|id!="native-opencode") {return Err(Error::new(1,"Choose native-opencode; separate OpenCode profiles are not supported"));}
         if options.resume || !options.extra.is_empty() || options.fresh || options.remote_control {return Err(Error::new(1,"Use saved HGS session names to resume OpenCode; select a model with --model provider/model"));}
         if options.effort.is_some() && options.model.is_none() {return Err(Error::new(1,"--effort needs --model"));}
-        // U60: this launch's provider is a model server's API, passed to the
-        // private host as session-scoped configuration; the user's OpenCode
-        // configuration is not changed.
-        if let Some(server) = options.model_server.as_deref() {
-            let model = options.model.as_deref().ok_or_else(|| Error::new(1, "--model-server needs --model MODEL"))?;
-            let (environment, args) = crate::state::model_servers::session_settings(config, server, "opencode", model)?;
-            for line in &environment {
-                if let Some((key, value)) = line.split_once('=') {
-                    std::env::set_var(key, value);
-                }
-            }
-            if let Some(at) = args.iter().position(|arg| arg == "--model") {
-                options.model = args.get(at + 1).cloned();
-            }
+        // U60 (#658 N1): OpenCode has no per-session provider contract; a model
+        // server session on it would need a global provider entry, so it is not
+        // offered. Codex and Claude Code get session-scoped settings instead.
+        if options.model_server.is_some() {
+            return Err(Error::new(1, "OpenCode is not offered for a model server; start Codex or Claude Code"));
         }
         let project=if project=="/" {"root".into()}else{sanitize(&project)};
         let tag=if options.tag.is_empty(){"main"}else{&options.tag};let name=format!("opencode/{project}/{tag}");
@@ -2360,12 +2354,19 @@ fn launch(
     }
     // U60: this session runs on a model server's API; the settings are this
     // launch's environment only, so the global agent configuration is untouched.
+    // The key is not part of that environment: it goes to a private file that
+    // `hgs --run` reads and removes, so no command line, tmux start command or
+    // dry-run carries it (#658 N3).
     let mut model_server_args: Vec<String> = Vec::new();
+    let mut model_server_secrets: Vec<String> = Vec::new();
+    let mut model_server_name = String::new();
     if let Some(server) = options.model_server.as_deref() {
         let model = options.model.as_deref().ok_or_else(|| Error::new(1, "--model-server needs --model MODEL"))?;
-        let (environment, args) = crate::state::model_servers::session_settings(config, server, &command_name, model)?;
-        account_environment.extend(environment);
-        model_server_args = args;
+        let settings = crate::state::model_servers::session_settings(config, server, &command_name, model)?;
+        account_environment.extend(settings.env);
+        model_server_args = settings.args;
+        model_server_secrets = settings.secrets;
+        model_server_name = server.to_owned();
     }
     if !options.dry {
         if let Some(id) = &options.account {
@@ -2559,6 +2560,12 @@ fn launch(
         environment.push(format!("HGS_LAUNCH_ID={id}"));
     }
     environment.extend(account_environment);
+    // The record names the server; the key reaches the agent only through the
+    // private file `hgs --run` reads and removes.
+    if !model_server_name.is_empty() {
+        environment.push(format!("HGS_MODEL_SERVER={model_server_name}"));
+        environment.push(format!("HGS_MODEL_SERVER_MODEL={}", options.model.as_deref().unwrap_or_default()));
+    }
     environment.extend(hint_environment);
     environment.extend(platform::gui_env());
     if !options.fresh
@@ -2601,6 +2608,16 @@ fn launch(
         println!("{}", terminal().describe(&DryRun::Launch(&spec)));
         return Ok(0);
     }
+    // U60 (#709 L1): the key file is written only here, right before the
+    // backend launch, and removed if that launch fails; `hgs --run` removes it
+    // on success. The resume branch above returned before this point, and a
+    // dry-run returned before it too, so neither leaves a file.
+    let mut secret_path: Option<std::path::PathBuf> = None;
+    if !model_server_secrets.is_empty() {
+        let path = crate::state::model_servers::write_secret_file(&config.state, &model_server_secrets)?;
+        spec.env.push(format!("HGS_MODEL_SERVER_ENV={}", path.display()));
+        secret_path = Some(path);
+    }
     if matches!(command_name.as_str(), "claude" | "codex" | "kimi")
         && env::var("HGS_TRACKING").as_deref() != Ok("0")
     {
@@ -2630,7 +2647,15 @@ fn launch(
         }
     }
     if options.detached {
-        let rc = terminal().launch(&spec)?.code;
+        let rc = match terminal().launch(&spec) {
+            Ok(exit) => exit.code,
+            Err(error) => {
+                if let Some(path) = &secret_path {
+                    let _ = std::fs::remove_file(path);
+                }
+                return Err(error);
+            }
+        };
         if rc == 0 {
             if let Some(id) = &options.launch_id {
                 // A session that ends before a listing shows it still ends
@@ -2645,7 +2670,15 @@ fn launch(
     }
     let _tab = TabGuard::begin(config, &session, &platform::tab_color(config, "local"));
     let start = Instant::now();
-    let exit = terminal().launch(&spec)?;
+    let exit = match terminal().launch(&spec) {
+        Ok(exit) => exit,
+        Err(error) => {
+            if let Some(path) = &secret_path {
+                let _ = std::fs::remove_file(path);
+            }
+            return Err(error);
+        }
+    };
     let rc = exit.code;
     if !report_startup_failure(&session)
         && !exit.server_died

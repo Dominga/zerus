@@ -2,6 +2,7 @@
 //! transcripts on every inspector poll. This cache contains counters, not text.
 use super::*;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 
@@ -148,12 +149,72 @@ fn cache_observation(state: &mut Value, event: &Value, usage: &Value, provider: 
     state["prompt_cache"]=cache;
 }
 
+/// U38: a native event's moment in epoch seconds (numerical milliseconds are
+/// normalized), for the usage history a span reads.
+fn moment(value: &Value) -> f64 {
+    let at = search::timestamp(value);
+    if at > 10_000_000_000.0 {
+        at / 1000.0
+    } else {
+        at
+    }
+}
+
+/// U38: the cached usage history a span is summed from: bounded samples with
+/// their moment, provider, model and either the request's counters or the
+/// cumulative cost and work a cost-state reported. Counters only, never text.
+fn push_history(state: &mut Value, sample: Value) {
+    if !state["history"].is_array() {
+        state["history"] = json!([]);
+    }
+    let mut truncated = false;
+    {
+        let history = state["history"].as_array_mut().unwrap();
+        history.push(sample);
+        if history.len() > 1000 {
+            let drop = history.len() - 1000;
+            history.drain(0..drop);
+            truncated = true;
+        }
+    }
+    if truncated {
+        state["history_truncated"] = json!(true);
+    }
+}
+
+/// U38: a request sample minus the same request's previous snapshot, so a
+/// repeated streaming usage is counted once.
+fn delta(sample: &Value, previous: &Value) -> Value {
+    let mut out = json!({});
+    for (key, value) in sample.as_object().into_iter().flatten() {
+        if let Some(count) = number(value) {
+            out[key] = json!(count.saturating_sub(number(&previous[key]).unwrap_or(0)));
+        }
+    }
+    out
+}
+
+fn has_numbers(value: &Value) -> bool {
+    value.as_object().is_some_and(|object| object.values().any(|value| number(value).is_some()))
+}
+
 fn observe(state: &mut Value, event: &Value, provider: &str, conversation: &str) {
     match provider {
         "codex" if event["type"] == "event_msg" && event["payload"]["type"] == "token_count" => {
             let info = &event["payload"]["info"];
+            let at = moment(&event["timestamp"]);
             let totals = buckets(&info["total_token_usage"], provider);
-            if !totals.as_object().unwrap().is_empty() {
+            if has_numbers(&totals) {
+                // U38: the snapshot is cumulative; its history sample is the
+                // difference from the previous snapshot.
+                let previous = state["codex_seen"].clone();
+                let delta = delta(&totals, &previous);
+                if at > 0.0 && has_numbers(&delta) {
+                    let model = string(&event["payload"], "model");
+                    let model = if model.is_empty() { string(info, "model") } else { model };
+                    push_history(state, json!({"at":at,"provider":"codex","model":model,"tokens":delta}));
+                }
+                state["codex_seen"] = totals.clone();
                 state["totals"] = totals;
             }
             let last = buckets(&info["last_token_usage"], provider);
@@ -174,7 +235,17 @@ fn observe(state: &mut Value, event: &Value, provider: &str, conversation: &str)
             if id.is_empty() || id.len() > 256 {
                 return;
             }
-            accumulate(state, buckets(&message["usage"], provider), Some(id));
+            // U38: the request's counters as a history sample; a repeated
+            // streaming snapshot counts only its delta.
+            let at = moment(&event["timestamp"]);
+            let sample = buckets(&message["usage"], provider);
+            if at > 0.0 && has_numbers(&sample) {
+                let delta = delta(&sample, state["seen"].get(id).unwrap_or(&Value::Null));
+                if has_numbers(&delta) {
+                    push_history(state, json!({"at":at,"provider":"claude","model":string(message,"model"),"tokens":delta}));
+                }
+            }
+            accumulate(state, sample, Some(id));
             if search::timestamp(&event["timestamp"]) >= state["compaction_at"].as_f64().unwrap_or(0.0) {
                 cache_observation(state,event,&message["usage"],provider);
                 if let Some(n) = number(&state["last"]["input"]) {
@@ -186,13 +257,16 @@ fn observe(state: &mut Value, event: &Value, provider: &str, conversation: &str)
             }
         }
         "claude" if event["sessionId"] == conversation && event["type"] == "cost-state" => {
-            if let Some(cost) = event["totalCostUSD"]
+            let at = moment(&event["timestamp"]);
+            let mut cost = None;
+            if let Some(total) = event["totalCostUSD"]
                 .as_f64()
                 .filter(|n| n.is_finite() && *n >= 0.0)
             {
-                state["cost_usd"] = json!(cost);
+                state["cost_usd"] = json!(total);
                 state["cost_stale"] = json!(false);
                 state["cost_incomplete"] = json!(event["hasUnknownModelCost"] == true);
+                cost = Some(total);
             }
             copy(
                 &mut state["extras"],
@@ -204,6 +278,21 @@ fn observe(state: &mut Value, event: &Value, provider: &str, conversation: &str)
                     ("totalLinesRemoved", "lines_removed"),
                 ],
             );
+            // U38: cost and work are cumulative here; a span differences them.
+            let work = match (number(&event["totalAPIDuration"]), number(&event["totalToolDuration"])) {
+                (None, None) => None,
+                (api, tool) => Some(api.unwrap_or(0).saturating_add(tool.unwrap_or(0))),
+            };
+            if at > 0.0 && (cost.is_some() || work.is_some()) {
+                let mut sample = json!({"at":at,"provider":"claude"});
+                if let Some(cost) = cost {
+                    sample["cost_usd"] = json!(cost);
+                }
+                if let Some(work) = work {
+                    sample["work_ms"] = json!(work);
+                }
+                push_history(state, sample);
+            }
         }
         "claude" if event["sessionId"] == conversation && event["type"] == "system"
             && event["subtype"] == "compact_boundary" => {
@@ -236,7 +325,12 @@ fn observe(state: &mut Value, event: &Value, provider: &str, conversation: &str)
             if event["type"] == "usage.record" {
                 // The matching message and step.end repeat this usage. Count
                 // only its authoritative ledger entry (also includes compaction).
-                accumulate(state, buckets(&event["usage"], provider), None);
+                let at = search::timestamp(&event["timestamp"]);
+                let sample = buckets(&event["usage"], provider);
+                if at > 0.0 && has_numbers(&sample) {
+                    push_history(state, json!({"at":at,"provider":"kimi","model":state["model"],"tokens":sample.clone()}));
+                }
+                accumulate(state, sample, None);
                 cache_observation(state,event,&event["usage"],provider);
             } else if event["type"] == "token_counting.measured" {
                 if let Some(n) = number(&event["tokens"]) {
@@ -278,6 +372,13 @@ fn settled_cache(state: &Value) -> Value {
 }
 
 fn scan(path: &Path, cache_path: &Path, provider: &str, conversation: &str) -> Result<Value> {
+    let (state, partial) = scanned(path, cache_path, provider, conversation)?;
+    Ok(output(&state, provider, partial))
+}
+
+/// U38: the cached scan state and whether the transcript is only partly read,
+/// so a span can read the usage history the cache keeps.
+fn scanned(path: &Path, cache_path: &Path, provider: &str, conversation: &str) -> Result<(Value, bool)> {
     let mut file = File::open(path).map_err(|e| e.to_string())?;
     let (identity, meta) =
         crate::platform::FileIdentity::with_metadata(&file).map_err(|e| e.to_string())?;
@@ -307,12 +408,22 @@ fn scan(path: &Path, cache_path: &Path, provider: &str, conversation: &str) -> R
         .unwrap_or(Value::Null);
     let mut offset = number(&state["offset"]).unwrap_or(0);
     let stamp = json!([identity.modified, identity.modified_nanos]);
-    if state["version"] != 4
+    if state["version"] != 5
         || state["fingerprint"] != fingerprint
         || offset > meta.len()
         || (state["size"] == meta.len() && state["stamp"] != stamp)
     {
-        state = json!({"version":4,"fingerprint":fingerprint,"totals":{},"seen":{},"context":{}});
+        // U38: a restarted session's history survives its old transcript, so a
+        // span across the restart still reads both runs.
+        let carried = state["history"].as_array().filter(|history| !history.is_empty()).cloned();
+        let truncated = state["history_truncated"] == true;
+        state = json!({"version":5,"fingerprint":fingerprint,"totals":{},"seen":{},"context":{},"history":[],"codex_seen":{}});
+        if let Some(history) = carried {
+            state["history"] = Value::Array(history);
+        }
+        if truncated {
+            state["history_truncated"] = json!(true);
+        }
         offset = 0;
         // Codex's last snapshot is cumulative; no need to replay its full log.
         if provider == "codex" && meta.len() > 8 * 1024 * 1024 {
@@ -323,10 +434,12 @@ fn scan(path: &Path, cache_path: &Path, provider: &str, conversation: &str) -> R
             offset += BufReader::new((&mut file).take(MAX_READ))
                 .read_until(b'\n', &mut skip)
                 .map_err(|e| e.to_string())? as u64;
+            // U38: the skipped part is not in the usage history.
+            state["history_truncated"] = json!(true);
         }
     }
     if state["offset"] == meta.len() && state["stamp"] == stamp {
-        return Ok(output(&state, provider, false));
+        return Ok((state, false));
     }
     file.seek(SeekFrom::Start(offset))
         .map_err(|e| e.to_string())?;
@@ -349,7 +462,7 @@ fn scan(path: &Path, cache_path: &Path, provider: &str, conversation: &str) -> R
     state["size"] = json!(meta.len());
     state["stamp"] = stamp;
     atomic(cache_path, &state.to_string())?;
-    Ok(output(&state, provider, offset < meta.len()))
+    Ok((state, offset < meta.len()))
 }
 
 fn kimi_capacity(config: &str, model: &str) -> Option<u64> {
@@ -415,6 +528,123 @@ pub(super) fn read(record: &Value) -> Value {
         Ok(result)
     };
     read().unwrap_or_else(|_| json!({"status":"unavailable","source":provider}))
+}
+
+/// U38: the native transcript and cache a Claude or Codex session reads, with
+/// the same validation and cache key as `read`.
+fn transcript(record: &Value) -> Result<(String, String, PathBuf, PathBuf)> {
+    let provider = string(record, "agent");
+    let id = string(record, "conversation_id");
+    if !["codex", "claude"].contains(&provider) || uuid::Uuid::parse_str(id).is_err() {
+        return Err("Native usage unavailable".into());
+    }
+    let path = PathBuf::from(string(record, "transcript"));
+    if !path.is_absolute()
+        || !path
+            .file_name()
+            .is_some_and(|f| f.to_string_lossy().contains(id))
+    {
+        return Err("Native transcript unavailable".into());
+    }
+    let key = format!(
+        "span-v1-{:x}",
+        Sha256::digest(json!([provider, id]).to_string().as_bytes())
+    );
+    Ok((
+        provider.to_owned(),
+        id.to_owned(),
+        path,
+        root().join("usage-cache").join(format!("{key}.json")),
+    ))
+}
+
+/// U38: the tokens and cost the native session spent between `from` and `to`
+/// (epoch seconds), per provider and model, from the usage history the cached
+/// transcript scan keeps. It reads only the bytes after the cached offset; a
+/// provider or a window without timestamped counters is unknown, never zero.
+pub(super) fn span(record: &Value, from: f64, to: f64) -> Value {
+    let provider = string(record, "agent");
+    let unknown = |reason: &str| {
+        json!({"status":"unknown","scope":"span","source":provider,"from":from,"to":to,"reason":reason})
+    };
+    if !(from.is_finite() && to.is_finite() && from > 0.0 && to > from) {
+        return unknown("A span needs two ordered moments");
+    }
+    let (provider, id, path, cache) = match transcript(record) {
+        Ok(found) => found,
+        Err(error) => return unknown(&format!("{error:#}")),
+    };
+    let (state, partial) = match scanned(&path, &cache, &provider, &id) {
+        Ok(found) => found,
+        Err(error) => return unknown(&format!("{error:#}")),
+    };
+    let history = state["history"].as_array().cloned().unwrap_or_default();
+    let oldest = history
+        .iter()
+        .filter_map(|sample| sample["at"].as_f64())
+        .fold(f64::INFINITY, f64::min);
+    if history.is_empty() {
+        return unknown("No timestamped counters");
+    }
+    if state["history_truncated"] == true && oldest > from {
+        return unknown("The cached history does not reach back to the window");
+    }
+    // Request counters per provider and model, the samples wholly in the span.
+    let mut models: BTreeMap<(String, String), (Value, u64)> = BTreeMap::new();
+    for sample in &history {
+        let at = sample["at"].as_f64().unwrap_or(0.0);
+        if at <= from || at > to {
+            continue;
+        }
+        let Some(tokens) = sample["tokens"].as_object() else { continue };
+        let key = (
+            sample["provider"].as_str().unwrap_or(provider.as_str()).to_owned(),
+            sample["model"].as_str().unwrap_or_default().to_owned(),
+        );
+        let entry = models.entry(key).or_insert_with(|| (json!({}), 0));
+        for (bucket, value) in tokens {
+            if let Some(count) = number(value) {
+                entry.0[bucket] = json!(number(&entry.0[bucket]).unwrap_or(0).saturating_add(count));
+            }
+        }
+        entry.1 += 1;
+    }
+    if models.is_empty() {
+        return unknown("No timestamped counters in the window");
+    }
+    // Cost and work are cumulative readings on a cost-state; the span is the
+    // difference of the readings at its two ends.
+    let reading = |key: &str, moment: f64| -> Option<f64> {
+        history
+            .iter()
+            .filter_map(|sample| {
+                let at = sample["at"].as_f64()?;
+                (at <= moment).then(|| sample[key].as_f64()).flatten()
+            })
+            .next_back()
+    };
+    let difference = |key: &str| match (reading(key, from), reading(key, to)) {
+        (Some(from), Some(to)) if to >= from => json!(to - from),
+        _ => Value::Null,
+    };
+    let cost = difference("cost_usd");
+    let work = difference("work_ms");
+    let mut per_provider: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+    for ((name, model), (tokens, requests)) in models {
+        per_provider.entry(name).or_default().push(json!({
+            "model": if model.is_empty() { Value::Null } else { json!(model) },
+            "tokens": tokens,
+            "requests": requests,
+        }));
+    }
+    let providers: Vec<Value> = per_provider
+        .into_iter()
+        .map(|(name, models)| {
+            json!({"provider":name,"models":models,"cost_usd":cost,"work_ms":work})
+        })
+        .collect();
+    json!({"status":"ok","scope":"span","source":provider,"from":from,"to":to,
+        "partial":partial,"providers":providers})
 }
 
 pub(super) fn dsh(projections: &Value) -> Value {
@@ -655,5 +885,156 @@ mod tests {
             buckets(&json!({"input_tokens":-3,"output_tokens":null}), "claude"),
             json!({})
         );
+    }
+
+    /// U38: a Claude transcript's requests inside a window, with its cost and
+    /// work readings, per model; a request outside the window is not counted.
+    #[test]
+    fn a_span_sums_claude_tokens_cost_and_models_in_a_window() {
+        let temp = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(temp.path(), || {
+            let id = "11111111-1111-4111-8111-111111111111";
+            let path = temp.path().join(format!("{id}.jsonl"));
+            let lines = [
+                json!({"type":"cost-state","sessionId":id,"timestamp":"2026-10-11T04:59:30Z","totalCostUSD":0.2,"totalAPIDuration":10,"totalToolDuration":5}),
+                json!({"type":"assistant","sessionId":id,"timestamp":"2026-10-11T05:00:00Z","message":{"id":"r1","model":"opus","usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":100,"cache_creation_input_tokens":20}}}),
+                json!({"type":"cost-state","sessionId":id,"timestamp":"2026-10-11T05:00:10Z","totalCostUSD":0.5,"totalAPIDuration":100,"totalToolDuration":50}),
+                json!({"type":"assistant","sessionId":id,"timestamp":"2026-10-11T05:01:00Z","message":{"id":"r2","model":"sonnet","usage":{"input_tokens":30,"output_tokens":7,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}),
+                json!({"type":"cost-state","sessionId":id,"timestamp":"2026-10-11T05:01:10Z","totalCostUSD":0.9,"totalAPIDuration":400,"totalToolDuration":100}),
+                json!({"type":"assistant","sessionId":id,"timestamp":"2026-10-11T05:05:00Z","message":{"id":"r3","model":"opus","usage":{"input_tokens":999,"output_tokens":999}}}),
+            ];
+            let text = lines.iter().map(|line| line.to_string() + "\n").collect::<String>();
+            fs::write(&path, text).unwrap();
+            let record = json!({"agent":"claude","conversation_id":id,"transcript":path.to_string_lossy()});
+            let result = span(
+                &record,
+                moment(&json!("2026-10-11T04:59:40Z")),
+                moment(&json!("2026-10-11T05:02:00Z")),
+            );
+            assert_eq!(result["status"], "ok", "{result}");
+            let providers = result["providers"].as_array().unwrap();
+            assert_eq!(providers.len(), 1, "{result}");
+            let provider = &providers[0];
+            assert_eq!(provider["provider"], "claude");
+            let models = provider["models"].as_array().unwrap();
+            let opus = models.iter().find(|model| model["model"] == "opus").unwrap();
+            assert_eq!(opus["tokens"], json!({"uncached_input":10,"output":5,"cache_read":100,"cache_write":20,"input":130,"total":135}), "{opus}");
+            let sonnet = models.iter().find(|model| model["model"] == "sonnet").unwrap();
+            assert_eq!(sonnet["tokens"], json!({"uncached_input":30,"output":7,"cache_read":0,"cache_write":0,"input":30,"total":37}), "{sonnet}");
+            assert!(!models.iter().any(|model| model.to_string().contains("999")), "a request outside the window is not counted");
+            assert!((provider["cost_usd"].as_f64().unwrap() - 0.7).abs() < 1e-9, "{provider}");
+            assert_eq!(provider["work_ms"].as_f64(), Some(485.0), "the work readings differ across the window");
+        });
+    }
+
+    /// U38: a Codex transcript's cumulative token snapshots become per-window
+    /// counters by difference, with its model.
+    #[test]
+    fn a_span_sums_codex_token_snapshots_in_a_window() {
+        let temp = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(temp.path(), || {
+            let id = "22222222-2222-4222-8222-222222222222";
+            let path = temp.path().join(format!("{id}.jsonl"));
+            let lines = [
+                json!({"type":"session_meta","payload":{"id":id}}),
+                json!({"type":"event_msg","timestamp":"2026-10-11T06:00:00Z","payload":{"type":"token_count","model":"gpt-x","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":5,"total_tokens":15}}}}),
+                json!({"type":"event_msg","timestamp":"2026-10-11T06:01:00Z","payload":{"type":"token_count","model":"gpt-x","info":{"total_token_usage":{"input_tokens":30,"cached_input_tokens":4,"output_tokens":12,"total_tokens":42}}}}),
+                json!({"type":"event_msg","timestamp":"2026-10-11T06:05:00Z","payload":{"type":"token_count","model":"gpt-x","info":{"total_token_usage":{"input_tokens":40,"cached_input_tokens":4,"output_tokens":20,"total_tokens":60}}}}),
+            ];
+            let text = lines.iter().map(|line| line.to_string() + "\n").collect::<String>();
+            fs::write(&path, text).unwrap();
+            let record = json!({"agent":"codex","conversation_id":id,"transcript":path.to_string_lossy()});
+            let result = span(
+                &record,
+                moment(&json!("2026-10-11T05:59:00Z")),
+                moment(&json!("2026-10-11T06:02:00Z")),
+            );
+            assert_eq!(result["status"], "ok", "{result}");
+            let provider = &result["providers"][0];
+            assert_eq!(provider["provider"], "codex");
+            let model = &provider["models"][0];
+            assert_eq!(model["model"], "gpt-x");
+            assert_eq!(model["tokens"], json!({"input":30,"cache_read":4,"output":12,"total":42}), "{model}");
+            assert_eq!(model["requests"], 2);
+            assert!(provider["cost_usd"].is_null(), "Codex reports no cost");
+        });
+    }
+
+    /// U38: a window across a session restart reads both runs; the history
+    /// survives the new transcript, and the cumulative cost spans them.
+    #[test]
+    fn a_span_across_a_session_restart_reads_both_runs() {
+        let temp = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(temp.path(), || {
+            let id = "33333333-3333-4333-8333-333333333333";
+            let first = temp.path().join(format!("{id}-one.jsonl"));
+            let lines = [
+                json!({"type":"cost-state","sessionId":id,"timestamp":"2026-10-11T03:58:00Z","totalCostUSD":0.1}),
+                json!({"type":"assistant","sessionId":id,"timestamp":"2026-10-11T04:01:00Z","message":{"id":"a","model":"m","usage":{"input_tokens":10,"output_tokens":2}}}),
+                json!({"type":"cost-state","sessionId":id,"timestamp":"2026-10-11T04:02:00Z","totalCostUSD":0.3}),
+            ];
+            fs::write(&first, lines.iter().map(|line| line.to_string() + "\n").collect::<String>()).unwrap();
+            let record = json!({"agent":"claude","conversation_id":id,"transcript":first.to_string_lossy()});
+            let early = span(
+                &record,
+                moment(&json!("2026-10-11T03:59:00Z")),
+                moment(&json!("2026-10-11T04:03:00Z")),
+            );
+            assert_eq!(early["status"], "ok", "{early}");
+            assert_eq!(early["providers"][0]["models"][0]["tokens"]["uncached_input"], 10, "{early}");
+            assert!((early["providers"][0]["cost_usd"].as_f64().unwrap() - 0.2).abs() < 1e-9, "{early}");
+            // The restarted session writes a new transcript; a window across it
+            // reads the old run's history and the new one.
+            let second = temp.path().join(format!("{id}-two.jsonl"));
+            let lines = [
+                json!({"type":"cost-state","sessionId":id,"timestamp":"2026-10-11T05:00:00Z","totalCostUSD":0.5}),
+                json!({"type":"assistant","sessionId":id,"timestamp":"2026-10-11T05:01:00Z","message":{"id":"b","model":"m","usage":{"input_tokens":20,"output_tokens":3}}}),
+                json!({"type":"cost-state","sessionId":id,"timestamp":"2026-10-11T05:02:00Z","totalCostUSD":0.9}),
+            ];
+            fs::write(&second, lines.iter().map(|line| line.to_string() + "\n").collect::<String>()).unwrap();
+            let record = json!({"agent":"claude","conversation_id":id,"transcript":second.to_string_lossy()});
+            let whole = span(
+                &record,
+                moment(&json!("2026-10-11T03:59:00Z")),
+                moment(&json!("2026-10-11T05:03:00Z")),
+            );
+            assert_eq!(whole["status"], "ok", "{whole}");
+            let model = &whole["providers"][0]["models"][0];
+            assert_eq!((model["tokens"]["uncached_input"].as_u64(), model["tokens"]["output"].as_u64()), (Some(30), Some(5)), "{whole}");
+            assert_eq!(model["requests"], 2);
+            assert!((whole["providers"][0]["cost_usd"].as_f64().unwrap() - 0.8).abs() < 1e-9, "{whole}");
+        });
+    }
+
+    /// U38: no timestamped counters is unknown, never zero; a DeepSeek session's
+    /// native counters are cumulative projections without a transcript, so a
+    /// span of it is unknown too.
+    #[test]
+    fn a_span_without_counters_is_unknown_never_zero() {
+        let temp = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(temp.path(), || {
+            let id = "44444444-4444-4444-8444-444444444444";
+            let path = temp.path().join(format!("{id}.jsonl"));
+            fs::write(
+                &path,
+                json!({"type":"user","sessionId":id,"timestamp":"2026-10-11T05:00:00Z"}).to_string() + "\n",
+            )
+            .unwrap();
+            let record = json!({"agent":"claude","conversation_id":id,"transcript":path.to_string_lossy()});
+            let result = span(
+                &record,
+                moment(&json!("2026-10-11T04:59:00Z")),
+                moment(&json!("2026-10-11T05:01:00Z")),
+            );
+            assert_eq!(result["status"], "unknown", "{result}");
+            assert!(result.get("providers").is_none(), "{result}");
+            assert!(!result.to_string().contains("\"total\":0"), "unknown is never zero: {result}");
+            let dsh = json!({"agent":"dsh","conversation_id":id,"projections":{"tokenUsage":{"uncachedInputTokens":10,"outputTokens":5}}});
+            let result = span(&dsh, 1000.0, 2000.0);
+            assert_eq!(result["status"], "unknown", "{result}");
+            assert!(result["reason"].as_str().unwrap().contains("Native usage unavailable"), "{result}");
+            let bad = span(&record, 2000.0, 1000.0);
+            assert_eq!(bad["status"], "unknown", "{bad}");
+        });
     }
 }

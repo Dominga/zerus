@@ -16,6 +16,8 @@
 #include <QStandardPaths>
 #include <QUuid>
 
+#include <windows.h>
+
 namespace {
 // QSettings creates the directory on its first write, and it is removed when the
 // program ends normally. A test child that is killed on purpose before it writes
@@ -41,8 +43,18 @@ void moveTemporaryFiles()
     qputenv("TMP", native);
 }
 
+// U62 (#720): a crashing test program, and every helper or child tray it
+// starts (they inherit the mode), shows no error box, so Windows Error
+// Reporting writes no dump into the person's %LOCALAPPDATA%\CrashDumps and
+// never rotates the owner's own dumps out. QtTest still prints the crash.
+void quietCrashes()
+{
+    SetErrorMode(SetErrorMode(0) | SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+}
+
 void isolateSettings()
 {
+    quietCrashes();
     moveTemporaryFiles();
     static SettingsDirectory directory;
     directory.path = QDir::tempPath() + '/' + QCoreApplication::applicationName() + '-'
@@ -51,6 +63,11 @@ void isolateSettings()
     QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, directory.path);
     QSettings::setPath(QSettings::IniFormat, QSettings::SystemScope, directory.path);
     QStandardPaths::setTestModeEnabled(true);
+    // Zerus's log (ForkLog.h) goes to this folder too: the fixtures' notices and
+    // errors once filled the person's zerus.log while a test ran (owner,
+    // 2026-10-30). A test that sets its own home still does.
+    if (qEnvironmentVariableIsEmpty("HGS_TRAY_HOME"))
+        qputenv("HGS_TRAY_HOME", QDir::toNativeSeparators(directory.path).toLocal8Bit());
     // ZERUS_FIXTURE_POOL=0 starts every fixture in a Python process of its own.
     if (qgetenv("ZERUS_FIXTURE_POOL") != "0")
         qputenv("ZERUS_FIXTURE_POOL", QByteArray::number(QCoreApplication::applicationPid()));

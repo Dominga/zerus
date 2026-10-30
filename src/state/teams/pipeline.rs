@@ -232,7 +232,9 @@ fn close_run(task: &mut Task, state: StageState, by: &str, text: &str, findings:
     let run = task.pipeline_run.as_mut()?.open_run_mut()?;
     // #538 N4: the stage's rights end with it, but a run it started may still go
     // in its folder: the folder (and its checkout) stays held until it ends.
-    let started = run.state == StageState::Delivered;
+    // #635 N3: a stalled (Waiting) stage with such a run does not lose it when a
+    // late verdict closes the run.
+    let started = run.state == StageState::Delivered || run.awaiting_run;
     let may_run = matches!(run.kind.as_str(), "test" | "command" | "land");
     run.state = state;
     run.ended_at = Some(now());
@@ -366,6 +368,7 @@ pub(crate) fn give_stage(team: &mut Team, id: u32, member: &str) -> anyhow::Resu
     run.state = StageState::Delivered;
     run.delivered_at = Some(now());
     run.stalled.clear();
+    run.silent.clear();
     run.unconfirmed = false;
     Ok(run.id.clone())
 }
@@ -387,7 +390,10 @@ pub(crate) fn stage_report(team: &mut Team, input: &Value, actor: &Actor, events
         events.push(Event::new("stale_report", json!({"by":team.role_of(&caller),"task":id,"stage":run.kind,"round":run.round})));
         return Ok(Some(json!({"status":"stale","task":id,"stage":run.kind,"round":run.round})));
     }
-    ensure!(run.member == caller, "This stage of task #{id} was given to {}, not to you", if run.member.is_empty() { "nobody yet".to_owned() } else { team.name_of(&run.member) });
+    // #727: a stalled stage kept its member's verdict; accept it while the run
+    // waits, even though `member` is cleared for a peer to take the stage.
+    let late = run.state == StageState::Waiting && !run.stalled_member.is_empty() && run.stalled_member == caller;
+    ensure!(run.member == caller || late, "This stage of task #{id} was given to {}, not to you", if !run.member.is_empty() { team.name_of(&run.member) } else if !run.stalled_member.is_empty() { team.name_of(&run.stalled_member) } else { "nobody yet".to_owned() });
     ensure!(!team.task(id).map(implementers).unwrap_or_default().contains(&caller), "The implementer never takes its own task's stage");
     let text = input["text"].as_str().unwrap_or_default().trim().to_owned();
     ensure!(text.chars().count() <= 64 * 1024, "A report is at most 64 KiB");
@@ -456,25 +462,45 @@ pub(crate) fn pipeline_returned(attempt: &Attempt) -> bool {
 
 /// #630 N7: an open stage whose member was removed, paused or never confirmed
 /// goes back to Waiting for a free member, and the lead hears it stalled.
+/// #635 N2: a run the stage started and that is still live keeps the folder
+/// and checkout (awaiting_run) until it ends, so the next member's run never
+/// races it; #635 N3 keeps the member for a late verdict while it waits.
 pub(crate) fn stall_stage(team: &mut Team, id: u32, run_id: &str, reason: &str, events: &mut Vec<Event>) -> bool {
-    let Some(task) = team.task_mut(id) else { return false };
-    let Some(run) = task.pipeline_run.as_mut().and_then(|pipeline| pipeline.runs.iter_mut().find(|run| run.id == run_id)) else {
+    let Some(run) = team.task(id).and_then(|task| task.pipeline_run.as_ref()).and_then(|pipeline| pipeline.runs.iter().find(|run| run.id == run_id)) else {
         return false;
     };
     if !matches!(run.state, StageState::Waiting | StageState::Delivered) {
         return false;
     }
+    let live = super::stages::run_live(team, run);
+    let member = run.member.clone();
     let (stage, round) = (run.kind.clone(), run.round);
+    let Some(task) = team.task_mut(id) else { return false };
+    let Some(run) = task.pipeline_run.as_mut().and_then(|pipeline| pipeline.runs.iter_mut().find(|run| run.id == run_id)) else {
+        return false;
+    };
     run.state = StageState::Waiting;
-    run.member.clear();
     run.delivered_at = None;
-    run.folder.clear();
-    run.checkout.clear();
-    run.checkout_repo.clear();
-    run.temp.clear();
-    run.holds = false;
     run.unconfirmed = false;
     run.stalled = reason.to_owned();
+    run.silent.clear();
+    // #727/#709 N1: the member a stall keeps is its own field: `run.member` is
+    // cleared so the stage's peers become candidates, while the stalled member
+    // may still send the verdict it owed while the run waits.
+    run.stalled_member = member;
+    run.member.clear();
+    if live {
+        // The run still uses them; StageCleanup releases them once it ends.
+        run.awaiting_run = true;
+        // Keep the folder, checkout, temp and holds until the run ends.
+    } else {
+        run.awaiting_run = false;
+        run.folder.clear();
+        run.checkout.clear();
+        run.checkout_repo.clear();
+        run.temp.clear();
+        run.holds = false;
+    }
     events.push(Event::new("stage_stalled", json!({"task":id,"stage":stage,"round":round,"reason":reason})));
     true
 }
@@ -1011,6 +1037,39 @@ mod tests {
         team.members.iter_mut().find(|member| member.id == "rev2").unwrap().draining = true;
         assert!(candidates(&team, 1).is_empty());
         assert!(give_stage(&mut team, 1, "rev").is_err());
+    }
+
+    /// #635 N3: a stalled hand-off keeps its member, so the member's verdict is
+    /// still accepted while the run waits instead of being refused.
+    #[test]
+    fn a_late_verdict_is_accepted_while_the_stage_waits() {
+        let mut team = team_with("code", &builtin());
+        let first = hand(&mut team);
+        report(&mut team, &first);
+        let run_id = give_stage(&mut team, 1, "rev").unwrap();
+        let mut events = Vec::new();
+        assert!(stall_stage(&mut team, 1, &run_id, "the stage hand-off was not confirmed", &mut events));
+        let stage = team.task(1).unwrap().pipeline_run.as_ref().unwrap().runs.iter().find(|stage| stage.id == run_id).unwrap().clone();
+        assert_eq!((stage.state, stage.member.as_str(), stage.stalled_member.as_str()), (StageState::Waiting, "", "rev"), "{stage:?}");
+        run(&mut team, "report", json!({"task":1,"attempt":run_id,"verdict":"pass","text":"Read it"}), &member("rev")).unwrap();
+        assert_eq!(team.task(1).unwrap().status, TaskStatus::InTest, "the late verdict moved the task on");
+    }
+
+    /// #727: a removed reviewer's owed verdict is still accepted while the
+    /// stage waits, even though its member slot is free for a peer.
+    #[test]
+    fn a_removed_stage_members_late_verdict_is_accepted_while_it_waits() {
+        let mut team = team_with("code", &builtin());
+        let first = hand(&mut team);
+        report(&mut team, &first);
+        let run_id = give_stage(&mut team, 1, "rev").unwrap();
+        team.members.iter_mut().find(|member| member.id == "rev").unwrap().state = MemberState::Removed;
+        let mut events = Vec::new();
+        assert!(stall_stage(&mut team, 1, &run_id, "rev was removed", &mut events));
+        let stage = team.task(1).unwrap().pipeline_run.as_ref().unwrap().runs.iter().find(|stage| stage.id == run_id).unwrap().clone();
+        assert_eq!((stage.state, stage.member.as_str(), stage.stalled_member.as_str()), (StageState::Waiting, "", "rev"), "{stage:?}");
+        run(&mut team, "report", json!({"task":1,"attempt":run_id,"verdict":"pass","text":"Read it"}), &member("rev")).unwrap();
+        assert_eq!(team.task(1).unwrap().status, TaskStatus::InTest, "the removed member's late verdict still counts");
     }
 
     #[test]

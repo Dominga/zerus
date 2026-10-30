@@ -25,7 +25,10 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include "HgsClient.h"
+#include "HangTrace.h"
 #include "MainThreadWatchdog.h"
+#include "Settings.h"
+#include "SlowEventLog.h"
 #include "SettingsJson.h"
 #include "WorkspaceSkin.h"
 #include "TrayAgent.h"
@@ -55,6 +58,11 @@
 #include <QFile>
 #include <QJsonObject>
 #include <QLockFile>
+
+#include <chrono>
+#include <future>
+#include <memory>
+#include <thread>
 #include <QStandardPaths>
 #include <qt_windows.h>
 #include <shellapi.h>
@@ -170,6 +178,29 @@ private:
     QApplication &m_app;
 };
 
+// WhiteWh fork (owner, 2026-10-30: "the UI lags"): with the slow-event log on,
+// every event the GUI thread handles is timed and the slow ones go to zerus.log
+// (SlowEventLog.h). Off, notify() costs one pointer check.
+class ZerusApplication : public QApplication {
+public:
+    using QApplication::QApplication;
+    ~ZerusApplication() override { SlowEventLog::Meter::setActive(nullptr); }
+    void watchSlowEvents(int thresholdMs)
+    {
+        m_meter = std::make_unique<SlowEventLog::Meter>(SlowEventLog::Config{thresholdMs},
+                                                        [](const QString &line) { ForkLog::write("warning", line); });
+        SlowEventLog::Meter::setActive(m_meter.get());
+    }
+    bool notify(QObject *receiver, QEvent *event) override
+    {
+        if (!m_meter) return QApplication::notify(receiver, event);
+        return m_meter->measure(receiver, event, [&] { return QApplication::notify(receiver, event); });
+    }
+
+private:
+    std::unique_ptr<SlowEventLog::Meter> m_meter;
+};
+
 // Порог сторожа главного потока (см. MainThreadWatchdog.h). Полминуты -- на порядок
 // больше любой честной паузы цикла событий (модальные диалоги его не останавливают) и
 // на порядки меньше недели, которую трей однажды простоял повисшим в AppKit.
@@ -192,6 +223,16 @@ int main(int argc, char *argv[])
     for (int i = 0; i < argc; ++i)
         args << QString::fromLocal8Bit(argv[i]);
 #endif
+    // HGS_TRAY_HOME (a test's launch) keeps the settings out of the real
+    // profile too, not only the log and the socket (ForkLog.h): a test's tray
+    // must never write or lock the person's hgs-tray.ini.
+    if (const QString home = qEnvironmentVariable("HGS_TRAY_HOME"); !home.isEmpty()) {
+#ifdef Q_OS_WIN
+        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, home + QStringLiteral("/AppData/Roaming"));
+#else
+        QSettings::setPath(QSettings::NativeFormat, QSettings::UserScope, home + QStringLiteral("/.config"));
+#endif
+    }
 
     AppConfig cfg;
     QString parseError;
@@ -271,7 +312,7 @@ int main(int argc, char *argv[])
     // default QoS, not this one.
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
 #endif
-    QApplication app(argc, argv);
+    ZerusApplication app(argc, argv);
 #ifdef Q_OS_WIN
     // WhiteWh fork: started from its own folder (a double click in Explorer), Zerus
     // and every program it starts would hold that folder as their current one,
@@ -301,10 +342,17 @@ int main(int argc, char *argv[])
     QApplication::setQuitOnLastWindowClosed(false);
     ForkLog::install();
     ForkLog::launch(QCoreApplication::applicationPid());
+    // The slow-event log, on request: ZERUS_SLOW_EVENTS or debug/slowEventsMs.
+    if (const int slow = SlowEventLog::thresholdFromEnvironment() ? SlowEventLog::thresholdFromEnvironment()
+                                                                 : QSettings().value(QStringLiteral("debug/slowEventsMs"), 0).toInt();
+        slow > 0) {
+        app.watchSlowEvents(slow);
+        ForkLog::write("info", QStringLiteral("Slow GUI event log on: events of %1 ms or more").arg(slow));
+    }
     // WhiteWh fork: the fork's published builds open in the WhiteWh skin until
     // the person picks another one in Settings → Appearance.
     if (ForkUpdater::installedBuild() > 0 && !QSettings().contains(QStringLiteral("workspace/skin")))
-        QSettings().setValue(QStringLiteral("workspace/skin"), QStringLiteral("whitewh"));
+        Settings::set(QStringLiteral("workspace/skin"), QStringLiteral("whitewh"));
     ZerusTranslator translator;
     QTranslator qtTranslator;
     if (!installZerusTranslation(app, translator, qtTranslator))
@@ -427,6 +475,10 @@ int main(int argc, char *argv[])
     // Nothing is shown yet: parse the saved JSON values the tray and its windows
     // read first, so the GUI thread finds them parsed (SettingsJson.h).
     SettingsJson::preload(TrayAgent::jsonSettings());
+    // A held settings lock is named in zerus.log (Settings.h).
+    Settings::setLog(&ForkLog::write);
+    Settings::watchLock();
+    HangTrace::rememberMainThread();
     WorkspaceSkin::preload();
     // KSNI derives its persistent tray ID from the initial display name. Rename
     // the UI only after constructing the icon to preserve Plasma's visibility setting.
@@ -474,12 +526,24 @@ int main(int argc, char *argv[])
     }
     _set_abort_behavior(0, _WRITE_ABORT_MSG);
 #endif
-    MainThreadWatchdog watchdog(kMainThreadHangMs, []() {
+    MainThreadWatchdog watchdog(kMainThreadHangMs, [&watchdog]() {
         std::fprintf(stderr,
                      "hgs-tray: main thread unresponsive for %d s (AppKit deadlock? see "
                      "QuietTrayIcon.h); aborting so the service manager restarts it\n",
                      kMainThreadHangMs / 1000);
         std::fflush(stderr);
+        // WhiteWh fork (owner, 2026-10-30): the hang, its length and the main
+        // thread's activity and stack go to zerus.log first. The writer runs
+        // beside this thread and gets 5 s: a main thread stopped inside the
+        // log's own lock must not keep the tray from aborting.
+        auto written = std::make_shared<std::promise<void>>();
+        auto done = written->get_future();
+        const auto hung = watchdog.hungMs();
+        std::thread([written, hung] {
+            ForkLog::write("error", HangTrace::report(hung, kMainThreadHangMs, Settings::activity()));
+            written->set_value();
+        }).detach();
+        done.wait_for(std::chrono::seconds(5));
         std::abort();
     });
 #ifdef Q_OS_MACOS

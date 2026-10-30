@@ -78,7 +78,7 @@ endif()
 
 add_library(hgs-window-layer STATIC src/WindowLayer.cpp)
 target_include_directories(hgs-window-layer PUBLIC src)
-target_link_libraries(hgs-window-layer PUBLIC Qt6::Widgets)
+target_link_libraries(hgs-window-layer PUBLIC Qt6::Widgets hgs-tray-core)
 if(LINUX)
     target_sources(hgs-window-layer PRIVATE src/KWinWindowLayer.cpp)
     target_link_libraries(hgs-window-layer PRIVATE Qt6::DBus)
@@ -170,7 +170,7 @@ endif()
 # link; tests/CMakeLists.txt fails when a suite lists a source that one of them
 # builds. Each layer adds Qt modules, so a suite that links the lowest layer
 # covering its code keeps its QTEST_MAIN application type.
-add_library(hgs-tray-core STATIC src/ProcessRunner.cpp src/JsonParse.cpp src/SettingsJson.cpp src/HgsClient.cpp src/EventStream.cpp src/FleetState.cpp
+add_library(hgs-tray-core STATIC src/ProcessRunner.cpp src/JsonParse.cpp src/HangTrace.cpp src/Settings.cpp src/SlowEventLog.cpp src/SettingsJson.cpp src/HgsClient.cpp src/EventStream.cpp src/FleetState.cpp
     src/SessionCreationController.cpp
     src/AnalyticsClient.cpp src/AnalyticsData.cpp
     src/ReadMarkSync.cpp src/AppConfig.cpp src/AccountUsageStore.cpp src/ComposerDraftStore.cpp
@@ -214,7 +214,7 @@ add_library(hgs-tray-ui STATIC src/SessionOrganization.cpp src/SessionList.cpp s
     src/KeyboardSettings.cpp src/ShortcutsDialog.cpp src/AutomaticApprovalSettings.cpp src/PhonePairing.cpp
     src/OpenCodeModels.cpp src/OpenCodeModelPicker.cpp src/OpenCodeExistingDialog.cpp src/WslPathMappingDialog.cpp src/MappedLocalFile.cpp src/WslFileOpenDialog.cpp
     # WhiteWh fork: agent teams, the inspector's Team tab.
-    src/TeamPanel.cpp src/TeamPanelPlan.cpp src/TeamTaskCard.cpp src/TeamNewDialog.cpp src/TeamNewTab.cpp src/TeamCatalogEditor.cpp src/TeamDesignerPanel.cpp src/TeamDesignerPage.cpp src/TeamWaitingPage.cpp src/TeamWaitingBanner.cpp src/TeamStages.cpp src/TeamConversation.cpp src/TeamWorkspace.cpp src/TeamWorkspaceAccounts.cpp src/TeamWorkspacePlanMode.cpp src/TeamProposalCard.cpp src/TeamSettingsDialog.cpp src/ModelServers.cpp src/ModelServersPage.cpp src/ModelServerSettings.cpp
+    src/TeamPanel.cpp src/TeamPanelPlan.cpp src/TeamTaskCard.cpp src/TeamNewDialog.cpp src/TeamNewTab.cpp src/TeamCatalogEditor.cpp src/TeamDesignerPanel.cpp src/TeamDesignerPage.cpp src/TeamWaitingPage.cpp src/TeamWaitingBanner.cpp src/TeamStages.cpp src/TeamConversation.cpp src/TeamWorkspace.cpp src/TeamWorkspaceAccounts.cpp src/TeamWorkspaceHeat.cpp src/TeamHeat.cpp src/TeamWorkspacePlanMode.cpp src/TeamProposalCard.cpp src/TeamProfile.cpp src/TeamSettingsDialog.cpp src/ModelServers.cpp src/ModelServersPage.cpp src/ModelServerSettings.cpp
     # Tray icon decorator (QuietTrayIcon.h): portable, but wrapped around the icon
     # only on macOS; makeTrayIcon() in TrayAgent.cpp explains why not on Linux.
     src/QuietTrayIcon.cpp)

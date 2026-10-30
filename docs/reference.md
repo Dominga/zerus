@@ -1476,6 +1476,37 @@ continues in standard mode. The feed records `plan_mode_proposed`,
 `plan_mode_switched`, `plan_mode_denied`, `phase_build_added`,
 `free_phase_close_pending`, `free_phase_closed` and `free_phase_build_failed`.
 
+### Auto-accepted drafts: start-ahead
+
+With Auto-accept drafts on (`settings.auto_accept`), a drafted phase whose
+approval is `auto` is not accepted when it is added. While the current phase
+runs and no member has taken one of its tasks, it stays a draft the lead edits
+freely: `extend`, `edit-draft`, `move-task` and `cancel` all work on it. Status
+carries each phase's `state` (`draft` and the rest), `auto` (true for these) and
+`start_ahead`.
+
+The phase is accepted with `phase_auto_accepted`, by Auto, at the moment its
+first task is handed out: when every phase ahead of it is done, or earlier when
+the lead starts it ahead. Its tasks' reports need no owner approval. The lead
+starts a phase ahead per phase (not the owner):
+
+```sh
+{"request_id":"<uuid>","team":"<id>","phase":2} | hgs team start-ahead --json
+{"request_id":"<uuid>","team":"<id>","phase":2,"undo":true} | hgs team start-ahead --json
+```
+
+Only an `auto` draft is eligible, only while the team runs or is paused, and
+only before any of its tasks was handed out; `undo` takes the start-ahead back
+the same way, before the first hand-out. The feed records `phase_started_ahead`
+and `phase_start_ahead_undone`. The hand-out admits the draft's independent
+tasks (dependencies met, no barrier, not held or waiting) through the same
+work-ahead step, and the first hand-out accepts the phase in the same change by
+turning its `draft` tasks `pending`; a second hand-out does not accept it again.
+
+A review draft keeps the owner's approval, and `settings.work_ahead` keeps its
+meaning for review drafts: starting an auto draft ahead is the lead's decision,
+not a change of the review rules.
+
 ### A model per task, a task for a role, and the context before one
 
 The owner's catalog gives a role the models its members may switch between,
@@ -1561,6 +1592,15 @@ the same commit twice in a row is marked `flaky` and goes to the lead; a timeout
 returns "timed out after N min". The plan chooses a preset, never a command:
 only the owner's catalog writes it.
 
+A stage member that ends its turn without a verdict, with no stage question
+open, gives the lead one stalled item while the stage stays its own. An
+unconfirmed hand-off is not retried on a timer: the lead hears it stalled only
+with evidence that it did not arrive (the member stayed idle and free since
+delivery, with no question and no run claim under the stage's id), and the
+member's late verdict is still accepted while the stage waits. A stage whose
+own run is still going when it goes back to Waiting keeps its folder and
+checkout until that run ends; the next member's work never races it.
+
 A `land` stage runs once every earlier stage passed and is the preset's last
 stage. Its `exits` map an exit code to `accepted` (Zerus accepts the task,
 `decided_by` is Zerus, and the feed names the stage), `returned` (back to the
@@ -1644,6 +1684,134 @@ kept); each restart returns the member's open attempt to the lead as
 one inbox item and `member_crashed`; pausing the team stops restarts, a member
 the team paused is never restarted, and a launch that fails records
 `restart_failed`.
+
+### The profile of the work: losses, spans and unknown
+
+`hgs team profile` reads a scope after the work: where its time and tokens
+went and what was lost. It is read only, computed on request from the tasks'
+timelines (the same spans U37's `timing` reads) and the tokens the members'
+sessions spent inside them. Input is one JSON object:
+
+```text
+{"team":"ID"}                      the plan: every task that is not a draft
+{"team":"ID","phase":2}            one phase
+{"team":"ID","task":7}             one task
+{"team":"ID","compare":[1,2]}      two phases side by side
+{"team":"ID","phase":2,"limit":20}     20 losses a page (20, at most 100)
+{"team":"ID","phase":2,"after_time":{"s":600,"id":"rework:7:a1"}}     next page
+{"team":"ID","phase":2,"after_tokens":{"tokens":12000,"id":"..."}}    next page
+{"team":"ID","phase":2,"after_task":50}                              next task page
+{"team":"ID","phase":2,"tokens":false}   no session reads, every token unknown
+```
+
+Canceled work stays in its phase's profile: its time was spent. A draft has no
+timeline yet. Every list is a stable page with a cursor, so a record that
+arrives between two reads never repeats or skips one.
+
+A timeline is a list of spans, one lane per task, that never overlap: a
+question inside the work cuts the work, a stage after the report covers the
+lead's wait. Each span has `kind`, `from`, `to`, `s` (seconds) and, where they
+apply, `member`, `attempt`, `stage`, `round`, `stage_kind`, `state`, `by`,
+`held_by`, `template` and `exit`. The span kinds are:
+
+- `work` and `rework`: an attempt's work; `rework` is a rejected or returned
+  attempt.
+- `deps`: waiting for a dependency; `member`: waiting for a free member;
+  `folder_held`: another task's stage holds the folder (`held_by`).
+- `delivery`: the hand-off to its delivery; `start_delay`: delivered to
+  started (A1); `lead`: waiting for the lead's decision; `hold`: a hold
+  (`by`).
+- `question` and `permission`: blocked on a native question or permission
+  request (`by` is who answered).
+- `stage_wait`: waiting for a stage member; `stage`: a U36 stage of a round
+  (`stage_kind`, `round`).
+- `background`: Background work (U30); `no_report`: a task without a report;
+  `stop`: a stop.
+- `unknown`: a gap nothing recorded, with `from`, `to` and `s` null (never
+  guessed). Builds lie on top of the lane in `overlay` as `build` spans with
+  their `template` and `exit`.
+
+The output is one JSON object:
+
+- `summary`: `tasks`, `accepted`, `from`, `to`, `elapsed_s`, `worked_s`
+  (work + rework + stage), `totals` per span kind, and `tokens` with `total`,
+  `cost_usd` and `partial`, or `{"unknown":true}` when no part is known.
+- `losses.by_time` and `losses.by_tokens`: ranked pages of `items` with
+  `next_cursor` and `total`. Each loss has `id` (stable, kind first), `kind`,
+  `s`, and `tokens`/`cost_usd` when its part's session is known. The kinds are
+  `rework` (per rejected or returned attempt, with `cause`, `share` of the
+  task's tokens and `tokens_unknown`), `lead_wait` (`lead_s`, `question_s`),
+  `permission_wait` (`answered_by`), `blocked_chain` (`deps_s`,
+  `folder_held_s`, `on`, `held_by`), `member_wait`, `idle_member` (`open_s`,
+  `from`, `to`), `long_test` (a test stage or test build of at least 300 s),
+  `merge` and `conflict` (a `git-merge-lead` run, or a land stage, that did
+  not merge cleanly). `by_tokens` ranks only the losses whose tokens are
+  known.
+- `critical_path`: `planned` (the longest dependency chain by task count,
+  ties to the lower ids), `real` (from the task that ended last back through
+  the dependency that ended last each time, with `s`), `off_plan` and
+  `matches`.
+- `members`, `roles` and `models`: `busy_s`, `idle_s`, `utilization`,
+  `accepted`, `tokens`, `tokens_unknown` and, where both are known,
+  `tokens_per_accepted`. A member is idle only where a task of the scope was
+  open after it joined.
+- `tasks`: a page of rows (`task`, `title`, `status`, `phase`, `elapsed_s`,
+  `worked_s`, `rework_s`, `tokens`, and `rework_tokens`/`rework_share` when
+  known), with `next_cursor`.
+- `events` (`read`, `truncated`: the bounded journal window was cut) and
+  `token_reads` (`asked`, `read`, `truncated`: at most 200 session reads).
+
+Unknown is never zero: a member on another computer, a missing session record,
+a provider without counters, or a read past the 200-read bound leaves those
+tokens unknown, and `summary.tokens` says `partial` or `unknown`. A `compare`
+answer has `a` and `b`, each a phase's summary and top three losses by time,
+and `delta` with the changes in `elapsed_s`, `worked_s`, `tasks`, `accepted`,
+`tokens` and per-kind `totals`.
+
+The lead's phase report names the phase's top three losses by time
+(`losses.by_time.items`), and planning weighs lanes with the per-role numbers
+(`roles[]`: utilization and tokens per accepted task) of the last finished
+phase.
+
+### Test isolation
+
+A test template that Zerus runs for a member (`cargo-test`, `qt-test` and
+`android-test` unless the project names others) runs in a run folder of the
+member's own folder, `.zerus-team/runs/<template>-<time>`, with its own
+`HOME`, `TEMP`/`TMP`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`,
+`XDG_CACHE_HOME` and, on Windows, `APPDATA` and `LOCALAPPDATA` (on Unix also
+`TMPDIR` and `XDG_RUNTIME_DIR`). `ZERUS_TEST_RUN` names the run folder.
+`CARGO_HOME` and `RUSTUP_HOME` keep the person's toolchain, the person's
+`.gitconfig` is copied into the run's home, and Zerus's own state variables
+(`HGS_STATE_DIR`, `HGS_CONFIG_DIR`, `HGS_TRAY_HOME`, `HGS_TRAY_LOCK_DIR`) are
+removed. The newest five run folders are kept. On Windows the run shows no
+error box, so a crash leaves no dump in the person's `CrashDumps`; a crash
+exit is noted in the run folder's `crash.txt` and in the result.
+
+The second line is a fingerprint of the person's own paths before and after
+the run. The run fails, with the paths named in its output, when:
+
+- a watched log or registry (Zerus's `private-stores.json` always) gains a
+  mention of the run folder;
+- a new entry in the person's temporary folder, or a watched folder, starts
+  with the test program's name or a project prefix;
+- a new crash dump in `%LOCALAPPDATA%\CrashDumps` belongs to a program found
+  in the member's folder or with a project prefix;
+- a watched file changes at all.
+
+The project configures it in `.zerus/tests.toml`, `[isolation]`, with
+`[isolation.windows]` and `[isolation.unix]` tables over it: `templates`,
+`env` (variable to a folder below the run folder; `""` unsets a default),
+`keep` (variable to a path below the person's home, used when unset),
+`remove`, `copy`, `prefixes`, `logs`, `files`, `folders` and `enabled`.
+`enabled = false` turns the run folders off but not the fingerprint, and the
+file adds watched paths without removing the built-in ones. A file that cannot
+be read keeps the defaults and says so in the result. Without the file the
+defaults above apply.
+
+Rust tests that set no state folder, or inherit one outside their temporary
+and build folders, use one per test process beside the test binary
+(`target/<profile>/deps/hgs-test-state/<pid>`), never the person's.
 
 <a id="activity"></a>
 
@@ -3698,12 +3866,20 @@ Each server row has a `name`; the API `base_url`
 `kind` (`openai` or `anthropic`); an optional `key` (stored only in this private
 file, never shown by a listing); an optional `ssh` host, either one of this
 computer's Machines or an SSH alias, always reached through hgs's own SSH
-transport (BatchMode, never a piped `ssh.exe` on Windows); and optional control
-commands as argv templates for `status`, `up`, `down` and `logs`. `{model}` is
-the only input a command receives and `{server}` its server name. Commands are
-argv lists, never shell lines: locally hgs starts the program itself and over
-SSH it quotes each argument for the peer's login shell. `up_minutes` bounds a
-detached `up` (30 by default, 1 to 240).
+transport (BatchMode, `-n`, never a piped `ssh.exe` on Windows); and optional
+control commands as argv templates for `status`, `up`, `down` and `logs`.
+`{model}` is the only input a command receives and `{server}` its server name.
+Commands are argv lists, never shell lines: locally hgs starts the program
+itself and over SSH it quotes each argument for the peer's login shell. A
+Windows Machine has no POSIX login shell, so its control commands are refused
+with a message naming it. `up_minutes` bounds a detached `up` (30 by default, 1
+to 240).
+
+`base_url` names the server root, without `/v1`: the root is stored and each
+consumer derives its own URL from it — `GET root/v1/models` for the model list,
+`root/v1` for an OpenAI-compatible client, `root` for Claude Code (which appends
+`/v1/messages` itself). Both spellings, with and without `/v1`, are accepted and
+name the same server; the trailing `/v1` is not stored.
 
 ```json
 {"version":1,"servers":[
@@ -3714,7 +3890,7 @@ detached `up` (30 by default, 1 to 240).
 ]}
 ```
 
-Without control commands the server is read only: `status` reads `GET /v1/models`
+Without control commands the server is read only: `status` reads `root/v1/models`
 (with `Authorization: Bearer` for an OpenAI kind, `x-api-key` for Anthropic) and
 lists the models it returns. An `http://` server is read by hgs itself; an
 `https://` server is read through the system `curl` (`curl.exe` on Windows 10+,
@@ -3727,7 +3903,12 @@ work because the agents speak TLS themselves. A control command may print the
 Zerus JSON contract
 `{"models":[{"name":"small","state":"running"}],"memory":{"free":12.5,"total":64}}`
 or plain lines `NAME: STATE`, with an optional `memory: FREE/TOTAL GB` line;
-any other line is kept as raw text. States are shown lowercased.
+a model in the JSON contract may carry `since`, when its state began (seconds
+since the epoch, or an RFC 3339 time), which the tab shows as "since 09:12";
+any other line is kept as raw text. States are shown lowercased. A `NAME: STATE`
+line splits at the last `": "`, so a model named with a tag (`coder-a:q4:
+running`) keeps its whole name and `Down` targets exactly that model; a name
+starting with `-` is offered by no list and refused by `up` and `down`.
 
 Commands (all local to the configured computer; `--json` is available on `list`
 and `status`):
@@ -3736,6 +3917,8 @@ and `status`):
 hgs model-server list [--json]
 hgs model-server status SERVER [--json]
 hgs model-server up SERVER MODEL [--detach]
+hgs model-server up-result REQUEST_ID --json
+hgs model-server sessions SERVER --json
 hgs model-server down SERVER MODEL [--yes]
 hgs model-server logs SERVER [MODEL] [--lines N]
 hgs model-server save --json      (JSON on stdin)
@@ -3750,20 +3933,30 @@ under `was`, and `"key":null` removes it. Every error names the server and the
 field, nothing is written on an error, and the receipt lists the servers as
 `list --json` does, never with a key. `test --json` takes one server as
 Settings shows it, saved or not (an absent `key` means the stored key of
-`was`), runs `status` once and prints what `status --json` would, saving
-nothing. The key travels only in the stdin JSON, never in an argument. Settings
-tests the status and logs commands only; `up` and `down` belong to the Model
-servers tab with its confirmations. `list --json` also carries each server's
-command templates in `argv`.
+`was`, kept only while its root is unchanged — a test with another root never
+sends the stored key), runs `status` once and prints what `status --json`
+would, saving nothing. Settings tests the status and logs commands only; `up`
+and `down` belong to the Model servers tab with its confirmations. `list --json`
+also carries each server's command templates in `argv`.
 
 `list` shows `name`, `base_url`, `kind`, its SSH host and which control commands
 exist, never the key. `up` and `down` accept only a validated model name (letters,
-digits and `-_.:/@+`) and return a receipt; `up --detach` starts the command as a
-detached `hgs run` with the server's time limit, so the receipt carries its
-`request_id`. A server may be shared, so `down` asks first and says so: without
-`--yes` it returns `{"status":"confirm",...}` and runs nothing. `logs` keeps the
-last `--lines` lines (200 by default, at most 2000) within a fixed time and
-output bound.
+digits and `-_.:/@+`, no leading `-`) and return a receipt; `up --detach` starts
+the command as a detached `hgs run` with the server's time limit, so the receipt
+carries its `request_id`. The run receives an argv, not a shell line, so a
+Windows path or a quoted remote command arrives as one argument. `up-result
+REQUEST_ID --json` reads that run's outcome: `status` `running`, `ran` (with
+`exit`, `timed_out` and the last 1000 characters of its output in `tail`) or
+`refused`, with its `server` and `model`; it reads only a detached up's own run
+and refuses any other id. The Model servers tab reads it every few seconds
+until the run ends, within its time limit, and shows the exit (with the last
+line of a failure's output), the time limit or the refusal. `sessions SERVER
+--json` lists this computer's live sessions whose binding names the server, as
+`{"server":...,"sessions":[{"name":...,"model":...}]}`; Down and Down all name
+them beside each model. A server may be
+shared, so `down` asks first and says so: without `--yes` it returns
+`{"status":"confirm",...}` and runs nothing. `logs` keeps the last `--lines`
+lines (200 by default, at most 2000) within a fixed time and output bound.
 
 Unreachable (the SSH host or API address does not answer), refused (the command
 or the API answered with a failure), timed out (the fixed limit passed) and
@@ -3773,12 +3966,29 @@ retries on its own.
 
 Choose a server's API and model for a new session with
 `hgs codex DIRECTORY --new -n TAG --model-server lab --model small`. The launch
-carries this session's provider settings only: Codex's OpenAI-compatible
-`OPENAI_BASE_URL`/`OPENAI_API_KEY` and `--model`, Claude Code's
-`ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` and model variables (an Anthropic
-server), and OpenCode's provider configuration in `OPENCODE_CONFIG_CONTENT`
-plus a `hgs-lab/small` provider model. The user's global agent configuration is
-never changed, and resuming a saved conversation keeps its original provider.
+carries this session's provider settings only. Codex gets a session-scoped
+custom provider, `-c model_providers.hgs-lab={name,base_url,env_key,wire_api}`
+and `-c model_provider=hgs-lab` with `--model small`: its `wire_api` follows
+the installed Codex (`chat` before 0.100, `responses` from then on, where
+`chat` is deprecated and removed from the newest releases), and it reads its
+key from `HGS_MODEL_SERVER_KEY`, so neither the built-in OpenAI provider nor a
+ChatGPT login is used.
+Claude Code gets `ANTHROPIC_BASE_URL` (the root) and its model variables, with
+the token in `ANTHROPIC_AUTH_TOKEN`. OpenCode is not offered for a model server
+until it has a per-session provider contract; a global provider entry would
+break the session scope. The user's global agent configuration is never
+changed.
+
+The key never travels on a command line: the launch leaves the session's secret
+environment in a private file and passes only its path to `hgs --run`, which
+reads it, gives it to the agent and removes the file. It is therefore absent
+from the tmux start command, from the session's environment listing and from
+`--dry-run` (which prints `NAME=***` for a secret). Only the agent's own
+environment inherits it.
+
+A session records its model server and model. `hgs resume` applies those
+settings again; when the server is no longer configured the resume is refused
+with a message naming it instead of falling back to the cloud account.
 
 <a id="deepseek"></a>
 

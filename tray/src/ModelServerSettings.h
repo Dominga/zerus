@@ -42,7 +42,7 @@ private:
     QLineEdit *m_name, *m_url, *m_key, *m_alias, *m_status, *m_up, *m_down, *m_logs;
     QPushButton *m_openai, *m_anthropic, *m_sshNone, *m_sshMachine, *m_sshAlias, *m_replace, *m_removeKey, *m_delete, *m_save, *m_testLogs;
     QComboBox *m_machine;
-    QLabel *m_stored, *m_apiResult, *m_statusResult, *m_logsResult, *m_saveError, *m_title;
+    QLabel *m_urlHint, *m_stored, *m_apiResult, *m_statusResult, *m_logsResult, *m_saveError, *m_title;
     QPlainTextEdit *m_raw;
     QString m_was;          // the server being edited; empty for a new one
     bool m_hasKey = false;  // a key is stored for m_was

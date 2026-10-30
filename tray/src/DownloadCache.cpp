@@ -1,3 +1,4 @@
+#include "Settings.h"
 #include "JsonParse.h"
 #include "DownloadCache.h"
 #include "LocalFile.h"
@@ -209,7 +210,7 @@ QString directory() {
     return QFileInfo(QSettings().value("downloads/folder", fallback).toString()).absoluteFilePath();
 }
 qint64 limitBytes() { return qMax(qint64(0), QSettings().value("downloads/cacheBytes", 0).toLongLong()); }
-void setLimitBytes(qint64 bytes) { QSettings().setValue("downloads/cacheBytes", qMax(qint64(0), bytes)); }
+void setLimitBytes(qint64 bytes) { Settings::set("downloads/cacheBytes", qMax(qint64(0), bytes)); }
 Pending::~Pending() {
     if (QFileInfo(root).canonicalFilePath() == canonicalRoot && QFileInfo(path).absolutePath() == root
         && QFileInfo(path).fileName().startsWith(".zerus-part-") && ordinary(QFileInfo(path))) QFile::remove(path);

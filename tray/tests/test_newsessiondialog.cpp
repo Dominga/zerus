@@ -107,7 +107,7 @@ private slots:
         WorkspaceSkin::preload();
     }
     void init() {
-        QSettings().clear();
+        clearSettings();
         for(const auto &name:{"fail","removed","slow-mac","released","missing","ended","quota-probes","mac-started","duplicates","other-scope","machine-accounts","slow-catalog-mac","catalog-started","empty-catalog","opencode","uncached","hold-probes","opencode-models","opencode-stopped","service-started","opencode-ids",
             "model-calls","favorite-calls","favorite-fails","models-stopped","old-hgs","favorites","slow-models","slow-favorite","favorite-started",
             "hold-next-models","models-held","project-inference","canonical-directory","clone-calls","clone-worktree","clone-uncertain","clone-receipt","prefill-linked","hold-creation-folder","creation-folder-started","release-creation-folder",

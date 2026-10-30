@@ -734,6 +734,10 @@ int folderHeldBy(const Team &team, const QString &member);
 // #538 L6: the task's open stage waits for a member and hgs names no member
 // that may take it (never a command or land stage, which Zerus runs).
 bool stageWithoutCandidate(const Task &task);
+// U49, #581 L2: how many members "Add more" may add: the team's limit less
+// every member that is not removed, the lead included, as hgs's scale counts;
+// 10 when hgs sends no limit.
+int scaleRoom(const Team &team);
 QList<Member::StageEntry> stageQueue(const Team &team, const QString &member);
 int stageQueuePlace(const Team &team, int task);
 QString stageName(const QString &kind);

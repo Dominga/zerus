@@ -2456,7 +2456,7 @@ QWidget *TeamCatalogEditor::pipelineStageDetails(int index, int stage)
                                                : tr("Any other exit holds the task for the lead."), c.muted), 1);
     v->addLayout(exitsRow);
     // U48: the owner's land_allowed gates it.
-    v->addWidget(warningLine(tr("A land stage runs only in a team whose owner turned on land_allowed in its settings. Without it the plan refuses this preset, "
+    v->addWidget(warningLine(tr("A land stage runs only in a team whose owner turned on land_allowed (Landing in the team's Settings). Without it the plan refuses this preset, "
                                 "and a land stage reached anyway is held for the lead, never run."), c.warn, "teamPipelineLandRule"));
     return frame;
 }

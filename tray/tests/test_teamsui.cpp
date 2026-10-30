@@ -790,6 +790,7 @@ private slots:
     void catalogRoleModelsAndContextAreSaved();
     void planTaskTakesModelsAndARole();
     void teamSettingsSendOnlyWhatChanged();
+    void teamSettingsAllowLandingAndEditMemberModels();
     void memberMenuScalesAndDrains();
     void catalogPipelinesAreEditedAndSaved();
     void catalogPipelineProposalsHavePlates();
@@ -6698,7 +6699,7 @@ elif a[:1]==['terminal']:
   os.remove(here+'.draft');print(json.dumps(dict(base,status='submitted')))
 else:print('{}')
 )PY"));
-    QFile(program + ".draft").open(QIODevice::WriteOnly);
+    QVERIFY(QFile(program + ".draft").open(QIODevice::WriteOnly));
     TeamConversation::setPollInterval(100);
     const auto restore = qScopeGuard([] { TeamConversation::setPollInterval(2000); });
     HgsClient client(FakeCli::program(program));
@@ -7214,6 +7215,114 @@ void TestTeamsUi::teamSettingsSendOnlyWhatChanged()
     QCOMPARE(dialog.changes(), (QJsonObject{{"branch_per_task", QJsonValue(QJsonValue::Null)}}));
 }
 
+// #581 N5: Landing (land_allowed) asks before it turns on, since a land stage's
+// command may push; Cancel keeps it off, turning it off asks nothing. #581 N6:
+// each member but the lead lists its models; Add and the chip's remove edit
+// them, and Save sends the changed members in members_update with the
+// changed settings in one `team settings` call.
+void TestTeamsUi::teamSettingsAllowLandingAndEditMemberModels()
+{
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    auto set = team();
+    auto members = set["members"].toArray();
+    auto backend = members[1].toObject(); backend["models"] = QJsonArray{QJsonObject{{"model", "gpt-5.5-codex"}, {"effort", "high"}}}; members[1] = backend;
+    set["members"] = members;
+    // Answers the next confirmation with Allow landing or Cancel.
+    int asked = 0;
+    std::function<void(bool, int)> answer = [&answer, &asked](bool allow, int tries) {
+        auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+        if (!box || box->objectName() != "teamSettingsLandConfirm") { if (tries > 0) QTimer::singleShot(10, qApp, [&answer, allow, tries] { answer(allow, tries - 1); }); return; }
+        ++asked;
+        QVERIFY(box->informativeText().contains("may merge or push"));
+        if (allow) shot(box, "u48-landing-confirm-dark");
+        for (auto *b : box->buttons()) if ((box->buttonRole(b) == QMessageBox::AcceptRole) == allow) { b->click(); return; }
+    };
+    TeamSettingsDialog dialog(&controller, parse(set), true);
+    dialog.resize(560, 900); dialog.show();
+    auto *land = dialog.findChild<QCheckBox *>("teamSettingsLandAllowed");
+    auto *save = dialog.findChild<QPushButton *>("teamSettingsSave");
+    QVERIFY(land && !land->isChecked());
+    QVERIFY(dialog.changes().isEmpty() && dialog.memberChanges().isEmpty() && !save->isEnabled());
+    // Cancel keeps landing off and nothing to save.
+    QTimer::singleShot(0, qApp, [&answer] { answer(false, 300); });
+    land->click();
+    QCOMPARE(asked, 1);
+    QVERIFY(!land->isChecked());
+    QVERIFY(dialog.changes().isEmpty() && !save->isEnabled());
+    // Allow turns it on.
+    QTimer::singleShot(0, qApp, [&answer] { answer(true, 300); });
+    land->click();
+    QCOMPARE(asked, 2);
+    QVERIFY(land->isChecked());
+    QCOMPARE(dialog.changes(), (QJsonObject{{"land_allowed", true}}));
+    QVERIFY(save->isEnabled());
+    // Member models: Backend and Tester, never the lead.
+    const auto rowOf = [&](const QString &id) -> QWidget * {
+        for (auto *row : dialog.findChildren<QWidget *>("teamSettingsMemberModels")) if (row->property("member") == id) return row;
+        return nullptr;
+    };
+    QStringList ids;
+    for (auto *row : dialog.findChildren<QWidget *>("teamSettingsMemberModels")) ids << row->property("member").toString();
+    QCOMPARE(ids, (QStringList{"backend", "tester"}));
+    const auto chipsOf = [&](const QString &id) {
+        QStringList models;
+        for (auto *chip : rowOf(id)->findChildren<QPushButton *>("teamSettingsMemberModel")) if (!chip->property("model").toString().isEmpty() && chip->parent()) models << chip->property("model").toString();
+        return models;
+    };
+    QCOMPARE(chipsOf("backend"), QStringList{"gpt-5.5-codex@high"});
+    QVERIFY(chipsOf("tester").isEmpty());
+    QVERIFY(rowOf("tester")->findChild<QLabel *>("teamSettingsMemberModelsNone"));
+    // Tester may also switch to kimi-k2.5; the same choice twice adds nothing.
+    auto *model = rowOf("tester")->findChild<QComboBox *>("teamSettingsMemberModelAdd");
+    QCOMPARE(model->count(), int(Teams::knownModels("kimi").size()));   // the agent's known models are offered
+    const auto addTester = [&] {
+        model->setEditText("kimi-k2.5");
+        rowOf("tester")->findChild<QPushButton *>("teamSettingsMemberModelAddButton")->click();
+    };
+    addTester();
+    QTRY_COMPARE(chipsOf("tester"), QStringList{"kimi-k2.5"});
+    addTester();
+    QCOMPARE(dialog.memberChanges(), (QJsonArray{QJsonObject{{"id", "tester"}, {"models", QJsonArray{QJsonObject{{"model", "kimi-k2.5"}}}}}}));
+    // Backend's chip removes its only choice: back to its launch model.
+    rowOf("backend")->findChild<QPushButton *>("teamSettingsMemberModel")->click();
+    QTRY_VERIFY(chipsOf("backend").isEmpty());
+    const QJsonArray expected{QJsonObject{{"id", "backend"}, {"models", QJsonArray{}}},
+                              QJsonObject{{"id", "tester"}, {"models", QJsonArray{QJsonObject{{"model", "kimi-k2.5"}}}}}};
+    QCOMPARE(dialog.memberChanges(), expected);
+    shot(&dialog, "u48-team-settings-landing-dark");
+    save->click();
+    QTRY_COMPARE(calls(script(), "settings").size(), 1);
+    QTRY_COMPARE(dialog.result(), int(QDialog::Accepted));
+    const auto sent = calls(script(), "settings").first();
+    QCOMPARE(sent["team"].toString(), QStringLiteral("team-1"));
+    QCOMPARE(sent["settings"].toObject(), (QJsonObject{{"land_allowed", true}}));
+    QCOMPARE(sent["members_update"].toArray(), expected);
+    // Allowed already: off asks nothing; models alone send no settings key.
+    auto allowed = set; allowed["settings"] = QJsonObject{{"land_allowed", true}};
+    lightPalette();
+    const auto restore = qScopeGuard([] { darkPalette(); });
+    TeamSettingsDialog light(&controller, parse(allowed), false);
+    light.resize(560, 900); light.show();
+    QVERIFY(light.findChild<QCheckBox *>("teamSettingsLandAllowed")->isChecked());
+    lightShot(&light, "u48-team-settings-landing-light");
+    light.findChild<QCheckBox *>("teamSettingsLandAllowed")->click();
+    QCOMPARE(asked, 2);
+    QCOMPARE(light.changes(), (QJsonObject{{"land_allowed", false}}));
+    light.findChild<QCheckBox *>("teamSettingsLandAllowed")->click();   // back to what the owner allowed: no question
+    QCOMPARE(asked, 2);
+    QVERIFY(light.changes().isEmpty());
+    auto *lightModel = light.findChildren<QComboBox *>("teamSettingsMemberModelAdd").at(1);
+    lightModel->setEditText("kimi-k2.5");
+    emit lightModel->lineEdit()->returnPressed();
+    QTRY_VERIFY(light.findChild<QPushButton *>("teamSettingsSave")->isEnabled());
+    light.findChild<QPushButton *>("teamSettingsSave")->click();
+    QTRY_COMPARE(calls(script(), "settings").size(), 2);
+    QVERIFY(!calls(script(), "settings").last().contains("settings"));
+    QCOMPARE(calls(script(), "settings").last()["members_update"].toArray(),
+             (QJsonArray{QJsonObject{{"id", "tester"}, {"models", QJsonArray{QJsonObject{{"model", "kimi-k2.5"}}}}}}));
+}
+
 // U49: the member menu adds more members of a role (scale) and drains one;
 // a draining member is marked and its drain can be cancelled.
 void TestTeamsUi::memberMenuScalesAndDrains()
@@ -7294,6 +7403,23 @@ void TestTeamsUi::memberMenuScalesAndDrains()
     inspectMemberMenu(&workspace, "tester", [](QMenu *menu) {
         for (auto *action : menu->actions())
             if (action->objectName() == "teamWorkspaceMemberScale") { QVERIFY(!action->isEnabled()); QVERIFY(action->toolTip().contains("2 members")); }
+    });
+    // #581 L2: the lead takes a seat, as hgs's scale counts it; a removed member does not.
+    int seated = 0;
+    for (const auto &value : drained["members"].toArray()) seated += value.toObject()["state"].toString() != QLatin1String("removed");
+    QVERIFY(seated >= 3);
+    auto exact = drained; exact["settings"] = QJsonObject{{"max_members", seated}}; exact["revision"] = 15;
+    QCOMPARE(scaleRoom(parse(exact)), 0);
+    auto spare = exact; spare["settings"] = QJsonObject{{"max_members", seated + 2}};
+    QCOMPARE(scaleRoom(parse(spare)), 2);
+    auto gone = exact; auto seats = gone["members"].toArray(); auto last = seats.last().toObject(); last["state"] = "removed"; seats[seats.size() - 1] = last; gone["members"] = seats;
+    QCOMPARE(scaleRoom(parse(gone)), 1);
+    setTeam(exact);
+    QTRY_VERIFY(([&] { controller.refresh(); const auto *t = controller.watched(); return t && t->revision == 15 && t->maxMembers == seated; })());
+    inspectMemberMenu(&workspace, "tester", [seated](QMenu *menu) {
+        for (auto *action : menu->actions())
+            if (action->objectName() == "teamWorkspaceMemberScale")
+                QVERIFY2(!action->isEnabled() && action->toolTip().contains(QStringLiteral("%1 members").arg(seated)), qPrintable(action->toolTip()));
     });
 }
 
@@ -11184,6 +11310,9 @@ else:print('{}')
     QVERIFY(confirm); QTRY_VERIFY(confirm->isVisible());
     QCOMPARE(confirm->findChild<QLabel *>("sessionAccountConfirmTitle")->text(), QStringLiteral("Move this session to Second?"));
     QVERIFY(confirm->findChild<QLabel *>("sessionAccountConfirmText")->text().contains("restarts there in the same conversation, folder and name"));
+    // #581 L6: a busy session is refused, so the text promises no wait.
+    QVERIFY(confirm->findChild<QLabel *>("sessionAccountConfirmText")->text().startsWith("Only an idle session moves: the agent stops,"));
+    QVERIFY(!confirm->findChild<QLabel *>("sessionAccountConfirmText")->text().contains("once it is idle"));
     confirm->findChild<QPushButton *>("sessionAccountCancel")->click();
     QTRY_COMPARE(accountRows(chip).size(), 2);
     QTest::qWait(150); QVERIFY(switches().isEmpty());
@@ -11205,7 +11334,7 @@ else:print('{}')
     QTRY_COMPARE(chip->fullLabel(), QStringLiteral("Second"));
     QVERIFY(chip->isEnabled());
     // A refusal: its reason, nothing changed, the chip says so.
-    QFile(program + ".refuse").open(QIODevice::WriteOnly);
+    QVERIFY(QFile(program + ".refuse").open(QIODevice::WriteOnly));
     QTRY_VERIFY(([&] { chip->click(); const bool open = accountRows(chip).size() == 2; if (!open) chip->accountPopover()->hide(); return open; }()));
     accountRows(chip)[1]->click();   // Work: the current account, Second, comes first
     chip->accountPopover()->findChild<QPushButton *>("sessionAccountMove")->click();
@@ -11214,7 +11343,7 @@ else:print('{}')
     QCOMPARE(chip->fullLabel(), QStringLiteral("Second"));
     QCOMPARE(chip->tone(), ChipTone::Danger);
     // While the agent works the chip is disabled and says why.
-    QFile(program + ".busy").open(QIODevice::WriteOnly);
+    QVERIFY(QFile(program + ".busy").open(QIODevice::WriteOnly));
     QTRY_VERIFY(!chip->isEnabled());
     QVERIFY(chip->toolTip().contains("The agent is working; change its account once it is idle."));
     chip->click(); QVERIFY(!chip->accountPopover()->isVisible());

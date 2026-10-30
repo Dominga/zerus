@@ -5424,7 +5424,7 @@ elif a[0]=='terminal':
  else:(here/'draft').unlink();print(json.dumps(dict(base,status='submitted')))
 else:print('{}')
 )PY"); fixture.close(); QVERIFY(FakeCli::makeRunnable(fixture.fileName()));
-    QFile(temp.filePath("draft")).open(QIODevice::WriteOnly);
+    QVERIFY(QFile(temp.filePath("draft")).open(QIODevice::WriteOnly));
     SessionsWindow window(FakeCli::program(program)); window.setFleet(fleet());
     window.setDetailsPollForTests(300, 24 * 60 * 60 * 1000); window.show(); window.showSession({}, "codex/hgs/dashboard");
     auto *bar = window.findChild<QFrame *>("sessionTerminalDraft"); QVERIFY(bar);
@@ -13129,7 +13129,7 @@ elif args[0] == 'worktrees':
     QVERIFY(FakeCli::makeRunnable(program.fileName()));
     QFile modeFile(fixture.filePath("mode"));QVERIFY(modeFile.open(QIODevice::WriteOnly));modeFile.write(mode.toUtf8());modeFile.close();
     QFile release(fixture.filePath("release"));
-    const auto releaseRequest=[&]{if(!release.exists()){release.open(QIODevice::WriteOnly);release.close();}};
+    const auto releaseRequest=[&]{if(!release.exists()&&release.open(QIODevice::WriteOnly))release.close();};
     const auto cleanup=qScopeGuard(releaseRequest);
     const auto creations=[&]{
         QList<QJsonArray> result;QFile calls(fixture.filePath("calls"));if(!calls.open(QIODevice::ReadOnly))return result;

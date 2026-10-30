@@ -211,6 +211,13 @@ QString implementerOf(const Task &task, const StageRun &run)
     return task.assignee;
 }
 
+int scaleRoom(const Team &team)
+{
+    if (team.maxMembers <= 0) return 10;
+    const auto seats = std::count_if(team.members.cbegin(), team.members.cend(), [](const Member &m) { return m.state != QLatin1String("removed"); });
+    return team.maxMembers - int(seats);
+}
+
 int folderHeldBy(const Team &team, const QString &member)
 {
     // As hgs's stages::held: a test waiting for its member holds the folder

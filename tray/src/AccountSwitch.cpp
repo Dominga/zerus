@@ -240,7 +240,8 @@ void AccountSwitchChip::showConfirm(const Option &option)
     auto *frame = new QWidget; frame->setObjectName("sessionAccountConfirm"); frame->setProperty("account", option.id);
     auto *v = new QVBoxLayout(frame); v->setContentsMargins(0, 0, 0, 0); v->setSpacing(8);
     auto *title = new QLabel(tr("Move this session to %1?").arg(option.label)); title->setObjectName("sessionAccountConfirmTitle"); title->setWordWrap(true);
-    auto *text = new QLabel(tr("The agent stops once it is idle, its conversation is copied to %1 and it restarts there in the same "
+    // #581 L6: a busy session is refused, never queued, so the text says so.
+    auto *text = new QLabel(tr("Only an idle session moves: the agent stops, its conversation is copied to %1 and it restarts there in the same "
                                "conversation, folder and name. If it cannot start on %1, it goes back to %2. Nothing is deleted from %2.")
                                 .arg(option.label, m_label));
     text->setObjectName("sessionAccountConfirmText"); text->setWordWrap(true);

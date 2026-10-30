@@ -3153,8 +3153,7 @@ void TeamWorkspace::memberMenu(const Team &team, const Member &member, const QPo
         // U49: more members of this role at once, and a drain: the member
         // finishes its open work, takes nothing new and then leaves.
         if (team.status == "planning" || team.status == "running" || team.status == "paused") {
-            int seats = 0; for (const auto &m : team.members) seats += !m.lead;
-            const int room = team.maxMembers > 0 ? team.maxMembers - seats : 10;
+            const int room = scaleRoom(team);   // #581 L2: the lead takes a seat too
             auto *scale = menu.addAction(tr("Add more %1…").arg(role), this, [this, teamId = team.id, id = member.id] {
                 QTimer::singleShot(0, this, [this, teamId, id] {
                     const auto *current = currentTeam(teamId);
@@ -3254,8 +3253,7 @@ void TeamWorkspace::memberMenu(const Team &team, const Member &member, const QPo
 
 void TeamWorkspace::scaleRole(const Team &team, const Member &member)
 {
-    int seats = 0; for (const auto &m : team.members) seats += !m.lead;
-    const int room = team.maxMembers > 0 ? team.maxMembers - seats : 10;
+    const int room = scaleRoom(team);
     if (room < 1) return;
     const QString role = team.roleOf(member.id);
     bool ok = false;

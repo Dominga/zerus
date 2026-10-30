@@ -21,6 +21,7 @@
 #include <QPointer>
 #include <QPolygonF>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QSet>
 #include <QToolButton>
 #include <QVBoxLayout>
@@ -2286,6 +2287,32 @@ inline QLabel *aged(QLabel *label, const QString &format, const QString &kind, d
     label->setText(agedText(format, kind, since, now < 0 ? workedClock()() : now));
     return label;
 }
+// #709 L4: a health or warning text names the minutes hgs counted when it was
+// read ("starved: qa idle 5 min ..."). The visible shape leaves those minutes
+// out, so the text grows by the whole minutes since its read, in place.
+inline QString agedMinutes(const QString &text, double at, double now)
+{
+    const qint64 add = at > 0 ? qMax<qint64>(0, qint64((now - at) / 60)) : 0;
+    if (!add || !text.contains(QLatin1String(" min"))) return text;
+    static const QRegularExpression minutes(QStringLiteral("\\b(\\d+) min\\b"));
+    QString out;
+    qsizetype last = 0;
+    for (auto it = minutes.globalMatch(text); it.hasNext();) {
+        const auto match = it.next();
+        out += text.mid(last, match.capturedStart() - last) + QString::number(match.captured(1).toLongLong() + add) + QStringLiteral(" min");
+        last = match.capturedEnd();
+    }
+    return out + text.mid(last);
+}
+// A widget that shows such a text: a label's text (null keeps its own) and
+// its tooltip, read at `at` (now by default); tickAged sets them again.
+inline void agedHealth(QWidget *widget, const QString &text, const QString &tip, double at = -1)
+{
+    if (at < 0) at = workedClock()();
+    widget->setProperty("healthAt", at); widget->setProperty("healthText", text); widget->setProperty("healthTip", tip);
+    if (auto *label = qobject_cast<QLabel *>(widget); label && !text.isNull()) label->setText(text);
+    widget->setToolTip(tip);
+}
 inline void tickAged(QWidget *root, double now)
 {
     for (auto *label : root->findChildren<QLabel *>()) {
@@ -2293,6 +2320,16 @@ inline void tickAged(QWidget *root, double now)
         if (!since.isValid()) continue;
         const QString text = agedText(label->property("agedFormat").toString(), label->property("agedKind").toString(), since.toDouble(), now);
         if (text != label->text()) label->setText(text);
+    }
+    for (auto *widget : root->findChildren<QWidget *>()) {
+        const QVariant at = widget->property("healthAt");
+        if (!at.isValid()) continue;
+        const QString text = widget->property("healthText").toString(), tip = agedMinutes(widget->property("healthTip").toString(), at.toDouble(), now);
+        if (auto *label = qobject_cast<QLabel *>(widget); label && !text.isEmpty()) {
+            const QString shown = agedMinutes(text, at.toDouble(), now);
+            if (shown != label->text()) label->setText(shown);
+        }
+        if (tip != widget->toolTip()) widget->setToolTip(tip);
     }
 }
 

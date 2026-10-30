@@ -2060,7 +2060,8 @@ QWidget *TeamWorkspace::board(const Team &team)
                 health->setObjectName("teamBoardPhaseHealth");
                 health->setStyleSheet(QStringLiteral("QLabel{color:%1;font-size:10px;}").arg(c.text3.name()));
                 const QString tip = phaseHealthTip(team, group.n);
-                health->setToolTip(tip.isEmpty() ? summary->healthLine : tip);
+                // #709 L4: its minutes grow in place between rebuilds.
+                agedHealth(health, summary->healthLine, tip.isEmpty() ? summary->healthLine : tip);
                 h->addWidget(health);
             }
         }
@@ -2295,7 +2296,7 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
         auto *health = label(tr("Healthy %1/%2").arg(healthy).arg(group.tasks.size()), healthy == group.tasks.size() ? c.accent : c.warn, 11, false, "teamPhaseHealth");
         const QString tip = phaseHealthTip(team, group.n);
         const auto *summary = team.phaseSummaryOf(group.n);
-        health->setToolTip(!tip.isEmpty() ? tip : summary ? summary->healthLine : QString());
+        agedHealth(health, QString(), !tip.isEmpty() ? tip : summary ? summary->healthLine : QString());
         info->add(health, 2);
         // QA #539: the folders the phase's tests hold, as the mock-up's "1 folder held".
         QString heldTip;
@@ -3054,7 +3055,7 @@ QWidget *TeamWorkspace::sideLists(const Team &team, const QString &status)
                 auto *r = new ClickFrame; r->setObjectName("teamPlanProblem"); r->setProperty("task", issue.task);
                 auto *h = new QHBoxLayout(r); h->setContentsMargins(4, 3, 4, 3); h->setSpacing(7);
                 auto *icon = new QLabel; icon->setPixmap(workspaceIcon("warning", tone).pixmap(12, 12)); h->addWidget(icon);
-                auto *t = elided(issue.text, tone, 12); t->setToolTip(issue.text); h->addWidget(t, 1);
+                auto *t = elided(issue.text, tone, 12); agedHealth(t, issue.text, issue.text); h->addWidget(t, 1);
                 if (issue.task) {
                     r->setCursor(Qt::PointingHandCursor); r->setToolTip(tr("Open the task"));
                     r->clicked = [this, id = issue.task] { if (const auto *t = currentTeam(m_team)) m_panel->editTask(*t, id); };

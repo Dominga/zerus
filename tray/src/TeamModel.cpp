@@ -1744,13 +1744,16 @@ QJsonObject steadyTiming(QJsonObject timing, bool decided)
     return timing;
 }
 
-// Health and its warnings anywhere: "idle 44 min" reads as "idle N min".
+// Health and its warnings anywhere: "idle 44 min" reads as "idle N min". The
+// desktop ages those minutes in place (agedMinutes, #709 L4); other units
+// are drawn as they come, so a change of them rebuilds.
 QJsonValue steadyHealth(const QJsonValue &value)
 {
-    static const QRegularExpression minutes(QStringLiteral("\\b\\d+ (min|h|s)\\b"));
+    static const QRegularExpression minutes(QStringLiteral("\\b\\d+ min\\b"));
+    if (value.isString()) return value.toString().replace(minutes, QStringLiteral("N min"));
     if (value.isArray()) {
         QJsonArray out;
-        for (const auto &item : value.toArray()) out.append(item.isString() ? QJsonValue(item.toString().replace(minutes, QStringLiteral("N \\1"))) : steadyHealth(item));
+        for (const auto &item : value.toArray()) out.append(steadyHealth(item));
         return out;
     }
     if (!value.isObject()) return value;

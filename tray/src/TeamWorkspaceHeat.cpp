@@ -21,8 +21,10 @@ namespace {
 // up to 200 session records.
 constexpr int HeatTimeoutMs = 2 * 60 * 1000;
 // Waits grow while tasks run: a shown tint is read again after a minute.
-constexpr qint64 HeatAgeMs = 60 * 1000;
+qint64 heatAgeMs = 60 * 1000;
 }
+
+void TeamWorkspace::setHeatAge(int milliseconds) { heatAgeMs = milliseconds; }
 
 QString TeamWorkspace::heatShown(const Team &team) const
 {
@@ -38,7 +40,7 @@ const Heat *TeamWorkspace::heat(const Team &team)
     if (metric.isEmpty()) return nullptr;
     auto &read = m_heat[metric];
     if (read.team != team.id) { read = HeatRead{}; read.team = team.id; }
-    if (!read.reading && (!read.at.isValid() || read.at.hasExpired(HeatAgeMs))) readHeat(team.id, metric, QJsonValue(), std::make_shared<Heat>());
+    if (!read.reading && (!read.at.isValid() || read.at.hasExpired(heatAgeMs))) readHeat(team.id, metric, QJsonValue(), std::make_shared<Heat>());
     return read.error.isEmpty() ? read.heat.get() : nullptr;
 }
 
@@ -64,6 +66,11 @@ void TeamWorkspace::readHeat(const QString &team, const QString &metric, const Q
         read.reading = false; read.at.start();
         read.error = ok ? QString() : (error.isEmpty() ? QObject::tr("no answer") : error.trimmed());
         if (ok) read.heat = into;
+        // #709 L6: the read a minute later mostly draws what is shown; only
+        // a changed tint, legend or error rebuilds the view.
+        const QByteArray digest = ok ? heatDigest(*into, colorsFor(self->m_dark)) : "error\n" + read.error.toUtf8();
+        if (digest == read.digest) return;
+        read.digest = digest;
         self->scheduleRender();
     }, false, HeatTimeoutMs);
 }

@@ -381,6 +381,29 @@ label, in `account_id` and `account_label`.
 A team member's account changes only through `hgs team swap-member`, on your
 word; `switch-account` refuses a member's session and names the team.
 
+To move a team off an account, `swap-member` takes `from_account`,
+`to_account` and `provider` instead of a member: every member of that agent
+whose local session really runs on `from_account`, the lead included, moves
+with one switch each. `""`, `native` and `native-<agent>` all name the default
+account. A member whose switch is confirmed keeps its session, conversation and
+attempt; one whose switch rolls back or is uncertain has its idle old session
+paused and saved as `<name>-<account>` and gets a fresh session on the new
+account; a busy old session is never interrupted, and that member keeps the
+reason in its error ("waiting for the old session to finish its turn"). `team
+status` names each member's real account in `session_account`.
+
+On the desktop, the team workspace's member menu has **Move to another
+account…**: choose the agent, the account to leave and the one to move to; the
+dialog lists the members it takes, asks once, and shows each one's progress
+(moving, then resumed in the same conversation, a fresh session that launches,
+waiting, uncertain or the refusal). Each member card shows the account its
+session runs on. A member that waits for its old session offers **Move again…**;
+a member folder left on another branch names both branches and offers **Check
+out <member branch>…**, for a folder on this computer only: after one
+confirmation it runs `git switch` there, never with `--force` or a reset (a
+folder with uncommitted changes is left as it is and the card says so), then
+relaunches the member.
+
 On the desktop, the composer shows the session's account by its label beside
 the model, in Activity, the team conversations and the designer. Its menu lists
 the same agent's signed-in accounts on that computer, each with its usage. A

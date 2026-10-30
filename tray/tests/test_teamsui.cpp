@@ -35,6 +35,7 @@
 #include <QSplitter>
 #include <QTabWidget>
 #include <QTemporaryDir>
+#include <QProcess>
 #include <QTextBlock>
 #include <QTextBrowser>
 #include <QTimer>
@@ -730,6 +731,8 @@ private slots:
     void terminalDraftIsShownAndSentFromTheConversation();
     void conversationAccountPickerConfirmsAndSwitches();
     void accountPickerStatesInShots();
+    void moveToAnotherAccountNamesTheMembersAndAsksOnce();
+    void memberBlocksShowTheirReasonAndReviewAction();
     void catalogEditorMarksManualEdits();
     void teamCustomizationIsOptIn();
     void catalogRoleModelsAndContextAreSaved();
@@ -874,6 +877,15 @@ elif a[:2]==['team','draft']:
  elif act=='create':print(json.dumps({'status':'planning','team':body.get('team')}))
  elif act=='discard':print(json.dumps({'status':'stopped','stop_lead':body.get('stop_lead',False)}))
  else:print(json.dumps({'status':'ok'}))
+elif a[:2]==['team','swap-member'] and body.get('from_account'):
+ # U54: a bulk move waits while `.swaphold` exists, then answers `.swaprefuse` or `.swapreceipt`.
+ import os,time
+ for _ in range(300):
+  if not os.path.exists(__file__+'.swaphold'):break
+  time.sleep(.1)
+ if os.path.exists(__file__+'.swaprefuse'):print(open(__file__+'.swaprefuse').read(),file=sys.stderr);sys.exit(1)
+ sys.stdout.write(open(__file__+'.swapreceipt').read())
+elif a[:2]==['account','ls'] and os.path.exists(__file__+'.accounts'):sys.stdout.write(open(__file__+'.accounts').read())
 elif a[:2]==['account','ls']:print(json.dumps({'profiles':[{'id':'native-claude','provider':'claude','label':'Default','account_status':{'status':'ok'}},
  {'id':'work','provider':'claude','label':'Claude work','account_status':{'status':'signed_out'}}]}))
 elif a[:2]==['account','model-settings']:
@@ -898,6 +910,7 @@ void TestTeamsUi::init()
     QFile::remove(script() + ".calls");
     QFile::remove(script() + ".draftrev");
     QFile::remove(script() + ".statushold");
+    for (const char *suffix : {".swaphold", ".swaprefuse", ".swapreceipt", ".accounts"}) QFile::remove(script() + QLatin1String(suffix));
     QFile::remove(script() + ".refuse");
     QFile::remove(script() + ".refuseapply");
     QFile::remove(script() + ".waiting");
@@ -2909,7 +2922,9 @@ void TestTeamsUi::permissionAttentionFocusKeepsItsContext()
     workspace.activateWindow(); QVERIFY(QTest::qWaitForWindowActive(&workspace));
     // Freeze the loaded fixture: these cases control exactly when a rebuild
     // happens, rather than letting an unrelated initial poll replace the box.
+    // U54: the accounts read for the member cards renders too.
     QObject::disconnect(&controller, nullptr, &workspace, nullptr);
+    QObject::disconnect(&client, nullptr, &workspace, nullptr);
     QCoreApplication::processEvents(); workspace.render();
     // Outside the rebuilt Members subtree: its focus choice survives a render.
     QLineEdit other(&workspace); other.setGeometry(10, 10, 150, 24); other.show();
@@ -10665,6 +10680,347 @@ void TestTeamsUi::accountPickerStatesInShots()
         chip->setSession("claude/orbit/old", "claude", "", "");
         QVERIFY(!chip->isVisible());
     }
+}
+
+// U54: the team the account move tests use. The lead and Backend run on Work,
+// the Reviewer on the default account, QA is a Codex member, the Designer runs
+// on another computer and the Tester is a Kimi member there.
+QJsonObject moveTeam()
+{
+    auto t = team();
+    const auto member = [](const char *id, const char *role, const char *agent, const char *session, const char *account, const char *host = "") {
+        QJsonObject m{{"id", id}, {"role", role}, {"agent", agent}, {"state", "active"}, {"account", ""}, {"session_account", account},
+                      {"session", QJsonObject{{"host", host}, {"name", session}, {"run_id", QStringLiteral("run-") + id}}}};
+        if (*host) m["computer"] = host;
+        return m;
+    };
+    t["members"] = QJsonArray{member("lead", "Architect", "claude", "claude/checkout/lead", "work"),
+                              member("backend", "Backend", "claude", "claude/checkout/backend", "work"),
+                              member("tester", "Tester", "kimi", "kimi/checkout/tester", "native-kimi", "msi-old"),
+                              member("reviewer", "Reviewer", "claude", "claude/checkout/reviewer", "native-claude"),
+                              member("qa", "QA", "codex", "codex/checkout/qa", "native-codex"),
+                              member("designer", "Designer", "claude", "claude/checkout/designer", "work", "gb10")};
+    return t;
+}
+
+QJsonObject withMember(QJsonObject team, const QString &id, const std::function<void(QJsonObject &)> &change)
+{
+    auto members = team["members"].toArray();
+    for (int i = 0; i < members.size(); ++i) {
+        auto m = members[i].toObject();
+        if (m["id"].toString() == id) { change(m); members[i] = m; }
+    }
+    team["members"] = members;
+    return team;
+}
+
+const char *moveAccounts = R"({"profiles":[
+ {"id":"native-claude","provider":"claude","label":"Default account","account_status":{"status":"ok"}},
+ {"id":"work","provider":"claude","label":"Work","account_status":{"status":"ok"}},
+ {"id":"second","provider":"claude","label":"Second","account_status":{"status":"ok"}},
+ {"id":"old","provider":"claude","label":"Old","account_status":{"status":"signed_out"}},
+ {"id":"native-codex","provider":"codex","label":"Default account","account_status":{"status":"ok"}}]})";
+
+// A shot while a held hgs call runs: shot() would wait for that call.
+void shotWhileHeld(QWidget *widget, const QString &name)
+{
+    const auto dir = qEnvironmentVariable("ZERUS_TEAM_SHOTS");
+    if (dir.isEmpty()) return;
+    QCoreApplication::processEvents();
+    if (!widget->grab().save(QDir(dir).filePath(name + ".png"))) qWarning() << "screenshot not saved:" << name;
+}
+
+QFrame *memberCard(QWidget *root, const QString &id)
+{
+    for (auto *card : root->findChildren<QFrame *>("teamWorkspaceMember"))
+        if (card->property("teamMember") == id && card->isVisibleTo(root)) return card;
+    return nullptr;
+}
+
+QString cardAccount(QWidget *root, const QString &id)
+{
+    auto *card = memberCard(root, id);
+    auto *shown = card ? card->findChild<QLabel *>("teamWorkspaceMemberAccount") : nullptr;
+    return shown ? shown->text() : QString();
+}
+
+QString cardStep(QWidget *root, const QString &id)
+{
+    auto *card = memberCard(root, id);
+    auto *step = card ? card->findChild<QWidget *>("teamWorkspaceMemberMove") : nullptr;
+    return step ? step->property("step").toString() : QString();
+}
+
+// U54: the members menu's Move to another account names every member of the
+// agent whose session runs on the chosen account, the lead included, asks
+// once, sends one swap-member with from_account, to_account and provider, and
+// shows each member's progress: moving, then resumed, fresh and launched; a
+// refusal names its reason. The cards show the account each session runs on.
+void TestTeamsUi::moveToAnotherAccountNamesTheMembersAndAsksOnce()
+{
+    for (const bool dark : {true, false}) {
+        if (dark) darkPalette(); else lightPalette();
+        const QString theme = dark ? QStringLiteral("dark") : QStringLiteral("light");
+        QFile::remove(script() + ".calls");
+        QFile::remove(script() + ".swaprefuse");
+        setTeam(moveTeam());
+        QVERIFY(FakeCli::replace(script() + ".accounts", moveAccounts));
+        HgsClient client(FakeCli::program(script()));
+        TeamController controller(&client);
+        TeamPanel panel(&controller);
+        TeamWorkspace workspace(&controller, &panel);
+        workspace.setTheme(dark);
+        workspace.setLive(live);
+        workspace.resize(1300, 820); workspace.show();
+        controller.refresh();
+        panel.showTeam("team-1");
+        workspace.showTeam("team-1");
+        // Each card shows the account its session runs on, by its label.
+        QTRY_COMPARE(cardAccount(&workspace, "lead"), QStringLiteral("Work"));
+        QCOMPARE(cardAccount(&workspace, "backend"), QStringLiteral("Work"));
+        QCOMPARE(cardAccount(&workspace, "reviewer"), QStringLiteral("Default account"));
+        QCOMPARE(memberCard(&workspace, "lead")->findChild<QLabel *>("teamWorkspaceMemberAccount")->property("account").toString(), QStringLiteral("work"));
+        // The lead's roster names no account: the empty one hid that it ran on Work.
+        QVERIFY(memberCard(&workspace, "lead")->findChild<QLabel *>("teamWorkspaceMemberAccount")->toolTip().contains(QStringLiteral("The roster names Default account")));
+        // A Kimi member cannot move in place; the menu says why.
+        inspectMemberMenu(&workspace, "tester", [](QMenu *menu) {
+            QAction *move = nullptr;
+            for (auto *action : menu->actions()) if (action->objectName() == "teamWorkspaceMemberMoveAccount") move = action;
+            QVERIFY(move);
+            QVERIFY(!move->isEnabled());
+        });
+        chooseMenuAction("teamWorkspaceMemberMoveAccount");
+        memberCard(&workspace, "backend")->findChild<QToolButton *>("teamWorkspaceMemberMenu")->click();
+        QDialog *dialog = nullptr;
+        QTRY_VERIFY((dialog = workspace.findChild<QDialog *>("teamMoveAccountDialog")) && dialog->isVisible());
+        auto *agent = dialog->findChild<QComboBox *>("teamMoveAccountAgent");
+        auto *from = dialog->findChild<QComboBox *>("teamMoveAccountFrom");
+        auto *to = dialog->findChild<QComboBox *>("teamMoveAccountTo");
+        auto *apply = dialog->findChild<QPushButton *>("teamMoveAccountApply");
+        QCOMPARE(agent->currentData().toString(), QStringLiteral("claude"));
+        QCOMPARE(agent->findData("kimi"), -1);
+        QTRY_COMPARE(from->currentData().toString(), QStringLiteral("work"));
+        QVERIFY(from->findData("native-claude") >= 0);
+        // To: the agent's other signed-in accounts on this computer.
+        QTRY_VERIFY(to->findData("second") >= 0);
+        QVERIFY(to->findData("native-claude") >= 0);
+        QCOMPARE(to->findData("work"), -1);
+        QCOMPARE(to->findData("old"), -1);
+        const auto rows = [&] {
+            QStringList ids;
+            for (auto *line : dialog->findChildren<QWidget *>("teamMoveAccountMember")) ids << line->property("member").toString();
+            return ids;
+        };
+        // The lead too; not the member on another computer.
+        QCOMPARE(rows(), (QStringList{"lead", "backend"}));
+        QVERIFY(dialog->findChild<QLabel *>("teamMoveAccountHead")->text().contains(QStringLiteral("2 members")));
+        from->setCurrentIndex(from->findData("native-claude"));
+        QTRY_COMPARE(rows(), QStringList{"reviewer"});
+        QVERIFY(to->findData("work") >= 0);
+        from->setCurrentIndex(from->findData("work"));
+        QTRY_COMPARE(rows(), (QStringList{"lead", "backend"}));
+        to->setCurrentIndex(to->findData("second"));
+        QVERIFY(apply->isEnabled());
+        shot(dialog, "u54-move-dialog-" + theme);
+        // Cancel at the confirmation sends nothing.
+        armConfirm(&panel, true);
+        apply->click();
+        QTest::qWait(100);
+        QVERIFY(calls(script(), "swap-member").isEmpty());
+        QVERIFY(workspace.findChild<QDialog *>("teamMoveAccountDialog"));
+        // One confirmation names the members; one call moves them.
+        { QFile hold(script() + ".swaphold"); QVERIFY(hold.open(QIODevice::WriteOnly)); }
+        QString name, asked;
+        armConfirmRecord(&panel, false, &name, &asked);
+        apply->click();
+        QTRY_COMPARE(calls(script(), "swap-member").size(), 1);
+        QCOMPARE(name, QStringLiteral("teamMoveAccountConfirm"));
+        QVERIFY2(asked.contains(QStringLiteral("Move Lead, Backend from Work to Second?")), qPrintable(asked));
+        QVERIFY(!asked.contains(QStringLiteral(" · ")));
+        const auto input = calls(script(), "swap-member").first();
+        QCOMPARE(input["team"].toString(), QStringLiteral("team-1"));
+        QCOMPARE(input["from_account"].toString(), QStringLiteral("work"));
+        QCOMPARE(input["to_account"].toString(), QStringLiteral("second"));
+        QCOMPARE(input["provider"].toString(), QStringLiteral("claude"));
+        QVERIFY(!input.contains("member"));
+        QVERIFY(!input["request_id"].toString().isEmpty());
+        const auto steps = [&] {
+            QStringList found;
+            for (auto *mark : dialog->findChildren<QWidget *>("teamMoveAccountStep")) found << mark->property("step").toString();
+            return found;
+        };
+        // While it runs every listed member shows Moving, in the dialog and on its card.
+        QTRY_COMPARE(steps(), (QStringList{"moving", "moving"}));
+        QTRY_COMPARE(cardStep(&workspace, "lead"), QStringLiteral("moving"));
+        QCOMPARE(cardStep(&workspace, "reviewer"), QString());
+        QVERIFY(!apply->isVisible());
+        QVERIFY(!from->isEnabled());
+        shotWhileHeld(dialog, "u54-move-progress-" + theme);
+        shotWhileHeld(&workspace, "u54-move-moving-cards-" + theme);
+        // The lead kept its conversation; Backend fell back to a fresh session.
+        auto moved = withMember(moveTeam(), "lead", [](QJsonObject &m) { m["session_account"] = "second"; m["account"] = "second"; });
+        moved = withMember(moved, "backend", [](QJsonObject &m) { m.remove("session"); m["state"] = "not_created"; m["account"] = "second"; m["session_account"] = "second"; });
+        setTeam(moved);
+        QVERIFY(FakeCli::replace(script() + ".swapreceipt",
+            R"({"status":"swapped","members":[{"status":"swapped","member":"lead"},{"status":"swapped","member":"backend"}],"fresh":["backend"]})"));
+        QFile::remove(script() + ".swaphold");
+        QTRY_VERIFY2(steps() == (QStringList{"resumed", "fresh"}),
+                     qPrintable(steps().join(',') + QLatin1Char(' ') + dialog->findChild<QLabel *>("teamMoveAccountError")->text()));
+        QTRY_COMPARE(cardAccount(&workspace, "lead"), QStringLiteral("Second"));
+        // Its new session starts: Launched.
+        setTeam(withMember(moved, "backend", [](QJsonObject &m) {
+            m["state"] = "active"; m["session"] = QJsonObject{{"host", ""}, {"name", "claude/checkout/backend"}, {"run_id", "run-new"}};
+        }));
+        controller.refresh();
+        QTRY_COMPARE(steps(), (QStringList{"resumed", "launched"}));
+        QTRY_COMPARE(cardStep(&workspace, "backend"), QStringLiteral("launched"));
+        QVERIFY(dialog->findChild<QLabel *>("teamMoveAccountHead")->text().contains(QStringLiteral("done")));
+        shot(dialog, "u54-move-done-" + theme);
+        shot(&workspace, "u54-move-cards-" + theme);
+        // Closing a finished move clears its steps from the cards.
+        dialog->findChild<QPushButton *>("teamMoveAccountClose")->click();
+        QTRY_VERIFY(!workspace.findChild<QDialog *>("teamMoveAccountDialog"));
+        QTRY_COMPARE(cardStep(&workspace, "lead"), QString());
+        // A refusal names its reason for each listed member.
+        QVERIFY(FakeCli::replace(script() + ".swaprefuse", "hgs: No member of team Checkout redesign could move to account work"));
+        chooseMenuAction("teamWorkspaceMemberMoveAccount");
+        memberCard(&workspace, "reviewer")->findChild<QToolButton *>("teamWorkspaceMemberMenu")->click();
+        QTRY_VERIFY((dialog = workspace.findChild<QDialog *>("teamMoveAccountDialog")) && dialog->isVisible());
+        from = dialog->findChild<QComboBox *>("teamMoveAccountFrom");
+        to = dialog->findChild<QComboBox *>("teamMoveAccountTo");
+        QTRY_COMPARE(from->currentData().toString(), QStringLiteral("native-claude"));
+        QTRY_VERIFY(to->findData("work") >= 0);
+        to->setCurrentIndex(to->findData("work"));
+        armConfirm(&panel, false);
+        dialog->findChild<QPushButton *>("teamMoveAccountApply")->click();
+        QTRY_COMPARE(steps(), QStringList{"failed"});
+        auto *error = dialog->findChild<QLabel *>("teamMoveAccountError");
+        QTRY_VERIFY(error->isVisible());
+        QCOMPARE(error->text(), QStringLiteral("No member of team Checkout redesign could move to account work"));
+        shot(dialog, "u54-move-refused-" + theme);
+        dialog->close();
+        QTRY_VERIFY(!workspace.findChild<QDialog *>("teamMoveAccountDialog"));
+    }
+    darkPalette();
+}
+
+// U54 (#619): a member whose old session is busy waits with that reason and
+// Move again; a folder left on another branch names both branches and offers
+// the checkout, only for a local folder: after one confirmation it runs git
+// switch (a dirty folder is refused and the card says so), then relaunches.
+void TestTeamsUi::memberBlocksShowTheirReasonAndReviewAction()
+{
+    QTemporaryDir repo;
+    QVERIFY(repo.isValid());
+    const QString folder = QDir(repo.path()).filePath("backend");
+    QVERIFY(QDir().mkpath(folder));
+    const auto git = [&](const QStringList &args) {
+        QProcess process; process.setWorkingDirectory(folder);
+        process.start("git", QStringList{"-c", "user.name=Test", "-c", "user.email=test@example.invalid"} + args);
+        process.waitForFinished(30000);
+        return process.exitCode() == 0 ? QString::fromUtf8(process.readAllStandardOutput()).trimmed() : QStringLiteral("<failed>");
+    };
+    QVERIFY(git({"init", "-q"}) != "<failed>");
+    QVERIFY(git({"checkout", "-q", "-b", "team/t/backend"}) != "<failed>");
+    { QFile f(QDir(folder).filePath("a.txt")); QVERIFY(f.open(QIODevice::WriteOnly)); f.write("a"); }
+    QVERIFY(git({"add", "."}) != "<failed>");
+    QVERIFY(git({"commit", "-qm", "base"}) != "<failed>");
+    QVERIFY(git({"checkout", "-q", "-b", "team/t/backend-3"}) != "<failed>");
+    { QFile f(QDir(folder).filePath("b.txt")); QVERIFY(f.open(QIODevice::WriteOnly)); f.write("b"); }
+    QVERIFY(git({"add", "."}) != "<failed>");
+    QVERIFY(git({"commit", "-qm", "task"}) != "<failed>");
+    const QString branchError = folder + " is on team/t/backend-3, not team/t/backend; team/t/backend-3 is not merged into team/t/backend. "
+                                         "Merge it, then check out team/t/backend in the folder.";
+    auto blocked = withMember(moveTeam(), "backend", [&](QJsonObject &m) {
+        m.remove("session"); m["state"] = "not_created"; m["directory"] = folder; m["error"] = branchError;
+    });
+    blocked = withMember(blocked, "reviewer", [](QJsonObject &m) {
+        m["error"] = "the account switch is rolled_back; waiting for the old session to finish its turn";
+    });
+    blocked = withMember(blocked, "qa", [](QJsonObject &m) {
+        m["error"] = "the account switch is uncertain; the old session was not paused: it is gone";
+    });
+    // A folder on another computer gets the reason, never the checkout.
+    blocked = withMember(blocked, "designer", [](QJsonObject &m) {
+        m.remove("session"); m["state"] = "not_created";
+        m["error"] = "/srv/designer is on team/t/designer-2, not team/t/designer; it has uncommitted changes, so Zerus did not switch it.";
+    });
+    for (const bool dark : {true, false}) {
+        if (dark) darkPalette(); else lightPalette();
+        const QString theme = dark ? QStringLiteral("dark") : QStringLiteral("light");
+        QFile::remove(script() + ".calls");
+        setTeam(blocked);
+        QVERIFY(FakeCli::replace(script() + ".accounts", moveAccounts));
+        HgsClient client(FakeCli::program(script()));
+        TeamController controller(&client);
+        TeamPanel panel(&controller);
+        TeamWorkspace workspace(&controller, &panel);
+        workspace.setTheme(dark);
+        workspace.setLive(live);
+        workspace.resize(1300, 900); workspace.show();
+        controller.refresh();
+        panel.showTeam("team-1");
+        workspace.showTeam("team-1");
+        QTRY_VERIFY(memberCard(&workspace, "backend") && memberCard(&workspace, "backend")->findChild<QPushButton *>("teamWorkspaceMemberCheckout"));
+        const auto stateOf = [&](const QString &id) {
+            auto *card = memberCard(&workspace, id);
+            auto *state = card ? card->findChild<QWidget *>("teamWorkspaceMemberState") : nullptr;
+            return state ? state->toolTip() : QString();
+        };
+        QVERIFY2(stateOf("backend").contains(QStringLiteral("Folder on another branch")), qPrintable(stateOf("backend")));
+        auto *reason = memberCard(&workspace, "backend")->findChild<QLabel *>("teamWorkspaceMemberBlockReason");
+        QVERIFY(reason);
+        QCOMPARE(reason->text(), QStringLiteral("Its folder is on team/t/backend-3, not team/t/backend"));
+        QVERIFY(reason->toolTip().contains(QStringLiteral("Merge it, then check out team/t/backend")));
+        auto *checkout = memberCard(&workspace, "backend")->findChild<QPushButton *>("teamWorkspaceMemberCheckout");
+        QCOMPARE(checkout->text(), QStringLiteral("Check out team/t/backend…"));
+        // The remote folder: its reason only.
+        QVERIFY(memberCard(&workspace, "designer")->findChild<QWidget *>("teamWorkspaceMemberBlockReason"));
+        QVERIFY(!memberCard(&workspace, "designer")->findChild<QPushButton *>("teamWorkspaceMemberCheckout"));
+        // A busy old session waits; Move again once it is idle.
+        QVERIFY2(stateOf("reviewer").contains(QStringLiteral("Waiting for its old session")), qPrintable(stateOf("reviewer")));
+        QVERIFY(memberCard(&workspace, "reviewer")->findChild<QPushButton *>("teamWorkspaceMemberMoveAgain"));
+        QVERIFY2(stateOf("qa").contains(QStringLiteral("Account switch unconfirmed")), qPrintable(stateOf("qa")));
+        QVERIFY(memberCard(&workspace, "qa")->findChild<QPushButton *>("teamWorkspaceMemberOpenSession"));
+        shot(&workspace, "u54-member-blocks-" + theme);
+        if (!dark) continue;
+        // Move again opens the move with the member's account.
+        memberCard(&workspace, "reviewer")->findChild<QPushButton *>("teamWorkspaceMemberMoveAgain")->click();
+        QDialog *dialog = nullptr;
+        QTRY_VERIFY((dialog = workspace.findChild<QDialog *>("teamMoveAccountDialog")) && dialog->isVisible());
+        QTRY_COMPARE(dialog->findChild<QComboBox *>("teamMoveAccountFrom")->currentData().toString(), QStringLiteral("native-claude"));
+        dialog->close();
+        QTRY_VERIFY(!workspace.findChild<QDialog *>("teamMoveAccountDialog"));
+        // A dirty folder is never switched; the card says why.
+        { QFile f(QDir(folder).filePath("dirty.txt")); QVERIFY(f.open(QIODevice::WriteOnly)); f.write("x"); }
+        QString asked;
+        armConfirmRecord(&panel, false, nullptr, &asked);
+        memberCard(&workspace, "backend")->findChild<QPushButton *>("teamWorkspaceMemberCheckout")->click();
+        QTRY_VERIFY(memberCard(&workspace, "backend") && memberCard(&workspace, "backend")->findChild<QLabel *>("teamWorkspaceMemberCheckoutError"));
+        QVERIFY2(asked.contains(folder) && asked.contains(QStringLiteral("from team/t/backend-3 to team/t/backend")), qPrintable(asked));
+        QVERIFY(asked.contains(QStringLiteral("without --force")));
+        QVERIFY(memberCard(&workspace, "backend")->findChild<QLabel *>("teamWorkspaceMemberCheckoutError")->text().contains(QStringLiteral("uncommitted changes")));
+        QCOMPARE(git({"rev-parse", "--abbrev-ref", "HEAD"}), QStringLiteral("team/t/backend-3"));
+        QVERIFY(calls(script(), "relaunch").isEmpty());
+        shot(&workspace, "u54-checkout-refused-dark");
+        // Clean: switched, the task branch kept, then relaunched.
+        QVERIFY(QFile::remove(QDir(folder).filePath("dirty.txt")));
+        armConfirm(&panel, false);
+        memberCard(&workspace, "backend")->findChild<QPushButton *>("teamWorkspaceMemberCheckout")->click();
+        QTRY_COMPARE(calls(script(), "relaunch").size(), 1);
+        QCOMPARE(calls(script(), "relaunch").first()["member"].toString(), QStringLiteral("backend"));
+        QCOMPARE(git({"rev-parse", "--abbrev-ref", "HEAD"}), QStringLiteral("team/t/backend"));
+        QVERIFY(git({"rev-parse", "--verify", "team/t/backend-3"}) != "<failed>");
+        QTRY_VERIFY(!memberCard(&workspace, "backend")->findChild<QLabel *>("teamWorkspaceMemberCheckoutError"));
+        // Cancel at its confirmation changes nothing.
+        QVERIFY(git({"checkout", "-q", "team/t/backend-3"}) != "<failed>");
+        armConfirm(&panel, true);
+        memberCard(&workspace, "backend")->findChild<QPushButton *>("teamWorkspaceMemberCheckout")->click();
+        QTest::qWait(300);
+        QCOMPARE(git({"rev-parse", "--abbrev-ref", "HEAD"}), QStringLiteral("team/t/backend-3"));
+        QCOMPARE(calls(script(), "relaunch").size(), 1);
+    }
+    darkPalette();
 }
 
 #include "test_teamsui.moc"

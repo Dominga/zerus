@@ -122,7 +122,7 @@ fn follow_session_rename(store: &mut Store, team_id: &str, record: Option<&Value
 /// whose session really runs on `from` (the listing's account, not only the
 /// configured one), the lead included.
 fn bulk_swap_members(team: &Team, sessions: &[super::dispatcher::Seen], from: &str, provider: &str) -> Vec<String> {
-    let native = from.is_empty() || from == "native" || from.starts_with("native-");
+    let native = default_account(from);
     team.members
         .iter()
         .filter(|member| member.state != MemberState::Removed)
@@ -138,10 +138,33 @@ fn bulk_swap_members(team: &Team, sessions: &[super::dispatcher::Seen], from: &s
             sessions
                 .iter()
                 .find(|seen| seen.name == session.name && (session.run_id.is_empty() || session.run_id == seen.run_id))
-                .is_some_and(|seen| if native { seen.account_id.is_empty() } else { seen.account_id == from })
+                .is_some_and(|seen| if native { default_account(&seen.account_id) } else { seen.account_id == from })
         })
         .map(|member| member.id.clone())
         .collect()
+}
+
+/// The swap-member input of a bulk move: every member that leaves the old
+/// account is swapped, the moved ones keeping their session and the fresh ones
+/// getting a new one, so an all-fresh move never reads as a single swap.
+fn fill_bulk_swap(filled: &mut Value, moved: &[String], fresh: &[String], notes: Vec<Value>, failed: Vec<Value>, to: &str) {
+    filled["members"] = json!(moved.iter().chain(fresh).collect::<Vec<_>>());
+    filled["fresh"] = json!(fresh);
+    filled["notes"] = json!(notes);
+    filled["bulk"] = json!(true);
+    filled["account"] = json!(to);
+    filled["failed"] = json!(failed);
+}
+
+/// A switch receipt's status as a word ("rolled_back"), not as JSON.
+fn switch_status(receipt: &Value) -> &str {
+    receipt["status"].as_str().unwrap_or("unknown")
+}
+
+/// U54: "", "native" and "native-<agent>" all name an agent's default
+/// account; `hgs ls` names a default-account session "native-claude".
+fn default_account(account: &str) -> bool {
+    account.is_empty() || account == "native" || account.starts_with("native-")
 }
 
 /// U54: a same-agent account move goes through U53's switch, which keeps the
@@ -3347,9 +3370,9 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                         Ok(receipt) => match retire_old_session(&session.name, &from) {
                             Ok(note) => {
                                 fresh.push(id.clone());
-                                notes.push(json!({"member":id,"note":format!("the account switch is {}; {note}", receipt["status"])}));
+                                notes.push(json!({"member":id,"note":format!("the account switch is {}; {note}", switch_status(&receipt))}));
                             }
-                            Err(wait) => failed.push(json!({"member":id,"error":format!("the account switch is {}; {wait}", receipt["status"])})),
+                            Err(wait) => failed.push(json!({"member":id,"error":format!("the account switch is {}; {wait}", switch_status(&receipt))})),
                         },
                         Err(error) => match retire_old_session(&session.name, &from) {
                             Ok(note) => {
@@ -3361,12 +3384,7 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                     }
                 }
                 ensure!(!moved.is_empty() || !fresh.is_empty(), format!("No member of team {} could move to account {to}", team.name));
-                filled["members"] = json!(moved);
-                filled["fresh"] = json!(fresh);
-                filled["notes"] = json!(notes);
-                filled["bulk"] = json!(true);
-                filled["account"] = json!(to);
-                filled["failed"] = json!(failed);
+                fill_bulk_swap(&mut filled, &moved, &fresh, notes, failed, &to);
             }
             if op == "use-last-reply" && text(input, "attempt").is_empty() {
                 // Without an attempt, the task's open one.
@@ -3706,6 +3724,13 @@ mod tests {
         assert_eq!(bulk_swap_members(&team, &elsewhere, "x", "claude"), ["dev".to_owned()]);
         let native = vec![seen("claude/x/lead", ""), seen("claude/x/dev", "x")];
         assert_eq!(bulk_swap_members(&team, &native, "native-claude", "claude"), ["lead".to_owned()]);
+        // `hgs ls` names a default-account session "native-claude": "", "native"
+        // and "native-claude" match it alike.
+        let listed = vec![seen("claude/x/lead", "native-claude"), seen("claude/x/dev", "native"), seen("codex/x/qa", "x")];
+        for from in ["", "native", "native-claude"] {
+            assert_eq!(bulk_swap_members(&team, &listed, from, "claude"), ["lead".to_owned(), "dev".to_owned()], "{from}");
+        }
+        assert!(bulk_swap_members(&team, &listed, "x", "claude").is_empty());
         let dir = tempfile::tempdir().unwrap();
         crate::state::with_test_state_root(dir.path(), || {
             let mut record = json!({"version":1,"name":"claude/x/dev","agent":"claude","account_id":"y"});
@@ -3714,6 +3739,41 @@ mod tests {
             // A session without a readable record keeps its configured account.
             assert_eq!(session_account(team.member("qa").unwrap()), "x");
         });
+    }
+
+    /// U54: the members a bulk move takes are all swapped: the moved ones keep
+    /// their session, the fresh ones get a new one on the target account, and
+    /// an all-fresh move is not read as a single-member swap.
+    #[test]
+    fn a_bulk_swap_swaps_moved_fresh_and_mixed_members() {
+        let swap = |moved: &[&str], fresh: &[&str]| {
+            let mut team = running_team();
+            let owned = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+            let notes = fresh.iter().map(|id| json!({"member":id,"note":"the old session was paused and saved as x"})).collect();
+            let mut input = json!({"from_account":"x","to_account":"y"});
+            fill_bulk_swap(&mut input, &owned(moved), &owned(fresh), notes, Vec::new(), "y");
+            let mut events = Vec::new();
+            let receipt = ops::apply(&mut team, "swap-member", &input, &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+            (team, receipt, events)
+        };
+        // Moved only: the lead keeps its session and takes the new account.
+        let (team, receipt, _) = swap(&["lead"], &[]);
+        assert_eq!(receipt["status"], "swapped", "{receipt}");
+        let lead = team.member("lead").unwrap();
+        assert_eq!((lead.account.as_str(), lead.session.as_ref().map(|s| s.name.as_str())), ("y", Some("claude/x/lead")));
+        assert!(!lead.launch_after_swap);
+        // Fresh only: the member is swapped, not refused as a single swap.
+        let (team, receipt, events) = swap(&[], &["dev"]);
+        assert_eq!(receipt["fresh"], json!(["dev"]), "{receipt}");
+        let dev = team.member("dev").unwrap();
+        assert!(dev.session.is_none() && dev.launch_after_swap && dev.state == MemberState::NotCreated, "{dev:?}");
+        assert_eq!(dev.account, "y");
+        assert!(events.iter().any(|event| event.kind == "member_retired"));
+        // Mixed: each one its own way.
+        let (team, receipt, _) = swap(&["lead"], &["dev"]);
+        assert_eq!(receipt["members"].as_array().map(Vec::len), Some(2), "{receipt}");
+        assert!(team.member("lead").unwrap().session.is_some());
+        assert!(team.member("dev").unwrap().session.is_none() && team.member("dev").unwrap().launch_after_swap);
     }
 
     /// U54: a bulk swap keeps each member's session, conversation and open

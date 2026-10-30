@@ -55,7 +55,7 @@ public:
     // Any `hgs team` operation ("catalog get", "create", ...) with its whole
     // answer. Changes get by and request_id like act().
     using Reply = std::function<void(bool ok, const QJsonObject &result, const QString &error)>;
-    void call(const QString &operation, QJsonObject input, const Reply &done, bool change = true);
+    void call(const QString &operation, QJsonObject input, const Reply &done, bool change = true, int timeoutMs = 0);
     // The catalog, read on request and again after each change through call().
     const Teams::Catalog &catalog() const { return m_catalog; }
     // U36: the catalog's pipeline presets as hgs sends them ({id, name,

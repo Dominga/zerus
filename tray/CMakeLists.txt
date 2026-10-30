@@ -176,7 +176,7 @@ add_library(hgs-tray-core STATIC src/ProcessRunner.cpp src/JsonParse.cpp src/Set
     src/ReadMarkSync.cpp src/AppConfig.cpp src/AccountUsageStore.cpp src/ComposerDraftStore.cpp
     src/SwarmController.cpp src/DesktopPresence.cpp src/AttentionNotifier.h src/CommandBackend.cpp
     # WhiteWh fork: agent teams (hgs team).
-    src/TeamModel.cpp src/TeamController.cpp src/TeamAttentionWatch.cpp
+    src/TeamModel.cpp src/TeamAccountMove.cpp src/TeamController.cpp src/TeamAttentionWatch.cpp
     src/LocalSessionHost.cpp src/DownloadCache.cpp src/AutomaticApprovals.cpp src/CacheKeepalive.cpp src/TaskBoard.cpp
     # Main-thread watchdog (MainThreadWatchdog.h): every platform, prompted by macOS.
     src/MainThreadWatchdog.cpp)
@@ -214,7 +214,7 @@ add_library(hgs-tray-ui STATIC src/SessionOrganization.cpp src/SessionList.cpp s
     src/KeyboardSettings.cpp src/ShortcutsDialog.cpp src/AutomaticApprovalSettings.cpp src/PhonePairing.cpp
     src/OpenCodeModels.cpp src/OpenCodeModelPicker.cpp src/OpenCodeExistingDialog.cpp src/WslPathMappingDialog.cpp src/MappedLocalFile.cpp src/WslFileOpenDialog.cpp
     # WhiteWh fork: agent teams, the inspector's Team tab.
-    src/TeamPanel.cpp src/TeamPanelPlan.cpp src/TeamTaskCard.cpp src/TeamNewDialog.cpp src/TeamNewTab.cpp src/TeamCatalogEditor.cpp src/TeamDesignerPanel.cpp src/TeamDesignerPage.cpp src/TeamWaitingPage.cpp src/TeamStages.cpp src/TeamConversation.cpp src/TeamWorkspace.cpp src/TeamSettingsDialog.cpp
+    src/TeamPanel.cpp src/TeamPanelPlan.cpp src/TeamTaskCard.cpp src/TeamNewDialog.cpp src/TeamNewTab.cpp src/TeamCatalogEditor.cpp src/TeamDesignerPanel.cpp src/TeamDesignerPage.cpp src/TeamWaitingPage.cpp src/TeamStages.cpp src/TeamConversation.cpp src/TeamWorkspace.cpp src/TeamWorkspaceAccounts.cpp src/TeamSettingsDialog.cpp
     # Tray icon decorator (QuietTrayIcon.h): portable, but wrapped around the icon
     # only on macOS; makeTrayIcon() in TrayAgent.cpp explains why not on Linux.
     src/QuietTrayIcon.cpp)

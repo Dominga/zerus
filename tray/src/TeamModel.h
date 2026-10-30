@@ -74,6 +74,10 @@ struct PermissionAnswer {
 struct Member {
     QString id, role, agent, model, computer, state, error;
     QString account, effort, permissions, folder, directory, prompt;
+    // U54: the account its session really runs on (team status's
+    // session_account), which may differ from the configured `account`.
+    QString sessionAccount;
+    bool sessionAccountKnown = false;
     // The member's session once it exists: computer alias (empty = the lead's
     // computer) and name.
     QString host, session;

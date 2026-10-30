@@ -835,14 +835,14 @@ quint64 HgsClient::requestSwarm(const QStringList &arguments, const QJsonObject 
 
 // WhiteWh fork: agent teams. Every operation reads one JSON object on stdin,
 // so even a read sends one: an empty input would leave stdin open.
-quint64 HgsClient::requestTeam(const QString &host, const QString &operation, const QJsonObject &input)
+quint64 HgsClient::requestTeam(const QString &host, const QString &operation, const QJsonObject &input, int timeoutMs)
 {
     const quint64 request = ++m_teamRequest;
     // A catalog operation is two words: "catalog get".
     QStringList args{QStringLiteral("team")};
     args << operation.split(' ', Qt::SkipEmptyParts) << QStringLiteral("--json");
     if (!host.isEmpty()) args.prepend('@' + host);
-    runHgsParsed(m_hgs, args, host.isEmpty() ? 15000 : 45000, this, parseObject,
+    runHgsParsed(m_hgs, args, timeoutMs > 0 ? timeoutMs : host.isEmpty() ? 15000 : 45000, this, parseObject,
         [this, request, host, operation](const ObjectReply &data) {
             if (!data.ok()) emit teamFailed(request, host, operation, tr("Invalid team response"));
             else emit teamReady(request, host, operation, data.object);

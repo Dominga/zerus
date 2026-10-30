@@ -253,7 +253,9 @@ public:
     quint64 requestSwarm(const QStringList &arguments = {QStringLiteral("get")}, const QJsonObject &input = {});
     // WhiteWh fork: `hgs [@host] team <operation> --json` with `input` on stdin
     // (agent teams). A change carries its own request_id; none is retried.
-    quint64 requestTeam(const QString &host, const QString &operation, const QJsonObject &input);
+    // `timeoutMs` 0 keeps the usual bound; a bulk account move (U54) waits
+    // for each member's switch and gets a longer one.
+    quint64 requestTeam(const QString &host, const QString &operation, const QJsonObject &input, int timeoutMs = 0);
     // The draft in the agent's own Terminal input (owner, 2026-10-28): read it,
     // or with submitHash press Enter only while it is still exactly that draft.
     // WhiteWh fork, U53: `hgs [@host] switch-account <name> --account ID

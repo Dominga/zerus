@@ -126,7 +126,7 @@ fn ready(stream: &UnixStream, events: i16, until: Instant) -> io::Result<()> {
         }
     }
 }
-fn exchange(mut stream: UnixStream, request: &[u8], until: Instant) -> Option<Hello> {
+fn exchange(mut stream: UnixStream, request: &[u8], until: Instant) -> Option<Vec<u8>> {
     if !same_user(&stream) {
         return None;
     }
@@ -159,7 +159,8 @@ fn exchange(mut stream: UnixStream, request: &[u8], until: Instant) -> Option<He
                     if end + 1 != bytes.len() || Instant::now() >= until {
                         return None;
                     }
-                    return serde_json::from_slice(&bytes[..end]).ok();
+                    bytes.truncate(end);
+                    return Some(bytes);
                 }
             }
             Err(e)
@@ -178,19 +179,61 @@ fn exchange(mut stream: UnixStream, request: &[u8], until: Instant) -> Option<He
 /// stale/unsafe/unreachable endpoint is Unknown. A connected silent legacy peer
 /// is LiveLegacyOrUnknown, never Absent. All outcomes remain passive.
 pub fn probe_at(path: &Path, nonce: &str, configuration: &str) -> Observation {
-    let until = Instant::now() + PROBE_WAIT;
     let Some(request) = query(nonce) else {
         return Observation::Unknown;
     };
+    match probe_request(path, &request) {
+        Raw::Absent => Observation::Absent,
+        Raw::Unknown => Observation::Unknown,
+        Raw::Live(bytes) => match bytes.and_then(|b| serde_json::from_slice::<Hello>(&b).ok()) {
+            Some(hello) if hello.identity_matches(nonce, configuration) => Observation::LiveNext {
+                hello: Box::new(hello),
+            },
+            _ => Observation::LiveLegacyOrUnknown,
+        },
+    }
+}
+
+/// Same authenticated, bounded socket exchange. A reply without a matched
+/// cached challenge is useful for diagnostics only, never producer admission.
+pub fn probe_producer_at(
+    path: &Path,
+    nonce: &str,
+    configuration: &str,
+) -> super::producer::Observation {
+    use super::producer::{self, Observation};
+    let Some(request) = producer::query(nonce) else {
+        return Observation::Unknown;
+    };
+    match probe_request(path, &request) {
+        Raw::Absent => Observation::Absent,
+        Raw::Unknown => Observation::Unknown,
+        Raw::Live(bytes) => match bytes
+            .and_then(|b| serde_json::from_slice::<producer::Reply>(&b).ok())
+        {
+            Some(reply) if reply.identity_matches(nonce, configuration) => Observation::LiveNext {
+                reply: Box::new(reply),
+            },
+            _ => Observation::LiveLegacyOrUnknown,
+        },
+    }
+}
+enum Raw {
+    Absent,
+    Unknown,
+    Live(Option<Vec<u8>>),
+}
+fn probe_request(path: &Path, request: &[u8]) -> Raw {
+    let until = Instant::now() + PROBE_WAIT;
     let meta = match fs::symlink_metadata(path) {
         Ok(meta) => meta,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Observation::Absent,
-        Err(_) => return Observation::Unknown,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Raw::Absent,
+        Err(_) => return Raw::Unknown,
     };
     // SAFETY: geteuid has no preconditions. Qt's permissions may be wider than
     // the private desktop-v1 endpoint; OS peer credentials are checked below.
     if !meta.file_type().is_socket() || meta.uid() != unsafe { libc::geteuid() } {
-        return Observation::Unknown;
+        return Raw::Unknown;
     }
     let stream = (|| -> io::Result<UnixStream> {
         // socket2 supplies CLOEXEC and Apple NOSIGPIPE. Never block in
@@ -217,12 +260,7 @@ pub fn probe_at(path: &Path, nonce: &str, configuration: &str) -> Observation {
         Ok(stream)
     })();
     let Ok(stream) = stream else {
-        return Observation::Unknown;
+        return Raw::Unknown;
     };
-    match exchange(stream, &request, until) {
-        Some(hello) if hello.identity_matches(nonce, configuration) => Observation::LiveNext {
-            hello: Box::new(hello),
-        },
-        _ => Observation::LiveLegacyOrUnknown,
-    }
+    Raw::Live(exchange(stream, request, until))
 }

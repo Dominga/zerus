@@ -507,3 +507,7 @@
 .cmp-voice-hint { margin: 4px 14px; font-size: var(--fs-sm); }
 .cmp-voice-round { width: 200px; max-width: 100%; aspect-ratio: 1; border-radius: 50%; overflow: hidden; margin: 6px auto; background: var(--z-color-tile); }
 .cmp-voice-round > img, .cmp-voice-round > video { display: block; width: 100%; height: 100%; object-fit: cover; }
+
+/* The mockup round player keeps its geometry while real frames decode. */
+.vm-poster .vm-frames.real { inset: 0; animation: none; will-change: auto; background: none; }
+.vm-frames > video { display: block; width: 100%; height: 100%; object-fit: cover; }

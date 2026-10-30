@@ -4,6 +4,7 @@ mod catalog_read;
 mod custody;
 mod fanout;
 mod feed;
+mod frontend;
 mod handoff;
 mod import_evidence;
 mod owner;
@@ -282,6 +283,7 @@ fn serve(location: Location) -> Result<()> {
     let active = Arc::new(AtomicUsize::new(0));
     let mut feed = feed::Broker::new(&epoch);
     let mut reads = catalog_read::Reader::default();
+    let mut frontend = frontend::Cache::default();
     // At most16 queued controls/data, thirteen bounded parsers and one passive
     // producer. No upstream reader starts here; later sources share this actor.
     let (send, receive) = mpsc::sync_channel(protocol::PENDING);
@@ -336,10 +338,11 @@ fn serve(location: Location) -> Result<()> {
     let mut collect_at = Instant::now();
     let mut failed = false;
     while platform::shutdown_signal() == 0 {
+        frontend.tick(&location);
         store.recover_operation_custody(&location);
         match receive.recv_timeout(Duration::from_millis(200)) {
             Ok(Event::Command(hello, queue)) => {
-                let value = projection(
+                let mut value = projection(
                     &location,
                     &store,
                     &epoch,
@@ -348,6 +351,7 @@ fn serve(location: Location) -> Result<()> {
                     &feed,
                     &reads,
                 );
+                value["frontend_read_delivery"] = frontend.status();
                 let mut streaming = false;
                 let reply = if hello.abi != ABI || hello.configuration != location.configuration {
                     frame(
@@ -450,7 +454,7 @@ fn serve(location: Location) -> Result<()> {
             store.recover_effects(&epoch);
             seq += 1;
             migration = handoff::inspect(&location);
-            let value = projection(
+            let mut value = projection(
                 &location,
                 &store,
                 &epoch,
@@ -459,6 +463,7 @@ fn serve(location: Location) -> Result<()> {
                 &feed,
                 &reads,
             );
+            value["frontend_read_delivery"] = frontend.status();
             fanout.publish(protocol::encode(&frame(&epoch, seq, "heartbeat", value))?.into());
             heartbeat = Instant::now() + HEARTBEAT;
         }
@@ -606,7 +611,8 @@ fn exchange(location: &Location, op: &str, request: Option<Value>) -> Result<Opt
     Ok(Some(response["value"].clone()))
 }
 fn status(location: &Location) -> Result<Value> {
-    Ok(exchange(location, "status", None)?.unwrap_or_else(|| json!({"abi":ABI,"running":false,"ownership":"unavailable","configuration":location.configuration,"writers_enabled":false})))
+    Ok(exchange(location, "status", None)?.unwrap_or_else(|| json!({"abi":ABI,"running":false,"ownership":"unavailable","configuration":location.configuration,"writers_enabled":false,
+        "frontend_read_delivery":frontend::inspect(&location.configuration)})))
 }
 fn watch(location: &Location) -> Result<()> {
     let stream = connection(location, "watch", None)?.context("desktop service is not running")?;

@@ -151,6 +151,8 @@ pub struct Startup {
     /// The claimed single-instance socket and the activations it receives.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub instance: Option<instance::Claimed>,
+    #[cfg(all(feature = "live", any(target_os = "linux", target_os = "macos")))]
+    pub desktop_responder: Option<std::sync::Arc<zerus_client_core::desktop::Responder>>,
 }
 
 /// Parses Qt's command line and answers `--help`, `--version` and
@@ -191,6 +193,8 @@ pub fn run() {
     }
     let identity = identity::current(&context.config().identifier);
     let opens_sessions = options.opens_sessions(identity.is_switch());
+    #[cfg(all(feature = "live", any(target_os = "linux", target_os = "macos")))]
+    let mut desktop_responder = None;
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let instance = match identity.instance_name(identity::flag("ZERUS_CLIENT_SINGLE_INSTANCE")) {
         None => None,
@@ -209,7 +213,10 @@ pub fn run() {
             match instance::claim(&name, identity.launchd_label(), activation, reply) {
                 instance::Claim::Claimed(claimed) => {
                     #[cfg(feature = "live")]
-                    desktop_hello::configure(responder, identity.is_switch());
+                    {
+                        desktop_hello::configure(responder.clone(), identity.is_switch());
+                        desktop_responder = Some(responder);
+                    }
                     Some(claimed)
                 }
                 instance::Claim::Forwarded => {
@@ -232,6 +239,8 @@ pub fn run() {
             opens_sessions,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             instance,
+            #[cfg(all(feature = "live", any(target_os = "linux", target_os = "macos")))]
+            desktop_responder,
         },
     );
 }
@@ -368,7 +377,19 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(mobile::start(app.handle()));
                 // A replay never touches the real read or attention marks.
                 let actions = actions::Actions::new(dir.join(actions::marks_file(replay)));
-                app.manage(readsync::start(actions.clone()));
+                let notice_app = app.handle().clone();
+                app.manage(readsync::start(actions.clone(), std::sync::Arc::new(move |health, saturated| {
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    if let Some(responder) = &startup.desktop_responder {
+                        responder.read_delivery(health);
+                    }
+                    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                    let _ = health;
+                    if saturated {
+                        desk::window_notice(&notice_app, "Read marks paused",
+                            "All four read-delivery slots are waiting for child processes or pipes to close. See hgs desktop status for details.");
+                    }
+                })));
                 app.manage(actions);
                 app.manage(actions::ArchiveReads::default());
                 app.manage(content_search::Searches::default());
@@ -1114,6 +1135,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         composer::composer_tab,
         drops::dropped_files,
         composer::fetch::attachment_fetch,
+        composer::fetch::attachment_media,
         composer::fetch::attachment_pin,
         composer::fetch::attachment_unpin,
         composer::fetch::attachment_open,

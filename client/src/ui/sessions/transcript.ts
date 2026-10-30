@@ -166,11 +166,15 @@ function media(e: ActivityEvent, id: string): MediaMessage {
   const video = (voice.video ?? undefined) as Record<string, unknown> | undefined;
   const state = String(voice.state ?? "uncertain") as VoiceState;
   const waveform = Array.isArray(audio.waveform) ? (audio.waveform as unknown[]).map((v) => Math.max(0, Math.min(255, Number(v) || 0))) : [];
+  const file = video && Object.keys(video).length ? video : audio;
+  const index = Number(file.index);
   return {
     id, kind: "media", media: video && Object.keys(video).length ? "video" : "voice", at: timeText(e.at),
     state: state in VOICE_STATE_LABEL ? state : "uncertain",
     durationMs: Math.max(0, Number(audio.duration_ms) || 0),
     waveform: waveform.length === 64 ? waveform : [],
+    file: typeof audio.request_id === "string" && !!audio.request_id && typeof file.request_id === "string" && !!file.request_id
+      && typeof file.index === "number" && Number.isSafeInteger(index) && index >= 0 ? { request_id: file.request_id, index } : undefined,
     transcript: typeof voice.transcript === "string" && voice.transcript ? voice.transcript : undefined,
     error: typeof voice.error === "string" && voice.error ? voice.error : undefined,
   };

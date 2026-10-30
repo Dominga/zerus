@@ -133,6 +133,7 @@ pub struct Startup {
 /// activation to the running instance and returns, and runs the app.
 pub fn run() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
     let options = match cli::parse(&args) {
         Ok(cli::Command::Run(options)) => options,
         Ok(cli::Command::Help) => {
@@ -166,7 +167,6 @@ pub fn run() {
     if let Some(hgs) = &options.hgs {
         std::env::set_var("ZERUS_CLIENT_HGS", hgs);
     }
-    let context = tauri::generate_context!();
     let identity = identity::current(&context.config().identifier);
     let opens_sessions = options.opens_sessions(identity.is_switch());
     #[cfg(any(target_os = "linux", target_os = "macos"))]

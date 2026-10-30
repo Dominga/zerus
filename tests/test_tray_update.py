@@ -30,6 +30,8 @@ if sys.argv[1:] == ['--build-info']:
     # 'unverifiable' reports itself as a build, never once installed.
     if VARIANT == 'unverifiable' and pathlib.Path(sys.argv[0]).parent.name == 'bin':
         sys.exit(1)
+    if VARIANT == 'legacy-broken':
+        sys.exit(1)
     info = {{'version': '0.42.0', 'versionName': VARIANT, 'devBuildNumber': int(VARIANT[4:]) if VARIANT.startswith('dev-') else 0,
              'sourceCommit': VARIANT.ljust(40, '0'), 'sourceDirty': False}}
     if VARIANT.startswith('client-'):
@@ -440,6 +442,28 @@ class TrayUpdate(unittest.TestCase):
         kind = subprocess.run([sys.executable, str(UPDATER), '--installed-gui', str(self.installed)],
                               env=self.env, capture_output=True, text=True, timeout=30)
         self.assertEqual((kind.returncode, kind.stdout.strip()), (0, 'qt'), kind.stderr)
+
+    def test_an_unreadable_legacy_gui_is_replaced_and_keeps_the_existing_slot(self):
+        for variant in ('second', 'client-1'):
+            with self.subTest(variant=variant):
+                slot = self.home / '.local/share/hgs/desktop-previous/hgs-tray'
+                self.build('previous-good', slot)
+                self.build('legacy-broken', self.installed)
+                (self.drafts / 'kept').mkdir(parents=True, exist_ok=True)
+                (self.drafts / 'kept/draft.json').write_text(json.dumps({'key': 'kept', 'text': 'legacy draft'}))
+                result = self.update(self.build(variant))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(f"'{variant}'", self.installed.read_text())
+                self.assertIn("'previous-good'", slot.read_text())
+                self.assertEqual(json.loads((self.drafts / 'kept/draft.json').read_text())['text'], 'legacy draft')
+
+    def test_an_unknown_installed_kind_allows_an_on_disk_reinstall(self):
+        self.build('unverifiable', self.installed)
+        for variant in ('second', 'client-1'):
+            with self.subTest(variant=variant):
+                result = subprocess.run([sys.executable, str(UPDATER), '--check', str(self.build(variant)),
+                                         str(self.installed)], env=self.env, capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_an_on_disk_client_switch_needs_the_live_update(self):
         self.build('first', self.installed)

@@ -2,6 +2,7 @@ import { createSignal } from "solid-js";
 import * as bridge from "../bridge";
 import { setSetting } from "./settings";
 import { toast } from "./notices";
+import { pauseMessagePlayback } from "./mediaPlayback";
 
 export type VoiceState = "idle" | "starting" | "recording" | "saving" | "preview" | "submitting" | "uncertain";
 export interface VoiceShown {
@@ -64,7 +65,7 @@ export function createVoice(port: VoicePort, owner: string = crypto.randomUUID()
       case "preview": setMirrored(event.mirrored); break;
       case "stop_playback": setStopPlayback((n) => n + 1); break;
       case "pause_messages":
-        if (typeof document !== "undefined") document.querySelectorAll<HTMLMediaElement>("audio,video").forEach((media) => media.pause());
+        pauseMessagePlayback();
         break;
       case "remember_profile": port.remember(event.profile); break;
       // Session delivery never inserts dictation into a text draft.

@@ -1135,6 +1135,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         composer::composer_tab,
         drops::dropped_files,
         composer::fetch::attachment_fetch,
+        composer::fetch::attachment_media,
         composer::fetch::attachment_pin,
         composer::fetch::attachment_unpin,
         composer::fetch::attachment_open,

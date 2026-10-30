@@ -872,3 +872,9 @@ export async function voicePreview(key: string, id: string): Promise<ArrayBuffer
 export const voiceVideo = () => desktop<{ available: boolean; reason: string | null }>("voice_video", {});
 export const voicePermission = () => desktop<{ text: string; can_open: boolean }>("voice_permission", {});
 export const voiceOpenSettings = () => desktop<void>("voice_open_settings", {});
+
+/** The existing attachment queue resolves an exact receipt before a bounded raw playback read. */
+export async function attachmentMedia(computer: string, file: AttachmentRef, video: boolean): Promise<ArrayBuffer> {
+  const reply = await desktop<ArrayBuffer | number[]>("attachment_media", { computer, file, video });
+  return reply instanceof ArrayBuffer ? reply : Uint8Array.from(reply).buffer;
+}

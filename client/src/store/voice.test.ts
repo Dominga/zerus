@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createVoice, type VoiceOut, type VoicePort, type VoiceShown } from "./voice";
+import { mediaPlayback } from "./mediaPlayback";
 
 const tick = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
 const context = { handle: 1, key: "peer\ncodex/sample-project/review", visible: true };
@@ -15,6 +16,14 @@ function setup() {
 }
 
 describe("the main session's voice driver", () => {
+  it("recording cancels a pending Activity player before its read can autoplay", async () => {
+    const stop = vi.fn(), pending = mediaPlayback.take(stop);
+    const a = setup(); a.store.follow(context); await tick();
+    a.out({ kind: "pause_messages" });
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(pending.current()).toBe(false);
+    await a.store.close();
+  });
   it("opens once, coalesces contexts and never adopts a stale session's view", async () => {
     const a = setup();
     a.store.follow(context); a.store.follow({ ...context }); await tick();

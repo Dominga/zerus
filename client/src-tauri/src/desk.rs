@@ -1100,6 +1100,7 @@ pub enum MenuAction {
         key: String,
         name: String,
         running: bool,
+        tty: String,
     },
     /// An "Open in" mode (`openModeChosen`).
     Mode(OpenMode),
@@ -1241,6 +1242,7 @@ impl Bar {
                     name,
                     text,
                     running,
+                    tty,
                 } => chosen_by(
                     text,
                     MenuAction::Session {
@@ -1248,6 +1250,7 @@ impl Bar {
                         key: key.clone(),
                         name: name.clone(),
                         running: *running,
+                        tty: tty.clone(),
                     },
                 ),
                 Entry::OpenIn(chosen) => {
@@ -2431,6 +2434,7 @@ mod tests {
             name: name.into(),
             text: name.into(),
             running,
+            tty: String::new(),
         }
     }
 
@@ -2487,6 +2491,7 @@ mod tests {
                 key: "run:a".into(),
                 name: "claude/sample-project/a".into(),
                 running: true,
+                tty: String::new(),
             })
         );
         assert!(matches!(
@@ -2548,5 +2553,27 @@ mod tests {
             None,
             "a menu shown since replaces the old one"
         );
+    }
+
+    #[test]
+    fn a_tray_action_keeps_the_shown_tty_when_the_listing_changes() {
+        let mut bar = Bar::default();
+        let mut entry = session("run:a", "sh/sample-project", true);
+        if let Entry::Session { computer, tty, .. } = &mut entry {
+            *computer = ComputerId::local();
+            *tty = "/dev/pts/7".into();
+        }
+        let first = bar.layout(&[entry.clone()]);
+        bar.began();
+        assert!(bar.ended());
+        if let Entry::Session { tty, .. } = &mut entry {
+            *tty = "/dev/pts/8".into();
+        }
+        bar.layout(&[entry]);
+        assert!(
+            matches!(bar.action(id(&first[0])), Some(MenuAction::Session { tty, .. }) if tty == "/dev/pts/7")
+        );
+        bar.began();
+        assert_eq!(bar.action(id(&first[0])), None);
     }
 }

@@ -92,6 +92,12 @@ Automatic, Tab, Window and Clipboard, reads `open-mode`/`terminal` from
 Native protocol tests create a private D-Bus daemon and fake Plasma watcher;
 they never connect to the desktop's bus.
 
+A running local tray session captures its first attached client's TTY from the
+existing listing, as Qt does. The existing terminal launcher raises a matching
+Konsole tab when possible and otherwise opens the normal attach terminal.
+Peer, detached and saved rows never use that TTY to select a local tab; a menu
+action keeps the terminal it showed even if the listing changes before its click.
+
 The same Linux connection exports Qt's launcher badge at
 `/org/hgdev/Zerus/LauncherEntry`, using `com.canonical.Unity.LauncherEntry`
 `Query`/`Update` for `application://hgs-tray.desktop`. Its signed 64-bit `count`

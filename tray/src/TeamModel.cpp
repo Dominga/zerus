@@ -195,7 +195,7 @@ const StageRun *PipelineRun::openRun() const
 
 int PipelineRun::returned() const
 {
-    return int(std::count_if(runs.cbegin(), runs.cend(), [](const StageRun &run) { return run.state == QLatin1String("returned"); }));
+    return trimmedReturns + int(std::count_if(runs.cbegin(), runs.cend(), [](const StageRun &run) { return run.state == QLatin1String("returned"); }));
 }
 
 bool stageWithoutCandidate(const Task &task)
@@ -218,19 +218,46 @@ int scaleRoom(const Team &team)
     return team.maxMembers - int(seats);
 }
 
-int folderHeldBy(const Team &team, const QString &member)
+Member::Hold folderHold(const Team &team, const QString &member)
 {
-    // As hgs's stages::held: a test waiting for its member holds the folder
-    // under the hold rule; a delivered one when its hand-off said so (#532),
-    // or under the hold rule when hgs sent no folder for it yet.
+    // #635 N4: hgs's status names each member's hold (stages::held_by): a
+    // review, test, command or land stage, or a closed stage whose run still
+    // goes. A status that names one names them all.
+    if (const auto *m = team.member(member); m && m->heldBy.task) return m->heldBy;
+    if (std::any_of(team.members.cbegin(), team.members.cend(), [](const Member &m) { return m.heldBy.task > 0; })) return {};
+    // An older hgs: the member's waiting task says it ("folder held by the
+    // stage of #N" since #680, "the test of #N" before).
+    static const QRegularExpression said(QStringLiteral("folder held by the (test|stage) of #(\\d+)"));
+    for (const auto &task : team.tasks) {
+        if (task.assignee != member || task.status != "pending") continue;
+        if (const auto match = said.match(task.wait.unblock); match.hasMatch()) {
+            const int holder = match.captured(2).toInt();
+            const auto *held = team.task(holder);
+            const auto *run = held ? held->pipelineRun.openRun() : nullptr;
+            return {holder, match.captured(1) == "test" ? QStringLiteral("test") : run ? run->kind : QString()};
+        }
+    }
+    // Older still: as hgs's stages::held was then, a test waiting for its
+    // member holds the folder under the hold rule; a delivered one when its
+    // hand-off said so (#532), or under the hold rule when hgs sent no folder.
     for (const auto &task : team.tasks) {
         const auto *run = task.pipelineRun.openRun();
         if (!run || run->kind != "test") continue;
         const bool hold = task.pipelineRun.folder != "checkout";
         const bool holds = run->state == "waiting" ? hold : (run->holds || (hold && run->folder.isEmpty()));
-        if (holds && implementerOf(task, *run) == member) return task.id;
+        if (holds && implementerOf(task, *run) == member) return {task.id, QStringLiteral("test")};
     }
-    return 0;
+    return {};
+}
+
+int folderHeldBy(const Team &team, const QString &member)
+{
+    return folderHold(team, member).task;
+}
+
+QString holderText(const Member::Hold &hold)
+{
+    return hold.stage.isEmpty() ? tr("the stage of #%1").arg(hold.task) : tr("the %1 stage of #%2").arg(hold.stage).arg(hold.task);
 }
 
 QList<Member::StageEntry> stageQueue(const Team &team, const QString &member)
@@ -430,6 +457,9 @@ Team parse(const QJsonObject &v)
                 member.stageQueue.append({e.value("task").toInt(), e.value("round").toInt(), str(e, "stage"), str(e, "state"), e.value("since").toDouble()});
             }
         }
+        // #635 N4: the stage whose hold keeps its folder.
+        if (const auto held = m.value("held_by").toObject(); held.value("task").toInt() > 0)
+            member.heldBy = {held.value("task").toInt(), str(held, "stage")};
         // G7: the services the member's session runs (MCP servers and the like).
         for (const auto &value : m.value("services").toArray()) {
             const auto service = value.toObject();
@@ -567,6 +597,7 @@ Team parse(const QJsonObject &v)
             run.known = true;
             run.id = str(o, "id"); run.name = str(o, "name"); run.folder = str(o, "folder"); run.accept = str(o, "accept");
             run.maxRounds = o.value("max_rounds").toInt(); run.round = o.value("round").toInt();
+            run.trimmedReturns = qMax(0, o.value("trimmed_returns").toInt());
             for (const auto &v : o.value("stages").toArray()) {
                 const auto st = v.toObject();
                 StageSpec spec{str(st, "kind"), str(st, "role"), str(st, "member")};
@@ -1119,11 +1150,11 @@ Status memberStatus(const Team &team, const Member &member, const Live &live)
         return make(run->kind == "test" ? "stage_test" : "stage_review", what.arg(task.id).arg(task.title).arg(run->round),
                     QStringLiteral("#%1").arg(task.id), Tone::Active, task.id);
     }
-    // U36: its folder is held by the test of one of its tasks; its next task waits.
-    if (const int held = folderHeldBy(team, member.id); held && (team.status == "running" || team.status == "paused"))
+    // U36: its folder is held by a stage of one of its tasks; its next task waits.
+    if (const auto hold = folderHold(team, member.id); hold.task && (team.status == "running" || team.status == "paused"))
         for (const auto &task : team.tasks)
-            if (task.assignee == member.id && task.status == "pending" && !task.held && task.id != held)
-                return make("folder_held", tr("Waits: its folder is held by the test of #%1").arg(held), tr("Folder held"), Tone::Warn, task.id);
+            if (task.assignee == member.id && task.status == "pending" && !task.held && task.id != hold.task)
+                return make("folder_held", tr("Waits: its folder is held by %1").arg(holderText(hold)), tr("Folder held"), Tone::Warn, task.id);
     // Spec 5.6: a sub-lead reviews its reports' work, or coordinates them.
     if (member.sub && (team.status == "running" || team.status == "paused")) {
         for (const auto &task : team.tasks)

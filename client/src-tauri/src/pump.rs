@@ -225,6 +225,22 @@ impl Pump {
         self.lock().grouping.runs_seeded()
     }
 
+    pub fn presentation_seeded(&self) -> Result<bool, &'static str> {
+        self.lock().grouping.presentation_seeded()
+    }
+
+    /// Only the worker reads Qt; merge against the current Next values under
+    /// the pump lock and let the existing layout writer checkpoint the result.
+    pub fn seed_presentation(
+        &self,
+        seed: zerus_client_core::swarm::layout::PresentationSeed,
+    ) -> Result<(), &'static str> {
+        let mut inner = self.lock();
+        inner.grouping.seed_presentation(seed)?;
+        self.wake(inner);
+        Ok(())
+    }
+
     /// Qt was read and parsed on the seed worker; merge only its bounded
     /// run memory, without replacing layout changes made during that read.
     pub fn seed_runs(&self, groups: &serde_json::Map<String, Value>) {

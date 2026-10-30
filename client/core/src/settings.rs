@@ -10,6 +10,7 @@
 mod imports;
 pub mod qt;
 pub use imports::OrganizationImport;
+pub(crate) use imports::{family_metadata, valid_family_metadata};
 
 use qt::QtValue;
 use serde_json::{json, Map, Value};

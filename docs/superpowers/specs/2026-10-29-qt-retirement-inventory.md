@@ -392,6 +392,16 @@ in `crates/desktop-migration`; G1 owns the executable transport, secure publishe
 marker phases and current drain. The first-G3 `task-preferences` family also
 imports a previously unhandled missing `tasks/onlySession` value once.
 
+Retained current Qt shared organization also recovers missing or
+`imported=false` catalogs through the existing missing-field initializer;
+existing causal values and tombstones win. The separate first-G3 local
+`organization-presentation` family records collapsed projects, session order
+and default project together in the existing local layout writer. Only these
+three fields may fill empty/null Next defaults under the coordinator's explicit
+2026-10-30 cosmetic exception; nonempty Next fields win, and handled families
+and the earlier run-memory seed never repeat. Legacy groups/pinned recovery,
+project vivid state and local Windows folders remain separate.
+
 Remaining source coverage includes `projectFolderSplit`,
 `removeWorktreeAfterTermination`, worktree snapshots, `pendingLaunches`,
 repository-clone pending state, `swarm/observed*`, `tray.conf`, task inspector
@@ -438,7 +448,7 @@ Implement the five remaining UI gaps: the Go to popup and shortcut-help dialog; 
 3. **Identity before defaults.** Import exact run/conversation/launch/archive/request/checkout ownership and causal versions first. Missing or conflicting evidence stays for review; never infer it from a display name, lexical path, timestamp or current filter.
 4. **No replay or privilege expansion.** Recovery uses read-only status/receipt checks. Automatic approvals remain off (Qt's former choice may be reported), and no notification, message, task, voice, cleanup or provider mutation is repeated automatically. **Microphone is not imported; the user chooses again**, because Qt's `QAudioDevice` ID names no client device.
 5. **Fail closed and preserve.** Invalid/truncated/unsupported records are quarantined, not dropped or rewritten as defaults. Re-running an importer is idempotent. Branches, ignored files, edited downloads and unknown local data remain untouched.
-6. **Rollback is not a new seed for a handled family.** The switch seed's settings, layout and drafts remain handled and never re-seed after rollback. Owner/coordinator ruling of 2026-10-30 permits one explicitly scoped, versioned first-G3 import of each previously unhandled family. Import only keys Next has not stored. Record the family, schema, source path, time, key names and hash of the bytes read. A source changed since the original switch is still eligible for a new family; record that observation without treating it as an error. A failed or partial family stays unhandled and retries at the next start. Later G3 versions may import only new families. Continued read-only access to Qt drafts through Saved drafts “From the previous Zerus app” (`client/src-tauri/src/composer/saved.rs`, `SavedDrafts.tsx`) and Recover does not re-import or replay them.
+6. **Rollback is not a new seed for a handled family.** The switch seed's settings, layout and drafts remain handled and never re-seed after rollback. Owner/coordinator ruling of 2026-10-30 permits one explicitly scoped, versioned first-G3 import of each previously unhandled family. Import only keys Next has not stored. The coordinator's narrow local-presentation exception permits `collapsed`, `order` and `default_project` to fill empty/null Next defaults once; nonempty Next values win and every other family retains strict key-presence precedence. Record the family, schema, source path, time, key names and hash of the bytes read. A source changed since the original switch is still eligible for a new family; record that observation without treating it as an error. A failed or partial family stays unhandled and retries at the next start. Later G3 versions may import only new families. Continued read-only access to Qt drafts through Saved drafts “From the previous Zerus app” (`client/src-tauri/src/composer/saved.rs`, `SavedDrafts.tsx`) and Recover does not re-import or replay them.
 7. **Local layout stays local.** The client's `organization-layout.json` is a local per-device store like Qt's local QSettings, not a synchronized second format. Shared organization uses the `hgs` replica; `.40`/`.47` local run memory and tokens do not create another sync protocol.
 8. **Connector boundary.** Connector settings import is read-only. Retirement never touches the `zerus-mobile-connector` unit or `~/.local/share/zerus-mobile` before `zerus-nmc8`; moving a live gateway is owner-approved.
 

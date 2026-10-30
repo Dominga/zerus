@@ -952,3 +952,56 @@ fn oversized_preferences_cannot_make_the_existing_store_unreadable() {
     assert!(reopened.error().is_none());
     assert_eq!(reopened.text("workspace/theme"), "dark");
 }
+
+#[test]
+fn task_preferences_cover_existing_switches_but_never_reseed_an_old_handled_key() {
+    let scratch = Scratch::new("g3-task-preferences");
+    let qt = scratch.0.join("qt.conf");
+    let original = b"[tasks]\nonlySession=true\n";
+    fs::write(&qt, original).unwrap();
+    for (name, values, expected) in [
+        ("previous-switch", json!({}), true),
+        ("next-false-wins", json!({"tasks/onlySession":false}), false),
+    ] {
+        let path = scratch.0.join(format!("{name}.json"));
+        legacy_switch(&path, values);
+        let settings = Settings::open(path.clone(), Some(QtStore::Ini(qt.clone())));
+        assert_eq!(settings.flag("tasks/onlySession"), expected);
+        assert!(settings.flush_within(FLUSH));
+        drop(settings);
+        let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            saved["g3"]["families"]["task-preferences"]["keys"],
+            json!(["tasks/onlySession"])
+        );
+        assert_eq!(
+            saved["g3"]["families"]["task-preferences"]["sha256"],
+            zerus_desktop_migration::sha256(original)
+        );
+    }
+    let path = scratch.0.join("old-handled.json");
+    fs::write(
+        &path,
+        serde_json::to_vec(&json!({"version":1,"values":{},
+        "seed":{"at":1,"source":"qt-ini","keys":["tasks/onlySession"]}}))
+        .unwrap(),
+    )
+    .unwrap();
+    let settings = Settings::open(path, Some(QtStore::Ini(qt.clone())));
+    assert!(!settings.contains("tasks/onlySession"));
+    assert!(!settings.flag("tasks/onlySession"));
+    assert!(settings.flush_within(FLUSH));
+    assert_eq!(fs::read(&qt).unwrap(), original);
+    drop(settings);
+    // An unusable value that is not an import candidate cannot erase or
+    // repeatedly quarantine the person's explicit Next choice.
+    fs::write(&qt, b"[tasks]\nonlySession=@Invalid()\n").unwrap();
+    let kept = scratch.0.join("keep-invalid-unused.json");
+    legacy_switch(&kept, json!({"tasks/onlySession":false}));
+    let settings = Settings::open(kept.clone(), Some(QtStore::Ini(qt)));
+    assert!(!settings.flag("tasks/onlySession"));
+    assert!(settings.flush_within(FLUSH));
+    drop(settings);
+    let saved: Value = serde_json::from_slice(&fs::read(kept).unwrap()).unwrap();
+    assert!(saved["g3"]["families"].get("task-preferences").is_some());
+}

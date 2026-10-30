@@ -31,6 +31,7 @@ mod status;
 mod state;
 mod swarm;
 mod tasks;
+mod test_discipline;
 mod watch;
 
 /// H2: the position of `--json-file` before the first `--`; arguments after it

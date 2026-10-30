@@ -5382,3 +5382,36 @@ clang -Wno-deprecated-declarations tests/test_macos_session_protocol.c \
 Process coverage includes exact call identity, background tasks, stale generations,
 independent output cursors, targeted stopping and offline/read-position behavior.
 Native DeepSeek tests use a local keyless model rather than paid API requests.
+### Affected tests (U62)
+
+A project names its test suites in `.zerus/tests.toml`; Zerus reads it, and the
+owner may override any field in the team settings (`settings.tests`, an object
+shaped like the file and merged over it, providers by name; only the owner sets
+it). Without the file `hgs test config` shows a proposal from the stacks it
+finds (Cargo, CMake/CTest, pytest or unittest, Gradle, npm) and nothing is
+enforced: a team without a configuration keeps today's flow.
+
+- `hgs test map --write` writes the committed map (`.zerus/test-map.json`) from
+  the build: a Cargo package's module graph (each module's tests, widened to
+  the modules that use it, `include_str!` files included); CMake's file API
+  reply, the CTest files and the include graph for each test binary (its
+  functions too); and for Python, Gradle and npm the files a test names or
+  imports. `[[provider.paths]]` adds path rules, with targets or with the tests
+  that mention a text (such as the CLI binary).
+- `hgs test map --check` fails on a tracked file outside every provider's area
+  and `map.ignore`, on a test file the map lacks, and on a map older than the
+  sources; the CLI job runs it.
+- `hgs test affected [RANGE|--staged|--files ...] [--full] [--json]` prints the
+  commands to run with their estimate from `.zerus/test-durations.json`. A file
+  the map does not know runs its provider's whole set; a file in no area is
+  named, never skipped. `--full` prints the whole set and its time; the
+  full-run policy (`[full]`) says who may start it.
+- `hgs test durations --record LOG --provider NAME` keeps the slowest measured
+  time per target from CTest, QtTest, Cargo (and libtest JSON), unittest or
+  pytest output, or a JSON object of test ids to seconds.
+- `hgs test coverage --provider NAME --report TARGET=FILE` compares one
+  target's coverage (lcov, Cobertura or llvm-cov JSON) with the map: a covered
+  file the map does not give the target is a gap. The weekly
+  `test-map-coverage.yml` workflow measures every Rust module and Qt binary.
+
+The file's fields are listed in `hgs guide tests`.

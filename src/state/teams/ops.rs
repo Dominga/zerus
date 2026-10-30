@@ -174,6 +174,10 @@ pub(crate) fn branch_name(template: &str, id: u32, member: &str, team8: &str) ->
 }
 
 fn validate_settings(settings: &Settings) -> anyhow::Result<()> {
+    ensure!(
+        settings.tests.as_ref().is_none_or(|tests| tests.is_object()),
+        "The tests override is an object shaped like .zerus/tests.toml"
+    );
     ensure!((1..=32).contains(&settings.max_members), "A team has 1 to 32 members");
     ensure!(
         (30..=3600).contains(&settings.start_timeout_seconds),
@@ -877,7 +881,7 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
 /// C4: the settings that decide who approves, how far a team may grow and
 /// what runs without the owner stay the owner's; the lead changes the rest.
 /// Spec 6.1 lets the lead set resume_after_limits too.
-pub(crate) const OWNER_SETTINGS: [&str; 16] = [
+pub(crate) const OWNER_SETTINGS: [&str; 17] = [
     "approval",
     "phase_approval",
     "max_members",
@@ -898,6 +902,8 @@ pub(crate) const OWNER_SETTINGS: [&str; 16] = [
     "restart_crashed",
     // U56: only the owner lets the lead restart a stuck member.
     "lead_restarts_stuck",
+    // U62: the owner's override of the project's test configuration.
+    "tests",
 ];
 
 fn ensure_lead_settings(old: &Settings, new: &Settings, actor: &Actor, on_word: bool) -> anyhow::Result<()> {
@@ -8804,6 +8810,29 @@ mod tests {
         assert!(error.starts_with("Only you change the team's approval"), "{error}");
         apply(&mut team, "settings", &json!({"settings":{"resume_after_limits":true}}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
         assert!(team.settings.resume_after_limits);
+    }
+
+    /// U62: the test configuration's override is the owner's, an object the
+    /// project file merges under.
+    #[test]
+    fn only_the_owner_overrides_the_test_configuration() {
+        let mut team = running_team();
+        let none = BTreeSet::new();
+        let mut events = Vec::new();
+        let tests = json!({"full":{"policy":"standing"},"provider":[{"name":"tray","disabled":true}]});
+        let error = apply(&mut team, "settings", &json!({"settings":{"tests":tests}}), &Actor::Member("lead".into()), &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert!(error.starts_with("Only you change the team's tests"), "{error}");
+        let error = apply(&mut team, "settings", &json!({"settings":{"tests":"all"}}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
+        assert!(error.contains("The tests override is an object"), "{error}");
+        apply(&mut team, "settings", &json!({"settings":{"tests":tests}}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(team.settings.tests.as_ref(), Some(&tests));
+        // The lead still changes its own settings without touching it.
+        apply(&mut team, "settings", &json!({"settings":{"remind_lead_minutes":9}}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        assert_eq!(team.settings.tests.as_ref(), Some(&tests));
+        let value = serde_json::to_value(&team.settings).unwrap();
+        assert_eq!(value["tests"]["full"]["policy"], "standing");
     }
 
     #[test]

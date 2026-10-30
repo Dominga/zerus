@@ -17,10 +17,8 @@ import { catalog } from "./store/catalog";
 import { contentScale, page, selectedKey, setContentScale, setPage, toast } from "./store/ui";
 import { num, setSetting } from "./store/settings";
 import { installShortcutRouter, onCommand } from "./store/shortcuts";
-import { openGoTo, openShortcutHelp } from "./store/goTo";
+import { openGoTo, openShortcutHelp, goToOrigin, shortcutHelpOrigin } from "./store/goTo";
 import { rememberRecentSession } from "./ui/sessions/goTo";
-import { GoToDialog } from "./ui/sessions/GoToDialog";
-import { ShortcutHelpDialog } from "./ui/sessions/ShortcutHelpDialog";
 import { updateCommands, updates } from "./store/updates";
 import { openUpdates } from "./store/desk";
 import { ZerusLogo } from "./ui/components/ZerusLogo";
@@ -35,6 +33,8 @@ const SettingsScreen = lazy(() => import("./ui/screens/Settings").then((m) => ({
 // New session and its child dialogs load the first time it opens
 // (`newSessionOpened`), and stay mounted from then on.
 const NewSessionDialog = lazy(() => import("./ui/sessions/NewSessionDialog").then((m) => ({ default: m.NewSessionDialog })));
+const GoToDialog = lazy(() => import("./ui/sessions/GoToDialog").then((m) => ({ default: m.GoToDialog })));
+const ShortcutHelpDialog = lazy(() => import("./ui/sessions/ShortcutHelpDialog").then((m) => ({ default: m.ShortcutHelpDialog })));
 const PerfHost = lazy(() => import("./ui/PerfHost").then((m) => ({ default: m.PerfHost })));
 
 const STATE_TEXT: Record<string, string> = {
@@ -139,8 +139,8 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
       <MenuLayer />
       <Toasts />
       <ActionDialogs />
-      <GoToDialog />
-      <ShortcutHelpDialog />
+      <Show when={goToOrigin()}><Suspense><GoToDialog /></Suspense></Show>
+      <Show when={shortcutHelpOrigin()}><Suspense><ShortcutHelpDialog /></Suspense></Show>
       <Show when={newSessionOpened()}><Suspense><NewSessionDialog /></Suspense></Show>
       <OrganizationDialogs />
       <Suspense><PerfHost /></Suspense>

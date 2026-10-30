@@ -1,4 +1,4 @@
-import { For, Match, Show, Switch, createEffect, createMemo, createRoot, createSignal, on, onCleanup } from "solid-js";
+import { For, Match, Show, Suspense, Switch, createEffect, createMemo, createRoot, createSignal, lazy, on, onCleanup } from "solid-js";
 import * as bridge from "../../bridge";
 import { terminal } from "../../store/terminal";
 import { TerminalTab } from "./Terminal";
@@ -29,9 +29,11 @@ import { composer } from "../../store/composer";
 import { createSubagentIdentity } from "../../store/subagentIdentity";
 import { selectedTask } from "../../store/taskNavigation";
 import { Inspector } from "./Inspector";
-import { TaskView, followProjectTasks } from "../screens/Tasks";
+import { followProjectTasks } from "../../store/taskContext";
 import { inspectorOpen, setInspectorOpen, openInspector, inspectorHint } from "../../store/inspector";
 import { sessionGoal } from "./inspector-data";
+
+const TaskView = lazy(() => import("../screens/TaskView"));
 
 // The session header and its Activity with the composer under it, after
 // design/webui SessionDetail. Session actions keep the mockup placement and
@@ -233,7 +235,7 @@ export function SessionDetail() {
                     </Show>
                   </div>
                 </Match>
-                <Match when={detailTab() === "taskview"}><TaskView /></Match>
+                <Match when={detailTab() === "taskview"}><Suspense><TaskView /></Suspense></Match>
                 <Match when={detailTab() === "terminal"}><TerminalTab /></Match>
                 <Match when={detailTab() === "processes"}><ProcessesTab /></Match>
               </Switch>

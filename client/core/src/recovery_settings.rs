@@ -145,6 +145,15 @@ fn envelope_valid(envelope: &Map<String, Value>) -> bool {
             .is_some_and(|order| order.len() == 2)
 }
 
+/// The original cached-envelope parser, shared with read-only migration.
+/// A decoded envelope is historical data, never a current policy authority.
+pub(crate) fn decode_cached(stored: &str) -> Option<Map<String, Value>> {
+    serde_json::from_str::<Value>(stored)
+        .ok()
+        .and_then(|value| value.as_object().cloned())
+        .filter(envelope_valid)
+}
+
 /// RecoverySync::compare: by revision, then by writer; an envelope without
 /// an order is older than one with.
 pub fn compare(a: &Map<String, Value>, b: &Map<String, Value>) -> Ordering {
@@ -189,11 +198,7 @@ pub struct RecoverySync {
 impl RecoverySync {
     /// Starts from the newest policy kept from before, if it is valid.
     pub fn new(stored: &str) -> RecoverySync {
-        let best = serde_json::from_str::<Value>(stored)
-            .ok()
-            .and_then(|value| value.as_object().cloned())
-            .filter(envelope_valid)
-            .unwrap_or_default();
+        let best = decode_cached(stored).unwrap_or_default();
         RecoverySync {
             best,
             machines: Vec::new(),

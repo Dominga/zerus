@@ -172,37 +172,54 @@ fn all_items(team: &Team) -> Vec<Item> {
             None if task.assignee.is_empty() => task.role.clone(),
             None => team.name_of(&task.assignee),
         };
-        // U56: a task pinned to a stuck, stopped or offline member frees itself
-        // by moving to a free same-role member, or by retrying once the member
-        // is back; the item names both.
+        // U56/N3: the command fits the cause, in whole sentences: a free peer
+        // takes the task, a paused member is resumed, a stopped session is
+        // relaunched, and a stuck or offline member is the owner's call.
         let (command, detail) = if wait.waits_for == "member" {
             let target = task.assignee.clone();
+            let found = team.member(&target);
+            let state = found.map(|member| member.state).unwrap_or(MemberState::NotCreated);
+            let live = found.and_then(|member| member.seen).is_some_and(|seen| seen.live);
             let free = team
                 .members
                 .iter()
                 .find(|other| {
                     other.id != target
-                        && other.state != MemberState::Removed
+                        && other.state == MemberState::Active
                         && !other.draining
                         && other.stuck.is_none()
-                        && other.seen.is_none_or(|seen| seen.live)
+                        && other.seen.is_some_and(|seen| seen.live)
                         && team.role_of(&other.id) == team.role_of(&target)
                 })
                 .map(|other| other.id.clone());
-            match free {
-                Some(peer) => (
+            let resume = format!(
+                "{} | hgs team resume-member --json",
+                json!({"request_id":PLACEHOLDER,"team":team.id,"member":target})
+            );
+            let relaunch = format!(
+                "{} | hgs team relaunch --json",
+                json!({"request_id":PLACEHOLDER,"team":team.id,"member":target})
+            );
+            let owner = format!(
+                "{} | hgs team settings --json",
+                json!({"request_id":PLACEHOLDER,"team":team.id,"settings":{"lead_restarts_stuck":true}})
+            );
+            match (free, state) {
+                (Some(peer), _) => (
                     format!(
                         "{} | hgs team reassign --json",
                         json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id,"member":peer})
                     ),
-                    format!("{}; reassigning it to {peer} frees it, or resume {} and hgs team retry", wait.reason, target),
+                    format!("{} Reassigning it to {peer} frees it now.", wait.reason),
                 ),
-                None => (
+                (None, MemberState::Paused) => (resume, format!("{} Resume the member to free it.", wait.reason)),
+                (None, _) if !live => (relaunch, format!("{} Relaunch its session to free it.", wait.reason)),
+                (None, _) => (
+                    owner,
                     format!(
-                        "{} | hgs team resume-member --json",
-                        json!({"request_id":PLACEHOLDER,"team":team.id,"member":target})
+                        "{} No same-role member can take it. This is the owner's call: ask the owner to set lead_restarts_stuck, then interrupt the member.",
+                        wait.reason
                     ),
-                    format!("{}; no other {} can take it, so resume the member and hgs team retry", wait.reason, team.role_of(&target)),
                 ),
             }
         } else {
@@ -267,13 +284,36 @@ fn all_items(team: &Team) -> Vec<Item> {
             .collect();
         let minutes = ((crate::state::now() - stuck.at) / 60.0).max(0.0).round() as u64;
         let why = if stuck.reason == "compaction_timeout" { "is stuck in compaction" } else { "has made no progress" };
-        let listed = if waiting.is_empty() {
-            String::new()
-        } else {
-            format!("; waiting for {}", waiting.iter().map(|id| format!("#{id}")).collect::<Vec<_>>().join(" "))
-        };
         let phase = if stuck.phase.is_empty() { "unknown".to_owned() } else { stuck.phase.clone() };
         let label = format!("{} ({})", member.id, team.role_of(&member.id));
+        let tasks = if waiting.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " Its tasks wait: {}.",
+                waiting.iter().map(|id| format!("#{id}")).collect::<Vec<_>>().join(" ")
+            )
+        };
+        // N3: whole sentences, and the command fits the cause: the owner's
+        // setting route while it is off, the lead's restart once the owner set it.
+        let (command, route) = if team.settings.lead_restarts_stuck {
+            (
+                format!(
+                    "{} | hgs team relaunch --json",
+                    json!({"request_id":PLACEHOLDER,"team":team.id,"member":member.id})
+                ),
+                format!("You may interrupt it and relaunch it: hgs team relaunch {}.", member.id),
+            )
+        } else {
+            (
+                format!(
+                    "{} | hgs team settings --json",
+                    json!({"request_id":PLACEHOLDER,"team":team.id,"settings":{"lead_restarts_stuck":true}})
+                ),
+                "This is the owner's call: ask the owner to set lead_restarts_stuck, with hgs team settings."
+                    .to_owned(),
+            )
+        };
         items.push(Item {
             subagents: Value::Null,
             kind: "member_stuck",
@@ -281,16 +321,11 @@ fn all_items(team: &Team) -> Vec<Item> {
             task: waiting.first().copied(),
             member: label.clone(),
             since: stuck.at,
-            summary: summary(&format!("{label} {why} for {minutes} min (phase {phase}){listed}")),
-            command: format!(
-                "{} | hgs team pause-member --json",
-                json!({"request_id":PLACEHOLDER,"team":team.id,"member":member.id})
-            ),
+            summary: summary(&format!("{label} {why} for {minutes} min in phase {phase}.{tasks}")),
+            command,
             detail: format!(
-                "{}{}. The lead may interrupt it with pause-member and resume it with resume-member{}.",
-                if stuck.reason == "compaction_timeout" { "The member's context compaction did not finish. " } else { "" },
-                if team.settings.lead_restarts_stuck { "" } else { "; the owner sets lead_restarts_stuck to allow the lead to restart it" },
-                listed
+                "{}{route}{tasks}",
+                if stuck.reason == "compaction_timeout" { "Its context compaction did not finish. " } else { "" }
             ),
         });
     }

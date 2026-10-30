@@ -125,7 +125,7 @@ fn failed_changed_or_oversized_sources_never_produce_a_final_record() {
         ];
         let mut producer = bundle(vec![source("next-reads", input.into_iter())], 1 << 20);
         let mut seen_failure = false;
-        while let Some(item) = producer.next() {
+        for item in producer.by_ref() {
             match item {
                 Ok(BundleItem::Record(_)) => panic!("partial source cannot finish evidence"),
                 Err(e) => {

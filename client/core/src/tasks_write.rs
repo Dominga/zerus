@@ -87,7 +87,7 @@ impl TaskCall {
     pub fn invocation(&self) -> Invocation {
         let long = matches!(
             self.args.first().map(String::as_str),
-            Some("send" | "cancel" | "cancel-execution" | "message")
+            Some("send" | "cancel" | "cancel-execution" | "start-deliver" | "message")
         );
         let mut args = vec!["task".to_owned()];
         args.extend(self.args.iter().cloned());
@@ -448,7 +448,7 @@ pub mod outbox {
     use sha2::{Digest, Sha256};
     use std::collections::HashSet;
     use std::fs;
-    use std::io::{Read, Write};
+    use std::io::Read;
     use std::path::{Path, PathBuf};
     use std::sync::{Mutex, PoisonError};
     use std::time::{Duration, Instant};
@@ -583,22 +583,39 @@ pub mod outbox {
     }
 
     fn write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-        let temporary = path.with_extension("tmp");
-        let result = (|| {
-            let mut file = fs::File::create(&temporary)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
-            }
-            file.write_all(bytes)?;
-            file.sync_all()?;
-            fs::rename(&temporary, path)
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&temporary);
+        crate::fsx::write_private_atomic(path, bytes, true)?;
+        #[cfg(unix)]
+        fs::File::open(path.parent().expect("outbox parent"))?.sync_all()?;
+        Ok(())
+    }
+
+    /// An exact private checkpoint, including unknown fields. Start review
+    /// settles or releases a record through this writer; it never removes the
+    /// original intent merely because a transport result was lost.
+    pub fn replace_if_unchanged(
+        root: &Path,
+        project: &str,
+        task: &str,
+        expected: &Value,
+        next: &Value,
+    ) -> Result<bool, String> {
+        let file = path(root, project, task);
+        let Some(_turn) = Turn::take(&file) else {
+            return Err("The task recovery record is busy.".into());
+        };
+        if pending(root, project, task)?.as_ref() != Some(expected) {
+            return Ok(false);
         }
-        result
+        let bytes = next.to_string();
+        decode(bytes.as_bytes())?;
+        write(&file, bytes.as_bytes())
+            .map_err(|_| "Could not save the task recovery record.".to_owned())?;
+        if next["id"] != expected["id"] {
+            write(&marker(&file), next["id"].as_str().unwrap_or("").as_bytes()).map_err(|_| {
+                "Could not reserve the new task request. Nothing was submitted.".to_owned()
+            })?;
+        }
+        Ok(true)
     }
 
     /// Reserves a message before it is sent. An earlier attempt is reused
@@ -623,6 +640,15 @@ pub mod outbox {
             use std::os::unix::fs::PermissionsExt;
             let _ = fs::set_permissions(root, fs::Permissions::from_mode(0o700));
             let _ = fs::set_permissions(&folder, fs::Permissions::from_mode(0o700));
+            // Persist newly created directory links before native input can
+            // depend on the reservation inside them.
+            for directory in [folder.as_path(), root, root.parent().unwrap_or(root)] {
+                fs::File::open(directory)
+                    .and_then(|file| file.sync_all())
+                    .map_err(|_| {
+                        "Could not save private message storage. Nothing was submitted.".to_owned()
+                    })?;
+            }
         }
         let Some(_turn) = Turn::take(&file) else {
             return Err("This task already has a message operation in progress.".into());

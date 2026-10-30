@@ -19,6 +19,7 @@ use zerus_replica::{
 
 mod answers;
 mod cancellation;
+mod dispatch;
 mod mobile;
 mod phone;
 mod sessions;
@@ -36,7 +37,7 @@ fn paste_uncertain(message: &str) -> bool {
     message.starts_with(SENT_UNRECORDED) || message.starts_with("delivery uncertain")
 }
 
-const USAGE: &str = "usage: hgs task list --project P [--stage S] | get REF [--history-limit 1..80 [--history-before CURSOR]] | add --project P [--backlog] [--start] [--target SESSION|any [--host ALIAS]] [--title TITLE [--request-id UUID]] [--position N] | edit REF | rename REF | move REF --top|--before REF|--after REF|--position N | stage REF backlog|todo|done | target REF SESSION|any|new-session|subagent [--parent SESSION] [--host ALIAS] | send REF [--session SESSION [--host ALIAS]] | cancel REF [--reason TEXT] | cancel-execution REF --json (guard JSON on stdin) | handoff REF --session SESSION [--host ALIAS] | start REF | report REF | comment REF [--content-json] | message REF --request-id UUID --mode queue|send|reopen|note [--expect-dispatch ID] [--content-json] | worker REF --subagent ID --request-id REQUEST | settings --project P [--set] | digests --json | exchange --json | mobile-send|mobile-cancel|mobile-done --json
+const USAGE: &str = "usage: hgs task list --project P [--stage S] | get REF [--history-limit 1..80 [--history-before CURSOR]] | add --project P [--backlog] [--start] [--target SESSION|any [--host ALIAS]] [--title TITLE [--request-id UUID]] [--position N] | edit REF | rename REF | move REF --top|--before REF|--after REF|--position N | stage REF backlog|todo|done | target REF SESSION|any|new-session|subagent [--parent SESSION] [--host ALIAS] | send REF [--session SESSION [--host ALIAS]] | start-plan REF --json | start-deliver REF --json [--recover-only] | cancel REF [--reason TEXT] | cancel-execution REF --json (guard JSON on stdin) | handoff REF --session SESSION [--host ALIAS] | start REF | report REF | comment REF [--content-json] | message REF --request-id UUID --mode queue|send|reopen|note [--expect-dispatch ID] [--content-json] | worker REF --subagent ID --request-id REQUEST | settings --project P [--set] | digests --json | exchange --json | mobile-send|mobile-cancel|mobile-done --json
   REF is T-xxxxxx with --project P, or PROJECT/T-xxxxxx; texts and --set settings are read from stdin;
   a change an agent makes prints one line, and --json prints the task";
 
@@ -429,6 +430,7 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
             let guard = cancellation::read()?;
             change_guarded(config, "cancel", args, None, Some(&guard))
         }
+        "start-plan" | "start-deliver" => dispatch::execute(config, action, args),
         "edit" | "rename" | "move" | "stage" | "target" | "comment" | "report" | "start" | "send" | "handoff" | "cancel" | "worker" => {
             change(config, action, args)
         }
@@ -896,11 +898,7 @@ fn send(
         task.set_target(&Target::Session(session.clone()), who, now())
             .map_err(fail)?;
     }
-    let (mut prompt, files) = task_dispatch_content(&settings.task_template, &task.view().map_err(fail)?, project_name, Tools::Cli).map_err(fail)?;
-    if matches!(view.target, Target::Subagent { .. }) {
-        prompt.push_str(&format!("\n\n[Zerus executor: subagent]\nYou are the coordinator for this task. Create a native subagent only now, after this explicit start request, and give it the implementation work. Keep coordination and task reporting in this session. After the native child appears, read `hgs task get {}/{}` and register its exact live ID with `hgs task worker {}/{} --subagent CHILD_ID --request-id CURRENT_SENT_REQUEST_ID`. Do not claim that the child has started before this registration succeeds; if creation is unavailable, report that limitation. The child must not impersonate the coordinator's CLI identity.\n", project_name, task.id(), project_name, task.id()));
-    }
-    let attachments = files.iter().map(serde_json::to_value).collect::<std::result::Result<Vec<_>, _>>().map_err(fail)?;
+    let (prompt, attachments) = dispatch_content(&settings, &task.view().map_err(fail)?, project_name, matches!(view.target, Target::Subagent { .. }))?;
     let receipt = crate::state::submit_task_message(&session, &prompt, &attachments).map_err(fail)?;
     let request_id = receipt["request_id"].as_str().unwrap_or_default().to_owned();
     (if handoff { task.record_handoff(&session, &request_id, who, now()) }
@@ -908,6 +906,15 @@ fn send(
         .map_err(|e| fail(format!("{SENT_UNRECORDED}: {e}")))?;
     task.record_queued_messages(&request_id, who, now()).map_err(|e| fail(format!("{SENT_UNRECORDED}: {e}")))?;
     Ok(json!({"receipt": receipt}))
+}
+
+fn dispatch_content(settings: &Settings, view: &zerus_replica::TaskView, project_name: &str, subagent: bool) -> Result<(String, Vec<Value>)> {
+    let (mut prompt, files) = task_dispatch_content(&settings.task_template, view, project_name, Tools::Cli).map_err(fail)?;
+    if subagent {
+        prompt.push_str(&format!("\n\n[Zerus executor: subagent]\nYou are the coordinator for this task. Create a native subagent only now, after this explicit start request, and give it the implementation work. Keep coordination and task reporting in this session. After the native child appears, read `hgs task get {}/{}` and register its exact live ID with `hgs task worker {}/{} --subagent CHILD_ID --request-id CURRENT_SENT_REQUEST_ID`. Do not claim that the child has started before this registration succeeds; if creation is unavailable, report that limitation. The child must not impersonate the coordinator's CLI identity.\n", project_name, view.id, project_name, view.id));
+    }
+    let attachments = files.iter().map(serde_json::to_value).collect::<std::result::Result<Vec<_>, _>>().map_err(fail)?;
+    Ok((prompt, attachments))
 }
 
 /// Moves the task to In review and pastes the cancel message; the turn is not

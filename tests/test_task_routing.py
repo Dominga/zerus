@@ -34,7 +34,7 @@ args = shlex.split(sys.argv[-1])[1:]
 with (root / 'calls').open('a') as file: file.write(alias + ' ' + ' '.join(args) + '\\n')
 if (root / ('oldcancel-' + alias)).exists() and args[:2] == ['task', 'cancel-execution']:
     print('hgs: usage: hgs task cancel REF', file=sys.stderr); sys.exit(1)
-if (root / ('dropafter-' + alias)).exists() and args[:2] in (['task', 'send'], ['task', 'cancel-execution']):
+if (root / ('dropafter-' + alias)).exists() and args[:2] in (['task', 'send'], ['task', 'cancel-execution'], ['task', 'start-deliver']):
     # The connection drops after that computer pasted and answered.
     subprocess.run([os.environ['ROUTING_HGS'], *args], input=sys.stdin.read(), env=env, text=True, capture_output=True)
     print('Connection reset by peer', file=sys.stderr); sys.exit(255)
@@ -225,6 +225,25 @@ class TaskRouting(unittest.TestCase):
             view = self.get(node, task)
             self.assertEqual(view["stage"], "review", node)
             self.assertIn("Wrong approach", [e.get("text") for e in view["log"]], node)
+
+    def test_start_plan_and_readonly_recovery_route_the_original_identity(self):
+        task = self.add("A routed guarded start", "--target", "codex/remote", "--host", "b")
+        current = self.get("a", task)
+        record = json.loads(self.record.read_text())
+        request = dict(schema=1, id=str(uuid.uuid4()), stage_at=current["stage_at"], target=current["target"],
+                       selection=dict(host="b", name="codex/remote", session_id="run_id:" + record["run_id"],
+                                      run_id=record["run_id"], conversation_id=record["conversation_id"]))
+        plan = self.task("a", "start-plan", task["id"], "--project", "project-1", text=json.dumps(request))["plan"]
+        self.assertEqual(plan["selection"]["host"], "")
+        self.assertEqual(self.received(), "")
+        (self.root / "dropafter-b").touch()
+        self.assertIn("Connection reset", self.task("a", "start-deliver", task["id"], "--project", "project-1", text=json.dumps(plan), ok=False))
+        self.wait_received("A routed guarded start")
+        (self.root / "dropafter-b").unlink()
+        settled = self.task("a", "start-deliver", task["id"], "--project", "project-1", "--recover-only", text=json.dumps(plan))
+        self.assertEqual((settled["state"], settled["id"]), ("submitted", request["id"]))
+        self.assertEqual(self.received().count("A routed guarded start"), 1)
+        self.assertEqual(self.get("a", task)["stage"], "active")
 
     def test_guarded_cancellation_routes_exact_payload_and_refuses_unknown_replay(self):
         task = self.add("Check pinned cancellation", "--target", "codex/remote", "--host", "b")

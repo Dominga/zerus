@@ -3855,9 +3855,6 @@ fn stall_stages_of(team: &mut Team, member: &str, reason: &str, events: &mut Vec
         if run.member != member || run.member.is_empty() {
             continue;
         }
-        if !run.checkout.is_empty() || !run.temp.is_empty() {
-            let _ = super::stages::clean_up(run);
-        }
         stalled.push((task.id, run.id.clone()));
     }
     for (task, run) in stalled {

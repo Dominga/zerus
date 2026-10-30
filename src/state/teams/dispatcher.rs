@@ -368,6 +368,9 @@ pub(crate) enum Step {
     /// #630 N7: an open stage whose member left the roster or whose hand-off
     /// was never confirmed goes back to Waiting.
     StageStalled { task: u32, run: String, reason: String },
+    /// #635 N1: a stage member's turn ended without a verdict; the lead hears
+    /// it once and the run stays Delivered.
+    StageSilent { task: u32, run: String },
     /// U47/U48: read a started command or land stage's run record.
     StageCommandEnded { task: u32, run: String },
     /// #511 N3: tell a member its worked-ahead attempt was revoked with its
@@ -1176,6 +1179,41 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     // hand-off was never confirmed, goes back to Waiting for a free member.
     for (task, run, reason) in super::stages::stalled(team, now) {
         steps.push(Step::StageStalled { task, run, reason });
+    }
+    // #635 N3: an unconfirmed hand-off is stalled only with evidence it did not
+    // arrive: its member is idle and free since delivery, no stage question is
+    // open and no run claim stands under the run id.
+    for task in &team.tasks {
+        let Some(run) = task.pipeline_run.as_ref().and_then(|pipeline| pipeline.open_run()) else { continue };
+        if run.state != StageState::Delivered || !run.unconfirmed || run.member.is_empty() {
+            continue;
+        }
+        let delivered = run.delivered_at.unwrap_or(run.at);
+        if now - delivered < super::stages::STAGE_UNCONFIRMED_GRACE {
+            continue;
+        }
+        let Some(member) = team.member(&run.member) else { continue };
+        let Some(found) = session_of(member, seen) else { continue };
+        if hand_off_missing(team, run, found, delivered) {
+            steps.push(Step::StageStalled { task: task.id, run: run.id.clone(), reason: "the stage hand-off was not confirmed".into() });
+        }
+    }
+    // #635 N1: a stage member's turn that ended after the hand-off without a
+    // verdict, and with no stage question open, is a stalled item for the lead.
+    for task in &team.tasks {
+        let Some(run) = task.pipeline_run.as_ref().and_then(|pipeline| pipeline.open_run()) else { continue };
+        if run.state != StageState::Delivered || run.member.is_empty() || !run.silent.is_empty() {
+            continue;
+        }
+        if run.questions.iter().any(|question| question.open()) {
+            continue;
+        }
+        let Some(member) = team.member(&run.member) else { continue };
+        let Some(found) = session_of(member, seen) else { continue };
+        let delivered = run.delivered_at.unwrap_or(run.at);
+        if found.free && found.reply_at.unwrap_or(0.0) > delivered {
+            steps.push(Step::StageSilent { task: task.id, run: run.id.clone() });
+        }
     }
     // C6: among a member's ready tasks the one with the most transitive
     // dependants goes first, then the lowest number.
@@ -3975,15 +4013,58 @@ fn stage_hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &st
 }
 
 /// #630 N7: takes a stalled stage back to Waiting and frees its checkout.
+/// #635 N2: the pipeline keeps it while the stage's own run is live.
 fn stall_stage_command(store: &mut Store, team: &Team, task_id: u32, run_id: &str, reason: &str) -> anyhow::Result<()> {
-    let Some(run) = team.task(task_id).and_then(|task| task.pipeline_run.as_ref()).and_then(|run| run.runs.iter().find(|run| run.id == run_id)).cloned() else {
-        return Ok(());
-    };
-    if !run.checkout.is_empty() || !run.temp.is_empty() {
-        let _ = super::stages::clean_up(&run);
-    }
     change(store, &team.id, |team, events| {
         super::pipeline::stall_stage(team, task_id, run_id, reason, events);
+        Ok(())
+    })
+}
+
+/// #635 N3: whether an unconfirmed hand-off shows evidence it did not arrive:
+/// its member is idle and free since delivery, no stage question is open, and
+/// no run claim stands under the run id in its folder or the stage's.
+fn hand_off_missing(team: &Team, run: &StageRun, found: &Seen, delivered: f64) -> bool {
+    if !found.free || found.reply_at.unwrap_or(0.0) > delivered || found.turn_started.is_some_and(|at| at > delivered) {
+        return false;
+    }
+    if run.questions.iter().any(|question| question.open()) {
+        return false;
+    }
+    let claim = |folder: &str| super::outbox::running(Path::new(folder), &run.id).is_some();
+    if let Some(member) = team.member(&run.member) {
+        if let Ok(folder) = member_folder_path(team, member) {
+            if claim(&folder) {
+                return false;
+            }
+        }
+    }
+    if !run.folder.is_empty() && claim(&run.folder) {
+        return false;
+    }
+    if super::super::builds::record(&run.id, now()).is_some_and(|record| record["status"] == "running") {
+        return false;
+    }
+    true
+}
+
+/// #635 N1: records once that a stage member's turn ended without a verdict,
+/// so the lead's inbox has the stalled item; the run stays Delivered.
+fn stage_silent_command(store: &mut Store, team: &Team, task_id: u32, run_id: &str) -> anyhow::Result<()> {
+    let role = team
+        .task(task_id)
+        .and_then(|task| task.pipeline_run.as_ref())
+        .and_then(|pipeline| pipeline.runs.iter().find(|run| run.id == run_id))
+        .map(|run| team.name_of(&run.member))
+        .unwrap_or_default();
+    change(store, &team.id, |team, events| {
+        let Some(run) = stage_run_mut(team, task_id, run_id) else { return Ok(()) };
+        if !run.silent.is_empty() || run.state != StageState::Delivered {
+            return Ok(());
+        }
+        run.silent = "its member ended its turn without a verdict".to_owned();
+        let (stage, round) = (run.kind.clone(), run.round);
+        events.push(Event::new("stage_silent", json!({"task":task_id,"stage":stage,"round":round,"member":role})));
         Ok(())
     })
 }
@@ -5832,6 +5913,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
         Step::StageCommand { task, run } => start_stage_command(store, team, *task, run),
         Step::StageCommandEnded { task, run } => settle_stage_command(store, team, *task, run),
         Step::StageStalled { task, run, reason } => stall_stage_command(store, team, *task, run, reason),
+        Step::StageSilent { task, run } => stage_silent_command(store, team, *task, run),
         Step::TellStop { stop } => tell_stop(store, team, stop),
         Step::Rebalanced { tasks } => tell_lead_rebalanced(store, team, tasks),
         Step::TurnEnded { task, at, reply } => change(store, &team.id, |team, _| {
@@ -6985,6 +7067,85 @@ mod tests {
         let found = steps(&t, &free_sessions(), 100.0);
         assert!(!found.iter().any(|step| matches!(step, Step::StageOut { .. })), "{found:?}");
         assert!(!found.iter().any(|step| matches!(step, Step::HandOut { member, .. } if member == "rev")), "{found:?}");
+    }
+
+    /// #635 N1: a stage member's turn that ended after the hand-off with no
+    /// verdict gives the lead one stalled item, and the run stays Delivered.
+    #[test]
+    fn a_stage_member_whose_turn_ends_without_a_verdict_is_told_to_the_lead() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().display().to_string();
+        let mut t = staged(&folder);
+        let run = super::super::pipeline::give_stage(&mut t, 1, "rev").unwrap();
+        {
+            let stage = t.task_mut(1).unwrap().pipeline_run.as_mut().unwrap().runs.iter_mut().find(|stage| stage.id == run).unwrap();
+            stage.delivered_at = Some(100.0);
+        }
+        let lead = session("claude/x/lead", "r0", true);
+        let dev = session("codex/x/dev", "r1", true);
+        let mut rev = session("claude/x/rev", "r2", true);
+        rev.reply_at = Some(200.0);
+        let found = steps(&t, &[lead.clone(), dev.clone(), rev.clone()], 1000.0);
+        assert!(found.contains(&Step::StageSilent { task: 1, run: run.clone() }), "{found:?}");
+        // A member still working, or one with a stage question open, is not silent.
+        let mut working = rev.clone();
+        working.free = false;
+        assert!(!steps(&t, &[lead.clone(), dev.clone(), working], 1000.0).iter().any(|step| matches!(step, Step::StageSilent { .. })));
+        {
+            let stage = t.task_mut(1).unwrap().pipeline_run.as_mut().unwrap().runs.iter_mut().find(|stage| stage.id == run).unwrap();
+            stage.questions.push(Question { id: "q".into(), text: "Which line?".into(), at: 150.0, ..Default::default() });
+        }
+        assert!(!steps(&t, &[lead, dev, rev], 1000.0).iter().any(|step| matches!(step, Step::StageSilent { .. })));
+        {
+            let stage = t.task_mut(1).unwrap().pipeline_run.as_mut().unwrap().runs.iter_mut().find(|stage| stage.id == run).unwrap();
+            stage.questions.clear();
+        }
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        store.create(&uuid::Uuid::new_v4().to_string(), &json!({}), t.clone(), vec![]).unwrap();
+        run_step(&mut store, &t, &Step::StageSilent { task: 1, run: run.clone() }, "").unwrap();
+        let saved = store.load(&t.id).unwrap().unwrap();
+        let stage = saved.task(1).unwrap().pipeline_run.as_ref().unwrap().runs.iter().find(|stage| stage.id == run).unwrap();
+        assert!(stage.silent.contains("without a verdict"), "{stage:?}");
+        assert_eq!(stage.state, StageState::Delivered, "the run is not reset: {stage:?}");
+        let items = crate::state::teams::inbox::items(&saved);
+        assert!(items.iter().any(|item| item.kind == "stage_stalled" && item.key.ends_with(":silent")), "{items:?}");
+        let page = store.events(&t.id, None, 50).unwrap();
+        assert!(page["items"].as_array().unwrap().iter().any(|event| event["kind"] == "stage_silent"), "{page}");
+    }
+
+    /// #635 N3: an unconfirmed hand-off is stalled only with evidence it did
+    /// not arrive; a reply after delivery or a run claim is evidence it did.
+    #[test]
+    fn an_unconfirmed_stage_hand_off_is_stalled_only_with_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().display().to_string();
+        let mut t = staged(&folder);
+        let run = super::super::pipeline::give_stage(&mut t, 1, "rev").unwrap();
+        {
+            let stage = t.task_mut(1).unwrap().pipeline_run.as_mut().unwrap().runs.iter_mut().find(|stage| stage.id == run).unwrap();
+            stage.unconfirmed = true;
+            stage.delivered_at = Some(100.0);
+        }
+        let lead = session("claude/x/lead", "r0", true);
+        let dev = session("codex/x/dev", "r1", true);
+        let rev = session("claude/x/rev", "r2", true);
+        let found = steps(&t, &[lead.clone(), dev.clone(), rev.clone()], 1000.0);
+        assert!(found.contains(&Step::StageStalled { task: 1, run: run.clone(), reason: "the stage hand-off was not confirmed".into() }), "{found:?}");
+        // A reply after the delivery shows the member had it.
+        let mut answered = rev.clone();
+        answered.reply_at = Some(200.0);
+        assert!(!steps(&t, &[lead.clone(), dev.clone(), answered], 1000.0).iter().any(|step| matches!(step, Step::StageStalled { .. })));
+        // A run claimed under the stage's id is evidence it arrived too.
+        let member = t.member("rev").unwrap().clone();
+        let qa_folder = member_folder_path(&t, &member).unwrap();
+        super::super::outbox::write_running(
+            Path::new(&qa_folder),
+            &run,
+            &json!({"request_id":run,"started":1000.0,"timeout_secs":1800,"label":"cargo-test"}),
+        )
+        .unwrap();
+        assert!(!steps(&t, &[lead, dev, rev], 1000.0).iter().any(|step| matches!(step, Step::StageStalled { .. })));
+        super::super::outbox::settle_running(Path::new(&qa_folder), &run, &json!({"status":"ran"})).unwrap();
     }
 
     #[test]

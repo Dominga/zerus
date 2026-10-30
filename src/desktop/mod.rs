@@ -1,6 +1,7 @@
 //! Durable desktop service kernel. Pre-handoff it owns no fleet or effect writer.
 mod fanout;
 mod protocol;
+mod registration;
 mod store;
 mod transport;
 
@@ -21,8 +22,34 @@ use std::{
 use store::{Location, Store};
 use transport::{Listener, Stream, TIMEOUT};
 
-const USAGE: &str = "usage: hgs desktop serve | status [--json] | watch --json | request --json";
+const USAGE: &str = "usage: hgs desktop serve [--config-dir DIR --state-dir DIR] | status [--json] | watch --json | request --json | registration --json";
 const HEARTBEAT: Duration = Duration::from_secs(10);
+
+/// Registrations pass the selected directories as argv, including on Windows
+/// where a logon task cannot carry a custom environment block. Only this exact
+/// local service form changes configuration before Config::load; ordinary hgs
+/// routing and all existing HGS_* selection remain unchanged.
+pub fn launch_configuration(args: &[String]) -> cli::Result<()> {
+    if let [desktop, serve, config_flag, config, state_flag, state] = args {
+        if desktop == "desktop"
+            && serve == "serve"
+            && config_flag == "--config-dir"
+            && state_flag == "--state-dir"
+        {
+            if !std::path::Path::new(config).is_absolute()
+                || !std::path::Path::new(state).is_absolute()
+            {
+                return Err(cli::Error::new(
+                    1,
+                    "desktop registration directories must be absolute",
+                ));
+            }
+            std::env::set_var("HGS_CONFIG_DIR", config);
+            std::env::set_var("HGS_STATE_DIR", state);
+        }
+    }
+    Ok(())
+}
 
 pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cli::Result<i32> {
     let run = || -> Result<()> {
@@ -38,6 +65,15 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
             .as_slice()
         {
             ["serve"] => serve(location),
+            ["serve", "--config-dir", dir, "--state-dir", state] => {
+                ensure!(std::path::Path::new(dir) == config.dir && std::path::Path::new(state) == config.state,
+                    "desktop registration configuration was not selected; invoke its exact local command");
+                serve(location)
+            }
+            ["registration", "--json"] => {
+                println!("{}", registration::preview(config, &location)?);
+                Ok(())
+            }
             ["status", "--json"] => {
                 println!("{}", status(&location)?);
                 Ok(())

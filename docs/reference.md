@@ -4118,6 +4118,25 @@ additional connections preserve the unary request/status lane. Admission holds
 at most sixteen control lines and twelve parsers, below the proposed 16 MiB
 ingress budget. The kernel has no upstream ingress or per-session cache.
 
+`hgs desktop registration --json` previews the current platform's per-user
+definition and exact configuration identity. It creates no files, contacts no
+service manager and enables no writer. Its `operation:preview` identifies this
+render-only operation; it makes no claim about OS registration. Maintained installer
+ownership checks and delegation are separate steps before using the definition.
+
+The proposed service names are `hgs-desktop.service` (systemd user),
+`com.hgdev.hgs-desktop` (LaunchAgent), and `hgs-desktop` (per-user Windows logon
+task). Definitions invoke the selected stable CLI with `desktop serve
+--config-dir DIR --state-dir DIR`; this exact local form pins those directories
+before configuration loading, including on Windows. Bare `desktop serve` keeps
+existing `HGS_*` configuration selection. Nothing registers nondefault or dev
+configurations automatically. Windows definitions use the current SID,
+`InteractiveToken`, `LeastPrivilege`, one instance and at most three failure
+restarts one minute apart (the [Task Scheduler schema minimum](https://learn.microsoft.com/en-us/windows/win32/taskschd/taskschedulerschema-interval-restarttype-element)).
+Paths with environment-variable markers are refused on Windows because Task
+Scheduler expands them even inside quoted arguments. Native installation,
+windowless startup and Windows runtime qualification remain outstanding.
+
 ### Event stream
 
 ```sh

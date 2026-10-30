@@ -169,7 +169,7 @@ struct Cache {
 }
 
 enum Input {
-    Submit(Value, SyncSender<Admission>),
+    Submit(Value, Option<String>, SyncSender<Admission>),
     Action(String, CreationAction, SyncSender<Result<(), String>>),
     Catalog,
     Flush(SyncSender<()>),
@@ -195,6 +195,7 @@ struct Shared {
     catalog: Arc<AtomicBool>,
     quitting: Arc<AtomicBool>,
     clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+    catalog_observer: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 /// Clones share the sole queue worker. The cached reads never do I/O.
@@ -216,6 +217,7 @@ impl CreationHost {
             catalog: Arc::clone(&catalog),
             quitting: Arc::clone(&quitting),
             clock: Arc::clone(&services.clock),
+            catalog_observer: Mutex::new(None),
         }));
         let writing = Arc::clone(&services);
         let written = done.clone();
@@ -318,7 +320,20 @@ impl CreationHost {
 
     /// Signals only after the source drain applied the change to its mirror.
     /// It never waits for the worker, journal or an organization lock.
+    pub(crate) fn on_catalog(&self, callback: Arc<dyn Fn() + Send + Sync>) {
+        *lock(&self.0.catalog_observer) = Some(callback);
+    }
+    pub(crate) fn phase(&self, id: &str) -> Option<String> {
+        lock(&self.0.cache)
+            .operations
+            .get(id)
+            .map(|v| text(v, "state").into())
+    }
     pub(crate) fn catalog_changed(&self) {
+        let observer = lock(&self.0.catalog_observer).clone();
+        if let Some(observer) = observer {
+            observer();
+        }
         if !self.0.catalog.swap(true, Ordering::AcqRel) {
             let _ = self.0.input.try_send(Input::Catalog);
         }
@@ -332,10 +347,16 @@ impl CreationHost {
     }
 
     fn submit(&self, plan: Value) -> Result<Admission, String> {
+        self.submit_plan(plan, None)
+    }
+    pub(crate) fn submit_reserved(&self, plan: Value, id: String) -> Result<Admission, String> {
+        self.submit_plan(plan, Some(id))
+    }
+    fn submit_plan(&self, plan: Value, id: Option<String>) -> Result<Admission, String> {
         let (send, answer) = mpsc::sync_channel(1);
         self.0
             .input
-            .send(Input::Submit(plan, send))
+            .send(Input::Submit(plan, id, send))
             .map_err(|_| STOPPED.to_owned())?;
         answer.recv().map_err(|_| STOPPED.to_owned())
     }
@@ -463,7 +484,7 @@ impl Worker {
     fn input(&mut self, message: Input) {
         self.stop_if_requested();
         match message {
-            Input::Submit(plan, answer) => {
+            Input::Submit(plan, id, answer) => {
                 let (result, effects) = if self.quitting || !self.services.allowed {
                     (
                         Err(if self.quitting {
@@ -475,7 +496,10 @@ impl Worker {
                         Vec::new(),
                     )
                 } else {
-                    self.queue.submit(plan)
+                    match id {
+                        Some(id) => self.queue.submit_reserved(plan, &id),
+                        None => self.queue.submit(plan),
+                    }
                 };
                 self.effects(effects);
                 let _ = answer.send(match result {
@@ -1125,6 +1149,9 @@ pub fn start(app: &AppHandle, dir: &Path, replay: bool, allowed: bool) -> Creati
             remember: Arc::new(move |choices| remember(&remembered, choices)),
             emit: Arc::new(move |value| {
                 let _ = emit.emit("creations", value);
+                if let Some(tasks) = emit.try_state::<crate::task_executor::TaskExecutors>() {
+                    tasks.changed();
+                }
             }),
             spawn: Arc::new(|job| {
                 tauri::async_runtime::spawn_blocking(job);

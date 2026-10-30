@@ -1,3 +1,5 @@
+import { taskAssignmentPopover } from "./store/taskAssignment";
+import { taskExecutorReview } from "./store/taskExecutors";
 import { taskStartReview } from "./store/taskStart";
 import { taskSettings } from "./store/taskSettings";
 import { taskCancellation } from "./store/taskCancel";
@@ -35,6 +37,8 @@ const SettingsScreen = lazy(() => import("./ui/screens/Settings").then((m) => ({
 // New session and its child dialogs load the first time it opens
 // (`newSessionOpened`), and stay mounted from then on.
 const NewSessionDialog = lazy(() => import("./ui/sessions/NewSessionDialog").then((m) => ({ default: m.NewSessionDialog })));
+const TaskAssignmentPopover = lazy(() => import("./ui/screens/TaskAssignmentPopover"));
+const TaskExecutorReview = lazy(() => import("./ui/screens/TaskExecutorReview"));
 const TaskStartReview = lazy(() => import("./ui/screens/TaskStartReview"));
 const TaskSettingsDialog = lazy(() => import("./ui/screens/TaskSettingsDialog"));
 const TaskCancelDialog = lazy(() => import("./ui/screens/TaskCancelDialog"));
@@ -156,6 +160,8 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
       <MenuLayer />
       <Toasts />
       <ActionDialogs />
+      <Show when={taskAssignmentPopover()}><Suspense><TaskAssignmentPopover /></Suspense></Show>
+      <Show when={taskExecutorReview()}><Suspense><TaskExecutorReview /></Suspense></Show>
       <Show when={taskStartReview()}><Suspense><TaskStartReview /></Suspense></Show>
       <Show when={taskSettings.dialog()}><Suspense><TaskSettingsDialog /></Suspense></Show>
       <Show when={taskCancellation()}><Suspense><TaskCancelDialog /></Suspense></Show>

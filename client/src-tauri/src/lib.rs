@@ -71,6 +71,8 @@ mod task_details;
 #[cfg(feature = "live")]
 mod task_editor;
 #[cfg(feature = "live")]
+mod task_executor;
+#[cfg(feature = "live")]
 mod task_forms;
 #[cfg(feature = "live")]
 mod task_settings;
@@ -534,6 +536,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     },
                 ));
                 // A write mark shows in the composer at once.
+                app.manage(task_executor::TaskExecutors::start(app.handle()));
                 let composers = app.state::<composer::Composers>();
                 app.state::<actions::Actions>().on_writes(composers.changed_hook());
                 // The composer's session part once a second (the cache chip)
@@ -1011,6 +1014,9 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         task_start::task_start_open,
         task_start::task_start,
         task_start::task_start_release,
+        task_executor::task_executor_open,
+        task_executor::task_executor_submit,
+        task_executor::task_executor_release,
         task_settings::task_settings,
         task_editor::task_editor_open,
         task_editor::task_editor_edit,

@@ -11,7 +11,7 @@ import { tasks } from "../../store/tasks";
 import { flag, setSetting } from "../../store/settings";
 import { now, selected, setMenu } from "../../store/ui";
 import { STAGES, STAGE_ICON, STAGE_LABEL, TASK_PAGE, assignmentLabel, boardRows, belongsTo, executorRef, taskPageOffset, type Stage, type Task } from "./tasks-ui";
-import { assign, assigningTask, canAssign, draggedTask, setDraggedTask, taskDragStart, readTaskDrag, TASK_MIME } from "../../store/taskAssignment";
+import { openTaskAssignment, assigningTask, canAssign, draggedTask, setDraggedTask, taskDragStart, readTaskDrag, TASK_MIME } from "../../store/taskAssignment";
 import { ACTION_ICON, ACTION_LABEL, actOnTask, boardActions, canDrag, primaryAction, reorderGap, stageDropAction, writingTask } from "../../store/taskBoard";
 import { taskProject as project, projectSessions as sessions, findTaskSession as find, projectTasks as rows } from "../../store/taskContext";
 import "../styles/tasks.css";
@@ -25,7 +25,6 @@ const LABEL = { current: "Active", ...STAGE_LABEL }, ICON = { current: "activity
 const EMPTY = { current: "No tasks in progress or review", review: "Nothing to review", active: "No session is running a task", todo: "No tasks in To do", backlog: "Empty", done: "Nothing yet" };
 export function TasksPanel() {
   const [stage, setStage] = createSignal<Filter>("current"), [older, setOlder] = createSignal(false), [at, setAt] = createSignal(0);
-  const [assignment, setAssignment] = createSignal<Task>(), [query, setQuery] = createSignal("");
   const { show: showReason, clear: clearReason, Tip: ReasonTip } = createTaskReason();
   createEffect(on(() => project()?.id, clearReason));
   const only = () => flag("tasks/onlySession") ? selected() : undefined;
@@ -33,7 +32,7 @@ export function TasksPanel() {
   const stageRows = (filter: Filter, old = false) => filter === "current" ? rows().filter((t) => ["review", "active"].includes(t.stage) && (!only() || belongsTo(t, only()!))) : boardRows(rows(), filter, only(), ageNow(), old);
   const visible = createMemo(() => tasks.error() ? [] : [...stageRows(stage()), ...(stage() === "done" && older() ? stageRows("done", true) : [])]);
   const shown = () => visible().slice(at(), at() + TASK_PAGE);
-  createEffect(on(() => project()?.id, () => { setAt(0); setOlder(false); setStage("current"); setAssignment(undefined); }));
+  createEffect(on(() => project()?.id, () => { setAt(0); setOlder(false); setStage("current"); }));
   createEffect(on(() => [stage(), only()?.key, older()] as const, () => setAt(0)));
   createEffect(on(visible, (next, previous) => { if (previous) setAt(taskPageOffset(previous, next, at())); }));
   createEffect(() => { if (at() >= visible().length) setAt(Math.max(0, Math.floor((visible().length - 1) / TASK_PAGE) * TASK_PAGE)); });
@@ -86,11 +85,8 @@ export function TasksPanel() {
     ...boardActions(t.stage).map((action) => ({ label: ACTION_LABEL[action], icon: ACTION_ICON[action], disabled: !t.writable || !!writingTask(), action: () => void actOnTask(projectId, t, { kind: action }) })),
     ...(["todo", "backlog"].includes(t.stage) && supportsTaskStart(t) ? [{ label: "Start task", icon: "play", disabled: !!taskStartBlocker(projectId, t) || !!writingTask(), hint: taskStartBlocker(projectId, t), action: () => void startTask(projectId, t) }] : []),
     ...(t.stage === "active" ? [{ label: "Cancel task…", icon: "x", danger: true, disabled: !canCancel(t) || !!writingTask(), action: () => requestTaskCancellation(projectId, t, anchor) }] : []),
-    { label: "Assign to session…", icon: "user-round-cog", disabled: !canAssign(t, projectId) || !!assigningTask(), action: () => { if (project()?.id !== projectId) return; setQuery(""); setAssignment(t); } },
+    { label: "Assign to session…", icon: "user-round-cog", disabled: !canAssign(t, projectId) || !!assigningTask(), action: () => { if (project()?.id === projectId) openTaskAssignment(projectId, t, anchor); } },
   ] }); };
-  let picker!: HTMLDivElement;
-  createEffect(() => { if (!assignment()) return; const close = (e: PointerEvent) => { if (!picker?.contains(e.target as Node)) setAssignment(undefined); }; document.addEventListener("pointerdown", close); onCleanup(() => document.removeEventListener("pointerdown", close)); queueMicrotask(() => picker?.querySelector<HTMLInputElement>("input")?.focus()); });
-  const choices = () => sessions().filter((s) => canAssign(assignment()!, project()!.id, s) && `${s.title} ${s.name} ${s.machine}`.toLowerCase().includes(query().toLowerCase()));
   return <div class="tk-panel"><Suspense><TaskCreate project={project()?.id} scope={project() ? `${visible().length} ${visible().length === 1 ? "task" : "tasks"}` : "Open a project session to see tasks"} accessible={!!project()?.accessible} backlog={stage() === "backlog"}>
     <button class="tk-sq" classList={{ on: flag("tasks/onlySession") }} aria-label="Only this session" title="Only this session" aria-pressed={flag("tasks/onlySession")} disabled={!project()} onClick={() => void setSetting("tasks/onlySession", !flag("tasks/onlySession"))}><Icon name="filter" size={15} /></button>
     <button class="tk-sq" aria-label="Task settings" title={project() ? `Task settings for ${project()!.name}` : "Task settings"} disabled={!project()?.accessible || taskSettings.busy()} onClick={(e) => { const p = project(); if (p) void taskSettings.open(p.id, p.name, e.currentTarget); }}><Icon name="settings" size={15} /></button>
@@ -110,7 +106,6 @@ export function TasksPanel() {
       </div>
       <Show when={visible().length > TASK_PAGE}><div class="tasks-navigation"><span class="muted">{at() + 1}–{Math.min(at() + TASK_PAGE, visible().length)} of {visible().length}</span><span class="grow" /><button class="btn small" disabled={!at()} onClick={() => setAt(Math.max(0, at() - TASK_PAGE))}>Previous</button><button class="btn small" disabled={at() + TASK_PAGE >= visible().length} onClick={() => setAt(at() + TASK_PAGE)}>Next</button></div></Show>
     </Show>
-    <Show when={assignment()}>{(task) => <div ref={picker} class="tk-assign menu" data-shortcut-context="none" role="dialog" aria-label="Assign to session" onKeyDown={(e) => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); setAssignment(undefined); } }}><b>Assign to session…</b><input class="field tk-assign-search" placeholder="Search sessions…" aria-label="Search sessions" value={query()} onInput={(e) => setQuery(e.currentTarget.value)} /><div class="tk-assign-list"><button class="menu-item" onClick={() => { void assign(project()!.id, task()); setAssignment(undefined); }}>Any session</button><For each={choices().slice(0, 50)}>{(s) => <button class="menu-item" onClick={() => { void assign(project()!.id, task(), { ...s }); setAssignment(undefined); }}>{s.title} <span class="muted">@{s.machine}</span></button>}</For><Show when={choices().length > 50}><div class="hint">Refine the search to see more sessions.</div></Show></div></div>}</Show>
     <ReasonTip />
   </div>;
 }

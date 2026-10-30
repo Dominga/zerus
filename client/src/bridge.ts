@@ -34,6 +34,10 @@ export const taskEditorPick = (handle: number, start: number, end: number) => de
 export const taskEditorRemove = (handle: number, index: number) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_files", { handle, change: { kind: "remove", index } });
 export const taskEditorSubmit = (handle: number, rev: number, recover: boolean, delivery?: import("./store/taskEditor").TaskMessageDelivery) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_submit", { input: { handle, rev, recover, delivery: delivery ?? null } });
 export const taskEditorRelease = (handle: number, rev: number, record: import("./store/taskEditor").TaskRecoveryRecord) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_release", { input: { handle, rev, ...record } });
+export const taskExecutorSubmit = (input: import("./store/taskExecutors").TaskLaunchContext & { plan: LaunchPlan }) => desktop<CreationAdmission>("task_executor_submit", { input });
+export const taskExecutorOpen = (project: string, task: string) => desktop<import("./store/taskExecutors").ExecutorView | null>("task_executor_open", { project, task });
+export const taskExecutorRelease = (id: string, snapshot: string) => desktop<void>("task_executor_release", { id, snapshot });
+export const onTaskExecutors = (listener: () => void) => onEvent<null>("task-executors", listener);
 export const taskStartOpen = (project: string, task: string) => desktop<import("./store/taskStart").StartView>("task_start_open", { project, task });
 export const readTaskSettings = (project: string) => desktop<import("./store/taskSettings").TaskSettings>("task_settings", { project, changes: null });
 export const saveTaskSettings = (project: string, changes: Partial<import("./store/taskSettings").TaskSettings>) => desktop<import("./store/taskSettings").TaskSettings>("task_settings", { project, changes });
@@ -45,7 +49,7 @@ export const taskFormOpen = (target: import("./store/taskEditor").TaskEditorTarg
 export const taskFormEdit = (kind: import("./store/taskForms").FormKind, input: Pick<import("./store/taskEditor").TaskEditorView, "handle" | "rev" | "text" | "position" | "anchor">) => desktop<import("./store/taskEditor").TaskEditorView<import("./store/taskForms").FormKind>>("task_form_edit", { kind, input });
 export const taskFormSubmit = (input: import("./store/taskForms").FormSubmit) => desktop<import("./store/taskEditor").TaskEditorView<import("./store/taskForms").FormKind>>("task_form_submit", { input });
 export const taskFormCancel = (kind: import("./store/taskForms").FormKind, handle: number, rev: number) => desktop<import("./store/taskEditor").TaskEditorView<import("./store/taskForms").FormKind>>("task_form_cancel", { kind, handle, rev });
-export const assignTask = (project: string, task: string, target: { computer: string; name: string; run_id: string; conversation_id: string } | null, catalogKey: string | null, sessionId: string | null) => desktop<void>("task_assign", { project, task, target, catalogKey, sessionId });
+export const assignTask = (project: string, task: string, target: { computer: string; name: string; run_id: string; conversation_id: string } | null, catalogKey: string | null, sessionId: string | null, mode?: "session" | "subagent" | "new_session") => desktop<void>("task_assign", { input: { project, task, target, catalog_key: catalogKey, session_id: sessionId, mode: mode ?? null } });
 export const readTaskDetails = (project: string, task: string, before: string | null) => desktop<unknown>("task_details", { project, task, before });
 export const openTaskAttachment = (path: string) => desktop<string | null>("task_attachment_open", { path });
 

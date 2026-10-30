@@ -1201,3 +1201,22 @@ mod calls {
         assert_eq!(older.log(), [vec!["--help"]]);
     }
 }
+
+#[test]
+fn task_creation_keeps_its_reserved_launch_id_and_refuses_duplicate_admission() {
+    let mut driver = Driver::loaded();
+    let reserved = id(99);
+    let (result, effects) = driver
+        .creations
+        .submit_reserved(plan(&choices()), &reserved);
+    assert_eq!(result, Ok(reserved.clone()));
+    driver.take(effects);
+    assert_eq!(driver.op(&reserved)["launch_id"], reserved);
+    assert!(driver.calls.is_empty() && driver.launches.is_empty());
+    let before = driver.writes.len();
+    let (result, effects) = driver
+        .creations
+        .submit_reserved(plan(&choices()), &reserved);
+    assert!(result.is_err() && effects.is_empty());
+    assert_eq!(driver.writes.len(), before);
+}

@@ -1015,7 +1015,7 @@ mod open_tests {
             "example".into(),
             ID.into(),
             Mode::Description,
-            &read,
+            read,
         )
         .unwrap();
         assert_eq!(opened.stored.draft.text, "Canonical");
@@ -1026,7 +1026,7 @@ mod open_tests {
             "example".into(),
             ID.into(),
             Mode::Description,
-            &read,
+            read,
         )
         .unwrap();
         assert_eq!(second.stored.draft.text, "Canonical");

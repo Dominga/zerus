@@ -11,6 +11,9 @@ use zerus_desktop_migration::{sha256, SourceRecord, MAX_SNAPSHOT_BYTES};
 const READ_BYTES: usize = 16 << 20;
 const READ_ENTRIES: usize = 50_000;
 
+mod tasks;
+pub use tasks::{qt_task_forms, task_delivery};
+
 #[derive(Clone, Copy)]
 pub enum Origin {
     Qt,

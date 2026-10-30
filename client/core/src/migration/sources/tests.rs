@@ -242,3 +242,137 @@ fn an_entry_at_the_page_boundary_is_refused_instead_of_silently_skipped() {
     assert!(matches!(values.next(), Some(Err(SourceError::TooLarge))));
     assert!(values.next().is_none());
 }
+
+const REQUEST: &str = "22222222-2222-4222-8222-222222222222";
+fn new_card() -> Value {
+    json!({"project":"project-fixture","title":"Reserved original card","request_id":REQUEST,
+        "stage":"todo","session":"any","host":"","session_id":"","future_field":{"keep":true}})
+}
+#[test]
+fn task_forms_keep_original_scope_request_ids_unknown_fields_and_unfinished_text() {
+    let mut snapshot = qt_snapshot(json!({}), json!([]));
+    for (key, value) in [
+        (
+            "tasks/newCard/project-fixture/title".into(),
+            QtValue::Text("unfinished title".into()),
+        ),
+        (
+            "tasks/newCard/project-fixture/request".into(),
+            QtValue::Bytes(serde_json::to_vec(&new_card()).unwrap()),
+        ),
+        (
+            format!("tasks/titleDraft/project-fixture/{ID}"),
+            QtValue::Text("edited title".into()),
+        ),
+        (
+            format!("tasks/noteDraft/project-fixture/{ID}"),
+            QtValue::Text("unfinished\nnote".into()),
+        ),
+        (
+            format!("tasks/messageRequest/project-fixture/{ID}"),
+            QtValue::Text(REQUEST.into()),
+        ),
+    ] {
+        snapshot.values.insert(key, value);
+    }
+    let bodies = snapshot_bodies(qt_task_forms(&snapshot).unwrap());
+    let entries = bodies[0]["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 5);
+    let request = entries
+        .iter()
+        .find(|entry| entry["kind"] == "new-card-request")
+        .unwrap();
+    assert_eq!(request["value"], new_card());
+    assert_eq!(request["project"], "project-fixture");
+    assert_ne!(request["value"]["request_id"], ID);
+    let marker = entries
+        .iter()
+        .find(|entry| entry["kind"] == "messageRequest")
+        .unwrap();
+    assert_eq!(marker["task"], ID);
+    assert_eq!(marker["value"], REQUEST);
+}
+
+#[test]
+fn mismatched_or_unknown_task_form_shapes_never_finish_evidence() {
+    let mut wrong_project = new_card();
+    wrong_project["project"] = json!("another-project");
+    let mut wrong_identity = new_card();
+    wrong_identity["request_id"] = json!("missing-identity");
+    for (key, value) in [
+        ("tasks/newCard/project-fixture/request", wrong_project),
+        ("tasks/newCard/project-fixture/request", wrong_identity),
+        ("tasks/newCard/project-fixture/future-shape", new_card()),
+    ] {
+        let mut qt = qt_snapshot(json!({}), json!([]));
+        qt.values.insert(
+            key.into(),
+            QtValue::Bytes(serde_json::to_vec(&value).unwrap()),
+        );
+        let mut refused = false;
+        for item in bundle(qt_task_forms(&qt).unwrap()) {
+            match item {
+                Err(SourceError::UnsupportedSource) => refused = true,
+                Ok(BundleItem::Record(_)) => panic!("incomplete form cannot finish"),
+                _ => {}
+            }
+        }
+        assert!(refused);
+    }
+}
+
+fn delivery() -> Vec<u8> {
+    serde_json::to_vec(&json!({"id":REQUEST,"intent":{"content":{"text":"original private body","attachments":[]},
+        "mode":"append","dispatch":"original-dispatch","future_intent":true},"future_record":"keep"})).unwrap()
+}
+#[test]
+fn task_delivery_reuses_the_outbox_decoder_and_keeps_exact_marker_and_intent() {
+    for origin in [Origin::Qt, Origin::Next] {
+        let bytes = delivery();
+        let stream = task_delivery(origin, "project-fixture", ID, REQUEST, &bytes).unwrap();
+        let path = crate::tasks_write::outbox::path(
+            std::path::Path::new("/srv/example-drafts"),
+            "project-fixture",
+            ID,
+        );
+        assert!(stream
+            .identity
+            .family
+            .ends_with(path.file_stem().unwrap().to_str().unwrap()));
+        assert_eq!(stream.identity.sha256, sha256(&bytes));
+        let bodies = snapshot_bodies(stream);
+        assert_eq!(bodies[0]["project"], "project-fixture");
+        assert_eq!(bodies[0]["task"], ID);
+        assert_eq!(bodies[0]["marker_id"], REQUEST);
+        assert_eq!(
+            bodies[0]["record"],
+            serde_json::from_slice::<Value>(&bytes).unwrap()
+        );
+    }
+    assert!(matches!(
+        task_delivery(Origin::Qt, "project-fixture", ID, ID, &delivery()),
+        Err(SourceError::UnsupportedSource)
+    ));
+    assert!(matches!(
+        task_delivery(
+            Origin::Qt,
+            "project-fixture",
+            ID,
+            REQUEST,
+            &vec![b' '; MAX_SNAPSHOT_BYTES as usize + 1]
+        ),
+        Err(SourceError::TooLarge)
+    ));
+    let mut future: Value = serde_json::from_slice(&delivery()).unwrap();
+    future["version"] = json!(2);
+    assert!(matches!(
+        task_delivery(
+            Origin::Next,
+            "project-fixture",
+            ID,
+            REQUEST,
+            &serde_json::to_vec(&future).unwrap()
+        ),
+        Err(SourceError::UnsupportedSource)
+    ));
+}

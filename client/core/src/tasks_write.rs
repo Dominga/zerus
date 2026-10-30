@@ -528,8 +528,22 @@ pub mod outbox {
         fs::File::open(file)
             .and_then(|f| f.take(MAX_RECORD + 1).read_to_end(&mut bytes))
             .map_err(|_| unavailable())?;
-        let record: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-        if !record["id"].as_str().is_some_and(uuid) || !record["intent"].is_object() {
+        decode(&bytes)
+    }
+
+    /// The same bounded record decoder, without opening a store, reserving an
+    /// identity, releasing a marker or checking/submitting a delivery.
+    pub fn decode(bytes: &[u8]) -> Result<Value, String> {
+        if bytes.len() as u64 > MAX_RECORD {
+            return Err("The original message recovery snapshot exceeds its byte limit. Nothing was submitted.".into());
+        }
+        let record: Value = serde_json::from_slice(bytes).unwrap_or(Value::Null);
+        if !record["id"].as_str().is_some_and(uuid)
+            || !record["intent"].is_object()
+            || ["version", "schema"]
+                .iter()
+                .any(|key| record.get(key).is_some_and(|version| version != 1))
+        {
             return Err("The message recovery snapshot is invalid. Nothing was submitted.".into());
         }
         Ok(record)

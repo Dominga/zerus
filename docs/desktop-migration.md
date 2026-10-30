@@ -159,8 +159,28 @@ Attach `SourceStream::recheck` using the same existing source reader after
 decoding. It runs once on exhaustion and refuses changed hashes or read errors
 before a final manifest. G1 still checks source identity and its current drain;
 this callback creates no runtime authority. Unsupported/oversized sources stay
-unchanged and unhandled. Approval-reset, task/outbox and other source adapters
-remain separate slices; these APIs do not imply a complete production import.
+unchanged and unhandled. These APIs do not imply a complete production import.
+
+`qt_task_forms(&QtSnapshot)` preserves `tasks/newCard/*/title|request`,
+`titleDraft`, `noteDraft` and `messageRequest` in private entries
+`{key, kind, project, task?, value}`. Reserved-card request scope/project,
+request UUID, target and stage must match the existing Qt schema. Incomplete
+text drafts and unknown request fields are preserved; neither request nor task
+IDs are regenerated. Existing DraftStore import still owns task description,
+comment and attachment drafts. Form input is bounded at 16 MiB/50,000 entries,
+individual items at 1 MiB, and pages at 64 entries/1 MiB.
+
+`task_delivery(Origin, project, task, marker_id, bytes)` reuses the existing
+`tasks_write::outbox::decode`. Its source must be the existing
+`outbox::path(root, project, task)`; the caller verifies/rechecks that exact file
+and marker under the current drain. The original marker must equal the record's
+request UUID. Private evidence preserves the exact intent and unknown fields,
+with distinct project/task/request identities. A delivery is one indivisible
+item: over 1 MiB is refused before JSON allocation, never truncated. Missing or
+mismatched markers, unknown versions and orphan/unidentified files stay for
+review; this adapter does not discover or authorize them. It never reserves,
+releases, submits or reconciles a message. Approval-reset and remaining source
+families are separate slices.
 
 ## Delivery boundary
 

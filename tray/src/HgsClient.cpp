@@ -580,6 +580,32 @@ void runHgsParsed(const QString &hgs, const QStringList &args, int timeoutMs, QO
 
 } // namespace
 
+quint64 HgsClient::requestModelServer(const QStringList &args, const QByteArray &input, int timeoutMs)
+{
+    const quint64 request = ++m_modelServerRequest;
+    QStringList full{QStringLiteral("model-server")};
+    full << args;
+    auto run = processRequest(m_hgs, full); run.timeoutMs = timeoutMs;
+    if (!input.isEmpty()) run.input = input;
+    // The reply is parsed on the preparation thread (ProcessRunner.h).
+    struct Reply { QJsonObject object; QString detail; };
+    ProcessRunner::run(std::move(run), this,
+        [hgs = m_hgs](ProcessRunner::Result result) {
+            Reply reply;
+            QString parseError;
+            const auto object = JsonParse::object(result.standardOutput.trimmed(), &parseError);
+            if (result.outcome == ProcessRunner::Result::Finished && parseError.isEmpty() && !object.isEmpty()) reply.object = object;
+            else reply.detail = failureDetail(hgs, result);
+            if (reply.object.isEmpty() && reply.detail.isEmpty()) reply.detail = HgsClient::tr("Invalid model server response. Update hgs and try again.");
+            return reply;
+        },
+        [this, request](Reply reply) {
+            if (reply.detail.isEmpty()) emit modelServerReady(request, reply.object);
+            else emit modelServerFailed(request, reply.detail);
+        });
+    return request;
+}
+
 void HgsClient::cancelArchivePages(){const auto jobs=std::exchange(m_archiveJobs,{});qDeleteAll(jobs);}
 quint64 HgsClient::requestArchivePage(const QString &host,const QJsonObject &query) {
     delete m_archiveJobs.take(host); // Cancels only our read-only CLI helper.
@@ -1336,6 +1362,16 @@ void HgsClient::launchDetachedSession(const QString &host, const QString &agent,
     runHgs(m_hgs, args, 90000, this,
         [this,launchId](const QByteArray &) { emit nativeSessionLaunched(launchId,true,{}); },
         [this,launchId](const QString &,const QString &error) { emit nativeSessionLaunched(launchId,false,error); });
+}
+
+void HgsClient::launchModelServerSession(const QString &agent, const QString &folder, const QString &name, const QString &server, const QString &model, const QString &launchId)
+{
+    QStringList args{agent, folder, "--new", "-n", name, "--launch-id", launchId};
+    if (agent != "opencode") args << "-d";
+    args << "--model-server" << server << "--model" << model;
+    runHgs(m_hgs, args, 90000, this,
+        [this, launchId](const QByteArray &) { emit nativeSessionLaunched(launchId, true, {}); },
+        [this, launchId](const QString &, const QString &error) { emit nativeSessionLaunched(launchId, false, error); });
 }
 
 void HgsClient::requestSubagentInspection(const QString &host, const QString &name, const QString &agentId, const QString &archiveId)

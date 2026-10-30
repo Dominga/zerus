@@ -3738,7 +3738,23 @@ hgs model-server status SERVER [--json]
 hgs model-server up SERVER MODEL [--detach]
 hgs model-server down SERVER MODEL [--yes]
 hgs model-server logs SERVER [MODEL] [--lines N]
+hgs model-server save --json      (JSON on stdin)
+hgs model-server test --json      (JSON on stdin)
 ```
+
+Settings > Model servers writes the configuration with `save --json`: stdin
+`{"by":"human","servers":[...]}` replaces the whole list atomically. Only you
+save it (an agent session cannot, as for other owner settings). Each server
+may carry `was`, its previous name: a server without `key` keeps the key stored
+under `was`, and `"key":null` removes it. Every error names the server and the
+field, nothing is written on an error, and the receipt lists the servers as
+`list --json` does, never with a key. `test --json` takes one server as
+Settings shows it, saved or not (an absent `key` means the stored key of
+`was`), runs `status` once and prints what `status --json` would, saving
+nothing. The key travels only in the stdin JSON, never in an argument. Settings
+tests the status and logs commands only; `up` and `down` belong to the Model
+servers tab with its confirmations. `list --json` also carries each server's
+command templates in `argv`.
 
 `list` shows `name`, `base_url`, `kind`, its SSH host and which control commands
 exist, never the key. `up` and `down` accept only a validated model name (letters,

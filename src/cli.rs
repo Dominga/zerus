@@ -114,7 +114,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs swarm preference get --json   shared phone notification timing
        hgs swarm preference set mobile_delivery VALUE --json   immediate|away|away_5|away_10|away_15|away_30
        hgs machine check <alias> | ssh <alias> [--directory PATH] | setup <alias> [--source <checkout>]
-       hgs model-server list [--json] | status SERVER [--json] | up SERVER MODEL [--detach] | down SERVER MODEL [--yes] | logs SERVER [MODEL] [--lines N]   model servers on this computer (local private configuration)
+       hgs model-server list [--json] | status SERVER [--json] | up SERVER MODEL [--detach] | down SERVER MODEL [--yes] | logs SERVER [MODEL] [--lines N] | save --json | test --json   model servers on this computer (local private configuration)
        hgs [@host] account ls | add ID --provider AGENT --label NAME | rm ID | restore ID | login ID
        hgs [@host] account rename ID --label NAME | inspect ID [--refresh]
        hgs [@host] account default [ID]   show or select the default account for new sessions

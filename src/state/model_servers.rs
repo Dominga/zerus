@@ -104,8 +104,7 @@ pub(crate) fn load(config: &Config) -> Result<Vec<Server>> {
 }
 
 /// Writes the servers to the private file; the key stays only there. Settings >
-/// Model servers writes the configuration this way.
-#[allow(dead_code)]
+/// Model servers writes the configuration this way (`save --json`).
 pub(crate) fn save(config: &Config, servers: &[Server]) -> Result<()> {
     for server in servers {
         checked(server.clone())?;
@@ -221,7 +220,61 @@ pub(crate) fn public(server: &Server) -> Value {
             "logs": !server.logs.is_empty(),
         },
         "up_minutes": server.up_minutes,
+        // U60 (#656): the argv templates Settings edits; never the key.
+        "argv": {"status": server.status, "up": server.up, "down": server.down, "logs": server.logs},
     })
+}
+
+/// U60 (#656): one server as Settings sends it. `was` is its previous name; a
+/// request without `key` keeps the key stored under `was`, `"key": null`
+/// removes it. Every error names the server and the field.
+fn requested(mut entry: Value, stored: &[Server]) -> Result<(Server, String)> {
+    let Some(object) = entry.as_object_mut() else { return Err(Error::new(1, "Each model server is a JSON object")) };
+    let label = object.get("name").and_then(Value::as_str).filter(|name| !name.is_empty()).unwrap_or("(unnamed)").to_owned();
+    let was = match object.remove("was") {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(was)) => was,
+        Some(_) => return Err(Error::new(1, format!("Server {label}: was is the server's previous name"))),
+    };
+    let key = match object.remove("key") {
+        None => stored.iter().find(|server| !was.is_empty() && server.name == was).map(|server| server.key.clone()).unwrap_or_default(),
+        Some(Value::Null) => String::new(),
+        Some(Value::String(key)) => key,
+        Some(_) => return Err(Error::new(1, format!("Server {label}: key is a string, or null to remove it"))),
+    };
+    let mut server: Server = serde_json::from_value(entry).map_err(|error| Error::new(1, format!("Server {label}: {error}")))?;
+    server.key = key;
+    let server = checked(server).map_err(|error| Error::new(1, format!("Server {label}: {}", error.message)))?;
+    Ok((server, was))
+}
+
+/// U60 (#656): `hgs model-server save --json` - Settings replaces the whole
+/// list; only you change it (the commands run on the server).
+pub(crate) fn save_request(config: &Config, input: &Value) -> Result<Value> {
+    super::owner_request(input, "the model servers").map_err(|error| Error::new(1, error))?;
+    let stored = load(config)?;
+    let entries = input["servers"].as_array().ok_or_else(|| Error::new(1, "The request carries \"servers\": a list"))?;
+    if entries.len() > 64 {
+        return Err(Error::new(1, "At most 64 model servers"));
+    }
+    let mut servers: Vec<Server> = Vec::new();
+    for entry in entries {
+        let (server, _) = requested(entry.clone(), &stored)?;
+        if servers.iter().any(|other| other.name == server.name) {
+            return Err(Error::new(1, format!("Server {}: name is already used by another server", server.name)));
+        }
+        servers.push(server);
+    }
+    save(config, &servers)?;
+    Ok(json!({"status": "saved", "servers": servers.iter().map(public).collect::<Vec<_>>()}))
+}
+
+/// U60 (#656): `hgs model-server test --json` - status once for one server as
+/// Settings shows it, saved or not; nothing is written.
+pub(crate) fn test_request(config: &Config, input: &Value) -> Result<std::result::Result<Value, Failure>> {
+    let stored = load(config)?;
+    let (server, _) = requested(input.clone(), &stored)?;
+    Ok(status(config, &server))
 }
 
 /// Substitutes `{model}` and `{server}` in every argument; the values are
@@ -923,11 +976,25 @@ pub(crate) fn dispatch(config: &Config, args: &[String]) -> Result<i32> {
                 }
             }
         }
+        "save" | "test" => {
+            let input = super::stdin_json().map_err(|error| Error::new(1, error))?;
+            if command == "save" {
+                println!("{}", save_request(config, &input)?);
+                return Ok(0);
+            }
+            match test_request(config, &input)? {
+                Ok(value) => {
+                    println!("{value}");
+                    Ok(0)
+                }
+                Err(failure) => fail(&failure),
+            }
+        }
         "set" => {
             let _ = servers;
             Err(Error::new(1, "The model servers are configured in Settings > Model servers; the file is model-servers.json in the private config folder"))
         }
-        other => Err(Error::new(2, format!("Unknown model-server command {other}; use list, status, up, down or logs"))),
+        other => Err(Error::new(2, format!("Unknown model-server command {other}; use list, status, up, down, logs, save or test"))),
     }
 }
 
@@ -978,6 +1045,83 @@ mod tests {
             ..Default::default()
         })
         .unwrap()
+    }
+
+    /// U60 (#656): Settings saves the whole list through `save --json`: a
+    /// server without `key` keeps the one stored under its previous name,
+    /// `null` removes it, errors name the server and field, nothing returns a
+    /// key, and only you save it.
+    #[test]
+    fn settings_save_keeps_or_removes_the_key_and_never_returns_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(dir.path());
+        save(&config, &[server()]).unwrap();
+        let human = |servers: Value| json!({"by": "human", "servers": servers});
+        // Renamed, its key kept through `was`; a second one added without a key.
+        let saved = save_request(&config, &human(json!([
+            {"was": "lab", "name": "lab-a", "base_url": "http://127.0.0.1:11434", "kind": "openai",
+             "status": ["serve", "status"], "down": ["serve", "down", "{model}"]},
+            {"name": "gate", "base_url": "https://gate.example/v1", "kind": "anthropic"}
+        ]))).unwrap();
+        assert_eq!(saved["status"], "saved");
+        assert!(!saved.to_string().contains("sk-test"), "{saved}");
+        assert_eq!(saved["servers"][0]["key"], true);
+        assert_eq!(saved["servers"][0]["argv"]["down"], json!(["serve", "down", "{model}"]));
+        let found = load(&config).unwrap();
+        assert_eq!((found[0].name.as_str(), found[0].key.as_str()), ("lab-a", "sk-test"));
+        assert_eq!((found[1].name.as_str(), found[1].key.as_str()), ("gate", ""));
+        // A new key replaces it; null removes it.
+        save_request(&config, &human(json!([{"was": "lab-a", "name": "lab-a", "base_url": "http://127.0.0.1:11434", "kind": "openai", "key": "sk-new"}]))).unwrap();
+        assert_eq!(load(&config).unwrap()[0].key, "sk-new");
+        save_request(&config, &human(json!([{"was": "lab-a", "name": "lab-a", "base_url": "http://127.0.0.1:11434", "kind": "openai", "key": null}]))).unwrap();
+        assert_eq!(load(&config).unwrap()[0].key, "");
+        // Errors name the server and the field; nothing is written.
+        let refused = |servers: Value| save_request(&config, &human(servers)).unwrap_err().message;
+        let error = refused(json!([{"name": "bad", "base_url": "ftp://x", "kind": "openai"}]));
+        assert!(error.starts_with("Server bad: The API URL"), "{error}");
+        let error = refused(json!([{"name": "bad", "base_url": "http://x", "kind": "openai", "colour": "red"}]));
+        assert!(error.starts_with("Server bad: unknown field `colour`"), "{error}");
+        let error = refused(json!([{"name": "x", "base_url": "http://x", "kind": "openai"}, {"name": "x", "base_url": "http://y", "kind": "openai"}]));
+        assert!(error.contains("Server x: name is already used"), "{error}");
+        let error = refused(json!([{"name": "x", "base_url": "http://x", "kind": "openai", "up": ["serve", "up"]}]));
+        assert!(error.starts_with("Server x: The up command"), "{error}");
+        assert_eq!(load(&config).unwrap().len(), 1);
+        // Only you: no "by":"human", nothing saved.
+        let error = save_request(&config, &json!({"servers": []})).unwrap_err().message;
+        assert!(error.contains("by"), "{error}");
+        assert_eq!(load(&config).unwrap().len(), 1);
+    }
+
+    /// U60 (#656): `test --json` reads status once for an unsaved server,
+    /// with the stored key of `was` when it sends none, and writes nothing.
+    #[test]
+    fn settings_test_reads_status_for_an_unsaved_server_and_saves_nothing() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let heard = seen.clone();
+        let answer = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0u8; 4096];
+            let read = stream.read(&mut buffer).unwrap();
+            *heard.lock().unwrap() = String::from_utf8_lossy(&buffer[..read]).into_owned();
+            let body = r#"{"data":[{"id":"small"},{"id":"large"}]}"#;
+            write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).unwrap();
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(dir.path());
+        save(&config, &[server()]).unwrap();
+        let before = std::fs::read(path(&config)).unwrap();
+        let value = test_request(&config, &json!({"was": "lab", "name": "lab-edit", "base_url": format!("http://127.0.0.1:{port}"), "kind": "openai"}))
+            .unwrap()
+            .unwrap();
+        answer.join().unwrap();
+        assert_eq!(value["source"], "api");
+        assert_eq!(value["models"].as_array().unwrap().len(), 2);
+        assert!(seen.lock().unwrap().contains("Bearer sk-test"), "the stored key of `was` is used");
+        assert_eq!(std::fs::read(path(&config)).unwrap(), before, "a test writes nothing");
+        // A refused field is an error, not a status.
+        assert!(test_request(&config, &json!({"name": "x", "base_url": "nope", "kind": "openai"})).unwrap_err().message.starts_with("Server x:"));
     }
 
     #[test]

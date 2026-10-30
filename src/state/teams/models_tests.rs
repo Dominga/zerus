@@ -297,3 +297,74 @@ fn the_plan_checks_roles_and_models() {
     assert!(found.warnings.iter().any(|f| f.kind == "models" && f.task == Some(2) && f.text.contains("Kimi cannot switch to model k3")), "{:?}", found.warnings);
     assert!(!found.warnings.iter().any(|f| f.task == Some(3)), "{:?}", found.warnings);
 }
+
+/// #581 N2: dev (a reviewer who may switch to gpt-5.5) has a pending switch
+/// for #1 while imp's #3 waits for review; at `at` the switch was sent.
+fn switching_with_review(at: f64) -> Team {
+    let mut t = team_with(
+        json!([
+            member("dev", "Reviewer", "codex", "gpt-5", json!([{"model":"gpt-5","effort":"medium"},{"model":"gpt-5.5","effort":"high"}])),
+            member("imp", "Backend", "codex", "gpt-5", json!([])),
+        ]),
+        json!([{"id":1,"title":"API","assignee":"dev","models":["gpt-5.5@high"]},{"id":2,"title":"Docs","assignee":"dev"},
+            {"id":3,"title":"Store","assignee":"imp"}]),
+    );
+    for member in &mut t.members {
+        member.folder = MemberFolder::Shared;
+    }
+    t.task_mut(3).unwrap().pipeline = "code".into();
+    super::super::pipeline::snapshot_with(&mut t, 3, &super::super::catalog::builtin());
+    let task = t.task_mut(3).unwrap();
+    task.attempts.push(Attempt { n: 1, id: "a3".into(), member: "imp".into(), state: AttemptState::Delivered, ..Default::default() });
+    task.status = TaskStatus::InProgress;
+    ops::apply(&mut t, "report", &json!({"task":3,"attempt":"a3","text":"Done"}), &Actor::Member("imp".into()), &BTreeSet::new(), &mut Vec::new()).unwrap();
+    assert_eq!(t.task(3).unwrap().status, TaskStatus::InReview);
+    super::super::models::record(
+        t.task_mut(1).unwrap(),
+        PrepareStep { step: "model".into(), member: "dev".into(), from: "gpt-5@medium".into(), to: "gpt-5.5@high".into(), at, result: "pending".into(), reason: String::new() },
+    );
+    t
+}
+
+#[test]
+fn a_switching_member_takes_no_stage_and_gets_its_task_once() {
+    let t = switching_with_review(100.0);
+    assert!(super::super::stages::waiting(&t).iter().any(|(task, candidates)| *task == 3 && candidates.contains(&"dev".to_owned())));
+    // While the switch is pending the review is not given to dev.
+    let old = [lead_seen(), on("codex/x/dev", "gpt-5", "medium", true), on("codex/x/imp", "gpt-5", "", false)];
+    let found = steps(&t, &old, 110.0);
+    assert!(!found.iter().any(|step| matches!(step, Step::StageOut { member, .. } if member == "dev")), "{found:?}");
+    assert!(!found.iter().any(|step| matches!(step, Step::HandOut { member, .. } if member == "dev")), "{found:?}");
+    // Once it shows, dev gets #1 and only #1: no stage beside it.
+    let now_on = [lead_seen(), on("codex/x/dev", "gpt-5.5", "high", true), on("codex/x/imp", "gpt-5", "", false)];
+    let found = steps(&t, &now_on, 110.0);
+    let dev: Vec<&Step> = found.iter().filter(|step| matches!(step, Step::StageOut { member, .. } | Step::HandOut { member, .. } | Step::Rebalance { to: member, .. } | Step::WorkAhead { member, .. } if member == "dev")).collect();
+    assert_eq!(dev, vec![&Step::HandOut { task: 1, member: "dev".into() }], "{found:?}");
+}
+
+#[test]
+fn a_confirmed_switch_hands_out_only_to_an_available_member_busy_with_nothing_else() {
+    let on_new = |free: bool| [lead_seen(), on("codex/x/dev", "gpt-5.5", "high", free), on("codex/x/imp", "gpt-5", "", false)];
+    let handed = |t: &Team, seen: &[Seen]| steps(t, seen, 110.0).contains(&Step::HandOut { task: 1, member: "dev".into() });
+    let t = switching_with_review(100.0);
+    assert!(handed(&t, &on_new(true)));
+    // A session that is not free gets nothing yet.
+    assert!(!handed(&t, &on_new(false)));
+    // Nor one without a run identity.
+    let mut no_run = on_new(true);
+    no_run[1].run_id.clear();
+    assert!(!handed(&t, &no_run));
+    // Nor a member already busy with another open attempt.
+    let mut other = t.clone();
+    let task = other.task_mut(2).unwrap();
+    task.attempts.push(Attempt { n: 1, id: "a2".into(), member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
+    task.status = TaskStatus::InProgress;
+    assert!(!handed(&other, &on_new(true)));
+    // Nor a paused or draining member.
+    let mut paused = t.clone();
+    paused.members.iter_mut().find(|m| m.id == "dev").unwrap().state = MemberState::Paused;
+    assert!(!handed(&paused, &on_new(true)));
+    let mut draining = t.clone();
+    draining.members.iter_mut().find(|m| m.id == "dev").unwrap().draining = true;
+    assert!(!handed(&draining, &on_new(true)));
+}

@@ -1047,6 +1047,20 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             && !refused_recently(member)
             && session_of(member, seen).is_some_and(|s| s.free && !s.run_id.is_empty())
     };
+    // U45: a member switching models for a ready task is busy with that
+    // switch before any stage is given out. Only a member busy with nothing
+    // else may take the task once the switch shows.
+    let mut switching: BTreeSet<&str> = BTreeSet::new();
+    for task in ready_ids.iter().filter_map(|id| team.task(*id)) {
+        if task.waits.is_some() || !super::models::applies(team, task) {
+            continue;
+        }
+        if let Some(pending) = super::models::pending(task) {
+            if busy.insert(pending.member.as_str()) {
+                switching.insert(pending.member.as_str());
+            }
+        }
+    }
     // U36: a waiting stage goes to its first free candidate (the pinned
     // member, or a member with its role who did not implement the task),
     // before new tasks: it finishes work already done.
@@ -1074,12 +1088,14 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         // one of its models, switched first when it must be.
         if super::models::applies(team, task) {
             if let Some(pending) = super::models::pending(task) {
-                // The member is busy with this task's switch until it shows.
-                busy.insert(pending.member.as_str());
+                // The member is busy with this task's switch until it shows
+                // (marked before the stages); it gets the task only when it is
+                // available and was busy with nothing else, once per tick.
                 let member = team.member(&pending.member);
                 let found = member.and_then(|member| session_of(member, seen));
-                if let (Some(member), Some(found)) = (member, found.filter(|found| super::models::confirmed(pending, &found.model, &found.effort))) {
-                    if found.free && !refused_recently(member) {
+                if let (Some(member), Some(_)) = (member, found.filter(|found| super::models::confirmed(pending, &found.model, &found.effort))) {
+                    if switching.contains(member.id.as_str()) && available(member, &BTreeSet::new()) {
+                        switching.remove(member.id.as_str());
                         steps.push(deliver(task, member));
                     }
                 } else if now - pending.at >= super::models::CONFIRM_SECONDS {

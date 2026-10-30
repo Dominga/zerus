@@ -55,6 +55,8 @@ mod replay;
 #[cfg(feature = "live")]
 mod screens;
 #[cfg(feature = "live")]
+mod session_files;
+#[cfg(feature = "live")]
 pub mod settings;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod signals;
@@ -539,7 +541,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                         tauri::async_runtime::spawn_blocking(job);
                     }),
                 ));
-                app.manage({
+                let opener = {
                     use tauri_plugin_opener::OpenerExt;
                     let (open, reveal) = (app.handle().clone(), app.handle().clone());
                     composer::fetch::Opener {
@@ -550,7 +552,16 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                             reveal.opener().reveal_item_in_dir(path).is_ok()
                         }),
                     }
-                });
+                };
+                app.manage(session_files::SessionFiles::new(
+                    app.handle().clone(),
+                    zerus_client_core::default_hgs(),
+                    opener.clone(),
+                    std::sync::Arc::new(|job: composer::Job| {
+                        tauri::async_runtime::spawn_blocking(job);
+                    }),
+                ));
+                app.manage(opener);
                 // The menu-bar item, before the fleet starts so its first catalog reaches it.
                 #[cfg(target_os = "macos")]
                 {
@@ -1043,6 +1054,13 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         composer::fetch::attachment_unpin,
         composer::fetch::attachment_open,
         composer::fetch::attachment_open_draft,
+        session_files::session_file_dialog,
+        session_files::session_file_check,
+        session_files::session_file_download,
+        session_files::session_file_save,
+        session_files::session_file_external,
+        session_files::session_file_act,
+        session_files::session_file_close,
         composer::saved::saved_drafts,
         composer::saved::saved_draft,
         composer::saved::draft_conflicts,

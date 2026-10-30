@@ -49,6 +49,7 @@ pub mod repository;
 pub mod row_preferences;
 pub mod run;
 pub mod send;
+pub mod session_file_reference;
 pub mod session_usage;
 pub mod settings;
 pub mod shell;

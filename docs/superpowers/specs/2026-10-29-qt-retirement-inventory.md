@@ -412,9 +412,15 @@ three fields may fill empty/null Next defaults under the coordinator's explicit
 and the earlier run-memory seed never repeat. Both decoders share Qt's bounded
 legacy `groups` and `before_pin` restoration rules, preserving exact project
 and session identities without generating missing folder IDs or discarding an
-ambiguous bucket. Project vivid state remains private evidence until the UI
-consumer (`.66.2.30`, G3 dependent `.66.5.3.9`) lands; the approved future local
-setting is `projects/vivid/<exact-project-id>` with existing Next values winning.
+ambiguous bucket. With the approved Soft/Bright fill UI consumer (`.66.2.30`)
+merged, first-G3 `project-vivid` (`.66.5.3.9`, schema 1) uses that same decoder
+and Settings writer to seed explicit boolean flags once into local
+`projects/vivid/<exact-project-id>`. Existing Next values including false win;
+missing flags do not create defaults. The atomic family record keeps the
+original organization key and Qt store hash/path/time/mtime condition. Invalid
+or ambiguous candidates retry without a partial family or a handled record;
+handled families never repeat after rollback. Original private evidence stays
+unchanged and vivid never enters shared organization or local layout.
 Local Windows folders remain private evidence until the Windows Next Projects
 model (`.66.2.31`, G3 dependent `.66.5.3.10`) exists. Neither creates a new
 organization-layout field or an independent G3 folder stack.

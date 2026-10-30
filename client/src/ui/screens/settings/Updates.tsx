@@ -6,7 +6,7 @@ import { Actions, Group, Lines, Row, SectionHead, Select, Status, ToggleRow } fr
 import { lastCheckedText } from "./updates-time";
 
 function failed(error: unknown) {
-  toast("Updates", String(error));
+  toast("Updates", String(error), "error", true);
 }
 
 export function UpdatesSection() {

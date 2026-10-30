@@ -39,7 +39,6 @@ export const [compactRows, setCompactRows] = createStore<Record<string, boolean>
 export const [stripMode, setStripMode] = createSignal(params.get("strip") === "1");
 export const [menu, setMenu] = createSignal<{ x: number; y: number; items: MenuEntry[] } | undefined>();
 export const [contentScale, setContentScale] = createSignal(1);
-export const [toasts, setToasts] = createStore<{ items: { id: number; title: string; text: string }[] }>({ items: [] });
 /** A row the session list scrolls to once it lists it (Qt's `revealRow`); a new selection drops it. */
 export const [revealing, setRevealing] = createSignal<string | undefined>();
 export const revealRow = (id: string) => setRevealing(id);
@@ -69,12 +68,8 @@ export function setSessionsWidth(width: number) {
   try { localStorage.setItem(SESSIONS_WIDTH_KEY, String(width)); } catch { /* storage may be unavailable */ }
 }
 
-let toastId = 0;
-export function toast(title: string, text: string) {
-  const id = ++toastId;
-  setToasts("items", (items) => [...items, { id, title, text }]);
-  setTimeout(() => setToasts("items", (items) => items.filter((t) => t.id !== id)), 4200);
-}
+/** Toasts go to the window's one notice bus (store/notices.ts). */
+export { toast } from "./notices";
 
 let archivedRow: (key: string) => Session | undefined = () => undefined;
 /** Hands the selection the loaded archived rows (store/archive.ts), which this module cannot import: archive.ts reads the filters here. */

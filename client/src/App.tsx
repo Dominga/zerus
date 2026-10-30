@@ -1,7 +1,7 @@
 import { For, Match, Show, Suspense, Switch, createEffect, createMemo, lazy, onCleanup, onMount } from "solid-js";
 import { Rail } from "./ui/components/Rail";
 import { MenuLayer, Toasts } from "./ui/components/Overlays";
-import { ActionDialogs, ActionNotices } from "./ui/sessions/ActionDialogs";
+import { ActionDialogs } from "./ui/sessions/ActionDialogs";
 import { newSessionFromShortcut, newSessionOpened } from "./ui/sessions/newsession-view";
 import { OrganizationDialogs } from "./ui/sessions/OrganizationDialogs";
 import { SessionList } from "./ui/sessions/SessionList";
@@ -68,7 +68,7 @@ function StatusBar(props: { mode: () => BridgeMode | "starting" }) {
       <Show when={!updates().quiet && updates().restart_required}>
         <button type="button" class="btn ghost small status-restart" title="Zerus was updated on disk. Drafts are kept; sessions keep running."
           aria-label="Zerus was updated on disk. Drafts are kept; sessions keep running."
-          onClick={() => { void updateCommands.restart().catch((error) => toast("Updates", String(error))); }}>
+          onClick={() => { void updateCommands.restart().catch((error) => toast("Updates", String(error), "error", true)); }}>
           <ZerusLogo attention={false} motion="spin" size={14} />Restart to finish update
         </button>
       </Show>
@@ -132,7 +132,6 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
       <ActionDialogs />
       <Show when={newSessionOpened()}><Suspense><NewSessionDialog /></Suspense></Show>
       <OrganizationDialogs />
-      <ActionNotices />
       <Suspense><PerfHost /></Suspense>
     </div>
   );

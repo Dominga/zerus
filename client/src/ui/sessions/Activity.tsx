@@ -137,7 +137,7 @@ function activityMenu(e: MouseEvent) {
 // Transcript
 
 const copyText = (text: string, what: string) => {
-  void navigator.clipboard?.writeText(text).then(() => toast("Copied", what), () => toast("Not copied", "The clipboard is unavailable"));
+  void navigator.clipboard?.writeText(text).then(() => toast("Copied", what), () => toast("Not copied", "The clipboard is unavailable", "error"));
 };
 
 // Markdown is rendered in Rust later (pulldown-cmark, sanitized); until then

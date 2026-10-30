@@ -95,6 +95,30 @@ private:
     // H6: swap a member's session, agent, model or account (the lead too),
     // confirmed; the old session keeps running and is listed for you to stop.
     void swapDialog(const Teams::Team &team, const Teams::Member &member);
+    // U59 (TeamWorkspacePlanMode.cpp): the plan mode. While a plan waits for
+    // approval, the lead's proposed mode with its reason and the owner's
+    // choice (none keeps standard). While the team runs, the switch to free
+    // is its own dialog bound to the request's id and hash; the mode shows
+    // beside each phase; the open free phase reads idle, never done, folds its
+    // accepted tasks, adds a build task on request and closes only on the
+    // owner's confirmation.
+    QWidget *planModeCard(const Teams::Team &team);
+    QWidget *phaseModeBadge(const Teams::Team &team, int phase);
+    static bool freeOpenPhase(const Teams::Team &team, int phase);
+    QWidget *freeAcceptedFold(const Teams::Team &team, int phase, const QList<int> &accepted);
+    QWidget *freeIdleCard(const Teams::Team &team, int phase);
+    QString freeBuildLine(const Teams::Team &team) const;
+    void popSwitchRequest(const Teams::Team &team);
+    void switchModeDialog(const Teams::Team &team, const QString &proposal);
+    void closePhaseDialog(const Teams::Team &team);
+    void integrateBuild(const Teams::Team &team);
+    // Why Close phase is off now (tasks still run, a close waits), or "".
+    static QString closeBlocked(const Teams::Team &team);
+    // The open build task of the free phase, 0 when none.
+    static int openBuildTask(const Teams::Team &team);
+    QSet<QString> m_switchShown;    // team/proposal: popped up once
+    QSet<QString> m_freeUnfolded;   // team/phase: its accepted tasks show
+    QSet<QString> m_buildSent;      // teams whose build request is on its way
     // U54 (TeamWorkspaceAccounts.cpp): move every member of one agent on an
     // account to another, asked once, with each member's progress; the
     // account each card shows, read from its session; the review action for a

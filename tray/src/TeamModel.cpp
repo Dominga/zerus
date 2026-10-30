@@ -514,6 +514,7 @@ Team parse(const QJsonObject &v)
         }
         for (const auto &c : t.value("criteria").toArray()) task.criteria.append(c.toString());
         for (const auto &d : t.value("deps").toArray()) task.deps.append({d.toObject().value("task").toInt(), str(d.toObject(), "kind") == "soft"});
+        task.phaseBuild = t.value("phase_build").toBool();
         if (t.value("hold").isObject()) {
             // A5: parked by the lead or by you until `release`.
             const auto h = t.value("hold").toObject();
@@ -746,6 +747,19 @@ Team parse(const QJsonObject &v)
         team.hasFinish = true;
         team.finish.by = str(f, "by"); team.finish.summary = str(f, "summary"); team.finish.at = f.value("at").toDouble();
     }
+    // U59: the plan mode; an older hgs sends none and the team plans standard.
+    team.planModeKnown = v.contains("plan_mode") && v.value("plan_mode").isString();
+    team.planMode = team.planModeKnown ? str(v, "plan_mode") : QStringLiteral("standard");
+    team.planModeOffer = str(v, "plan_mode_offer"); team.planModeReason = str(v, "plan_mode_reason");
+    if (v.value("free_phase").isObject()) {
+        const auto f = v.value("free_phase").toObject();
+        auto &free = team.freePhase;
+        free.known = true;
+        free.phase = f.value("phase").toInt(); free.state = str(f, "state");
+        for (const auto &id : f.value("running").toArray()) free.running.append(id.toInt());
+        free.accepted = f.value("accepted").toInt(); free.acceptedSince = f.value("accepted_since").toInt();
+        free.lastBuildAt = f.value("last_build_at").toDouble(); free.closePending = f.value("close_pending").toInt();
+    }
     // hgs derives both; a team file without them (an older hgs) gets the same
     // answer from the tasks and the phase records.
     team.waitingForLead = v.value("waiting_for_lead").toBool() || (team.status == "running" && allDecided(team));
@@ -879,6 +893,7 @@ Team parse(const QJsonObject &v)
         proposal.id = str(p, "id"); proposal.kind = str(p, "kind"); proposal.by = str(p, "by");
         proposal.state = str(p, "state"); proposal.reason = str(p, "reason"); proposal.note = str(p, "note");
         proposal.goal = p.value("goal").toString();
+        proposal.mode = str(p, "mode"); proposal.hash = str(p, "hash");
         proposal.at = p.value("at").toDouble();
         proposal.member = p.value("member");
         if (!proposal.id.isEmpty()) team.proposals.append(proposal);
@@ -1208,6 +1223,7 @@ QString proposalText(const Team &team, const Team::Proposal &proposal)
         return how.isEmpty() ? tr("Swap %1 to a new session").arg(role) : tr("Swap %1 to %2").arg(role, how.join(QStringLiteral(" · ")));
     }
     if (proposal.kind == "next-goal") return tr("Next goal: %1").arg(proposal.goal.section('\n', 0, 0).left(120));
+    if (proposal.kind == "switch-plan-mode") return proposal.mode == "standard" ? tr("Switch to standard planning") : tr("Switch to free planning");
     return proposal.kind;
 }
 
@@ -1273,7 +1289,8 @@ int accepted(const Team &team)
 
 bool allDecided(const Team &team)
 {
-    if (team.tasks.isEmpty()) return false;
+    // U59: a free phase's empty queue is idle, not done.
+    if (team.tasks.isEmpty() || team.freeMode()) return false;
     for (const auto &task : team.tasks) if (!task.finished()) return false;
     return true;
 }

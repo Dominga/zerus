@@ -81,3 +81,34 @@ fn an_oversized_task_reply_is_ended_with_qt_s_text() {
         Err("Task response exceeds 36 MiB".into())
     );
 }
+
+#[test]
+fn outbox_reads_preserve_original_files_and_refuse_future_versions_without_calls() {
+    use tasks_write::outbox;
+    let fake = Fake::new(json!({}));
+    let path = outbox::path(
+        &fake.dir,
+        "project-fixture",
+        "11111111-1111-4111-8111-111111111111",
+    );
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let record = json!({"id":"22222222-2222-4222-8222-222222222222",
+        "intent":{"content":{"text":"private fixture","attachments":[]},"mode":"append","dispatch":"exact-dispatch"},
+        "unknown":{"preserved":true}});
+    let original = serde_json::to_vec(&record).unwrap();
+    std::fs::write(&path, &original).unwrap();
+    let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+    assert_eq!(outbox::read(&path).unwrap(), record);
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().modified().unwrap(),
+        modified
+    );
+    let mut future = record;
+    future["version"] = json!(2);
+    let original = serde_json::to_vec(&future).unwrap();
+    std::fs::write(&path, &original).unwrap();
+    assert!(outbox::read(&path).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert!(fake.calls().is_empty());
+}

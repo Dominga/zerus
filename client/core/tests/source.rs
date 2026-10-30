@@ -145,6 +145,106 @@ fn reconnect_reuses_registration_and_increments_stream_generation() {
 }
 
 #[test]
+fn explicit_resnapshot_is_scoped_and_reuses_the_single_supervisor() {
+    let fake = FakeHgs::new(
+        "source_resnapshot",
+        json!({"":{"runs":[
+            [{"lines":[hello("first"),catalog(&[("r1","first")])]},{"serve":true}],
+            [{"lines":[hello("second"),catalog(&[("r2","second")])]},{"serve":true}]
+        ]}}),
+    );
+    let (tx, rx) = source::channel(spawn);
+    let handle = tx
+        .spawn(&fake.path(), &ComputerId::local(), quick())
+        .unwrap();
+    let identity = handle.identity().clone();
+    until(&rx, |event| {
+        matches!(event, Event::Frame { generation:1, frame,.. }
+        if matches!(&frame.body, Body::Snapshot(_)))
+    });
+    assert!(
+        !handle.reconnect(),
+        "offline Refresh stays unavailable online"
+    );
+    assert!(!handle.resnapshot(0));
+    assert!(!handle.resnapshot(2));
+    let started = Instant::now();
+    assert!(handle.resnapshot(1));
+    assert!(!handle.resnapshot(1));
+    until(&rx, |event| {
+        if let Event::Frame {
+            source,
+            generation: 2,
+            frame,
+            ..
+        } = event
+        {
+            assert_eq!(*source, identity);
+            return matches!(&frame.body, Body::Snapshot(_));
+        }
+        false
+    });
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(!handle.resnapshot(1));
+    std::thread::sleep(Duration::from_millis(30));
+    assert_eq!(fake.runs("", &["watch", "--json"]).len(), 2);
+    let log = fake.log();
+    let ended = log.iter().position(|row| row["eof"] == true).unwrap();
+    let watches: Vec<_> = log
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| row["args"] == json!(["watch", "--json"]))
+        .map(|(n, _)| n)
+        .collect();
+    assert!(
+        ended < watches[1],
+        "owned old watch exits before replacement"
+    );
+    handle.stop();
+    assert_eq!(tx.usage().sources, 0);
+}
+
+#[test]
+fn resnapshot_admission_never_waits_for_saturated_ingress() {
+    let pages: Vec<_> = (0..48)
+        .map(|n| {
+            let mut page = catalog(&[("r", "s")]);
+            page["page"] = json!(n);
+            page["last"] = json!(false);
+            page["items"][0]["row"]["synthetic"] = json!("x".repeat(500_000));
+            page
+        })
+        .collect();
+    let fake = FakeHgs::new(
+        "source_resnapshot_pressure",
+        json!({"":{"runs":[
+            [{"lines":[hello("first")]},{"lines":pages},{"serve":true}],
+            [{"lines":[hello("second"),catalog(&[("r2","s2")])]},{"serve":true}]
+        ]}}),
+    );
+    let (tx, rx) = source::channel(spawn);
+    let handle = tx
+        .spawn(&fake.path(), &ComputerId::local(), quick())
+        .unwrap();
+    until(
+        &rx,
+        |event| matches!(event, Event::Frame {generation:1,frame,..} if matches!(&frame.body, Body::Hello(_))),
+    );
+    eventually("ingress filled", || tx.usage().bytes > 15 << 20);
+    let at = Instant::now();
+    assert!(handle.resnapshot(1));
+    assert!(at.elapsed() < Duration::from_millis(100));
+    until(
+        &rx,
+        |event| matches!(event, Event::Frame {generation:2,frame,..} if matches!(&frame.body, Body::Snapshot(_))),
+    );
+    assert_eq!(fake.runs("", &["watch", "--json"]).len(), 2);
+    assert!(tx.usage().high_bytes <= source::INGRESS_BYTES);
+    handle.stop();
+    eventually("reader ends", || tx.usage().readers == 0);
+}
+
+#[test]
 fn first_hello_and_increasing_sequences_are_required_before_projection() {
     for (name, lines, accepted) in [
         ("before_hello", vec![catalog(&[("r", "s")])], 0),

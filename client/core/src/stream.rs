@@ -347,6 +347,7 @@ pub(crate) fn read_line(
 }
 
 enum Input {
+    SourceResnapshot,
     Reconnect,
     Line {
         generation: u64,
@@ -502,6 +503,13 @@ pub struct StreamHandle {
 }
 
 impl StreamHandle {
+    pub(crate) fn wake_source_resnapshot(&self) -> bool {
+        !self.stopped()
+            && match self.tx.try_send(Input::SourceResnapshot) {
+                Ok(()) | Err(TrySendError::Full(_)) => true,
+                Err(TrySendError::Disconnected(_)) => false,
+            }
+    }
     /// Requests one immediate offline retry without replacing this supervisor,
     /// its catalog or subscriptions. False online, stopped or already pending.
     pub fn reconnect(&self) -> bool {
@@ -868,6 +876,7 @@ fn spawn_with(
 enum Outcome {
     Ended,
     Stopped,
+    Resnapshot,
 }
 
 struct Supervisor {
@@ -975,6 +984,10 @@ impl Supervisor {
             }
             let outcome = self.pump();
             self.close();
+            if outcome == Outcome::Resnapshot {
+                self.status(ComputerStatus::Probing);
+                continue;
+            }
             if outcome == Outcome::Stopped || !self.fail() {
                 break;
             }
@@ -1342,6 +1355,13 @@ impl Supervisor {
             if self.stop.load(Ordering::Relaxed) {
                 return Outcome::Stopped;
             }
+            if self
+                .source
+                .as_ref()
+                .is_some_and(|source| source.resnapshot.take(self.generation))
+            {
+                return Outcome::Resnapshot;
+            }
             let mut left = self
                 .timing
                 .silence
@@ -1413,7 +1433,7 @@ impl Supervisor {
                 Ok(Input::Control(control)) => self.write(&control),
                 // A queued wake from an older attempt must never restart a
                 // source that is online now, or a later offline attempt.
-                Ok(Input::Reconnect) => {}
+                Ok(Input::Reconnect | Input::SourceResnapshot) => {}
                 Ok(Input::Notifications {
                     target,
                     preferences,
@@ -1454,6 +1474,9 @@ impl Supervisor {
         if hello {
             self.greeted = true;
             self.connection = None;
+            if let Some(source) = &self.source {
+                source.resnapshot.open(self.generation);
+            }
         }
         let Some(permit) = permit else {
             self.stop.store(true, Ordering::Relaxed);
@@ -1798,6 +1821,9 @@ impl Supervisor {
 
     /// Ends the running stream: EOF first, then a kill after the grace time.
     fn close(&mut self) {
+        if let Some(source) = &self.source {
+            source.resnapshot.close();
+        }
         self.stdin = None;
         self.greeted = false;
         if let Some(stop) = self.reader_stop.take() {

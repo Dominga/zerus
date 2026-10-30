@@ -8,7 +8,29 @@ fn endpoint(sender: &Sender, name: &str) -> Endpoint {
             computer: name.into(),
             incarnation: 1,
         },
+        resnapshot: Arc::default(),
     }
+}
+
+#[test]
+fn resnapshot_is_one_transient_request_for_an_exact_greeted_generation() {
+    let reset = Resnapshot::default();
+    assert!(!reset.request(0));
+    assert!(!reset.request(1));
+    reset.open(1);
+    assert!(!reset.request(2));
+    assert!(reset.request(1));
+    assert!(!reset.request(1));
+    assert!(!reset.take(2));
+    assert!(reset.take(1));
+    assert!(!reset.request(1));
+    reset.open(2);
+    assert!(!reset.request(1));
+    assert!(reset.request(2));
+    reset.close();
+    assert!(!reset.take(2));
+    reset.open(3);
+    assert!(!reset.take(3));
 }
 
 #[test]

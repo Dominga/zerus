@@ -44,6 +44,15 @@ consumer owns it. Dropping the item releases the reservation. The actor must
 retire an incarnation itself when deliberately stopping its handle; cancellation
 does not wait for an Ended status to fit in a full queue.
 
+`Handle::resnapshot(generation)` requests a complete snapshot by reconnecting
+the current greeted watch through that same supervisor. It is a single
+coalesced, nonblocking transient request: stale, offline and repeated requests
+refuse, and closing that generation cancels it. Admission never waits for an
+input-queue slot. The actor continues consuming/discarding old ingress while the
+owned watch closes, rejects its old generation, and waits for a new hello and
+complete snapshot before restoring coverage. It grants no effect authority.
+Existing `reconnect()` remains the offline manual retry with its old semantics.
+
 ## Bounds and cancellation
 
 All sources on a channel share 16 MiB and 1,024 owned ingress items, including

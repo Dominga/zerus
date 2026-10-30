@@ -107,21 +107,83 @@ never claims complete source discovery, drain or G2 coverage.
 
 ## Executing kinds and the exit boundary
 
-The first proposed executing policy is existing task Start's original
-`--recover-only` reconciliation. Before integration, G2 and G1 must agree exact
-types, durable fields, limits and the bounded step interface. A step may return
-Settled, NeedsReview or one proposed original receipt lookup/existing request.
+The first pure policy is `operation_recovery::task_start::Original`. G1 and G2
+agreed its contract on 2026-10-30. It has no actor integration, process runner,
+SQL, positive job IPC or executing permission. The dedicated operation
+table/API remains G1's lane, separate from native `desktop-ledger::Kind`.
+
+`Key` separates kind (`task_start_reconcile`), schema 1, configuration,
+project/task and the original request UUID from every reconciliation-attempt
+UUID. `Binding` adds the exact marker, original executor's stable machine,
+session, run and conversation, and three distinct fingerprints:
+
+| Field | Exact meaning |
+| --- | --- |
+| `source_record_sha256` | SHA-256 of complete original source record bytes |
+| `ui_snapshot_sha256` | Existing `outbox::snapshot` fingerprint of the serialized record Value, as used by the UI |
+| `task_start_reconcile_input_v1_sha256` | SHA-256 of the exact retained `TaskCall.input` bytes; this versioned field is its digest domain, without a hash prefix |
+
+G1 supplies the immutable expected binding and retained input. Verification
+checks the existing outbox/Start identity validators, all original native scope
+bindings and parsed equality between the input and the complete saved
+`intent.plan`. Opaque fields stay intact. Missing retained input stays reviewable;
+this policy never regenerates request bytes from a plan or another build graph.
+An actor must not replace bytes, consent or fingerprints under the same key.
+
+Each explicit `step` returns NeedsReview, one private Proposed call, or
+SettledSubmitted evidence. Default review, cancellation and unknown outcomes
+produce no proposal. Historical started/released phases never prove current
+settlement. An explicit request can propose only:
+
+```text
+hgs task start-deliver TASK --project PROJECT --json --recover-only
+```
+
+The unchanged retained input accompanies it. This existing command cannot
+submit native input, but can settle original canonical task metadata from an
+existing native receipt and exchange task metadata remotely. It is therefore
+a fenced reconciliation effect, not a generic read-only command. It never
+uses automatic `task_start::release`, a new Start/plan or a new delivery UUID.
+
+Only a reply matching schema 1, original request/project/task, nested task
+membership and `submitted` can propose settlement. The returned receipt is a
+closed allowlist of schema/id/project/uuid/state, below 16 KiB; host task views
+and errors are discarded. A missing, malformed, refused, uncertain, oversized
+or timed-out reply remains reviewable with the original identity. Debug output
+cannot expose private proposed input. This evidence still grants no authority:
+G1 must match its exact reserved original operation, attempt and epochs.
+
+The pure component accepts at most 1 MiB each for the record, retained input
+and host reply, 512 bytes per executor identity and existing project bounds.
+Larger legacy outboxes (up to 32 MiB) remain in their existing stores for review;
+they are never truncated. There is at most one proposal per step. G1's agreed
+execution admission is 32 unsettled operations, **one executing reconciliation
+globally per configuration**, and one coalesced current lookup per original
+scope, with a 30-second owned-child deadline, 1 MiB stdout and 16 KiB stderr.
+All owned pipes/readers must actually drain before execution admission releases;
+returning from a bounded stop does not establish that fact. These are actor
+requirements, not guarantees implemented by this pure component.
+
 G1 owns durable pre-execution reservation, current writer/service epoch and
-lease checks, revoke and drain accounting. Unknown execution only reconciles
-by its original identity. No new request may be manufactured to repeat it;
-each command's existing receipt semantics decide what can be checked.
+lease/policy checks, fresh live writer drain, revoke and drain accounting.
+Source/import/body provenance stays separate from that current ownership
+proof. A remapped/missing computer identity refuses; a current display alias
+never replaces the original executor. Immutable unknown attempts stay unknown.
+A later separately admitted reconciliation may use only the unchanged original
+call under its command's receipt semantics; notification retry rules do not
+apply. No unknown result permits native input, a new delivery identity, changed
+plan, automatic release or broader action. Pending/unknown work is never evicted
+under pressure; admission refuses instead, and status uses bounded keyset pages.
 
 The existing merged task Start/message outboxes remain their owners' records.
 Only admitted producer schemas are recognized; a provisional new-session task
 executor journal is not consumed by this slice. Creation migration preserves original durable effect
 barriers. Further slices must coordinate their writer drain and exact receipts
 before moving any execution into the actor, with kill/revoke/restart proof for
-each kind.
+each kind. Pure tests cover frozen-input reconstruction, unknown/cancelled
+decisions, identity and consent changes, exact receipts and historical records.
+They do not claim a real process-kill, pipe-drain, late-epoch or worker restart
+proof: those remain required at G1's executing reserve/finish boundary.
 
 All slices preserve `.9.30`: Dock Quit, logout/shutdown, other Cocoa
 `terminate:`, Windows `WM_ENDSESSION`, SIGKILL and Tauri restart retain the

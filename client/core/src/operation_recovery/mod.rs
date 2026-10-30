@@ -10,6 +10,7 @@ use zerus_desktop_migration::{
 
 mod observation;
 pub use observation::{Kind, Operation, RecordedState, Scope};
+pub mod task_start;
 
 pub const MAX_PAGES: usize = 64;
 pub const MAX_BYTES: u64 = 8 << 20;

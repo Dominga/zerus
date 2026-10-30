@@ -1,7 +1,7 @@
 use super::*;
 
 struct Fixture {
-    temp: tempfile::TempDir,
+    _temp: tempfile::TempDir,
     state: PathBuf,
     home: PathBuf,
     wire: PathBuf,
@@ -41,7 +41,7 @@ impl Fixture {
                 "message":{"message":{"role":"user","content":[{"type":"text","text":"# AGENTS.md instructions PRIVATE_SYSTEM_BODY"}]}}}).to_string()+"\n"].concat();
         fs::write(&wire, text).unwrap();
         Self {
-            temp,
+            _temp: temp,
             state,
             home,
             wire,
@@ -299,7 +299,7 @@ fn appended_kimi_messages_resume_and_forgotten_bindings_stay_excluded() {
 #[test]
 fn a_linked_wire_never_copies_another_conversations_body() {
     let fixture = Fixture::new();
-    let other = fixture.temp.path().join("foreign.jsonl");
+    let other = fixture._temp.path().join("foreign.jsonl");
     fs::write(&other, Fixture::event("foreign", "PRIVATE_FOREIGN_BODY")).unwrap();
     fs::remove_file(&fixture.wire).unwrap();
     std::os::unix::fs::symlink(other, &fixture.wire).unwrap();

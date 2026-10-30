@@ -116,11 +116,41 @@ class Desktop(unittest.TestCase):
     def test_registration_preview_preserves_selected_paths_without_installing(self):
         preview = self.cli('desktop', 'registration', '--json')
         self.assertEqual(preview['operation'], 'preview')
-        self.assertEqual(preview['argv'][1:], ['desktop', 'serve', '--config-dir', str(self.config), '--state-dir', str(self.state)])
+        expected = ['desktop', 'serve', '--config-dir', str(self.config), '--state-dir', str(self.state)]
+        if os.uname().sysname == 'Darwin':
+            expected.append('--launchd')
+        self.assertEqual(preview['argv'][1:], expected)
         self.assertEqual(Path(preview['argv'][0]).resolve(), HGS)
         self.assertEqual(preview['configuration'], self.cli('desktop', 'status', '--json')['configuration'])
         self.assertFalse(Path(preview['destination']).exists())
         self.assertFalse(self.state.exists())
+        self.assertFalse((self.root / 'unexpected-tool').exists())
+
+    def test_launchd_permanent_refusal_stops_restarts_but_ordinary_cli_fails(self):
+        args = ['desktop', 'serve', '--config-dir', 'relative', '--state-dir', str(self.state)]
+        result = self.cli(*args, ok=False)
+        self.assertEqual(result.returncode, 78)
+        refused = subprocess.run([str(HGS), *args, '--launchd'], env=self.env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(refused.returncode, 0, refused.stderr)
+        self.assertIn('automatic restart paused', refused.stderr)
+        self.assertFalse(self.state.exists())
+        # A private-dir refusal after configuration loading uses the same lane.
+        self.state.mkdir()
+        (self.state / 'desktop').write_text('foreign data')
+        args[3] = str(self.config)
+        result = self.cli(*args, ok=False)
+        self.assertEqual(result.returncode, 78)
+        refused = subprocess.run([str(HGS), *args, '--launchd'], env=self.env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(refused.returncode, 0, refused.stderr)
+        self.assertIn('desktop startup refused', refused.stderr)
+        self.assertEqual((self.state / 'desktop').read_text(), 'foreign data')
+        # Configuration loading fails before desktop dispatch and must not loop.
+        (self.config / 'config').mkdir()
+        refused = subprocess.run([str(HGS), *args, '--launchd'], env=self.env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(refused.returncode, 0, refused.stderr)
+        self.assertIn('automatic restart paused', refused.stderr)
+        # Unrelated/prefixed commands cannot gain the launchd exit mapping.
+        self.cli('@example', *args, '--launchd', ok=False)
         self.assertFalse((self.root / 'unexpected-tool').exists())
 
     def test_registered_launch_pins_directories_instead_of_inherited_environment(self):

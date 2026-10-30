@@ -4128,13 +4128,20 @@ The proposed service names are `hgs-desktop.service` (systemd user),
 `com.hgdev.hgs-desktop` (LaunchAgent), and `hgs-desktop` (per-user Windows logon
 task). Definitions invoke the selected stable CLI with `desktop serve
 --config-dir DIR --state-dir DIR`; this exact local form pins those directories
-before configuration loading, including on Windows. Bare `desktop serve` keeps
+before configuration loading, including on Windows. All three paths must be
+absolute for the target platform. Bare `desktop serve` keeps
 existing `HGS_*` configuration selection. Nothing registers nondefault or dev
 configurations automatically. Windows definitions use the current SID,
 `InteractiveToken`, `LeastPrivilege`, one instance and at most three failure
 restarts one minute apart (the [Task Scheduler schema minimum](https://learn.microsoft.com/en-us/windows/win32/taskschd/taskschedulerschema-interval-restarttype-element)).
 Paths with environment-variable markers are refused on Windows because Task
-Scheduler expands them even inside quoted arguments. Native installation,
+Scheduler expands them even inside quoted arguments. Linux permits three starts
+within five minutes and does not restart a startup refusal (exit 78). macOS adds
+the private `--launchd` argument to the exact registered form: permanent startup
+refusals print a diagnostic and exit successfully, so
+[`SuccessfulExit=false`](https://github.com/apple-oss-distributions/launchd/blob/main/man/launchd.plist.5)
+does not restart them; failures after startup still return nonzero. A refused
+service needs explicit repair and another maintained start. Native installation,
 windowless startup and Windows runtime qualification remain outstanding.
 
 ### Event stream

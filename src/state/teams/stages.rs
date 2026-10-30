@@ -193,6 +193,35 @@ pub(crate) fn record(team: &mut Team, task_id: u32, run_id: &str, prepared: &Pre
     run.temp = prepared.temp.clone();
 }
 
+/// #630 N7: how long an unconfirmed stage hand-off keeps its member before the
+/// stage goes back to Waiting.
+pub(crate) const STAGE_UNCONFIRMED_GRACE: f64 = 120.0;
+
+/// #630 N7: open stage runs whose member left the roster (removed or paused) or
+/// whose hand-off was never confirmed long enough: each goes back to Waiting
+/// and the lead hears why.
+pub(crate) fn stalled(team: &Team, at: f64) -> Vec<(u32, String, String)> {
+    team.tasks
+        .iter()
+        .filter_map(|task| {
+            let run = task.pipeline_run.as_ref()?.open_run()?;
+            if run.state != StageState::Delivered || run.member.is_empty() {
+                return None;
+            }
+            let member = team.member(&run.member);
+            let reason = match member.map(|member| member.state) {
+                Some(MemberState::Removed) => format!("{} was removed", team.role_of(&run.member)),
+                Some(MemberState::Paused) => format!("{} was paused", team.role_of(&run.member)),
+                _ if run.unconfirmed && at - run.delivered_at.unwrap_or(run.at) >= STAGE_UNCONFIRMED_GRACE => {
+                    "the stage hand-off was not confirmed".to_owned()
+                }
+                _ => return None,
+            };
+            Some((task.id, run.id.clone(), reason))
+        })
+        .collect()
+}
+
 /// The task whose stage holds `member`'s folder: the implementer's next task
 /// there waits until the stage ends. A test waiting for its member already
 /// holds it under the hold rule; a command or land stage holds it from the
@@ -359,6 +388,14 @@ pub(crate) fn hand_off_text(team: &Team, task: &Task, run: &StageRun, prepared: 
         "verdict":"pass","text":"...","findings":[]});
     text += &format!(
         "\nReport once with your verdict: pass, or return with each finding in \"findings\" (it goes back to {implementer} as a new attempt):\n{verdict} | hgs {at}team report --json\n"
+    );
+    // H5 for a stage member (#630 N6): the question route, the current-stage
+    // route, and the capture rule: a reply is not a verdict.
+    let ask = json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":team.id,"task":task.id,"text":"..."});
+    text += &format!(
+        "Questions for the lead: {ask} | hgs {at}team ask --json\n\
+         Your stage and attempt again: hgs {at}team current --json\n\
+         A reply in your turn is not a verdict: end with the report command above. Without one, Zerus keeps the stage waiting and tells the lead it stalled.\n"
     );
     text
 }
@@ -545,6 +582,91 @@ mod tests {
             assert_eq!(to_clean(&team), [(1, test.clone())]);
             clean_up(&ended).unwrap();
             assert!(!Path::new(&ended.temp).exists());
+        });
+    }
+
+    #[test]
+    fn a_stage_member_asks_and_the_answer_reaches_its_run() {
+        isolated(|dir| {
+            let project = project(dir, true);
+            let (mut team, _) = team_in(&project, MemberFolder::Shared, &builtin(), "code");
+            report(&mut team, &project, true);
+            let (run, prepared) = give(&mut team, "rev");
+            let mut events = Vec::new();
+            let none = BTreeSet::new();
+            let asked = apply(&mut team, "ask", &json!({"task":1,"text":"Which line?"}), &Actor::Member("rev".into()), &none, &mut events).unwrap();
+            assert_eq!((asked["status"].as_str(), asked["stage"].as_str(), asked["task"].as_u64()), (Some("asked"), Some("review"), Some(1)));
+            let question = asked["question"].as_str().unwrap().to_owned();
+            let stage = run_of(&team, &run);
+            assert_eq!((stage.questions.len(), stage.questions[0].text.as_str()), (1, "Which line?"), "{stage:?}");
+            // The lead's inbox lists the stage member's question.
+            let items = crate::state::teams::inbox::items(&team);
+            assert!(items.iter().any(|item| item.kind == "question" && item.summary == "Which line?"), "{items:?}");
+            // The lead answers it; the answer stays on the stage run.
+            apply(&mut team, "reply", &json!({"question":question,"text":"Line 3"}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+            let stage = run_of(&team, &run);
+            assert_eq!((stage.questions[0].answer.as_str(), stage.questions[0].notice), ("Line 3", Notice::Pending));
+            assert_eq!(events.last().unwrap().kind, "question_answered");
+            assert_eq!(events.last().unwrap().payload["stage"], "review");
+            // The hand-off names the ask and current routes and the capture rule.
+            let text = hand_off_text(&team, team.task(1).unwrap(), &run_of(&team, &run), &prepared, "");
+            for line in ["hgs team ask --json", "hgs team current --json", "A reply in your turn is not a verdict"] {
+                assert!(text.contains(line), "{line} missing: {text}");
+            }
+        });
+    }
+
+    #[test]
+    fn a_removed_or_paused_stage_member_frees_the_stage_and_the_lead_hears_it() {
+        isolated(|dir| {
+            let project = project(dir, true);
+            // Removed: rev has no open task of its own.
+            let (mut team, _) = team_in(&project, MemberFolder::Shared, &builtin(), "code");
+            report(&mut team, &project, true);
+            let (run, _) = give(&mut team, "rev");
+            let mut events = Vec::new();
+            apply(&mut team, "remove-member", &json!({"member":"rev"}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+            let stage = run_of(&team, &run);
+            assert_eq!((stage.state, stage.member.as_str()), (StageState::Waiting, ""), "{stage:?}");
+            assert!(stage.stalled.contains("was removed"), "{stage:?}");
+            let items = crate::state::teams::inbox::items(&team);
+            assert!(items.iter().any(|item| item.kind == "stage_stalled" && item.task == Some(1)), "{items:?}");
+            // Paused: the same reset with its reason.
+            let (mut team, _) = team_in(&project, MemberFolder::Shared, &builtin(), "code");
+            report(&mut team, &project, false);
+            let (run, _) = give(&mut team, "rev");
+            apply(&mut team, "pause-member", &json!({"member":"rev"}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+            let stage = run_of(&team, &run);
+            assert_eq!((stage.state, stage.member.as_str()), (StageState::Waiting, ""), "{stage:?}");
+            assert!(stage.stalled.contains("was paused"), "{stage:?}");
+            let items = crate::state::teams::inbox::items(&team);
+            assert!(items.iter().any(|item| item.kind == "stage_stalled" && item.summary.contains("was paused")), "{items:?}");
+        });
+    }
+
+    #[test]
+    fn an_unconfirmed_stage_hand_off_goes_back_to_waiting() {
+        isolated(|dir| {
+            let project = project(dir, true);
+            let (mut team, _) = team_in(&project, MemberFolder::Shared, &builtin(), "code");
+            report(&mut team, &project, true);
+            let (run_id, _) = give(&mut team, "rev");
+            let delivered = run_of(&team, &run_id).delivered_at.unwrap();
+            {
+                let found = team.task_mut(1).unwrap().pipeline_run.as_mut().unwrap().runs.iter_mut().find(|stage| stage.id == run_id).unwrap();
+                found.unconfirmed = true;
+                found.delivered_at = Some(delivered - STAGE_UNCONFIRMED_GRACE - 1.0);
+            }
+            let found = stalled(&team, delivered);
+            assert_eq!(found.len(), 1, "{found:?}");
+            assert!(found[0].2.contains("not confirmed"), "{found:?}");
+            let mut events = Vec::new();
+            assert!(pipeline::stall_stage(&mut team, 1, &run_id, &found[0].2, &mut events));
+            let stage = run_of(&team, &run_id);
+            assert_eq!((stage.state, stage.member.as_str(), stage.unconfirmed), (StageState::Waiting, "", false), "{stage:?}");
+            assert!(stage.stalled.contains("not confirmed"), "{stage:?}");
+            let items = crate::state::teams::inbox::items(&team);
+            assert!(items.iter().any(|item| item.kind == "stage_stalled" && item.task == Some(1)), "{items:?}");
         });
     }
 

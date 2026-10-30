@@ -1550,6 +1550,19 @@ push, it needs the owner's `"land_allowed":true`: without it a plan choosing
 the preset is refused, and a team that turns it off later holds the task for
 the lead instead of running the stage.
 
+A stage's return or a send-back goes back to the implementer, never to a peer:
+the next hand-out names the stage's findings (or the send-back's reason), and
+that attempt is not counted as a failed member. Once the preset's rounds run
+out, the lead's decision is the last word: a rejection reaches the next
+hand-out with its reason, not the returned stage it followed.
+
+A stage member may ask the lead with `hgs team ask` (its question belongs to the
+stage run and the lead answers it with `hgs team reply`), and the stage hand-off
+names that route, `hgs team current` and the rule that a reply in its turn is
+not a verdict. A stage given to a member that was removed or paused, or whose
+hand-off was never confirmed, goes back to `Waiting` for a free member, and the
+lead gets a stalled-stage item.
+
 `Settings.branch_per_task` gives each task its own branch: `{"template":
 "task/{id}"}` fills `{id}`, `{member}` and `{team8}` and must be a valid Git
 branch name; `base_branch` (default the lead's branch) is what the branch

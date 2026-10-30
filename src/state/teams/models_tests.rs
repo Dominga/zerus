@@ -116,6 +116,29 @@ fn a_team_without_the_new_fields_hands_out_reports_and_accepts_as_before() {
 }
 
 #[test]
+fn a_stage_returned_task_stays_with_its_implementer_on_the_models_path() {
+    // #630 C2: the U45 path must not filter out the implementer after a return.
+    let mut t = team_with(
+        json!([
+            member("dev", "Backend", "codex", "gpt-5", json!([{"model":"gpt-5","effort":"medium"}])),
+            member("dev2", "Backend", "codex", "gpt-4", json!([]))
+        ]),
+        json!([{"id":1,"title":"API","assignee":"dev","models":["gpt-5@medium"]}]),
+    );
+    let task = t.task_mut(1).unwrap();
+    task.attempts.push(Attempt { n: 1, member: "dev".into(), state: AttemptState::Rejected, pipeline_return: true, ..Default::default() });
+    task.status = TaskStatus::Pending;
+    let seen = [lead_seen(), on("codex/x/dev", "gpt-5", "medium", true), on("codex/x/dev2", "gpt-4", "", true)];
+    let found = steps(&t, &seen, 100.0);
+    assert!(found.contains(&Step::HandOut { task: 1, member: "dev".into() }), "{found:?}");
+    // A lead's rejection still filters dev, and dev2 cannot run the model: no hand-out.
+    let mut rejected = t.clone();
+    rejected.task_mut(1).unwrap().attempts[0].pipeline_return = false;
+    let found = steps(&rejected, &seen, 100.0);
+    assert!(!found.iter().any(|step| matches!(step, Step::HandOut { task: 1, .. })), "{found:?}");
+}
+
+#[test]
 fn a_switch_is_confirmed_by_the_session_before_the_hand_out() {
     let t = switching();
     let old = [lead_seen(), on("codex/x/dev", "gpt-5", "medium", true)];

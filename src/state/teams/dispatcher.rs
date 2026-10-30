@@ -350,6 +350,9 @@ pub(crate) enum Step {
     Quiet { member: String, session: SessionRef, muted: bool, revision: u64 },
     /// U47/U48: start a command or land stage that waits for Zerus.
     StageCommand { task: u32, run: String },
+    /// #630 N7: an open stage whose member left the roster or whose hand-off
+    /// was never confirmed goes back to Waiting.
+    StageStalled { task: u32, run: String, reason: String },
     /// U47/U48: read a started command or land stage's run record.
     StageCommandEnded { task: u32, run: String },
     /// #511 N3: tell a member its worked-ahead attempt was revoked with its
@@ -784,7 +787,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         }
     }
     // The lead's answer reaches the member as a message, once its session is
-    // live (A3).
+    // live (A3). #630 N6: a stage member's answer goes to its run.
     'answers: for task in &team.tasks {
         for attempt in &task.attempts {
             for question in &attempt.questions {
@@ -793,6 +796,19 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                     if live {
                         steps.push(Step::AnswerQuestion { task: task.id, question: question.id.clone() });
                         break 'answers;
+                    }
+                }
+            }
+        }
+        if let Some(pipeline) = task.pipeline_run.as_ref() {
+            for run in &pipeline.runs {
+                for question in &run.questions {
+                    if !question.open() && question.notice == Notice::Pending {
+                        let live = team.member(&run.member).and_then(|m| session_of(m, seen)).is_some_and(|s| s.live);
+                        if live {
+                            steps.push(Step::AnswerQuestion { task: task.id, question: question.id.clone() });
+                            break 'answers;
+                        }
                     }
                 }
             }
@@ -1075,6 +1091,11 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     for (task, run) in super::stages::to_clean(team) {
         steps.push(Step::StageCleanup { task, run });
     }
+    // #630 N7: a stage given to a member that was removed or paused, or whose
+    // hand-off was never confirmed, goes back to Waiting for a free member.
+    for (task, run, reason) in super::stages::stalled(team, now) {
+        steps.push(Step::StageStalled { task, run, reason });
+    }
     // C6: among a member's ready tasks the one with the most transitive
     // dependants goes first, then the lowest number.
     let ready = plan::dispatch_order(team, ready_ids);
@@ -1107,7 +1128,13 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                 steps.push(Step::TaskWaits { task: id, reason: super::models::no_fit_reason(team, task) });
                 continue;
             }
-            let failed = |m: &Member| !task.pinned && task.attempts.iter().any(|a| a.member == m.id && matches!(a.state, AttemptState::Rejected | AttemptState::Refused));
+            let failed = |m: &Member| {
+                !task.pinned
+                    && task
+                        .attempts
+                        .iter()
+                        .any(|a| a.member == m.id && matches!(a.state, AttemptState::Rejected | AttemptState::Refused) && !super::pipeline::pipeline_returned(a))
+            };
             let candidates = super::models::candidates(team, task);
             let fits: Vec<(&Member, super::models::Fit)> = candidates
                 .iter()
@@ -1169,7 +1196,11 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         // a free member with the same role may take it.
         let held = super::stages::held(team, &member.id).is_some();
         if !task.pinned {
-            let failed = |m: &Member| task.attempts.iter().any(|a| a.member == m.id && matches!(a.state, AttemptState::Rejected | AttemptState::Refused));
+            let failed = |m: &Member| {
+            task.attempts
+                .iter()
+                .any(|a| a.member == m.id && matches!(a.state, AttemptState::Rejected | AttemptState::Refused) && !super::pipeline::pipeline_returned(a))
+        };
             let assignee_fits = available(member, &busy) && !failed(member) && !held;
             if !assignee_fits {
                 let role = team.role_of(&member.id);
@@ -1524,7 +1555,10 @@ pub(crate) fn hand_off_text_with(
             let stage = run.runs.iter().rev().find(|stage| stage.attempt == previous.n && stage.state != super::model::StageState::Revoked)?;
             (stage.state == super::model::StageState::Returned).then(|| (stage.clone(), run.max_rounds))
         });
-        if let Some((stage, max_rounds)) = returned {
+        // #630 N2: once the lead or you decided the task (a round-limit return,
+        // then a rejection, or a send-back), that decision is the latest word,
+        // not the stage run that preceded it.
+        if let Some((stage, max_rounds)) = returned.filter(|_| task.decided_by.is_none()) {
             text += &format!("\nAttempt {} was returned by the {} of {} (round {} of {max_rounds}). Fix these findings:\n", previous.n, stage.kind, stage.by, stage.round);
             if !stage.text.trim().is_empty() {
                 text += &format!("{}\n", stage.text.trim());
@@ -3710,9 +3744,26 @@ fn stage_hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &st
                 events.push(Event::new("stage_refused", json!({"task":task_id,"stage":run.kind,"error":error})));
             }
             Sent::Uncertain(error) => {
+                // #630 N7: a hand-off that may not have arrived is not
+                // confirmed; after a grace it goes back to Waiting.
+                run.unconfirmed = true;
                 events.push(Event::new("stage_unconfirmed", json!({"task":task_id,"stage":run.kind,"error":error})));
             }
         }
+        Ok(())
+    })
+}
+
+/// #630 N7: takes a stalled stage back to Waiting and frees its checkout.
+fn stall_stage_command(store: &mut Store, team: &Team, task_id: u32, run_id: &str, reason: &str) -> anyhow::Result<()> {
+    let Some(run) = team.task(task_id).and_then(|task| task.pipeline_run.as_ref()).and_then(|run| run.runs.iter().find(|run| run.id == run_id)).cloned() else {
+        return Ok(());
+    };
+    if !run.checkout.is_empty() || !run.temp.is_empty() {
+        let _ = super::stages::clean_up(&run);
+    }
+    change(store, &team.id, |team, events| {
+        super::pipeline::stall_stage(team, task_id, run_id, reason, events);
         Ok(())
     })
 }
@@ -4020,7 +4071,8 @@ fn tell_lead_start_late(store: &mut Store, team: &Team, task_id: u32) -> anyhow:
 /// Gives the member the lead's answer as a message, once (A3).
 fn send_answer(store: &mut Store, team: &Team, task_id: u32, question_id: &str) -> anyhow::Result<()> {
     let task = team.task(task_id).context("unknown task")?;
-    let (attempt, question) = task
+    // #630 N6: the answer may belong to an attempt or to a stage member's run.
+    let (asked_by, question) = task
         .attempts
         .iter()
         .rev()
@@ -4029,19 +4081,34 @@ fn send_answer(store: &mut Store, team: &Team, task_id: u32, question_id: &str) 
                 .questions
                 .iter()
                 .find(|question| question.id == question_id && !question.open() && question.notice == Notice::Pending)
-                .map(|question| (attempt, question))
+                .map(|question| (attempt.member.clone(), question.clone()))
+        })
+        .or_else(|| {
+            task.pipeline_run.as_ref().and_then(|pipeline| {
+                pipeline.runs.iter().rev().find_map(|run| {
+                    run.questions
+                        .iter()
+                        .find(|question| question.id == question_id && !question.open() && question.notice == Notice::Pending)
+                        .map(|question| (run.member.clone(), question.clone()))
+                })
+            })
         })
         .context("the answer is no longer waiting")?;
-    let session = team.member(&attempt.member).and_then(|m| m.session.clone()).context("the member has no session")?;
+    let session = team.member(&asked_by).and_then(|m| m.session.clone()).context("the member has no session")?;
     let notice_id = uuid::Uuid::new_v4().to_string();
-    let outcome = send(&session, &notice_id, &answer_to_member_text(task, question));
+    let outcome = send(&session, &notice_id, &answer_to_member_text(task, &question));
     if matches!(outcome, Sent::Refused(_)) {
         return Ok(());
     }
     change(store, &team.id, |team, _| {
-        let question = team
-            .task_mut(task_id)
-            .and_then(|task| task.attempts.iter_mut().flat_map(|attempt| attempt.questions.iter_mut()).find(|question| question.id == question_id));
+        let task = team.task_mut(task_id);
+        let question = task.and_then(|task| {
+            task.attempts
+                .iter_mut()
+                .flat_map(|attempt| attempt.questions.iter_mut())
+                .find(|question| question.id == question_id)
+                .or_else(|| task.pipeline_run.as_mut().and_then(|pipeline| pipeline.runs.iter_mut().flat_map(|run| run.questions.iter_mut()).find(|question| question.id == question_id)))
+        });
         if let Some(question) = question {
             if question.notice == Notice::Pending {
                 question.notice = match outcome {
@@ -5291,6 +5358,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
         Step::StageCleanup { task, run } => stage_clean_up(store, team, *task, run),
         Step::StageCommand { task, run } => start_stage_command(store, team, *task, run),
         Step::StageCommandEnded { task, run } => settle_stage_command(store, team, *task, run),
+        Step::StageStalled { task, run, reason } => stall_stage_command(store, team, *task, run, reason),
         Step::TellStop { stop } => tell_stop(store, team, stop),
         Step::Rebalanced { tasks } => tell_lead_rebalanced(store, team, tasks),
         Step::TurnEnded { task, at, reply } => change(store, &team.id, |team, _| {
@@ -9954,6 +10022,23 @@ mod tests {
         seen[2].free = false;
         let now = steps(&team, &seen, 1.0);
         assert!(now.contains(&Step::HandOut { task: 1, member: "dev".into() }), "{now:?}");
+    }
+
+    #[test]
+    fn a_stage_returned_task_stays_with_its_implementer_not_a_peer() {
+        // #630 C2: a return's attempt is not failed(); the implementer keeps
+        // the task, while a lead's rejection still rebalances it.
+        let (mut team, seen) = team_with_two_backends();
+        let task = team.task_mut(1).unwrap();
+        task.attempts.push(Attempt { n: 1, member: "dev".into(), state: AttemptState::Rejected, pipeline_return: true, ..Default::default() });
+        task.status = TaskStatus::Pending;
+        let now = steps(&team, &seen, 1.0);
+        assert!(now.contains(&Step::HandOut { task: 1, member: "dev".into() }), "{now:?}");
+        assert!(!now.iter().any(|step| matches!(step, Step::Rebalance { task: 1, .. })), "{now:?}");
+        let mut rejected = team.clone();
+        rejected.task_mut(1).unwrap().attempts[0].pipeline_return = false;
+        let now = steps(&rejected, &seen, 1.0);
+        assert!(now.contains(&Step::Rebalance { task: 1, from: "dev".into(), to: "dev2".into() }), "{now:?}");
     }
 
     #[test]

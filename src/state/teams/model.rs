@@ -1054,6 +1054,10 @@ pub(crate) struct Attempt {
     /// U31: this attempt worked a task of a draft phase before its approval.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub worked_ahead: bool,
+    /// #630 C2: a stage return or a send-back closed this attempt; the
+    /// implementer keeps the task and is not counted as failed for it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pipeline_return: bool,
     #[serde(default)]
     pub sent_at: f64,
     #[serde(default)]
@@ -1344,6 +1348,16 @@ pub(crate) struct StageRun {
     /// U48: what a land stage's exit code meant (accepted, returned, held).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub outcome: String,
+    /// #630 N6: the stage member's questions to the lead, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub questions: Vec<Question>,
+    /// #630 N7: why the stage went back to Waiting (a removed or paused
+    /// member, a hand-off never confirmed); empty while it has its member.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stalled: String,
+    /// #630 N7: the hand-off's delivery was not confirmed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unconfirmed: bool,
 }
 
 /// U36: a task's pipeline snapshot and progress.

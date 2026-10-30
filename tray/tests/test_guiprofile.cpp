@@ -154,6 +154,8 @@ QByteArray program()
     QByteArray text(ReadmeShots::program);
     text.replace(" elif op=='status':out(d['team'])",
                  " elif op=='status':\n  import time\n  t=dict(d['team']);t['revision']=int(time.time()*2);t['updated']=time.time();out(t)");
+    // #706: so does its item in `team list`, as hgs lists a running team.
+    text.replace("  out({'items':[t]})", "  import time\n  t['revision']=int(time.time()*2);t['updated']=time.time()\n  out({'items':[t]})");
     text.replace(" out({} if '--agent' in a else d['inspect'].get(host+'\\n'+name,{'tracked':True,'events':[],'cursor':0}))",
                  " r={} if '--agent' in a else dict(d['inspect'].get(host+'\\n'+name,{'tracked':True,'events':[],'cursor':0}))\n"
                  " if host+'\\n'+name==d['active']['key']:\n"
@@ -228,7 +230,7 @@ void TestGuiProfile::initTestCase()
                            {"catalog", ReadmeShots::catalog()}, {"organization", ReadmeShots::organization()},
                            {"active", QJsonObject{{"key", activeChat}, {"start", m_now}, {"text", answer(0).replace("0", "#")}}}};
     // Both changes of the README fake took: a running team and a growing chat.
-    QVERIFY(program().contains("d['active']") && program().contains("time.time()*2"));
+    QVERIFY(program().contains("d['active']") && program().count("time.time()*2") == 2);
     QVERIFY(FakeCli::install(fixture(), program()));
     QVERIFY(FakeCli::replace(fixture() + ".json", QJsonDocument(data).toJson(QJsonDocument::Compact)));
     setJsonSetting("workspace/organization", QJsonDocument(ReadmeShots::organization()).toJson(QJsonDocument::Compact));

@@ -108,6 +108,7 @@ private:
     QJsonObject m_lastList, m_lastStatus;
     QByteArray m_watchedShape, m_inboxShape;
     QHash<QString, QByteArray> m_listShapes;   // by team id
+    QStringList m_listOrder;   // the ids as listed
     QString m_watch;
     Teams::Team m_watched;
     QMap<qint64, QJsonObject> m_feed;   // by seq

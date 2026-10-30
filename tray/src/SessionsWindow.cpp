@@ -2,6 +2,7 @@
 #include "ConversationSource.h"
 #include "WslFileOpenDialog.h"
 #include "SettingsJson.h"
+#include "SlowEventLog.h"
 #include "ArchiveBrowser.h"
 #include "NativeSessionCapabilities.h"
 #include "SessionsWindow.h"
@@ -1785,6 +1786,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_teamNotices=std::make_shared<TeamAttentionNotices>(QSettings().value("teams/attentionNotified").toStringList());
     connect(m_teams,&TeamController::watchedChanged,this,[this]{updateProposalCards();});
     connect(m_teams,&TeamController::teamsChanged,this,[this]{
+        const SlowEventLog::Scope scope(this,"teams changed");
         // U25 (spec 2.3): members other than the lead are muted by default.
         QSet<QString> members;
         for(const auto &team:m_teams->teams())if(team.status!="archived")
@@ -7428,6 +7430,7 @@ void SessionsWindow::updateProposalCards()
 
 void SessionsWindow::updateTeamPanel()
 {
+    const SlowEventLog::Scope scope(this,"team panel");
     if(!m_teamPanel||!m_teams)return;
     updateProposalCards();
     if(m_teamStrip){
@@ -7473,7 +7476,7 @@ void SessionsWindow::updateTeamPanel()
     const QString draft=teamRecord&&teamRecord->draft()?team:QString();
     if(!draft.isEmpty())team.clear();
     m_teamPanel->showTeam(team);
-    m_teamPanel->render();
+    m_teamPanel->refresh();   // #706: only when what it shows changed
     if(m_teamWorkspace){
         QList<TeamWorkspace::Computer> computers;
         const qint64 now=QDateTime::currentMSecsSinceEpoch();

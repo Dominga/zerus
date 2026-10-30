@@ -79,6 +79,16 @@ private:
     void tickInPlace();
     bool m_forced = false;
     QByteArray m_renderedKey;
+    // #706: a member's live state alone (working, idle) rebuilds only the
+    // side column, the header and the coordinator's head; the canvas's
+    // activity labels and working dots change in place. A live change that
+    // moves the team's status or its problems is in pollKey and rebuilds.
+    QByteArray liveKey(bool working = true) const;
+    void renderLive();
+    void renderSide(const Teams::Team &team, const QString &status);
+    bool refreshMembersLive(const Teams::Team &team);
+    void refreshCanvasLive(const Teams::Team &team);
+    QByteArray m_renderedLive, m_renderedLiveRest;
     void renderHeader();
     QWidget *headerStatusContent(const Teams::Team &team, const QString &status);
     QWidget *headerActionsContent(const Teams::Team &team);

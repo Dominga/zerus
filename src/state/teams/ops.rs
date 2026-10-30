@@ -2416,6 +2416,12 @@ fn checked_finding(team: &Team, finding: &Value) -> anyhow::Result<CheckedFindin
 }
 
 fn report(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    report_with(team, input, actor, false, events)
+}
+
+/// `captured`: Zerus records the member's last reply (A2); it never enters the
+/// pipeline's stages (#538 C1).
+fn report_with(team: &mut Team, input: &Value, actor: &Actor, captured: bool, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     let id = task_id(input)?;
     // U36: a stage member's verdict names its stage run as the attempt.
     if let Some(result) = super::pipeline::stage_report(team, input, actor, events)? {
@@ -2477,7 +2483,7 @@ fn report(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
         };
         let attempt = task.attempts.iter_mut().find(|a| a.id == open_id).unwrap();
         attempt.state = AttemptState::Reported;
-        attempt.report = Some(Report { text: body, at: now(), structured: structured.clone(), unstructured: structured.is_none(), ..Default::default() });
+        attempt.report = Some(Report { text: body, at: now(), structured: structured.clone(), unstructured: structured.is_none(), captured, ..Default::default() });
         attempt.no_report = false;
         attempt.check = check_result;
         // The lead hears of a report unless it wrote it.
@@ -2499,7 +2505,12 @@ fn report(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
             // C5: the check decides, without the lead.
             return decide_check(team, id, n, events);
         }
-        // U36: a task with a pipeline goes to its first stage.
+        // U36: a task with a pipeline goes to its first stage. #538 C1: a
+        // captured reply stays Submitted for the member's real report (A6)
+        // or the lead's decision; the real report enters the stages.
+        if captured {
+            return Ok(json!({"status":"submitted","task":id,"attempt":n}));
+        }
         if let Some(result) = super::pipeline::on_report(team, id, events)? {
             return Ok(result);
         }
@@ -2537,19 +2548,33 @@ fn report(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
         report.structured = structured.clone();
         report.unstructured = structured.is_none();
         report.at = now();
-        report.captured = false;
+        let was_captured = std::mem::take(&mut report.captured);
         attempt.no_report = false;
         // The lead hears the real report as a report, not as the captured one;
         // U36: a stage still reading it tells the lead after the last stage.
         if member != team_lead && task.status == TaskStatus::Submitted {
             attempt.notice = Notice::Pending;
         }
+        let (in_stage, submitted) = (task.status.in_stage(), task.status == TaskStatus::Submitted);
         let title = task.title.clone();
         let role = team.role_of(&member);
         events.push(Event::new(
             "report_replaced",
             json!({"by":role,"task":id,"title":title,"attempt":n,"human":by_member.is_empty()}),
         ));
+        // #538 C1: the real report that replaces a captured one enters the
+        // stages; #595 N4: one replaced while a stage reads it starts that
+        // stage again on the new text.
+        let staged = if in_stage {
+            super::pipeline::restart_open(team, id, events)?
+        } else if submitted && was_captured {
+            super::pipeline::on_report(team, id, events)?
+        } else {
+            None
+        };
+        if let Some(result) = staged {
+            return Ok(result);
+        }
         return Ok(json!({"status":"submitted","task":id,"attempt":n}));
     }
     // A late report of a revoked or replaced attempt is refused and shown.
@@ -3578,6 +3603,8 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
     let lead_id = team.lead.clone();
     let task = team.task_mut(id).context("Unknown task")?;
     ensure!(!(task.decided_by == Some(Decider::Human) && task.status.finished()), "You already decided task #{id}");
+    // #538 N1: accepting over an open stage names why, as skip-stage does.
+    ensure!(!accept || !task.status.in_stage() || !reason.is_empty(), "Accepting task #{id} in a stage needs a reason");
     if human {
         ensure!(!matches!(task.status, TaskStatus::Draft | TaskStatus::Cancelled), "Task #{id} cannot be decided now");
     } else {
@@ -3870,6 +3897,13 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
             ensure!(op == "report" || matches!(actor, Actor::Human), "Only you use a last reply as the report");
             ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
             report(team, input, actor, events)
+        }
+        // A2: the dispatcher's capture of a member's last reply; no command
+        // reaches this operation.
+        "capture-report" => {
+            ensure!(matches!(actor, Actor::Member(_)), "Zerus captures a member's reply");
+            ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
+            report_with(team, input, actor, true, events)
         }
         "ask" => ask(team, input, actor, events),
         "reply" => reply(team, input, actor, events),
@@ -6120,6 +6154,7 @@ mod tests {
                 folder: "hold".into(),
                 accept: "lead".into(),
                 round: 1,
+                trimmed_returns: 0,
                 runs: Vec::new(),
             });
         }

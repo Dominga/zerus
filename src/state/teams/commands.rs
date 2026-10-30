@@ -6753,6 +6753,7 @@ mod tests {
                 folder: "hold".into(),
                 accept: "lead".into(),
                 round: 1,
+                trimmed_returns: 0,
                 runs: vec![StageRun {
                     id: "stage-run-1".into(),
                     stage: 0,

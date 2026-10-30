@@ -67,6 +67,7 @@ pub(crate) fn resolve(catalog: &Catalog, team: &Team, task: &Task) -> Option<Pip
         accept: if preset.accept.is_empty() { "lead".into() } else { preset.accept.clone() },
         round: 1,
         runs: Vec::new(),
+        trimmed_returns: 0,
     })
 }
 
@@ -156,7 +157,8 @@ fn enter(team: &mut Team, id: u32, stage: usize, events: &mut Vec<Event>) -> any
         ..Default::default()
     });
     let excess = run.runs.len().saturating_sub(MAX_RUNS);
-    run.runs.drain(..excess);
+    let trimmed = run.runs.drain(..excess).filter(|old| old.state == StageState::Returned).count() as u32;
+    run.trimmed_returns += trimmed;
     task.status = status_of(&spec.kind);
     let status = serde_json::to_value(task.status)?;
     let who = if spec.runs_command() {
@@ -233,6 +235,15 @@ pub(crate) fn revoke_runs(task: &mut Task, why: &str) {
     if task.pipeline_run.as_ref().and_then(PipelineRun::open_run).is_some() {
         close_run(task, StageState::Revoked, "Zerus", why, Vec::new());
     }
+}
+
+/// #538 C1, #595 N4: the implementer replaced the report a stage reads. The
+/// open run ends and the same stage starts again, in the same round, on the
+/// new text.
+pub(crate) fn restart_open(team: &mut Team, id: u32, events: &mut Vec<Event>) -> anyhow::Result<Option<Value>> {
+    let Some(task) = team.task_mut(id) else { return Ok(None) };
+    let Some(run) = close_run(task, StageState::Revoked, "Zerus", "The report was replaced", Vec::new()) else { return Ok(None) };
+    enter(team, id, run.stage, events).map(Some)
 }
 
 /// Moves on after the open stage passed or was skipped.
@@ -670,7 +681,7 @@ pub(crate) fn skip_stage(team: &mut Team, input: &Value, actor: &Actor, events: 
     let task = team.task_mut(id).context("Unknown task")?;
     ensure!(task.status.in_stage(), "Task #{id} is not in a stage");
     let title = task.title.clone();
-    let run = close_run(task, StageState::Skipped, &by, &reason, Vec::new()).context("Task #{id} is not in a stage")?;
+    let run = close_run(task, StageState::Skipped, &by, &reason, Vec::new()).with_context(|| format!("Task #{id} is not in a stage"))?;
     events.push(Event::new("stage_skipped", json!({"by":by,"task":id,"title":title,"stage":run.kind,"round":run.round,"reason":reason})));
     advance(team, id, run.stage, events)
 }
@@ -801,11 +812,6 @@ mod tests {
         assert_eq!(task.status, TaskStatus::InReview);
         assert_eq!(task.attempts[0].notice, Notice::None, "the lead is not told while a stage reads the report");
         assert_eq!(pipeline(&team).open_run().unwrap().state, StageState::Waiting);
-        // A captured report replaced while the review reads it tells nobody yet.
-        team.task_mut(1).unwrap().attempts[0].report.as_mut().unwrap().captured = true;
-        run(&mut team, "report", json!({"task":1,"attempt":attempt,"text":"Done, really"}), &member("dev")).unwrap();
-        let task = team.task(1).unwrap();
-        assert_eq!((task.status, task.attempts[0].notice), (TaskStatus::InReview, Notice::None));
         // A sandboxed stage member's queued verdict names its open run.
         let stage = give_stage(&mut team, 1, "rev").unwrap();
         assert_eq!((open_run_task(&team, &stage, "rev"), open_run_task(&team, &stage, "dev")), (Some(1), None));
@@ -826,6 +832,121 @@ mod tests {
         assert_eq!(states, [StageState::Passed, StageState::Passed]);
         run(&mut team, "accept", json!({"task":1}), &member("lead")).unwrap();
         assert_eq!(team.task(1).unwrap().status, TaskStatus::Accepted);
+    }
+
+    #[test]
+    fn a_captured_reply_never_enters_the_stages_and_the_real_report_does() {
+        let mut team = team_with("code", &builtin());
+        let attempt = hand(&mut team);
+        // #538 C1: Zerus captures the member's last reply: it stays Submitted,
+        // for the lead and for the member's real report, and holds the member.
+        let (value, events) = feed(&mut team, "capture-report", json!({"task":1,"attempt":attempt,"text":"Queued, after #12"}), &member("dev"));
+        assert_eq!(value["status"], "submitted");
+        assert!(!kinds(&events).contains(&"stage_started"), "{:?}", kinds(&events));
+        let task = team.task(1).unwrap();
+        assert_eq!((task.status, task.attempts[0].notice), (TaskStatus::Submitted, Notice::Pending));
+        assert!(task.attempts[0].report.as_ref().unwrap().captured);
+        assert!(pipeline(&team).runs.is_empty(), "no stage reads a captured reply");
+        assert_eq!(team.captured_hold("dev"), Some(1));
+        assert!(crate::state::teams::stages::waiting(&team).is_empty());
+        // The real report replaces it and enters the first stage, round 1.
+        let (value, events) = feed(&mut team, "report", json!({"task":1,"attempt":attempt,"text":"Done: paged"}), &member("dev"));
+        assert_eq!((value["status"].clone(), value["stage"].clone(), value["round"].clone()), (json!("in_review"), json!("review"), json!(1)));
+        assert!(kinds(&events).contains(&"report_replaced") && kinds(&events).contains(&"stage_started"), "{:?}", kinds(&events));
+        let task = team.task(1).unwrap();
+        assert_eq!((task.status, task.attempts[0].notice), (TaskStatus::InReview, Notice::None));
+        assert_eq!(team.captured_hold("dev"), None);
+        // A captured report that reached a stage before (older data) holds
+        // its member there too.
+        team.task_mut(1).unwrap().attempts[0].report.as_mut().unwrap().captured = true;
+        assert_eq!(team.captured_hold("dev"), Some(1));
+        // Only the dispatcher captures: no command names it, and you cannot.
+        assert!(!crate::state::teams::commands::USAGE.contains("capture-report"));
+        assert!(run(&mut team, "capture-report", json!({"task":1,"attempt":attempt,"text":"x"}), &Actor::Human).is_err());
+    }
+
+    #[test]
+    fn a_report_replaced_while_a_stage_reads_it_starts_that_stage_again() {
+        let mut team = team_with("code", &builtin());
+        let attempt = hand(&mut team);
+        report(&mut team, &attempt);
+        let stage = give_stage(&mut team, 1, "rev").unwrap();
+        // #595 N4: the review run ends and the review waits again, same round.
+        let (value, events) = feed(&mut team, "report", json!({"task":1,"attempt":attempt,"text":"Done, really"}), &member("dev"));
+        assert_eq!((value["status"].clone(), value["stage"].clone(), value["round"].clone()), (json!("in_review"), json!("review"), json!(1)));
+        assert!(kinds(&events).contains(&"stage_started"), "{:?}", kinds(&events));
+        let runs = &pipeline(&team).runs;
+        assert_eq!(runs.len(), 2);
+        assert_eq!((runs[0].state, runs[0].by.as_str(), runs[0].text.as_str()), (StageState::Revoked, "Zerus", "The report was replaced"));
+        assert_eq!((runs[1].state, runs[1].stage, runs[1].round), (StageState::Waiting, 0, 1));
+        let task = team.task(1).unwrap();
+        assert_eq!((task.status, task.attempts[0].notice), (TaskStatus::InReview, Notice::None));
+        assert_eq!(task.attempts[0].report.as_ref().unwrap().text, "Done, really");
+        // The reviewer's verdict on the old text is stale.
+        let value = run(&mut team, "report", json!({"task":1,"attempt":stage,"verdict":"pass"}), &member("rev")).unwrap();
+        assert_eq!(value["status"], "stale");
+        // Replaced in the test stage, the test starts again, not the review.
+        verdict(&mut team, "rev", "pass", &[]).unwrap();
+        assert_eq!(team.task(1).unwrap().status, TaskStatus::InTest);
+        let value = run(&mut team, "report", json!({"task":1,"attempt":attempt,"text":"Done, with tests"}), &member("dev")).unwrap();
+        assert_eq!((value["status"].clone(), value["stage"].clone()), (json!("in_test"), json!("test")));
+        let states: Vec<(StageState, usize)> = pipeline(&team).runs.iter().map(|run| (run.state, run.stage)).collect();
+        assert_eq!(states, [(StageState::Revoked, 0), (StageState::Passed, 0), (StageState::Revoked, 1), (StageState::Waiting, 1)]);
+        assert_eq!(pipeline(&team).round, 1, "a replaced report is not a new round");
+    }
+
+    #[test]
+    fn accepting_in_a_stage_needs_a_reason() {
+        let mut team = team_with("code", &builtin());
+        let attempt = hand(&mut team);
+        report(&mut team, &attempt);
+        // #538 N1: the lead and the owner both name why.
+        for actor in [member("lead"), Actor::Human] {
+            let error = run(&mut team, "accept", json!({"task":1}), &actor).unwrap_err();
+            assert!(error.to_string().contains("needs a reason"), "{error}");
+            assert_eq!(team.task(1).unwrap().status, TaskStatus::InReview);
+        }
+        run(&mut team, "accept", json!({"task":1,"reason":"Reviewed with the owner"}), &member("lead")).unwrap();
+        let task = team.task(1).unwrap();
+        assert_eq!((task.status, task.decision_reason.as_str()), (TaskStatus::Accepted, "Reviewed with the owner"));
+        // The final acceptance after the stages needs none, as today.
+        let mut team = team_with("code", &builtin());
+        let attempt = hand(&mut team);
+        report(&mut team, &attempt);
+        verdict(&mut team, "rev", "pass", &[]).unwrap();
+        verdict(&mut team, "qa", "pass", &[]).unwrap();
+        run(&mut team, "accept", json!({"task":1}), &member("lead")).unwrap();
+        assert_eq!(team.task(1).unwrap().status, TaskStatus::Accepted);
+    }
+
+    #[test]
+    fn a_stage_error_names_its_task_and_trimmed_runs_keep_the_round_limit() {
+        // #538 L1: the message is formatted.
+        let mut team = team_with("code", &builtin());
+        team.task_mut(1).unwrap().status = TaskStatus::InReview;
+        let error = run(&mut team, "skip-stage", json!({"task":1,"reason":"x"}), &member("lead")).unwrap_err();
+        assert_eq!(error.to_string(), "Task #1 is not in a stage");
+        // #538 L2: a return, then enough send-backs to trim its run away.
+        let mut catalog = builtin();
+        catalog.pipelines[0].max_rounds = 2;
+        let mut team = team_with("code", &catalog);
+        let first = hand(&mut team);
+        report(&mut team, &first);
+        verdict(&mut team, "rev", "return", &["One"]).unwrap();
+        for _ in 0..MAX_RUNS {
+            let attempt = hand(&mut team);
+            report(&mut team, &attempt);
+            run(&mut team, "send-back", json!({"task":1,"reason":"Again"}), &member("lead")).unwrap();
+        }
+        assert_eq!(pipeline(&team).runs.len(), MAX_RUNS);
+        assert!(!pipeline(&team).runs.iter().any(|run| run.state == StageState::Returned), "the return's run is trimmed");
+        assert_eq!(pipeline(&team).returned(), 1, "the count outlives its run");
+        let stored: PipelineRun = serde_json::from_value(serde_json::to_value(pipeline(&team)).unwrap()).unwrap();
+        assert_eq!(stored.returned(), 1);
+        let last = hand(&mut team);
+        report(&mut team, &last);
+        let value = verdict(&mut team, "rev2", "return", &["Two"]).unwrap();
+        assert_eq!(value["round_limit"], true, "{value}");
     }
 
     #[test]
@@ -999,10 +1120,20 @@ mod tests {
         team.members.iter_mut().find(|member| member.id == "dev").unwrap().parent = "rev2".into();
         let attempt = hand(&mut team);
         report(&mut team, &attempt);
-        let error = run(&mut team, "accept", json!({"task":1}), &member("rev2")).unwrap_err();
+        let error = run(&mut team, "accept", json!({"task":1,"reason":"x"}), &member("rev2")).unwrap_err();
         assert!(error.to_string().contains("accepted by the lead"), "{error}");
+        // #538 N3: once the stages passed, the report is the lead's to accept,
+        // in the lead's inbox and not the sub-lead's.
+        let reports = |team: &Team, reviewer: &str| {
+            crate::state::teams::inbox::items_for(team, reviewer).iter().filter(|item| item.kind == "report" && item.task == Some(1)).count()
+        };
+        verdict(&mut team, "rev", "pass", &[]).unwrap();
+        verdict(&mut team, "qa", "pass", &[]).unwrap();
+        assert_eq!(team.task(1).unwrap().status, TaskStatus::Submitted);
+        assert_eq!((reports(&team, "lead"), reports(&team, "rev2")), (1, 0));
         // A sub_lead pipeline is the sub-lead's to accept.
         team.task_mut(1).unwrap().pipeline_run.as_mut().unwrap().accept = "sub_lead".into();
+        assert_eq!((reports(&team, "lead"), reports(&team, "rev2")), (0, 1));
         run(&mut team, "accept", json!({"task":1}), &member("rev2")).unwrap();
         assert_eq!(team.task(1).unwrap().status, TaskStatus::Accepted);
     }

@@ -199,6 +199,25 @@ jobs:
           cargo +1.99.1 fmt --check --manifest-path client/core/Cargo.toml
           cargo +1.99.1 clippy --locked --manifest-path client/core/Cargo.toml --target-dir target/client-core --all-targets -- -D warnings
           cargo +1.99.1 test --locked --manifest-path client/core/Cargo.toml --target-dir target/client-core
+      # hgs and client/core take these by path, which builds them but never runs their tests.
+      # They share one target directory: same dependencies, one cache entry.
+      - name: Desktop crates (format, lints, tests)
+        run: |
+          cargo +1.99.1 fmt --check --manifest-path crates/content-search/Cargo.toml
+          cargo +1.99.1 clippy --locked --manifest-path crates/content-search/Cargo.toml --target-dir target/desktop-crates --all-targets -- -D warnings
+          cargo +1.99.1 test --locked --manifest-path crates/content-search/Cargo.toml --target-dir target/desktop-crates
+          cargo +1.99.1 fmt --check --manifest-path crates/desktop-catalog/Cargo.toml
+          cargo +1.99.1 clippy --locked --manifest-path crates/desktop-catalog/Cargo.toml --target-dir target/desktop-crates --all-targets -- -D warnings
+          cargo +1.99.1 test --locked --manifest-path crates/desktop-catalog/Cargo.toml --target-dir target/desktop-crates
+          cargo +1.99.1 fmt --check --manifest-path crates/desktop-ledger/Cargo.toml
+          cargo +1.99.1 clippy --locked --manifest-path crates/desktop-ledger/Cargo.toml --target-dir target/desktop-crates --all-targets -- -D warnings
+          cargo +1.99.1 test --locked --manifest-path crates/desktop-ledger/Cargo.toml --target-dir target/desktop-crates
+          cargo +1.99.1 fmt --check --manifest-path crates/desktop-migration/Cargo.toml
+          cargo +1.99.1 clippy --locked --manifest-path crates/desktop-migration/Cargo.toml --target-dir target/desktop-crates --all-targets -- -D warnings
+          cargo +1.99.1 test --locked --manifest-path crates/desktop-migration/Cargo.toml --target-dir target/desktop-crates
+          cargo +1.99.1 fmt --check --manifest-path crates/desktop-read-policy/Cargo.toml
+          cargo +1.99.1 clippy --locked --manifest-path crates/desktop-read-policy/Cargo.toml --target-dir target/desktop-crates --all-targets -- -D warnings
+          cargo +1.99.1 test --locked --manifest-path crates/desktop-read-policy/Cargo.toml --target-dir target/desktop-crates
       # Packages fail without a notice for every shipped crate; find out here.
       - name: Rust license notices
         run: python3 scripts/collect-licenses.py "$RUNNER_TEMP/rust-licenses"

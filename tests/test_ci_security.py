@@ -533,6 +533,18 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertNotIn("continue-on-error", frontend)
         self.assertNotIn("actions/cache/save@", frontend)
 
+    def test_every_crate_is_formatted_linted_and_tested(self):
+        # A crate taken by path is only built by its users; its own tests run nowhere else.
+        quick = job((ROOT / ".github/workflows/checks.yml").read_text(), "quick")
+        crates = sorted(path.parent.name for path in (ROOT / "crates").glob("*/Cargo.toml"))
+        self.assertIn("desktop-read-policy", crates)
+        for crate in crates:
+            manifest = f"--manifest-path crates/{crate}/Cargo.toml"
+            with self.subTest(crate=crate):
+                self.assertIn(f"cargo +1.99.1 fmt --check {manifest}\n", quick)
+                self.assertRegex(quick, rf"cargo \+1\.99\.1 clippy --locked {re.escape(manifest)} --target-dir target/[\w-]+ --all-targets -- -D warnings\n")
+                self.assertRegex(quick, rf"cargo \+1\.99\.1 test --locked {re.escape(manifest)} --target-dir target/[\w-]+\n")
+
     def test_native_client_jobs_cover_media_and_platform_code(self):
         checks = (ROOT / ".github/workflows/checks.yml").read_text()
         macos_steps = {

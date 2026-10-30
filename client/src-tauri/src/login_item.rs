@@ -25,7 +25,7 @@ fn thread_max_priority() -> i32 {
         let thread = libc::mach_thread_self();
         let result = libc::thread_info(
             thread,
-            libc::THREAD_EXTENDED_INFO,
+            libc::THREAD_EXTENDED_INFO as libc::thread_flavor_t,
             &mut info as *mut _ as libc::thread_info_t,
             &mut count,
         );

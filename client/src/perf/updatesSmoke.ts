@@ -22,6 +22,10 @@ function require(ok: boolean, what: string) {
 }
 
 async function statusbarSmoke() {
+  const batch = (status: string, attempt = 0) => applyBatch({
+    upserts: [], removes: [], replaces: [], activity: [],
+    computers: [{ computer: "build-02", status, attempt }],
+  });
   applyBatch({
     upserts: [], removes: [], replaces: [], activity: [],
     computers: [
@@ -35,11 +39,20 @@ async function statusbarSmoke() {
   await until(() => !!document.querySelector(".vrow .rowhit"), "the replay session rows did not render");
   document.querySelector<HTMLElement>(".vrow .rowhit")!.click();
   await until(() => !!document.querySelector(".usage-refresh"), "the selected session's usage refresh did not render");
-  await until(() => document.querySelector(".statusbar")?.textContent?.includes("4 of 5 machines connected, 1 offline") ?? false, "connection counts did not render");
   require(Object.keys(catalog.computers).length === 5, "the status fixture has extra computers");
+  await until(() => document.querySelector(".statusbar .danger")?.textContent?.includes("build-02: reconnecting (attempt 2)") ?? false, `inline connection details did not render: ${JSON.stringify(catalog.computers)} ${document.querySelector(".statusbar")?.textContent}`);
   const retry = [...document.querySelectorAll<HTMLButtonElement>(".statusbar button")].find((button) => button.textContent === "Retry now");
   require(!!retry, "Retry now is missing in the connection-error state");
   retry!.click();
+
+  batch("probing");
+  await until(() => document.querySelector(".statusbar .conn-ok")?.textContent === "4 of 5 machines connected, build-02 offline", "the calm offline-name summary did not render");
+  require(![...document.querySelectorAll<HTMLButtonElement>(".statusbar button")].some((button) => button.textContent === "Retry now"), "Retry now shows without a connection error");
+  batch("live");
+  await until(() => document.querySelector(".statusbar .conn-ok")?.textContent === "5 of 5 machines connected", "the all-connected summary did not render");
+  require(!document.querySelector(".statusbar .conn-ok")?.textContent?.includes("offline"), "all-connected has an offline tail");
+  batch("reconnecting", 2);
+  await until(() => document.querySelector(".statusbar .danger")?.textContent?.includes("build-02: reconnecting (attempt 2)") ?? false, "connection details did not return");
 
   const gap = document.querySelector(".statusbar .grow")!;
   for (const selector of [".status-update", ".status-restart", ".statusbar .warn-chip"]) {
@@ -50,13 +63,25 @@ async function statusbarSmoke() {
     require((button.compareDocumentPosition(gap) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0, `${selector} is not left of the gap`);
   }
   const fix = document.querySelector<HTMLButtonElement>(".statusbar .warn-chip")!;
-  require(fix.textContent === "Fix login item", "the macOS login-item chip is missing");
+  require(fix.textContent === "Fix login item" && fix.title === "macOS limits background priority for this login item", "the macOS login-item chip is wrong");
   fix.click();
+  await until(() => page() === "settings" && !!document.querySelector(".upd-login"), "the login-item chip did not open Updates");
+  const notice = document.querySelector(".upd-login")!;
+  require(notice.textContent?.includes("macOS starts Zerus at background priority, so it can stop responding while the computer is busy.") === true, "the Updates login-item notice is missing");
+  [...notice.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Fix login item")!.click();
   await until(() => (document.getElementById("login-item-dialog") as HTMLDialogElement | null)?.open === true, "login-item confirmation did not open");
   const dialog = document.getElementById("login-item-dialog") as HTMLDialogElement;
-  require(dialog.textContent?.includes("Update Only applies this at your next login") === true, "login-item confirmation is incomplete");
+  require(dialog.style.width === "520px", "login-item dialog is not 520 px wide");
+  require(dialog.querySelector("p b")?.textContent === "macOS runs Zerus at background priority.", "login-item dialog's first line is not bold");
+  const muted = dialog.querySelectorAll("p.muted");
+  require(muted.length === 2 && muted[1].innerHTML.includes("<br"), "login-item dialog's muted paragraphs are wrong");
+  const footer = [...dialog.querySelectorAll<HTMLButtonElement>(".dlg-foot button")].map((button) => button.textContent);
+  require(JSON.stringify(footer) === JSON.stringify(["Cancel", "Update and Restart", "Update Only"]), "login-item footer order is wrong");
+  await until(() => document.activeElement?.textContent === "Update Only", "Update Only is not focused");
   [...dialog.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Cancel")!.click();
   await until(() => !dialog.open, "login-item confirmation did not close");
+  setPage("sessions");
+  await until(() => !!document.querySelector(".sessions-page"), "Sessions did not return after the login-item dialog");
 
   const refresh = document.querySelector<HTMLButtonElement>(".usage-refresh")!;
   require(refresh.title === "Refresh usage" && refresh.getAttribute("aria-label") === "Refresh usage", "usage refresh title is wrong");

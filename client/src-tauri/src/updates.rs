@@ -1071,9 +1071,26 @@ pub fn updates_restart() -> Result<(), String> {
     Err("Restart to finish update is available on macOS only.".into())
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn login_item_restart(
+    executable: &Path,
+    restart: bool,
+    start: impl FnOnce(&Path) -> Result<(), String>,
+) -> Option<String> {
+    if !restart {
+        return None;
+    }
+    restart_bundle(executable, true)
+        .and_then(|bundle| start(&bundle))
+        .err()
+}
+
 #[cfg(target_os = "macos")]
 #[tauri::command]
-pub async fn updates_fix_login_item(app: AppHandle, restart: bool) -> Result<(), String> {
+pub async fn updates_fix_login_item(
+    app: AppHandle,
+    restart: bool,
+) -> Result<Option<String>, String> {
     let updates = app.state::<Updates>().inner().clone();
     let executable = updates.0.executable.clone();
     tauri::async_runtime::spawn_blocking(move || crate::login_item::fix(&executable))
@@ -1081,12 +1098,13 @@ pub async fn updates_fix_login_item(app: AppHandle, restart: bool) -> Result<(),
         .map_err(|error| error.to_string())??;
     lock(&updates.0.state).login_item_deprioritized = false;
     updates.changed();
-    if restart {
-        let bundle = restart_bundle(&updates.0.executable, true)?;
-        restart_helper(&bundle, std::process::id()).map_err(|error| error.to_string())?;
+    let restart_error = login_item_restart(&updates.0.executable, restart, |bundle| {
+        restart_helper(bundle, std::process::id()).map_err(|error| error.to_string())
+    });
+    if restart_error.is_none() && restart {
         crate::exit_flush::quit_with_flush(&app, 0);
     }
-    Ok(())
+    Ok(restart_error)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1402,6 +1420,19 @@ mod tests {
                 ..Installation::default()
             }
         ));
+    }
+
+    #[test]
+    fn login_item_restart_failure_is_a_result_not_a_fix_error() {
+        let executable = Path::new("/tmp/Zerus.app/Contents/MacOS/zerus-client");
+        assert_eq!(
+            login_item_restart(executable, false, |_| unreachable!()),
+            None
+        );
+        assert_eq!(
+            login_item_restart(executable, true, |_| Err("restart refused".into())),
+            Some("restart refused".into())
+        );
     }
 
     #[test]

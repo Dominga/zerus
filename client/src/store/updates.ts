@@ -11,7 +11,7 @@ export interface UpdatesPort {
   open(target: "release" | "download" | "instructions"): Promise<void>;
   copyCommand(): Promise<void>;
   restart(): Promise<void>;
-  fixLoginItem(restart: boolean): Promise<void>;
+  fixLoginItem(restart: boolean): Promise<string | null>;
 }
 
 const native: UpdatesPort = {

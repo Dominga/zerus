@@ -12,7 +12,7 @@ function fake(overrides: Partial<UpdatesPort> = {}) {
     open: vi.fn(async () => {}),
     copyCommand: vi.fn(async () => {}),
     restart: vi.fn(async () => {}),
-    fixLoginItem: vi.fn(async () => {}),
+    fixLoginItem: vi.fn(async () => null),
     ...overrides,
   };
   return port;
@@ -78,5 +78,6 @@ describe("updates store", () => {
     expect(port.open).toHaveBeenNthCalledWith(3, "instructions");
     expect(port.copyCommand).toHaveBeenCalledTimes(1);
     expect(port.restart).toHaveBeenCalledTimes(1);
+    expect(port.fixLoginItem).toHaveBeenCalledWith(false);
   });
 });

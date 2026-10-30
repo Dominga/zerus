@@ -648,7 +648,7 @@ export const updatesOpen = (target: "release" | "download" | "instructions") =>
   inTauri() ? invoke<void>("updates_open", { target }) : Promise.reject(UPDATES_DESKTOP_ONLY);
 export const updatesCopyCommand = () => inTauri() ? invoke<void>("updates_copy_command") : Promise.reject(UPDATES_DESKTOP_ONLY);
 export const updatesRestart = () => inTauri() ? invoke<void>("updates_restart") : Promise.reject(UPDATES_DESKTOP_ONLY);
-export const updatesFixLoginItem = (restart: boolean) => inTauri() ? invoke<void>("updates_fix_login_item", { restart }) : Promise.reject(UPDATES_DESKTOP_ONLY);
+export const updatesFixLoginItem = (restart: boolean) => inTauri() ? invoke<string | null>("updates_fix_login_item", { restart }) : Promise.reject(UPDATES_DESKTOP_ONLY);
 /** `updates-changed`: the native worker's latest snapshot; resolves once listening. */
 export const onUpdates = (listener: (view: UpdatesView) => void) => onEvent<UpdatesView>("updates-changed", listener);
 

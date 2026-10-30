@@ -413,8 +413,12 @@ splitter; never map it onto a different inspector panel. The remembered
 Terminate dialog owner (`.10`) may prefill its checkbox once, with explicit
 confirmation every time, never automatic-maintenance consent.
 
-Remaining source coverage includes `tray.conf`, downloaded content and the
-rest of the interim stores listed below.
+The shared `tray.conf` also has bounded private evidence through its existing
+key parser; it preserves the original text without changing the selected CLI,
+terminal, polling or service settings. Remaining source coverage includes
+downloaded content and the rest of the interim stores listed below. Linux
+notification owner/token sources await the native worker/lease ownership seam;
+the existing native reader and one-time seed remain unchanged.
 Source discovery and production integration remain separate; adapters do not
 by themselves publish eligible evidence or transfer writer authority. The
 `approval_policies` adapter inspects Qt and interim Next choices together,

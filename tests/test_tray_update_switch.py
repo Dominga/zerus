@@ -187,6 +187,16 @@ class Switch(Fixture):
                 self.assertEqual(updater.check_replace(client, installed, live=True), 0)
             self.assertEqual(updater.check_replace(built, self.root / 'missing.app'), 0, 'nothing installed yet')
 
+    def test_macos_still_refuses_an_unknown_installed_kind(self):
+        installed = self.bundle('half', 'qt')
+        (installed / 'Contents/Info.plist').unlink()
+        client = self.bundle('client', 'tauri')
+        with mock.patch.object(updater, 'MAC', True), \
+                mock.patch.object(updater, 'installed_build_info', return_value={}), \
+                mock.patch.object(updater, 'build_info', return_value={'version': '0.47.0'}):
+            with self.assertRaisesRegex(updater.UpdateError, 'needs the live update'):
+                updater.check_replace(client, installed)
+
     def test_settings_changes_separate_qt_keys_from_cocoa_keys(self):
         before = {'attention.observed': b'{}', 'workspace.reduceMotion': False, 'NSStatusItem Preferred Position Item-0': 900.0}
         after = {'attention.observed': b'{"x":1}', 'NSStatusItem Preferred Position Item-0': 880.0,

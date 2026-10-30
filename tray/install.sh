@@ -322,8 +322,23 @@ else
     UNIT_DEST="${HOME}/.config/systemd/user/hgs-tray.service"
 fi
 mkdir -p "$(dirname "${UNIT_DEST}")"
-# The service starts the binary this installer selected, without opening a window.
-NEW_UNIT="$(sed -e "s|^ExecStart=.*|ExecStart=${BIN_DEST}|" "${SCRIPT_DIR}/packaging/hgs-tray.service")"
+# The default unit stays byte-identical to the packaged %h form. Only a scratch
+# prefix needs a literal path, quoted and escaped as systemd requires.
+if [ "${SCRATCH}" = "1" ]; then
+    SYSTEMD_BIN_DEST="${BIN_DEST//\\/\\\\}"
+    SYSTEMD_BIN_DEST="${SYSTEMD_BIN_DEST//\"/\\\"}"
+    SYSTEMD_BIN_DEST="${SYSTEMD_BIN_DEST//%/%%}"
+    NEW_UNIT=""
+    while IFS= read -r line || [ -n "${line}" ]; do
+        case "${line}" in
+            ExecStart=*) line="ExecStart=\"${SYSTEMD_BIN_DEST}\"" ;;
+        esac
+        NEW_UNIT+="${line}"$'\n'
+    done < "${SCRIPT_DIR}/packaging/hgs-tray.service"
+    NEW_UNIT="${NEW_UNIT%$'\n'}"
+else
+    NEW_UNIT="$(cat "${SCRIPT_DIR}/packaging/hgs-tray.service")"
+fi
 if [ "$(cat "${UNIT_DEST}" 2>/dev/null || true)" != "${NEW_UNIT}" ]; then
     printf '%s\n' "${NEW_UNIT}" > "${UNIT_DEST}"
     CHANGED=1
@@ -333,8 +348,15 @@ DESKTOP_DEST="${PREFIX}/share/applications/hgs-tray.desktop"
 mkdir -p "${DESKTOP_DEST%/*}"
 # The launcher opens Sessions through the running instance; login start is only
 # through the service above, never another copy of this desktop file.
-NEW_DESKTOP="$(sed -e "s|^Exec=.*|Exec=${BIN_DEST} --sessions|" \
-                  -e "s|^Icon=.*|Icon=${SYMBOLIC_DEST}|" "${SCRIPT_DIR}/packaging/hgs-tray.desktop")"
+NEW_DESKTOP=""
+while IFS= read -r line || [ -n "${line}" ]; do
+    case "${line}" in
+        Exec=*) line="Exec=${BIN_DEST} --sessions" ;;
+        Icon=*) line="Icon=${SYMBOLIC_DEST}" ;;
+    esac
+    NEW_DESKTOP+="${line}"$'\n'
+done < "${SCRIPT_DIR}/packaging/hgs-tray.desktop"
+NEW_DESKTOP="${NEW_DESKTOP%$'\n'}"
 if [ "$(cat "${DESKTOP_DEST}" 2>/dev/null || true)" != "${NEW_DESKTOP}" ]; then
     printf '%s\n' "${NEW_DESKTOP}" > "${DESKTOP_DEST}"
     DESKTOP_CHANGED=1

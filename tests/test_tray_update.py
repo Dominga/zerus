@@ -30,6 +30,8 @@ if sys.argv[1:] == ['--build-info']:
     # 'unverifiable' reports itself as a build, never once installed.
     if VARIANT == 'unverifiable' and pathlib.Path(sys.argv[0]).parent.name == 'bin':
         sys.exit(1)
+    if VARIANT == 'legacy-broken':
+        sys.exit(1)
     info = {{'version': '0.42.0', 'versionName': VARIANT, 'devBuildNumber': int(VARIANT[4:]) if VARIANT.startswith('dev-') else 0,
              'sourceCommit': VARIANT.ljust(40, '0'), 'sourceDirty': False}}
     if VARIANT.startswith('client-'):
@@ -331,7 +333,7 @@ class TrayUpdate(unittest.TestCase):
 
     def test_client_install_is_prefix_private_and_stays_selected(self):
         install = self.client_installer(self.build('client-1'))
-        prefix = self.root / 'prefix'
+        prefix = self.root / 'prefix%dev&review\\path'
         plugin = prefix / 'lib/hgs-tray/plugins/libhgs-tray-native-ui.so'
         plugin.parent.mkdir(parents=True)
         plugin.write_bytes(b'for the Qt rollback')
@@ -342,7 +344,8 @@ class TrayUpdate(unittest.TestCase):
         self.assertTrue(binary.is_file())
         self.assertIn("'client-1'", binary.read_text())
         unit = prefix / 'lib/systemd/user/hgs-tray.service'
-        self.assertIn(f'ExecStart={binary}', unit.read_text())
+        escaped = str(binary).replace('\\', '\\\\').replace('"', '\\"').replace('%', '%%')
+        self.assertIn(f'ExecStart="{escaped}"', unit.read_text())
         self.assertNotIn('--sessions', unit.read_text())
         desktop = (prefix / 'share/applications/hgs-tray.desktop').read_text()
         self.assertIn(f'Exec={binary} --sessions', desktop)
@@ -350,8 +353,11 @@ class TrayUpdate(unittest.TestCase):
         self.assertFalse((self.root / 'systemctl').exists(), 'a scratch prefix never reaches systemd')
         self.assertIn('no service-manager action', result.stdout)
         env.pop('HGS_LINUX_GUI')
+        unit_before = unit.read_bytes()
         result = subprocess.run(['bash', str(install)], env=env, capture_output=True, text=True, timeout=90)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(unit.read_bytes(), unit_before)
+        self.assertFalse(unit_before.endswith(b'\n\n'))
         calls = [json.loads(line) for line in (self.root / 'npm.json').read_text().splitlines()]
         self.assertEqual(len(calls), 4, 'npm ci and the Tauri build on each install')
         for call in calls[1::2]:
@@ -376,6 +382,22 @@ class TrayUpdate(unittest.TestCase):
             self.assertIn('Installed hgs-tray.', result.stdout)
             self.assertEqual(installed.read_bytes() if installed.exists() else None, expected)
             self.assertFalse(installed.with_name(installed.name + '.new').exists())
+
+    def test_default_install_keeps_the_packaged_unit_byte_identical(self):
+        install = self.installer(self.build('first'))
+        result = subprocess.run(['bash', str(install)], env=self.env,
+                                capture_output=True, text=True, timeout=90)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        installed = self.home / '.config/systemd/user/hgs-tray.service'
+        self.assertEqual(installed.read_bytes(), (REPO / 'tray/packaging/hgs-tray.service').read_bytes())
+        desktop = self.home / '.local/share/applications/hgs-tray.desktop'
+        before = desktop.read_bytes()
+        result = subprocess.run(['bash', str(install)], env=self.env,
+                                capture_output=True, text=True, timeout=90)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('already installed and unchanged', result.stdout)
+        self.assertEqual(desktop.read_bytes(), before)
+        self.assertTrue(before.endswith(b'\n') and not before.endswith(b'\n\n'))
 
     def test_installer_replaces_a_running_gui_through_the_updater(self):
         install = self.installer(self.build('second'))
@@ -440,6 +462,28 @@ class TrayUpdate(unittest.TestCase):
         kind = subprocess.run([sys.executable, str(UPDATER), '--installed-gui', str(self.installed)],
                               env=self.env, capture_output=True, text=True, timeout=30)
         self.assertEqual((kind.returncode, kind.stdout.strip()), (0, 'qt'), kind.stderr)
+
+    def test_an_unreadable_legacy_gui_is_replaced_and_keeps_the_existing_slot(self):
+        for variant in ('second', 'client-1'):
+            with self.subTest(variant=variant):
+                slot = self.home / '.local/share/hgs/desktop-previous/hgs-tray'
+                self.build('previous-good', slot)
+                self.build('legacy-broken', self.installed)
+                (self.drafts / 'kept').mkdir(parents=True, exist_ok=True)
+                (self.drafts / 'kept/draft.json').write_text(json.dumps({'key': 'kept', 'text': 'legacy draft'}))
+                result = self.update(self.build(variant))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(f"'{variant}'", self.installed.read_text())
+                self.assertIn("'previous-good'", slot.read_text())
+                self.assertEqual(json.loads((self.drafts / 'kept/draft.json').read_text())['text'], 'legacy draft')
+
+    def test_an_unknown_installed_kind_allows_an_on_disk_reinstall(self):
+        self.build('unverifiable', self.installed)
+        for variant in ('second', 'client-1'):
+            with self.subTest(variant=variant):
+                result = subprocess.run([sys.executable, str(UPDATER), '--check', str(self.build(variant)),
+                                         str(self.installed)], env=self.env, capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_an_on_disk_client_switch_needs_the_live_update(self):
         self.build('first', self.installed)

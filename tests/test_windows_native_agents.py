@@ -680,12 +680,15 @@ class NativeAgent:
         else:
             self.assertFalse(expected, expected)
         # The copy is in the new account's store and starts with the conversation's
-        # records: the resumed agent may append to it. The old account keeps its own
-        # file unchanged.
+        # records: the resumed agent may append to it. The old account's file is
+        # final only after its agent stops: it may grow past the snapshot taken
+        # before the switch (Claude appends its cost-state record while stopping),
+        # and the copy holds those final bytes.
         copy = next(folder.rglob(f"*{conversation}.jsonl"))
         copied = copy.read_bytes()
-        self.assertEqual(copied[:len(original)], original, "the copy does not start with the conversation")
-        self.assertEqual(transcript.read_bytes(), original, "the old account's file changed")
+        old_final = transcript.read_bytes()
+        self.assertTrue(old_final.startswith(original), "the old account's records were rewritten")
+        self.assertTrue(copied.startswith(old_final), "the copy does not hold the old file's final records")
         self.assertTrue(transcript.is_file())
         # The listing and the inspection both name the account.
         self.assertEqual((self.row(name)["account_id"], self.row(name)["account_label"]),
@@ -984,6 +987,35 @@ class NativeWindowsClaude(NativeAgent, host.HostCase):
 
     def test_a_switch_to_another_account_keeps_the_conversation_folder_and_name(self):
         self.check_switch_account("switch")
+
+    def test_a_team_swap_moves_the_lead_through_u53(self):
+        """U54: one owner action moves a team's lead to another account through the
+        same U53 switch, keeping its session, conversation and name."""
+        name = self.launch("swap")
+        self.deliver(name, MESSAGES[0])
+        conversation = self.ready(name)["conversation_id"]
+        self.second_account()
+        team = self.json("team", "create", input=json.dumps({
+            "request_id": str(uuid.uuid4()), "name": "Swap", "by": "human",
+            "lead": {"id": "lead", "role": "Lead", "agent": "claude",
+                     "session": {"name": name, "host": ""}}}))
+        receipt = self.json("team", "swap-member", input=json.dumps({
+            "request_id": str(uuid.uuid4()), "team": team["team"], "by": "human",
+            "from_account": "native-claude", "to_account": "second", "provider": "claude"}))
+        self.assertEqual(receipt["status"], "swapped", receipt)
+        self.assertEqual([entry["member"] for entry in receipt["members"]], ["lead"], receipt)
+        # The same session, conversation and name, now on the second account.
+        switched = self.record(name)
+        self.assertEqual((switched["name"], switched["conversation_id"], switched["account_id"]),
+                         (name, conversation, "second"))
+        # The roster reads the real account from the session.
+        status = self.json("team", "status", input=json.dumps({"team": team["team"], "by": "human"}))
+        lead = next(member for member in status["members"] if member["id"] == "lead")
+        self.assertEqual(lead["session_account"], "second", lead)
+        # The moved lead still answers in that conversation.
+        text = "After the team swap."
+        self.deliver(name, text)
+        self.assertEqual(self.accepted(name, text, conversation), 1, self.describe())
 
     def test_input_keys_reach_claude_through_the_host(self):
         self.check_keys(self.launch("keys"))

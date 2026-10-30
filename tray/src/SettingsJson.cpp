@@ -187,8 +187,9 @@ QObject *reparser()
 }
 
 // The GUI thread found nothing parsed: the last value, and a parse for the
-// reads after this one.
-QJsonDocument unprepared(const QString &key, const QJsonDocument &last, const char *file, int line)
+// reads after this one. Called with s_mutex held; "last" is a copy taken under
+// it, since the entry it came from may move once the mutex is released.
+QJsonDocument unprepared(const QString &key, QJsonDocument last, const char *file, int line)
 {
     const bool scheduled = s_reparsing.contains(key);
     s_reparsing.insert(key);

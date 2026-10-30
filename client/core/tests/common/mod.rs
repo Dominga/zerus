@@ -56,8 +56,9 @@ impl FakeHgs {
     }
 
     pub fn log(&self) -> Vec<Value> {
-        std::fs::read_to_string(self.dir.join("log.ndjson"))
-            .unwrap()
+        let log = std::fs::read_to_string(self.dir.join("log.ndjson")).unwrap();
+        let complete = log.rsplit_once('\n').map_or("", |(lines, _)| lines);
+        complete
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect()

@@ -44,6 +44,7 @@ def log(entry):
     entry["at"] = time.time()
     with open(os.path.join(HERE, "log.ndjson"), "a", encoding="utf-8") as handle:
         handle.write(json.dumps(entry) + "\n")
+        handle.flush()
 
 
 def previous_watches(host):

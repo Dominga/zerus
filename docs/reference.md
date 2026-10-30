@@ -5733,6 +5733,9 @@ run. A team setting `full_tests` says who may start one (`never`, `ask` or
 release; `hgs team run` refuses a full-suite template without that grant and
 names the estimate and the command that asks. `hgs team status` shows the
 policy and an active grant. Zerus computes a task's affected set from its own
-diff and accepts its report only with that set green on the merging commit. No
-test is dropped: a split keeps every test, counted before and after, and a new
-test that repeats an existing one becomes a case of a table test.
+diff and accepts its report only with that set green on the merging commit. Every
+test is weighed by real need, speed first (owner, 2026-10-31): a run earns
+its place only if it can fail for the change; lint and screenshots ride on the
+integration's and the test's own run. A split keeps every test, counted before
+and after; a repeat becomes a case of a table test, and a test that guards
+nothing is removed with the reason in the report.

@@ -649,6 +649,22 @@ pub(crate) struct MemberStuck {
     pub phase: String,
 }
 
+/// U62 (#717): one test result announced to the team: the record's id, its
+/// suite and status, who asked and when. The log and excerpt stay in the test
+/// database, read only when someone opens the record.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct TestNotice {
+    pub record: String,
+    pub suite: String,
+    pub status: String,
+    #[serde(default)]
+    pub duration_ms: u64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub asked_by: String,
+    #[serde(default)]
+    pub at: f64,
+}
+
 impl Member {
     /// A started DeepSeek member whose role chose a model or effort.
     pub(crate) fn needs_settings(&self) -> bool {
@@ -1722,6 +1738,14 @@ pub(crate) struct Team {
     /// release; the next full run uses it once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub full_tests_grant: Option<FullTestsGrant>,
+    /// U62 (#717): when the worker last read the machine's load for the test
+    /// queue; a read is at least 30 s after the one before.
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub test_load_at: f64,
+    /// U62 (#717): the newest test results, one card each; the logs stay in the
+    /// test database and this list is bounded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub test_notices: Vec<TestNotice>,
     /// U59: when the last integration-and-build close of a free phase passed;
     /// the desktop shows it with the free phase.
     #[serde(default, skip_serializing_if = "Option::is_none")]

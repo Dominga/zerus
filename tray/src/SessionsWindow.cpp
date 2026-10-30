@@ -46,6 +46,8 @@
 #include "TeamProposalCard.h"
 #include "TeamDesignerPage.h"
 #include "TeamWaitingPage.h"
+#include "ModelServersPage.h"
+#include "ModelServerSettings.h"
 #include "TeamWaitingBanner.h"
 #include "TeamNewTab.h"
 #include <memory>
@@ -359,7 +361,11 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     // U50: what waits for you across every team, beside the Team designer.
     m_teamWaitingNav = iconButton("inbox", tr("Waiting for you"), "railButton"); m_teamWaitingNav->setProperty("teamWaitingNav", true); m_teamWaitingNav->setCheckable(true);
     connect(m_teamWaitingNav, &QPushButton::clicked, this, [this] { showTeamWaiting(); });
-    for (auto *button : {m_sessionsNav, m_projectsNav, m_machinesNav, m_accountsNav, m_teamDesignerNav, m_teamWaitingNav}) { button->setFixedSize(42, 44); button->setIconSize(QSize(24, 24)); side->addWidget(button); }
+    // U60 (#656): Model servers, only while this computer has one.
+    m_modelServersNav = iconButton("server", tr("Model servers"), "railButton"); m_modelServersNav->setProperty("modelServersNav", true); m_modelServersNav->setCheckable(true);
+    connect(m_modelServersNav, &QPushButton::clicked, this, [this] { showModelServers(); });
+    for (auto *button : {m_sessionsNav, m_projectsNav, m_machinesNav, m_accountsNav, m_teamDesignerNav, m_teamWaitingNav, m_modelServersNav}) { button->setFixedSize(42, 44); button->setIconSize(QSize(24, 24)); side->addWidget(button); }
+    m_modelServersNav->hide();
     m_attentionBadge = new QLabel(m_sessionsNav); m_attentionBadge->setObjectName("railAttentionBadge");
     m_attentionBadge->setAlignment(Qt::AlignCenter); m_attentionBadge->setAttribute(Qt::WA_TransparentForMouseEvents);
     m_attentionBadge->setGeometry(24, 3, 17, 16); m_attentionBadge->hide();
@@ -2158,6 +2164,18 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     // U25: Prompt order shows the selected session's project rules.
     m_teamCatalog->projectRules=[this]{return teamProjectRules();};
     m_teamSettingsSection=m_settingsPage->addSection(tr("Teams"),m_teamCatalog);
+    // U60 (#656): this computer's model servers - the rail's tab while it has
+    // one, and their settings; the configuration stays with hgs.
+    m_modelServers=new ModelServers::Controller(&m_client,this);
+    m_modelServerSettings=new ModelServerSettings(m_modelServers);
+    m_modelServerSettings->machines=[this]{return m_fleet.peerNames();};
+    m_modelServerSettingsSection=m_settingsPage->addSection(tr("Model servers"),m_modelServerSettings);
+    connect(m_modelServers,&ModelServers::Controller::changed,this,[this]{
+        const bool any=m_modelServers->available();
+        if(m_modelServersNav->isHidden()==any)m_modelServersNav->setVisible(any);
+        if(!any&&m_modelServersPage&&m_pages->currentWidget()==m_modelServersPage)m_pages->setCurrentIndex(0);
+    });
+    m_modelServers->refreshList();
     connect(m_swarm,&SwarmController::snapshotChanged,this,[this](const QJsonObject &snapshot){m_settingsPage->setSwarmSnapshot(snapshot);});
     m_settingsPage->pollingChanged=[this]{
         const bool enabled=ProcessSettings::enabled();
@@ -2226,6 +2244,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         m_sessionsNav->setChecked(index==0); m_projectsNav->setChecked(index==1); m_machinesNav->setChecked(index==2); m_brand->setChecked(index==3); m_accountsNav->setChecked(index==4); m_settingsNav->setChecked(index==5);
         if (m_teamDesignerNav) m_teamDesignerNav->setChecked(index==m_teamDesignerPageIndex);
         if (m_teamWaitingNav) m_teamWaitingNav->setChecked(index==m_teamWaitingPageIndex);
+        if (m_modelServersNav) m_modelServersNav->setChecked(index==m_modelServersPageIndex);
         // WhiteWh fork: the catalog's Computer and Account dropdowns, fresh on each visit.
         if (index==5 && m_teamCatalog) m_teamCatalog->setSources(&m_client, teamComputers());
         if (index==m_teamDesignerPageIndex && m_teamDesignerPage) m_teamDesignerPage->editor()->setSources(&m_client, teamComputers());
@@ -2853,6 +2872,8 @@ void SessionsWindow::applyTheme()
     if (m_teamWorkspace) m_teamWorkspace->setTheme(m_dark);
     if (m_teamDesignerPage) m_teamDesignerPage->setDark(m_dark);
     if (m_teamWaitingPage) m_teamWaitingPage->setDark(m_dark);
+    if (m_modelServersPage) m_modelServersPage->setDark(m_dark);
+    if (m_modelServerSettings) m_modelServerSettings->setDark(m_dark);
     for (auto *banner : {m_waitingBanner, m_teamWaitingBanner}) if (banner) banner->setDark(m_dark);
     if (m_teamNewForm) m_teamNewForm->setDark(m_dark);
     m_processes->setTheme(m_dark);
@@ -7110,7 +7131,7 @@ void SessionsWindow::placeRailControls(bool inTitle)
     // the controls once the window is complete.
     if (inTitle == m_railInTitle || !m_railLayout || !m_statusLayout || !m_titleBar) return;
     m_railInTitle = inTitle;
-    const QList<QPushButton *> leading{m_railSessionsToggle, m_railNewSession, m_sessionsNav, m_projectsNav, m_machinesNav, m_accountsNav, m_teamDesignerNav, m_teamWaitingNav};
+    const QList<QPushButton *> leading{m_railSessionsToggle, m_railNewSession, m_sessionsNav, m_projectsNav, m_machinesNav, m_accountsNav, m_teamDesignerNav, m_teamWaitingNav, m_modelServersNav};
     const QList<QPushButton *> trailing{m_windowPin, m_settingsNav};
     QList<QPushButton *> all{m_brand}; all << leading << trailing;
     // Moving a widget hides it; each keeps whether it was shown.
@@ -7655,6 +7676,36 @@ void SessionsWindow::showTeamDesigner()
     m_teamDesignerPage->setContext(m_teamDesignerFolder,m_teamDesignerProject);
     m_pages->setCurrentWidget(m_teamDesignerPage);
     m_teamDesignerPage->refresh();
+}
+// U60 (#656): the Model servers tab, made on first use; it reads the servers
+// in the background only while it shows.
+void SessionsWindow::showModelServers()
+{
+    if(!m_modelServers)return;
+    if(!m_modelServersPage){
+        m_modelServersPage=new ModelServersPage(m_modelServers);m_modelServersPage->setDark(m_dark);
+        m_modelServersPage->machines=[this]{return m_fleet.peerNames();};
+        m_modelServersPage->folders=[this]{
+            // This computer's project folders, the selected session's first.
+            QStringList folders;
+            if(const auto *entry=selected();entry&&entry->host.isEmpty()&&!entry->session.cwd.isEmpty())folders<<entry->session.cwd;
+            for(const auto &group:m_organization.groups())for(const auto &folder:group.folders)
+                if(folder.machine==m_fleet.local().host&&!folders.contains(folder.path))folders<<folder.path;
+            return folders;
+        };
+        m_modelServersPage->editServers=[this](const QString &server){
+            m_pages->setCurrentIndex(5);m_settingsPage->openSection(m_modelServerSettingsSection);
+            if(server.isEmpty()&&m_modelServers->servers().isEmpty())m_modelServerSettings->addServer();else m_modelServerSettings->showServer(server);
+        };
+        m_modelServersPage->startSession=[this](const QString &agent,const QString &folder,const QString &tag,const QString &server,const QString &model){
+            const auto launch=QUuid::createUuid().toString(QUuid::WithoutBraces);
+            showNotice(tr("Starting %1 on %2…").arg(agent,server));
+            m_client.launchModelServerSession(agent,QDir::toNativeSeparators(folder),tag,server,model,launch);
+        };
+        m_modelServersPageIndex=m_pages->addWidget(m_modelServersPage);
+    }
+    m_pages->setCurrentWidget(m_modelServersPage);
+    m_modelServersNav->setChecked(true);
 }
 // U50: the waiting list of every team; a row opens its team's Team tab, a
 // draft phase unfolded.

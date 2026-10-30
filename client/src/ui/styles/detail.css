@@ -482,6 +482,7 @@
 .qcard-status.error { color: var(--z-color-danger); }
 .wrap-pre { white-space: pre-wrap; }
 .session-file-path { overflow-wrap: anywhere; }
+.session-file-hint { white-space: pre-wrap; overflow-wrap: anywhere; }
 .act-reply-q { color: var(--z-color-muted); font-size: 10px; margin-bottom: 3px; }
 .act-reply-a { border: 1px solid var(--z-color-border); background: var(--z-color-code-bg); padding: 10px; border-radius: var(--z-radius-md); margin-bottom: 10px; }
 .act-reply-a b { color: var(--z-color-accent); font-size: 10px; }

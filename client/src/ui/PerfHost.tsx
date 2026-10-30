@@ -983,6 +983,10 @@ export function PerfHost() {
       const { contentSearchSmoke } = await import("../perf/contentSearchSmoke");
       void contentSearchSmoke(!!config().actions_smoke);
     }
+    if (new URLSearchParams(location.search).has("file-reference-smoke") && inTauri()) {
+      const { fileReferenceSmoke } = await import("../perf/fileReferenceSmoke");
+      void fileReferenceSmoke(!!config().replay && !!config().actions_smoke);
+    }
     if (new URLSearchParams(location.search).has("markdown-smoke") && inTauri()) {
       const { markdownSmoke } = await import("../perf/markdownSmoke");
       void markdownSmoke(!!config().replay && !!config().actions_smoke);

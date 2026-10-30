@@ -1256,6 +1256,7 @@ jobs:
       HOMEBREW_NO_AUTO_UPDATE: 1
       CCACHE_MAXSIZE: 100M
       CMAKE_GENERATOR: Ninja
+      HGS_SKIP_QT_SCALE_ROWS: 1
       ZERUS_BUILD_JOBS: 3
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

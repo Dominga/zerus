@@ -32,8 +32,13 @@ class Desktop(unittest.TestCase):
         self.desktop = self.state / 'desktop'
         self.config = self.root / 'config'
         self.config.mkdir(mode=0o700)
+        private_tmp = self.root / 'tmp'
+        private_tmux = self.root / 'tmux'
+        private_tmp.mkdir(mode=0o700)
+        private_tmux.mkdir(mode=0o700)
         self.env = {k: v for k, v in os.environ.items() if not k.startswith('HGS_') and k not in ('TMUX', 'TMUX_PANE')}
         self.env.update(HOME=str(self.root), USERPROFILE=str(self.root),
+                        TMPDIR=str(private_tmp), TMUX_TMPDIR=str(private_tmux),
                         HGS_CONFIG_DIR=str(self.config), HGS_STATE_DIR=str(self.state),
                         HGS_SELF='example', HGS_PEERS='peer.example')
         if os.name != 'nt':

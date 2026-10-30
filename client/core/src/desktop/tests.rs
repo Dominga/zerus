@@ -145,6 +145,48 @@ mod sockets {
         task.join().unwrap();
         result
     }
+
+    #[test]
+    fn cached_producer_offer_is_one_use_over_the_authenticated_socket() {
+        use super::super::producer::{Challenge, Observation as Producer};
+        let root = Scratch::new();
+        let path = root.0.join("p");
+        let listener = UnixListener::bind(&path).unwrap();
+        let responder = responder();
+        responder.configure_once("a".repeat(64));
+        let expected = responder.hello(NONCE);
+        let offer = Challenge {
+            nonce: NONCE.into(),
+            service_epoch: EPOCH.into(),
+            producer_epoch: "33333333-3333-4333-8333-333333333333".into(),
+        };
+        let deadline = Instant::now() + producer::CHALLENGE_WAIT;
+        assert!(responder.install_challenge(offer.clone(), Instant::now()));
+        let task = thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                assert!(same_user(&stream));
+                stream.set_read_timeout(Some(PROBE_WAIT)).unwrap();
+                let mut line = Vec::new();
+                let mut byte = [0];
+                while stream.read(&mut byte).unwrap() == 1 && byte[0] != b'\n' {
+                    line.push(byte[0]);
+                    assert!(line.len() < 64);
+                }
+                stream.write_all(&responder.reply(&line).unwrap()).unwrap();
+            }
+        });
+        let Producer::LiveNext { reply } = probe_producer_at(&path, NONCE, &"a".repeat(64)) else {
+            panic!("missing exact reply")
+        };
+        assert!(reply.binds(&offer, &expected, deadline));
+        let Producer::LiveNext { reply } = probe_producer_at(&path, NONCE, &"a".repeat(64)) else {
+            panic!("missing diagnostic reply")
+        };
+        assert!(!reply.binds(&offer, &expected, deadline));
+        assert!(reply.challenge.is_none());
+        task.join().unwrap();
+    }
     #[test]
     fn valid_same_user_challenge_is_identity_evidence_only() {
         let mut bytes = serde_json::to_vec(&hello()).unwrap();

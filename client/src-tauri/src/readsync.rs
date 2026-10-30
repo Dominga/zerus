@@ -6,8 +6,8 @@
 //!
 //! Each call claims its session's read lane; a session whose read lane is busy
 //! is left for the next wake. Writes and interrupts keep their own lanes: a
-//! read never blocks a write, and Stop never waits for one. A delivery shows no
-//! notice, as in Qt (`markFinished` has no visible receiver). Each wake first
+//! read never blocks a write, and Stop never waits for one. Individual deliveries
+//! show no notice; saturation of all four retained slots warns once. Each wake first
 //! writes the marks `queue_read_marks` added, so a mark is saved before any
 //! call while the command itself does no file I/O. Marks are settled by
 //! `Actions::observe`.
@@ -25,6 +25,7 @@ use zerus_client_core::readsync::{applied_all, ReadSync};
 use zerus_client_core::{default_hgs, Action, Exit, Invocation, Outcome, Target};
 
 use crate::actions::{Actions, Claim, Lane};
+mod slots;
 
 /// Qt's `m_timer` interval.
 pub const INTERVAL: Duration = Duration::from_secs(5);
@@ -54,7 +55,7 @@ impl Wake {
 }
 
 /// Runs one invocation (in the app: `run` with `default_hgs()`).
-type Runner = Arc<dyn Fn(&Invocation, Charge, &AtomicBool) -> Exit + Send + Sync>;
+type Runner = Arc<dyn Fn(&Invocation, Arc<slots::Resource>, &AtomicBool) -> Exit + Send + Sync>;
 /// Milliseconds on a monotonic clock.
 type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
 
@@ -68,6 +69,7 @@ struct Worker {
     deliver: bool,
     gate: Gate,
     cancel: Arc<AtomicBool>,
+    slots: slots::Pool,
 }
 
 /// The future frontend handoff controller can stop this loop without blocking
@@ -79,12 +81,14 @@ pub struct ReadDelivery {
     gate: Gate,
     cancel: Arc<AtomicBool>,
     wake: Wake,
+    slots: slots::Pool,
 }
 
 impl ReadDelivery {
     pub fn stop(&self) -> Closed {
         let closed = self.gate.close();
         self.cancel.store(true, Ordering::Release);
+        self.slots.stop();
         self.wake.notify();
         closed
     }
@@ -102,6 +106,7 @@ impl Worker {
             // pipes retain capacity even after ReadSync receives an outcome.
             gate: Gate::new(5).expect("fixed read delivery capacity"),
             cancel: Arc::new(AtomicBool::new(false)),
+            slots: slots::Pool::new(Arc::new(|_, _| {})),
         }
     }
 
@@ -110,6 +115,7 @@ impl Worker {
             gate: self.gate.clone(),
             cancel: self.cancel.clone(),
             wake: self.actions.wake.clone(),
+            slots: self.slots.clone(),
         }
     }
 
@@ -137,6 +143,10 @@ impl Worker {
                 lock(&self.sync).not_sent(&mark);
                 continue;
             };
+            let Some(resource) = self.slots.take(charge) else {
+                lock(&self.sync).not_sent(&mark);
+                continue;
+            };
             let Some(claim) = self
                 .actions
                 .claim_lane(&mark.computer, &mark.name, Lane::Read)
@@ -148,7 +158,7 @@ impl Worker {
             let sent = mark.clone();
             let spawned = std::thread::Builder::new()
                 .name("zerus-read-mark".into())
-                .spawn(move || worker.deliver(&sent, claim, charge));
+                .spawn(move || worker.deliver(&sent, claim, resource));
             match spawned {
                 Ok(thread) => threads.push(thread),
                 // The claim went with the closure.
@@ -160,8 +170,7 @@ impl Worker {
 
     /// Runs `hgs [@host] read` for the mark and reports how it ended. An
     /// unset part is sent as null, which hosts never apply (`ReadMark::payload`).
-    fn deliver(&self, mark: &ReadMark, claim: Claim, charge: Charge) {
-        let _callback = charge.clone();
+    fn deliver(&self, mark: &ReadMark, claim: Claim, resource: Arc<slots::Resource>) {
         let target = Target {
             computer: mark.computer.clone(),
             name: mark.name.clone(),
@@ -181,7 +190,7 @@ impl Worker {
                     &target,
                     &action,
                     &inv,
-                    (self.run)(&inv, charge, &self.cancel),
+                    (self.run)(&inv, resource.clone(), &self.cancel),
                 )
             })
         }));
@@ -191,7 +200,15 @@ impl Worker {
             _ => (false, false),
         };
         lock(&self.sync).finished(mark, delivered, all, (self.clock)());
-        // Qt pumps after each answer: the freed slot goes to the next mark.
+        if self.slots.finished(&resource) {
+            eprintln!(
+                "zerus-client: resource pinned role=read_delivery slot={}",
+                resource.slot
+            );
+        }
+        drop(resource);
+        // Publish callback completion before waking the next ordinary delivery.
+        // Retained I/O still owns its original slot and charge.
         self.actions.wake.notify();
     }
 
@@ -232,7 +249,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// Starts the worker for the app's marks. In replay mode without an explicit
 /// `ZERUS_CLIENT_HGS` it only saves queued marks and sends nothing, so a
 /// replay never drives the real CLI.
-pub fn start(actions: Actions) -> ReadDelivery {
+pub fn start(actions: Actions, observe: slots::Observe) -> ReadDelivery {
     let deliver = !crate::actions::blocked();
     let started = Instant::now();
     let run: Runner = Arc::new(|inv: &Invocation, charge, cancel| {
@@ -242,7 +259,7 @@ pub fn start(actions: Actions) -> ReadDelivery {
             &[],
             1 << 20,
             cancel,
-            Arc::new(charge),
+            charge,
         ) {
             Ok(exit) => exit,
             Err(_) => Exit::Abnormal {
@@ -252,7 +269,8 @@ pub fn start(actions: Actions) -> ReadDelivery {
     });
     let clock: Clock =
         Arc::new(move || i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX));
-    let worker = Worker::new(actions, run, clock, deliver);
+    let mut worker = Worker::new(actions, run, clock, deliver);
+    worker.slots = slots::Pool::new(observe);
     worker.start()
 }
 

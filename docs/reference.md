@@ -1032,6 +1032,22 @@ minutes; `settings`), else five minutes (`default`). Keep cache warm extends it:
 each keepalive turn is a native event, and `kept_warm` says the last turn only
 warmed the cache. These fields are additive; older fields keep their meaning.
 
+A team's builds may share one build cache (U62): the project file
+`.zerus/tests.toml` turns it on with `[build_cache]`, `enabled = true`
+(off when absent), `size` (each tool's bound, `20G` by default, K/M/G/T),
+`compilers` (`["rust", "cxx"]` by default) and `dir` (an absolute folder;
+by default `build-cache` in Zerus state, so every worktree and team on the
+computer shares it). The owner's `build_cache` object in the team templates
+file (Settings > Teams) overrides any of these keys. With it on, the
+`cargo-build`, `cargo-test` and `cargo-clippy` templates run rustc through
+`sccache` (`RUSTC_WRAPPER`, `SCCACHE_DIR`, `SCCACHE_CACHE_SIZE`, and a server
+of the run's own on a free port that ends with the run), and `qt-configure`
+sets `ccache` as the C and C++ compiler launcher with `CCACHE_DIR`,
+`CCACHE_MAXSIZE` and `CCACHE_BASEDIR` (the member's folder, so worktrees hit
+each other's entries); `qt-build` sets the launcher first in a build folder
+configured without it. A tool not found on `PATH` (or in cargo's bin folder)
+is named at the start of the run's output and the run builds without it.
+
 Start builds and long tests through Zerus so they show as work:
 `hgs team run` for a team member's templates (`hgs guide team-run`), and
 `hgs run --json [--wait]` with `{request_id, label, command, cwd?,

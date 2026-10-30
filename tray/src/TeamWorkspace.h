@@ -17,6 +17,7 @@ class QSplitter;
 class QVBoxLayout;
 class TeamController;
 class TeamConversation;
+namespace TeamProfile { class Cache; }
 class TeamPanel;
 class TeamTaskCard;
 namespace TeamUi { class TaskView; struct Heat; }
@@ -189,6 +190,8 @@ private:
     const Teams::Team *planTeam(const QString &id);
     QWidget *toolbar(const Teams::Team &team);
     QWidget *canvas(const Teams::Team &team);
+    // U38 (#665): Profile beside Graph, Board and Layers.
+    QWidget *profileView(const Teams::Team &team);
     void linkDraft(const Teams::Team &team, int dependency, int task, bool add);
     QWidget *board(const Teams::Team &team);
     // U25 (spec 5.3, 5.5): every phase a collapsible scroll in Graph, Board and
@@ -305,6 +308,8 @@ private:
     QWidget *m_coordinator, *m_coordinatorHead;
     TeamConversation *m_conversation;
     class TeamProposalCards *m_proposalCards = nullptr;
+    TeamProfile::Cache *m_profileCache = nullptr;
+    QPointer<class TeamProfileView> m_profileView;
     QLabel *m_empty;
     TeamTaskCard *m_drawer;
     QPointer<QFrame> m_popover;

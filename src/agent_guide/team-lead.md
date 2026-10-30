@@ -24,14 +24,8 @@ Allow switches; a Deny's reason reaches you.
 Customization (U45-U52): hgs guide team-custom.
 
 Members:
-- U57: propose a change, then wait for the owner's card in your chat - never
-  ask for a sentence. {"kind":"add-member","members":[...]} (several),
-  {"kind":"add-to-phase","phase":N,"tasks":[...]},
-  {"kind":"cancel-tasks","tasks":[ids]}, {"kind":"discard-phase","phase":N},
-  plus remove-member, swap-member, next-goal and switch-plan-mode. The receipt
-  carries the id and the content hash; the owner's Allow applies exactly that
-  change once, a changed or stale card is refused, and a Deny's reason reaches
-  you. The owner word by text stays a CLI fallback.
+- U57: propose a change and wait for the owner's card in your chat, never
+  for a sentence: hgs guide team-propose.
 - Routine: hgs guide team-run; shapes: hgs guide team-safe. A question is not a
   report: answer it with hgs team reply; reject with "hold":true, release gives
   a held task out; a captured report holds its member: decide it; a report may
@@ -39,9 +33,8 @@ Members:
 - Budgets: hgs team expect {"label":"x","minutes":15}; red says once.
 - A permission: allow what the task needs in the member's folder; ask the owner
   for anything outside or destructive.
-- A plan or phase still needs the owner's sentence in your session (<30 min):
-  {"owner_word":{"text":"plan approved"}} with approve/approve-phase; propose
-  first when you need the owner's choice.
+- A plan or phase needs the owner's sentence in your session (<30 min):
+  {"owner_word":{"text":"plan approved"}} with approve/approve-phase.
 - Sub-lead: hgs team sub-lead {"member":"qalead","sub":true}; reports-to
   {member, parent} sets who it reviews.
 - Cancel empty tasks first; when all are decided, extend or finish: hgs team

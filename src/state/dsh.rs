@@ -15,7 +15,18 @@ use std::{
 };
 
 #[cfg(unix)]
-const VERSION: &str = "0.2.1-rc.2";
+// Resident bridge identity is independent of the installed harness release.
+const ADAPTER_VERSION: &str = "0.2.1-rc.2";
+#[cfg(unix)]
+const REVIEWED_VERSIONS: &[&str] = &["0.2.1-rc.2", "0.2.1-rc.5"];
+#[cfg(unix)]
+fn reviewed_harness_version(version: &str) -> bool {
+    REVIEWED_VERSIONS.contains(&version)
+}
+#[cfg(unix)]
+fn compatible_adapter(ping: &Value) -> bool {
+    ping["version"] == ADAPTER_VERSION && ping["protocol"] == 1
+}
 #[cfg(unix)]
 const BRIDGE: &str = include_str!("../dsh/bridge.mjs");
 fn bindings() -> PathBuf {
@@ -129,7 +140,7 @@ fn ensure_host(record: &Value) -> Result<()> {
     private_dir(&dir)?;
     let _guard = lock(Some(&dir.join("start.lock")))?;
     if let Ok(ping) = rpc(record, "ping", json!({})) {
-        if ping["version"] == VERSION && ping["protocol"] == 1 {
+        if compatible_adapter(&ping) {
             return Ok(());
         }
         return Err("The running DeepSeek host uses an incompatible adapter; close its sessions before upgrading".into());
@@ -139,12 +150,15 @@ fn ensure_host(record: &Value) -> Result<()> {
         Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused) => {},
         Err(e) => return Err(format!("Cannot check the native host: {e}")),
     }
+    let recommended = REVIEWED_VERSIONS.last().expect("reviewed harness version");
     let version = Command::new("dsh").arg("--version").output().map_err(|_| {
-        format!("Install the official harness: npm install -g @deepseek-ai/dsh@{VERSION}")
+        format!("Install the official harness: npm install -g @deepseek-ai/dsh@{recommended}")
     })?;
-    if !version.status.success() || String::from_utf8_lossy(&version.stdout).trim() != VERSION {
+    if !version.status.success()
+        || !reviewed_harness_version(String::from_utf8_lossy(&version.stdout).trim())
+    {
         return Err(format!(
-            "This adapter requires official @deepseek-ai/dsh@{VERSION}; installed version differs"
+            "This adapter requires official @deepseek-ai/dsh@{recommended}; installed version differs"
         ));
     }
     let script = dir.join("hgs-bridge.mjs");
@@ -1716,5 +1730,29 @@ mod notification_tests {
         assert!(notification_snapshot_with(&record, |method, _| Ok(if method == "inspect" { json!({"generation":"host","pendingQuestions":[{}]}) } else { json!({"generation":"host"}) })).is_err());
         assert!(notification_snapshot_with(&record, |method, _| Ok(if method == "inspect" { json!({"generation":"old","pendingQuestions":[]}) } else { json!({"generation":"new"}) })).is_err());
         assert!(notification_snapshot_with(&record, |_, _| Ok(json!({"generation":"host"}))).is_err());
+    }
+}
+
+#[cfg(all(test, unix))]
+mod compatibility_tests {
+    use super::*;
+
+    #[test]
+    fn startup_accepts_only_the_explicitly_reviewed_harness_releases() {
+        assert!(reviewed_harness_version("0.2.1-rc.2"));
+        assert!(reviewed_harness_version("0.2.1-rc.5"));
+        for unknown in ["0.2.1-rc.1", "0.2.1-rc.3", "0.2.1-rc.4", "0.2.1-rc.6",
+            "0.2.1-rc.50", "0.2.1", "0.3.0", "0.2.1-rc.5+unreviewed", "0.2.1-rc.5\nother"] {
+            assert!(!reviewed_harness_version(unknown), "{unknown}");
+        }
+    }
+
+    #[test]
+    fn reviewed_engine_versions_do_not_change_the_resident_adapter_identity() {
+        assert!(compatible_adapter(&json!({"protocol":1,"version":"0.2.1-rc.2"})));
+        for ping in [json!({"protocol":1,"version":"0.2.1-rc.5"}),
+            json!({"protocol":2,"version":"0.2.1-rc.2"}), json!({"protocol":1})] {
+            assert!(!compatible_adapter(&ping));
+        }
     }
 }

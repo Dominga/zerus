@@ -1,19 +1,34 @@
 #!/usr/bin/env python3
 """Run the Phase 4 Part A smoke against a fresh synthetic scratch directory."""
 import argparse
+from array import array
 import base64
 import copy
+import io
 import json
+import math
 import os
 from pathlib import Path
 import shutil
 import signal
 import subprocess
 import sys
+import wave
 
 
 CLIENT = Path(__file__).resolve().parent.parent
 PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+
+
+def tone_wav():
+    pcm = array("h", (int(1000 * math.sin(2 * math.pi * 440 * index / 8000)) for index in range(8000)))
+    output = io.BytesIO()
+    with wave.open(output, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(8000)
+        wav.writeframes(pcm.tobytes())
+    return output.getvalue()
 
 
 def fixture_config(replay_path):
@@ -129,13 +144,16 @@ def main():
                        for event in frame["events"]]
     media = {"seq": max(event["seq"] for event in activity_events) + 1, "type": "UserPromptSubmit", "source": "hgs_voice",
              "message_id": "m-media-smoke", "voice": {"id": "m-media-smoke", "state": "submitted",
-             "audio": {"duration_ms": 60000, "waveform": [128] * 64}, "transcript": "media smoke transcript"},
+             "audio": {"duration_ms": 60000, "waveform": [128] * 64, "request_id": "req-media-smoke", "index": 0}, "transcript": "media smoke transcript"},
              "at": max(event.get("at", 0) for event in activity_events) + 1}
     frames.append({"v": 1, "seq": max(frame["seq"] for frame in frames) + 1,
                    "t": "events", "topic": "activity", "key": "run:000001-run", "events": [media], "cursor": media["seq"]})
     replay = scratch / "replay.ndjson"
     replay.write_text("".join(json.dumps(frame, separators=(",", ":")) + "\n" for frame in frames), encoding="utf-8")
-    (scratch / "config.json").write_text(json.dumps(fixture_config(replay), separators=(",", ":")), encoding="utf-8")
+    config = fixture_config(replay)
+    config["attachments"]["req-media-smoke"] = {"name": "media-smoke.wav", "mime": "audio/wav",
+                                                "data_base64": base64.b64encode(tone_wav()).decode("ascii")}
+    (scratch / "config.json").write_text(json.dumps(config, separators=(",", ":")), encoding="utf-8")
     smoke_file = scratch / "smoke-notes.txt"
     smoke_file.write_text('{"orders":[1,2,3]}\n', encoding="utf-8")
 

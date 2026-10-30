@@ -295,6 +295,8 @@ struct Task {
     QList<Attempt> attempts;   // oldest first
     bool held = false;         // A5: the lead holds the task
     Hold hold;
+    // U59: the free phase's integration-and-build task, a lead task like any.
+    bool phaseBuild = false;
     // C3: why the task waits and what unblocks it.
     struct Wait { QString for_, unblock; QStringList on; bool known = false; };
     Wait wait;
@@ -478,6 +480,23 @@ struct Team {
     // U25: the owner's auto-accept of error-free phase drafts (settings.auto_accept),
     // and the open tasks of running phases, the only ones that make a team Stuck.
     bool autoAccept = false;
+    // U59: how the team plans, "standard" or "free" (known only when hgs sent
+    // it); the lead's proposal while it plans, and the open free phase.
+    QString planMode;
+    bool planModeKnown = false;
+    QString planModeOffer, planModeReason;
+    struct FreePhase {
+        bool known = false;
+        int phase = 0;
+        QString state;          // open (tasks run) or idle
+        QList<int> running;
+        int accepted = 0, acceptedSince = 0;
+        double lastBuildAt = 0;
+        int closePending = 0;   // the phase a close waits for, 0 when none
+        bool idle() const { return state == QLatin1String("idle"); }
+    };
+    FreePhase freePhase;
+    bool freeMode() const { return planMode == QLatin1String("free"); }
     // U31: idle members may take independent tasks of the next draft phase.
     bool workAhead = false;
     QList<int> stuckScope;
@@ -489,8 +508,10 @@ struct Team {
     QList<Intake> intakes;
     // F8: the lead's membership proposals, decided by the owner. `member` is
     // the proposed member (add), its id (remove) or the swap fields (swap).
+    // U59: a switch-plan-mode proposal names its mode and the content hash the
+    // owner's answer is bound to.
     struct Proposal {
-        QString id, kind, by, state, reason, goal, note;
+        QString id, kind, by, state, reason, goal, note, mode, hash;
         double at = 0;
         QJsonValue member;
         bool open() const { return state == QLatin1String("open"); }

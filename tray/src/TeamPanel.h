@@ -66,6 +66,11 @@ public:
     // always asks, names the member sessions it starts, and a permission
     // widening needs its own confirmation (B5).
     void approvePlan(const Teams::Team &team);
+    // U59: the plan mode the owner chose for a plan under review ("" when not
+    // chosen: the approval sends none and the team plans standard). Kept per
+    // team for the session; a pick that equals the default is still sent.
+    QString planModeChoice(const QString &team) const { return m_planModes.value(team); }
+    void choosePlanMode(const QString &team, const QString &mode);
     // A confirmation runs its own event loop: while it is open the team views
     // do not rebuild, or the widget that asked would be deleted under it.
     bool confirming() const { return m_confirming > 0; }
@@ -131,6 +136,7 @@ private:
     double m_zoom = 1.0;
     // team id -> phase -> open; at most a handful of teams, oldest dropped.
     QHash<QString, QHash<int, bool>> m_phaseOpen;
+    QHash<QString, QString> m_planModes;
     QStringList m_phaseOrder;
     QPointer<QWidget> m_finishDialog;
     QScrollArea *m_scroll;

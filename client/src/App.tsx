@@ -14,9 +14,13 @@ import { AccountsScreen } from "./ui/screens/Accounts";
 import { ProjectsScreen } from "./ui/screens/Projects";
 import { applySkin, skin } from "./skin/runtime";
 import { catalog } from "./store/catalog";
-import { contentScale, page, setContentScale, setPage, toast } from "./store/ui";
+import { contentScale, page, selectedKey, setContentScale, setPage, toast } from "./store/ui";
 import { num, setSetting } from "./store/settings";
 import { installShortcutRouter, onCommand } from "./store/shortcuts";
+import { openGoTo, openShortcutHelp } from "./store/goTo";
+import { rememberRecentSession } from "./ui/sessions/goTo";
+import { GoToDialog } from "./ui/sessions/GoToDialog";
+import { ShortcutHelpDialog } from "./ui/sessions/ShortcutHelpDialog";
 import { updateCommands, updates } from "./store/updates";
 import { openUpdates } from "./store/desk";
 import { ZerusLogo } from "./ui/components/ZerusLogo";
@@ -85,6 +89,7 @@ function zoom(scale: number) {
 export function App(props: { mode: () => BridgeMode | "starting" }) {
   createEffect(() => applySkin(skin()));
   createEffect(() => setContentScale(num("workspace/contentScale")));
+  createEffect(() => rememberRecentSession(selectedKey()));
   // Window commands through the shortcut router (store/shortcuts.ts), with the
   // chords of Settings > Keyboard.
   const zoomBy = (step: number) => {
@@ -98,6 +103,8 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
     ["go.machines", () => setPage("machines")],
     ["go.accounts", () => setPage("accounts")],
     ["go.settings", () => setPage("settings")],
+    ["go.anywhere", openGoTo],
+    ["help.shortcuts", openShortcutHelp],
     // session.new (Shortcuts.cpp:29, 58): New session from every page.
     ["session.new", newSessionFromShortcut],
     ["zoom.in", () => zoomBy(0.1)],
@@ -130,6 +137,8 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
       <MenuLayer />
       <Toasts />
       <ActionDialogs />
+      <GoToDialog />
+      <ShortcutHelpDialog />
       <Show when={newSessionOpened()}><Suspense><NewSessionDialog /></Suspense></Show>
       <OrganizationDialogs />
       <ActionNotices />

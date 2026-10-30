@@ -166,6 +166,28 @@ resource visibility and always has `authority:false`; it is not the service's
 read queue, a complete role drain or a takeover permit. An orphan remains
 charged until its actual holders exit, or until that GUI process is restarted.
 
+The existing `ReadMarks` store now has an explicit `checkpoint()` prerequisite,
+without a production caller. Call it off-thread under the store mutex, only
+after all mark-writer admissions and their callbacks have actually drained.
+Its caller must retain the role charge across blocked filesystem I/O; a timed
+out wait cannot turn it into a successful barrier. Normal GUI APIs retain their
+existing format and behavior. The checkpoint separately remembers failed saves,
+refuses an unreliable initial load or changed source bytes, and enforces the
+same 16 MiB/50,000-entry bounds as G3, including original rows before duplicate
+key coalescing. Serialization streams the ordered entries into a bounded buffer
+without collecting another reference list.
+
+Unchanged source bytes and unknown fields are synced without rewriting. Pending
+in-memory changes use the existing private atomic writer, followed by file and
+parent-directory sync. Linked, public, foreign or symlinked leaves refuse. A
+directory-sync error can follow a completed rename and still returns failure;
+neither the file's presence nor a successful legacy flush proves durability.
+The returned hash/length/count is source metadata only, never a complete role
+drain or capture context. Native Windows checkpoint durability is unqualified
+and refuses before checkpoint I/O. Full ReadDelivery still needs every Actions
+mark writer, direct MarkRead call, ordered callbacks and its admission closure;
+the new method does not close or activate anything itself.
+
 ## Fresh capture and publication boundary
 
 G1 supplies G3 an opaque, non-serializing capture context only after the exact

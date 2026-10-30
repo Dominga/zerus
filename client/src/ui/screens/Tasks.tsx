@@ -1,6 +1,6 @@
 import { For, Show, createEffect, createMemo, createSignal, on, onCleanup } from "solid-js";
 import { Icon } from "../lib/icons";
-import { Body } from "../sessions/Activity";
+import { TaskInspector } from "./TaskInspector";
 import { statusOf } from "../sessions/SessionCard";
 import { catalog, orderedRows } from "../../store/catalog";
 import { groupOf, grouping, INBOX } from "../../store/organization";
@@ -108,15 +108,8 @@ export function TasksScreen() {
           </div>
         </div>
         <aside class="tasks-detail" aria-label="Task details">
-          <Show when={chosen()} fallback={<p class="tasks-empty">{selected() ? "This task is no longer listed." : "Select a task to see its details."}</p>}>{(t) => <>
-            <div class="tasks-detail-head"><span class="mono">{t().id}</span><span>{STAGE_LABEL[t().stage as Stage] ?? t().stage}</span><span class="grow" />
-              <button class="btn small" disabled={!find()(executorRef(t()))} onClick={() => openExecutor(t())}>Open executor</button></div>
-            <h2>{t().title || "Untitled task"}</h2>
-            <p class="muted">{t().stage === "todo" || t().stage === "backlog" ? "Planned" : t().stage === "active" ? "Executor" : "Last executor"}: {assignmentLabel(t())}</p>
-            <Show when={t().summary || t().cancelReason}><article class="tasks-document"><h3>{t().cancelledAt ? "Cancelled" : "Result"}</h3><Body text={t().cancelReason || t().summary} /></article></Show>
-            <article class="tasks-document"><h3>Description</h3><Body text={t().text || "No description yet."} /></article>
-            <Show when={t().attachments}><p class="muted">Attachments: {t().attachments}</p></Show>
-          </>}</Show>
+          <Show when={chosen()} fallback={<p class="tasks-empty">{selected() ? "This task is no longer listed." : "Select a task to see its details."}</p>}>{(t) => <TaskInspector project={project()!.id} task={tasks.tasks().find((row) => row.uuid === t().uuid)!}
+            presentation={t()} executorAvailable={!!find()(executorRef(t()))} openExecutor={() => openExecutor(t())} />}</Show>
         </aside>
       </div>
     </Show>

@@ -57,6 +57,7 @@ pub mod state;
 pub mod stream;
 pub mod swarm;
 pub mod task_view;
+pub mod task_details;
 pub mod tasks;
 pub mod tasks_write;
 pub mod terminal;

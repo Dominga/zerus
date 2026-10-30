@@ -959,12 +959,12 @@ pub(crate) fn execute_as(plan: &Plan, folder: &Path, timeout: Duration, env: &[(
     let before = isolated.as_ref().map(super::isolation::Run::fingerprint);
     let mut outcome = run_tree(&mut command, timeout.saturating_sub(started.elapsed()).max(Duration::from_secs(1)), stdin);
     outcome.ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-    if let (Some(run), Some(before)) = (&isolated, before) {
-        checked(&mut outcome, run, &before, folder);
-    }
     if !cache.note.is_empty() {
         outcome.tail = last_chars(&format!("{}
 {}", cache.note, outcome.tail), TAIL_BYTES);
+    }
+    if let (Some(run), Some(before)) = (&isolated, before) {
+        checked(&mut outcome, run, &before, folder);
     }
     outcome
 }
@@ -1458,6 +1458,52 @@ mod tests {
         settings_override(None);
     }
 
+    #[test]
+    fn a_run_that_fails_records_the_failing_test_names() {
+        // #717: the record of a failed run carries what failed, not just the tail.
+        let mut command = if cfg!(windows) {
+            let mut command = std::process::Command::new("cmd");
+            command.args(["/D", "/S", "/C", "echo FAIL!  : SlowEventLog::a_case() & exit /b 1"]);
+            command
+        } else {
+            let mut command = std::process::Command::new("sh");
+            command.args(["-c", "echo 'FAIL!  : SlowEventLog::a_case()'; exit 1"]);
+            command
+        };
+        let outcome = run_tree(&mut command, Duration::from_secs(30), None);
+        assert_eq!(outcome.exit, Some(1), "{outcome:?}");
+        assert_eq!(outcome.failures, ["SlowEventLog::a_case()"], "{outcome:?}");
+        assert!(outcome.excerpt.contains("FAIL!  : SlowEventLog::a_case()"), "{outcome:?}");
+    }
+
+    #[test]
+    fn a_failed_run_names_its_tests_and_keeps_the_context_around_them() {
+        // #717: Qt, cargo, pytest and CTest failure lines name the tests.
+        let qt = "********* Start testing of SlowEventLog *********\nPASS   : SlowEventLog::initTestCase()\nFAIL!  : SlowEventLog::a_slow_case() Compared values are not the same\n   Actual (1): 1\n   Expected (2): 2\nFAIL!  : SlowEventLog::b_case() timeout\nTotals: 2 failed\n";
+        let (names, excerpt) = failures_in(qt);
+        assert_eq!(names, ["SlowEventLog::a_slow_case()", "SlowEventLog::b_case()"]);
+        assert!(excerpt.contains("FAIL!  : SlowEventLog::a_slow_case()") && excerpt.contains("Expected (2): 2"), "{excerpt}");
+        assert!(excerpt.chars().count() <= FAILURE_EXCERPT_BYTES);
+        let (names, _) = failures_in("test teams::mod::a_case ... FAILED\ntest teams::mod::b_case ... ok\n");
+        assert_eq!(names, ["teams::mod::a_case"]);
+        let (names, _) = failures_in("FAILED tests/test_api.py::test_page - assert 1 == 2\n");
+        assert_eq!(names, ["tests/test_api.py::test_page"]);
+        let (names, _) = failures_in("The following tests FAILED:\n\t12 - test_sloweventlog (Failed)\n");
+        assert_eq!(names, ["test_sloweventlog"]);
+        assert_eq!(failures_in("all good\n"), (Vec::new(), String::new()));
+    }
+
+    #[test]
+    fn a_suite_bound_follows_its_recorded_duration_within_the_configured_limits() {
+        // #717: no record keeps the template's own bound; a record scales with
+        // the configured factor, grace, floor and ceiling.
+        assert_eq!(recorded_bound(1800, None, 2, 60, 60, 7200), 1800);
+        assert_eq!(recorded_bound(1800, Some(0), 2, 60, 60, 7200), 1800);
+        assert_eq!(recorded_bound(1800, Some(300_000), 2, 60, 60, 7200), 660);
+        assert_eq!(recorded_bound(1800, Some(10_000), 2, 60, 120, 7200), 120, "the floor");
+        assert_eq!(recorded_bound(1800, Some(3_600_000), 2, 60, 60, 7200), 7200, "the ceiling");
+    }
+
     fn env_of(used: &CacheUse, key: &str) -> Option<String> {
         used.env.iter().find(|(name, _)| name == key).map(|(_, value)| value.clone())
     }
@@ -1608,51 +1654,5 @@ mod tests {
         assert_eq!(configured_launcher(dir.path()).as_deref(), Some(""));
         std::fs::write(gui.join("CMakeCache.txt"), "CMAKE_CXX_COMPILER_LAUNCHER:STRING=C:/tools/ccache.exe\n").unwrap();
         assert_eq!(configured_launcher(dir.path()).as_deref(), Some("C:/tools/ccache.exe"));
-    }
-
-    #[test]
-    fn a_run_that_fails_records_the_failing_test_names() {
-        // #717: the record of a failed run carries what failed, not just the tail.
-        let mut command = if cfg!(windows) {
-            let mut command = std::process::Command::new("cmd");
-            command.args(["/D", "/S", "/C", "echo FAIL!  : SlowEventLog::a_case() & exit /b 1"]);
-            command
-        } else {
-            let mut command = std::process::Command::new("sh");
-            command.args(["-c", "echo 'FAIL!  : SlowEventLog::a_case()'; exit 1"]);
-            command
-        };
-        let outcome = run_tree(&mut command, Duration::from_secs(30), None);
-        assert_eq!(outcome.exit, Some(1), "{outcome:?}");
-        assert_eq!(outcome.failures, ["SlowEventLog::a_case()"], "{outcome:?}");
-        assert!(outcome.excerpt.contains("FAIL!  : SlowEventLog::a_case()"), "{outcome:?}");
-    }
-
-    #[test]
-    fn a_failed_run_names_its_tests_and_keeps_the_context_around_them() {
-        // #717: Qt, cargo, pytest and CTest failure lines name the tests.
-        let qt = "********* Start testing of SlowEventLog *********\nPASS   : SlowEventLog::initTestCase()\nFAIL!  : SlowEventLog::a_slow_case() Compared values are not the same\n   Actual (1): 1\n   Expected (2): 2\nFAIL!  : SlowEventLog::b_case() timeout\nTotals: 2 failed\n";
-        let (names, excerpt) = failures_in(qt);
-        assert_eq!(names, ["SlowEventLog::a_slow_case()", "SlowEventLog::b_case()"]);
-        assert!(excerpt.contains("FAIL!  : SlowEventLog::a_slow_case()") && excerpt.contains("Expected (2): 2"), "{excerpt}");
-        assert!(excerpt.chars().count() <= FAILURE_EXCERPT_BYTES);
-        let (names, _) = failures_in("test teams::mod::a_case ... FAILED\ntest teams::mod::b_case ... ok\n");
-        assert_eq!(names, ["teams::mod::a_case"]);
-        let (names, _) = failures_in("FAILED tests/test_api.py::test_page - assert 1 == 2\n");
-        assert_eq!(names, ["tests/test_api.py::test_page"]);
-        let (names, _) = failures_in("The following tests FAILED:\n\t12 - test_sloweventlog (Failed)\n");
-        assert_eq!(names, ["test_sloweventlog"]);
-        assert_eq!(failures_in("all good\n"), (Vec::new(), String::new()));
-    }
-
-    #[test]
-    fn a_suite_bound_follows_its_recorded_duration_within_the_configured_limits() {
-        // #717: no record keeps the template's own bound; a record scales with
-        // the configured factor, grace, floor and ceiling.
-        assert_eq!(recorded_bound(1800, None, 2, 60, 60, 7200), 1800);
-        assert_eq!(recorded_bound(1800, Some(0), 2, 60, 60, 7200), 1800);
-        assert_eq!(recorded_bound(1800, Some(300_000), 2, 60, 60, 7200), 660);
-        assert_eq!(recorded_bound(1800, Some(10_000), 2, 60, 120, 7200), 120, "the floor");
-        assert_eq!(recorded_bound(1800, Some(3_600_000), 2, 60, 60, 7200), 7200, "the ceiling");
     }
 }

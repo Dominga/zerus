@@ -321,6 +321,9 @@ pub(crate) enum Step {
     WaitOnMember { task: u32, member: String, reason: String },
     /// U56: the member is available again; the wait goes.
     ReleaseWait { task: u32 },
+    /// U56/#728: the lead or the owner restarted a stuck member: interrupt its
+    /// session and resume it in its conversation.
+    RestartStuck { member: String },
     /// U61: an auto-accepted draft whose phases ahead are done and whose plan has
     /// no blocker is accepted by Auto; the ready path hands its tasks out next.
     AutoAcceptDraft { phase: u32 },
@@ -774,8 +777,12 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                 let reason = if found.phase == "compacting" { "compaction_timeout" } else { "no_progress" };
                 let checked = open.as_ref().is_some_and(|(_, attempt)| attempt.told_lead.iter().any(|kind| kind == "silent"));
                 if member.agent == "dsh" && !checked {
-                    if let Some((task_id, _)) = open.as_ref() {
-                        steps.push(Step::CheckSilent { task: *task_id, last: listed.unwrap_or(0.0) });
+                    if let Some((task_id, attempt)) = open.as_ref() {
+                        // #728 L2: between the stuck and the silent bound the
+                        // session is read at most once a minute, not every tick.
+                        if attempt.silent_read_at.is_none_or(|at| now - at >= 60.0) {
+                            steps.push(Step::CheckSilent { task: *task_id, last: listed.unwrap_or(0.0) });
+                        }
                     } else {
                         steps.push(Step::MarkStuck { member: member.id.clone(), reason: reason.into(), phase: found.phase.clone() });
                     }
@@ -1091,6 +1098,12 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     }
     // C7: a member idle without a ready task while tasks are open starves the
     // plan. The lead hears once after 20 minutes; the episode ends with work.
+    // U56/#728: a restart the lead or the owner asked for runs on its own.
+    if team.status == TeamStatus::Running {
+        for member in team.members.iter().filter(|member| member.restart_pending) {
+            steps.push(Step::RestartStuck { member: member.id.clone() });
+        }
+    }
     // U61: an auto-accepted draft whose phases ahead are done and whose plan has
     // no blocker is accepted by Auto here, in its own change; the ordinary ready
     // path then hands its tasks out (launch, rebalance, role routing).
@@ -1472,6 +1485,44 @@ fn drained(team: &Team, member: &str) -> bool {
 /// a stage of its pipeline (which no implementer waits for).
 fn task_owes(task: &Task) -> bool {
     matches!(task.status, TaskStatus::Draft | TaskStatus::Pending | TaskStatus::Assigned | TaskStatus::InProgress)
+}
+
+/// U56/#728: interrupts a stuck member's session and resumes it in its own
+/// conversation; the lead (with lead_restarts_stuck) and the owner have this
+/// route. A member without a session keeps today's failed-launch relaunch.
+fn restart_stuck(store: &mut Store, team_id: &str, member_id: &str) -> anyhow::Result<()> {
+    let team = store.load(team_id)?.with_context(|| format!("Unknown team {team_id}"))?;
+    let Some(member) = team.member(member_id) else { return Ok(()) };
+    let role = team.role_of(member_id);
+    let Some(session) = member.session.clone() else {
+        return clear_restarted(store, team_id, member_id, &role);
+    };
+    let input = json!({"run_id":session.run_id,"conversation_id":session.conversation_id});
+    // An interrupt of an already stopped session fails; the resume is what
+    // brings it back, so only the resume's outcome decides.
+    let _ = hgs(&session.host, &["interrupt", &session.name, "--json"], Some(&input), Duration::from_secs(60));
+    let resumed = hgs(&session.host, &["resume", &session.name, "--json"], Some(&input), Duration::from_secs(60))?;
+    anyhow::ensure!(
+        resumed.status.success(),
+        "The session of {role} was not resumed: {}",
+        String::from_utf8_lossy(&resumed.stderr).trim()
+    );
+    clear_restarted(store, team_id, member_id, &role)
+}
+
+fn clear_restarted(store: &mut Store, team_id: &str, member_id: &str, role: &str) -> anyhow::Result<()> {
+    change(store, team_id, |team, events| {
+        let Some(found) = team.members.iter_mut().find(|found| found.id == member_id) else { return Ok(()) };
+        found.restart_pending = false;
+        found.stuck = None;
+        found.seen = None;
+        found.seen_phase.clear();
+        found.seen_activity.clear();
+        found.seen_event_at = None;
+        events.push(Event::new("member_interrupted", json!({"member":role,"id":member_id})));
+        events.push(Event::new("member_relaunched", json!({"member":role,"id":member_id})));
+        Ok(())
+    })
 }
 
 /// U31: the tasks of the next draft phase an idle member may work ahead on: a
@@ -5012,6 +5063,8 @@ fn check_dsh_silent(store: &mut Store, team: &Team, task_id: u32, listing_last: 
     let attempt_id = attempt.id.clone();
     change(store, &team.id, |team, _| {
         if let Some(found) = team.task_mut(task_id).and_then(|task| task.attempts.iter_mut().find(|found| found.id == attempt_id)) {
+            // #728 L2: the read is recorded, so the next one is a minute away.
+            found.silent_read_at = Some(now());
             if let Some(newest) = newest {
                 if found.activity_at.is_none_or(|at| newest > at) {
                     found.activity_at = Some(newest);
@@ -5992,6 +6045,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             }
         }
         Step::PrepareContext { task, member } => check_context_step(store, &team.id, *task, member, host),
+        Step::RestartStuck { member } => restart_stuck(store, &team.id, member),
         Step::AutoAcceptDraft { phase } => change(store, &team.id, |team, events| {
             super::ops::accept_auto_draft(team, *phase, &BTreeSet::new(), events);
             Ok(())
@@ -10478,6 +10532,85 @@ mod tests {
         run_step(&mut store, &saved, &Step::HandOut { task: 4, member: "dev".into() }, "").unwrap();
         let feed = store.events(&t.id, None, 80).unwrap().to_string();
         assert_eq!(feed.matches("phase_auto_accepted").count(), 1, "{feed}");
+    }
+
+    /// #728: the requested restart interrupts the session and resumes it in its
+    /// conversation; the member is no longer stuck and the request is cleared.
+    #[test]
+    fn a_restart_interrupts_the_session_and_resumes_it_in_its_conversation() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        {
+            let dev = t.members.iter_mut().find(|member| member.id == "dev").unwrap();
+            dev.stuck = Some(MemberStuck { at: 1.0, reason: "no_progress".into(), phase: "tool".into() });
+            dev.restart_pending = true;
+        }
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let recorded = calls.clone();
+        set_fake_hgs(Some(Box::new(move |_host, args: &[&str], _input| {
+            recorded.borrow_mut().push(args.first().copied().unwrap_or_default().to_owned());
+            Ok(fake_output(0, "{}", ""))
+        })));
+        let seen = [session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", true)];
+        let found = steps(&t, &seen, 100.0);
+        assert!(found.contains(&Step::RestartStuck { member: "dev".into() }), "{found:?}");
+        run_step(&mut store, &t, &Step::RestartStuck { member: "dev".into() }, "").unwrap();
+        set_fake_hgs(None);
+        let saved = store.load(&t.id).unwrap().unwrap();
+        let dev = saved.member("dev").unwrap();
+        assert!(dev.stuck.is_none() && !dev.restart_pending);
+        assert_eq!(calls.borrow().as_slice(), ["interrupt", "resume"]);
+        let feed = store.events(&t.id, None, 20).unwrap().to_string();
+        assert!(feed.contains("member_relaunched"), "{feed}");
+    }
+
+    /// #728 L2: between the stuck and the silent bounds a quiet dsh member's
+    /// session is read at most once a minute.
+    #[test]
+    fn a_quiet_dsh_member_is_read_at_most_once_a_minute() {
+        let at = crate::state::now();
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        t.members.iter_mut().find(|member| member.id == "dev").unwrap().agent = "dsh".into();
+        let task = t.tasks.iter_mut().find(|task| task.assignee == "dev").unwrap();
+        task.status = TaskStatus::InProgress;
+        task.attempts.push(Attempt {
+            n: 1,
+            id: "a1".into(),
+            member: "dev".into(),
+            state: AttemptState::Delivered,
+            sent_at: 1.0,
+            delivered_at: Some(1.0),
+            activity_at: Some(at - 15.0 * 60.0),
+            ..Default::default()
+        });
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+        let mut dev = session("codex/x/dev", "r1", true);
+        dev.agent = "dsh".into();
+        dev.activity = "busy".into();
+        dev.phase = "tool".into();
+        dev.last_event_at = Some(at - 15.0 * 60.0);
+        let lead = session("claude/x/lead", "r0", true);
+        let old = at - 15.0 * 60.0;
+        set_fake_hgs(Some(Box::new(move |_, args: &[&str], _| match args.first().copied() {
+            Some("inspect") => Ok(fake_output(0, &json!({"run_id":"r1","conversation_id":"c","events":[{"at":old}]}).to_string(), "")),
+            other => panic!("only an inspect is sent: {other:?}"),
+        })));
+        let first = steps(&t, &[lead.clone(), dev.clone()], at);
+        assert!(first.iter().any(|step| matches!(step, Step::CheckSilent { .. })), "{first:?}");
+        run_step(&mut store, &t, &Step::CheckSilent { task: 1, last: old }, "").unwrap();
+        let saved = store.load(&t.id).unwrap().unwrap();
+        let attempt = saved.task(1).unwrap().attempts.last().unwrap();
+        assert!(attempt.silent_read_at.is_some());
+        // A few seconds later there is no second read; a minute later there is.
+        assert!(!steps(&saved, &[lead.clone(), dev.clone()], at + 3.0).iter().any(|step| matches!(step, Step::CheckSilent { .. })));
+        assert!(steps(&saved, &[lead, dev], at + 61.0).iter().any(|step| matches!(step, Step::CheckSilent { .. })));
+        set_fake_hgs(None);
     }
 
     /// U61 #709 C1: an auto draft whose phases ahead are done accepts and the

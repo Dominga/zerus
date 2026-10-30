@@ -130,7 +130,12 @@ impl Store {
         {
             return Err("Search index directory must be private and owned by this user".into());
         }
-        let path = directory.join("index.sqlite3");
+        // SQLite NOFOLLOW rejects symlinks in every path component, including
+        // macOS's ordinary /var -> /private/var parent. Resolve the verified
+        // directory only; keep refusing a symlink at the database itself.
+        let path = crate::platform::canonical(directory)
+            .map_err(|e| e.to_string())?
+            .join("index.sqlite3");
         // A copied/restored database or auxiliary file must not become a new
         // public copy of message text, even if its parent is currently private.
         for name in [
@@ -571,11 +576,16 @@ impl Store {
         progress: &mut Progress,
         cancel: &AtomicBool,
     ) -> Result<bool> {
-        let path = self
+        // NOFOLLOW below: resolve the state directory, never the database name.
+        let state = self
             .directory
             .parent()
-            .ok_or("Invalid search state directory")?
-            .join("events.sqlite3");
+            .ok_or("Invalid search state directory")?;
+        let path = match crate::platform::canonical(state) {
+            Ok(state) => state.join("events.sqlite3"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+            Err(e) => return Err(e.to_string()),
+        };
         if !path.exists() {
             return Ok(true);
         }

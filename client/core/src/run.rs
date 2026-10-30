@@ -9,6 +9,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod custody;
+
 /// A noisy child keeps no more than this much of its standard error.
 const STDERR_CAP: usize = 64 * 1024;
 /// How long to wait for the readers once the child has exited.

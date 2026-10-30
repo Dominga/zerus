@@ -9,6 +9,8 @@ import { actionEntries } from "./ActionDialogs";
 import { snapshotOf } from "./actions-ui";
 import { markReadChip, runMarkRead } from "./mark-entries";
 import { AttachmentsChip } from "./Attachments";
+import { RecoveryChip } from "./RecoveryChip";
+import { SessionUsageChip, UsageLimitChip } from "./UsageChips";
 import { moveFocusOff } from "./composer-ui";
 import { focusTranscript, following, jumpToLatest, unseen } from "./Activity";
 import type { ChipTone } from "../../types";
@@ -18,7 +20,7 @@ import type { ChipTone } from "../../types";
 // action row. The toolbar keeps Qt's slots (ComposerToolbar.h, Slot): the
 // leading zone holds Attachments, the voice slot (Task 13), Latest, Mark as
 // read, the compaction indicator and Cancel send; the grip fills the space
-// between; the trailing zone holds the cache and Context chips. The action
+// between; the trailing zone holds Usage limit, Recovery, Cache and Context. The action
 // row holds Attach, Reference file, the status line, Refresh, Allow retry,
 // the model button, Stop and Send (364). The store (store/composer.ts) owns
 // the text and the locks; Rust owns the draft, the attachments and the send.
@@ -130,7 +132,6 @@ function CacheChip(props: { compact: boolean }) {
             <Show when={v().cache_warning}><p class="cache-warning">{v().cache_warning}</p></Show>
             <p class="cache-detail">{v().cache_details}</p>
             <div class="cache-actions">
-              <button type="button" class="btn small" disabled title="Arrives with the side panel.">Usage details</button>
               {/* Shown with a warning only (3793); enabled by the cache rule, not Clear session's (3794). */}
               <Show when={v().cache_warning}>
                 <button type="button" class="btn small" disabled={!v().clear.cache_enabled} title={v().clear.cache_reason || USUAL_CACHE_CLEAR}
@@ -251,15 +252,10 @@ export function Composer() {
         </Show>
         <ResizeHandle hidden={!input()} />
         <Show when={!input()}><span class="grow" /></Show>
+        <UsageLimitChip session={s()} compact={compact()} />
+        <RecoveryChip session={s()} compact={compact()} />
         <Show when={v()}><CacheChip compact={compact()} /></Show>
-        <Show when={v()?.context.visible}>
-          <span class={`tchip ${toneClass(v()!.context.tone)}`} title={v()!.context.tooltip} aria-label={v()!.context.accessible_name}>
-            <Show when={v()!.context.warning} fallback={<span class="ctx-ring" style={{ "--p": `${Math.max(0, Math.min(100, v()!.context.percent ?? 0))}%` }} />}>
-              <Icon name="context-warning" size={13} />
-            </Show>
-            {v()!.context.text}
-          </span>
-        </Show>
+        <SessionUsageChip session={s()} />
       </div>
       <textarea ref={editor} class="cmp-editor" hidden={!input()} style={{ height: `${editorHeight() * contentScale()}px` }} aria-label="Message to selected agent"
         placeholder="Message this agent…" readOnly={composer.locked()} disabled={!v()} value={composer.text()} title={editorTip()}

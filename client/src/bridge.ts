@@ -1,6 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type Batch, type ComputerId, type Details, type EditOutcome, type Outcome, type ReadMark, type Target, type TerminalConnected, type TerminalFacts, type TerminalFinished, type TerminalStatus, type TerminalTarget, type ArchivePage, type ArchivedActivity, type ProcessTarget, type Answer, type ComposerTab, type ComposerView, type Inspect, type SendReply, type SessionRef, type AttachmentRef, type Fetched, type ConflictsPage, type DraftSource, type SavedDraftDetail, type SavedDraftsPage, type QuestionEdit, type QuestionReply, type ClearControl } from "./types";
+import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, emptyUsage, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type Batch, type ComputerId, type Details, type EditOutcome, type Outcome, type ReadMark, type Target, type TerminalConnected, type TerminalFacts, type TerminalFinished, type TerminalStatus, type TerminalTarget, type ArchivePage, type ArchivedActivity, type ProcessTarget, type Answer, type ComposerTab, type ComposerView, type Inspect, type SendReply, type SessionRef, type SessionUsageRef, type Usage, type AttachmentRef, type Fetched, type ConflictsPage, type DraftSource, type SavedDraftDetail, type SavedDraftsPage, type QuestionEdit, type QuestionReply, type ClearControl } from "./types";
 import type { CreatedWorktree, CreationAction, CreationAdmission, CreationCard, CreationEvent, FolderOut, LaunchAccounts, LaunchChoices, LaunchPlan, LaunchStart, MachineMeta, NewSessionContext, NewSessionFormInput, NewSessionFormView, PathStyle, RepositoryFields } from "./types";
 import type { ActivityPort, FollowRequest } from "./store/activity";
 import { documentVisibility, type PageVisibility } from "./store/visibility";
@@ -363,6 +363,27 @@ const DESKTOP_ONLY = "Reads need the desktop app.";
 export async function screenVisible(screen: Screen, visible: boolean): Promise<void> {
   if (!inTauri()) return;
   await invoke("screen_visible", { screen, visible }).catch((error) => console.warn("Zerus Next: screen_visible failed", error));
+}
+
+/** The selected session's account usage; null stops later reads. */
+export async function sessionUsage(target: SessionUsageRef | null, force = false): Promise<Usage> {
+  if (!inTauri()) return emptyUsage();
+  return invoke<Usage>("session_usage", { target, force });
+}
+
+/** Calls `listener` when the selected session's usage changes; returns the stop. */
+export function onSessionUsage(listener: () => void): () => void {
+  if (!inTauri()) return () => {};
+  let stop: (() => void) | undefined;
+  let stopped = false;
+  void listen<void>("session-usage-changed", listener).then((unlisten) => {
+    if (stopped) unlisten();
+    else stop = unlisten;
+  });
+  return () => {
+    stopped = true;
+    stop?.();
+  };
 }
 
 /** The Accounts and Overview account data; `force` is Refresh. */

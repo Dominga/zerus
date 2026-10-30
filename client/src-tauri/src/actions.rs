@@ -74,6 +74,7 @@ pub enum Lane {
     Queue,
     Inbox,
     Answer,
+    Recovery,
 }
 
 impl Lane {
@@ -86,6 +87,7 @@ impl Lane {
             Action::SendNow { .. } => Self::Queue,
             Action::RemoveQueued { .. } => Self::Inbox,
             Action::Answer { .. } => Self::Answer,
+            Action::Recovery { .. } => Self::Recovery,
             _ => Self::Write,
         }
     }

@@ -23,6 +23,22 @@ pub struct Target {
     pub conversation_id: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryControl {
+    Now,
+    Cancel,
+}
+
+impl RecoveryControl {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Now => "now",
+            Self::Cancel => "cancel",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Action {
@@ -123,6 +139,12 @@ pub enum Action {
     Answer {
         question: Value,
         answers: Vec<questions::AnswerItem>,
+    },
+    /// `hgs recovery action --scoped-json`: Retry now or Cancel retry for the
+    /// current waiting job of this exact run and conversation.
+    Recovery {
+        job_id: String,
+        action: RecoveryControl,
     },
     /// `hgs kill NAME` as Forget saved session; its own kind so notices and
     /// logs tell it from Terminate's Kill (`killSession`).
@@ -358,6 +380,36 @@ pub fn invocation(
                 15,
                 35,
                 None,
+            )
+        }
+        Action::Recovery { job_id, action } => {
+            if target.name.is_empty()
+                || target.run_id.is_empty()
+                || target.conversation_id.is_empty()
+                || !uuid_shaped(job_id)
+                || job_id.to_ascii_lowercase() != *job_id
+                || job_id.chars().all(|c| c == '0' || c == '-')
+            {
+                return Err("Recovery needs its exact session, run, conversation and job.".into());
+            }
+            let input = json!({
+                "request_id": request_id,
+                "name": target.name,
+                "expected_run_id": target.run_id,
+                "expected_conversation_id": target.conversation_id,
+                "job_id": job_id,
+                "action": action.as_str(),
+            });
+            (
+                vec![
+                    "recovery".to_owned(),
+                    "action".to_owned(),
+                    "--scoped-json".to_owned(),
+                ],
+                Some(serde_json::to_vec(&input).map_err(|error| error.to_string())?),
+                10,
+                25,
+                Some(request_id.to_owned()),
             )
         }
         Action::Pause => (vec!["pause".to_owned(), name], None, 45, 45, None),
@@ -1016,6 +1068,9 @@ pub fn classify(target: &Target, action: &Action, invocation: &Invocation, exit:
         Action::Answer { question, answers } => {
             classify_answer(target, invocation, question, answers, exit)
         }
+        Action::Recovery { job_id, action } => {
+            classify_recovery(target, invocation, job_id, *action, exit)
+        }
         Action::ForgetBinding => classify_forget_binding(target, invocation, exit),
         Action::MarkRead { .. } => classify_read(target, exit),
         Action::Archive | Action::Terminate => classify_write(exit, true),
@@ -1275,6 +1330,73 @@ fn classify_send_now(
                 done(receipt, None)
             } else {
                 uncertain("Invalid queue acknowledgement. Check Terminal before retrying.")
+            }
+        }
+    }
+}
+
+/// The scoped recovery edit's durable receipt. Only the exact waiting job,
+/// session, run and conversation confirms a change; an unknown outcome is
+/// never replayed.
+fn classify_recovery(
+    target: &Target,
+    invocation: &Invocation,
+    job_id: &str,
+    action: RecoveryControl,
+    exit: Exit,
+) -> Outcome {
+    match exit {
+        Exit::StartFailed(error) => failed(error),
+        Exit::WriteFailed => {
+            uncertain("Recovery transfer failed. Reload its state before trying again.")
+        }
+        Exit::TimedOut => {
+            uncertain("Recovery request timed out. Reload its state before trying again.")
+        }
+        Exit::Abnormal { stderr } => uncertain(trimmed_stderr(&stderr).unwrap_or_else(|| {
+            "Recovery ended abnormally. Reload its state before trying again.".into()
+        })),
+        Exit::Code { code, stderr, .. } if code != 0 => failed(
+            trimmed_stderr(&stderr)
+                .unwrap_or_else(|| "Could not update recovery. Reload its state.".into()),
+        ),
+        Exit::Code { stdout, .. } => {
+            let receipt: Value = serde_json::from_slice(&stdout).unwrap_or(Value::Null);
+            let field = |key: &str| receipt.get(key).and_then(Value::as_str);
+            let identity = invocation.request_id.is_some()
+                && field("request_id") == invocation.request_id.as_deref()
+                && field("name") == Some(target.name.as_str())
+                && field("run_id") == Some(target.run_id.as_str())
+                && field("conversation_id") == Some(target.conversation_id.as_str())
+                && field("job_id") == Some(job_id)
+                && field("action") == Some(action.as_str());
+            let reason: String = field("error")
+                .unwrap_or("")
+                .trim()
+                .chars()
+                .take(STDERR_CHARS)
+                .collect();
+            let succeeded = match action {
+                RecoveryControl::Now => "scheduled",
+                RecoveryControl::Cancel => "cancelled",
+            };
+            match field("status") {
+                Some(status)
+                    if identity && status == succeeded && receipt["recovery"].is_object() =>
+                {
+                    done(receipt, None)
+                }
+                Some("failed") if identity => failed(if reason.is_empty() {
+                    "Could not update recovery. Reload its state.".into()
+                } else {
+                    reason
+                }),
+                Some("uncertain") if identity => uncertain(if reason.is_empty() {
+                    "Recovery was not confirmed. Reload its state before trying again.".into()
+                } else {
+                    reason
+                }),
+                _ => uncertain("Invalid recovery response. Reload its state before trying again."),
             }
         }
     }
@@ -3646,5 +3768,76 @@ mod tests {
         assert!(!draft.sending && draft.uncertain);
         draft.allow_retry();
         assert!(!draft.uncertain);
+    }
+
+    #[test]
+    fn recovery_actions_are_scoped_and_use_the_durable_receipt() {
+        const JOB: &str = "11111111-1111-4111-8111-111111111111";
+        const REQUEST: &str = "22222222-2222-4222-8222-222222222222";
+        let target = target("studio");
+        let action = Action::Recovery {
+            job_id: JOB.into(),
+            action: RecoveryControl::Now,
+        };
+        let inv = invocation(&target, &action, REQUEST).unwrap();
+        assert_eq!(inv.args, ["@studio", "recovery", "action", "--scoped-json"]);
+        assert_eq!(inv.timeout, Duration::from_secs(25));
+        let input: Value = serde_json::from_slice(inv.stdin.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            input,
+            json!({
+                "request_id": REQUEST,
+                "name": target.name,
+                "expected_run_id": "run-1",
+                "expected_conversation_id": "conv-1",
+                "job_id": JOB,
+                "action": "now",
+            })
+        );
+        let receipt = json!({
+            "request_id": REQUEST, "name": target.name, "run_id": "run-1",
+            "conversation_id": "conv-1", "job_id": JOB, "action": "now",
+            "status": "scheduled", "recovery": {"id": JOB, "state": "waiting"},
+        });
+        assert!(matches!(
+            classify(&target, &action, &inv, reply_exit(&receipt)),
+            Outcome::Done { .. }
+        ));
+        let failed_receipt = json!({
+            "request_id": REQUEST, "name": target.name, "run_id": "run-1",
+            "conversation_id": "conv-1", "job_id": JOB, "action": "now",
+            "status": "failed", "error": "job changed",
+        });
+        assert_eq!(
+            classify(&target, &action, &inv, reply_exit(&failed_receipt)),
+            failed("job changed")
+        );
+        let uncertain_receipt = json!({
+            "request_id": REQUEST, "name": target.name, "run_id": "run-1",
+            "conversation_id": "conv-1", "job_id": JOB, "action": "now",
+            "status": "uncertain", "error": "interrupted",
+        });
+        assert_eq!(
+            classify(&target, &action, &inv, reply_exit(&uncertain_receipt)),
+            uncertain("interrupted")
+        );
+        let wrong = json!({
+            "request_id": REQUEST, "name": target.name, "run_id": "run-2",
+            "conversation_id": "conv-1", "job_id": JOB, "action": "now",
+            "status": "scheduled", "recovery": {},
+        });
+        assert!(matches!(
+            classify(&target, &action, &inv, reply_exit(&wrong)),
+            Outcome::Uncertain { .. }
+        ));
+        assert!(matches!(
+            classify(&target, &action, &inv, Exit::TimedOut),
+            Outcome::Uncertain { .. }
+        ));
+        let bad = Action::Recovery {
+            job_id: "not-a-job".into(),
+            action: RecoveryControl::Cancel,
+        };
+        assert!(invocation(&target, &bad, REQUEST).is_err());
     }
 }

@@ -24,6 +24,7 @@ import { Composer } from "./Composer";
 import { ComposerDialogs } from "./ComposerDialogs";
 import { QuestionCard } from "./QuestionCard";
 import { QueuePanel } from "./QueuePanel";
+import { AccountUsageChip } from "./UsageChips";
 import { onCommand } from "../../store/shortcuts";
 import { composer } from "../../store/composer";
 
@@ -120,6 +121,7 @@ function Header() {
         <span class="grow" />
         <span class="dh-model ell">{s().model} {s().effort ?? ""}</span>
       </div>
+      <AccountUsageChip session={s()} />
     </header>
   );
 }

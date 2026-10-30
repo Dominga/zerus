@@ -943,6 +943,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         organization::set_project_collapsed,
         organization::project_folders,
         screens::screen_visible,
+        screens::session_usage,
         screens::accounts_view,
         screens::machines_view,
         screens::machine_resolve,

@@ -138,6 +138,8 @@ inline QIcon workspaceIcon(const QString &name, const QColor &color)
         } else if (name == "view-board") {   // tasks as a board: columns of cards
             p.drawRoundedRect(QRectF(3, 4, 5, 16), 1.5, 1.5); p.drawRoundedRect(QRectF(9.5, 4, 5, 11), 1.5, 1.5);
             p.drawRoundedRect(QRectF(16, 4, 5, 7), 1.5, 1.5);
+        } else if (name == "view-profile") {   // U38: a profile: lanes of spans
+            p.drawLine(QPointF(4, 7), QPointF(16, 7)); p.drawLine(QPointF(4, 12), QPointF(20, 12)); p.drawLine(QPointF(4, 17), QPointF(12, 17));
         } else if (name == "view-layers") {   // tasks in layers: stacked sheets
             QPainterPath top; top.moveTo(12, 4); top.lineTo(21, 8.5); top.lineTo(12, 13); top.lineTo(3, 8.5); top.closeSubpath(); p.drawPath(top);
             QPainterPath mid; mid.moveTo(3, 12.5); mid.lineTo(12, 17); mid.lineTo(21, 12.5); p.drawPath(mid);

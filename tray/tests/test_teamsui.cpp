@@ -77,8 +77,10 @@
 #include "WorkspaceStyle.h"
 #include <QScopeGuard>
 #include <QElapsedTimer>
+#include <QTableWidget>
 #include <QInputDialog>
 #include "support/FakeCli.h"
+#include "TeamProfile.h"
 
 using namespace Teams;
 
@@ -750,6 +752,9 @@ private slots:
     void proposalCardsNameTheChangeAndAStaleCardSendsNothing();
     void planModeIsChosenWhenThePlanIsApproved();
     void switchToFreeOpensOneDialogBoundToTheRequest();
+    void profileViewShowsThePhaseAndItsLosses();
+    void profileReadsInBoundedPagesAndKeepsABoundedCache();
+    void profileOfALargeTeamStaysResponsive();
     void freePhaseReadsIdleBuildsAndClosesOnConfirmation();
     void swapMemberAsksFirstAndListsTheOldSession();
     void memberMenuWorksBeforeTheStatusReadLands();
@@ -918,6 +923,16 @@ elif a[:3]==['team','catalog','decide'] or a[:3]==['team','catalog','apply']:
   try:os.replace(__file__+'.catalog.new',__file__+'.catalog');break
   except PermissionError:time.sleep(.05)   # Windows: a read holds the file
  print(json.dumps(out))
+elif a[:2]==['team','profile']:
+ # U38 (#665): `.profile`, or `.compare` for a compare.
+ import os
+ print(open(__file__+('.compare' if 'compare' in body else '.profile')).read() if os.path.exists(__file__+('.compare' if 'compare' in body else '.profile')) else json.dumps({'summary':{}}))
+elif a[:2]==['team','spans']:
+ # U38: `.spans` in pages after `after`, `limit` at a time.
+ import os
+ tl=json.load(open(__file__+'.spans')) if os.path.exists(__file__+'.spans') else []
+ rest=[t for t in tl if t['task']>body.get('after',0)];page=rest[:body.get('limit',50)]
+ print(json.dumps({'team':body.get('team'),'tasks':page,'next_cursor':page[-1]['task'] if len(rest)>len(page) else None,'events':{'read':0,'truncated':False}}))
 elif a[:2]==['team','decide-proposal']:
  # U57: the receipt names the stored decision; `.proposalrefuse` refuses it,
  # `.proposalstatus` names an earlier decision (a replay).
@@ -983,6 +998,7 @@ void TestTeamsUi::init()
     QFile::remove(script() + ".refuse");
     QFile::remove(script() + ".refuseapply");
     QFile::remove(script() + ".proposalrefuse");
+    for (const char *suffix : {".profile", ".spans", ".compare"}) QFile::remove(script() + QLatin1String(suffix));
     QFile::remove(script() + ".proposalstatus");
     QFile::remove(script() + ".waiting");
     QFile::remove(script() + ".waitingrefuse");
@@ -9029,6 +9045,298 @@ void TestTeamsUi::proposalCardsNameTheChangeAndAStaleCardSendsNothing()
     QVERIFY(!cardOf("p4")->findChild<QPushButton *>("teamProposalAllow"));
     cardOf("p4")->findChild<QPushButton *>("teamProposalDismiss")->click();
     QTRY_VERIFY(!cardOf("p4"));
+}
+
+namespace {
+// U38 (#665): phase 2 of phasedTeam as `hgs team profile` and `hgs team
+// spans` answer it: #3 returned once on backend, #4 waited for #3 and for
+// tester, the tester idled while #3 ran.
+double profileStart() { return double(QDateTime(QDate::currentDate(), QTime(16, 47)).toSecsSinceEpoch()); }
+
+QJsonObject profileOfPhase2()
+{
+    const double t0 = profileStart();
+    const auto loss = [](const QJsonObject &fields) { return fields; };
+    const QJsonArray byTime{
+        loss({{"id", "idle_member:tester"}, {"kind", "idle_member"}, {"member", "tester"}, {"role", "Tester"}, {"s", 9000}, {"open_s", 21600}}),
+        loss({{"id", "member_wait:4"}, {"kind", "member_wait"}, {"task", 4}, {"member", "tester"}, {"s", 4000}}),
+        loss({{"id", "rework:3:a1"}, {"kind", "rework"}, {"task", 3}, {"attempt", 1}, {"member", "backend"}, {"cause", "returned"}, {"s", 3000},
+              {"share", 0.45}, {"tokens", 900000}}),
+        loss({{"id", "blocked_chain:4"}, {"kind", "blocked_chain"}, {"task", 4}, {"on", QJsonArray{3}}, {"deps_s", 1200}, {"folder_held_s", 0}, {"s", 1200}})};
+    const QJsonArray byTokens{byTime[2]};
+    return {
+        {"team", "team-1"}, {"scope", QJsonObject{{"phase", 2}}},
+        {"summary", QJsonObject{{"tasks", 2}, {"accepted", 1}, {"from", t0}, {"to", t0 + 21600}, {"elapsed_s", 21600}, {"worked_s", 15000},
+                                {"totals", QJsonObject{{"work", 12000}, {"rework", 3000}, {"member", 4000}, {"deps", 1200}, {"lead", 600}}},
+                                {"tokens", QJsonObject{{"total", 2400000}}}}},
+        {"losses", QJsonObject{{"by_time", QJsonObject{{"items", byTime}, {"next_cursor", QJsonValue()}}},
+                               {"by_tokens", QJsonObject{{"items", byTokens}, {"next_cursor", QJsonValue()}}}}},
+        {"critical_path", QJsonObject{{"planned", QJsonObject{{"tasks", QJsonArray{3, 4}}, {"length", 2}}},
+                                      {"real", QJsonObject{{"tasks", QJsonArray{3, 4}}, {"s", 21600}}}, {"off_plan", QJsonArray()}, {"matches", true}}},
+        {"members", QJsonArray{
+            QJsonObject{{"member", "backend"}, {"role", "Backend"}, {"model", "gpt-5.5-codex"}, {"busy_s", 15000}, {"idle_s", 3000}, {"utilization", 0.83},
+                        {"accepted", 1}, {"tokens", QJsonObject{{"total", 2000000}}}, {"tokens_per_accepted", 2000000}},
+            QJsonObject{{"member", "tester"}, {"role", "Tester"}, {"model", "kimi-k2"}, {"busy_s", 2000}, {"idle_s", 9000}, {"utilization", 0.18},
+                        {"accepted", 0}, {"tokens", QJsonObject{{"total", 400000}}}}}},
+        {"roles", QJsonArray{QJsonObject{{"role", "Backend"}, {"busy_s", 15000}, {"idle_s", 3000}, {"utilization", 0.83}, {"accepted", 1}, {"tokens", 2000000}, {"tokens_per_accepted", 2000000}},
+                             QJsonObject{{"role", "Tester"}, {"busy_s", 2000}, {"idle_s", 9000}, {"utilization", 0.18}, {"accepted", 0}, {"tokens", 400000}}}},
+        {"models", QJsonArray{QJsonObject{{"model", "gpt-5.5-codex"}, {"busy_s", 15000}, {"idle_s", 3000}, {"utilization", 0.83}, {"accepted", 1}, {"tokens", 2000000}}}},
+        {"tasks", QJsonObject{{"items", QJsonArray{
+            QJsonObject{{"task", 3}, {"title", "Address form UI"}, {"status", "accepted"}, {"phase", 2}, {"elapsed_s", 15600}, {"worked_s", 14640},
+                        {"rework_s", 3000}, {"tokens", QJsonObject{{"total", 2000000}}}, {"rework_tokens", 900000}, {"rework_share", 0.45}},
+            QJsonObject{{"task", 4}, {"title", "Unit tests"}, {"status", "in_progress"}, {"phase", 2}, {"elapsed_s", 21600}, {"worked_s", 2000},
+                        {"rework_s", 0}, {"tokens", QJsonObject{{"total", 400000}}}}}}, {"next_cursor", QJsonValue()}}},
+        {"events", QJsonObject{{"read", 40}, {"truncated", false}}}};
+}
+
+QJsonArray spansOfPhase2()
+{
+    const double t0 = profileStart();
+    const auto span = [t0](const QString &kind, double from, double to, const QJsonObject &extra = {}) {
+        QJsonObject value{{"kind", kind}, {"from", t0 + from}, {"to", t0 + to}, {"s", to - from}};
+        for (auto it = extra.begin(); it != extra.end(); ++it) value.insert(it.key(), it.value());
+        return value;
+    };
+    return {
+        QJsonObject{{"task", 3}, {"status", "accepted"}, {"overlay", QJsonArray()},
+                    {"spans", QJsonArray{span("delivery", 0, 60, {{"member", "backend"}, {"attempt", 1}}),
+                                         span("rework", 60, 3060, {{"member", "backend"}, {"attempt", 1}}),
+                                         span("work", 3300, 15000, {{"member", "backend"}, {"attempt", 2}}),
+                                         span("lead", 15000, 15600)}}},
+        QJsonObject{{"task", 4}, {"status", "in_progress"},
+                    {"overlay", QJsonArray{span("build", 20800, 21400, {{"member", "tester"}, {"template", "qt-build"}, {"exit", 0}})}},
+                    {"spans", QJsonArray{span("deps", 0, 15600), span("member", 15600, 19600),
+                                         span("work", 19600, 21000, {{"member", "tester"}, {"attempt", 1}}),
+                                         span("stage", 21000, 21600, {{"member", "tester"}, {"attempt", 1}, {"stage", 1}, {"round", 1}, {"stage_kind", "test"}})}}}};
+}
+
+QJsonObject compareOf1And2()
+{
+    const QJsonObject first{{"tasks", 2}, {"accepted", 2}, {"elapsed_s", 9000}, {"worked_s", 8000}, {"totals", QJsonObject{{"work", 8000}, {"member", 600}}},
+                            {"tokens", QJsonObject{{"total", 1200000}}}};
+    const QJsonObject second = profileOfPhase2().value("summary").toObject();
+    return {{"team", "team-1"}, {"compare", QJsonObject{
+        {"a", QJsonObject{{"phase", 1}, {"summary", first}, {"top_losses", QJsonArray{QJsonObject{{"id", "member_wait:2"}, {"kind", "member_wait"}, {"task", 2}, {"s", 600}}}}}},
+        {"b", QJsonObject{{"phase", 2}, {"summary", second}, {"top_losses", profileOfPhase2()["losses"].toObject()["by_time"].toObject()["items"]}}},
+        {"delta", QJsonObject{{"elapsed_s", 12600}, {"worked_s", 7000}, {"tasks", 0}, {"accepted", -1}, {"tokens", 1200000},
+                              {"totals", QJsonObject{{"rework", 3000}, {"member", 3400}}}}}}}};
+}
+
+TeamProfileView *profileViewOf(QWidget *root)
+{
+    return static_cast<TeamProfileView *>(root->findChild<QWidget *>("teamProfileView"));
+}
+}
+
+// U38 (#665): Profile beside Graph, Board and Layers, from hgs team profile
+// and hgs team spans: the summary, the member lanes with the real and planned
+// critical paths, the top losses (a click opens the task and marks it), the
+// tokens per task, the members table, the phase compare and Export JSON.
+void TestTeamsUi::profileViewShowsThePhaseAndItsLosses()
+{
+    setTeam(phasedTeam());
+    QVERIFY(FakeCli::replace(script() + ".profile", QJsonDocument(profileOfPhase2()).toJson(QJsonDocument::Compact)));
+    QVERIFY(FakeCli::replace(script() + ".spans", QJsonDocument(spansOfPhase2()).toJson(QJsonDocument::Compact)));
+    QVERIFY(FakeCli::replace(script() + ".compare", QJsonDocument(compareOf1And2()).toJson(QJsonDocument::Compact)));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(1600, 980); workspace.show();
+    controller.refresh();
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    QPushButton *profile = nullptr;
+    QTRY_VERIFY(([&] {
+        for (auto *b : workspace.findChildren<QPushButton *>()) if (b->property("segment") == "profile" && b->isVisible()) profile = b;
+        return profile != nullptr;
+    })());
+    profile->click();
+    TeamProfileView *view = nullptr;
+    QTRY_VERIFY((view = profileViewOf(&workspace)) && view->isVisible());
+    QCOMPARE(view->phase(), 2);
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamProfileTimeline"));
+    // The reads: the profile of phase 2, then its spans.
+    QTRY_VERIFY(!calls(script(), "profile").isEmpty() && !calls(script(), "spans").isEmpty());
+    QCOMPARE(calls(script(), "profile").first()["phase"].toInt(), 2);
+    QVERIFY(!calls(script(), "profile").first().contains("request_id"));   // a read, not a change
+    // The summary tiles.
+    const auto tile = [&](const char *name) { auto *found = workspace.findChild<QLabel *>(name); return found ? found->text() : QString(); };
+    QCOMPARE(tile("teamProfileTook"), QStringLiteral("6h 00m"));
+    QCOMPARE(tile("teamProfileWorked"), QStringLiteral("4h 10m"));
+    QCOMPARE(tile("teamProfileRework"), QStringLiteral("1 return"));
+    QCOMPARE(tile("teamProfileMemberWait"), QStringLiteral("1h 06m"));
+    QCOMPARE(tile("teamProfileAccepted"), QStringLiteral("1 of 2"));
+    // The lanes: backend and tester; the real and planned paths.
+    const auto &model = view->model();
+    QCOMPARE(model.lanes.size(), 2);
+    QCOMPARE(model.lanes[0].member, QStringLiteral("backend"));
+    QCOMPARE(model.lanes[0].spans.size(), 2);   // the returned attempt and the accepted one
+    QCOMPARE(model.lanes[1].member, QStringLiteral("tester"));
+    QCOMPARE(model.lanes[1].waits.size(), 2);   // #4 waited for #3 and for tester
+    QVERIFY(!model.lanes[1].idle.isEmpty());    // tester idled while #3 ran
+    QCOMPARE(model.real.size(), 2); QCOMPARE(model.real[0].task, 3);
+    QCOMPARE(model.planned.size(), 2);
+    QCOMPARE(model.plannedSeconds, qint64(3000 + 1400 + 600));   // each task's first attempt
+    // The timeline paints: no widget per span.
+    QVERIFY(workspace.findChild<QWidget *>("teamProfileTimeline")->findChildren<QWidget *>().isEmpty());
+    // The losses, by time: the idle tester first; a chip opens the task and marks it.
+    QStringList kinds;
+    for (auto *card : workspace.findChildren<QFrame *>("teamProfileLoss")) kinds << card->property("kind").toString();
+    QCOMPARE(kinds, (QStringList{"idle_member", "member_wait", "rework", "blocked_chain"}));
+    shot(&workspace, "u38-profile-time");
+    workspace.setTheme(false); workspace.render();
+    lightShot(&workspace, "u38-profile-time-light");
+    darkPalette(); workspace.setTheme(true); workspace.render();
+    // By tokens: the rework of #3.
+    view->setLossOrder("tokens");
+    QTRY_COMPARE(workspace.findChildren<QFrame *>("teamProfileLoss").size(), 1);
+    QCOMPARE(workspace.findChild<QLabel *>("teamProfileLossValue")->text(), QStringLiteral("900k"));
+    view->setLossOrder("time");
+    // Tokens per task.
+    view->setTab("tokens");
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamProfileTokens"));
+    shot(&workspace, "u38-profile-tokens");
+    workspace.setTheme(false); workspace.render(); lightShot(&workspace, "u38-profile-tokens-light"); darkPalette(); workspace.setTheme(true); workspace.render();
+    // Members: one row each, then the role and model groups.
+    view->setTab("members");
+    QTableWidget *members = nullptr;
+    QTRY_VERIFY((members = workspace.findChild<QTableWidget *>("teamProfileMembers")));
+    QCOMPARE(members->rowCount(), 2 + 2 + 1);
+    QCOMPARE(members->item(0, 0)->text(), QStringLiteral("backend"));
+    QCOMPARE(members->item(0, 3)->text(), QStringLiteral("2"));   // attempts
+    QCOMPARE(members->item(0, 4)->text(), QStringLiteral("1"));   // returned
+    QCOMPARE(members->item(0, 6)->text(), QStringLiteral("83%"));
+    QCOMPARE(members->item(0, 9)->text(), QStringLiteral("2.00M"));
+    QCOMPARE(members->item(2, 0)->text(), QStringLiteral("Role Backend"));
+    shot(&workspace, "u38-profile-members");
+    workspace.setTheme(false); workspace.render(); lightShot(&workspace, "u38-profile-members-light"); darkPalette(); workspace.setTheme(true); workspace.render();
+    // Compare: phases 1 and 2 side by side.
+    view->setTab("compare");
+    QTRY_VERIFY(!calls(script(), "profile").isEmpty() && calls(script(), "profile").last().contains("compare"));
+    QCOMPARE(calls(script(), "profile").last()["compare"].toArray(), (QJsonArray{1, 2}));
+    QTRY_VERIFY(!workspace.findChildren<QLabel *>("teamProfileCompareDelta").isEmpty());
+    QStringList deltas;
+    for (auto *delta : workspace.findChildren<QLabel *>("teamProfileCompareDelta")) deltas << delta->text();
+    QVERIFY2(deltas.contains("+3h 30m") && deltas.contains("+1.20M"), qPrintable(deltas.join(", ")));
+    shot(&workspace, "u38-profile-compare");
+    workspace.setTheme(false); workspace.render(); lightShot(&workspace, "u38-profile-compare-light"); darkPalette(); workspace.setTheme(true); workspace.render();
+    // A loss's task chip opens the task's card and marks it in the timeline.
+    view->setTab("time");
+    QPushButton *chip = nullptr;
+    QTRY_VERIFY(([&] {
+        for (auto *card : workspace.findChildren<QFrame *>("teamProfileLoss"))
+            if (card->property("kind") == "rework") chip = card->findChild<QPushButton *>("teamProfileLossTask");
+        return chip != nullptr;
+    })());
+    QCOMPARE(chip->property("task").toInt(), 3);
+    chip->click();
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceDrawer") && workspace.findChild<QWidget *>("teamWorkspaceDrawer")->isVisible());
+    QCOMPARE(view->selectedTask(), 3);
+    // Export JSON: the profile and its spans.
+    view->setTab("time");
+    const QString path = m_dir.filePath("profile-export.json");
+    view->exportPath = [path] { return path; };
+    QTRY_VERIFY(workspace.findChild<QPushButton *>("teamProfileExport"));
+    workspace.findChild<QPushButton *>("teamProfileExport")->click();
+    QFile exported(path); QVERIFY(exported.open(QIODevice::ReadOnly));
+    const auto json = QJsonDocument::fromJson(exported.readAll()).object();
+    QCOMPARE(json["profile"].toObject()["summary"].toObject()["elapsed_s"].toInt(), 21600);
+    QCOMPARE(json["spans"].toArray().size(), 2);
+    // Back to Graph: the view leaves the canvas and stays for the next visit.
+    for (auto *b : workspace.findChildren<QPushButton *>()) if (b->property("segment") == "graph" && b->isVisible()) { b->click(); break; }
+    QTRY_VERIFY(!view->isVisible());
+    QVERIFY(profileViewOf(&workspace) == view);
+}
+
+// U38 (#665): the spans are read in pages of 50, at most 20 pages; a scope
+// past that is named, never read whole. At most six scopes stay cached.
+void TestTeamsUi::profileReadsInBoundedPagesAndKeepsABoundedCache()
+{
+    setTeam(phasedTeam());
+    QJsonArray many;
+    const double t0 = profileStart();
+    for (int id = 1; id <= 1300; ++id)
+        many.append(QJsonObject{{"task", id}, {"status", "accepted"}, {"overlay", QJsonArray()},
+                                {"spans", QJsonArray{QJsonObject{{"kind", "work"}, {"from", t0 + id}, {"to", t0 + id + 600}, {"s", 600}, {"member", "backend"}, {"attempt", 1}}}}});
+    QVERIFY(FakeCli::replace(script() + ".profile", QJsonDocument(profileOfPhase2()).toJson(QJsonDocument::Compact)));
+    QVERIFY(FakeCli::replace(script() + ".spans", QJsonDocument(many).toJson(QJsonDocument::Compact)));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamProfile::Cache cache(&controller);
+    QSignalSpy changed(&cache, &TeamProfile::Cache::changed);
+    const auto *entry = cache.entry("team-1", "plan", 1);
+    QVERIFY(entry->loading);
+    QTRY_VERIFY_WITH_TIMEOUT(cache.entry("team-1", "plan", 1)->ready, 60000);
+    entry = cache.entry("team-1", "plan", 1);
+    QCOMPARE(entry->timelines.size(), TeamProfile::Cache::MaxSpanPages * TeamProfile::Cache::SpanPage);
+    QVERIFY(entry->truncated);
+    QCOMPARE(calls(script(), "spans").size(), TeamProfile::Cache::MaxSpanPages);
+    for (const auto &call : calls(script(), "spans")) QCOMPARE(call["limit"].toInt(), 50);
+    // Read again only when the team changed and the entry is old: the same revision reads nothing.
+    const int reads = cache.reads();
+    cache.entry("team-1", "plan", 1);
+    QCOMPARE(cache.reads(), reads);
+    // At most six scopes.
+    for (int phase = 1; phase <= 9; ++phase) cache.entry("team-1", QStringLiteral("phase:%1").arg(phase), 1);
+    QCOMPARE(cache.size(), TeamProfile::Cache::MaxEntries);
+}
+
+// U38 (#665): a large team - 600 tasks over 60 members, 6000 spans - builds
+// and paints in a bounded time; the timeline is one painted widget.
+void TestTeamsUi::profileOfALargeTeamStaysResponsive()
+{
+    auto big = phasedTeam();
+    QJsonArray members, tasks, timelines, rows;
+    const double t0 = profileStart();
+    for (int m = 0; m < 60; ++m) {
+        const QString id = QStringLiteral("member-%1").arg(m);
+        members.append(QJsonObject{{"id", id}, {"role", QStringLiteral("Role %1").arg(m % 6)}, {"agent", "codex"}, {"state", "active"},
+                                   {"session", QJsonObject{{"host", ""}, {"name", "codex/big/" + id}}}});
+        rows.append(QJsonObject{{"member", id}, {"role", QStringLiteral("Role %1").arg(m % 6)}, {"model", "gpt-5.5"}, {"busy_s", 20000}, {"idle_s", 4000},
+                                {"utilization", 0.83}, {"accepted", 10}, {"tokens", QJsonObject{{"total", 1000000}}}, {"tokens_per_accepted", 100000}});
+    }
+    big["members"] = members;
+    for (int id = 1; id <= 600; ++id) {
+        const QString member = QStringLiteral("member-%1").arg(id % 60);
+        tasks.append(QJsonObject{{"id", id}, {"title", QStringLiteral("Task %1").arg(id)}, {"assignee", member}, {"status", "accepted"}, {"phase", 2}});
+        QJsonArray spans;
+        for (int k = 0; k < 10; ++k) {
+            const double from = t0 + id * 60 + k * 300;
+            spans.append(QJsonObject{{"kind", k % 3 == 0 ? "member" : k % 4 == 1 ? "rework" : "work"}, {"from", from}, {"to", from + 280}, {"s", 280},
+                                     {"member", k % 3 == 0 ? QJsonValue() : QJsonValue(member)}, {"attempt", 1 + k / 5}});
+        }
+        timelines.append(QJsonObject{{"task", id}, {"status", "accepted"}, {"spans", spans}, {"overlay", QJsonArray()}});
+    }
+    big["tasks"] = tasks;
+    auto profile = profileOfPhase2();
+    profile["members"] = rows;
+    auto summary = profile["summary"].toObject(); summary["to"] = t0 + 600 * 60 + 3000; profile["summary"] = summary;
+    const auto team = Teams::parse(big);
+    QElapsedTimer clock; clock.start();
+    const auto model = TeamProfile::Model::build(team, profile, timelines, t0 + 50000);
+    const qint64 built = clock.elapsed();
+    QCOMPARE(model.lanes.size(), 60);
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamProfile::Cache cache(&controller);
+    TeamProfileView view(&controller, &cache);
+    view.resize(1600, 980); view.show();
+    clock.restart();
+    view.showModel(model);
+    view.grab();
+    const qint64 painted = clock.elapsed();
+    QVERIFY2(built < 1500 && painted < 1500, qPrintable(QStringLiteral("built %1 ms, painted %2 ms").arg(built).arg(painted)));
+    auto *timeline = view.findChild<QWidget *>("teamProfileTimeline");
+    QVERIFY(timeline && timeline->findChildren<QWidget *>().isEmpty());
+    // The losses list stays a page, never one card per task.
+    QVERIFY(view.findChildren<QFrame *>("teamProfileLoss").size() <= TeamProfile::Cache::LossPage);
+    // The other tabs build just as fast.
+    for (const char *tab : {"tokens", "members", "time"}) {
+        clock.restart(); view.setTab(QLatin1String(tab)); view.grab();
+        QVERIFY2(clock.elapsed() < 1500, tab);
+    }
 }
 
 // U59: Start planning shows the lead's proposed mode and its reason; the owner

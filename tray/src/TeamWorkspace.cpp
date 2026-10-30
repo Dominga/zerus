@@ -7,6 +7,7 @@
 #include "TeamController.h"
 #include "TeamConversation.h"
 #include "TeamProposalCard.h"
+#include "TeamProfile.h"
 #include "TeamPanel.h"
 #include "TeamSettingsDialog.h"
 #include "TeamTaskCard.h"
@@ -155,6 +156,8 @@ TeamWorkspace::TeamWorkspace(TeamController *teams, TeamPanel *panel, QWidget *p
     QObject::connect(m_sideSplit, &QSplitter::splitterMoved, this, [this] { QSettings().setValue("teams/workspaceSideSplit", m_sideSplit->saveState()); });
     m_membersOpen = QSettings().value("teams/membersOpen", true).toBool();
     m_hideFinished = QSettings().value("teams/hideFinished", false).toBool();
+    // U38 (#665): the Profile view's reads, kept across renders and teams.
+    m_profileCache = new TeamProfile::Cache(teams, this);
     m_drawer = new TeamTaskCard(this);
     m_drawer->setObjectName("teamWorkspaceDrawer");
     m_drawer->hide();
@@ -256,6 +259,7 @@ void TeamWorkspace::setTheme(bool dark)
     m_headerStrip->setStyleSheet(QStringLiteral("QFrame#teamWorkspaceHeader{border-bottom:1px solid %1;}").arg(c.border.name()));
     m_conversation->setTheme(dark);
     m_proposalCards->setDark(dark);
+    if (m_profileView) m_profileView->setDark(dark);
     scheduleRender();
 }
 
@@ -378,6 +382,8 @@ void TeamWorkspace::render()
         lv->addWidget(canvas(m_hideFinished ? withoutFinished(shown) : shown), 1);
         if (const auto &items = m_teams->inbox(); !items.isEmpty()) lv->addWidget(inboxStrip(*team, items));
         lv->addWidget(feed(*team));
+        // The Profile view outlives the canvas it was shown in.
+        if (m_profileView && m_left && m_left->isAncestorOf(m_profileView)) { m_profileView->hide(); m_profileView->setParent(this); }
         if (m_left) { m_leftHost->removeWidget(m_left); retire(m_left); }
         m_leftHost->addWidget(left); left->show(); m_left = left;
         // Members keep their scroll position.
@@ -452,6 +458,18 @@ void TeamWorkspace::setHeaderShown(bool shown)
     if (shown == m_headerShown) return;
     m_headerShown = shown;
     renderHeader();
+}
+
+QWidget *TeamWorkspace::profileView(const Team &team)
+{
+    if (!m_profileView) {
+        m_profileView = new TeamProfileView(m_teams, m_profileCache, this);
+        m_profileView->setDark(m_dark);
+        m_profileView->openTask = [this](int task) { m_drawerTask = task; scheduleRender(); };
+    }
+    m_profileView->setTeam(team);
+    m_profileView->show();
+    return m_profileView;
 }
 
 void TeamWorkspace::showPhase(int phase)
@@ -1232,7 +1250,7 @@ private:
 class ToolbarRow : public QWidget {
 public:
     using QWidget::QWidget;
-    bool compact() const { return m_level == 2; }
+    bool compact() const { return m_level == 3; }
 protected:
     void resizeEvent(QResizeEvent *event) override { QWidget::resizeEvent(event); refit(); }
     void showEvent(QShowEvent *event) override { QWidget::showEvent(event); refit(); }
@@ -1249,8 +1267,9 @@ private:
             row->setSpacing(0); row->setContentsMargins(0, 8, 0, 6);
         }
     }
-    // Two steps: first the switch labels go (their switches keep them as
-    // tooltips), then the buttons' words.
+    // Steps: first the switch labels go (their switches keep them as
+    // tooltips), then the filter's words, then every button's words (the
+    // icon-only row leaves out Hide finished and the zoom group).
     void refit()
     {
         if (m_level == 0) {
@@ -1259,14 +1278,20 @@ private:
             const int spacing = layout() ? layout()->spacing() : 0;
             for (auto *l : findChildren<QLabel *>())
                 if (l->property("compactHide").toBool() && !l->isHidden()) m_labels += l->sizeHint().width() + spacing;
+            // Then the filter's words, before the views' (U38 added Profile).
+            m_first = 0;
+            for (auto *b : findChildren<QPushButton *>())
+                if (b->property("compactFirst").toBool() && !b->property("compactText").toString().isEmpty())
+                    m_first += std::max(0, b->sizeHint().width() - (b->iconSize().width() + 16));
         }
-        const int level = width() >= m_full ? 0 : width() >= m_full - m_labels ? 1 : 2;
-        if (level == m_level) { if (level == 2) fitCompactSpacing(); return; }
+        const int level = width() >= m_full ? 0 : width() >= m_full - m_labels ? 1 : width() >= m_full - m_labels - m_first ? 2 : 3;
+        if (level == m_level) { if (level == 3) fitCompactSpacing(); return; }
         m_level = level;
-        const bool compact = level == 2;
+        const bool compact = level == 3;
         for (auto *l : findChildren<QLabel *>()) if (l->property("compactHide").toBool()) l->setVisible(level == 0);
-        // A view preference (Hide finished) leaves the icon-only row; it stays set.
-        for (auto *w : findChildren<QWidget *>()) if (w->property("compactDrop").toBool()) w->setVisible(level < 2);
+        // The icon-only row leaves out a view preference (Hide finished, which
+        // stays set) and the zoom group.
+        for (auto *w : findChildren<QWidget *>()) if (w->property("compactDrop").toBool()) w->setVisible(level < 3);
         // Icon-only buttons take their icon's width, not the style's text
         // minimum, and the row draws its groups closer together.
         if (auto *row = qobject_cast<QHBoxLayout *>(layout())) {
@@ -1278,16 +1303,17 @@ private:
             const bool zoom = b->objectName() == "teamWorkspaceZoomOut" || b->objectName() == "teamWorkspaceZoomIn";
             if (zoom) { if (compact) b->setFixedWidth(30); else { b->setMinimumWidth(0); b->setMaximumWidth(QWIDGETSIZE_MAX); } }
             if (text.isEmpty()) continue;
-            if (compact) b->setFixedWidth(b->iconSize().width() + 16);
+            const bool iconOnly = compact || (level == 2 && b->property("compactFirst").toBool());
+            if (iconOnly) b->setFixedWidth(b->iconSize().width() + 16);
             else { b->setMinimumWidth(0); b->setMaximumWidth(QWIDGETSIZE_MAX); }
-            b->setText(compact ? QString() : text);
-            if (b->toolTip().isEmpty() || b->toolTip() == text) b->setToolTip(compact ? text : QString());
+            b->setText(iconOnly ? QString() : text);
+            if (b->toolTip().isEmpty() || b->toolTip() == text) b->setToolTip(iconOnly ? text : QString());
             const QIcon icon = b->property("compactIcon").value<QIcon>();
-            if (!icon.isNull()) b->setIcon(compact ? icon : QIcon());
+            if (!icon.isNull()) b->setIcon(iconOnly ? icon : QIcon());
         }
         if (compact) fitCompactSpacing();
     }
-    int m_level = 0, m_full = 0, m_labels = 0;
+    int m_level = 0, m_full = 0, m_labels = 0, m_first = 0;
 };
 
 QWidget *TeamWorkspace::toolbar(const Team &team)
@@ -1297,7 +1323,7 @@ QWidget *TeamWorkspace::toolbar(const Team &team)
     bar->setMinimumWidth(0); bar->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
     auto *h = new QHBoxLayout(bar); h->setContentsMargins(12, 8, 12, 6); h->setSpacing(8);
     // U25 (spec 5.1): Graph / Board / Layers with their icons and names.
-    auto *views = segmented({{"graph", tr("Graph")}, {"board", tr("Board")}, {"layers", tr("Layers")}}, m_view, "teamWorkspaceView",
+    auto *views = segmented({{"graph", tr("Graph")}, {"board", tr("Board")}, {"layers", tr("Layers")}, {"profile", tr("Profile")}}, m_view, "teamWorkspaceView",
                             [this](const QString &value) { m_view = value; m_fit = true; scheduleRender(); });
     for (auto *b : views->findChildren<QPushButton *>()) {
         const QString value = b->property("segment").toString();
@@ -1314,7 +1340,7 @@ QWidget *TeamWorkspace::toolbar(const Team &team)
             auto *hint = elided(tr("Drag from a node's right edge onto a task to connect them"), c.dim, 11);
             hint->setObjectName("teamWorkspaceHint"); hint->setProperty("compactHide", true); h->addWidget(hint, 1);
         }
-    } else if (m_view != "board") {
+    } else if (m_view != "board" && m_view != "profile") {
         // The board's columns already sort tasks by state; the graph dims and
         // the layers hide what the filter leaves out.
         auto *filter = segmented({{"all", tr("All")}, {"active", tr("Active")}, {"problems", tr("Problems")}}, m_filter, "teamWorkspaceFilter",
@@ -1322,6 +1348,7 @@ QWidget *TeamWorkspace::toolbar(const Team &team)
         for (auto *b : filter->findChildren<QPushButton *>()) {
             const QString value = b->property("segment").toString();
             b->setAccessibleName(b->text()); b->setProperty("compactText", b->text()); b->setIconSize(QSize(13, 13));
+            b->setProperty("compactFirst", true);
             b->setProperty("compactIcon", QVariant::fromValue(workspaceIcon(value == "problems" ? QStringLiteral("attention") : value,
                                                                               b->isChecked() ? c.accent : c.text2)));
         }
@@ -1344,7 +1371,7 @@ QWidget *TeamWorkspace::toolbar(const Team &team)
     }
     if (!planning || m_view != "graph") h->addStretch();
     const auto groups = phaseGroups(team);
-    if (!groups.isEmpty() && !planning) {
+    if (!groups.isEmpty() && !planning && m_view != "profile") {
         // The drafts waiting for the owner; a click opens the first.
         int drafts = 0, first = 0;
         for (const auto &group : groups) {
@@ -1392,7 +1419,7 @@ QWidget *TeamWorkspace::toolbar(const Team &team)
         auto *aheadLabel = label(tr("Work ahead"), c.text3, 11); aheadLabel->setProperty("compactHide", true);
         h->addWidget(aheadLabel);
     }
-    if (!groups.isEmpty()) {
+    if (!groups.isEmpty() && m_view != "profile") {
         bool allOpen = true;
         for (const auto &group : groups) allOpen = allOpen && m_panel->phaseOpen(team, group);
         auto *expand = button(allOpen ? tr("Collapse all") : tr("Expand all"), "teamWorkspaceExpandAll"); expand->setProperty("ghost", true);
@@ -1409,6 +1436,7 @@ QWidget *TeamWorkspace::toolbar(const Team &team)
     if (m_view == "graph") {
         const auto zoomTo = [this](double zoom) { m_zoom = qBound(0.5, std::round(zoom * 10) / 10, 1.5); m_zoomManual = true; scheduleRender(); };
         auto *zoom = new QWidget; zoom->setProperty("seg", true); zoom->setAttribute(Qt::WA_StyledBackground);
+        zoom->setObjectName("teamWorkspaceZoom"); zoom->setProperty("compactDrop", true);
         auto *zh = new QHBoxLayout(zoom); zh->setContentsMargins(2, 2, 2, 2); zh->setSpacing(0);
         auto *out = button(QStringLiteral("−"), "teamWorkspaceZoomOut"); QObject::connect(out, &QPushButton::clicked, this, [=] { zoomTo(m_zoom - .1); });
         // "Fit" until the owner zooms, then the zoom itself; a click fits again.
@@ -1441,6 +1469,8 @@ void TeamWorkspace::linkDraft(const Team &team, int dependency, int taskId, bool
 QWidget *TeamWorkspace::canvas(const Team &team)
 {
     const Colors c = colorsFor(m_dark);
+    // U38 (#665): the Profile view stays across renders; it reads in the background.
+    if (m_view == "profile") return profileView(team);
     // U25: a team with phases shows each phase as its own scroll, in every view.
     if (!phaseGroups(team).isEmpty()) return phaseColumn(team);
     if (m_view == "board") return board(team);

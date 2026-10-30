@@ -74,6 +74,7 @@
 #include "TeamWorkspace.h"
 #include "TeamPhaseScroll.h"
 #include "TeamStages.h"
+#include "TeamHeat.h"
 #include "WorkspaceStyle.h"
 #include <QScopeGuard>
 #include <QElapsedTimer>
@@ -834,6 +835,7 @@ private slots:
     void catalogRoleDeleteNamesThePresetsItStrips();
     void stageOverridesReachHgsWithTheirReason();
     void planEditorPicksATasksPipeline();
+    void heatTintsGraphAndBoardByTimeOrTokens();
 private:
     QString script() const { return m_dir.filePath("hgs"); }
     void setTeam(const QJsonObject &value) { QVERIFY(FakeCli::replace(script() + ".status", QJsonDocument(value).toJson(QJsonDocument::Compact))); }
@@ -878,6 +880,13 @@ elif a[:2]==['team','status']:
   time.sleep(.1)
  sys.stdout.write(open(__file__+'.status').read())
 elif a[:2]==['team','events']:sys.stdout.write(open(__file__+'.feed').read())
+elif a[:2]==['team','profile']:
+ # U38: `.profile` holds the pages by metric; a cursor names its page.
+ import os
+ if os.path.exists(__file__+'.profilerefuse'):print(open(__file__+'.profilerefuse').read(),file=sys.stderr);sys.exit(1)
+ pages=json.load(open(__file__+'.profile'))['tokens' if body.get('tokens') else 'time']
+ c=body.get('after_tokens' if body.get('tokens') else 'after_time')
+ print(json.dumps(pages[c['page'] if c else 0]))
 elif a[:2]==['team','waiting']:
  # U50: pages `.waiting` as hgs does: newest first, ties by id, after the cursor.
  import os
@@ -10163,6 +10172,21 @@ void TestTeamsUi::aNarrowToolbarKeepsOnlyItsIcons()
     QTRY_COMPARE(segment("teamWorkspaceView", "graph")->text(), QStringLiteral("Graph"));
     QCOMPARE(segment("teamWorkspaceFilter", "problems")->text(), QStringLiteral("Problems"));
     QVERIFY(segment("teamWorkspaceFilter", "problems")->icon().isNull());
+    // U38: with the switch labels gone, Heat is one flame button whose menu
+    // holds the same three choices; a choice is kept for the team.
+    auto *heatMenu = workspace.findChild<QPushButton *>("teamWorkspaceHeatMenu");
+    QVERIFY(heatMenu && heatMenu->isVisible() && !heatMenu->icon().isNull());
+    QVERIFY(!workspace.findChild<QWidget *>("teamWorkspaceHeatWide")->isVisible());
+    QCOMPARE(heatMenu->toolTip(), QStringLiteral("Heat: Off"));
+    QStringList choices; for (auto *action : heatMenu->menu()->actions()) choices << action->text();
+    QCOMPARE(choices, (QStringList{"Off", "Time lost", "Tokens"}));
+    QSettings().remove("teams/heat/team-1");
+    heatMenu->menu()->actions().at(1)->trigger();
+    QCOMPARE(TeamUi::heatMode("team-1"), QStringLiteral("time"));
+    QTRY_COMPARE(workspace.findChild<QPushButton *>("teamWorkspaceHeatMenu")->toolTip(), QStringLiteral("Heat: Time lost"));
+    workspace.findChild<QPushButton *>("teamWorkspaceHeatMenu")->menu()->actions().at(0)->trigger();
+    QCOMPARE(TeamUi::heatMode("team-1"), QStringLiteral("off"));
+    QTRY_COMPARE(segment("teamWorkspaceView", "graph")->text(), QStringLiteral("Graph"));
     auto *split = workspace.findChild<QSplitter *>("teamWorkspaceSplit");
     QVERIFY(split);
     split->setSizes({430, 1010});
@@ -10173,6 +10197,8 @@ void TestTeamsUi::aNarrowToolbarKeepsOnlyItsIcons()
     QVERIFY(segment("teamWorkspaceFilter", "problems")->text().isEmpty());
     QVERIFY(!segment("teamWorkspaceFilter", "problems")->icon().isNull());
     if (auto *expand = workspace.findChild<QPushButton *>("teamWorkspaceExpandAll")) QVERIFY(expand->text().isEmpty());
+    // U38: the icon-only step leaves the Heat switch out.
+    QVERIFY(!workspace.findChild<QWidget *>("teamWorkspaceHeatBox")->isVisible());
     // A render rebuilds the toolbar: look it up each time.
     const auto bar = [&] { return workspace.findChild<QWidget *>("teamWorkspaceToolbar"); };
     QTest::qWait(200); shot(bar(), "team-toolbar-narrow-dark");
@@ -12312,6 +12338,259 @@ void TestTeamsUi::memberBlocksShowTheirReasonAndReviewAction()
         QCOMPARE(calls(script(), "relaunch").size(), 1);
     }
     darkPalette();
+}
+
+// U38: phase 38 of the heat mock-up (design/agent-teams/profile, heat and
+// heatboard): nine tasks into #482 and the integration #483, its review, test
+// and build cancelled.
+static QJsonObject heatTeam()
+{
+    QJsonArray members;
+    for (const auto &[id, role, agent] : QList<std::tuple<QString, QString, QString>>{
+             {"lead", "Lead", "claude"}, {"backend", "Backend", "dsh"}, {"backend2", "Backend2", "dsh"}, {"backend3", "Backend3", "claude"},
+             {"backend4", "Backend4", "dsh"}, {"reviewer", "Reviewer", "claude"}, {"qa", "QA", "dsh"}})
+        members.append(QJsonObject{{"id", id}, {"role", role}, {"agent", agent}, {"state", "active"},
+                                   {"session", QJsonObject{{"host", ""}, {"name", agent + "/heat/" + id}}}});
+    QJsonArray tasks;
+    QJsonObject layers;
+    const auto add = [&](int id, const QString &title, const QString &who, const QString &status, const QList<int> &deps, int layer) {
+        QJsonArray on; for (int d : deps) on.append(QJsonObject{{"task", d}});
+        tasks.append(QJsonObject{{"id", id}, {"phase", 38}, {"title", title}, {"assignee", who}, {"status", status}, {"deps", on},
+                                 {"attempts", QJsonArray{QJsonObject{{"n", 1}, {"id", QStringLiteral("a%1").arg(id)}, {"member", who}, {"state", "reported"}}}}});
+        layers[QString::number(id)] = layer;
+    };
+    add(474, "Review fixes: drafts, proposals", "backend", "accepted", {}, 0);
+    add(475, "Draft follow-ups: owner edits", "backend", "accepted", {}, 0);
+    add(515, "Approve a draft while the previous runs", "backend", "accepted", {}, 0);
+    add(476, "MCP servers from plugins", "backend3", "accepted", {}, 0);
+    add(480, "Review fixes: limit resume", "backend3", "accepted", {}, 0);
+    add(478, "Designer starts trusted", "backend4", "accepted", {}, 0);
+    add(477, "Review fixes: sub-team questions", "backend2", "accepted", {}, 0);
+    add(479, "Confirm subagents", "backend2", "accepted", {}, 0);
+    add(481, "Block session-log upload", "backend2", "accepted", {}, 0);
+    add(482, "Settings: confirm subagents", "backend2", "accepted", {479}, 1);
+    add(483, "Integrate phase 38", "lead", "accepted", {474, 475, 515, 476, 480, 478, 477, 481, 482}, 2);
+    add(484, "Review phase 38", "reviewer", "cancelled", {483}, 3);
+    add(485, "Test phase 38", "qa", "cancelled", {483}, 3);
+    add(486, "Build phase 38", "lead", "cancelled", {484, 485}, 4);
+    return QJsonObject{{"id", "team-1"}, {"name", "Teams v2: delivery and reports"}, {"status", "running"}, {"project", "Zerus"}, {"folder", "/work/zerus"},
+                       {"lead", "lead"}, {"revision", 7}, {"created", 1000}, {"updated", 9000}, {"settings", QJsonObject{}},
+                       {"phases", QJsonArray{QJsonObject{{"n", 38}, {"title", "Server fixes and the Sessions settings"}, {"barrier", false}, {"approval", "review"},
+                                                          {"state", "approved"}, {"added_by", "Lead"}, {"added_at", 1000.0}, {"decided_by", "You"}, {"decided_at", 1100.0}}}},
+                       {"members", members}, {"tasks", tasks}, {"layers", layers}, {"cycle", QJsonArray{}}, {"ready", QJsonArray{}},
+                       {"validation", QJsonObject{{"errors", QJsonArray{}}, {"warnings", QJsonArray{}}}}};
+}
+
+// Its profile as `hgs team profile` pages it: by time in two pages (an idle
+// member's loss has no task), by tokens in one, some tokens unknown.
+static QJsonObject heatProfile()
+{
+    const auto loss = [](const QString &kind, int task, int s, QJsonObject detail = {}) {
+        detail["kind"] = kind; detail["task"] = task; detail["s"] = s; detail["id"] = QStringLiteral("%1:%2").arg(kind).arg(task);
+        return detail;
+    };
+    const QJsonArray time{
+        QJsonObject{{"kind", "idle_member"}, {"id", "idle_member:backend4"}, {"s", 9000}, {"member", "backend4"}},
+        loss("lead_wait", 483, 7200, {{"lead_s", 6000}, {"question_s", 1200}}),
+        loss("blocked_chain", 483, 4560, {{"deps_s", 4560}, {"folder_held_s", 0}, {"on", QJsonArray{474, 482}}, {"held_by", QJsonArray{}}}),
+        loss("member_wait", 481, 4320, {{"member", "backend2"}}),
+        loss("rework", 482, 3900, {{"attempt", 1}, {"cause", "returned"}, {"member", "backend2"}}),
+        loss("rework", 480, 2820, {{"attempt", 1}, {"cause", "returned"}, {"member", "backend3"}}),
+        loss("member_wait", 482, 2520, {{"member", "backend2"}}),
+        loss("blocked_chain", 515, 2460, {{"deps_s", 0}, {"folder_held_s", 2460}, {"on", QJsonArray{}}, {"held_by", QJsonArray{474}}}),
+        loss("member_wait", 477, 2460, {{"member", "backend2"}}),
+        loss("conflict", 483, 2400, {{"template", "git-merge-lead"}, {"exit", 1}}),
+        loss("lead_wait", 475, 2220, {{"lead_s", 2220}, {"question_s", 0}}),
+        loss("long_test", 476, 2100, {{"stage", "test"}, {"round", 1}}),
+        loss("member_wait", 479, 2100, {{"member", "backend2"}}),
+        loss("permission_wait", 478, 1500, {{"answered_by", QJsonArray{"You"}}}),
+        loss("lead_wait", 478, 1320, {{"lead_s", 1320}, {"question_s", 0}}),
+        loss("rework", 481, 1200, {{"attempt", 1}, {"cause", "rejected"}, {"member", "backend2"}}),
+        loss("lead_wait", 515, 1200, {{"lead_s", 1200}, {"question_s", 0}})};
+    const auto page = [](const QString &list, const QJsonArray &items, const QJsonValue &next, bool partial) {
+        return QJsonObject{{"summary", QJsonObject{{"tasks", 14}, {"tokens", partial ? QJsonObject{{"total", 1800000}, {"partial", true}} : QJsonObject{{"unknown", true}}}}},
+                           {"losses", QJsonObject{{list, QJsonObject{{"items", items}, {"next_cursor", next}, {"total", 17}}}}}};
+    };
+    QJsonArray first, second;
+    for (int i = 0; i < time.size(); ++i) (i < 9 ? first : second).append(time.at(i));
+    const QJsonArray tokens{
+        loss("rework", 482, 3900, {{"attempt", 1}, {"cause", "returned"}, {"tokens", 1240000}, {"cost_usd", 3.1}, {"share", .58}}),
+        loss("rework", 480, 2820, {{"attempt", 1}, {"cause", "returned"}, {"tokens", 236000}, {"cost_usd", .6}, {"share", .41}}),
+        loss("rework", 481, 1200, {{"attempt", 1}, {"cause", "rejected"}, {"tokens", 98000}, {"cost_usd", .25}, {"share", .22}}),
+        loss("long_test", 476, 2100, {{"tokens", 61000}, {"cost_usd", .15}})};
+    return QJsonObject{{"time", QJsonArray{page("by_time", first, QJsonObject{{"s", 2460}, {"id", "member_wait:477"}, {"page", 1}}, false),
+                                           page("by_time", second, QJsonValue(), false)}},
+                       {"tokens", QJsonArray{page("by_tokens", tokens, QJsonValue(), true)}}};
+}
+
+void TestTeamsUi::heatTintsGraphAndBoardByTimeOrTokens()
+{
+    // Off by default: no remembered choice for this team or another one.
+    QSettings().remove("teams/heat/team-1"); QSettings().remove("teams/heat/team-2");
+    const auto forget = qScopeGuard([this] {
+        QSettings().remove("teams/heat/team-1"); QSettings().remove("teams/heat/team-2");
+        QFile::remove(script() + ".profilerefuse");
+    });
+    setTeam(heatTeam());
+    QVERIFY(FakeCli::replace(script() + ".profile", QJsonDocument(heatProfile()).toJson(QJsonDocument::Compact)));
+    QFile::remove(script() + ".profilerefuse");
+    const int profileCalls = calls(script(), "profile").size();
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    controller.setShowCancelled(true);
+    TeamPanel panel(&controller);
+    auto workspace = std::make_unique<TeamWorkspace>(&controller, &panel);
+    panel.setLive(live); workspace->setLive(live);
+    darkPalette(); workspace->setTheme(true);
+    workspace->resize(2140, 900); workspace->show();
+    controller.refresh();
+    QTRY_VERIFY(controller.team("team-1"));
+    panel.showTeam("team-1");
+    workspace->showTeam("team-1");
+    QTRY_VERIFY(phaseScrollOf(workspace.get(), 38));
+    if (!phaseOpen(workspace.get(), 38)) togglePhase(workspace.get(), 38);
+    QTRY_VERIFY(phaseOpen(workspace.get(), 38));
+    const auto heatButton = [&](TeamWorkspace *w, const char *value) -> QPushButton * {
+        auto *box = w->findChild<QWidget *>("teamWorkspaceHeat");
+        if (!box) return nullptr;
+        for (auto *b : box->findChildren<QPushButton *>()) if (b->property("segment") == value) return b;
+        return nullptr;
+    };
+    const auto node = [&](int id) {
+        for (auto *widget : workspace->findChildren<QWidget *>("teamPhaseGraph"))
+            if (auto *view = dynamic_cast<TeamUi::TaskView *>(widget))
+                for (const auto &n : view->nodes) if (n.id == id) return n;
+        return TeamUi::TaskView::Node{};
+    };
+    QTRY_VERIFY(node(483).id == 483);
+    // Off: the switch is there, nothing is tinted and no profile is read.
+    QTRY_VERIFY(heatButton(workspace.get(), "off"));
+    QVERIFY(heatButton(workspace.get(), "off")->isChecked());
+    // A wide toolbar says the choices in words (a narrow one keeps the icons).
+    QTRY_COMPARE(heatButton(workspace.get(), "time")->text(), QStringLiteral("Time lost"));
+    QCOMPARE(heatButton(workspace.get(), "tokens")->text(), QStringLiteral("Tokens"));
+    QCOMPARE(heatButton(workspace.get(), "off")->text(), QStringLiteral("Off"));
+    QVERIFY(!workspace->findChild<QWidget *>("teamHeatLegend"));
+    QVERIFY(node(483).heat.isEmpty() && !node(483).heatFill.isValid());
+    QCOMPARE(calls(script(), "profile").size(), profileCalls);
+    // Time lost: the plan's losses by time in two pages, without the
+    // sessions' tokens; the choice is this team's.
+    heatButton(workspace.get(), "time")->click();
+    QTRY_COMPARE(calls(script(), "profile").size(), profileCalls + 2);
+    const auto asked = calls(script(), "profile").mid(profileCalls);
+    QCOMPARE(asked.at(0)["team"].toString(), QStringLiteral("team-1"));
+    QCOMPARE(asked.at(0)["tokens"].toBool(), false);
+    QCOMPARE(asked.at(0)["limit"].toInt(), 100);
+    QVERIFY(!asked.at(0).contains("phase") && !asked.at(0).contains("after_time"));
+    QCOMPARE(asked.at(1)["after_time"].toObject()["id"].toString(), QStringLiteral("member_wait:477"));
+    QCOMPARE(TeamUi::heatMode("team-1"), QStringLiteral("time"));
+    QCOMPARE(TeamUi::heatMode("team-2"), QStringLiteral("off"));
+    QTRY_COMPARE(node(483).heat, QStringLiteral("lost 3h 56m"));
+    const auto c = TeamUi::colorsFor(true);
+    // The integration lost more than 2 h: the warmest tint, the loss in the
+    // heat color. A small loss is muted, a task without one says so untinted.
+    QCOMPARE(node(483).heatFill, TeamUi::heatFill(c, 1));
+    QCOMPARE(node(483).heatColor, c.danger);
+    QCOMPARE(node(482).heat, QStringLiteral("lost 1h 47m"));
+    QCOMPARE(node(475).heat, QStringLiteral("lost 37m"));
+    QCOMPARE(node(475).heatColor, c.muted);
+    QVERIFY(node(475).heatFill.isValid() && node(475).heatFill != node(483).heatFill && node(475).heatFill != c.surface);
+    QCOMPARE(node(474).heat, QStringLiteral("no loss"));
+    QVERIFY(!node(474).heatFill.isValid());
+    // Cancelled work and the node's own lines: no tint; the working time
+    // gives way to the loss.
+    QVERIFY(node(484).heat.isEmpty() && !node(484).heatFill.isValid());
+    QVERIFY(node(483).worked.isEmpty());
+    // The tooltip names the top loss and the next two.
+    const QString tip = node(483).tooltip;
+    QVERIFY2(tip.contains("Lost 3h 56m to waits and rework\nTop loss: Waited for the lead (decision 1h 40m, questions 20m), 2h 00m"), qPrintable(tip));
+    QVERIFY2(tip.contains("Then: Waited for dependencies #474, #482 1h 16m; Merge conflict 40m"), qPrintable(tip));
+    QVERIFY2(node(515).tooltip.contains("Top loss: Folder held by #474, 41m"), qPrintable(node(515).tooltip));
+    QVERIFY2(node(478).tooltip.contains("Top loss: Waited for a permission (answered by You), 25m"), qPrintable(node(478).tooltip));
+    // The legend: the metric, the 0 to 2 h scale and the tint-only note.
+    auto *legend = workspace->findChild<QWidget *>("teamHeatLegend");
+    QVERIFY(legend);
+    QCOMPARE(legend->findChild<QLabel *>("teamHeatMetric")->text(), QStringLiteral("Time lost: waits and rework"));
+    QCOMPARE(legend->findChild<QLabel *>("teamHeatEnd")->text(), QStringLiteral("2h or more"));
+    QVERIFY(legend->findChild<QWidget *>("teamHeatScale"));
+    QCOMPARE(legend->findChild<QLabel *>("teamHeatNote")->text(), QStringLiteral("Tint only; the state icon and border stay."));
+    const auto shoot = [&](const QString &name) {
+        shot(workspace.get(), name + "-dark");
+        lightPalette(); workspace->setTheme(false); workspace->render(); QTest::qWait(200);
+        lightShot(workspace.get(), name + "-light");
+        darkPalette(); workspace->setTheme(true); workspace->render(); QTest::qWait(150);
+    };
+    shoot("u38-heat-graph-time");
+    // The Board: the same tint on the cards and the loss at the line's end.
+    const auto view = [&](const char *segment) {
+        for (auto *b : workspace->findChild<QWidget *>("teamWorkspaceView")->findChildren<QPushButton *>())
+            if (b->property("segment") == segment) { b->click(); break; }
+    };
+    const auto card = [&](int id) -> QFrame * {
+        for (auto *frame : workspace->findChildren<QFrame *>("teamBoardCard")) if (frame->property("task").toInt() == id) return frame;
+        return nullptr;
+    };
+    const auto lost = [&](int id) -> QLabel * { auto *frame = card(id); return frame ? frame->findChild<QLabel *>("teamBoardHeat") : nullptr; };
+    view("board");
+    QTRY_VERIFY(lost(483));
+    QVERIFY(heatButton(workspace.get(), "time")->isChecked());
+    QCOMPARE(lost(483)->text(), QStringLiteral("lost 3h 56m"));
+    QVERIFY(lost(483)->font().bold());
+    QVERIFY(card(483)->styleSheet().contains(TeamUi::heatFill(c, 1).name()));
+    QVERIFY(card(474)->styleSheet().contains("background:" + c.surface.name()));
+    QCOMPARE(lost(474)->text(), QStringLiteral("no loss"));
+    QVERIFY(!lost(485));
+    QVERIFY(!card(483)->findChild<QLabel *>("teamBoardWorked"));
+    QVERIFY(card(483)->toolTip().contains("Top loss: Waited for the lead"));
+    QVERIFY(lost(483)->geometry().left() > card(483)->findChild<QWidget *>("teamBoardRole")->geometry().right());
+    shoot("u38-heat-board-time");
+    // Tokens: the losses by tokens, read with the sessions' tokens; the scale
+    // ends at the largest task's and the unknown tokens are named.
+    heatButton(workspace.get(), "tokens")->click();
+    QTRY_VERIFY(!calls(script(), "profile").isEmpty() && calls(script(), "profile").last()["tokens"].toBool());
+    QCOMPARE(TeamUi::heatMode("team-1"), QStringLiteral("tokens"));
+    QTRY_COMPARE(lost(482) ? lost(482)->text() : QString(), QStringLiteral("lost 1.2M tokens"));
+    QCOMPARE(lost(480)->text(), QStringLiteral("lost 236k tokens"));
+    QCOMPARE(lost(483)->text(), QStringLiteral("no loss"));
+    QVERIFY(card(482)->styleSheet().contains(TeamUi::heatFill(c, 1).name()));
+    QVERIFY2(lost(482)->toolTip().contains("Lost 1.2M tokens to rework and long tests\nTop loss: Rework: attempt 1 returned, 1.2M tokens, 58% of the task's tokens"),
+             qPrintable(lost(482)->toolTip()));
+    legend = workspace->findChild<QWidget *>("teamHeatLegend");
+    QCOMPARE(legend->findChild<QLabel *>("teamHeatMetric")->text(), QStringLiteral("Tokens lost: rework and long tests"));
+    QCOMPARE(legend->findChild<QLabel *>("teamHeatEnd")->text(), QStringLiteral("1.2M, the most"));
+    QVERIFY(legend->findChild<QLabel *>("teamHeatNote")->text().contains("Some tokens are unknown."));
+    shoot("u38-heat-board-tokens");
+    view("graph");
+    QTRY_COMPARE(node(482).heat, QStringLiteral("lost 1.2M tokens"));
+    QCOMPARE(node(476).heat, QStringLiteral("lost 61k tokens"));
+    shoot("u38-heat-graph-tokens");
+    // Layers has no tint and no switch; the choice stays for Graph and Board.
+    view("layers");
+    QTRY_VERIFY(!workspace->findChild<QWidget *>("teamWorkspaceHeat"));
+    QVERIFY(!workspace->findChild<QWidget *>("teamHeatLegend"));
+    view("graph");
+    QTRY_VERIFY(heatButton(workspace.get(), "tokens") && heatButton(workspace.get(), "tokens")->isChecked());
+    // Remembered per team: a new workspace opens team-1 with Tokens; another
+    // team is still off.
+    workspace.reset();
+    auto again = std::make_unique<TeamWorkspace>(&controller, &panel);
+    again->setLive(live); again->setTheme(true); again->resize(2140, 900); again->show();
+    again->showTeam("team-1");
+    QTRY_VERIFY(heatButton(again.get(), "tokens"));
+    QVERIFY(heatButton(again.get(), "tokens")->isChecked());
+    QCOMPARE(TeamUi::heatMode("team-2"), QStringLiteral("off"));
+    // A refused read names its reason in the legend and tints nothing.
+    QVERIFY(FakeCli::replace(script() + ".profilerefuse", "usage: hgs [@host] team create|plan|status --json"));
+    heatButton(again.get(), "time")->click();
+    QTRY_VERIFY(again->findChild<QLabel *>("teamHeatError"));
+    QVERIFY2(again->findChild<QLabel *>("teamHeatError")->text().startsWith("The profile could not be read: ")
+                 && again->findChild<QLabel *>("teamHeatError")->toolTip().contains("usage: hgs"), qPrintable(again->findChild<QLabel *>("teamHeatError")->toolTip()));
+    QVERIFY(again->findChildren<QLabel *>("teamBoardHeat").isEmpty());
+    // Off forgets the choice.
+    heatButton(again.get(), "off")->click();
+    QTRY_VERIFY(!again->findChild<QWidget *>("teamHeatLegend"));
+    QCOMPARE(TeamUi::heatMode("team-1"), QStringLiteral("off"));
+    QVERIFY(!QSettings().contains("teams/heat/team-1"));
 }
 
 #include "test_teamsui.moc"

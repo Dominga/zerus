@@ -1,3 +1,4 @@
+import { createActivityScroll } from "./activity-scroll";
 import { activityReadingRows, createActivityAnchor } from "./activity-anchor";
 import { searchPreview, clearSearchPreview } from "../../store/searchSelection";
 import { SearchHighlight } from "./SearchHighlight";
@@ -549,8 +550,6 @@ function Item(props: { item: TranscriptItem; scope?: AttachmentScope }) {
 
 /** Within this distance of the top, scrolling reads the previous page. */
 const OLDER_EDGE = 120;
-/** Within this distance of the bottom, new events keep the view at the bottom. */
-const STICK_EDGE = 48;
 
 // The jump to the latest activity (ActivityView.cpp 1607-1636): whether the
 // view follows the newest item, how many events arrived since it stopped,
@@ -560,8 +559,7 @@ const [following, setFollowing] = createSignal(true);
 const [unseen, setUnseen] = createSignal(0);
 /** The mounted transcript's scroller (one Activity view shows at a time). */
 let liveScroller: HTMLDivElement | undefined;
-let liveEnd: ReturnType<typeof createActivityEnd> | undefined;
-let liveAnchor: ReturnType<typeof createActivityAnchor> | undefined;
+let liveLatest: (() => void) | undefined;
 export { following, unseen };
 
 /**
@@ -579,9 +577,7 @@ export function jumpToLatest() {
   if (searchPreview()) { clearSearchPreview(); return; }
   setFollowing(true);
   setUnseen(0);
-  liveAnchor?.reset();
-  liveEnd?.pin();
-  liveScroller?.scrollTo({ top: liveScroller.scrollHeight, behavior: "instant" });
+  liveLatest?.();
 }
 
 /** The transcript items of a source, with the open session's local rows. */
@@ -634,14 +630,20 @@ export function ActivityView(props: { source?: ActivitySource }) {
   let scroller!: HTMLDivElement;
   // Items keep their identity while events append: the list reconciles by id,
   // so a growing tool group updates in place and older pages only add nodes.
-  const [view, setView] = createStore<{ items: TranscriptItem[] }>({ items: [] });
+  const [view, setView] = createStore<{ items: TranscriptItem[]; expired: boolean; pane: ReturnType<typeof paneStates>; tool: string }>({ items: [], expired: false, pane: paneStates(source(), s()), tool: "" });
   const local = createMemo(() => localRows(source(), s()), undefined, { equals: (a, b) => a === b || (a.length === 0 && b.length === 0) });
   const built = createMemo(() => transcriptOf(source(), local()));
   createEffect(() => {
     const items = built();
-    settleReading(true);
-    setView("items", reconcile(items, { key: "id" }));
-    reading.changed(); end.changed();
+    const expired = source().olderDone() && source().events().length > 0 && source().summary()?.history_truncated === true;
+    const pane = paneStates(source(), s());
+    const summary = source().summary(), tool = String(summary?.current_tool || summary?.activity_summary || s()?.summary || "");
+    motion.update(() => {
+      settleReading(true);
+      setView("items", reconcile(items, { key: "id" }));
+      setView({ expired, pane, tool });
+      reading.changed(); end.changed();
+    });
   });
 
   // Keep a named row and its offset while the end pin is released.
@@ -656,34 +658,38 @@ export function ActivityView(props: { source?: ActivitySource }) {
     () => ({ top: scroller.scrollTop, height: scroller.scrollHeight, viewport: scroller.clientHeight }),
     () => scroller.scrollTo({ top: scroller.scrollHeight, behavior: "instant" }),
     animationFrames,
-    () => !selectionInside(),
+    () => !motion.active() && !selectionInside(),
   );
-  let anchorScroll: number | undefined, rememberedTop = 0;
+  let latestAfterScroll = false;
+  const motion = createActivityScroll(() => scroller.scrollTop, (flush) => {
+    const atEnd = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= 1;
+    reading.remember();
+    flush();
+    if ((atEnd || latestAfterScroll) && !preview()) { latestAfterScroll = false; setFollowing(true); setUnseen(0); reading.reset(); end.pin(); }
+    else reading.changed();
+  });
   const reading = createActivityAnchor({
     visible: () => activityReadingRows(scroller).visible(),
     offset: (key) => activityReadingRows(scroller).offset(key),
-    adjust: (delta) => { activityReadingRows(scroller).adjust(delta); anchorScroll = rememberedTop = scroller.scrollTop; },
-  }, () => !end.active() && !preview());
-  let pointerScrolling = false, userScrolling = false, scrollIdle: ReturnType<typeof setTimeout> | undefined;
-  const scrollIntent = () => { userScrolling = true; clearTimeout(scrollIdle); scrollIdle = setTimeout(() => { userScrolling = false; }, 180); };
-  const rememberReading = () => { reading.remember(); rememberedTop = scroller.scrollTop; };
-  const settleReading = (before = false) => {
-    // Compositor scrolling can precede its scroll event. Adopt that user
-    // movement before reconciling, rather than correcting it back as drift.
-    if ((userScrolling || pointerScrolling) && scroller.scrollTop !== rememberedTop && scroller.scrollTop !== anchorScroll) rememberReading();
-    if (before) reading.beforeChange(); else reading.changed();
+    adjust: (delta) => activityReadingRows(scroller).adjust(delta),
+  }, () => !end.active() && !preview(), animationFrames, () => !motion.active());
+  const settleReading = (before = false) => { if (before) reading.beforeChange(); else reading.changed(); };
+  const scrollIntent = () => {
+    motion.intent(); latestAfterScroll = false;
+    end.release(); setFollowing(false); reading.remember();
   };
-  let manualAway = false, hasLeftEnd = false;
-  let touchY: number | undefined;
-  const scrollAway = () => { settleReading(true); end.release(); manualAway = true; hasLeftEnd = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight > 1; setFollowing(false); rememberReading(); };
+  const latest = () => {
+    if (motion.active()) { latestAfterScroll = true; return; }
+    reading.reset(); end.pin();
+    scroller.scrollTo({ top: scroller.scrollHeight, behavior: "instant" });
+  };
   onMount(() => {
     liveScroller = scroller;
-    liveEnd = end;
-    liveAnchor = reading;
-    const pointerEnded = () => { if (pointerScrolling) { pointerScrolling = false; scrollIntent(); } };
-    window.addEventListener("pointerup", pointerEnded); window.addEventListener("pointercancel", pointerEnded);
-    onCleanup(() => { window.removeEventListener("pointerup", pointerEnded); window.removeEventListener("pointercancel", pointerEnded); });
-    const selectionChanged = () => end.changed();
+    liveLatest = latest;
+    const pointerEnded = () => motion.release();
+    window.addEventListener("pointerup", pointerEnded); window.addEventListener("pointercancel", pointerEnded); window.addEventListener("blur", pointerEnded);
+    onCleanup(() => { window.removeEventListener("pointerup", pointerEnded); window.removeEventListener("pointercancel", pointerEnded); window.removeEventListener("blur", pointerEnded); });
+    const selectionChanged = () => { if (selectionInside() && motion.active()) motion.moved(); else end.changed(); };
     document.addEventListener("selectionchange", selectionChanged);
     // Content includes Markdown, images and tool disclosures; the viewport
     // also resizes when the composer or a question card changes height.
@@ -702,37 +708,23 @@ export function ActivityView(props: { source?: ActivitySource }) {
     onCleanup(() => { document.removeEventListener("selectionchange", selectionChanged); resize.disconnect(); mutations.disconnect(); scroller.removeEventListener("load", changed, true); scroller.removeEventListener("contentvisibilityautostatechange", changed, true); document.fonts?.removeEventListener("loadingdone", changed); });
   });
   onCleanup(() => {
-    end.dispose(); reading.dispose(); clearTimeout(scrollIdle);
+    end.dispose(); reading.dispose(); motion.dispose();
     if (liveScroller === scroller) liveScroller = undefined;
-    if (liveEnd === end) liveEnd = undefined;
-    if (liveAnchor === reading) liveAnchor = undefined;
+    if (liveLatest === latest) liveLatest = undefined;
   });
   const onScroll = () => {
-    // A first render or a resize can emit scroll before the pin's frame.
-    // It must not turn following off or trigger an older-page read.
-    if (end.scrolled()) return;
-    // Layout, anchor corrections and remeasurement cannot change reading mode.
-    const correction = anchorScroll !== undefined && Math.abs(anchorScroll - scroller.scrollTop) < .5;
-    anchorScroll = undefined;
-    if (correction || (!userScrolling && !pointerScrolling) || preview()) { reading.changed(); return; }
-    scrollIntent();
-    const atBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < (manualAway ? 1 : STICK_EDGE);
-    // A queued end-scroll event can arrive after an upward wheel/key intent,
-    // before the browser has moved. It cannot re-pin that released reader.
-    if (atBottom && manualAway && !hasLeftEnd) return;
-    if (!atBottom) hasLeftEnd = true;
-    if (atBottom) { manualAway = false; hasLeftEnd = false; }
-    if (atBottom !== following()) setFollowing(atBottom);
-    if (atBottom) { reading.reset(); end.pin(); if (unseen()) setUnseen(0); }
-    else rememberReading();
-    if (scroller.scrollTop < OLDER_EDGE && readsOlder(source())) {
-      source().loadOlder();
+    if (motion.active()) {
+      motion.moved(); reading.remember();
+      if (!preview() && scroller.scrollTop < OLDER_EDGE && readsOlder(source())) source().loadOlder();
+      return;
     }
+    if (end.scrolled()) return;
+    reading.changed();
   };
   let sendIds: Set<string> | undefined;
   createEffect(on(() => source().target()?.id, () => {
     sendIds = undefined;
-    setFollowing(true); setUnseen(0); reading.reset(); newest = undefined; manualAway = false; hasLeftEnd = false;
+    motion.reset(); latestAfterScroll = false; setFollowing(true); setUnseen(0); reading.reset(); newest = undefined;
     // Selection changes must place even when the next page has the same row count.
     end.pin();
   }));
@@ -743,9 +735,9 @@ export function ActivityView(props: { source?: ActivitySource }) {
   }));
   createEffect(on(preview, (match) => {
     if (match) {
-      end.release(); reading.reset(); manualAway = true; setFollowing(false);
-      requestAnimationFrame(() => scroller.querySelector(".search-preview mark")?.scrollIntoView({ block: "center" }));
-    } else { manualAway = false; setFollowing(true); end.pin(); }
+      motion.reset(); end.release(); reading.reset(); setFollowing(false);
+      requestAnimationFrame(() => { if (!motion.active()) scroller.querySelector(".search-preview mark")?.scrollIntoView({ block: "center" }); });
+    } else { setFollowing(true); end.pin(); }
   }));
   // Events after the newest one seen count as new while the view does not follow (Qt's m_unseen).
   createEffect(on(() => source().events(), (events) => {
@@ -759,10 +751,9 @@ export function ActivityView(props: { source?: ActivitySource }) {
   }));
 
 
-  const summary = () => source().summary();
   const scope = createMemo(() => source().attachmentScope?.(), undefined, { equals: (a, b) => JSON.stringify(a) === JSON.stringify(b) });
-  const liveTool = () => String(summary()?.current_tool || summary()?.activity_summary || s()?.summary || "");
-  const states = createMemo(() => paneStates(source(), s()));
+  const liveTool = () => view.tool;
+  const states = () => view.pane;
   const fileSession = () => {
     const id = source().target()?.id;
     return orderedRows().find((row) => row.key === id);
@@ -773,12 +764,11 @@ export function ActivityView(props: { source?: ActivitySource }) {
       <LocalDeleteDialog />
       <SessionFileDialog />
       <div class="act-scroll" ref={scroller} tabindex="-1" onContextMenu={activityMenu} onScroll={onScroll} style={{ "overflow-anchor": "none" }}
-        onWheel={(e) => { scrollIntent(); if (e.deltaY < 0) scrollAway(); }}
+        onWheel={scrollIntent}
         onKeyDown={(e) => { if (!e.defaultPrevented && ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(e.key)
-          && !(e.target as HTMLElement).closest("input,textarea,select,[contenteditable=true]") && !(e.key === " " && (e.target as HTMLElement).closest("button,a"))) { scrollIntent(); if (["ArrowUp", "PageUp", "Home"].includes(e.key)) scrollAway(); } }}
-        onPointerDown={(e) => { if (e.target === scroller) { pointerScrolling = true; scrollIntent(); scrollAway(); } }}
-        onTouchStart={(e) => { touchY = e.touches[0]?.clientY; }}
-        onTouchMove={(e) => { const y = e.touches[0]?.clientY; scrollIntent(); if (y !== undefined && touchY !== undefined && y > touchY) scrollAway(); touchY = y; }}>
+          && !(e.target as HTMLElement).closest("input,textarea,select,[contenteditable=true]") && !(e.key === " " && (e.target as HTMLElement).closest("button,a"))) { scrollIntent(); } }}
+        onPointerDown={(e) => { if (e.button === 0 && !(e.target as HTMLElement).closest("button,a,input,textarea,.col-edge")) { scrollIntent(); motion.hold(); } }}
+        onTouchStart={() => { scrollIntent(); motion.hold(); }} onTouchMove={scrollIntent} onTouchEnd={() => motion.release()} onTouchCancel={() => motion.release()}>
         <div class="act-col">
           <Show when={!fullWidth()}><ColumnEdge /><ColumnEdge right /></Show>
           <Show when={subagentOpen()}>
@@ -794,9 +784,11 @@ export function ActivityView(props: { source?: ActivitySource }) {
             <div class="search-preview-body"><SearchHighlight text={String(p().hit.event.detail ?? "")} query={p().query} /></div>
           </section>}</Show>
           <Show when={!preview()}>
-          <div class="act-label eyebrow">Recorded activity — messages and tool excerpts</div>
-          <Show when={source().loadingOlder()}><div class="act-older hint">Reading earlier activity…</div></Show>
-          <Show when={source().olderDone() && source().events().length > 0 && summary()?.history_truncated === true}>
+          <div class="act-label eyebrow" style={{ position: "relative" }}>
+            <span style={{ visibility: source().loadingOlder() ? "hidden" : "visible" }}>Recorded activity — messages and tool excerpts</span>
+            <span class="act-older hint" style={{ position: "absolute", inset: "0", padding: "0", display: "flex", "align-items": "center", "justify-content": "center", "text-transform": "none", "letter-spacing": "normal", "font-weight": "normal", visibility: source().loadingOlder() ? "visible" : "hidden" }} aria-hidden={!source().loadingOlder()}>Reading earlier activity…</span>
+          </div>
+          <Show when={view.expired}>
             <div class="act-older hint">Older events have expired from the journal.</div>
           </Show>
           <Show when={!states().archived} fallback={<div class="notice"><Icon name="archive" size={14} /><div>This conversation is archived.</div></div>}>

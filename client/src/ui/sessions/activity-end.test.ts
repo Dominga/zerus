@@ -90,9 +90,21 @@ describe("Activity end settling", () => {
   it("coalesces a resize burst into two frames and stops after disposal", () => {
     const f = fixture(); f.end.pin();
     for (let i = 0; i < 100; i++) f.end.changed();
-    expect(f.queued.size).toBe(1); f.frame(); f.frame(); expect(f.writes()).toBe(2);
+    expect(f.queued.size).toBe(1); f.frame(); f.frame(); expect(f.writes()).toBe(1);
     f.end.changed(); f.end.dispose(); f.frame(); f.end.pin(); f.end.changed();
-    expect(f.queued.size).toBe(0); expect(f.writes()).toBe(2);
+    expect(f.queued.size).toBe(0); expect(f.writes()).toBe(1);
+  });
+  it("streams while pinned without repeating writes for an unchanged layout", () => {
+    const f = fixture(); f.end.pin(); f.frame(); f.frame();
+    for (let n = 0; n < 60; n++) {
+      const before = f.writes();
+      f.geometry.height += 12 + n % 3;
+      f.end.changed(); f.frame(); f.frame();
+      expect(f.writes()).toBe(before + 1);
+      expect(f.geometry.top + f.geometry.viewport).toBe(f.geometry.height);
+      f.end.changed(); f.end.scrolled(); f.frame(); f.frame();
+      expect(f.writes()).toBe(before + 1);
+    }
   });
 });
 

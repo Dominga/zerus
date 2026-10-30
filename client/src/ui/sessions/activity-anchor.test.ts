@@ -74,3 +74,12 @@ describe("Activity's released reading anchor", () => {
     expect(f.writes()).toBe(1);
   });
 });
+
+it("never corrects a layout or queued verification frame while a scroll owns the viewport", () => {
+  let offset=-40, writes=0, busy=false;const frames=new Map<number,()=>void>();let id=0;
+  const anchor=createActivityAnchor({visible:()=>[{key:"reading",offset}],offset:()=>offset,adjust:(delta)=>{writes++;offset-=delta;}},()=>true,{request:run=>{frames.set(++id,run);return id;},cancel:key=>{frames.delete(key);}},()=>!busy);
+  anchor.remember();anchor.changed();busy=true;offset+=100;
+  anchor.beforeChange();anchor.changed();for(const run of frames.values())run();frames.clear();
+  expect(writes).toBe(0);expect(offset).toBe(60);
+  busy=false;anchor.changed();expect(writes).toBe(1);expect(offset).toBe(-40);
+});

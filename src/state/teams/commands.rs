@@ -10,7 +10,7 @@ use super::store::{self, canonical_uuid, Event, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|move-task|add-to-phase|approve-phase|discard-phase|return-to-draft|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|close-phase|integrate-build|run|templates|safe-action|reports-to|sub-lead --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|move-task|add-to-phase|approve-phase|discard-phase|return-to-draft|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|spans|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|close-phase|integrate-build|run|templates|safe-action|reports-to|sub-lead --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
 
 const MUTATIONS: &[&str] = &[
     "plan", "extend", "edit-draft", "move-phase", "move-task", "add-to-phase", "approve-phase", "discard-phase", "return-to-draft", "reject-phase", "undo-reject-phase",
@@ -2281,6 +2281,52 @@ fn current_team<'a>(teams: &'a [Team], named: &str, mut member_of: impl FnMut(&T
     }
 }
 
+/// U38: the timelines of one task (`task`), or a page of a phase's (`phase`)
+/// or the plan's tasks by id after `after`, at most `limit` (50). One bounded,
+/// indexed read of the journal serves the page. Read only.
+fn spans_view(input: &Value) -> anyhow::Result<Value> {
+    use super::spans;
+    let store = Store::open(false)?;
+    let team = store.load(text(input, "team"))?.context("Unknown team")?;
+    let now = now();
+    let limit = input["limit"].as_u64().map_or(spans::TASK_PAGE, |n| (n as usize).clamp(1, spans::TASK_PAGE));
+    let mut chosen: Vec<&Task> = match input["task"].as_u64() {
+        Some(id) => vec![team.task(id as u32).with_context(|| format!("Unknown task #{id}"))?],
+        None => {
+            let after = input["after"].as_u64().unwrap_or(0);
+            let phase = input["phase"].as_u64();
+            let mut list: Vec<&Task> = team
+                .tasks
+                .iter()
+                .filter(|task| u64::from(task.id) > after && phase.is_none_or(|phase| u64::from(task.phase) == phase))
+                .collect();
+            list.sort_by_key(|task| task.id);
+            list
+        }
+    };
+    let more = chosen.len() > limit;
+    chosen.truncate(limit);
+    let (journal, cut) = match spans::window(&team, &chosen, now) {
+        Some((from, to)) => store.span_events(&team.id, from, to, spans::EVENT_LIMIT)?,
+        None => (Vec::new(), false),
+    };
+    let holders = spans::holders(&team, now);
+    let tasks: Vec<Value> = chosen
+        .iter()
+        .map(|task| {
+            let mut value = spans::spans(&team, task, &journal, &holders, now);
+            if cut {
+                let mut unknown: BTreeSet<String> = serde_json::from_value(value["unknown"].clone()).unwrap_or_default();
+                unknown.insert("events".into());
+                value["unknown"] = json!(unknown);
+            }
+            value
+        })
+        .collect();
+    let next = if more { chosen.last().map(|task| task.id) } else { None };
+    Ok(json!({"team":team.id,"tasks":tasks,"next_cursor":next,"events":{"read":journal.len(),"truncated":cut}}))
+}
+
 /// The member's live attempt from its own session; `team` is optional when the
 /// session belongs to one team (spec section 5). Read only.
 fn current(input: &Value) -> anyhow::Result<Value> {
@@ -3538,6 +3584,7 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             };
             Store::open(false)?.events(text(input, "team"), before, input["limit"].as_i64().unwrap_or(PAGE))
         }
+        "spans" => spans_view(input),
         "current" => current(input),
         "escalate" => escalate(input),
         op if MUTATIONS.contains(&op) => {
@@ -4841,6 +4888,29 @@ mod tests {
     /// U36 through `hgs team`: the implementer's report enters review, status
     /// shows the stage, its candidates and its span, the reviewer's verdict is
     /// proven by its stage id alone, and the owner's overrides are mutations.
+    /// U38: `spans` gives one task's timeline, or a phase's or the plan's in
+    /// pages by task id, with one bounded read of the journal.
+    #[test]
+    fn spans_give_a_task_or_a_page_of_timelines() {
+        let (team, _, _) = review_team();
+        assert!(USAGE.contains("|spans|") && !MUTATIONS.contains(&"spans"));
+        with_review_team(&team, || {
+            let one = run("spans", &json!({"team":"rv","task":1}), false).unwrap();
+            assert_eq!(one["tasks"].as_array().unwrap().len(), 1, "{one}");
+            assert_eq!(one["tasks"][0]["task"], 1);
+            assert!(one["tasks"][0]["spans"].is_array() && one["tasks"][0]["totals"].is_object(), "{one}");
+            assert_eq!((one["events"]["truncated"].clone(), one["next_cursor"].clone()), (json!(false), Value::Null));
+            let page = run("spans", &json!({"team":"rv","limit":2}), false).unwrap();
+            let ids: Vec<Value> = page["tasks"].as_array().unwrap().iter().map(|task| task["task"].clone()).collect();
+            assert_eq!((ids, page["next_cursor"].clone()), (vec![json!(1), json!(2)], json!(2)));
+            let rest = run("spans", &json!({"team":"rv","limit":2,"after":2}), false).unwrap();
+            assert_eq!((rest["tasks"][0]["task"].clone(), rest["next_cursor"].clone()), (json!(3), Value::Null));
+            let phase = run("spans", &json!({"team":"rv","phase":2}), false).unwrap();
+            assert_eq!(phase["tasks"].as_array().unwrap().len(), 1);
+            assert!(run("spans", &json!({"team":"rv","task":99}), false).is_err());
+        });
+    }
+
     #[test]
     fn a_pipeline_runs_through_hgs_team() {
         use crate::state::teams::model::{Member, MemberState, TaskStatus};

@@ -48,6 +48,10 @@ pub struct Run {
     pub functions: Vec<String>,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub functions_command: String,
+    /// #741: the same run as an `hgs team run` request's template and args,
+    /// when a team template expresses it (cargo-test, qt-test).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub team_run: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -71,7 +75,10 @@ pub fn select(root: &std::path::Path, config: &TestsConfig, map: &TestMap, durat
         whole.extend(providers.iter().map(|provider| provider.name.as_str()));
     }
     for file in changed.iter().filter(|_| !full) {
-        if glob::any(&config.map.ignore, file) {
+        // map.ignore never hides a file the map knows: a text compiled into a
+        // binary (include_str!) is that module's.
+        let known = map.providers.values().any(|section| section.files.contains_key(file) || section.test_files.contains_key(file));
+        if glob::any(&config.map.ignore, file) && !known {
             selection.ignored.push(file.clone());
             continue;
         }
@@ -170,6 +177,7 @@ pub fn select(root: &std::path::Path, config: &TestsConfig, map: &TestMap, durat
                         run.seconds = run.seconds.map(|seconds| seconds * run.functions.len() as f64 / target.tests as f64);
                     }
                     run.tests = run.functions.len();
+                    run.team_run = Some(serde_json::json!({"template": "qt-test", "args": {"suite": ids[0], "functions": run.functions}}));
                 }
             }
             selection.runs.push(run);
@@ -245,6 +253,12 @@ fn whole_run(provider: &Provider, section: &ProviderMap, durations: &Durations, 
     let command = if explicit { command(provider, &items(provider, section, &ids)) } else { command(provider, "") };
     let tests = section.targets.values().map(|target| target.tests).sum();
     let unknown = unknown.max(usize::from(section.targets.is_empty()));
+    let all: Vec<String> = section.targets.keys().filter(|id| *id != ALL).cloned().collect();
+    let team_run = match provider.kind {
+        Kind::Cargo => Some(cargo_team_run(provider, "", &[], &[])),
+        Kind::Ctest if !all.is_empty() => Some(serde_json::json!({"template": "qt-test", "args": {"suites": all}})),
+        _ => None,
+    };
     Run {
         provider: provider.name.clone(),
         kind: provider.kind,
@@ -257,6 +271,7 @@ fn whole_run(provider: &Provider, section: &ProviderMap, durations: &Durations, 
         whole: true,
         functions: Vec::new(),
         functions_command: String::new(),
+        team_run,
     }
 }
 
@@ -276,6 +291,14 @@ fn run(provider: &Provider, section: &ProviderMap, group: &str, ids: &[String], 
     if provider.kind == Kind::Cargo {
         targets = format!("{group} -- {targets}");
     }
+    let team_run = match provider.kind {
+        Kind::Cargo => {
+            let (filters, skips) = cargo_filters(section, ids);
+            Some(cargo_team_run(provider, group, &filters, &skips))
+        }
+        Kind::Ctest => Some(serde_json::json!({"template": "qt-test", "args": {"suites": ids}})),
+        _ => None,
+    };
     Run {
         provider: provider.name.clone(),
         kind: provider.kind,
@@ -288,7 +311,41 @@ fn run(provider: &Provider, section: &ProviderMap, group: &str, ids: &[String], 
         whole: false,
         functions: Vec::new(),
         functions_command: String::new(),
+        team_run,
     }
+}
+
+/// A cargo run's filters, and the child modules to skip that were not chosen.
+fn cargo_filters(section: &ProviderMap, ids: &[String]) -> (Vec<String>, Vec<String>) {
+    let filters: BTreeSet<String> = ids.iter().filter_map(|id| section.targets.get(id)).flat_map(|target| target.run.iter().cloned()).collect();
+    let skips: BTreeSet<String> = ids
+        .iter()
+        .filter_map(|id| section.targets.get(id))
+        .flat_map(|target| target.skip.iter().cloned())
+        .filter(|skip| !filters.iter().any(|filter| filter.starts_with(skip.as_str())))
+        .collect();
+    (filters.into_iter().collect(), skips.into_iter().collect())
+}
+
+/// The cargo-test template's request for a cargo run: its binary, the
+/// provider's manifest when it is not the project's, its filters and skips.
+fn cargo_team_run(provider: &Provider, group: &str, filters: &[String], skips: &[String]) -> serde_json::Value {
+    let mut args = serde_json::Map::new();
+    if let Some(bin) = group.strip_prefix("--bin ") {
+        args.insert("bin".into(), bin.into());
+    }
+    let manifest = if provider.manifest.is_empty() { "Cargo.toml" } else { provider.manifest.as_str() };
+    if !provider.root.is_empty() || manifest != "Cargo.toml" {
+        let path = if provider.root.is_empty() { manifest.to_owned() } else { format!("{}/{manifest}", provider.root.trim_end_matches('/')) };
+        args.insert("manifest".into(), serde_json::json!([path]));
+    }
+    if !filters.is_empty() {
+        args.insert("filters".into(), serde_json::json!(filters));
+    }
+    if !skips.is_empty() {
+        args.insert("skips".into(), serde_json::json!(skips));
+    }
+    serde_json::json!({"template": "cargo-test", "args": args})
 }
 
 fn cwd(provider: &Provider) -> String {
@@ -304,14 +361,9 @@ fn items(provider: &Provider, section: &ProviderMap, ids: &[String]) -> String {
     let runs: Vec<&String> = ids.iter().filter_map(|id| section.targets.get(id)).flat_map(|target| target.run.iter()).collect();
     match provider.kind {
         Kind::Cargo => {
-            let filters: BTreeSet<&String> = runs.iter().copied().collect();
+            let (filters, skips) = cargo_filters(section, ids);
             let mut words: Vec<String> = filters.iter().map(|filter| quote(filter)).collect();
-            let skips: BTreeSet<&String> = ids.iter().filter_map(|id| section.targets.get(id)).flat_map(|target| target.skip.iter()).collect();
-            for skip in skips {
-                if !filters.iter().any(|filter| filter.starts_with(skip.as_str())) {
-                    words.push(format!("--skip {}", quote(skip)));
-                }
-            }
+            words.extend(skips.iter().map(|skip| format!("--skip {}", quote(skip))));
             words.join(" ")
         }
         Kind::Ctest => {
@@ -412,6 +464,9 @@ pub fn text(selection: &Selection) -> String {
         if !run.functions.is_empty() {
             out.push_str(&format!("  only the changed functions: {}\n", run.functions_command));
         }
+        if let Some(request) = &run.team_run {
+            out.push_str(&format!("  hgs team run: {request}\n"));
+        }
     }
     if !selection.widened.is_empty() {
         out.push_str("\nWidened to the whole area (no test the map knows uses them):\n");
@@ -474,7 +529,7 @@ mod tests {
     fn config() -> TestsConfig {
         let text = r#"
 [map]
-ignore = ["docs/**"]
+ignore = ["docs/**", "*.md"]
 [[provider]]
 name = "rust"
 kind = "cargo"
@@ -515,6 +570,7 @@ affected = "all"
         rust.targets.insert("--bin hgs cli".into(), target("--bin hgs", &["cli::"], 10));
         rust.files.insert("src/state/teams/mod.rs".into(), vec!["--bin hgs state::teams".into(), "--bin hgs cli".into()]);
         rust.files.insert("src/state/teams/ops.rs".into(), vec!["--bin hgs state::teams::ops".into()]);
+        rust.files.insert("src/guide/teams.md".into(), vec!["--bin hgs cli".into()]);
         map.providers.insert("rust".into(), rust);
         let mut gui = ProviderMap::empty(Kind::Ctest);
         gui.rule = Rule::Build;
@@ -563,6 +619,12 @@ affected = "all"
         // ops is a child that was not chosen: skipped.
         assert_eq!(rust.command, "cargo test --manifest-path Cargo.toml --bin hgs -- cli:: state::teams:: --skip state::teams::ops::");
         assert_eq!(rust.tests, 30);
+        // #741: the same run as a cargo-test request.
+        assert_eq!(
+            rust.team_run,
+            Some(serde_json::json!({"template":"cargo-test","args":{"bin":"hgs","filters":["cli::","state::teams::"],"skips":["state::teams::ops::"]}}))
+        );
+        assert!(text(&selection).contains("\"template\":\"cargo-test\"}"), "{}", text(&selection));
         assert_eq!(rust.seconds, Some(30.0));
         // The path rule: every src change runs the CLI test too.
         let py = &selection.runs[1];
@@ -588,6 +650,10 @@ affected = "all"
         );
         assert_eq!(selection.unmapped, vec!["design/logo.svg"]);
         assert_eq!(selection.ignored, vec!["docs/a.md"]);
+        // An ignored pattern does not hide a text a module compiles in (#741).
+        let guide = select_files(&["src/guide/teams.md"], &Hunks::new());
+        assert!(guide.ignored.is_empty());
+        assert_eq!(guide.runs[0].targets, vec!["--bin hgs cli"]);
         assert_eq!(selection.manual, vec!["tests/test_native.py"]);
         assert_eq!(selection.runs[0].command, "cargo test --manifest-path Cargo.toml");
         // The whole Python set names its tests, leaving the manual one out.
@@ -609,11 +675,13 @@ affected = "all"
         assert_eq!(run.command, "ctest --test-dir build/gui -R \"^(teams-0|teams-1)$\"");
         assert_eq!(run.functions, vec!["opens"]);
         assert_eq!(run.functions_command, "build/gui/tests/test_teams opens");
+        assert_eq!(run.team_run, Some(serde_json::json!({"template":"qt-test","args":{"suite":"test_teams","functions":["opens"]}})));
         assert_eq!(run.seconds, Some(20.0));
         // A change in the class declaration is every function's.
         let outside = Hunks::from([("gui/tests/test_teams.cpp".to_owned(), vec![(4, 4)])]);
         let selection = select(root.path(), &config(), &map(), &durations(), &changed, &outside, false);
         assert!(selection.runs[0].functions.is_empty());
+        assert_eq!(selection.runs[0].team_run, Some(serde_json::json!({"template":"qt-test","args":{"suites":["test_teams"]}})));
         assert_eq!(selection.runs[0].seconds, Some(40.0));
     }
 
@@ -623,6 +691,10 @@ affected = "all"
         let selection = select(root.path(), &config(), &map(), &durations(), &[], &Hunks::new(), true);
         assert_eq!(selection.runs.len(), 4);
         assert_eq!(selection.runs[1].command, "ctest --test-dir build/gui");
+        assert_eq!(selection.runs[0].team_run, Some(serde_json::json!({"template":"cargo-test","args":{}})));
+        assert_eq!(selection.runs[1].team_run, Some(serde_json::json!({"template":"qt-test","args":{"suites":["test_teams"]}})));
+        // Python has no team template: hgs run runs its command.
+        assert_eq!(selection.runs[2].team_run, None);
         assert_eq!(selection.runs[0].seconds, Some(60.0));
         assert!(text(&selection).starts_with("The full set: 4 run(s), about 1 min 40 s recorded, 3 target(s) without"), "{}", text(&selection));
     }

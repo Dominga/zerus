@@ -15,6 +15,9 @@ import type { LocalMessage } from "../../types";
 import { createActivityEnd } from "./activity-end";
 import { buildTranscript, VOICE_STATE_LABEL, voiceStateDetail, voiceStateIssue } from "./transcript";
 import { DELETE_TEXT, DELETE_TITLE, retryReason, routeInspect } from "./local-actions";
+import { inlineParts } from "./markdown";
+import { openExternal, openSessionFile } from "./sessionFiles";
+import { SessionFileDialog } from "./SessionFileDialog";
 import { statusOf } from "./SessionCard";
 import type { ItemAttachment, LocalItem, MediaMessage, Session, TranscriptItem } from "./types";
 
@@ -141,19 +144,23 @@ const copyText = (text: string, what: string) => {
   void navigator.clipboard?.writeText(text).then(() => toast("Copied", what), () => toast("Not copied", "The clipboard is unavailable", "error"));
 };
 
-// Markdown is rendered in Rust later (pulldown-cmark, sanitized); until then
-// text is shown as text: paragraphs, lists, fenced code, `code` and **bold**.
-// Nothing is inserted as HTML, and only example-domain links are drawn as
-// links (they never navigate the app).
+// Inline Markdown stays text except its links: HTTP(S) uses the system
+// opener, and local/file references open the session's File reference dialog.
 
 function inline(text: string) {
-  // Inline formatting: `code`, **bold**, links on example domains.
-  const parts = text.split(/(`[^`]+`|\*\*[^*]+\*\*|https:\/\/[a-z.]+example\.com\S*)/g);
-  return parts.map((p) =>
-    p.startsWith("`") ? <code>{p.slice(1, -1)}</code> :
-    p.startsWith("**") ? <b>{p.slice(2, -2)}</b> :
-    p.startsWith("https://") ? <a href="#" onClick={(e) => e.preventDefault()} title={p}>{p}</a> : p,
-  );
+  const session = selected();
+  return inlineParts(text).map((part) => {
+    if (part.kind === "code") return <code>{part.text}</code>;
+    if (part.kind === "bold") return <b>{part.text}</b>;
+    if (part.kind === "external" || part.kind === "file") {
+      return <a href={part.href} title={part.href} onClick={(event) => {
+        event.preventDefault();
+        if (part.kind === "external") openExternal(part.href);
+        else if (session) openSessionFile(session, part.href);
+      }}>{part.text}</a>;
+    }
+    return part.text;
+  });
 }
 
 type Block = { kind: "p" | "ul" | "code"; text: string };
@@ -650,6 +657,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
   return (
     <div class="activity">
       <LocalDeleteDialog />
+      <SessionFileDialog />
       <div class="act-scroll" ref={scroller} tabindex="-1" onContextMenu={activityMenu} onScroll={onScroll}
         onWheel={(e) => { if (e.deltaY < 0) scrollAway(); }}
         onKeyDown={(e) => { if (!e.defaultPrevented && ["ArrowUp", "PageUp", "Home"].includes(e.key)

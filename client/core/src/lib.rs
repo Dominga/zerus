@@ -46,6 +46,7 @@ pub mod recovery_settings;
 pub mod repository;
 pub mod run;
 pub mod send;
+pub mod session_file_reference;
 pub mod session_usage;
 pub mod settings;
 pub mod shell;

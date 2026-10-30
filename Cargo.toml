@@ -35,6 +35,7 @@ unicode-width = "0.2"
 uuid = { version = "1", features = ["v4"] }
 zerus-replica = { path = "crates/replica" }
 zerus-watch-protocol = { path = "crates/watch-protocol" }
+zerus-desktop-migration = { path = "crates/desktop-migration" }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [

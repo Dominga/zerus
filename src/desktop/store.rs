@@ -2,12 +2,12 @@
 use crate::{config::Config, platform};
 use anyhow::{ensure, Context, Result};
 use rusqlite::{Connection, OpenFlags};
-use sha2::{Digest, Sha256};
 use std::{
     fs,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     time::Duration,
 };
+use zerus_desktop_migration::{canonical, configuration, HANDOFF_LOCK};
 
 pub const SCHEMA: i64 = 1;
 pub struct Location {
@@ -17,16 +17,9 @@ pub struct Location {
 impl Location {
     pub fn new(config: &Config) -> Result<Self> {
         let state = canonical(&config.state)?;
-        let dir = canonical(&config.dir)?;
-        let mut hash = Sha256::new();
-        for path in [&state, &dir] {
-            let path = path.as_os_str().as_encoded_bytes();
-            hash.update((path.len() as u64).to_le_bytes());
-            hash.update(path);
-        }
         Ok(Self {
             root: state.join("desktop"),
-            configuration: format!("{:x}", hash.finalize()),
+            configuration: configuration(&config.state, &config.dir)?,
         })
     }
     pub fn prepare(&self) -> Result<()> {
@@ -61,34 +54,14 @@ impl Location {
             .context("another desktop service owns this state")?;
         Ok(platform::FileLock::held(file))
     }
-}
-
-/// Resolve existing ancestors, even on a first read-only status. Aliases through
-/// symlinks must not acquire separate service ownership.
-fn canonical(path: &Path) -> Result<PathBuf> {
-    let path = if path.is_absolute() {
-        path.to_owned()
-    } else {
-        std::env::current_dir()?.join(path)
-    };
-    let mut resolved = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => (),
-            Component::ParentDir => {
-                resolved.pop();
-            }
-            component => {
-                resolved.push(component);
-            }
-        }
-        match fs::canonicalize(&resolved) {
-            Ok(path) => resolved = path,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
-            Err(error) => return Err(error.into()),
-        }
+    /// Passive inspection releases this immediately. Migrated writers will
+    /// retain it for their full lifetime; the service process lock is separate.
+    pub fn handoff_lock(&self) -> Result<platform::FileLock> {
+        self.check_existing()?;
+        let file = private_file(&self.root.join(HANDOFF_LOCK))?;
+        fs2::FileExt::try_lock_exclusive(&file).context("desktop handoff is busy")?;
+        Ok(platform::FileLock::held(file))
     }
-    Ok(resolved)
 }
 
 fn private_file(path: &Path) -> Result<fs::File> {
@@ -188,6 +161,21 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[cfg(unix)]
+    fn handoff_lock_never_creates_a_leaf_through_a_replaced_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("desktop");
+        let foreign = temp.path().join("foreign");
+        platform::private_dir(&foreign).unwrap();
+        std::os::unix::fs::symlink(&foreign, &root).unwrap();
+        let location = Location {
+            root,
+            configuration: "fixture".into(),
+        };
+        assert!(location.handoff_lock().is_err());
+        assert!(!foreign.join(HANDOFF_LOCK).exists());
+    }
     #[test]
     fn canonical_aliases_share_the_os_lock() {
         let temp = tempfile::tempdir().unwrap();

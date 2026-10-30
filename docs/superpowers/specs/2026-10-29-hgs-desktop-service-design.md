@@ -76,9 +76,27 @@ The G1/G3 agreement of 2026-10-30 is specified in [the desktop migration contrac
 
 The coordinator's later 2026-10-30 ruling adds the closed v1 `revoked` phase without changing the marker payload: G1 durably revokes before normal rollback/Qt start and records reason/history in its own journal. Exact shared effect identities guard correctness, and live legacy-GUI detection revokes the abnormal path. This supersedes a requirement for service-owned long-lived Qt Unix socket exclusion; Windows permanent lock exclusion remains separately unqualified. Production takeover stays fenced until revocation and exact effect guards exist.
 
+The accepted effect audit reuses `approval-log begin`'s per-host unique durable
+question reservation and `hgs read`'s serialized exact-identity merge. Presence
+needs epoch-bound producer admission, with legacy refusal naming the revoke
+command. Posting/withdrawal need durable edge/attempt reservations and exact
+leased receipts; badge application needs newest-only epoch/revision receipts.
+The service probes the GUI socket's live owner before each effect batch and at a
+bounded interval, revoking for legacy Qt. It never owns the canonical socket.
+Unmodified Qt directly calls native notification/badge APIs and bypasses a new
+hgs journal: cosmetic duplicates or visible cleanup races are acceptable only on
+the abnormal manual-Qt-start path until stand-down. No global exactly-once
+guarantee is claimed.
+
 Maintained upgrades stop admissions, checkpoint, publish the executable through the maintained platform installer and restart **only desktop**, preserving source identity/signing. Reconcile receipts/current snapshots before effects resume; unknown delivery is not replayed. Verify native-agent birth identities survive. Recovery, voice, swarm and the connector are never restarted as a side effect. Preserve the Windows staged session-host images and in-use binaries (`tests/test_windows_installer_survival.py`); an in-use replacement is deferred rather than killing its owner.
 
-Rollback never re-seeds Qt: a compatible frontend keeps using the service; before old Qt resumes, G1 durably revokes its migrated writer authority, retaining exact delivery identities against replay. G5 preserves the rollback copy and leaves takeover disabled until this gate exists. Qt removal still requires platform G6 acceptance.
+Rollback never re-seeds imported stores. Before `update-installed.py --rollback`
+or an install selecting `HGS_MAC_GUI=qt` / `HGS_LINUX_GUI=qt` starts Qt, G1 must
+durably revoke: stop admissions, record `revoked`, drain and checkpoint. Failed
+or uncertain revocation stops rollback before Qt starts with an actionable
+diagnostic. Retain exact delivery identities against replay. G5 preserves the
+rollback copy and leaves takeover disabled until this gate exists. Qt removal
+still requires platform G6 acceptance.
 
 ## Budget and proof
 
@@ -103,7 +121,7 @@ Required tests before implementation can be called complete:
 - Closed Next plus banner/menu/badge activation starts once, waits for readiness and opens the exact session through its instance channel. Application-focus leases suppress globally, not per session.
 - Two frontends, zero windows, repeated reconnects and a slow subscriber: one reader per computer, one poster, bounded queues, gap/snapshot recovery and no duplicate banners.
 - Kill/fail injection before and after every reservation, checkpoint, native send and receipt; lost replies, disk-full and newer-schema cases retain unknown outcomes without replay. Without new consent, imports/restarts cannot enable approvals.
-- Qt/Next/service handoff and installer rollback interrupted at every marker; unchanged source bytes, no overlapping writers, preserved tokens and no historical alert replay. Uncooperative legacy Qt must refuse cutover.
+- Qt/Next/service handoff, explicit revocation and installer rollback interrupted at every marker; unchanged source bytes, identity-guarded effects, preserved tokens and no historical alert replay. Uncooperative legacy Qt must refuse initial cutover; abnormal manual Qt startup revokes the service, with only the acknowledged cosmetic native-post/badge overlap.
 - Fake peer outages, fair read retries and the resource workload above; no parsing or durable I/O on a UI thread. Prove failure isolation with recovery/voice workers active.
 - Native Linux/macOS/Windows startup, idle/lock, posting/withdrawal/click/badge, service upgrade and running-agent survival. Windows runtime acceptance stays blocked until the owner's PC is reachable; cross-target Clippy alone does not prove it.
 

@@ -1,5 +1,6 @@
 //! Durable desktop service kernel. Pre-handoff it owns no fleet or effect writer.
 mod fanout;
+mod handoff;
 mod protocol;
 mod registration;
 mod store;
@@ -159,12 +160,18 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
 fn frame(epoch: &str, seq: u64, kind: &str, value: Value) -> Value {
     json!({"abi":ABI,"epoch":epoch,"seq":seq,"t":kind,"value":value})
 }
-fn projection(location: &Location, store: &Store, epoch: &str, subscribers: usize) -> Value {
+fn projection(
+    location: &Location,
+    store: &Store,
+    epoch: &str,
+    subscribers: usize,
+    migration: &Value,
+) -> Value {
     json!({"abi":ABI,"version":env!("CARGO_PKG_VERSION"),"schema":store::SCHEMA,
         "configuration":location.configuration,"generation":store.generation,"epoch":epoch,
         "running":true,"ownership":"passive","writers_enabled":false,"handoff":"required",
         "upstreams":[],"complete":false,"subscribers":subscribers,"automatic_approvals":false,
-        "pending":{"reads":0,"posting":0,"approvals":0},"errors":[],
+        "pending":{"reads":0,"posting":0,"approvals":0},"errors":[],"migration":migration,
         "limits":{"subscribers":protocol::SUBSCRIBERS,"queue_bytes":protocol::QUEUE_BYTES,
             "frame_bytes":protocol::FRAME_BYTES,"control_bytes":protocol::CONTROL_BYTES,"ingress_bytes":16<<20},
         "components":{"fleet":"awaiting_handoff","presence":"awaiting_handoff","reads":"awaiting_handoff","attention":"awaiting_handoff","approvals":"awaiting_handoff"}})
@@ -242,13 +249,14 @@ fn serve(location: Location) -> Result<()> {
             })?
     };
     let mut fanout = Fanout::default();
+    let mut migration = handoff::inspect(&location);
     let mut seq = 0;
     let mut heartbeat = Instant::now() + HEARTBEAT;
     let mut failed = false;
     while platform::shutdown_signal() == 0 {
         match receive.recv_timeout(Duration::from_millis(200)) {
             Ok(Event::Command(hello, queue)) => {
-                let value = projection(&location, &store, &epoch, fanout.len());
+                let value = projection(&location, &store, &epoch, fanout.len(), &migration);
                 let reply = if hello.abi != ABI || hello.configuration != location.configuration {
                     frame(
                         &epoch,
@@ -285,7 +293,8 @@ fn serve(location: Location) -> Result<()> {
         }
         if Instant::now() >= heartbeat {
             seq += 1;
-            let value = projection(&location, &store, &epoch, fanout.len());
+            migration = handoff::inspect(&location);
+            let value = projection(&location, &store, &epoch, fanout.len(), &migration);
             fanout.publish(protocol::encode(&frame(&epoch, seq, "heartbeat", value))?.into());
             heartbeat = Instant::now() + HEARTBEAT;
         }

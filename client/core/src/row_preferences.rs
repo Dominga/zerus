@@ -18,7 +18,9 @@ pub fn from_qt(value: &QtValue) -> Option<Value> {
         return None;
     }
     let keys = bytes
-        .chunks_exact(32)
+        .as_chunks::<32>()
+        .0
+        .iter()
         .map(|key| key.iter().map(|b| format!("{b:02x}")).collect::<String>())
         .collect::<std::collections::BTreeSet<_>>();
     Some(json!(keys))

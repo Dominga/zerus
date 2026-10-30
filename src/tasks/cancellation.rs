@@ -24,7 +24,7 @@ pub(super) fn read() -> Result<Guard> {
     if bytes.len() > 70 * 1024 {
         return Err(fail("cancellation request exceeds 70 KiB"));
     }
-    let request: Guard = serde_json::from_slice(&bytes).map_err(fail)?;
+    let request: Guard = serde_json::from_slice(crate::state::without_bom(&bytes)).map_err(fail)?;
     if request.schema != 1
         || request.stage_at <= 0
         || [&request.dispatch_id, &request.machine, &request.session_id]

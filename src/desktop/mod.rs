@@ -201,7 +201,7 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
                     "desktop request exceeds its limit"
                 );
                 let request: Value =
-                    serde_json::from_slice(&bytes).context("invalid desktop request")?;
+                    serde_json::from_slice(crate::state::without_bom(&bytes)).context("invalid desktop request")?;
                 println!(
                     "{}",
                     exchange(&location, "request", Some(request))?

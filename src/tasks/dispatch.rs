@@ -50,7 +50,7 @@ fn input() -> Result<Value> {
     if bytes.len() as u64 > MAX_PLAN {
         return Err(fail("task start plan exceeds 32 MiB"));
     }
-    serde_json::from_slice(&bytes).map_err(fail)
+    serde_json::from_slice(crate::state::without_bom(&bytes)).map_err(fail)
 }
 fn id(value: &str) -> bool {
     uuid::Uuid::parse_str(value).is_ok_and(|id| id.to_string() == value && !id.is_nil())

@@ -920,7 +920,7 @@ pub(super) fn dispatch(args: &[String]) -> Option<Result<i32>> {
                 return Err("Search-index request exceeds its input budget".into());
             }
             let request: Request =
-                serde_json::from_slice(&bytes).map_err(|_| "Invalid search-index request")?;
+                serde_json::from_slice(crate::state::without_bom(&bytes)).map_err(|_| "Invalid search-index request")?;
             if request.abi != ABI {
                 return Err("Unsupported search-index ABI".into());
             }

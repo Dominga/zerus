@@ -210,6 +210,27 @@ pub fn load_mode(dir: &Path, tray_conf: Option<&str>) -> OpenMode {
         .unwrap_or_default()
 }
 
+/// The same configured launch terminal for New session and folder shells.
+pub fn terminal_settings(dir: &Path) -> zerus_client_core::terminal_launch::Settings {
+    let conf = tray_conf();
+    let value = |key| {
+        conf.as_deref()
+            .and_then(|text| tray_conf_value(text, key))
+            .unwrap_or_default()
+    };
+    zerus_client_core::terminal_launch::Settings {
+        template: value("terminal"),
+        open_mode: if cfg!(target_os = "macos") {
+            serde_json::to_value(load_mode(dir, conf.as_deref()))
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .unwrap_or_default()
+        } else {
+            value("open-mode")
+        },
+    }
+}
+
 #[cfg(target_os = "linux")]
 pub fn load_linux_mode(dir: &Path, tray_conf: Option<&str>) -> OpenMode {
     std::fs::read(dir.join(MODE_FILE))

@@ -1159,28 +1159,8 @@ pub fn start(app: &AppHandle, dir: &Path, replay: bool, allowed: bool) -> Creati
             launch: Arc::new(move |operation| {
                 let invocation = launch_invocation(operation);
                 if flag(operation, "terminal") {
-                    let conf = crate::desk::tray_conf();
                     let mut terminal = lock(&launcher);
-                    let mut mode = terminal.settings().clone();
-                    mode.template = conf
-                        .as_deref()
-                        .and_then(|conf| {
-                            zerus_client_core::menubar::tray_conf_value(conf, "terminal")
-                        })
-                        .unwrap_or_default();
-                    mode.open_mode = if cfg!(target_os = "macos") {
-                        serde_json::to_value(crate::desk::load_mode(&terminal_dir, conf.as_deref()))
-                            .ok()
-                            .and_then(|value| value.as_str().map(str::to_owned))
-                            .unwrap_or_default()
-                    } else {
-                        conf.as_deref()
-                            .and_then(|conf| {
-                                zerus_client_core::menubar::tray_conf_value(conf, "open-mode")
-                            })
-                            .unwrap_or_default()
-                    };
-                    terminal.set_settings(mode);
+                    terminal.set_settings(crate::desk::terminal_settings(&terminal_dir));
                     let command = zerus_client_core::shell::command(
                         &hgs.to_string_lossy(),
                         &invocation.args,

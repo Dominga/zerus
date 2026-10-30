@@ -146,10 +146,7 @@ pub fn run() {
         }
         Ok(cli::Command::BuildInfo) => {
             #[cfg(target_os = "linux")]
-            let info = {
-                let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
-                cli::build_info_for(&cli::BUILD, &context.config().identifier)
-            };
+            let info = cli::build_info_for(&cli::BUILD, &context.config().identifier);
             #[cfg(not(target_os = "linux"))]
             let info = cli::build_info(&cli::BUILD);
             println!("{info}");

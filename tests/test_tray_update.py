@@ -333,7 +333,7 @@ class TrayUpdate(unittest.TestCase):
 
     def test_client_install_is_prefix_private_and_stays_selected(self):
         install = self.client_installer(self.build('client-1'))
-        prefix = self.root / 'prefix%dev'
+        prefix = self.root / 'prefix%dev&review\\path'
         plugin = prefix / 'lib/hgs-tray/plugins/libhgs-tray-native-ui.so'
         plugin.parent.mkdir(parents=True)
         plugin.write_bytes(b'for the Qt rollback')
@@ -344,7 +344,7 @@ class TrayUpdate(unittest.TestCase):
         self.assertTrue(binary.is_file())
         self.assertIn("'client-1'", binary.read_text())
         unit = prefix / 'lib/systemd/user/hgs-tray.service'
-        escaped = str(binary).replace('%', '%%')
+        escaped = str(binary).replace('\\', '\\\\').replace('"', '\\"').replace('%', '%%')
         self.assertIn(f'ExecStart="{escaped}"', unit.read_text())
         self.assertNotIn('--sessions', unit.read_text())
         desktop = (prefix / 'share/applications/hgs-tray.desktop').read_text()

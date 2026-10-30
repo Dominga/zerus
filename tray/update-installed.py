@@ -846,7 +846,7 @@ def check_replace(built, installed, live=False):
     if refusal:
         raise UpdateError(refusal + ' Nothing was replaced.')
     built_kind, installed_kind = bundle_kind(built), bundle_kind(installed)
-    if not live and built_kind is not None and installed_kind is not None and built_kind != installed_kind:
+    if not live and built_kind != installed_kind and (MAC or (built_kind is not None and installed_kind is not None)):
         raise UpdateError('switching between the Qt GUI and the Tauri client needs the live update; '
                           'run tray/install.sh without HGS_TRAY_RESTART=0. Nothing was replaced.')
     return 0

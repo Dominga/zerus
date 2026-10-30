@@ -31,6 +31,8 @@ mod identity;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod instance;
 mod lifecycle;
+#[cfg(feature = "live")]
+mod login_item;
 mod metrics;
 #[cfg(feature = "live")]
 mod mobile;
@@ -923,6 +925,7 @@ fn flush_drafts(app: &AppHandle) {
 fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
         commands::start,
+        commands::fleet_refresh,
         commands::next_batch,
         commands::follow,
         commands::unfollow,
@@ -1114,6 +1117,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         updates::updates_open,
         updates::updates_copy_command,
         updates::updates_restart,
+        updates::updates_fix_login_item,
         #[cfg(feature = "media")]
         voice::voice_open,
         #[cfg(feature = "media")]
@@ -1137,6 +1141,7 @@ fn desk_take_pending() -> serde_json::Value {
 fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
         commands::start,
+        commands::fleet_refresh,
         commands::next_batch,
         commands::follow,
         commands::unfollow,

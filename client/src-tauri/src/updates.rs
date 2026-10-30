@@ -72,6 +72,8 @@ pub struct UpdatesView {
     pub download_label: Option<String>,
     pub details: InstallationGuide,
     pub restart_required: bool,
+    #[serde(default)]
+    pub login_item_deprioritized: bool,
     pub version: String,
     /// A source or unknown dev-app installation keeps its status in Settings only.
     pub quiet: bool,
@@ -90,6 +92,7 @@ struct UpdateState {
     cached: bool,
     error: String,
     restart_required: bool,
+    login_item_deprioritized: bool,
     fresh_for_notification: bool,
     automatic_in_flight: bool,
 }
@@ -111,6 +114,7 @@ impl Default for UpdateState {
             cached: false,
             error: String::new(),
             restart_required: false,
+            login_item_deprioritized: false,
             fresh_for_notification: false,
             automatic_in_flight: false,
         }
@@ -238,6 +242,7 @@ impl UpdatesView {
                 &build.app_version,
             ),
             restart_required: state.restart_required,
+            login_item_deprioritized: state.login_item_deprioritized,
             version: state.feed.version.clone(),
             quiet: false,
         }
@@ -262,6 +267,7 @@ impl Updates {
         let state = UpdateState {
             channel: Channel::parse(&settings.text("updates/channel")).unwrap_or_default(),
             automatic: settings.flag("updates/automatic"),
+            login_item_deprioritized: crate::login_item::deprioritized(),
             ..UpdateState::default()
         };
         (
@@ -1063,6 +1069,30 @@ pub fn updates_restart(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub fn updates_restart() -> Result<(), String> {
     Err("Restart to finish update is available on macOS only.".into())
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+pub async fn updates_fix_login_item(app: AppHandle, restart: bool) -> Result<(), String> {
+    let updates = app.state::<Updates>().inner().clone();
+    let executable = updates.0.executable.clone();
+    tauri::async_runtime::spawn_blocking(move || crate::login_item::fix(&executable))
+        .await
+        .map_err(|error| error.to_string())??;
+    lock(&updates.0.state).login_item_deprioritized = false;
+    updates.changed();
+    if restart {
+        let bundle = restart_bundle(&updates.0.executable, true)?;
+        restart_helper(&bundle, std::process::id()).map_err(|error| error.to_string())?;
+        crate::exit_flush::quit_with_flush(&app, 0);
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+pub fn updates_fix_login_item() -> Result<(), String> {
+    Err("Fix login item is available on macOS only.".into())
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]

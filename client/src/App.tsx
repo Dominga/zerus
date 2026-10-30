@@ -1,5 +1,5 @@
 import { taskCancellation } from "./store/taskCancel";
-import { For, Match, Show, Suspense, Switch, createEffect, createMemo, lazy, onCleanup, onMount } from "solid-js";
+import { For, Match, Show, Suspense, Switch, createEffect, createMemo, createSignal, lazy, onCleanup, onMount } from "solid-js";
 import { Rail } from "./ui/components/Rail";
 import { MenuLayer, Toasts } from "./ui/components/Overlays";
 import { ActionDialogs } from "./ui/sessions/ActionDialogs";
@@ -22,9 +22,9 @@ import { openGoTo, openShortcutHelp, goToOrigin, shortcutHelpOrigin } from "./st
 import { rememberRecentSession } from "./ui/sessions/goTo";
 import { updateCommands, updates } from "./store/updates";
 import { openUpdates } from "./store/desk";
-import { ZerusLogo } from "./ui/components/ZerusLogo";
 import { SessionUsageStrip } from "./ui/components/SessionUsageStrip";
-import type { BridgeMode } from "./bridge";
+import { Icon } from "./ui/lib/icons";
+import { fleetRefresh, type BridgeMode } from "./bridge";
 
 // The client shell: the rail, the pages and the status bar.
 
@@ -47,38 +47,80 @@ const STATE_TEXT: Record<string, string> = {
   ended: "stream ended",
 };
 
+function LoginItemButton() {
+  const [open, setOpen] = createSignal(false);
+  const [busy, setBusy] = createSignal(false);
+  let dialog!: HTMLDialogElement;
+  createEffect(() => {
+    if (open()) { if (!dialog.open) dialog.showModal(); }
+    else if (dialog.open) dialog.close();
+  });
+  const fix = (restart: boolean) => {
+    setBusy(true);
+    void updateCommands.fixLoginItem(restart).then(() => {
+      setOpen(false);
+      if (!restart) toast("Updates", "The Zerus login item is updated; it applies at your next login.");
+    }).catch((error) => {
+      toast("Fix the Zerus login item", `The login item was not changed.\n\n${String(error)}`, "error", true);
+    }).finally(() => setBusy(false));
+  };
+  return (
+    <>
+      <Show when={updates().login_item_deprioritized}>
+        <button type="button" class="chip-accent warn-chip" title="macOS starts Zerus at background priority, so it can stop responding while the computer is busy." onClick={() => setOpen(true)}>Fix login item</button>
+      </Show>
+      <dialog id="login-item-dialog" class="dlg" ref={dialog} role="alertdialog" aria-labelledby="login-item-title" aria-describedby="login-item-text"
+        onCancel={(event) => { event.preventDefault(); setOpen(false); }} onClose={() => setOpen(false)}>
+        <div class="dlg-head"><Icon name="triangle-alert" size={18} class="warn" /><h2 id="login-item-title">Fix the Zerus login item</h2></div>
+        <div class="dlg-body confirm-body" id="login-item-text">
+          <p>macOS runs Zerus at background priority.</p>
+          <p>Zerus was started by its login item, which macOS runs at background priority, so Zerus can stop responding while other programs keep the computer busy. Updating the login item makes macOS start Zerus like other apps.</p>
+          <p>Update Only applies this at your next login; Zerus keeps running.</p>
+          <p>Update and Restart applies it now: Zerus quits and opens again. Saved drafts, sessions and agents stay; a voice or video message that is still recording stops and is not kept.</p>
+        </div>
+        <div class="dlg-foot">
+          <span class="spacer" />
+          <button type="button" class="btn primary" data-initial disabled={busy()} onClick={() => fix(false)}>Update Only</button>
+          <button type="button" class="btn" disabled={busy()} onClick={() => fix(true)}>Update and Restart</button>
+          <button type="button" class="btn" disabled={busy()} onClick={() => setOpen(false)}>Cancel</button>
+        </div>
+      </dialog>
+    </>
+  );
+}
+
 function StatusBar(props: { mode: () => BridgeMode | "starting" }) {
   const computers = createMemo(() => Object.values(catalog.computers));
   const connected = (status: string) => status === "live" || status === "polled";
   const live = () => computers().filter((c) => connected(c.status)).length;
   const problems = () => computers().filter((c) => !connected(c.status));
   const label = (id: string) => id || "this computer";
+  const details = () => problems().map((c) => `${label(c.id)}: ${STATE_TEXT[c.status] ?? c.status}${c.status === "reconnecting" && c.attempt ? ` (attempt ${c.attempt})` : ""}`).join("\n");
   return (
     <footer class="statusbar">
       <Show when={computers().length} fallback={<span>{props.mode() === "starting" ? "Starting…" : "Connecting…"}</span>}>
-        <Show when={problems().length} fallback={<span class="conn-ok"><span class="state-dot ready" />{computers().length === 1 ? "Connected" : `${live()} of ${computers().length} machines connected`}</span>}>
-          <span classList={{ danger: problems().some((c) => c.status !== "probing") }}>
-            <For each={problems()}>{(c, i) => <>{i() ? "; " : ""}{label(c.id)}: {STATE_TEXT[c.status] ?? c.status}{c.status === "reconnecting" && c.attempt ? ` (attempt ${c.attempt})` : ""}</>}</For>
-          </span>
+        <span classList={{ "conn-ok": !problems().length, danger: problems().some((c) => c.status !== "probing") }} title={problems().length ? details() : undefined}>
+          <Show when={!problems().length}><span class="state-dot ready" /></Show>
+          {`${live()} of ${computers().length} machines connected, ${problems().length} offline`}
+        </span>
+        <Show when={problems().length}>
+          <button type="button" class="btn small ghost" onClick={() => { void fleetRefresh().catch((error) => toast("Connection", String(error), "error", true)); }}>Retry now</button>
         </Show>
       </Show>
       <Show when={props.mode() === "replay"}>
         <span class="chip-accent" title="Synthetic data from the replay fixture; no hgs is running">Replay</span>
       </Show>
-      <span class="grow" />
       <Show when={!updates().quiet && updates().available}>
-        <button type="button" class="btn ghost small status-update" title={`Zerus ${updates().version} is available. Open Updates.`}
-          aria-label={`Zerus ${updates().version} is available. Open Updates.`} onClick={openUpdates}>
-          <ZerusLogo attention={false} motion="spin" size={14} />New version
-        </button>
+        <button type="button" class="chip-accent status-update" title={`Zerus ${updates().version} is available. Open Updates.`}
+          aria-label={`Zerus ${updates().version} is available. Open Updates.`} onClick={openUpdates}>New version</button>
       </Show>
       <Show when={!updates().quiet && updates().restart_required}>
-        <button type="button" class="btn ghost small status-restart" title="Zerus was updated on disk. Drafts are kept; sessions keep running."
+        <button type="button" class="chip-accent status-restart" title="Zerus was updated on disk. Drafts are kept; sessions keep running."
           aria-label="Zerus was updated on disk. Drafts are kept; sessions keep running."
-          onClick={() => { void updateCommands.restart().catch((error) => toast("Updates", String(error), "error", true)); }}>
-          <ZerusLogo attention={false} motion="spin" size={14} />Restart to finish update
-        </button>
+          onClick={() => { void updateCommands.restart().catch((error) => toast("Updates", String(error), "error", true)); }}>Restart to finish update</button>
       </Show>
+      <LoginItemButton />
+      <span class="grow" />
       <SessionUsageStrip />
     </footer>
   );

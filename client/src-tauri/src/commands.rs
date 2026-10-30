@@ -21,6 +21,25 @@ pub struct AppState {
 }
 
 #[cfg(feature = "live")]
+#[tauri::command]
+pub fn fleet_refresh(state: State<'_, AppState>) -> usize {
+    let mut nudged = state.reconnect("") as usize;
+    if let Some(peers) = state.peers() {
+        nudged += peers
+            .iter()
+            .filter(|computer| state.reconnect(computer))
+            .count();
+    }
+    nudged
+}
+
+#[cfg(not(feature = "live"))]
+#[tauri::command]
+pub fn fleet_refresh() -> usize {
+    0
+}
+
+#[cfg(feature = "live")]
 impl AppState {
     /// A manual offline Refresh nudges only its existing source; never starts
     /// another fleet or changes an online source.

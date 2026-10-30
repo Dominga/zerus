@@ -44,9 +44,9 @@ export function AccountUsageChip(props: { session: Session }) {
           <Show when={u().provider}><AgentBadge agent={props.session.agent} /></Show>
           <UsageMeters windows={windowsAt(u().windows, now())} loading={usageLoading(u())} summary={footerUsageSummary(u())} indicator={text("workspace/usageIndicator") as UsageIndicator} />
         </button>
-        <button type="button" class="icon-btn usage-refresh" disabled={!online() || u().refreshing} aria-label="Refresh account usage"
-          title={u().refreshing ? "Updating account usage…" : "Refresh account usage (automatically every 5 minutes)"} onClick={() => void refreshSessionUsage(true)}>
-          <Show when={!u().refreshing} fallback={<span class="su-spin"><Icon name="refresh-cw" size={14} /></span>}><Icon name="refresh-cw" size={14} /></Show>
+        <button type="button" class="icon-btn small usage-refresh" disabled={!online() || u().refreshing} aria-label="Refresh usage"
+          title={u().refreshing ? "Updating account usage…" : "Refresh usage"} onClick={() => void refreshSessionUsage(true)}>
+          <Show when={!u().refreshing} fallback={<span class="su-spin"><Icon name="refresh-cw" size={12} /></span>}><Icon name="refresh-cw" size={12} /></Show>
         </button>
       </span>
     </Show>

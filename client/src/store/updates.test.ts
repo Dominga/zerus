@@ -12,6 +12,7 @@ function fake(overrides: Partial<UpdatesPort> = {}) {
     open: vi.fn(async () => {}),
     copyCommand: vi.fn(async () => {}),
     restart: vi.fn(async () => {}),
+    fixLoginItem: vi.fn(async () => {}),
     ...overrides,
   };
   return port;
@@ -68,6 +69,7 @@ describe("updates store", () => {
     await store.open("instructions");
     await store.copyCommand();
     await store.restart();
+    await store.fixLoginItem(false);
     expect(port.check).toHaveBeenCalledTimes(1);
     expect(port.setChannel).toHaveBeenCalledWith("dev");
     expect(port.setAutomatic).toHaveBeenCalledWith(false);

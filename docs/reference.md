@@ -4120,6 +4120,9 @@ receipt from this exact configuration:
 hgs desktop revoke --json --request-id UUID --reason rollback
 ```
 
+Before invoking it, probe `hgs --help` for the exact capability marker
+`Desktop revoke ABI: desktop-revoke-v1`; a desktop-v1 kernel alone need not
+support revoke. An older selected CLI must never be called speculatively.
 The installer generates and retains a canonical UUID for this attempt. A
 settled receipt requires exit zero and `accepted`, `durable`, `revoked` and
 `checkpointed` all true, with the same `request_id` and configuration. When

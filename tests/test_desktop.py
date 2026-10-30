@@ -405,6 +405,10 @@ class Desktop(unittest.TestCase):
             self.assertEqual(db.execute('SELECT configuration FROM service').fetchone()[0], configuration)
 
     def test_revoke_without_handoff_or_service_writes_nothing(self):
+        help_result = subprocess.run([str(HGS), '--help'], env=self.env, capture_output=True, text=True, timeout=5)
+        self.assertEqual(help_result.returncode, 0, help_result.stderr)
+        self.assertIn('Desktop revoke ABI: desktop-revoke-v1', help_result.stdout)
+        self.assertFalse(self.state.exists())
         request_id = str(uuid.uuid4())
         result = self.cli('desktop', 'revoke', '--json', '--request-id', request_id, '--reason', 'rollback')
         self.assertEqual(result['handoff'], 'none')

@@ -52,6 +52,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs desktop watch|request --json    private local desktop-v1 IPC
        hgs desktop registration --json    preview this user's passive service definition
        Desktop service ABI: desktop-v1
+        Desktop revoke ABI: desktop-revoke-v1
        hgs mobile-peer --json         guarded direct-peer native request from JSON stdin
        hgs [@host] voice <session> --json  send and inspect persistent voice messages (JSON stdin; voice-video-v1)
        hgs [@host] speech --json      host speech providers and durable jobs (JSON stdin)

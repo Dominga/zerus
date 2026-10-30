@@ -315,8 +315,8 @@ pub fn payload(command: &Command) -> Result<Value> {
     Ok(serde_json::to_value(command)?)
 }
 
-/// CLI-only absent-service path. The caller holds owner.lock; a running but
-/// unreachable actor cannot be bypassed. No listener, manager or worker starts.
+/// CLI-only absent-service path. Existing state requires owner.lock; a running
+/// but unreachable actor cannot be bypassed. No listener, manager or worker starts.
 pub fn offline(location: &Location, command: &Command) -> Result<Value> {
     command.validate()?;
     let exists = |name: &str| -> Result<bool> {

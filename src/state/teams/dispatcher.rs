@@ -6536,7 +6536,8 @@ fn record_run(store: &mut Store, team: &Team, member: &Member, request: &Value, 
     if let Err(error) = recorded {
         eprintln!("hgs team worker: {}: ran: {error:#}", team.name);
     }
-    json!({"status":"ran","template":template,"exit":outcome.exit,"tail":outcome.tail,"ms":outcome.ms,
+    json!({"status":"ran","template":template,"exit":outcome.exit,"tail":outcome.tail,
+        "failures":outcome.failures,"excerpt":outcome.excerpt,"ms":outcome.ms,
         "timed_out":outcome.timed_out,"error":outcome.error})
 }
 

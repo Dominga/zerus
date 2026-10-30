@@ -877,8 +877,16 @@ pub fn open_files(pid: u32) -> std::result::Result<Vec<PathBuf>, RunError> {
     }
 }
 /// Whether `pid` has the file at `path` open; `path` is compared as the kernel names it.
-pub fn holds_open(pid: u32, path: &Path) -> std::result::Result<bool, RunError> {
-    Ok(open_files(pid)?.iter().any(|file| file == path))
+pub fn holds_open(pid: u32, path: &Path) -> std::result::Result<super::OpenFiles, RunError> {
+    #[cfg(test)]
+    if let Some(reason) = super::forced_open_files_unknown() {
+        return Ok(super::OpenFiles::Unknown(reason));
+    }
+    Ok(if open_files(pid)?.iter().any(|file| file == path) {
+        super::OpenFiles::Held
+    } else {
+        super::OpenFiles::NotHeld
+    })
 }
 
 /// A process to stop, pinned to its identity. Linux holds a PID file
@@ -2204,10 +2212,10 @@ mod tests {
         let path = folder.join("held");
         let file = fs::File::create(&path).unwrap();
         let own = std::process::id();
-        assert!(holds_open(own, &path).unwrap());
+        assert_eq!(holds_open(own, &path).unwrap(), super::OpenFiles::Held);
         assert!(open_files(own).unwrap().contains(&path));
         drop(file);
-        assert!(!holds_open(own, &path).unwrap());
+        assert_eq!(holds_open(own, &path).unwrap(), super::OpenFiles::NotHeld);
 
         let mut child = Command::new("sleep")
             .arg("30")

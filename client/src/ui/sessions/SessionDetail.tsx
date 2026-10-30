@@ -17,7 +17,7 @@ import { archiveActivity } from "../../store/archiveActivity";
 import { computerOffline } from "../../store/catalog";
 import { copyIdentity, detailsFor, followedFor } from "../../store/actions";
 import { headerClearSlot, sessionIdentity } from "./actions-ui";
-import { actionEntries, freshActionEntry } from "./ActionDialogs";
+import { actionEntries, copyEntries, freshActionEntry } from "./ActionDialogs";
 import { snapshotOf } from "./actions-ui";
 import { markEntry } from "./mark-entries";
 import { Composer } from "./Composer";
@@ -72,6 +72,7 @@ function Header() {
   const identity = () => sessionIdentity(s(), details(), child());
   const copyId = () => { void copyIdentity(snapshotOf(s()), details(), child()); };
   const act = createMemo(() => actionEntries(s(), details()));
+  const copies = createMemo(() => copyEntries(s(), details()));
   const mark = createMemo(() => markEntry(s()));
   const slot = () => headerClearSlot(!subagentOpen(), s().state);
   const fresh = createMemo(() => freshActionEntry(s(), true));
@@ -88,7 +89,7 @@ function Header() {
     act().rename,
     { label: "Fork session…", icon: "git-fork", disabled: true },
     { separator: true },
-    { label: "Copy connect command", icon: "link", disabled: true },
+    copies().command,
     act().change,
     ...(mark() ? [mark()!] : []),
     { separator: true },

@@ -4,11 +4,16 @@
 use super::{Contents, QtSnapshot, QtStore, QtValue, MAX_STORE};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const VERSION: u32 = 1;
 const MAX_KEYS: usize = 4096;
-const FAMILIES: &[&str] = &["machine-appearance", "project-view", "row-density"];
+const FAMILIES: &[&str] = &[
+    "machine-appearance",
+    "project-view",
+    "row-density",
+    "task-preferences",
+];
 
 #[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -85,6 +90,7 @@ fn matches(family: &str, key: &str) -> bool {
         }
         "project-view" => key == "workspace/allSwarmProjects",
         "row-density" => key == crate::row_preferences::KEY,
+        "task-preferences" => key == "tasks/onlySession",
         _ => false,
     }
 }
@@ -131,6 +137,15 @@ pub(super) fn apply(
         .and_then(|s| s.modified_at)
         .zip(old_seed_at)
         .map(|(mtime, seed)| mtime > seed);
+    let handled_keys: BTreeSet<String> = contents
+        .seed
+        .as_ref()
+        .and_then(|s| s["keys"].as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect();
     let mut dirty = false;
     for family in FAMILIES {
         if journal.families.contains_key(*family) {
@@ -148,6 +163,12 @@ pub(super) fn apply(
         } else {
             entries
                 .iter()
+                // Existing Next values and keys handled by the old seed are
+                // not candidates. Malformed unused Qt values cannot turn a
+                // deliberate Next choice into an import/retry requirement.
+                .filter(|(key, _)| {
+                    !contents.values.contains_key(*key) && !handled_keys.contains(*key)
+                })
                 .map(|(key, value)| converted(key, value).map(|v| ((*key).clone(), v)))
                 .collect()
         };

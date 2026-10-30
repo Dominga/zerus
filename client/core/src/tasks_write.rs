@@ -679,6 +679,40 @@ pub mod outbox {
         Ok(reserved)
     }
 
+    /// Fingerprint of the complete recovery record, including opaque fields.
+    pub fn snapshot(record: &Value) -> String {
+        format!("{:x}", Sha256::digest(record.to_string().as_bytes()))
+    }
+
+    /// An explicit review releases only the exact record and marker it saw,
+    /// including opaque fields. It never submits or checks native input.
+    pub fn release_if_unchanged(
+        root: &Path,
+        project: &str,
+        task: &str,
+        expected: &Value,
+    ) -> Result<bool, String> {
+        let file = path(root, project, task);
+        let Some(_turn) = Turn::take(&file) else {
+            return Err("The message recovery record is busy.".into());
+        };
+        if pending(root, project, task)?.as_ref() != Some(expected) {
+            return Ok(false);
+        }
+        fs::remove_file(&file)
+            .map_err(|_| "Could not release the local message recovery record.".to_owned())?;
+        match fs::remove_file(marker(&file)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err("Could not update message recovery state.".into()),
+        }
+        #[cfg(unix)]
+        fs::File::open(file.parent().expect("outbox parent"))
+            .and_then(|f| f.sync_all())
+            .map_err(|_| "Could not update message recovery state.".to_owned())?;
+        Ok(true)
+    }
+
     /// Releases a delivered message's record.
     pub fn release(root: &Path, project: &str, task: &str, id: &str) -> Result<(), String> {
         let file = path(root, project, task);
@@ -1097,5 +1131,36 @@ mod outbox_tests {
             outbox::reserve(&root.0, "alpha", "t-1", &intent, OTHER),
             Err("The message recovery snapshot is invalid. Nothing was submitted.".into())
         );
+    }
+
+    #[test]
+    fn reviewed_release_requires_the_exact_record_and_marker() {
+        let root = scratch("reviewed-release");
+        let intent = message_intent("hello", &[], "comment", "none");
+        let original = outbox::reserve(&root.0, "alpha", "t-1", &intent, ID)
+            .unwrap()
+            .record;
+        let file = outbox::path(&root.0, "alpha", "t-1");
+        let mut changed = original.clone();
+        changed["opaque"] = json!({"future": true});
+        std::fs::write(&file, changed.to_string()).unwrap();
+        assert_ne!(outbox::snapshot(&original), outbox::snapshot(&changed));
+        assert_eq!(
+            outbox::release_if_unchanged(&root.0, "alpha", "t-1", &original),
+            Ok(false)
+        );
+        assert_eq!(
+            outbox::pending(&root.0, "alpha", "t-1").unwrap(),
+            Some(changed.clone())
+        );
+        std::fs::write(file.with_extension("marker"), OTHER).unwrap();
+        assert!(outbox::release_if_unchanged(&root.0, "alpha", "t-1", &changed).is_err());
+        assert!(file.is_file());
+        std::fs::write(file.with_extension("marker"), ID).unwrap();
+        assert_eq!(
+            outbox::release_if_unchanged(&root.0, "alpha", "t-1", &changed),
+            Ok(true)
+        );
+        assert_eq!(outbox::pending(&root.0, "alpha", "t-1"), Ok(None));
     }
 }

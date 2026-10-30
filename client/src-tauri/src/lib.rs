@@ -1003,6 +1003,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         task_editor::task_editor_files,
         task_editor::task_editor_pick,
         task_editor::task_editor_submit,
+        task_editor::task_editor_release,
         task_forms::task_form_open,
         task_forms::task_form_edit,
         task_forms::task_form_submit,

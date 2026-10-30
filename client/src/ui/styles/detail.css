@@ -408,16 +408,6 @@
   .proc-output { margin: 0; flex: 1; min-height: 60px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
   .native-frame { flex: 1; margin: 0 10px 10px; border-radius: var(--z-radius-lg); border: 1px dashed var(--z-color-border); display: grid; place-items: center; }
 
-  /* Go to */
-  .goto-scrim { position: fixed; inset: 0; z-index: 75; background: color-mix(in srgb, var(--z-color-backdrop) 50%, transparent); animation: fadeIn var(--z-motion-fast) both; }
-  .goto { position: absolute; left: 50%; top: 12px; translate: -50% 0; width: clamp(200px, calc(100vw - 32px), 640px); background: var(--z-color-raised); border: 1px solid var(--z-color-border); border-radius: var(--z-radius-xl); box-shadow: var(--z-shadow-dialog); overflow: hidden; animation: drop var(--z-motion-base) var(--ease) both; }
-  .goto-field { display: flex; align-items: center; gap: 10px; padding: 0 12px; height: 44px; border-bottom: 1px solid var(--z-color-divider); color: var(--z-color-dim); }
-  .goto-field input { flex: 1; border: 0; background: transparent; outline: none; color: var(--z-color-text); font-size: var(--fs-md); }
-  .goto-list { max-height: calc(12 * 30px + 8px); overflow-y: auto; padding: 4px; }
-  .goto-list li { display: flex; align-items: center; gap: 10px; height: 30px; padding: 0 8px; border-radius: var(--z-radius-md); font-size: var(--fs-sm); cursor: pointer; }
-  .goto-list li.on { background: var(--z-color-segment-on); }
-  .goto-kind { flex: none; width: 64px; font-size: var(--fs-2xs); color: var(--z-color-dim); text-transform: uppercase; letter-spacing: .4px; }
-  .goto-empty { color: var(--z-color-dim); justify-content: center; }
   .sc-group { margin: 6px 0 12px; }
   .sc-group .kv { grid-template-columns: 1fr auto; }
   .draft-list { display: flex; flex-direction: column; gap: 2px; max-height: 330px; overflow-y: auto; }

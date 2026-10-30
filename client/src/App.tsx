@@ -57,20 +57,24 @@ function LoginItemButton() {
 function StatusBar(props: { mode: () => BridgeMode | "starting" }) {
   const computers = createMemo(() => Object.values(catalog.computers));
   const connected = (status: string) => status === "live" || status === "polled";
-  const live = () => computers().filter((c) => connected(c.status)).length;
-  const problems = () => computers().filter((c) => !connected(c.status));
+  const live = createMemo(() => computers().filter((c) => connected(c.status)).length);
+  const problems = createMemo(() => computers().filter((c) => !connected(c.status)));
   const label = (id: string) => id || "this computer";
-  const connectionError = () => problems().some((c) => c.status !== "probing");
-  const summary = () => `${live()} of ${computers().length} machines connected${problems().length ? `, ${problems().map((c) => label(c.id)).join(", ")} offline` : ""}`;
+  const connectionError = createMemo(() => problems().some((c) => c.status !== "probing"));
+  const summary = createMemo(() => `${live()} of ${computers().length} machines connected${problems().length ? `, ${problems().map((c) => label(c.id)).join(", ")} offline` : ""}`);
   return (
     <footer class="statusbar">
       <Show when={computers().length} fallback={<span>{props.mode() === "starting" ? "Starting…" : "Connecting…"}</span>}>
-        <Show when={connectionError()} fallback={<span class="conn-ok"><Show when={!problems().length}><span class="state-dot ready" /></Show>{summary()}</span>}>
-          <span class="danger">
-            <For each={problems()}>{(c, i) => <>{i() ? "; " : ""}{label(c.id)}: {STATE_TEXT[c.status] ?? c.status}{c.status === "reconnecting" && c.attempt ? ` (attempt ${c.attempt})` : ""}</>}</For>
-          </span>
-          <button type="button" class="btn small ghost" onClick={() => { void fleetRefresh().catch((error) => toast("Connection", String(error), "error", true)); }}>Retry now</button>
-        </Show>
+        {connectionError() ? (
+          <>
+            <span class="danger">
+              <For each={problems()}>{(c, i) => <>{i() ? "; " : ""}{label(c.id)}: {STATE_TEXT[c.status] ?? c.status}{c.status === "reconnecting" && c.attempt ? ` (attempt ${c.attempt})` : ""}</>}</For>
+            </span>
+            <button type="button" class="btn small ghost" onClick={() => { void fleetRefresh().catch((error) => toast("Connection", String(error), "error", true)); }}>Retry now</button>
+          </>
+        ) : (
+          <span class="conn-ok"><span class="state-dot ready" hidden={problems().length > 0} />{summary()}</span>
+        )}
       </Show>
       <Show when={props.mode() === "replay"}>
         <span class="chip-accent" title="Synthetic data from the replay fixture; no hgs is running">Replay</span>

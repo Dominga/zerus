@@ -593,6 +593,14 @@ QList<PhaseGroup> phaseGroups(const Team &team);
 bool phaseCancelled(const Team &team, int phase);
 int cancelledTasks(const Team &team);
 Team withoutCancelled(const Team &team);
+// Owner, 2026-10-30: a finished phase has tasks and every one of them is
+// decided (accepted, rejected or cancelled), not all cancelled, and it is not
+// the open free phase. Hide finished leaves those phases and their tasks out
+// of Graph, Board and Layers; like withoutCancelled the copy is for display
+// only (cancelledHidden keeps a plan from being sent from it).
+bool phaseFinished(const Team &team, int phase);
+int finishedPhases(const Team &team);
+Team withoutFinished(const Team &team);
 // U58: the phases a task that has not started (no attempt that reached its
 // member: a refused one never did) may move to with `move-task`, keeping its
 // number: phase 1 and every phase record that is not discarded, except its own.

@@ -63,16 +63,35 @@ impl Location {
         Ok(())
     }
     pub fn lock(&self) -> Result<platform::FileLock> {
-        let file = private_file(&self.root.join("owner.lock"))?;
+        let file = private_file(&self.root.join("owner.lock"), true)?;
         fs2::FileExt::try_lock_exclusive(&file)
             .context("another desktop service owns this state")?;
         Ok(platform::FileLock::held(file))
+    }
+    /// Read-only preflight must not create desktop state on a never-used host.
+    /// An existing owner still has to be excluded before returning a no-op.
+    pub fn existing_lock(&self) -> Result<Option<platform::FileLock>> {
+        self.check_existing()?;
+        let file = match private_file(&self.root.join("owner.lock"), false) {
+            Ok(file) => file,
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                return Ok(None)
+            }
+            Err(error) => return Err(error),
+        };
+        fs2::FileExt::try_lock_exclusive(&file)
+            .context("another desktop service owns this state")?;
+        Ok(Some(platform::FileLock::held(file)))
     }
     /// Passive inspection releases this immediately. Migrated writers will
     /// retain it for their full lifetime; the service process lock is separate.
     pub fn handoff_lock(&self) -> Result<HandoffLock> {
         self.check_existing()?;
-        let file = private_file(&self.root.join(HANDOFF_LOCK))?;
+        let file = private_file(&self.root.join(HANDOFF_LOCK), true)?;
         fs2::FileExt::try_lock_exclusive(&file).context("desktop handoff is busy")?;
         Ok(HandoffLock {
             _lock: platform::FileLock::held(file),
@@ -82,9 +101,15 @@ impl Location {
     }
 }
 
-fn private_file(path: &Path) -> Result<fs::File> {
+fn private_file(path: &Path, create: bool) -> Result<fs::File> {
     let mut options = fs::OpenOptions::new();
-    platform::private_open(options.read(true).write(true).create(true).truncate(false));
+    platform::private_open(
+        options
+            .read(true)
+            .write(true)
+            .create(create)
+            .truncate(false),
+    );
     #[cfg(unix)]
     platform::no_follow(&mut options);
     #[cfg(windows)]
@@ -131,7 +156,7 @@ impl Store {
                 "desktop state requires a newer hgs version"
             );
         }
-        let _file = private_file(&path)?;
+        let _file = private_file(&path, true)?;
         let mut db = Connection::open_with_flags(&path, flags | OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         db.busy_timeout(Duration::from_secs(2))?;
         let version: i64 = db.query_row("PRAGMA user_version", [], |row| row.get(0))?;

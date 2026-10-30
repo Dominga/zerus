@@ -404,7 +404,36 @@ class Desktop(unittest.TestCase):
             self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 3)
             self.assertEqual(db.execute('SELECT configuration FROM service').fetchone()[0], configuration)
 
-    def test_revoke_without_service_takes_os_locks_but_starts_nothing(self):
+    def test_revoke_without_handoff_or_service_writes_nothing(self):
+        request_id = str(uuid.uuid4())
+        result = self.cli('desktop', 'revoke', '--json', '--request-id', request_id, '--reason', 'rollback')
+        self.assertEqual(result['handoff'], 'none')
+        self.assertFalse(result['applicable'])
+        self.assertTrue(result['nothing_written'])
+        self.assertTrue(result['revoked'])
+        self.assertEqual(result['request_id'], request_id)
+        self.assertFalse(self.state.exists())
+        self.assertFalse((self.root / 'unexpected-tool').exists())
+        # Pre-existing native state or an unused desktop folder stays unchanged.
+        self.state.mkdir(mode=0o700)
+        preserved = self.state / 'foreign-state'
+        preserved.write_text('preserved')
+        for desktop in (False, True):
+            if desktop:
+                self.desktop.mkdir(mode=0o700)
+            self.assertEqual(self.cli('desktop', 'revoke', '--json', '--request-id', request_id, '--reason', 'rollback'), result)
+            self.assertEqual(preserved.read_text(), 'preserved')
+            if desktop:
+                self.assertEqual(list(self.desktop.iterdir()), [])
+        orphan = self.desktop / 'state.sqlite3-wal'
+        orphan.write_bytes(b'preserved orphan')
+        self.cli('desktop', 'revoke', '--json', ok=False)
+        self.assertEqual(orphan.read_bytes(), b'preserved orphan')
+        self.assertFalse((self.desktop / 'owner.lock').exists())
+
+    def test_absent_service_with_existing_state_revokes_without_starting_anything(self):
+        process, _ = self.serve()
+        self.stop(process)
         request_id = str(uuid.uuid4())
         result = self.cli('desktop', 'revoke', '--json', '--request-id', request_id, '--reason', 'rollback')
         self.assertTrue(result['revoked'])
@@ -465,9 +494,25 @@ class Desktop(unittest.TestCase):
         request_id = str(uuid.uuid4())
         command = dict(op='revoke', request_id=request_id, reason='rollback')
         hello = dict(abi='desktop-v1', configuration=status['configuration'], op='request', request=command)
-        with socket.socket(socket.AF_UNIX) as client:
-            client.connect(str(self.desktop / 'service.sock'))
-            client.sendall(json.dumps(hello).encode() + b'\n')
+        database = self.desktop / 'state.sqlite3'
+        with closing(sqlite3.connect(database)) as reader, closing(sqlite3.connect(database)) as observer:
+            reader.execute('BEGIN')
+            reader.execute('SELECT generation FROM service').fetchone()
+            with socket.socket(socket.AF_UNIX) as client:
+                client.connect(str(self.desktop / 'service.sock'))
+                client.sendall(json.dumps(hello).encode() + b'\n')
+                # Pin actual durable admission, keeping checkpoint blocked so
+                # closing the socket loses the result after acceptance. Closing
+                # before hello was read need not admit anything on macOS.
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    row = observer.execute('SELECT state FROM desktop_commands WHERE request_id=?', (request_id,)).fetchone()
+                    if row == ('prepared',):
+                        break
+                    time.sleep(0.01)
+                else:
+                    self.fail('revoke was not durably admitted')
+            reader.execute('ROLLBACK')
         # Losing the response is not permission to invent a new request. The
         # actor finishes independently, and an exact read finds that receipt.
         deadline = time.monotonic() + 5

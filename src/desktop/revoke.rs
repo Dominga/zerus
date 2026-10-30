@@ -318,6 +318,36 @@ pub fn payload(command: &Command) -> Result<Value> {
 /// CLI-only absent-service path. The caller holds owner.lock; a running but
 /// unreachable actor cannot be bypassed. No listener, manager or worker starts.
 pub fn offline(location: &Location, command: &Command) -> Result<Value> {
+    command.validate()?;
+    let exists = |name: &str| -> Result<bool> {
+        match std::fs::symlink_metadata(location.root.join(name)) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    };
+    // A missing service/handoff preserves today's plain Qt rollback. Checking
+    // for any leaf (including unsafe ones) never repairs or follows it. Exclude
+    // an existing live owner, and repeat the state check under that lock.
+    {
+        let _existing_owner = location.existing_lock()?;
+        if !exists("state.sqlite3")? && !exists(zerus_desktop_migration::HANDOFF_FILE)? {
+            for sidecar in [
+                "state.sqlite3-wal",
+                "state.sqlite3-shm",
+                "state.sqlite3-journal",
+            ] {
+                ensure!(
+                    !exists(sidecar)?,
+                    "desktop state is incomplete; keep Qt stopped for inspection"
+                );
+            }
+            return Ok(
+                json!({"request_id":command.request_id,"configuration":location.configuration,
+                "applicable":false,"handoff":"none","revoked":true,"nothing_written":true}),
+            );
+        }
+    }
     location.prepare()?;
     let _owner = location.lock()?;
     let epoch = uuid::Uuid::new_v4().to_string();

@@ -4120,14 +4120,25 @@ receipt from this exact configuration:
 hgs desktop revoke --json --request-id UUID --reason rollback
 ```
 
-The installer generates and retains a canonical UUID for this attempt. Success
-requires exit zero and `accepted`, `durable`, `revoked` and `checkpointed` all
-true, with the same `request_id` and configuration. Failure, timeout or missing
+The installer generates and retains a canonical UUID for this attempt. A
+settled receipt requires exit zero and `accepted`, `durable`, `revoked` and
+`checkpointed` all true, with the same `request_id` and configuration. When
+there is no desktop database and no handoff marker, exit zero instead returns
+`applicable:false`, `handoff:"none"`, `revoked:true`, `nothing_written:true`
+and the exact request/configuration identity. This explicit no-op preserves
+plain rollback without creating directories, locks or a database; an existing
+live owner is still refused. It claims no durable command reservation. Failure, timeout or missing
 receipt keeps Qt stopped. The command contacts the existing actor; when no
 service endpoint exists it instead takes the real exclusive service and handoff
 locks and opens only the desktop journal. It starts no service manager, listener,
 agent or GUI. An unreachable owner holding its lock cannot be bypassed.
 This CLI primitive does not yet wire the maintained installer rollback hook.
+If `owner.lock` is held but IPC does not answer, keep Qt stopped. Stop only
+`hgs-desktop` through its owning service manager (Linux `hgs-desktop.service`,
+macOS `com.hgdev.hgs-desktop`, Windows task `hgs-desktop`), then retry the same
+request in the same configuration. Never stop native agents, tmux servers,
+process groups, recovery, voice or mobile connector services. An unmanaged or
+uncertain owner requires operator inspection; its lock is never bypassed.
 
 Revocation commits its private audit reservation and revoked writer policy
 before draining owned work, atomically changes only a supported marker's phase

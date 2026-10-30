@@ -143,9 +143,15 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
                     })?,
                 };
                 println!("{result}");
-                ensure!(result["revoked"] == true && result["checkpointed"] == true
-                        && result["accepted"] == true && result["durable"] == true
-                        && result["request_id"] == command.id()
+                let settled = result["accepted"] == true
+                    && result["durable"] == true
+                    && result["revoked"] == true
+                    && result["checkpointed"] == true;
+                let absent = result["applicable"] == false
+                    && result["handoff"] == "none"
+                    && result["revoked"] == true
+                    && result["nothing_written"] == true;
+                ensure!((settled || absent) && result["request_id"] == command.id()
                         && result["configuration"] == location.configuration,
                     "desktop revocation is not settled; keep Qt stopped and inspect the same request_id");
                 Ok(())

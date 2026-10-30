@@ -227,6 +227,30 @@ This adapter never calls task open/start/recover/release, reserves an identity
 or writes a source. Startup publication and G1 consumption remain separate;
 neither an imported phase nor an original plan authorizes execution.
 
+`qt_pending_launches(&QtSnapshot)` and `qt_executor_launches(&QtSnapshot)`
+preserve the separate legacy Qt maps `workspace/pendingLaunches` and
+`tasks/pendingExecutorLaunches`. They use the existing QtStore/Qt JSON reader,
+not the live creation or task state machines. Their distinct families are
+`qt-pending-launches` and `qt-executor-launches`, schema 1, with format
+`qt-ini`, `qt-plist` or `qt-defaults` and the raw Qt snapshot hash.
+Private chunks start with `{kind:"pending-header",key,present}` and continue
+with `{entries:[{launch_id,record}]}` pages. An absent key is distinct from an
+explicitly empty map. Original keys, local empty host, task/project/parent,
+saved `waiting`/`reserved`/`review` phase, session, timestamp, hidden status and
+unknown fields remain unchanged. No age-based expiry, state conversion,
+name-based matching or ID generation occurs. Creation-schema records in the
+legacy map refuse; Qt already saves those only in its separate creation journal.
+
+Executor input keeps Qt's 64 KiB/16-record caps, checked before JSON allocation;
+legacy placeholders use the bounded 16 MiB/50,000-entry reader. Private pages
+keep the existing 64-entry/1 MiB limit; a single oversized record refuses, never
+truncates. Malformed identities, unsupported phases/shapes and partial sources
+cannot complete a family manifest. The caller still discovers only the existing
+source and freshly rechecks it under G1's current drain. These are Staged
+evidence adapters with no startup publication, status service, placement,
+launch, task delivery, release, settlement or replay authority. Separate clone,
+deferred, draft operation, download and cleanup sources remain uncovered.
+
 `approval_policies(&QtSnapshot, next_settings_bytes)` inspects both policy
 stores before returning either `qt-approval-policy` or `next-approval-policy`
 stream. It reuses the existing Qt flag conversion and bounded Next settings

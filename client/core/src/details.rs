@@ -59,6 +59,65 @@ pub fn details_invocation(target: &Target, archive_id: Option<&str>) -> Invocati
     }
 }
 
+/// One bounded child inspection when it opens. The CLI verifies roster membership.
+pub fn subagent_identity_invocation(
+    target: &Target,
+    archive_id: Option<&str>,
+    agent_id: &str,
+) -> Option<Invocation> {
+    if target.run_id.is_empty()
+        || target.conversation_id.is_empty()
+        || agent_id.is_empty()
+        || agent_id.len() > 160
+        || agent_id.contains(['/', '\\'])
+        || agent_id.chars().any(char::is_control)
+    {
+        return None;
+    }
+    let mut call = details_invocation(target, archive_id);
+    call.args.extend(["--subagent".into(), agent_id.into()]);
+    Some(call)
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SubagentIdentity {
+    pub agent_id: String,
+    pub conversation_id: String,
+}
+
+/// Adopt only the requested child of this exact parent run/conversation.
+pub fn parse_subagent_identity(
+    target: &Target,
+    agent_id: &str,
+    exit: Exit,
+) -> Option<SubagentIdentity> {
+    let Exit::Code {
+        code: 0, stdout, ..
+    } = exit
+    else {
+        return None;
+    };
+    let value: Value = serde_json::from_slice(&stdout).ok()?;
+    if text(&value, "name") != target.name
+        || text(&value, "run_id") != target.run_id
+        || text(&value, "parent_conversation_id") != target.conversation_id
+        || text(&value, "agent_id") != agent_id
+    {
+        return None;
+    }
+    let conversation_id = text(&value, "conversation_id");
+    if conversation_id.is_empty()
+        || conversation_id.len() > 1024
+        || conversation_id.chars().any(char::is_control)
+    {
+        return None;
+    }
+    Some(SubagentIdentity {
+        agent_id: agent_id.into(),
+        conversation_id,
+    })
+}
+
 fn text(value: &Value, key: &str) -> String {
     value
         .get(key)
@@ -133,6 +192,59 @@ pub fn parse_details(target: &Target, exit: Exit) -> Option<Details> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn child_identity_uses_the_inspected_conversation_and_checks_parent_and_child() {
+        let t = Target {
+            computer: "mac".into(),
+            name: "codex/sample-project/review".into(),
+            run_id: "r1".into(),
+            conversation_id: "parent".into(),
+        };
+        let call = subagent_identity_invocation(&t, Some("a1"), "child").unwrap();
+        assert_eq!(
+            call.args,
+            [
+                "@mac",
+                "inspect",
+                "codex/sample-project/review",
+                "--after",
+                "0",
+                "--skip-processes",
+                "--archive",
+                "a1",
+                "--subagent",
+                "child"
+            ]
+        );
+        assert_eq!(call.timeout, Duration::from_secs(15));
+        for id in ["", "../child", "child\\other", "child\n"] {
+            assert!(subagent_identity_invocation(&t, None, id).is_none());
+        }
+        let receipt = serde_json::json!({"name":t.name,"run_id":"r1","parent_conversation_id":"parent","agent_id":"child","conversation_id":"child-conversation"});
+        let exit = |v: &Value| Exit::Code {
+            code: 0,
+            stdout: serde_json::to_vec(v).unwrap(),
+            stderr: String::new(),
+        };
+        assert_eq!(
+            parse_subagent_identity(&t, "child", exit(&receipt))
+                .unwrap()
+                .conversation_id,
+            "child-conversation"
+        );
+        for key in ["name", "run_id", "parent_conversation_id", "agent_id"] {
+            let mut wrong = receipt.clone();
+            wrong[key] = serde_json::json!("other");
+            assert!(
+                parse_subagent_identity(&t, "child", exit(&wrong)).is_none(),
+                "{key}"
+            );
+        }
+        let mut empty = receipt;
+        empty["conversation_id"] = serde_json::json!("");
+        assert!(parse_subagent_identity(&t, "child", exit(&empty)).is_none());
+    }
 
     #[test]
     fn inspect_call_matches_the_qt_client() {

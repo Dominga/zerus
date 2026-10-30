@@ -26,6 +26,7 @@ import { QuestionCard } from "./QuestionCard";
 import { QueuePanel } from "./QueuePanel";
 import { onCommand } from "../../store/shortcuts";
 import { composer } from "../../store/composer";
+import { createSubagentIdentity } from "../../store/subagentIdentity";
 
 // The session header and its Activity with the composer under it, after
 // design/webui SessionDetail. Processes and the side panel move in with later
@@ -52,10 +53,15 @@ function Header() {
   // Details come from the followed session's Activity state value; the store
   // inspects only once that subscription answered without one.
   const details = createMemo(() => detailsFor(s(), !computerOffline(s().computer), followedFor(s().key)));
-  const child = () => {
+  const childDetails = createSubagentIdentity(bridge.inspectSubagentIdentity);
+  createEffect(() => {
     const id = subagentOpen();
-    return id ? { id, conversationId: s().subagents?.find((agent) => agent.id === id)?.conversationId } : undefined;
-  };
+    const row = s(), d = details();
+    childDetails.follow(id ? { agentId: id, archiveId: row.archiveId ?? null,
+      target: { computer: row.computer, name: row.name, run_id: d?.run_id || row.runId || "", conversation_id: d?.conversation_id || row.conversationId || "" } } : undefined);
+  });
+  onCleanup(() => childDetails.follow(undefined));
+  const child = childDetails.child;
   const identity = () => sessionIdentity(s(), details(), child());
   const copyId = () => { void copyIdentity(snapshotOf(s()), details(), child()); };
   const act = createMemo(() => actionEntries(s(), details()));

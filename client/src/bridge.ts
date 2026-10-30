@@ -185,6 +185,12 @@ export async function inspectSession(target: Target, archiveId: string | null): 
   return (await invoke<Details | null>("inspect_session", { target, archiveId })) ?? null;
 }
 
+/** Child identity from its own inspection, read once when it opens. */
+export async function inspectSubagentIdentity(target: Target, archiveId: string | null, agentId: string): Promise<{ agent_id: string; conversation_id: string } | null> {
+  if (!inTauri()) return null;
+  return (await invoke<{ agent_id: string; conversation_id: string } | null>("inspect_subagent_identity", { target, archiveId, agentId })) ?? null;
+}
+
 /** Read marks whose delivery has not been confirmed yet; undefined outside the app, which keeps no list. */
 export async function pendingReadMarks(): Promise<ReadMark[] | undefined> {
   if (!inTauri()) return undefined;

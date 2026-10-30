@@ -49,7 +49,12 @@ fn bytes(value: &impl Serialize) -> Vec<u8> {
 
 #[test]
 fn exact_marker_round_trips_all_phases_without_granting_authority() {
-    for phase in [Phase::Imported, Phase::Quiesced, Phase::Complete] {
+    for phase in [
+        Phase::Imported,
+        Phase::Quiesced,
+        Phase::Complete,
+        Phase::Revoked,
+    ] {
         let expected = Handoff { phase, ..handoff() };
         let parsed = Handoff::parse(&bytes(&expected), &config()).unwrap();
         assert_eq!(parsed, expected);

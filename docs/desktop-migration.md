@@ -30,6 +30,12 @@ and migrated approval consent. Development/local identities and replay never
 participate. `writer_epoch` is the durable cutover generation, distinct from a
 service process/watch epoch, and authorizes no delivery replay.
 
+The closed v1 phase enum is `imported`, `quiesced`, `complete`, `revoked`.
+`revoked` durably withdraws the service's migrated writer authority before a
+rollback or Qt start. G1 alone commits it. Reason/history stay in G1's private
+journal, without extending the marker payload. Older consumers fail closed on
+the unknown phase; none may interpret it as a new import or reseed.
+
 The import record always resolves to
 `desktop/imports/<import_id>/record-v1.json`; JSON cannot supply another path.
 `Handoff::verify_import_record` checks the exact byte digest, version and matching
@@ -72,17 +78,21 @@ G1 retains `desktop/owner.lock` for its process lifetime. G3 never takes it.
 `desktop/handoff.lock` is a separate OS-backed exclusive lock: G3 holds it only
 to commit immutable evidence and refuses/retries while G1 holds it. G1 rereads
 the exact import UUID and digest under that lock, owns all marker transitions
-(`imported`, `quiesced`, `complete`), and retains the lock while any migrated
+(`imported`, `quiesced`, `complete`, `revoked`), and retains the lock while any migrated
 writer runs. Commits use atomic replacement with durable file/directory flushes.
 
 Readers/committers require private directories and private regular single-link
 files, no-follow opens and byte limits. Pure validation does not perform these
 filesystem checks. A complete marker never replaces fresh runtime proof:
 versioned build/configuration/writer-epoch hello, stopped old admissions, durable
-drain, real Qt/Next instance exclusion and both service locks. The temporary Unix
-instance start lock alone does not prove long-lived exclusion. Legacy, unknown
-or uncooperative instances keep the service passive. Arch remains passive until
-the explicit Linux handoff even if a marker is copied there.
+drain, exact shared effect identities and both service locks. The revised
+coordinator ruling of 2026-10-30 uses explicit durable revocation before rollback
+or Qt start on the normal path, with live legacy-GUI detection revoking the
+abnormal path. It does not require the service to own Qt's Unix socket; the
+temporary instance start lock alone cannot prove long-lived exclusion. Takeover
+remains fenced until revocation and exact effect guards exist. Windows permanent
+lock exclusion is separately unqualified. Arch remains passive until the explicit
+Linux handoff even if a marker is copied there.
 
 `configuration(state, config)` extracts the service's existing algorithm:
 canonicalize existing path ancestors, then SHA-256 the state and config paths in

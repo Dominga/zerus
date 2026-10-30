@@ -8,6 +8,7 @@ import { onCommand } from "../../store/shortcuts";
 import { actionEntries } from "./ActionDialogs";
 import { snapshotOf } from "./actions-ui";
 import { markReadChip, runMarkRead } from "./mark-entries";
+import { ModelSettingsButton } from "./ModelSettings";
 import { AttachmentsChip } from "./Attachments";
 import { moveFocusOff } from "./composer-ui";
 import { focusTranscript, following, jumpToLatest, unseen } from "./Activity";
@@ -286,9 +287,7 @@ export function Composer() {
           <button type="button" class="btn ghost" title="Check the terminal before sending again to avoid a duplicate message"
             onClick={() => { void composer.allowRetry(); editor.focus(); }}><Icon name="refresh-cw" size={13} />Allow retry</button>
         </Show>
-        <button type="button" class="btn ghost cmp-model" disabled aria-label="Model and reasoning effort for this session" title="Arrives with model settings.">
-          {s().model} <span class="dim">{s().effort}</span><Icon name="chevron-down" size={12} />
-        </button>
+        <ModelSettingsButton />
         <Show when={act().stop.shown}>
           <button type="button" class="btn" aria-label="Stop current turn" title={act().stop.hint ?? USUAL_STOP} disabled={act().stop.disabled}
             onClick={() => { stopTurn(); }}><Icon name="square" size={12} />Stop</button>

@@ -234,6 +234,7 @@ export interface ActivityEvent {
 export interface Target { computer: ComputerId; name: string; run_id: string; conversation_id: string }
 
 export type Action =
+  | { kind: "settings"; model: string; effort: string; expected_pending_id?: string; without_terminal: boolean }
   | { kind: "interrupt"; turn_started: number }
   | { kind: "mark_read"; reply_id: string | null; attention_signature: string | null }
   | { kind: "pause" }
@@ -658,7 +659,7 @@ export interface CardView { heading: string; progress: string; pending: string; 
  * grows with every change of the answers from Rust, each revision's included:
  * the fields take Rust's values again, and an edit names the epoch it is based on.
  */
-export interface QuestionView { card: string; revision: number; epoch: number; asked: string; asked_tip: string; terminal_label: string; view: CardView }
+export interface QuestionView { answering?: boolean; card: string; revision: number; epoch: number; asked: string; asked_tip: string; terminal_label: string; view: CardView }
 export type QuestionEdit = { kind: "option"; item: string; option: string; checked: boolean } | { kind: "other"; item: string; checked: boolean } | { kind: "text"; item: string; text: string };
 export interface ColdAnswer { title: string; text: string; proceed: string }
 export type QuestionReply = { kind: "sending" } | { kind: "busy" } | { kind: "cold"; token: number; prompt: ColdAnswer } | { kind: "notice"; text: string };

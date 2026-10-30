@@ -42,10 +42,10 @@ fn thread_max_priority() -> i32 {
 pub fn deprioritized() -> bool {
     #[cfg(target_os = "macos")]
     {
-        return launched_deprioritized(
+        launched_deprioritized(
             thread_max_priority(),
             &std::env::var("XPC_SERVICE_NAME").unwrap_or_default(),
-        );
+        )
     }
     #[cfg(not(target_os = "macos"))]
     {

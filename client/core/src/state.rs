@@ -1001,6 +1001,26 @@ mod tests {
     use serde_json::json;
     use zerus_watch_protocol::decode;
 
+    #[test]
+    fn raw_lifecycle_does_not_stage_or_retain_a_large_catalog() {
+        let mut state = CatalogState::new();
+        let computer = ComputerId::local();
+        for n in 0..50_000 {
+            let page = frame(json!({"v":1,"seq":n+1,"t":"snapshot","topic":"catalog",
+                "page":n,"last":n==49_999,"cursor":1,"items":[{"key":format!("run:{n}"),
+                "row":{"name":format!("s-{n}"),"run_id":format!("r-{n}")}}]}));
+            assert!(crate::stream::source_lifecycle(&mut state, &computer, &page).is_empty());
+        }
+        assert!(state.rows.is_empty());
+        assert!(state.staged.is_none());
+        assert!(state.activity.is_empty());
+        let fatal = frame(json!({"v":1,"seq":50001,"t":"error","code":"failed",
+            "message":"fixture","topic":"organization","fatal":true}));
+        crate::stream::source_lifecycle(&mut state, &computer, &fatal);
+        assert!(state.failed());
+        println!("raw lifecycle: 50000 source rows, zero resident or staged catalog rows");
+    }
+
     fn fixture(name: &str) -> Vec<Frame> {
         let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
         std::fs::read_to_string(path)

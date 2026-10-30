@@ -10,7 +10,7 @@ use crate::schema::{
     SCHEMA,
 };
 use crate::{ids, rank, Error, Result};
-use loro::{ExportMode, LoroDoc, LoroMap, LoroValue, UpdateOptions, VersionVector};
+use loro::{ContainerTrait, ExportMode, LoroDoc, LoroMap, LoroValue, UpdateOptions, VersionVector};
 
 pub struct NewTask<'a> {
     pub project: &'a str,
@@ -310,6 +310,13 @@ impl TaskDoc {
     }
 
     pub fn view(&self) -> Result<TaskView> {
+        self.view_with_history_ids().map(|(view, _)| view)
+    }
+
+    /// The canonical view plus immutable Loro identities in the same order as
+    /// `view.log`. A derived history index can keep a cursor across appends,
+    /// receipt refinements and merges without exposing Loro to its caller.
+    pub fn view_with_history_ids(&self) -> Result<(TaskView, Vec<String>)> {
         let meta = self.meta();
         let fields = self.fields();
         let writable = self.schema() <= TASK_SCHEMA;
@@ -325,37 +332,40 @@ impl TaskDoc {
             let Ok(entry) = container.into_map() else {
                 continue;
             };
-            log.push(LogEntry {
-                kind: string(&entry, "kind").unwrap_or_default(),
-                actor: decode(&entry, "actor").unwrap_or(Actor::Person),
-                at: integer(&entry, "at").unwrap_or(0),
-                text: string(&entry, "text").unwrap_or_default(),
-                session: string(&entry, "session").and_then(|s| serde_json::from_str(&s).ok()),
-                request_id: string(&entry, "request_id"),
-                delivery: match string(&entry, "delivery")
-                    .map(|raw| serde_json::from_str(&raw))
-                    .transpose()
-                {
-                    Err(_) if !writable => None,
-                    delivery => delivery?,
-                },
-                attachments: match string(&entry, "attachments") {
-                    Some(raw) => match serde_json::from_str::<Vec<TaskAttachment>>(&raw)
-                        .map_err(Error::from)
-                        .and_then(|files| {
-                            check_attachments(&files)?;
-                            Ok(files)
-                        }) {
-                        Err(_) if !writable => Vec::new(),
-                        files => files?,
+            log.push((
+                entry.id().to_string(),
+                LogEntry {
+                    kind: string(&entry, "kind").unwrap_or_default(),
+                    actor: decode(&entry, "actor").unwrap_or(Actor::Person),
+                    at: integer(&entry, "at").unwrap_or(0),
+                    text: string(&entry, "text").unwrap_or_default(),
+                    session: string(&entry, "session").and_then(|s| serde_json::from_str(&s).ok()),
+                    request_id: string(&entry, "request_id"),
+                    delivery: match string(&entry, "delivery")
+                        .map(|raw| serde_json::from_str(&raw))
+                        .transpose()
+                    {
+                        Err(_) if !writable => None,
+                        delivery => delivery?,
                     },
-                    None => Vec::new(),
+                    attachments: match string(&entry, "attachments") {
+                        Some(raw) => match serde_json::from_str::<Vec<TaskAttachment>>(&raw)
+                            .map_err(Error::from)
+                            .and_then(|files| {
+                                check_attachments(&files)?;
+                                Ok(files)
+                            }) {
+                            Err(_) if !writable => Vec::new(),
+                            files => files?,
+                        },
+                        None => Vec::new(),
+                    },
                 },
-            });
+            ));
         }
         // A merge orders entries appended on two replicas by peer, not by time;
         // the history reads oldest first, keeping the order of equal times.
-        log.sort_by_key(|entry| entry.at);
+        log.sort_by_key(|(_, entry)| entry.at);
         // Receipt events refine the original message without rewriting its text.
         let mut receipts: std::collections::BTreeMap<String, crate::TaskDelivery> =
             std::collections::BTreeMap::new();
@@ -365,7 +375,7 @@ impl TaskDoc {
             "uncertain" => 1,
             _ => 0,
         };
-        for entry in log.iter().filter(|e| e.kind == "message_delivery") {
+        for (_, entry) in log.iter().filter(|(_, e)| e.kind == "message_delivery") {
             if let (Some(id), Some(delivery)) = (&entry.request_id, &entry.delivery) {
                 if receipts
                     .get(id)
@@ -375,7 +385,7 @@ impl TaskDoc {
                 }
             }
         }
-        for message in log.iter_mut().filter(|e| e.kind == "message") {
+        for (_, message) in log.iter_mut().filter(|(_, e)| e.kind == "message") {
             if let Some(receipt) = message.request_id.as_ref().and_then(|id| receipts.get(id)) {
                 let prompt = message
                     .delivery
@@ -392,7 +402,7 @@ impl TaskDoc {
         // dispatches once; a conflicting identity fails closed.
         let mut messages = std::collections::BTreeMap::new();
         let mut unique = Vec::with_capacity(log.len());
-        for entry in log {
+        for (id, entry) in log {
             if entry.kind == "message" {
                 if let Some(id) = &entry.request_id {
                     if let Some(old) = messages.get(id) {
@@ -409,9 +419,9 @@ impl TaskDoc {
                     messages.insert(id.clone(), entry.clone());
                 }
             }
-            unique.push(entry);
+            unique.push((id, entry));
         }
-        let log = unique;
+        let (ids, log): (Vec<_>, Vec<_>) = unique.into_iter().unzip();
         // A newer schema may encode a field differently: such a task is shown
         // read-only with defaults. In this schema a field that does not decode
         // is damage, and the store sets the task aside.
@@ -427,37 +437,40 @@ impl TaskDoc {
             Err(_) if !writable => Vec::new(),
             files => files?,
         };
-        Ok(TaskView {
-            uuid: self.uuid.clone(),
-            id: self.id(),
-            project: string(&meta, "project").unwrap_or_default(),
-            schema: self.schema(),
-            writable,
-            created_at: integer(&meta, "created_at").unwrap_or(0),
-            // Documents written before this field existed report their creation.
-            stage_at: integer(&fields, "stage_at")
-                .or_else(|| integer(&meta, "created_at"))
-                .unwrap_or(0),
-            author,
-            stage: self.stage()?,
-            target,
-            rank: self.rank(),
-            session: self.session(),
-            worker: match string(&fields, "worker")
-                .map(|raw| serde_json::from_str(&raw))
-                .transpose()
-            {
-                Err(_) if !writable => None,
-                worker => worker?,
+        Ok((
+            TaskView {
+                uuid: self.uuid.clone(),
+                id: self.id(),
+                project: string(&meta, "project").unwrap_or_default(),
+                schema: self.schema(),
+                writable,
+                created_at: integer(&meta, "created_at").unwrap_or(0),
+                // Documents written before this field existed report their creation.
+                stage_at: integer(&fields, "stage_at")
+                    .or_else(|| integer(&meta, "created_at"))
+                    .unwrap_or(0),
+                author,
+                stage: self.stage()?,
+                target,
+                rank: self.rank(),
+                session: self.session(),
+                worker: match string(&fields, "worker")
+                    .map(|raw| serde_json::from_str(&raw))
+                    .transpose()
+                {
+                    Err(_) if !writable => None,
+                    worker => worker?,
+                },
+                summary: string(&fields, "summary").unwrap_or_default(),
+                cancelled_at: integer(&fields, "cancelled_at"),
+                cancel_reason: string(&fields, "cancel_reason").unwrap_or_default(),
+                title: self.title(),
+                text: self.doc.get_text("text").to_string(),
+                attachments,
+                log,
             },
-            summary: string(&fields, "summary").unwrap_or_default(),
-            cancelled_at: integer(&fields, "cancelled_at"),
-            cancel_reason: string(&fields, "cancel_reason").unwrap_or_default(),
-            title: self.title(),
-            text: self.doc.get_text("text").to_string(),
-            attachments,
-            log,
-        })
+            ids,
+        ))
     }
 
     fn log(
@@ -1269,6 +1282,9 @@ mod tests {
                 (&Actor::Person, 2)
             )
             .unwrap());
+        let (before, before_ids) = task.view_with_history_ids().unwrap();
+        let message_index = before.log.iter().position(|e| e.kind == "message").unwrap();
+        let message_id = before_ids[message_index].clone();
         task.record_send(&api(), "dispatch", &Actor::Person, 3)
             .unwrap();
         task.record_queued_messages("dispatch", &Actor::Person, 4)
@@ -1290,6 +1306,24 @@ mod tests {
         let message = view.log.iter().find(|e| e.kind == "message").unwrap();
         assert_eq!(message.delivery.as_ref().unwrap().state, "submitted");
         assert_eq!(message.delivery.as_ref().unwrap().submitted_id, "dispatch");
+        let (after, after_ids) = task.view_with_history_ids().unwrap();
+        let message_index = after.log.iter().position(|e| e.kind == "message").unwrap();
+        assert_eq!(
+            after_ids[message_index], message_id,
+            "receipt refinement keeps the history cursor"
+        );
+        assert_eq!(
+            serde_json::to_value(&after).unwrap(),
+            serde_json::to_value(&view).unwrap()
+        );
+        assert_eq!(after_ids.len(), after.log.len());
+        assert_eq!(
+            after_ids
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            after_ids.len()
+        );
     }
 
     #[test]

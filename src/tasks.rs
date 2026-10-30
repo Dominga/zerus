@@ -22,6 +22,7 @@ mod mobile;
 mod phone;
 mod sessions;
 mod messages;
+mod history;
 
 /// A send that pasted the prompt but could not record it: its outcome is
 /// uncertain, and the phone's receipt says so.
@@ -34,7 +35,7 @@ fn paste_uncertain(message: &str) -> bool {
     message.starts_with(SENT_UNRECORDED) || message.starts_with("delivery uncertain")
 }
 
-const USAGE: &str = "usage: hgs task list --project P [--stage S] | get REF | add --project P [--backlog] [--start] [--target SESSION|any [--host ALIAS]] [--title TITLE [--request-id UUID]] [--position N] | edit REF | rename REF | move REF --top|--before REF|--after REF|--position N | stage REF backlog|todo|done | target REF SESSION|any|new-session|subagent [--parent SESSION] [--host ALIAS] | send REF [--session SESSION [--host ALIAS]] | cancel REF [--reason TEXT] | handoff REF --session SESSION [--host ALIAS] | start REF | report REF | comment REF [--content-json] | message REF --request-id UUID --mode queue|send|reopen|note [--expect-dispatch ID] [--content-json] | worker REF --subagent ID --request-id REQUEST | settings --project P [--set] | digests --json | exchange --json | mobile-send|mobile-cancel|mobile-done --json
+const USAGE: &str = "usage: hgs task list --project P [--stage S] | get REF [--history-limit 1..80 [--history-before CURSOR]] | add --project P [--backlog] [--start] [--target SESSION|any [--host ALIAS]] [--title TITLE [--request-id UUID]] [--position N] | edit REF | rename REF | move REF --top|--before REF|--after REF|--position N | stage REF backlog|todo|done | target REF SESSION|any|new-session|subagent [--parent SESSION] [--host ALIAS] | send REF [--session SESSION [--host ALIAS]] | cancel REF [--reason TEXT] | handoff REF --session SESSION [--host ALIAS] | start REF | report REF | comment REF [--content-json] | message REF --request-id UUID --mode queue|send|reopen|note [--expect-dispatch ID] [--content-json] | worker REF --subagent ID --request-id REQUEST | settings --project P [--set] | digests --json | exchange --json | mobile-send|mobile-cancel|mobile-done --json
   REF is T-xxxxxx with --project P, or PROJECT/T-xxxxxx; texts and --set settings are read from stdin;
   a change an agent makes prints one line, and --json prints the task";
 
@@ -289,7 +290,11 @@ fn view(task: &TaskDoc, project_name: &str, with_log: bool, machines: &Machines)
     let dispatch_id = task_view.execution_id();
     let mut value = serde_json::to_value(task_view).map_err(fail)?;
     value["dispatch_id"] = json!(dispatch_id);
-    value["ref"] = json!(format!("{project_name}/{}", task.id()));
+    label_view(value, project_name, with_log, &files, machines)
+}
+
+fn label_view(mut value: Value, project_name: &str, with_log: bool, files: &[Value], machines: &Machines) -> Result<Value> {
+    value["ref"] = json!(format!("{project_name}/{}", value["id"].as_str().unwrap_or_default()));
     // Every session reference names its computer: the task's target, session and
     // author, and each history entry's session and actor.
     let name = |reference: &mut Value| {
@@ -401,10 +406,18 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
             let machines = machines(config)?;
             let who = actor(&machines.here, args, false)?;
             let r = reference(config, args, &who)?;
-            let task = store(config, &r.project.0)?
-                .find(&r.task)
-                .map_err(fail)?;
-            Ok(json!({"project": {"id": r.project.0, "name": r.project.1}, "task": view(&task, &r.project.1, true, &machines)?}))
+            let limit = history::limit(args)?;
+            let store = store(config, &r.project.0)?;
+            let value = if let Some(limit) = limit {
+                let uuid = if zerus_replica::ids::is_uuid(&r.task) { r.task.clone() }
+                    else { store.find(&r.task).map_err(fail)?.uuid().to_owned() };
+                let task = history::page(&store, &store_dir(config, &r.project.0), &uuid,
+                    limit, option(args, "--history-before")?)?;
+                label_view(task, &r.project.1, true, &[], &machines)?
+            } else {
+                view(&store.find(&r.task).map_err(fail)?, &r.project.1, true, &machines)?
+            };
+            Ok(json!({"project": {"id": r.project.0, "name": r.project.1}, "task": value}))
         }
         "add" => add(config, args),
         "message" => messages::execute(config, args),

@@ -353,8 +353,11 @@ class TrayUpdate(unittest.TestCase):
         self.assertFalse((self.root / 'systemctl').exists(), 'a scratch prefix never reaches systemd')
         self.assertIn('no service-manager action', result.stdout)
         env.pop('HGS_LINUX_GUI')
+        unit_before = unit.read_bytes()
         result = subprocess.run(['bash', str(install)], env=env, capture_output=True, text=True, timeout=90)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(unit.read_bytes(), unit_before)
+        self.assertFalse(unit_before.endswith(b'\n\n'))
         calls = [json.loads(line) for line in (self.root / 'npm.json').read_text().splitlines()]
         self.assertEqual(len(calls), 4, 'npm ci and the Tauri build on each install')
         for call in calls[1::2]:
@@ -381,11 +384,20 @@ class TrayUpdate(unittest.TestCase):
             self.assertFalse(installed.with_name(installed.name + '.new').exists())
 
     def test_default_install_keeps_the_packaged_unit_byte_identical(self):
-        result = subprocess.run(['bash', str(self.installer(self.build('first')))], env=self.env,
+        install = self.installer(self.build('first'))
+        result = subprocess.run(['bash', str(install)], env=self.env,
                                 capture_output=True, text=True, timeout=90)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         installed = self.home / '.config/systemd/user/hgs-tray.service'
         self.assertEqual(installed.read_bytes(), (REPO / 'tray/packaging/hgs-tray.service').read_bytes())
+        desktop = self.home / '.local/share/applications/hgs-tray.desktop'
+        before = desktop.read_bytes()
+        result = subprocess.run(['bash', str(install)], env=self.env,
+                                capture_output=True, text=True, timeout=90)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('already installed and unchanged', result.stdout)
+        self.assertEqual(desktop.read_bytes(), before)
+        self.assertTrue(before.endswith(b'\n') and not before.endswith(b'\n\n'))
 
     def test_installer_replaces_a_running_gui_through_the_updater(self):
         install = self.installer(self.build('second'))

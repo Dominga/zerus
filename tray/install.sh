@@ -329,12 +329,13 @@ if [ "${SCRATCH}" = "1" ]; then
     SYSTEMD_BIN_DEST="${SYSTEMD_BIN_DEST//\"/\\\"}"
     SYSTEMD_BIN_DEST="${SYSTEMD_BIN_DEST//%/%%}"
     NEW_UNIT=""
-    while IFS= read -r line; do
+    while IFS= read -r line || [ -n "${line}" ]; do
         case "${line}" in
             ExecStart=*) line="ExecStart=\"${SYSTEMD_BIN_DEST}\"" ;;
         esac
         NEW_UNIT+="${line}"$'\n'
     done < "${SCRIPT_DIR}/packaging/hgs-tray.service"
+    NEW_UNIT="${NEW_UNIT%$'\n'}"
 else
     NEW_UNIT="$(cat "${SCRIPT_DIR}/packaging/hgs-tray.service")"
 fi
@@ -348,13 +349,14 @@ mkdir -p "${DESKTOP_DEST%/*}"
 # The launcher opens Sessions through the running instance; login start is only
 # through the service above, never another copy of this desktop file.
 NEW_DESKTOP=""
-while IFS= read -r line; do
+while IFS= read -r line || [ -n "${line}" ]; do
     case "${line}" in
         Exec=*) line="Exec=${BIN_DEST} --sessions" ;;
         Icon=*) line="Icon=${SYMBOLIC_DEST}" ;;
     esac
     NEW_DESKTOP+="${line}"$'\n'
 done < "${SCRIPT_DIR}/packaging/hgs-tray.desktop"
+NEW_DESKTOP="${NEW_DESKTOP%$'\n'}"
 if [ "$(cat "${DESKTOP_DEST}" 2>/dev/null || true)" != "${NEW_DESKTOP}" ]; then
     printf '%s\n' "${NEW_DESKTOP}" > "${DESKTOP_DEST}"
     DESKTOP_CHANGED=1

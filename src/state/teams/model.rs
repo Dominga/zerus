@@ -172,6 +172,10 @@ pub(crate) struct Settings {
     /// task does; off by default, so a free same-role member may take it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub keep_assignees: bool,
+    /// U62: the owner's override of the project's `.zerus/tests.toml`, merged
+    /// over it field by field (providers by name).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tests: Option<serde_json::Value>,
 }
 
 /// U48: the name of a task's branch: `{id}`, `{member}` and `{team8}` are
@@ -262,6 +266,7 @@ impl Default for Settings {
             stuck_minutes: 0,
             lead_restarts_stuck: false,
             keep_assignees: false,
+            tests: None,
         }
     }
 }
@@ -449,12 +454,10 @@ pub(crate) struct Member {
     /// reason and the phase it was in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stuck: Option<MemberStuck>,
-    /// #728: the restart of a stuck member the owner, or the lead with
-    /// lead_restarts_stuck, asked for. The worker spends it once: it interrupts
-    /// the session's turn and continues it, or relaunches the session in its
-    /// own conversation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub restart: Option<MemberRestart>,
+    /// #728: the lead or the owner asked to interrupt and resume a stuck
+    /// member; the dispatcher runs the session commands and clears this.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub restart_pending: bool,
     /// The permission request the lead last heard about (B1): the exact
     /// command, where it came from and the agent's reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -617,16 +620,6 @@ pub(crate) struct MemberStuck {
     /// start of the tool call it waits in); its minutes are the stuck time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<f64>,
-}
-
-/// #728: a requested restart of a stuck member: who asked, when, and the
-/// stuck mark it replaced.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
-pub(crate) struct MemberRestart {
-    pub at: f64,
-    pub by: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub reason: String,
 }
 
 impl Member {
@@ -1111,6 +1104,10 @@ pub(crate) struct Attempt {
     /// U31: this attempt worked a task of a draft phase before its approval.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub worked_ahead: bool,
+    /// #728 L2: when the silent check last read a dsh session for this attempt;
+    /// the stuck check reads it at most once a minute too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub silent_read_at: Option<f64>,
     /// #630 C2: a stage return or a send-back closed this attempt; the
     /// implementer keeps the task and is not counted as failed for it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -1157,10 +1154,6 @@ pub(crate) struct Attempt {
     /// on every tick.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity_at: Option<f64>,
-    /// #728 (#709 L2): when the worker last read a quiet DeepSeek member's
-    /// session for this attempt; it reads again at most once a minute.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_read_at: Option<f64>,
     /// The lead was reminded once that this report still waits for a decision
     /// (C4); absent until it was.
     #[serde(default, skip_serializing_if = "Option::is_none")]

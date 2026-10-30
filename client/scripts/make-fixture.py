@@ -172,6 +172,8 @@ def phase4_rows(rows):
         elif row["name"] in states:
             phase, activity, runtime, process = states[row["name"]]
             row.update(phase=phase, activity=activity, state="running", runtime_state=runtime, process_state=process)
+        if row["name"] == PROCESS_SESSION:
+            row["process_work"] = processes_for(row)["process_work"]
     return rows
 
 
@@ -194,6 +196,32 @@ def phase4_approval(row):
                            "options": [{"id": "allow", "label": "Allow"}, {"id": "deny", "label": "Deny"}]}]}
 
 
+def phase4_echoes(row):
+    """One readable native image echo and one whose guarded read must fail."""
+    if row["name"] != "claude/sample-project/api-refactor":
+        return [], []
+    at = row["last_event_at"] + 120
+    image_path = "/home/example/.local/state/hgs/sessions/attachments/message-echo01/01-pasted-image.png"
+    missing_path = "/home/example/.local/state/hgs/sessions/attachments/message-missing/01-missing.png"
+    image_raw = f'[Image #1] (Inspect the attached image at "{image_path}")\nReconciled image message'
+    missing_raw = f'[Image #1] (Inspect the attached image at "{missing_path}")\nUnreadable image stays raw'
+    image = {"name": "pasted-image.png", "request_id": "req-fixture-echo-image", "index": 0,
+             "mime": "image/png", "bytes": 68, "reference": "[Image #1]"}
+    missing = {"name": "missing.png", "request_id": "req-fixture-missing-image", "index": 0,
+               "mime": "image/png", "bytes": 68, "reference": "[Image #1]"}
+    events = [
+        {"seq": next_seq(), "type": "UserPromptSubmit", "source": "claude_hooks", "detail": image_raw, "at": at},
+        {"seq": next_seq(), "type": "UserPromptSubmit", "source": "claude_hooks", "detail": missing_raw, "at": at + 1},
+    ]
+    receipts = [
+        {"type": "UserPromptSubmit", "source": "hgs_delivery", "message_id": image["request_id"],
+         "detail": "[Image #1]\nReconciled image message", "submitted_text": image_raw, "attachments": [image]},
+        {"type": "UserPromptSubmit", "source": "hgs_delivery", "message_id": missing["request_id"],
+         "detail": "[Image #1]\nUnreadable image stays raw", "submitted_text": missing_raw, "attachments": [missing]},
+    ]
+    return events, receipts
+
+
 def state_for(row):
     state = {"name": row["name"], "phase": row["phase"], "activity": row["activity"], "current_tool": row["current_tool"],
              "activity_summary": row["activity_summary"], "turn_started": row["turn_started"], "pending_questions": [], "history_truncated": False,
@@ -202,6 +230,8 @@ def state_for(row):
     if row["name"] == "claude/sample-project/api-refactor":
         state["session_usage"] = {"prompt_cache": {"status": "warm", "expires_at": BASE_AT + 1800}}
         state["clear_context_supported"] = True
+        state["attachment_messages"] = phase4_echoes(row)[1]
+        state["process_work"] = processes_for(row)["process_work"]
     elif row["name"] == "codex/sample-project/pagination":
         state.update(cache_hint={"status": "cold", "tokens": 120000}, compact_context_supported=True, clear_context_supported=True)
     elif row["name"] == "claude/sample-project/review":
@@ -260,7 +290,8 @@ def view_row(row, machine):
             "attention": "approval" if phase == "approval" else "question" if phase == "input" else None, "unread": unread, "muted": False,
             "machine": machine, "project": row["project"], "folder": row["cwd"].rstrip("/").rsplit("/", 1)[-1], "branch": row["git_branch"] or None,
             "model": row["model"] or None, "effort": row["effort"] or None, "summary": row["activity_summary"], "updated_at": row["last_event_at"],
-            "turn_started": row["turn_started"] or None, "run_id": row["run_id"], "conversation_id": row["conversation_id"]}
+            "turn_started": row["turn_started"] or None, "run_id": row["run_id"], "conversation_id": row["conversation_id"],
+            "background": (row.get("process_work") or {}).get("count", -1)}
 
 
 def deltas_for(rows):
@@ -414,6 +445,7 @@ def phase4_attachments(row):
         {"seq": next_seq(), "type": "UserPromptSubmit", "source": "claude_hooks", "detail": "The tiny image is attached too.", "at": at + 1,
          "attachments": [{"name": "pixel.png", "request_id": "req-fixture-image", "index": 0,
                           "mime": "image/png", "size": 68, "bytes": 68, "reference": "[Image #1]"}]},
+        *phase4_echoes(row)[0],
     ]
 
 

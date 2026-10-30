@@ -146,6 +146,8 @@
 #include "ProcessSettings.h"
 #include "QuestionNotificationSettings.h"
 #include "Shortcuts.h"
+#include "support/DialogTheme.h"
+#include "ModelServerSettings.h"
 
 // U25 part 6: the inspector is a column of cards; a card by its key and
 // whether it is unfolded.
@@ -268,6 +270,8 @@ private slots:
     void phonePairingDialogUsesWorkspaceTheme_data();
     void phonePairingDialogUsesWorkspaceTheme();
     void settingsPhonesPanelFollowsTheTheme();
+    void dialogsDrawTheThemeNotTheSystem_data();
+    void dialogsDrawTheThemeNotTheSystem();
     void machinesPageMatchesThePrototype_data();
     void machinesPageMatchesThePrototype();
     void nativeSettingsNavigationOnExplicitSpeechHost();
@@ -2462,7 +2466,7 @@ void TestSessionsWindow::leadSessionAnswersAProposalOnItsCard()
         QCOMPARE(card->property("proposal").toString(), QStringLiteral("p1"));
         QCOMPARE(card->findChild<QLabel *>("teamProposalWhat")->text(), QStringLiteral("Add 2 members"));
         QStringList lines; for (auto *line : card->findChildren<QLabel *>("teamProposalChange")) lines << line->text();
-        QCOMPARE(lines, (QStringList{"Designer (claude · sonnet)", "Designer (claude · sonnet)"}));
+        QCOMPARE(lines, (QStringList{"Designer (claude, sonnet)", "Designer (claude, sonnet)"}));
         QVERIFY(card->findChild<QLabel *>("teamProposalBy")->text().startsWith("Lead asks, "));
         QVERIFY(card->findChild<QLabel *>("teamProposalReason")->text().contains("need a designer each"));
         // Above the composer, in the Activity column.
@@ -2846,6 +2850,83 @@ void TestSessionsWindow::settingsPhonesPanelFollowsTheTheme()
     save("u701-settings-phones-light");
     theme->setCurrentIndex(theme->findData("dark"));
     check(true);
+}
+
+// #737 (owner, 2026-10-31): the New team dialog in the dark theme drew the
+// system's light surface with the theme's light labels on it. Every dialog
+// the window opens, and its Settings, draws the theme the person chose on a
+// system palette of the other one.
+void TestSessionsWindow::dialogsDrawTheThemeNotTheSystem_data()
+{
+    QTest::addColumn<QString>("theme");
+    QTest::newRow("dark on a light system") << QStringLiteral("dark");
+    QTest::newRow("light on a dark system") << QStringLiteral("light");
+}
+
+void TestSessionsWindow::dialogsDrawTheThemeNotTheSystem()
+{
+    QFETCH(QString, theme);
+    const bool dark = theme == "dark";
+    QSettings().setValue("workspace/theme", theme);
+    const QPalette before = QApplication::palette();
+    QApplication::setPalette(DialogTheme::system(!dark));
+    const auto restore = qScopeGuard([before] { QSettings().remove("workspace/theme"); QApplication::setPalette(before); });
+    // An hgs with teams (none yet) and an empty catalog: New team opens.
+    QFile original(script()); QVERIFY(original.open(QIODevice::ReadOnly));
+    const QString fixture = m_dir->filePath("hgs-dialog-theme");
+    QVERIFY(FakeCli::install(fixture, original.readAll().replace("if False:pass\n", "if False:pass\n"
+        "elif c=='team' and a[1:2]==['list']:print('{\"items\":[]}')\n"
+        "elif c=='team':print('{}')\n")));
+    SessionsWindow window(FakeCli::program(fixture)); window.setFleet(fleet()); window.resize(1260, 820); window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    // A remote session: New team is the dialog, not this session's tab.
+    window.showSession("mac", "claude/infra/review");
+    const auto save = [&](QWidget *widget, const QString &name) {
+        const auto shots = qEnvironmentVariable("ZERUS_TEAM_SHOTS");
+        if (shots.isEmpty()) return;
+        QDir().mkpath(shots);
+        widget->grab().save(shots + "/u737-" + name + "-" + theme + ".png");
+    };
+    // Each modal dialog is read once it is up, then cancelled.
+    const auto modal = [&](const QString &name, const std::function<void()> &open) {
+        QString found = name + QStringLiteral(" never opened");
+        bool done = false;
+        QTimer poll; poll.setInterval(50);
+        QObject::connect(&poll, &QTimer::timeout, &window, [&] {
+            auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+            if (!dialog || dialog->objectName() != name) return;
+            poll.stop();
+            QTest::qWait(200);
+            found = DialogTheme::problem(dialog, dark);
+            save(dialog, name);
+            dialog->reject(); done = true;
+        });
+        poll.start();
+        open();
+        QTRY_VERIFY_WITH_TIMEOUT(done, 10000);
+        QVERIFY2(found.isEmpty(), qPrintable(found));
+    };
+    modal(QStringLiteral("teamNewDialog"), [&] { window.findChild<QAction *>("newTeam")->trigger(); });
+    if (QTest::currentTestFailed()) return;
+    modal(QStringLiteral("newSessionDialog"), [&] { window.showNewSession(); });
+    if (QTest::currentTestFailed()) return;
+    window.showUpdates();
+    auto *settings = window.findChild<QWidget *>("settingsPage");
+    QTRY_VERIFY(settings && settings->isVisible());
+    QTest::qWait(150);
+    QString found = DialogTheme::problem(settings, dark);
+    QVERIFY2(found.isEmpty(), qPrintable(found));
+    save(&window, QStringLiteral("settings"));
+    // The model server settings, a section of Settings.
+    auto *sections = window.findChild<QListWidget *>("settingsSections"); QVERIFY(sections);
+    for (int i = 0; i < sections->count(); ++i) if (sections->item(i)->text() == "Model servers") sections->setCurrentRow(i);
+    ModelServerSettings *servers = nullptr;
+    for (auto *widget : window.findChildren<QWidget *>()) if (auto *found = dynamic_cast<ModelServerSettings *>(widget)) servers = found;
+    QTRY_VERIFY(servers && servers->isVisible());
+    QTest::qWait(150);
+    found = DialogTheme::problem(servers, dark);
+    QVERIFY2(found.isEmpty(), qPrintable(found));
+    save(&window, QStringLiteral("model-server-settings"));
 }
 
 void TestSessionsWindow::colorPickerUsesWorkspaceThemeAndCancelsOutside()

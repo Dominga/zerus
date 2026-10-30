@@ -51,6 +51,14 @@ namespace {
 const QStringList agents{"claude", "codex", "kimi", "dsh", "opencode"};
 const QMap<QString, QString> agentNames{{"claude", "Claude Code"}, {"codex", "Codex"}, {"kimi", "Kimi"}, {"dsh", "DeepSeek"}, {"opencode", "OpenCode"}};
 
+// #708: a Board or Layers view with many cards is built over event-loop turns.
+// One turn builds for at most kSliceMs; a view of at most kSyncSlices cards is
+// drained inside the render, so a small team keeps its old synchronous render.
+constexpr int kSliceMs = 6;
+constexpr std::size_t kSyncSlices = 24;
+// A team small enough that its whole board is built in the render itself.
+constexpr std::size_t kSmallTeam = 20;
+
 // The board's columns, by what a task needs. Accepted, rejected and cancelled
 // are all decided, but only an accepted task is done: the others get their own
 // column so a rejected task never sits under Accepted (QA).
@@ -94,6 +102,10 @@ protected:
 TeamWorkspace::TeamWorkspace(TeamController *teams, TeamPanel *panel, QWidget *parent) : QWidget(parent), m_teams(teams), m_panel(panel)
 {
     setObjectName("teamWorkspace");
+    m_sliceTimer = new QTimer(this);
+    m_sliceTimer->setSingleShot(true);
+    m_sliceTimer->setInterval(0);
+    QObject::connect(m_sliceTimer, &QTimer::timeout, this, &TeamWorkspace::runSlices);
     auto *outer = new QVBoxLayout(this); outer->setContentsMargins(0, 0, 0, 0); outer->setSpacing(0);
     // U25 (spec 3): the team's status and actions, for the lead session's header.
     // They stay here, above the canvas, until a window takes them (takeHeader).
@@ -483,6 +495,9 @@ void TeamWorkspace::render()
 {
     const SlowEventLog::Scope scope(this, "render");
     const QScopedValueRollback<bool> rebuilding(m_answerRendering, true);
+    // #708: a render replaces the view, so the previous render's sliced cards
+    // must stop before their widgets go.
+    cancelSlices();
     renderHeader();
     // #693: a skipped rebuild is made up by the next poll.
     m_renderedKey.clear();
@@ -565,6 +580,34 @@ void TeamWorkspace::render()
     } else m_drawer->hide();
     placePopover();
     if (team) { m_renderedKey = pollKey(); m_renderedLive = liveKey(); m_renderedLiveRest = liveKey(false); }
+    // A small view is finished inside this render, as it always was; a large
+    // one keeps its remaining cards for the sliced turns and paints at once.
+    if (m_slices.size() <= kSyncSlices) runSlices();
+}
+
+void TeamWorkspace::queueSlice(std::function<void()> work)
+{
+    m_slices.push_back(std::move(work));
+    if (m_sliceTimer && !m_sliceTimer->isActive()) m_sliceTimer->start();
+}
+
+void TeamWorkspace::runSlices()
+{
+    QElapsedTimer budget;
+    budget.start();
+    while (!m_slices.empty()) {
+        auto work = std::move(m_slices.front());
+        m_slices.pop_front();
+        work();
+        if (budget.elapsed() >= kSliceMs) break;
+    }
+    if (!m_slices.empty() && m_sliceTimer) m_sliceTimer->start();
+}
+
+void TeamWorkspace::cancelSlices()
+{
+    m_slices.clear();
+    if (m_sliceTimer) m_sliceTimer->stop();
 }
 
 void TeamWorkspace::renderSide(const Team &team, const QString &status)
@@ -1100,35 +1143,15 @@ bool TeamWorkspace::approvePhase(const QString &id, int phase)
 {
     const auto *team = currentTeam(id);
     if (!team || m_phaseAct || phaseDecided(*team, phase)) return false;
-    int count = 0;
-    for (const auto &group : phaseGroups(*team)) if (group.n == phase) count = group.tasks.size();
-    // F12/N40: a draft approved while an earlier phase runs runs alongside it;
-    // the owner is warned of what that costs before anything is sent.
-    const int alongside = alongsidePhase(*team, phase);
-    bool barrier = false;
-    for (const auto &group : phaseGroups(*team)) if (group.n == phase) barrier = group.barrier;
-    if (alongside) {
-        // N6: a barrier phase's tasks wait for the earlier phase however it is
-        // approved, so its confirmation says that instead of promising them now.
-        if (!m_panel->confirm("teamApproveAlongsideConfirm", tr("Approve phase %1 now?").arg(phase),
-                              barrier ? tr("Phase %1 is a barrier: its tasks start only when phase %2 is finished, so approving it "
-                                           "now just locks the plan. Are you sure?").arg(phase).arg(alongside)
-                                      : tr("If you approve phase %1 now, the lead can send members to its tasks while phase %2 still runs, "
-                                           "but can no longer edit this phase. Are you sure?").arg(phase).arg(alongside),
-                              tr("Approve now")))
-            return false;
-    } else if (!m_panel->confirm("teamApprovePhaseConfirm", tr("Approve phase?"),
-                                 tr("Hand phase %1's %2 tasks to the members?").arg(phase).arg(count),
-                                 tr("Approve phase")))
-        return false;
+    // #724: the same question as Waiting for you's Approve (Teams::phaseApproval).
+    const auto approval = phaseApproval(*team, phase);
+    if (!m_panel->confirm(approval.name, approval.title, approval.text, approval.action)) return false;
     // The team may have been refreshed while the dialog was open: read it again.
     team = currentTeam(id);
     if (!team || m_phaseAct || phaseDecided(*team, phase)) return false;
     const QString key = markPhaseDecided(*team, phase);
-    // N6: the confirmed alongside approval really hands the tasks out; a
-    // barrier phase keeps its U25 queue because its barrier holds it anyway.
-    QJsonObject request{{"team", id}, {"phase", phase}};
-    if (alongside && !barrier) request["alongside"] = true;
+    QJsonObject request = approval.input;
+    request.insert("team", id);
     m_panel->act("approve-phase", request, [this, key](bool ok, const QString &message) { phaseSent(key, ok, message); });
     return true;
 }
@@ -1458,13 +1481,27 @@ private:
     {
         if (m_fitting) return;
         const QScopedValueRollback<bool> once(m_fitting, true);
-        int level = 0;
-        for (; level < 3; ++level) {
-            apply(level);
-            if (sizeHint().width() <= width()) break;
+        // whitewh-115: the shortened toolbar jumped between two steps at the
+        // boundaries because a step's own hiding changed the row it was
+        // measured from. Measure every step with its own controls first, from
+        // the same width, then choose: the step it was decided from never
+        // depends on the step currently applied.
+        int need[4] = {0, 0, 0, 0};
+        for (int step = 0; step < 4; ++step) {
+            apply(step);
+            need[step] = sizeHint().width();
         }
-        if (level == 3) apply(3);
+        const int room = width();
+        int level = m_level < 0 ? 0 : qBound(0, m_level, 3);
+        while (level < 3 && need[level] > room) ++level;
+        // Hysteresis: widening needs a little slack beyond the narrower step's
+        // own measure, so a poll or a refit exactly at the boundary keeps the
+        // step it is on instead of flipping back and forth.
+        while (level > 0 && need[level - 1] <= room - kGrowSlack) --level;
+        apply(level);
     }
+    /// The slack a refit needs before it widens the toolbar by one step.
+    static constexpr int kGrowSlack = 8;
     void apply(int level)
     {
         if (level == m_level) { if (level == 3) fitCompactSpacing(); return; }
@@ -2080,7 +2117,8 @@ QWidget *TeamWorkspace::board(const Team &team)
                 health->setObjectName("teamBoardPhaseHealth");
                 health->setStyleSheet(QStringLiteral("QLabel{color:%1;font-size:10px;}").arg(c.text3.name()));
                 const QString tip = phaseHealthTip(team, group.n);
-                health->setToolTip(tip.isEmpty() ? summary->healthLine : tip);
+                // #709 L4: its minutes grow in place between rebuilds.
+                agedHealth(health, summary->healthLine, tip.isEmpty() ? summary->healthLine : tip);
                 h->addWidget(health);
             }
         }
@@ -2315,7 +2353,7 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
         auto *health = label(tr("Healthy %1/%2").arg(healthy).arg(group.tasks.size()), healthy == group.tasks.size() ? c.accent : c.warn, 11, false, "teamPhaseHealth");
         const QString tip = phaseHealthTip(team, group.n);
         const auto *summary = team.phaseSummaryOf(group.n);
-        health->setToolTip(!tip.isEmpty() ? tip : summary ? summary->healthLine : QString());
+        agedHealth(health, QString(), !tip.isEmpty() ? tip : summary ? summary->healthLine : QString());
         info->add(health, 2);
         // QA #539: the folders the phase's tests hold, as the mock-up's "1 folder held".
         QString heldTip;
@@ -2813,7 +2851,15 @@ QWidget *TeamWorkspace::boardColumns(const Team &team, const QList<int> &ids, in
         headRow->addStretch();
         headRow->addWidget(label(QString::number(shown.size()), c.text3, 10, true));
         cv->addLayout(headRow);
+        auto held = std::make_shared<Team>(team);
         for (const auto *task : shown) {
+            const int taskId = task->id;
+            auto buildCard = [this, held, problemsByTask, cv, taskId, c] {
+                const Team &team = *held;
+                const auto *task = team.task(taskId);
+                if (!task) return;
+                const auto live = m_live ? m_live : LiveLookup([](const Member &) { return Live{}; });
+                const Heat *heatOn = heat(team);
             const bool problem = problemsByTask.contains(task->id);
             // U36: the stage line, and a warning border for a held folder or
             // a task out of rounds.
@@ -2879,7 +2925,12 @@ QWidget *TeamWorkspace::boardColumns(const Team &team, const QList<int> &ids, in
             if (lost) r2->addWidget(lost);
             b->addLayout(r2);
             if (stages) b->addWidget(stages);
-            cv->addWidget(cardBox);
+                if (auto *last = cv->count() > 0 ? cv->itemAt(cv->count() - 1) : nullptr; last && last->spacerItem())
+                    cv->insertWidget(cv->count() - 1, cardBox);
+                else
+                    cv->addWidget(cardBox);
+            };
+            if (team.tasks.size() <= kSmallTeam) buildCard(); else queueSlice(buildCard);
         }
         if (shown.isEmpty()) {
             auto *none = label(QStringLiteral("—"), c.dim, 11); none->setAlignment(Qt::AlignCenter); none->setObjectName("teamBoardEmpty");
@@ -2911,6 +2962,8 @@ QWidget *TeamWorkspace::layerRows(const Team &team, const QList<int> &ids)
     std::stable_sort(order.begin(), order.end(), [&layers](int a, int b) { return layers.value(a) < layers.value(b); });
     auto *box = new QWidget; box->setObjectName("teamLayerRows");
     auto *v = new QVBoxLayout(box); v->setContentsMargins(0, 0, 0, 0); v->setSpacing(2);
+    auto held = std::make_shared<Team>(team);
+    int matches = 0;
     for (int id : order) {
         const auto *task = team.task(id);
         if (!task) continue;
@@ -2919,6 +2972,13 @@ QWidget *TeamWorkspace::layerRows(const Team &team, const QList<int> &ids)
         const bool match = (m_filter == "all" || team.status == "planning" || (m_filter == "active" && active) || (m_filter == "problems" && problem))
                            && (m_focus.isEmpty() || task->assignee == m_focus);
         if (!match) continue;
+        ++matches;
+        auto buildRow = [this, held, id, layers, problemsByTask, c, v] {
+            const Team &team = *held;
+            const auto *task = team.task(id);
+            if (!task) return;
+            const auto live = m_live ? m_live : LiveLookup([](const Member &) { return Live{}; });
+            const bool problem = problemsByTask.contains(id);
         const auto s = taskStatus(*task);
         const auto mark = phaseMark(team, *task);
         auto *line = new ClickFrame; line->setObjectName("teamLayerRow"); line->setProperty("task", id); line->setCursor(Qt::PointingHandCursor);
@@ -2952,9 +3012,11 @@ QWidget *TeamWorkspace::layerRows(const Team &team, const QList<int> &ids)
         auto *logo = new QLabel; logo->setFixedWidth(16);
         if (const auto *m = team.member(task->assignee)) logo->setPixmap(agentLogo(m->agent, c.text3).pixmap(14, 14));
         h->addWidget(logo);
-        v->addWidget(line);
+            v->addWidget(line);
+        };
+        if (order.size() <= kSmallTeam) buildRow(); else queueSlice(buildRow);
     }
-    if (v->count() == 0) v->addWidget(label(tr("No task matches the filter"), c.dim, 11));
+    if (matches == 0) v->addWidget(label(tr("No task matches the filter"), c.dim, 11));
     return box;
 }
 
@@ -3074,7 +3136,7 @@ QWidget *TeamWorkspace::sideLists(const Team &team, const QString &status)
                 auto *r = new ClickFrame; r->setObjectName("teamPlanProblem"); r->setProperty("task", issue.task);
                 auto *h = new QHBoxLayout(r); h->setContentsMargins(4, 3, 4, 3); h->setSpacing(7);
                 auto *icon = new QLabel; icon->setPixmap(workspaceIcon("warning", tone).pixmap(12, 12)); h->addWidget(icon);
-                auto *t = elided(issue.text, tone, 12); t->setToolTip(issue.text); h->addWidget(t, 1);
+                auto *t = elided(issue.text, tone, 12); agedHealth(t, issue.text, issue.text); h->addWidget(t, 1);
                 if (issue.task) {
                     r->setCursor(Qt::PointingHandCursor); r->setToolTip(tr("Open the task"));
                     r->clicked = [this, id = issue.task] { if (const auto *t = currentTeam(m_team)) m_panel->editTask(*t, id); };
@@ -3615,6 +3677,7 @@ void TeamWorkspace::nextGoalDialog(const Team &team)
     const Colors c = colorsFor(m_dark);
     auto *dialog = new QDialog(this);
     dialog->setObjectName("teamNextGoalDialog");
+    dialog->setStyleSheet(dialogSheet(c));   // #737
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     dialog->setWindowTitle(tr("Next goal \u00b7 %1").arg(team.name));
     dialog->resize(560, 380);
@@ -3676,7 +3739,7 @@ void TeamWorkspace::addLateDialog(const Team &team, int phase)
     dialog->setProperty("free", free);
     dialog->setWindowTitle(free ? tr("Add a task to open phase %1").arg(phase) : tr("Add a task to running phase %1").arg(phase));
     dialog->resize(520, 420);
-    dialog->setStyleSheet(QStringLiteral("QDialog{background:%1;} QLabel{background:transparent;}").arg(c.bg.name()));
+    dialog->setStyleSheet(dialogSheet(c));
     auto *v = new QVBoxLayout(dialog);
     auto *intro = label(free ? tr("Phase %1 is open. The task joins it and starts when its member is free.").arg(phase)
                              : tr("Phase %1 is running. The task joins it only after Zerus warns what changes and you confirm.").arg(phase), c.text2, 12);
@@ -3772,6 +3835,7 @@ void TeamWorkspace::swapDialog(const Team &team, const Member &member)
     const QString role = team.roleOf(member.id);
     auto *dialog = new QDialog(this);
     dialog->setObjectName("teamSwapDialog");
+    dialog->setStyleSheet(dialogSheet(c));   // #737
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     dialog->setWindowTitle(tr("Swap %1").arg(role));
     dialog->resize(520, 300);

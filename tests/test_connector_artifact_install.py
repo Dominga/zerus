@@ -33,7 +33,9 @@ class ConnectorArtifactInstall(unittest.TestCase):
                        "HGS_INSTALL_PREFIX": str(self.prefix)}
         return subprocess.run(["bash", str(ROOT / "install.sh"), "--connector-only",
                                str(self.artifact), sha or self.sha], env=environment,
-                              capture_output=True, timeout=5)
+                              # A hang guard only: a cold /usr/bin/python3 shim on a
+                              # macOS runner can take longer than five seconds.
+                              capture_output=True, timeout=60)
 
     def test_verified_artifact_only_and_idempotence(self):
         cli_inode = self.cli.stat().st_ino

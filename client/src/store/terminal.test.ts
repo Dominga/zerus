@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createRoot } from "solid-js";
 import { cleanPaste, createTerminal, RESIZE_MS, type Screen, type TerminalPort, type Timers } from "./terminal";
 import type { PageVisibility } from "./visibility";
-import type { TerminalStatus, TerminalTarget } from "../types";
+import type { TerminalEvent, TerminalStatus, TerminalTarget } from "../types";
 
 const target = (run = "run-1"): TerminalTarget => ({ computer: "mac", name: "claude/sample-project/review", run_id: run, machine: "studio" });
 const ok: TerminalStatus = {
@@ -12,7 +12,7 @@ const ok: TerminalStatus = {
 
 function fakes() {
   const calls: string[] = [];
-  let onEvent: ((m: ArrayBuffer | { kind: "finished"; code: number; status: string }) => void) | undefined;
+  let onEvent: ((m: TerminalEvent) => void) | undefined;
   let changed = true;
   let failWrite: string | undefined;
   const port: TerminalPort = {
@@ -58,6 +58,87 @@ describe("terminal store", () => {
       f.emit(new TextEncoder().encode("hello").buffer);
       expect(f.written).toEqual(["hello"]);
       expect(f.calls.at(-1)).toBe("ack 7");
+    });
+  });
+
+  it("never sends xterm query replies from an async replay or remount, then answers live queries once", async () => {
+    // Run the actual pinned parser without opening a window. onData includes
+    // automatic replies as well as user input; a fake screen misses this bug.
+    Object.defineProperty(globalThis, "self", { value: globalThis, configurable: true });
+    const { Terminal } = await import("@xterm/xterm");
+    const f = fakes();
+    await createRoot(async () => {
+      const t = createTerminal(f.port, f.timers, f.visibility);
+      await t.setTarget(target(), ok);
+      const queries = "\x1b[c\x1b[>c\x1b[?2026$p";
+      const mounted = async () => {
+        const term = new Terminal();
+        term.onData((data) => t.input(new TextEncoder().encode(data), screen));
+        let parsed!: () => void;
+        const done = new Promise<void>((resolve) => { parsed = resolve; });
+        const screen: Screen = {
+          write: (bytes, ack) => term.write(bytes, () => { ack(); parsed(); }),
+          reset: () => term.reset(), size: () => ({ cols: 80, rows: 24 }),
+        };
+        t.show(screen);
+        await tick();
+        return { term, done };
+      };
+      // Rebind sends the marker and bytes before resolving the connect IPC,
+      // while the parser callback runs later, as it does in the webview.
+      const port = f.port.connect;
+      f.port.connect = async (...args) => {
+        const c = await port(...args);
+        f.emit({ kind: "replay" });
+        f.emit(new TextEncoder().encode(queries + "\x1b[?2026$").buffer);
+        return { ...c, reused: true };
+      };
+      for (let i = 0; i < 2; i++) {
+        const { term, done } = await mounted();
+        await done;
+        await tick();
+        expect(t.connected()).toBe(true);
+        expect(f.calls.filter((c) => c.startsWith("write"))).toEqual([]);
+        // A historical partial query must not be completed by live bytes.
+        await new Promise<void>((resolve) => term.write("p", resolve));
+        await tick();
+        expect(f.calls.filter((c) => c.startsWith("write"))).toEqual([]);
+        t.hide();
+        term.dispose();
+      }
+      const term = new Terminal();
+      term.onData((data) => t.input(new TextEncoder().encode(data)));
+      // The attach is ready: real user input and live replies go through.
+      term.input("typed");
+      await new Promise<void>((resolve) => term.write(queries, resolve));
+      await tick();
+      expect(f.calls.filter((c) => c.startsWith("write"))).toEqual([
+        "write 7 typed", "write 7 \x1b[?1;2c", "write 7 \x1b[>0;276;0c", "write 7 \x1b[?2026;2$y",
+      ]);
+      term.dispose();
+    });
+  });
+
+  it("rejects input from a replaced screen, even after its replay callback runs", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const t = createTerminal(f.port, f.timers, f.visibility);
+      await t.setTarget(target(), ok);
+      let parsed!: () => void;
+      const old: Screen = { ...f.screen, write: (_bytes, done) => { parsed = done; } };
+      t.show(old);
+      await tick();
+      f.emit({ kind: "replay" });
+      f.emit(new TextEncoder().encode("history").buffer);
+      t.hide();
+      t.show(f.screen);
+      await tick();
+      parsed();
+      t.input(new TextEncoder().encode("old reply"), old);
+      t.input(new TextEncoder().encode("new input"), f.screen);
+      await tick();
+      expect(t.connected()).toBe(true);
+      expect(f.calls.filter((c) => c.startsWith("write"))).toEqual(["write 7 new input"]);
     });
   });
 

@@ -3,7 +3,7 @@ import type { Reply } from "../../types";
 // catalog store's row: the Rust view row plus the presentation fields derived
 // from it once per upsert (store/catalog.ts `toSession`).
 
-export type AgentKind = "claude" | "codex" | "kimi" | "deepseek" | "opencode";
+export type AgentKind = "claude" | "codex" | "kimi" | "deepseek" | "opencode" | "sh";
 
 /** Presentation status, in the existing precedence order (design/webui). */
 export type Status =
@@ -87,11 +87,18 @@ export interface Session {
   /** Seconds since the Unix epoch when the current turn started (the Working clock). */
   turnStarted?: number;
   runId?: string;
+  launchId?: string;
   conversationId?: string;
+  /** Exact/fallback device-local density identity, calculated in Rust. */
+  compactKeys?: [string, string];
   // What the guarded actions read, copied flat from the core's row: a nested
   // row in the store would double the cost of reconciling a large catalog.
   /** The agent as the core reports it (`deepseek` for `dsh`); `agent` draws unknown agents as Claude. */
   cmd: string;
+  accountProvider?: string;
+  accountId?: string;
+  accountHome?: string;
+  accountReported?: boolean;
   /** The raw state (`running`, `paused`, `stopped`, `archived`, ...). */
   state: string;
   tracked: boolean;
@@ -193,6 +200,8 @@ export interface ActivityItem {
   at: string;
   title?: string;
   body?: string;
+  /** The native prompt echo to restore if its attachment cannot be read. */
+  echoBody?: string;
   code?: string;
   lines?: string[];
   attachments?: ItemAttachment[];
@@ -222,6 +231,8 @@ export interface MediaMessage {
   durationMs: number;
   /** Exactly 64 integer amplitudes 0-255; anything else draws a flat line. */
   waveform: number[];
+  /** Public receipt identity, never a path on the recording's host. */
+  file?: { request_id: string; index: number };
   transcript?: string;
   error?: string;
 }

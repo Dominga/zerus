@@ -150,19 +150,18 @@ bool heatCovers(const Teams::Task &task)
     return task.status != QLatin1String("draft") && task.status != QLatin1String("cancelled");
 }
 
-QString heatLabel(const Heat &heat, const Teams::Task &task)
+namespace {
+QString lossLabel(const Heat &heat, int task)
 {
-    if (!heatCovers(task)) return {};
-    const qint64 lost = heat.lost(task.id);
+    const qint64 lost = heat.lost(task);
     if (lost <= 0) return heat.complete ? QObject::tr("no loss") : QString();
     return heat.metric == QLatin1String("tokens") ? QObject::tr("lost %1 tokens").arg(tokensText(lost)) : QObject::tr("lost %1").arg(workedText(lost));
 }
 
-QString heatTip(const Heat &heat, const Teams::Task &task)
+QString lossTip(const Heat &heat, int task)
 {
-    if (!heatCovers(task)) return {};
     const bool tokens = heat.metric == QLatin1String("tokens");
-    const qint64 lost = heat.lost(task.id);
+    const qint64 lost = heat.lost(task);
     if (lost <= 0)
         return !heat.complete ? QString() : tokens ? QObject::tr("No tokens lost to rework or long tests") : QObject::tr("No time lost to waits or rework");
     const auto amount = [tokens](const HeatLoss &loss) {
@@ -170,7 +169,7 @@ QString heatTip(const Heat &heat, const Teams::Task &task)
     };
     QStringList lines{tokens ? QObject::tr("Lost %1 tokens to rework and long tests").arg(tokensText(lost))
                              : QObject::tr("Lost %1 to waits and rework").arg(workedText(lost))};
-    const auto losses = heat.losses.value(task.id);
+    const auto losses = heat.losses.value(task);
     QString top = QObject::tr("Top loss: %1, %2").arg(heatLossName(losses.first()), amount(losses.first()));
     if (tokens && losses.first().detail.contains("share"))
         top += QObject::tr(", %1% of the task's tokens").arg(qRound(losses.first().detail.value("share").toDouble() * 100));
@@ -179,6 +178,35 @@ QString heatTip(const Heat &heat, const Teams::Task &task)
     for (int i = 1; i < losses.size() && i < 3; ++i) next << QStringLiteral("%1 %2").arg(heatLossName(losses.at(i)), amount(losses.at(i)));
     if (!next.isEmpty()) lines << QObject::tr("Then: %1").arg(next.join(QStringLiteral("; ")));
     return lines.join(QLatin1Char('\n'));
+}
+}
+
+QString heatLabel(const Heat &heat, const Teams::Task &task)
+{
+    return heatCovers(task) ? lossLabel(heat, task.id) : QString();
+}
+
+QString heatTip(const Heat &heat, const Teams::Task &task)
+{
+    return heatCovers(task) ? lossTip(heat, task.id) : QString();
+}
+
+QByteArray heatDigest(const Heat &heat, const Colors &c)
+{
+    // What Graph, Board and the legend draw from it: each task's loss text,
+    // tint, text color and tooltip, and the legend's end and notes. A wait
+    // that grew by seconds the loss text does not show draws the same.
+    const bool tokens = heat.metric == QLatin1String("tokens");
+    QByteArray digest = heat.metric.toUtf8() + ' ' + char('0' + heat.complete) + char('0' + heat.tokensPartial) + ' ' + QByteArray::number(heat.pages)
+                        + ' ' + (tokens ? tokensText(heat.most()).toUtf8() : QByteArray()) + '\n';
+    QList<int> tasks = heat.losses.keys();
+    std::sort(tasks.begin(), tasks.end());
+    for (int task : tasks) {
+        const double share = heat.share(task);
+        digest += QByteArray::number(task) + ' ' + lossLabel(heat, task).toUtf8() + ' ' + heatFill(c, share).name().toUtf8() + ' '
+                  + heatTextColor(c, share).name().toUtf8() + ' ' + lossTip(heat, task).toUtf8() + '\n';
+    }
+    return digest;
 }
 
 QColor heatFill(const Colors &c, double share)

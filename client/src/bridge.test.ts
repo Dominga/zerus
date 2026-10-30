@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { attentionMarks, pendingReadMarks, pump, queueReadMarks, updateAttentionMarks, type PumpHost, type Source } from "./bridge";
 import { emptyBatch, type Batch } from "./types";
+import { createTasks } from "./store/tasks";
 
 /** A source whose `next` answers are resolved by the test. */
 function source() {
@@ -37,6 +38,35 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 const batch = (key: string): Batch => ({ ...emptyBatch(), removes: [{ computer: "", key, reason: null }] });
 
 describe("pump", () => {
+  it("delivers task-only lists and failures for a peer session's local project replica", async () => {
+    const src = source(), h = host(), store = createTasks(async () => {});
+    const project = "22222222-2222-4222-8222-222222222222";
+    store.follow(project);
+    const got: Batch[] = [];
+    pump(src.s, (b) => { got.push(b); store.apply(b.tasks ?? []); }, h.h);
+    // A remote session's catalog is independent of the local replica's task topic.
+    src.answer({ computers: [{ computer: "arch", status: "live", attempt: 0 }] } as Batch);
+    await settle(); h.runFrames();
+    src.answer({ tasks: [{ computer: "", key: project, kind: "list", payload: {
+      project: { id: project, name: "Example" }, damaged: [],
+      tasks: [{ uuid: "task-1", id: "T-1", text: "Peer session project task", stage: "todo" }],
+    } }] } as Batch);
+    await settle(); h.runFrames();
+    expect(store.loaded()).toBe(true);
+    expect(store.tasks().map((t) => t.title)).toEqual(["Peer session project task"]);
+    for (const [kind, payload, message] of [
+      ["failed", { message: "This computer does not support task subscriptions." }, "does not support"],
+      ["ended", null, "subscription ended"],
+    ] as const) {
+      src.answer({ tasks: [{ computer: "", key: project, kind, payload }] } as Batch);
+      await settle(); h.runFrames();
+      expect(store.error()).toContain(message);
+      expect(store.loaded()).toBe(true);
+    }
+    expect(got).toHaveLength(4);
+    expect(got[0].tasks).toEqual([]);
+  });
+
   it("keeps machine cards and counts a batch of only cards as content", async () => {
     const src = source();
     const h = host();

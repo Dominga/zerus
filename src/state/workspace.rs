@@ -154,6 +154,17 @@ fn inspect_git(cwd: &str, deadline: Instant) -> Value {
         "git_detached":!named,"git_common_dir":absolute(lines[2]),"git_metadata_state":"ok"})
 }
 
+/// Search publishes only the capped result window's folder scopes. Unlike
+/// `enrich`, this never writes a metadata cache or reads live pane state.
+pub(super) fn search_scopes(cwd: &str, deadline: Instant) -> Option<Value> {
+    if !valid_path(cwd) || cwd.len() > 16 * 1024 || Instant::now() >= deadline {
+        return None;
+    }
+    let canonical = crate::platform::canonical(Path::new(cwd)).ok();
+    let (ok, root) = git(cwd, &["rev-parse", "--show-toplevel"], deadline)?;
+    Some(json!({"cwd_canonical":canonical,"git_root":if ok { root.trim() } else { "" }}))
+}
+
 fn cached(cwd: &str, deadline: Instant) -> Value {
     if !valid_path(cwd) {
         return empty("unavailable");

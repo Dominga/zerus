@@ -190,10 +190,12 @@ impl Pump {
         self.lock().grouping.take_layout()
     }
 
-    pub fn load_layout(&self, bytes: &[u8]) {
+    pub fn load_layout(&self, bytes: &[u8]) -> Result<(), &'static str> {
+        let layout = Layout::try_from_json(bytes)?;
         let mut inner = self.lock();
-        inner.grouping.replace_layout(Layout::from_json(bytes));
+        inner.grouping.replace_layout(layout);
         self.wake(inner);
+        Ok(())
     }
 
     pub fn take_runs(&self) -> Option<zerus_client_core::swarm::runs::Snapshot> {
@@ -223,12 +225,65 @@ impl Pump {
         self.lock().grouping.runs_seeded()
     }
 
+    pub fn presentation_seeded(&self) -> Result<bool, &'static str> {
+        self.lock().grouping.presentation_seeded()
+    }
+
+    /// Only the worker reads Qt; merge against the current Next values under
+    /// the pump lock and let the existing layout writer checkpoint the result.
+    pub fn seed_presentation(
+        &self,
+        seed: zerus_client_core::swarm::layout::PresentationSeed,
+    ) -> Result<(), &'static str> {
+        let mut inner = self.lock();
+        inner.grouping.seed_presentation(seed)?;
+        self.wake(inner);
+        Ok(())
+    }
+
     /// Qt was read and parsed on the seed worker; merge only its bounded
     /// run memory, without replacing layout changes made during that read.
     pub fn seed_runs(&self, groups: &serde_json::Map<String, Value>) {
         let mut inner = self.lock();
         inner.grouping.seed_runs(groups);
         self.wake(inner);
+    }
+
+    /// Read-only project membership for a bounded public-content reply. Search
+    /// never admits new identities to the mutation/placement page cache.
+    pub fn place_search_archives(
+        &self,
+        computer: &ComputerId,
+        hits: &mut [zerus_client_core::content_search::Hit],
+    ) -> Result<(), String> {
+        if hits.len() > zerus_client_core::content_search::MAX_HITS {
+            return Err("Invalid search response".into());
+        }
+        let inner = self.lock();
+        let machine = computer
+            .alias()
+            .map(str::to_owned)
+            .or_else(|| {
+                inner
+                    .mirror
+                    .computers
+                    .get(&computer.0)?
+                    .machine
+                    .as_ref()?
+                    .host
+                    .clone()
+            })
+            .unwrap_or_default();
+        for hit in hits.iter_mut().filter(|hit| !hit.archive_id.is_empty()) {
+            hit.group = inner.grouping.archive_project(&ArchivedRow {
+                computer: computer.clone(),
+                key: format!("archive:{}", hit.archive_id),
+                machine: machine.clone(),
+                archive_id: hit.archive_id.clone(),
+                run_id: hit.run_id.clone(),
+            });
+        }
+        Ok(())
     }
 
     /// One checked archive page, resolved against one organization snapshot.
@@ -1093,7 +1148,7 @@ mod tests {
         pump.push(a_row());
         present(&pump, &organization());
         let _ = pump.take(PARK);
-        pump.load_layout(br#"{"collapsed":["alpha"]}"#);
+        pump.load_layout(br#"{"collapsed":["alpha"]}"#).unwrap();
         let batch = pump.take(PARK);
         assert!(batch.grouping.unwrap().headers[0].collapsed);
         pump.resend();

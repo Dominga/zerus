@@ -45,6 +45,7 @@ export function eventKey(e: ActivityEvent): string {
   const voice = e.voice && typeof e.voice.id === "string" ? e.voice.id : "";
   if (e.source === "hgs_voice" && (voice || e.message_id)) return `v${voice || e.message_id}`;
   if (e.activity_key) return `k${e.activity_key}`;
+  if (e.message_id && (e.source === "codex_transcript" || e.source === "claude_transcript" || e.source === "kimi_wire")) return `p${e.source}:${e.type}:${e.message_id}`;
   if (e.source === "hgs_delivery" && e.message_id) return `r${e.message_id}`;
   return `t${e.type ?? ""}:${e.at ?? ""}:${(e.detail ?? "").slice(0, 48)}`;
 }

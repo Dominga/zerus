@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   BUTTON, NO_PENDING, OLDER, PREPARING, accessibleText, computerOf, createDetailsView, creationOfRow, creationRowId, elapsed, footerText, machineOf,
-  newestFirst, noticeOf, panelButtons, panelStatus, placeCreations, projectOf, rowDetail, statusMenu, type ListScope, type Placement,
+  newestFirst, noticeOf, panelButtons, panelStatus, placeCreations, projectOf, rowDetail, statusMenu, shownCards, type ListScope, type Placement,
 } from "./creations-ui";
 import { toSession } from "../../store/catalog";
 import { applyGrouping } from "../../store/organization";
@@ -9,6 +9,7 @@ import { placement } from "./organize";
 import type { Row } from "./model";
 import { emptyBatch, type CreationCard, type GroupingOut, type ViewRow } from "../../types";
 import type { Session } from "./types";
+import { accountBinding } from "./scope-filters";
 
 // The creation cards' rows, buttons, menu and footer (SessionsWindow.cpp
 // 463-480, 3729-3756; SessionsWindowRows.cpp 259-341, 376-397, 474-479).
@@ -21,6 +22,14 @@ const card = (id: string, extra: Partial<CreationCard> = {}): CreationCard => ({
   id, tag: `tag-${id}`, state: "queued", caption: "Queued", error: "", created: 1_793_000_000, group: "alpha", host: "",
   machine: "workstation", cmd: "claude", account: "", target: "/workspace/example", show_pending: true, launch_dispatched: false,
   stop_requested: false, worktree_receipts: false, can_resume: false, can_edit: false, bound_session: "", ...extra,
+});
+
+it("scopes pending creations by exact account binding and target folder, preserving an explicit reveal", () => {
+  const cards = [card("a", { account: "work", target: "/srv/example/app" }), card("b", { account: "personal", target: "/srv/example/app" }), card("c", { account: "work", target: "/srv/example/other" })];
+  const scope = { grouping: { loaded: false, default_project: "alpha", headers: [] } as unknown as GroupingOut, filter: "all" as const, hosts: [], projects: [], query: "", accounts: [accountBinding("", "claude", "work")], folder: { computer: "", path: "/srv/example/app", checkout: true, style: "posix" as const } };
+  const listed = (revealed?: string) => [...shownCards(scope, { cards, revealed, details: () => undefined }).values()].flat().map((c) => c.id);
+  expect(listed()).toEqual(["a"]);
+  expect(listed("b")).toEqual(["a", "b"]);
 });
 const session = (n: number, extra: Partial<ViewRow> = {}): Session =>
   toSession("", `run:${n}`, { name: `claude/sample-project/s${n}`, machine: "workstation", status: "ready", ...extra });

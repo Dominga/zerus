@@ -1,12 +1,16 @@
+import { inspectSession, sessionFolderStatus } from "../../bridge";
+import { folderEntries, folderRequest, type FolderStatus } from "../../store/sessionFolders";
+import { groupOf } from "../../store/organization";
+import { taskDragOver, taskDrop } from "../../store/taskAssignment";
 import { For, Show, Suspense, createMemo, createEffect, createSignal, lazy, on, onCleanup } from "solid-js";
 import { createVirtualizer } from "@tanstack/solid-virtual";
 import { Icon } from "../lib/icons";
-import { listRows, rowHeight, shownSummary, machineChoices, projectChoices, type Row } from "./model";
+import { listRows, rowHeight, shownSummary, machineChoices, projectChoices, filterCounts as counts, pickerCounts, type Row } from "./model";
 import {
   SessionCard, ChildCard, CompactCard, AgentBadge, StatusBadge, badgeKind, statusCaption, stripCaption,
-  emphasis, childStatus, gitTooltip, paletteIndex, folderOf,
+  emphasis, childStatus, gitTooltip, paletteIndex, folderOf, ProviderGlyph,
 } from "./SessionCard";
-import { catalog, computerFresh, computerOffline } from "../../store/catalog";
+import { agentKind, catalog, computerFresh, computerOffline } from "../../store/catalog";
 import { visibleUnreadReply } from "../../store/attention";
 import { runningCommandsEntry } from "../../store/processes";
 import { flag } from "../../store/settings";
@@ -18,7 +22,7 @@ import { running } from "../../store/batch";
 import { grouping, headerOf, moveProject, setProjectCollapsed, setProjectToShow, sortProject } from "../../store/organization";
 import { TOOL_WIDTH, clearArchiveMenuEntry, machineMenu, runSelection, selectedRows, selectionContextMenu, selectionCount } from "./selection-live";
 import { barTools, splitTools, toolEntry } from "./selection-ui";
-import { actionEntries, copyEntries, freshActionEntry, muteEntry } from "./ActionDialogs";
+import { actionEntries, copyEntries, freshActionEntry, forkEntry, muteEntry } from "./ActionDialogs";
 import { markAllEntry, markAllTip, markEntry, runMarkAll } from "./mark-entries";
 import { moveEntry, openCreateProjectDialog, openDeleteProjectDialog, openRenameProjectDialog } from "./OrganizationDialogs";
 import { backgroundEntries } from "./background-menu";
@@ -28,18 +32,25 @@ import { CreationCard, CreationTile } from "./CreationCard";
 import { creationCount, creationFooter, creationStatusMenu } from "../../store/creations";
 import {
   selectedKey, setSelectedKey, setExpandedChildren, expandedChildren,
-  setCompactRows, compactRows, stateFilter, setStateFilter, counts, search, setSearch, stripMode, setStripMode,
-  setMenu, machineFilter, setMachineFilter, projectFilter, setProjectFilter, setPage,
+  setCompactRows, compactRows, expandCompactRows, hasCompactRows, stateFilter, setStateFilter, search, setSearch, stripMode, setStripMode,
+  setMenu, machineFilter, setMachineFilter, projectFilter, setProjectFilter, accountFilterSet, setAccountFilter, folderFilter, setPage,
   multi, setMulti, peek, setPeek, setSubagentOpen, sessionsWidth, setSessionsWidth, menu, subagentOpen,
   revealing, setRevealing, setDetailTab,
   type StateFilter, type MenuEntry,
 } from "../../store/ui";
 import type { Session } from "./types";
+import { filterAccounts, selectedFilterAccounts, chooseFilterAccounts, toggleFilterAccount, openFilterAccounts, cancelFilterAccountReads } from "../../store/accountFilters";
+import { clearFolderScope } from "../../store/folderFilter";
+import { leaf, native } from "./paths";
+import { appendAccountChoices, bindingState, type AccountChoice } from "./scope-filters";
 import type { ClearControl, SessionRef } from "../../types";
 import { motionReduced } from "../motion";
 import { composer } from "../../store/composer";
 import { composerClearControl } from "../../bridge";
 import { bulkSelect, clearMulti, multiCount, setAnchor, dragItem, setDragItem, drop, setDrop, endDrag, placement, applyDrop, SESSION_MIME, type DragItem } from "./organize";
+
+import { SearchResults } from "./SearchResults";
+import "../styles/content-search.css";
 
 const SavedDraftsDialog = lazy(() => import("./SavedDrafts").then((m) => ({ default: m.SavedDraftsDialog })));
 
@@ -167,11 +178,13 @@ function clearEntry(s: Session): MenuEntry {
   };
 }
 
-export function sessionMenu(s: Session): MenuEntry[] {
+export function sessionMenu(s: Session, folderStatus?: { request: ReturnType<typeof folderRequest>; status: FolderStatus }, forkDetails?: import("../../types").Details): MenuEntry[] {
   // The selected row's menu reads the same details as the header (Qt's m_details).
   const details = s.key === selectedKey() && !subagentOpen() ? detailsFor(s, !computerOffline(s.computer), followedFor(s.key)) : undefined;
   const act = actionEntries(s, undefined, { context: true });
   const cp = copyEntries(s, details);
+  const request = folderRequest(s, details);
+  const folders = folderEntries(s, request, folderStatus && JSON.stringify(folderStatus.request) === JSON.stringify(request) ? folderStatus.status : undefined);
   const mute = muteEntry(s);
   const mark = markEntry(s);
   const fresh = freshActionEntry(s);
@@ -179,20 +192,20 @@ export function sessionMenu(s: Session): MenuEntry[] {
   const commands = runningCommandsEntry(s, () => computerFresh(s.computer), () => flag("processes/enabled"), () => { setSelectedKey(s.key); setDetailTab("processes"); });
   return [
     { label: compactRows[s.key] ? "Expand session row" : "Compact session row", icon: compactRows[s.key] ? "expand-row" : "compact-row", action: () => setRowCompact(s.key, !compactRows[s.key]) },
-    { label: "Expand all collapsed", icon: "expand-row", disabled: !Object.values(compactRows).some(Boolean), action: () => Object.keys(compactRows).forEach((k) => setCompactRows(k, false)) },
+    { label: "Expand all collapsed", icon: "expand-row", disabled: !hasCompactRows(), action: expandCompactRows },
     { separator: true },
     // An archived row has no terminal, and no Mute or Mark group (Qt's `if (!archived)`).
     ...(archived ? [] : [s.agent === "deepseek" ? { label: "Open native DeepSeek UI", icon: "external-link", disabled: LATER } : { label: "Open terminal", icon: "square-terminal", disabled: LATER }]),
     ...(commands ? [commands] : []),
-    { label: "Open folder", icon: "folder-open", disabled: LATER },
-    { label: "Open shell in session folder", icon: "terminal", disabled: LATER },
+    folders.folder,
+    { ...folders.shell, icon: "terminal" },
     cp.command,
     ...(archived ? [] : [{ separator: true } as const, ...(mute ? [mute] : []), ...(mark ? [mark] : [])]),
     { separator: true },
     act.change,
     ...(fresh ? [fresh] : archived ? [] : [clearEntry(s)]),
     act.rename,
-    { label: "Fork session…", icon: "git-fork", disabled: LATER },
+    forkEntry(s, forkDetails ?? details),
     ...(act.archive ? [act.archive] : []),
     moveEntry(s),
     { separator: true },
@@ -202,6 +215,29 @@ export function sessionMenu(s: Session): MenuEntry[] {
     { separator: true },
     act.end,
   ];
+}
+
+/** Only an explicitly opened menu checks its folder; no per-row filesystem reads. */
+function openSessionMenu(e: MouseEvent, s: Session) {
+  const details = s.key === selectedKey() && !subagentOpen() ? detailsFor(s, !computerOffline(s.computer), followedFor(s.key)) : undefined;
+  const request = folderRequest(s, details);
+  let items = sessionMenu(s);
+  let folderStatus: { request: ReturnType<typeof folderRequest>; status: FolderStatus } | undefined;
+  let forkDetails = details;
+  openMenu(e, items);
+  const refresh = () => {
+    const shown = menu();
+    if (shown?.items !== items) return;
+    items = sessionMenu(s, folderStatus, forkDetails);
+    setMenu({ ...shown, items });
+  };
+  void sessionFolderStatus(request.target.computer, request.directory).then((status) => {
+    folderStatus = { request, status }; refresh();
+  }).catch(() => { /* Keep explicit unavailable states, with no automatic retry. */ });
+  // An explicitly opened nonselected row reads capability once, as Qt's
+  // contextForkSession. The exact open-menu identity drops late replies.
+  if (!details && !computerOffline(s.computer)) void inspectSession({ computer: s.computer, name: s.name, run_id: s.runId ?? "", conversation_id: s.conversationId ?? "" }, s.archiveId ?? null)
+    .then((value) => { forkDetails = value ?? undefined; refresh(); }).catch(() => {});
 }
 
 /** The project header's menu (SessionsWindow.cpp:2568-2616); its rules are organization-ui.ts's. */
@@ -221,7 +257,7 @@ function headerMenu(project: string): MenuEntry[] {
 function batchMenu(): MenuEntry[] {
   return [
     ...machineMenu(),
-    { label: "Expand all collapsed", icon: "expand-row", action: () => Object.keys(compactRows).forEach((k) => setCompactRows(k, false)) },
+    { label: "Expand all collapsed", icon: "expand-row", action: expandCompactRows },
     markAllEntry(),
     clearArchiveMenuEntry(),
   ];
@@ -232,7 +268,7 @@ function Header(props: { row: Extract<Row, { type: "header" }> }) {
   const name = () => props.row.name;
   const open = () => !props.row.collapsed;
   return (
-    <button class="group-band entity" style={{ "--entity": projectColor(props.row) }} draggable="true" onDragStart={(e) => startDrag(e, { kind: "group", id: props.row.project })}
+    <button onDragOver={(e) => taskDragOver(e, props.row.project)} onDrop={(e) => taskDrop(e, props.row.project)} class="group-band entity" style={{ "--entity": projectColor(props.row) }} draggable="true" onDragStart={(e) => startDrag(e, { kind: "group", id: props.row.project })}
       aria-expanded={open()} onClick={() => setProjectCollapsed(props.row.project, !props.row.collapsed)}
       onContextMenu={(e) => openMenu(e, headerMenu(props.row.project))}
       title={`${name()}: ${props.row.total} shown, ${props.row.attention} need a response, ${props.row.working} working, ${props.row.unread} unread replies. Click to collapse or expand; drag to reorder.`}>
@@ -263,16 +299,30 @@ function selectSession(key: string, e?: MouseEvent) {
 }
 
 
-function ScopeButton(props: { icon: string; label: string; selected: string[]; set: (v: string[]) => void; choices: { id: string; label: string; count: number }[] }) {
+type ScopeChoice = { id: string; label: string; count: number; provider?: string; bindings?: string[] };
+function ScopeButton(props: { icon: string; label: string; selected: string[]; set: (v: string[]) => void; open?: () => void; total?: number; choices: ScopeChoice[] }) {
+  let ownItems: MenuEntry[] | undefined;
+  let shown: ScopeChoice[] = [];
+  const syncChoices = () => { shown = props.label === "accounts" ? appendAccountChoices(shown as AccountChoice[], props.choices as AccountChoice[]) as ScopeChoice[] : props.choices; };
+  const items = (): MenuEntry[] => [
+    { heading: `Choose ${props.label}` },
+    { label: `All ${props.label} (${props.total ?? props.choices.reduce((a, c) => a + c.count, 0)})`, action: () => props.set([]) },
+    { separator: true },
+    ...shown.map((c) => {
+      const checked = c.bindings ? bindingState(c as AccountChoice, accountFilterSet()) : props.selected.includes(c.id);
+      const count = c.bindings ? c.bindings.reduce((n, b) => n + (pickerCounts().account.get(b) ?? 0), 0) : c.count;
+      return { label: `${c.label} (${count})`, agent: c.provider ? agentKind(c.provider) : undefined, checked,
+        action: () => c.bindings ? toggleFilterAccount(c as AccountChoice, checked !== true) : props.set(props.selected.includes(c.id) ? props.selected.filter((x) => x !== c.id) : [...props.selected, c.id]) };
+    }),
+  ];
+  // Account replies may arrive while the menu is open. on() leaves the menu snapshot untracked.
+  createEffect(on(() => [props.choices, props.selected, props.total], () => {
+    const m = menu();
+    if (ownItems && m?.items === ownItems) { syncChoices(); ownItems = items(); setMenu({ ...m, items: ownItems }); }
+  }));
   return (
-    <button class="scope-btn" classList={{ on: props.selected.length > 0 }} data-tip={props.selected.length ? `${props.selected.length} ${props.label} selected; click to change` : `All ${props.label}: choose one or more`}
-      onClick={(e) => openMenu(e, [
-        { heading: `Choose ${props.label}` },
-        { label: `All ${props.label} (${props.choices.reduce((a, c) => a + c.count, 0)})`, action: () => props.set([]) },
-        { separator: true },
-        ...props.choices.map((c) => ({ label: `${c.label} (${c.count})`, checked: props.selected.includes(c.id),
-          action: () => props.set(props.selected.includes(c.id) ? props.selected.filter((x) => x !== c.id) : [...props.selected, c.id]) })),
-      ])}>
+    <button class="scope-btn" aria-label={`Filter sessions by ${props.label}`} classList={{ on: props.selected.length > 0 }} data-tip={props.selected.length ? `${props.selected.length} ${props.label} selected; click to change` : `All ${props.label}: choose one or more`}
+      onClick={(e) => { props.open?.(); shown = props.choices; ownItems = items(); openMenu(e, ownItems); }}>
       <Icon name={props.icon} size={14} />
       <Show when={props.selected.length}><span class="tabular">{props.selected.length}</span></Show>
     </button>
@@ -283,14 +333,17 @@ function FilterChips() {
   const chips = (): FilterChip[] => [
     ...machineFilter().map((m) => ({ id: m, label: m, kind: "m" as const })),
     ...projectFilter().map((p) => ({ id: p, label: headerOf(p)?.name ?? p, kind: "p" as const })),
+    ...selectedFilterAccounts().map((a) => ({ id: a.id, label: a.label, kind: "a" as const, provider: a.provider })),
   ];
   const remove = (c: FilterChip) =>
-    c.kind === "m" ? setMachineFilter(machineFilter().filter((x) => x !== c.id)) : setProjectFilter(projectFilter().filter((x) => x !== c.id));
+    c.kind === "m" ? setMachineFilter(machineFilter().filter((x) => x !== c.id)) : c.kind === "p" ? setProjectFilter(projectFilter().filter((x) => x !== c.id))
+      : (() => { const account = selectedFilterAccounts().find((a) => a.id === c.id); if (account) toggleFilterAccount(account, false); })();
   return (
     <Show when={chips().length}>
       <div class="filter-chips">
         <For each={chips()}>{(c) => (
           <button class="fchip-sel entity" style={{ "--entity": chipColor(c, headerOf, paletteIndex) }} title="Remove filter" onClick={() => remove(c)}>
+            <Show when={c.provider}><span class="menu-agent" style={{ color: `var(--z-agent-${agentKind(c.provider)})` }}><ProviderGlyph agent={agentKind(c.provider)} size={12} /></span></Show>
             <span class="ell">{c.label}</span><Icon name="x" size={11} />
           </button>
         )}</For>
@@ -384,6 +437,9 @@ function slide(el: HTMLElement | undefined, width: number, opening: boolean, don
 }
 
 export function SessionList() {
+  const refreshAccounts = () => { void openFilterAccounts().catch(() => {}); };
+  onCleanup(cancelFilterAccountReads);
+  const accountChoices = createMemo(() => filterAccounts().map((a) => ({ ...a, count: a.bindings.reduce((n, b) => n + (pickerCounts().account.get(b) ?? 0), 0) })));
   const list = useRows(false);
   // A row the menu bar or a notification opened (Qt's revealRow): scrolled to
   // once the list has it; another selection drops the request.
@@ -494,9 +550,15 @@ export function SessionList() {
           <button class="icon-btn hd" data-tip="Session and machine actions" onClick={(e) => openMenu(e, batchMenu())}><Icon name="more" size={18} /></button>
         </header>
         <div class="sp-search">
-          <input class="field" type="search" placeholder={stateFilter() === "archived" ? "Search archive names and IDs…" : "Search sessions and IDs…"} value={search()}
+          <input class="field" type="search" maxLength={256} placeholder={stateFilter() === "archived" ? "Search archive names and IDs…" : "Search sessions, IDs and messages…"} value={search()}
             onInput={(e) => setSearch(e.currentTarget.value)} onFocus={() => setSearchFocused(true)} onBlur={() => setSearchFocused(false)}
-            onKeyDown={(e) => e.key === "Escape" && setSearch("")} aria-label="Search sessions" />
+            onKeyDown={(e) => {
+              if (e.key === "Escape") setSearch("");
+              else if (e.key === "ArrowDown" && search().trim()) {
+                e.preventDefault(); const results = document.querySelector<HTMLElement>(".content-search-list");
+                results?.focus(); results?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+              }
+            }} aria-label="Search sessions" />
         </div>
         <div class="sp-filters" role="toolbar" aria-label="State filter">
           <For each={FILTERS}>
@@ -510,10 +572,13 @@ export function SessionList() {
           </For>
           <ScopeButton icon="machines" label="machines" selected={machineFilter()} set={setMachineFilter} choices={machineChoices()} />
           <ScopeButton icon="projects" label="projects" selected={projectFilter()} set={setProjectFilter} choices={projectChoices()} />
+          <ScopeButton icon="accounts" label="accounts" selected={selectedFilterAccounts().map((a) => a.id)} set={chooseFilterAccounts} choices={accountChoices()} total={[...pickerCounts().account.values()].reduce((n, v) => n + v, 0)} open={refreshAccounts} />
         </div>
         <FilterChips />
+        <Show when={folderFilter()}>{(folder) => <div class="filter-chips"><button class="fchip-sel" title={`${native(folder().path, folder().style)}\nClear folder filter`} onClick={clearFolderScope}>Folder: {leaf(folder().path, folder().style)}<Icon name="x" size={11} /></button></div>}</Show>
 
-        <Show when={stateFilter() === "archived"}><ArchiveBar /></Show>
+        <Show when={stateFilter() === "archived"}><ArchiveBar contentSearch={!!search().trim()} /></Show>
+        <Show when={search().trim()} fallback={<>
           <Show when={catalog.order.length > 0 || creationCount() > 0 || stateFilter() === "archived"} fallback={<ListPlaceholder />}>
             <div class="sp-scroll" classList={{ morphing: morphing(), organizing: !!dragItem() }} ref={list.ref} tabindex="0" onKeyDown={onKey} role="tree"
               onDragOver={(e) => organizeOver(e, list)} onDrop={(e) => organizeDrop(e)} onDragLeave={(e) => { if (!(e.currentTarget as Element).contains(e.relatedTarget as Node)) setDrop(undefined); }}
@@ -526,9 +591,12 @@ export function SessionList() {
               </Show>
             </div>
           </Show>
-        <SelectionBar />
+        </>}>
+          <SearchResults />
+        </Show>
+        <Show when={!search().trim()}><SelectionBar /></Show>
         <footer class="sp-foot">
-          <span class="tabular ell">{shownSummary().shown ? `${shownSummary().shown} shown, ${shownSummary().working} working, ${shownSummary().attention} attention${creationFooter(true)}` : creationFooter(false) || (catalog.order.length ? "No matching sessions" : "")}</span>
+          <span class="tabular ell">{search().trim() ? "" : shownSummary().shown ? `${shownSummary().shown} shown, ${shownSummary().working} working, ${shownSummary().attention} attention${creationFooter(true)}` : creationFooter(false) || (catalog.order.length ? "No matching sessions" : "")}</span>
           <span class="grow" />
           <button class="icon-btn small" data-tip="Session creation status" onClick={(e) => openMenu(e, creationStatusMenu())}><Icon name="clock" size={16} /></button>
           <button class="icon-btn small" title={markAllTip(markAllEntry())} disabled={markAllEntry().disabled} onClick={() => runMarkAll()}><Icon name="read-all" size={16} /></button>
@@ -626,14 +694,14 @@ function ListRow(props: { id: string; list: RowSource }) {
       <Show when={row()?.type === "creation" ? (row() as Extract<Row, { type: "creation" }>) : undefined}>{(v) => <CreationCard card={v().creation} />}</Show>
       <Show when={row()?.type === "card" ? (row() as Extract<Row, { type: "card" }>) : undefined}>
         {(v) => (
-          <div class="rowhit" classList={{ "has-kids-open": v().expanded && !v().compactRow, multi: !!multi[v().session.key], dragged: dragItem()?.id === v().session.key }}
+          <div onDragOver={(e) => taskDragOver(e, groupOf(v().session.key), v().session)} onDrop={(e) => taskDrop(e, groupOf(v().session.key), v().session)} class="rowhit" classList={{ "has-kids-open": v().expanded && !v().compactRow, multi: !!multi[v().session.key], dragged: dragItem()?.id === v().session.key }}
             draggable="true" onDragStart={(e) => startDrag(e, { kind: "session", id: v().session.key })}
             onMouseDown={(e) => { if (e.shiftKey) e.preventDefault(); }} onClick={(e) => selectSession(v().session.key, e)}
             onContextMenu={(e) => {
               // macOS turns Control-click into a context click; Control keeps its selection meaning here.
               if (e.ctrlKey && e.button === 0 && IS_MAC) { e.preventDefault(); selectSession(v().session.key, e); return; }
               if (multi[v().session.key] && selectedRows(listRows()).length > 1) { openMenu(e, selectionContextMenu(listRows())); return; }
-              if (!multi[v().session.key]) selectSession(v().session.key); openMenu(e, sessionMenu(v().session));
+              if (!multi[v().session.key]) selectSession(v().session.key); openSessionMenu(e, v().session);
             }}
             onDblClick={(e) => { if (!e.ctrlKey && !e.metaKey && !e.shiftKey) setRowCompact(v().session.key, !compactRows[v().session.key]); }}>
             <Show when={!v().compactRow} fallback={<CompactCard session={v().session} selected={selectedKey() === v().session.key || !!multi[v().session.key]} onExpand={() => setRowCompact(v().session.key, false)} />}>
@@ -653,7 +721,7 @@ function NoMatches() {
       <Icon name="funnel-x" size={28} />
       <h3>No matching sessions</h3>
       <p>The current filters hide every session. Filters change only this list, never the open conversation.</p>
-      <button class="btn small" onClick={() => { setSearch(""); setStateFilter("all"); setMachineFilter([]); setProjectFilter([]); }}>Show all sessions</button>
+      <button class="btn small" onClick={() => { setSearch(""); setStateFilter("all"); setMachineFilter([]); setProjectFilter([]); setAccountFilter([]); }}>Show all sessions</button>
     </div>
   );
 }
@@ -770,7 +838,7 @@ function StripTile(props: { row: Extract<Row, { type: "card" }> }) {
   const tip = () => [`${s().name}: ${statusCaption(s())}`, s().summary, `${folderOf(s())}${s().branch ? ` / ${s().branch}` : ""} on ${s().machine}`, s().git ? gitTooltip(s()) : "", s().optionalQuestions ? `${s().optionalQuestions} optional question(s) waiting` : ""].filter(Boolean).join("\n");
   return (
     <button class="strip-tile" classList={{ selected: selectedKey() === s().key }} data-frame={frame()} title={tip()} onClick={() => selectSession(s().key)}
-      onContextMenu={(e) => { selectSession(s().key); openMenu(e, sessionMenu(s())); }}>
+      onContextMenu={(e) => { selectSession(s().key); openSessionMenu(e, s()); }}>
       <span class="st-block">
         <span class="st-top">
           <span class="st-status">

@@ -1,0 +1,9 @@
+/* Search cards use the approved Sessions search-hit/sh-* styles. Only the
+   bounded virtual list needs separate positioning and scroll ownership. */
+.content-search { display: flex; flex: 1; min-height: 0; flex-direction: column; gap: 2px; }
+.content-search-status { display: flex; align-items: center; gap: 6px; padding: 2px 6px 6px; color: var(--z-color-dim); font-size: var(--fs-xs); }
+.content-search-status > span { flex: 1; }
+.content-search-list { flex: 1; min-height: 0; overflow: auto; margin-top: 0; }
+.content-search-row { position: absolute; inset: 0 0 auto; width: 100%; }
+.search-preview { display: contents; }
+.search-preview-body { white-space: pre-wrap; font: inherit; line-height: 1.6; overflow-wrap: anywhere; }

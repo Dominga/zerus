@@ -3,14 +3,17 @@ import { createStore } from "solid-js/store";
 import { catalog, computerFresh, orderedRows } from "./catalog";
 import { documentVisibility } from "./visibility";
 import { isActive, isWorking, needsAttention } from "./attention";
+import { settings, settingsReady, setSetting } from "./settings";
+import { createRowDensity, ROW_DENSITY_KEY } from "./rowDensity";
 import type { Session, Status } from "../ui/sessions/types";
+import type { FolderScope } from "../ui/sessions/scope-filters";
 export { isActive, needsAttention };
 
 // Interface state of the first screen: page, selection, filters, list layout,
 // menus and toasts. Data lives in store/catalog.ts and store/activity.ts.
 
 export type MenuEntry =
-  | { label: string; icon?: string; kbd?: string; danger?: boolean; disabled?: boolean; hint?: string; checked?: boolean; action?: () => void }
+  | { label: string; icon?: string; agent?: string; kbd?: string; danger?: boolean; disabled?: boolean; hint?: string; checked?: boolean | "mixed"; action?: () => void }
   | { separator: true }
   | { heading: string };
 
@@ -25,21 +28,36 @@ const PAGES: Page[] = ["dashboard", "sessions", "projects", "machines", "account
 // `?page=settings` opens a screen (headless screenshots), as in the mockup.
 export const [page, setPage] = createSignal<Page>(PAGES.find((p) => p === params.get("page")) ?? "sessions");
 export const [selectedKey, setSelectedKey] = createSignal<string | undefined>();
-export const [stateFilter, setStateFilter] = createSignal<StateFilter>("all");
+export const [stateFilter, setStateFilterRaw] = createSignal<StateFilter>("all");
+/** Qt clears an exact-folder scope when All sessions is chosen. */
+export function setStateFilter(filter: StateFilter) { if (filter === "all") setFolderFilter(undefined); return setStateFilterRaw(filter); }
 export const [machineFilter, setMachineFilter] = createSignal<string[]>([]);
 export const [projectFilter, setProjectFilter] = createSignal<string[]>([]);
+/** Machine-local binding keys, not display account ids. */
+export const [accountFilter, setAccountFilter] = createSignal<string[]>([]);
+export const accountFilterSet = createMemo(() => new Set(accountFilter()));
+export const [folderFilter, setFolderFilter] = createSignal<FolderScope>();
 export const [multi, setMulti] = createStore<Record<string, boolean>>({});
 export const [peek, setPeek] = createSignal(false);
-export type DetailTab = "activity" | "terminal" | "native" | "processes";
+export type DetailTab = "activity" | "terminal" | "native" | "processes" | "taskview";
 export const [detailTab, setDetailTab] = createSignal<DetailTab>("activity");
 export const [subagentOpen, setSubagentOpen] = createSignal<string | undefined>();
 export const [search, setSearch] = createSignal(params.get("q") ?? "");
 export const [expandedChildren, setExpandedChildren] = createStore<Record<string, boolean>>({});
-export const [compactRows, setCompactRows] = createStore<Record<string, boolean>>({});
+const rowDensity = createRowDensity({
+  stored: () => settings[ROW_DENSITY_KEY], ready: settingsReady,
+  save: (keys) => setSetting(ROW_DENSITY_KEY, keys),
+  keys: (key) => (catalog.rows[key] ?? archivedRow(key))?.compactKeys,
+});
+export const compactRows = new Proxy<Record<string, boolean>>({}, {
+  get: (_target, key) => typeof key === "string" ? rowDensity.get(key) : undefined,
+});
+export const setCompactRows = rowDensity.set;
+export const expandCompactRows = rowDensity.expandAll;
+export const hasCompactRows = rowDensity.any;
 export const [stripMode, setStripMode] = createSignal(params.get("strip") === "1");
 export const [menu, setMenu] = createSignal<{ x: number; y: number; items: MenuEntry[] } | undefined>();
 export const [contentScale, setContentScale] = createSignal(1);
-export const [toasts, setToasts] = createStore<{ items: { id: number; title: string; text: string }[] }>({ items: [] });
 /** A row the session list scrolls to once it lists it (Qt's `revealRow`); a new selection drops it. */
 export const [revealing, setRevealing] = createSignal<string | undefined>();
 export const revealRow = (id: string) => setRevealing(id);
@@ -69,20 +87,19 @@ export function setSessionsWidth(width: number) {
   try { localStorage.setItem(SESSIONS_WIDTH_KEY, String(width)); } catch { /* storage may be unavailable */ }
 }
 
-let toastId = 0;
-export function toast(title: string, text: string) {
-  const id = ++toastId;
-  setToasts("items", (items) => [...items, { id, title, text }]);
-  setTimeout(() => setToasts("items", (items) => items.filter((t) => t.id !== id)), 4200);
-}
+/** Toasts go to the window's one notice bus (store/notices.ts). */
+export { toast } from "./notices";
 
 let archivedRow: (key: string) => Session | undefined = () => undefined;
+let searchRow: (key: string) => Session | undefined = () => undefined;
+/** The search keeps at most its one selected archived row, independently of archive pages. */
+export function bindSearchRow(lookup: (key: string) => Session | undefined) { searchRow = lookup; }
 /** Hands the selection the loaded archived rows (store/archive.ts), which this module cannot import: archive.ts reads the filters here. */
 export function bindArchivedRows(lookup: (key: string) => Session | undefined) { archivedRow = lookup; }
 
 export const selected = createMemo<Session | undefined>(() => {
   const key = selectedKey();
-  return key ? catalog.rows[key] ?? archivedRow(key) : undefined;
+  return key ? catalog.rows[key] ?? archivedRow(key) ?? searchRow(key) : undefined;
 });
 
 /** The window's online state of a row: its computer's rows are current (Qt's `entry.online`). */

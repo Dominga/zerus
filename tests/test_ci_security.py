@@ -466,12 +466,12 @@ class WorkflowSecurityTests(unittest.TestCase):
 
     def test_checks_gate_requires_exactly_the_selected_suites(self):
         gate = job((ROOT / ".github/workflows/checks.yml").read_text(), "gate")
-        self.assertIn("needs: [source, quick, relay, connector, connector-macos, ios, android, client-native-linux, client-native-macos-core, client-native-macos-tauri, client-native-windows, cli, "
+        self.assertIn("needs: [source, quick, client-frontend, relay, connector, connector-macos, ios, android, client-native-linux, client-native-macos-core, client-native-macos-tauri, client-native-windows, cli, "
                       "cli-macos-debug, cli-macos-core, cli-macos-native, cli-macos, arch, arch-package, mac-desktop, windows-desktop, windows-host]", gate)
         self.assertIn("RUN_WINDOWS: ${{ needs.source.outputs.run_windows == 'true' }}", gate)
         script = re.search(r"(?s)python3 - <<'PY'\n(.*?)\n          PY", gate)[1]
         code = compile(textwrap.dedent(script), "workflow-checks-gate", "exec")
-        base = {"source": "success", "quick": "success", "relay": "success", "connector": "success",
+        base = {"source": "success", "quick": "success", "client-frontend": "success", "relay": "success", "connector": "success",
                 "android": "success", "client-native-linux": "success", "client-native-macos-core": "success",
                 "client-native-macos-tauri": "success", "cli": "success", "cli-macos-debug": "success", "cli-macos-core": "success",
                 "cli-macos-native": "success", "cli-macos": "success", "arch": "success", "arch-package": "success",
@@ -498,6 +498,9 @@ class WorkflowSecurityTests(unittest.TestCase):
         base.update(dict.fromkeys(windows, "success"))
         arch_skipped = {**base, "arch": "skipped", "arch-package": "skipped"}
         for results, run_arch, success in [
+            ({**base, "client-frontend": "failure"}, "true", False),
+            ({**base, "client-frontend": "skipped"}, "true", False),
+            ({**base, "client-frontend": "cancelled"}, "true", False),
             ({**base, "quick": "failure"}, "true", False), ({**base, "quick": "skipped"}, "true", False),
             ({**base, "connector": "failure"}, "true", False), ({**base, "connector": "skipped"}, "true", False),
             ({**base, "connector": "cancelled"}, "true", False), ({**arch_skipped, "connector": "skipped"}, "false", False),
@@ -519,6 +522,28 @@ class WorkflowSecurityTests(unittest.TestCase):
                 else:
                     with self.assertRaises(SystemExit):
                         exec(code, {})
+
+    def test_frontend_budget_is_checked_after_the_production_build(self):
+        frontend = job((ROOT / ".github/workflows/checks.yml").read_text(), "client-frontend")
+        self.assertIn("persist-credentials: false", frontend)
+        self.assertIn("package-manager-cache: false", frontend)
+        commands = ("npm ci", "npm run check", "npm test", "npm run build", "python3 client/scripts/check-bundle-size.py")
+        positions = [frontend.index(command) for command in commands]
+        self.assertEqual(positions, sorted(positions))
+        self.assertNotIn("continue-on-error", frontend)
+        self.assertNotIn("actions/cache/save@", frontend)
+
+    def test_every_crate_is_formatted_linted_and_tested(self):
+        # A crate taken by path is only built by its users; its own tests run nowhere else.
+        quick = job((ROOT / ".github/workflows/checks.yml").read_text(), "quick")
+        crates = sorted(path.parent.name for path in (ROOT / "crates").glob("*/Cargo.toml"))
+        self.assertIn("desktop-read-policy", crates)
+        for crate in crates:
+            manifest = f"--manifest-path crates/{crate}/Cargo.toml"
+            with self.subTest(crate=crate):
+                self.assertIn(f"cargo +1.99.1 fmt --check {manifest}\n", quick)
+                self.assertRegex(quick, rf"cargo \+1\.99\.1 clippy --locked {re.escape(manifest)} --target-dir target/[\w-]+ --all-targets -- -D warnings\n")
+                self.assertRegex(quick, rf"cargo \+1\.99\.1 test --locked {re.escape(manifest)} --target-dir target/[\w-]+\n")
 
     def test_native_client_jobs_cover_media_and_platform_code(self):
         checks = (ROOT / ".github/workflows/checks.yml").read_text()
@@ -762,7 +787,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         gate = job(checks, "gate")
         script = re.search(r"(?s)python3 - <<'PY'\n(.*?)\n          PY", gate)[1]
         code = compile(textwrap.dedent(script), "workflow-checks-gate", "exec")
-        names = ("source", "quick", "relay", "connector", "connector-macos", "ios", "android", "client-native-linux", "client-native-macos-core", "client-native-macos-tauri", "client-native-windows",
+        names = ("source", "quick", "client-frontend", "relay", "connector", "connector-macos", "ios", "android", "client-native-linux", "client-native-macos-core", "client-native-macos-tauri", "client-native-windows",
                  "cli", "cli-macos-debug", "cli-macos-core", "cli-macos-native", "cli-macos", "arch", "arch-package",
                  "mac-desktop", "windows-desktop", "windows-host")
         for run_macos, smoke_result, success in [("true", "success", True), ("true", "failure", False),
@@ -806,7 +831,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         gate = job(checks, "gate")
         script = re.search(r"(?s)python3 - <<'PY'\n(.*?)\n          PY", gate)[1]
         code = compile(textwrap.dedent(script), "workflow-checks-gate", "exec")
-        names = ("source", "quick", "relay", "connector", "connector-macos", "ios", "android", "client-native-linux", "client-native-macos-core", "client-native-macos-tauri", "client-native-windows",
+        names = ("source", "quick", "client-frontend", "relay", "connector", "connector-macos", "ios", "android", "client-native-linux", "client-native-macos-core", "client-native-macos-tauri", "client-native-windows",
                  "cli", "cli-macos-debug", "cli-macos-core", "cli-macos-native", "cli-macos", "arch", "arch-package",
                  "mac-desktop", "windows-desktop", "windows-host")
         for run_ios, ios_result, success in [("true", "success", True), ("true", "failure", False),
@@ -1177,6 +1202,7 @@ class WorkflowSecurityTests(unittest.TestCase):
             "54ece01be80c6dfb552eb9fc31a6455011fda1a2:mobile/ios/ZerusKit/Tests/ZerusKitTests/TasksPresentationTests.swift:generic-api-key:148",
             "54ece01be80c6dfb552eb9fc31a6455011fda1a2:mobile/android/app/src/test/java/app/zerus/mobile/TasksPresentationTest.kt:generic-api-key:134",
             "ba4192badbff37d33faf8462aa189e82625f332d:tray/tests/test_sessionswindow.cpp:generic-api-key:1715",
+            "907468c65d867742cca2ce8342cf3d5107ac4823:client/src-tauri/src/native_ui.rs:generic-api-key:138",
         ])
 
     def test_cache_directories_stay_outside_uploaded_paths(self):

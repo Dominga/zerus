@@ -71,6 +71,10 @@ pub struct SyncView {
     /// the JSON when there is none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notice: Option<String>,
+    /// Presentation-only status: the saved local layout was refused and is
+    /// retained. This carries no service writer/drain authority.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub layout_save_paused: bool,
 }
 
 impl Default for SyncView {
@@ -83,6 +87,7 @@ impl Default for SyncView {
             status_error: false,
             conflicts: 0,
             notice: None,
+            layout_save_paused: false,
         }
     }
 }
@@ -452,10 +457,10 @@ impl Grouping {
         out
     }
 
-    fn archive_place(&mut self, row: &ArchivedRow) -> (String, u64) {
+    /// Read-only archive membership for bounded search hits; no placement cache.
+    pub fn archive_project(&self, row: &ArchivedRow) -> String {
         let member = super::archive_member(&row.machine, &row.archive_id);
-        let project = self
-            .membership
+        self.membership
             .get(&member)
             .map(String::as_str)
             .filter(|project| self.listed.contains(*project))
@@ -465,7 +470,12 @@ impl Grouping {
                     .filter(|project| self.listed.contains(*project))
             })
             .unwrap_or(&self.default)
-            .to_owned();
+            .to_owned()
+    }
+
+    fn archive_place(&mut self, row: &ArchivedRow) -> (String, u64) {
+        let member = super::archive_member(&row.machine, &row.archive_id);
+        let project = self.archive_project(row);
         let rank = self.layout.rank(&project, &member);
         (project, rank)
     }
@@ -676,6 +686,28 @@ impl Grouping {
         self.layout.runs_seeded()
     }
 
+    pub fn presentation_seeded(&self) -> Result<bool, &'static str> {
+        self.layout.presentation_seeded()
+    }
+
+    pub fn seed_presentation(
+        &mut self,
+        seed: super::layout::PresentationSeed,
+    ) -> Result<(), &'static str> {
+        if self.layout.seed_presentation(seed)? {
+            if let Some(default) = self
+                .layout
+                .default_project()
+                .filter(|id| self.listed.contains(*id))
+            {
+                self.default = default.into();
+            }
+            let layout = std::mem::take(&mut self.layout);
+            self.replace_layout(layout);
+        }
+        Ok(())
+    }
+
     /// Merge a seed read on a worker into the current layout, retaining newer
     /// native assignments. Reobserve live rows: implicit assignments made
     /// while the read was pending must remove their old Qt run memory again.
@@ -719,7 +751,8 @@ impl Grouping {
                 }
                 self.layout.forget(project);
             }
-            Intent::Rename { .. }
+            Intent::Color { .. }
+            | Intent::Rename { .. }
             | Intent::Reorder { .. }
             | Intent::Renamed { .. }
             | Intent::AddFolder { .. } => {}
@@ -875,8 +908,12 @@ mod tests {
         let (_, out) = grouping.take();
         let json = serde_json::to_value(out.unwrap()).unwrap();
         assert!(json.get("notice").is_none(), "absent when there is none");
+        assert!(json.get("layout_save_paused").is_none());
+        let legacy: GroupingOut = serde_json::from_value(json).unwrap();
+        assert!(!legacy.sync.layout_save_paused);
         grouping.set_sync(SyncView {
             notice: Some("The saved project changes were not applied.".into()),
+            layout_save_paused: true,
             ..SyncView::default()
         });
         let (_, out) = grouping.take();
@@ -885,7 +922,9 @@ mod tests {
             json["notice"],
             "The saved project changes were not applied."
         );
+        assert_eq!(json["layout_save_paused"], true);
         let back: GroupingOut = serde_json::from_value(json).unwrap();
+        assert!(back.sync.layout_save_paused);
         assert_eq!(
             back.sync.notice.as_deref(),
             Some("The saved project changes were not applied.")

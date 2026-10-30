@@ -96,6 +96,7 @@ void TeamProposalCards::setTeam(const Teams::Team *team)
 {
     const QString id = team ? team->id : QString();
     auto views = team ? viewsOf(*team) : QList<View>();
+    if (!m_only.isEmpty()) views.erase(std::remove_if(views.begin(), views.end(), [this](const View &view) { return view.id != m_only; }), views.end());
     if (id != m_team) { m_staleViews.clear(); m_notices.clear(); m_reasons.clear(); m_sending.clear(); }
     QSet<QString> open;
     for (const auto &view : views) open << view.id;

@@ -1,4 +1,4 @@
-import { compactRows, setCompactRows, type MenuEntry } from "../../store/ui";
+import { expandCompactRows, hasCompactRows, type MenuEntry } from "../../store/ui";
 import { grouping, setProjectCollapsed } from "../../store/organization";
 import { clearArchiveMenuEntry } from "./selection-live";
 import { markAllEntry } from "./mark-entries";
@@ -18,7 +18,7 @@ const defaults: BackgroundDeps = {
   newSession: () => {},
   newProject: () => {},
   collapse: setProjectCollapsed,
-  expandRows: () => Object.keys(compactRows).forEach((key) => setCompactRows(key, false)),
+  expandRows: expandCompactRows,
   markAll: markAllEntry,
   clearArchive: clearArchiveMenuEntry,
 };
@@ -29,7 +29,7 @@ export function collapseAllProjects(headers: readonly { id: string }[], collapse
 
 export function expandAllCollapsedEntry(expandRows: () => void = defaults.expandRows): MenuEntry {
   return {
-    label: "Expand all collapsed", icon: "expand-row", disabled: !Object.values(compactRows).some(Boolean),
+    label: "Expand all collapsed", icon: "expand-row", disabled: !hasCompactRows(),
     hint: "Restore full session rows, including sessions hidden by filters", action: expandRows,
   };
 }

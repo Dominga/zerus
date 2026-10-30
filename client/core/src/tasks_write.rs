@@ -82,12 +82,12 @@ impl TaskCall {
         }
     }
 
-    /// `hgs task ...` with Qt's timeouts: 90 s for `send`, `cancel` and
+    /// `hgs task ...` with Qt's timeouts: 90 s for `send`, `cancel`, `cancel-execution` and
     /// `message`, otherwise 30 s.
     pub fn invocation(&self) -> Invocation {
         let long = matches!(
             self.args.first().map(String::as_str),
-            Some("send" | "cancel" | "message")
+            Some("send" | "cancel" | "cancel-execution" | "start-deliver" | "message")
         );
         let mut args = vec!["task".to_owned()];
         args.extend(self.args.iter().cloned());
@@ -448,7 +448,7 @@ pub mod outbox {
     use sha2::{Digest, Sha256};
     use std::collections::HashSet;
     use std::fs;
-    use std::io::{Read, Write};
+    use std::io::Read;
     use std::path::{Path, PathBuf};
     use std::sync::{Mutex, PoisonError};
     use std::time::{Duration, Instant};
@@ -528,30 +528,94 @@ pub mod outbox {
         fs::File::open(file)
             .and_then(|f| f.take(MAX_RECORD + 1).read_to_end(&mut bytes))
             .map_err(|_| unavailable())?;
-        let record: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-        if !record["id"].as_str().is_some_and(uuid) || !record["intent"].is_object() {
+        decode(&bytes)
+    }
+
+    /// The same bounded record decoder, without opening a store, reserving an
+    /// identity, releasing a marker or checking/submitting a delivery.
+    pub fn decode(bytes: &[u8]) -> Result<Value, String> {
+        if bytes.len() as u64 > MAX_RECORD {
+            return Err("The original message recovery snapshot exceeds its byte limit. Nothing was submitted.".into());
+        }
+        let record: Value = serde_json::from_slice(bytes).unwrap_or(Value::Null);
+        if !record["id"].as_str().is_some_and(uuid)
+            || !record["intent"].is_object()
+            || ["version", "schema"]
+                .iter()
+                .any(|key| record.get(key).is_some_and(|version| version != 1))
+        {
             return Err("The message recovery snapshot is invalid. Nothing was submitted.".into());
         }
         Ok(record)
     }
 
-    fn write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-        let temporary = path.with_extension("tmp");
-        let result = (|| {
-            let mut file = fs::File::create(&temporary)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
-            }
-            file.write_all(bytes)?;
-            file.sync_all()?;
-            fs::rename(&temporary, path)
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&temporary);
+    /// The pending record only when its exact reservation marker agrees.
+    /// Missing, mismatched or future evidence stays intact and authorizes no
+    /// recovery call. This read never reserves, releases or submits anything.
+    pub fn pending(root: &Path, project: &str, task: &str) -> Result<Option<Value>, String> {
+        let file = path(root, project, task);
+        let marker = marker(&file);
+        let unavailable = || {
+            "The original message reservation could not be verified. Nothing was submitted."
+                .to_owned()
+        };
+        let exists = |p: &Path| match fs::symlink_metadata(p) {
+            Ok(meta) if meta.is_file() => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            _ => Err(unavailable()),
+        };
+        let (has_record, has_marker) = (exists(&file)?, exists(&marker)?);
+        if !has_record && !has_marker {
+            return Ok(None);
         }
-        result
+        if !has_record || !has_marker {
+            return Err(unavailable());
+        }
+        let record = read(&file)?;
+        let mut bytes = Vec::new();
+        fs::File::open(marker)
+            .and_then(|f| f.take(129).read_to_end(&mut bytes))
+            .map_err(|_| unavailable())?;
+        if bytes.len() > 128 || record["id"].as_str().map(str::as_bytes) != Some(bytes.as_slice()) {
+            return Err(unavailable());
+        }
+        Ok(Some(record))
+    }
+
+    fn write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        crate::fsx::write_private_atomic(path, bytes, true)?;
+        #[cfg(unix)]
+        fs::File::open(path.parent().expect("outbox parent"))?.sync_all()?;
+        Ok(())
+    }
+
+    /// An exact private checkpoint, including unknown fields. Start review
+    /// settles or releases a record through this writer; it never removes the
+    /// original intent merely because a transport result was lost.
+    pub fn replace_if_unchanged(
+        root: &Path,
+        project: &str,
+        task: &str,
+        expected: &Value,
+        next: &Value,
+    ) -> Result<bool, String> {
+        let file = path(root, project, task);
+        let Some(_turn) = Turn::take(&file) else {
+            return Err("The task recovery record is busy.".into());
+        };
+        if pending(root, project, task)?.as_ref() != Some(expected) {
+            return Ok(false);
+        }
+        let bytes = next.to_string();
+        decode(bytes.as_bytes())?;
+        write(&file, bytes.as_bytes())
+            .map_err(|_| "Could not save the task recovery record.".to_owned())?;
+        if next["id"] != expected["id"] {
+            write(&marker(&file), next["id"].as_str().unwrap_or("").as_bytes()).map_err(|_| {
+                "Could not reserve the new task request. Nothing was submitted.".to_owned()
+            })?;
+        }
+        Ok(true)
     }
 
     /// Reserves a message before it is sent. An earlier attempt is reused
@@ -576,6 +640,15 @@ pub mod outbox {
             use std::os::unix::fs::PermissionsExt;
             let _ = fs::set_permissions(root, fs::Permissions::from_mode(0o700));
             let _ = fs::set_permissions(&folder, fs::Permissions::from_mode(0o700));
+            // Persist newly created directory links before native input can
+            // depend on the reservation inside them.
+            for directory in [folder.as_path(), root, root.parent().unwrap_or(root)] {
+                fs::File::open(directory)
+                    .and_then(|file| file.sync_all())
+                    .map_err(|_| {
+                        "Could not save private message storage. Nothing was submitted.".to_owned()
+                    })?;
+            }
         }
         let Some(_turn) = Turn::take(&file) else {
             return Err("This task already has a message operation in progress.".into());
@@ -604,6 +677,40 @@ pub mod outbox {
             "Could not reserve the message identity. Nothing was submitted.".to_owned()
         })?;
         Ok(reserved)
+    }
+
+    /// Fingerprint of the complete recovery record, including opaque fields.
+    pub fn snapshot(record: &Value) -> String {
+        format!("{:x}", Sha256::digest(record.to_string().as_bytes()))
+    }
+
+    /// An explicit review releases only the exact record and marker it saw,
+    /// including opaque fields. It never submits or checks native input.
+    pub fn release_if_unchanged(
+        root: &Path,
+        project: &str,
+        task: &str,
+        expected: &Value,
+    ) -> Result<bool, String> {
+        let file = path(root, project, task);
+        let Some(_turn) = Turn::take(&file) else {
+            return Err("The message recovery record is busy.".into());
+        };
+        if pending(root, project, task)?.as_ref() != Some(expected) {
+            return Ok(false);
+        }
+        fs::remove_file(&file)
+            .map_err(|_| "Could not release the local message recovery record.".to_owned())?;
+        match fs::remove_file(marker(&file)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err("Could not update message recovery state.".into()),
+        }
+        #[cfg(unix)]
+        fs::File::open(file.parent().expect("outbox parent"))
+            .and_then(|f| f.sync_all())
+            .map_err(|_| "Could not update message recovery state.".to_owned())?;
+        Ok(true)
     }
 
     /// Releases a delivered message's record.
@@ -909,6 +1016,37 @@ mod outbox_tests {
     const OTHER: &str = "22222222-2222-4222-8222-222222222222";
 
     #[test]
+    fn pending_requires_the_exact_original_marker_and_record() {
+        let root = scratch("pending-pair");
+        assert_eq!(outbox::pending(&root.0, "example", "task").unwrap(), None);
+        let intent = message_intent("Note", &[], "note", "");
+        outbox::reserve(&root.0, "example", "task", &intent, ID).unwrap();
+        assert_eq!(
+            outbox::pending(&root.0, "example", "task")
+                .unwrap()
+                .unwrap()["id"],
+            ID
+        );
+        let file = outbox::path(&root.0, "example", "task");
+        let marker = file.with_extension("marker");
+        std::fs::write(&marker, OTHER).unwrap();
+        assert!(outbox::pending(&root.0, "example", "task").is_err());
+        assert!(
+            file.exists() && marker.exists(),
+            "mismatched evidence is kept"
+        );
+        std::fs::write(&marker, ID).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        assert!(outbox::pending(&root.0, "example", "task").is_err());
+        std::fs::write(
+            &file,
+            serde_json::json!({"id":ID,"intent":intent,"schema":2}).to_string(),
+        )
+        .unwrap();
+        assert!(outbox::pending(&root.0, "example", "task").is_err());
+    }
+
+    #[test]
     fn a_message_is_reserved_recovered_and_released() {
         let root = scratch("cycle");
         let intent = message_intent("hello", &[], "comment", "none");
@@ -993,5 +1131,36 @@ mod outbox_tests {
             outbox::reserve(&root.0, "alpha", "t-1", &intent, OTHER),
             Err("The message recovery snapshot is invalid. Nothing was submitted.".into())
         );
+    }
+
+    #[test]
+    fn reviewed_release_requires_the_exact_record_and_marker() {
+        let root = scratch("reviewed-release");
+        let intent = message_intent("hello", &[], "comment", "none");
+        let original = outbox::reserve(&root.0, "alpha", "t-1", &intent, ID)
+            .unwrap()
+            .record;
+        let file = outbox::path(&root.0, "alpha", "t-1");
+        let mut changed = original.clone();
+        changed["opaque"] = json!({"future": true});
+        std::fs::write(&file, changed.to_string()).unwrap();
+        assert_ne!(outbox::snapshot(&original), outbox::snapshot(&changed));
+        assert_eq!(
+            outbox::release_if_unchanged(&root.0, "alpha", "t-1", &original),
+            Ok(false)
+        );
+        assert_eq!(
+            outbox::pending(&root.0, "alpha", "t-1").unwrap(),
+            Some(changed.clone())
+        );
+        std::fs::write(file.with_extension("marker"), OTHER).unwrap();
+        assert!(outbox::release_if_unchanged(&root.0, "alpha", "t-1", &changed).is_err());
+        assert!(file.is_file());
+        std::fs::write(file.with_extension("marker"), ID).unwrap();
+        assert_eq!(
+            outbox::release_if_unchanged(&root.0, "alpha", "t-1", &changed),
+            Ok(true)
+        );
+        assert_eq!(outbox::pending(&root.0, "alpha", "t-1"), Ok(None));
     }
 }

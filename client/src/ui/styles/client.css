@@ -2,8 +2,11 @@
    showed with fixed data (reading, older pages, other screens) and the cost of
    long transcripts. */
 @layer components {
-  /* Off-screen Activity items skip layout and paint until they scroll into view. */
-  .act-col > .act-msg, .act-col > .act-tools, .act-col > .act-thinking, .act-col > .act-notice { content-visibility: auto; contain-intrinsic-size: auto 72px; }
+  /* Keyed rows retain their measured layout while the user scrolls.
+     Estimated content-visibility sizes shift earlier rows as items unskip. */
+  /* zerus-5wmh.83: live appends must be visible when the end pin follows them.
+     A tall new row starting at opacity zero blanks the whole transcript. */
+  .act-col > [id^="item-"] { animation: none; }
   .act-older { padding: 4px 2px; text-align: center; }
   /* Groups that hold an approval or a failure read in the warning colour, as in Qt. */
   .act-tools.warn .act-tools-head b { color: var(--z-color-warn); }

@@ -1,0 +1,45 @@
+{
+  "bead": "zerus-5wmh.10.11.3.1.2",
+  "environment": "Private D-Bus and Xvfb, isolated HOME/XDG/TMPDIR/TMUX_TMPDIR; normal native CreationHost and TaskExecutors with a synthetic watch/CLI fixture. No real agent starts.",
+  "creation": {
+    "launches": 1,
+    "reservation_verified_before_launch": true,
+    "catalog_confirmed_exact_launch_id": true,
+    "provider_tag_parent_project_verified": true
+  },
+  "delivery": {
+    "calls": 1,
+    "complete_original_plan_verified_on_disk_before_dispatch": true,
+    "same_launch_and_request_id": true,
+    "unknown_receipt_retained_for_review_in_separate_run": true,
+    "no_replay": true
+  },
+  "saved_launch": {
+    "loaded_as_review_only": true,
+    "not_dispatched": true,
+    "explicit_release_made_no_cli_call": true,
+    "exact_marker_and_record_removed": true
+  },
+  "dialog_focus": [
+    {
+      "active": "Close",
+      "label": null
+    },
+    {
+      "active": "Review executor launch",
+      "label": null
+    },
+    {
+      "active": "Start task",
+      "label": "Start task"
+    }
+  ],
+  "mockup": "Sessions Task View executor menu in screens/tasks/overlays.tsx and Task executor launch in dialogs/TaskDialogs.tsx. Opened approved app.html privately and compared with native captures.",
+  "checks": {
+    "root_task_delivery": 22,
+    "core_task_executor": 4,
+    "core_reserved_creation_identity": 1,
+    "native_identity_and_assignment": 6,
+    "frontend": 1980
+  }
+}

@@ -1,0 +1,829 @@
+{
+  "groups": {
+    "rust/--bin hgs": {
+      "recorded": "2026-10-31",
+      "runs": 4,
+      "seconds": 92.55,
+      "tests": 535
+    },
+    "tray/test_accountfilter": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 0.092,
+      "tests": 10
+    },
+    "tray/test_accountspage": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 22.152,
+      "tests": 38
+    },
+    "tray/test_accountusage": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 0.381,
+      "tests": 19
+    },
+    "tray/test_activityview": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 42.305,
+      "tests": 98
+    },
+    "tray/test_analytics": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 7.578,
+      "tests": 19
+    },
+    "tray/test_appconfig": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 0.162,
+      "tests": 43
+    },
+    "tray/test_archivebrowser": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 5.384,
+      "tests": 4
+    },
+    "tray/test_attachmentviewer": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 2.703,
+      "tests": 13
+    },
+    "tray/test_attention": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 0.097,
+      "tests": 38
+    },
+    "tray/test_automaticapprovals": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 14.582,
+      "tests": 7
+    },
+    "tray/test_cachekeepalive": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 2.523,
+      "tests": 3
+    },
+    "tray/test_claudeappsessions": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 0.486,
+      "tests": 1
+    },
+    "tray/test_clonerepository": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 5.949,
+      "tests": 1
+    },
+    "tray/test_composertoolbar": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 1.291,
+      "tests": 14
+    },
+    "tray/test_dashboard": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 0.75,
+      "tests": 2
+    },
+    "tray/test_desktoppresence": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 0.002,
+      "tests": 5
+    },
+    "tray/test_directorydialog": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 6.328,
+      "tests": 1
+    },
+    "tray/test_downloadcache": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 1.214,
+      "tests": 16
+    },
+    "tray/test_downloadcachesettings": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 0.48,
+      "tests": 1
+    },
+    "tray/test_eventstream": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 12.565,
+      "tests": 8
+    },
+    "tray/test_externalfile": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 0.126,
+      "tests": 5
+    },
+    "tray/test_fleetstate": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 0.105,
+      "tests": 28
+    },
+    "tray/test_gotodialog": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 0.093,
+      "tests": 12
+    },
+    "tray/test_hgsclient": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 26.576,
+      "tests": 72
+    },
+    "tray/test_iconfactory": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 0.112,
+      "tests": 16
+    },
+    "tray/test_ironrules": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 0.167,
+      "tests": 3
+    },
+    "tray/test_jsonparse": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 0.567,
+      "tests": 6
+    },
+    "tray/test_keyboardsettings": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 0.734,
+      "tests": 14
+    },
+    "tray/test_machinefilter": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 0.631,
+      "tests": 6
+    },
+    "tray/test_machineplatform": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 0.112,
+      "tests": 13
+    },
+    "tray/test_machinespage": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 10.309,
+      "tests": 24
+    },
+    "tray/test_markdownhtml": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 0.096,
+      "tests": 26
+    },
+    "tray/test_markdownobjects": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 12.346,
+      "tests": 17
+    },
+    "tray/test_messagecomposer": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 25.454,
+      "tests": 90
+    },
+    "tray/test_mobiledeliverysettings": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 0.753,
+      "tests": 1
+    },
+    "tray/test_nativeuiview": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 0.856,
+      "tests": 6
+    },
+    "tray/test_newsessiondialog": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 60.723,
+      "tests": 1
+    },
+    "tray/test_opencodemodelpicker": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 0.866,
+      "tests": 17
+    },
+    "tray/test_paintcache": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 12.815,
+      "tests": 3
+    },
+    "tray/test_phonepairing": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 5.191,
+      "tests": 1
+    },
+    "tray/test_processrunner": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 3.704,
+      "tests": 21
+    },
+    "tray/test_processview": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 7.498,
+      "tests": 5
+    },
+    "tray/test_projectsdialog": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 6.964,
+      "tests": 28
+    },
+    "tray/test_questioncard": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 26.043,
+      "tests": 47
+    },
+    "tray/test_quiettrayicon": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 0.006,
+      "tests": 11
+    },
+    "tray/test_readmarksync": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 9.318,
+      "tests": 8
+    },
+    "tray/test_relaysettings": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 0.006,
+      "tests": 19
+    },
+    "tray/test_sessioncreation": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 5.141,
+      "tests": 1
+    },
+    "tray/test_sessionsearch": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 11.477,
+      "tests": 16
+    },
+    "tray/test_shortcuts": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 0.432,
+      "tests": 14
+    },
+    "tray/test_socraticodepanel": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 4.896,
+      "tests": 1
+    },
+    "tray/test_speech": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 38.604,
+      "tests": 62
+    },
+    "tray/test_swarmbutton": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 0.231,
+      "tests": 3
+    },
+    "tray/test_swarmcontroller": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 11.657,
+      "tests": 1
+    },
+    "tray/test_taskboard": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 0.003,
+      "tests": 4
+    },
+    "tray/test_taskdialogs": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 2.49,
+      "tests": 13
+    },
+    "tray/test_taskdrag": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 13.281,
+      "tests": 18
+    },
+    "tray/test_tasksview": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 21.712,
+      "tests": 36
+    },
+    "tray/test_teams": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 2.606,
+      "tests": 37
+    },
+    "tray/test_teamsui": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 115.825,
+      "tests": 157
+    },
+    "tray/test_terminalbackend": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 0.004,
+      "tests": 29
+    },
+    "tray/test_traymenu": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 0.007,
+      "tests": 13
+    },
+    "tray/test_ui_language": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 0.16,
+      "tests": 5
+    },
+    "tray/test_updates": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 2.408,
+      "tests": 27
+    },
+    "tray/test_watchdog": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 7.78,
+      "tests": 6
+    },
+    "tray/test_windowsdesktop": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 8.42,
+      "tests": 18
+    },
+    "tray/test_windowsmobilesettings": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 27.213,
+      "tests": 3
+    },
+    "tray/test_workspace": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 0.732,
+      "tests": 42
+    },
+    "tray/test_workspacesettings": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 10.861,
+      "tests": 14
+    },
+    "tray/test_worktreepanel": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 32.178,
+      "tests": 1
+    },
+    "tray/test_worktreesettings": {
+      "recorded": "2026-10-28",
+      "runs": 1,
+      "seconds": 0.599,
+      "tests": 1
+    }
+  },
+  "schema": 1,
+  "targets": {
+    "python/test_account_lifecycle": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 12.0
+    },
+    "python/test_account_mcp": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 1.0
+    },
+    "python/test_accounts": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 27.0
+    },
+    "python/test_agent_compatibility": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 0.0
+    },
+    "python/test_arch_setup": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 0.0
+    },
+    "python/test_ci_security": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 0.0
+    },
+    "python/test_claude_approval_native": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 0.0
+    },
+    "python/test_claude_input_native": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 0.0
+    },
+    "python/test_claude_permission": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 10.0
+    },
+    "python/test_claude_permission_native": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 0.0
+    },
+    "python/test_claude_questions_native": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 0.0
+    },
+    "python/test_claude_resume": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 8.0
+    },
+    "python/test_claude_resume_native": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 0.0
+    },
+    "python/test_claude_trust": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 15.0
+    },
+    "python/test_claude_trust_native": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 0.0
+    },
+    "python/test_clear_context": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 11.0
+    },
+    "python/test_clear_context_native": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 0.0
+    },
+    "python/test_codex_async_questions": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 26.0
+    },
+    "python/test_codex_goal_resume": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 15.0
+    },
+    "python/test_codex_hooks_trust": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 21.0
+    },
+    "python/test_codex_trust": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 21.0
+    },
+    "python/test_codex_update": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 38.0
+    },
+    "python/test_compact_context": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 18.0
+    },
+    "python/test_compact_context_native": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 0.0
+    },
+    "python/test_deepseek_accounts": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 6.0
+    },
+    "python/test_dev_updates": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 0.0
+    },
+    "python/test_download": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 1.0
+    },
+    "python/test_dsh_legacy": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 6.0
+    },
+    "python/test_dsh_session_actions": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 0.0
+    },
+    "python/test_effort": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 6.0
+    },
+    "python/test_external_agents_native": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 0.0
+    },
+    "python/test_fork": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 7.0
+    },
+    "python/test_git_status": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 6.0
+    },
+    "python/test_history_stop_clipping": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 1.0
+    },
+    "python/test_input": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 43.0
+    },
+    "python/test_kimi_cache_hint": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 18.0
+    },
+    "python/test_kimi_trust": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 18.0
+    },
+    "python/test_launchd_agent": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 0.0
+    },
+    "python/test_mac_install": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 3.0
+    },
+    "python/test_machines": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 6.0
+    },
+    "python/test_macos_bundle": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 0.0
+    },
+    "python/test_macos_package": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 0.0
+    },
+    "python/test_macos_qt": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 0.0
+    },
+    "python/test_macos_setup": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 3.0
+    },
+    "python/test_macos_signing": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 0.0
+    },
+    "python/test_mobile_peers": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 53.0
+    },
+    "python/test_mobile_release": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 0.0
+    },
+    "python/test_mobile_worktrees_native": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 16.0
+    },
+    "python/test_mobile_worktrees_transport": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 36.0
+    },
+    "python/test_nightly_publication": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 1.0
+    },
+    "python/test_pause": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 130.0
+    },
+    "python/test_presence": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 1.0
+    },
+    "python/test_process_control": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 4.0
+    },
+    "python/test_public_history_contract": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 4.0
+    },
+    "python/test_questions": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 9.0
+    },
+    "python/test_read_marks": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 11.0
+    },
+    "python/test_recovery": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 10.0
+    },
+    "python/test_recovery_native": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 0.0
+    },
+    "python/test_release_publication": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 1.0
+    },
+    "python/test_scoped_lifecycle": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 3.0
+    },
+    "python/test_scoped_recovery": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 0.0
+    },
+    "python/test_search": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 0.0
+    },
+    "python/test_session_actions": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 12.0
+    },
+    "python/test_session_references": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 2.0
+    },
+    "python/test_settings": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 23.0
+    },
+    "python/test_source_privacy": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 0.0
+    },
+    "python/test_speech": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 3.0
+    },
+    "python/test_speech_profiles": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 39.0
+    },
+    "python/test_speech_setup": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 0.0
+    },
+    "python/test_status": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 1.0
+    },
+    "python/test_swarm": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 37.0
+    },
+    "python/test_terminal": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 3.0
+    },
+    "python/test_tray_update": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 14.0
+    },
+    "python/test_update_feed": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 0.0
+    },
+    "python/test_voice": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 58.0
+    },
+    "python/test_windows_client": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 0.0
+    },
+    "python/test_windows_publication": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 1.0
+    },
+    "python/test_worktrees": {
+      "recorded": "2026-10-31",
+      "runs": 1,
+      "seconds": 18.0
+    }
+  }
+}

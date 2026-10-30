@@ -174,6 +174,10 @@ pub(crate) fn branch_name(template: &str, id: u32, member: &str, team8: &str) ->
 }
 
 fn validate_settings(settings: &Settings) -> anyhow::Result<()> {
+    ensure!(
+        settings.tests.as_ref().is_none_or(|tests| tests.is_object()),
+        "The tests override is an object shaped like .zerus/tests.toml"
+    );
     ensure!((1..=32).contains(&settings.max_members), "A team has 1 to 32 members");
     ensure!(
         (30..=3600).contains(&settings.start_timeout_seconds),
@@ -877,7 +881,7 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
 /// C4: the settings that decide who approves, how far a team may grow and
 /// what runs without the owner stay the owner's; the lead changes the rest.
 /// Spec 6.1 lets the lead set resume_after_limits too.
-pub(crate) const OWNER_SETTINGS: [&str; 16] = [
+pub(crate) const OWNER_SETTINGS: [&str; 17] = [
     "approval",
     "phase_approval",
     "max_members",
@@ -898,6 +902,8 @@ pub(crate) const OWNER_SETTINGS: [&str; 16] = [
     "restart_crashed",
     // U56: only the owner lets the lead restart a stuck member.
     "lead_restarts_stuck",
+    // U62: the owner's override of the project's test configuration.
+    "tests",
 ];
 
 fn ensure_lead_settings(old: &Settings, new: &Settings, actor: &Actor, on_word: bool) -> anyhow::Result<()> {
@@ -4474,20 +4480,16 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
             let id = member_id;
             let by = actor.label(team);
             let member = team.members.iter_mut().find(|m| m.id == id).context("Unknown member")?;
-            if member.session.is_some() && member.stuck.is_some() {
-                // #728 (#709 N4, #645 N2): the real route for a stuck member, the
-                // owner's and, with lead_restarts_stuck, the lead's. The worker
-                // interrupts the session's turn and continues it, or relaunches
-                // the session in its own conversation (dispatcher::restart_stuck).
-                // The request is spent once; the stuck mark goes now.
-                let stuck = member.stuck.take().unwrap_or_default();
-                member.restart = Some(MemberRestart { at: now(), by: by.clone(), reason: stuck.reason.clone() });
-                member.seen_phase.clear();
-                member.seen_activity.clear();
-                member.seen_event_at = None;
-                let role = team.role_of(&id);
-                events.push(Event::new("member_restart_requested", json!({"by":by,"member":role,"reason":stuck.reason})));
-                return Ok(json!({"status":"restarting","member":id}));
+            if member.stuck.is_some() {
+                // U56/#728: the real route for a stuck member: the dispatcher
+                // interrupts its session and resumes it in its conversation;
+                // the lead needs no word when the owner set lead_restarts_stuck,
+                // and the owner has the same route.
+                member.restart_pending = true;
+                member.error.clear();
+                member.launch_id.clear();
+                events.push(Event::new("member_restart_requested", json!({"by":by,"member":id})));
+                return Ok(json!({"status":"relaunching","member":id}));
             }
             ensure!(member.session.is_none() && !member.error.is_empty(), "This member's session did not fail to start");
             member.error.clear();
@@ -6776,11 +6778,12 @@ mod tests {
         assert!(error.contains("lead_restarts_stuck"), "{error}");
         team.settings.lead_restarts_stuck = true;
         let receipt = apply(&mut team, "relaunch", &json!({"member":"qa"}), &lead, &none, &mut events).unwrap();
-        assert_eq!((receipt["status"].as_str(), receipt["member"].as_str()), (Some("restarting"), Some("qa")));
-        // #728: the step is real: a restart request the worker spends.
-        let qa = team.member("qa").unwrap();
-        assert!(qa.stuck.is_none());
-        assert_eq!(qa.restart.as_ref().map(|restart| (restart.by.as_str(), restart.reason.as_str())), Some(("Lead", "no_progress")));
+        // #728: the request records a pending restart; the dispatcher interrupts
+        // and resumes the session and only then clears the mark.
+        assert_eq!((receipt["status"].as_str(), receipt["member"].as_str()), (Some("relaunching"), Some("qa")));
+        let qa = team.members.iter().find(|member| member.id == "qa").unwrap();
+        assert!(qa.restart_pending);
+        assert!(qa.stuck.is_some());
         assert!(events.iter().any(|event| event.kind == "member_restart_requested"));
     }
 
@@ -8810,6 +8813,29 @@ mod tests {
         assert!(error.starts_with("Only you change the team's approval"), "{error}");
         apply(&mut team, "settings", &json!({"settings":{"resume_after_limits":true}}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
         assert!(team.settings.resume_after_limits);
+    }
+
+    /// U62: the test configuration's override is the owner's, an object the
+    /// project file merges under.
+    #[test]
+    fn only_the_owner_overrides_the_test_configuration() {
+        let mut team = running_team();
+        let none = BTreeSet::new();
+        let mut events = Vec::new();
+        let tests = json!({"full":{"policy":"standing"},"provider":[{"name":"tray","disabled":true}]});
+        let error = apply(&mut team, "settings", &json!({"settings":{"tests":tests}}), &Actor::Member("lead".into()), &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert!(error.starts_with("Only you change the team's tests"), "{error}");
+        let error = apply(&mut team, "settings", &json!({"settings":{"tests":"all"}}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
+        assert!(error.contains("The tests override is an object"), "{error}");
+        apply(&mut team, "settings", &json!({"settings":{"tests":tests}}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(team.settings.tests.as_ref(), Some(&tests));
+        // The lead still changes its own settings without touching it.
+        apply(&mut team, "settings", &json!({"settings":{"remind_lead_minutes":9}}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        assert_eq!(team.settings.tests.as_ref(), Some(&tests));
+        let value = serde_json::to_value(&team.settings).unwrap();
+        assert_eq!(value["tests"]["full"]["policy"], "standing");
     }
 
     #[test]

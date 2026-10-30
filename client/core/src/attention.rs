@@ -195,13 +195,18 @@ pub fn gone_text(name: &str) -> String {
 /// The tracker's saved state: the client's own file; on its first start,
 /// Qt's `attention/observed` value (Decision 11).
 pub fn seed(own: Option<&[u8]>, qt: Option<&[u8]>) -> Map<String, Value> {
-    let parse = |bytes: &[u8]| match serde_json::from_slice(bytes) {
+    match own {
+        Some(bytes) => decode_observed(bytes).unwrap_or_default(),
+        None => qt.and_then(decode_observed).unwrap_or_default(),
+    }
+}
+
+/// The original seed parser, shared with read-only migration. This only
+/// decodes the saved object; it establishes no live notification identity.
+pub(crate) fn decode_observed(bytes: &[u8]) -> Option<Map<String, Value>> {
+    match serde_json::from_slice(bytes) {
         Ok(Value::Object(map)) => Some(map),
         _ => None,
-    };
-    match own {
-        Some(bytes) => parse(bytes).unwrap_or_default(),
-        None => qt.and_then(parse).unwrap_or_default(),
     }
 }
 

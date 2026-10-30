@@ -32,7 +32,9 @@ for name in ('HGS_SESSION', 'HGS_RUN_ID'):
     env.pop(name, None)  # an SSH login is no agent
 args = shlex.split(sys.argv[-1])[1:]
 with (root / 'calls').open('a') as file: file.write(alias + ' ' + ' '.join(args) + '\\n')
-if (root / ('dropafter-' + alias)).exists() and args[:2] == ['task', 'send']:
+if (root / ('oldcancel-' + alias)).exists() and args[:2] == ['task', 'cancel-execution']:
+    print('hgs: usage: hgs task cancel REF', file=sys.stderr); sys.exit(1)
+if (root / ('dropafter-' + alias)).exists() and args[:2] in (['task', 'send'], ['task', 'cancel-execution'], ['task', 'start-deliver']):
     # The connection drops after that computer pasted and answered.
     subprocess.run([os.environ['ROUTING_HGS'], *args], input=sys.stdin.read(), env=env, text=True, capture_output=True)
     print('Connection reset by peer', file=sys.stderr); sys.exit(255)
@@ -223,6 +225,63 @@ class TaskRouting(unittest.TestCase):
             view = self.get(node, task)
             self.assertEqual(view["stage"], "review", node)
             self.assertIn("Wrong approach", [e.get("text") for e in view["log"]], node)
+
+    def test_start_plan_and_readonly_recovery_route_the_original_identity(self):
+        task = self.add("A routed guarded start", "--target", "codex/remote", "--host", "b")
+        current = self.get("a", task)
+        record = json.loads(self.record.read_text())
+        request = dict(schema=1, id=str(uuid.uuid4()), stage_at=current["stage_at"], target=current["target"],
+                       selection=dict(host="b", name="codex/remote", session_id="run_id:" + record["run_id"],
+                                      run_id=record["run_id"], conversation_id=record["conversation_id"]))
+        plan = self.task("a", "start-plan", task["id"], "--project", "project-1", text=json.dumps(request))["plan"]
+        self.assertEqual(plan["selection"]["host"], "")
+        self.assertEqual(self.received(), "")
+        (self.root / "dropafter-b").touch()
+        self.assertIn("Connection reset", self.task("a", "start-deliver", task["id"], "--project", "project-1", text=json.dumps(plan), ok=False))
+        self.wait_received("A routed guarded start")
+        (self.root / "dropafter-b").unlink()
+        settled = self.task("a", "start-deliver", task["id"], "--project", "project-1", "--recover-only", text=json.dumps(plan))
+        self.assertEqual((settled["state"], settled["id"]), ("submitted", request["id"]))
+        self.assertEqual(self.received().count("A routed guarded start"), 1)
+        self.assertEqual(self.get("a", task)["stage"], "active")
+
+    def test_guarded_cancellation_routes_exact_payload_and_refuses_unknown_replay(self):
+        task = self.add("Check pinned cancellation", "--target", "codex/remote", "--host", "b")
+        self.task("a", "send", task["id"], "--project", "project-1")
+        self.wait_received("Check pinned cancellation")
+        self.confirm()
+        sent = self.get("a", task)
+        request = dict(schema=1, dispatch_id=sent["dispatch_id"], stage_at=sent["stage_at"], machine=sent["session"]["machine"],
+                       session_id=sent["session"]["session_id"], reason="--agent")
+        (self.root / "oldcancel-b").touch()
+        self.assertIn("usage", self.task("a", "cancel-execution", task["id"], "--project", "project-1", text=json.dumps(request), ok=False))
+        self.assertEqual(self.get("a", task)["stage"], "active")
+        self.assertNotIn("cancelled]", self.received())
+        (self.root / "oldcancel-b").unlink()
+        (self.root / "dropafter-b").touch()
+        error = self.task("a", "cancel-execution", task["id"], "--project", "project-1", text=json.dumps(request), ok=False)
+        self.assertIn("Connection reset", error)
+        self.wait_received(" cancelled]")
+        self.assertEqual(self.get("b", task)["stage"], "review")
+        (self.root / "dropafter-b").unlink()
+        self.assertIn("changed", self.task("a", "cancel-execution", task["id"], "--project", "project-1", text=json.dumps(request), ok=False))
+        self.assertEqual(self.received().count(" cancelled]"), 1)
+        self.assertNotIn("--agent", self.received())
+        self.assertIn("--agent", [e.get("text") for e in self.get("b", task)["log"]])
+
+    def test_guarded_cancellation_offline_fallback_checks_same_execution(self):
+        task = self.add("Offline cancellation", "--target", "codex/remote", "--host", "b")
+        self.task("a", "send", task["id"], "--project", "project-1")
+        self.wait_received("Offline cancellation")
+        sent = self.get("a", task)
+        request = dict(schema=1, dispatch_id=sent["dispatch_id"], stage_at=sent["stage_at"], machine=sent["session"]["machine"],
+                       session_id=sent["session"]["session_id"], reason="No longer needed")
+        (self.root / "offline-b").touch()
+        out = self.task("a", "cancel-execution", task["id"], "--project", "project-1", text=json.dumps(request))
+        self.assertEqual(out["task"]["stage"], "review")
+        self.assertNotIn("log", out["task"])
+        self.assertFalse(out["cancel_message"]["sent"])
+        self.assertNotIn("cancelled]", self.received())
 
     def test_an_unreachable_computer_refuses_a_send_and_records_nothing(self):
         task = self.add("Add rate limiting", "--target", "codex/remote", "--host", "b")

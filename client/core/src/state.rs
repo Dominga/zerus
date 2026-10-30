@@ -173,19 +173,23 @@ impl CatalogState {
             Body::Hello(hello) => {
                 self.hello = Some(hello.clone());
                 self.begin();
-                // Archive pages need the local machine identity even with an
-                // empty catalog, before (or without) catalog.meta. Keep card
-                // facts across reconnects; hello only supplies the host name.
+                // Retain display facts across reconnects, but bind the physical
+                // identity to this hello. An unknown/legacy hello clears it,
+                // including when the new host caption is absent.
+                let mut machine = self.machine.clone().unwrap_or_default();
                 if !hello.host.is_empty() {
-                    let mut machine = self.machine.clone().unwrap_or_default();
                     machine.host = Some(hello.host.clone());
-                    if self.machine.as_ref() != Some(&machine) {
-                        self.machine = Some(machine.clone());
-                        changes.push(Change::Machine {
-                            computer: computer.clone(),
-                            machine,
-                        });
-                    }
+                }
+                machine.machine_id = hello
+                    .machine_id
+                    .clone()
+                    .filter(|id| crate::creation::canonical_uuid(id));
+                if self.machine.as_ref() != Some(&machine) {
+                    self.machine = Some(machine.clone());
+                    changes.push(Change::Machine {
+                        computer: computer.clone(),
+                        machine,
+                    });
                 }
             }
             Body::Snapshot(snapshot) if snapshot.topic == topic::CATALOG => {
@@ -200,7 +204,7 @@ impl CatalogState {
                     else {
                         continue;
                     };
-                    staged.insert(key.to_owned(), project(row, &machine));
+                    staged.insert(key.to_owned(), project(row, &machine, computer));
                 }
                 if snapshot.last {
                     let rows = self.staged.take().unwrap_or_default();
@@ -248,7 +252,7 @@ impl CatalogState {
                 let mut upserts: Vec<(&String, ViewRow)> = delta
                     .upsert
                     .iter()
-                    .map(|item| (&item.key, project(&item.row, &machine)))
+                    .map(|item| (&item.key, project(&item.row, &machine, computer)))
                     .collect();
                 // The rows before this frame are Qt's `before`, read once per frame.
                 Before::index(&self.rows, upserts.iter().map(|(_, row)| row))
@@ -469,6 +473,12 @@ impl CatalogState {
     /// Keeps a `catalog.meta` value; a changed machine card is a change.
     fn set_meta(&mut self, computer: &ComputerId, meta: Value) -> Option<Change> {
         let mut machine = crate::MachineMeta::project(&meta);
+        if let Some(hello) = &self.hello {
+            machine.machine_id = hello
+                .machine_id
+                .clone()
+                .filter(|id| crate::creation::canonical_uuid(id));
+        }
         if machine.host.as_deref().is_none_or(str::is_empty) {
             machine.host = self
                 .hello
@@ -501,7 +511,7 @@ impl CatalogState {
             .filter_map(|row| {
                 let name = row["name"].as_str()?;
                 let key = zerus_watch_protocol::key_for(row["run_id"].as_str(), name);
-                Some((key, project(row, &machine)))
+                Some((key, project(row, &machine, computer)))
             })
             .collect();
         let mut changes = self.replace_rows(computer, rows);
@@ -659,12 +669,22 @@ impl CatalogState {
             _ => 1,
         };
         self.last_failure = Some(now);
-        vec![Change::Computer {
+        let mut changes = vec![Change::Computer {
             computer: computer.clone(),
             status: ComputerStatus::Reconnecting {
                 attempt: self.failures,
             },
-        }]
+        }];
+        let keys: Vec<String> = self.tasks.keys().cloned().collect();
+        for key in keys {
+            changes.extend(self.tasks.unavailable(
+                computer,
+                &key,
+                "disconnected",
+                "The task connection was interrupted. Reconnecting…",
+            ));
+        }
+        changes
     }
 
     /// Whether this attempt has ended.
@@ -980,9 +1000,10 @@ impl<'a> Before<'a> {
     }
 }
 
-fn project(row: &Value, machine: &str) -> ViewRow {
+fn project(row: &Value, machine: &str, computer: &ComputerId) -> ViewRow {
     let mut view = view::row(row);
     view.machine = machine.to_owned();
+    view.compact_keys = crate::row_preferences::keys(&computer.0, &view);
     view
 }
 
@@ -999,6 +1020,66 @@ mod tests {
     use super::*;
     use serde_json::json;
     use zerus_watch_protocol::decode;
+
+    #[test]
+    fn physical_computer_identity_survives_metadata_without_becoming_a_host_alias() {
+        let computer = ComputerId::local();
+        let mut state = CatalogState::new();
+        let mut hello = fixture("basic.ndjson").remove(0);
+        let Body::Hello(value) = &mut hello.body else {
+            panic!("hello")
+        };
+        value.machine_id = Some("11111111-1111-4111-8111-111111111111".into());
+        state.apply(&computer, &hello);
+        let mut meta = serde_json::json!({"host":"display-alias","ok":true});
+        state.set_meta(&computer, meta.clone());
+        assert_eq!(
+            state.machine.as_ref().unwrap().machine_id.as_deref(),
+            Some("11111111-1111-4111-8111-111111111111")
+        );
+        let Body::Hello(value) = &mut hello.body else {
+            unreachable!()
+        };
+        value.machine_id = Some("22222222-2222-4222-8222-222222222222".into());
+        state.apply(&computer, &hello);
+        state.set_meta(&computer, meta.clone());
+        assert_eq!(
+            state.machine.as_ref().unwrap().machine_id.as_deref(),
+            Some("22222222-2222-4222-8222-222222222222")
+        );
+        let Body::Hello(value) = &mut hello.body else {
+            unreachable!()
+        };
+        value.machine_id = None;
+        value.host.clear();
+        state.apply(&computer, &hello);
+        meta["machine_id"] = serde_json::json!("11111111-1111-4111-8111-111111111111");
+        state.set_meta(&computer, meta);
+        assert!(
+            state.machine.as_ref().unwrap().machine_id.is_none(),
+            "a legacy/unknown hello cannot retain the previous peer identity"
+        );
+    }
+
+    #[test]
+    fn raw_lifecycle_does_not_stage_or_retain_a_large_catalog() {
+        let mut state = CatalogState::new();
+        let computer = ComputerId::local();
+        for n in 0..50_000 {
+            let page = frame(json!({"v":1,"seq":n+1,"t":"snapshot","topic":"catalog",
+                "page":n,"last":n==49_999,"cursor":1,"items":[{"key":format!("run:{n}"),
+                "row":{"name":format!("s-{n}"),"run_id":format!("r-{n}")}}]}));
+            assert!(crate::stream::source_lifecycle(&mut state, &computer, &page).is_empty());
+        }
+        assert!(state.rows.is_empty());
+        assert!(state.staged.is_none());
+        assert!(state.activity.is_empty());
+        let fatal = frame(json!({"v":1,"seq":50001,"t":"error","code":"failed",
+            "message":"fixture","topic":"organization","fatal":true}));
+        crate::stream::source_lifecycle(&mut state, &computer, &fatal);
+        assert!(state.failed());
+        println!("raw lifecycle: 50000 source rows, zero resident or staged catalog rows");
+    }
 
     fn fixture(name: &str) -> Vec<Frame> {
         let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));

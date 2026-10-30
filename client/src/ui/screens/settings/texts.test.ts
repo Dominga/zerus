@@ -13,6 +13,10 @@ const repo = new URL("../../../../../", import.meta.url);
 const qt = ["tray/src/SettingsPage.h", "tray/src/UiLanguage.h"].map((file) => fs.readFileSync(new URL(file, repo), "utf8")).join("\n");
 const source = (file: string) => fs.readFileSync(new URL(file, here), "utf8");
 const layer = fs.readFileSync(new URL("tray/src/WindowLayer.cpp", repo), "utf8");
+// Since the shared Keep Above state (zerus-5wmh.24.2) the hints come from the
+// window layer: its store and the native layer that reports them.
+const clientLayer = [fs.readFileSync(new URL("../../../store/windowLayer.ts", here), "utf8"),
+  fs.readFileSync(new URL("client/src-tauri/src/window_layer.rs", repo), "utf8")].join("\n");
 const keyboard = fs.readFileSync(new URL("tray/src/KeyboardSettings.cpp", repo), "utf8");
 const shortcuts = fs.readFileSync(new URL("tray/src/Shortcuts.cpp", repo), "utf8");
 const store = fs.readFileSync(new URL("../../../store/shortcuts.ts", here), "utf8");
@@ -441,9 +445,9 @@ describe("Settings texts", () => {
     expect(qt).toContain(`"${template}"`);
     expect(source("Appearance.tsx")).toContain(shown);
   });
-  it.each(WINDOW_LAYER)("Appearance shows WindowLayer's %s", (text) => {
+  it.each(WINDOW_LAYER)("Keep Above shows WindowLayer's %s", (text) => {
     expect(layer).toContain(`"${text}"`);
-    expect(source("Appearance.tsx")).toContain(text);
+    expect(clientLayer).toContain(text);
   });
   it.each(SESSIONS)("Sessions shows Qt's %s", (text) => {
     expect(qt).toContain(`"${text}"`);

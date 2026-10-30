@@ -18,12 +18,14 @@ const TOPICS: &[(&str, &str)] = &[
     ("team-safe", include_str!("agent_guide/team-safe.md")),
     ("team-propose", include_str!("agent_guide/team-propose.md")),
     ("run", include_str!("agent_guide/run.md")),
+    // WhiteWh fork (U62): the project's affected tests.
+    ("tests", include_str!("agent_guide/tests.md")),
     ("designer", include_str!("agent_guide/designer.md")),
     ("launch", include_str!("agent_guide/launch.md")),
     ("stop", include_str!("agent_guide/stop.md")),
     ("tasks", include_str!("agent_guide/tasks.md")),
 ];
-const USAGE: &str = "usage: hgs guide [send|wait|team|team-lead|team-custom|team-draft|team-tree|team-run|team-safe|team-propose|run|designer|launch|stop|tasks]";
+const USAGE: &str = "usage: hgs guide [send|wait|team|team-lead|team-custom|team-draft|team-tree|team-run|team-safe|team-propose|run|tests|designer|launch|stop|tasks]";
 
 pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
     let text = match args {

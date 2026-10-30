@@ -10,7 +10,7 @@ use super::store::{self, canonical_uuid, Event, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|move-task|add-to-phase|approve-phase|discard-phase|return-to-draft|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|spans|profile|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|close-phase|integrate-build|start-ahead|run|templates|safe-action|reports-to|sub-lead --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|move-task|add-to-phase|approve-phase|discard-phase|return-to-draft|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|spans|profile|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|close-phase|integrate-build|start-ahead|test|run|templates|safe-action|reports-to|sub-lead --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
 
 const MUTATIONS: &[&str] = &[
     "plan", "extend", "edit-draft", "move-phase", "move-task", "add-to-phase", "approve-phase", "discard-phase", "return-to-draft", "reject-phase", "undo-reject-phase",
@@ -2405,16 +2405,109 @@ fn profile_of(store: &Store, team: &Team, chosen: &[&Task], page: &super::profil
     };
     let holders = spans::holders(team, now);
     let timelines: Vec<Value> = chosen.iter().map(|task| spans::spans(team, task, &journal, &holders, now)).collect();
+    // #736: every phase's timelines decide whether a member was really idle:
+    // work on another phase's task (or one moved between phases) is not idle.
+    let all: Vec<Value> = team.tasks.iter().map(|task| spans::spans(team, task, &journal, &holders, now)).collect();
     let asks = profile::asks(&timelines, now);
     let (tokens, capped) = if read {
         profile::read_tokens(team, &asks)
     } else {
         (asks.iter().map(|ask| ((ask.task, ask.part.clone()), None)).collect(), false)
     };
-    let mut value = profile::profile(team, chosen, &timelines, &tokens, page, now);
+    let mut value = profile::profile(team, chosen, &timelines, &all, &tokens, page, now);
     value["events"] = json!({"read":journal.len(),"truncated":cut});
     value["token_reads"] = json!({"asked":asks.len(),"read":if read { asks.len().min(profile::TOKEN_READS) } else { 0 },"truncated":capped});
     Ok(value)
+}
+
+/// #717: the suite's targets from the project's map for the task's diff against
+/// the lead branch; an empty list when the project has no map or no change.
+fn affected_targets(project: &std::path::Path, team: &str, suite: &str) -> anyhow::Result<Vec<String>> {
+    let loaded = crate::test_discipline::load(project, Some(team))?;
+    let config = &loaded.config;
+    let text = std::fs::read_to_string(project.join(&config.map.file)).map_err(|error| anyhow::anyhow!("{error}"))?;
+    let map: crate::test_discipline::map::TestMap = serde_json::from_str(&text)?;
+    let durations = crate::test_discipline::durations::Durations::read(&project.join(&config.map.durations)).map_err(|error| anyhow::anyhow!("{error}"))?;
+    let changed = super::dispatcher::git_at(&project.to_string_lossy(), &["diff", "--name-only", "teams-v2/lead"]).unwrap_or_default();
+    let files: Vec<String> = changed.lines().map(|line| line.trim().to_owned()).filter(|line| !line.is_empty()).collect();
+    let selection = crate::test_discipline::affected::select(project, config, &map, &durations, &files, &Default::default(), false);
+    Ok(selection.runs.iter().filter(|run| run.provider == suite).flat_map(|run| run.targets.clone()).collect())
+}
+
+/// #717: `hgs team test submit|force|results` on the team's test database.
+fn test_command(input: &Value) -> anyhow::Result<Value> {
+    use super::test_queue::{self, Load, TestStore};
+    let team_id = text(input, "team").to_owned();
+    let store = Store::open(false)?;
+    let team = store.load(&team_id)?.context("Unknown team")?;
+    let action = text(input, "action");
+    let database = TestStore::open(false)?;
+    let project = std::path::PathBuf::from(&team.folder);
+    let asked_by = if text(input, "by").is_empty() { input["asked_by"].as_str().unwrap_or_default().to_owned() } else { text(input, "by").to_owned() };
+    let load = Load {
+        cpu_free: input["cpu_free"].as_u64().map_or(16, |n| n as u32),
+        ram_free_mb: input["ram_free_mb"].as_u64().map_or(32_000, |n| n as u32),
+        gpu_free: input["gpu_free"].as_bool().unwrap_or(true),
+        at_night: input["night"].as_bool().unwrap_or(false),
+    };
+    let classes = match crate::test_discipline::load(&project, Some(&team_id)) {
+        Ok(loaded) => loaded.config.resources,
+        Err(_) => Default::default(),
+    };
+    match action {
+        "submit" | "force" => {
+            let suite = text(input, "suite");
+            ensure!(!suite.is_empty(), "A test request names a suite");
+            let mut targets: Vec<String> = input["targets"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
+            // #717: without listed targets the task's diff against the lead
+            // branch names them through the project's test map.
+            if targets.is_empty() {
+                if let Ok(found) = affected_targets(&project, &team_id, suite) {
+                    targets = found;
+                }
+            }
+            let mut request = test_queue::suite_from_config(&project, Some(&team_id), suite, &targets)?;
+            request.id = uuid::Uuid::new_v4().to_string();
+            request.team = team_id.clone();
+            request.task = input["task"].as_u64().and_then(|id| u32::try_from(id).ok());
+            request.asked_by = if asked_by.is_empty() { "You".to_owned() } else { asked_by };
+            request.forced = action == "force";
+            request.commit = if text(input, "commit").is_empty() {
+                super::dispatcher::git_at(&project.to_string_lossy(), &["rev-parse", "HEAD"]).unwrap_or_default()
+            } else {
+                text(input, "commit").to_owned()
+            };
+            let mut hash = sha2::Sha256::new();
+            use sha2::Digest;
+            hash.update(request.suite.as_bytes());
+            hash.update(request.commit.as_bytes());
+            for target in &request.targets {
+                hash.update(target.as_bytes());
+            }
+            request.input_hash = format!("{:x}", hash.finalize());
+            if !request.forced {
+                if let Some(found) = database.reused(&request.suite, &request.commit, &request.input_hash)? {
+                    return Ok(json!({"status":"reused","record":found,"suite":request.suite}));
+                }
+            }
+            database.enqueue(&request)?;
+            if action == "submit" {
+                return Ok(json!({"status":"queued","request":request,"suite":request.suite}));
+            }
+            let queued = database.queued(&team_id)?;
+            let chosen = test_queue::schedule(&queued, &classes, &load);
+            let records = test_queue::run_due(&database, &project, &chosen, super::super::now())?;
+            Ok(json!({"status":"ran","suite":request.suite,"results":records}))
+        }
+        "results" => {
+            let limit = input["limit"].as_u64().map_or(20, |n| n as usize);
+            let before = input["before"].as_f64();
+            let records = database.results(Some(&team_id), before, limit)?;
+            let next = records.last().map(|record| record.at);
+            Ok(json!({"status":"ok","items":records,"next_cursor":next}))
+        }
+        other => anyhow::bail!("Unknown test action {other}; use submit, force or results"),
+    }
 }
 
 /// The member's live attempt from its own session; `team` is optional when the
@@ -2934,11 +3027,12 @@ fn roster_word_rule(team: &Team, op: &str, input: &Value) -> super::owner_word::
         }
         "relaunch" => {
             // U54: the lead relaunches a member's session on the owner's word.
-            // #728 (#709 N4): with lead_restarts_stuck, a member Zerus marks
-            // stuck is the lead's to restart without a word.
+            // #728: except a stuck member when the owner set lead_restarts_stuck;
+            // that route is the lead's own decision.
             let id = text(input, "member");
-            let stuck = team.member(id).is_some_and(|member| member.stuck.is_some());
-            if id.is_empty() || (team.settings.lead_restarts_stuck && stuck) {
+            if id.is_empty()
+                || (team.settings.lead_restarts_stuck && team.member(id).is_some_and(|member| member.stuck.is_some()))
+            {
                 WordRule::default()
             } else {
                 WordRule {
@@ -3576,6 +3670,11 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
     }
     if op == "safe-action" {
         return safe_action_command(input);
+    }
+    // #717: the team's test queue and its results database; only the runner
+    // writes a result, never a report.
+    if op == "test" {
+        return test_command(input);
     }
     // F8: a decision may create the next team, so it runs with the store.
     if op == "decide-proposal" {
@@ -5008,44 +5107,6 @@ mod tests {
             let phase = run("spans", &json!({"team":"rv","phase":2}), false).unwrap();
             assert_eq!(phase["tasks"].as_array().unwrap().len(), 1);
             assert!(run("spans", &json!({"team":"rv","task":99}), false).is_err());
-        });
-    }
-
-    /// #728 (#709 N4, #645 N2) through `hgs team`: with lead_restarts_stuck the
-    /// lead restarts a stuck member without the owner's word, and the step is
-    /// a restart request the worker carries out; without the setting the lead
-    /// needs the word, and the owner always has the same route.
-    #[test]
-    fn the_lead_restarts_a_stuck_member_on_the_owners_setting_without_a_word() {
-        use crate::state::teams::model::{MemberStuck, SessionRef};
-        let (mut team, _, _) = review_team();
-        for member in team.members.iter_mut().filter(|member| member.id == "dev" || member.id == "qa") {
-            member.session = Some(SessionRef { name: format!("codex/x/{}", member.id), run_id: "r1".into(), conversation_id: format!("c-{}", member.id), ..Default::default() });
-            member.stuck = Some(MemberStuck { at: 1.0, reason: "compaction_timeout".into(), phase: "compacting".into(), ..Default::default() });
-        }
-        with_review_team(&team, || {
-            assert!(MUTATIONS.contains(&"relaunch") && USAGE.contains("|relaunch|"));
-            let error = as_lead(|| call("relaunch", json!({"member":"dev"}))).unwrap_err().to_string();
-            assert!(error.contains("owner_word"), "{error}");
-            assert!(stored().member("dev").unwrap().restart.is_none());
-            call("settings", json!({"settings":{"lead_restarts_stuck":true},"by":"human"})).unwrap();
-            let receipt = as_lead(|| call("relaunch", json!({"member":"dev"}))).unwrap();
-            assert_eq!(receipt["status"], "restarting", "{receipt}");
-            let dev = stored().member("dev").unwrap().clone();
-            assert!(dev.stuck.is_none());
-            assert_eq!(dev.restart.as_ref().map(|restart| (restart.by.as_str(), restart.reason.as_str())), Some(("Lead", "compaction_timeout")));
-            // The worker's step is planned for it.
-            let steps = super::super::dispatcher::steps(&stored(), &[], 10.0);
-            assert!(steps.contains(&super::super::dispatcher::Step::RestartStuck { member: "dev".into() }), "{steps:?}");
-            // A member that is not stuck still needs the word, and is no restart.
-            assert!(as_lead(|| call("relaunch", json!({"member":"lead"}))).is_err());
-            // The owner restarts a stuck, live member by the same route.
-            let receipt = call("relaunch", json!({"member":"qa","by":"human"})).unwrap();
-            assert_eq!(receipt["status"], "restarting", "{receipt}");
-            assert_eq!(stored().member("qa").unwrap().restart.as_ref().map(|restart| restart.by.as_str()), Some("You"));
-            let events = Store::open(false).unwrap().events("rv", None, 50).unwrap();
-            let requested = events["items"].as_array().unwrap().iter().filter(|event| event["kind"] == "member_restart_requested").count();
-            assert_eq!(requested, 2);
         });
     }
 
@@ -7514,7 +7575,6 @@ mod tests {
         assert_eq!(listed["members"].as_array().unwrap().iter().find(|member| member["id"] == "dev").unwrap()["queue"], expected);
     }
 
-    /// #635 N4: status names the task and stage that hold each member's folder,
     /// so clients need not derive the hold from inbox text.
     #[test]
     fn status_gives_each_member_the_task_and_stage_that_hold_its_folder() {
@@ -7551,6 +7611,30 @@ mod tests {
         let value = view_with(&team, &[], None);
         assert_eq!(member(&value, "dev")["held_by"], json!({"task":1,"stage":"test"}));
         assert!(member(&value, "lead").get("held_by").is_none());
+    }
+
+    /// #717: submit queues, force runs within the resource rule, results list it.
+    #[test]
+    fn test_submit_force_and_results_use_the_projects_suite() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".zerus")).unwrap();
+        std::fs::write(
+            dir.path().join(".zerus/tests.toml"),
+            "version = 1\n[budgets]\nsuite_minutes = 1\n[[provider]]\nname = \"echo\"\nkind = \"command\"\ncommand = \"echo hello\"\n",
+        )
+        .unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let id = "11111111-1111-4111-8111-111111111111";
+            let team = Team { id: id.into(), lead: "lead".into(), folder: dir.path().display().to_string(), ..Default::default() };
+            let mut store = Store::open_at(&super::super::store::path(), true).unwrap();
+            store.create(id, &json!({}), team, vec![]).unwrap();
+            let queued = run("test", &json!({"team":id,"action":"submit","suite":"echo","targets":[]}), false).unwrap();
+            assert_eq!(queued["status"], "queued", "{queued}");
+            let ran = run("test", &json!({"team":id,"action":"force","suite":"echo","targets":[]}), false).unwrap();
+            assert_eq!(ran["results"][0]["status"], "passed", "{ran}");
+            let listed = run("test", &json!({"team":id,"action":"results"}), false).unwrap();
+            assert!(!listed["items"].as_array().unwrap().is_empty(), "{listed}");
+        });
     }
 
     #[test]
@@ -8481,6 +8565,34 @@ mod tests {
             // The owner starts it too.
             let again = call("start-ahead", json!({"phase":9,"by":"human"})).unwrap();
             assert_eq!(again["status"], json!("started"));
+        });
+    }
+
+    /// #728: the lead relaunches a stuck member on the owner's setting without a
+    /// word; the owner has the same route; without the setting the word is still
+    /// asked.
+    #[test]
+    fn the_lead_relaunches_a_stuck_member_with_lead_restarts_stuck() {
+        use crate::state::teams::model::MemberStuck;
+        let (mut team, _, _) = review_team();
+        team.settings.lead_restarts_stuck = true;
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().stuck =
+            Some(MemberStuck { at: 1.0, reason: "no_progress".into(), phase: "tool".into(), ..Default::default() });
+        with_review_team(&team, || {
+            let receipt = as_lead(|| call("relaunch", json!({"member":"dev"}))).unwrap();
+            assert_eq!(receipt["status"], json!("relaunching"));
+            assert!(stored().member("dev").unwrap().restart_pending);
+            // The owner takes the same route.
+            let owner = call("relaunch", json!({"member":"dev","by":"human"})).unwrap();
+            assert_eq!(owner["status"], json!("relaunching"));
+        });
+        // Without the setting the lead still needs the owner's word.
+        let (mut strict, _, _) = review_team();
+        strict.members.iter_mut().find(|member| member.id == "dev").unwrap().stuck =
+            Some(MemberStuck { at: 1.0, reason: "no_progress".into(), phase: "tool".into(), ..Default::default() });
+        with_review_team(&strict, || {
+            let error = as_lead(|| call("relaunch", json!({"member":"dev"}))).unwrap_err().to_string();
+            assert!(error.contains("owner_word"), "{error}");
         });
     }
 

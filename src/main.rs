@@ -6,6 +6,7 @@ mod claude_app;
 mod cli;
 mod config;
 mod external_workstreams;
+mod desktop;
 mod download;
 mod host;
 mod machines;
@@ -31,6 +32,7 @@ mod status;
 mod state;
 mod swarm;
 mod tasks;
+mod test_discipline;
 mod watch;
 
 /// H2: the position of `--json-file` before the first `--`; arguments after it

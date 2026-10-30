@@ -15,7 +15,7 @@
 //! [`Bar`] is the status item's state apart from AppKit: what reaches it
 //! ([`Gate`]), the Dock badge, the menus that are tracking, and the action
 //! each item of the menu names.
-// The menu bar exists only on macOS in this phase; Linux keeps the Qt GUI.
+// Linux shares this desk with its native SNI/DBusMenu adapter.
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -64,6 +64,11 @@ pub enum DeskInput {
     },
     /// A notification's default action (`MacAttentionNotifier.mm:20-28`).
     Clicked(String),
+    #[cfg(target_os = "linux")]
+    LinuxClicked {
+        token: String,
+        activation: String,
+    },
     /// A delivery failed (`AttentionNotifier::failed`).
     Failed {
         token: String,
@@ -203,6 +208,42 @@ pub fn load_mode(dir: &Path, tray_conf: Option<&str>) -> OpenMode {
                 .and_then(|value| OpenMode::from_config(&value))
         })
         .unwrap_or_default()
+}
+
+/// The same configured launch terminal for New session and folder shells.
+pub fn terminal_settings(dir: &Path) -> zerus_client_core::terminal_launch::Settings {
+    let conf = tray_conf();
+    let value = |key| {
+        conf.as_deref()
+            .and_then(|text| tray_conf_value(text, key))
+            .unwrap_or_default()
+    };
+    zerus_client_core::terminal_launch::Settings {
+        template: value("terminal"),
+        open_mode: if cfg!(target_os = "macos") {
+            serde_json::to_value(load_mode(dir, conf.as_deref()))
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .unwrap_or_default()
+        } else {
+            value("open-mode")
+        },
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub fn load_linux_mode(dir: &Path, tray_conf: Option<&str>) -> OpenMode {
+    std::fs::read(dir.join(MODE_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Saved>(&bytes).ok())
+        .map(|saved| saved.open_mode)
+        .filter(|mode| OpenMode::LINUX.contains(mode))
+        .or_else(|| {
+            tray_conf
+                .and_then(|text| tray_conf_value(text, "open-mode"))
+                .and_then(|value| OpenMode::from_linux_config(&value))
+        })
+        .unwrap_or(OpenMode::Automatic)
 }
 
 pub fn save_mode(dir: &Path, mode: OpenMode) -> std::io::Result<()> {
@@ -458,6 +499,8 @@ pub struct Outcome {
     pub save_mode: Option<OpenMode>,
     /// A notification was clicked: open the window (`showSessions`).
     pub show: bool,
+    #[cfg(target_os = "linux")]
+    pub activation: Option<String>,
     /// Banners to withdraw, then post.
     pub changes: Changes,
     /// The clicked notification's session.
@@ -558,6 +601,17 @@ impl DeskLoop {
                             deadline: cx.now + CLICK_WAIT,
                         });
                         outcome.show = true;
+                    }
+                }
+                #[cfg(target_os = "linux")]
+                DeskInput::LinuxClicked { token, activation } => {
+                    if let Some(target) = attention::target(&token) {
+                        self.click = Some(Click {
+                            target,
+                            deadline: cx.now + CLICK_WAIT,
+                        });
+                        outcome.show = true;
+                        outcome.activation = (!activation.is_empty()).then_some(activation);
                     }
                 }
                 DeskInput::Failed { token, detail } => {
@@ -719,6 +773,9 @@ fn apply(app: &AppHandle, outcome: Outcome) {
     if outcome.show {
         let handle = app.clone();
         let _ = app.run_on_main_thread(move || {
+            #[cfg(target_os = "linux")]
+            crate::platform::linux_tray::present(&handle, outcome.activation.as_deref());
+            #[cfg(not(target_os = "linux"))]
             if let Err(error) = crate::lifecycle::show_main(&handle) {
                 eprintln!("zerus-client: could not open the window: {error}");
             }
@@ -737,7 +794,7 @@ fn apply(app: &AppHandle, outcome: Outcome) {
     for text in outcome.notices {
         window_notice(app, "Zerus", &text);
     }
-    if app.get_webview_window(crate::MAIN_WINDOW).is_some() {
+    if crate::main_window(app).is_some() {
         for text in outcome.window_notices {
             window_notice(app, "Zerus", &text);
         }
@@ -757,11 +814,21 @@ fn deliver(app: &AppHandle, changes: Changes) {
             crate::platform::macos_notify::deliver(&handle, changes.cleared, changes.raised)
         });
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    crate::platform::linux_notify::deliver(app, changes.cleared, changes.raised);
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     let _ = (app, changes);
 }
 
 fn publish(app: &AppHandle, desk: &Desk, mode: OpenMode) {
+    #[cfg(target_os = "linux")]
+    crate::platform::linux_tray::offer(
+        app,
+        desk.face(),
+        desk.tooltip(),
+        desk.menu(mode),
+        desk.badge(),
+    );
     #[cfg(target_os = "macos")]
     {
         let (face, tooltip, menu, badge) =
@@ -771,7 +838,7 @@ fn publish(app: &AppHandle, desk: &Desk, mode: OpenMode) {
             crate::platform::macos_menubar::offer(&handle, face, tooltip, menu, badge)
         });
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     let _ = (app, desk, mode);
 }
 
@@ -891,6 +958,10 @@ pub fn tray_notify(title: &str, body: &str) {
 /// says (`TrayAgent::activateSessionWith`, `TrayAgent.cpp:631-659`). A copy
 /// is confirmed every time (`ClipboardBackend::open`); a failure of either
 /// shows the command to run by hand.
+#[cfg(target_os = "linux")]
+pub use crate::platform::linux_tray::open_running;
+
+#[cfg(not(target_os = "linux"))]
 pub fn open_running(app: &AppHandle, computer: &ComputerId, name: &str) {
     let hgs = zerus_client_core::default_hgs();
     let command = shell::open_command(
@@ -905,7 +976,9 @@ pub fn open_running(app: &AppHandle, computer: &ComputerId, name: &str) {
         .map(|state| *lock(&state.mode))
         .unwrap_or_default();
     let opened = match mode {
-        OpenMode::Terminal => open_in_terminal(&command),
+        OpenMode::Terminal | OpenMode::Automatic | OpenMode::Tab | OpenMode::Window => {
+            open_in_terminal(&command)
+        }
         OpenMode::Clipboard => {
             use tauri_plugin_clipboard_manager::ClipboardExt;
             shell::copyable(&command)
@@ -986,6 +1059,13 @@ pub fn set_mode(app: &AppHandle, mode: OpenMode) {
     let _ = lock(&state.sender).send(DeskInput::Mode(mode));
 }
 
+#[cfg(target_os = "linux")]
+pub fn current_mode(app: &AppHandle) -> OpenMode {
+    app.try_state::<DeskState>()
+        .map(|state| *lock(&state.mode))
+        .unwrap_or(OpenMode::Automatic)
+}
+
 /// Saves a chosen mode; Qt's notice when it cannot (`TrayAgent.cpp:864-872`).
 fn mode_saved(dir: &Path, mode: OpenMode) -> Result<(), Notice> {
     save_mode(dir, mode).map_err(|error| Notice {
@@ -1020,9 +1100,11 @@ pub enum MenuAction {
         key: String,
         name: String,
         running: bool,
+        tty: String,
     },
     /// An "Open in" mode (`openModeChosen`).
     Mode(OpenMode),
+    Refresh,
     Quit,
 }
 
@@ -1126,6 +1208,10 @@ impl Bar {
 
     /// The native items of a new menu, Qt's texts (`TrayMenu::rebuild`).
     pub fn layout(&mut self, entries: &[Entry]) -> Vec<Item> {
+        self.layout_modes(entries, &OpenMode::ALL)
+    }
+
+    pub fn layout_modes(&mut self, entries: &[Entry], offered: &[OpenMode]) -> Vec<Item> {
         self.generation += 1;
         let mut actions = HashMap::new();
         let mut items = Vec::with_capacity(entries.len());
@@ -1156,6 +1242,7 @@ impl Bar {
                     name,
                     text,
                     running,
+                    tty,
                 } => chosen_by(
                     text,
                     MenuAction::Session {
@@ -1163,11 +1250,13 @@ impl Bar {
                         key: key.clone(),
                         name: name.clone(),
                         running: *running,
+                        tty: tty.clone(),
                     },
                 ),
                 Entry::OpenIn(chosen) => {
-                    let modes = OpenMode::ALL
-                        .into_iter()
+                    let modes = offered
+                        .iter()
+                        .copied()
                         .map(|mode| {
                             let item = format!("{id}-{}", mode.label());
                             actions.insert(item.clone(), MenuAction::Mode(mode));
@@ -1179,6 +1268,7 @@ impl Bar {
                         modes,
                     }
                 }
+                Entry::Refresh => chosen_by("Refresh", MenuAction::Refresh),
                 Entry::Quit => chosen_by("Quit", MenuAction::Quit),
             });
         }
@@ -1867,6 +1957,32 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_linux_notification_keeps_its_activation_token_and_exact_session() {
+        let dir = scratch("linux-click");
+        let mut thread = Thread::new(&dir);
+        let first = thread.round(0.0, live("fixture", vec![asking("claude/p/exact")]));
+        let token = first.changes.raised[0].token.clone();
+        let clicked = thread.round(
+            1.0,
+            vec![DeskInput::LinuxClicked {
+                token,
+                activation: "fixture-wayland-activation".into(),
+            }],
+        );
+        assert!(clicked.show);
+        assert_eq!(
+            clicked.activation.as_deref(),
+            Some("fixture-wayland-activation")
+        );
+        assert_eq!(
+            clicked.open,
+            Some((ComputerId::from("fixture"), "run:claude/p/exact".into()))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_click_with_a_stale_stream_waits_up_to_sixteen_seconds() {
         let dir = scratch("click-stale");
@@ -2318,6 +2434,7 @@ mod tests {
             name: name.into(),
             text: name.into(),
             running,
+            tty: String::new(),
         }
     }
 
@@ -2374,6 +2491,7 @@ mod tests {
                 key: "run:a".into(),
                 name: "claude/sample-project/a".into(),
                 running: true,
+                tty: String::new(),
             })
         );
         assert!(matches!(
@@ -2435,5 +2553,27 @@ mod tests {
             None,
             "a menu shown since replaces the old one"
         );
+    }
+
+    #[test]
+    fn a_tray_action_keeps_the_shown_tty_when_the_listing_changes() {
+        let mut bar = Bar::default();
+        let mut entry = session("run:a", "sh/sample-project", true);
+        if let Entry::Session { computer, tty, .. } = &mut entry {
+            *computer = ComputerId::local();
+            *tty = "/dev/pts/7".into();
+        }
+        let first = bar.layout(&[entry.clone()]);
+        bar.began();
+        assert!(bar.ended());
+        if let Entry::Session { tty, .. } = &mut entry {
+            *tty = "/dev/pts/8".into();
+        }
+        bar.layout(&[entry]);
+        assert!(
+            matches!(bar.action(id(&first[0])), Some(MenuAction::Session { tty, .. }) if tty == "/dev/pts/7")
+        );
+        bar.began();
+        assert_eq!(bar.action(id(&first[0])), None);
     }
 }

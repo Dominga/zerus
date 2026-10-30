@@ -975,6 +975,45 @@ export function PerfHost() {
       const { updatesSmoke } = await import("../perf/updatesSmoke");
       void updatesSmoke(!!config().replay);
     }
+    if (new URLSearchParams(location.search).has("window-layer-smoke") && inTauri()) {
+      const { windowLayerSmoke } = await import("../perf/windowLayerSmoke");
+      void windowLayerSmoke(!!config().replay);
+    }
+    if (new URLSearchParams(location.search).has("content-search-smoke") && inTauri()) {
+      const { contentSearchSmoke } = await import("../perf/contentSearchSmoke");
+      void contentSearchSmoke(!!config().actions_smoke);
+    }
+    if (new URLSearchParams(location.search).has("project-vivid-smoke") && inTauri()) {
+      const { projectVividSmoke } = await import("../perf/projectVividSmoke");
+      void projectVividSmoke(!!config().replay && !!config().actions_smoke, new URLSearchParams(location.search).get("project-vivid-smoke") === "restored");
+    }
+    if (new URLSearchParams(location.search).has("worktree-review-smoke") && inTauri()) {
+      const { worktreeReviewSmoke } = await import("../perf/worktreeReviewSmoke");
+      void worktreeReviewSmoke(!!config().replay && !!config().actions_smoke);
+    }
+    if (new URLSearchParams(location.search).has("shell-badge-smoke") && inTauri()) {
+      const { shellBadgeSmoke } = await import("../perf/shellBadgeSmoke");
+      void shellBadgeSmoke(!!config().replay && !!config().actions_smoke);
+    }
+    if (new URLSearchParams(location.search).has("termination-cleanup-smoke") && inTauri()) {
+      const { terminationCleanupSmoke } = await import("../perf/terminationCleanupSmoke");
+      void terminationCleanupSmoke(!!config().replay && !!config().actions_smoke);
+    }
+    if (new URLSearchParams(location.search).has("file-ssh-smoke") && inTauri()) {
+      void import("../perf/fileSshSmoke").then(({ fileSshSmoke }) => fileSshSmoke(!!config().replay && !!config().actions_smoke));
+    }
+    if (new URLSearchParams(location.search).has("file-reference-smoke") && inTauri()) {
+      const { fileReferenceSmoke } = await import("../perf/fileReferenceSmoke");
+      void fileReferenceSmoke(!!config().replay && !!config().actions_smoke);
+    }
+    if (new URLSearchParams(location.search).has("markdown-smoke") && inTauri()) {
+      const { markdownSmoke } = await import("../perf/markdownSmoke");
+      void markdownSmoke(!!config().replay && !!config().actions_smoke);
+    }
+    if (new URLSearchParams(location.search).has("scope-filter-smoke") && inTauri()) {
+      const { scopeFilterSmoke } = await import("../perf/scopeFilterSmoke");
+      void scopeFilterSmoke(!!config().replay && !!config().actions_smoke);
+    }
     if (config().mode === "auto") {
       setOpen(true);
       void autoRun(config());

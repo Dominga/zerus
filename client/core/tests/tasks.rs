@@ -2,7 +2,7 @@
 //! (tests/support/fake_hgs.py), never the real CLI.
 mod common;
 
-use common::{catalog, eventually, hello, status_of, FakeHgs, Seen};
+use common::{catalog, eventually, hello, meta, status_of, FakeHgs, Seen};
 use serde_json::{json, Value};
 use std::sync::mpsc::channel;
 use std::time::Duration;
@@ -77,7 +77,7 @@ fn controls(fake: &FakeHgs) -> Vec<(String, String)> {
 }
 
 #[test]
-fn a_followed_project_gets_whole_lists_once_per_digest_across_reconnects() {
+fn a_followed_project_republishes_after_reconnect_and_delivers_changes() {
     let fake = FakeHgs::new(
         "tasks_follow",
         json!({"": {"runs": [
@@ -113,11 +113,10 @@ fn a_followed_project_gets_whole_lists_once_per_digest_across_reconnects() {
         texts(tasks(&seen.all[first], "p1").unwrap()),
         ["a", "b", "c"]
     );
-    // After a reconnect the same list (digest d1) gives nothing; a changed
-    // one does, then a failed read.
+    // A reconnect republishes d1 to clear its connection error, then d2 changes it.
     fake.touch("again");
     let second = seen.until_from(first + 1, "the changed list", |change| {
-        tasks(change, "p1").is_some()
+        matches!(tasks(change, "p1"), Some(TasksUpdate::List { digest, .. }) if digest == "d2")
     });
     let Some(TasksUpdate::List { digest, .. }) = tasks(&seen.all[second], "p1") else {
         panic!("{:?}", seen.all[second])
@@ -143,7 +142,7 @@ fn a_followed_project_gets_whole_lists_once_per_digest_across_reconnects() {
 }
 
 #[test]
-fn a_cli_without_the_topic_stays_quiet_and_a_refusal_ends_the_follow() {
+fn a_cli_without_the_topic_reports_unsupported_and_a_refusal_ends_the_follow() {
     let fake = FakeHgs::new(
         "tasks_unsupported",
         json!({"": {"runs": [
@@ -159,11 +158,10 @@ fn a_cli_without_the_topic_stays_quiet_and_a_refusal_ends_the_follow() {
     let local = ComputerId::local();
     seen.until("live", live);
     assert_eq!(fleet.follow_tasks(&local, "p1"), Ok("p1".into()));
-    seen.drain_for(Duration::from_millis(100));
-    assert!(seen
-        .all
-        .iter()
-        .all(|change| !matches!(change, Change::Tasks { .. })));
+    seen.until("unsupported task topic", |change| {
+        matches!(tasks(change, "p1"), Some(TasksUpdate::Failed { code, .. }) if code == "unsupported_topic")
+    });
+    assert!(controls(&fake).is_empty());
     // The next stream offers the topic, subscribes and is refused.
     fake.touch("followed");
     seen.until("the refusal's end", |change| {
@@ -172,5 +170,69 @@ fn a_cli_without_the_topic_stays_quiet_and_a_refusal_ends_the_follow() {
     assert!(fleet.followed_tasks(&local).is_empty());
     eventually("the subscription", || !controls(&fake).is_empty());
     assert_eq!(controls(&fake), vec![("subscribe".into(), "p1".into())]);
+    fleet.stop();
+}
+
+#[test]
+fn peer_session_tasks_use_the_local_replica_and_reconnect_restores_the_same_digest() {
+    let fake = FakeHgs::new(
+        "tasks_two_computers",
+        json!({
+            "": {"runs": [
+                [{"lines": [hello_with_tasks(8), catalog(&[]), meta(Some(&["peer"]))]},
+                 {"await_file": "follow"}, {"lines": [page("project-id", &["local replica task"], 0, Some("same"))]},
+                 {"serve": true, "until_file": "disconnect"}],
+                [{"await_file": "reconnect"}, {"lines": [hello_with_tasks(8), catalog(&[]),
+                 page("project-id", &["local replica task"], 0, Some("same"))]}, {"serve": true}]
+            ]},
+            "peer": {"runs": [[{"lines": [hello_with_tasks(8), catalog(&[("peer-run", "codex/example/remote")])]}, {"serve": true}]]}
+        }),
+    );
+    let (tx, rx) = channel();
+    let mut seen = Seen::new(rx);
+    let fleet = Fleet::start_with(fake.path(), tx, quick());
+    seen.until("peer session catalog", |c| matches!(c, Change::Replace { computer, rows } if computer.0 == "peer" && !rows.is_empty()));
+    fleet
+        .follow_tasks(&ComputerId::local(), "project-id")
+        .unwrap();
+    fake.touch("follow");
+    seen.until("local replica tasks", |c| {
+        matches!(tasks(c, "project-id"), Some(TasksUpdate::List { .. }))
+    });
+    fake.touch("disconnect");
+    let failed = seen.until("task disconnect state", |c| matches!(tasks(c, "project-id"), Some(TasksUpdate::Failed { code, .. }) if code == "disconnected"));
+    fake.touch("reconnect");
+    let restored = seen.until_from(failed + 1, "unchanged list clears failure", |c| matches!(tasks(c, "project-id"), Some(TasksUpdate::List { digest, .. }) if digest == "same"));
+    assert_eq!(
+        texts(tasks(&seen.all[restored], "project-id").unwrap()),
+        ["local replica task"]
+    );
+    eventually("local tasks subscription", || !controls(&fake).is_empty());
+    assert!(fake.stdin("peer").iter().all(|c| c["topic"] != "tasks"));
+    assert!(controls(&fake)
+        .iter()
+        .all(|(_, project)| project == "project-id"));
+    fleet.stop();
+}
+
+#[test]
+fn a_polled_legacy_cli_reports_unsupported_tasks_without_starting_a_task_poller() {
+    let fake = FakeHgs::new("tasks_legacy_unsupported", json!({"": {"marker": false}}));
+    std::fs::write(
+        fake.dir.join("ls-local.json"),
+        json!({"sessions": []}).to_string(),
+    )
+    .unwrap();
+    let (tx, rx) = channel();
+    let mut seen = Seen::new(rx);
+    let fleet = Fleet::start_local(fake.path(), tx, quick());
+    seen.until("legacy catalog", |c| {
+        status_of(c, &ComputerId::local()) == Some(ComputerStatus::Polled)
+    });
+    fleet
+        .follow_tasks(&ComputerId::local(), "project-id")
+        .unwrap();
+    seen.until("unsupported legacy task follow", |c| matches!(tasks(c, "project-id"), Some(TasksUpdate::Failed { code, .. }) if code == "unsupported_topic"));
+    assert!(fake.log().iter().all(|entry| entry["args"][0] != "task"));
     fleet.stop();
 }

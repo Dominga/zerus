@@ -291,6 +291,11 @@ export function keys(id: string, on: Platform = platform): Sequence[] {
   return stored.map(parseSequence).filter((s): s is Sequence => !!s && s.length > 0);
 }
 
+export function shortcutTooltip(label: string, command: string): string {
+  const first = keys(command)[0];
+  return first ? `${label} (${nativeText(first)})` : label;
+}
+
 export const customized = (id: string) => Array.isArray(settings[settingKey(id)]);
 
 /** Stores a command's chords; its defaults are stored as an absence, so they follow future default changes. */

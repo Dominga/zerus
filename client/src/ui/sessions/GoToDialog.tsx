@@ -1,7 +1,8 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
 import { keys } from "../../store/shortcuts";
 import { activateGoTo, closeGoTo, goToItems, goToOrigin } from "../../store/goTo";
-import { goToKey, rankGoTo, visibleGoToRows, type GoToKeyState } from "./goTo";
+import { goToDetails, goToKey, goToKindLabel, rankGoTo, visibleGoToRows, type GoToKeyState } from "./goTo";
+import { Icon } from "../lib/icons";
 
 export function GoToDialog() {
   let field: HTMLInputElement | undefined;
@@ -49,18 +50,25 @@ export function GoToDialog() {
   };
   return (
     <Show when={goToOrigin()}>
-      <div class="go-to" data-shortcut-context="none" ref={frame} role="dialog" aria-label="Go to">
-        <input ref={field} class="go-to-query" value={query()} placeholder="Go to… (type > for commands)" onInput={(event) => { setQuery(event.currentTarget.value); setCurrent(0); }} onKeyDown={onKey} />
-        <Show when={visible().rows.length} fallback={<div class="go-to-empty">No matching results</div>}>
-          <div class="go-to-results" role="listbox" aria-label="Results">
-            <For each={visible().rows}>{(item, index) => (
-              <button type="button" class="go-to-row" classList={{ on: visible().start + index() === current() }} role="option" aria-selected={visible().start + index() === current()}
-                onMouseEnter={() => setCurrent(visible().start + index())} onClick={() => activateGoTo(item)}>
-                <span class="go-to-main">{item.title}</span><span class="go-to-detail">{item.detail}</span><span class="go-to-chord">{item.chord}</span>
-              </button>
-            )}</For>
+      <div class="goto-scrim" data-shortcut-context="none">
+        <div class="goto" ref={frame} role="dialog" aria-label="Go to">
+          <div class="goto-field">
+            <Icon name="search" size={15} />
+            <input ref={field} value={query()} placeholder="Go to… (type > for commands)" onInput={(event) => { setQuery(event.currentTarget.value); setCurrent(0); }} onKeyDown={onKey} />
+            <span class="kbd">Esc</span>
           </div>
-        </Show>
+          <ul class="goto-list" role="listbox" aria-label="Results">
+            <For each={visible().rows} fallback={<li class="goto-empty">Nothing matches</li>}>{(item, index) => (
+              <li role="option" aria-selected={visible().start + index() === current()} classList={{ on: visible().start + index() === current() }}
+                onMouseEnter={() => setCurrent(visible().start + index())} onClick={() => activateGoTo(item)}>
+                <span class="goto-kind">{goToKindLabel(item.kind)}</span>
+                <span class="ell parts goto-text"><b>{item.title}</b><For each={goToDetails(item.detail)}>{(detail) => <span class="dim">{detail}</span>}</For></span>
+                <span class="grow" />
+                <Show when={item.chord}><span class="kbd">{item.chord}</span></Show>
+              </li>
+            )}</For>
+          </ul>
+        </div>
       </div>
     </Show>
   );

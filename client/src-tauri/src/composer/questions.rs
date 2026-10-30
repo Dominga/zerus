@@ -42,6 +42,8 @@ pub(crate) type Done = Box<dyn FnOnce(bool) + Send>;
 /// The shown card, as the composer view carries it.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct QuestionView {
+    /// This session has an answer in flight (model settings wait for it).
+    pub answering: bool,
     /// The card's draft key; every card command names it.
     pub card: String,
     /// Bumps when the card is built again (Qt's `changed` in `setQuestion`,
@@ -550,6 +552,7 @@ impl Composers {
             .map(|(_, texts)| texts.clone())
             .unwrap_or_default();
         let view = QuestionView {
+            answering: hub.answers.in_flight.contains_key(&ctx.key),
             card: key,
             revision: hub.answers.revision,
             epoch: hub.answers.epoch,

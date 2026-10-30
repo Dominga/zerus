@@ -20,6 +20,7 @@ pub(crate) mod spans;
 pub(crate) mod stages;
 pub(crate) mod store;
 pub(crate) mod templates;
+pub(crate) mod test_queue;
 pub(crate) mod timing;
 pub(crate) mod waiting;
 

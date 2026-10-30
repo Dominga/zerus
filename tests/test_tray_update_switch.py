@@ -17,6 +17,8 @@ import tempfile
 import unittest
 from unittest import mock
 
+from desktop_revoke_fixture import REVOCATION_CLI
+
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('update_installed', ROOT / 'tray/update-installed.py')
 updater = importlib.util.module_from_spec(spec)
@@ -57,9 +59,17 @@ class Fixture(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
         environment = mock.patch.dict(os.environ, {'XDG_CONFIG_HOME': str(self.home / '.config'),
-                                                   'XDG_DATA_HOME': str(self.home / '.local/share')})
+                                                   'XDG_DATA_HOME': str(self.home / '.local/share'),
+                                                   'TRAY_FIXTURE': str(self.root),
+                                                   'HGS_DESKTOP_REVOKE_TIMEOUT': '1'})
         environment.start()
         self.addCleanup(environment.stop)
+        revocation_cli = self.root / 'revocation-hgs'
+        revocation_cli.write_text(REVOCATION_CLI.format(python=sys.executable))
+        revocation_cli.chmod(0o755)
+        patcher = mock.patch.object(updater, 'CLI', str(revocation_cli))
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def bundle(self, name, kind, identifier=TEST_ID):
         app = self.root / 'bundles' / name / 'hgs-tray.app'
@@ -186,6 +196,16 @@ class Switch(Fixture):
                 # The installer's guard before a live update: the switch itself is the updater's.
                 self.assertEqual(updater.check_replace(client, installed, live=True), 0)
             self.assertEqual(updater.check_replace(built, self.root / 'missing.app'), 0, 'nothing installed yet')
+
+    def test_macos_still_refuses_an_unknown_installed_kind(self):
+        installed = self.bundle('half', 'qt')
+        (installed / 'Contents/Info.plist').unlink()
+        client = self.bundle('client', 'tauri')
+        with mock.patch.object(updater, 'MAC', True), \
+                mock.patch.object(updater, 'installed_build_info', return_value={}), \
+                mock.patch.object(updater, 'build_info', return_value={'version': '0.47.0'}):
+            with self.assertRaisesRegex(updater.UpdateError, 'needs the live update'):
+                updater.check_replace(client, installed)
 
     def test_settings_changes_separate_qt_keys_from_cocoa_keys(self):
         before = {'attention.observed': b'{}', 'workspace.reduceMotion': False, 'NSStatusItem Preferred Position Item-0': 900.0}

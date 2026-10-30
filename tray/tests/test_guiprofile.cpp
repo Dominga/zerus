@@ -37,8 +37,10 @@
 // folder's gui-profile) as profile.json and profile.txt, and to the log.
 //
 // Run: QT_QPA_PLATFORM=windows ZERUS_GUI_PROFILE_SECONDS=20 test_guiprofile (the
-// window stays off the screen). Offscreen uses FreeType, which crashed under
-// this load (the report of #704); ZERUS_GUI_PROFILE_METER=0 runs unmeasured.
+// window stays off the screen), or offscreen (the guiprofile_sessions ctest
+// runs the sessions scene so). ZERUS_GUI_PROFILE_METER=0 runs unmeasured. The
+// crashes #704 saw, FreeType's at exit among them, came from the sessions
+// scene reading a destroyed temporary (#723).
 namespace {
 
 SlowEventLog::Meter *g_meter = nullptr;
@@ -287,8 +289,13 @@ void TestGuiProfile::run(const QString &name, int periodMs, const std::function<
 void TestGuiProfile::sessionsListAndInspector()
 {
     // Fleet polls every second; the person moves through the list.
+    // #723: the fleet is kept while its names are read. A range-for over
+    // fleet(...).local().sessions read a temporary that ended before the loop
+    // (local() returns into it): each copied name raised the refcount of a
+    // freed string, which corrupted the heap seconds later (#704's crash).
     QStringList names;
-    for (const auto &s : fleet(m_now, sessionCount(), 0).local().sessions) names << s.name;
+    const auto state = fleet(m_now, sessionCount(), 0);
+    for (const auto &s : state.local().sessions) names << s.name;
     run(QStringLiteral("sessions"), 500, [this, names](int n) {
         if (n % 2 == 0) {
             m_window->refreshFleet(fleet(m_now + n, sessionCount(), ++m_generation));
